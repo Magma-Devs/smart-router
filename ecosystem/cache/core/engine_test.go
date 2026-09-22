@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -189,6 +190,57 @@ func testEngine(store KVStore) *Engine {
 // ---------------------------------------------------------------------------
 // Key formatting
 // ---------------------------------------------------------------------------
+
+// tipFailingStore is a fake store whose chain-tip read fails: the backend, not
+// the tip, is what could not be reached.
+type tipFailingStore struct {
+	*fakeStore
+	err error
+}
+
+func (f *tipFailingStore) GetChainTip(ctx context.Context, key string) (int64, bool, error) {
+	return spectypes.NOT_APPLICABLE, false, f.err
+}
+
+// A request for a symbolic block resolves the tip first. An unknown or stale
+// tip is a miss; a tip the store could not READ is a store failure and must
+// say so, or a backend that never answers looks like a clean miss to the
+// RESP backend's breaker and resets its failure count (Codex review of #406).
+func TestGetRelaySymbolicBlockReportsAFailedTipRead(t *testing.T) {
+	get := func(store KVStore) (*relaytypes.CacheRelayReply, error) {
+		engine := &Engine{Store: store, Policy: DefaultPolicy()}
+		reply, _, err := engine.GetRelay(context.Background(), &relaytypes.RelayCacheGet{RequestHash: []byte("h"), ChainId: "ETH1", RequestedBlock: spectypes.SAFE_BLOCK})
+		return reply, err
+	}
+	reply, err := get(newFakeStore())
+	require.NotErrorIs(t, err, StoreError, "an unknown tip is a miss, not a store failure")
+	require.Nil(t, reply.GetReply())
+
+	reply, err = get(&tipFailingStore{fakeStore: newFakeStore(), err: errors.New("connection reset")})
+	require.ErrorIs(t, err, StoreError, "a tip the store could not read is the store failing")
+	require.ErrorIs(t, err, errChainTipUnreadable)
+	require.Nil(t, reply.GetReply())
+
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	engine := &Engine{Store: &tipFailingStore{fakeStore: newFakeStore(), err: context.DeadlineExceeded}, Policy: DefaultPolicy()}
+	_, _, err = engine.GetRelay(expired, &relaytypes.RelayCacheGet{RequestHash: []byte("h"), ChainId: "ETH1", RequestedBlock: spectypes.SAFE_BLOCK})
+	require.ErrorIs(t, err, context.DeadlineExceeded, "a timed-out read is reported as a timeout")
+}
+
+// Sticky-session store failures carry StoreError like every other store failure, so the RESP
+// backend's breaker counts them; the caller still gets an error, never a missing claim.
+func TestStickyStoreFailuresAreStoreErrors(t *testing.T) {
+	store := newFakeStore()
+	store.stickyErr = errors.New("connection reset")
+	engine := &Engine{Store: store, Policy: DefaultPolicy()}
+	_, found, err := engine.GetSticky(context.Background(), "ETH1", "jsonrpc", "base", "digest")
+	require.ErrorIs(t, err, StoreError)
+	require.ErrorContains(t, err, "connection reset")
+	require.False(t, found)
+	_, err = engine.SetStickyIfAbsent(context.Background(), "ETH1", "jsonrpc", "base", "digest", StickyPin{}, time.Minute)
+	require.ErrorIs(t, err, StoreError)
+}
 
 func TestKeyFormats(t *testing.T) {
 	hash := []byte{0xab, 0xcd}
