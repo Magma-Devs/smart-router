@@ -254,17 +254,18 @@ func TestDecide_IsTickerHedge(t *testing.T) {
 	})
 }
 
-// TestDecide_RetryNeverRewritesTheRequest pins the removal of the speculative archive upgrade.
+// TestDecide_RetryNeverRewritesTheRequest records what Decide answers at the attempt numbers the
+// removed archive upgrade keyed on.
 //
-// A retry used to add the archive extension on attempt 1 and take it off again on attempt 2,
-// keyed on the attempt number alone. That inverted the retry: the extension filter dropped every
-// endpoint without the archive addon, so one failed attempt could narrow a healthy multi-endpoint
-// pool to the single endpoint that declared it — or push the retry into the backup tier — for a
-// request that was never an archive request. Whether a request needs archive is decided once, by
-// the spec's ArchiveParserRule, from the requested block, before the first attempt.
+// It is NOT the regression guard, and it cannot be: the upgrade's only observable trace in this
+// package was the Mutation field on DecisionOutput, and removing that field removes the thing an
+// assertion here could look at. Action and Reason read identically before and after, so every
+// case below passes on the unfixed code — verified by running this file against the merge base.
 //
-// The policy therefore returns a retry decision and nothing else. If this test starts failing
-// because DecisionOutput grew a mutation again, read Policy.Decide before changing it.
+// The behavioural guards are in relaycore (TestRetryReSendsTheSameRequest, which dispatches
+// batches so the attempt counter actually reaches 1 and 2) and in rpcsmartrouter
+// (TestSmartRouterStateMachineRetryKeepsTheRequestIntact, end to end). Change those if the
+// behaviour changes; this file documents the decision table around them.
 func TestDecide_RetryNeverRewritesTheRequest(t *testing.T) {
 	newPolicy := func() *Policy {
 		return NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})

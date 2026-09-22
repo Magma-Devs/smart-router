@@ -6,10 +6,8 @@ import (
 	"sync/atomic"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
-	slices "github.com/magma-Devs/smart-router/utils/lavaslices"
 )
 
 type RelayParserInf interface {
@@ -24,25 +22,17 @@ type RelayParserInf interface {
 	) (protocolMessage chainlib.ProtocolMessage, err error)
 }
 
-// ArchiveStatus records whether THIS request is an archive request — decided once, from the
-// caller's lava-extension header or the spec's ArchiveParserRule, before the first attempt. It no
-// longer tracks an "upgraded" state, because a retry no longer rewrites the request.
+// ArchiveStatus is the per-request state that survives a retry. One flag: whether the
+// earliest-block re-parse has already run, which must happen at most once per request.
+//
+// Whether the request IS archive is not held here. It lives on the request's extensions, which is
+// where selection reads it from; a copy on the side had no reader and could only disagree.
 type ArchiveStatus struct {
-	isArchive      atomic.Bool
 	isEarliestUsed atomic.Bool
-}
-
-func (as *ArchiveStatus) IsArchive() bool {
-	return as.isArchive.Load()
-}
-
-func (as *ArchiveStatus) SetArchive(v bool) {
-	as.isArchive.Store(v)
 }
 
 func (as *ArchiveStatus) Copy() *ArchiveStatus {
 	archiveStatus := &ArchiveStatus{}
-	archiveStatus.isArchive.Store(as.isArchive.Load())
 	archiveStatus.isEarliestUsed.Store(as.isEarliestUsed.Load())
 	return archiveStatus
 }
@@ -64,7 +54,6 @@ func GetEmptyRelayState(protocolMessage chainlib.ProtocolMessage) *RelayState {
 }
 
 func NewRelayState(protocolMessage chainlib.ProtocolMessage, stateNumber int, archiveStatus *ArchiveStatus) *RelayState {
-	relayRequestData := protocolMessage.RelayPrivateData()
 	if archiveStatus == nil {
 		utils.LavaFormatError("misuse detected archiveStatus is nil", nil, utils.Attribute{Key: "protocolMessage.GetApi", Value: protocolMessage.GetApi()})
 		archiveStatus = &ArchiveStatus{}
@@ -74,12 +63,7 @@ func NewRelayState(protocolMessage chainlib.ProtocolMessage, stateNumber int, ar
 		stateNumber:     stateNumber,
 		archiveStatus:   archiveStatus,
 	}
-	rs.archiveStatus.isArchive.Store(rs.CheckIsArchive(relayRequestData))
 	return rs
-}
-
-func (rs *RelayState) CheckIsArchive(relayRequestData *pairingtypes.RelayPrivateData) bool {
-	return relayRequestData != nil && slices.Contains(relayRequestData.Extensions, extensionslib.ArchiveExtension)
 }
 
 func (rs *RelayState) GetIsEarliestUsed() bool {
@@ -89,25 +73,11 @@ func (rs *RelayState) GetIsEarliestUsed() bool {
 	return rs.archiveStatus.isEarliestUsed.Load()
 }
 
-func (rs *RelayState) GetIsArchive() bool {
-	if rs == nil {
-		return false
-	}
-	return rs.archiveStatus.isArchive.Load()
-}
-
 func (rs *RelayState) SetIsEarliestUsed() {
 	if rs == nil || rs.archiveStatus == nil {
 		return
 	}
 	rs.archiveStatus.isEarliestUsed.Store(true)
-}
-
-func (rs *RelayState) SetIsArchive(isArchive bool) {
-	if rs == nil || rs.archiveStatus == nil {
-		return
-	}
-	rs.archiveStatus.isArchive.Store(isArchive)
 }
 
 func (rs *RelayState) GetStateNumber() int {
