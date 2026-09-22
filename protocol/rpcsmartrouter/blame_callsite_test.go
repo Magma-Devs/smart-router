@@ -104,7 +104,7 @@ func TestBlameAtCallSite(t *testing.T) {
 
 			sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}
 			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{},
-				lavaprotocol.NewRelayRetriesManager(), sm)
+				sm)
 			// The dispatcher reads this to decide, exactly as ProcessRelaySend sets it before the
 			// deferred cancel that releases the goroutines.
 			relayProcessor.SetStopReason(tc.stopReason)
