@@ -143,6 +143,42 @@ func TestRefreshKeepsPreviousCredentialsWhenTheFileIsEmpty(t *testing.T) {
 	require.Equal(t, []string{"u:pw2"}, listener.recorded(), "the rotation that follows lands")
 }
 
+// An empty file mid-rotation (a secret mount being rewritten) is a source
+// outage like any other under the once-per-outage report: however many reads
+// see it, one warning; a connection opened meanwhile is handed the last
+// credentials read rather than failed; the recovery is one line, and a
+// rotation that lands with it reaches every connection.
+func TestEmptyCredentialFileIsOneOutage(t *testing.T) {
+	credFile := writeTempFile(t, "cred", "pw1")
+	provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: credFile})
+	listener := &recordingListener{}
+	creds, unsubscribe, err := provider.Subscribe(listener)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = unsubscribe() })
+	require.Equal(t, "u:pw1", creds.RawCredentials())
+
+	require.NoError(t, os.WriteFile(credFile, []byte(" \n"), 0o600))
+	late := &recordingListener{}
+	out := captureLog(t, func() {
+		for i := 0; i < 5; i++ {
+			provider.Refresh()
+		}
+		lateCreds, unsubscribeLate, err := provider.Subscribe(late)
+		require.NoError(t, err, "a connection opened during the outage is not failed on the empty file")
+		t.Cleanup(func() { _ = unsubscribeLate() })
+		require.Equal(t, "u:pw1", lateCreds.RawCredentials(), "it is handed the last credentials read")
+	})
+	require.Equal(t, 1, strings.Count(out, "credential source unreadable"), "five reads and a subscribe, one line: %s", out)
+	require.Contains(t, out, credFile, "the line names the file")
+	require.Empty(t, listener.recorded(), "nothing is pushed during the outage")
+
+	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
+	out = captureLog(t, provider.Refresh)
+	require.Equal(t, 1, strings.Count(out, "readable again"), "the recovery is one line: %s", out)
+	require.Equal(t, []string{"u:pw2"}, listener.recorded(), "the rotation that lands with the recovery is pushed")
+	require.Equal(t, []string{"u:pw2"}, late.recorded(), "to the connection opened during the outage too")
+}
+
 // A credential that begins with a rune no trim removes is sent as written,
 // and the router says so once, naming the file and the code point and never
 // the value.
