@@ -150,3 +150,34 @@ func TestByHashAnswerSettlesOnceItsBlockIsFinal(t *testing.T) {
 		}
 	}
 }
+
+// evmByHashMethods and the case lists in extractBlockHeightFromEVMResponse are two
+// by-name lists that must agree: an identity-keyed answer settles only if its block is
+// harvested. This walks the map, so a method added to it without a harvest case (or a
+// row here) fails, and a row for a method that is not in the map fails too. Answers that
+// carry no block (raw bytes, a count) harvest 0 by design and stay in the short store.
+func TestEveryByHashMethodHasItsHarvest(t *testing.T) {
+	const block = int64(19999000) // 0x1312918
+	answers := map[string]struct {
+		reply string
+		want  int64
+	}{
+		"eth_getTransactionByHash":                 {`{"jsonrpc":"2.0","id":1,"result":{"hash":"` + txHash + `","blockNumber":"0x1312918"}}`, block},
+		"eth_getRawTransactionByHash":              {`{"jsonrpc":"2.0","id":1,"result":"0xf86c0a85046c7cfe0083016dea94d1220a0cf47c7b9be7a2e6ba89f429762e7b9adb"}`, 0},
+		"eth_getTransactionReceipt":                {`{"jsonrpc":"2.0","id":1,"result":{"transactionHash":"` + txHash + `","blockNumber":"0x1312918","status":"0x1"}}`, block},
+		"eth_getBlockByHash":                       {`{"jsonrpc":"2.0","id":1,"result":{"hash":"` + txHash + `","number":"0x1312918"}}`, block},
+		"eth_getBlockTransactionCountByHash":       {`{"jsonrpc":"2.0","id":1,"result":"0x5"}`, 0},
+		"eth_getTransactionByBlockHashAndIndex":    {`{"jsonrpc":"2.0","id":1,"result":{"hash":"` + txHash + `","blockNumber":"0x1312918","transactionIndex":"0x0"}}`, block},
+		"eth_getRawTransactionByBlockHashAndIndex": {`{"jsonrpc":"2.0","id":1,"result":"0xf86c0a85046c7cfe0083016dea94d1220a0cf47c7b9be7a2e6ba89f429762e7b9adb"}`, 0},
+		"eth_getUncleByBlockHashAndIndex":          {`{"jsonrpc":"2.0","id":1,"result":{"hash":"` + otherHash + `","number":"0x1312918"}}`, block},
+		"eth_getUncleCountByBlockHash":             {`{"jsonrpc":"2.0","id":1,"result":"0x1"}`, 0},
+	}
+	for method := range evmByHashMethods {
+		require.Contains(t, answers, method, "every by-hash method needs a representative answer here")
+	}
+	for method, answer := range answers {
+		_, listed := evmByHashMethods[method]
+		require.True(t, listed, "%s has a row but is not identity-keyed", method)
+		require.Equal(t, answer.want, extractBlockHeightFromEVMResponse([]byte(answer.reply), method), "%s: the harvest and the by-hash list must agree", method)
+	}
+}
