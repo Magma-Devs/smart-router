@@ -149,7 +149,8 @@ resp-cache:
   read-addresses: ["reader.eu-west-1.cache:6379"] # reads
 ```
 
-Reads go to `read-addresses`, writes (including cache population and flush) to `addresses`.
+Reads go to `read-addresses` and writes (cache population) to `addresses`; a reset reaches both,
+see **Resets reach both endpoints** below.
 Replication lag is safe by construction: an entry that hasn't replicated yet is a plain cache
 miss, and the router's block-freshness validation (seen-block rules) runs on every hit — a
 lagging replica can never serve data older than what the client has already seen.
@@ -165,11 +166,15 @@ set or cluster are not supported; use the managed reader endpoint in `standalone
 
 **Resets reach both endpoints.** `/debug/reset-all` scans and unlinks under the key prefix on
 the read endpoint as well as the write endpoint, because a separate read store is one the
-write endpoint never feeds, and an entry left there kept being served after every reset. A
-read endpoint that is a read-only replica of the write endpoint answers `READONLY` to the
-unlink; that is left to replication, which the write-side purge reaches it through, and the
-reset still succeeds. A read endpoint that cannot be reached fails the reset, naming the read
-side.
+write endpoint never feeds, and an entry left there kept being served after every reset. Before
+scanning the read endpoint the router asks it `ROLE` (or `INFO replication` where `ROLE` is not
+answered): one that reports itself a replica is not scanned at all, since every unlink there
+would answer `READONLY` and a `SCAN` walks the node's whole keyspace whatever the `MATCH`, which
+on a shared managed reader is a full walk per reset for no effect. The master it names, and
+whether that is the configured write address, are logged at debug level. A read endpoint that
+answers neither is scanned, and a `READONLY` at the unlink is left to replication the same way;
+the reset still succeeds. A read endpoint that cannot be reached fails the reset, naming the
+read side.
 
 ## Credential rotation
 

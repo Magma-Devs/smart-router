@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -805,18 +806,27 @@ func decodeStickyPin(raw string) (core.StickyPin, error) {
 // it was meant to remove, reset after reset (MAG-3673). Ping, PoolStats and
 // Close already touch both clients; this was the one operation that did not.
 //
-// A read endpoint that is a read-only REPLICA of the write endpoint answers
-// READONLY to the unlink. That is not a failed purge: the write-side unlinks
-// reach it through replication. It is noted at debug level and the purge
-// succeeds. Any other failure on the read side is a failed purge and says so,
-// naming the read side, because a reset that silently did half the job is the
-// defect this exists to close.
+// A read endpoint that is a read-only REPLICA of the write endpoint is not
+// scanned at all when it says so (readEndpointReplicaOf): the write-side
+// unlinks reach it through replication, and a scan there would walk its whole
+// keyspace to queue unlinks it answers READONLY. One that answers READONLY
+// without having said so is treated the same way, noted at debug level, and
+// the purge succeeds. Any other failure on the read side is a failed purge and
+// says so, naming the read side, because a reset that silently did half the
+// job is the defect this exists to close.
 func (s *Store) Purge(ctx context.Context) error {
 	match := s.prefix + ":*"
 	if err := purgeClient(ctx, s.write, match); err != nil {
 		return err
 	}
 	if s.read == s.write {
+		return nil
+	}
+	if master, isReplica := s.readEndpointReplicaOf(ctx); isReplica {
+		utils.LavaFormatDebug("resp-cache purge: the read endpoint reports itself a replica, so it is not scanned; the write-side purge reaches it through replication",
+			utils.LogAttr("read-endpoint", s.readEndpoint.current()),
+			utils.LogAttr("replica-of", master),
+			utils.LogAttr("replica-of-write-endpoint", addressListed(master, s.configuredEndpoints.Addresses)))
 		return nil
 	}
 	if err := purgeClient(ctx, s.read, match); err != nil {
@@ -828,6 +838,90 @@ func (s *Store) Purge(ctx context.Context) error {
 		return fmt.Errorf("resp-cache: purging the read endpoint: %w", err)
 	}
 	return nil
+}
+
+// readEndpointReplicaOf asks the read endpoint what it is before Purge scans
+// it, and reports whether it calls itself a replica and of which master
+// ("host:port", empty when it did not say).
+//
+// A replica answers READONLY to every unlink, so scanning it is a walk of its
+// whole keyspace for no effect: SCAN visits every key on the node whatever the
+// MATCH, so on a shared managed reader — the shape read-addresses is
+// documented for — every reset cost one round trip per scanBatchSize keys of
+// everything stored there, on the read path (review of #403). ROLE is asked
+// first; a backend that does not answer it (a proxy, a managed service that
+// hides it) is asked INFO replication; one that answers neither is scanned as
+// before, with READONLY still tolerated at the unlink. A cluster read client
+// resolves to writable masters and is scanned per master, so it is not asked.
+//
+// Whether the named master is the configured write endpoint is logged, not
+// acted on: a replica of some other deployment would keep its entries, but
+// it would also have answered READONLY to every unlink, so the outcome is the
+// same as before this check and the attribute is what makes it visible. The
+// comparison is textual, and a replica names its master by IP where the
+// operator may have written a hostname, so a false there is a hint, not a
+// finding.
+func (s *Store) readEndpointReplicaOf(ctx context.Context) (master string, isReplica bool) {
+	if _, isCluster := s.read.(*redis.ClusterClient); isCluster {
+		return "", false
+	}
+	if reply, err := s.read.Do(ctx, "ROLE").Slice(); err == nil {
+		return replicaOfFromRole(reply)
+	}
+	if info, err := s.read.Info(ctx, "replication").Result(); err == nil {
+		return replicaOfFromInfo(info)
+	}
+	return "", false
+}
+
+// replicaOfFromRole reads a ROLE reply: ["master", ...], ["sentinel", ...] or
+// ["slave", host, port, link-state, offset], "slave" being the wire word for
+// a replica.
+func replicaOfFromRole(reply []interface{}) (master string, isReplica bool) {
+	if len(reply) == 0 {
+		return "", false
+	}
+	if role, _ := reply[0].(string); role != "slave" {
+		return "", false
+	}
+	if len(reply) < 3 {
+		return "", true
+	}
+	host, _ := reply[1].(string)
+	port, _ := reply[2].(int64)
+	if host == "" {
+		return "", true
+	}
+	return net.JoinHostPort(host, strconv.FormatInt(port, 10)), true
+}
+
+// replicaOfFromInfo reads the replication section of INFO: role:slave names
+// a replica, master_host and master_port name its master.
+func replicaOfFromInfo(info string) (master string, isReplica bool) {
+	fields := map[string]string{}
+	for _, line := range strings.Split(info, "\n") {
+		key, value, found := strings.Cut(strings.TrimSpace(line), ":")
+		if found {
+			fields[key] = value
+		}
+	}
+	if fields["role"] != "slave" {
+		return "", false
+	}
+	if fields["master_host"] == "" {
+		return "", true
+	}
+	return net.JoinHostPort(fields["master_host"], fields["master_port"]), true
+}
+
+// addressListed reports whether addr is one of the configured addresses.
+func addressListed(addr string, addresses []string) bool {
+	for _, candidate := range addresses {
+		if candidate == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // purgeClient scans and unlinks under match on one client — per master when

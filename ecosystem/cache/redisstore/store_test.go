@@ -3,7 +3,10 @@ package redisstore
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -307,10 +310,17 @@ func prefixedKeys(mr *miniredis.Miniredis, prefix string) []string {
 	return keys
 }
 
-// readOnlyReplica stands in for a reader endpoint that is a replica of the
-// write endpoint: it answers a write command the way a replica does, while SCAN
-// still works because replicas serve reads.
-type readOnlyReplica struct{}
+// replicaEndpoint stands in for a reader endpoint that is a replica: it
+// answers ROLE and INFO replication as configured (or lets miniredis refuse
+// them, which is what a backend that supports neither does), counts the SCANs
+// that reach it, and answers a write command the way a replica does, while
+// SCAN still works because replicas serve reads.
+type replicaEndpoint struct {
+	roleReply []interface{} // nil: ROLE is not supported
+	infoReply string        // "": INFO replication is not supported
+	writable  bool          // true: unlinks pass through (a master, not a replica)
+	scans     atomic.Int32
+}
 
 // replicaError satisfies redis.Error, which is what redis.HasErrorPrefix
 // matches on — a plain errors.New would not be recognised as a server reply.
@@ -319,24 +329,42 @@ type replicaError string
 func (e replicaError) Error() string { return string(e) }
 func (replicaError) RedisError()     {}
 
+// readOnlyReply is the wire form, verbatim, as a valkey 7.2 replica started
+// with --replicaof answers an UNLINK; the prefix match in Purge is pinned
+// against it, so it must not be shortened.
 const readOnlyReply = replicaError("READONLY You can't write against a read only replica.")
 
-func (readOnlyReplica) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (*replicaEndpoint) DialHook(next redis.DialHook) redis.DialHook { return next }
 
-func (readOnlyReplica) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+func (h *replicaEndpoint) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		if cmd.Name() == "unlink" {
-			cmd.SetErr(readOnlyReply)
-			return readOnlyReply
+		switch cmd.Name() {
+		case "role":
+			if roleCmd, ok := cmd.(*redis.Cmd); ok && h.roleReply != nil {
+				roleCmd.SetVal(h.roleReply)
+				return nil
+			}
+		case "info":
+			if infoCmd, ok := cmd.(*redis.StringCmd); ok && h.infoReply != "" {
+				infoCmd.SetVal(h.infoReply)
+				return nil
+			}
+		case "scan":
+			h.scans.Add(1)
+		case "unlink":
+			if !h.writable {
+				cmd.SetErr(readOnlyReply)
+				return readOnlyReply
+			}
 		}
 		return next(ctx, cmd)
 	}
 }
 
-func (readOnlyReplica) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+func (h *replicaEndpoint) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return func(ctx context.Context, cmds []redis.Cmder) error {
 		for _, cmd := range cmds {
-			if cmd.Name() == "unlink" {
+			if cmd.Name() == "unlink" && !h.writable {
 				cmd.SetErr(readOnlyReply)
 				return readOnlyReply
 			}
@@ -345,16 +373,25 @@ func (readOnlyReplica) ProcessPipelineHook(next redis.ProcessPipelineHook) redis
 	}
 }
 
-// A read endpoint that is a genuine replica answers READONLY to the unlink.
-// That is not a failed purge — the write-side purge reaches the replica
-// through replication — so the reset succeeds.
-func TestPurgeToleratesAReadOnlyReplica(t *testing.T) {
+// replicaStore builds a split store whose read endpoint is the stand-in.
+func replicaStore(t *testing.T, replica *replicaEndpoint) (*Store, *miniredis.Miniredis, *miniredis.Miniredis) {
+	t.Helper()
 	mrWrite, mrReplica := miniredis.RunT(t), miniredis.RunT(t)
-	replica := redis.NewClient(&redis.Options{Addr: mrReplica.Addr()})
-	replica.AddHook(readOnlyReplica{})
-	store, err := NewWithClients(redis.NewClient(&redis.Options{Addr: mrWrite.Addr()}), replica, "sr")
+	readClient := redis.NewClient(&redis.Options{Addr: mrReplica.Addr()})
+	readClient.AddHook(replica)
+	store, err := NewWithClients(redis.NewClient(&redis.Options{Addr: mrWrite.Addr()}), readClient, "sr")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = store.Close() })
+	return store, mrWrite, mrReplica
+}
+
+// A read endpoint that answers neither ROLE nor INFO replication is scanned as
+// before, and a genuine replica answers READONLY to the unlink. That is not a
+// failed purge — the write-side purge reaches the replica through replication
+// — so the reset succeeds.
+func TestPurgeToleratesAReadOnlyReplica(t *testing.T) {
+	replica := &replicaEndpoint{}
+	store, mrWrite, mrReplica := replicaStore(t, replica)
 
 	key := "sr:" + core.HeightKey("ETH1", "0xreplica")
 	require.NoError(t, mrWrite.Set(key, "1"))
@@ -362,6 +399,100 @@ func TestPurgeToleratesAReadOnlyReplica(t *testing.T) {
 	require.NoError(t, store.Purge(context.Background()), "a replica's READONLY is replication's business, not a failed purge")
 	require.False(t, mrWrite.Exists(key))
 	require.True(t, mrReplica.Exists(key), "the stand-in has no replication, so its copy stays; a real replica drops it when the write-side unlink replicates")
+	require.Positive(t, replica.scans.Load(), "a reader that could not say what it is was scanned, and its READONLY tolerated at the unlink")
+}
+
+// A read endpoint that reports itself a replica is not scanned at all: every
+// unlink there would answer READONLY, and SCAN walks the node's whole keyspace
+// whatever the MATCH, so on a shared managed reader each reset cost one round
+// trip per batch of everything stored there for no effect (review of #403).
+// ROLE is asked first, INFO replication when ROLE is refused; a reader that
+// calls itself a master is scanned like any separate store.
+func TestPurgeDoesNotScanAReaderThatReportsItselfAReplica(t *testing.T) {
+	roleReply := func(masterAddr string) []interface{} {
+		host, portText, err := net.SplitHostPort(masterAddr)
+		require.NoError(t, err)
+		port, err := strconv.ParseInt(portText, 10, 64)
+		require.NoError(t, err)
+		return []interface{}{"slave", host, port, "connected", int64(12345)}
+	}
+	infoReply := func(masterAddr string) string {
+		host, port, err := net.SplitHostPort(masterAddr)
+		require.NoError(t, err)
+		return "# Replication\r\nrole:slave\r\nmaster_host:" + host + "\r\nmaster_port:" + port + "\r\nmaster_link_status:up\r\n"
+	}
+	plant := func(t *testing.T, mrWrite, mrReplica *miniredis.Miniredis) string {
+		key := "sr:" + core.HeightKey("ETH1", "0xrole")
+		require.NoError(t, mrWrite.Set(key, "1"))
+		require.NoError(t, mrReplica.Set(key, "1"))
+		return key
+	}
+
+	t.Run("ROLE names it a replica", func(t *testing.T) {
+		replica := &replicaEndpoint{}
+		store, mrWrite, mrReplica := replicaStore(t, replica)
+		replica.roleReply = roleReply(mrWrite.Addr())
+		key := plant(t, mrWrite, mrReplica)
+
+		require.NoError(t, store.Purge(context.Background()))
+		require.False(t, mrWrite.Exists(key), "the write endpoint is purged as always")
+		require.Zero(t, replica.scans.Load(), "a self-declared replica is not scanned")
+		require.True(t, mrReplica.Exists(key), "the stand-in has no replication; a real replica drops it when the unlink replicates")
+	})
+
+	t.Run("INFO replication names it a replica when ROLE is refused", func(t *testing.T) {
+		replica := &replicaEndpoint{}
+		store, mrWrite, mrReplica := replicaStore(t, replica)
+		replica.infoReply = infoReply(mrWrite.Addr())
+		key := plant(t, mrWrite, mrReplica)
+
+		require.NoError(t, store.Purge(context.Background()))
+		require.False(t, mrWrite.Exists(key))
+		require.Zero(t, replica.scans.Load(), "the INFO answer is enough to skip the scan")
+	})
+
+	t.Run("ROLE names it a master", func(t *testing.T) {
+		replica := &replicaEndpoint{roleReply: []interface{}{"master", int64(0), []interface{}{}}, writable: true}
+		store, mrWrite, mrRead := replicaStore(t, replica)
+		key := plant(t, mrWrite, mrRead)
+
+		require.NoError(t, store.Purge(context.Background()))
+		require.Positive(t, replica.scans.Load(), "a separate master is a store the write endpoint never feeds: scanned and emptied")
+		require.False(t, mrRead.Exists(key), "the MAG-3673 shape still empties the read store")
+	})
+}
+
+func TestReplicaOfParsesRoleAndInfoReplies(t *testing.T) {
+	master, isReplica := replicaOfFromRole([]interface{}{"slave", "10.0.0.5", int64(6379), "connected", int64(99)})
+	require.True(t, isReplica)
+	require.Equal(t, "10.0.0.5:6379", master)
+
+	master, isReplica = replicaOfFromRole([]interface{}{"master", int64(3129659), []interface{}{}})
+	require.False(t, isReplica)
+	require.Empty(t, master)
+
+	_, isReplica = replicaOfFromRole([]interface{}{"sentinel", []interface{}{"mymaster"}})
+	require.False(t, isReplica, "a sentinel is not a replica")
+
+	_, isReplica = replicaOfFromRole(nil)
+	require.False(t, isReplica, "an empty reply is not a verdict")
+
+	master, isReplica = replicaOfFromRole([]interface{}{"slave"})
+	require.True(t, isReplica, "a replica that did not name its master is still a replica")
+	require.Empty(t, master)
+
+	master, isReplica = replicaOfFromInfo("# Replication\r\nrole:slave\r\nmaster_host:primary.internal\r\nmaster_port:6380\r\nmaster_link_status:up\r\n")
+	require.True(t, isReplica)
+	require.Equal(t, "primary.internal:6380", master)
+
+	_, isReplica = replicaOfFromInfo("# Replication\r\nrole:master\r\nconnected_slaves:1\r\n")
+	require.False(t, isReplica)
+
+	_, isReplica = replicaOfFromInfo("")
+	require.False(t, isReplica)
+
+	require.True(t, addressListed("10.0.0.5:6379", []string{"10.0.0.5:6379"}))
+	require.False(t, addressListed("10.0.0.5:6379", []string{"primary.internal:6379"}), "a hostname and the IP it resolves to do not match textually: the attribute is a hint")
 }
 
 // A read store that cannot be reached is a failed purge, reported as such and
