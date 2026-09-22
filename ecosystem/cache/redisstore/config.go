@@ -171,9 +171,10 @@ func (cfg Config) Validate() error {
 	// The same rule as the sentinel-* credentials above: a half-written section
 	// is a deployment mistake, not a configuration. Here the cost of accepting
 	// it is a credential crossing the network in the clear, so this is the one
-	// combination that must not be able to start quietly.
+	// combination that must not be able to start quietly. The message keeps to
+	// the shape of its siblings; the reasoning lives on TLSConfig.
 	if !cfg.TLS.Enabled && cfg.TLS.hasMaterial() {
-		return fmt.Errorf("resp-cache: tls.* options are set but tls.enabled is not true — dangling configuration: the connection would be plaintext and the configured credentials would cross the network readable (set tls.enabled: true, or remove the tls block)")
+		return fmt.Errorf("resp-cache: tls.* options are set but tls.enabled is not true — dangling configuration (set tls.enabled: true, or remove the other tls.* keys)")
 	}
 	return nil
 }
@@ -190,6 +191,30 @@ func (cfg Config) refreshInterval() time.Duration {
 		return DefaultCredentialRefreshInterval
 	}
 	return cfg.CredentialRefreshInterval
+}
+
+// configuredCredentialKeys names every credential key the block sets, data
+// node and sentinel control plane alike — the keys, never the values. Every
+// one of them is sent to the backend on each new connection, so together they
+// are what crosses the network readable when TLS is off.
+func (cfg Config) configuredCredentialKeys() []string {
+	var keys []string
+	for _, key := range []struct {
+		name string
+		set  bool
+	}{
+		{"username", cfg.Username != ""},
+		{"password", cfg.Password != ""},
+		{"password-file", cfg.PasswordFile != ""},
+		{"sentinel-username", cfg.SentinelUsername != ""},
+		{"sentinel-password", cfg.SentinelPassword != ""},
+		{"sentinel-password-file", cfg.SentinelPasswordFile != ""},
+	} {
+		if key.set {
+			keys = append(keys, key.name)
+		}
+	}
+	return keys
 }
 
 // credentialsSource picks the data-node credential source: file-backed when

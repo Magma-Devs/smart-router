@@ -141,6 +141,8 @@ func New(cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("resp-cache: reading credentials: %w", err)
 	}
 
+	warnIfCredentialsCrossPlaintext(cfg)
+
 	writeTracker := &endpointTracker{}
 	readTracker := writeTracker
 	writeClient, err := cfg.buildClient(cfg.Addresses, tlsCfg, provider, writeTracker)
@@ -286,6 +288,33 @@ func warnIfReadSplitIsDiscoveryScoped(cfg Config) {
 	utils.LavaFormatWarning("resp-cache read-addresses under a discovering topology: the read client performs its own discovery and resolves to the master(s) of the topology those addresses front — it yields replica reads only when it points at a separate replicated deployment (e.g. a regional cluster), not at replicas of the write topology", nil,
 		utils.LogAttr("topology", cfg.topology()),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
+	)
+}
+
+// warnIfCredentialsCrossPlaintext says, once at construction, that the
+// configured credentials will be sent to the backend in the clear.
+//
+// Validate refuses the one shape that READS as encrypted and is not (a tls
+// block without its switch). Every other plaintext shape — credentials with no
+// tls block at all — is deliberate and stays allowed: a loopback or
+// private-network backend is the ordinary case, and the gRPC upstreams take
+// the same decision (TokenOverInsecureWarning in protocol/common). But the
+// harm the refusal names is just as real here and used to be silent: the
+// startup line said tls=false in one word among six, and the first write of
+// every new connection carried the password readable. So it is said out loud,
+// naming the endpoints and which credential keys are set — never their values.
+func warnIfCredentialsCrossPlaintext(cfg Config) {
+	if cfg.TLS.Enabled {
+		return
+	}
+	keys := cfg.configuredCredentialKeys()
+	if len(keys) == 0 {
+		return
+	}
+	utils.LavaFormatWarning("resp-cache credentials are configured without tls: they cross the network readable on every new connection to the backend (set tls.enabled: true to protect them in transit; on a loopback or private-network backend this may be intended)", nil,
+		utils.LogAttr("addresses", cfg.Addresses),
+		utils.LogAttr("read-addresses", cfg.ReadAddresses),
+		utils.LogAttr("credential-keys", keys),
 	)
 }
 

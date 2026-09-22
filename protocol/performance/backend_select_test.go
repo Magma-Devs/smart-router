@@ -131,3 +131,50 @@ resp-cache:
 `))
 	require.Error(t, err, "a glob-unsafe prefix must abort startup")
 }
+
+// MAG-3683, the shape the refusal cannot reach. Credentials with no tls block
+// at all are deliberate and stay allowed, and the harm the refusal names — the
+// password readable in the first write of every connection — was just as real
+// for them and silent: the startup line said tls=false in one word among six.
+// The store now warns once at construction, naming the endpoints and which
+// credential keys are set. The two controls pin what the warning is about: the
+// same credentials under TLS are not warned about, and no credentials are not.
+func TestSelectBackendWarnsWhenCredentialsCrossPlaintext(t *testing.T) {
+	mr := miniredis.RunT(t)
+	mr.RequireUserAuth("cacheuser", "placeholder-cache-credential")
+	const warning = "credentials are configured without tls"
+	block := func(tlsLines string) string {
+		return fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+  username: cacheuser
+  password: placeholder-cache-credential
+%s`, mr.Addr(), tlsLines)
+	}
+
+	plaintext := captureLog(t, func() {
+		backend := selectBackend(t, block(""))
+		require.True(t, backend.CacheActive())
+		require.NoError(t, backend.Close())
+	})
+	require.Contains(t, plaintext, warning, "credentials without tls must be said out loud at startup")
+	require.Contains(t, plaintext, `"level":"warn"`)
+	require.Contains(t, plaintext, `"credential-keys":"username,password"`, "the warning names which keys are set")
+	require.NotContains(t, plaintext, "placeholder-cache-credential", "and never their values")
+
+	// Control: the same credentials under TLS. The handshake fails against the
+	// plaintext server, so the probe logs its own failure while the cache lives;
+	// closing inside the capture keeps that to this capture.
+	encrypted := captureLog(t, func() {
+		backend := selectBackend(t, block("  tls:\n    enabled: true\n"))
+		require.NoError(t, backend.Close())
+	})
+	require.NotContains(t, encrypted, warning, "with tls on the credentials do not cross readable, so nothing to warn about")
+
+	// Control: no credentials at all.
+	anonymous := captureLog(t, func() {
+		backend := selectBackend(t, fmt.Sprintf("\nresp-cache:\n  addresses: [%q]\n", mr.Addr()))
+		require.NoError(t, backend.Close())
+	})
+	require.NotContains(t, anonymous, warning, "with nothing to protect there is nothing to warn about")
+}
