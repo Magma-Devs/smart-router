@@ -231,7 +231,15 @@ log line rather than one per interval.
 A store that closes or refuses connections while requests are flowing does not cost the router
 memory: a connection whose setup failed is released, buffers and socket included, once the
 garbage collector reclaims it, rather than being kept by the rotation machinery for the life of
-the process. Its file descriptor therefore closes at the next collection, not at the failure.
+the process. Its file descriptor therefore closes at the next collection, not at the failure,
+and a collection is triggered by heap growth (`GOGC`), not by the failure. Every failed
+handshake allocates the same two 32 KiB buffers, so the sockets open at once during an outage
+are roughly `live heap × GOGC/100 ÷ 64 KiB`: about 4,000 for a router with 256 MiB live, one
+cycle's worth, which is where the figure the defect was measured at came from. Under a low
+`nofile` limit (1024 is a common service default) that is exhaustion before the first cycle,
+and the router's other sockets fail alongside. Bounding how many connections an outage opens at
+all is the job of the request-path breaker (MAG-3676), a separate change; this one bounds how
+long each failed connection is held. Together they are the fix.
 
 ## Sizing and eviction (`maxmemory-policy`)
 
