@@ -165,6 +165,28 @@ func TestSelectBackendGRPCKeyPrefix(t *testing.T) {
 		"a server that knows the field has echoed it by now")
 }
 
+// A cache-be-key-prefix beside a resp-cache block scopes nothing: the RESP
+// backend outranks cache-be and the gRPC client is never built. Said at
+// startup naming the prefix, since the keyspace in force is the block's
+// (MAG-3521 review); the same prefix with no RESP block is the dangling shape,
+// reported by the other line.
+func TestSelectBackendWarnsWhenTheGRPCPrefixIsOutranked(t *testing.T) {
+	mr := miniredis.RunT(t)
+	logged := captureLog(t, func() {
+		selectBackend(t, fmt.Sprintf("resp-cache:\n  addresses: [%q]\n  key-prefix: in-force\ncache-be: \"127.0.0.1:1\"\ncache-be-key-prefix: outranked\n", mr.Addr()))
+	})
+	require.Contains(t, logged, "takes precedence, so the gRPC prefix scopes nothing")
+	require.Contains(t, logged, `"key-prefix":"outranked"`)
+	require.Contains(t, logged, `"resp-cache-key-prefix":"in-force"`)
+	require.NotContains(t, logged, "dangling configuration, it scopes nothing", "the outranked shape is not the dangling one")
+
+	logged = captureLog(t, func() {
+		selectBackend(t, "cache-be-key-prefix: dangling\n")
+	})
+	require.Contains(t, logged, "dangling configuration, it scopes nothing")
+	require.Contains(t, logged, `"key-prefix":"dangling"`)
+}
+
 // MAG-3683, the shape the refusal cannot reach. Credentials with no tls block
 // at all are deliberate and stay allowed, and the harm the refusal names — the
 // password readable in the first write of every connection — was just as real

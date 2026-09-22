@@ -107,6 +107,9 @@ func (s *RelayerCacheServer) SetStickySession(ctx context.Context, req *relaytyp
 	if s.CacheServer == nil {
 		return nil, status.Error(codes.Unavailable, "cache server is not initialized")
 	}
+	if err := refuseInvalidKeyPrefix(req.KeyPrefix); err != nil {
+		return nil, err
+	}
 	// The claim lives in the router's keyspace, like every relay key: a claim
 	// names an upstream by NAME, which means nothing to a router on other nodes.
 	pin, err := s.engine().SetStickyIfAbsent(ctx, core.ScopedChainId(req.KeyPrefix, req.ChainId), req.ApiInterface, req.Service, req.StickyId,
@@ -127,6 +130,9 @@ func (s *RelayerCacheServer) SetStickySession(ctx context.Context, req *relaytyp
 func (s *RelayerCacheServer) GetStickySession(ctx context.Context, req *relaytypes.StickySessionGet) (*relaytypes.StickySessionReply, error) {
 	if s.CacheServer == nil {
 		return nil, status.Error(codes.Unavailable, "cache server is not initialized")
+	}
+	if err := refuseInvalidKeyPrefix(req.KeyPrefix); err != nil {
+		return nil, err
 	}
 	pin, found, err := s.engine().GetSticky(ctx, core.ScopedChainId(req.KeyPrefix, req.ChainId), req.ApiInterface, req.Service, req.StickyId)
 	if err != nil {

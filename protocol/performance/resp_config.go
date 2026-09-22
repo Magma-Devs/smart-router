@@ -115,9 +115,20 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 	if err := core.ValidateKeyPrefix(cacheKeyPrefix); err != nil {
 		return nil, fmt.Errorf("%s: %w", CacheKeyPrefixFlagName, err)
 	}
-	if cacheKeyPrefix != "" && cacheAddr == "" {
-		utils.LavaFormatWarning(CacheKeyPrefixFlagName+" is set while "+CacheFlagName+" is empty — dangling configuration, it scopes nothing (set "+CacheFlagName+" or drop the prefix; the RESP backend's keyspace is resp-cache.key-prefix)", nil,
-			utils.LogAttr("key-prefix", cacheKeyPrefix))
+	// A gRPC prefix that scopes nothing is said out loud, naming the prefix: the
+	// two shapes are a prefix with no cache-be to apply it to, and a prefix
+	// beside a resp-cache block, which outranks cache-be entirely so the gRPC
+	// client is never built — the keyspace in force is the RESP block's.
+	if cacheKeyPrefix != "" {
+		switch {
+		case respEnabled:
+			utils.LavaFormatWarning(CacheKeyPrefixFlagName+" is set but the RESP backend is configured and takes precedence, so the gRPC prefix scopes nothing; the keyspace in force is resp-cache.key-prefix", nil,
+				utils.LogAttr("key-prefix", cacheKeyPrefix),
+				utils.LogAttr("resp-cache-key-prefix", respConfig.KeyPrefix))
+		case cacheAddr == "":
+			utils.LavaFormatWarning(CacheKeyPrefixFlagName+" is set while "+CacheFlagName+" is empty — dangling configuration, it scopes nothing (set "+CacheFlagName+" or drop the prefix; the RESP backend's keyspace is resp-cache.key-prefix)", nil,
+				utils.LogAttr("key-prefix", cacheKeyPrefix))
+		}
 	}
 
 	if respEnabled {
