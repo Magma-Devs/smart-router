@@ -54,6 +54,20 @@ func TestConfigValidateMatrix(t *testing.T) {
 	}
 }
 
+// The plaintext-credential warning (warnIfCredentialsCrossPlaintext) names the
+// credential keys the block sets, data node and sentinel alike, and only the
+// keys: what it says is what would cross the network readable, and it must
+// never say the values.
+func TestConfiguredCredentialKeys(t *testing.T) {
+	require.Empty(t, Config{Addresses: []string{"h:1"}}.configuredCredentialKeys(), "nothing configured, nothing to name")
+	require.Equal(t, []string{"username", "password"},
+		Config{Addresses: []string{"h:1"}, Username: "u", Password: "p"}.configuredCredentialKeys())
+	require.Equal(t, []string{"password-file"},
+		Config{Addresses: []string{"h:1"}, PasswordFile: "/run/secrets/cache"}.configuredCredentialKeys())
+	require.Equal(t, []string{"sentinel-username", "sentinel-password", "sentinel-password-file"},
+		Config{Topology: TopologySentinel, MasterName: "m", Addresses: []string{"s:1"}, SentinelUsername: "u", SentinelPassword: "p", SentinelPasswordFile: "/f"}.configuredCredentialKeys())
+}
+
 func listenLocal(t *testing.T) net.Listener {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
