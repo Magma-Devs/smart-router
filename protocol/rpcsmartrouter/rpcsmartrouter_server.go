@@ -3603,23 +3603,22 @@ func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peer
 // sendRelayToEndpoint and the write in tryCacheWriteResolved — consult this one rule, so
 // the two cannot drift apart.
 //
-// Two spec flags decide it. A stateful request (eth_sendRawTransaction) mutates chain
-// state and is broadcast to every upstream; its answer is an event, not a fact. A
-// non-deterministic one (category.deterministic=false: the spec's own statement that the
-// answer is not the same across nodes) creates or names state that lives on ONE node, or
-// reports a fact about one node: eth_newFilter hands back a filter id no other node
-// knows, eth_getFilterLogs reads a filter another caller opened, eth_accounts lists one
-// node's keys. Served from the cache, such an answer reaches a caller it was never
-// produced for (MAG-3461). The flag also covers methods whose answers merely differ
-// across nodes without harm, such as trace and log queries; they stop being cached too.
-// That is the price of taking the spec at its word rather than keeping a method list
-// the spec can drift from, and the spec is where to argue a method's flag.
+// Two things decide it. A stateful request (eth_sendRawTransaction) mutates chain state
+// and is broadcast to every upstream; its answer is an event, not a fact. A node-bound
+// one (nodeBoundMethods) creates or names state that lives on ONE node, or reports a fact
+// about one node: eth_newFilter hands back a filter id no other node knows,
+// eth_getFilterLogs reads a filter another caller opened, eth_accounts lists one node's
+// keys. Served from the cache, such an answer reaches a caller it was never produced for
+// (MAG-3461). Answers that merely differ across nodes without belonging to one of them
+// (a trace, a log query, a fee estimate) are not excluded here: that is a reproducibility
+// question, and the spec's deterministic flag, which cross-validation owns, is where it
+// is answered.
 func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 		return "stateful"
 	}
-	if !chainlib.IsDeterministic(protocolMessage) {
-		return "non-deterministic"
+	if nodeBoundReason(protocolMessage.GetApi().Name) != "" {
+		return "node-bound"
 	}
 	return ""
 }
@@ -3629,7 +3628,7 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 // Cache writes are skipped when:
 // - Cache is not active
 // - Quorum is enabled (quorum requires fresh endpoint validation)
-// - Request is stateful or non-deterministic (cacheExclusionReason)
+// - Request is stateful or node-bound (cacheExclusionReason)
 // - Response is a node error
 // - Requested block is NOT_APPLICABLE
 // - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
@@ -3661,11 +3660,12 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
-	// Skip what must never reach another caller: a stateful write, or an answer the
-	// spec says is not reproducible across nodes (cacheExclusionReason).
+	// Skip what must never reach another caller: a stateful write, or an answer that
+	// belongs to the node that produced it (cacheExclusionReason).
 	if reason := cacheExclusionReason(protocolMessage); reason != "" {
 		utils.LavaFormatDebug("cache write skipped: "+reason+" request",
 			utils.LogAttr("api", protocolMessage.GetApi().Name),
+			utils.LogAttr("why", nodeBoundReason(protocolMessage.GetApi().Name)),
 			utils.LogAttr("GUID", ctx),
 		)
 		return
@@ -3974,13 +3974,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				utils.LogAttr("reason", "cross-validation requires fresh endpoint validation, cache would defeat consensus verification"),
 			)
 		} else if reason := cacheExclusionReason(protocolMessage); reason != "" {
-			// A stateful request mutates state; a non-deterministic one has an answer that
+			// A stateful request mutates state; a node-bound one has an answer that
 			// belongs to the node that produced it. Neither may be served from the cache.
 			utils.LavaFormatDebug("Cache bypassed due to "+reason+" request",
 				utils.LogAttr("GUID", ctx),
 				utils.LogAttr("cacheActive", true),
 				utils.LogAttr("api", protocolMessage.GetApi().Name),
 				utils.LogAttr("reason", reason),
+				utils.LogAttr("why", nodeBoundReason(protocolMessage.GetApi().Name)),
 			)
 		} else if protocolMessage.GetForceCacheRefresh() {
 			// User requested cache bypass via header

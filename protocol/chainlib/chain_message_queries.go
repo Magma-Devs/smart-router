@@ -20,13 +20,6 @@ func GetStateful(chainMessage ChainMessageForSend) uint32 {
 	return chainMessage.GetApi().Category.Stateful
 }
 
-// IsDeterministic reports whether the spec declares this API's answer reproducible
-// across nodes (category.deterministic). A batch is deterministic only when every
-// member is, which is how SpecCategory.Combine folds it.
-func IsDeterministic(chainMessage ChainMessageForSend) bool {
-	return chainMessage.GetApi().Category.Deterministic
-}
-
 // IsGrpcSubscription reports whether this message targets a gRPC server-streaming
 // method, from the SUBSCRIBE parse directive its API carries in the spec.
 //
