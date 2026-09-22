@@ -10,8 +10,10 @@ import (
 // it can never come back different. Listed by name, like the EVM harvest in
 // extractBlockHeightFromEVMResponse and for the same reason: the spec's block parsing
 // resolves these to LATEST by default, which says nothing about what they return. The
-// trace and debug by-hash methods are non-deterministic in the spec and never reach the
-// cache, so they are not listed.
+// trace and debug by-hash methods are not listed: a trace's shape depends on the client
+// implementation that produced it, so an identity-keyed trace kept for the finalized
+// lifetime would pin one implementation's answer on every caller. They stay tip-keyed in
+// the short store, as on main.
 var evmByHashMethods = map[string]struct{}{
 	"eth_getTransactionByHash":                 {},
 	"eth_getRawTransactionByHash":              {},
@@ -27,7 +29,9 @@ var evmByHashMethods = map[string]struct{}{
 // identityKeyBlock is the constant block an identity-keyed entry lives under. Zero is
 // safe: a by-hash method never parses a numeric block, so no entry of the same method
 // can land there by any other route, and the cache server's seen-block floor is
-// min(seen, requested), which zero never trips.
+// min(seen, requested), which zero never trips. That floor is therefore inert for these
+// entries: a lookup's SeenBlock does nothing here, and the finalization decision at the
+// write (byHashFinalized) is the only freshness control they have.
 const identityKeyBlock = int64(0)
 
 // identityKeyed reports whether this request's answer is identified by the request
