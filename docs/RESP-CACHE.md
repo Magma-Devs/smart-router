@@ -313,9 +313,21 @@ Both take the same character set (`[A-Za-z0-9._-]+`), so one value works on eith
 On the RESP backend the prefix heads every key (`<prefix>:rel:f:ETH1:…`); on the sidecar it
 travels inside each request and the server folds it into every key it derives
 (`rel:f:<prefix>:ETH1:…`), which is why **the sidecar has to be a build that knows the
-field** — an older `smart-router cache` drops it on the wire silently and isolates nothing.
-`GET /debug/cache-state` names the keyspace in the tier's `address` (`prefix=…`) on both
-backends, so two routers can be checked for separation without sending traffic.
+field** — an older `smart-router cache` drops it on the wire and isolates nothing. The router
+does not have to take that on trust: the server echoes the prefix it scoped by on every reply,
+and a router that sent one and reads no echo warns once per connection
+(`cache-be-key-prefix is set but the cache server did not echo it`) and keeps serving from the
+shared keyspace. `GET /debug/cache-state` names the keyspace in the tier's `address`
+(`prefix=…`) on both backends, so two routers can be checked for separation without sending
+traffic; on the sidecar the prefix reads `prefix=… (unconfirmed)` until the first reply on a
+connection and `prefix=… (ignored by the cache server)` once a reply came back without the
+echo, and bare `prefix=…` only once the server has confirmed it.
+
+A prefix is a **cooperative namespace, not a tenant boundary**. The sidecar has no
+authentication, so any client that can reach it can name any keyspace; the server refuses a
+prefix that is malformed (outside the character set, `InvalidArgument`), never one that
+belongs to someone else. Isolation between deployments that must not read each other's
+answers is a network question, not a naming one.
 
 What a prefix does **not** do: replicas that share a keyspace on purpose still share one
 chain tip, and that tip is a monotonic maximum with no downward path before expiry — one
@@ -330,7 +342,8 @@ other tenants (and other prefixes) are untouched. If two deployments must be flu
 give them distinct prefixes.
 
 The gRPC sidecar is the exception: its in-memory store cannot enumerate keys by prefix, so a
-`/debug/reset-all` on any router empties **every** keyspace on that sidecar. Routers that must
+`/debug/reset-all` on any router empties **every** keyspace on that sidecar — the prefix
+scopes what a router reads and writes, and is not a flush boundary there. Routers that must
 be flush-isolated from each other need separate sidecars, or the RESP backend.
 
 ## Precedence and rollback
