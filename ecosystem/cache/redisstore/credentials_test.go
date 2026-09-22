@@ -2,6 +2,7 @@ package redisstore
 
 import (
 	"context"
+	"errors"
 	"net"
 	"os"
 	"strings"
@@ -409,7 +410,7 @@ func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
 	_, _, err := provider.Subscribe(listener)
 	require.NoError(t, err)
 
-	const failed, recovered = "credential refresh failed", "readable again"
+	const failed, recovered = "credential source unreadable", "readable again; refresh resumed"
 
 	quiet := captureLog(t, func() { provider.Refresh() })
 	require.NotContains(t, quiet, failed, "a readable source is not an event")
@@ -439,6 +440,18 @@ func TestRefreshReportsSourceFailureOncePerOutage(t *testing.T) {
 		provider.Refresh()
 	})
 	require.Equal(t, 1, strings.Count(again, failed), "a second outage is a new event")
+
+	// A change of cause mid-outage is news, and is reported once more: the
+	// path now exists but cannot be read as a file.
+	require.NoError(t, os.Mkdir(credFile, 0o700))
+	cause := captureLog(t, func() {
+		provider.Refresh()
+		provider.Refresh()
+	})
+	require.Equal(t, 1, strings.Count(cause, failed), "a new cause within the same outage is one more line, not one per tick")
+	require.Contains(t, cause, "is a directory")
+	require.NotContains(t, cause, recovered, "the outage did not end")
+	require.NoError(t, os.Remove(credFile))
 
 	// Recovery with ROTATED contents both closes the outage and pushes.
 	require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
@@ -471,4 +484,150 @@ func TestCloseWaitsForTheCredentialWatcher(t *testing.T) {
 	// watcher that already returned; what go-redis answers for its own
 	// already-closed client is its business.
 	_ = store.Close()
+}
+
+// MAG-3690 review: "keeps the credentials it already holds" was true of the
+// live connections only. go-redis opens connections throughout an outage,
+// pool growth, a reconnect after a network blip, an idle replacement, and
+// each one's Subscribe re-read the file and failed its setup on the read
+// error, which reached no log line at all. A connection opened during an
+// outage is now handed the last credentials any read returned, and still
+// receives the rotation that ends the outage.
+func TestSubscribeDuringSourceOutageHandsOutLastGoodCredentials(t *testing.T) {
+	const failed, recovered = "credential source unreadable", "readable again; refresh resumed"
+	// A subscription is held for as long as its unsubscribe closure is, the
+	// way go-redis holds it on the connection; every subscription asserted on
+	// below keeps its closure for the test's life.
+	hold := func(t *testing.T, unsubscribe auth.UnsubscribeFunc) {
+		t.Helper()
+		t.Cleanup(func() { _ = unsubscribe() })
+	}
+
+	t.Run("before any successful read the error stands", func(t *testing.T) {
+		provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: "/does/not/exist"})
+		out := captureLog(t, func() {
+			for i := 0; i < 3; i++ {
+				_, _, err := provider.Subscribe(&recordingListener{})
+				require.ErrorContains(t, err, "/does/not/exist", "nothing to hand out yet: this is New's fail-fast")
+			}
+		})
+		require.Equal(t, 1, strings.Count(out, failed), "the outage is still reported once, whoever observes it")
+		require.Equal(t, 0, provider.subscriberCount(), "a failed subscription registers nothing")
+	})
+
+	t.Run("during an outage a connection gets the last set read and the outage is one event", func(t *testing.T) {
+		credFile := writeTempFile(t, "cred", "pw1")
+		provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: credFile})
+		early := &recordingListener{}
+		creds, unsubscribe, err := provider.Subscribe(early)
+		require.NoError(t, err)
+		hold(t, unsubscribe)
+		require.Equal(t, "u:pw1", creds.RawCredentials())
+
+		// A rotation lands on disk and a connection reads it before the watcher
+		// ticks: the newest set is what a later fallback must hand out, while
+		// the watcher's baseline stays on the set the early connection has.
+		require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
+		creds, unsubscribe, err = provider.Subscribe(&recordingListener{})
+		require.NoError(t, err)
+		hold(t, unsubscribe)
+		require.Equal(t, "u:pw2", creds.RawCredentials())
+
+		require.NoError(t, os.Remove(credFile))
+		late := &recordingListener{}
+		out := captureLog(t, func() {
+			provider.Refresh() // the watcher notices first
+			creds, unsubscribe, err = provider.Subscribe(late)
+			require.NoError(t, err, "a connection opened during the outage must not fail its setup")
+			hold(t, unsubscribe)
+			require.Equal(t, "u:pw2", creds.RawCredentials(), "the last set any read returned, not the watcher's baseline")
+			for i := 0; i < 5; i++ {
+				_, unsubscribe, err = provider.Subscribe(&recordingListener{})
+				require.NoError(t, err)
+				hold(t, unsubscribe)
+			}
+		})
+		require.Equal(t, 1, strings.Count(out, failed), "the watcher and six subscriptions observed one outage")
+		require.Equal(t, 8, provider.subscriberCount())
+		require.Empty(t, early.recorded(), "nothing is pushed while the source is unreadable")
+
+		// The outage ends with the rotation the watcher's baseline never saw:
+		// one recovery line, and the push reaches the early connection (still on
+		// pw1) and the late one alike.
+		require.NoError(t, os.WriteFile(credFile, []byte("pw2"), 0o600))
+		back := captureLog(t, func() { provider.Refresh() })
+		require.Equal(t, 1, strings.Count(back, recovered))
+		require.NotContains(t, back, failed)
+		require.Equal(t, []string{"u:pw2"}, early.recorded(), "the connection that had the old set is re-authenticated")
+		require.Equal(t, []string{"u:pw2"}, late.recorded(), "a connection that fell back still receives the push that ends the outage")
+	})
+
+	t.Run("a connection that noticed first also reports it once", func(t *testing.T) {
+		credFile := writeTempFile(t, "cred", "pw1")
+		provider := NewStreamingProvider(&FileCredentials{Username: "u", Path: credFile})
+		_, unsubscribe, err := provider.Subscribe(&recordingListener{})
+		require.NoError(t, err)
+		hold(t, unsubscribe)
+		require.NoError(t, os.Remove(credFile))
+		out := captureLog(t, func() {
+			_, unsubscribe, err = provider.Subscribe(&recordingListener{})
+			require.NoError(t, err)
+			hold(t, unsubscribe)
+			provider.Refresh()
+			provider.Refresh()
+		})
+		require.Equal(t, 1, strings.Count(out, failed), "the watcher's ticks add nothing to what the connection reported")
+	})
+}
+
+// The same rule through go-redis itself: with the file gone, the connections
+// the client opens beyond the one it already has authenticate with the last
+// credentials read instead of failing their setup on the read error. Four
+// blocking commands in flight at once need four connections, so three are
+// new dials and new Subscribes during the outage. (go-redis's dedicated
+// Conn() cannot be used here: at v9.22.0 it carries no streaming
+// credentials manager and panics on init with a streaming provider.)
+func TestConnectionsOpenedDuringSourceOutageAuthenticate(t *testing.T) {
+	mr := miniredis.RunT(t)
+	mr.RequireAuth("pw1")
+	credFile := writeTempFile(t, "cred", "pw1")
+	provider := NewStreamingProvider(&FileCredentials{Path: credFile})
+
+	var dials atomic.Int64
+	client := redis.NewClient(&redis.Options{
+		Addr:                         mr.Addr(),
+		StreamingCredentialsProvider: provider,
+		PoolSize:                     4,
+		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dials.Add(1)
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
+	})
+	t.Cleanup(func() { _ = client.Close() })
+	ctx := context.Background()
+
+	require.NoError(t, client.Ping(ctx).Err(), "the first connection reads the file while it is there")
+	require.Equal(t, int64(1), dials.Load())
+
+	require.NoError(t, os.Remove(credFile))
+	const inFlight = 4
+	block := func() error {
+		err := client.BLPop(ctx, 300*time.Millisecond, "a-list-nobody-pushes-to").Err()
+		if errors.Is(err, redis.Nil) {
+			return nil // the timeout: the command ran on an authenticated connection
+		}
+		return err
+	}
+	out := captureLog(t, func() {
+		results := make(chan error, inFlight)
+		for i := 0; i < inFlight; i++ {
+			go func() { results <- block() }()
+		}
+		for i := 0; i < inFlight; i++ {
+			require.NoError(t, <-results, "a command whose connection was opened during the outage must run, not fail its setup")
+		}
+	})
+	require.Equal(t, int64(inFlight), dials.Load(), "the commands in flight forced the pool to open the other connections during the outage")
+	require.Equal(t, inFlight, provider.subscriberCount(), "every connection, fallen back or not, is subscribed for the rotation that ends the outage")
+	require.Equal(t, 1, strings.Count(out, "credential source unreadable"), "three failed reads, one line")
 }
