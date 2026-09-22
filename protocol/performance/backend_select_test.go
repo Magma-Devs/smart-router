@@ -31,7 +31,9 @@ func viperFromYAML(t *testing.T, yaml string) *viper.Viper {
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	flags.String(performance.RespCacheAddressesFlagName, "", "")
 	flags.String(performance.RespCacheTopologyFlagName, "", "")
+	flags.String(performance.RespCacheKeyPrefixFlagName, "", "")
 	flags.String(performance.CacheFlagName, "", "")
+	flags.String(performance.CacheKeyPrefixFlagName, "", "")
 	require.NoError(t, v.BindPFlags(flags))
 	return v
 }
@@ -130,4 +132,104 @@ resp-cache:
   key-prefix: "glob*unsafe"
 `))
 	require.Error(t, err, "a glob-unsafe prefix must abort startup")
+
+	_, err = performance.SelectCacheBackend(context.Background(), viperFromYAML(t, `
+cache-be: "a:20100"
+cache-be-key-prefix: "glob*unsafe"
+`))
+	require.ErrorContains(t, err, performance.CacheKeyPrefixFlagName,
+		"the gRPC keyspace takes the same character set, and a bad one must abort startup rather than start cacheless")
+}
+
+// The gRPC keyspace setting end to end through selection: two routers selected
+// against one cache server with different cache-be-key-prefix values share no
+// entries, and the debug state names the keyspace (MAG-3521).
+func TestSelectBackendGRPCKeyPrefix(t *testing.T) {
+	addr := startLoopbackCacheServer(t)
+	tenantA := selectBackend(t, fmt.Sprintf("cache-be: %q\ncache-be-key-prefix: tenant-a\n", addr))
+	tenantB := selectBackend(t, fmt.Sprintf("cache-be: %q\ncache-be-key-prefix: tenant-b\n", addr))
+	require.Eventually(t, tenantA.CacheActive, selectEventuallyTimeout, selectEventuallyTick)
+	require.Eventually(t, tenantB.CacheActive, selectEventuallyTimeout, selectEventuallyTick)
+
+	grpcA, ok := tenantA.(*performance.Cache)
+	require.True(t, ok)
+	require.Equal(t, addr+" prefix=tenant-a (unconfirmed)", grpcA.DebugCacheState().Address,
+		"before the first reply nothing has confirmed the server scopes by the prefix")
+
+	hash := []byte("select-prefix-hash")
+	setForParity(t, tenantA, false, hash, nil, []byte(`tenant-a`), 100, 100)
+	eventuallyData(t, tenantA, hash, nil, 100, 100, false, []byte(`tenant-a`))
+	require.Nil(t, getForParity(t, tenantB, hash, nil, 100, 100, false).GetReply(),
+		"a router selected with another prefix must not see the entry")
+	require.Equal(t, addr+" prefix=tenant-a", grpcA.DebugCacheState().Address,
+		"a server that knows the field has echoed it by now")
+}
+
+// A cache-be-key-prefix beside a resp-cache block scopes nothing: the RESP
+// backend outranks cache-be and the gRPC client is never built. Said at
+// startup naming the prefix, since the keyspace in force is the block's
+// (MAG-3521 review); the same prefix with no RESP block is the dangling shape,
+// reported by the other line.
+func TestSelectBackendWarnsWhenTheGRPCPrefixIsOutranked(t *testing.T) {
+	mr := miniredis.RunT(t)
+	logged := captureLog(t, func() {
+		selectBackend(t, fmt.Sprintf("resp-cache:\n  addresses: [%q]\n  key-prefix: in-force\ncache-be: \"127.0.0.1:1\"\ncache-be-key-prefix: outranked\n", mr.Addr()))
+	})
+	require.Contains(t, logged, "takes precedence, so the gRPC prefix scopes nothing")
+	require.Contains(t, logged, `"key-prefix":"outranked"`)
+	require.Contains(t, logged, `"resp-cache-key-prefix":"in-force"`)
+	require.NotContains(t, logged, "dangling configuration, it scopes nothing", "the outranked shape is not the dangling one")
+
+	logged = captureLog(t, func() {
+		selectBackend(t, "cache-be-key-prefix: dangling\n")
+	})
+	require.Contains(t, logged, "dangling configuration, it scopes nothing")
+	require.Contains(t, logged, `"key-prefix":"dangling"`)
+}
+
+// MAG-3683, the shape the refusal cannot reach. Credentials with no tls block
+// at all are deliberate and stay allowed, and the harm the refusal names — the
+// password readable in the first write of every connection — was just as real
+// for them and silent: the startup line said tls=false in one word among six.
+// The store now warns once at construction, naming the endpoints and which
+// credential keys are set. The two controls pin what the warning is about: the
+// same credentials under TLS are not warned about, and no credentials are not.
+func TestSelectBackendWarnsWhenCredentialsCrossPlaintext(t *testing.T) {
+	mr := miniredis.RunT(t)
+	mr.RequireUserAuth("cacheuser", "placeholder-cache-credential")
+	const warning = "credentials are configured without tls"
+	block := func(tlsLines string) string {
+		return fmt.Sprintf(`
+resp-cache:
+  addresses: [%q]
+  username: cacheuser
+  password: placeholder-cache-credential
+%s`, mr.Addr(), tlsLines)
+	}
+
+	plaintext := captureLog(t, func() {
+		backend := selectBackend(t, block(""))
+		require.True(t, backend.CacheActive())
+		require.NoError(t, backend.Close())
+	})
+	require.Contains(t, plaintext, warning, "credentials without tls must be said out loud at startup")
+	require.Contains(t, plaintext, `"level":"warn"`)
+	require.Contains(t, plaintext, `"credential-keys":"username,password"`, "the warning names which keys are set")
+	require.NotContains(t, plaintext, "placeholder-cache-credential", "and never their values")
+
+	// Control: the same credentials under TLS. The handshake fails against the
+	// plaintext server, so the probe logs its own failure while the cache lives;
+	// closing inside the capture keeps that to this capture.
+	encrypted := captureLog(t, func() {
+		backend := selectBackend(t, block("  tls:\n    enabled: true\n"))
+		require.NoError(t, backend.Close())
+	})
+	require.NotContains(t, encrypted, warning, "with tls on the credentials do not cross readable, so nothing to warn about")
+
+	// Control: no credentials at all.
+	anonymous := captureLog(t, func() {
+		backend := selectBackend(t, fmt.Sprintf("\nresp-cache:\n  addresses: [%q]\n", mr.Addr()))
+		require.NoError(t, backend.Close())
+	})
+	require.NotContains(t, anonymous, warning, "with nothing to protect there is nothing to warn about")
 }

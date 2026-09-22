@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/go-viper/mapstructure/v2"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
 	"github.com/magma-Devs/smart-router/utils"
@@ -21,6 +22,12 @@ const (
 	// cache flag. Environment variables are intentionally not bound.
 	RespCacheAddressesFlagName = "resp-cache-addresses"
 	RespCacheTopologyFlagName  = "resp-cache-topology"
+	// RespCacheKeyPrefixFlagName is the flag form of resp-cache.key-prefix. It
+	// exists because the keyspace is the one setting that MUST differ between
+	// deployments sharing a backend, and a deployment that can only pass flags
+	// (a chart rendering a global flag list) had no way to set it — so every
+	// such router landed on the shared default (MAG-3687).
+	RespCacheKeyPrefixFlagName = "resp-cache-key-prefix"
 )
 
 // LoadRespCacheConfig reads the resp-cache configuration: the `resp-cache:`
@@ -31,8 +38,15 @@ const (
 func LoadRespCacheConfig(v *viper.Viper) (cfg redisstore.Config, enabled bool, err error) {
 	blockPresent := v.IsSet(RespCacheViperKey)
 	if blockPresent {
-		if unmarshalErr := v.UnmarshalKey(RespCacheViperKey, &cfg); unmarshalErr != nil {
-			return cfg, false, fmt.Errorf("invalid %s block: %w", RespCacheViperKey, unmarshalErr)
+		// Strict: a key the block does not define is an error, not a line
+		// silently ignored. What lives here decides which keyspace the router
+		// occupies and how it authenticates, so a misspelled key-prefix that
+		// fell back to the shared default without a word put the router in
+		// another deployment's keyspace (MAG-3677). Nested blocks (tls) are
+		// held to the same rule.
+		strict := func(dc *mapstructure.DecoderConfig) { dc.ErrorUnused = true }
+		if unmarshalErr := v.UnmarshalKey(RespCacheViperKey, &cfg, strict); unmarshalErr != nil {
+			return cfg, false, fmt.Errorf("invalid %s block (unknown keys are rejected so a misspelled setting cannot fall back to a default unnoticed): %w", RespCacheViperKey, unmarshalErr)
 		}
 	}
 
@@ -50,6 +64,10 @@ func LoadRespCacheConfig(v *viper.Viper) (cfg redisstore.Config, enabled bool, e
 	}
 	if topology := strings.TrimSpace(v.GetString(RespCacheTopologyFlagName)); topology != "" {
 		cfg.Topology = redisstore.Topology(topology)
+		flagged = true
+	}
+	if keyPrefix := strings.TrimSpace(v.GetString(RespCacheKeyPrefixFlagName)); keyPrefix != "" {
+		cfg.KeyPrefix = keyPrefix
 		flagged = true
 	}
 
@@ -88,6 +106,30 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 		return nil, err
 	}
 	cacheAddr := v.GetString(CacheFlagName)
+	// The gRPC client's keyspace. Validated HERE and not in the constructor,
+	// because the constructor's error means "the first dial failed, the client
+	// reconnects in the background" and the call below deliberately carries on
+	// through it — a configuration error returned the same way would start the
+	// router without a cache and log it as a connection problem.
+	cacheKeyPrefix := strings.TrimSpace(v.GetString(CacheKeyPrefixFlagName))
+	if err := core.ValidateKeyPrefix(cacheKeyPrefix); err != nil {
+		return nil, fmt.Errorf("%s: %w", CacheKeyPrefixFlagName, err)
+	}
+	// A gRPC prefix that scopes nothing is said out loud, naming the prefix: the
+	// two shapes are a prefix with no cache-be to apply it to, and a prefix
+	// beside a resp-cache block, which outranks cache-be entirely so the gRPC
+	// client is never built — the keyspace in force is the RESP block's.
+	if cacheKeyPrefix != "" {
+		switch {
+		case respEnabled:
+			utils.LavaFormatWarning(CacheKeyPrefixFlagName+" is set but the RESP backend is configured and takes precedence, so the gRPC prefix scopes nothing; the keyspace in force is resp-cache.key-prefix", nil,
+				utils.LogAttr("key-prefix", cacheKeyPrefix),
+				utils.LogAttr("resp-cache-key-prefix", respConfig.KeyPrefix))
+		case cacheAddr == "":
+			utils.LavaFormatWarning(CacheKeyPrefixFlagName+" is set while "+CacheFlagName+" is empty — dangling configuration, it scopes nothing (set "+CacheFlagName+" or drop the prefix; the RESP backend's keyspace is resp-cache.key-prefix)", nil,
+				utils.LogAttr("key-prefix", cacheKeyPrefix))
+		}
+	}
 
 	if respEnabled {
 		if cacheAddr != "" {
@@ -112,11 +154,11 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 
 	var cache CacheBackend = (*Cache)(nil)
 	if cacheAddr != "" {
-		grpcCache, initErr := InitCache(ctx, cacheAddr)
+		grpcCache, initErr := InitCacheWithKeyPrefix(ctx, cacheAddr, cacheKeyPrefix)
 		if initErr != nil {
 			utils.LavaFormatError("Failed To Connect to cache at address", initErr, utils.Attribute{Key: "address", Value: cacheAddr})
 		} else {
-			utils.LavaFormatInfo("cache service connected", utils.Attribute{Key: "address", Value: cacheAddr})
+			utils.LavaFormatInfo("cache service connected", utils.Attribute{Key: "address", Value: cacheAddr}, utils.LogAttr("key-prefix", cacheKeyPrefix))
 		}
 		cache = grpcCache
 	}

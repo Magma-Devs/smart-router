@@ -25,10 +25,24 @@ type relayerCacheClientStore struct {
 	address      string
 	reconnecting atomic.Bool
 	closed       atomic.Bool // set by close(); no reconnect may spawn afterwards
+	// keyspaceEcho is the last thing the server behind the installed connection
+	// said about this client's key prefix (one of the keyspaceEcho* values),
+	// and keyspaceWarned whether a missing echo has been reported on this
+	// connection. Both are reset when a connection is installed: a reconnect
+	// can land on a different build of the cache server.
+	keyspaceEcho   atomic.Int32
+	keyspaceWarned atomic.Bool
 }
 
 const (
 	reconnectInterval = 5 * time.Second
+)
+
+// What the server behind a connection has said about this client's key prefix.
+const (
+	keyspaceEchoUnknown   int32 = iota // no reply on this connection yet
+	keyspaceEchoConfirmed              // a reply echoed the prefix the request carried
+	keyspaceEchoMissing                // a reply came back without it: the server predates the field
 )
 
 func newRelayerCacheClientStore(ctx context.Context, address string) (*relayerCacheClientStore, error) {
@@ -115,6 +129,10 @@ func (r *relayerCacheClientStore) connectClient() error {
 			}
 			r.client = relayerCacheClient
 			r.conn = conn
+			// A fresh connection is a fresh server as far as the keyspace goes:
+			// what the previous one echoed says nothing about this one.
+			r.keyspaceEcho.Store(keyspaceEchoUnknown)
+			r.keyspaceWarned.Store(false)
 		}()
 
 		r.reconnecting.Store(false)
@@ -204,13 +222,34 @@ type Cache struct {
 	// eventually disagree.
 	clientStore *relayerCacheClientStore
 	serviceCtx  context.Context
+	// keyPrefix is the keyspace this client occupies on the cache server
+	// (cache-be-key-prefix), stamped onto every message it sends; the server
+	// folds it into every key it derives. Empty means the shared, unscoped
+	// keyspace — what every router occupied before the setting existed. The
+	// RESP backend has the same setting applied at its store layer instead
+	// (resp-cache.key-prefix), which is why the call sites never see either.
+	keyPrefix string
 }
 
+// InitCache builds a client on the shared, unscoped keyspace; see
+// InitCacheWithKeyPrefix.
 func InitCache(ctx context.Context, addr string) (*Cache, error) {
+	return InitCacheWithKeyPrefix(ctx, addr, "")
+}
+
+// InitCacheWithKeyPrefix builds a client that occupies one keyspace on the
+// cache server. The returned error is the initial dial's, never a
+// configuration error: the client is usable either way and reconnects in the
+// background, so a caller must not read a non-nil error as "no cache". The
+// prefix is expected to have passed core.ValidateKeyPrefix — SelectCacheBackend
+// does that before construction and aborts startup on a bad one, because
+// failing here would be indistinguishable from a dial failure to the caller.
+func InitCacheWithKeyPrefix(ctx context.Context, addr, keyPrefix string) (*Cache, error) {
 	clientStore, err := newRelayerCacheClientStore(ctx, addr)
 	cache := &Cache{
 		clientStore: clientStore,
 		serviceCtx:  ctx,
+		keyPrefix:   keyPrefix,
 	}
 	if err != nil {
 		// Initial dial failed. Start the reconnect loop eagerly so the
@@ -231,11 +270,94 @@ func (cache *Cache) GetEntry(ctx context.Context, relayCacheGet *pairingtypes.Re
 		return nil, NotConnectedError
 	}
 
-	reply, err = client.GetRelay(ctx, relayCacheGet)
+	reply, err = client.GetRelay(ctx, cache.scopedGet(relayCacheGet))
 	if err != nil {
 		cache.clientStore.resetOnConnectionError(err)
+		return reply, err
 	}
-	return reply, err
+	cache.noteKeyspaceEcho(reply.GetKeyPrefix())
+	return reply, nil
+}
+
+// noteKeyspaceEcho reads the keyspace echo off a reply. A cache server from
+// this version returns the prefix it scoped the request by; one that predates
+// the field drops the prefix on the way in and echoes nothing, and from then on
+// every entry this router reads and writes lives in the shared keyspace with no
+// other sign of it — the operator set the one setting that must differ between
+// deployments and got no isolation (MAG-3521 review). The verdict is kept per
+// connection for /debug/cache-state, and a missing echo is reported once per
+// connection: the reconnect loop resets both when it installs a connection, so
+// a server upgraded behind a reconnect is judged afresh. Serving goes on either
+// way; refusing would turn a missing upgrade into an outage.
+func (cache *Cache) noteKeyspaceEcho(echo string) {
+	if cache.keyPrefix == "" {
+		return
+	}
+	store := cache.clientStore
+	if echo == cache.keyPrefix {
+		store.keyspaceEcho.Store(keyspaceEchoConfirmed)
+		return
+	}
+	store.keyspaceEcho.Store(keyspaceEchoMissing)
+	if !store.keyspaceWarned.CompareAndSwap(false, true) {
+		return
+	}
+	utils.LavaFormatWarning(CacheKeyPrefixFlagName+" is set but the cache server did not echo it: the server predates the field and isolates nothing, so this router reads and writes the shared keyspace (upgrade the cache server alongside the router; reported once per connection)", nil,
+		utils.LogAttr("address", store.address),
+		utils.LogAttr("key-prefix", cache.keyPrefix),
+		utils.LogAttr("echoed", echo),
+	)
+}
+
+// keyspaceEchoMarker qualifies the prefix on /debug/cache-state by what the
+// server behind the current connection has said about it: nothing once a reply
+// has echoed it, "(unconfirmed)" before the first reply on the connection, and
+// "(ignored by the cache server)" once a reply came back without it.
+func (cache *Cache) keyspaceEchoMarker() string {
+	if cache.clientStore == nil {
+		return " (unconfirmed)"
+	}
+	switch cache.clientStore.keyspaceEcho.Load() {
+	case keyspaceEchoConfirmed:
+		return ""
+	case keyspaceEchoMissing:
+		return " (ignored by the cache server)"
+	default:
+		return " (unconfirmed)"
+	}
+}
+
+// scopedGet stamps this client's key prefix onto the request. On a shallow copy,
+// because the caller owns the message — the secondary-cache path in particular
+// reuses one request shape across tiers that may sit on different keyspaces —
+// and a copy sharing the slices is all a send needs. A client without a prefix
+// passes the request through untouched, including any prefix the caller set.
+func (cache *Cache) scopedGet(req *pairingtypes.RelayCacheGet) *pairingtypes.RelayCacheGet {
+	if cache.keyPrefix == "" || req == nil {
+		return req
+	}
+	scoped := *req
+	scoped.KeyPrefix = cache.keyPrefix
+	return &scoped
+}
+
+// scopedSet is scopedGet for writes.
+func (cache *Cache) scopedSet(req *pairingtypes.RelayCacheSet) *pairingtypes.RelayCacheSet {
+	if cache.keyPrefix == "" || req == nil {
+		return req
+	}
+	scoped := *req
+	scoped.KeyPrefix = cache.keyPrefix
+	return &scoped
+}
+
+// KeyPrefix reports the keyspace this client occupies; empty for the shared
+// keyspace. Nil-safe, like every other accessor on the typed-nil wiring.
+func (cache *Cache) KeyPrefix() string {
+	if cache == nil {
+		return ""
+	}
+	return cache.keyPrefix
 }
 
 func (cache *Cache) CacheActive() bool {
@@ -270,6 +392,14 @@ func (cache *Cache) DebugCacheState() DebugCacheState {
 	address := cache.BackendEndpoint()
 	if address == "" {
 		return DebugCacheState{Engine: CacheEngineGRPC}
+	}
+	// The keyspace is rendered into the address the same way the RESP tier does
+	// it ("prefix=..."): two routers on one cache server with different prefixes
+	// share zero entries and are otherwise indistinguishable in this output.
+	// Qualified until the server has echoed it, because a prefix the server
+	// ignores isolates nothing (see keyspaceEchoMarker).
+	if cache.keyPrefix != "" {
+		address += " prefix=" + cache.keyPrefix + cache.keyspaceEchoMarker()
 	}
 	state := DebugCacheState{
 		Configured: true,
@@ -313,7 +443,7 @@ func (cache *Cache) SetEntry(ctx context.Context, cacheSet *pairingtypes.RelayCa
 		return NotConnectedError
 	}
 
-	_, err := client.SetRelay(ctx, cacheSet)
+	_, err := client.SetRelay(ctx, cache.scopedSet(cacheSet))
 	if err != nil {
 		cache.clientStore.resetOnConnectionError(err)
 	}
@@ -421,11 +551,13 @@ func (cache *Cache) GetStickySession(ctx context.Context, chainId, apiInterface,
 		ApiInterface: apiInterface,
 		Service:      service,
 		StickyId:     stickyId,
+		KeyPrefix:    cache.keyPrefix,
 	})
 	if err != nil {
 		cache.clientStore.resetOnConnectionError(err)
 		return core.StickyPin{}, false, err
 	}
+	cache.noteKeyspaceEcho(reply.GetKeyPrefix())
 	if !reply.GetFound() {
 		return core.StickyPin{}, false, nil
 	}
@@ -454,10 +586,12 @@ func (cache *Cache) SetStickySessionIfAbsent(ctx context.Context, chainId, apiIn
 		Provider:     pin.Provider,
 		Epoch:        pin.Epoch,
 		TtlMs:        ttl.Milliseconds(),
+		KeyPrefix:    cache.keyPrefix,
 	})
 	if err != nil {
 		cache.clientStore.resetOnConnectionError(err)
 		return core.StickyPin{}, err
 	}
+	cache.noteKeyspaceEcho(reply.GetKeyPrefix())
 	return core.StickyPin{Provider: reply.GetProvider(), Epoch: reply.GetEpoch()}, nil
 }

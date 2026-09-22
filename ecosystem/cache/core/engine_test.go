@@ -21,7 +21,12 @@ type fakeStore struct {
 	tipBlock int64
 	tipFresh bool
 	tipSets  []int64
-	heights  map[string]int64
+	// tips/tipKeys record chain tips written THROUGH the store, by key, so a
+	// test can tell one keyspace's tip from another's; tipBlock/tipFresh above
+	// is the older key-blind fixture for tests that only care about freshness.
+	tips    map[string]int64
+	tipKeys []string
+	heights map[string]int64
 
 	// heightCalls counts round trips to the height surface: one per GetHeights
 	// call regardless of key count, so a test can tell a batched lookup from a
@@ -45,6 +50,7 @@ func newFakeStore() *fakeStore {
 		stickyPins: map[string]StickyPin{},
 		stickyTTLs: map[string]time.Duration{},
 		heights:    map[string]int64{},
+		tips:       map[string]int64{},
 	}
 }
 
@@ -110,16 +116,23 @@ func (f *fakeStore) SetInt64IfGreaterOrEqual(ctx context.Context, key string, va
 func (f *fakeStore) GetChainTip(ctx context.Context, key string) (int64, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.tipFresh {
-		return spectypes.NOT_APPLICABLE, false, nil
+	if f.tipFresh {
+		return f.tipBlock, true, nil
 	}
-	return f.tipBlock, true, nil
+	if block, ok := f.tips[key]; ok {
+		return block, true, nil
+	}
+	return spectypes.NOT_APPLICABLE, false, nil
 }
 
 func (f *fakeStore) SetChainTipIfGreaterOrEqual(ctx context.Context, key string, block int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tipSets = append(f.tipSets, block)
+	f.tipKeys = append(f.tipKeys, key)
+	if existing, ok := f.tips[key]; !ok || block >= existing {
+		f.tips[key] = block
+	}
 	return nil
 }
 
@@ -157,6 +170,7 @@ func (f *fakeStore) Purge(ctx context.Context) error {
 	f.entries = map[string]*Envelope{}
 	f.int64s = map[string]int64{}
 	f.heights = map[string]int64{}
+	f.tips = map[string]int64{}
 	return nil
 }
 
@@ -486,4 +500,100 @@ func TestSetRelayRejectsNegativeBlock(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Empty(t, store.entries, "nothing may be stored under an unresolved block")
+}
+
+// ---------------------------------------------------------------------------
+// Keyspace scoping (MAG-3521)
+// ---------------------------------------------------------------------------
+
+func TestScopedChainIdAndKeyPrefixValidation(t *testing.T) {
+	require.Equal(t, "ETH1", ScopedChainId("", "ETH1"),
+		"no prefix is the identity: every key an unprefixed router writes stays byte-for-byte what it was")
+	require.Equal(t, "prod-eu:ETH1", ScopedChainId("prod-eu", "ETH1"))
+	require.Equal(t, "rel:f:prod-eu:ETH1:abcd:100", RelayKey(true, ScopedChainId("prod-eu", "ETH1"), []byte{0xab, 0xcd}, 100),
+		"the scope sits after the kind prefix, so store routing on rel:f:/rel:t:/h2h: is unaffected")
+	require.Equal(t, "chaintip:prod-eu:ETH1", ChainTipKey(ScopedChainId("prod-eu", "ETH1")))
+
+	require.NoError(t, ValidateKeyPrefix(""), "empty means unscoped")
+	require.NoError(t, ValidateKeyPrefix("prod-eu_1.cache"))
+	for _, bad := range []string{"a*b", "x?", "pre[fix", "sp ace", "colon:"} {
+		require.Error(t, ValidateKeyPrefix(bad), "glob-unsafe or separator-bearing prefix %q must be rejected", bad)
+	}
+}
+
+// Two routers on one chain with different key prefixes must share nothing —
+// not the entry, not the chain tip that resolves LATEST, not the heights, not
+// the shared-state tip. The ticket's finding was the entry; the tip is the part
+// a fix that only scoped RelayKey would miss, and it is the one that shifts
+// LATEST resolution for a whole chain.
+func TestKeyPrefixIsolatesEveryKey(t *testing.T) {
+	store := newFakeStore()
+	engine := testEngine(store)
+	hash := []byte{0x0a}
+
+	set := func(prefix string, data []byte) {
+		t.Helper()
+		require.NoError(t, engine.SetRelay(context.Background(), &relaytypes.RelayCacheSet{
+			KeyPrefix:             prefix,
+			RequestHash:           hash,
+			ChainId:               "ETH1",
+			RequestedBlock:        100,
+			SeenBlock:             100,
+			SharedStateId:         "ETH1jsonrpc",
+			AverageBlockTime:      int64(12 * time.Second),
+			Response:              &relaytypes.RelayReply{Data: data, LatestBlock: 100},
+			BlocksHashesToHeights: []*relaytypes.BlockHashToHeight{{Hash: "0xh", Height: 100}},
+		}))
+	}
+	get := func(prefix string, block int64) (*relaytypes.CacheRelayReply, bool) {
+		t.Helper()
+		reply, hit, _ := engine.GetRelay(context.Background(), &relaytypes.RelayCacheGet{
+			KeyPrefix:             prefix,
+			RequestHash:           hash,
+			ChainId:               "ETH1",
+			RequestedBlock:        block,
+			SeenBlock:             100,
+			SharedStateId:         "ETH1jsonrpc",
+			BlocksHashesToHeights: []*relaytypes.BlockHashToHeight{{Hash: "0xh"}},
+		})
+		return reply, hit
+	}
+
+	set("tenant-a", []byte(`0xc0ffee`))
+
+	// Every key of the write carries the scope, and nothing lands unscoped.
+	require.NotNil(t, store.entries[RelayKey(false, "tenant-a:ETH1", hash, 100)])
+	require.Nil(t, store.entries[RelayKey(false, "ETH1", hash, 100)], "nothing lands in the unscoped keyspace")
+	require.Equal(t, []string{ChainTipKey("tenant-a:ETH1")}, store.tipKeys, "the chain tip is scoped too")
+	require.Equal(t, int64(100), store.heights[HeightKey("tenant-a:ETH1", "0xh")])
+	require.Equal(t, int64(100), store.int64s[SharedTipKey("tenant-a:ETH1", "ETH1jsonrpc")])
+
+	// The writer reads its own entry back, by concrete block and by LATEST.
+	reply, hit := get("tenant-a", 100)
+	require.True(t, hit)
+	require.Equal(t, []byte(`0xc0ffee`), reply.Reply.Data)
+	reply, hit = get("tenant-a", spectypes.LATEST_BLOCK)
+	require.True(t, hit, "LATEST resolves through the writer's own scoped tip")
+	require.Equal(t, int64(100), reply.BlocksHashesToHeights[0].Height, "heights come back in-scope")
+
+	// A router on another prefix — or on none — sees nothing of it.
+	for _, other := range []string{"tenant-b", ""} {
+		reply, hit = get(other, 100)
+		require.False(t, hit, "prefix %q must not see tenant-a's entry", other)
+		require.Nil(t, reply.Reply)
+		reply, hit = get(other, spectypes.LATEST_BLOCK)
+		require.False(t, hit, "prefix %q must not resolve LATEST through tenant-a's tip", other)
+		require.Equal(t, spectypes.NOT_APPLICABLE, reply.BlocksHashesToHeights[0].Height,
+			"prefix %q must not see tenant-a's heights", other)
+	}
+
+	// And the other way round: the unscoped keyspace is exactly what it was.
+	set("", []byte(`0x0`))
+	require.NotNil(t, store.entries[RelayKey(false, "ETH1", hash, 100)], "an unprefixed writer's keys are unchanged")
+	reply, hit = get("", 100)
+	require.True(t, hit)
+	require.Equal(t, []byte(`0x0`), reply.Reply.Data)
+	reply, hit = get("tenant-a", 100)
+	require.True(t, hit)
+	require.Equal(t, []byte(`0xc0ffee`), reply.Reply.Data, "tenant-a's entry is untouched by the unscoped write")
 }

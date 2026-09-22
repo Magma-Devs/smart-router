@@ -81,6 +81,13 @@ type Config struct {
 }
 
 // TLSConfig is the file-based TLS surface (config-file friendly).
+//
+// Enabled is the switch, and it is the ONLY key that turns TLS on: build reads
+// nothing else while it is false. A block that carries any other tls.* key
+// without it is therefore refused by Config.Validate rather than accepted —
+// otherwise the router starts, opens a plaintext connection, and its first
+// write puts the configured username and password on the wire readable, while
+// the operator who wrote three certificate paths believes the opposite.
 type TLSConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// CAFile roots server verification; empty falls back to the system pool.
@@ -92,6 +99,18 @@ type TLSConfig struct {
 	// that differs from the certificate).
 	ServerName         string `mapstructure:"server-name"`
 	InsecureSkipVerify bool   `mapstructure:"insecure-skip-verify"`
+}
+
+// hasMaterial reports whether the block carries any setting other than the
+// switch itself — the operator wrote a tls section, whatever Enabled says.
+//
+// It compares the whole struct with the switch cleared rather than naming the
+// keys, so a key added to TLSConfig is covered by the rule without anyone
+// remembering to list it here; it stops compiling if a non-comparable field is
+// ever added, which is the moment to revisit it.
+func (c TLSConfig) hasMaterial() bool {
+	c.Enabled = false
+	return c != TLSConfig{}
 }
 
 // build materialises the tls.Config, nil when disabled. Files are read
@@ -155,6 +174,14 @@ func (cfg Config) Validate() error {
 	if cfg.SentinelPassword != "" && cfg.SentinelPasswordFile != "" {
 		return fmt.Errorf("resp-cache: sentinel-password and sentinel-password-file are mutually exclusive")
 	}
+	// The same rule as the sentinel-* credentials above: a half-written section
+	// is a deployment mistake, not a configuration. Here the cost of accepting
+	// it is a credential crossing the network in the clear, so this is the one
+	// combination that must not be able to start quietly. The message keeps to
+	// the shape of its siblings; the reasoning lives on TLSConfig.
+	if !cfg.TLS.Enabled && cfg.TLS.hasMaterial() {
+		return fmt.Errorf("resp-cache: tls.* options are set but tls.enabled is not true — dangling configuration (set tls.enabled: true, or remove the other tls.* keys)")
+	}
 	return nil
 }
 
@@ -170,6 +197,30 @@ func (cfg Config) refreshInterval() time.Duration {
 		return DefaultCredentialRefreshInterval
 	}
 	return cfg.CredentialRefreshInterval
+}
+
+// configuredCredentialKeys names every credential key the block sets, data
+// node and sentinel control plane alike — the keys, never the values. Every
+// one of them is sent to the backend on each new connection, so together they
+// are what crosses the network readable when TLS is off.
+func (cfg Config) configuredCredentialKeys() []string {
+	var keys []string
+	for _, key := range []struct {
+		name string
+		set  bool
+	}{
+		{"username", cfg.Username != ""},
+		{"password", cfg.Password != ""},
+		{"password-file", cfg.PasswordFile != ""},
+		{"sentinel-username", cfg.SentinelUsername != ""},
+		{"sentinel-password", cfg.SentinelPassword != ""},
+		{"sentinel-password-file", cfg.SentinelPasswordFile != ""},
+	} {
+		if key.set {
+			keys = append(keys, key.name)
+		}
+	}
+	return keys
 }
 
 // credentialsSource picks the data-node credential source: file-backed when

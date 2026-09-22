@@ -37,6 +37,13 @@ func TestConfigValidateMatrix(t *testing.T) {
 		{"db on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, DB: 2}, "db selection"},
 		{"password and password-file", Config{Addresses: []string{"h:1"}, Password: "a", PasswordFile: "/f"}, "mutually exclusive"},
 		{"sentinel password and file", Config{Topology: TopologySentinel, MasterName: "m", Addresses: []string{"s:1"}, SentinelPassword: "a", SentinelPasswordFile: "/f"}, "mutually exclusive"},
+		// MAG-3683: a tls block without the switch. One case per key that can
+		// make the block look complete, because each on its own reads as "TLS
+		// is configured" to whoever wrote it.
+		{"tls ca-file without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{CAFile: "/ca.pem"}}, "tls.enabled"},
+		{"tls client keypair without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{CertFile: "/c.pem", KeyFile: "/k.pem"}}, "tls.enabled"},
+		{"tls server-name without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{ServerName: "cache.internal"}}, "tls.enabled"},
+		{"tls insecure-skip-verify without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{InsecureSkipVerify: true}}, "tls.enabled"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -45,6 +52,20 @@ func TestConfigValidateMatrix(t *testing.T) {
 			require.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+// The plaintext-credential warning (warnIfCredentialsCrossPlaintext) names the
+// credential keys the block sets, data node and sentinel alike, and only the
+// keys: what it says is what would cross the network readable, and it must
+// never say the values.
+func TestConfiguredCredentialKeys(t *testing.T) {
+	require.Empty(t, Config{Addresses: []string{"h:1"}}.configuredCredentialKeys(), "nothing configured, nothing to name")
+	require.Equal(t, []string{"username", "password"},
+		Config{Addresses: []string{"h:1"}, Username: "u", Password: "p"}.configuredCredentialKeys())
+	require.Equal(t, []string{"password-file"},
+		Config{Addresses: []string{"h:1"}, PasswordFile: "/run/secrets/cache"}.configuredCredentialKeys())
+	require.Equal(t, []string{"sentinel-username", "sentinel-password", "sentinel-password-file"},
+		Config{Topology: TopologySentinel, MasterName: "m", Addresses: []string{"s:1"}, SentinelUsername: "u", SentinelPassword: "p", SentinelPasswordFile: "/f"}.configuredCredentialKeys())
 }
 
 func listenLocal(t *testing.T) net.Listener {
@@ -207,14 +228,17 @@ func TestClusterOptionsMapping(t *testing.T) {
 
 func TestNewFailsFastOnBadInputs(t *testing.T) {
 	_, err := New(Config{Addresses: []string{"h:1"}, PasswordFile: "/does/not/exist"})
-	require.Error(t, err, "unreadable credential file must fail construction, not first dial")
+	require.ErrorContains(t, err, "/does/not/exist", "unreadable credential file must fail construction naming the file, not first dial")
 
 	_, err = New(Config{Addresses: []string{"h:1"}, TLS: TLSConfig{Enabled: true, CAFile: "/does/not/exist"}})
-	require.Error(t, err, "unreadable CA must fail construction")
+	require.ErrorContains(t, err, "/does/not/exist", "unreadable CA must fail construction naming the file")
 
 	_, err = New(Config{Addresses: []string{"h:1"}, TLS: TLSConfig{Enabled: true, CertFile: "/only/cert"}})
 	require.Error(t, err, "client cert without key must fail construction")
 
 	_, err = New(Config{Addresses: []string{"h:1"}, KeyPrefix: "glob*"})
 	require.Error(t, err, "glob-unsafe prefix must fail construction")
+
+	_, err = New(Config{Addresses: []string{"h:1"}, Password: "placeholder-credential", TLS: TLSConfig{CAFile: "/does/not/exist"}})
+	require.ErrorContains(t, err, "tls.enabled", "a tls block without the switch must fail construction, not dial in plaintext (MAG-3683)")
 }

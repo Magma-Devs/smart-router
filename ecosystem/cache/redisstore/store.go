@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,12 +40,6 @@ const (
 	// codec) can be introduced additively.
 	envelopeVersion = 1
 )
-
-// keyPrefixPattern restricts prefixes to characters with no glob meaning:
-// Purge feeds the prefix into SCAN MATCH, whose patterns are globs, so an
-// unsafe prefix could silently match and delete unrelated keys on a shared
-// backend.
-var keyPrefixPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // Store implements core.KVStore over a RESP backend. Reads and writes may be
 // routed to distinct clients (D8: reader endpoints in multi-region
@@ -140,6 +133,8 @@ func New(cfg Config) (*Store, error) {
 	if _, _, err := cfg.credentialsSource().Credentials(); err != nil {
 		return nil, fmt.Errorf("resp-cache: reading credentials: %w", err)
 	}
+
+	warnIfCredentialsCrossPlaintext(cfg)
 
 	writeTracker := &endpointTracker{}
 	readTracker := writeTracker
@@ -289,6 +284,33 @@ func warnIfReadSplitIsDiscoveryScoped(cfg Config) {
 	)
 }
 
+// warnIfCredentialsCrossPlaintext says, once at construction, that the
+// configured credentials will be sent to the backend in the clear.
+//
+// Validate refuses the one shape that READS as encrypted and is not (a tls
+// block without its switch). Every other plaintext shape — credentials with no
+// tls block at all — is deliberate and stays allowed: a loopback or
+// private-network backend is the ordinary case, and the gRPC upstreams take
+// the same decision (TokenOverInsecureWarning in protocol/common). But the
+// harm the refusal names is just as real here and used to be silent: the
+// startup line said tls=false in one word among six, and the first write of
+// every new connection carried the password readable. So it is said out loud,
+// naming the endpoints and which credential keys are set — never their values.
+func warnIfCredentialsCrossPlaintext(cfg Config) {
+	if cfg.TLS.Enabled {
+		return
+	}
+	keys := cfg.configuredCredentialKeys()
+	if len(keys) == 0 {
+		return
+	}
+	utils.LavaFormatWarning("resp-cache credentials are configured without tls: they cross the network readable on every new connection to the backend (set tls.enabled: true to protect them in transit; on a loopback or private-network backend this may be intended)", nil,
+		utils.LogAttr("addresses", cfg.Addresses),
+		utils.LogAttr("read-addresses", cfg.ReadAddresses),
+		utils.LogAttr("credential-keys", keys),
+	)
+}
+
 // NewWithClient wraps an externally constructed client for both reads and
 // writes (any topology; tests inject miniredis-backed clients here).
 func NewWithClient(client redis.UniversalClient, keyPrefix string) (*Store, error) {
@@ -304,8 +326,11 @@ func newStore(writeClient, readClient redis.UniversalClient, keyPrefix string) (
 	if keyPrefix == "" {
 		keyPrefix = DefaultKeyPrefix
 	}
-	if !keyPrefixPattern.MatchString(keyPrefix) {
-		return nil, fmt.Errorf("invalid resp-cache key prefix %q: must match %s — SCAN MATCH patterns are globs, so glob characters could purge unrelated keys", keyPrefix, keyPrefixPattern.String())
+	// The character set is core's (shared with the gRPC client's key prefix) so
+	// one value works on either backend; Purge feeds this prefix into SCAN
+	// MATCH, which is where a glob character would do damage.
+	if err := core.ValidateKeyPrefix(keyPrefix); err != nil {
+		return nil, fmt.Errorf("resp-cache: %w", err)
 	}
 	// Derived rather than left empty so the exported NewWithClient/NewWithClients
 	// seams produce a usable address. New() overwrites this with the operator's
