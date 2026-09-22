@@ -289,10 +289,24 @@ func TestCacheStateWireContract(t *testing.T) {
 	for _, key := range []string{
 		`"schema_version"`, `"engine"`, `"tiers"`, `"primary"`, `"secondary"`,
 		`"configured"`, `"address"`, `"reachable"`, `"reachable_checked_at"`,
-		`"reachable_detail"`, `"when_unreachable"`, `"lifetimes"`,
+		`"reachable_detail"`, `"when_unreachable"`, `"lifetimes"`, `"breaker"`,
 	} {
 		require.Contains(t, body, key, "wire key must be present")
 	}
+
+	t.Run("a tier without a breaker reports null, a RESP tier reports each side", func(t *testing.T) {
+		rr, resp := getCacheState(t, debugMuxDeps{
+			cache: &stubCacheStateBackend{state: performance.DebugCacheState{
+				Configured: true, Engine: performance.CacheEngineRESP, Address: "redis:6379",
+				Reachable: boolPtr(true), WhenUnreachable: performance.CacheWhenUnreachableSkipped,
+				Breaker: &performance.CacheBreakerState{ReadOpen: true},
+			}},
+			secondaryCache: &stubCacheStateReader{state: grpcTier("cache-be:20100", boolPtr(true))},
+		})
+		require.Contains(t, rr.Body.String(), `"breaker":{"write_open":false,"read_open":true}`,
+			"with a read/write split, reachable alone cannot say which side is being skipped")
+		require.Nil(t, resp.Tiers.Secondary.Breaker, "a cache-be tier has no breaker, and null says so rather than a pair of falses")
+	})
 
 	t.Run("an unnameable address is reported empty, not omitted", func(t *testing.T) {
 		rr, _ := getCacheState(t, debugMuxDeps{

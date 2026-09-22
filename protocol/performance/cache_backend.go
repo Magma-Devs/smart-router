@@ -71,6 +71,15 @@ type CacheLifetimes struct {
 	NodeErrorsSeconds   float64 `json:"node_errors_seconds"`
 }
 
+// CacheBreakerState is a RESP tier's breaker, per side of the relay path:
+// WriteOpen while writes are being skipped, ReadOpen while lookups are. A tier
+// without one (the gRPC client returns not-connected before any I/O) reports
+// none.
+type CacheBreakerState struct {
+	WriteOpen bool `json:"write_open"`
+	ReadOpen  bool `json:"read_open"`
+}
+
 // DebugCacheState is one cache tier as GET /debug/cache-state reports it.
 //
 // Deliberately a single struct behind a single method rather than an accessor per
@@ -105,6 +114,11 @@ type DebugCacheState struct {
 	WhenUnreachable string
 	// Lifetimes is nil when this backend cannot answer for its own TTLs.
 	Lifetimes *CacheLifetimes
+	// Breaker is nil for a tier that has none. Reported per side because a
+	// store split by role fails by role: Reachable=false and WhenUnreachable
+	// together cannot say whether it is the lookups or the writes that are
+	// being skipped.
+	Breaker *CacheBreakerState
 }
 
 // DebugCacheStateReporter exposes the runtime facts needed by the debug cache

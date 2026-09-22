@@ -36,11 +36,12 @@ type respCacheMetricsSet struct {
 	// cache is down, which the unlabelled pair cannot (MAG-3674).
 	endpointConnected        *prometheus.GaugeVec
 	endpointConnectionErrors *prometheus.CounterVec
-	// skipped counts operations answered by the open breaker without I/O, by
-	// op, and breakerOpen is 1 while it is open — together they are what an
-	// outage costs the relay path, as distinct from the failures that opened it.
+	// skipped counts operations answered by an open breaker without I/O, by
+	// op, and breakerOpen is 1 per side while that side's breaker is open —
+	// together they are what an outage costs the relay path, as distinct from
+	// the failures that opened it.
 	skipped        *prometheus.CounterVec
-	breakerOpen    prometheus.Gauge
+	breakerOpen    *prometheus.GaugeVec
 	poolTotalConns prometheus.Gauge
 	poolIdleConns  prometheus.Gauge
 	poolStaleConns prometheus.Gauge
@@ -76,12 +77,12 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 			}, []string{"role"}),
 			skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
 				Name: "smartrouter_resp_cache_skipped_total",
-				Help: "RESP cache operations skipped without I/O while the breaker was open (backend unreachable), by op (get|set). Never counted as failed: the backend never saw them.",
+				Help: "RESP cache operations skipped without I/O while the breaker on their side was open (endpoint unreachable or slower than its budget), by op (get|set|sticky_get|sticky_set). Never counted as failed: the backend never saw them.",
 			}, []string{"op"}),
-			breakerOpen: prometheus.NewGauge(prometheus.GaugeOpts{
+			breakerOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 				Name: "smartrouter_resp_cache_breaker_open",
-				Help: "1 while the RESP cache breaker is open — lookups and writes are being skipped until a health probe succeeds — 0 otherwise.",
-			}),
+				Help: "Per side of the relay path: 1 while that side's breaker is open, 0 otherwise. role=write: writes are being skipped (the write endpoint failed writes or its probe); role=read: lookups are being skipped (the read endpoint failed lookups or its probe). Without a read split one breaker stands behind both roles and the two series move together.",
+			}, []string{"role"}),
 			poolTotalConns: prometheus.NewGauge(prometheus.GaugeOpts{
 				Name: "smartrouter_resp_cache_pool_total_conns",
 				Help: "Connections currently held by the RESP client pool(s) (write + read when split).",

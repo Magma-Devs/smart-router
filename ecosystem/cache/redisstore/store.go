@@ -118,6 +118,13 @@ func (s *Store) ReadEndpoint() string {
 	return s.writeEndpoint.current()
 }
 
+// ReadSplit reports whether reads go to a separate endpoint from writes, so a
+// caller can hold state per endpoint (a breaker per side) where the store has
+// two, and one where it has one.
+func (s *Store) ReadSplit() bool {
+	return s != nil && s.read != s.write
+}
+
 var _ core.KVStore = (*Store)(nil)
 
 // New validates the config and builds the client(s): topology-appropriate
@@ -438,11 +445,14 @@ const (
 )
 
 // ProbeResult is one endpoint's health probe: which half, the addresses the
-// operator configured for it, and the error when the probe failed.
+// operator configured for it, the error when the probe failed, and the round
+// trip it took — so a reader of the probe can tell an endpoint that answered
+// from one that answered within the budget the relay path gives it.
 type ProbeResult struct {
 	Role      string
 	Addresses string
 	Err       error
+	Latency   time.Duration
 }
 
 // Probe pings every endpoint the store uses and reports each one on its own.
@@ -475,7 +485,9 @@ func (s *Store) Probe(ctx context.Context) []ProbeResult {
 		probes.Add(1)
 		go func(i int, client redis.UniversalClient) {
 			defer probes.Done()
+			start := time.Now()
 			results[i].Err = client.Ping(ctx).Err()
+			results[i].Latency = time.Since(start)
 		}(i, clients[i])
 	}
 	probes.Wait()

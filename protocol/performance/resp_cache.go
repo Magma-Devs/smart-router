@@ -10,6 +10,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/redis/go-redis/v9"
@@ -27,16 +28,22 @@ const (
 	// briefly slow backend would cost a second of misses — and the third
 	// failure in a row of 50ms lookups arrives about 150ms into an outage.
 	respCacheBreakerThreshold = 3
-	// respCacheBreakerProbeInterval is the probe cadence while the breaker is
+	// respCacheBreakerProbeInterval is the probe cadence while a breaker is
 	// open: the recovery latency an outage costs after the backend returns.
+	// It is also the least time a breaker stays open once opened. The relay
+	// path nudges a probe the moment it opens one, and without the hold that
+	// probe closed the breaker again inside the same 150ms window on a backend
+	// that answers PING but not within the relay budget: open, close, three
+	// failed lookups, open, twice a second, two log lines a cycle (review of
+	// #406).
 	respCacheBreakerProbeInterval = time.Second
 )
 
 // ErrCacheBreakerOpen is returned, joined with core.StoreError, by a lookup or
-// write skipped because the breaker is open. Joined so call sites classify it
-// as the backend failure it stands for (outcome "error", never "miss") without
-// a second code path.
-var ErrCacheBreakerOpen = errors.New("resp-cache breaker open: the backend is unreachable, lookups and writes are skipped until a health probe succeeds")
+// write skipped because the breaker on its side is open. Joined so call sites
+// classify it as the backend failure it stands for (outcome "error", never
+// "miss") without a second code path.
+var ErrCacheBreakerOpen = errors.New("resp-cache breaker open: the endpoint is unreachable or slower than its budget, operations on this side are skipped until a health probe answers within it")
 
 // RespCache is the RESP-compatible (Redis/Valkey) cache backend: the same
 // cache engine the gRPC cache server runs, executed in-process over a remote
@@ -44,29 +51,30 @@ var ErrCacheBreakerOpen = errors.New("resp-cache breaker open: the backend is un
 // call sites cannot tell the two backends apart — and per the interface's
 // wiring convention every method is typed-nil safe.
 //
-// An unreachable backend is handled by a breaker (MAG-3676). Without one,
-// every lookup and write was still issued against a dead backend: lookups
-// paid their 50ms budget, and the asynchronous writes paid their 5s budget
-// each while holding a pool slot, so under steady traffic the pool filled
-// with stalled writes and lookups queued behind them — a forty-fold drop in
-// serving rate for as long as the outage lasted, and one more connection
-// opened for every operation. The breaker opens after
-// respCacheBreakerThreshold consecutive failures or one failed health probe;
-// while open, lookups and writes return at once with ErrCacheBreakerOpen and
-// no I/O, the probe runs every respCacheBreakerProbeInterval, and one
-// successful probe closes it.
+// An unreachable backend is handled by a breaker per side of the relay path
+// (MAG-3676). Without one, every lookup and write was still issued against a
+// dead backend: lookups paid their 50ms budget, and the asynchronous writes
+// paid their 5s budget each while holding a pool slot, so under steady
+// traffic the pool filled with stalled writes and lookups queued behind them
+// — a forty-fold drop in serving rate for as long as the outage lasted, and
+// one more connection opened for every operation. A breaker opens after
+// respCacheBreakerThreshold consecutive failures on its side or one failed
+// probe of its endpoint; while open, that side's operations return at once
+// with ErrCacheBreakerOpen and no I/O, the probe runs every
+// respCacheBreakerProbeInterval, and it closes on the first probe that
+// answers within the side's budget, once at least one interval has passed.
 type RespCache struct {
 	engine  *core.Engine
 	store   *redisstore.Store
 	metrics *respCacheMetricsSet
 
-	// breakerOpen is the state the relay path reads on every operation;
-	// consecutiveFailures is what opens it from that path. probeNow nudges
-	// the health loop to probe at once when the relay path opens the breaker,
-	// so the fast cadence starts immediately rather than at the next tick.
-	breakerOpen         atomic.Bool
-	consecutiveFailures atomic.Int64
-	probeNow            chan struct{}
+	// writeBreaker and readBreaker guard the two sides of the relay path; on a
+	// store with no read split they are one and the same. probeNow nudges the
+	// health loop to probe at once when the relay path opens one, so the fast
+	// cadence starts immediately rather than at the next tick.
+	writeBreaker *respCacheBreaker
+	readBreaker  *respCacheBreaker
+	probeNow     chan struct{}
 
 	healthStop chan struct{}
 	// healthDone is closed by the health loop as it exits; healthCancel aborts
@@ -99,6 +107,74 @@ type respCacheHealth struct {
 	detail string
 }
 
+// respCacheBreaker guards one side of the relay path. Writes and the write
+// endpoint's probe steer the write breaker; lookups (entries, the chain tip,
+// sticky claims) and the read endpoint's probe steer the read breaker. A store
+// split by role fails by role, and one breaker for the whole cache made a
+// writer outage skip every lookup on a healthy reader that held the data, and
+// a reader outage stop the cache being populated on a healthy writer (review
+// of #406). With no read split one breaker stands behind both sides and the
+// tier behaves as it did with one.
+type respCacheBreaker struct {
+	// roles are the label values this breaker publishes under: one for a split
+	// store's breaker, both for the shared breaker of an unsplit store, so each
+	// series answers "is this side being skipped" whatever the topology.
+	roles []string
+	// subject names the breaker in log lines; skips names what an open one
+	// costs ("writes", "lookups", "lookups and writes").
+	subject, skips string
+	// closeBudget is the round trip a probe must answer within for this
+	// breaker to close: the relay path's budget on the tightest side it gates.
+	// A backend that answered PING but could not meet the lookup budget used
+	// to close the breaker, fail the next three lookups and open it again,
+	// twice a second (review of #406). Lookups have the relay's cache budget;
+	// writes have theirs, which exceeds the probe deadline, so a write-only
+	// breaker closes on any answered probe, as before.
+	closeBudget         time.Duration
+	open                atomic.Bool
+	consecutiveFailures atomic.Int64
+	// openedAt is when the breaker last opened, for the hold: it may not close
+	// before respCacheBreakerProbeInterval has passed.
+	openedAt atomic.Pointer[time.Time]
+}
+
+// newRespCacheBreakers builds the write and read breakers for a store: two
+// when reads are split, one shared otherwise.
+func newRespCacheBreakers(store *redisstore.Store) (write, read *respCacheBreaker) {
+	if !store.ReadSplit() {
+		shared := &respCacheBreaker{
+			roles:       []string{redisstore.EndpointRoleWrite, redisstore.EndpointRoleRead},
+			subject:     "backend",
+			skips:       "lookups and writes",
+			closeBudget: common.DefaultCacheTimeout,
+		}
+		return shared, shared
+	}
+	write = &respCacheBreaker{
+		roles:       []string{redisstore.EndpointRoleWrite},
+		subject:     "write endpoint",
+		skips:       "writes",
+		closeBudget: common.CacheWriteTimeout,
+	}
+	read = &respCacheBreaker{
+		roles:       []string{redisstore.EndpointRoleRead},
+		subject:     "read endpoint",
+		skips:       "lookups",
+		closeBudget: common.DefaultCacheTimeout,
+	}
+	return write, read
+}
+
+// heldLongEnough reports whether the breaker opened at least a probe interval
+// before now, the hold that keeps the nudged probe from closing it inside the
+// window that opened it. openedAt is nil while closed and between the flip to
+// open and the store of its time, so an opening in progress reads as not held
+// rather than as held since the previous opening.
+func (breaker *respCacheBreaker) heldLongEnough(now time.Time) bool {
+	opened := breaker.openedAt.Load()
+	return opened != nil && now.Sub(*opened) >= respCacheBreakerProbeInterval
+}
+
 var _ CacheBackend = (*RespCache)(nil)
 
 // NewRespCache assembles the backend from a connected store and a TTL policy
@@ -110,15 +186,23 @@ func NewRespCache(store *redisstore.Store, policy core.Policy) *RespCache {
 
 func newRespCacheWithHealthInterval(store *redisstore.Store, policy core.Policy, healthInterval time.Duration) *RespCache {
 	healthCtx, healthCancel := context.WithCancel(context.Background())
+	writeBreaker, readBreaker := newRespCacheBreakers(store)
 	cache := &RespCache{
 		engine:       &core.Engine{Store: store, Policy: policy},
 		store:        store,
 		metrics:      getRespCacheMetrics(),
+		writeBreaker: writeBreaker,
+		readBreaker:  readBreaker,
 		probeNow:     make(chan struct{}, 1),
 		healthStop:   make(chan struct{}),
 		healthDone:   make(chan struct{}),
 		healthCancel: healthCancel,
 	}
+	// Both role series exist as 0 from construction, so an alert can tell
+	// "closed" from "never opened", and a store without a read split still
+	// publishes both.
+	cache.setBreakerGauge(writeBreaker, 0)
+	cache.setBreakerGauge(readBreaker, 0)
 	go cache.healthLoop(healthCtx, healthInterval)
 	return cache
 }
@@ -182,24 +266,40 @@ func (cache *RespCache) healthLoop(loopCtx context.Context, interval time.Durati
 		cache.metrics.poolStaleConns.Set(float64(stats.StaleConns))
 	}
 
-	// settle steers the breaker by the probe's verdict. Logging is
-	// transition-only: a backend that stays down stays quiet after the first
-	// report, so a persistent auth failure cannot flood the log.
+	// settle publishes the probe, then steers each side's breaker by its
+	// endpoint's verdict: a failed probe opens it, a probe answered within the
+	// side's budget closes it once the hold has passed, and one answered but
+	// slower than the budget leaves it as it is. Published first so that
+	// whoever observes a breaker flip finds the verdict behind it already in
+	// the debug state. Logging is transition-only: a backend that stays down
+	// stays quiet after the first report, so a persistent auth failure cannot
+	// flood the log, and the halves that opened on one probe are reported in
+	// one line.
 	settle := func(connected bool, results []redisstore.ProbeResult, atStartup bool) {
-		wasOpen := cache.breakerOpen.Load()
-		switch {
-		case connected && wasOpen:
-			cache.closeBreaker()
-		case !connected && !wasOpen:
-			message := "resp-cache backend became unavailable; lookups and writes are skipped until a health probe succeeds"
-			if atStartup {
-				message = "resp-cache backend unavailable at startup; lookups and writes are skipped until a health probe succeeds"
-			}
-			logUnavailable(message, results)
-			cache.openBreaker()
-		}
 		publishHealth(connected, results)
 		updateGauges(connected, results)
+		now := time.Now()
+		var opened []redisstore.ProbeResult
+		var skips []string
+		for _, result := range results {
+			breaker := cache.breakerFor(result.Role)
+			switch {
+			case result.Err != nil:
+				if cache.openBreaker(breaker) {
+					opened = append(opened, result)
+					skips = append(skips, breaker.skips)
+				}
+			case result.Latency <= breaker.closeBudget:
+				cache.closeBreaker(breaker, now)
+			}
+		}
+		if len(opened) > 0 {
+			message := "resp-cache backend became unavailable; " + strings.Join(skips, " and ") + " are skipped until a health probe succeeds"
+			if atStartup {
+				message = "resp-cache backend unavailable at startup; " + strings.Join(skips, " and ") + " are skipped until a health probe succeeds"
+			}
+			logUnavailable(message, opened)
+		}
 	}
 
 	connected, results := probe()
@@ -229,71 +329,104 @@ func (cache *RespCache) healthLoop(loopCtx context.Context, interval time.Durati
 	}
 }
 
-// probeCadence is the configured interval while the breaker is closed and the
-// faster breaker interval while it is open, so recovery is noticed within
-// about a second of the backend returning.
+// probeCadence is the configured interval while both breakers are closed and
+// the faster breaker interval while either is open, so recovery is noticed
+// within about a second of the endpoint returning.
 func (cache *RespCache) probeCadence(interval time.Duration) time.Duration {
-	if cache.breakerOpen.Load() && respCacheBreakerProbeInterval < interval {
+	if cache.anyBreakerOpen() && respCacheBreakerProbeInterval < interval {
 		return respCacheBreakerProbeInterval
 	}
 	return interval
 }
 
-// openBreaker flips the tier to skipping. Idempotent: the relay path and the
-// health loop can both reach it, and the second caller finds it open.
-func (cache *RespCache) openBreaker() {
-	if !cache.breakerOpen.CompareAndSwap(false, true) {
-		return
+// breakerFor maps a probe result's endpoint role to the breaker it steers.
+func (cache *RespCache) breakerFor(role string) *respCacheBreaker {
+	if role == redisstore.EndpointRoleRead {
+		return cache.readBreaker
 	}
-	cache.metrics.breakerOpen.Set(1)
+	return cache.writeBreaker
+}
+
+func (cache *RespCache) anyBreakerOpen() bool {
+	return cache.writeBreaker.open.Load() || cache.readBreaker.open.Load()
+}
+
+func (cache *RespCache) setBreakerGauge(breaker *respCacheBreaker, value float64) {
+	for _, role := range breaker.roles {
+		cache.metrics.breakerOpen.WithLabelValues(role).Set(value)
+	}
+}
+
+// openBreaker flips one side to skipping and reports whether this call did
+// it. The relay path and the health loop can both reach it; the caller that
+// finds it already open announces nothing, so a threshold two goroutines
+// cross together is logged once (review of #406).
+func (cache *RespCache) openBreaker(breaker *respCacheBreaker) bool {
+	if !breaker.open.CompareAndSwap(false, true) {
+		return false
+	}
+	now := time.Now()
+	breaker.openedAt.Store(&now)
+	cache.setBreakerGauge(breaker, 1)
 	cache.metrics.connected.Set(0)
 	select {
 	case cache.probeNow <- struct{}{}:
 	default:
 	}
+	return true
 }
 
-// closeBreaker resumes lookups and writes after a probe succeeded.
-func (cache *RespCache) closeBreaker() {
-	if !cache.breakerOpen.CompareAndSwap(true, false) {
-		return
+// closeBreaker resumes one side after its probe answered within the side's
+// budget, unless the breaker opened less than a probe interval ago: the
+// nudged probe that follows an opening must not close it inside the window
+// that opened it.
+func (cache *RespCache) closeBreaker(breaker *respCacheBreaker, now time.Time) bool {
+	if !breaker.open.Load() || !breaker.heldLongEnough(now) {
+		return false
 	}
-	cache.consecutiveFailures.Store(0)
-	cache.metrics.breakerOpen.Set(0)
-	utils.LavaFormatInfo("resp-cache backend reachable again; lookups and writes resume")
+	// Clear the hold before the flip, so the next opening, which flips first
+	// and stores its time second, cannot be closed on this one's timestamp.
+	breaker.openedAt.Store(nil)
+	if !breaker.open.CompareAndSwap(true, false) {
+		return false
+	}
+	breaker.consecutiveFailures.Store(0)
+	cache.setBreakerGauge(breaker, 0)
+	utils.LavaFormatInfo("resp-cache " + breaker.subject + " reachable again; " + breaker.skips + " resume")
+	return true
 }
 
-// noteOperation feeds the relay path's results to the breaker: a failure of
-// the backend itself (never a semantic miss) counts toward the threshold, and
-// a success resets the count. Reaching the threshold opens the breaker from
-// here, without waiting for the next health probe — the third failure in a
-// row of 50ms lookups is about 150ms into an outage, the next probe could be
-// ten seconds away, and every write started in between held a pool slot for
-// its 5s budget.
-func (cache *RespCache) noteOperation(err error) {
+// noteOperation feeds the relay path's results to the breaker on its side: a
+// failure of the backend itself (never a semantic miss) counts toward the
+// threshold, and a success resets the count. Reaching the threshold opens the
+// breaker from here, without waiting for the next health probe — the third
+// failure in a row of 50ms lookups is about 150ms into an outage, the next
+// probe could be ten seconds away, and every write started in between held a
+// pool slot for its 5s budget. The line is written by the call that opened
+// it, after the CAS, never by one that found it open.
+func (cache *RespCache) noteOperation(breaker *respCacheBreaker, err error) {
 	if err == nil || !errors.Is(err, core.StoreError) {
-		cache.consecutiveFailures.Store(0)
+		breaker.consecutiveFailures.Store(0)
 		return
 	}
-	failures := cache.consecutiveFailures.Add(1)
-	if failures < respCacheBreakerThreshold || cache.breakerOpen.Load() {
+	failures := breaker.consecutiveFailures.Add(1)
+	if failures < respCacheBreakerThreshold || !cache.openBreaker(breaker) {
 		return
 	}
-	utils.LavaFormatWarning("resp-cache backend failed consecutive operations; lookups and writes are skipped until a health probe succeeds", nil,
+	utils.LavaFormatWarning("resp-cache "+breaker.subject+" failed consecutive operations; "+breaker.skips+" are skipped until a health probe succeeds", nil,
 		utils.Attribute{Key: "failures", Value: failures},
 		utils.Attribute{Key: "detail", Value: safeProbeDetail(err)},
 	)
 	cache.health.Store(&respCacheHealth{
 		reachable: false,
 		at:        time.Now(),
-		detail:    "breaker open after consecutive operation failures: " + safeProbeDetail(err),
+		detail:    breaker.subject + " breaker open after consecutive operation failures: " + safeProbeDetail(err),
 	})
-	cache.openBreaker()
 }
 
-// skip answers an operation while the breaker is open: no I/O, counted on its
-// own series so an outage's cost is visible as skips rather than as failures
-// the backend never saw.
+// skip answers an operation while the breaker on its side is open: no I/O,
+// counted on its own series so an outage's cost is visible as skips rather
+// than as failures the backend never saw.
 func (cache *RespCache) skip(op string) error {
 	cache.metrics.skipped.WithLabelValues(op).Inc()
 	return errors.Join(core.StoreError, ErrCacheBreakerOpen)
@@ -414,6 +547,14 @@ func (cache *RespCache) DebugCacheState() DebugCacheState {
 		// relay paid the full cache timeout — which is what MAG-3676 measured.
 		WhenUnreachable: CacheWhenUnreachableSkipped,
 		Lifetimes:       cache.lifetimes(),
+		// Live reads of the two atomics, not part of the health snapshot: which
+		// side is being skipped is what an operator with a split store needs
+		// beside "reachable", and the snapshot's detail names only the endpoint
+		// that failed its probe.
+		Breaker: &CacheBreakerState{
+			WriteOpen: cache.writeBreaker.open.Load(),
+			ReadOpen:  cache.readBreaker.open.Load(),
+		},
 	}
 	// A nil snapshot means the first probe has not returned yet. Left as nil
 	// Reachable ("not determined") rather than false, which would report a
@@ -459,13 +600,13 @@ func (cache *RespCache) GetEntry(ctx context.Context, relayCacheGet *pairingtype
 	if cache == nil {
 		return nil, NotInitializedError
 	}
-	if cache.breakerOpen.Load() {
+	if cache.readBreaker.open.Load() {
 		// A miss-shaped reply, as the engine would return, with the reason
 		// alongside — the call site degrades either way and labels the outcome.
 		return &pairingtypes.CacheRelayReply{}, cache.skip(respCacheOpGet)
 	}
 	reply, _, err := cache.engine.GetRelay(ctx, relayCacheGet)
-	cache.noteOperation(err)
+	cache.noteOperation(cache.readBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpGet, err)
 		return reply, err
@@ -477,11 +618,11 @@ func (cache *RespCache) SetEntry(ctx context.Context, cacheSet *pairingtypes.Rel
 	if cache == nil {
 		return NotInitializedError
 	}
-	if cache.breakerOpen.Load() {
+	if cache.writeBreaker.open.Load() {
 		return cache.skip(respCacheOpSet)
 	}
 	err := cache.engine.SetRelay(ctx, cacheSet)
-	cache.noteOperation(err)
+	cache.noteOperation(cache.writeBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpSet, err)
 	}
@@ -531,21 +672,21 @@ func (cache *RespCache) Close() error {
 // gRPC backend reaches the same engine call over a cache-be hop; both satisfy
 // StickySessionBackend, so the router does not care which is configured.
 //
-// Behind the breaker like a lookup: while it is open the claim registry is
-// unavailable, and the answer is an error at once, never a missing claim. A
-// free claim would split the session, the failure stickiness exists to
+// Behind the read breaker like a lookup: while it is open the claim registry
+// is unavailable, and the answer is an error at once, never a missing claim.
+// A free claim would split the session, the failure stickiness exists to
 // prevent, and before this guard every new session kept paying its store
 // budget against a blackholed backend after the breaker had opened (Codex
-// review of #406). A failure feeds the breaker like any other operation.
+// review of #406). A failure feeds the breaker like any other lookup.
 func (cache *RespCache) GetStickySession(ctx context.Context, chainId, apiInterface, service, stickyId string) (core.StickyPin, bool, error) {
 	if cache == nil {
 		return core.StickyPin{}, false, NotInitializedError
 	}
-	if cache.breakerOpen.Load() {
+	if cache.readBreaker.open.Load() {
 		return core.StickyPin{}, false, cache.skip(respCacheOpStickyGet)
 	}
 	pin, found, err := cache.engine.GetSticky(ctx, chainId, apiInterface, service, stickyId)
-	cache.noteOperation(err)
+	cache.noteOperation(cache.readBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpStickyGet, err)
 	}
@@ -559,11 +700,11 @@ func (cache *RespCache) SetStickySessionIfAbsent(ctx context.Context, chainId, a
 	if cache == nil {
 		return core.StickyPin{}, NotInitializedError
 	}
-	if cache.breakerOpen.Load() {
+	if cache.writeBreaker.open.Load() {
 		return core.StickyPin{}, cache.skip(respCacheOpStickySet)
 	}
 	effective, err := cache.engine.SetStickyIfAbsent(ctx, chainId, apiInterface, service, stickyId, pin, ttl)
-	cache.noteOperation(err)
+	cache.noteOperation(cache.writeBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpStickySet, err)
 	}
