@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jhump/protoreflect/desc"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -68,7 +69,7 @@ func TestReflectionSnapshot_OneSessionOneCompleteView(t *testing.T) {
 	require.ElementsMatch(t, []string{
 		"grpc.health.v1.Health", "grpc.testing.TestService", "grpc.testing.UnimplementedService",
 	}, snapshot.Services, "the node's reflection services are left to the router")
-	_, err = snapshot.Files.FindFileByPath("grpc/testing/messages.proto")
+	_, err = snapshot.FindFileByPath("grpc/testing/messages.proto")
 	require.NoError(t, err)
 	require.Equal(t, int32(1), s.reflectionStream.Load(), "one snapshot is one reflection session")
 
@@ -374,7 +375,7 @@ func TestBuildReflectionSnapshot_OnePathOneBuild(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, snapshot.Complete)
 	require.Equal(t, []string{"x.S1", "x.S3"}, snapshot.Services, "the same build twice is fine; a second build is not")
-	_, err = snapshot.Files.FindDescriptorByName("x.ANew")
+	_, err = snapshot.FindDescriptorByName("x.ANew")
 	require.Error(t, err, "nothing of the refused build is registered")
 }
 
@@ -426,6 +427,86 @@ func TestBuildReflectionSnapshot_TheSameContentFromTwoSourcesIsOneBuild(t *testi
 	require.NoError(t, err)
 	require.True(t, snapshot.Complete, "identical content from two sources is one build")
 	require.Equal(t, []string{"x.S1", "x.S2"}, snapshot.Services)
+}
+
+// linkFile builds fdp against deps.
+func linkFile(t *testing.T, fdp *descriptorpb.FileDescriptorProto, deps ...protoreflect.FileDescriptor) protoreflect.FileDescriptor {
+	t.Helper()
+	files := new(protoregistry.Files)
+	for _, dep := range deps {
+		require.NoError(t, files.RegisterFile(dep))
+	}
+	fd, err := protodesc.NewFile(fdp, files)
+	require.NoError(t, err)
+	return fd
+}
+
+// messageFile builds path in package pkg with one message, name, whose field 1 is
+// a string called field, or with typeName a message of that type from deps.
+func messageFile(t *testing.T, path, pkg, name, field, typeName string, deps ...protoreflect.FileDescriptor) protoreflect.FileDescriptor {
+	t.Helper()
+	fieldProto := &descriptorpb.FieldDescriptorProto{
+		Name: proto.String(field), Number: proto.Int32(1),
+		Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+		Type:  descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+	}
+	if typeName != "" {
+		fieldProto.Type, fieldProto.TypeName = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(), proto.String(typeName)
+	}
+	fdp := &descriptorpb.FileDescriptorProto{
+		Name: proto.String(path), Package: proto.String(pkg), Syntax: proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{{Name: proto.String(name), Field: []*descriptorpb.FieldDescriptorProto{fieldProto}}},
+	}
+	for _, dep := range deps {
+		fdp.Dependency = append(fdp.Dependency, dep.Path())
+	}
+	return linkFile(t, fdp, deps...)
+}
+
+// payloadBuild is one build of x/payload.proto, whose message x.P has one field.
+func payloadBuild(t *testing.T, field string) protoreflect.FileDescriptor {
+	return messageFile(t, "x/payload.proto", "x", "P", field, "")
+}
+
+// wrapperOver is x/wrapper.proto built against payload: its x.W holds an x.P.
+func wrapperOver(t *testing.T, payload protoreflect.FileDescriptor) protoreflect.FileDescriptor {
+	return messageFile(t, "x/wrapper.proto", "x", "W", "p", ".x.P", payload)
+}
+
+// serveSnapshotReflection serves the router's reflection over bufconn from the
+// snapshots source returns.
+func serveSnapshotReflection(t *testing.T, source func(context.Context) (*GRPCReflectionSnapshot, error)) *grpc.ClientConn {
+	t.Helper()
+	server := grpc.NewServer()
+	grpcproxy.RegisterReflection(server, snapshotSource(source))
+	return serveOverBufconn(t, server)
+}
+
+type snapshotSource func(context.Context) (*GRPCReflectionSnapshot, error)
+
+func (f snapshotSource) ReflectionSnapshot(ctx context.Context) (grpcproxy.ReflectionSnapshot, error) {
+	snapshot, err := f(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot, nil
+}
+
+// serveOverBufconn serves server over bufconn and returns a client of it.
+func serveOverBufconn(t *testing.T, server *grpc.Server) *grpc.ClientConn {
+	t.Helper()
+	lis := bufconn.Listen(1 << 20)
+	go func() { _ = server.Serve(lis) }()
+	t.Cleanup(server.Stop)
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
+			return lis.DialContext(ctx)
+		}),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
 }
 
 // A node whose partial snapshot refreshes to a partial one is partial by nature, not

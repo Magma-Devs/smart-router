@@ -23,6 +23,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
@@ -133,9 +134,89 @@ var _ GRPCMethodResolver = (*GRPCDirectRPCConnection)(nil)
 // no path has two builds. Complete says no listed service was left out.
 type GRPCReflectionSnapshot struct {
 	Services []string
-	Files    *protoregistry.Files
 	Taken    time.Time
 	Complete bool
+
+	// lookup finds the file declaring a name on the node the snapshot was taken
+	// from. Nil holds the snapshot to the files it was built with.
+	lookup func(ctx context.Context, name string) (protoreflect.FileDescriptor, error)
+
+	// files holds the services' files and those lookups add later, under the same
+	// rule, so a path keeps one build for the snapshot's life. missed records the
+	// names a lookup did not add. Both are guarded by mu.
+	mu     sync.RWMutex
+	files  *protoregistry.Files
+	missed map[protoreflect.FullName]time.Time
+}
+
+var _ grpcproxy.ReflectionSnapshot = (*GRPCReflectionSnapshot)(nil)
+
+// reflectionLookupMisses bounds the names a snapshot remembers as missed; the
+// record starts over once it is full.
+const reflectionLookupMisses = 1024
+
+// ServiceNames implements grpcproxy.ReflectionSnapshot.
+func (s *GRPCReflectionSnapshot) ServiceNames() []string {
+	return s.Services
+}
+
+// FindFileByPath implements grpcproxy.ReflectionSnapshot.
+func (s *GRPCReflectionSnapshot) FindFileByPath(path string) (protoreflect.FileDescriptor, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.files == nil {
+		return nil, protoregistry.NotFound
+	}
+	return s.files.FindFileByPath(path)
+}
+
+// FindDescriptorByName implements grpcproxy.ReflectionSnapshot.
+func (s *GRPCReflectionSnapshot) FindDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.files == nil {
+		return nil, protoregistry.NotFound
+	}
+	return s.files.FindDescriptorByName(name)
+}
+
+// LookupDescriptor implements grpcproxy.ReflectionSnapshot. The router's own
+// reflection services are never looked up, and a name that was not added is not
+// looked up again within reflectionSnapshotRetry.
+func (s *GRPCReflectionSnapshot) LookupDescriptor(ctx context.Context, name protoreflect.FullName) (protoreflect.Descriptor, error) {
+	if d, err := s.FindDescriptorByName(name); err == nil {
+		return d, nil
+	}
+	if s.lookup == nil || s.files == nil || strings.HasPrefix(string(name), "grpc.reflection.") {
+		return nil, protoregistry.NotFound
+	}
+	s.mu.RLock()
+	missedAt, missed := s.missed[name]
+	s.mu.RUnlock()
+	if missed && time.Since(missedAt) < reflectionSnapshotRetry {
+		return nil, protoregistry.NotFound
+	}
+
+	fd, err := s.lookup(ctx, string(name))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil {
+		err = registerFileGraph(s.files, fd)
+	}
+	var d protoreflect.Descriptor
+	if err == nil {
+		d, err = s.files.FindDescriptorByName(name)
+	}
+	if err != nil && ctx.Err() == nil {
+		if s.missed == nil || len(s.missed) >= reflectionLookupMisses {
+			s.missed = make(map[protoreflect.FullName]time.Time)
+		}
+		s.missed[name] = time.Now()
+		utils.LavaFormatDebug("gRPC reflection lookup added nothing",
+			utils.LogAttr("name", string(name)),
+			utils.LogAttr("error", err.Error()))
+	}
+	return d, err
 }
 
 // Current reports whether the snapshot is complete and within its TTL.
@@ -1786,39 +1867,18 @@ func (g *GRPCDirectRPCConnection) takeReflectionSnapshot(done chan struct{}) {
 }
 
 // readReflectionSnapshot reads the node through one session of its configured
-// descriptor source. It runs on the warm-up sweep's budget, ends with the
-// connection, and never dials: refreshSnapshotLocked starts it only on an
-// initialized connection.
+// descriptor source, on the warm-up sweep's budget. The snapshot looks up names it
+// does not hold through lookupReflectionSymbol.
 func (g *GRPCDirectRPCConnection) readReflectionSnapshot() (*GRPCReflectionSnapshot, error) {
-	parent := g.connectorCtx
-	if parent == nil {
-		parent = context.Background()
-	}
-	ctx, cancel := context.WithTimeout(parent,
+	ctx, cancel := context.WithTimeout(context.Background(),
 		descriptorWarmupBudgetFactor*g.nodeUrl.GrpcConfig.GetReflectionTimeout())
 	defer cancel()
 
-	g.connMu.RLock()
-	connector := g.connector
-	if connector == nil {
-		g.connMu.RUnlock()
-		return nil, ErrGRPCConnectionClosed
-	}
-	conn, err := connector.GetRpc(ctx, true)
-	g.connMu.RUnlock()
-	if err != nil {
-		return nil, utils.LavaFormatWarning("gRPC reflection snapshot: no connection", err,
-			utils.LogAttr("url", g.nodeUrl.Url))
-	}
-	defer connector.ReturnRpc(conn)
-
-	cl := grpcreflect.NewClientAuto(ctx, conn)
-	defer cl.Reset()
-	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&g.nodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
-	if err != nil {
-		return nil, err
-	}
-	snapshot, err := buildReflectionSnapshot(descriptorSource)
+	var snapshot *GRPCReflectionSnapshot
+	err := g.withDescriptorSource(ctx, func(source grpcurl.DescriptorSource) (err error) {
+		snapshot, err = buildReflectionSnapshot(source)
+		return err
+	})
 	if err != nil {
 		return nil, utils.LavaFormatWarning("gRPC reflection snapshot failed", err,
 			utils.LogAttr("url", g.nodeUrl.Url))
@@ -1828,7 +1888,62 @@ func (g *GRPCDirectRPCConnection) readReflectionSnapshot() (*GRPCReflectionSnaps
 			utils.LogAttr("services", len(snapshot.Services)),
 			utils.LogAttr("url", g.nodeUrl.Url))
 	}
+	snapshot.lookup = g.lookupReflectionSymbol
 	return snapshot, nil
+}
+
+// lookupReflectionSymbol finds the file declaring name through one session of the
+// node's configured descriptor source, within the reflection timeout.
+func (g *GRPCDirectRPCConnection) lookupReflectionSymbol(ctx context.Context, name string) (protoreflect.FileDescriptor, error) {
+	ctx, cancel := context.WithTimeout(ctx, g.nodeUrl.GrpcConfig.GetReflectionTimeout())
+	defer cancel()
+
+	var fd protoreflect.FileDescriptor
+	err := g.withDescriptorSource(ctx, func(source grpcurl.DescriptorSource) error {
+		d, err := source.FindSymbol(name)
+		if err != nil {
+			return err
+		}
+		fd = d.GetFile().UnwrapFile()
+		return nil
+	})
+	return fd, err
+}
+
+// withDescriptorSource runs use on one session of the node's configured descriptor
+// source over a pooled client. The session ends with ctx or the connection, and
+// never dials: it needs a connection a relay or prewarm has initialized.
+func (g *GRPCDirectRPCConnection) withDescriptorSource(ctx context.Context, use func(grpcurl.DescriptorSource) error) error {
+	if !g.initialized.Load() {
+		return errNotInitialized
+	}
+	if g.connectorCtx != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		defer context.AfterFunc(g.connectorCtx, cancel)()
+	}
+
+	g.connMu.RLock()
+	connector := g.connector
+	if connector == nil {
+		g.connMu.RUnlock()
+		return ErrGRPCConnectionClosed
+	}
+	conn, err := connector.GetRpc(ctx, true)
+	g.connMu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("no connection: %w", err)
+	}
+	defer connector.ReturnRpc(conn)
+
+	cl := grpcreflect.NewClientAuto(ctx, conn)
+	defer cl.Reset()
+	source, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&g.nodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
+	if err != nil {
+		return err
+	}
+	return use(source)
 }
 
 // buildReflectionSnapshot resolves every service the source lists and registers
@@ -1839,7 +1954,7 @@ func buildReflectionSnapshot(source grpcurl.DescriptorSource) (*GRPCReflectionSn
 	if err != nil {
 		return nil, err
 	}
-	snapshot := &GRPCReflectionSnapshot{Files: new(protoregistry.Files), Complete: true}
+	snapshot := &GRPCReflectionSnapshot{files: new(protoregistry.Files), Complete: true}
 	for _, name := range names {
 		// The router describes its own reflection services.
 		if strings.HasPrefix(name, "grpc.reflection.") {
@@ -1847,7 +1962,7 @@ func buildReflectionSnapshot(source grpcurl.DescriptorSource) (*GRPCReflectionSn
 		}
 		serviceDescriptor, err := resolveServiceFrom(source, name)
 		if err == nil {
-			err = registerFileGraph(snapshot.Files, serviceDescriptor.GetFile().UnwrapFile())
+			err = registerFileGraph(snapshot.files, serviceDescriptor.GetFile().UnwrapFile())
 		}
 		if err != nil {
 			snapshot.Complete = false

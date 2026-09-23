@@ -10,22 +10,49 @@ import (
 	"google.golang.org/grpc/reflection"
 	reflectionv1 "google.golang.org/grpc/reflection/grpc_reflection_v1"
 	reflectionv1alpha "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
+	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 )
 
 // ReflectionSource supplies the router's gRPC reflection answers: one consistent
-// snapshot of what an upstream serves, its service names and the files they need.
+// snapshot of what an upstream serves.
 type ReflectionSource interface {
-	ReflectionSnapshot(ctx context.Context) (services []string, files *protoregistry.Files, err error)
+	ReflectionSnapshot(ctx context.Context) (ReflectionSnapshot, error)
 }
 
-// noUpstreamReflection is the source of a proxy given none: an empty snapshot, so
-// reflection lists and describes the router's own reflection services alone.
+// ReflectionSnapshot is one upstream's services and the files they need.
+// FindFileByPath and FindDescriptorByName answer from the files held.
+type ReflectionSnapshot interface {
+	protodesc.Resolver
+	ServiceNames() []string
+	// LookupDescriptor asks the upstream the snapshot came from for a name it does
+	// not hold, such as a type that only an Any field refers to. The answer is kept
+	// only when every file it needs agrees with the builds already held.
+	LookupDescriptor(ctx context.Context, name protoreflect.FullName) (protoreflect.Descriptor, error)
+}
+
+// noUpstreamReflection is the source of a proxy given none, and its snapshot: an
+// empty one, so reflection lists and describes the router's own reflection
+// services alone.
 type noUpstreamReflection struct{}
 
-func (noUpstreamReflection) ReflectionSnapshot(context.Context) ([]string, *protoregistry.Files, error) {
-	return nil, nil, nil
+func (noUpstreamReflection) ReflectionSnapshot(context.Context) (ReflectionSnapshot, error) {
+	return noUpstreamReflection{}, nil
+}
+
+func (noUpstreamReflection) ServiceNames() []string { return nil }
+
+func (noUpstreamReflection) FindFileByPath(string) (protoreflect.FileDescriptor, error) {
+	return nil, protoregistry.NotFound
+}
+
+func (noUpstreamReflection) FindDescriptorByName(protoreflect.FullName) (protoreflect.Descriptor, error) {
+	return nil, protoregistry.NotFound
+}
+
+func (noUpstreamReflection) LookupDescriptor(context.Context, protoreflect.FullName) (protoreflect.Descriptor, error) {
+	return nil, protoregistry.NotFound
 }
 
 // reflectionSnapshotWait bounds how long a reflection stream waits, as it opens,
@@ -94,57 +121,66 @@ type streamSnapshot struct {
 
 	mu       sync.Mutex
 	pinned   bool
-	services []string
-	files    *protoregistry.Files
+	snapshot ReflectionSnapshot
 }
 
 // take pins a snapshot unless one is pinned already, waiting up to wait for it.
-func (p *streamSnapshot) take(wait time.Duration) ([]string, *protoregistry.Files) {
+func (p *streamSnapshot) take(wait time.Duration) ReflectionSnapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.pinned {
 		ctx, cancel := context.WithTimeout(p.ctx, wait)
-		services, files, err := p.source.ReflectionSnapshot(ctx)
+		snapshot, err := p.source.ReflectionSnapshot(ctx)
 		cancel()
 		switch {
 		case err == nil:
-			p.services, p.files, p.pinned = services, files, true
+			p.snapshot, p.pinned = snapshot, true
 		case wait > 0:
 			utils.LavaFormatWarning("gRPC reflection: no upstream snapshot yet, describing the reflection services only", err)
 		}
 	}
-	return p.services, p.files
+	return p.snapshot
 }
 
 // GetServiceInfo implements reflection.ServiceInfoProvider.
 func (p *streamSnapshot) GetServiceInfo() map[string]grpc.ServiceInfo {
-	services, _ := p.take(0)
 	info := map[string]grpc.ServiceInfo{
 		reflectionv1.ServerReflection_ServiceDesc.ServiceName:      {},
 		reflectionv1alpha.ServerReflection_ServiceDesc.ServiceName: {},
 	}
-	for _, name := range services {
-		info[name] = grpc.ServiceInfo{}
+	if snapshot := p.take(0); snapshot != nil {
+		for _, name := range snapshot.ServiceNames() {
+			info[name] = grpc.ServiceInfo{}
+		}
 	}
 	return info
 }
 
 // FindFileByPath implements protodesc.Resolver.
 func (p *streamSnapshot) FindFileByPath(path string) (protoreflect.FileDescriptor, error) {
-	if _, files := p.take(0); files != nil {
-		if fd, err := files.FindFileByPath(path); err == nil {
+	if snapshot := p.take(0); snapshot != nil {
+		if fd, err := snapshot.FindFileByPath(path); err == nil {
 			return fd, nil
 		}
 	}
 	return reflectionFiles.FindFileByPath(path)
 }
 
-// FindDescriptorByName implements protodesc.Resolver.
+// FindDescriptorByName implements protodesc.Resolver. A name neither the snapshot
+// nor the router's reflection files hold is looked up on the snapshot's upstream,
+// within reflectionSnapshotWait.
 func (p *streamSnapshot) FindDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, error) {
-	if _, files := p.take(0); files != nil {
-		if d, err := files.FindDescriptorByName(name); err == nil {
+	snapshot := p.take(0)
+	if snapshot != nil {
+		if d, err := snapshot.FindDescriptorByName(name); err == nil {
 			return d, nil
 		}
 	}
-	return reflectionFiles.FindDescriptorByName(name)
+	d, err := reflectionFiles.FindDescriptorByName(name)
+	if err == nil || snapshot == nil {
+		return d, err
+	}
+	ctx, cancel := context.WithTimeout(p.ctx, reflectionSnapshotWait)
+	defer cancel()
+	return snapshot.LookupDescriptor(ctx, name)
 }

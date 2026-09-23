@@ -9,7 +9,6 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"google.golang.org/protobuf/reflect/protoregistry"
 )
 
 var _ grpcproxy.ReflectionSource = (*RPCSmartRouterServer)(nil)
@@ -19,16 +18,16 @@ var _ grpcproxy.ReflectionSource = (*RPCSmartRouterServer)(nil)
 var errNoReflectionSnapshotters = errors.New("no live gRPC endpoint to take a reflection snapshot from")
 
 // ReflectionSnapshot implements grpcproxy.ReflectionSource.
-func (rpcss *RPCSmartRouterServer) ReflectionSnapshot(ctx context.Context) ([]string, *protoregistry.Files, error) {
+func (rpcss *RPCSmartRouterServer) ReflectionSnapshot(ctx context.Context) (grpcproxy.ReflectionSnapshot, error) {
 	if rpcss.sessionManager == nil {
-		return nil, nil, errNoReflectionSnapshotters
+		return nil, errNoReflectionSnapshotters
 	}
 	primaries, backups := orderSnapshotters(rpcss.sessionManager.GetAllDirectRPCEndpoints())
 	snapshot, err := pickReflectionSnapshot(ctx, primaries, backups)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return snapshot.Services, snapshot.Files, nil
+	return snapshot, nil
 }
 
 // orderSnapshotters splits the endpoints' gRPC connections into primaries and

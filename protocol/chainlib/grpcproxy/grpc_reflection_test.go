@@ -54,14 +54,17 @@ func snapshotFiles(t *testing.T, fds ...protoreflect.FileDescriptor) *protoregis
 
 // fakeReflectionSource hands out one snapshot and counts requests for it. With
 // unavailable set it has none yet; with silent set it waits out ctx instead, like
-// an upstream that never answers.
+// an upstream that never answers. Names the snapshot does not hold are looked up
+// in upstream, and counted.
 type fakeReflectionSource struct {
 	mu          sync.Mutex
 	services    []string
 	files       *protoregistry.Files
+	upstream    *protoregistry.Files
 	unavailable error
 	silent      bool
 	calls       atomic.Int32
+	lookups     atomic.Int32
 }
 
 // newFakeReflectionSource holds grpc.health.v1.Health (a file with no imports) and
@@ -79,24 +82,54 @@ func newFakeReflectionSource(t *testing.T) *fakeReflectionSource {
 	return &fakeReflectionSource{services: services, files: files}
 }
 
-func (f *fakeReflectionSource) ReflectionSnapshot(ctx context.Context) ([]string, *protoregistry.Files, error) {
+func (f *fakeReflectionSource) ReflectionSnapshot(ctx context.Context) (ReflectionSnapshot, error) {
 	f.calls.Add(1)
 	if f.silent {
 		<-ctx.Done()
-		return nil, nil, ctx.Err()
+		return nil, ctx.Err()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.unavailable != nil {
-		return nil, nil, f.unavailable
+		return nil, f.unavailable
 	}
-	return f.services, f.files, nil
+	return &fakeSnapshot{source: f, services: f.services, files: f.files}, nil
 }
 
 func (f *fakeReflectionSource) set(services []string, files *protoregistry.Files) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.services, f.files, f.unavailable = services, files, nil
+}
+
+type fakeSnapshot struct {
+	source   *fakeReflectionSource
+	services []string
+	files    *protoregistry.Files
+}
+
+func (s *fakeSnapshot) ServiceNames() []string { return s.services }
+
+func (s *fakeSnapshot) FindFileByPath(path string) (protoreflect.FileDescriptor, error) {
+	if s.files == nil {
+		return nil, protoregistry.NotFound
+	}
+	return s.files.FindFileByPath(path)
+}
+
+func (s *fakeSnapshot) FindDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, error) {
+	if s.files == nil {
+		return nil, protoregistry.NotFound
+	}
+	return s.files.FindDescriptorByName(name)
+}
+
+func (s *fakeSnapshot) LookupDescriptor(_ context.Context, name protoreflect.FullName) (protoreflect.Descriptor, error) {
+	s.source.lookups.Add(1)
+	if s.source.upstream == nil {
+		return nil, protoregistry.NotFound
+	}
+	return s.source.upstream.FindDescriptorByName(name)
 }
 
 // startReflectionServer serves RegisterReflection(source) over bufconn.
@@ -245,6 +278,33 @@ func TestReflection_DoesNotDescribeTheRoutersOwnTypes(t *testing.T) {
 	numbers, err := client.AllExtensionNumbersForType("google.protobuf.MethodOptions")
 	require.NoError(t, err)
 	require.Empty(t, numbers)
+}
+
+// A type no listed service imports, such as one only an Any field refers to, is
+// looked up on the snapshot's upstream. What the snapshot holds and the router's
+// own reflection services are answered without one.
+func TestReflection_LooksUpWhatTheSnapshotDoesNotHold(t *testing.T) {
+	source := newFakeReflectionSource(t)
+	source.upstream = snapshotFiles(t, testgrpc.File_grpc_testing_payloads_proto)
+	conn := startReflectionServer(t, source)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := grpcreflect.NewClientAuto(ctx, conn)
+	defer client.Reset()
+	_, err := client.ResolveService("grpc.testing.TestService")
+	require.NoError(t, err)
+	_, err = client.ResolveService("grpc.reflection.v1.ServerReflection")
+	require.NoError(t, err)
+	require.Zero(t, source.lookups.Load(), "held names and the reflection services need no lookup")
+
+	message, err := client.ResolveMessage("grpc.testing.ByteBufferParams")
+	require.NoError(t, err)
+	require.Equal(t, "grpc/testing/payloads.proto", message.GetFile().GetName())
+	require.Equal(t, int32(1), source.lookups.Load())
+
+	_, err = client.ResolveMessage("grpc.testing.NoSuchMessage")
+	require.Error(t, err)
 }
 
 // MAG-3816 regression pin: with no snapshot to answer from — none taken yet, or an
