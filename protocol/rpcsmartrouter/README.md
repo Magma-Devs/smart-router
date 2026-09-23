@@ -344,6 +344,23 @@ inlinable no-op call and nothing else.
 --usage-otel-service-instance-id "$HOSTNAME-eth"  # default: hostname-pid
 ```
 
+## Upstream response headers
+
+The router does not pass an upstream's response headers through to the client. Before its
+own headers are appended, the reply keeps only:
+
+| Kept | Why |
+| --- | --- |
+| `Content-Type`, `Content-Encoding` | the client needs them to decode the body |
+| `Retry-After`, `Date` | a 429's wait is computed from them: an HTTP-date `Retry-After` is measured against the upstream's own `Date` |
+| headers the chain spec declares as `pass_reply` or `pass_both` | part of that chain's API contract — today the Cosmos and Aptos block-height headers |
+
+Everything else the upstream or its CDN sends — server and ray ids, its CORS policy, cookies,
+quota counters, product headers — is dropped, and so is any header an upstream sends under a
+name the router owns (`lava-*`, `Provider-Latest-Block`, `Smart-Router-Version`), whether or
+not a spec lists it. A cache hit replays the same reduced set. The filter is
+`upstreamReplyMetadata` in `upstream_reply_headers.go` (MAG-3104).
+
 ## Architecture
 
 ```
