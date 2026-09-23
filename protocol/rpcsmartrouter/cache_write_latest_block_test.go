@@ -23,7 +23,7 @@ func TestReplyLatestBlockForCacheWrite(t *testing.T) {
 		{"a claim one block ahead is cut to the tip too", 101, 100, 100, 100},
 		{"with no fresh tip the parse-time seen block is the ceiling", 1_000_100, 0, 95, 95},
 		{"with no fresh tip a claim under the seen block is kept", 90, 0, 95, 90},
-		{"with nothing to vouch for, the claim is dropped", 1_000_100, 0, 0, 0},
+		{"with nothing to vouch for, the claim stands", 1_000_100, 0, 0, 1_000_100},
 		{"a reply that carried no block stays empty", 0, 100, 100, 0},
 	}
 	for _, tc := range cases {
@@ -78,4 +78,33 @@ func TestCacheWriteNeverPublishesAHeadTheRouterDidNotBelieve(t *testing.T) {
 			require.Equal(t, tip, reply.GetSeenBlock(), "the floor, and so the published tip, is the router's own belief")
 		})
 	}
+}
+
+// The other side of the bound, and a contract getLatestBlock documents: a pod with no tip
+// at all keeps the node's own claim, so it still finalizes from the reply ("per-reply
+// finalization") rather than filing everything non-finalized under a zero floor.
+// ChainState would accept this same block as its first observation, so dropping the claim
+// here would make the cache stricter than the router itself.
+func TestNoTipPodKeepsTheNodesOwnClaim(t *testing.T) {
+	const claim = int64(20000000)
+	primary, rcs := startCacheServerForTest(t)
+	chainParser := ethJsonRPCParser(t)
+	rpcss := ethCacheTestServer(chainParser, primary) // no chain state: the gated tip reads 0
+
+	msg := ethProtocolMessage(t, chainParser, `{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x000000000000000000000000000000000000dead","0x1"]}`, 0)
+	hashKey, _, err := msg.HashCacheRequest("ETH1")
+	require.NoError(t, err)
+	reqBlock, _ := msg.RequestedBlock()
+	require.Equal(t, int64(1), reqBlock, "an explicit block, so the write does not need a tip for its key")
+
+	rpcss.tryCacheWrite(context.Background(), msg, &common.RelayResult{
+		Reply:      &pairingtypes.RelayReply{Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x0"}`), LatestBlock: claim},
+		StatusCode: http.StatusOK,
+	})
+	var reply *pairingtypes.CacheRelayReply
+	require.Eventually(t, func() bool {
+		reply = directGetOn(rcs, "ETH1", hashKey, 1, 0)
+		return reply.GetReply() != nil
+	}, 3*time.Second, 20*time.Millisecond, "the entry is filed under its own block")
+	require.Equal(t, claim, reply.GetSeenBlock(), "with nothing to bound it, the node's claim is the floor, as before")
 }

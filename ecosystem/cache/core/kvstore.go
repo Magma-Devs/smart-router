@@ -53,7 +53,8 @@ type KVStore interface {
 	// writer keeps refreshing stops fencing honest writers the moment readers
 	// stop trusting it. Same rule the router's own ChainState applies to its
 	// tip (MAG-3755). An equal or higher block always writes and refreshes the
-	// horizon.
+	// horizon. In a keyspace written less often than the horizon the tip is
+	// simply the last writer's value, which is also all a reader could use.
 	SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error
 
 	// Block-hash → height scalars. Missing key reads as (0, false).
