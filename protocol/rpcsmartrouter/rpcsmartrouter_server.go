@@ -3791,7 +3791,13 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	// value is the requested block itself (extractBlockHeightFromEVMResponse
 	// reads result.number), so the naive check never marks any historical
 	// block finalized and every entry takes the ~625 ms non-finalized TTL.
-	latestBlock := relayResult.Reply.LatestBlock
+	//
+	// The reply's claim is bounded by what this router vouches for before it is
+	// used anywhere here — finalization, the older-than-tip guard below, and the
+	// copy SetRelay reads — so an upstream cannot publish a head the router did
+	// not believe as the cache's chain-level tip or the entry's floor (MAG-3755;
+	// see replyLatestBlockForCacheWrite).
+	latestBlock := replyLatestBlockForCacheWrite(relayResult.Reply.LatestBlock, int64(rpcss.getLatestBlock()), relayData.SeenBlock)
 	// Finalization uses the GATED getLatestBlock (fresh tip or 0), never getLatestBlockAllowStale:
 	// a stale or too-high head here would falsely finalize a mutable block into the long-TTL store.
 	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
@@ -3913,6 +3919,9 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		)
 		return
 	}
+	// The copy is what the cache server reads: it carries the bounded claim, not the
+	// upstream's (MAG-3755).
+	copyReply.LatestBlock = latestBlock
 
 	// Write to cache in a non-blocking goroutine
 	go func() {

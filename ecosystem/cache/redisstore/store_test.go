@@ -140,8 +140,8 @@ func TestSetInt64OverCorruptValue(t *testing.T) {
 
 // Same invariant for the chain tip. This script was already correct against a
 // real backend; the test exists because it is the pair to the one above, and
-// because it pins the miniredis-portable form — see setChainTipGEScript on why
-// the match result is bound before tonumber rather than nested inside it.
+// because it pins the miniredis-portable form — see setChainTipGuardedScript on
+// why the match results are bound before tonumber rather than nested inside it.
 func TestSetChainTipOverCorruptValue(t *testing.T) {
 	store, mr := newTestStore(t)
 	ctx := context.Background()
@@ -152,7 +152,7 @@ func TestSetChainTipOverCorruptValue(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, fresh, "a corrupt tip reads as unknown")
 
-	require.NoError(t, store.SetChainTipIfGreaterOrEqual(ctx, key, 100),
+	require.NoError(t, store.SetChainTipIfGreaterOrEqualOrStale(ctx, key, 100),
 		"a corrupt stored value must not fence the write")
 
 	block, fresh, err := store.GetChainTip(ctx, key)
@@ -161,36 +161,50 @@ func TestSetChainTipOverCorruptValue(t *testing.T) {
 	require.Equal(t, int64(100), block)
 }
 
-// Chain-tip semantics ported from the in-memory adapter: readers honour the
-// embedded freshness deadline, while the monotonic guard keeps comparing
-// against the raw stored block even after it goes stale.
+// Chain-tip semantics shared with the in-memory adapter: readers honour the
+// embedded freshness deadline, and so does the write guard. A lower write is
+// refused only while the stored tip is still fresh; once it has gone stale
+// the lower write replaces it, which is how a false high tip nobody keeps
+// refreshing ages out instead of fencing honest writers for the whole key
+// retention (MAG-3755).
 func TestChainTipFreshnessAndFencing(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()
 	key := core.ChainTipKey("ETH1")
 
-	require.NoError(t, store.SetChainTipIfGreaterOrEqual(ctx, key, 100))
+	require.NoError(t, store.SetChainTipIfGreaterOrEqualOrStale(ctx, key, 100))
 	block, fresh, err := store.GetChainTip(ctx, key)
 	require.NoError(t, err)
 	require.True(t, fresh)
 	require.Equal(t, int64(100), block)
 
-	require.NoError(t, store.SetChainTipIfGreaterOrEqual(ctx, key, 90))
-	block, _, _ = store.GetChainTip(ctx, key)
-	require.Equal(t, int64(100), block, "a lower write must not move the tip backward")
+	require.NoError(t, store.SetChainTipIfGreaterOrEqualOrStale(ctx, key, 90))
+	block, fresh, _ = store.GetChainTip(ctx, key)
+	require.True(t, fresh)
+	require.Equal(t, int64(100), block, "a lower write must not move a fresh tip backward")
 
 	// Let the freshness window (core.DefaultExpirationForNonFinalized) lapse.
 	time.Sleep(core.DefaultExpirationForNonFinalized + 100*time.Millisecond)
 	_, fresh, _ = store.GetChainTip(ctx, key)
 	require.False(t, fresh, "a stale tip reads as unknown")
 
-	require.NoError(t, store.SetChainTipIfGreaterOrEqual(ctx, key, 90))
-	_, fresh, _ = store.GetChainTip(ctx, key)
-	require.False(t, fresh, "even stale, the stored block fences lower writes")
+	require.NoError(t, store.SetChainTipIfGreaterOrEqualOrStale(ctx, key, 90))
+	block, fresh, _ = store.GetChainTip(ctx, key)
+	require.True(t, fresh, "once stale, the stored block no longer fences a lower write")
+	require.Equal(t, int64(90), block, "and the lower write is the tip readers now see")
 
-	require.NoError(t, store.SetChainTipIfGreaterOrEqual(ctx, key, 150))
+	require.NoError(t, store.SetChainTipIfGreaterOrEqualOrStale(ctx, key, 150))
 	block, fresh, _ = store.GetChainTip(ctx, key)
 	require.True(t, fresh)
+	require.Equal(t, int64(150), block)
+
+	// An equal write moves the deadline: 4/5 then 2/5 of a window apart the tip is still
+	// fresh only because the write in between refreshed it.
+	time.Sleep(core.DefaultExpirationForNonFinalized * 4 / 5)
+	require.NoError(t, store.SetChainTipIfGreaterOrEqualOrStale(ctx, key, 150))
+	time.Sleep(core.DefaultExpirationForNonFinalized * 2 / 5)
+	block, fresh, _ = store.GetChainTip(ctx, key)
+	require.True(t, fresh, "an equal write refreshes freshness")
 	require.Equal(t, int64(150), block)
 }
 

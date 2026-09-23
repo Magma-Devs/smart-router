@@ -339,7 +339,7 @@ func (e *Engine) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCa
 	// Tip and height bookkeeping stays best-effort even when the entry write
 	// failed — and its own failures don't fail the call.
 	e.SetSharedTip(ctx, chainId, relayCacheSet.SharedStateId, latestKnownBlock, e.Policy.SharedStateTip(time.Duration(relayCacheSet.AverageBlockTime)))
-	if err := e.Store.SetChainTipIfGreaterOrEqual(ctx, ChainTipKey(chainId), latestKnownBlock); err != nil {
+	if err := e.Store.SetChainTipIfGreaterOrEqualOrStale(ctx, ChainTipKey(chainId), latestKnownBlock); err != nil {
 		utils.LavaFormatWarning("failed setting chain tip", err, utils.LogAttr("chainId", relayCacheSet.ChainId))
 	}
 	e.setBlocksHashesToHeights(ctx, chainId, relayCacheSet.BlocksHashesToHeights)

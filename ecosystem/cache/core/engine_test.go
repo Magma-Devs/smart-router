@@ -126,7 +126,7 @@ func (f *fakeStore) GetChainTip(ctx context.Context, key string) (int64, bool, e
 	return spectypes.NOT_APPLICABLE, false, nil
 }
 
-func (f *fakeStore) SetChainTipIfGreaterOrEqual(ctx context.Context, key string, block int64) error {
+func (f *fakeStore) SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tipSets = append(f.tipSets, block)

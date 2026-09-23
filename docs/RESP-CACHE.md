@@ -427,9 +427,14 @@ belongs to someone else. Isolation between deployments that must not read each o
 answers is a network question, not a naming one.
 
 What a prefix does **not** do: replicas that share a keyspace on purpose still share one
-chain tip, and that tip is a monotonic maximum with no downward path before expiry — one
-replica publishing a false high block pins `latest` resolution for its whole fleet. That is a
-trust problem rather than a naming one and is tracked separately (MAG-3755).
+chain tip, so what one replica publishes is what the others resolve block tags against.
+Two rules keep a single replica from poisoning it (MAG-3755): a router only ever publishes
+the head it itself believed — a reply's claimed latest block is bounded by the router's
+own anti-lie-guarded tip before the cache write — and the tip's write guard yields to a
+lower write once the stored value has gone stale for readers (the embedded sub-second
+deadline), so a false high value that nobody keeps refreshing stops fencing honest
+writers as soon as readers stop trusting it, on both backends. A lie that passes the
+router's own outlier guard is still shared, for as long as the router itself believes it.
 
 ## Flush semantics
 
