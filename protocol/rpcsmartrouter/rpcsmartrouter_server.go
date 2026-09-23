@@ -4353,6 +4353,30 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		// Verify we have enough sessions to meet the agreement threshold
 		// If not, fail early with a clear error rather than proceeding knowing consensus is impossible
 		if crossValidationParams != nil && len(sessions) < crossValidationParams.AgreementThreshold {
+			// Release every session GetSessions handed back before returning. Its deferred AddUsed
+			// already registered them in UsedProviders, but no relay goroutine will be launched for
+			// them, so nothing downstream ever removes them. The state machine's
+			// validateReturnCondition only delivers this error once CurrentlyUsed() == 0, so without
+			// the release the caller waits out the full processingTimeout (~30s) for a verdict the
+			// router reached the moment GetSessions returned (MAG-3286). Same defect and same cure
+			// as the post-filter guard in sendRelayToDirectEndpoints.
+			//
+			// OnSessionDiscarded rather than a bare Session.Free: the relay was never sent, so the
+			// endpoint takes no QoS hit, and the compute units GetSessions reserved go back to the
+			// provider's budget. The nil reason keeps the provider out of the errored set — it did
+			// nothing wrong; there simply were not enough of them.
+			releaseRouterKey := lavasession.NewRouterKeyFromExtensions(extensions)
+			for endpointAddress, sessionInfo := range sessions {
+				if sessionInfo == nil || sessionInfo.Session == nil {
+					continue
+				}
+				usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, nil)
+				if discardErr := rpcss.sessionManager.OnSessionDiscarded(sessionInfo.Session, nil); discardErr != nil {
+					utils.LavaFormatError("failed releasing an undispatched cross-validation session", discardErr,
+						utils.LogAttr("endpoint", endpointAddress),
+						utils.LogAttr("GUID", ctx))
+				}
+			}
 			relayProcessor.SetCrossValidationFailFastReason(common.CrossValidationReasonInsufficientCapacity)
 			return utils.LavaFormatError("insufficient sessions for cross-validation consensus",
 				lavasession.PairingListEmptyError,
