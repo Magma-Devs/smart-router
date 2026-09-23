@@ -542,6 +542,23 @@ func TestSetRelayWrites(t *testing.T) {
 	require.False(t, unknownStored, "NOT_APPLICABLE heights are never stored")
 }
 
+func TestSetRelayDoesNotPublishAZeroChainTip(t *testing.T) {
+	store := newFakeStore()
+	engine := testEngine(store)
+
+	err := engine.SetRelay(context.Background(), &relaytypes.RelayCacheSet{
+		RequestHash:      []byte{0x05},
+		ChainId:          "LAV1",
+		RequestedBlock:   100,
+		SeenBlock:        0,
+		AverageBlockTime: int64(16 * time.Second),
+		Response:         &relaytypes.RelayReply{Data: []byte(`stored`), LatestBlock: 0},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, store.entries[RelayKey(false, "LAV1", []byte{0x05}, 100)], "the entry itself is stored")
+	require.Empty(t, store.tipSets, "a write that knew no block publishes no tip: it would say nothing, and a stale tip now yields to any write")
+}
+
 func TestSetRelayRejectsNegativeBlock(t *testing.T) {
 	store := newFakeStore()
 	err := testEngine(store).SetRelay(context.Background(), &relaytypes.RelayCacheSet{
