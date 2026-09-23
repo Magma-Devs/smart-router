@@ -8,6 +8,140 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.5.3 — 2026-09-23
+
+### Highlights
+
+Release v1.5.3 introduces four breaking changes, starting with strict decoding for the `resp-cache:` configuration block where unknown or misspelled keys now cause startup failures instead of falling back to defaults, requiring operators to remove or correct invalid keys in their charts before upgrading. Within that block, `resp-cache.tls` settings like `ca-file` or `cert-file` will fail startup if configured without `enabled: true`; operators must explicitly set `enabled: true` to use TLS, or remove the keys entirely to run in plaintext. Additionally, standalone cache topologies will refuse to start if more than one endpoint is defined in `addresses` or `read-addresses`, requiring operators to either reduce the list to a single address or explicitly set `topology: sentinel` or `topology: cluster`. For websocket clients, streamed subscription notifications like `eth_subscription` pushes no longer carry an injected `id`, meaning integrators must match pushes using `params.subscription` instead. Beyond these breaking changes, this release improves cache correctness by preventing node-bound methods from being cached and applying finalized lifetimes to hash-fetched answers once their block is final, while also serving gRPC reflection directly from internal snapshots rather than forwarding it. Finally, to improve backend resilience, unreachable RESP caches now trip a circuit breaker that is split by endpoint, and a socket leak caused by keeping failed setup connections alive indefinitely has been resolved.
+
+### Changes
+
+#### ⚠ Breaking changes
+- fix(redisstore)!: refuse a tls block that was written without its switch (MAG-3683) ([#396]) [`71b5e52`]
+  - a `resp-cache.tls` block that carries `ca-file`, `cert-file`, `key-file`, `server-name` or `insecure-skip-verify` without `enabled: true` now fails startup with "tls.* options are set but tls.enabled is not true — dangling configuration". This includes a block that writes `enabled: false` beside those keys, which v1.5.x accepted and ran as a plaintext connection. To run without TLS, remove the other tls.* keys or the whole block; `tls: {enabled: false}` on its own and `tls: {}` are still accepted. To run with TLS, set `enabled: true`, after which the files are read and verified at startup.
+- fix(cache)!: give every router its own keyspace on a shared cache (MAG-3521) ([#397]) [`047a743`]
+  - the `resp-cache:` configuration block is decoded strictly. A key the block does not define, including a misspelled one that v1.5.x ignored while the router ran on the default it was meant to override, now fails startup with "invalid resp-cache block (unknown keys are rejected so a misspelled setting cannot fall back to a default unnoticed)" naming the key; nested blocks such as `tls:` are held to the same rule. Correct or remove the key. A chart or template that renders an extra key under `resp-cache:` must be fixed before the router is upgraded.
+- fix(rpcsmartrouter)!: judge a secondary cache entry by its contents before serving it (MAG-3597) ([#412]) [`3314109`]
+  - streamed websocket subscription notifications (messages with no top-level `result` or `error`, such as `eth_subscription` pushes) no longer carry the `id` the router used to inject from the subscribe request. JSON-RPC 2.0 notifications have no id. A client that matched pushes on that injected id must key on `params.subscription` instead. Replies (the subscribe and unsubscribe acknowledgements, cached answers) still get the caller's id back.
+- fix(redisstore)!: refuse a standalone address list longer than one (MAG-3672) ([#401]) [`018f821`]
+  - a standalone `resp-cache` block (the default topology) with more than one entry under `addresses` or `read-addresses` now fails startup with "addresses are configured but topology is standalone, which dials exactly one". On v1.5.x such a block started and served every request from its first address, silently ignoring the rest. Keep a single address per list, or set `topology: sentinel` or `topology: cluster` if the list was meant for one of those.
+
+#### Bug fixes
+- fix(scripts): re-depth the moved cache lanes and keep the ownership harness ([#384]) [`970ab87`]
+- fix(redisstore)!: refuse a tls block that was written without its switch (MAG-3683) ([#396]) [`71b5e52`]
+- fix(redisstore): warn when credentials are configured without tls ([#396]) [`d5713cd`]
+- fix(redisstore): compare the whole tls block instead of naming its keys ([#396]) [`0879471`]
+- fix(cache)!: give every router its own keyspace on a shared cache (MAG-3521) ([#397]) [`047a743`]
+- fix(cache): echo the keyspace a cache server scoped by, and say when it did not ([#397]) [`ecbaae1`]
+- fix(cache): hold the key grammar at the server too, and name a gRPC prefix the RESP backend outranks ([#397]) [`236dbda`]
+- fix(redisstore): trim both sides of the credential file, not only the right (MAG-3685) ([#398]) [`7086919`]
+- fix(redisstore): read a credential file by one rule on both sides, both halves and both paths ([#398]) [`6ce9cda`]
+- fix(redisstore): report an unreadable credential file once per outage, not per tick (MAG-3690) ([#399]) [`5267043`]
+- fix(redisstore): make Close wait for the credential watcher to return ([#399]) [`0b10772`]
+- fix(redisstore): hand a connection opened during a credential outage the last credentials read ([#399]) [`3ac5f29`]
+- fix(redisstore): refuse a master-name whose topology line was forgotten (MAG-3671) ([#400]) [`8dd9c76`]
+- fix(redisstore): name the resolved topology and master set on the debug endpoint too ([#400]) [`10b3a28`]
+- fix(redisstore): purge the read endpoint too when reads are split (MAG-3673) ([#403]) [`94803cc`]
+- fix(redisstore): ask the read endpoint its role before purging it, and skip the scan of a replica ([#403]) [`10b0e71`]
+- fix(redisstore): make the cache lifetimes reachable on a RESP backend (MAG-3631) ([#405]) [`fc58a0c`]
+- fix(redisstore): refuse an expiration lifetime that its multiplier rounds away ([#405]) [`f2c6f3e`]
+- fix(redisstore): hold every cache lifetime to the millisecond a RESP expiry can express ([#405]) [`72ecaa9`]
+- fix(cacheformat): return a caller's text request id byte for byte on a cache hit (MAG-3611) ([#408]) [`9ca4861`]
+- fix(rpcsmartrouter): never cache an answer the spec says is not reproducible across nodes (MAG-3461) ([#409]) [`deeeb19`]
+- fix(rpcsmartrouter): gate the cache on a node-bound method list, not the spec's deterministic flag ([#409]) [`2d7c2ac`]
+- fix(rpcsmartrouter): file a latest-tagged answer under the key its lookup computes (MAG-3460) ([#410]) [`4cd9660`]
+- fix(rpcsmartrouter): never file a lagging node's answer under the tip it would be served as ([#410]) [`4b6c95a`]
+- fix(rpcsmartrouter): keep an answer fetched by hash for the finalized lifetime once its block is final (MAG-3462) ([#411]) [`97ad8e8`]
+- fix(rpcsmartrouter)!: judge a secondary cache entry by its contents before serving it (MAG-3597) ([#412]) [`3314109`]
+- fix(cacheformat): refuse a JSON-RPC envelope that answers nothing before the cache hit is accepted ([#412]) [`0b00d20`]
+- fix(rpcsmartrouter): judge a primary cache entry by its contents too, so the tier makes no difference ([#412]) [`276d19a`]
+- fix(redisstore)!: refuse a standalone address list longer than one (MAG-3672) ([#401]) [`018f821`]
+- fix(redisstore): say out loud when certificate verification is off (MAG-3684) ([#402]) [`7566236`]
+- fix(redisstore): warn about skipped certificate verification from the store, and show the marker in the docs example ([#402]) [`b8bdaac`]
+- fix(performance): name which half of a split cache failed its probe (MAG-3674) ([#404]) [`41cb10f`]
+- fix(redisstore): probe every endpoint within the same deadline, not one after the other ([#404]) [`2a7aef5`]
+- fix(performance): classify a failed probe from every endpoint, not the first one met ([#404]) [`691b068`]
+- fix(performance): trip a breaker when the RESP cache is unreachable (MAG-3676) ([#406]) [`6077548`]
+- fix(performance): count symbolic-block tip failures and guard the sticky calls with the breaker ([#406]) [`fa45fb9`]
+- fix(performance): split the breaker by endpoint, and keep it open on a backend slower than its budget ([#406]) [`bf642ed`]
+- fix(redisstore): stop keeping connections that failed setup alive for the life of the process (MAG-3728) ([#407]) [`5883ac0`]
+- fix(redisstore): prune collected subscriptions on every refresh and subscribe, and anchor the rotation tests ([#407]) [`9f66d86`]
+- fix(grpc): serve reflection from snapshots instead of forwarding it ([#419]) [`7b4402a`]
+
+#### Documentation updates
+- docs(resp-cache): say what the dangling-tls refusal covers and the off-shape it accepts ([#396]) [`3cf9bcf`]
+- docs(resp-cache): say how a router learns its prefix was dropped, and what a prefix is not ([#397]) [`2570da8`]
+- docs(skill): can-i-merge gains the size question and the adversary review round ([#414]) [`40c2755`]
+- docs(resp-cache): say what bounds the open sockets during an outage, and why the prune sits on the hot path ([#407]) [`5547aeb`]
+- docs(secondary-cache): dangling timeout/mode warns, it does not abort startup (MAG-3538) ([#417]) [`4c52acc`]
+
+[#384]: https://github.com/magma-Devs/smart-router/pull/384
+[#396]: https://github.com/magma-Devs/smart-router/pull/396
+[#397]: https://github.com/magma-Devs/smart-router/pull/397
+[#398]: https://github.com/magma-Devs/smart-router/pull/398
+[#399]: https://github.com/magma-Devs/smart-router/pull/399
+[#400]: https://github.com/magma-Devs/smart-router/pull/400
+[#401]: https://github.com/magma-Devs/smart-router/pull/401
+[#402]: https://github.com/magma-Devs/smart-router/pull/402
+[#403]: https://github.com/magma-Devs/smart-router/pull/403
+[#404]: https://github.com/magma-Devs/smart-router/pull/404
+[#405]: https://github.com/magma-Devs/smart-router/pull/405
+[#406]: https://github.com/magma-Devs/smart-router/pull/406
+[#407]: https://github.com/magma-Devs/smart-router/pull/407
+[#408]: https://github.com/magma-Devs/smart-router/pull/408
+[#409]: https://github.com/magma-Devs/smart-router/pull/409
+[#410]: https://github.com/magma-Devs/smart-router/pull/410
+[#411]: https://github.com/magma-Devs/smart-router/pull/411
+[#412]: https://github.com/magma-Devs/smart-router/pull/412
+[#414]: https://github.com/magma-Devs/smart-router/pull/414
+[#417]: https://github.com/magma-Devs/smart-router/pull/417
+[#419]: https://github.com/magma-Devs/smart-router/pull/419
+[`018f821`]: https://github.com/magma-Devs/smart-router/commit/018f8219119f562e2c5d5f8bbe9413e0c476a1cc
+[`047a743`]: https://github.com/magma-Devs/smart-router/commit/047a7438f8a1f5cd7e6af3698f794032a6524ac2
+[`0879471`]: https://github.com/magma-Devs/smart-router/commit/087947188aa4bf3c177ca4fefc71a241549cb3d5
+[`0b00d20`]: https://github.com/magma-Devs/smart-router/commit/0b00d2032266b134233ef1ddf3271dc50d3a2976
+[`0b10772`]: https://github.com/magma-Devs/smart-router/commit/0b10772cd6d5e89b5f0190f492474768e9edfd1a
+[`10b0e71`]: https://github.com/magma-Devs/smart-router/commit/10b0e71a4d90bd9aa2a85b34aceb57068da2f68a
+[`10b3a28`]: https://github.com/magma-Devs/smart-router/commit/10b3a2870effc494416fe7061632d9d09bc5c805
+[`236dbda`]: https://github.com/magma-Devs/smart-router/commit/236dbdab108a34dd69d9c566c2fcf858cd7a6165
+[`2570da8`]: https://github.com/magma-Devs/smart-router/commit/2570da84a33a4128c7391ff49e2105831f4a6e98
+[`276d19a`]: https://github.com/magma-Devs/smart-router/commit/276d19a6f82525779fcef0f6c318b798a7feee1a
+[`2a7aef5`]: https://github.com/magma-Devs/smart-router/commit/2a7aef5057d9d3a7c050259fb03f2fc9b5515d8d
+[`2d7c2ac`]: https://github.com/magma-Devs/smart-router/commit/2d7c2ac3becc8021c876811bc2ebd14e763d2bcf
+[`3314109`]: https://github.com/magma-Devs/smart-router/commit/3314109ec0b7f47ce89d6042d46c4f743d4e5fb9
+[`3ac5f29`]: https://github.com/magma-Devs/smart-router/commit/3ac5f293b9f5a2407094766c6b2c4cfce2c2e610
+[`3cf9bcf`]: https://github.com/magma-Devs/smart-router/commit/3cf9bcf1d5b5679c229c209f2f219771da57fe27
+[`40c2755`]: https://github.com/magma-Devs/smart-router/commit/40c2755a29a2f7cba31fa79812773168580005de
+[`41cb10f`]: https://github.com/magma-Devs/smart-router/commit/41cb10f139af5ba0f073868f164efa62e1f27b3a
+[`4b6c95a`]: https://github.com/magma-Devs/smart-router/commit/4b6c95afb4dcd46cd5dc440a40104d6f75edf4be
+[`4c52acc`]: https://github.com/magma-Devs/smart-router/commit/4c52acca6614c9c8bb49be3740c0be709fea2f36
+[`4cd9660`]: https://github.com/magma-Devs/smart-router/commit/4cd9660d0b330f909cc6a93aa43035270cba70e5
+[`5267043`]: https://github.com/magma-Devs/smart-router/commit/52670430fac2e75da9bd196e9e1bed37f000e1bf
+[`5547aeb`]: https://github.com/magma-Devs/smart-router/commit/5547aebcc3a25a681a98d872c24823c855b8c9ee
+[`5883ac0`]: https://github.com/magma-Devs/smart-router/commit/5883ac0390661db35b25f121dc586deb5f0e7911
+[`6077548`]: https://github.com/magma-Devs/smart-router/commit/60775480fc89c2023bee1347465e790e1b00e551
+[`691b068`]: https://github.com/magma-Devs/smart-router/commit/691b06824f5e6344d11e3fc558938b27c43049ab
+[`6ce9cda`]: https://github.com/magma-Devs/smart-router/commit/6ce9cda3754706f4bae766288bf50e8575db33ef
+[`7086919`]: https://github.com/magma-Devs/smart-router/commit/70869190666947a0d32c511e9445e6f51b602168
+[`71b5e52`]: https://github.com/magma-Devs/smart-router/commit/71b5e52e1d523347b4e81d943c21698bec86b272
+[`72ecaa9`]: https://github.com/magma-Devs/smart-router/commit/72ecaa92d3bda33b185737eeff07983d95c8a896
+[`7566236`]: https://github.com/magma-Devs/smart-router/commit/7566236147051ba48bca50f0f28c15d4c7261eab
+[`7b4402a`]: https://github.com/magma-Devs/smart-router/commit/7b4402a05fb211787db4d8ef9f0f6545446081b6
+[`8dd9c76`]: https://github.com/magma-Devs/smart-router/commit/8dd9c7657191a49d098e787323b1527a160cae1a
+[`94803cc`]: https://github.com/magma-Devs/smart-router/commit/94803cc760224d2c64fabced07ab78df942a0e7e
+[`970ab87`]: https://github.com/magma-Devs/smart-router/commit/970ab87196adb583e01d2c8427e7884b781fd100
+[`97ad8e8`]: https://github.com/magma-Devs/smart-router/commit/97ad8e8212172787049ccbdcf807340fcedb0b97
+[`9ca4861`]: https://github.com/magma-Devs/smart-router/commit/9ca486115cda27b3b7123cd5e977c374963692fc
+[`9f66d86`]: https://github.com/magma-Devs/smart-router/commit/9f66d8618c76a0fe415e30571f7f6fb29643e4c8
+[`b8bdaac`]: https://github.com/magma-Devs/smart-router/commit/b8bdaac40f086b03a4868c10ae640215612ae360
+[`bf642ed`]: https://github.com/magma-Devs/smart-router/commit/bf642ed24c4ca16c04595ab9bbcd18c2fffda7e9
+[`d5713cd`]: https://github.com/magma-Devs/smart-router/commit/d5713cdceeb50191f874c8d4794c99ba1bebd98e
+[`deeeb19`]: https://github.com/magma-Devs/smart-router/commit/deeeb19bcf3dcd1fb9f5db0dab41482bb70be9b2
+[`ecbaae1`]: https://github.com/magma-Devs/smart-router/commit/ecbaae12dff025681ad4b54becef4c6007a4e7e1
+[`f2c6f3e`]: https://github.com/magma-Devs/smart-router/commit/f2c6f3eed4a26c136ed2f7a49e13396833f4e302
+[`fa45fb9`]: https://github.com/magma-Devs/smart-router/commit/fa45fb9ba056ff32140d01ff7fa0398da5ad4013
+[`fc58a0c`]: https://github.com/magma-Devs/smart-router/commit/fc58a0c1c2cab070ff97fdcb94ca38ec0327dd9a
+
 ## v1.5.2 — 2026-09-17
 
 ### Highlights
