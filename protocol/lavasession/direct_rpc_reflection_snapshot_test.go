@@ -357,6 +357,38 @@ func TestBuildReflectionSnapshot_TheWellKnownTypesMayComeTwice(t *testing.T) {
 	require.Equal(t, []string{"x.S1", "x.S2"}, snapshot.Services)
 }
 
+// In hybrid mode a service the protoset predates arrives with the node's build of
+// every import the protoset holds too. The same content, source info aside, is one
+// build, so the service is kept and the snapshot stays complete.
+func TestBuildReflectionSnapshot_TheSameContentFromTwoSourcesIsOneBuild(t *testing.T) {
+	sharedProto := func() *descriptorpb.FileDescriptorProto {
+		return &descriptorpb.FileDescriptorProto{
+			Name: proto.String("x/shared.proto"), Package: proto.String("x"), Syntax: proto.String("proto3"),
+			MessageType: []*descriptorpb.DescriptorProto{{Name: proto.String("A")}},
+		}
+	}
+	protosetBuild, err := protodesc.NewFile(sharedProto(), new(protoregistry.Files))
+	require.NoError(t, err)
+	compiledWithSourceInfo := sharedProto()
+	compiledWithSourceInfo.SourceCodeInfo = &descriptorpb.SourceCodeInfo{
+		Location: []*descriptorpb.SourceCodeInfo_Location{{Path: []int32{4, 0}, Span: []int32{2, 0, 2, 12}}},
+	}
+	nodeBuild, err := protodesc.NewFile(compiledWithSourceInfo, new(protoregistry.Files))
+	require.NoError(t, err)
+
+	source := fakeDescriptorSource{
+		listed: []string{"x.S1", "x.S2"},
+		services: map[string]*desc.ServiceDescriptor{
+			"x.S1": wrappedService(t, serviceFileImporting(t, "S1", protosetBuild, ".x.A"), "x.S1"),
+			"x.S2": wrappedService(t, serviceFileImporting(t, "S2", nodeBuild, ".x.A"), "x.S2"),
+		},
+	}
+	snapshot, err := buildReflectionSnapshot(source)
+	require.NoError(t, err)
+	require.True(t, snapshot.Complete, "identical content from two sources is one build")
+	require.Equal(t, []string{"x.S1", "x.S2"}, snapshot.Services)
+}
+
 // A node whose partial snapshot refreshes to a partial one is partial by nature, not
 // by accident: it is not swept again every retry interval, only after the full TTL.
 func TestReflectionSnapshot_ASettledPartialWaitsTheFullTTL(t *testing.T) {

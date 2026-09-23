@@ -29,6 +29,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	protov2 "google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
 )
@@ -1857,15 +1859,15 @@ func buildReflectionSnapshot(source grpcurl.DescriptorSource) (*GRPCReflectionSn
 }
 
 // registerFileGraph registers fd after everything it imports. A path already
-// registered must hold this very build, or fd is refused: one path, one build. The
-// well-known types are exempt, being identical in every build. Unresolved imports
-// are skipped, as reflection serialization skips them.
+// registered must hold this build, or one with the same content, or fd is refused:
+// one path, one build. The well-known types are exempt, being identical in every
+// build. Unresolved imports are skipped, as reflection serialization skips them.
 func registerFileGraph(files *protoregistry.Files, fd protoreflect.FileDescriptor) error {
 	if fd.IsPlaceholder() {
 		return nil
 	}
 	if registered, err := files.FindFileByPath(fd.Path()); err == nil {
-		if registered != fd && !strings.HasPrefix(fd.Path(), "google/protobuf/") {
+		if registered != fd && !strings.HasPrefix(fd.Path(), "google/protobuf/") && !sameFileContent(registered, fd) {
 			return fmt.Errorf("a second build of %q", fd.Path())
 		}
 		return nil
@@ -1877,6 +1879,18 @@ func registerFileGraph(files *protoregistry.Files, fd protoreflect.FileDescripto
 		}
 	}
 	return files.RegisterFile(fd)
+}
+
+// sameFileContent reports whether two builds of one file declare the same thing.
+// Source info is left out of the comparison: a protoset compiled with it and a
+// node's reflection without it are still one file, as hybrid mode produces.
+func sameFileContent(a, b protoreflect.FileDescriptor) bool {
+	content := func(fd protoreflect.FileDescriptor) protov2.Message {
+		fdp := protodesc.ToFileDescriptorProto(fd)
+		fdp.SourceCodeInfo = nil
+		return fdp
+	}
+	return protov2.Equal(content(a), content(b))
 }
 
 // parseInputMessage parses the input data into the dynamic message.
