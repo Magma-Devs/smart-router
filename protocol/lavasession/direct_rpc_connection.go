@@ -161,7 +161,8 @@ var _ GRPCReflectionSnapshotter = (*GRPCDirectRPCConnection)(nil)
 // A snapshot is refreshed once older than reflectionSnapshotTTL; a partial one
 // already after reflectionSnapshotRetry, unless its last refresh came back partial
 // too. The one held keeps being served meanwhile, and after a failure the next
-// attempt waits reflectionSnapshotRetry.
+// attempt waits reflectionSnapshotRetry. A partial refresh displaces a complete
+// snapshot only once that one is two TTLs old.
 var (
 	reflectionSnapshotTTL   = 10 * time.Minute
 	reflectionSnapshotRetry = 30 * time.Second
@@ -1765,7 +1766,9 @@ func (g *GRPCDirectRPCConnection) takeReflectionSnapshot(done chan struct{}) {
 	case err != nil:
 		// A failed refresh leaves the snapshot it would have replaced in service.
 		g.snapshotErr, g.snapshotFailedAt = err, time.Now()
-	case !snapshot.Complete && g.snapshot != nil && g.snapshot.Complete:
+	case !snapshot.Complete && g.snapshot != nil && g.snapshot.Complete && time.Since(g.snapshot.Taken) < 2*reflectionSnapshotTTL:
+		// A complete snapshot outlasts partial refreshes for one TTL past its own,
+		// retried on the failure spacing; after that the partial one takes over.
 		g.snapshotErr, g.snapshotFailedAt = errPartialRefresh, time.Now()
 	default:
 		g.snapshotSettledPartial = !snapshot.Complete && g.snapshot != nil && !g.snapshot.Complete

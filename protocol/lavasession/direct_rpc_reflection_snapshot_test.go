@@ -181,13 +181,25 @@ func TestReflectionSnapshot_AFailedRefreshKeepsTheHeldSnapshot(t *testing.T) {
 	require.Same(t, held, g.ReflectionSnapshot(), "a failed refresh leaves the held snapshot in service")
 }
 
-func TestReflectionSnapshot_APartialRefreshNeverDisplacesAComplete(t *testing.T) {
-	g := scriptedConn(func() (*GRPCReflectionSnapshot, error) { return heldSnapshot(false, 0), nil })
-	complete := heldSnapshot(true, time.Hour)
+// A partial refresh leaves a complete snapshot in service for one TTL past its
+// expiry, retried on the failure spacing meanwhile, so a node whose reflection is
+// throttled for a while keeps its full listing. Past that the partial one takes
+// over, so a node whose reflection went partial for good is not frozen forever.
+func TestReflectionSnapshot_APartialRefreshDisplacesACompleteOnlyOnceItIsTwoTTLsOld(t *testing.T) {
+	partial := func() (*GRPCReflectionSnapshot, error) { return heldSnapshot(false, 0), nil }
+
+	g := scriptedConn(partial)
+	complete := heldSnapshot(true, reflectionSnapshotTTL+time.Minute)
 	g.snapshot = complete
 	g.ReflectionSnapshot()
 	require.Eventually(t, settled(g), 5*time.Second, 5*time.Millisecond)
-	require.Same(t, complete, g.ReflectionSnapshot())
+	require.Same(t, complete, g.ReflectionSnapshot(), "a complete snapshot expired less than a TTL ago stays")
+
+	g = scriptedConn(partial)
+	g.snapshot = heldSnapshot(true, 2*reflectionSnapshotTTL+time.Minute)
+	g.ReflectionSnapshot()
+	require.Eventually(t, settled(g), 5*time.Second, 5*time.Millisecond)
+	require.False(t, g.PeekReflectionSnapshot().Complete, "one that is two TTLs old gives way to the partial refresh")
 
 	fresher := heldSnapshot(false, 0)
 	g = scriptedConn(func() (*GRPCReflectionSnapshot, error) { return fresher, nil })
