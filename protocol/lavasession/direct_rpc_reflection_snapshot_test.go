@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,6 +21,7 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	testgrpc "google.golang.org/grpc/interop/grpc_testing"
 	"google.golang.org/grpc/reflection"
+	reflectionv1 "google.golang.org/grpc/reflection/grpc_reflection_v1"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
@@ -507,6 +510,76 @@ func serveOverBufconn(t *testing.T, server *grpc.Server) *grpc.ClientConn {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
+}
+
+// definitionsOnOneStream asks one reflection stream for the file of each symbol,
+// then for every file received by name, and returns each file's definitions by path.
+func definitionsOnOneStream(t *testing.T, conn *grpc.ClientConn, symbols ...string) map[string][]*descriptorpb.FileDescriptorProto {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	stream, err := reflectionv1.NewServerReflectionClient(conn).ServerReflectionInfo(ctx)
+	require.NoError(t, err)
+	defer func() { _ = stream.CloseSend() }()
+
+	received := make(map[string][]*descriptorpb.FileDescriptorProto)
+	ask := func(request *reflectionv1.ServerReflectionRequest) {
+		require.NoError(t, stream.Send(request))
+		response, err := stream.Recv()
+		require.NoError(t, err)
+		for _, raw := range response.GetFileDescriptorResponse().GetFileDescriptorProto() {
+			fdp := new(descriptorpb.FileDescriptorProto)
+			require.NoError(t, proto.Unmarshal(raw, fdp))
+			received[fdp.GetName()] = append(received[fdp.GetName()], fdp)
+		}
+	}
+	for _, symbol := range symbols {
+		ask(&reflectionv1.ServerReflectionRequest{MessageRequest: &reflectionv1.ServerReflectionRequest_FileContainingSymbol{FileContainingSymbol: symbol}})
+	}
+	paths := slices.Sorted(maps.Keys(received))
+	for _, path := range paths {
+		ask(&reflectionv1.ServerReflectionRequest{MessageRequest: &reflectionv1.ServerReflectionRequest_FileByFilename{FileByFilename: path}})
+	}
+	return received
+}
+
+// Review of #419: a file whose content matches the build held can still import a
+// changed one, and reflection serializes a file's imports from the file itself. A
+// service that reaches a changed file through an unchanged one is a second build
+// too, and is refused with everything it would have added.
+func TestBuildReflectionSnapshot_AnUnchangedFileOverAChangedImportIsASecondBuild(t *testing.T) {
+	oldWrapper, newWrapper := wrapperOver(t, payloadBuild(t, "old_value")), wrapperOver(t, payloadBuild(t, "new_value"))
+	require.True(t, sameFileContent(oldWrapper, newWrapper), "the file in between is unchanged")
+	fresh := messageFile(t, "x/fresh.proto", "x", "F", "f", "")
+	s2File := linkFile(t, &descriptorpb.FileDescriptorProto{
+		Name: proto.String("S2.proto"), Package: proto.String("x"), Syntax: proto.String("proto3"),
+		Dependency: []string{fresh.Path(), newWrapper.Path()},
+		Service: []*descriptorpb.ServiceDescriptorProto{{
+			Name:   proto.String("S2"),
+			Method: []*descriptorpb.MethodDescriptorProto{{Name: proto.String("M"), InputType: proto.String(".x.F"), OutputType: proto.String(".x.W")}},
+		}},
+	}, fresh, newWrapper)
+
+	source := fakeDescriptorSource{
+		listed: []string{"x.S1", "x.S2"},
+		services: map[string]*desc.ServiceDescriptor{
+			"x.S1": wrappedService(t, serviceFileImporting(t, "S1", oldWrapper, ".x.W"), "x.S1"),
+			"x.S2": wrappedService(t, s2File, "x.S2"),
+		},
+	}
+	snapshot, err := buildReflectionSnapshot(source)
+	require.NoError(t, err)
+	require.False(t, snapshot.Complete)
+	require.Equal(t, []string{"x.S1"}, snapshot.Services)
+	_, err = snapshot.FindFileByPath("x/fresh.proto")
+	require.Error(t, err, "a refused service adds no file, not even one new to the snapshot")
+
+	conn := serveSnapshotReflection(t, func(context.Context) (*GRPCReflectionSnapshot, error) { return snapshot, nil })
+	for path, definitions := range definitionsOnOneStream(t, conn, "x.S2", "x.S1") {
+		for _, definition := range definitions[1:] {
+			require.True(t, proto.Equal(definitions[0], definition), "one stream got two definitions of %s", path)
+		}
+	}
 }
 
 // A node whose partial snapshot refreshes to a partial one is partial by nature, not

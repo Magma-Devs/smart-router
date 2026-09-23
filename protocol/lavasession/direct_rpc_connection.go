@@ -1980,27 +1980,59 @@ func buildReflectionSnapshot(source grpcurl.DescriptorSource) (*GRPCReflectionSn
 	return snapshot, nil
 }
 
-// registerFileGraph registers fd after everything it imports. A path already
-// registered must hold this build, or one with the same content, or fd is refused:
-// one path, one build. The well-known types are exempt, being identical in every
-// build. Unresolved imports are skipped, as reflection serialization skips them.
+// registerFileGraph registers fd and the files it imports that files lacks, or
+// nothing. Every path in the graph must be new to files, or hold this build or one
+// with the same content, down to the leaves: reflection serializes a file's imports
+// from the file itself, so a matching file that imports a changed one would still
+// deliver a second build. One path, one build. The well-known types are exempt,
+// being identical in every build. Unresolved imports are skipped, as reflection
+// serialization skips them.
 func registerFileGraph(files *protoregistry.Files, fd protoreflect.FileDescriptor) error {
-	if fd.IsPlaceholder() {
-		return nil
-	}
-	if registered, err := files.FindFileByPath(fd.Path()); err == nil {
-		if registered != fd && !strings.HasPrefix(fd.Path(), "google/protobuf/") && !sameFileContent(registered, fd) {
-			return fmt.Errorf("a second build of %q", fd.Path())
+	visited := make(map[string]protoreflect.FileDescriptor)
+	var fresh []protoreflect.FileDescriptor
+	var walk func(fd protoreflect.FileDescriptor) error
+	walk = func(fd protoreflect.FileDescriptor) error {
+		if fd.IsPlaceholder() {
+			return nil
+		}
+		if seen, ok := visited[fd.Path()]; ok {
+			return oneBuild(seen, fd)
+		}
+		visited[fd.Path()] = fd
+		registered, err := files.FindFileByPath(fd.Path())
+		if err == nil {
+			if err := oneBuild(registered, fd); err != nil {
+				return err
+			}
+		}
+		imports := fd.Imports()
+		for i := 0; i < imports.Len(); i++ {
+			if err := walk(imports.Get(i).FileDescriptor); err != nil {
+				return err
+			}
+		}
+		if registered == nil {
+			fresh = append(fresh, fd)
 		}
 		return nil
 	}
-	imports := fd.Imports()
-	for i := 0; i < imports.Len(); i++ {
-		if err := registerFileGraph(files, imports.Get(i).FileDescriptor); err != nil {
+	if err := walk(fd); err != nil {
+		return err
+	}
+	for _, fd := range fresh {
+		if err := files.RegisterFile(fd); err != nil {
 			return err
 		}
 	}
-	return files.RegisterFile(fd)
+	return nil
+}
+
+// oneBuild refuses b where a, another build of its path, is already taken.
+func oneBuild(a, b protoreflect.FileDescriptor) error {
+	if a == b || strings.HasPrefix(b.Path(), "google/protobuf/") || sameFileContent(a, b) {
+		return nil
+	}
+	return fmt.Errorf("a second build of %q", b.Path())
 }
 
 // sameFileContent reports whether two builds of one file declare the same thing.
