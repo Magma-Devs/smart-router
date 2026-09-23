@@ -327,6 +327,28 @@ smartrouter config.yml --use-static-spec specs/
 --log_level debug                    # Log verbosity
 ```
 
+### Request tracing headers
+
+A caller can label a request so it can be found again in the router's logs and matched to
+their own records. Three headers are read, on every interface:
+
+| Header | Log field |
+| --- | --- |
+| `X-Request-Id` | `request_id` |
+| `X-Task-Id` | `task_id` |
+| `X-Tx-Id` | `tx_id` |
+
+On JSON-RPC, REST and Tendermint RPC they travel as HTTP request headers; on gRPC they travel
+as request metadata (`x-request-id` and so on: gRPC lower-cases metadata keys in transit, and
+the router accepts either casing). The values are stamped on the request's context as it enters
+the listener, so the router's log lines for that request carry them, they ride on the relay
+sent to the provider, and `/debug/logs?request_id=<id>` returns the lines that do. They are
+stripped before the cache key is built, so two callers asking the same question under different
+ids still share one cache entry.
+
+The headers are read per HTTP request or gRPC call. A WebSocket connection's upgrade request
+is not read, so messages sent over a WebSocket carry no caller ids today.
+
 ### Usage telemetry (OTel)
 
 Off by default. When enabled, the smart router emits two event types as
