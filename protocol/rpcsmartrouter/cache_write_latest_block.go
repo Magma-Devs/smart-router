@@ -12,12 +12,15 @@ package rpcsmartrouter
 // it reached the cache with no guard at all: on a keyspace shared by a fleet, one replica
 // relaying a lying or mislabelled node could raise every replica's tip.
 //
-// The ceiling is the gated tip when it is fresh, else the parse-time seen block, the same
-// order latestCacheBlock resolves the lookup key in. A claim at or below the ceiling is
-// returned unchanged; a claim above it is cut to the ceiling; with no ceiling at all the
-// claim is dropped, the treatment the secondary tier already gives a foreign reply
-// (SanitizeForeignCacheReply), so the entry's floor falls back to the seen block and
-// finalization to the tracked tip alone.
+// The ceiling is the gated tip when it is fresh, because that is the router's belief NOW;
+// else the parse-time seen block, the belief this request was served under. (latestCacheBlock
+// orders the two the other way round, because a lookup KEY has to be reproducible on both
+// ends; a ceiling wants the newest belief.) A claim at or below the ceiling is returned
+// unchanged and a claim above it is cut to the ceiling. With no ceiling at all the claim
+// stands: ChainState would accept that very block as its first observation, since its
+// guard needs a fresh reference to fire, and a pod with no tip keeps the per-reply
+// finalization fallback getLatestBlock documents. The bound is therefore never stricter
+// than the router's own tip.
 //
 // Cost for an honest node one block ahead of the router: that relay's cache write carries
 // the router's tip rather than the node's, and the tip harvest that runs after the write
@@ -29,7 +32,7 @@ func replyLatestBlockForCacheWrite(replyLatestBlock, gatedTip, seenBlock int64) 
 		ceiling = seenBlock
 	}
 	if ceiling <= 0 {
-		return 0
+		return replyLatestBlock
 	}
 	if replyLatestBlock > ceiling {
 		return ceiling

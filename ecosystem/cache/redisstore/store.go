@@ -692,8 +692,10 @@ func (s *Store) SetInt64IfGreaterOrEqual(ctx context.Context, key string, value 
 // The chain tip stores "block:freshnessDeadlineUnixMs". Readers honour the
 // embedded deadline, and so does the write guard: a lower block is refused
 // only while the stored tip is still fresh by that deadline. ARGV[4] is the
-// caller's clock — the one that stamped the deadline — so the script never
-// needs redis TIME. Once the deadline has passed the stored block fences
+// writer's clock: the deadline was stamped by whichever replica wrote last and
+// readers judge it by their own clock (GetChainTip), so the guard assumes the
+// same clock alignment across replicas that readers already do, and the script
+// never needs redis TIME. Once the deadline has passed the stored block fences
 // nothing and any write replaces it: the downward path a false high tip needs
 // in order to age out once nobody refreshes it (MAG-3755). An equal or higher
 // block always writes, which moves the deadline.
