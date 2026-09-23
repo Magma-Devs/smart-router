@@ -218,10 +218,6 @@ func (dgm *DirectGRPCSubscriptionManager) endpointsSnapshot() grpcEndpointsSnaps
 // reports whether anything changed. Counterpart to
 // DirectWSSubscriptionManager.SetEndpoints — see there for why the tiers must track
 // the live pairing and why only live endpoints may be passed in (MAG-2525).
-//
-// This also un-sticks gRPC reflection: GetReflectionConnection selects through the
-// same cascade, so a chain that booted dark answered reflection with "no endpoints"
-// until the tiers were repopulated.
 func (dgm *DirectGRPCSubscriptionManager) SetEndpoints(grpcEndpoints, grpcBackupEndpoints []*common.NodeUrl) (changed bool) {
 	byURL := make(map[string]*common.NodeUrl, len(grpcEndpoints)+len(grpcBackupEndpoints))
 	for _, ep := range grpcEndpoints {
@@ -335,32 +331,6 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupStaleSubscriptions() {
 			utils.LogAttr("count", len(stale)),
 		)
 	}
-}
-
-// GetReflectionConnection returns a gRPC connection for reflection requests.
-// This enables tools like grpcurl to discover services through the smart router.
-// The cleanup function should be called when the connection is no longer needed.
-func (dgm *DirectGRPCSubscriptionManager) GetReflectionConnection(ctx context.Context) (*grpc.ClientConn, func(), error) {
-	// Select an endpoint via the primary→backup cascade. Reflection is read-only
-	// metadata so it isn't client-pinned; clientKey is empty.
-	endpoint, err := dgm.selectEndpoint(ctx, "", nil)
-	if err != nil {
-		return nil, nil, fmt.Errorf("no gRPC endpoints available for reflection: %w", err)
-	}
-
-	pool, err := dgm.getOrCreatePool(ctx, endpoint)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get pool for reflection: %w", err)
-	}
-
-	conn, err := pool.GetConnectionForStream(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get connection for reflection: %w", err)
-	}
-
-	cleanup := func() {}
-
-	return conn.GetConn(), cleanup, nil
 }
 
 // IsStreamingMethod checks if a gRPC method is server-streaming

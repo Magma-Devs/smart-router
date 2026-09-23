@@ -37,7 +37,6 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/spf13/viper"
-	"google.golang.org/grpc"
 	grpcmetadata "google.golang.org/grpc/metadata"
 )
 
@@ -359,17 +358,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 
 func (rpcss *RPCSmartRouterServer) GetListeningAddress() string {
 	return rpcss.chainListener.GetListeningAddress()
-}
-
-// GetGRPCReflectionConnection implements chainlib.GRPCReflectionProvider.
-// This enables gRPC reflection for tools like grpcurl when using Direct RPC mode.
-// Returns a connection to the upstream gRPC server for reflection requests.
-func (rpcss *RPCSmartRouterServer) GetGRPCReflectionConnection(ctx context.Context) (*grpc.ClientConn, func(), error) {
-	if rpcss.grpcSubscriptionManager == nil {
-		return nil, nil, fmt.Errorf("gRPC reflection not available: no gRPC subscription manager configured")
-	}
-
-	return rpcss.grpcSubscriptionManager.GetReflectionConnection(ctx)
 }
 
 // GetGRPCSubscriptionManager implements chainlib.GRPCSubscriptionProvider, which is how

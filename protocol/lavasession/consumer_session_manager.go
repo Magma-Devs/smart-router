@@ -699,6 +699,7 @@ type EndpointWithDirectConnection struct {
 	Endpoint         *Endpoint
 	DirectConnection DirectRPCConnection
 	ProviderAddress  string
+	Backup           bool // from the backup provider list rather than the pairing
 }
 
 // GetAllDirectRPCEndpoints returns all endpoints with direct RPC connections from both
@@ -720,7 +721,7 @@ func (csm *ConsumerSessionManager) GetAllDirectRPCEndpoints() []*EndpointWithDir
 
 	var results []*EndpointWithDirectConnection
 
-	collect := func(providers map[string]*ConsumerSessionsWithProvider) {
+	collect := func(providers map[string]*ConsumerSessionsWithProvider, backup bool) {
 		for providerAddr, cswp := range providers {
 			for _, endpoint := range cswp.Endpoints {
 				// The length check is redundant today (IsDirectRPC IS len(DirectConnections) > 0)
@@ -731,14 +732,15 @@ func (csm *ConsumerSessionManager) GetAllDirectRPCEndpoints() []*EndpointWithDir
 						Endpoint:         endpoint,
 						DirectConnection: endpoint.DirectConnections[0],
 						ProviderAddress:  providerAddr,
+						Backup:           backup,
 					})
 				}
 			}
 		}
 	}
 
-	collect(csm.pairing)
-	collect(csm.backupProviders)
+	collect(csm.pairing, false)
+	collect(csm.backupProviders, true)
 
 	return results
 }

@@ -2594,12 +2594,16 @@ func TestGetAllDirectRPCEndpoints_IncludesBackupProviders(t *testing.T) {
 	// Collect the provider addresses we got back. Both the primary and the backup
 	// must be present — a purely-primary iteration would miss the backup entirely.
 	gotAddrs := map[string]bool{}
+	isBackup := map[string]bool{}
 	for _, r := range results {
 		gotAddrs[r.ProviderAddress] = true
+		isBackup[r.ProviderAddress] = r.Backup
 	}
 	require.True(t, gotAddrs["blockpi1"], "primary must be included")
 	require.True(t, gotAddrs["lava1"],
 		"backup with a dedicated URL must be included so startup ChainTracker init covers it")
+	require.False(t, isBackup["blockpi1"], "a pairing endpoint is not marked as a backup")
+	require.True(t, isBackup["lava1"], "a backup-list endpoint is marked as one")
 }
 
 // TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint guards the endpoint.Enabled

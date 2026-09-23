@@ -453,10 +453,11 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		return relayReply.Data, convertRelayMetaDataToMDMetaData(metadataToReply), nil
 	}
 
-	// Check if the relay sender supports gRPC reflection (optional interface)
-	var reflectionCallback grpcproxy.ReflectionProxyCallback
-	if reflectionProvider, ok := apil.relaySender.(GRPCReflectionProvider); ok {
-		reflectionCallback = reflectionProvider.GetGRPCReflectionConnection
+	// Reflection is answered from the relay sender's upstream snapshots when it can
+	// supply them (optional interface).
+	var reflectionSource grpcproxy.ReflectionSource
+	if source, ok := apil.relaySender.(grpcproxy.ReflectionSource); ok {
+		reflectionSource = source
 		utils.LavaFormatInfo("gRPC reflection support enabled",
 			utils.LogAttr("address", apil.endpoint.NetworkAddress),
 		)
@@ -480,7 +481,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		}
 	}
 
-	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionCallback, streamCallback)
+	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionSource, streamCallback)
 	if err != nil {
 		utils.LavaFormatFatal("provider failure RegisterServer", err, utils.Attribute{Key: "listenAddr", Value: apil.endpoint.NetworkAddress})
 	}

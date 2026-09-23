@@ -111,9 +111,8 @@ func (c *UpstreamGRPCStreamConnection) connect(ctx context.Context, timeout time
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(chainproxy.MaxCallRecvMsgSize)),
 	)
 
-	// MAG-2218: attach the endpoint's configured auth-headers. This pool backs
-	// GetReflectionConnection (live, via RPCSmartRouterServer.GetGRPCReflectionConnection)
-	// and the subscription manager's upstream streams, neither of which sent credentials.
+	// MAG-2218: attach the endpoint's configured auth-headers to the subscription
+	// manager's upstream streams, which this pool backs.
 	c.nodeUrl.TokenOverInsecureWarning(transportIsSecure)
 	dialOpts = append(dialOpts, c.nodeUrl.GrpcAuthDialOptions()...)
 
