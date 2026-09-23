@@ -44,9 +44,18 @@ type KVStore interface {
 	SetInt64IfGreaterOrEqual(ctx context.Context, key string, value int64, ttl time.Duration) error
 
 	// Chain tip with a write-time freshness horizon. fresh=false means unknown
-	// (missing or stale); the write guard still fences against the raw value.
+	// (missing or stale).
 	GetChainTip(ctx context.Context, key string) (block int64, fresh bool, err error)
-	SetChainTipIfGreaterOrEqual(ctx context.Context, key string, block int64) error
+	// SetChainTipIfGreaterOrEqualOrStale adopts block unless the stored tip is
+	// both higher and still fresh. While fresh the tip is a monotonic maximum,
+	// so a lagging writer cannot drag it backward; once its freshness horizon
+	// has passed a lower write replaces it, so a false high value that no
+	// writer keeps refreshing stops fencing honest writers the moment readers
+	// stop trusting it. Same rule the router's own ChainState applies to its
+	// tip (MAG-3755). An equal or higher block always writes and refreshes the
+	// horizon. In a keyspace written less often than the horizon the tip is
+	// simply the last writer's value, which is also all a reader could use.
+	SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error
 
 	// Block-hash → height scalars. Missing key reads as (0, false).
 	GetHeight(ctx context.Context, key string) (int64, bool, error)

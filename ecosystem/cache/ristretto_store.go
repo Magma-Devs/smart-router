@@ -16,8 +16,8 @@ const DbValueConfirmationAttempts = 5
 
 // LastestCacheStore is the chain-level tip representation: stored with no
 // ristretto TTL, it goes stale for readers via the embedded wall-clock
-// deadline while the stored block keeps fencing lower writes indefinitely.
-// (Name retained from the original implementation.)
+// deadline, and the same deadline bounds how long the stored block fences
+// lower writes (MAG-3755). (Name retained from the original implementation.)
 type LastestCacheStore struct {
 	latestBlock          int64
 	latestExpirationTime time.Time
@@ -129,17 +129,20 @@ func (r ristrettoStore) GetChainTip(ctx context.Context, key string) (int64, boo
 	return spectypes.NOT_APPLICABLE, false, nil
 }
 
-func (r ristrettoStore) SetChainTipIfGreaterOrEqual(ctx context.Context, key string, block int64) error {
+func (r ristrettoStore) SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error {
 	cacheStore := LastestCacheStore{latestBlock: block, latestExpirationTime: time.Now().Add(core.DefaultExpirationForNonFinalized)}
 	utils.LavaFormatDebug("setting latest block", utils.Attribute{Key: "key", Value: key}, utils.Attribute{Key: "latestBlock", Value: block})
 	set := func() {
 		r.cs.finalizedCache.Set(key, cacheStore, cacheStore.Cost())
 	}
 	get := func() int64 {
-		// The monotonic guard compares against the RAW stored block, stale or
-		// not — a stale tip is unreadable (GetChainTip reports fresh=false) but
-		// still fences lower writes.
-		existingLatest, _ := r.chainTipRaw(key)
+		// A stored tip fences lower writes only while readers still trust it.
+		// Past its deadline it reads as absent here, so the next write — lower
+		// included — replaces it (MAG-3755). It used to fence forever.
+		existingLatest, expiration := r.chainTipRaw(key)
+		if existingLatest == spectypes.NOT_APPLICABLE || !expiration.After(time.Now()) {
+			return spectypes.NOT_APPLICABLE
+		}
 		return existingLatest
 	}
 	performInt64WriteWithValidationAndRetry(get, set, block)

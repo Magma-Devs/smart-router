@@ -126,7 +126,7 @@ func (f *fakeStore) GetChainTip(ctx context.Context, key string) (int64, bool, e
 	return spectypes.NOT_APPLICABLE, false, nil
 }
 
-func (f *fakeStore) SetChainTipIfGreaterOrEqual(ctx context.Context, key string, block int64) error {
+func (f *fakeStore) SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.tipSets = append(f.tipSets, block)
@@ -540,6 +540,23 @@ func TestSetRelayWrites(t *testing.T) {
 	require.Equal(t, int64(100), store.heights[HeightKey("LAV1", "0xh")], "known height stored")
 	_, unknownStored, _ := store.GetHeight(context.Background(), HeightKey("LAV1", "0xunknown"))
 	require.False(t, unknownStored, "NOT_APPLICABLE heights are never stored")
+}
+
+func TestSetRelayDoesNotPublishAZeroChainTip(t *testing.T) {
+	store := newFakeStore()
+	engine := testEngine(store)
+
+	err := engine.SetRelay(context.Background(), &relaytypes.RelayCacheSet{
+		RequestHash:      []byte{0x05},
+		ChainId:          "LAV1",
+		RequestedBlock:   100,
+		SeenBlock:        0,
+		AverageBlockTime: int64(16 * time.Second),
+		Response:         &relaytypes.RelayReply{Data: []byte(`stored`), LatestBlock: 0},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, store.entries[RelayKey(false, "LAV1", []byte{0x05}, 100)], "the entry itself is stored")
+	require.Empty(t, store.tipSets, "a write that knew no block publishes no tip: it would say nothing, and a stale tip now yields to any write")
 }
 
 func TestSetRelayRejectsNegativeBlock(t *testing.T) {

@@ -3688,8 +3688,8 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 }
 
 // tryCacheWriteResolved is tryCacheWrite with an optional pre-resolved cache-key
-// block. resolvedBlock == nil preserves the
-// legacy resolution (Reply.LatestBlock → SeenBlock → skip). A non-nil resolvedBlock
+// block. resolvedBlock == nil preserves the normal resolution (latestCacheBlock: the
+// parse-time seen block, else the gated tip, else skip). A non-nil resolvedBlock
 // carries the exact block that produced a secondary-cache hit, so the backfill SET
 // lands on the identical server-side key (hash ‖ block) — re-deriving it here could
 // land on a different key (tip advance between parse and lookup) or skip the write
@@ -3791,7 +3791,13 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	// value is the requested block itself (extractBlockHeightFromEVMResponse
 	// reads result.number), so the naive check never marks any historical
 	// block finalized and every entry takes the ~625 ms non-finalized TTL.
-	latestBlock := relayResult.Reply.LatestBlock
+	//
+	// The reply's claim is bounded by what this router vouches for before it is
+	// used anywhere here — finalization, the older-than-tip guard below, and the
+	// copy SetRelay reads — so an upstream cannot publish a head the router did
+	// not believe as the cache's chain-level tip or the entry's floor (MAG-3755;
+	// see replyLatestBlockForCacheWrite).
+	latestBlock := replyLatestBlockForCacheWrite(relayResult.Reply.LatestBlock, int64(rpcss.getLatestBlock()), relayData.SeenBlock)
 	// Finalization uses the GATED getLatestBlock (fresh tip or 0), never getLatestBlockAllowStale:
 	// a stale or too-high head here would falsely finalize a mutable block into the long-TTL store.
 	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
@@ -3881,9 +3887,10 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		// request it is the RAW user-requested height — vouched for by nothing but
 		// the foreign tier's willingness to answer that key — and SetRelay publishes
 		// max(Response.LatestBlock, SeenBlock) as the cache server's chain-level tip
-		// through a monotonic-max write that resolves LATEST/SAFE/FINALIZED/PENDING
-		// for the whole chain. Lifted past the local tip, one request at a far-future
-		// key would retarget negative-tag resolution on this router's own primary
+		// through a write that only ever moves up while the tip is fresh (MAG-3755)
+		// and resolves LATEST/SAFE/FINALIZED/PENDING for the whole chain. Lifted past
+		// the local tip, one request at a far-future key would retarget negative-tag
+		// resolution on this router's own primary
 		// until expiry (TestSecondaryFutureKeyBackfillNeverRaisesPrimaryChainTip).
 		// Clamping costs the legitimate cases nothing: the entry still lands on its
 		// exact key, and it stays visible to its own follow-up GET because a
@@ -3913,6 +3920,9 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		)
 		return
 	}
+	// The copy is what the cache server reads: it carries the bounded claim, not the
+	// upstream's (MAG-3755).
+	copyReply.LatestBlock = latestBlock
 
 	// Write to cache in a non-blocking goroutine
 	go func() {
