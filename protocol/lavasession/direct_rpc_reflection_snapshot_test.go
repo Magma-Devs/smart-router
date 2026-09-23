@@ -132,10 +132,37 @@ func TestReflectionSnapshot_NeverDialsAnUninitializedConnection(t *testing.T) {
 }
 
 // scriptedConn is a connection whose snapshots come from read, not from a node.
+// It is initialized, as endpoint setup leaves a connection.
 func scriptedConn(read func() (*GRPCReflectionSnapshot, error)) *GRPCDirectRPCConnection {
 	g := newGRPCDirectRPCConnection(common.NodeUrl{Url: "grpc://127.0.0.1:1"})
 	g.snapshotReader = read
+	g.initialized.Store(true)
 	return g
+}
+
+// Before initialization there is no attempt to fail, so the refusal arms no
+// failure spacing: the first request after a relay has initialized the connection
+// takes the snapshot.
+func TestReflectionSnapshot_TheRefusalBeforeInitializationArmsNoSpacing(t *testing.T) {
+	var reads atomic.Int32
+	g := scriptedConn(func() (*GRPCReflectionSnapshot, error) {
+		reads.Add(1)
+		return heldSnapshot(true, 0), nil
+	})
+	g.initialized.Store(false)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := g.AwaitReflectionSnapshot(ctx)
+	require.ErrorIs(t, err, errNotInitialized)
+	require.Nil(t, g.ReflectionSnapshot())
+	require.Zero(t, reads.Load(), "nothing is read before initialization")
+
+	g.initialized.Store(true)
+	snapshot, err := g.AwaitReflectionSnapshot(ctx)
+	require.NoError(t, err)
+	require.True(t, snapshot.Current())
+	require.Equal(t, int32(1), reads.Load(), "the first request after initialization takes the snapshot")
 }
 
 func heldSnapshot(complete bool, age time.Duration) *GRPCReflectionSnapshot {

@@ -1706,11 +1706,16 @@ func (g *GRPCDirectRPCConnection) AwaitReflectionSnapshot(ctx context.Context) (
 		return snapshot, nil
 	}
 	if taking == nil {
-		// Closed, or the last attempt failed within reflectionSnapshotRetry.
-		if lastErr == nil {
-			lastErr = ErrGRPCConnectionClosed
+		// Nothing is being taken: the last attempt failed within
+		// reflectionSnapshotRetry, the connection is closed, or it is not initialized.
+		switch {
+		case lastErr != nil:
+			return nil, lastErr
+		case g.closed.Load():
+			return nil, ErrGRPCConnectionClosed
+		default:
+			return nil, errNotInitialized
 		}
-		return nil, lastErr
 	}
 	select {
 	case <-taking:
@@ -1728,10 +1733,11 @@ func (g *GRPCDirectRPCConnection) AwaitReflectionSnapshot(ctx context.Context) (
 
 // refreshSnapshotLocked starts taking a snapshot when one is due (see
 // reflectionSnapshotTTL). It does not while one is being taken, once the
-// connection is closed, or within reflectionSnapshotRetry of a failure. Callers
+// connection is closed, before a relay or prewarm has initialized it (see
+// errNotInitialized), or within reflectionSnapshotRetry of a failure. Callers
 // hold snapshotMu.
 func (g *GRPCDirectRPCConnection) refreshSnapshotLocked() {
-	if g.snapshotting != nil || g.closed.Load() {
+	if g.snapshotting != nil || g.closed.Load() || !g.initialized.Load() {
 		return
 	}
 	now := time.Now()
@@ -1781,11 +1787,9 @@ func (g *GRPCDirectRPCConnection) takeReflectionSnapshot(done chan struct{}) {
 
 // readReflectionSnapshot reads the node through one session of its configured
 // descriptor source. It runs on the warm-up sweep's budget, ends with the
-// connection, and never dials: see errNotInitialized.
+// connection, and never dials: refreshSnapshotLocked starts it only on an
+// initialized connection.
 func (g *GRPCDirectRPCConnection) readReflectionSnapshot() (*GRPCReflectionSnapshot, error) {
-	if !g.initialized.Load() {
-		return nil, errNotInitialized
-	}
 	parent := g.connectorCtx
 	if parent == nil {
 		parent = context.Background()
