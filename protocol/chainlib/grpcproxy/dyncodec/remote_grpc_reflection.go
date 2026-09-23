@@ -3,6 +3,7 @@ package dyncodec
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/magma-Devs/smart-router/utils"
@@ -49,6 +50,8 @@ type GRPCReflectionProtoFileRegistry struct {
 	// path that is BootValidateTimeout, and the failure then surfaces as a closed
 	// connection pool rather than as reflection never answering (MAG-3371).
 	timeout time.Duration
+
+	replies replyFiles
 }
 
 // reflectionCtx returns the deadline-bounded context for one exchange. The
@@ -63,6 +66,9 @@ func (g *GRPCReflectionProtoFileRegistry) ProtoFileByPath(path string) (_ *descr
 			err = fmt.Errorf("proto file by path: %w", err)
 		}
 	}()
+	if fd, ok := g.replies.byPath(path); ok {
+		return fd, nil
+	}
 
 	ctx, cancel := g.reflectionCtx()
 	defer cancel()
@@ -85,7 +91,7 @@ func (g *GRPCReflectionProtoFileRegistry) ProtoFileByPath(path string) (_ *descr
 		return nil, err
 	}
 
-	return parseFileDescriptorResponse(recv)
+	return g.replies.keep(recv)
 }
 
 func (g *GRPCReflectionProtoFileRegistry) ProtoFileContainingSymbol(name protoreflect.FullName) (_ *descriptorpb.FileDescriptorProto, err error) {
@@ -117,7 +123,7 @@ func (g *GRPCReflectionProtoFileRegistry) ProtoFileContainingSymbol(name protore
 		return nil, err
 	}
 
-	return parseFileDescriptorResponse(recv)
+	return g.replies.keep(recv)
 }
 
 func maybeFileDescriptorResponse(resp *grpc_reflection_v1alpha.ServerReflectionResponse) (*grpc_reflection_v1alpha.ServerReflectionResponse_FileDescriptorResponse, error) {
@@ -134,17 +140,50 @@ func maybeFileDescriptorResponse(resp *grpc_reflection_v1alpha.ServerReflectionR
 
 func (g *GRPCReflectionProtoFileRegistry) Close() error { return nil }
 
-func parseFileDescriptorResponse(recv *grpc_reflection_v1alpha.ServerReflectionResponse) (*descriptorpb.FileDescriptorProto, error) {
+// replyFiles keeps every file a reflection reply carried. A server answers with the
+// requested file followed by the dependencies it has not yet sent on that stream, and
+// each request here opens a stream of its own, so one reply holds the file's whole
+// dependency set. Keeping it spares a request for every import.
+type replyFiles struct {
+	mu    sync.Mutex
+	files map[string]*descriptorpb.FileDescriptorProto
+}
+
+// byPath returns a file an earlier reply carried.
+func (c *replyFiles) byPath(path string) (*descriptorpb.FileDescriptorProto, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fd, ok := c.files[path]
+	return fd, ok
+}
+
+// keep records every file in the reply and returns the requested one, which the
+// server sends first.
+func (c *replyFiles) keep(recv *grpc_reflection_v1alpha.ServerReflectionResponse) (*descriptorpb.FileDescriptorProto, error) {
 	resp, err := maybeFileDescriptorResponse(recv)
 	if err != nil {
 		return nil, err
 	}
-	fdRawBytes := resp.FileDescriptorResponse.FileDescriptorProto[0]
-	fdPb := &descriptorpb.FileDescriptorProto{}
-	err = proto.Unmarshal(fdRawBytes, fdPb)
-	if err != nil {
-		return nil, err
+	raw := resp.FileDescriptorResponse.GetFileDescriptorProto()
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("reflection reply carried no file descriptor")
+	}
+	files := make([]*descriptorpb.FileDescriptorProto, 0, len(raw))
+	for _, b := range raw {
+		fd := &descriptorpb.FileDescriptorProto{}
+		if err := proto.Unmarshal(b, fd); err != nil {
+			return nil, err
+		}
+		files = append(files, fd)
 	}
 
-	return fdPb, nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.files == nil {
+		c.files = make(map[string]*descriptorpb.FileDescriptorProto, len(files))
+	}
+	for _, fd := range files {
+		c.files[fd.GetName()] = fd
+	}
+	return files[0], nil
 }

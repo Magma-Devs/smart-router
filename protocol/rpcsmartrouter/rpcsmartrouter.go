@@ -3071,8 +3071,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		grpcEndpoints = collectGRPCEndpoints(healthyStaticProviders, "primary")
 		grpcBackupEndpoints = collectGRPCEndpoints(healthyBackupProviders, "backup")
 		// Same reasoning as wsConfigured above: keyed off the configured providers so a
-		// dark boot still gets a manager. Leaving grpcSubscriptionManager nil would also
-		// disable gRPC reflection permanently (GetGRPCReflectionConnection nil-checks it).
+		// dark boot still gets a manager.
 		grpcConfigured = len(collectGRPCEndpoints(relevantStaticProviderList, "")) > 0 ||
 			len(collectGRPCEndpoints(relevantBackupProviderList, "")) > 0
 	}

@@ -37,7 +37,6 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/spf13/viper"
-	"google.golang.org/grpc"
 	grpcmetadata "google.golang.org/grpc/metadata"
 )
 
@@ -359,17 +358,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 
 func (rpcss *RPCSmartRouterServer) GetListeningAddress() string {
 	return rpcss.chainListener.GetListeningAddress()
-}
-
-// GetGRPCReflectionConnection implements chainlib.GRPCReflectionProvider.
-// This enables gRPC reflection for tools like grpcurl when using Direct RPC mode.
-// Returns a connection to the upstream gRPC server for reflection requests.
-func (rpcss *RPCSmartRouterServer) GetGRPCReflectionConnection(ctx context.Context) (*grpc.ClientConn, func(), error) {
-	if rpcss.grpcSubscriptionManager == nil {
-		return nil, nil, fmt.Errorf("gRPC reflection not available: no gRPC subscription manager configured")
-	}
-
-	return rpcss.grpcSubscriptionManager.GetReflectionConnection(ctx)
 }
 
 // GetGRPCSubscriptionManager implements chainlib.GRPCSubscriptionProvider, which is how
@@ -4466,20 +4454,16 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		}
 
 		// Second line of defence for methods the spec does not declare as
-		// subscriptions. Reflection may be unavailable, in which case we have nothing
-		// left to check and the call proceeds as unary, which is the correct handling
-		// for the overwhelming majority of gRPC methods.
-		if rpcss.grpcSubscriptionManager != nil {
-			// Bound the reflection lookup explicitly: it dials + queries the upstream's reflection
-			// service, and detached CV relay contexts carry no deadline — an upstream that accepts the
-			// connection but never answers would otherwise block this goroutine (and leak its session)
-			// forever, since the attempt-budget bound is only applied later inside SendDirectRelay.
-			// Bounded by the WINDOW rather than the budget on purpose: this is a cheap capability
-			// probe, not the relay, and it should not be allowed to consume the whole request.
+		// subscriptions, from the descriptor this call needs anyway: cached on its
+		// connection, and resolved in the background when cold. Without one the call
+		// proceeds as unary, which is right for the overwhelming majority of methods.
+		if resolver, ok := directConnection.(lavasession.GRPCMethodResolver); ok {
+			// Bounded by the WINDOW, not the budget: detached CV relay contexts carry no
+			// deadline, and a capability check must not consume the whole request.
 			streamCheckCtx, streamCheckCancel := context.WithTimeout(ctx, relayTimeout)
-			isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(streamCheckCtx, methodPath)
+			methodDesc, streamErr := resolver.ResolveMethodDescriptor(streamCheckCtx, methodPath)
 			streamCheckCancel()
-			if streamErr == nil && isStreaming {
+			if streamErr == nil && methodDesc.IsServerStreaming() {
 				utils.LavaFormatWarning("gRPC method is server-streaming upstream but carries no SUBSCRIBE directive in the spec", nil,
 					utils.LogAttr("method", methodPath),
 					utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
