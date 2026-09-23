@@ -333,36 +333,6 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupStaleSubscriptions() {
 	}
 }
 
-// IsStreamingMethod checks if a gRPC method is server-streaming
-func (dgm *DirectGRPCSubscriptionManager) IsStreamingMethod(ctx context.Context, methodPath string) (bool, *desc.MethodDescriptor, error) {
-	// Parse service and method name
-	svc, methodName := rpcInterfaceMessages.ParseSymbol(methodPath)
-
-	// Select an endpoint via the primary→backup cascade.
-	// clientKey is empty because method-descriptor lookups aren't client-scoped.
-	endpoint, err := dgm.selectEndpoint(ctx, "", nil)
-	if err != nil {
-		return false, nil, err
-	}
-
-	pool, err := dgm.getOrCreatePool(ctx, endpoint)
-	if err != nil {
-		return false, nil, err
-	}
-
-	conn, err := pool.GetConnectionForStream(ctx)
-	if err != nil {
-		return false, nil, err
-	}
-
-	methodDesc, err := conn.GetMethodDescriptor(ctx, svc, methodName)
-	if err != nil {
-		return false, nil, err
-	}
-
-	return methodDesc.IsServerStreaming(), methodDesc, nil
-}
-
 // errSubscriptionUnavailable reports that the subscription picked for sharing was
 // released between the activeSubscriptions lookup and the join, so the caller must
 // create a fresh one instead. Never returned to callers of StartSubscription.

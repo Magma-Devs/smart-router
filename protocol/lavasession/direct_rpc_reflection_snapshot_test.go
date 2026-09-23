@@ -127,7 +127,7 @@ func TestReflectionSnapshot_NeverDialsAnUninitializedConnection(t *testing.T) {
 	defer cancel()
 
 	_, err := g.AwaitReflectionSnapshot(ctx)
-	require.ErrorIs(t, err, errSnapshotBeforeInit)
+	require.ErrorIs(t, err, errNotInitialized)
 	require.Zero(t, dials.Load())
 }
 

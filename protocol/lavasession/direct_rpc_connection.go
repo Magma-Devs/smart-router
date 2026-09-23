@@ -115,6 +115,16 @@ type GRPCDescriptorProvider interface {
 	GetCachedMethodDescriptor(methodPath string) *desc.MethodDescriptor
 }
 
+// GRPCMethodResolver is implemented by gRPC connections: it resolves a method's
+// descriptor through the connection's cached lookup, which keeps running and
+// caches its result even when ctx ends first.
+type GRPCMethodResolver interface {
+	// ResolveMethodDescriptor takes methodPath as "service/method".
+	ResolveMethodDescriptor(ctx context.Context, methodPath string) (*desc.MethodDescriptor, error)
+}
+
+var _ GRPCMethodResolver = (*GRPCDirectRPCConnection)(nil)
+
 // GRPCReflectionSnapshot is one consistent view of what a gRPC node serves: its
 // service names and the files those services need, read in one descriptor session.
 // A service whose files would clash with another build of a file is left out, so
@@ -155,9 +165,10 @@ var (
 	reflectionSnapshotRetry = 30 * time.Second
 )
 
-// errSnapshotBeforeInit refuses a snapshot on a connection no relay or prewarm has
-// initialized: dialing here would hold initMu for the sweep's whole budget.
-var errSnapshotBeforeInit = errors.New("gRPC connection not initialized yet")
+// errNotInitialized refuses descriptor work on a connection no relay or prewarm has
+// initialized. Dialing is left to those: a lookup that dialed first would hold
+// initMu, which relays wait on, and double the cost of reaching a dead node.
+var errNotInitialized = errors.New("gRPC connection not initialized yet")
 
 // HTTPDirectRPCResponse contains complete HTTP response data (Phase 4 REST support)
 type HTTPDirectRPCResponse struct {
@@ -1656,6 +1667,16 @@ func (g *GRPCDirectRPCConnection) GetCachedMethodDescriptor(methodPath string) *
 	return nil
 }
 
+// ResolveMethodDescriptor implements GRPCMethodResolver. It never dials: see
+// errNotInitialized.
+func (g *GRPCDirectRPCConnection) ResolveMethodDescriptor(ctx context.Context, methodPath string) (*desc.MethodDescriptor, error) {
+	if !g.initialized.Load() {
+		return nil, errNotInitialized
+	}
+	service, method := rpcInterfaceMessages.ParseSymbol(methodPath)
+	return g.getMethodDescriptor(ctx, service, method)
+}
+
 // PeekReflectionSnapshot implements GRPCReflectionSnapshotter.
 func (g *GRPCDirectRPCConnection) PeekReflectionSnapshot() *GRPCReflectionSnapshot {
 	g.snapshotMu.Lock()
@@ -1755,10 +1776,10 @@ func (g *GRPCDirectRPCConnection) takeReflectionSnapshot(done chan struct{}) {
 
 // readReflectionSnapshot reads the node through one session of its configured
 // descriptor source. It runs on the warm-up sweep's budget, ends with the
-// connection, and never dials: see errSnapshotBeforeInit.
+// connection, and never dials: see errNotInitialized.
 func (g *GRPCDirectRPCConnection) readReflectionSnapshot() (*GRPCReflectionSnapshot, error) {
 	if !g.initialized.Load() {
-		return nil, errSnapshotBeforeInit
+		return nil, errNotInitialized
 	}
 	parent := g.connectorCtx
 	if parent == nil {
