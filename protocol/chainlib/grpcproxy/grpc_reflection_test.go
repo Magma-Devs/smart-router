@@ -13,11 +13,14 @@ import (
 	"github.com/stretchr/testify/require"
 	_ "google.golang.org/genproto/googleapis/api/annotations" // registers an extension of MethodOptions in GlobalTypes
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	testgrpc "google.golang.org/grpc/interop/grpc_testing"
+	"google.golang.org/grpc/metadata"
 	reflectionv1 "google.golang.org/grpc/reflection/grpc_reflection_v1"
 	reflectionv1alpha "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
@@ -298,4 +301,44 @@ func TestReflection_ServedThroughTheProxyListener(t *testing.T) {
 			require.NotNil(t, service.FindMethodByName("UnaryCall"))
 		})
 	}
+}
+
+// Without a source the proxy still keeps reflection away from the relay callback,
+// answering on both versions for the reflection services alone.
+func TestReflection_WithoutASourceNothingReachesTheRelayCallback(t *testing.T) {
+	var relayed atomic.Int32
+	relay := func(context.Context, string, []byte) ([]byte, metadata.MD, error) {
+		relayed.Add(1)
+		return nil, nil, status.Error(codes.Internal, "reflection reached the relay callback")
+	}
+	_, httpServer, err := NewGRPCProxy(relay, "", testCmdFlags(), nil)
+	require.NoError(t, err)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = httpServer.Serve(lis) }()
+	t.Cleanup(func() { _ = httpServer.Close() })
+
+	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	clients := map[string]*grpcreflect.Client{
+		"v1":      grpcreflect.NewClientV1(ctx, reflectionv1.NewServerReflectionClient(conn)),
+		"v1alpha": grpcreflect.NewClientV1Alpha(ctx, reflectionv1alpha.NewServerReflectionClient(conn)),
+	}
+	for version, client := range clients {
+		t.Run(version, func(t *testing.T) {
+			defer client.Reset()
+			services, err := client.ListServices()
+			require.NoError(t, err)
+			require.ElementsMatch(t, routerReflectionServices, services)
+			_, err = client.ResolveService("grpc.reflection.v1.ServerReflection")
+			require.NoError(t, err)
+			_, err = client.ResolveService("grpc.testing.TestService")
+			require.Error(t, err)
+		})
+	}
+	require.Zero(t, relayed.Load())
 }

@@ -20,6 +20,14 @@ type ReflectionSource interface {
 	ReflectionSnapshot(ctx context.Context) (services []string, files *protoregistry.Files, err error)
 }
 
+// noUpstreamReflection is the source of a proxy given none: an empty snapshot, so
+// reflection lists and describes the router's own reflection services alone.
+type noUpstreamReflection struct{}
+
+func (noUpstreamReflection) ReflectionSnapshot(context.Context) ([]string, *protoregistry.Files, error) {
+	return nil, nil, nil
+}
+
 // reflectionSnapshotWait bounds how long a reflection stream waits, as it opens,
 // for a snapshot; the client's own deadline applies as well.
 var reflectionSnapshotWait = 10 * time.Second

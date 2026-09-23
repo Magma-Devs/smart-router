@@ -406,10 +406,6 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	apil.listeningAddress.Store(&addr)
 	apiInterface := apil.endpoint.ApiInterface
 	sendRelayCallback := func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
-		if method == "grpc.reflection.v1.ServerReflection/ServerReflectionInfo" {
-			return nil, nil, status.Error(codes.Unimplemented, "v1 reflection currently not supported by cosmos-sdk")
-		}
-
 		guid := utils.GenerateUniqueIdentifier()
 		ctx = utils.WithUniqueIdentifier(ctx, guid)
 		msgSeed := strconv.FormatUint(guid, 10)
@@ -454,7 +450,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	}
 
 	// Reflection is answered from the relay sender's upstream snapshots when it can
-	// supply them (optional interface).
+	// supply them (optional interface), and otherwise for the reflection services alone.
 	var reflectionSource grpcproxy.ReflectionSource
 	if source, ok := apil.relaySender.(grpcproxy.ReflectionSource); ok {
 		reflectionSource = source
