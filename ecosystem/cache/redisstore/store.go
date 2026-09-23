@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -450,19 +451,34 @@ type ProbeResult struct {
 // reads split "the cache is unreachable" cannot say which half, and an alert
 // that cannot say sends the operator to the healthy address half the time
 // (MAG-3674).
+//
+// Every endpoint is pinged on its own goroutine, all within the caller's one
+// deadline. Pinged one after the other with the same context, a writer that
+// stalled until the deadline handed the reader a context already expired, and a
+// healthy reader was reported down, with its error counted, for the writer's
+// fault: the very diagnosis this split exists to give (Codex review of #404).
 func (s *Store) Probe(ctx context.Context) []ProbeResult {
 	results := []ProbeResult{{
 		Role:      EndpointRoleWrite,
 		Addresses: strings.Join(s.configuredEndpoints.Addresses, ","),
-		Err:       s.write.Ping(ctx).Err(),
 	}}
+	clients := []redis.UniversalClient{s.write}
 	if s.read != s.write {
 		results = append(results, ProbeResult{
 			Role:      EndpointRoleRead,
 			Addresses: strings.Join(s.configuredEndpoints.ReadAddresses, ","),
-			Err:       s.read.Ping(ctx).Err(),
 		})
+		clients = append(clients, s.read)
 	}
+	var probes sync.WaitGroup
+	for i := range results {
+		probes.Add(1)
+		go func(i int, client redis.UniversalClient) {
+			defer probes.Done()
+			results[i].Err = client.Ping(ctx).Err()
+		}(i, clients[i])
+	}
+	probes.Wait()
 	return results
 }
 

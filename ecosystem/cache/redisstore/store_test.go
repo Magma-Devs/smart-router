@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -539,6 +540,66 @@ func TestProbeReportsEachEndpointSeparately(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = single.Close() })
 	require.Len(t, single.Probe(ctx), 1, "with no read split there is one endpoint to report")
+}
+
+// silentListener stands in for a store that accepts connections and never
+// answers: the shape of a stalled endpoint, as opposed to a closed port that
+// fails at once.
+func silentListener(t *testing.T) net.Listener {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	var held []net.Conn
+	var mu sync.Mutex
+	go func() {
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, conn)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = lis.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	})
+	return lis
+}
+
+// A stalled writer must not spend the budget a healthy reader needed. Probed
+// one after the other with one context, the reader received a context the
+// writer had already exhausted and was reported down for the writer's fault;
+// probed together, each endpoint's verdict is its own (Codex review of #404).
+func TestProbeDoesNotBlameAHealthyReaderForAStalledWriter(t *testing.T) {
+	stalledWriter := silentListener(t)
+	mrRead := miniredis.RunT(t)
+	store, err := New(Config{
+		Addresses:     []string{stalledWriter.Addr().String()},
+		ReadAddresses: []string{mrRead.Addr()},
+		DialTimeout:   time.Second,
+		ReadTimeout:   time.Second,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	results := store.Probe(ctx)
+	require.Less(t, time.Since(start), 500*time.Millisecond, "the probe ends with its deadline, not after it")
+	require.Len(t, results, 2)
+	require.Equal(t, EndpointRoleWrite, results[0].Role)
+	require.Error(t, results[0].Err, "the stalled writer is the one reported down")
+	require.Equal(t, EndpointRoleRead, results[1].Role)
+	require.NoError(t, results[1].Err, "the healthy reader answered within the same deadline and is not blamed")
+	require.Error(t, store.Ping(ctx), "Ping still folds to the first failure")
 }
 
 func TestChainTipNotApplicableWhenMissing(t *testing.T) {
