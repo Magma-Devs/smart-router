@@ -8,6 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -147,4 +148,49 @@ func TestClassifyCacheLookupOutcome(t *testing.T) {
 			require.Equal(t, tc.want, ClassifyCacheLookupOutcome(tc.err, tc.hit))
 		})
 	}
+}
+
+// ---- cache writes ----
+
+func TestSmartRouterRecordCacheWriteSkipped_CountsByReason(t *testing.T) {
+	m := newSmartRouterForCacheTest()
+	m.cacheWriteSkippedTotalMetric = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cache_write_skipped"}, []string{"spec", "apiInterface", "method", "reason"})
+
+	m.RecordCacheWriteSkipped("SOLANA", "jsonrpc", "getBlock", CacheWriteSkipReasonSize)
+	m.RecordCacheWriteSkipped("SOLANA", "jsonrpc", "getBlock", CacheWriteSkipReasonSize)
+
+	require.Equal(t, float64(2), testutil.ToFloat64(m.cacheWriteSkippedTotalMetric.WithLabelValues("SOLANA", "jsonrpc", "getBlock", CacheWriteSkipReasonSize)))
+}
+
+// The default 1 MiB cap is a bucket boundary, so "entries at or under the cap" is one bucket.
+func TestSmartRouterRecordCacheEntryWritten_ObservesBodySize(t *testing.T) {
+	m := newSmartRouterForCacheTest()
+	m.cacheEntryBytesHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "t_sr_cache_entry_bytes", Buckets: cacheEntryBytesBuckets}, []string{"spec", "apiInterface", "method"})
+
+	m.RecordCacheEntryWritten("SOLANA", "jsonrpc", "getBlock", 900)
+	m.RecordCacheEntryWritten("SOLANA", "jsonrpc", "getBlock", 1<<20)
+	m.RecordCacheEntryWritten("SOLANA", "jsonrpc", "getBlock", 1<<20+1)
+
+	var written dto.Metric
+	observer, ok := m.cacheEntryBytesHistogram.WithLabelValues("SOLANA", "jsonrpc", "getBlock").(prometheus.Histogram)
+	require.True(t, ok)
+	require.NoError(t, observer.Write(&written))
+	histogram := written.GetHistogram()
+	require.Equal(t, uint64(3), histogram.GetSampleCount())
+	require.Equal(t, float64(900+1<<20+1<<20+1), histogram.GetSampleSum())
+	cumulative := map[float64]uint64{}
+	for _, bucket := range histogram.GetBucket() {
+		cumulative[bucket.GetUpperBound()] = bucket.GetCumulativeCount()
+	}
+	require.Equal(t, uint64(1), cumulative[1<<10])
+	require.Equal(t, uint64(2), cumulative[1<<20], "an entry of exactly the default cap lands in the 1 MiB bucket")
+	require.Equal(t, uint64(3), cumulative[1<<22])
+}
+
+func TestSmartRouterCacheWriteRecorders_NilSafe(t *testing.T) {
+	var m *SmartRouterMetricsManager
+	require.NotPanics(t, func() {
+		m.RecordCacheWriteSkipped("SOLANA", "jsonrpc", "getBlock", CacheWriteSkipReasonSize)
+		m.RecordCacheEntryWritten("SOLANA", "jsonrpc", "getBlock", 1<<20)
+	})
 }
