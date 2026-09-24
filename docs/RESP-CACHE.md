@@ -190,9 +190,34 @@ read side.
 
 Use `password-file` with whatever refreshes the file (Kubernetes secret mounts, a sidecar
 token refresher). On change, the router pushes the new credentials to every live connection,
-which re-authenticates **in place** — no reconnect, no dropped operations. Custom credential
-sources (e.g. an IAM SigV4 signer) can implement the `CredentialsSource` interface in
+and go-redis re-authenticates each one **in place** — no restart, no dropped operations. Custom
+credential sources (e.g. an IAM SigV4 signer) can implement the `CredentialsSource` interface in
 `ecosystem/cache/redisstore`; the router deliberately bundles no cloud SDKs.
+
+Two caveats come from go-redis (v9.22) itself. First, re-authentication is driven by traffic:
+the push only marks each connection, and the worker that re-authenticates a connection starts
+when that connection is next checked out and returned (a checkout of a marked connection is
+refused, which is what schedules the work). A connection that sits idle after the push, with no
+operation or probe reaching it, stays authenticated as the previous user for as long as it
+stays idle, so a fixed wait after rewriting the secret proves nothing about retirement. Second,
+the scheduled worker can miss the notification that the connection went idle (the pool's hot
+path marks a connection idle without notifying waiters; reported upstream as
+redis/go-redis#4027, fix opened as redis/go-redis#4028; tracked here as MAG-3769). Such a
+connection serves no traffic while the worker waits, and when the wait expires after the pool
+timeout the client closes it and dials a fresh connection under the new credentials. That
+timeout bounds the scheduled worker's wait only, not the time from rewriting the secret; it is
+`read-timeout` + 1s when a read timeout is set (six seconds with the client's default of five)
+and thirty seconds when `read-timeout` is negative, which go-redis reads as "no read timeout".
+The stalled connection also keeps its pool slot until then, so a pool already at `pool-size`
+dials and drops a replacement for every operation in that window; leave the pool headroom.
+
+No operation is dropped either way. What an operator may see is one connection replaced rather
+than re-authenticated per rotation, and connections that stay authenticated as the previous
+user for a while. Do not treat a rotation as complete after a timed wait: verify it on the
+server with `CLIENT LIST`, whose `user=` field names the ACL user of every connection, and to
+force it, delete the previous ACL user (`ACL DELUSER`) or run `CLIENT KILL USER <previous>`;
+both disconnect every session still authenticated as it, and the client reconnects with the
+current credentials. Keep the previous credential valid until then.
 
 Under `topology: sentinel` the go-redis failover client (v9.22) does not support in-place
 streaming re-auth, so rotated credentials are resolved fresh **per connection attempt** — they
