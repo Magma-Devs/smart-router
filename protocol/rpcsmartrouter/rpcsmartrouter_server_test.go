@@ -3121,9 +3121,13 @@ func TestConsistencyPreValidationError_NotRetryable(t *testing.T) {
 type cvGuardStateMachine struct {
 	usedProviders *lavasession.UsedProviders
 	cvParams      *common.CrossValidationParams
+	// protocolMessage is what sendRelayToEndpoint reads off the processor before it gets sessions.
+	// The post-filter test below drives sendRelayToDirectEndpoints, which takes the message as an
+	// argument, so it leaves this nil.
+	protocolMessage chainlib.ProtocolMessage
 }
 
-func (m *cvGuardStateMachine) GetProtocolMessage() chainlib.ProtocolMessage { return nil }
+func (m *cvGuardStateMachine) GetProtocolMessage() chainlib.ProtocolMessage { return m.protocolMessage }
 func (m *cvGuardStateMachine) GetDebugState() bool                          { return false }
 func (m *cvGuardStateMachine) GetRelayTaskChannel() (chan relaycore.RelayStateSendInstructions, error) {
 	return make(chan relaycore.RelayStateSendInstructions), nil
