@@ -81,12 +81,14 @@ func TestExtractSolanaContextSlot(t *testing.T) {
 		{"context is not an object", `{"result":{"context":[5]}}`, 0, false},
 		{"result is an array, not an envelope", `{"result":[{"context":{"slot":5}}]}`, 0, false},
 		{"error after the result still counts", `{"jsonrpc":"2.0","result":{"context":{"slot":7},"value":[1,2,3]},"error":{"code":-32000,"message":"x"},"id":1}`, 0, false},
+		// The relay checks json.Valid only on 2xx replies, and the harvest also runs on 4xx ones, so
+		// a cut body must yield nothing: cut inside the digits, it would read as a smaller slot.
+		{"truncated after the slot yields no slot", `{"result":{"context":{"slot":5},"value":{"data":"ab`, 0, false},
+		{"cut inside the slot's digits yields no slot", `{"result":{"context":{"slot":4242`, 0, false},
+		{"trailing whitespace after the object", "{\"result\":{\"context\":{\"slot\":6}}}\n", 6, true},
 		// MAG-3843: where the path read differs from the decode it replaced, on purpose.
 		{"first of two slot members counts", `{"result":{"context":{"slot":1,"slot":2}}}`, 1, true},
 		{"member names match exactly", `{"Result":{"Context":{"Slot":5}}}`, 0, false},
-		// Not validated here: the JSON-RPC relay drops a body that fails json.Valid before any
-		// harvest (sendJSONRPCRelay), and the slot a node wrote is real even if later bytes are not.
-		{"truncated after the slot yields it", `{"result":{"context":{"slot":5},"value":{"data":"ab`, 5, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			slot, ok := extractSolanaContextSlot([]byte(tc.body))
