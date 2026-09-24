@@ -55,6 +55,9 @@ func TestCacheWriteSnapshotSurvivesResponseMutation(t *testing.T) {
 	rpcss.tryCacheWrite(context.Background(), msg, result)
 	result.Reply.LatestBlock = tip + 5
 	result.Reply.Metadata = append(result.Reply.Metadata, pairingtypes.Metadata{Name: "Lava-Guid", Value: "per-request"})
+	// An append alone cannot tell a cloned Metadata from a shared one: it lands past the
+	// snapshot's length. Writing an existing element can.
+	result.Reply.Metadata[0].Value = "changed"
 
 	var cached *pairingtypes.RelayReply
 	require.Eventually(t, func() bool {
