@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,7 +32,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/protocopy"
 	"github.com/magma-Devs/smart-router/version"
 
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -3897,15 +3897,8 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		sharedStateId = rpcss.listenEndpoint.Key()
 	}
 
-	// Deep copy reply to avoid race conditions (cache write is async)
-	copyReply := &pairingtypes.RelayReply{}
-	if copyErr := protocopy.DeepCopyProtoObject(relayResult.Reply, copyReply); copyErr != nil {
-		utils.LavaFormatDebug("cache write skipped: failed to copy reply",
-			utils.LogAttr("error", copyErr),
-			utils.LogAttr("GUID", ctx),
-		)
-		return
-	}
+	// Snapshot the reply for the async write; see cacheWriteReplySnapshot for what it shares.
+	copyReply := cacheWriteReplySnapshot(relayResult.Reply)
 
 	// Write to cache in a non-blocking goroutine
 	go func() {
@@ -3946,6 +3939,26 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 			)
 		}
 	}()
+}
+
+// cacheWriteReplySnapshot returns the copy of a reply the async cache write reads while the
+// response path keeps using the original. The write outlives this call, and the response path
+// then mutates the reply: the relay goroutine stamps LatestBlock with the endpoint's observed
+// tip when the reply carried none, and appendHeadersToRelayResult appends this request's
+// headers to Metadata. So the struct is copied and Metadata cloned, and the snapshot is
+// immune to both.
+//
+// The byte slices are shared, not copied. Data is the body, up to tens of MB on a block
+// reply, and nothing writes into it after it is read off the wire — every later change
+// (the JSON-RPC id restore, the secondary cache's rewrites) builds a new slice and
+// reassigns the field, which leaves the snapshot's slice alone. This replaced a
+// JSON-and-base64 deep copy that cost 33 ms and a second full copy of the body per write
+// on a 5 MB Solana block. Anything that starts writing into Data in place would corrupt
+// cached entries: TestCacheWriteSnapshotSurvivesResponseMutation pins the contract.
+func cacheWriteReplySnapshot(reply *pairingtypes.RelayReply) *pairingtypes.RelayReply {
+	snapshot := *reply
+	snapshot.Metadata = slices.Clone(reply.Metadata)
+	return &snapshot
 }
 
 // resolvePinDirectives returns the lava-select-provider and lava-stickiness directives,
