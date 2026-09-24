@@ -571,7 +571,9 @@ func TestHTTPDirectRPCConnection_UsesSharedOptimizedTransport(t *testing.T) {
 // the smart-router HTTP path tells upstream not to gzip. This is the scoped
 // replacement for disabling compression on the shared transport: provider
 // chain proxies keep their standard auto-gzip behavior, and the smart router
-// alone opts out via an outbound header.
+// alone opts out via an outbound header. A url can opt back in to gzip
+// (NodeUrl.AcceptEncoding, MAG-3844); direct_rpc_accept_encoding_test.go
+// covers that side.
 //
 // Without this, Go's http client auto-adds `Accept-Encoding: gzip` and
 // auto-decodes every response — the hot path that showed up at ~30-39% CPU
