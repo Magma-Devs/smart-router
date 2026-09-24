@@ -578,9 +578,16 @@ func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRe
 //
 // It is NOT how long an attempt may live — that is the processing budget, see
 // GetTimeoutForProcessing and sendRelayToDirectEndpoints.
+//
+// A caller's lava-relay-timeout replaces the computed window only once it has been bounded
+// (common.BoundCallerRelayTimeout). The result is always positive: it feeds time.NewTicker, and the
+// processing budget is never shorter than it, so this is the one place both hazards of an
+// unchecked header are closed for every consumer of the window (MAG-3600).
 func GetRelayTimeout(chainMessage ChainMessageForSend, averageBlockTime time.Duration) time.Duration {
-	if chainMessage.TimeoutOverride() != 0 {
-		return chainMessage.TimeoutOverride()
+	if override := chainMessage.TimeoutOverride(); override != 0 {
+		if window, ok := common.BoundCallerRelayTimeout(override, GetTimeoutInfo(chainMessage)); ok {
+			return window
+		}
 	}
 	// Calculate extra RelayTimeout
 	extraRelayTimeout := time.Duration(0)
