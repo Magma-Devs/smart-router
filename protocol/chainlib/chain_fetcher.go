@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -901,6 +903,27 @@ func HashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId string) 
 	return hashCacheRequest(relayData, chainId, "")
 }
 
+// isClientBodyHeader reports whether a metadata entry is one of clientBodyHeaders.
+func isClientBodyHeader(entry pairingtypes.Metadata) bool {
+	_, ok := clientBodyHeaders[strings.ToLower(entry.Name)]
+	return ok
+}
+
+// metadataWithoutClientBodyHeaders returns metadata with the clientBodyHeaders entries removed,
+// or metadata itself when it carries none, so the common case allocates nothing.
+func metadataWithoutClientBodyHeaders(metadata []pairingtypes.Metadata) []pairingtypes.Metadata {
+	if !slices.ContainsFunc(metadata, isClientBodyHeader) {
+		return metadata
+	}
+	kept := make([]pairingtypes.Metadata, 0, len(metadata)-1)
+	for _, entry := range metadata {
+		if !isClientBodyHeader(entry) {
+			kept = append(kept, entry)
+		}
+	}
+	return kept
+}
+
 // hashCacheRequest derives the cache key for a relay. explicitExtensionDirective carries the
 // normalized value of the client's lava-extension directive header (empty when absent). When
 // present it is folded into the hash so an explicitly requested extension (e.g. "archive") lands
@@ -915,6 +938,7 @@ func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explici
 	originalRequestId := relayData.RequestId
 	originalTaskId := relayData.XTaskId
 	originalTxId := relayData.XTxId
+	originalMetadata := relayData.Metadata
 	defer func() {
 		// return all information back to the object on defer (in any case)
 		relayData.Data = originalData
@@ -925,6 +949,7 @@ func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explici
 		relayData.RequestId = originalRequestId
 		relayData.XTaskId = originalTaskId
 		relayData.XTxId = originalTxId
+		relayData.Metadata = originalMetadata
 	}()
 
 	// we need to remove some data from the request so the cache will hit properly.
@@ -935,6 +960,11 @@ func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explici
 	relayData.RequestId = ""                        // remove request id (unique per request)
 	relayData.XTaskId = nil                         // remove task id (unique per request)
 	relayData.XTxId = nil                           // remove tx id (unique per request)
+	// A client body header (content-type, forwarded on REST bodies since MAG-2745) says how the
+	// node should read the bytes in Data, which are already in the key. Two clients sending the
+	// same body with and without it are the same request; a value the node cannot read is a
+	// non-2xx answer that is never written. Keep it out so it cannot split the lane.
+	relayData.Metadata = metadataWithoutClientBodyHeaders(relayData.Metadata)
 	// we remove the discrepancy of requested block from the hash, and add it on the cache side instead
 	// this is due to the fact that we don't know the latest seen block at this moment, as on shared state
 	// only the cache has this information. we make sure the hashing at this stage does not include the requested block.
