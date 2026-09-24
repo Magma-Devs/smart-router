@@ -433,8 +433,9 @@ func startTestTendermintListener(t *testing.T, ctx context.Context) (*Tendermint
 // tendermintGetRelayStub is the slice of RelaySender the URI-style GET path uses: it
 // records what it was asked for and answers with a fixed reply.
 type tendermintGetRelayStub struct {
-	mu   sync.Mutex
-	urls []string
+	mu      sync.Mutex
+	urls    []string
+	tracing []tracingIds // the caller ids on each SendRelay context, in call order
 }
 
 const tendermintGetStubReply = `{"jsonrpc":"2.0","id":-1,"result":{"stub":true}}`
@@ -443,7 +444,18 @@ func (s *tendermintGetRelayStub) SendRelay(ctx context.Context, url, req, connec
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.urls = append(s.urls, url)
+	s.tracing = append(s.tracing, tracingIdsFromContext(ctx))
 	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(tendermintGetStubReply)}, StatusCode: http.StatusOK}, nil
+}
+
+// lastTracing reports the caller ids seen on the most recent call, and whether there was one.
+func (s *tendermintGetRelayStub) lastTracing() (tracingIds, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.tracing) == 0 {
+		return tracingIds{}, false
+	}
+	return s.tracing[len(s.tracing)-1], true
 }
 
 func (s *tendermintGetRelayStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {

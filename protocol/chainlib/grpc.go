@@ -410,6 +410,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		ctx = utils.WithUniqueIdentifier(ctx, guid)
 		msgSeed := strconv.FormatUint(guid, 10)
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		startTime := time.Now()
 		// Extract dappID from grpc header
 		dappID := extractDappIDFromGrpcHeader(metadataValues)
@@ -417,6 +418,9 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		grpcHeaders := convertToMetadataMapOfSlices(metadataValues)
 		utils.LavaFormatDebug("in <<< GRPC Relay ",
 			utils.LogAttr("GUID", ctx),
+			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+			utils.LogAttr(utils.KEY_TASK_ID, ctx),
+			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("_method", method),
 			utils.LogAttr("headers", common.RedactMetadata(grpcHeaders)),
 		)
@@ -526,6 +530,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCSubscriptionManager) grpcproxy.StreamProxyCallBack {
 	return func(ctx context.Context, method string, reqBody []byte) (*grpcproxy.StreamResponse, error) {
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		dappID := extractDappIDFromGrpcHeader(metadataValues)
 		consumerIp := common.GetIpFromGrpcContext(ctx)
 
@@ -561,6 +566,9 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 
 		utils.LavaFormatDebug("in <<< GRPC stream subscribe",
 			utils.LogAttr("GUID", ctx),
+			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+			utils.LogAttr(utils.KEY_TASK_ID, ctx),
+			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("_method", method),
 			utils.LogAttr("dappID", dappID),
 		)
