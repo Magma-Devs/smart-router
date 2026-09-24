@@ -36,12 +36,12 @@ func newHarvestMonitor(t *testing.T) *endpointstate.EndpointMonitor {
 	return m
 }
 
-func ethTipServer(t *testing.T, chainID string) *RPCSmartRouterServer {
+func ethTipServer(t testing.TB, chainID string) *RPCSmartRouterServer {
 	t.Helper()
 	// Attach a REAL parser: the tip gate resolves GET_BLOCKNUM / GET_BLOCK_BY_NUM via
 	// chainParser.GetParsingByTag, so a nil parser makes isMethodTagged return false for
-	// everything (every tip would be dropped). The Solana path short-circuits before touching
-	// the parser, but a real SOLANA parser still constructs cleanly so we keep this uniform.
+	// everything (every tip would be dropped). The Solana path uses it too: it skips the
+	// GET_BLOCK_BY_NUM method (getBlock) before reading the reply.
 	return &RPCSmartRouterServer{
 		listenEndpoint: &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"},
 		chainParser:    newRealChainParserForHarvest(t, chainID),
@@ -72,6 +72,21 @@ func TestExtractSolanaContextSlot(t *testing.T) {
 		{"malformed json", `{not json`, 0, false},
 		{"empty", ``, 0, false},
 		{"non-positive slot", `{"result":{"context":{"slot":0}}}`, 0, false},
+		// MAG-3843: the path read keeps the rules the decode enforced.
+		{"negative slot", `{"result":{"context":{"slot":-5}}}`, 0, false},
+		{"fractional slot", `{"result":{"context":{"slot":5.5}}}`, 0, false},
+		{"exponent slot", `{"result":{"context":{"slot":1e3}}}`, 0, false},
+		{"string slot", `{"result":{"context":{"slot":"5"}}}`, 0, false},
+		{"slot beyond int64", `{"result":{"context":{"slot":9223372036854775808}}}`, 0, false},
+		{"context is not an object", `{"result":{"context":[5]}}`, 0, false},
+		{"result is an array, not an envelope", `{"result":[{"context":{"slot":5}}]}`, 0, false},
+		{"error after the result still counts", `{"jsonrpc":"2.0","result":{"context":{"slot":7},"value":[1,2,3]},"error":{"code":-32000,"message":"x"},"id":1}`, 0, false},
+		// MAG-3843: where the path read differs from the decode it replaced, on purpose.
+		{"first of two slot members counts", `{"result":{"context":{"slot":1,"slot":2}}}`, 1, true},
+		{"member names match exactly", `{"Result":{"Context":{"Slot":5}}}`, 0, false},
+		// Not validated here: the JSON-RPC relay drops a body that fails json.Valid before any
+		// harvest (sendJSONRPCRelay), and the slot a node wrote is real even if later bytes are not.
+		{"truncated after the slot yields it", `{"result":{"context":{"slot":5},"value":{"data":"ab`, 5, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			slot, ok := extractSolanaContextSlot([]byte(tc.body))
@@ -155,6 +170,24 @@ func TestTipBlockFromRelay_Solana_UsesContextSlot(t *testing.T) {
 	errReply := &pairingtypes.RelayReply{Data: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"x"}}`)}
 	_, ok = rpcss.tipBlockFromRelay(cm, errReply)
 	require.False(t, ok)
+}
+
+// MAG-3843: a Solana getBlock reply (the spec's GET_BLOCK_BY_NUM method) is skipped before it
+// is read — it is the block itself, never an RpcResponse. The reply below carries a context
+// slot only to prove nothing reads it. The GET_BLOCKNUM method (getLatestBlockhash) does
+// answer with a context, so it must still be harvested.
+func TestTipBlockFromRelay_Solana_SkipsGetBlockWithoutReadingIt(t *testing.T) {
+	rpcss := ethTipServer(t, "SOLANA")
+	reply := &pairingtypes.RelayReply{Data: []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":250000000},"value":42}}`)}
+
+	getBlock := &mockChainMessage{api: &spectypes.Api{Name: "getBlock"}, requestedBlock: 249999990}
+	_, ok := rpcss.tipBlockFromRelay(getBlock, reply)
+	require.False(t, ok, "getBlock is GET_BLOCK_BY_NUM on Solana and must not be harvested")
+
+	getLatestBlockhash := &mockChainMessage{api: &spectypes.Api{Name: "getLatestBlockhash"}, requestedBlock: spectypes.LATEST_BLOCK}
+	block, ok := rpcss.tipBlockFromRelay(getLatestBlockhash, reply)
+	require.True(t, ok, "getLatestBlockhash is GET_BLOCKNUM on Solana and carries the context slot")
+	require.Equal(t, int64(250000000), block)
 }
 
 // A non-Solana chain must NOT interpret a coincidental "slot" field, and a non-latest
@@ -589,7 +622,7 @@ func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.
 // newRealChainParserForHarvest builds a real ChainParser from the on-disk spec (the
 // lightweight subset of CreateChainLibMocks, no server/connector), so GetOrCreateTracker
 // can register a generation without a nil-parser panic in the background poll.
-func newRealChainParserForHarvest(t *testing.T, specIndex string) chainlib.ChainParser {
+func newRealChainParserForHarvest(t testing.TB, specIndex string) chainlib.ChainParser {
 	t.Helper()
 	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, specIndex)
 	require.NoError(t, err)
