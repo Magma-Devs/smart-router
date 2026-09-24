@@ -322,10 +322,14 @@ smartrouter config.yml --use-static-spec specs/
 
 ```bash
 --cache-be "127.0.0.1:7778"          # Enable caching
+--cache-max-entry-bytes 1048576      # Largest reply written to the cache (default 1 MiB, 0 = no cap)
 --strategy balanced                   # Provider selection strategy
 --metrics-listen-address ":7779"     # Prometheus metrics
 --log_level debug                    # Log verbosity
 ```
+
+A reply larger than `--cache-max-entry-bytes` is served but not written to the cache, on either
+backend: encoding a multi-MB entry costs the router and the cache more than its rare hits save.
 
 ### Usage telemetry (OTel)
 
