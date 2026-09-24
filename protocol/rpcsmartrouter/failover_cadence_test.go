@@ -50,7 +50,7 @@ func TestFailoverCadence_NextEndpointDispatchedAfterOneWindow(t *testing.T) {
 	require.NoError(t, err)
 	relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams,
 		relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics,
-		relaycoretest.RelayRetriesManagerInstance, stateMachine)
+		stateMachine)
 
 	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 	require.NoError(t, err)

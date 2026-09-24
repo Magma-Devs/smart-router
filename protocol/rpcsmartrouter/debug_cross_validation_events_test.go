@@ -407,7 +407,7 @@ func TestCrossValidationEvents_StragglerPathRecords(t *testing.T) {
 		}, nil, "dapp", "1.2.3.4")
 		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(baseCtx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
 		require.NoError(t, smErr)
-		rp := relaycore.NewRelayProcessor(baseCtx, sm.GetCrossValidationParams(), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, sm)
+		rp := relaycore.NewRelayProcessor(baseCtx, sm.GetCrossValidationParams(), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, sm)
 		rp.SetCrossValidationQueriedProviders([]string{"p1", "p2", "p3"})
 		pushSuccess(rp, "p1", "tier-1", consensusBody)
 		pushSuccess(rp, "p2", "external", consensusBody)

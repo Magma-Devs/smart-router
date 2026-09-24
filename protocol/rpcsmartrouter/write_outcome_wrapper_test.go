@@ -8,7 +8,6 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	relaycoretest "github.com/magma-Devs/smart-router/protocol/relaycoretest"
@@ -36,7 +35,7 @@ func newWriteOutcomeProcessor(t *testing.T, msg chainlib.ProtocolMessage, dispat
 	}
 	sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: msg}
 	return relaycore.NewRelayProcessor(context.Background(), nil, cvGuardMetrics{}, cvGuardMetrics{},
-		lavaprotocol.NewRelayRetriesManager(), sm)
+		sm)
 }
 
 // SetResponse only queues; the results manager files nothing until the responses are drained. An
@@ -74,10 +73,9 @@ func TestSendParsedRelay_ExpiredBeforeWriteDispatch(t *testing.T) {
 	defer cancel()
 	msg := expiredWriteProtocolMessage{writeMessage(common.CONSISTENCY_SELECT_ALL_PROVIDERS)}
 	server := &RPCSmartRouterServer{
-		listenEndpoint:      &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
-		chainParser:         expiredWriteChainParser{},
-		sessionManager:      &lavasession.ConsumerSessionManager{},
-		relayRetriesManager: lavaprotocol.NewRelayRetriesManager(),
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		chainParser:    expiredWriteChainParser{},
+		sessionManager: &lavasession.ConsumerSessionManager{},
 	}
 
 	// The real state machine can report a timeout without dispatching an endpoint.
