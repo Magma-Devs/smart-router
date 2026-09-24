@@ -59,6 +59,11 @@ func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 		return true, extractErrorMessage(data, httpStatusCode)
 	}
 
+	// A gateway refusing the route is not the node answering. See isGatewayRouteRefusal.
+	if isGatewayRouteRefusal(httpStatusCode, data) {
+		return true, extractErrorMessage(data, httpStatusCode)
+	}
+
 	// Check Cosmos SDK transaction errors (HTTP 2xx with error code in JSON body)
 	if httpStatusCode >= 200 && httpStatusCode < 300 {
 		if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
@@ -69,6 +74,26 @@ func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 
 	// 4xx (except 429) are client errors — not node errors, pass through to consumer
 	return false, ""
+}
+
+// isGatewayRouteRefusal reports a 404 or 405 whose body is not JSON.
+//
+// A node that answers 404 or 405 does so with a problem document — Horizon, Aptos and the Cosmos
+// gRPC-gateway all send JSON, and that answer is data the caller asked for (an unfunded account, a
+// missing resource). An empty or non-JSON body on those two codes is the gateway in front of the
+// node refusing the route: the endpoint never served the request, so the reply is a node error,
+// not an answer.
+//
+// The distinction is load-bearing on a stateful broadcast, where the first success ends the
+// fan-out. Counted as a success, a gateway's instant empty 404 was returned to the caller while a
+// sibling upstream was still executing the same write, which it then broadcast anyway. The
+// registry already classifies both codes as non-retryable and not the endpoint's fault, so a read
+// that meets one is still returned as-is, and nothing is scored against the endpoint.
+func isGatewayRouteRefusal(httpStatusCode int, data []byte) bool {
+	if httpStatusCode != 404 && httpStatusCode != 405 {
+		return false
+	}
+	return !json.Valid(data)
 }
 
 // checkCosmosTxError detects errors in Cosmos SDK transaction responses
