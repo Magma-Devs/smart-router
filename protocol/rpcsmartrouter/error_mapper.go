@@ -75,6 +75,38 @@ func endpointCancellationIsExempt(isClientCancel bool, budgetExpired func() bool
 	return budgetExpired == nil || !budgetExpired()
 }
 
+// isProtocolFailure decides whether a direct relay attempt whose sender returned err counts in
+// smartrouter_protocol_errors_total (MAG-3536): the attempt went out on the wire and came back with
+// no answer from the upstream. The cuts are structural rather than read from the error
+// classification, because the registry books a dropped connection, a truncated body, a TLS failure
+// and a DNS failure as UNKNOWN_ERROR, in the same category as a node's own message.
+//
+//   - Not gRPC. The gRPC sender wraps every error that carries no status, including the ones its
+//     connection returns before invoking anything, such as a request body it could not parse, so
+//     the wire test below cannot tell the router's refusal from the endpoint's failure there. And a
+//     dead gRPC upstream mostly arrives as a status such as UNAVAILABLE, which is a reply and a node
+//     error. Counting gRPC would count client mistakes and still miss the outages.
+//   - It reached the wire. Every error a sender brings back from the wire goes through
+//     classifyAndWrap. An error from before dialling, such as a request the sender could not build
+//     or a connection of the wrong kind, comes back plain: that is the router refusing, not the
+//     endpoint failing. The one refusal that does get wrapped, an HTTP request DoHTTPRequest could
+//     not build, carries lavasession.ErrBuildHTTPRequest and is left out by name.
+//   - The upstream did not answer. An HTTP status the JSON-RPC sender turned into an error is an
+//     answer, so it is a node or gateway fault, not a protocol one. REST statuses never reach this
+//     test: relayInnerDirect handles them in its status branch.
+//   - The router did not stop it. A race loser or a client that hung up is exempt, the same rule
+//     endpoint health follows, unless the request ran out of budget, which makes the silence a hang.
+func isProtocolFailure(transport common.TransportType, err error, isClientCancel bool, budgetExpired func() bool) bool {
+	if transport == common.TransportGRPC || err == nil || extractLavaError(err) == nil || errors.Is(err, lavasession.ErrBuildHTTPRequest) {
+		return false
+	}
+	var statusErr *lavasession.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		return false
+	}
+	return !endpointCancellationIsExempt(isClientCancel, budgetExpired)
+}
+
 // classifyEndpointHealth decides whether an endpoint should be marked unhealthy
 // and/or backed off based on the classified error.
 //

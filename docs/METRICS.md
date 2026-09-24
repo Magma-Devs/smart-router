@@ -268,7 +268,7 @@ Once it is non-zero they are lossy — some batch types are being merged into `b
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `smartrouter_node_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Node errors returned by endpoints. |
-| `smartrouter_protocol_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Protocol/transport errors (connection/session failures). |
+| `smartrouter_protocol_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Relay attempts that went out on the wire and got no usable answer from the upstream: the connection was refused, reset or dropped, the body was cut off or is not valid JSON, TLS or DNS failed, the attempt timed out, or the endpoint hung past the request budget. One increment per attempt, labelled with the provider that was dialled. An attempt the upstream **answered** is not counted, whatever it answered. A `5xx` or `429` attempt is in `smartrouter_requests_failed_total`, the superset of failed attempts, and a `429` also in `smartrouter_rate_limit_holdoffs_total{event="recorded"}`. A reply that carries an error is a node error, in `smartrouter_node_errors_total`, and not a failed attempt. Not counted either: a relay the router cancelled itself — a relay-race loser on a stateful broadcast, or a client that hung up — the same rule `rpc_endpoint_total_cancelled` follows, and a relay the router refused before dialling, including an HTTP request it could not build. gRPC endpoints are not counted: the gRPC sender wraps its connection's own refusals, such as a request body it could not parse, like wire errors, and a dead upstream mostly arrives as a gRPC status such as `UNAVAILABLE`, which the router books as a node error. An endpoint disabled after repeated failures receives no relays, so during a sustained outage this series stops moving; `smartrouter_endpoint_serving_tier` shows that state. `smartrouter_errors_total` carries the same failures per chain under their classified name, but books a dropped connection, a TLS failure and a DNS failure as `UNKNOWN_ERROR`. Before MAG-3536 this series was registered but nothing wrote to it. |
 
 #### Retries
 
@@ -449,6 +449,7 @@ drained by the release path, and `0` means dark unambiguously.
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `smartrouter_endpoint_serving_tier` | Gauge | `spec`, `apiInterface` | Which provider tier the endpoint is serving from: `2` = primaries, `1` = degraded (backups only), `0` = dark (no healthy providers). |
+| `smartrouter_backup_tier_served_total` | Counter | `spec`, `apiInterface` | Relay requests the caller got a backup provider's reply for. A request counts once, when it completes: a primary that failed, dropped the connection or hung all count once the backup answers, and so does a hedge the backup wins against a slow primary. A node error the backup returned counts too, since the backup answered; a request no tier answered does not, and its failed attempts are in `smartrouter_requests_failed_total`. A stateful relay counts the same way: with `--stateful-to-backup` off it reaches a backup only by falling over, and with it on a broadcast the backup answered first still counts. Not counted: cross-validation requests, whose answer is a quorum rather than one provider's reply, and WebSocket or gRPC subscriptions, whose managers pick an endpoint before any connection exists, so a count there would include subscribes that failed. The gauge above is a **level**; this is the **event** it cannot show: that a backup served, and how often (MAG-3536). A router whose backups alone serve an addon counts every request for it, a steady baseline rather than an incident. |
 
 Before MAG-2525 an endpoint with no healthy provider exited the process, so a
 CrashLoopBackOff was the de-facto alert. It now boots and reports unhealthy instead,
@@ -464,6 +465,7 @@ Suggested alerts:
 | --- | --- |
 | `smartrouter_endpoint_serving_tier == 0` | Endpoint is dark — all relays 5xx. Page. |
 | `smartrouter_endpoint_serving_tier < 2` | Serving on backups only. Redundancy is gone; the next failure is an outage. |
+| `increase(smartrouter_backup_tier_served_total[5m]) > 0` | The backup tier answered at least one request, so the primaries failed it, hung, or lost a hedge to a backup. Redundancy was consumed, even if the tier gauge has already recovered. Expect a baseline on a router whose backups alone serve an addon. |
 
 Sizing the `for:` window: recovery from `0` is not one cadence. A chain that was **dark
 at boot** is retried on an adaptive schedule starting at ~2s and doubling to a 3m

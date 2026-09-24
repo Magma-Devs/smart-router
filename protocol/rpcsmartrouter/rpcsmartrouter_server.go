@@ -1250,6 +1250,19 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		utils.LogAttr("GUID", ctx),
 	)
 
+	// smartrouter_backup_tier_served_total (MAG-3536): a request a backup answered. Counted here, once,
+	// from the provider whose bytes the caller got, rather than at session acquisition: at acquisition
+	// the router cannot tell a hedge off a healthy primary that is merely slow from one off a primary
+	// that will never answer, and either guess about which counts gets real fall-overs wrong. A hedge
+	// the backup wins counts, because the backup did serve. A stateful relay counts the same way: it
+	// reaches a backup only through the fall-over unless --stateful-to-backup is on, and with it on a
+	// broadcast the backup answered first was still served by the backup. Cross-validation is left
+	// out, because its answer is a quorum of providers rather than one provider's bytes.
+	if err == nil && servedBy != "" && relayProcessor != nil && relayProcessor.GetSelection() != relaycore.CrossValidation &&
+		rpcss.sessionManager.IsBackupProvider(servedBy) {
+		rpcss.smartRouterEndpointMetrics.RecordBackupTierServed(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface)
+	}
+
 	// Set the request-level Success once, on the request goroutine (both the success and failure
 	// paths below flow through here). relayInnerDirect no longer writes analytics.Success, so a
 	// detached CV straggler cannot race this or the downstream consumer (MAG-2187).
@@ -4563,6 +4576,15 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// the health metric — while the provider's own QoS availability did drop.
 		var shouldMarkUnhealthy bool
 		shouldMarkUnhealthy, needsBackoff = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
+
+		// smartrouter_protocol_errors_total (MAG-3536). Stamped here, in the branch where the sender
+		// itself failed, because this is the one place every cut isProtocolFailure makes is
+		// structural: an upstream status reaches this branch only as the JSON-RPC sender's
+		// HTTPStatusError (REST statuses take the status branch below), and the refusals above return
+		// before any sender runs.
+		if isProtocolFailure(rpcss.directRelayTransport(directConnection), err, isClientCancel, budgetExpired) && rpcss.rpcSmartRouterLogs != nil {
+			rpcss.rpcSmartRouterLogs.SetProtocolError(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, chainMessage.GetApi().Name)
+		}
 
 		// Apply health tracking based on error classification. The failing request is recorded
 		// FIRST (read-only methods only) so that if this failure crosses the disable threshold,
