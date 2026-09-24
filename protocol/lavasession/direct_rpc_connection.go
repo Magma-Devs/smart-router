@@ -741,9 +741,10 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 }
 
 // maxPresizedResponseBytes is the largest Content-Length readResponseBody trusts for its one
-// up-front allocation. It sits above every block a chain can legally produce (Tendermint's
-// default block.max_bytes is 21 MB; a Solana block is 5–7 MB), so every block reply is read
-// presized. It exists because the length is the upstream's claim: without a bound, a wrong one
+// up-front allocation. It sits above the block replies these routers serve today: a Solana block
+// reply is 5–7 MB, and Tendermint's default block.max_bytes is 21 MB. A chain can raise
+// block.max_bytes past it (CometBFT allows 100 MB), and a reply is larger than the block it
+// carries. It exists because the length is the upstream's claim: without a bound, a wrong one
 // would allocate memory before the transport finds out the body is shorter. A longer
 // announcement is read as it arrives, as it was before.
 const maxPresizedResponseBytes = 32 << 20

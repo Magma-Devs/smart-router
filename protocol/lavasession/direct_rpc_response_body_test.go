@@ -124,6 +124,13 @@ func TestHTTPDirectRPCConnection_ReadsAnnouncedAndStreamedBodies(t *testing.T) {
 			done, err := h.DoHTTPRequest(ctx, HTTPRequestParams{Method: http.MethodGet, URL: srv.URL + path})
 			require.NoError(t, err)
 			require.Equal(t, payload, done.Body)
+
+			if path == "/announced" {
+				// Only the presized read returns exactly one spare byte of capacity; io.ReadAll
+				// rounds its final buffer up. This is what fails if a call site goes back to it.
+				require.Equal(t, len(payload)+1, cap(sent.Data), "SendRequest must read an announced body presized")
+				require.Equal(t, len(payload)+1, cap(done.Body), "DoHTTPRequest must read an announced body presized")
+			}
 		})
 	}
 }
