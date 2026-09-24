@@ -158,9 +158,16 @@ func TestRelayTimeoutHeader_BoundedBetweenParseAndTheStateMachine(t *testing.T) 
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			budget, window := srv.GetProcessingTimeout(parseWithRelayTimeout(t, srv, relayTimeoutLightRequest, tt.header))
+			protocolMessage := parseWithRelayTimeout(t, srv, relayTimeoutLightRequest, tt.header)
+			budget, window := srv.GetProcessingTimeout(protocolMessage)
 			require.Equal(t, tt.wantWindow, window, "attempt window for lava-relay-timeout: %s", tt.header)
-			require.Equal(t, ownBudget, budget, "the header must never move the budget by default (lava-relay-timeout: %s)", tt.header)
+			require.Equal(t, ownBudget, budget,
+				"on a call whose own window sits inside its budget, the header must not move the budget by default (lava-relay-timeout: %s)", tt.header)
+			if tt.wantWindow == ownWindow {
+				// Ignored at parse time, not merely at use: a stored value would be copied onto any
+				// message rebuilt from this one (preserveRelayTimeout).
+				require.Zero(t, protocolMessage.TimeoutOverride(), "an ignored lava-relay-timeout must not be stored (%s)", tt.header)
+			}
 		})
 	}
 
@@ -178,8 +185,8 @@ func TestRelayTimeoutHeader_BoundedBetweenParseAndTheStateMachine(t *testing.T) 
 	})
 }
 
-// --max-relay-timeout is the operator's way to let callers ask for more time: up to it, and no
-// further.
+// --max-caller-relay-timeout is the operator's way to let callers ask for more time: up to it, and
+// no further.
 func TestRelayTimeoutHeader_OperatorCeilingLetsCallersExtendTheBudget(t *testing.T) {
 	pinRelayTimeoutGlobals(t, 30*time.Second, 10*time.Minute)
 	srv := relayTimeoutTestServer(t)
@@ -192,7 +199,7 @@ func TestRelayTimeoutHeader_OperatorCeilingLetsCallersExtendTheBudget(t *testing
 		t.Run(header, func(t *testing.T) {
 			budget, window := srv.GetProcessingTimeout(parseWithRelayTimeout(t, srv, relayTimeoutLightRequest, header))
 			require.Equal(t, want, window)
-			require.Equal(t, want, budget, "the budget follows the window up to --max-relay-timeout and no further")
+			require.Equal(t, want, budget, "the budget follows the window up to --max-caller-relay-timeout and no further")
 		})
 	}
 }
@@ -236,6 +243,44 @@ func TestRelayTimeoutHeader_AppliedWindowIsReportedToTheCaller(t *testing.T) {
 			value, reported := applied(t, header)
 			require.True(t, reported, "a request that carried lava-relay-timeout must be told what applied")
 			require.Equal(t, want, value)
+		})
+	}
+}
+
+// A call's own budget is not always its category's. Bitcoin's sendrawtransaction is a hanging
+// write, so its own window adds twice the 10-minute block time, and with no header the router gives
+// it ~20 minutes, far above the 180s a hanging call gets from its category alone. A header asking
+// for at least that window must never come out below it: the bound is measured from the call's own
+// budget, not from its category (found in review of PR 427, where 45m came out as 3m).
+func TestRelayTimeoutHeader_BoundIsTheCallsOwnBudgetNotItsCategory(t *testing.T) {
+	pinRelayTimeoutGlobals(t, 30*time.Second, 0)
+	origFloor := common.MinimumTimePerRelayDelay
+	t.Cleanup(func() { common.MinimumTimePerRelayDelay = origFloor })
+	common.MinimumTimePerRelayDelay = 7 * time.Second // the production --min-relay-timeout
+
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+		context.Background(), "BTC", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	require.NoError(t, err)
+	srv := &RPCSmartRouterServer{
+		chainParser:    chainParser,
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "BTC", ApiInterface: spectypes.APIInterfaceJsonRPC},
+	}
+	const sendRawTransaction = `{"jsonrpc":"1.0","id":1,"method":"sendrawtransaction","params":["00"]}`
+
+	ownBudget, ownWindow := srv.GetProcessingTimeout(parseWithRelayTimeout(t, srv, sendRawTransaction, ""))
+	require.Greater(t, ownBudget, 180*time.Second,
+		"setup: this call's own window must exceed its category budget, or it cannot show the difference")
+	require.Equal(t, ownWindow, ownBudget, "setup: this call's budget is its own window")
+
+	for _, header := range []string{"25m", "45m"} {
+		t.Run(header, func(t *testing.T) {
+			budget, window := srv.GetProcessingTimeout(parseWithRelayTimeout(t, srv, sendRawTransaction, header))
+			require.Equal(t, ownWindow, window, "a header above the call's own budget is held to that budget")
+			require.Equal(t, ownBudget, budget, "asking for more time must never leave the call with less than no header gives it")
 		})
 	}
 }
