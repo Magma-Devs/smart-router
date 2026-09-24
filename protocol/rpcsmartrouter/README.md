@@ -327,6 +327,37 @@ smartrouter config.yml --use-static-spec specs/
 --log_level debug                    # Log verbosity
 ```
 
+### Per-request time budget (`lava-relay-timeout`)
+
+A caller can send `lava-relay-timeout: <Go duration>` (for example `300ms` or `5s`) to set the
+request's attempt window: how long the router waits on one endpoint before it also tries the next.
+The router bounds the value (MAG-3600):
+
+- A value that is not a positive duration (`-45s`, `0s`, `abc`) is ignored, and the router's own
+  window applies.
+- A value under 300ms is raised to 300ms, about one round trip. A much shorter window hedges before
+  any endpoint could answer, fanning one request out to every endpoint the retry limits allow.
+- A value above the request's own budget is held to that budget. The own budget is what the
+  router gives the request with no header: `--default-processing-timeout`, doubled for calls of
+  50 CU or more, and six times it for hanging, stateful or 100+ CU calls. A call whose own window is
+  longer still keeps it: a hanging call waits twice the chain's block time, so Bitcoin's
+  `sendrawtransaction` gets about 20 minutes. By default the header reshapes hedging but cannot
+  make the router hold a request longer than that.
+
+A value below the router's own window replaces it. On most calls that only makes hedging sooner.
+On a call whose budget comes from its own window, such as that Bitcoin write, it also shortens the
+budget, as it did before these bounds.
+
+`--max-caller-relay-timeout` lets callers extend the budget, up to its value:
+
+```bash
+--max-caller-relay-timeout 2m        # default 0: callers cannot extend a request's budget
+```
+
+A reply to a request that carried the header includes `Lava-Relay-Timeout-Applied`: the window the
+router actually used, as a Go duration. Like the router's other reply headers, it is absent when the
+request failed without any reply.
+
 ### Usage telemetry (OTel)
 
 Off by default. When enabled, the smart router emits two event types as

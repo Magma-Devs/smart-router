@@ -41,8 +41,30 @@ var CacheTimeout = DefaultCacheTimeout
 // It can be overridden via the --min-relay-timeout flag on consumer and smart router commands.
 var MinimumTimePerRelayDelay = time.Second
 
+// MaxCallerRelayTimeout is the longest a caller's lava-relay-timeout header may make the router
+// hold one request. It can be overridden via the --max-caller-relay-timeout flag on the smart
+// router command.
+//
+// The header sets the attempt window, and a request's processing budget is never shorter than its
+// window (GetTimeoutForProcessing), so an unbounded header was an unbounded hold (MAG-3600). The
+// bound is max(the request's own budget, MaxCallerRelayTimeout), where the own budget is the one
+// the request gets with no header: the header can reshape the window anywhere inside that budget,
+// and can stretch it only as far as this setting. The default, 0, means it cannot stretch it at
+// all. A value below --default-processing-timeout has the same effect, because this setting never
+// shortens a budget.
+var MaxCallerRelayTimeout time.Duration
+
+// MinCallerRelayTimeout is the shortest attempt window a caller's lava-relay-timeout header can ask
+// for. The window is the hedge interval, so a value far below one round trip makes the state
+// machine dispatch every attempt the retry limits allow before any endpoint could have answered:
+// a per-request fan-out, whatever the endpoints' health. It sits well under --min-relay-timeout on
+// purpose. That flag floors only the CU-derived window, and callers do use the header to hedge
+// sooner than it (deployments run it at several seconds; the automation suite sends 300ms).
+const MinCallerRelayTimeout = AverageWorldLatency
+
 // ValidateAndCapMinRelayTimeout ensures both DefaultTimeout and MinimumTimePerRelayDelay
-// are positive and that MinimumTimePerRelayDelay < DefaultTimeout. Called once at startup
+// are positive and that MinimumTimePerRelayDelay < DefaultTimeout. It also resets a
+// non-positive CacheTimeout and a negative MaxCallerRelayTimeout. Called once at startup
 // after flags are parsed.
 func ValidateAndCapMinRelayTimeout() {
 	// Guard DefaultTimeout < 1s: GetTimeoutForProcessing feeds into
@@ -92,6 +114,27 @@ func ValidateAndCapMinRelayTimeout() {
 			utils.LogAttr("reset_to", DefaultCacheTimeout),
 		)
 		CacheTimeout = DefaultCacheTimeout
+	}
+
+	// Guard MaxCallerRelayTimeout < 0: a negative ceiling has no meaning. 0 is the default, and
+	// means a caller cannot extend a request's budget.
+	if MaxCallerRelayTimeout < 0 {
+		utils.LavaFormatWarning("max-caller-relay-timeout is negative, resetting to 0 (a caller's lava-relay-timeout cannot extend a request's budget)",
+			nil,
+			utils.LogAttr("invalid_value", MaxCallerRelayTimeout),
+		)
+		MaxCallerRelayTimeout = 0
+	}
+
+	// Kept as set, but said out loud: this can read like a cap on every request, and it is not one.
+	// Below the default budget it cannot extend anything, and it never shortens anything, so an
+	// operator who set it to cut requests short would otherwise see no effect and no reason.
+	if MaxCallerRelayTimeout > 0 && MaxCallerRelayTimeout <= DefaultTimeout {
+		utils.LavaFormatWarning("max-caller-relay-timeout is not above default-processing-timeout, so it has no effect: it only lets a caller's lava-relay-timeout extend a request's budget, it never shortens one",
+			nil,
+			utils.LogAttr("max_caller_relay_timeout", MaxCallerRelayTimeout),
+			utils.LogAttr("default_processing_timeout", DefaultTimeout),
+		)
 	}
 }
 
@@ -144,4 +187,26 @@ func GetTimeoutForProcessing(relayTimeout time.Duration, timeoutInfo TimeoutInfo
 		ctxTimeout = relayTimeout
 	}
 	return ctxTimeout
+}
+
+// BoundCallerRelayTimeout turns the value of a caller's lava-relay-timeout header into the attempt
+// window the router will use, and reports false when the value must be ignored in favour of
+// ownWindow, the window the router computes for the request by itself.
+//
+// A value that is not positive is ignored. It means nothing as a window, and the window reaches
+// time.NewTicker in the relay state machine's goroutine, which panics on it; a panic there ends the
+// process, for every request on it (MAG-3600). A positive value is held inside
+// [MinCallerRelayTimeout, max(the request's own budget, MaxCallerRelayTimeout)], where the request's
+// own budget is the one it gets with no header: GetTimeoutForProcessing(ownWindow). It has to be
+// measured from ownWindow, not from the call's category alone. A hanging call on a slow-block chain
+// waits twice the block time, so Bitcoin's sendrawtransaction gets ~20 minutes with no header, and
+// a bound built from its category (180s) would leave a caller who asked for more with less. Were
+// the floor and the bound ever to cross (a budget under 300ms, which ValidateAndCapMinRelayTimeout
+// rules out), the floor wins, so the result is always positive.
+func BoundCallerRelayTimeout(requested, ownWindow time.Duration, timeoutInfo TimeoutInfo) (window time.Duration, ok bool) {
+	if requested <= 0 {
+		return 0, false
+	}
+	ceiling := max(GetTimeoutForProcessing(ownWindow, timeoutInfo), MaxCallerRelayTimeout)
+	return max(min(requested, ceiling), MinCallerRelayTimeout), true
 }
