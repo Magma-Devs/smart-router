@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -148,6 +149,25 @@ type EndpointMonitor struct {
 	peerObservations PeerObservationStore
 	podID            string
 
+	// Idle mode (idle.go). idleAfter 0 = off; idlePollInterval 0 = poll nothing while idle.
+	idleAfter        time.Duration
+	idlePollInterval time.Duration
+	// lastClientRelayNanos is the unix-nano stamp of the last CLIENT relay this chain+interface
+	// served — crafted health relays never reach the stamping call site — seeded with the
+	// monitor's construction time, so a freshly started process is "active" for one idle window
+	// before it can go idle. Written by NoteClientRelay on the relay hot path (one atomic swap),
+	// read by every tracker's idle gate, the probe loop and the debug view.
+	lastClientRelayNanos atomic.Int64
+	// idleAnnounced is telemetry state only (the transition log line and the gauge); decisions
+	// read the stamp. The first idle skip sets it, the wake clears it.
+	idleAnnounced atomic.Bool
+	// wakeDone is non-nil while a wake burst is in flight and is closed once the first endpoint
+	// poll of the burst has recorded a fresh tip (or every poll has finished). Guarded by wakeMu.
+	wakeMu   sync.Mutex
+	wakeDone chan struct{}
+	// onIdleChange, if set, is invoked on every idle<->active transition (metrics gauge).
+	onIdleChange func(idle bool)
+
 	// Callbacks for events (optional)
 	onFork        func(endpointURL string, blockNum int64)
 	onNewBlock    func(endpointURL string, fromBlock, toBlock int64)
@@ -203,6 +223,15 @@ type EndpointChainTrackerConfig struct {
 	// how this combines with a spec that cannot serve hashes at all.
 	EnableForkDetection bool
 
+	// IdleAfter turns idle mode on (idle.go): after this long without a client relay the
+	// chain's dedicated polls pause until the next client relay wakes it. 0 = off (the default);
+	// below MinIdleAfter reverts to off with a warning. See IdleAfterFlagName.
+	IdleAfter time.Duration
+	// IdlePollInterval is the idle heartbeat: while idle each endpoint is still polled once per
+	// this interval. 0 = poll nothing while idle. Ignored unless IdleAfter is set; a value below
+	// the normal cadence is raised to it. See IdlePollIntervalFlagName.
+	IdlePollInterval time.Duration
+
 	// Optional callbacks
 	OnFork        func(endpointURL string, blockNum int64)
 	OnNewBlock    func(endpointURL string, fromBlock, toBlock int64)
@@ -237,6 +266,10 @@ type EndpointChainTrackerConfig struct {
 	// with the endpoint URL and the request kind (metrics.TrackerRequestKind*). It backs the
 	// only metric that measures tracker REQUEST VOLUME — see RecordTrackerRequest.
 	OnTrackerRequest func(endpointURL, kind string)
+
+	// OnIdleChange, if set, is invoked with true when the chain goes idle (first skipped poll
+	// cycle) and false when a client relay wakes it. Backs smartrouter_chain_idle.
+	OnIdleChange func(idle bool)
 }
 
 // NewEndpointMonitor creates a new manager for per-endpoint ChainTrackers.
@@ -273,6 +306,8 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	pollDivisor := resolvePollDivisor(config.PollIntervalDivisor, config.ChainID, config.ApiInterface)
 	flatPollInterval := resolveFlatPollInterval(avgBlockTime, pollDivisor)
 	warnIfCadenceOutrunsStaleness(flatPollInterval, avgBlockTime, config.ChainID, config.ApiInterface)
+	// Idle mode knobs (idle.go), validated once per chain like the cadence above.
+	idleAfter, idlePollInterval := resolveIdleConfig(config.IdleAfter, config.IdlePollInterval, flatPollInterval, config.ChainID, config.ApiInterface)
 
 	ctxWithCancel, cancel := context.WithCancel(ctx)
 
@@ -308,8 +343,27 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		onTrackerRequest:   config.OnTrackerRequest,
 		peerObservations:   config.PeerObservations,
 		podID:              LocalPodID(),
+		idleAfter:          idleAfter,
+		idlePollInterval:   idlePollInterval,
+		onIdleChange:       config.OnIdleChange,
 		ctx:                ctxWithCancel,
 		cancel:             cancel,
+	}
+	// A new process starts "active": it may go idle only after a full idle window with no
+	// client relay, so a rollout never boots straight into paused polls.
+	manager.lastClientRelayNanos.Store(time.Now().UnixNano())
+	if idleAfter > 0 {
+		utils.LavaFormatInfo("chain tracker idle mode enabled: polls pause after a quiet window and resume on the next client relay",
+			utils.LogAttr("chainID", config.ChainID),
+			utils.LogAttr("apiInterface", config.ApiInterface),
+			utils.LogAttr("idleAfter", idleAfter),
+			utils.LogAttr("idlePollInterval", idlePollInterval),
+		)
+		// Publish "active" from boot so the gauge series exists at 0 whenever the feature is on,
+		// rather than appearing only at the first idle transition.
+		if manager.onIdleChange != nil {
+			manager.onIdleChange(false)
+		}
 	}
 
 	// Resolved after the struct exists because it reads manager.chainParser. Both inputs are
@@ -463,6 +517,13 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 			}
 			return false
 		},
+	}
+	// Idle gate (idle.go): consulted before the traffic gate, unbounded, bypassed by PollNow.
+	// Wired only when idle mode is on so an unconfigured tracker pays nothing per tick.
+	if m.idleAfter > 0 {
+		config.IdleGate = func(now time.Time, sinceLastRealPoll time.Duration) bool {
+			return m.idleGate(endpointURL, now, sinceLastRealPoll)
+		}
 	}
 
 	// Set up callbacks with endpoint context
@@ -819,38 +880,17 @@ func (m *EndpointMonitor) BackoffSnapshot() map[string]time.Duration {
 // setTrackerState), so the lock is released BEFORE the trigger — holding it across the wait would
 // deadlock the monitor against its own poll loop the first time a poll observed a new block.
 func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (observation EndpointObservation, polled bool, err error) {
-	m.mu.RLock()
-	tracker, exists := m.trackers[endpointURL]
-	stateBefore := m.trackerStates[endpointURL]
-	m.mu.RUnlock()
-
-	if !exists {
+	// The trigger itself — tracker lookup, the delivery grace for a tracker that is not yet
+	// Polling, and the sentinel classification — is triggerPoll, shared with the idle wake
+	// burst. This wrapper adds what the debug caller needs: the record, and a diagnostic error
+	// naming the tracker's lifecycle state when no poll can be vouched for.
+	ran, pollErr := m.triggerPoll(ctx, endpointURL)
+	if errors.Is(pollErr, errNoTrackerForEndpoint) {
 		return EndpointObservation{}, false, utils.LavaFormatError("poll-now: no ChainTracker for endpoint", nil,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 		)
 	}
-
-	// A tracker that is not yet Polling has no poll goroutine to take the request — start() spawns
-	// it only after the init fetch succeeds — so an endpoint stuck retrying a dead upstream would
-	// otherwise burn the caller's whole budget waiting for a receiver that does not exist. Cap that
-	// wait instead. Deliberately a shorter DEADLINE and not a rejection: the state can lag the
-	// goroutine by a hair (it flips to Polling just after start returns), and in that window the
-	// send is taken instantly anyway, so nothing that could have succeeded is refused.
-	//
-	// The grace bounds DELIVERY ONLY. Once the goroutine has the request, the cycle it runs is
-	// bounded by the tracker's own fetch timeout — several times this grace — and is awaited on the
-	// caller's full budget, exactly as for a tracker that was already Polling. Bounding both with
-	// the grace would turn the lagging-state window into the worst outcome of all: the send taken,
-	// the poll running, and the caller timing out on a healthy cycle with a pre-poll record in hand.
-	deliveryCtx := ctx
-	if stateBefore != EndpointChainTrackerPolling {
-		var cancelDelivery context.CancelFunc
-		deliveryCtx, cancelDelivery = context.WithTimeout(ctx, pollNowUnstartedGrace)
-		defer cancelDelivery()
-	}
-
-	pollErr := tracker.PollNowWithDeliveryDeadline(deliveryCtx, ctx)
 	// Report the record either way: on a failed poll it carries the failure the caller came to
 	// observe, and otherwise it is the prior state, flagged as such by polled=false.
 	observation, _ = m.GetObservation(endpointURL)
@@ -860,8 +900,7 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 	// polled=false — the caller's question is "may I trust this record", not "did a goroutine move".
 	// Name the tracker's lifecycle state in the error: "retrying_start" is a diagnosis, a bare
 	// timeout is not.
-	if errors.Is(pollErr, chaintracker.ErrorPollNowNotDelivered) || errors.Is(pollErr, chaintracker.ErrorPollNowUnsupported) ||
-		errors.Is(pollErr, chaintracker.ErrorPollNowResultNotAwaited) {
+	if !ran {
 		// Read the state HERE, not before the attempt: what matters to whoever is diagnosing is the
 		// tracker's state at the moment the attempt gave out.
 		state, _, _ := m.GetTrackerState(endpointURL)
