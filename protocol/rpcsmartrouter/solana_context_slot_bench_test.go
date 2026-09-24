@@ -16,8 +16,8 @@ const solanaGetBlockReplyBytes = 5_900_000
 
 // BenchmarkExtractSolanaContextSlot measures the Solana tip harvest on the reply shapes that
 // matter: a multi-MB getBlock reply, which never carries result.context and so is a miss; a
-// multi-MB reply whose result is an array (getProgramAccounts without withContext), which the
-// path read walks element by element; a small getBalance reply, which is a hit; and a multi-MB
+// multi-MB reply whose result is an array (getProgramAccounts without withContext), answered from
+// result's first byte; a small getBalance reply, which is a hit; and a multi-MB
 // reply that does carry a context (getMultipleAccounts, getProgramAccounts withContext), where
 // the error check still has to get past the whole value.
 //

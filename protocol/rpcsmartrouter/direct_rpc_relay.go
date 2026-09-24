@@ -155,7 +155,8 @@ func resultRuleReadsBlockHash(parseDirective *spectypes.ParseDirective) bool {
 // replies while the harvest also runs on 4xx ones, so a body that does not close its top-level
 // object yields no slot: a cut inside the slot's digits would otherwise read as a smaller slot
 // than the node wrote. A member that appears twice counts the first time, and member names match
-// exactly.
+// exactly. A result that is not an object is recognised from its first byte (see
+// resultIsNotAnObject): the path read would otherwise walk every element of a list.
 //
 // The caller (tipBlockFromRelay) additionally gates on chain family so this is never
 // applied to non-Solana chains.
@@ -166,6 +167,9 @@ func extractSolanaContextSlot(data []byte) (int64, bool) {
 	}
 	if end := bytes.TrimRight(trimmed, " \t\r\n"); end[len(end)-1] != '}' {
 		return 0, false // cut short: the top-level object never closes
+	}
+	if resultIsNotAnObject(trimmed) {
+		return 0, false // a list, a number, a string or null: no context to find
 	}
 	// The slot first: a reply without one never pays for the second read.
 	slot := gjson.GetBytes(trimmed, "result.context.slot")
@@ -180,6 +184,99 @@ func extractSolanaContextSlot(data []byte) (int64, bool) {
 		return 0, false // JSON-RPC error response
 	}
 	return value, true
+}
+
+// resultIsNotAnObject reports whether the top-level result member of obj, a JSON object, holds
+// something other than an object: a list, a number, a string or null. Solana answers
+// getProgramAccounts (without withContext), getSignaturesForAddress and getBlocks with a list,
+// which cannot carry result.context.slot, and gjson would walk every element to find that out.
+// This reads only the members in front of result: "jsonrpc", and "id", which some upstreams
+// (tatum) write first, so a fixed prefix would not do.
+//
+// It answers false whenever it cannot tell cheaply: a member in front of result that holds an
+// object or a list, an escaped member name, no result at all, or bytes that are not a reply. The
+// caller then does the full read, so this only saves work. Two kinds of reply read differently
+// from the path read alone, both as main's decode read them: one with two result members, the
+// first not an object (the first decides; gjson goes on to the second), and bytes that are not
+// valid JSON (no slot; gjson reads leniently and can find one). No node sends either.
+func resultIsNotAnObject(obj []byte) bool {
+	i := 1 // past the opening brace
+	for {
+		i = skipJSONSpace(obj, i)
+		if i >= len(obj) || obj[i] != '"' {
+			return false
+		}
+		nameEnd := bytes.IndexByte(obj[i+1:], '"')
+		if nameEnd < 0 {
+			return false
+		}
+		name := obj[i+1 : i+1+nameEnd]
+		if bytes.IndexByte(name, '\\') >= 0 {
+			return false // an escaped name; leave it to the full read
+		}
+		i = skipJSONSpace(obj, i+nameEnd+2)
+		if i >= len(obj) || obj[i] != ':' {
+			return false
+		}
+		i = skipJSONSpace(obj, i+1)
+		if i >= len(obj) {
+			return false
+		}
+		if string(name) == "result" {
+			return obj[i] != '{'
+		}
+		if i = skipJSONScalar(obj, i); i < 0 {
+			return false
+		}
+		i = skipJSONSpace(obj, i)
+		if i >= len(obj) || obj[i] != ',' {
+			return false // the object ended, or a member was malformed, before result
+		}
+		i++
+	}
+}
+
+// skipJSONSpace returns the index of the first byte at or after i that is not JSON whitespace.
+func skipJSONSpace(b []byte, i int) int {
+	for i < len(b) {
+		switch b[i] {
+		case ' ', '\t', '\r', '\n':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// skipJSONScalar returns the index just past the string, number, true, false or null that
+// starts at b[i]. It returns -1 for an object or a list, which it does not step over, and for a
+// value that is cut short.
+func skipJSONScalar(b []byte, i int) int {
+	switch b[i] {
+	case '{', '[':
+		return -1
+	case '"':
+		for j := i + 1; j < len(b); j++ {
+			switch b[j] {
+			case '\\':
+				j++ // the escaped byte cannot close the string
+			case '"':
+				return j + 1
+			}
+		}
+		return -1
+	}
+	for j := i; j < len(b); j++ {
+		switch b[j] {
+		case ',', '}', ']', ' ', '\t', '\r', '\n':
+			if j == i {
+				return -1
+			}
+			return j
+		}
+	}
+	return -1
 }
 
 // extractBlockHeightFromEVMResponse extracts block height from EVM JSON-RPC responses.
