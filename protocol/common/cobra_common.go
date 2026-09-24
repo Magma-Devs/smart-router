@@ -143,6 +143,10 @@ const (
 	DefaultProcessingTimeoutFlagName = "default-processing-timeout" // default timeout for relay processing
 	MinRelayTimeoutFlagName          = "min-relay-timeout"          // minimum relay timeout floor (default 1s)
 	CacheTimeoutFlagName             = "cache-timeout"              // per-relay cache lookup budget (default 50ms)
+	// CacheMaxEntryBytesFlagName caps the reply body the router writes to its cache: a larger
+	// reply is served but not written. 0 disables the cap.
+	CacheMaxEntryBytesFlagName       = "cache-max-entry-bytes"
+	DefaultCacheMaxEntryBytes  int64 = 1 << 20
 
 	// ResponseCompressionFlag controls the encoding used by the fiber compress
 	// middleware on client-facing responses. Accepted values: "gzip", "brotli", "off".
