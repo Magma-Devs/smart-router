@@ -711,7 +711,7 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readResponseBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed reading response body: %w", err)
 	}
@@ -738,6 +738,46 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	}
 
 	return response, nil
+}
+
+// maxPresizedResponseBytes is the largest Content-Length readResponseBody trusts for its one
+// up-front allocation. It sits above every block a chain can legally produce (Tendermint's
+// default block.max_bytes is 21 MB; a Solana block is 5–7 MB), so every block reply is read
+// presized. It exists because the length is the upstream's claim: without a bound, a wrong one
+// would allocate memory before the transport finds out the body is shorter. A longer
+// announcement is read as it arrives, as it was before.
+const maxPresizedResponseBytes = 32 << 20
+
+// readResponseBody reads an upstream response body. When the upstream announced a length, the
+// body is read into one buffer of exactly that size (MAG-3845). io.ReadAll cannot know the
+// size, so it reads into a chain of growing buffers and then copies them all into a final one:
+// for a 5.9 MB Solana block that is 14.6 MB allocated and a full extra copy, against 5.9 MB and
+// none. A body with no announced length, or one above maxPresizedResponseBytes, still goes
+// through io.ReadAll. Read errors, including a body shorter than announced, come back as they
+// did before.
+func readResponseBody(resp *http.Response) ([]byte, error) {
+	size := resp.ContentLength
+	if size <= 0 || size > maxPresizedResponseBytes {
+		return io.ReadAll(resp.Body)
+	}
+	// One spare byte, so a body of exactly the announced length reaches EOF without growing
+	// the buffer (the same approach as os.ReadFile).
+	body := make([]byte, 0, size+1)
+	for {
+		n, err := resp.Body.Read(body[len(body):cap(body)])
+		body = body[:len(body)+n]
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return body, nil
+			}
+			return body, err
+		}
+		if len(body) == cap(body) {
+			// Longer than announced. The transport enforces Content-Length, so this should not
+			// happen; grow rather than cut the body short if it ever does.
+			body = append(body, 0)[:len(body)]
+		}
+	}
 }
 
 // HTTPStatusError represents an HTTP error response (4xx/5xx)
@@ -840,7 +880,7 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	defer resp.Body.Close()
 
 	// Read response body
-	body, err := io.ReadAll(resp.Body)
+	body, err := readResponseBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed reading response: %w", err)
 	}
