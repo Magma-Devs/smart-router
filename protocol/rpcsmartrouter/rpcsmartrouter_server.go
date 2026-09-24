@@ -1261,9 +1261,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// detached dissenting straggler would land last and overwrite the cache with the data the
 	// quorum just outvoted). The consensus WINNER is written exactly once, here — and BEFORE
 	// appendHeadersToRelayResult appends this request's cross-validation response headers to
-	// returnedResult.Reply.Metadata, so the cached entry (a deep copy of the whole reply, metadata
-	// included) does not carry per-request CV/GUID headers that would then be replayed verbatim to
-	// unrelated stateless requests on a cache hit.
+	// returnedResult.Reply.Metadata, so the cached entry (a snapshot of the reply taken here, see
+	// cacheWriteReplySnapshot) does not carry per-request CV/GUID headers that would then be
+	// replayed verbatim to unrelated stateless requests on a cache hit.
 	if err == nil && relayProcessor.GetSelection() == relaycore.CrossValidation && returnedResult != nil && returnedResult.Reply != nil {
 		rpcss.tryCacheWrite(ctx, protocolMessage, returnedResult)
 	}
@@ -3955,6 +3955,10 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 // JSON-and-base64 deep copy that cost 33 ms and a second full copy of the body per write
 // on a 5 MB Solana block. Anything that starts writing into Data in place would corrupt
 // cached entries: TestCacheWriteSnapshotSurvivesResponseMutation pins the contract.
+//
+// The snapshot is also private to the write, which mutates it: the RESP backend's
+// NewEnvelope reassigns Response.Sig and, for a compressed body, Response.Data. Handing the
+// write relayResult.Reply itself would race the response path even with nothing appended.
 func cacheWriteReplySnapshot(reply *pairingtypes.RelayReply) *pairingtypes.RelayReply {
 	snapshot := *reply
 	snapshot.Metadata = slices.Clone(reply.Metadata)
