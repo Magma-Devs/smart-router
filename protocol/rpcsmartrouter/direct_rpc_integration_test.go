@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -865,16 +866,107 @@ func TestExtractBlockHeightFromJSONResponse_EVMFallback(t *testing.T) {
 	assert.Equal(t, int64(4096), result, "EVM methods should work via fallback parsing")
 }
 
-// TestBlockExtractionResponseSizeGuard covers MAG-2557: the gRPC block-height
-// extraction path had no response-size cap while the JSON-RPC path capped at 1 MB,
-// so an oversized gRPC response was unmarshalled into a dynamic.Message, re-marshalled
-// to JSON and copied — several full-size allocations off one upstream reply.
+// solanaGetBlockReply builds a jsonParsed-shaped Solana getBlock reply with txCount
+// transactions: the header fields, blockhash among them, followed by the transactions array
+// that makes a real block 2-7 MB.
+func solanaGetBlockReply(txCount int) []byte {
+	var b strings.Builder
+	b.WriteString(`{"jsonrpc":"2.0","id":1,"result":{"blockHeight":331234567,"blockTime":1758700000,` +
+		`"blockhash":"5Q7xZr8k2mDsV9cWb3hJfLqE1nTa6YpRuKoG4iXzBv2N","parentSlot":353000000,"transactions":[`)
+	for i := 0; i < txCount; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"meta":{"err":null,"fee":5000,"postBalances":[1,2,3],"preBalances":[1,2,3],`+
+			`"logMessages":["Program 11111111111111111111111111111111 invoke [1]","Program 11111111111111111111111111111111 success"]},`+
+			`"transaction":{"accountKeys":[{"pubkey":"Acc%d","signer":true,"source":"transaction","writable":true}],"signatures":["sig%d"]},"version":0}`, i, i)
+	}
+	b.WriteString(`]}}`)
+	return []byte(b.String())
+}
+
+// TestBlockExtractionSkipsHashRule pins that neither extractor runs a GET_BLOCK_BY_NUM rule
+// as a height parse. That rule reads a block hash (it exists for the chain tracker's
+// hash-of-block-N lookup), so the parse could only fail, and it failed only after decoding
+// the whole reply: on a Solana getBlock, the largest reply the chain serves, that was 33 ms
+// and 786k allocations per 5 MB block for a result that was always 0.
 //
-// Both paths are asserted together, driven by the SAME constant, because that is the
-// claim: one cap for block extraction, not one per transport. The encoding differs
-// between JSON-RPC and gRPC; the size of the block we want to read does not. Threading
-// both extractors through maxResponseSizeForBlockExtraction is what makes a future
-// re-split of the constant fail here rather than pass quietly.
+// The assertion is the allocation count, not the returned height, for the reason
+// TestBlockExtractionResponseSizeGuard gives: 0 is returned both when the parse is skipped
+// and when it runs and fails, so only the work done tells the two apart.
+func TestBlockExtractionSkipsHashRule(t *testing.T) {
+	hashRuleMsg := func(apiName string, hashField string) *mockChainMessage {
+		return &mockChainMessage{
+			api:        &spectypes.Api{Name: apiName},
+			rpcMessage: &rpcInterfaceMessages.JsonrpcMessage{},
+			parseDirective: &spectypes.ParseDirective{
+				FunctionTag: spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM,
+				ApiName:     apiName,
+				ResultParsing: spectypes.BlockParser{
+					ParserArg:  []string{"0", hashField},
+					ParserFunc: spectypes.PARSER_FUNC_PARSE_CANONICAL,
+				},
+			},
+		}
+	}
+	reply := solanaGetBlockReply(500)
+
+	extractors := []struct {
+		name    string
+		extract func([]byte, chainlib.ChainMessage) int64
+	}{
+		{"grpc", extractBlockHeightFromGRPCResponse},
+		{"jsonrpc", extractBlockHeightFromJSONResponse},
+	}
+	for _, extractor := range extractors {
+		t.Run(extractor.name+"/hash rule is not run over the reply", func(t *testing.T) {
+			msg := hashRuleMsg("getBlock", "blockhash")
+			var got int64
+			allocs := testing.AllocsPerRun(5, func() { got = extractor.extract(reply, msg) })
+
+			assert.Equal(t, int64(0), got)
+			// A parse of this 500-transaction reply allocates tens of thousands of objects;
+			// the skip allocates only the debug log's attributes.
+			assert.Less(t, allocs, float64(100),
+				"a GET_BLOCK_BY_NUM rule reads a hash and must not decode the reply to find it")
+		})
+	}
+
+	// The skip must not cost a height the router gets today. eth_getBlockByNumber carries a
+	// GET_BLOCK_BY_NUM rule too (reading result.hash); its height always came from the EVM
+	// fallback, and still does.
+	t.Run("jsonrpc/eth_getBlockByNumber still yields its number", func(t *testing.T) {
+		msg := hashRuleMsg("eth_getBlockByNumber", "hash")
+		data := []byte(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x10","hash":"0x` + strings.Repeat("ab", 32) + `"}}`)
+
+		assert.Equal(t, int64(16), extractBlockHeightFromJSONResponse(data, msg))
+	})
+
+	// A rule that reads a height is untouched: Solana's GET_BLOCKNUM rule on
+	// getLatestBlockhash still parses result.context.slot.
+	t.Run("jsonrpc/a height rule still parses", func(t *testing.T) {
+		msg := &mockChainMessage{
+			api:        &spectypes.Api{Name: "getLatestBlockhash"},
+			rpcMessage: &rpcInterfaceMessages.JsonrpcMessage{},
+			parseDirective: &spectypes.ParseDirective{
+				FunctionTag: spectypes.FUNCTION_TAG_GET_BLOCKNUM,
+				ApiName:     "getLatestBlockhash",
+				ResultParsing: spectypes.BlockParser{
+					ParserArg:  []string{"0", "context", "slot"},
+					ParserFunc: spectypes.PARSER_FUNC_PARSE_CANONICAL,
+				},
+			},
+		}
+		data := []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":353000123},"value":{"blockhash":"abc","lastValidBlockHeight":1}}}`)
+
+		assert.Equal(t, int64(353000123), extractBlockHeightFromJSONResponse(data, msg))
+	})
+}
+
+// TestBlockExtractionResponseSizeGuard covers the per-transport caps on block-height
+// extraction. MAG-2557 gave the gRPC path a cap (it had none, so an oversized response was
+// unmarshalled into a dynamic.Message, re-marshalled to JSON and copied); the JSON-RPC path
+// carries the 1 MiB cap it had before MAG-2557 folded both into one.
 //
 // The assertion is parseDirectiveCalls, not the returned height. Extraction returns 0
 // whether it skipped the response or parsed it and found nothing, so the return value
@@ -893,20 +985,21 @@ func TestBlockExtractionResponseSizeGuard(t *testing.T) {
 	extractors := []struct {
 		name    string
 		extract func([]byte, chainlib.ChainMessage) int64
+		limit   int
 	}{
-		{"grpc", extractBlockHeightFromGRPCResponse},
-		{"jsonrpc", extractBlockHeightFromJSONResponse},
+		{"grpc", extractBlockHeightFromGRPCResponse, maxGRPCResponseSizeForBlockExtraction},
+		{"jsonrpc", extractBlockHeightFromJSONResponse, maxJSONRPCResponseSizeForBlockExtraction},
 	}
 
 	for _, extractor := range extractors {
 		t.Run(extractor.name+"/over cap is skipped without parsing", func(t *testing.T) {
 			msg := newMsg()
-			oversized := make([]byte, maxResponseSizeForBlockExtraction+1)
+			oversized := make([]byte, extractor.limit+1)
 
 			assert.Equal(t, int64(0), extractor.extract(oversized, msg))
 			assert.Zero(t, msg.parseDirectiveCalls,
 				"response over the %d byte cap must be skipped before any parsing work",
-				maxResponseSizeForBlockExtraction)
+				extractor.limit)
 		})
 
 		// Boundary: the guard is `>`, so a response of exactly the cap still parses.
@@ -914,7 +1007,7 @@ func TestBlockExtractionResponseSizeGuard(t *testing.T) {
 		// dropping block tracking for responses that are within budget.
 		t.Run(extractor.name+"/exactly at cap still parses", func(t *testing.T) {
 			msg := newMsg()
-			atCap := make([]byte, maxResponseSizeForBlockExtraction)
+			atCap := make([]byte, extractor.limit)
 
 			// The payload is zero bytes, so parsing yields no height — the point is
 			// that extraction was attempted at all.
@@ -924,24 +1017,22 @@ func TestBlockExtractionResponseSizeGuard(t *testing.T) {
 		})
 	}
 
-	// The regression this whole test exists to prevent is not "the guard is missing" but
-	// "the guard is set too low". On both transports the biggest response IS the block
-	// source — GetLatestBlock on gRPC, eth_getBlockByNumber on JSON-RPC — so a cap below
-	// the chain's consensus block.max_bytes fires only on full blocks, during congestion,
-	// silently, exactly when tip accuracy matters most. Tendermint's default max_bytes is
-	// the ceiling to clear; the 1 MB this constant used to carry lands far under it.
-	t.Run("cap clears the consensus block ceiling", func(t *testing.T) {
+	// On gRPC the biggest response IS the tip: GetLatestBlock returns the whole block. A cap
+	// below the chain's consensus block.max_bytes fires only on full blocks, during
+	// congestion, silently, exactly when tip accuracy matters most. Tendermint's default
+	// max_bytes is the ceiling to clear.
+	t.Run("grpc cap clears the consensus block ceiling", func(t *testing.T) {
 		const tendermintDefaultMaxBytes = 22020096 // 21 MB, Tendermint's default block.max_bytes
-		assert.Greater(t, maxResponseSizeForBlockExtraction, tendermintDefaultMaxBytes,
-			"block-extraction cap must exceed the largest block a chain can legally produce")
+		assert.Greater(t, maxGRPCResponseSizeForBlockExtraction, tendermintDefaultMaxBytes,
+			"gRPC block-extraction cap must exceed the largest block a chain can legally produce")
 	})
 
-	// The other half of the sizing claim: a cap at the transport's own receive limit could
-	// never fire, because gRPC refuses to decode a message above it before extraction is
-	// reached. Pinning strict inequality keeps "just reuse the overall limit" from turning
+	// The other half of the gRPC sizing claim: a cap at the transport's own receive limit
+	// could never fire, because gRPC refuses to decode a message above it before extraction
+	// is reached. Pinning strict inequality keeps "just reuse the overall limit" from turning
 	// the guard into a branch no input can take.
-	t.Run("cap stays below the transport receive limit", func(t *testing.T) {
-		assert.Less(t, maxResponseSizeForBlockExtraction, chainproxy.MaxCallRecvMsgSize,
+	t.Run("grpc cap stays below the transport receive limit", func(t *testing.T) {
+		assert.Less(t, maxGRPCResponseSizeForBlockExtraction, chainproxy.MaxCallRecvMsgSize,
 			"a cap at or above MaxCallRecvMsgSize is unreachable — the transport rejects first")
 	})
 }
