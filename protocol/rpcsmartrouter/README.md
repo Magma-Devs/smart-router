@@ -327,6 +327,31 @@ smartrouter config.yml --use-static-spec specs/
 --log_level debug                    # Log verbosity
 ```
 
+### Per-request time budget (`lava-relay-timeout`)
+
+A caller can send `lava-relay-timeout: <Go duration>` (for example `300ms` or `5s`) to set the
+request's attempt window: how long the router waits on one endpoint before it also tries the next.
+The router bounds the value (MAG-3600):
+
+- A value that is not a positive duration (`-45s`, `0s`, `abc`) is ignored, and the router's own
+  window applies.
+- A value under 300ms is raised to 300ms. A shorter window would dispatch every attempt the retry
+  limits allow before any endpoint could answer.
+- A value above the request's own processing budget is held to that budget. The budget is
+  `--default-processing-timeout`, doubled for calls of 50 CU or more, and six times it for hanging,
+  stateful or 100+ CU calls. By default the header reshapes hedging but cannot make the router hold
+  a request longer.
+
+`--max-relay-timeout` lets callers extend the budget, up to its value:
+
+```bash
+--max-relay-timeout 2m               # default 0: callers cannot extend a request's budget
+```
+
+A reply to a request that carried the header includes `Lava-Relay-Timeout-Applied`: the window the
+router actually used, as a Go duration. Like the router's other reply headers, it is absent when the
+request failed without any reply.
+
 ### Usage telemetry (OTel)
 
 Off by default. When enabled, the smart router emits two event types as

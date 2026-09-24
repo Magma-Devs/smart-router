@@ -3,6 +3,7 @@ package relaycore
 import (
 	context "context"
 	"errors"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -447,6 +448,18 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 
 		// relayTimeout is the attempt WINDOW: when to dispatch another endpoint. It no longer also
 		// kills the attempt in flight, so this genuinely hedges rather than replaces.
+		//
+		// time.NewTicker panics on a non-positive interval, and nothing recovers a panic in this
+		// goroutine: it ends the process, for every request on it (MAG-3600). GetRelayTimeout never
+		// returns one, but the window arrives through an interface, so the line is held here too.
+		// A window that means nothing means no hedging, not a crash and not a hedge storm.
+		if relayTimeout <= 0 {
+			utils.LavaFormatWarning("[StateMachine] non-positive attempt window, this relay will not hedge", nil,
+				utils.LogAttr("attemptWindow", relayTimeout),
+				utils.LogAttr("GUID", sm.ctx),
+			)
+			relayTimeout = time.Duration(math.MaxInt64) // never fires within the request
+		}
 		startNewBatchTicker := time.NewTicker(relayTimeout)
 		defer startNewBatchTicker.Stop()
 

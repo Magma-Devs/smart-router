@@ -3739,6 +3739,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 
 	cmdRPCSmartRouter.Flags().DurationVar(&common.DefaultTimeout, common.DefaultProcessingTimeoutFlagName, common.DefaultTimeout, "default timeout for relay processing (e.g., 30s, 1m)")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.MinimumTimePerRelayDelay, common.MinRelayTimeoutFlagName, common.MinimumTimePerRelayDelay, "minimum relay timeout floor applied to all methods when CU-based timeout is lower (e.g., 1s, 5s)")
+	cmdRPCSmartRouter.Flags().DurationVar(&common.MaxCallerRelayTimeout, common.MaxRelayTimeoutFlagName, common.MaxCallerRelayTimeout, "longest a caller's lava-relay-timeout header may make the router hold one request (e.g., 2m). It only extends a request's own budget (default-processing-timeout, x2 or x6 for heavy calls), never shortens it; the default 0 lets the header reshape hedging but not extend the budget")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.CacheTimeout, common.CacheTimeoutFlagName, common.CacheTimeout, "per-relay cache lookup budget; must exceed the network round trip to the cache backend, so raise it for a remote (e.g. cross-region RESP) backend (e.g., 400ms)")
 	cmdRPCSmartRouter.Flags().Uint64(common.BenchAfterFlagName, lavasession.DefaultBenchAfter,
 		"consecutive failed requests to one endpoint address before it is taken out of rotation; a successful relay resets the count. Must be > 0")

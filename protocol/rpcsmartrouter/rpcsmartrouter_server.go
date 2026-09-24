@@ -4752,17 +4752,27 @@ func (rpcss *RPCSmartRouterServer) getExtensionsFromDirectiveHeaders(directiveHe
 }
 
 func (rpcss *RPCSmartRouterServer) HandleDirectiveHeadersForMessage(chainMessage chainlib.ChainMessage, directiveHeaders map[string]string) {
-	timeoutStr, ok := directiveHeaders[common.RELAY_TIMEOUT_HEADER_NAME]
-	if ok {
+	if timeoutStr, ok := directiveHeaders[common.RELAY_TIMEOUT_HEADER_NAME]; ok {
+		// Any caller can send this, unauthenticated. A value that is not a positive duration is
+		// dropped here rather than stored: a negative one used to reach time.NewTicker and end the
+		// process (MAG-3600). A positive one is stored as sent and bounded where it is used
+		// (chainlib.GetRelayTimeout), so a message rebuilt from this one (preserveRelayTimeout) is
+		// bounded against its own budget. The caller learns what applied from the
+		// Lava-Relay-Timeout-Applied reply header. Debug level on purpose: the value is the
+		// caller's, and anything louder would let any caller write to the log at will.
 		timeout, err := time.ParseDuration(timeoutStr)
-		if err == nil {
-			// set an override timeout
-			utils.LavaFormatDebug("User indicated to set the timeout using flag", utils.LogAttr("timeout", timeoutStr))
+		switch {
+		case err != nil:
+			utils.LavaFormatDebug("lava-relay-timeout ignored: not a duration", utils.LogAttr("timeout", timeoutStr))
+		case timeout <= 0:
+			utils.LavaFormatDebug("lava-relay-timeout ignored: not positive", utils.LogAttr("timeout", timeoutStr))
+		default:
+			utils.LavaFormatDebug("lava-relay-timeout set by the caller", utils.LogAttr("timeout", timeoutStr))
 			chainMessage.TimeoutOverride(timeout)
 		}
 	}
 
-	_, ok = directiveHeaders[common.FORCE_CACHE_REFRESH_HEADER_NAME]
+	_, ok := directiveHeaders[common.FORCE_CACHE_REFRESH_HEADER_NAME]
 	chainMessage.SetForceCacheRefresh(ok)
 }
 
@@ -5359,6 +5369,23 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			pairingtypes.Metadata{
 				Name:  common.LAVA_HEDGE_TRIGGERED_HEADER,
 				Value: "true",
+			})
+	}
+
+	// MAG-3600: a caller who sent lava-relay-timeout is told the window the router actually used —
+	// the value as sent, the bound it was held to, or the router's own window when the value was
+	// ignored (not a duration, or not positive). Read through GetRelayTimeout, the function the
+	// relay itself used, so the two cannot disagree. Emitted whenever the directive was sent, so an
+	// absent header means only "not sent" or "router predates this header".
+	if _, sent := protocolMessage.GetDirectiveHeaders()[common.RELAY_TIMEOUT_HEADER_NAME]; sent {
+		var averageBlockTime time.Duration
+		if rpcss.chainParser != nil {
+			_, averageBlockTime, _, _ = rpcss.chainParser.ChainBlockStats()
+		}
+		metadataReply = append(metadataReply,
+			pairingtypes.Metadata{
+				Name:  common.RELAY_TIMEOUT_APPLIED_HEADER_NAME,
+				Value: chainlib.GetRelayTimeout(protocolMessage, averageBlockTime).String(),
 			})
 	}
 
