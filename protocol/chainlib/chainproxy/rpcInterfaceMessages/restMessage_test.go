@@ -699,3 +699,95 @@ func TestCheckResponseError_ServerErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckResponseError_RouteRefusal pins the line between a node answering 404 with a problem
+// document (data, passed through) and a refused route — any 405, or a 404 with an empty or
+// non-JSON body — which is a node error, so a stateful broadcast keeps waiting for its siblings.
+func TestCheckResponseError_RouteRefusal(t *testing.T) {
+	testCases := []struct {
+		name          string
+		httpStatus    int
+		response      string
+		expectedError bool
+		errorContains string
+	}{
+		{
+			name:          "404 with empty body is a gateway refusal",
+			httpStatus:    404,
+			response:      ``,
+			expectedError: true,
+			errorContains: "HTTP 404",
+		},
+		{
+			name:          "404 with an HTML body is a gateway refusal",
+			httpStatus:    404,
+			response:      `<html><head><title>404 Not Found</title></head><body>nginx</body></html>`,
+			expectedError: true,
+			errorContains: "404 Not Found",
+		},
+		{
+			name:          "404 with a plain-text body is a gateway refusal",
+			httpStatus:    404,
+			response:      `route not found`,
+			expectedError: true,
+			errorContains: "route not found",
+		},
+		{
+			name:          "404 with a Horizon problem document is the node's answer",
+			httpStatus:    404,
+			response:      `{"type":"https://stellar.org/horizon-errors/not_found","title":"Resource Missing","status":404,"detail":"The resource at the url requested was not found."}`,
+			expectedError: false,
+		},
+		{
+			name:          "404 with an Aptos error body is the node's answer",
+			httpStatus:    404,
+			response:      `{"message":"Account not found by Address(0x1) and Ledger version(1)","error_code":"account_not_found","vm_error_code":null}`,
+			expectedError: false,
+		},
+		{
+			name:          "404 with a gRPC-gateway body is the node's answer",
+			httpStatus:    404,
+			response:      `{"code":5,"message":"rpc error: code = NotFound desc = not found","details":[]}`,
+			expectedError: false,
+		},
+		{
+			name:          "405 with an Aptos JSON body is still a refusal — the request was never executed",
+			httpStatus:    405,
+			response:      `{"message":"method not allowed","error_code":"web_framework_error","vm_error_code":null}`,
+			expectedError: true,
+			errorContains: "method not allowed",
+		},
+		{
+			name:          "405 with an empty body is a refusal — Horizon's own answer to a wrong method",
+			httpStatus:    405,
+			response:      ``,
+			expectedError: true,
+			errorContains: "HTTP 405",
+		},
+		{
+			name:          "400 with empty body stays a pass-through client error",
+			httpStatus:    400,
+			response:      ``,
+			expectedError: false,
+		},
+		{
+			name:          "403 with empty body stays a pass-through client error",
+			httpStatus:    403,
+			response:      ``,
+			expectedError: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			restMsg := RestMessage{}
+
+			hasError, errorMessage := restMsg.CheckResponseError([]byte(tc.response), tc.httpStatus)
+
+			require.Equal(t, tc.expectedError, hasError, "error detection mismatch for %s", tc.name)
+			if tc.errorContains != "" {
+				require.Contains(t, errorMessage, tc.errorContains)
+			}
+		})
+	}
+}
