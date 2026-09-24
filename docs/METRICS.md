@@ -449,6 +449,7 @@ drained by the release path, and `0` means dark unambiguously.
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `smartrouter_endpoint_serving_tier` | Gauge | `spec`, `apiInterface` | Which provider tier the endpoint is serving from: `2` = primaries, `1` = degraded (backups only), `0` = dark (no healthy providers). |
+| `smartrouter_backup_tier_served_total` | Counter | `spec`, `apiInterface` | Relay requests the caller got a backup provider's reply for. A request counts once, when it completes: a primary that failed, dropped the connection or hung all count once the backup answers, and so does a hedge the backup wins against a slow primary. A node error the backup returned counts too, since the backup answered; a request no tier answered does not, and its failed attempts are in `smartrouter_requests_failed_total`. A stateful relay counts the same way: with `--stateful-to-backup` off it reaches a backup only by falling over, and with it on a broadcast the backup answered first still counts. Not counted: cross-validation requests, whose answer is a quorum rather than one provider's reply, and WebSocket or gRPC subscriptions, whose managers pick an endpoint before any connection exists, so a count there would include subscribes that failed. The gauge above is a **level**; this is the **event** it cannot show: that a backup served, and how often (MAG-3536). A router whose backups alone serve an addon counts every request for it, a steady baseline rather than an incident. |
 
 Before MAG-2525 an endpoint with no healthy provider exited the process, so a
 CrashLoopBackOff was the de-facto alert. It now boots and reports unhealthy instead,
@@ -464,6 +465,7 @@ Suggested alerts:
 | --- | --- |
 | `smartrouter_endpoint_serving_tier == 0` | Endpoint is dark — all relays 5xx. Page. |
 | `smartrouter_endpoint_serving_tier < 2` | Serving on backups only. Redundancy is gone; the next failure is an outage. |
+| `increase(smartrouter_backup_tier_served_total[5m]) > 0` | The backup tier answered at least one request, so the primaries failed it, hung, or lost a hedge to a backup. Redundancy was consumed, even if the tier gauge has already recovered. Expect a baseline on a router whose backups alone serve an addon. |
 
 Sizing the `for:` window: recovery from `0` is not one cadence. A chain that was **dark
 at boot** is retried on an adaptive schedule starting at ~2s and doubling to a 3m

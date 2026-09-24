@@ -51,6 +51,7 @@ func (NoOpConsumerMetrics) SetCSMBlockedBackupProvidersCount(string, string, int
 func (NoOpConsumerMetrics) SetCSMStickySessionsCount(string, string, int)                  {}
 func (NoOpConsumerMetrics) RecordStickyClaim(string, string, string)                       {}
 func (NoOpConsumerMetrics) SetCSMReportedProvidersCount(string, string, int)               {}
+func (NoOpConsumerMetrics) RecordBackupTierServed(string, string)                          {}
 func (NoOpConsumerMetrics) SetWsSubscriptionRequestMetric(string, string)                  {}
 func (NoOpConsumerMetrics) SetFailedWsSubscriptionRequestMetric(string, string)            {}
 func (NoOpConsumerMetrics) SetWebSocketConnectionActive(string, string, bool)              {}
@@ -125,6 +126,12 @@ type ConsumerMetricsManagerInf interface {
 	// RecordStickyClaim counts one cross-pod sticky-session claim resolution by outcome.
 	RecordStickyClaim(chainId, apiInterface, outcome string)
 	SetCSMReportedProvidersCount(chainId, apiInterface string, count int)
+
+	// --- Routing decisions (relay server) ---
+	// RecordBackupTierServed counts one relay request the caller got a backup provider's reply for.
+	// This is the EVENT that the level gauges
+	// (SetEndpointServingTier, SetCSMBlockedBackupProvidersCount) cannot show (MAG-3536).
+	RecordBackupTierServed(chainId, apiInterface string)
 
 	// --- WebSocket (DirectWSSubscriptionManager) ---
 	SetWsSubscriptionRequestMetric(chainId string, apiInterface string)
