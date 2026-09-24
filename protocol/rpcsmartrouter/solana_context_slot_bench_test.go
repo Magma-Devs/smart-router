@@ -16,9 +16,10 @@ const solanaGetBlockReplyBytes = 5_900_000
 
 // BenchmarkExtractSolanaContextSlot measures the Solana tip harvest on the reply shapes that
 // matter: a multi-MB getBlock reply, which never carries result.context and so is a miss; a
-// small getBalance reply, which is a hit; and a multi-MB reply that does carry a context
-// (getMultipleAccounts, getProgramAccounts withContext), where the error check still has to
-// get past the whole value.
+// multi-MB reply whose result is an array (getProgramAccounts without withContext), which the
+// path read walks element by element; a small getBalance reply, which is a hit; and a multi-MB
+// reply that does carry a context (getMultipleAccounts, getProgramAccounts withContext), where
+// the error check still has to get past the whole value.
 //
 //	go test ./protocol/rpcsmartrouter/ -bench SolanaContextSlot -benchmem -run=^$ -count=3
 func BenchmarkExtractSolanaContextSlot(b *testing.B) {
@@ -28,6 +29,7 @@ func BenchmarkExtractSolanaContextSlot(b *testing.B) {
 		wantOK bool
 	}{
 		{"getBlock_~5.9MB/miss", solanaGetBlockReply(solanaGetBlockReplyBytes), false},
+		{"getProgramAccounts_~5.9MB/miss", solanaArrayResultReply(solanaGetBlockReplyBytes), false},
 		{"getBalance/hit", []byte(`{"jsonrpc":"2.0","result":{"context":{"apiVersion":"2.2.7","slot":341197053},"value":1000000},"id":1}`), true},
 		{"getMultipleAccounts_~5.9MB/hit", solanaLargeContextReply(solanaGetBlockReplyBytes), true},
 	} {
@@ -65,17 +67,35 @@ func BenchmarkTipBlockFromRelay_SolanaGetBlock(b *testing.B) {
 	}
 }
 
-// solanaGetBlockReply builds a jsonParsed getBlock reply of at least targetBytes. Members come
-// in the order a Solana node serializes them, and, like every real getBlock reply, the result
-// is the block itself, with no result.context.
+// solanaGetBlockReply builds a jsonParsed getBlock reply of at least targetBytes. The block's own
+// members come in the order a Solana node sends them, alphabetical, so the transactions are last
+// (checked against a mainnet getBlock reply on 2026-09-24). Like every real getBlock reply, the
+// result is the block itself, with no result.context. Each transaction is a representative
+// jsonParsed shape, not a byte-exact one.
 func solanaGetBlockReply(targetBytes int) []byte {
 	var buf bytes.Buffer
 	buf.Grow(targetBytes + 4096)
-	fmt.Fprintf(&buf, `{"jsonrpc":"2.0","result":{"previousBlockhash":"%s","blockhash":"%s","parentSlot":341197052,"transactions":[`,
-		fakeBase58(1, 44), fakeBase58(2, 44))
+	fmt.Fprintf(&buf, `{"jsonrpc":"2.0","result":{"blockHeight":319512345,"blockTime":1758700000,"blockhash":"%s","parentSlot":341197052,"previousBlockhash":"%s","rewards":[{"commission":null,"lamports":12345678,"postBalance":987654321,"pubkey":"%s","rewardType":"Fee"}],"transactions":[`,
+		fakeBase58(2, 44), fakeBase58(1, 44), fakeBase58(3, 44))
 	writeSolanaParsedTransactions(&buf, targetBytes)
-	fmt.Fprintf(&buf, `],"rewards":[{"pubkey":"%s","lamports":12345678,"postBalance":987654321,"rewardType":"Fee","commission":null}],"blockTime":1758700000,"blockHeight":319512345},"id":1}`,
-		fakeBase58(3, 44))
+	buf.WriteString(`]},"id":1}`)
+	return buf.Bytes()
+}
+
+// solanaArrayResultReply builds a reply of at least targetBytes whose result is an array, as
+// getProgramAccounts (without withContext), getSignaturesForAddress and getBlocks return.
+func solanaArrayResultReply(targetBytes int) []byte {
+	var buf bytes.Buffer
+	buf.Grow(targetBytes + 4096)
+	buf.WriteString(`{"jsonrpc":"2.0","result":[`)
+	for i := 0; buf.Len() < targetBytes; i++ {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		fmt.Fprintf(&buf, `{"account":{"data":["%s","base64"],"executable":false,"lamports":%d,"owner":"%s","rentEpoch":18446744073709551615,"space":165},"pubkey":"%s"}`,
+			fakeBase58(uint64(i), 220), 2_039_280+i, fakeBase58(9, 44), fakeBase58(uint64(i)+7, 44))
+	}
+	buf.WriteString(`],"id":1}`)
 	return buf.Bytes()
 }
 

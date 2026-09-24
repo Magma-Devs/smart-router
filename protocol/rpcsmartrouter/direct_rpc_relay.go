@@ -149,11 +149,13 @@ func resultRuleReadsBlockHash(parseDirective *spectypes.ParseDirective) bool {
 //   - only the nested result.context.slot envelope — a bare numeric "slot" elsewhere is
 //     NOT interpreted, avoiding coincidental matches — and only a positive integer.
 //
-// It reads that one path and never decodes the reply (MAG-3843). This runs on every Solana
-// reply, and decoding one meant copying the whole body and walking all of it, to find a
-// member most large replies do not have. It does not validate the reply either: the JSON-RPC
-// relay drops a body that fails json.Valid before any harvest (sendJSONRPCRelay). A member
-// that appears twice counts the first time, and member names match exactly.
+// It never decodes the reply (MAG-3843): it reads result.context.slot by path, and the error
+// member only once a slot is found. Decoding copied the whole body first, on every Solana reply.
+// The path read does not validate the reply, and the relay checks json.Valid only on 2xx
+// replies while the harvest also runs on 4xx ones, so a body that does not close its top-level
+// object yields no slot: a cut inside the slot's digits would otherwise read as a smaller slot
+// than the node wrote. A member that appears twice counts the first time, and member names match
+// exactly.
 //
 // The caller (tipBlockFromRelay) additionally gates on chain family so this is never
 // applied to non-Solana chains.
@@ -161,6 +163,9 @@ func extractSolanaContextSlot(data []byte) (int64, bool) {
 	trimmed := bytes.TrimLeft(data, " \t\r\n")
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return 0, false // not a single JSON object (e.g. a batch array)
+	}
+	if end := bytes.TrimRight(trimmed, " \t\r\n"); end[len(end)-1] != '}' {
+		return 0, false // cut short: the top-level object never closes
 	}
 	// The slot first: a reply without one never pays for the second read.
 	slot := gjson.GetBytes(trimmed, "result.context.slot")
