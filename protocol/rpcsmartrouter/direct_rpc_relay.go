@@ -23,6 +23,7 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
+	"github.com/tidwall/gjson"
 )
 
 // DirectRPCRelaySender handles sending relay requests directly to RPC endpoints
@@ -146,7 +147,13 @@ func resultRuleReadsBlockHash(parseDirective *spectypes.ParseDirective) bool {
 //     since per-call slots can't be attributed to one endpoint tip;
 //   - successful responses only (a present, non-null "error" member → false);
 //   - only the nested result.context.slot envelope — a bare numeric "slot" elsewhere is
-//     NOT interpreted, avoiding coincidental matches.
+//     NOT interpreted, avoiding coincidental matches — and only a positive integer.
+//
+// It reads that one path and never decodes the reply (MAG-3843). This runs on every Solana
+// reply, and decoding one meant copying the whole body and walking all of it, to find a
+// member most large replies do not have. It does not validate the reply either: the JSON-RPC
+// relay drops a body that fails json.Valid before any harvest (sendJSONRPCRelay). A member
+// that appears twice counts the first time, and member names match exactly.
 //
 // The caller (tipBlockFromRelay) additionally gates on chain family so this is never
 // applied to non-Solana chains.
@@ -155,27 +162,19 @@ func extractSolanaContextSlot(data []byte) (int64, bool) {
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return 0, false // not a single JSON object (e.g. a batch array)
 	}
-	var resp struct {
-		Error  json.RawMessage `json:"error"`
-		Result *struct {
-			Context *struct {
-				Slot *int64 `json:"slot"`
-			} `json:"context"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(trimmed, &resp); err != nil {
+	// The slot first: a reply without one never pays for the second read.
+	slot := gjson.GetBytes(trimmed, "result.context.slot")
+	if slot.Type != gjson.Number {
 		return 0, false
 	}
-	if e := bytes.TrimSpace(resp.Error); len(e) > 0 && string(e) != "null" {
+	value, err := strconv.ParseInt(slot.Raw, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, false // a fraction, an exponent, out of range, or not positive
+	}
+	if errorMember := gjson.GetBytes(trimmed, "error"); errorMember.Exists() && errorMember.Type != gjson.Null {
 		return 0, false // JSON-RPC error response
 	}
-	if resp.Result == nil || resp.Result.Context == nil || resp.Result.Context.Slot == nil {
-		return 0, false
-	}
-	if slot := *resp.Result.Context.Slot; slot > 0 {
-		return slot, true
-	}
-	return 0, false
+	return value, true
 }
 
 // extractBlockHeightFromEVMResponse extracts block height from EVM JSON-RPC responses.

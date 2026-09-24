@@ -3246,7 +3246,9 @@ func (rpcss *RPCSmartRouterServer) endpointObservationGeneration(endpointURL str
 //   - Solana family (JSON-RPC): result.context.slot — the slot the query was processed at,
 //     i.e. the node's current tip — present on most successful Solana responses
 //     (getBalance, getAccountInfo, getLatestBlockhash, ...). Chain-aware; never applied to
-//     other chains. See extractSolanaContextSlot.
+//     other chains. See extractSolanaContextSlot. The GET_BLOCK_BY_NUM method (getBlock) is
+//     skipped without reading the reply: it answers with the block itself, never with a
+//     context, and looking for one would walk every transaction in a multi-MB block.
 //   - Otherwise (EVM/gRPC): Reply.LatestBlock is the tip ONLY for a method whose semantics make the
 //     reply's block the node's current tip, identified by SPEC TAG (not by RequestedBlock alone):
 //     1. GET_BLOCKNUM (eth_blockNumber-equivalent): the result IS the tip.
@@ -3267,6 +3269,9 @@ func (rpcss *RPCSmartRouterServer) tipBlockFromRelay(chainMessage chainlib.Chain
 		return 0, false
 	}
 	if common.IsSolanaFamily(rpcss.listenEndpoint.ChainID) {
+		if rpcss.isGetBlockByNumMethod(chainMessage) {
+			return 0, false
+		}
 		return extractSolanaContextSlot(reply.Data)
 	}
 	if reply.LatestBlock <= 0 {
