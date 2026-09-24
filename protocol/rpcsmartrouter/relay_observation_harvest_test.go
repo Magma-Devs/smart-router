@@ -1,7 +1,9 @@
 package rpcsmartrouter
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -19,6 +21,7 @@ import (
 	rand "github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func newHarvestMonitor(t *testing.T) *endpointstate.EndpointMonitor {
@@ -86,6 +89,13 @@ func TestExtractSolanaContextSlot(t *testing.T) {
 		{"truncated after the slot yields no slot", `{"result":{"context":{"slot":5},"value":{"data":"ab`, 0, false},
 		{"cut inside the slot's digits yields no slot", `{"result":{"context":{"slot":4242`, 0, false},
 		{"trailing whitespace after the object", "{\"result\":{\"context\":{\"slot\":6}}}\n", 6, true},
+		// MAG-3843: a result that is not an object is answered from its first byte. The first three
+		// read exactly as the path read alone would. With two result members the first decides, as
+		// it did in main's decode; the path read alone would go on to the second.
+		{"result is a list, with id written first", `{"id":1,"jsonrpc":"2.0","result":[{"pubkey":"x"}]}`, 0, false},
+		{"an object result behind an id holding an escaped quote", `{"id":"a\"b","jsonrpc":"2.0","result":{"context":{"slot":11}}}`, 11, true},
+		{"an object result with whitespace around every token", `{ "jsonrpc" : "2.0" , "result" : { "context" : { "slot" : 12 } } }`, 12, true},
+		{"the first of two result members counts", `{"result":[1],"result":{"context":{"slot":5}}}`, 0, false},
 		// MAG-3843: where the path read differs from the decode it replaced, on purpose.
 		{"first of two slot members counts", `{"result":{"context":{"slot":1,"slot":2}}}`, 1, true},
 		{"member names match exactly", `{"Result":{"Context":{"Slot":5}}}`, 0, false},
@@ -96,6 +106,66 @@ func TestExtractSolanaContextSlot(t *testing.T) {
 			require.Equal(t, tc.wantSlot, slot)
 		})
 	}
+}
+
+// MAG-3843: resultIsNotAnObject answers true only once it has reached result and result is not
+// an object. Whatever it cannot tell cheaply is false, and the caller does the full read.
+func TestResultIsNotAnObject(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		obj  string
+		want bool
+	}{
+		{"a list", `{"jsonrpc":"2.0","result":[1,2],"id":1}`, true},
+		{"a list, with id written first", `{"id":1,"jsonrpc":"2.0","result":[{"pubkey":"x"}]}`, true},
+		{"a number", `{"jsonrpc":"2.0","result":450006708,"id":1}`, true},
+		{"null", `{"jsonrpc":"2.0","result":null,"id":1}`, true},
+		{"a string", `{"jsonrpc":"2.0","result":"ok","id":1}`, true},
+		{"whitespace around every token", `{ "jsonrpc" : "2.0" , "result" : [ ] }`, true},
+		{"an id string holding an escaped quote", `{"id":"a\"b","jsonrpc":"2.0","result":[1]}`, true},
+		{"an object", `{"jsonrpc":"2.0","result":{"context":{"slot":1}},"id":1}`, false},
+		{"an object member in front of result", `{"error":{"code":1},"result":[1]}`, false},
+		{"a list member in front of result", `{"extra":[1],"result":[1]}`, false},
+		{"an escaped member name", `{"res\u0075lt":[1]}`, false},
+		{"no result member", `{"jsonrpc":"2.0","id":1}`, false},
+		{"cut short before result", `{"jsonrpc":"2.0","res`, false},
+		{"an empty object", `{}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, resultIsNotAnObject([]byte(tc.obj)))
+		})
+	}
+}
+
+// MAG-3843: the list check must not change an answer. For valid JSON with one result member,
+// whenever it says result is not an object, the path read it skips must find no slot either. The
+// rest is skipped, because there the check is stricter than gjson on purpose (see
+// resultIsNotAnObject): input that is not valid JSON, or that can hold a second result member
+// (the word twice, or any \u escape).
+//
+//	go test ./protocol/rpcsmartrouter/ -run '^$' -fuzz FuzzResultIsNotAnObject -fuzztime 60s
+func FuzzResultIsNotAnObject(f *testing.F) {
+	for _, seed := range []string{
+		`{"jsonrpc":"2.0","result":[1,2],"id":1}`,
+		`{"id":1,"jsonrpc":"2.0","result":[{"context":{"slot":5}}]}`,
+		`{"jsonrpc":"2.0","result":{"context":{"slot":5}},"id":1}`,
+		`{"result":[1],"result":{"context":{"slot":5}}}`,
+		`{"id":"a\"b","result":null}`,
+		`{ "jsonrpc" : "2.0" , "result" : "x" }`,
+	} {
+		f.Add([]byte(seed))
+	}
+	f.Fuzz(func(t *testing.T, obj []byte) {
+		if len(obj) == 0 || obj[0] != '{' {
+			return // the caller only asks about a single object
+		}
+		if !json.Valid(obj) || bytes.Count(obj, []byte("result")) > 1 || bytes.Contains(obj, []byte(`\u`)) {
+			return
+		}
+		if resultIsNotAnObject(obj) && gjson.GetBytes(obj, "result.context.slot").Exists() {
+			t.Fatalf("the list check skips a slot the path read finds, in %q", obj)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
