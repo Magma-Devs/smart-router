@@ -2,7 +2,6 @@ package rpcsmartrouter
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -300,6 +299,10 @@ func TestRESTRelay_503_ServiceUnavailable(t *testing.T) {
 	assert.True(t, result.IsNodeError)
 }
 
+// TestRESTRelay_ResponseHeaders pins, through the real LAVA REST spec, which upstream
+// headers reach the reply (MAG-3104): the vendor's own header is dropped, Content-Type is
+// kept, and the block-height header the spec declares as a reply header (inherited from
+// cosmossdk as pass_both) is kept under the upstream's spelling.
 func TestRESTRelay_ResponseHeaders(t *testing.T) {
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
@@ -307,8 +310,9 @@ func TestRESTRelay_ResponseHeaders(t *testing.T) {
 		"LAVA",
 		spectypes.APIInterfaceRest,
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Custom-Header", "test-value")
-			w.Header().Set("X-Block-Height", "12345")
+			w.Header().Set("X-Cosmos-Block-Height", "12345")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"result":"success"}`))
 		}),
@@ -344,14 +348,10 @@ func TestRESTRelay_ResponseHeaders(t *testing.T) {
 	require.NotNil(t, result)
 	require.NotNil(t, result.Reply)
 
-	found := false
-	for _, md := range result.Reply.Metadata {
-		if md.Name == "X-Custom-Header" && md.Value == "test-value" {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, fmt.Sprintf("expected X-Custom-Header in metadata, got: %+v", result.Reply.Metadata))
+	names := metadataNames(result.Reply.Metadata)
+	assert.NotContains(t, names, "X-Custom-Header", "a header the spec does not declare must not reach the reply, got: %+v", result.Reply.Metadata)
+	assert.Contains(t, names, "Content-Type")
+	assert.Contains(t, names, "X-Cosmos-Block-Height", "the spec's pass_both header must be kept, got: %+v", result.Reply.Metadata)
 }
 
 // TestRESTRelay_501_NotImplemented_relayInnerDirect reproduces MAG-1576: a

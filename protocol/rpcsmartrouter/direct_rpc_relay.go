@@ -517,9 +517,9 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	// Uses spec-driven parsing for all API interfaces (EVM, Tendermint, etc.)
 	latestBlockFromResponse := extractBlockHeightFromJSONResponse(responseData, chainMessage)
 
-	// Convert response headers to metadata (same as REST path)
-	// This enables Provider-Latest-Block, lava-identified-node-error, and upstream hints
-	responseMetadata := convertHTTPHeadersToMetadata(response.Headers)
+	// Keep only the upstream headers the client is entitled to (MAG-3104): the transport
+	// set and the spec's own reply headers. See upstreamReplyMetadata for what is dropped.
+	responseMetadata := upstreamReplyMetadata(response.Headers, chainMessage.GetApiCollection())
 
 	result := &common.RelayResult{
 		Reply: &pairingtypes.RelayReply{
@@ -704,8 +704,8 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		)
 	}
 
-	// Convert response headers to metadata
-	responseMetadata := convertHTTPHeadersToMetadata(response.Headers)
+	// Keep only the upstream headers the client is entitled to (MAG-3104).
+	responseMetadata := upstreamReplyMetadata(response.Headers, chainMessage.GetApiCollection())
 
 	// Build result (include body even for 4xx/5xx!)
 	providerAddress := d.endpointName
@@ -871,8 +871,9 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			}
 			result := &common.RelayResult{
 				Reply: &pairingtypes.RelayReply{
-					Data:     response.Data,                                   // Error response in JSON format
-					Metadata: convertHTTPHeadersToMetadata(response.Metadata), // Include metadata even for errors
+					// Error body in JSON; its metadata allow-listed like a success's (MAG-3104)
+					Data:     response.Data,
+					Metadata: upstreamReplyMetadata(response.Metadata, chainMessage.GetApiCollection()),
 				},
 				Finalized:  true,
 				StatusCode: response.StatusCode,
@@ -944,7 +945,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		Reply: &pairingtypes.RelayReply{
 			Data:        response.Data,
 			LatestBlock: latestBlockFromResponse,
-			Metadata:    convertHTTPHeadersToMetadata(response.Metadata), // Include gRPC response metadata
+			Metadata:    upstreamReplyMetadata(response.Metadata, chainMessage.GetApiCollection()), // allow-listed (MAG-3104)
 		},
 		Finalized:  true,
 		StatusCode: response.StatusCode,
@@ -977,19 +978,4 @@ func looksLikeJSONOpening(data []byte) bool {
 		}
 	}
 	return false
-}
-
-// convertHTTPHeadersToMetadata converts http.Header to pairingtypes.Metadata
-func convertHTTPHeadersToMetadata(headers map[string][]string) []pairingtypes.Metadata {
-	metadata := make([]pairingtypes.Metadata, 0, len(headers))
-	for name, values := range headers {
-		if len(values) > 0 {
-			// Use first value (most headers are single-value)
-			metadata = append(metadata, pairingtypes.Metadata{
-				Name:  name,
-				Value: values[0],
-			})
-		}
-	}
-	return metadata
 }
