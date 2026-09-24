@@ -109,6 +109,10 @@ with the backend: a hit always costs ~1 RTT, and a miss waits out the budget bef
 through to the upstream. (`--secondary-cache-timeout` is the same knob for the secondary
 tier.)
 
+The router also decides what it **writes**: a reply body larger than `--cache-max-entry-bytes`
+(default 1 MiB, `0` = no cap) is served but never written, on this backend as on cache-be.
+Each one counts in `smartrouter_cache_write_skipped_total{reason="size"}`.
+
 Config values are **not** environment-expanded: a `${VAR}` written here is read literally as
 the value.
 

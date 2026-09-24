@@ -349,6 +349,8 @@ histogram_quantile(0.9,
 | `smartrouter_cache_success_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier` | Cache hits per tier. |
 | `smartrouter_cache_failed_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier`, `outcome` | Non-hit lookups, split by the closed enum `outcome` = `miss` (clean not-found) \| `error` (transport/server error) \| `timeout` (per-lookup budget exceeded). |
 | `smartrouter_cache_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `method`, `cache_tier` | Cache lookup latency, observed on **every attempted lookup** (hits and non-hits). |
+| `smartrouter_cache_write_skipped_total` | Counter | `spec`, `apiInterface`, `method`, `reason` | Replies served but not written to the cache, by the closed enum `reason` = `size` (the body exceeded `--cache-max-entry-bytes`, default 1 MiB). Same on the gRPC and RESP backends, and counts secondary-tier hits too large to backfill. |
+| `smartrouter_cache_entry_bytes` | Histogram | `spec`, `apiInterface`, `method` | Body size of every reply handed to the cache backend for writing, before the backend encodes it. Buckets 1 KiB to 64 MiB in steps of 4, so the default cap is a bucket boundary. |
 
 Per tier, `cache_requests_total` = `cache_success_total` + `sum without (outcome) (cache_failed_total)`.
 Note the `sum without` — recovering the identity now takes an explicit aggregation
