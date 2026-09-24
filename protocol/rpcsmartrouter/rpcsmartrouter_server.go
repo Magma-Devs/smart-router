@@ -4577,6 +4577,14 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		var shouldMarkUnhealthy bool
 		shouldMarkUnhealthy, needsBackoff = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
 
+		// smartrouter_protocol_errors_total (MAG-3536). Stamped here, in the branch where the sender
+		// itself failed, because this is the one place every cut isProtocolFailure makes is
+		// structural: an upstream status reaches this branch only as the JSON-RPC sender's
+		// HTTPStatusError (REST statuses take the status branch below), and the refusals above return
+		// before any sender runs.
+		if isProtocolFailure(rpcss.directRelayTransport(directConnection), err, isClientCancel, budgetExpired) && rpcss.rpcSmartRouterLogs != nil {
+			rpcss.rpcSmartRouterLogs.SetProtocolError(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, chainMessage.GetApi().Name)
+		}
 
 		// Apply health tracking based on error classification. The failing request is recorded
 		// FIRST (read-only methods only) so that if this failure crosses the disable threshold,

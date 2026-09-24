@@ -781,6 +781,11 @@ func (h *HTTPDirectRPCConnection) GetNodeUrl() *common.NodeUrl {
 	return &h.nodeUrl
 }
 
+// ErrBuildHTTPRequest marks a request DoHTTPRequest could not even build, so nothing was sent.
+// The senders wrap it like any error from the wire, so smartrouter_protocol_errors_total needs this
+// mark to leave the router's own failure out (MAG-3536). The message is unchanged.
+var ErrBuildHTTPRequest = errors.New("failed to build HTTP request")
+
 // DoHTTPRequest implements HTTPDirectRPCDoer for REST support (Phase 4)
 // Executes HTTP request with variable method (GET/POST/PUT/DELETE)
 func (h *HTTPDirectRPCConnection) DoHTTPRequest(
@@ -798,7 +803,7 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 
 	req, err := http.NewRequestWithContext(ctx, params.Method, fullURL, bodyReader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build HTTP request: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrBuildHTTPRequest, err)
 	}
 
 	// Apply NodeUrl auth headers (API keys, bearer tokens, etc.)

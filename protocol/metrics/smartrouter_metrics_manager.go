@@ -448,7 +448,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, incidentProviderLabels)
 	incidentProtocolErrorsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_protocol_errors_total",
-		Help: "Total protocol errors (transport/timeout) encountered by the smart router.",
+		Help: "Direct relay attempts that went out on the wire and got no answer from the upstream (refused, reset or dropped connection, truncated or invalid body, TLS or DNS failure, timeout, or a hang past the request budget), by the provider dialled. " +
+			"Attempts the upstream answered, such as an HTTP 5xx or 429, relays the router cancelled itself, relays it refused before dialling, and gRPC endpoints are not counted.",
 	}, incidentProviderLabels)
 	incidentRetriesTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_retries_total",
