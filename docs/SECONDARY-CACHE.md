@@ -112,7 +112,8 @@ merely implemented:
   carrying the entry's true state. A cached node error or an error status is
   served to the caller but rejected for backfill by that component's own
   rules — so the two tiers can never drift apart in what they consider
-  cacheable.
+  cacheable. The same holds for size: a hit larger than
+  `--cache-max-entry-bytes` is served but not backfilled.
 
 ## Configuration
 
