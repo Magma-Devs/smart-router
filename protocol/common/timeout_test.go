@@ -193,10 +193,15 @@ func TestBoundCallerRelayTimeout(t *testing.T) {
 	hanging := TimeoutInfo{CU: 10, Hanging: true}                               // budget: DefaultTimeout * 6
 	stateful := TimeoutInfo{CU: 10, Stateful: CONSISTENCY_SELECT_ALL_PROVIDERS} // budget: DefaultTimeout * 6
 
+	// A hanging write on a chain with a 10-minute block: its own window is twice the block time plus
+	// the 7s floor, so with no header it gets ~20 minutes, far above its category's 180s.
+	const slowBlockHangingWindow = 20*time.Minute + 7*time.Second
+
 	tests := []struct {
 		name       string
 		maxCaller  time.Duration
 		requested  time.Duration
+		ownWindow  time.Duration // the router's own window for the call; zero means inside its category budget
 		info       TimeoutInfo
 		wantWindow time.Duration
 		wantOK     bool
@@ -225,6 +230,12 @@ func TestBoundCallerRelayTimeout(t *testing.T) {
 		{name: "45m is held to a stateful call's budget", requested: 45 * time.Minute, info: stateful, wantWindow: 180 * time.Second, wantOK: true},
 		{name: "the largest duration is held to the budget", requested: time.Duration(math.MaxInt64), info: light, wantWindow: 30 * time.Second, wantOK: true},
 
+		// A call whose own window exceeds its category budget: the bound is the call's own budget.
+		{name: "45m is held to a slow-block hanging call's own budget, not its category's", requested: 45 * time.Minute, ownWindow: slowBlockHangingWindow, info: stateful, wantWindow: slowBlockHangingWindow, wantOK: true},
+		{name: "25m is held to that call's own budget", requested: 25 * time.Minute, ownWindow: slowBlockHangingWindow, info: stateful, wantWindow: slowBlockHangingWindow, wantOK: true},
+		{name: "20m fits inside that call's own budget", requested: 20 * time.Minute, ownWindow: slowBlockHangingWindow, info: stateful, wantWindow: 20 * time.Minute, wantOK: true},
+		{name: "an operator ceiling below that budget does not cut it", maxCaller: 10 * time.Minute, requested: 45 * time.Minute, ownWindow: slowBlockHangingWindow, info: stateful, wantWindow: slowBlockHangingWindow, wantOK: true},
+
 		// An operator ceiling above the budget lets the caller stretch it, up to the ceiling.
 		{name: "operator ceiling: 45s is honoured", maxCaller: 10 * time.Minute, requested: 45 * time.Second, info: light, wantWindow: 45 * time.Second, wantOK: true},
 		{name: "operator ceiling: 45m is held to it", maxCaller: 10 * time.Minute, requested: 45 * time.Minute, info: light, wantWindow: 10 * time.Minute, wantOK: true},
@@ -239,17 +250,24 @@ func TestBoundCallerRelayTimeout(t *testing.T) {
 			origDefault, origMax := DefaultTimeout, MaxCallerRelayTimeout
 			t.Cleanup(func() { DefaultTimeout, MaxCallerRelayTimeout = origDefault, origMax })
 			DefaultTimeout, MaxCallerRelayTimeout = 30*time.Second, tt.maxCaller
+			ownWindow := tt.ownWindow
+			if ownWindow == 0 {
+				ownWindow = 2 * time.Second // a light call's window, well inside every category budget
+			}
 
-			window, ok := BoundCallerRelayTimeout(tt.requested, tt.info)
+			window, ok := BoundCallerRelayTimeout(tt.requested, ownWindow, tt.info)
 			require.Equal(t, tt.wantOK, ok)
 			require.Equal(t, tt.wantWindow, window)
 		})
 	}
 }
 
-// The two properties MAG-3600 is about, over the whole range a caller can send: an accepted
-// window is always positive (it feeds time.NewTicker), and the budget built from it never exceeds
-// max(the request's own budget, --max-relay-timeout).
+// The properties MAG-3600 is about, over the whole range a caller can send and for calls whose own
+// window sits inside or far above their category budget: an accepted window is always positive (it
+// feeds time.NewTicker); the budget built from it never exceeds max(the call's own budget,
+// --max-caller-relay-timeout); and a caller who asks for at least the router's own window never
+// gets a smaller budget than no header gives. The own budget is computed here from the own window,
+// so the last property can fail if the bound is measured from the category alone.
 func TestBoundCallerRelayTimeout_NeverZeroAndNeverPastTheBound(t *testing.T) {
 	origDefault, origMax := DefaultTimeout, MaxCallerRelayTimeout
 	t.Cleanup(func() { DefaultTimeout, MaxCallerRelayTimeout = origDefault, origMax })
@@ -262,22 +280,34 @@ func TestBoundCallerRelayTimeout_NeverZeroAndNeverPastTheBound(t *testing.T) {
 	}
 	infos := []TimeoutInfo{{CU: 1}, {CU: 50}, {CU: 100}, {Hanging: true}, {Stateful: CONSISTENCY_SELECT_ALL_PROVIDERS}}
 
+	ownWindows := []time.Duration{time.Second, 8*time.Minute + 20*time.Second, 20*time.Minute + 7*time.Second}
+
+	checked := 0
 	for _, maxCaller := range []time.Duration{0, 10 * time.Second, 5 * time.Minute} {
 		MaxCallerRelayTimeout = maxCaller
 		for _, info := range infos {
-			ownBudget := GetTimeoutForProcessing(0, info)
-			for _, value := range requested {
-				window, ok := BoundCallerRelayTimeout(value, info)
-				if !ok {
-					require.LessOrEqual(t, value, time.Duration(0), "only a non-positive value may be ignored (%s)", value)
-					continue
+			for _, ownWindow := range ownWindows {
+				ownBudget := GetTimeoutForProcessing(ownWindow, info)
+				for _, value := range requested {
+					checked++
+					window, ok := BoundCallerRelayTimeout(value, ownWindow, info)
+					if !ok {
+						require.LessOrEqual(t, value, time.Duration(0), "only a non-positive value may be ignored (%s)", value)
+						continue
+					}
+					budget := GetTimeoutForProcessing(window, info)
+					require.Positive(t, window, "an accepted window must be positive (%s)", value)
+					require.LessOrEqual(t, budget, max(ownBudget, maxCaller),
+						"lava-relay-timeout: %s stretched the budget past the bound (max-caller-relay-timeout %s, own window %s, info %+v)", value, maxCaller, ownWindow, info)
+					if value >= ownWindow {
+						require.GreaterOrEqual(t, budget, ownBudget,
+							"lava-relay-timeout: %s asked for more than the router's own window %s and got a smaller budget than no header (%s < %s)", value, ownWindow, budget, ownBudget)
+					}
 				}
-				require.Positive(t, window, "an accepted window must be positive (%s)", value)
-				require.LessOrEqual(t, GetTimeoutForProcessing(window, info), max(ownBudget, maxCaller),
-					"lava-relay-timeout: %s stretched the budget past the bound (max-relay-timeout %s, info %+v)", value, maxCaller, info)
 			}
 		}
 	}
+	require.Equal(t, 3*len(infos)*len(ownWindows)*len(requested), checked, "every combination must have been checked")
 }
 
 // A budget under the floor cannot happen after ValidateAndCapMinRelayTimeout, which holds
@@ -287,7 +317,7 @@ func TestBoundCallerRelayTimeout_FloorWinsOverAMisconfiguredBudget(t *testing.T)
 	t.Cleanup(func() { DefaultTimeout, MaxCallerRelayTimeout = origDefault, origMax })
 	DefaultTimeout, MaxCallerRelayTimeout = 0, 0
 
-	window, ok := BoundCallerRelayTimeout(45*time.Second, TimeoutInfo{CU: 1})
+	window, ok := BoundCallerRelayTimeout(45*time.Second, 0, TimeoutInfo{CU: 1})
 	require.True(t, ok)
 	require.Equal(t, MinCallerRelayTimeout, window)
 }

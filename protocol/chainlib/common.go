@@ -580,16 +580,23 @@ func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRe
 // GetTimeoutForProcessing and sendRelayToDirectEndpoints.
 //
 // A caller's lava-relay-timeout replaces the computed window only once it has been bounded
-// (common.BoundCallerRelayTimeout). The result is always positive: it feeds time.NewTicker, and the
-// processing budget is never shorter than it, so this is the one place both hazards of an
-// unchecked header are closed for every consumer of the window (MAG-3600).
+// (common.BoundCallerRelayTimeout), and a bounded value is always positive. The window feeds
+// time.NewTicker, and the processing budget is never shorter than it, so this is the one place both
+// hazards of an unchecked header are closed for every consumer of the window (MAG-3600).
 func GetRelayTimeout(chainMessage ChainMessageForSend, averageBlockTime time.Duration) time.Duration {
+	ownWindow := routerRelayTimeout(chainMessage, averageBlockTime)
 	if override := chainMessage.TimeoutOverride(); override != 0 {
-		if window, ok := common.BoundCallerRelayTimeout(override, GetTimeoutInfo(chainMessage)); ok {
+		if window, ok := common.BoundCallerRelayTimeout(override, ownWindow, GetTimeoutInfo(chainMessage)); ok {
 			return window
 		}
 	}
-	// Calculate extra RelayTimeout
+	return ownWindow
+}
+
+// routerRelayTimeout is the window the router computes for a message by itself: the spec's
+// timeout_ms, or its compute units at --min-relay-timeout at least, plus twice the block time for a
+// hanging call.
+func routerRelayTimeout(chainMessage ChainMessageForSend, averageBlockTime time.Duration) time.Duration {
 	extraRelayTimeout := time.Duration(0)
 	if IsHangingApi(chainMessage) {
 		extraRelayTimeout = averageBlockTime * 2
