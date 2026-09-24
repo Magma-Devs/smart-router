@@ -21,6 +21,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -44,8 +45,9 @@ type DirectRPCRelaySender struct {
 // IS the block source:
 //
 //   - gRPC: GET_BLOCKNUM resolves to cosmos.base.tendermint.v1beta1.Service/GetLatestBlock
-//     across the Cosmos family (AKASH, BABYLON, COSMOSSDK, DYDX, KAVA, SEI) and
-//     GET_BLOCK_BY_NUM to GetBlockByHeight — the whole block, every tx included.
+//     across the Cosmos family (AKASH, BABYLON, COSMOSSDK, DYDX, KAVA, SEI) — the whole
+//     block, every tx included. (GET_BLOCK_BY_NUM's GetBlockByHeight is the same size but
+//     is never parsed here: its rule reads a hash, see resultRuleReadsBlockHash.)
 //   - JSON-RPC: GET_BLOCK_BY_NUM is eth_getBlockByNumber, which with full transaction
 //     objects measures ~460 KB median and ~670 KB peak over recent Ethereum mainnet blocks
 //     (Base ~385/577 KB) — already inside 1.5x of the 1 MB this constant used to carry,
@@ -97,7 +99,7 @@ func extractBlockHeightFromJSONResponse(
 
 	// First try spec-driven parsing (works for all API interfaces including Tendermint)
 	parseDirective := chainMessage.GetParseDirective()
-	if parseDirective != nil {
+	if parseDirective != nil && !resultRuleReadsBlockHash(parseDirective) {
 		parserInput, err := chainlib.FormatResponseForParsing(
 			&pairingtypes.RelayReply{Data: responseData},
 			chainMessage,
@@ -116,6 +118,19 @@ func extractBlockHeightFromJSONResponse(
 
 	// Fallback to EVM-specific parsing for backwards compatibility
 	return extractBlockHeightFromEVMResponse(responseData, chainMessage.GetApi().Name)
+}
+
+// resultRuleReadsBlockHash reports whether a parse directive's result rule reads a block
+// hash rather than a height, so running it as a height parse can only fail. A
+// GET_BLOCK_BY_NUM rule exists so the chain tracker can fetch the hash of block N — its
+// only reader is ParseBlockHashFromReplyAndDecode — and every spec points it at one
+// (Solana getBlock reads result.blockhash, EVM eth_getBlockByNumber result.hash, Cosmos
+// GetBlockByHeight blockId.hash). Those are the largest replies a chain serves, and the
+// parse decodes the whole of one to reach the field: a 5 MB Solana block cost 33 ms and
+// 786k allocations per reply to learn nothing. Skipping it changes no result — a method
+// that carries a height still reaches the EVM fallback, which reads result.number itself.
+func resultRuleReadsBlockHash(parseDirective *spectypes.ParseDirective) bool {
+	return parseDirective.FunctionTag == spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM
 }
 
 // extractSolanaContextSlot returns result.context.slot from a SINGLE successful Solana
@@ -273,7 +288,7 @@ func extractBlockHeightFromGRPCResponse(
 
 	// Get parse directive from chain message (contains spec-defined parsing rules)
 	parseDirective := chainMessage.GetParseDirective()
-	if parseDirective == nil {
+	if parseDirective == nil || resultRuleReadsBlockHash(parseDirective) {
 		return 0
 	}
 

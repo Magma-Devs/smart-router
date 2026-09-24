@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -863,6 +864,103 @@ func TestExtractBlockHeightFromJSONResponse_EVMFallback(t *testing.T) {
 
 	// Should fallback to EVM-specific parsing
 	assert.Equal(t, int64(4096), result, "EVM methods should work via fallback parsing")
+}
+
+// solanaGetBlockReply builds a jsonParsed-shaped Solana getBlock reply with txCount
+// transactions: the header fields, blockhash among them, followed by the transactions array
+// that makes a real block 2-7 MB.
+func solanaGetBlockReply(txCount int) []byte {
+	var b strings.Builder
+	b.WriteString(`{"jsonrpc":"2.0","id":1,"result":{"blockHeight":331234567,"blockTime":1758700000,` +
+		`"blockhash":"5Q7xZr8k2mDsV9cWb3hJfLqE1nTa6YpRuKoG4iXzBv2N","parentSlot":353000000,"transactions":[`)
+	for i := 0; i < txCount; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"meta":{"err":null,"fee":5000,"postBalances":[1,2,3],"preBalances":[1,2,3],`+
+			`"logMessages":["Program 11111111111111111111111111111111 invoke [1]","Program 11111111111111111111111111111111 success"]},`+
+			`"transaction":{"accountKeys":[{"pubkey":"Acc%d","signer":true,"source":"transaction","writable":true}],"signatures":["sig%d"]},"version":0}`, i, i)
+	}
+	b.WriteString(`]}}`)
+	return []byte(b.String())
+}
+
+// TestBlockExtractionSkipsHashRule pins that neither extractor runs a GET_BLOCK_BY_NUM rule
+// as a height parse. That rule reads a block hash (it exists for the chain tracker's
+// hash-of-block-N lookup), so the parse could only fail, and it failed only after decoding
+// the whole reply: on a Solana getBlock, the largest reply the chain serves, that was 33 ms
+// and 786k allocations per 5 MB block for a result that was always 0.
+//
+// The assertion is the allocation count, not the returned height, for the reason
+// TestBlockExtractionResponseSizeGuard gives: 0 is returned both when the parse is skipped
+// and when it runs and fails, so only the work done tells the two apart.
+func TestBlockExtractionSkipsHashRule(t *testing.T) {
+	hashRuleMsg := func(apiName string, hashField string) *mockChainMessage {
+		return &mockChainMessage{
+			api:        &spectypes.Api{Name: apiName},
+			rpcMessage: &rpcInterfaceMessages.JsonrpcMessage{},
+			parseDirective: &spectypes.ParseDirective{
+				FunctionTag: spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM,
+				ApiName:     apiName,
+				ResultParsing: spectypes.BlockParser{
+					ParserArg:  []string{"0", hashField},
+					ParserFunc: spectypes.PARSER_FUNC_PARSE_CANONICAL,
+				},
+			},
+		}
+	}
+	reply := solanaGetBlockReply(500)
+
+	extractors := []struct {
+		name    string
+		extract func([]byte, chainlib.ChainMessage) int64
+	}{
+		{"grpc", extractBlockHeightFromGRPCResponse},
+		{"jsonrpc", extractBlockHeightFromJSONResponse},
+	}
+	for _, extractor := range extractors {
+		t.Run(extractor.name+"/hash rule is not run over the reply", func(t *testing.T) {
+			msg := hashRuleMsg("getBlock", "blockhash")
+			var got int64
+			allocs := testing.AllocsPerRun(5, func() { got = extractor.extract(reply, msg) })
+
+			assert.Equal(t, int64(0), got)
+			// A parse of this 500-transaction reply allocates tens of thousands of objects;
+			// the skip allocates only the debug log's attributes.
+			assert.Less(t, allocs, float64(100),
+				"a GET_BLOCK_BY_NUM rule reads a hash and must not decode the reply to find it")
+		})
+	}
+
+	// The skip must not cost a height the router gets today. eth_getBlockByNumber carries a
+	// GET_BLOCK_BY_NUM rule too (reading result.hash); its height always came from the EVM
+	// fallback, and still does.
+	t.Run("jsonrpc/eth_getBlockByNumber still yields its number", func(t *testing.T) {
+		msg := hashRuleMsg("eth_getBlockByNumber", "hash")
+		data := []byte(`{"jsonrpc":"2.0","id":1,"result":{"number":"0x10","hash":"0x` + strings.Repeat("ab", 32) + `"}}`)
+
+		assert.Equal(t, int64(16), extractBlockHeightFromJSONResponse(data, msg))
+	})
+
+	// A rule that reads a height is untouched: Solana's GET_BLOCKNUM rule on
+	// getLatestBlockhash still parses result.context.slot.
+	t.Run("jsonrpc/a height rule still parses", func(t *testing.T) {
+		msg := &mockChainMessage{
+			api:        &spectypes.Api{Name: "getLatestBlockhash"},
+			rpcMessage: &rpcInterfaceMessages.JsonrpcMessage{},
+			parseDirective: &spectypes.ParseDirective{
+				FunctionTag: spectypes.FUNCTION_TAG_GET_BLOCKNUM,
+				ApiName:     "getLatestBlockhash",
+				ResultParsing: spectypes.BlockParser{
+					ParserArg:  []string{"0", "context", "slot"},
+					ParserFunc: spectypes.PARSER_FUNC_PARSE_CANONICAL,
+				},
+			},
+		}
+		data := []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":353000123},"value":{"blockhash":"abc","lastValidBlockHeight":1}}}`)
+
+		assert.Equal(t, int64(353000123), extractBlockHeightFromJSONResponse(data, msg))
+	})
 }
 
 // TestBlockExtractionResponseSizeGuard covers MAG-2557: the gRPC block-height
