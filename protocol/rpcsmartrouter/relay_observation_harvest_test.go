@@ -175,19 +175,24 @@ func TestTipBlockFromRelay_Solana_UsesContextSlot(t *testing.T) {
 // MAG-3843: a Solana getBlock reply (the spec's GET_BLOCK_BY_NUM method) is skipped before it
 // is read — it is the block itself, never an RpcResponse. The reply below carries a context
 // slot only to prove nothing reads it. The GET_BLOCKNUM method (getLatestBlockhash) does
-// answer with a context, so it must still be harvested.
+// answer with a context, so it must still be harvested. SOLANAT gets both tags by importing
+// SOLANA.
 func TestTipBlockFromRelay_Solana_SkipsGetBlockWithoutReadingIt(t *testing.T) {
-	rpcss := ethTipServer(t, "SOLANA")
-	reply := &pairingtypes.RelayReply{Data: []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":250000000},"value":42}}`)}
+	for _, chainID := range []string{"SOLANA", "SOLANAT"} {
+		t.Run(chainID, func(t *testing.T) {
+			rpcss := ethTipServer(t, chainID)
+			reply := &pairingtypes.RelayReply{Data: []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":250000000},"value":42}}`)}
 
-	getBlock := &mockChainMessage{api: &spectypes.Api{Name: "getBlock"}, requestedBlock: 249999990}
-	_, ok := rpcss.tipBlockFromRelay(getBlock, reply)
-	require.False(t, ok, "getBlock is GET_BLOCK_BY_NUM on Solana and must not be harvested")
+			getBlock := &mockChainMessage{api: &spectypes.Api{Name: "getBlock"}, requestedBlock: 249999990}
+			_, ok := rpcss.tipBlockFromRelay(getBlock, reply)
+			require.False(t, ok, "getBlock is GET_BLOCK_BY_NUM on Solana and must not be harvested")
 
-	getLatestBlockhash := &mockChainMessage{api: &spectypes.Api{Name: "getLatestBlockhash"}, requestedBlock: spectypes.LATEST_BLOCK}
-	block, ok := rpcss.tipBlockFromRelay(getLatestBlockhash, reply)
-	require.True(t, ok, "getLatestBlockhash is GET_BLOCKNUM on Solana and carries the context slot")
-	require.Equal(t, int64(250000000), block)
+			getLatestBlockhash := &mockChainMessage{api: &spectypes.Api{Name: "getLatestBlockhash"}, requestedBlock: spectypes.LATEST_BLOCK}
+			block, ok := rpcss.tipBlockFromRelay(getLatestBlockhash, reply)
+			require.True(t, ok, "getLatestBlockhash is GET_BLOCKNUM on Solana and carries the context slot")
+			require.Equal(t, int64(250000000), block)
+		})
+	}
 }
 
 // A non-Solana chain must NOT interpret a coincidental "slot" field, and a non-latest
