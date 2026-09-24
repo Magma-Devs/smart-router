@@ -2801,18 +2801,23 @@ func TestEndpointTipPreferStore(t *testing.T) {
 		name       string
 		pollAtomic int64
 		storeTip   int64
+		storeKnown bool
 		want       int64
 	}{
-		{"frozen atomic below fresh store → store wins (traffic gate)", 100, 195, 195},
-		{"reorg: stale-high atomic, newer lower store → store wins (the follow-up bug)", 1000, 900, 900},
-		{"purely relay-fed endpoint: atomic 0, store fresh", 0, 195, 195},
-		{"store empty: atomic is the bootstrap fallback", 195, 0, 195},
-		{"equal", 195, 195, 195},
-		{"both unknown (e.g. after a reset that cleared both)", 0, 0, 0},
+		{"frozen atomic below fresh store → store wins (traffic gate)", 100, 195, true, 195},
+		{"reorg: stale-high atomic, newer lower store → store wins (the follow-up bug)", 1000, 900, true, 900},
+		{"purely relay-fed endpoint: atomic 0, store fresh", 0, 195, true, 195},
+		{"store never written: atomic is the bootstrap fallback", 195, 0, false, 195},
+		{"equal", 195, 195, true, 195},
+		{"both unknown (e.g. after a reset that cleared both)", 0, 0, false, 0},
+		// The idle-mode / long-backoff case: the store HAS an entry but it is older than the
+		// staleness window, so it arrives as 0. The atomic is at least as old, so it must NOT
+		// be used — the answer is "unknown", which consistency treats as "do not gate".
+		{"store entry stale → unknown, the stale atomic is NOT a fallback", 1000, 0, true, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, endpointTipPreferStore(tc.pollAtomic, tc.storeTip))
+			require.Equal(t, tc.want, endpointTipPreferStore(tc.pollAtomic, tc.storeTip, tc.storeKnown))
 		})
 	}
 }
