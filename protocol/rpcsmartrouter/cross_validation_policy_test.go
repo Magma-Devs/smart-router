@@ -313,12 +313,17 @@ func TestParseCrossValidationConfig_RejectsNonInteger(t *testing.T) {
 // to the preflight entry point, which is what makes the ordering structural rather than something you
 // have to read the logs to confirm.
 func TestPreflightValidateCrossValidationConfig(t *testing.T) {
-	preflight := func(t *testing.T, yamlBody string) error {
+	ethEndpoint := &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
+	preflightFor := func(t *testing.T, yamlBody string, endpoints ...*lavasession.RPCEndpoint) error {
 		t.Helper()
 		v := viper.New()
 		v.SetConfigType("yaml")
 		require.NoError(t, v.ReadConfig(strings.NewReader(yamlBody)))
-		return PreflightValidateCrossValidationConfig(v)
+		return PreflightValidateCrossValidationConfig(v, endpoints)
+	}
+	preflight := func(t *testing.T, yamlBody string) error {
+		t.Helper()
+		return preflightFor(t, yamlBody, ethEndpoint)
 	}
 
 	const policyHeader = "cross-validation:\n" +
@@ -344,6 +349,37 @@ func TestPreflightValidateCrossValidationConfig(t *testing.T) {
 	t.Run("no cross-validation key at all is accepted", func(t *testing.T) {
 		// The overwhelmingly common config. Preflight must be a no-op for it.
 		require.NoError(t, preflight(t, "direct-rpc:\n  - name: x\n"))
+	})
+
+	// MAG-3604: a policy is found by the endpoint a request arrives on, so one whose chain-id and
+	// api-interface name no endpoint is stored and never applies. It must stop the router instead.
+	policyFor := func(chainID, apiInterface, knobs string) string {
+		return "cross-validation:\n  policies:\n    - chain-id: " + chainID + "\n      api-interface: " + apiInterface +
+			"\n      method: eth_getBalance\n" + knobs
+	}
+	t.Run("a misspelled api-interface is rejected before boot, naming the policy and the endpoints", func(t *testing.T) {
+		err := preflight(t, policyFor("ETH1", "json-rpc", "      enabled: true\n"))
+		require.ErrorContains(t, err, "no endpoint serves")
+		assert.Contains(t, err.Error(), "policy #0 ETH1/json-rpc/eth_getBalance")
+		assert.Contains(t, err.Error(), "endpoints: ETH1/jsonrpc")
+	})
+	t.Run("a policy with neither enabled nor forbid-caller-cv is a no-op and is left alone", func(t *testing.T) {
+		require.NoError(t, preflight(t, policyFor("ETH1", "json-rpc", "      enabled: false\n")))
+	})
+	t.Run("a misspelled chain-id is rejected before boot", func(t *testing.T) {
+		require.ErrorContains(t, preflight(t, policyFor("ETH", "jsonrpc", "      enabled: true\n")), "ETH/jsonrpc/eth_getBalance")
+	})
+	t.Run("a forbid-caller-cv policy that names no endpoint is rejected too", func(t *testing.T) {
+		require.ErrorContains(t, preflight(t, policyFor("ETH1", "json-rpc", "      forbid-caller-cv: true\n")), "no endpoint serves")
+	})
+	t.Run("chain-id and api-interface match case-insensitively, as a request's lookup does", func(t *testing.T) {
+		require.NoError(t, preflight(t, policyFor("eth1", "JSONRPC", "      enabled: true\n")))
+	})
+	t.Run("a policy for another configured endpoint is accepted", func(t *testing.T) {
+		lava := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+		require.NoError(t, preflightFor(t, policyFor("LAVA", "rest", "      enabled: true\n"), ethEndpoint, lava))
+		require.ErrorContains(t, preflightFor(t, policyFor("LAVA", "rest", "      enabled: true\n"), ethEndpoint), "no endpoint serves",
+			"the same policy with its endpoint absent from the config")
 	})
 
 	t.Run("the other context-free errors are caught too", func(t *testing.T) {
@@ -411,6 +447,26 @@ func TestValidateCrossValidationStartup(t *testing.T) {
 	t.Run("min-groups 3 with 3 configured groups -> ok", func(t *testing.T) {
 		require.NoError(t, validateCrossValidationStartup(mkResolver(t, groupPolicy), realParser, "ETH1", "jsonrpc", 3, nil))
 	})
+	t.Run("a policy naming a method the spec does not serve -> rejected (MAG-3604)", func(t *testing.T) {
+		misspelled := readPolicy
+		misspelled.Method = "eth_getbalance"
+		err := validateCrossValidationStartup(mkResolver(t, readPolicy, misspelled), realParser, "ETH1", "jsonrpc", 5, nil)
+		require.ErrorContains(t, err, "does not serve")
+		require.ErrorContains(t, err, "policy #1 eth_getbalance", "named by its position in the list and its method")
+	})
+	t.Run("a policy with neither enabled nor forbid-caller-cv is a no-op and is not checked", func(t *testing.T) {
+		noop := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getbalance", CrossValidationPolicy: CrossValidationPolicy{}}
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, readPolicy, noop), realParser, "ETH1", "jsonrpc", 5, nil))
+	})
+	t.Run("a forbid-caller-cv policy naming an unserved method -> rejected too", func(t *testing.T) {
+		forbid := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_gasprice", CrossValidationPolicy: CrossValidationPolicy{ForbidCallerCV: true}}
+		require.ErrorContains(t, validateCrossValidationStartup(mkResolver(t, readPolicy, forbid), realParser, "ETH1", "jsonrpc", 5, nil), "eth_gasprice")
+	})
+	t.Run("another endpoint's policy is not this endpoint's to check", func(t *testing.T) {
+		solana := CrossValidationPolicyEntry{ChainID: "SOLANA", ApiInterface: "jsonrpc", Method: "getEpochInfo", CrossValidationPolicy: CrossValidationPolicy{Enabled: true}}
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, readPolicy, solana), realParser, "ETH1", "jsonrpc", 5, nil),
+			"getEpochInfo is not an ETH1 method, and the ETH1 parser must not judge the SOLANA policy")
+	})
 	t.Run("parser cannot classify stateful -> fail closed", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		defer ctrl.Finish()
@@ -442,6 +498,24 @@ func TestValidateCrossValidationStartup(t *testing.T) {
 	t.Run("default min-groups: all groups at/above threshold -> ok (no warning condition)", func(t *testing.T) {
 		require.NoError(t, validateCrossValidationStartup(mkResolver(t, groupPolicy), realParser, "ETH1", "jsonrpc", 3, map[string]int{"A": 3, "B": 2, "C": 2}))
 	})
+}
+
+// TestPolicyMethods pins the endpoint scoping of the startup log and the method guard (MAG-3604): an
+// endpoint sees its own policies, whatever their intent, and no one else's.
+func TestPolicyMethods(t *testing.T) {
+	r, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: []CrossValidationPolicyEntry{
+		{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true}},
+		{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_gasPrice", CrossValidationPolicy: CrossValidationPolicy{ForbidCallerCV: true}},
+		{ChainID: "SOLANA", ApiInterface: "jsonrpc", Method: "getEpochInfo", CrossValidationPolicy: CrossValidationPolicy{Enabled: true}},
+		{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_call", CrossValidationPolicy: CrossValidationPolicy{}}, // neither intent: a no-op
+	}})
+	require.NoError(t, err)
+	require.Equal(t, []string{"eth_gasPrice", "eth_getBalance"}, r.PolicyMethods("ETH1", "jsonrpc"), "the no-op eth_call policy is not counted")
+	require.Equal(t, []string{"eth_gasPrice", "eth_getBalance"}, r.PolicyMethods("eth1", "JSONRPC"), "matched as a request's lookup matches")
+	require.Equal(t, []string{"getEpochInfo"}, r.PolicyMethods("SOLANA", "jsonrpc"))
+	require.Empty(t, r.PolicyMethods("ETH1", "rest"))
+	require.Equal(t, 2, r.PolicyPosition("SOLANA", "jsonrpc", "getEpochInfo"), "the index in the configured list")
+	require.Equal(t, -1, r.PolicyPosition("SOLANA", "jsonrpc", "getBalance"))
 }
 
 // TestGroupsBelowThreshold pins the pure helper behind the startup SPOF advisory: it returns the

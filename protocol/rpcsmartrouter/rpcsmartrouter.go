@@ -3273,7 +3273,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			// before the metrics port binds, before any provider is dialed, and before the router logs
 			// that it is listening — so a bad config is a clean startup error instead of a crash loop
 			// from a router that has already announced itself.
-			if err := PreflightValidateCrossValidationConfig(viper.GetViper()); err != nil {
+			if err := PreflightValidateCrossValidationConfig(viper.GetViper(), rpcEndpoints); err != nil {
 				return utils.LavaFormatError("invalid cross-validation configuration", err)
 			}
 

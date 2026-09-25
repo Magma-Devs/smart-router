@@ -3,9 +3,11 @@ package rpcsmartrouter
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
 )
@@ -81,7 +83,8 @@ type CrossValidationConfig struct {
 // CrossValidationPolicyResolver resolves the effective cross-validation params for a request. It is
 // immutable after construction and safe for concurrent use.
 type CrossValidationPolicyResolver struct {
-	policies map[string]CrossValidationPolicy // keyed by policyKey(chain, api, method)
+	policies  map[string]CrossValidationPolicy // keyed by policyKey(chain, api, method)
+	positions map[string]int                   // same keys: the policy's index in the configured list
 }
 
 // policyKeySeparator joins the three identifiers in a policy key. NUL is used because it cannot appear in a
@@ -107,7 +110,7 @@ func policyKey(chainID, apiInterface, method string) string {
 // NewCrossValidationPolicyResolver flattens and validates the nested config into a resolver. An empty or
 // nil config yields a resolver with no policies (every request resolves to pure caller-driven behavior).
 func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidationPolicyResolver, error) {
-	r := &CrossValidationPolicyResolver{policies: map[string]CrossValidationPolicy{}}
+	r := &CrossValidationPolicyResolver{policies: map[string]CrossValidationPolicy{}, positions: map[string]int{}}
 	for i, entry := range cfg.Policies {
 		if entry.ChainID == "" || entry.ApiInterface == "" || entry.Method == "" {
 			return nil, fmt.Errorf("cross-validation policy #%d must set chain-id, api-interface, and method", i)
@@ -120,13 +123,17 @@ func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidati
 			return nil, fmt.Errorf("duplicate cross-validation policy for %s/%s/%s", entry.ChainID, entry.ApiInterface, entry.Method)
 		}
 		r.policies[key] = entry.CrossValidationPolicy
+		r.positions[key] = i
 	}
 	return r, nil
 }
 
 // PreflightValidateCrossValidationConfig runs the context-free half of cross-validation config
 // validation — everything decidable from the config text alone: the enabled/forbid-caller-cv
-// contradiction, missing chain-id/api-interface/method, duplicate policies, and out-of-range bounds.
+// contradiction, missing chain-id/api-interface/method, duplicate policies, out-of-range bounds, and a
+// policy whose chain-id and api-interface name no configured endpoint (MAG-3604). A request looks its
+// policy up by the endpoint it arrived on, so such a policy is stored under a key no request builds: it
+// never applies, and nothing at runtime would say so.
 //
 // This exists to run at process start, before the router boots anything (MAG-3022). The same parse and
 // resolver construction happen again per endpoint inside ServeRPCRequests, which is where the resolver
@@ -135,16 +142,53 @@ func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidati
 // router. Rejecting the config here costs a few milliseconds and one extra parse, and means a
 // contradictory policy never gets that far.
 //
-// The checks that need spec or provider context (the stateful-write guard, the min-groups capacity
-// bound) cannot move here — they need a chainParser and registered providers. They stay in
-// validateCrossValidationStartup.
-func PreflightValidateCrossValidationConfig(v *viper.Viper) error {
+// The checks that need spec or provider context (the stateful-write guard, the method a policy names, the
+// min-groups capacity bound) cannot move here — they need a chainParser and registered providers. They
+// stay in validateCrossValidationStartup.
+func PreflightValidateCrossValidationConfig(v *viper.Viper, endpoints []*lavasession.RPCEndpoint) error {
 	cfg, err := ParseCrossValidationConfig(v)
 	if err != nil {
 		return err
 	}
-	_, err = NewCrossValidationPolicyResolver(cfg)
-	return err
+	if _, err = NewCrossValidationPolicyResolver(cfg); err != nil {
+		return err
+	}
+	return validatePolicyEndpoints(cfg, endpoints)
+}
+
+// validatePolicyEndpoints rejects every policy that governs requests (enabled or forbid-caller-cv) whose
+// chain-id and api-interface match none of the endpoints, compared the way a request finds its policy
+// (policyKeyPrefix). It names each by its position in the list as well as its identifiers, because the
+// log redactor mistakes a gRPC method name for a url and hides its method part. A policy with neither
+// intent does nothing by design, so it is left alone.
+func validatePolicyEndpoints(cfg CrossValidationConfig, endpoints []*lavasession.RPCEndpoint) error {
+	served := make(map[string]struct{}, len(endpoints))
+	servedNames := make([]string, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		served[policyKeyPrefix(endpoint.ChainID, endpoint.ApiInterface)] = struct{}{}
+		servedNames = append(servedNames, endpoint.ChainID+"/"+endpoint.ApiInterface)
+	}
+	var unserved []string
+	for i, entry := range cfg.Policies {
+		if !entry.governsRequests() {
+			continue
+		}
+		if _, ok := served[policyKeyPrefix(entry.ChainID, entry.ApiInterface)]; !ok {
+			unserved = append(unserved, fmt.Sprintf("policy #%d %s/%s/%s", i, entry.ChainID, entry.ApiInterface, entry.Method))
+		}
+	}
+	if len(unserved) > 0 {
+		return fmt.Errorf("cross-validation policies name a chain-id and api-interface that no endpoint serves, so they would never apply: %s (endpoints: %s)",
+			strings.Join(unserved, ", "), strings.Join(servedNames, ", "))
+	}
+	return nil
+}
+
+// governsRequests reports whether the policy changes how a request is served: enabled mandates
+// cross-validation, forbid-caller-cv disables it. A policy with neither leaves the method caller-driven,
+// exactly as if it were absent.
+func (p CrossValidationPolicy) governsRequests() bool {
+	return p.Enabled || p.ForbidCallerCV
 }
 
 // HasPolicies reports whether any policy is configured (used to keep the no-policy path identical to today).
@@ -165,12 +209,34 @@ func (r *CrossValidationPolicyResolver) ForbidsCallerCV(chainID, apiInterface, m
 	return ok && policy.ForbidCallerCV && !policy.Enabled
 }
 
-// NumPolicies returns how many per-method policies are configured (for startup logging).
-func (r *CrossValidationPolicyResolver) NumPolicies() int {
+// PolicyMethods returns, sorted, the methods of the policies for the given chain/api that govern requests
+// (enabled or forbid-caller-cv): the ones a request arriving on that endpoint is held to. A policy with
+// neither intent is a no-op by design and is not counted. There is deliberately no whole-configuration
+// count: printed beside one endpoint, it read as that endpoint's (MAG-3604).
+func (r *CrossValidationPolicyResolver) PolicyMethods(chainID, apiInterface string) []string {
 	if r == nil {
-		return 0
+		return nil
 	}
-	return len(r.policies)
+	prefix := policyKeyPrefix(chainID, apiInterface)
+	var methods []string
+	for key, policy := range r.policies {
+		if strings.HasPrefix(key, prefix) && policy.governsRequests() {
+			methods = append(methods, strings.TrimPrefix(key, prefix))
+		}
+	}
+	sort.Strings(methods)
+	return methods
+}
+
+// PolicyPosition returns the policy's index in the configured cross-validation.policies list, or -1.
+func (r *CrossValidationPolicyResolver) PolicyPosition(chainID, apiInterface, method string) int {
+	if r == nil {
+		return -1
+	}
+	if position, ok := r.positions[policyKey(chainID, apiInterface, method)]; ok {
+		return position
+	}
+	return -1
 }
 
 // MaxResolvedMinGroups returns the largest no-caller resolved min-groups among ENABLED policies for the
