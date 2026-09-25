@@ -89,7 +89,18 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		// checked before Resolve, since Resolve returns applies=false for a forbid policy — which on its own
 		// would just let the machine fall back to the caller's headers.
 		forbidCallerCV = resolver.ForbidsCallerCV(chainID, apiInterface, method)
-		if !forbidCallerCV {
+		// A write's cross-validation headers are not read here either, for the reason the state
+		// machine does not act on them: a write routes as a write, so a malformed value for a
+		// parameter that could never have applied must not fail the transaction. Skipping the read
+		// is what makes that true — this line failed such a write outright, before the state
+		// machine got the chance to ignore the headers, in any deployment with a cross-validation
+		// policy configured for any method at all (MAG-3603).
+		//
+		// Resolve is skipped with it. A policy cannot legitimately apply to a write anyway:
+		// validateCrossValidationStartup refuses to boot on one, so the only thing Resolve could
+		// return here is applies=false.
+		isWrite := chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
+		if !forbidCallerCV && !isWrite {
 			caller, callerPresent, err := protocolMessage.GetCrossValidationParameters()
 			if callerPresent && err != nil {
 				return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))

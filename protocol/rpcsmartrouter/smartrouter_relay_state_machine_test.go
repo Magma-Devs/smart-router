@@ -1236,4 +1236,36 @@ func TestSmartRouterStateMachine_CallerCVHeadersOnAWrite(t *testing.T) {
 			&SmartRouterRelaySenderMock{retValue: nil}, buildPM(t, readBody, bad), nil, false, nil, specId, apiInterface)
 		require.Error(t, readErr, "a read still rejects headers it cannot parse")
 	})
+
+	// The state machine is not the only place the caller's headers are read: the policy layer
+	// reads them too, before the machine is built, and used to fail the request from there. So
+	// a write with malformed headers still failed in any deployment that had a
+	// cross-validation policy configured — for any method at all, including a policy on some
+	// unrelated read, since the read is gated only on the resolver having policies.
+	t.Run("a configured policy elsewhere does not make malformed headers fail a write", func(t *testing.T) {
+		resolver, rerr := NewCrossValidationPolicyResolver(CrossValidationConfig{
+			Policies: []CrossValidationPolicyEntry{{
+				ChainID: specId, ApiInterface: apiInterface, Method: "eth_blockNumber",
+				CrossValidationPolicy: CrossValidationPolicy{Enabled: true},
+			}},
+		})
+		require.NoError(t, rerr)
+		bad := map[string]string{
+			common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "not-a-number",
+			common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+		}
+
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil),
+			&SmartRouterRelaySenderMock{retValue: nil}, buildPM(t, writeBody, bad), nil, false, resolver, specId, apiInterface)
+		require.NoError(t, smErr, "the policy layer must not fail a write over headers a write ignores")
+		require.Equal(t, relaycore.Stateful, sm.GetSelection())
+
+		// The policy still governs the method it was written for, so the skip above is scoped
+		// to writes rather than switching the resolver off.
+		readSM, readErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil),
+			&SmartRouterRelaySenderMock{retValue: nil}, buildPM(t, readBody, nil), nil, false, resolver, specId, apiInterface)
+		require.NoError(t, readErr)
+		require.Equal(t, relaycore.CrossValidation, readSM.GetSelection(),
+			"the enabled policy on the read method still applies")
+	})
 }
