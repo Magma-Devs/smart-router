@@ -116,13 +116,18 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 // read's budget — a fraction of the dial budget — did on every read of a dead
 // cache before ErrEndpointUnreachable carried the reason out (MAG-3653).
 func (m *respCacheMetricsSet) recordOpFailure(op string, err error) {
-	kind := respCacheFailureKindError
+	m.opsFailed.WithLabelValues(op, respCacheFailureKind(err)).Inc()
+}
+
+func respCacheFailureKind(err error) string {
+	// Asked first: an endpoint the store could not reach is an outage however the
+	// failure that reported it happened to look.
+	if errors.Is(err, redisstore.ErrEndpointUnreachable) {
+		return respCacheFailureKindError
+	}
 	var netErr net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
-		kind = respCacheFailureKindTimeout
+		return respCacheFailureKindTimeout
 	}
-	if errors.Is(err, redisstore.ErrEndpointUnreachable) {
-		kind = respCacheFailureKindError
-	}
-	m.opsFailed.WithLabelValues(op, kind).Inc()
+	return respCacheFailureKindError
 }

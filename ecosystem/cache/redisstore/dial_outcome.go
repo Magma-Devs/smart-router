@@ -38,14 +38,50 @@ type endpointFault struct {
 // callbacks on arbitrary goroutines — including go-redis's own dial queue, which
 // runs them detached from any caller — and read from the relay path.
 //
-// Last fault wins, deliberately: what an operation needs to know is whether the
-// endpoint was faulting while IT ran, so the freshest observation is the only
-// one that can answer.
+// Last observation wins, deliberately: what an operation needs to know is
+// whether the endpoint was faulting while IT ran, so only the freshest
+// observation can answer. clearFault is the other half of that — a dial that
+// succeeded is the endpoint answering, and leaving a refusal standing behind it
+// would attribute an outage to an operation that failed later, for its own
+// reasons, against an endpoint since proven reachable.
 func (t *endpointTracker) noteFault(cause error) {
 	if t == nil || cause == nil {
 		return
 	}
 	t.fault.Store(&endpointFault{at: time.Now(), cause: cause})
+}
+
+// clearFault records that the endpoint answered a handshake, which is direct
+// proof it is there.
+func (t *endpointTracker) clearFault() {
+	if t == nil {
+		return
+	}
+	t.fault.Store(nil)
+}
+
+// dialFailureProvesEndpointGone classifies a failed dial by WHOSE clock ran out,
+// which is the only thing separating an endpoint that is gone from a budget too
+// small for a healthy one.
+//
+// An attempt that spent its own whole budget was answered by nobody: a black
+// hole. One that failed with budget to spare was answered — refused, no route,
+// no such name. One the CALLER's context cut short proves neither: go-redis
+// abandons a queued dial whose caller has gone, and a healthy cache a network
+// away cannot finish a handshake inside a same-zone read budget either.
+// Reporting that as an outage would send an operator hunting a cache that is up
+// — the same wrong turn as the bug this exists to fix, reversed. It is also the
+// reading docs/RESP-CACHE.md already promises for a too-distant backend.
+//
+// A pure function of its three inputs so each quadrant is testable on its own.
+// Inside the dialer the cheap disjunct alone decided every case a test could
+// reach, and the black-hole term could be deleted with the suite still green —
+// a term that cannot fail is not a term.
+func dialFailureProvesEndpointGone(elapsed, dialTimeout time.Duration, ctxErr error) bool {
+	if dialTimeout > 0 && elapsed >= dialTimeout {
+		return true
+	}
+	return ctxErr == nil
 }
 
 // faultSince returns the endpoint's failure to be reached if one was observed at
@@ -79,6 +115,18 @@ func (t *endpointTracker) faultSince(since time.Time) error {
 // health probe dials the same endpoint — and that is the right answer either
 // way: what it establishes is that the endpoint was unreachable while this
 // operation was failing against it, which is the question the label asks.
+//
+// It holds only where ONE endpoint stands behind the tracker, which is why
+// faults are recorded for standalone alone (see trackingDialer). Under sentinel
+// a dial may be a control-plane dial to any quorum member, including one
+// discovered at runtime that no configured list names; under cluster one tracker
+// stands behind every shard and a fault carries no address. In both, a single
+// down member — a non-paging condition under sentinel quorum — would report a
+// healthy master unreachable, continuously, and relabel every saturation
+// timeout with it. That is the ticket's misdirection inverted, which is worse
+// than leaving it (MAG-3653 follow-up: the health probe already reaches each
+// endpoint role-correctly under every topology, and is the candidate signal
+// there).
 type OpWindow struct {
 	endpoint *endpointTracker
 	since    time.Time
