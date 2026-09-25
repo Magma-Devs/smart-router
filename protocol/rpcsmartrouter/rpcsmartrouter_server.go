@@ -1573,14 +1573,6 @@ func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlo
 	return reqBlock
 }
 
-func (rpcss *RPCSmartRouterServer) newBlocksHashesToHeightsSliceFromRequestedBlockHashes(requestedBlockHashes []string) []*pairingtypes.BlockHashToHeight {
-	var blocksHashesToHeights []*pairingtypes.BlockHashToHeight
-	for _, blockHash := range requestedBlockHashes {
-		blocksHashesToHeights = append(blocksHashesToHeights, &pairingtypes.BlockHashToHeight{Hash: blockHash, Height: spectypes.NOT_APPLICABLE})
-	}
-	return blocksHashesToHeights
-}
-
 func deepCopyRelayPrivateData(original *pairingtypes.RelayPrivateData) *pairingtypes.RelayPrivateData {
 	if original == nil {
 		return nil
@@ -1866,6 +1858,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	ctx context.Context,
 	sessions lavasession.ConsumerSessionsMap,
 	protocolMessage chainlib.ProtocolMessage,
+	// cacheWriteMessage is the message the cache lookup hashed, which the answer is filed under.
+	// It differs from protocolMessage only when a known hash height rebuilt the request for
+	// archive routing after the lookup (see sendRelayToEndpoint).
+	cacheWriteMessage chainlib.ProtocolMessage,
 	relayProcessor *relaycore.RelayProcessor,
 	consistencyFallback *consistencyFallbackState,
 	analytics *metrics.RelayMetrics,
@@ -2283,7 +2279,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				// requests until TTL (CV requests themselves never read the cache). The consensus
 				// winner is cache-written once, post-quorum, in SendParsedRelay.
 				if selection != relaycore.CrossValidation {
-					rpcss.tryCacheWrite(goroutineCtx, protocolMessage, localRelayResult)
+					rpcss.tryCacheWrite(goroutineCtx, cacheWriteMessage, localRelayResult)
 				}
 			}
 			provSpan.End()
@@ -3787,14 +3783,26 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	latestBlock := relayResult.Reply.LatestBlock
 	// Finalization uses the GATED getLatestBlock (fresh tip or 0), never getLatestBlockAllowStale:
 	// a stale or too-high head here would falsely finalize a mutable block into the long-TTL store.
-	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
+	trackedTip := int64(rpcss.getLatestBlock())
+	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, trackedTip, int64(blockDistanceForFinalizedData))
 	byHash := identityKeyed(protocolMessage)
+	var hashHeights []*pairingtypes.BlockHashToHeight
 	if byHash {
 		// The object's own block decides the store, re-read from the response rather than
 		// taken from Reply.LatestBlock: a reply that carried no block (a pending
 		// transaction answers null) is stamped downstream with the endpoint's observed
 		// tip, and that value must never settle an answer that can still change.
-		finalized = byHashFinalized(extractBlockHeightFromJSONResponse(relayResult.Reply.Data, protocolMessage), int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
+		answerBlock := extractBlockHeightFromJSONResponse(relayResult.Reply.Data, protocolMessage)
+		finalized = byHashFinalized(answerBlock, trackedTip, int64(blockDistanceForFinalizedData))
+		// The same block is the height of the hash the request named, and later requests
+		// naming that hash read it back (MAG-3807). Only an answer from this router's own
+		// upstream teaches it. A primary hit is served without a write, and a secondary-tier
+		// answer is another zone's word, which must never steer routing here
+		// (docs/SECONDARY-CACHE.md).
+		servedTier := relayResult.CacheLookup.ServedTier
+		if servedTier != common.CacheTierPrimary && servedTier != common.CacheTierSecondary {
+			hashHeights = learnedHashHeight(protocolMessage, answerBlock, finalized, trackedTip)
+		}
 	}
 
 	// Convert LATEST_BLOCK to the concrete block the cache key carries. This MUST be the
@@ -3917,7 +3925,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 			SharedStateId:         sharedStateId,
 			AverageBlockTime:      int64(averageBlockTime),
 			IsNodeError:           false, // node errors are rejected by the eligibility checks above
-			BlocksHashesToHeights: nil,   // Not available in direct RPC mode
+			BlocksHashesToHeights: hashHeights,
 			// The local captured above, not relayResult.StatusCode: this goroutine outlives
 			// the call and the response path keeps mutating relayResult, so reading a field
 			// off it here would be a cross-goroutine read of live state.
@@ -4148,7 +4156,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 								Finalized:             lookupFinalized,
 								SharedStateId:         sharedStateId,
 								SeenBlock:             localRelayData.SeenBlock,
-								BlocksHashesToHeights: rpcss.newBlocksHashesToHeightsSliceFromRequestedBlockHashes(protocolMessage.GetRequestedBlocksHashes()),
+								BlocksHashesToHeights: hashHeightsToAsk(protocolMessage),
 							}) // caching in the consumer doesn't care about hashes, and we don't have data on finalization yet
 							cancel()
 							latencyMs := float64(time.Since(cacheStart).Milliseconds())
@@ -4275,6 +4283,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 
 	addon := chainlib.GetAddon(protocolMessage)
 	reqBlock = rpcss.resolveRequestedBlock(reqBlock, localRelayData.SeenBlock, latestBlockHashRequested, protocolMessage)
+	// The answer is filed under the key the lookup above asked for, so it is hashed from this
+	// message rather than from the one rebuilt below. A height the cache knew for a hash the
+	// request names can rebuild the message with the archive extension, and the extensions are
+	// part of the cache key. Filed under the rebuilt message's key, the answer would sit where no
+	// lookup of the same request ever looks, and every later request for an old object would miss
+	// and go upstream again (MAG-3807).
+	cacheWriteMessage := protocolMessage
 	// check whether we need a new protocol message with the new earliest block hash requested
 	protocolMessage = rpcss.updateProtocolMessageIfNeededWithNewEarliestData(ctx, relayState, protocolMessage, earliestBlockHashRequested, addon)
 
@@ -4407,7 +4422,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		utils.LogAttr("num_sessions", len(sessions)),
 		utils.LogAttr("GUID", ctx),
 	)
-	return rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMessage, relayProcessor, consistencyFallback, analytics, cacheReport)
+	return rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMessage, cacheWriteMessage, relayProcessor, consistencyFallback, analytics, cacheReport)
 }
 
 // relayInnerDirect handles relay requests using direct RPC connections (smart router mode)

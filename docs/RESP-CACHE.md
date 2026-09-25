@@ -385,6 +385,22 @@ polls would look healthy *because of* the first poll.
 > `--debug-address 127.0.0.1:6161` rather than `:6161`, and reach it through
 > `kubectl port-forward` in a cluster.
 
+## Block-hash→height mappings
+
+The `h2h:` keys record which block a hash belongs to. When a request names a block or a
+transaction by hash, its lookup asks for that hash's height. A known height does two things.
+It raises the effective requested block, so selection prefers nodes that have reached it. It
+also lets the archive rule judge the request, so an object older than the rule's threshold goes
+straight to an archive node. A request that names no block has no other way to reach archive.
+
+The router writes a mapping from answers that state the named object's block:
+`eth_getBlockByHash`, `eth_getTransactionByBlockHashAndIndex`, `eth_getTransactionByHash` and
+`eth_getTransactionReceipt`. It learns only from its own upstream, never from a secondary-tier
+answer. A block's mapping is written at once, because a block hash commits to its height. A
+transaction's mapping waits until its block is final, because a reorg can mine it again at
+another height. A height above the router's own tip is never written. Each mapping lives for
+`expiration.blocks-hashes-to-heights`, 48h by default.
+
 ## Sharing a backend between routers
 
 A keyspace is one cache. Every router in it reads and writes the same entries, resolves
