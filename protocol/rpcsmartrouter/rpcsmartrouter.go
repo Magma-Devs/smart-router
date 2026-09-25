@@ -1724,6 +1724,39 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		writeDebugRows(w, rows)
 	})
 
+	// GET /debug/sticky-claims — per-endpoint cross-pod sticky-session claim outcomes (MAG-3860). Flat
+	// array of self-describing records (ChainID + ApiInterface). SharedSticky says whether the fleet-wide
+	// claim registry is wired (--shared-state with a cache backend); Outcomes holds the seven counts
+	// smartrouter_csm_sticky_claims_total carries, cumulative since the pod started, every outcome present.
+	// "adopted" is the one that proves a session crossed pods: Lava-Provider-Address reads the same whether
+	// a pod used its own claim or a peer's. Without the registry every count stays 0, so SharedSticky is
+	// what tells "off" from "never fired". Read-only; nil-router safe.
+	mux.HandleFunc("/debug/sticky-claims", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			deps.router.mu.Lock()
+			for _, csm := range deps.router.sessionManagers {
+				if csm == nil {
+					continue
+				}
+				ep := csm.RPCEndpoint()
+				shared, outcomes := csm.StickyClaimCounts()
+				rows = append(rows, map[string]any{
+					"ChainID":      ep.ChainID,
+					"ApiInterface": ep.ApiInterface,
+					"SharedSticky": shared,
+					"Outcomes":     outcomes,
+				})
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
 	// GET /debug/probe-loop — per-chain proactive-prober cycle telemetry (MAG-2202 endpoint 4). Flat
 	// array of self-describing records (ChainID + ApiInterface): the configured --probe-loop-interval
 	// cadence (CycleIntervalMs) plus a snapshot of the last completed runProbeCycle — start/duration,

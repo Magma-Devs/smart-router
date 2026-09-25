@@ -56,6 +56,9 @@ type ConsumerSessionManager struct {
 	lock           sync.RWMutex
 	pairing        map[string]*ConsumerSessionsWithProvider // key == provider address
 	stickySessions *StickySessionStore
+	// stickyClaimCounts mirrors smartrouter_csm_sticky_claims_total in process, indexed like
+	// stickyOutcomes, so GET /debug/sticky-claims can report it without the metrics port (MAG-3860).
+	stickyClaimCounts [len(stickyOutcomes)]atomic.Uint64
 	// sharedSticky is the fleet-wide claim registry. Nil leaves stickiness pod-local, which is
 	// the pre-existing behaviour. stickyEpochDuration sizes a claim's backstop lifetime.
 	sharedSticky        SharedStickyStore
@@ -3965,6 +3968,17 @@ const (
 	stickyOutcomeInvalidated = "invalidated"
 )
 
+// stickyOutcomes is the closed set above, in the order StickyClaimCounts reports it.
+var stickyOutcomes = [...]string{
+	stickyOutcomeLocalHit,
+	stickyOutcomeAdopted,
+	stickyOutcomeClaimed,
+	stickyOutcomeLostRace,
+	stickyOutcomeError,
+	stickyOutcomeNoCandidate,
+	stickyOutcomeInvalidated,
+}
+
 // SetSharedStickyStore wires the fleet-wide claim registry and the epoch length used to size a
 // claim's lifetime. Called once at construction; nil leaves stickiness pod-local.
 func (csm *ConsumerSessionManager) SetSharedStickyStore(store SharedStickyStore, epochDuration time.Duration) {
@@ -4091,5 +4105,23 @@ func (csm *ConsumerSessionManager) invalidateStickyPin(localKey string) {
 // recordStickyOutcome publishes one claim resolution. The metrics manager is nil-safe, and
 // SafeMetrics guarantees a non-nil consumer, so this needs no guard of its own.
 func (csm *ConsumerSessionManager) recordStickyOutcome(outcome string) {
+	for i, known := range stickyOutcomes {
+		if known == outcome {
+			csm.stickyClaimCounts[i].Add(1)
+			break
+		}
+	}
 	csm.consumerMetricsManager.RecordStickyClaim(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, outcome)
+}
+
+// StickyClaimCounts reports whether the fleet-wide claim registry is wired (shared) and how many times
+// each outcome has resolved on this pod since it started: the resolutions smartrouter_csm_sticky_claims_total
+// counts, readable without the metrics port (MAG-3860). Every outcome is present, zero included, and without
+// the registry every count stays zero, so shared is what tells "off" from "never fired".
+func (csm *ConsumerSessionManager) StickyClaimCounts() (shared bool, outcomes map[string]uint64) {
+	outcomes = make(map[string]uint64, len(stickyOutcomes))
+	for i, outcome := range stickyOutcomes {
+		outcomes[outcome] = csm.stickyClaimCounts[i].Load()
+	}
+	return csm.sharedSticky != nil, outcomes
 }
