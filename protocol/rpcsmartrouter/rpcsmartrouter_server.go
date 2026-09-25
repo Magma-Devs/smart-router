@@ -136,6 +136,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	listenEndpoint *lavasession.RPCEndpoint,
 	chainParser chainlib.ChainParser,
 	sessionManager *lavasession.ConsumerSessionManager,
+	configuredProviderGroups map[string][]string,
 	cache performance.CacheBackend,
 	secondaryCache performance.CacheReader,
 	secondaryCacheTimeout time.Duration,
@@ -171,25 +172,12 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	}
 	rpcss.crossValidationResolver = cvResolver
 	if cvResolver.HasPolicies() {
-		// Providers are already registered (UpdateAllProviders runs before ServeRPCRequests), so the
-		// configured group layout is the upper bound for the startup capacity checks.
-		groupAssignments := sessionManager.ProviderGroupAssignments()
-		groupSizes := make(map[string]int, len(groupAssignments))
-		for label, addrs := range groupAssignments {
-			groupSizes[label] = len(addrs)
-		}
-		if cvStartupErr := validateCrossValidationStartup(cvResolver, chainParser, listenEndpoint.ChainID, listenEndpoint.ApiInterface, sessionManager.NumberOfValidProviderGroups(), groupSizes); cvStartupErr != nil {
+		// The session manager holds only the primaries that passed boot verification, so the configured
+		// layout comes from the caller: judging the policy by the verified ones turned one node that was
+		// down at boot into an exit (MAG-3751).
+		if cvStartupErr := validateCrossValidationFleet(cvResolver, chainParser, listenEndpoint.ChainID, listenEndpoint.ApiInterface, configuredProviderGroups, sessionManager.ProviderGroupAssignments()); cvStartupErr != nil {
 			return cvStartupErr
 		}
-		// Log the resolved provider->group layout once at startup so operators can confirm the diversity
-		// their config yields (a min-groups policy is only as good as the group spread of the fleet).
-		utils.LavaFormatInfo("cross-validation per-method policies loaded",
-			utils.LogAttr("policies", cvResolver.NumPolicies()),
-			utils.LogAttr("chainID", listenEndpoint.ChainID),
-			utils.LogAttr("apiInterface", listenEndpoint.ApiInterface),
-			utils.LogAttr("distinctGroups", len(groupAssignments)),
-			utils.LogAttr("groupSizes", groupSizes),
-			utils.LogAttr("groupAssignments", groupAssignments))
 	}
 
 	// Initialize consistency validation config from chain spec values. The finalization distance
@@ -465,7 +453,8 @@ func (rpcss *RPCSmartRouterServer) craftRelay(ctx context.Context) (ok bool, rel
 // configuredGroups is the total distinct provider-group count for the endpoint (the per-request check
 // tightens it to the addon/extension candidate set). groupSizes maps each group label to its provider
 // count, used by the per-group-quorum capacity check (a per-group policy needs MinGroups groups that EACH
-// have >= Threshold providers). Both are passed in to keep this function testable.
+// have >= Threshold providers). Both are passed in to keep this function testable. Both describe the
+// CONFIGURED primaries, not the verified ones — validateCrossValidationFleet explains why.
 func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, chainParser chainlib.ChainParser, chainID, apiInterface string, configuredGroups int, groupSizes map[string]int) error {
 	if !resolver.HasPolicies() {
 		return nil
@@ -558,6 +547,119 @@ func groupsBelowThreshold(groupSizes map[string]int, threshold int) []string {
 	}
 	sort.Strings(below)
 	return below
+}
+
+// validateCrossValidationFleet runs the startup cross-validation checks for an endpoint that has per-method
+// policies. configured maps each group label to the primaries the operator configured for the endpoint;
+// verified is the same map for the primaries that passed boot verification. Both fold an empty label into
+// common.DefaultProviderGroup.
+//
+// Whether a policy can EVER be met is a question about the configuration, so the guards in
+// validateCrossValidationStartup run against the configured layout, and an error from them stops the
+// endpoint from starting. A primary that failed boot verification is a runtime condition: it is retried in
+// the background and re-admitted when it recovers (MAG-2525). A shortfall among the verified primaries is
+// therefore logged, not returned. The endpoint starts and serves what it can, and
+// validateCrossValidationCapacity refuses only the cross-validated requests the verified groups cannot meet.
+// Judging the policy by the verified primaries turned one node that was down at boot into a crash loop
+// (MAG-3751).
+func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chainParser chainlib.ChainParser, chainID, apiInterface string, configured, verified map[string][]string) error {
+	configuredSizes := groupSizesOf(configured)
+	if err := validateCrossValidationStartup(resolver, chainParser, chainID, apiInterface, len(configured), configuredSizes); err != nil {
+		return err
+	}
+	verifiedSizes := groupSizesOf(verified)
+	// Log the resolved provider->group layout once at startup so operators can confirm the diversity
+	// their config yields (a min-groups policy is only as good as the group spread of the fleet).
+	utils.LavaFormatInfo("cross-validation per-method policies loaded",
+		utils.LogAttr("policies", resolver.NumPolicies()),
+		utils.LogAttr("chainID", chainID),
+		utils.LogAttr("apiInterface", apiInterface),
+		utils.LogAttr("distinctGroups", len(configured)),
+		utils.LogAttr("groupSizes", configuredSizes),
+		utils.LogAttr("groupAssignments", configured),
+		utils.LogAttr("verifiedGroupSizes", verifiedSizes))
+	// A shortfall with no provider missing is the configured fleet's own, which is rejected above unless
+	// the endpoint has no primaries at all; that case has nothing to report here.
+	unavailable := providersMissingFrom(configured, verified)
+	if requiredGroups := unmetCrossValidationGroupRequirement(resolver, chainID, apiInterface, verifiedSizes); requiredGroups > 0 && len(unavailable) > 0 {
+		utils.LavaFormatWarning("ATTENTION: the providers that passed startup verification cannot meet a cross-validation group policy — the requests it governs are refused until the failed providers recover", nil,
+			utils.LogAttr("chainID", chainID),
+			utils.LogAttr("apiInterface", apiInterface),
+			utils.LogAttr("requiredGroups", requiredGroups),
+			utils.LogAttr("verifiedGroupSizes", verifiedSizes),
+			utils.LogAttr("configuredGroupSizes", configuredSizes),
+			utils.LogAttr("unavailableProviders", unavailable),
+			utils.LogAttr("hint", "providers that failed verification are retried in the background; requests without cross-validation are served meanwhile"))
+	}
+	return nil
+}
+
+// unmetCrossValidationGroupRequirement returns the largest min-groups among the endpoint's enabled policies
+// that a fleet with the given group sizes cannot meet, or 0 when it meets them all. Each policy is judged by
+// crossValidationGroupShortfall at its no-caller shape, the same test the request-time guards apply to the
+// live candidate set, so a non-zero result is a prediction of requests that will be refused.
+func unmetCrossValidationGroupRequirement(resolver *CrossValidationPolicyResolver, chainID, apiInterface string, groupSizes map[string]int) int {
+	unmet := 0
+	for _, req := range resolver.MinGroupsRequirements(chainID, apiInterface) {
+		if _, reason := crossValidationGroupShortfall(groupSizes, &common.CrossValidationParams{MinGroups: req.MinGroups}); reason != "" {
+			unmet = max(unmet, req.MinGroups)
+		}
+	}
+	for _, req := range resolver.PerGroupRequirements(chainID, apiInterface) {
+		params := &common.CrossValidationParams{MinGroups: req.MinGroups, PerGroupQuorum: true, AgreementThreshold: req.Threshold}
+		if _, reason := crossValidationGroupShortfall(groupSizes, params); reason != "" {
+			unmet = max(unmet, req.MinGroups)
+		}
+	}
+	return unmet
+}
+
+// staticProviderGroupAssignments maps configured providers onto their cross-validation groups (label ->
+// sorted provider names). It folds an empty label into common.DefaultProviderGroup the way the session
+// manager's ProviderGroupAssignments does, so the configured and verified layouts compare label for label.
+func staticProviderGroupAssignments(providers []*lavasession.RPCStaticProviderEndpoint) map[string][]string {
+	assignments := make(map[string][]string)
+	for _, provider := range providers {
+		label := common.DefaultProviderGroup
+		if provider.GroupLabel != "" {
+			label = provider.GroupLabel
+		}
+		assignments[label] = append(assignments[label], provider.Name)
+	}
+	for label := range assignments {
+		sort.Strings(assignments[label])
+	}
+	return assignments
+}
+
+// groupSizesOf returns the provider count of each group in a provider->group layout.
+func groupSizesOf(assignments map[string][]string) map[string]int {
+	sizes := make(map[string]int, len(assignments))
+	for label, providers := range assignments {
+		sizes[label] = len(providers)
+	}
+	return sizes
+}
+
+// providersMissingFrom returns, sorted, the providers of the configured layout that the verified layout
+// does not hold.
+func providersMissingFrom(configured, verified map[string][]string) []string {
+	held := make(map[string]struct{})
+	for _, providers := range verified {
+		for _, provider := range providers {
+			held[provider] = struct{}{}
+		}
+	}
+	var missing []string
+	for _, providers := range configured {
+		for _, provider := range providers {
+			if _, ok := held[provider]; !ok {
+				missing = append(missing, provider)
+			}
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 // crossValidationSuccessOutliers returns the successful responses whose content diverged from the reached

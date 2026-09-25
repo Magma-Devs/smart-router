@@ -136,7 +136,7 @@ func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidati
 // contradictory policy never gets that far.
 //
 // The checks that need spec or provider context (the stateful-write guard, the min-groups capacity
-// bound) cannot move here — they need a chainParser and registered providers. They stay in
+// bound) cannot move here — they need a chainParser and the endpoint's configured providers. They stay in
 // validateCrossValidationStartup.
 func PreflightValidateCrossValidationConfig(v *viper.Viper) error {
 	cfg, err := ParseCrossValidationConfig(v)

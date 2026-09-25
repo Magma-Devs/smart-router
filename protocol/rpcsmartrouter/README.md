@@ -161,7 +161,10 @@ selection so a QoS-dominant group cannot starve the others.
 
 A policy that cannot be satisfied by the configured fleet (too few groups, or too few providers
 per group for per-group quorum) is **rejected at startup**, and the resolved
-provider→group layout is logged.
+provider→group layout is logged. A provider that fails its startup verification does not count
+against that check: the endpoint starts, logs an `ATTENTION` line naming the provider, and refuses
+only the requests whose policy the verified groups cannot meet until the background retry
+re-admits it.
 
 ### Response headers
 
