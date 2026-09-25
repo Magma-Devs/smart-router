@@ -55,7 +55,8 @@ func TestDetachedReqHeaders_OwnsEveryString(t *testing.T) {
 }
 
 // TestWebSocketLocals_AreOwnStrings covers the three header values stored for the websocket
-// handler, which reads them after fasthttp has recycled the request buffer.
+// handler. Its metrics goroutines read them, and can do so after fasthttp has recycled the request
+// buffer.
 func TestWebSocketLocals_AreOwnStrings(t *testing.T) {
 	var shared []string
 	var read int

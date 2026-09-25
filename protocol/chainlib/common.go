@@ -164,8 +164,9 @@ func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled f
 		c.Locals(ProjectIDHeader, dappID)
 
 		if isMetricEnabled {
-			// Cloned for the same reason as Origin below: all three are read by the websocket
-			// handler after fasthttp has recycled the request buffer (MAG-3881).
+			// Cloned for the same reason as Origin below: all three are read by the AddMetricForWebSocket
+			// goroutines, which can run after the websocket handler has returned and fasthttp has
+			// recycled the request buffer (MAG-3881).
 			c.Locals(metrics.RefererHeaderKey, strings.Clone(c.Get(metrics.RefererHeaderKey, "")))
 			c.Locals(metrics.UserAgentHeaderKey, strings.Clone(c.Get(metrics.UserAgentHeaderKey, "")))
 			// Clone Origin: it crosses the request boundary into the
@@ -483,27 +484,27 @@ func GetListenerWithRetryGrpc(protocol, addr string) net.Listener {
 }
 
 // detachedReqHeaders returns the request's headers with every name and value copied out of
-// fasthttp's per-request buffers. fiber hands them back zero-copy (no Immutable config), and
-// fasthttp reuses a header slot's buffer for the next request on the connection, so a header
-// string kept past the handler changes under whoever kept it: a pinned provider name held as a
-// metric label, a request id read by a goroutine after the reply, an Origin serialized by the
-// usage sink (MAG-3881). Every consumer of the map below this point gets owned strings.
+// fasthttp's per-request buffers. fiber's GetReqHeaders hands them back zero-copy (no Immutable
+// config), and fasthttp reuses a header slot's buffer for the next request on the connection, so a
+// header string kept past the handler changes under whoever kept it: a pinned provider name held as
+// a metric label, a request id read by a goroutine after the reply, an Origin serialized by the usage
+// sink (MAG-3881). Every consumer of the map below this point gets owned strings. It builds the map
+// the way GetReqHeaders does, copying each string as it goes, rather than copying GetReqHeaders'
+// map, which would build it twice.
 func detachedReqHeaders(c *fiber.Ctx) map[string][]string {
-	headers := c.GetReqHeaders()
-	detached := make(map[string][]string, len(headers))
-	for name, values := range headers {
-		owned := make([]string, len(values))
-		for i, value := range values {
-			owned[i] = strings.Clone(value)
-		}
-		detached[strings.Clone(name)] = owned
-	}
-	return detached
+	headers := make(map[string][]string)
+	c.Request().Header.VisitAll(func(name, value []byte) {
+		key := string(name)
+		headers[key] = append(headers[key], string(value))
+	})
+	return headers
 }
 
 // GetHeaderFromCachedMap extracts a header value from a cached headers map.
 // Returns the first value if present, or the defaultValue if not found.
 // This avoids repeated calls to fiberCtx.Get() which has overhead.
+// The value is returned as stored, so a caller that keeps it needs a map of owned strings,
+// which is what the listeners pass (detachedReqHeaders).
 func GetHeaderFromCachedMap(headers map[string][]string, key string, defaultValue string) string {
 	if values, ok := headers[key]; ok && len(values) > 0 {
 		return values[0]
