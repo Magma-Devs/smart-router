@@ -176,42 +176,42 @@ func NewUnifiedRelayStateMachine(
 			selection = Stateless
 		}
 	} else if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
-		// A write routes as a write, whatever the caller asked for. Tested BEFORE the
-		// caller-header branch below, which it used to sit after — and that ordering
-		// let two request headers turn a transaction submission into a cross-validated
-		// one (MAG-3603).
+		// A method in the stateful category routes by that category, whatever the caller asked
+		// for. Tested BEFORE the caller-header branch below, which it used to sit after — and
+		// that ordering let two request headers turn a transaction submission into a
+		// cross-validated one (MAG-3603).
 		//
-		// Cross-validating a write cannot succeed, so this is not a preference between
-		// two workable routes. A write is broadcast to the whole stateful tier and only
-		// the first node can accept it; every other node answers "already known" or
-		// "nonce too low", which are node errors and never count as successes. The
-		// success count is therefore stuck at one while the caller asked for two or more
-		// to agree, so the threshold is unreachable and the relay ends as HTTP 500 —
-		// after the transaction has already gone to every node. The caller is told
-		// their transaction failed, with no hash to follow it by, and resubmitting is
-		// the obvious next step and the one thing the write path exists to prevent.
+		// For a transaction submission, which is what the category is for, cross-validation
+		// cannot succeed at all: the write is broadcast to the whole stateful tier, only the
+		// first node can accept it, and every other node answers "already known" or "nonce too
+		// low" — node errors, which never count as successes. The success count is stuck at one
+		// while the caller asked for two or more to agree, so the threshold is unreachable and
+		// the relay ended as HTTP 500 after the transaction had already gone to every node: a
+		// caller told their transaction failed, with no hash to follow it by, for whom
+		// resubmitting is the obvious next step and the one thing the write path exists to
+		// prevent.
 		//
-		// Ignoring rather than refusing: a client library configured to cross-validate
-		// everything sends these headers on writes too, and failing those closed would
-		// break every transaction it submits for a parameter that could never have
-		// applied. There is nothing to cross-validate — a write's reply is a
-		// deterministic acknowledgement, not an observation of chain state
-		// (cross_validation_policy.go says the same about the operator-configured
-		// direction, which validateCrossValidationStartup refuses to boot on).
+		// That reasoning does NOT hold for every method in the category, and the category is
+		// what this branch keys on. Four of the fifteen methods carrying it broadcast nothing —
+		// the cosmos tx encode, encode/amino, decode and simulate endpoints — and a
+		// cross-validation across three nodes would have agreed for the three deterministic
+		// ones. They lose caller-driven cross-validation here. That is deliberate: the router
+		// already refuses an operator's cross-validation policy on every stateful method, those
+		// four included (ValidateNoStatefulPolicies, which fails closed), so keying on the
+		// category keeps one definition of the boundary instead of two that can drift. A
+		// narrower rule would need a signal the spec does not carry.
 		//
-		// The operator-forced branch above is deliberately left ahead of this one:
-		// Finding A ordered it that way, and a policy on a write cannot reach here
-		// because that startup guard fails closed.
+		// This is also exactly as complete as the spec data: a submit endpoint the spec does not
+		// mark stateful is not covered. specs/aptos.json marks POST /transactions and
+		// /transactions/batch stateful:0, so an Aptos submit still takes the caller's headers.
+		// That marking is its own bug and its own change — it would alter fan-out, not just this
+		// label — but the limit belongs written down here rather than discovered later.
+		//
+		// The operator-forced branch above stays ahead of this one: Finding A ordered it that
+		// way. What keeps a policy override off a write is not that branch's own guard but the
+		// skip in NewSmartRouterRelayStateMachineWithPolicy, which is where the caller's headers
+		// would otherwise be resolved into one.
 		selection = Stateful
-		// Read only for the log, and only to keep the ordinary write path quiet. The
-		// parse error is discarded along with the headers: an invalid value for a
-		// parameter that cannot apply is not a reason to fail a transaction, which is
-		// the same call the forbid-caller-cv branch above makes.
-		if _, headersPresent, _ := protocolMessage.GetCrossValidationParameters(); headersPresent {
-			utils.LavaFormatDebug("[StateMachine] caller cross-validation headers ignored on a write method (no agreement threshold is reachable on a broadcast only one node can accept)",
-				utils.LogAttr("method", protocolMessage.GetApi().GetName()),
-				utils.LogAttr("GUID", ctx))
-		}
 	} else if crossValidationParams, headersPresent, err := protocolMessage.GetCrossValidationParameters(); headersPresent && err != nil {
 		return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
 	} else if headersPresent {

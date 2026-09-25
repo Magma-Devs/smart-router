@@ -76,7 +76,7 @@ strictly than a caller asked, and it is an explicit operator decision — an ope
 a method's fan-out pinned regardless of caller headers sets `floor == cap`, and one who wants
 the headers ignored outright sets `forbid-caller-cv: true`.
 
-With no policy for a method the caller's headers are the only authority, and any
+With no policy for a **stateless** method the caller's headers are the only authority, and any
 self-consistent shape is honored — including the degenerate `max-participants: 1` with
 `agreement-threshold: 1`, which returns `lava-cross-validation-status: success` after a
 single response because the requested quorum of one was met. Nothing is compared in that
@@ -125,10 +125,16 @@ recording path) for test suites that cannot scrape the metrics port — see
 
 ## Caveats
 
-- **Writes.** An *operator policy* on a stateful (write) method is rejected at startup.
-  Cross-validating a write response verifies nothing — leave writes to the stateful fan-out.
-  To also block the legacy *caller-header* path on a specific write, set
-  `forbid-caller-cv: true` on its policy.
+- **Writes.** Cross-validation does not apply to a method in the stateful category, by either
+  route. An *operator policy* on one is rejected at startup, and the *caller-header* path is
+  ignored on one — the request routes by its category and the headers have no effect, whatever
+  they contain. No policy is needed for that (MAG-3603): cross-validating a broadcast only one
+  node can accept cannot reach any agreement threshold, so the router used to answer HTTP 500
+  after the transaction had already been submitted. `forbid-caller-cv: true` is for a
+  **stateless** method an operator wants protected from caller-driven cross-validation.
+  Caveats: the four cosmos `tx` endpoints that carry the stateful category without broadcasting
+  (`encode`, `encode/amino`, `decode`, `simulate`) are covered by the same rule, and a submit
+  endpoint the spec does not mark stateful — Aptos `POST /transactions` today — is not covered.
 - **Cost & latency.** N relays per request. Scope policies to the methods that warrant it.
 - **Public endpoints are best-effort.** The example fleets use rate-limited community
   endpoints; for production, point at your own nodes or keyed gateways.

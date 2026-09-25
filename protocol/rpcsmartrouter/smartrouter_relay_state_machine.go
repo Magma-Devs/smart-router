@@ -94,20 +94,25 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		// checked before Resolve, since Resolve returns applies=false for a forbid policy — which on its own
 		// would just let the machine fall back to the caller's headers.
 		forbidCallerCV = resolver.ForbidsCallerCV(chainID, apiInterface, method)
-		// A write's cross-validation headers are not read here either, for the reason the state
-		// machine does not act on them: a write routes as a write, so a malformed value for a
-		// parameter that could never have applied must not fail the transaction. Skipping the read
-		// is what makes that true — this line failed such a write outright, before the state
-		// machine got the chance to ignore the headers, in any deployment with a cross-validation
-		// policy configured for any method at all (MAG-3603).
-		//
-		// Resolve is skipped with it. A policy cannot legitimately apply to a write anyway:
-		// validateCrossValidationStartup refuses to boot on one, so the only thing Resolve could
-		// return here is applies=false.
-		// routesAsWrite, not isWrite: the stateful category is what decides routing, and
-		// four of the fifteen methods carrying it are not chain writes at all (the cosmos
-		// tx encode/decode/simulate endpoints). What matters here is how the method routes.
+		// routesAsWrite, not isWrite: the stateful category is what decides routing, and four of
+		// the fifteen methods carrying it are not chain writes at all (see the state machine's
+		// own note). What matters here is how the method routes.
 		routesAsWrite := chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
+		// A write's cross-validation headers are not read here, and this is the half of MAG-3603
+		// that the state machine cannot fix on its own. Resolve returns (callerParams,
+		// callerPresent) for a method that has no policy of its own, so with ANY policy
+		// configured — for any method at all — a write's own headers came back as a resolved
+		// override, and cvOverride is the machine's FIRST branch, ahead of the write branch by
+		// design (Finding A). Routing the write as a write in the machine was therefore inert on
+		// every router that had a cross-validation policy.
+		//
+		// It also stopped the request outright when a value would not parse, before the machine
+		// could ignore the headers at all.
+		//
+		// So the startup guard is NOT what keeps a policy override off a write, which an earlier
+		// version of this comment claimed: validateCrossValidationStartup only rejects an ENABLED
+		// policy whose own method is stateful, and says nothing about a write with no policy
+		// borrowing the caller's headers. This skip is what keeps it off.
 		if !forbidCallerCV && !routesAsWrite {
 			caller, callerPresent, err := protocolMessage.GetCrossValidationParameters()
 			if callerPresent && err != nil {
@@ -128,7 +133,15 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 				}
 			}
 		} else if debugRelays {
-			utils.LavaFormatDebug("[CrossValidation] per-method policy forbids caller-driven cross-validation",
+			// Two reasons reach here now, and naming the wrong one sends an operator looking for
+			// a policy nobody wrote: before the write skip above, this branch was reachable only
+			// when a forbid policy existed.
+			reason := "forbidden by per-method policy"
+			if routesAsWrite {
+				reason = "method routes as a write"
+			}
+			utils.LavaFormatDebug("[CrossValidation] caller cross-validation headers not consulted",
+				utils.LogAttr("reason", reason),
 				utils.LogAttr("chainID", chainID),
 				utils.LogAttr("apiInterface", apiInterface),
 				utils.LogAttr("method", method),

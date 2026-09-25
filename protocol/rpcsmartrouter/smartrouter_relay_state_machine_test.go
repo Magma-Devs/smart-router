@@ -1238,10 +1238,34 @@ func TestSmartRouterStateMachine_CallerCVHeadersOnAWrite(t *testing.T) {
 	})
 
 	// The state machine is not the only place the caller's headers are read: the policy layer
-	// reads them too, before the machine is built, and used to fail the request from there. So
-	// a write with malformed headers still failed in any deployment that had a
-	// cross-validation policy configured — for any method at all, including a policy on some
-	// unrelated read, since the read is gated only on the resolver having policies.
+	// reads them first, and Resolve returns (callerParams, callerPresent) for a method with no
+	// policy of its own — so with ANY policy configured, for any method at all, a write's own
+	// headers came back as a resolved policy override. That took the machine's FIRST branch,
+	// cvOverride != nil, which sits ahead of the write branch by design (Finding A). Routing the
+	// write as a write in the machine was therefore inert on every router that had a
+	// cross-validation policy: the headers were laundered into an operator mandate before the
+	// machine ever saw them.
+	//
+	// This is the case that proves it — valid headers, a policy on an unrelated read — and it
+	// is the reason the write skip has to live in the policy layer too, not only in the machine.
+	t.Run("a policy on an unrelated method does not launder a write's headers into an override", func(t *testing.T) {
+		resolver, rerr := NewCrossValidationPolicyResolver(CrossValidationConfig{
+			Policies: []CrossValidationPolicyEntry{{
+				ChainID: specId, ApiInterface: apiInterface, Method: "eth_blockNumber",
+				CrossValidationPolicy: CrossValidationPolicy{Enabled: true},
+			}},
+		})
+		require.NoError(t, rerr)
+
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil),
+			&SmartRouterRelaySenderMock{retValue: nil}, buildPM(t, writeBody, callerCVHeaders), nil, false, resolver, specId, apiInterface)
+		require.NoError(t, smErr)
+		require.Equal(t, relaycore.Stateful, sm.GetSelection(),
+			"a write must route as a write even when some other method has a policy")
+		require.Nil(t, sm.GetCrossValidationParams(),
+			"the caller's headers must not arrive dressed as an operator mandate")
+	})
+
 	t.Run("a configured policy elsewhere does not make malformed headers fail a write", func(t *testing.T) {
 		resolver, rerr := NewCrossValidationPolicyResolver(CrossValidationConfig{
 			Policies: []CrossValidationPolicyEntry{{
