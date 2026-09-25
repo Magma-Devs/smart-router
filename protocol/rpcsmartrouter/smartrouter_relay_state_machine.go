@@ -69,6 +69,11 @@ func NewSmartRouterRelayStateMachine(
 // policy applies, injects the resolved params as an override so the unified state machine selects
 // CrossValidation regardless of the method's stateful category. resolver may be nil / empty, in which
 // case behavior is identical to the header-driven path.
+//
+// It reads the caller's cross-validation headers here as well, ahead of the state machine, so a policy
+// can be resolved against what the caller asked for — and therefore skips that read for a method that
+// routes as a write, whose headers are ignored either way. Without the skip this constructor failed such
+// a request outright on a header it could not parse (MAG-3603).
 func NewSmartRouterRelayStateMachineWithPolicy(
 	ctx context.Context,
 	usedProviders *lavasession.UsedProviders,
@@ -99,8 +104,11 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		// Resolve is skipped with it. A policy cannot legitimately apply to a write anyway:
 		// validateCrossValidationStartup refuses to boot on one, so the only thing Resolve could
 		// return here is applies=false.
-		isWrite := chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
-		if !forbidCallerCV && !isWrite {
+		// routesAsWrite, not isWrite: the stateful category is what decides routing, and
+		// four of the fifteen methods carrying it are not chain writes at all (the cosmos
+		// tx encode/decode/simulate endpoints). What matters here is how the method routes.
+		routesAsWrite := chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
+		if !forbidCallerCV && !routesAsWrite {
 			caller, callerPresent, err := protocolMessage.GetCrossValidationParameters()
 			if callerPresent && err != nil {
 				return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
