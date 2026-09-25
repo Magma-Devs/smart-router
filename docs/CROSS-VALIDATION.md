@@ -129,6 +129,16 @@ recording path) for test suites that cannot scrape the metrics port — see
   Cross-validating a write response verifies nothing — leave writes to the stateful fan-out.
   To also block the legacy *caller-header* path on a specific write, set
   `forbid-caller-cv: true` on its policy.
+- **The readiness health check is not cross-validated.** The router's own health check crafts a
+  latest-block request (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`, whatever
+  the spec tags) and takes one provider's answer. A policy on that method does **not** apply to it,
+  deliberately: the check asks whether a provider can answer, and a single answer can never meet an
+  agreement threshold above 1. Before MAG-3746 the policy did apply, so a router with such a policy
+  failed every health check — `/readyz` answered 503 for ever and, under a readiness probe on that
+  path, the pod never became Ready and received no traffic at all, while its providers were healthy
+  and client requests were passing with the agreement the policy asked for. Measured: an
+  `agreement-threshold` of 1 was unaffected; 2 and 3 failed. Client requests are unchanged — a
+  policy on the latest-block method still governs what a caller is given.
 - **Cost & latency.** N relays per request. Scope policies to the methods that warrant it.
 - **Public endpoints are best-effort.** The example fleets use rate-limited community
   endpoints; for production, point at your own nodes or keyed gateways.
