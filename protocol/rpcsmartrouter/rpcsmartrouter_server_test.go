@@ -3261,7 +3261,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	defer cancel()
 
 	start := time.Now()
-	sendErr := rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{})
+	sendErr := rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, protocolMsg, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{})
 	elapsed := time.Since(start)
 
 	require.Less(t, elapsed, time.Second,
