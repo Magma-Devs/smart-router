@@ -87,12 +87,18 @@ type Store struct {
 	credentials *StreamingProvider
 }
 
-// endpointTracker holds the last successfully dialled address. Written from
-// dial callbacks on arbitrary goroutines, read from the relay path, so it is
-// atomic; a slightly stale value is fine for its purpose (naming a node in a
-// debug header) and never affects routing.
+// endpointTracker holds the last successfully dialled address, and the last
+// observation that the endpoint could not be reached at all. Written from dial
+// callbacks on arbitrary goroutines, read from the relay path, so both are
+// atomic; neither affects routing.
+//
+// The address is an answer about identity — which node served this — and a
+// slightly stale one is fine for its purpose, naming a node in a debug header.
+// The fault is an answer about reachability, read through OpWindow, and there
+// staleness is the whole difficulty: see OpWindow for why it is timestamped.
 type endpointTracker struct {
-	addr atomic.Value // string
+	addr  atomic.Value // string
+	fault atomic.Pointer[endpointFault]
 }
 
 func (t *endpointTracker) note(addr string) {
