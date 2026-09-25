@@ -617,6 +617,39 @@ func crossValidationPendingProviders(allProviders []string, successResults, node
 	return pending
 }
 
+// attemptsWithoutResult returns the dispatched attempts that have no recorded result, in dispatch
+// order: dispatched minus one entry for each result that carries the same provider. It is the
+// non-cross-validation counterpart of crossValidationPendingProviders, which works on a set. This
+// one subtracts per attempt, because a retry path may ask the same provider twice, and a provider
+// asked twice but answered once still has an attempt out.
+//
+// A cache hit is recorded without being dispatched and carries no provider, so it never settles
+// a dispatched attempt.
+func attemptsWithoutResult(dispatched []string, successResults, nodeErrorResults []common.RelayResult, protocolErrorResults []relaycore.RelayError) []string {
+	if len(dispatched) == 0 {
+		return nil
+	}
+	recorded := make(map[string]int, len(successResults)+len(nodeErrorResults)+len(protocolErrorResults))
+	for _, result := range successResults {
+		recorded[result.ProviderInfo.ProviderAddress]++
+	}
+	for _, result := range nodeErrorResults {
+		recorded[result.ProviderInfo.ProviderAddress]++
+	}
+	for _, result := range protocolErrorResults {
+		recorded[result.ProviderInfo.ProviderAddress]++
+	}
+	var withoutResult []string
+	for _, addr := range dispatched {
+		if recorded[addr] > 0 {
+			recorded[addr]--
+			continue
+		}
+		withoutResult = append(withoutResult, addr)
+	}
+	return withoutResult
+}
+
 // preferStructuralFailureReason overwrites a cross-validation FAILURE result's reason with a structural
 // request-time fail-fast reason (insufficient-capacity / insufficient-groups) when one was set. The
 // structural reason means the fleet cannot satisfy the policy at all — strictly more actionable for the
@@ -5194,7 +5227,22 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 
 		// add the relay retried count: total attempts minus 1 (the initial attempt is not a retry)
 		successResults, nodeErrorResults, protocolErrorResults := relayProcessor.GetResultsData()
-		totalAttempts := uint64(len(successResults)) + uint64(len(nodeErrorResults)) + protocolErrors
+
+		// The three lists hold only the attempts whose result was recorded before this reply was
+		// built, and a hedge's loser is not among them (MAG-3762). An attempt outlives the window
+		// that dispatches the hedge, so the loser is still running when the hedge wins. The router
+		// then cancels it, and the loser posts its result to a channel that nothing reads again.
+		// Counting results alone reported a two-attempt hedge race as zero retries. Lava-Retries
+		// counts every attempt the router sent (MAG-1818), so the attempts still out count too.
+		unfinished := attemptsWithoutResult(relayProcessor.GetUsedProviders().DispatchedProviders(), successResults, nodeErrorResults, protocolErrorResults)
+
+		// The caller read its protocol-error count before this snapshot. On a failure path a
+		// reader still draining the responses can record one more in between. That attempt is in
+		// protocolErrorResults, so attemptsWithoutResult no longer counts it, and the caller's
+		// count does not either. Counting from the same snapshot keeps it counted once. The list
+		// only grows, so the larger of the two is the snapshot's own count.
+		protocolErrorCount := max(protocolErrors, uint64(len(protocolErrorResults)))
+		totalAttempts := uint64(len(successResults)) + uint64(len(nodeErrorResults)) + protocolErrorCount + uint64(len(unfinished))
 
 		// Stateful selection fans out to all top providers in a single batch and
 		// never retries (relaypolicy.Decide returns Stop for Stateful). Failures
@@ -5225,10 +5273,14 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			// Lava-Retries — without it, retries=N and a single provider name
 			// disagree on how many actors participated (MAG-1653 Bug #2).
 			//
-			// Ordering rule: walk protocol errors → node errors → successes,
-			// skipping any entry whose address matches the resolver, then
-			// append the resolver (`providerAddress`, which is "Cached" when
-			// relayResult.GetProvider() was empty). The skip-then-append is
+			// Ordering rule: walk protocol errors → attempts without a result
+			// → node errors → successes, skipping any entry whose address
+			// matches the resolver, then append the resolver
+			// (`providerAddress`, which is "Cached" when
+			// relayResult.GetProvider() was empty). An attempt without a
+			// result sits with the protocol errors, which is where v1.5.1
+			// listed the attempt a hedge overtook: its window killed it and it
+			// was recorded as a timeout. The skip-then-append is
 			// load-bearing: dedup alone preserves first-seen position, so if
 			// the resolver happened to be in successResults[0] (e.g. it
 			// completed before the loser was even recorded), the final
@@ -5254,6 +5306,12 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 					continue
 				}
 				addProvider(r.ProviderInfo.ProviderAddress)
+			}
+			for _, addr := range unfinished {
+				if addr == providerAddress {
+					continue
+				}
+				addProvider(addr)
 			}
 			for _, r := range nodeErrorResults {
 				if r.ProviderInfo.ProviderAddress == providerAddress {
