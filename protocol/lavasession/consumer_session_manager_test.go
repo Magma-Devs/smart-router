@@ -306,9 +306,9 @@ func createNamedPairingList(names ...string) map[uint64]*ConsumerSessionsWithPro
 	return cswpList
 }
 
-// TestNumberOfValidProviderGroups covers the Fix 3 group-capacity helper: distinct cross-validation
-// group labels across valid providers, with empty GroupLabel folded into the implicit "default" group.
-func TestNumberOfValidProviderGroups(t *testing.T) {
+// TestProviderGroupAssignments covers the group accounting over valid providers: providers sharing a
+// cross-validation label form one group, and an empty GroupLabel folds into the implicit "default" group.
+func TestProviderGroupAssignments(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	mk := func(addr, group string) *ConsumerSessionsWithProvider {
 		return &ConsumerSessionsWithProvider{
@@ -329,7 +329,11 @@ func TestNumberOfValidProviderGroups(t *testing.T) {
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairingList, nil))
 
 	require.Equal(t, 4, csm.GetNumberOfValidProviders())
-	require.Equal(t, 3, csm.NumberOfValidProviderGroups(), "tier-1, external, default are the 3 distinct groups")
+	require.Equal(t, map[string][]string{
+		"tier-1":                    {"lava@p0", "lava@p1"},
+		"external":                  {"lava@p2"},
+		common.DefaultProviderGroup: {"lava@p3"},
+	}, csm.ProviderGroupAssignments(), "tier-1, external, default are the 3 distinct groups")
 
 	// With no addon/extension filtering the request-scoped counts match the totals.
 	providers, groups := csm.ProviderAndGroupCountsForRequest("", nil, context.Background())
@@ -340,8 +344,8 @@ func TestNumberOfValidProviderGroups(t *testing.T) {
 // TestBackupProvidersExcludedFromValidationSet is the Phase 1.5 validation-set scope guard: backup
 // providers are failover-only and must never enter the cross-validation candidate set. Concretely they
 // must not (a) be returned by GetSessions — the path CV fans out over — while healthy primaries exist,
-// nor (b) appear in the group accounting (NumberOfValidProviderGroups / ProviderGroupAssignments) that
-// the CV capacity check trusts, or a backup could inflate a quorum it was never meant to validate.
+// nor (b) appear in the group accounting (ProviderGroupAssignments / ProviderAndGroupCountsForRequest)
+// that the CV capacity checks trust, or a backup could inflate a quorum it was never meant to validate.
 func TestBackupProvidersExcludedFromValidationSet(t *testing.T) {
 	ctx := context.Background()
 	csm := CreateConsumerSessionManager()
@@ -366,7 +370,7 @@ func TestBackupProvidersExcludedFromValidationSet(t *testing.T) {
 
 	// (b) Group accounting only sees primaries — the backup's distinct "backup-group" must not count.
 	require.Equal(t, 2, csm.GetNumberOfValidProviders(), "only primaries are valid providers")
-	require.Equal(t, 2, csm.NumberOfValidProviderGroups(), "backup-group must not inflate the group count")
+	require.Len(t, csm.ProviderGroupAssignments(), 2, "backup-group must not inflate the group count")
 	// ProviderAndGroupCountsForRequest is the exact input the CV capacity gate trusts to fail-fast; a
 	// backup leaking in here would let an unsatisfiable min-groups/max-participants policy pass.
 	reqProviders, reqGroups := csm.ProviderAndGroupCountsForRequest("", nil, context.Background())
