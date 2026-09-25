@@ -795,6 +795,34 @@ func (rpcss *RPCSmartRouterServer) crossValidationFailFast(reason string, protoc
 	return crossValidationFailFastResult(reason)
 }
 
+// internalRelayStateMachine builds the state machine for a relay the ROUTER crafted for itself —
+// today the readiness/init health check's latest-block request, which sendCraftedRelays is the only
+// producer of. It is deliberately built WITHOUT the per-method cross-validation resolver, which is
+// what separates it from a client request.
+//
+// A health check asks one question: can a provider answer? So it takes one session, and it takes
+// whichever latest block that provider returns. Passing the resolver made an operator's
+// cross-validation policy on the latest-block method apply to this request too, and then the two
+// halves could not both be satisfied: the consensus check refuses before sending anything when
+// len(sessions) < AgreementThreshold, so one session against a threshold of two failed every
+// health check, for ever. The chain's own health flag stayed false, /readyz answered 503, and under
+// the published chart's readiness probe the pod never became Ready — so a router whose providers
+// were all healthy, and whose client requests were succeeding with the agreement the policy asked
+// for, received no traffic at all (MAG-3746).
+//
+// Asking for AgreementThreshold sessions instead would be the wrong repair. Readiness would then
+// depend on several nodes agreeing on the chain tip, which real nodes routinely do not — they
+// differ by a block, which is why docs/configuration/failover/cross-validation.md advises against
+// cross-validating latest-block reads in the first place. That trades a permanent failure for a
+// flaky one and multiplies health-check traffic by the threshold, to corroborate an answer nobody
+// serves to a caller.
+//
+// A client request is unaffected: it goes through SendParsedRelay, and an operator policy on the
+// latest-block method still cross-validates what the caller is actually given.
+func (rpcss *RPCSmartRouterServer) internalRelayStateMachine(ctx context.Context, usedProviders *lavasession.UsedProviders, protocolMessage chainlib.ProtocolMessage) (RelayStateMachine, error) {
+	return NewSmartRouterRelayStateMachineWithPolicy(ctx, usedProviders, rpcss, protocolMessage, nil, rpcss.debugRelays, nil, rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface)
+}
+
 func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, retries int, initialRelays bool, protocolMessage chainlib.ProtocolMessage) (bool, error) {
 	success := false
 	var err error
@@ -802,8 +830,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	usedProviders.SetChainID(rpcss.listenEndpoint.ChainID)
 	usedProviders.SetEligibilityFunc(relaypolicy.DecideEligibility)
 
-	// Create state machine first - it determines Selection type based on per-method policy + headers
-	stateMachine, err := NewSmartRouterRelayStateMachineWithPolicy(ctx, usedProviders, rpcss, protocolMessage, nil, rpcss.debugRelays, rpcss.crossValidationResolver, rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface)
+	// Selection comes from the method's own category only — see internalRelayStateMachine for why
+	// an operator cross-validation policy must not reach a health check.
+	stateMachine, err := rpcss.internalRelayStateMachine(ctx, usedProviders, protocolMessage)
 	if err != nil {
 		return false, err
 	}
