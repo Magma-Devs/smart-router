@@ -59,7 +59,8 @@ curl -s :7801/metrics | grep smartrouter_csm_sticky_claims_total
 
 - `claimed` — this pod created the claim. Summed across pods it should equal the number of
   DISTINCT session ids used, because a claim is first-writer-wins fleet-wide.
-- `adopted` — this pod took a claim a peer had made. **Zero here on every pod means the
+- `adopted` — this pod routed by a claim it read from the registry: a peer's, or its own after
+  dropping its local copy (`invalidated` moves with it then). **Zero here on every pod means the
   feature is wired but never firing.**
 - `local_hit` — answered from this pod's confirmed table with no round trip.
 - `error` — the claim could not be established and the request was failed rather than
