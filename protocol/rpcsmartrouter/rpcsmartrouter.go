@@ -1724,6 +1724,45 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		writeDebugRows(w, rows)
 	})
 
+	// GET /debug/sticky-claims — per-endpoint cross-pod sticky-session claim outcomes (MAG-3860). Flat
+	// array of self-describing records (ChainID + ApiInterface). SharedSticky says whether the fleet-wide
+	// claim registry is wired (--shared-state with a cache backend); Outcomes holds the seven counts
+	// smartrouter_csm_sticky_claims_total carries, cumulative since the process started, every outcome
+	// present. PodID names the process that answered (endpointstate.LocalPodID: the pod name and a
+	// per-process suffix). The debug Service balances across a router's pods, so two readings compare only
+	// when their PodID matches. "adopted" is how a peer's claim shows up, which Lava-Provider-Address cannot
+	// show, because it reads the same whether a pod used its own claim or a peer's. A pod that dropped its
+	// local copy of its own claim (invalidated, or /debug/reset-all) reads it back as adopted too. Without
+	// the registry every count stays 0, so SharedSticky is what tells "off" from "never fired". Read-only;
+	// nil-router safe.
+	mux.HandleFunc("/debug/sticky-claims", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			podID := endpointstate.LocalPodID()
+			deps.router.mu.Lock()
+			for _, csm := range deps.router.sessionManagers {
+				if csm == nil {
+					continue
+				}
+				ep := csm.RPCEndpoint()
+				shared, outcomes := csm.StickyClaimCounts()
+				rows = append(rows, map[string]any{
+					"ChainID":      ep.ChainID,
+					"ApiInterface": ep.ApiInterface,
+					"PodID":        podID,
+					"SharedSticky": shared,
+					"Outcomes":     outcomes,
+				})
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
 	// GET /debug/probe-loop — per-chain proactive-prober cycle telemetry (MAG-2202 endpoint 4). Flat
 	// array of self-describing records (ChainID + ApiInterface): the configured --probe-loop-interval
 	// cadence (CycleIntervalMs) plus a snapshot of the last completed runProbeCycle — start/duration,
