@@ -797,30 +797,54 @@ func (rpcss *RPCSmartRouterServer) crossValidationFailFast(reason string, protoc
 
 // internalRelayStateMachine builds the state machine for a relay the ROUTER crafted for itself —
 // today the readiness/init health check's latest-block request, which sendCraftedRelays is the only
-// producer of. It is deliberately built WITHOUT the per-method cross-validation resolver, which is
-// what separates it from a client request.
+// producer of. It cross-validates nothing, and says so twice: no policy resolver, and
+// forbidCallerCrossValidation set outright.
 //
 // A health check asks one question: can a provider answer? So it takes one session, and it takes
 // whichever latest block that provider returns. Passing the resolver made an operator's
 // cross-validation policy on the latest-block method apply to this request too, and then the two
 // halves could not both be satisfied: the consensus check refuses before sending anything when
 // len(sessions) < AgreementThreshold, so one session against a threshold of two failed every
-// health check, for ever. The chain's own health flag stayed false, /readyz answered 503, and under
-// the published chart's readiness probe the pod never became Ready — so a router whose providers
-// were all healthy, and whose client requests were succeeding with the agreement the policy asked
-// for, received no traffic at all (MAG-3746).
+// health check, for as long as the policy stood. The chain's health flag stayed false, /readyz
+// answered 503, and under the published chart's readiness probe the pod never became Ready — so a
+// router whose providers were all healthy, and whose client requests were succeeding with the
+// agreement the policy asked for, received no traffic at all (MAG-3746).
 //
-// Asking for AgreementThreshold sessions instead would be the wrong repair. Readiness would then
-// depend on several nodes agreeing on the chain tip, which real nodes routinely do not — they
-// differ by a block, which is why docs/configuration/failover/cross-validation.md advises against
-// cross-validating latest-block reads in the first place. That trades a permanent failure for a
-// flaky one and multiplies health-check traffic by the threshold, to corroborate an answer nobody
-// serves to a caller.
+// The forbid flag is not redundant with the nil resolver. Without it the machine falls through to
+// its caller-header branch, so the seal would rest entirely on craftRelay happening to parse with
+// nil metadata three frames away — give a crafted relay a directive header later, or reuse this
+// path for another internal probe, and MAG-3746 returns with the suite green. The flag makes it
+// structural instead of incidental.
+//
+// Asking for AgreementThreshold sessions instead would be the wrong repair, for a reason that does
+// not depend on how often real nodes agree on a tip: a health check exists to report reachability,
+// and readiness gated on a quorum reporting the SAME tip would fail on any disagreement between
+// healthy nodes — while multiplying health-check traffic by the threshold every interval, to
+// corroborate an answer no caller is ever given. (How often real nodes do disagree here is listed
+// as unmeasured on the ticket, and nothing in this fix rests on it.)
+//
+// What this deliberately does NOT do is make readiness attest that a cross-validated method has
+// quorum capacity right now. Readiness is per chain and interface, and the documented contract is
+// that a chain "can serve relays" — a method whose policy is temporarily short of participants does
+// not stop the chain serving every other method, and gating the whole chain on one method's policy
+// would re-create the over-coupling this bug was. Capacity is still enforced per client request, by
+// validateCrossValidationCapacity on the client path, which is where a caller learns of it.
 //
 // A client request is unaffected: it goes through SendParsedRelay, and an operator policy on the
 // latest-block method still cross-validates what the caller is actually given.
 func (rpcss *RPCSmartRouterServer) internalRelayStateMachine(ctx context.Context, usedProviders *lavasession.UsedProviders, protocolMessage chainlib.ProtocolMessage) (RelayStateMachine, error) {
-	return NewSmartRouterRelayStateMachineWithPolicy(ctx, usedProviders, rpcss, protocolMessage, nil, rpcss.debugRelays, nil, rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface)
+	return relaycore.NewUnifiedRelayStateMachine(
+		ctx,
+		usedProviders,
+		rpcss,
+		protocolMessage,
+		nil, // no analytics: this relay is not a client request
+		rpcss.debugRelays,
+		SmartRouterStateMachineConfig(),
+		relaypolicy.NewPolicy(SmartRouterPolicyConfig()),
+		nil,  // no policy override: an operator policy must not reach a health check
+		true, // and no caller headers either, whatever a future craftRelay puts on one
+	)
 }
 
 func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, retries int, initialRelays bool, protocolMessage chainlib.ProtocolMessage) (bool, error) {
@@ -840,7 +864,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	// Get cross-validation parameters from the state machine (nil for Stateless/Stateful)
 	crossValidationParams := stateMachine.GetCrossValidationParams()
 
-	// Initial/health relays are not client-facing, so the structured reason is unused here.
+	// Retained as a guard rail, not as a live check: internalRelayStateMachine can no longer
+	// produce a CrossValidation selection, and validateCrossValidationCapacity returns nothing
+	// for any other, so this cannot fail today. It stays because the alternative is a silent
+	// hole if this path ever gains a selection that does cross-validate. Readiness deliberately
+	// does not attest a policied method's quorum capacity — see internalRelayStateMachine.
 	if _, err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
 		return false, err
 	}
@@ -1386,8 +1414,9 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	// Validate the requested fan-out against the live candidate-endpoint count BEFORE constructing the
 	// processor. The processor sizes its response channel from that fan-out, and this check is the only
 	// thing that bounds MaxParticipants by the endpoints that actually exist, so a rejected request must
-	// never reach the constructor. This matches the ordering already used on the initial/health relay path
-	// in sendRelayWithRetries (MAG-2796).
+	// never reach the constructor. The ordering was copied from the initial/health relay path in
+	// sendRelayWithRetries (MAG-2796), where the same call now cannot fire — that path stopped being
+	// able to select CrossValidation (MAG-3746) — so this is the only place the bound is enforced.
 	if reason, err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
 		// Nothing will be relayed on this path, so the processor exists only to carry the structured reason
 		// back to SendParsedRelay. Build it with the single-relay defaults rather than the caller's params:

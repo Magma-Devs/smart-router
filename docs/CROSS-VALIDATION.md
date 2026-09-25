@@ -133,19 +133,26 @@ recording path) for test suites that cannot scrape the metrics port — see
   latest-block request (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`, whatever
   the spec tags) and takes one provider's answer. A policy on that method does **not** apply to it,
   deliberately: the check asks whether a provider can answer, and a single answer can never meet an
-  agreement threshold above 1. Before MAG-3746 the policy did apply, so a router with such a policy
-  failed every health check — `/readyz` answered 503 for ever and, under a readiness probe on that
-  path, the pod never became Ready and received no traffic at all, while its providers were healthy
-  and client requests were passing with the agreement the policy asked for. Measured: an
-  `agreement-threshold` of 1 was unaffected; 2 and 3 failed. Client requests are unchanged — a
-  policy on the latest-block method still governs what a caller is given.
+  agreement threshold above 1. Before MAG-3746 the policy did apply, so every health check failed
+  for as long as the policy stood — `/readyz` answered 503 after each one and, under a readiness
+  probe on that path, the pod never became Ready, while its providers were healthy and client
+  requests were passing with the agreement the policy asked for. (A successful client request flips
+  the flag back to healthy until the next check, so the 503 was persistent rather than literally
+  uninterrupted.) A threshold of 1 was unaffected — one session is not fewer than one — which
+  `TestInternalRelayIgnoresCrossValidationPolicy` now pins for 1, 2 and 3.
+- **Readiness does not attest that a cross-validated method has quorum capacity.** It never did for
+  any other method, and since MAG-3746 it does not for the latest-block one either. `/readyz`
+  answers for the chain — can it serve relays — so a policy temporarily short of participants or
+  groups leaves it 200 while requests for *that* method are refused with `insufficient-capacity`.
+  That is deliberate: gating a whole chain and interface on one method's quorum is the over-coupling
+  MAG-3746 was. Alert on the cross-validation failure series for policy capacity, not on readiness.
 - **Cost & latency.** N relays per request. Scope policies to the methods that warrant it.
 - **Public endpoints are best-effort.** The example fleets use rate-limited community
   endpoints; for production, point at your own nodes or keyed gateways.
 - **No value-threshold escalation.** There is no knob that raises a method's policy for an
   individual request based on the value it carries (parsing `eth_sendRawTransaction` for a
   native amount, decoding ERC-20 calldata). That was descoped; a method's policy is the same
-  for every request to it. Callers that need a stricter quorum on a specific request can still
+  for every client request to it (the router's own health check is the one exception — see above). Callers that need a stricter quorum on a specific request can still
   ask for one with the headers, up to the policy's cap.
 
 ## Local testing lanes
