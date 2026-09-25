@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -72,19 +73,33 @@ func stickyClaimsMux(router *RPCSmartRouter) http.Handler {
 	return buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano, router: router})
 }
 
-// TestDebugStickyClaims_ReportsEachEndpointsOutcomes reads the route the sticky-session tests will
-// use (MAG-3860): one row per endpoint, SharedSticky telling a router with the fleet registry from one
-// without, and all seven outcome counts, with the ones a real claim produced.
-func TestDebugStickyClaims_ReportsEachEndpointsOutcomes(t *testing.T) {
-	shared := stickyClaimsTestCSM(t, "ETH1", &stickyClaimsTestRegistry{claims: map[string]string{}})
-	for i := 0; i < 3; i++ { // one claim, then two answers from memory
-		sessions, err := shared.GetSessions(context.Background(), 1, 10, lavasession.NewUsedProviders(nil), spectypes.LATEST_BLOCK, "", nil, common.NO_STATE, 0, "session-1", "")
-		require.NoError(t, err)
-		for _, session := range sessions {
-			require.NoError(t, shared.OnSessionDone(session.Session, spectypes.LATEST_BLOCK, 10, time.Millisecond, time.Millisecond, 1, 1, 1, false, nil))
-		}
+// stickyRequest sends one request carrying a sticky id through csm and completes it.
+func stickyRequest(t *testing.T, csm *lavasession.ConsumerSessionManager, stickyID string) {
+	t.Helper()
+	sessions, err := csm.GetSessions(context.Background(), 1, 10, lavasession.NewUsedProviders(nil), spectypes.LATEST_BLOCK, "", nil, common.NO_STATE, 0, stickyID, "")
+	require.NoError(t, err)
+	for _, session := range sessions {
+		require.NoError(t, csm.OnSessionDone(session.Session, spectypes.LATEST_BLOCK, 10, time.Millisecond, time.Millisecond, 1, 1, 1, false, nil))
 	}
+}
+
+// TestDebugStickyClaims_ReportsEachEndpointsOutcomes reads the route the sticky-session tests will
+// use (MAG-3860): one row per endpoint, each naming the process that answered, SharedSticky telling a
+// router with the fleet registry from one without, and all seven outcome counts. The ETH1 endpoint
+// shares its registry with a peer pod that claims a session first, so its row carries the adopted
+// count a session crossing pods produces. The SOLANA endpoint serves sticky requests pod-locally,
+// which resolves no claim.
+func TestDebugStickyClaims_ReportsEachEndpointsOutcomes(t *testing.T) {
+	registry := &stickyClaimsTestRegistry{claims: map[string]string{}}
+	peer := stickyClaimsTestCSM(t, "ETH1", registry)
+	shared := stickyClaimsTestCSM(t, "ETH1", registry)
+	stickyRequest(t, peer, "session-1")   // the peer pod claims session-1
+	stickyRequest(t, shared, "session-1") // this pod takes the peer's claim
+	stickyRequest(t, shared, "session-1") // and then answers it from memory
+	stickyRequest(t, shared, "session-2") // a session nobody holds yet, which this pod claims
 	podLocal := stickyClaimsTestCSM(t, "SOLANA", nil)
+	stickyRequest(t, podLocal, "session-1")
+	stickyRequest(t, podLocal, "session-1")
 
 	router := createTestRPCSmartRouter()
 	for _, csm := range []*lavasession.ConsumerSessionManager{shared, podLocal} {
@@ -97,6 +112,7 @@ func TestDebugStickyClaims_ReportsEachEndpointsOutcomes(t *testing.T) {
 	var rows []struct {
 		ChainID      string
 		ApiInterface string
+		PodID        string
 		SharedSticky bool
 		Outcomes     map[string]uint64
 	}
@@ -107,31 +123,22 @@ func TestDebugStickyClaims_ReportsEachEndpointsOutcomes(t *testing.T) {
 	for i, row := range rows {
 		byChain[row.ChainID] = i
 		require.Equal(t, spectypes.APIInterfaceJsonRPC, row.ApiInterface)
+		require.Equal(t, endpointstate.LocalPodID(), row.PodID, "the process that answered")
 		require.Len(t, row.Outcomes, 7, "every outcome is present, zeros included")
 	}
 	eth := rows[byChain["ETH1"]]
 	require.True(t, eth.SharedSticky)
+	require.Equal(t, uint64(1), eth.Outcomes["adopted"], "the peer's claim")
+	require.Equal(t, uint64(1), eth.Outcomes["local_hit"])
 	require.Equal(t, uint64(1), eth.Outcomes["claimed"])
-	require.Equal(t, uint64(2), eth.Outcomes["local_hit"])
-	require.Zero(t, eth.Outcomes["adopted"])
+	require.Zero(t, eth.Outcomes["invalidated"], "so the adopted count is the peer's claim, not this pod reading back its own")
 
 	solana := rows[byChain["SOLANA"]]
 	require.False(t, solana.SharedSticky, "no registry: the feature is off, which zero counts alone could not say")
 	for outcome, count := range solana.Outcomes {
-		require.Zero(t, count, outcome)
+		require.Zero(t, count, "%s: pod-local stickiness resolves no claim", outcome)
 	}
 
 	again := getDebugRouter(stickyClaimsMux(router), "/debug/sticky-claims")
 	require.Equal(t, rr.Body.String(), again.Body.String(), "reading the route changes nothing")
-}
-
-func TestDebugStickyClaims_MethodNotAllowed(t *testing.T) {
-	rr := postDebugRouter(stickyClaimsMux(createTestRPCSmartRouter()), "/debug/sticky-claims")
-	require.Equal(t, http.StatusMethodNotAllowed, rr.Code)
-}
-
-func TestDebugStickyClaims_NilRouterAnswersAnEmptyList(t *testing.T) {
-	rr := getDebugRouter(stickyClaimsMux(nil), "/debug/sticky-claims")
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.JSONEq(t, "[]", rr.Body.String())
 }

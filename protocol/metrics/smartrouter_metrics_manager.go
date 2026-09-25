@@ -531,7 +531,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_csm_sticky_claims_total",
 		Help: "Cross-pod sticky-session claim resolutions by outcome. " +
 			"local_hit: answered from this pod's confirmed table, no round trip. " +
-			"adopted: took a claim another pod had already made — the signal that cross-pod stickiness is doing its job, and zero here on a multi-replica fleet means it is wired but never firing. " +
+			"adopted: routed by a live claim read from the registry rather than one held in memory — normally another pod's, the signal that cross-pod stickiness is doing its job, and zero here on a multi-replica fleet means it is wired but never firing; a pod also reads back its own claim after dropping its local copy (see invalidated). " +
 			"claimed: this pod's write created the claim. " +
 			"lost_race: a peer's claim was already live and named a DIFFERENT upstream, so this pod adopted it. " +
 			"(A peer claim naming the same upstream this pod would have picked is indistinguishable from winning, and counts as claimed.) " +

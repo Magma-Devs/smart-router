@@ -56,9 +56,9 @@ type ConsumerSessionManager struct {
 	lock           sync.RWMutex
 	pairing        map[string]*ConsumerSessionsWithProvider // key == provider address
 	stickySessions *StickySessionStore
-	// stickyClaimCounts mirrors smartrouter_csm_sticky_claims_total in process, indexed like
-	// stickyOutcomes, so GET /debug/sticky-claims can report it without the metrics port (MAG-3860).
-	stickyClaimCounts [len(stickyOutcomes)]atomic.Uint64
+	// stickyClaimCounts mirrors smartrouter_csm_sticky_claims_total in process, indexed by outcome,
+	// so GET /debug/sticky-claims can report it without the metrics port (MAG-3860).
+	stickyClaimCounts [numStickyOutcomes]atomic.Uint64
 	// sharedSticky is the fleet-wide claim registry. Nil leaves stickiness pod-local, which is
 	// the pre-existing behaviour. stickyEpochDuration sizes a claim's backstop lifetime.
 	sharedSticky        SharedStickyStore
@@ -3953,30 +3953,38 @@ const (
 	// drop claims that readers still honour — reopening the split this feature closes. Exported
 	// so the wiring site can warn when the configured epoch pushes the TTL past the ceiling.
 	StickyClaimEpochSpan = 2
-
-	// Outcomes for smartrouter_csm_sticky_claims_total. A closed set, so the series stays bounded.
-	stickyOutcomeLocalHit = "local_hit"
-	stickyOutcomeAdopted  = "adopted"
-	stickyOutcomeClaimed  = "claimed"
-	stickyOutcomeLostRace = "lost_race"
-	stickyOutcomeError    = "error"
-	// stickyOutcomeNoCandidate is this pod having no upstream to offer (an empty pairing), which
-	// is not a registry failure and must not share a series with one.
-	stickyOutcomeNoCandidate = "no_candidate"
-	// stickyOutcomeInvalidated is a local claim dropped because its upstream could not serve
-	// here. A climbing series means claims are outliving the upstreams they name.
-	stickyOutcomeInvalidated = "invalidated"
 )
 
-// stickyOutcomes is the closed set above, in the order StickyClaimCounts reports it.
-var stickyOutcomes = [...]string{
-	stickyOutcomeLocalHit,
-	stickyOutcomeAdopted,
-	stickyOutcomeClaimed,
-	stickyOutcomeLostRace,
-	stickyOutcomeError,
-	stickyOutcomeNoCandidate,
-	stickyOutcomeInvalidated,
+// stickyOutcome is one way a sticky id resolves, counted by smartrouter_csm_sticky_claims_total and
+// by GET /debug/sticky-claims. A closed set, so the series stays bounded. Declaring an outcome here
+// is what gives it a count slot, so the route cannot miss one the metric counts.
+type stickyOutcome uint8
+
+const (
+	stickyOutcomeLocalHit stickyOutcome = iota
+	stickyOutcomeAdopted
+	stickyOutcomeClaimed
+	stickyOutcomeLostRace
+	stickyOutcomeError
+	// stickyOutcomeNoCandidate is this pod having no upstream to offer (an empty pairing), which
+	// is not a registry failure and must not share a series with one.
+	stickyOutcomeNoCandidate
+	// stickyOutcomeInvalidated is a local claim dropped because its upstream could not serve
+	// here. A climbing series means claims are outliving the upstreams they name.
+	stickyOutcomeInvalidated
+	numStickyOutcomes
+)
+
+// stickyOutcomes is each outcome's value for the metric's outcome label, which is also its key in
+// StickyClaimCounts.
+var stickyOutcomes = [numStickyOutcomes]string{
+	stickyOutcomeLocalHit:    "local_hit",
+	stickyOutcomeAdopted:     "adopted",
+	stickyOutcomeClaimed:     "claimed",
+	stickyOutcomeLostRace:    "lost_race",
+	stickyOutcomeError:       "error",
+	stickyOutcomeNoCandidate: "no_candidate",
+	stickyOutcomeInvalidated: "invalidated",
 }
 
 // SetSharedStickyStore wires the fleet-wide claim registry and the epoch length used to size a
@@ -4104,14 +4112,9 @@ func (csm *ConsumerSessionManager) invalidateStickyPin(localKey string) {
 
 // recordStickyOutcome publishes one claim resolution. The metrics manager is nil-safe, and
 // SafeMetrics guarantees a non-nil consumer, so this needs no guard of its own.
-func (csm *ConsumerSessionManager) recordStickyOutcome(outcome string) {
-	for i, known := range stickyOutcomes {
-		if known == outcome {
-			csm.stickyClaimCounts[i].Add(1)
-			break
-		}
-	}
-	csm.consumerMetricsManager.RecordStickyClaim(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, outcome)
+func (csm *ConsumerSessionManager) recordStickyOutcome(outcome stickyOutcome) {
+	csm.stickyClaimCounts[outcome].Add(1)
+	csm.consumerMetricsManager.RecordStickyClaim(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, stickyOutcomes[outcome])
 }
 
 // StickyClaimCounts reports whether the fleet-wide claim registry is wired (shared) and how many times
@@ -4119,9 +4122,9 @@ func (csm *ConsumerSessionManager) recordStickyOutcome(outcome string) {
 // counts, readable without the metrics port (MAG-3860). Every outcome is present, zero included, and without
 // the registry every count stays zero, so shared is what tells "off" from "never fired".
 func (csm *ConsumerSessionManager) StickyClaimCounts() (shared bool, outcomes map[string]uint64) {
-	outcomes = make(map[string]uint64, len(stickyOutcomes))
-	for i, outcome := range stickyOutcomes {
-		outcomes[outcome] = csm.stickyClaimCounts[i].Load()
+	outcomes = make(map[string]uint64, numStickyOutcomes)
+	for outcome, label := range stickyOutcomes {
+		outcomes[label] = csm.stickyClaimCounts[outcome].Load()
 	}
 	return csm.sharedSticky != nil, outcomes
 }
