@@ -43,8 +43,14 @@ var DefaultTimeout = time.Duration(DefaultTimeoutSeconds) * time.Second
 // smartrouter_resp_cache_failed_total while writes — whose budget outlasts the
 // retries — recorded the same outage correctly. The store now records what it
 // observed about the endpoint rather than inferring it from whose clock ran out
-// (redisstore.ErrEndpointUnreachable, MAG-3653), so raising this is a latency
-// decision only.
+// (redisstore.ErrEndpointUnreachable, MAG-3653).
+//
+// One case still turns on this budget, so "latency only" would be too strong: a
+// black-holed endpoint, which swallows the handshake rather than refusing it, is
+// only provably gone once a dial spends its whole DialTimeout — and a budget
+// below that cuts the dial short first, which is indistinguishable from a
+// healthy backend too far away to answer in time. That one reads as a timeout by
+// design; a refused or unroutable endpoint reads as an outage at any budget.
 var CacheTimeout = DefaultCacheTimeout
 
 // MinimumTimePerRelayDelay is the minimum relay timeout floor used by GetTimePerCu.

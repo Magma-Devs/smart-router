@@ -57,7 +57,11 @@ type Store struct {
 	// each client, so the store can name the node actually serving it. Static
 	// configuration cannot answer this: under sentinel the serving node changes
 	// on every failover, and under cluster it depends on the key's slot.
-	// Observability only — nothing in the cache path reads these.
+	//
+	// The address half is observability only. The reachability half these also
+	// carry IS read on the relay path, through OpWindow, to tell an endpoint that
+	// is gone from one that is merely slow — recorded for standalone alone, which
+	// is the only topology where one endpoint stands behind one tracker.
 	readEndpoint  *endpointTracker
 	writeEndpoint *endpointTracker
 

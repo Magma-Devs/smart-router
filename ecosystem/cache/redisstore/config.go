@@ -525,11 +525,14 @@ func (cfg Config) dialTimeout() time.Duration {
 // threads the context through both the TCP dial and the handshake; whichever
 // bound (context deadline or DialTimeout) is sooner applies.
 //
-// And a dial is where the store learns an endpoint is GONE, so it is where that
-// has to be recorded: by the time the operation returns, its own error no longer
-// says (see ErrEndpointUnreachable). The tracker may be nil for a dialer built
-// outside a store.
-func baseDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
+// And a dial is where the store learns whether an endpoint is THERE, so it is
+// where that has to be recorded: by the time the operation returns, its own
+// error no longer says (see ErrEndpointUnreachable).
+//
+// faults is the tracker reachability is recorded on, and is nil wherever a dial
+// cannot be attributed to the endpoint an operation used — every topology but
+// standalone. See trackingDialer.
+func baseDialer(tlsCfg *tls.Config, dialTimeout time.Duration, faults *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
 	netDialer := &net.Dialer{Timeout: dialTimeout}
 	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return netDialer.DialContext(ctx, network, addr)
@@ -544,21 +547,13 @@ func baseDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpoint
 		started := time.Now()
 		conn, err := dial(ctx, network, addr)
 		if err == nil {
+			// The endpoint answered a handshake: whatever it refused before, it
+			// is there now, and a later failure is that failure's own.
+			faults.clearFault()
 			return conn, nil
 		}
-		// Which failures prove the endpoint is not there, and which prove
-		// nothing. An attempt that used up its OWN budget was answered by
-		// nobody: a black hole. One that failed with budget to spare was
-		// answered — refused, no route, no such name. But one the CONTEXT cut
-		// short proves neither: go-redis abandons a queued dial whose caller
-		// has gone, and a healthy cache a network away cannot finish a
-		// handshake inside a same-zone read budget either. Calling that an
-		// outage would send an operator hunting a cache that is up — the same
-		// wrong turn as the bug this exists to fix, in the other direction (see
-		// common.CacheTimeout, and DefaultDialTimeout above).
-		spentItsOwnBudget := dialTimeout > 0 && time.Since(started) >= dialTimeout
-		if spentItsOwnBudget || ctx.Err() == nil {
-			tracker.noteFault(err)
+		if dialFailureProvesEndpointGone(time.Since(started), dialTimeout, ctx.Err()) {
+			faults.noteFault(err)
 		}
 		return conn, err
 	}
@@ -570,8 +565,19 @@ func baseDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpoint
 //
 // This is the only way to name the serving node: the configured address is a
 // discovery seed (not the shard) under cluster.
-func trackingDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
-	base := baseDialer(tlsCfg, dialTimeout, tracker)
+//
+// recordFaults says whether a failed dial here may be read as THIS store's
+// endpoint being unreachable. Only standalone may: it has exactly one endpoint,
+// so every dial is about that endpoint. Under cluster the same tracker stands
+// behind every shard and a fault carries no address, so one down node would
+// report the whole cache unreachable for as long as it stayed down — see
+// OpWindow.
+func trackingDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker, recordFaults bool) func(context.Context, string, string) (net.Conn, error) {
+	faults := tracker
+	if !recordFaults {
+		faults = nil
+	}
+	base := baseDialer(tlsCfg, dialTimeout, faults)
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		conn, err := base(ctx, network, addr)
 		if err == nil {
@@ -622,8 +628,16 @@ func (markDataDialsHook) ProcessPipelineHook(next redis.ProcessPipelineHook) red
 // trackingDialerMarkedOnly records only dials carrying the data-dial mark —
 // the sentinel-topology tracker (see markDataDialsHook for why sentinel cannot
 // use the plain trackingDialer).
+//
+// It records no faults, and cannot: the data-dial mark is what separates a
+// master dial from a control-plane dial, and this is the only place that sees
+// the mark — go-redis dials from a queue under a context of its own, so a fault
+// recorded inside baseDialer arrives here already attributed to the data
+// endpoint. A down sentinel is a non-paging condition under quorum, and
+// sentinels re-dial on their own schedule, so recording those would report a
+// healthy master unreachable continuously (see OpWindow).
 func trackingDialerMarkedOnly(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
-	base := baseDialer(tlsCfg, dialTimeout, tracker)
+	base := baseDialer(tlsCfg, dialTimeout, nil)
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		conn, err := base(ctx, network, addr)
 		if err == nil && ctx.Value(dataDialMarkKey{}) != nil {
@@ -638,7 +652,7 @@ func trackingDialerMarkedOnly(tlsCfg *tls.Config, dialTimeout time.Duration, tra
 // file-backed credential rides the streaming provider (see New).
 func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) *redis.Options {
 	opts := &redis.Options{
-		Dialer:       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
+		Dialer:       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker, true),
 		Addr:         addrs[0],
 		DB:           cfg.DB,
 		TLSConfig:    tlsCfg,
@@ -700,7 +714,7 @@ func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source Cre
 // standaloneOptions's.
 func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) *redis.ClusterOptions {
 	opts := &redis.ClusterOptions{
-		Dialer:       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
+		Dialer:       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker, false),
 		Addrs:        addrs,
 		TLSConfig:    tlsCfg,
 		DialTimeout:  cfg.dialTimeout(),

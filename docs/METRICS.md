@@ -347,7 +347,7 @@ histogram_quantile(0.9,
 | --- | --- | --- | --- |
 | `smartrouter_cache_requests_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier` | Cache lookup attempts per tier (`primary` \| `secondary`). A tier that is unconfigured, disconnected, or bypassed emits nothing for that request. |
 | `smartrouter_cache_success_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier` | Cache hits per tier. |
-| `smartrouter_cache_failed_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier`, `outcome` | Non-hit lookups, split by the closed enum `outcome` = `miss` (clean not-found) \| `error` (transport/server error) \| `timeout` (per-lookup budget exceeded). |
+| `smartrouter_cache_failed_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier`, `outcome` | Non-hit lookups, split by the closed enum `outcome` = `miss` (clean not-found) \| `error` (transport/server error) \| `timeout` (per-lookup budget exceeded). **`timeout` here means literally that the budget expired, which an unreachable RESP backend also does** — so for one incident this series can read `timeout` while `smartrouter_resp_cache_failed_total` reads `kind="error"`. The RESP series is the one that separates outage from saturation; prefer it when you need to know which. (MAG-3653 left these deliberately unaligned rather than widen a second enum; the decision to align them is recorded there.) |
 | `smartrouter_cache_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `method`, `cache_tier` | Cache lookup latency, observed on **every attempted lookup** (hits and non-hits). |
 
 Per tier, `cache_requests_total` = `cache_success_total` + `sum without (outcome) (cache_failed_total)`.
