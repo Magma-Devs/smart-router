@@ -1144,3 +1144,152 @@ func TestSmartRouterStateMachine_ForbidCallerCV(t *testing.T) {
 		require.Nil(t, sm.GetCrossValidationParams(), "no cross-validation params when CV is forbidden")
 	})
 }
+
+// TestSmartRouterStateMachine_CallerCVHeadersOnAWrite is the write-method sibling of
+// TestSmartRouterStateMachine_ForbidCallerCV above, which uses a read method deliberately.
+// Two request headers used to turn a transaction submission into a cross-validated request,
+// and a cross-validation on a write cannot succeed: the write is broadcast to the whole
+// stateful tier, only the first node can accept it, and every other node answers "already
+// known" or "nonce too low" — node errors, which never count as successes. So the success
+// count is stuck at one while the caller asked for two to agree, the threshold is
+// unreachable, and the relay ended as HTTP 500 after the transaction had already gone to
+// every node: a caller told their transaction failed, with no hash to follow it by
+// (MAG-3603).
+//
+// No operator policy is involved in any case here. That is the point — the operator
+// direction was already refused at startup by validateCrossValidationStartup, and this is
+// the caller direction, which needed no permission and no configuration to reach.
+func TestSmartRouterStateMachine_CallerCVHeadersOnAWrite(t *testing.T) {
+	ctx := context.Background()
+	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	specId := "ETH1"
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	const apiInterface = "jsonrpc"
+	callerCVHeaders := map[string]string{
+		common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
+		common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+	}
+	// Re-parsed per case so each ProtocolMessage is independent.
+	buildPM := func(t *testing.T, body string, headers map[string]string) chainlib.ProtocolMessage {
+		t.Helper()
+		cm, perr := chainParser.ParseMsg("", []byte(body), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+		require.NoError(t, perr)
+		return chainlib.NewProtocolMessage(cm, headers, nil, "dapp", "1.2.3.4")
+	}
+	const writeBody = `{"jsonrpc":"2.0","method":"eth_sendRawTransaction","params":["0xdeadbeef"],"id":11}`
+	const readBody = `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
+
+	selectionFor := func(t *testing.T, pm chainlib.ProtocolMessage) relaycore.RelayStateMachine {
+		t.Helper()
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil),
+			&SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, specId, apiInterface)
+		require.NoError(t, smErr)
+		return sm
+	}
+
+	// The premise, asserted rather than assumed: eth_sendRawTransaction really is the write
+	// category on this spec. Were it not, every assertion below would pass for the wrong reason.
+	writePM := buildPM(t, writeBody, callerCVHeaders)
+	// Cast, not EqualValues: GetStateful returns uint32 and the constant is untyped, so an
+	// unconverted compare fails on type alone and would read as the spec being wrong.
+	require.Equal(t, uint32(common.CONSISTENCY_SELECT_ALL_PROVIDERS), chainlib.GetStateful(writePM),
+		"premise: eth_sendRawTransaction must be the stateful (write) category")
+
+	t.Run("a write routes as a write despite the caller's cross-validation headers", func(t *testing.T) {
+		sm := selectionFor(t, buildPM(t, writeBody, callerCVHeaders))
+		require.Equal(t, relaycore.Stateful, sm.GetSelection(),
+			"a transaction submission must broadcast as a write, not be cross-validated")
+		require.Nil(t, sm.GetCrossValidationParams(),
+			"no cross-validation params on a write: a threshold that can never be met must not be carried")
+	})
+
+	t.Run("control: the same headers do turn cross-validation on for a read", func(t *testing.T) {
+		// Without this the test above would pass just as well against headers that were
+		// never parsed, or a spec that failed to load.
+		sm := selectionFor(t, buildPM(t, readBody, callerCVHeaders))
+		require.Equal(t, relaycore.CrossValidation, sm.GetSelection(),
+			"caller CV headers still enable cross-validation where it can actually work")
+	})
+
+	t.Run("control: a write with no headers is unchanged", func(t *testing.T) {
+		sm := selectionFor(t, buildPM(t, writeBody, nil))
+		require.Equal(t, relaycore.Stateful, sm.GetSelection())
+	})
+
+	t.Run("malformed cross-validation headers on a write do not fail the transaction", func(t *testing.T) {
+		// The headers are ignored, so their contents are moot — and failing a money-moving
+		// request over an unparseable value for a parameter that could never have applied
+		// would be the same misreport in a new costume. On a READ the error still stands.
+		bad := map[string]string{
+			common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "not-a-number",
+			common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+		}
+		sm := selectionFor(t, buildPM(t, writeBody, bad))
+		require.Equal(t, relaycore.Stateful, sm.GetSelection())
+
+		_, readErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil),
+			&SmartRouterRelaySenderMock{retValue: nil}, buildPM(t, readBody, bad), nil, false, nil, specId, apiInterface)
+		require.Error(t, readErr, "a read still rejects headers it cannot parse")
+	})
+
+	// The state machine is not the only place the caller's headers are read: the policy layer
+	// reads them first, and Resolve returns (callerParams, callerPresent) for a method with no
+	// policy of its own — so with ANY policy configured, for any method at all, a write's own
+	// headers came back as a resolved policy override. That took the machine's FIRST branch,
+	// cvOverride != nil, which sits ahead of the write branch by design (Finding A). Routing the
+	// write as a write in the machine was therefore inert on every router that had a
+	// cross-validation policy: the headers were laundered into an operator mandate before the
+	// machine ever saw them.
+	//
+	// This is the case that proves it — valid headers, a policy on an unrelated read — and it
+	// is the reason the write skip has to live in the policy layer too, not only in the machine.
+	t.Run("a policy on an unrelated method does not launder a write's headers into an override", func(t *testing.T) {
+		resolver, rerr := NewCrossValidationPolicyResolver(CrossValidationConfig{
+			Policies: []CrossValidationPolicyEntry{{
+				ChainID: specId, ApiInterface: apiInterface, Method: "eth_blockNumber",
+				CrossValidationPolicy: CrossValidationPolicy{Enabled: true},
+			}},
+		})
+		require.NoError(t, rerr)
+
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil),
+			&SmartRouterRelaySenderMock{retValue: nil}, buildPM(t, writeBody, callerCVHeaders), nil, false, resolver, specId, apiInterface)
+		require.NoError(t, smErr)
+		require.Equal(t, relaycore.Stateful, sm.GetSelection(),
+			"a write must route as a write even when some other method has a policy")
+		require.Nil(t, sm.GetCrossValidationParams(),
+			"the caller's headers must not arrive dressed as an operator mandate")
+	})
+
+	t.Run("a configured policy elsewhere does not make malformed headers fail a write", func(t *testing.T) {
+		resolver, rerr := NewCrossValidationPolicyResolver(CrossValidationConfig{
+			Policies: []CrossValidationPolicyEntry{{
+				ChainID: specId, ApiInterface: apiInterface, Method: "eth_blockNumber",
+				CrossValidationPolicy: CrossValidationPolicy{Enabled: true},
+			}},
+		})
+		require.NoError(t, rerr)
+		bad := map[string]string{
+			common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "not-a-number",
+			common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+		}
+
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil),
+			&SmartRouterRelaySenderMock{retValue: nil}, buildPM(t, writeBody, bad), nil, false, resolver, specId, apiInterface)
+		require.NoError(t, smErr, "the policy layer must not fail a write over headers a write ignores")
+		require.Equal(t, relaycore.Stateful, sm.GetSelection())
+
+		// The policy still governs the method it was written for, so the skip above is scoped
+		// to writes rather than switching the resolver off.
+		readSM, readErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil),
+			&SmartRouterRelaySenderMock{retValue: nil}, buildPM(t, readBody, nil), nil, false, resolver, specId, apiInterface)
+		require.NoError(t, readErr)
+		require.Equal(t, relaycore.CrossValidation, readSM.GetSelection(),
+			"the enabled policy on the read method still applies")
+	})
+}
