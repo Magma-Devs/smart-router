@@ -3,6 +3,7 @@ package lavasession
 import (
 	"context"
 	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -56,12 +57,18 @@ type UsedProviders struct {
 	originalUnwantedProviders map[string]struct{}
 	selecting                 bool
 	sessionsLatestBatch       int
-	// sessionsDispatched is sessionsLatestBatch without the per-batch reset: how many sessions this
-	// request has dispatched in total. Callers comparing against a CUMULATIVE tally — "did everyone
-	// we asked come back?" — need this one; sessionsLatestBatch answers a per-batch question and
-	// silently means something else the moment a request runs a second batch.
-	sessionsDispatched int
-	batchNumber        int
+	// dispatched is sessionsLatestBatch without the per-batch reset: the provider of every session
+	// this request has dispatched in total, one entry per session. Callers comparing against a
+	// CUMULATIVE tally — "did everyone we asked come back?" — need this one; sessionsLatestBatch
+	// answers a per-batch question and silently means something else the moment a request runs a
+	// second batch.
+	//
+	// Names, not a count, because a count cannot say which attempt is still out, and the reply's
+	// attempt headers have to name one: a hedge's cancelled loser was sent and never reported back
+	// (MAG-3762). The in-flight set cannot stand in for this list. It drops a provider when the
+	// provider's session is freed, and that happens before the provider's result is posted.
+	dispatched  []string
+	batchNumber int
 	// chainID is used for chain-aware unsupported-method detection (so
 	// chain-native messages don't collide with broad Tier-1 substring
 	// matchers). Empty means classification falls back to Tier-1 only.
@@ -130,7 +137,21 @@ func (up *UsedProviders) SessionsDispatched() int {
 	}
 	up.lock.RLock()
 	defer up.lock.RUnlock()
-	return up.sessionsDispatched
+	return len(up.dispatched)
+}
+
+// DispatchedProviders names the provider of every session this request has dispatched, one entry
+// per session, so a provider asked twice appears twice. Batches appear in the order they went out;
+// within one batch the order is arbitrary. A provider released before dispatch is not listed; one
+// that has since answered still is.
+func (up *UsedProviders) DispatchedProviders() []string {
+	if up == nil {
+		utils.LavaFormatError("UsedProviders.DispatchedProviders is nil, misuse detected", nil)
+		return nil
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return slices.Clone(up.dispatched)
 }
 
 func (up *UsedProviders) BatchNumber() int {
@@ -262,9 +283,13 @@ func (up *UsedProviders) ReleaseFromLatestBatch(provider string, routerKey Route
 	if up.sessionsLatestBatch > 0 {
 		up.sessionsLatestBatch--
 	}
-	// Same reason: this provider never dispatched, so it must not count as one we asked.
-	if up.sessionsDispatched > 0 {
-		up.sessionsDispatched--
+	// Same reason: this provider never dispatched, so it must not count as one we asked. The latest
+	// batch added it, so its entry is the last one under its name.
+	for i := len(up.dispatched) - 1; i >= 0; i-- {
+		if up.dispatched[i] == provider {
+			up.dispatched = slices.Delete(up.dispatched, i, i+1)
+			break
+		}
 	}
 }
 
@@ -356,7 +381,7 @@ func (up *UsedProviders) AddUsed(sessions ConsumerSessionsMap, err error) {
 			uniqueUsedProviders := up.createOrUseUniqueUsedProvidersForKey(routerKey)
 			uniqueUsedProviders.providers[provider] = struct{}{}
 			up.sessionsLatestBatch++
-			up.sessionsDispatched++
+			up.dispatched = append(up.dispatched, provider)
 		}
 		// increase batch number
 		up.batchNumber++
