@@ -277,3 +277,36 @@ func TestUsedProviders_SessionsDispatchedIsCumulativeAcrossBatches(t *testing.T)
 	require.Equal(t, 2, usedProviders.SessionsDispatched(),
 		"a provider that answered still counts as one we asked")
 }
+
+// The reply's attempt headers name every attempt the request sent, including one that never
+// reported back (MAG-3762), so the names have to survive exactly as the count does: in the order
+// the batches went out, one per session, gone only when released before dispatch.
+func TestUsedProviders_DispatchedProvidersNamesEveryAttempt(t *testing.T) {
+	usedProviders := NewUsedProviders(nil)
+	require.Empty(t, usedProviders.DispatchedProviders())
+
+	usedProviders.AddUsed(ConsumerSessionsMap{"lava@a": &SessionInfo{}}, nil)
+	usedProviders.AddUsed(ConsumerSessionsMap{"lava@b": &SessionInfo{}}, nil)
+	require.Equal(t, []string{"lava@a", "lava@b"}, usedProviders.DispatchedProviders(),
+		"a hedge is a second batch, so the order the batches went out is the order of the attempts")
+
+	// A retry path can ask the same provider again; that is a second attempt, not a duplicate.
+	usedProviders.RemoveUsed("lava@a", NewRouterKey(nil), nil)
+	usedProviders.AddUsed(ConsumerSessionsMap{"lava@a": &SessionInfo{}}, nil)
+	require.Equal(t, []string{"lava@a", "lava@b", "lava@a"}, usedProviders.DispatchedProviders())
+	require.Equal(t, 3, usedProviders.SessionsDispatched(), "the count is the length of the list")
+
+	// Released before dispatch: never asked. Only the latest batch's entry goes, not the first one.
+	usedProviders.ReleaseFromLatestBatch("lava@a", NewRouterKey(nil), nil)
+	require.Equal(t, []string{"lava@a", "lava@b"}, usedProviders.DispatchedProviders())
+	require.Equal(t, 2, usedProviders.SessionsDispatched())
+
+	// Answering does not undo a dispatch.
+	usedProviders.RemoveUsed("lava@b", NewRouterKey(nil), nil)
+	require.Equal(t, []string{"lava@a", "lava@b"}, usedProviders.DispatchedProviders())
+
+	// The caller gets a copy; the header path must not be able to rewrite the request's history.
+	names := usedProviders.DispatchedProviders()
+	names[0] = "lava@z"
+	require.Equal(t, []string{"lava@a", "lava@b"}, usedProviders.DispatchedProviders())
+}

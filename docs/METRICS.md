@@ -279,6 +279,11 @@ Once it is non-zero they are lossy — some batch types are being merged into `b
 | `smartrouter_retries_failed_total` | Counter | `spec`, `apiInterface`, `method` | Retried requests that failed. |
 | `smartrouter_retry_attempts` | Histogram | `spec`, `apiInterface`, `method` | Attempts per retried request (buckets 1…10). |
 
+A hedged request is counted here as well. A hedge is an extra attempt, and these series are
+recorded from the same count as the `Lava-Retries` header, which includes every attempt the
+router sent (MAG-1818), a hedge's losing attempt among them. The retry and hedging families
+therefore overlap, so do not add them together.
+
 #### Rate-limit hold-off
 
 Emitted by the [hold-off registry](RATE-LIMIT-HOLDOFF.md) itself, so every consumer path

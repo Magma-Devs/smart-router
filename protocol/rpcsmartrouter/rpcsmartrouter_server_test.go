@@ -41,6 +41,9 @@ type MockRelayProcessorForHeaders struct {
 	protocolErrors                  []relaycore.RelayError
 	statefulRelayTargets            []string
 	crossValidationQueriedProviders []string
+	// usedProviders, when set, is what the request dispatched. Unset reads as a request whose
+	// dispatch history is empty, which is what every test written before MAG-3762 assumed.
+	usedProviders *lavasession.UsedProviders
 }
 
 func (m *MockRelayProcessorForHeaders) GetCrossValidationParams() *common.CrossValidationParams {
@@ -64,6 +67,9 @@ func (m *MockRelayProcessorForHeaders) GetCrossValidationQueriedProviders() []st
 }
 
 func (m *MockRelayProcessorForHeaders) GetUsedProviders() *lavasession.UsedProviders {
+	if m.usedProviders != nil {
+		return m.usedProviders
+	}
 	return lavasession.NewUsedProviders(nil)
 }
 
