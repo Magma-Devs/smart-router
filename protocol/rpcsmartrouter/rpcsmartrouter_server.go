@@ -559,7 +559,7 @@ func groupsBelowThreshold(groupSizes map[string]int, threshold int) []string {
 // endpoint from starting. A primary that failed boot verification is a runtime condition: it is retried in
 // the background and re-admitted when it recovers (MAG-2525). A shortfall among the verified primaries is
 // therefore logged, not returned. The endpoint starts and serves what it can, and
-// validateCrossValidationCapacity refuses only the cross-validated requests the verified groups cannot meet.
+// validateCrossValidationCapacity refuses only the cross-validated requests the verified primaries cannot meet.
 // Judging the policy by the verified primaries turned one node that was down at boot into a crash loop
 // (MAG-3751).
 func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chainParser chainlib.ChainParser, chainID, apiInterface string, configured, verified map[string][]string) error {
@@ -578,40 +578,49 @@ func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chain
 		utils.LogAttr("groupSizes", configuredSizes),
 		utils.LogAttr("groupAssignments", configured),
 		utils.LogAttr("verifiedGroupSizes", verifiedSizes))
-	// A shortfall with no provider missing is the configured fleet's own, which is rejected above unless
-	// the endpoint has no primaries at all; that case has nothing to report here.
+	// Reported only when a configured primary is missing: that is the runtime condition this line is for.
+	// A shortfall of the configured primaries themselves belongs to the config: validateCrossValidationStartup
+	// rejects its group shapes above, and max-participants has never been checked at startup.
 	unavailable := providersMissingFrom(configured, verified)
-	if requiredGroups := unmetCrossValidationGroupRequirement(resolver, chainID, apiInterface, verifiedSizes); requiredGroups > 0 && len(unavailable) > 0 {
-		utils.LavaFormatWarning("ATTENTION: the providers that passed startup verification cannot meet a cross-validation group policy — the requests it governs are refused until the failed providers recover", nil,
+	if requiredProviders, requiredGroups := crossValidationShortfall(resolver, chainID, apiInterface, verifiedSizes); (requiredProviders > 0 || requiredGroups > 0) && len(unavailable) > 0 {
+		attrs := []utils.Attribute{
 			utils.LogAttr("chainID", chainID),
 			utils.LogAttr("apiInterface", apiInterface),
-			utils.LogAttr("requiredGroups", requiredGroups),
+		}
+		if requiredProviders > 0 {
+			attrs = append(attrs, utils.LogAttr("requiredProviders", requiredProviders))
+		}
+		if requiredGroups > 0 {
+			attrs = append(attrs, utils.LogAttr("requiredGroups", requiredGroups))
+		}
+		attrs = append(attrs,
 			utils.LogAttr("verifiedGroupSizes", verifiedSizes),
 			utils.LogAttr("configuredGroupSizes", configuredSizes),
 			utils.LogAttr("unavailableProviders", unavailable),
 			utils.LogAttr("hint", "providers that failed verification are retried in the background; requests without cross-validation are served meanwhile"))
+		utils.LavaFormatWarning("ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy — the requests it governs are refused until the failed providers recover", nil, attrs...)
 	}
 	return nil
 }
 
-// unmetCrossValidationGroupRequirement returns the largest min-groups among the endpoint's enabled policies
-// that a fleet with the given group sizes cannot meet, or 0 when it meets them all. Each policy is judged by
-// crossValidationGroupShortfall at its no-caller shape, the same test the request-time guards apply to the
-// live candidate set, so a non-zero result is a prediction of requests that will be refused.
-func unmetCrossValidationGroupRequirement(resolver *CrossValidationPolicyResolver, chainID, apiInterface string, groupSizes map[string]int) int {
-	unmet := 0
-	for _, req := range resolver.MinGroupsRequirements(chainID, apiInterface) {
-		if _, reason := crossValidationGroupShortfall(groupSizes, &common.CrossValidationParams{MinGroups: req.MinGroups}); reason != "" {
-			unmet = max(unmet, req.MinGroups)
+// crossValidationShortfall predicts what the request-time guard (validateCrossValidationCapacity) will do
+// with a request that sends no cross-validation headers when the candidates are the given primaries. It
+// returns the largest max-participants and the largest min-groups among the enabled policies it would refuse
+// for that reason, each 0 when none. Groups are judged by crossValidationGroupShortfall, the guards' own test.
+func crossValidationShortfall(resolver *CrossValidationPolicyResolver, chainID, apiInterface string, groupSizes map[string]int) (requiredProviders, requiredGroups int) {
+	providers := 0
+	for _, size := range groupSizes {
+		providers += size
+	}
+	for _, params := range resolver.HeaderlessParams(chainID, apiInterface) {
+		if params.MaxParticipants > providers {
+			requiredProviders = max(requiredProviders, params.MaxParticipants)
+		}
+		if _, reason := crossValidationGroupShortfall(groupSizes, &params); reason != "" {
+			requiredGroups = max(requiredGroups, params.MinGroups)
 		}
 	}
-	for _, req := range resolver.PerGroupRequirements(chainID, apiInterface) {
-		params := &common.CrossValidationParams{MinGroups: req.MinGroups, PerGroupQuorum: true, AgreementThreshold: req.Threshold}
-		if _, reason := crossValidationGroupShortfall(groupSizes, params); reason != "" {
-			unmet = max(unmet, req.MinGroups)
-		}
-	}
-	return unmet
+	return requiredProviders, requiredGroups
 }
 
 // staticProviderGroupAssignments maps configured providers onto their cross-validation groups (label ->

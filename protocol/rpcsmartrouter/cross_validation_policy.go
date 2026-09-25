@@ -399,6 +399,24 @@ func (r *CrossValidationPolicyResolver) Resolve(chainID, apiInterface, method st
 	return eff, true
 }
 
+// HeaderlessParams returns what Resolve gives a request that sends no cross-validation headers, for every
+// ENABLED policy of the given chain/api: the shape the request-time capacity guard holds such a request to.
+func (r *CrossValidationPolicyResolver) HeaderlessParams(chainID, apiInterface string) []common.CrossValidationParams {
+	if r == nil {
+		return nil
+	}
+	prefix := policyKeyPrefix(chainID, apiInterface)
+	var shapes []common.CrossValidationParams
+	for key, policy := range r.policies {
+		if !policy.Enabled || !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		params, _ := r.Resolve(chainID, apiInterface, strings.TrimPrefix(key, prefix), common.CrossValidationParams{}, false)
+		shapes = append(shapes, params)
+	}
+	return shapes
+}
+
 // resolveKnob computes one knob's effective value: start from the caller value (if present), else the
 // floor (if set), else the default; then clamp into [floor, cap].
 func resolveKnob(callerVal int, callerPresent bool, b Bound, def int) int {
