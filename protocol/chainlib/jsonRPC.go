@@ -471,7 +471,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		}
 
 		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := fiberCtx.GetReqHeaders()
+		metadataValues := detachedReqHeaders(fiberCtx)
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		headers := convertToMetadataMap(metadataValues)

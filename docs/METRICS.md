@@ -12,7 +12,7 @@ metrics manager.
 
 | Path | Format | Description |
 | --- | --- | --- |
-| `/metrics` | Prometheus | All registered metrics ([`promhttp.Handler()`](../protocol/metrics/smartrouter_metrics_manager.go#L623)) |
+| `/metrics` | Prometheus | All registered metrics ([`newMetricsPageHandler`](../protocol/metrics/metrics_page.go)). A metric that cannot be gathered is left out, logged, and counted as `promhttp_metric_handler_errors_total{cause="gathering"}`, and the rest of the page is still served. The library default answers `500` with no metrics at all and logs nothing. |
 | `/metrics/overall-health` | text | `200 Health status OK` if ≥1 endpoint is healthy, else `503 Unhealthy` |
 | `/metrics/health-overall` | text | Alias of the above (backward-compat path) |
 

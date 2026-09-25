@@ -2048,8 +2048,13 @@ func convertSelectionStatsToMetrics(stats *provideroptimizer.SelectionStats) (al
 // the opposite of what pinning is for. The caller reports the collision so the operator
 // can rename a provider.
 func resolveSelectedProviderAddress(selectedProvider string, addresses []string) (address string, ambiguous []string) {
-	if slices.Contains(addresses, selectedProvider) {
-		return selectedProvider, nil
+	// The router's own string, never the caller's, even on an exact match. selectedProvider comes
+	// from a request header, which a listener may hand over still pointing into a buffer the next
+	// request reuses; the resolved address outlives the request as the session-map key and the
+	// endpoint_id / provider_address metric labels. A label whose text changed under Prometheus
+	// took down the whole /metrics page (MAG-3881).
+	if i := slices.Index(addresses, selectedProvider); i >= 0 {
+		return addresses[i], nil
 	}
 	var folded []string
 	for _, candidate := range addresses {
