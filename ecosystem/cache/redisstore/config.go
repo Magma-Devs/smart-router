@@ -516,23 +516,51 @@ func (cfg Config) dialTimeout() time.Duration {
 }
 
 // baseDialer is the transport dialer every client variant shares. It exists
-// instead of redis.NewDialer for one reason: go-redis's TLS branch is the
-// ctx-less tls.DialWithDialer, so a caller's context deadline bounds a
-// plaintext dial but never a TLS handshake — a black-holed (SYN-dropped) TLS
-// endpoint then costs every cold lookup the full DialTimeout instead of the
-// relay's cache budget. tls.Dialer.DialContext threads the context through
-// both the TCP dial and the handshake; whichever bound (context deadline or
-// DialTimeout) is sooner applies.
-func baseDialer(tlsCfg *tls.Config, dialTimeout time.Duration) func(context.Context, string, string) (net.Conn, error) {
+// instead of redis.NewDialer for two reasons.
+//
+// go-redis's TLS branch is the ctx-less tls.DialWithDialer, so a caller's
+// context deadline bounds a plaintext dial but never a TLS handshake — a
+// black-holed (SYN-dropped) TLS endpoint then costs every cold lookup the full
+// DialTimeout instead of the relay's cache budget. tls.Dialer.DialContext
+// threads the context through both the TCP dial and the handshake; whichever
+// bound (context deadline or DialTimeout) is sooner applies.
+//
+// And a dial is where the store learns an endpoint is GONE, so it is where that
+// has to be recorded: by the time the operation returns, its own error no longer
+// says (see ErrEndpointUnreachable). The tracker may be nil for a dialer built
+// outside a store.
+func baseDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
 	netDialer := &net.Dialer{Timeout: dialTimeout}
-	if tlsCfg == nil {
-		return func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return netDialer.DialContext(ctx, network, addr)
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return netDialer.DialContext(ctx, network, addr)
+	}
+	if tlsCfg != nil {
+		tlsDialer := &tls.Dialer{NetDialer: netDialer, Config: tlsCfg}
+		dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return tlsDialer.DialContext(ctx, network, addr)
 		}
 	}
-	tlsDialer := &tls.Dialer{NetDialer: netDialer, Config: tlsCfg}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return tlsDialer.DialContext(ctx, network, addr)
+		started := time.Now()
+		conn, err := dial(ctx, network, addr)
+		if err == nil {
+			return conn, nil
+		}
+		// Which failures prove the endpoint is not there, and which prove
+		// nothing. An attempt that used up its OWN budget was answered by
+		// nobody: a black hole. One that failed with budget to spare was
+		// answered — refused, no route, no such name. But one the CONTEXT cut
+		// short proves neither: go-redis abandons a queued dial whose caller
+		// has gone, and a healthy cache a network away cannot finish a
+		// handshake inside a same-zone read budget either. Calling that an
+		// outage would send an operator hunting a cache that is up — the same
+		// wrong turn as the bug this exists to fix, in the other direction (see
+		// common.CacheTimeout, and DefaultDialTimeout above).
+		spentItsOwnBudget := dialTimeout > 0 && time.Since(started) >= dialTimeout
+		if spentItsOwnBudget || ctx.Err() == nil {
+			tracker.noteFault(err)
+		}
+		return conn, err
 	}
 }
 
@@ -543,7 +571,7 @@ func baseDialer(tlsCfg *tls.Config, dialTimeout time.Duration) func(context.Cont
 // This is the only way to name the serving node: the configured address is a
 // discovery seed (not the shard) under cluster.
 func trackingDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
-	base := baseDialer(tlsCfg, dialTimeout)
+	base := baseDialer(tlsCfg, dialTimeout, tracker)
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		conn, err := base(ctx, network, addr)
 		if err == nil {
@@ -595,7 +623,7 @@ func (markDataDialsHook) ProcessPipelineHook(next redis.ProcessPipelineHook) red
 // the sentinel-topology tracker (see markDataDialsHook for why sentinel cannot
 // use the plain trackingDialer).
 func trackingDialerMarkedOnly(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
-	base := baseDialer(tlsCfg, dialTimeout)
+	base := baseDialer(tlsCfg, dialTimeout, tracker)
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		conn, err := base(ctx, network, addr)
 		if err == nil && ctx.Value(dataDialMarkKey{}) != nil {
