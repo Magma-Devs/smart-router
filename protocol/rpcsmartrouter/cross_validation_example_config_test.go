@@ -44,3 +44,24 @@ func TestMultichainCrossValidationExample_EveryPolicyApplies(t *testing.T) {
 	}
 	require.Equal(t, len(cfg.Policies), checked, "every policy in the example belongs to an endpoint that was checked")
 }
+
+// TestMethodGuard_NamesAGrpcNamedPolicyByPosition pins that the method guard's error identifies the policy
+// even when the log redactor hides part of its method: a gRPC name looks like a url to it
+// ("cosmos.bank.v1beta1.Query/[redacted]"), and a gRPC name on a REST endpoint is the case the guard exists
+// for, the one the shipped example had.
+func TestMethodGuard_NamesAGrpcNamedPolicyByPosition(t *testing.T) {
+	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "COSMOSHUB")
+	require.NoError(t, err)
+	parser, err := chainlib.NewChainParser("rest")
+	require.NoError(t, err)
+	parser.SetSpec(spec)
+	resolver, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: []CrossValidationPolicyEntry{
+		{ChainID: "COSMOSHUB", ApiInterface: "rest", Method: "/cosmos/bank/v1beta1/balances/{address}", CrossValidationPolicy: CrossValidationPolicy{Enabled: true}},
+		{ChainID: "COSMOSHUB", ApiInterface: "rest", Method: "cosmos.bank.v1beta1.Query/Balance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true}},
+	}})
+	require.NoError(t, err)
+	err = validateCrossValidationStartup(resolver, parser, "COSMOSHUB", "rest", 0, nil)
+	require.ErrorContains(t, err, "does not serve")
+	require.ErrorContains(t, err, "policy #1 cosmos.bank.v1beta1.Query/", "the position survives the redactor")
+	require.NotContains(t, err.Error(), "policy #0", "the path-template policy is served")
+}

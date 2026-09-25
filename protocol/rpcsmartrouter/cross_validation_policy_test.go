@@ -360,8 +360,11 @@ func TestPreflightValidateCrossValidationConfig(t *testing.T) {
 	t.Run("a misspelled api-interface is rejected before boot, naming the policy and the endpoints", func(t *testing.T) {
 		err := preflight(t, policyFor("ETH1", "json-rpc", "      enabled: true\n"))
 		require.ErrorContains(t, err, "no endpoint serves")
-		assert.Contains(t, err.Error(), "ETH1/json-rpc/eth_getBalance")
+		assert.Contains(t, err.Error(), "policy #0 ETH1/json-rpc/eth_getBalance")
 		assert.Contains(t, err.Error(), "endpoints: ETH1/jsonrpc")
+	})
+	t.Run("a policy with neither enabled nor forbid-caller-cv is a no-op and is left alone", func(t *testing.T) {
+		require.NoError(t, preflight(t, policyFor("ETH1", "json-rpc", "      enabled: false\n")))
 	})
 	t.Run("a misspelled chain-id is rejected before boot", func(t *testing.T) {
 		require.ErrorContains(t, preflight(t, policyFor("ETH", "jsonrpc", "      enabled: true\n")), "ETH/jsonrpc/eth_getBalance")
@@ -449,7 +452,11 @@ func TestValidateCrossValidationStartup(t *testing.T) {
 		misspelled.Method = "eth_getbalance"
 		err := validateCrossValidationStartup(mkResolver(t, readPolicy, misspelled), realParser, "ETH1", "jsonrpc", 5, nil)
 		require.ErrorContains(t, err, "does not serve")
-		require.ErrorContains(t, err, "eth_getbalance")
+		require.ErrorContains(t, err, "policy #1 eth_getbalance", "named by its position in the list and its method")
+	})
+	t.Run("a policy with neither enabled nor forbid-caller-cv is a no-op and is not checked", func(t *testing.T) {
+		noop := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getbalance", CrossValidationPolicy: CrossValidationPolicy{}}
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, readPolicy, noop), realParser, "ETH1", "jsonrpc", 5, nil))
 	})
 	t.Run("a forbid-caller-cv policy naming an unserved method -> rejected too", func(t *testing.T) {
 		forbid := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_gasprice", CrossValidationPolicy: CrossValidationPolicy{ForbidCallerCV: true}}
@@ -500,13 +507,15 @@ func TestPolicyMethods(t *testing.T) {
 		{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getBalance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true}},
 		{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_gasPrice", CrossValidationPolicy: CrossValidationPolicy{ForbidCallerCV: true}},
 		{ChainID: "SOLANA", ApiInterface: "jsonrpc", Method: "getEpochInfo", CrossValidationPolicy: CrossValidationPolicy{Enabled: true}},
+		{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_call", CrossValidationPolicy: CrossValidationPolicy{}}, // neither intent: a no-op
 	}})
 	require.NoError(t, err)
-	require.Equal(t, 3, r.NumPolicies(), "the whole configuration")
-	require.Equal(t, []string{"eth_gasPrice", "eth_getBalance"}, r.PolicyMethods("ETH1", "jsonrpc"))
+	require.Equal(t, []string{"eth_gasPrice", "eth_getBalance"}, r.PolicyMethods("ETH1", "jsonrpc"), "the no-op eth_call policy is not counted")
 	require.Equal(t, []string{"eth_gasPrice", "eth_getBalance"}, r.PolicyMethods("eth1", "JSONRPC"), "matched as a request's lookup matches")
 	require.Equal(t, []string{"getEpochInfo"}, r.PolicyMethods("SOLANA", "jsonrpc"))
 	require.Empty(t, r.PolicyMethods("ETH1", "rest"))
+	require.Equal(t, 2, r.PolicyPosition("SOLANA", "jsonrpc", "getEpochInfo"), "the index in the configured list")
+	require.Equal(t, -1, r.PolicyPosition("SOLANA", "jsonrpc", "getBalance"))
 }
 
 // TestGroupsBelowThreshold pins the pure helper behind the startup SPOF advisory: it returns the

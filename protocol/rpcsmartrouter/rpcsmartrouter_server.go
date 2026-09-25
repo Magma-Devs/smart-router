@@ -498,15 +498,17 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 			utils.LogAttr("chainID", chainID),
 			utils.LogAttr("apiInterface", apiInterface))
 	}
-	var unservedMethods []string
+	// Each is named by its position in the policy list as well: the log redactor mistakes a gRPC method name
+	// for a url and hides its method part, and the position still points at the one policy.
+	var unservedPolicies []string
 	for _, method := range resolver.PolicyMethods(chainID, apiInterface) {
 		if !methodChecker.ApiNameDefined(method) {
-			unservedMethods = append(unservedMethods, method)
+			unservedPolicies = append(unservedPolicies, fmt.Sprintf("policy #%d %s", resolver.PolicyPosition(chainID, apiInterface, method), method))
 		}
 	}
-	if len(unservedMethods) > 0 {
+	if len(unservedPolicies) > 0 {
 		return utils.LavaFormatError("cross-validation policies name methods this endpoint's spec does not serve, so they would never apply", nil,
-			utils.LogAttr("methods", unservedMethods),
+			utils.LogAttr("policies", unservedPolicies),
 			utils.LogAttr("chainID", chainID),
 			utils.LogAttr("apiInterface", apiInterface),
 			utils.LogAttr("hint", "a policy names the method exactly as the spec does: the JSON-RPC method, the REST path template, or the gRPC service/method"))
