@@ -1959,8 +1959,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// - OnSessionDiscarded returns reserved CU and unlocks the session without
 	//   QoS punishment. No request reached the upstream, so this is a routing
 	//   exclusion rather than an availability failure.
+	//
+	// Every release names the key the session was taken under, not one derived
+	// from the request's extensions. A request that degrades to a regular provider
+	// takes its sessions under the plain key, so a release under the request's
+	// key found nothing and did nothing, and the provider stayed in the dispatch
+	// history. Lava-Retries reads that history (MAG-3762), so the reply then
+	// counted an attempt at a node that never received the request.
 	usedProviders := relayProcessor.GetUsedProviders()
-	releaseRouterKey := lavasession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())
 	for endpointAddress, sessionInfo := range failedSessions {
 		if sessionInfo != nil && sessionInfo.Session != nil {
 			utils.LavaFormatDebug("discarding stale session before relay dispatch",
@@ -1968,7 +1974,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				utils.LogAttr("error", lavasession.ConsistencyPreValidationError),
 				utils.LogAttr("GUID", ctx),
 			)
-			usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, lavasession.ConsistencyPreValidationError)
+			usedProviders.ReleaseFromLatestBatch(endpointAddress, sessionInfo.Session.RouterKey(), lavasession.ConsistencyPreValidationError)
 			if err := rpcss.sessionManager.OnSessionDiscarded(sessionInfo.Session, lavasession.ConsistencyPreValidationError); err != nil {
 				utils.LavaFormatError("failed discarding consistency-rejected session", err,
 					utils.LogAttr("endpoint", endpointAddress),
@@ -2008,7 +2014,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		// full processingTimeout (~30s) instead of failing fast.
 		for endpointAddress, sessionInfo := range validSessions {
 			if sessionInfo != nil && sessionInfo.Session != nil {
-				usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, nil)
+				usedProviders.ReleaseFromLatestBatch(endpointAddress, sessionInfo.Session.RouterKey(), nil)
 				sessionInfo.Session.Free(nil)
 			}
 		}
@@ -2047,7 +2053,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		if qualifyingGroups, failReason := crossValidationGroupShortfall(survivingGroupCounts, crossValidationParams); failReason != "" {
 			for endpointAddress, sessionInfo := range validSessions {
 				if sessionInfo != nil && sessionInfo.Session != nil {
-					usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, nil)
+					usedProviders.ReleaseFromLatestBatch(endpointAddress, sessionInfo.Session.RouterKey(), nil)
 					sessionInfo.Session.Free(nil)
 				}
 			}
