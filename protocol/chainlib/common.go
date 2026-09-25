@@ -164,8 +164,10 @@ func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled f
 		c.Locals(ProjectIDHeader, dappID)
 
 		if isMetricEnabled {
-			c.Locals(metrics.RefererHeaderKey, c.Get(metrics.RefererHeaderKey, ""))
-			c.Locals(metrics.UserAgentHeaderKey, c.Get(metrics.UserAgentHeaderKey, ""))
+			// Cloned for the same reason as Origin below: all three are read by the websocket
+			// handler after fasthttp has recycled the request buffer (MAG-3881).
+			c.Locals(metrics.RefererHeaderKey, strings.Clone(c.Get(metrics.RefererHeaderKey, "")))
+			c.Locals(metrics.UserAgentHeaderKey, strings.Clone(c.Get(metrics.UserAgentHeaderKey, "")))
 			// Clone Origin: it crosses the request boundary into the
 			// websocket handler and from there into RelayMetrics, which the
 			// OTel sink serializes asynchronously after fasthttp has
@@ -478,6 +480,25 @@ func GetListenerWithRetryGrpc(protocol, addr string) net.Listener {
 		time.Sleep(RetryListeningInterval * time.Second)
 		utils.LavaFormatWarning("Attempting connection retry", nil)
 	}
+}
+
+// detachedReqHeaders returns the request's headers with every name and value copied out of
+// fasthttp's per-request buffers. fiber hands them back zero-copy (no Immutable config), and
+// fasthttp reuses a header slot's buffer for the next request on the connection, so a header
+// string kept past the handler changes under whoever kept it: a pinned provider name held as a
+// metric label, a request id read by a goroutine after the reply, an Origin serialized by the
+// usage sink (MAG-3881). Every consumer of the map below this point gets owned strings.
+func detachedReqHeaders(c *fiber.Ctx) map[string][]string {
+	headers := c.GetReqHeaders()
+	detached := make(map[string][]string, len(headers))
+	for name, values := range headers {
+		owned := make([]string, len(values))
+		for i, value := range values {
+			owned[i] = strings.Clone(value)
+		}
+		detached[strings.Clone(name)] = owned
+	}
+	return detached
 }
 
 // GetHeaderFromCachedMap extracts a header value from a cached headers map.
