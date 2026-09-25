@@ -103,7 +103,9 @@ smartrouter config/smartrouter_examples/smartrouter_multichain_cross_validation.
 
 At startup the router logs the resolved provider→group layout and **rejects** a policy the
 configured fleet can never satisfy (e.g. `min-groups: 3` with only two groups), so a
-misconfiguration fails fast rather than silently degrading.
+misconfiguration fails fast rather than silently degrading. It also rejects a policy that could never
+apply at all: one whose `chain-id`/`api-interface` no endpoint serves, or whose `method` the spec does
+not serve. A REST policy names the spec's path template, not the gRPC method name.
 
 ## What the caller sees
 
@@ -486,5 +488,5 @@ policy floor instead.
 | A dissent shows up as *pending* instead of *disagreeing* | The quorum early-exited before the outlier answered. Give the honest providers a `latency_ms` so the outlier wins the race — that is exactly what the lane does to pick the reply-time path. |
 | `finality="unknown"` on the mismatch metric | The request did not carry a resolvable block number, or the chain tracker had not learned the head yet. Query a concrete finalized block, not `latest`. |
 | A cross-validated method answers without fanning out | Something served it from cache. These lanes configure no cache for that reason; if you add one, vary the request parameters. |
-| Router exits at startup with a cross-validation error | Working as intended for an unsatisfiable policy. The error itself carries the numbers: `requiredGroups` / `configuredGroups` on the `min-groups` refusal, `groupSizes` on the per-group one. Don't look for the `distinctGroups` startup line — the validation runs *before* it, so a router that exits this way never logs it. |
+| Router exits at startup with a cross-validation error | Working as intended for an unsatisfiable policy. The error itself carries the numbers: `requiredGroups` / `configuredGroups` on the `min-groups` refusal, `groupSizes` on the per-group one. Don't look for the `distinctGroups` startup line — the validation runs *before* it, so a router that exits this way never logs it. A policy that could never apply is refused the same way and named in the error: `no endpoint serves` lists the endpoints that do exist, and `does not serve` lists the methods the spec lacks. |
 | `/debug/cross-validation-events` is refused / connection reset | The router was started without `--debug-address`, so there is no debug listener at all. A **503** is a different state — the listener is up but the recorder was never installed — and it is not an empty result: "nothing was recorded" and "nothing dissented" are opposite answers. |

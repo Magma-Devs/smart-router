@@ -560,6 +560,25 @@ func (apip *BaseChainParser) ApiHasStatefulCategory(name string) bool {
 	return false
 }
 
+// ApiNameDefined reports whether the spec serves an enabled API with exactly this name on this parser's
+// interface, in any collection (add-ons included). It compares the API's own name, which is what a
+// request resolves to (GetApi().GetName()); a REST key is a regex built from the path template, so the key
+// would not match the name an operator writes. Used by the cross-validation startup guard to reject a
+// per-method policy that no request can ever select.
+func (apip *BaseChainParser) ApiNameDefined(name string) bool {
+	if apip == nil {
+		return false
+	}
+	apip.rwLock.RLock()
+	defer apip.rwLock.RUnlock()
+	for _, apiCont := range apip.serverApis {
+		if apiCont.api != nil && apiCont.api.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (apip *BaseChainParser) isValidInternalPath(path string) bool {
 	if apip == nil || len(apip.internalPaths) == 0 {
 		return false

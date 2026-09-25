@@ -253,10 +253,11 @@ cross-validation:
       max-participants: 2
       min-groups: 2
 
-    # COSMOSHUB REST — corroborate a bank balance query across both vendors.
+    # COSMOSHUB REST — corroborate a bank balance query across both vendors. A REST policy names the
+    # spec's path template; the gRPC name (cosmos.bank.v1beta1.Query/Balance) matches no REST request.
     - chain-id: COSMOSHUB
       api-interface: rest
-      method: cosmos.bank.v1beta1.Query/Balance
+      method: /cosmos/bank/v1beta1/balances/{address}
       enabled: true
       agreement-threshold: 2
       max-participants: 2

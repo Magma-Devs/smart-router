@@ -106,7 +106,11 @@ direct-rpc:
 
 An optional top-level `cross-validation:` block sets policy per `(chain-id, api-interface,
 method)`. Omitting it entirely keeps the header-driven behavior above, fully backwards
-compatible. `chain-id`/`api-interface` match case-insensitively; `method` matches exactly.
+compatible. `chain-id`/`api-interface` match case-insensitively; `method` matches exactly, as the
+spec names it: the JSON-RPC method, the REST path template (`/cosmos/bank/v1beta1/balances/{address}`),
+or the gRPC service/method. A policy that could never apply is a startup error: one whose
+`chain-id`/`api-interface` no configured endpoint serves, or whose method that endpoint's spec does
+not serve.
 Each numeric knob is either a bare number `N` (meaning `{floor: N}`) or an object
 `{floor: F, cap: C}`.
 
