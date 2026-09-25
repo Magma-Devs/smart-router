@@ -3988,6 +3988,26 @@ func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]strin
 	return selectedProvider, stickiness
 }
 
+// crossValidationOverridesPin reports whether an active cross-validation policy displaces the
+// caller's single-provider directives.
+//
+// lava-select-provider and a sticky claim each pin selection to exactly ONE provider, while a
+// cross-validation relay needs MaxParticipants of them to have anything to compare against. The
+// two cannot both be honoured, and the operator mandate wins (UC-1: stricter validation regardless
+// of what the caller asked).
+//
+// Silently, before this existed: selection returns the single pinned address and then lowers its
+// own target to match what it got, so a policy asking for 3 participants is satisfied by 1, with
+// no error — and the answer goes back marked validated having been compared against nothing.
+//
+// Keyed on cross-validation being enabled AT ALL, not on the policy also mandating group
+// diversity. The override existed before, deep inside selection, keyed on minGroups > 1; MinGroups
+// defaults to 1 whenever a policy is merely enabled, so the common configuration never reached it.
+// Group diversity was only ever the loudest case of the rule, never the rule itself.
+func crossValidationOverridesPin(crossValidationEnabled bool, selectedProvider, stickiness string) bool {
+	return crossValidationEnabled && (selectedProvider != "" || stickiness != "")
+}
+
 func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	ctx context.Context,
 	numOfEndpoints int,
@@ -4292,6 +4312,22 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// On a retry (a provider batch has already been dispatched, so BatchNumber > 0) the
 	// relay must be free to fall through to a different provider. See resolvePinDirectives.
 	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders, usedProviders.BatchNumber() == 0)
+
+	// Dropped here rather than inside lavasession so the rest of this call stays coherent: the
+	// failover cascade reads selectedProvider to decide whether releasing the blocked provider
+	// list could serve this request, and a pin that selection has already discarded makes it
+	// answer for an address nobody will be routed to.
+	if crossValidationOverridesPin(crossValidationEnabled, selectedProvider, stickiness) {
+		utils.LavaFormatWarning("cross-validation overrides caller provider selection / stickiness", nil,
+			utils.LogAttr("selectedProvider", selectedProvider),
+			utils.LogAttr("stickiness", stickiness),
+			utils.LogAttr("maxParticipants", crossValidationParams.MaxParticipants),
+			utils.LogAttr("minGroups", crossValidationParams.MinGroups),
+			utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
+			utils.LogAttr("GUID", ctx))
+		selectedProvider = ""
+		stickiness = ""
+	}
 
 	// Group-aware fan-out: when a cross-validation policy requires group diversity, select across at
 	// least MinGroups distinct provider groups (1.2a). Default 1 leaves selection group-blind. For
