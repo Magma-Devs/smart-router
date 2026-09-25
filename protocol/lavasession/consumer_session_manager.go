@@ -372,19 +372,11 @@ func (csm *ConsumerSessionManager) countByGroup(addresses []string) map[string]i
 	return counts
 }
 
-// NumberOfValidProviderGroups returns the count of distinct cross-validation group labels across ALL
-// currently valid providers (ignoring addon/extension filtering). Used by the startup capacity check as
-// the upper bound on how many distinct groups a request could ever draw from.
-func (csm *ConsumerSessionManager) NumberOfValidProviderGroups() int {
-	csm.lock.RLock()
-	defer csm.lock.RUnlock()
-	return csm.countDistinctGroups(csm.validAddresses)
-}
-
 // ProviderGroupAssignments returns a snapshot of how the currently valid providers map onto
 // cross-validation group labels (label -> sorted provider addresses), folding an empty label into
-// common.DefaultProviderGroup. It is meant for one-shot startup/diagnostic logging so operators can see the diversity
-// their config actually yields; it is not on any hot path.
+// common.DefaultProviderGroup. It is meant for one-shot startup/diagnostic logging; it is not on any hot
+// path. It holds only the providers that passed verification, so it describes the fleet serving now, not
+// the configured one: a provider that failed its boot verification is absent until it is re-admitted.
 func (csm *ConsumerSessionManager) ProviderGroupAssignments() map[string][]string {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
