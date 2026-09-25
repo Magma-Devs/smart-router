@@ -136,7 +136,7 @@ func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidati
 // contradictory policy never gets that far.
 //
 // The checks that need spec or provider context (the stateful-write guard, the min-groups capacity
-// bound) cannot move here — they need a chainParser and registered providers. They stay in
+// bound) cannot move here — they need a chainParser and the endpoint's configured providers. They stay in
 // validateCrossValidationStartup.
 func PreflightValidateCrossValidationConfig(v *viper.Viper) error {
 	cfg, err := ParseCrossValidationConfig(v)
@@ -397,6 +397,24 @@ func (r *CrossValidationPolicyResolver) Resolve(chainID, apiInterface, method st
 	// enforced by Validate(); a caller-induced infeasibility surfaces at runtime as group-quorum-unmet.
 	eff.PerGroupQuorum = policy.PerGroupQuorum && eff.MinGroups > 1
 	return eff, true
+}
+
+// HeaderlessParams returns what Resolve gives a request that sends no cross-validation headers, for every
+// ENABLED policy of the given chain/api: the shape the request-time capacity guard holds such a request to.
+func (r *CrossValidationPolicyResolver) HeaderlessParams(chainID, apiInterface string) []common.CrossValidationParams {
+	if r == nil {
+		return nil
+	}
+	prefix := policyKeyPrefix(chainID, apiInterface)
+	var shapes []common.CrossValidationParams
+	for key, policy := range r.policies {
+		if !policy.Enabled || !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		params, _ := r.Resolve(chainID, apiInterface, strings.TrimPrefix(key, prefix), common.CrossValidationParams{}, false)
+		shapes = append(shapes, params)
+	}
+	return shapes
 }
 
 // resolveKnob computes one knob's effective value: start from the caller value (if present), else the

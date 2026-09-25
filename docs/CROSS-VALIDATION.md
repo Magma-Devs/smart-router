@@ -103,7 +103,9 @@ smartrouter config/smartrouter_examples/smartrouter_multichain_cross_validation.
 
 At startup the router logs the resolved provider→group layout and **rejects** a policy the
 configured fleet can never satisfy (e.g. `min-groups: 3` with only two groups), so a
-misconfiguration fails fast rather than silently degrading.
+misconfiguration fails fast rather than silently degrading. A provider that is down when the
+router starts is a different case, and it does not stop the router: see the `ATTENTION` row
+under [Troubleshooting](#troubleshooting).
 
 ## What the caller sees
 
@@ -487,4 +489,5 @@ policy floor instead.
 | `finality="unknown"` on the mismatch metric | The request did not carry a resolvable block number, or the chain tracker had not learned the head yet. Query a concrete finalized block, not `latest`. |
 | A cross-validated method answers without fanning out | Something served it from cache. These lanes configure no cache for that reason; if you add one, vary the request parameters. |
 | Router exits at startup with a cross-validation error | Working as intended for an unsatisfiable policy. The error itself carries the numbers: `requiredGroups` / `configuredGroups` on the `min-groups` refusal, `groupSizes` on the per-group one. Don't look for the `distinctGroups` startup line — the validation runs *before* it, so a router that exits this way never logs it. |
+| Startup logs `ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy` | A primary failed its startup verification (it is named in `unavailableProviders`), and the primaries left cannot meet a policy: fewer groups than its `min-groups` (`requiredGroups`), or fewer providers than its `max-participants` (`requiredProviders`). The router is serving: requests without cross-validation are answered, and requests under that policy fail fast with `insufficient-groups` or `insufficient-capacity` until the background retry re-admits the provider, which happens at most 3 minutes after it recovers. `configuredGroupSizes` is the configured layout and `verifiedGroupSizes` the one serving now. |
 | `/debug/cross-validation-events` is refused / connection reset | The router was started without `--debug-address`, so there is no debug listener at all. A **503** is a different state — the listener is up but the recorder was never installed — and it is not an empty result: "nothing was recorded" and "nothing dissented" are opposite answers. |
