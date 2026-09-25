@@ -423,6 +423,13 @@ func resolveKnob(callerVal int, callerPresent bool, b Bound, def int) int {
 // a deterministic acknowledgement, not an observation), and selection-mode precedence would route such a
 // method into CrossValidation — so an enabled policy on a write is a configuration error. isStateful is
 // injected (it needs loaded specs) and is called per enabled policy at startup.
+//
+// This covers the OPERATOR direction only, and still has to: the policy override is resolved before the
+// stateful branch (Finding A), so it is the one way a write can still reach CrossValidation, and this is
+// what stops it. The caller direction — the same routing asked for by request headers — is refused in the
+// state machine instead, by routing a write as a write (MAG-3603). The two differ deliberately: a
+// misconfigured operator should not be able to start the router, while a caller whose client library
+// cross-validates everything should still be able to submit a transaction.
 func (r *CrossValidationPolicyResolver) ValidateNoStatefulPolicies(isStateful func(chainID, apiInterface, method string) bool) error {
 	if r == nil || isStateful == nil {
 		return nil

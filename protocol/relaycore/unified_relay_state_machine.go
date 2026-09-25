@@ -137,11 +137,14 @@ func NewUnifiedRelayStateMachine(
 	policy RelayPolicyInf,
 	// cvOverride, when non-nil, forces CrossValidation with these already-resolved params. The
 	// rpcsmartrouter layer sets it from a per-method policy (it owns the policy resolver; relaycore
-	// must not import it). nil => the legacy header-driven decision below, unchanged.
+	// must not import it). nil => the header-driven decision below, which applies to stateless
+	// methods only: a write routes as a write whatever headers arrive with it (MAG-3603).
 	cvOverride *common.CrossValidationParams,
 	// forbidCallerCrossValidation, when true, suppresses the caller-header-driven CrossValidation decision
 	// for this method: the request's lava-cross-validation-* headers are ignored entirely (not even
-	// validated) and the method routes by its normal stateful/stateless category. The rpcsmartrouter layer
+	// validated) and the method routes by its normal stateful/stateless category. It is what an operator
+	// reaches for on a STATELESS method, since a write now ignores those headers on its own account
+	// (MAG-3603) and needs no policy written for it. The rpcsmartrouter layer
 	// sets it from a per-method `forbid-caller-cv` policy. It is moot when cvOverride != nil (an operator
 	// that mandates CV cannot also forbid it — Validate rejects that combination upstream).
 	forbidCallerCrossValidation bool,
@@ -172,6 +175,43 @@ func NewUnifiedRelayStateMachine(
 		} else {
 			selection = Stateless
 		}
+	} else if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+		// A write routes as a write, whatever the caller asked for. Tested BEFORE the
+		// caller-header branch below, which it used to sit after — and that ordering
+		// let two request headers turn a transaction submission into a cross-validated
+		// one (MAG-3603).
+		//
+		// Cross-validating a write cannot succeed, so this is not a preference between
+		// two workable routes. A write is broadcast to the whole stateful tier and only
+		// the first node can accept it; every other node answers "already known" or
+		// "nonce too low", which are node errors and never count as successes. The
+		// success count is therefore stuck at one while the caller asked for two or more
+		// to agree, so the threshold is unreachable and the relay ends as HTTP 500 —
+		// after the transaction has already gone to every node. The caller is told
+		// their transaction failed, with no hash to follow it by, and resubmitting is
+		// the obvious next step and the one thing the write path exists to prevent.
+		//
+		// Ignoring rather than refusing: a client library configured to cross-validate
+		// everything sends these headers on writes too, and failing those closed would
+		// break every transaction it submits for a parameter that could never have
+		// applied. There is nothing to cross-validate — a write's reply is a
+		// deterministic acknowledgement, not an observation of chain state
+		// (cross_validation_policy.go says the same about the operator-configured
+		// direction, which validateCrossValidationStartup refuses to boot on).
+		//
+		// The operator-forced branch above is deliberately left ahead of this one:
+		// Finding A ordered it that way, and a policy on a write cannot reach here
+		// because that startup guard fails closed.
+		selection = Stateful
+		// Read only for the log, and only to keep the ordinary write path quiet. The
+		// parse error is discarded along with the headers: an invalid value for a
+		// parameter that cannot apply is not a reason to fail a transaction, which is
+		// the same call the forbid-caller-cv branch above makes.
+		if _, headersPresent, _ := protocolMessage.GetCrossValidationParameters(); headersPresent {
+			utils.LavaFormatDebug("[StateMachine] caller cross-validation headers ignored on a write method (no agreement threshold is reachable on a broadcast only one node can accept)",
+				utils.LogAttr("method", protocolMessage.GetApi().GetName()),
+				utils.LogAttr("GUID", ctx))
+		}
 	} else if crossValidationParams, headersPresent, err := protocolMessage.GetCrossValidationParameters(); headersPresent && err != nil {
 		return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
 	} else if headersPresent {
@@ -181,8 +221,6 @@ func NewUnifiedRelayStateMachine(
 			utils.LogAttr("maxParticipants", crossValidationParams.MaxParticipants),
 			utils.LogAttr("agreementThreshold", crossValidationParams.AgreementThreshold),
 			utils.LogAttr("GUID", ctx))
-	} else if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
-		selection = Stateful
 	} else {
 		selection = Stateless
 	}
