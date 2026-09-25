@@ -476,7 +476,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		defer cancel() // incase there's a problem make sure to cancel the connection
 		msgSeed := strconv.FormatUint(guid, 10)
 		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := fiberCtx.GetReqHeaders()
+		metadataValues := detachedReqHeaders(fiberCtx)
 		headers := convertToMetadataMap(metadataValues)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
@@ -557,7 +557,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		metricsData := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
 		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := fiberCtx.GetReqHeaders()
+		metadataValues := detachedReqHeaders(fiberCtx)
 		headers := convertToMetadataMap(metadataValues)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)

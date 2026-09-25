@@ -172,7 +172,9 @@ func (rpccl *RPCConsumerLogs) AddMetricForHttp(data *RelayMetrics, err error, he
 	// path too, where consumerMetricsManager.SetRelayMetrics is a no-op.
 	data.Success = err == nil
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
-	// strings.Join always allocates; result is independent of any request buffer.
+	// headers must hold owned strings: this runs in a goroutine after the reply, and strings.Join
+	// of a single value returns that value itself rather than a copy. The HTTP listeners pass
+	// chainlib's detached map (MAG-3881).
 	data.Origin = strings.Join(headers[OriginHeaderKey], ", ")
 	rpccl.usageSink.Emit(NewRelayUsageEvent(data))
 }

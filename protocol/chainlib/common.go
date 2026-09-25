@@ -469,6 +469,25 @@ func GetListenerWithRetryGrpc(protocol, addr string) net.Listener {
 	}
 }
 
+// detachedReqHeaders returns the request's headers with every name and value copied out of
+// fasthttp's per-request buffers. fiber hands them back zero-copy (no Immutable config), and
+// fasthttp reuses a header slot's buffer for the next request on the connection, so a header
+// string kept past the handler changes under whoever kept it: a pinned provider name held as a
+// metric label, a request id read by a goroutine after the reply, an Origin serialized by the
+// usage sink (MAG-3881). Every consumer of the map below this point gets owned strings.
+func detachedReqHeaders(c *fiber.Ctx) map[string][]string {
+	headers := c.GetReqHeaders()
+	detached := make(map[string][]string, len(headers))
+	for name, values := range headers {
+		owned := make([]string, len(values))
+		for i, value := range values {
+			owned[i] = strings.Clone(value)
+		}
+		detached[strings.Clone(name)] = owned
+	}
+	return detached
+}
+
 // GetHeaderFromCachedMap extracts a header value from a cached headers map.
 // Returns the first value if present, or the defaultValue if not found.
 // This avoids repeated calls to fiberCtx.Get() which has overhead.
