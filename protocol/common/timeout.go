@@ -35,6 +35,22 @@ var DefaultTimeout = time.Duration(DefaultTimeoutSeconds) * time.Second
 // budget before falling through to the upstream) for the ability to hit at
 // all; the secondary tier's --secondary-cache-timeout exists for the same
 // reason.
+//
+// What this budget no longer decides is how a failure is REPORTED. It is
+// shorter than the RESP backend's first dial retry, so a read of an unreachable
+// cache always ran out of budget before the refusal could be returned, and
+// every outage was recorded as saturation on
+// smartrouter_resp_cache_failed_total while writes — whose budget outlasts the
+// retries — recorded the same outage correctly. The store now records what it
+// observed about the endpoint rather than inferring it from whose clock ran out
+// (redisstore.ErrEndpointUnreachable, MAG-3653).
+//
+// One case still turns on this budget, so "latency only" would be too strong: a
+// black-holed endpoint, which swallows the handshake rather than refusing it, is
+// only provably gone once a dial spends its whole DialTimeout — and a budget
+// below that cuts the dial short first, which is indistinguishable from a
+// healthy backend too far away to answer in time. That one reads as a timeout by
+// design; a refused or unroutable endpoint reads as an outage at any budget.
 var CacheTimeout = DefaultCacheTimeout
 
 // MinimumTimePerRelayDelay is the minimum relay timeout floor used by GetTimePerCu.

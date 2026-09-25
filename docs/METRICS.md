@@ -347,7 +347,7 @@ histogram_quantile(0.9,
 | --- | --- | --- | --- |
 | `smartrouter_cache_requests_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier` | Cache lookup attempts per tier (`primary` \| `secondary`). A tier that is unconfigured, disconnected, or bypassed emits nothing for that request. |
 | `smartrouter_cache_success_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier` | Cache hits per tier. |
-| `smartrouter_cache_failed_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier`, `outcome` | Non-hit lookups, split by the closed enum `outcome` = `miss` (clean not-found) \| `error` (transport/server error) \| `timeout` (per-lookup budget exceeded). |
+| `smartrouter_cache_failed_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier`, `outcome` | Non-hit lookups, split by the closed enum `outcome` = `miss` (clean not-found) \| `error` (transport/server error) \| `timeout` (per-lookup budget exceeded). **`timeout` here means literally that the budget expired, which an unreachable RESP backend also does** — so for one incident this series can read `timeout` while `smartrouter_resp_cache_failed_total` reads `kind="error"`. The RESP series is the one that separates outage from saturation; prefer it when you need to know which. (MAG-3653 left these deliberately unaligned rather than widen a second enum; the decision to align them is recorded there.) |
 | `smartrouter_cache_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `method`, `cache_tier` | Cache lookup latency, observed on **every attempted lookup** (hits and non-hits). |
 
 Per tier, `cache_requests_total` = `cache_success_total` + `sum without (outcome) (cache_failed_total)`.
@@ -386,7 +386,7 @@ are the alerting surface for cache degradation.
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_resp_cache_failed_total` | Counter | `op`, `kind` | Backend-level operation failures (never clean misses): `op` = `get` \| `set` \| `sticky_get` \| `sticky_set`; `kind` = `error` (unreachable / protocol error) \| `timeout` (budget exceeded — saturation reads differently from outage). |
+| `smartrouter_resp_cache_failed_total` | Counter | `op`, `kind` | Backend-level operation failures (never clean misses): `op` = `get` \| `set` \| `sticky_get` \| `sticky_set`; `kind` = `error` (unreachable / protocol error) \| `timeout` (budget exceeded — saturation reads differently from outage). `error` is the reading whenever the store could not reach the endpoint, **including when the operation's own budget expired first** — a read's budget is shorter than the backend's first dial retry, so it always does. Until MAG-3653 that made every `op="get"` outage arrive as `kind="timeout"` while `op="set"` on the same incident read `error` correctly. |
 | `smartrouter_resp_cache_connection_errors_total` | Counter | — | Failed background health probes (PING, every 10s), whole cache: one per probe in which any endpoint failed. |
 | `smartrouter_resp_cache_connected` | Gauge | — | Whole cache: 1 while the last health probe succeeded against every endpoint, 0 after any endpoint failed. Reachability *transitions* are also logged, naming the failing endpoint; steady state stays quiet. |
 | `smartrouter_resp_cache_endpoint_connected` | Gauge | `role` | Per endpoint: 1 while its last probe succeeded, 0 after a failure. `role` = `write` \| `read` (`read` exists only with the read/write split configured). This is the series that says **which half** of a split cache is down; the unlabelled gauge cannot. |

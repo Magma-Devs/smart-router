@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -103,15 +104,30 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 }
 
 // recordOpFailure counts a backend-level operation failure; timeouts are
-// distinguished so saturation is separable from outage on dashboards. Both
-// deadline exhaustion (caller budget) and network timeouts (dial/read/write
-// limits — the handshake of a fresh connection is bounded by DialTimeout, not
-// the caller's context) classify as timeouts.
+// distinguished so saturation is separable from outage on dashboards. Deadline
+// exhaustion (the caller's budget) and network timeouts (read/write limits)
+// classify as timeouts — the backend was reachable and did not answer in time.
+//
+// A failure of the CONNECTION is an outage whatever it looked like, and is
+// decided last, because on reads it is the only thing the timeout test above
+// can get wrong. A dial that ran out of its own DialTimeout is an endpoint that
+// cannot be reached, not a slow one; and a caller budget that expired while the
+// endpoint was refusing connections is an outage the budget merely hid, which a
+// read's budget — a fraction of the dial budget — did on every read of a dead
+// cache before ErrEndpointUnreachable carried the reason out (MAG-3653).
 func (m *respCacheMetricsSet) recordOpFailure(op string, err error) {
-	kind := respCacheFailureKindError
+	m.opsFailed.WithLabelValues(op, respCacheFailureKind(err)).Inc()
+}
+
+func respCacheFailureKind(err error) string {
+	// Asked first: an endpoint the store could not reach is an outage however the
+	// failure that reported it happened to look.
+	if errors.Is(err, redisstore.ErrEndpointUnreachable) {
+		return respCacheFailureKindError
+	}
 	var netErr net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
-		kind = respCacheFailureKindTimeout
+		return respCacheFailureKindTimeout
 	}
-	m.opsFailed.WithLabelValues(op, kind).Inc()
+	return respCacheFailureKindError
 }

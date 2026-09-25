@@ -50,7 +50,7 @@ func TestTLSHandshakeBoundedByCallerContext(t *testing.T) {
 		}
 	}()
 
-	dial := baseDialer(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, 5*time.Second)
+	dial := baseDialer(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, 5*time.Second, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	start := time.Now()

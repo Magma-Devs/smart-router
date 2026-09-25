@@ -605,7 +605,13 @@ func (cache *RespCache) GetEntry(ctx context.Context, relayCacheGet *pairingtype
 		// alongside — the call site degrades either way and labels the outcome.
 		return &pairingtypes.CacheRelayReply{}, cache.skip(respCacheOpGet)
 	}
+	window := cache.store.BeginRead()
 	reply, _, err := cache.engine.GetRelay(ctx, relayCacheGet)
+	// A lookup's budget is shorter than the backend's first dial retry, so a
+	// dead cache used to return a bare context.DeadlineExceeded with the
+	// refusal lost behind it. Annotate restores what the budget hid, from what
+	// the store observed while this lookup ran (MAG-3653).
+	err = window.Annotate(err)
 	cache.noteOperation(cache.readBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpGet, err)
@@ -621,7 +627,9 @@ func (cache *RespCache) SetEntry(ctx context.Context, cacheSet *pairingtypes.Rel
 	if cache.writeBreaker.open.Load() {
 		return cache.skip(respCacheOpSet)
 	}
+	window := cache.store.BeginWrite()
 	err := cache.engine.SetRelay(ctx, cacheSet)
+	err = window.Annotate(err)
 	cache.noteOperation(cache.writeBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpSet, err)
@@ -685,7 +693,9 @@ func (cache *RespCache) GetStickySession(ctx context.Context, chainId, apiInterf
 	if cache.readBreaker.open.Load() {
 		return core.StickyPin{}, false, cache.skip(respCacheOpStickyGet)
 	}
+	window := cache.store.BeginRead()
 	pin, found, err := cache.engine.GetSticky(ctx, chainId, apiInterface, service, stickyId)
+	err = window.Annotate(err)
 	cache.noteOperation(cache.readBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpStickyGet, err)
@@ -703,7 +713,9 @@ func (cache *RespCache) SetStickySessionIfAbsent(ctx context.Context, chainId, a
 	if cache.writeBreaker.open.Load() {
 		return core.StickyPin{}, cache.skip(respCacheOpStickySet)
 	}
+	window := cache.store.BeginWrite()
 	effective, err := cache.engine.SetStickyIfAbsent(ctx, chainId, apiInterface, service, stickyId, pin, ttl)
+	err = window.Annotate(err)
 	cache.noteOperation(cache.writeBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpStickySet, err)
