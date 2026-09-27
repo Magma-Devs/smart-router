@@ -348,10 +348,20 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 // These are used for REST transport where the error code is the HTTP status code itself.
 func httpStatusCodeMappings() []errorMapping {
 	return []errorMapping{
+		// 4xx: the request, not the node. Non-retryable and never the endpoint's fault, so a
+		// read returns the node's answer as-is without a second attempt and nothing is scored.
+		// 400 is a rejected request (Horizon transaction_failed and bad_request, a sidecar
+		// "block beyond head", Aptos "failed to parse"); 403 is the same door as 401; 422 is
+		// toncenter's "failed to parse". 410 is data the node no longer holds (Horizon
+		// before_history, Aptos version_pruned): retry elsewhere, blame nobody.
+		{CodeEquals(400), LavaErrorUserInvalidRequest},
 		{CodeEquals(401), LavaErrorNodeUnauthorized},
+		{CodeEquals(403), LavaErrorNodeUnauthorized},
 		{CodeEquals(404), LavaErrorNodeEndpointNotFound},
 		{CodeEquals(405), LavaErrorNodeMethodNotAllowed},
+		{CodeEquals(410), LavaErrorChainStatePruned},
 		{CodeEquals(413), LavaErrorUserRequestTooLarge},
+		{CodeEquals(422), LavaErrorUserInvalidParams},
 		{CodeEquals(429), LavaErrorNodeRateLimited},
 		{CodeEquals(500), LavaErrorNodeInternalError},
 		// 501 Not Implemented: node lacks this method/endpoint (e.g. Cosmos REST
@@ -377,10 +387,14 @@ func httpStatusCodeMappings() []errorMapping {
 // These match status codes appearing as substrings in error messages (e.g., "HTTP status 429").
 func httpStatusMessageMappings() []errorMapping {
 	return []errorMapping{
+		{HTTPStatusContains(400), LavaErrorUserInvalidRequest},
 		{HTTPStatusContains(401), LavaErrorNodeUnauthorized},
+		{HTTPStatusContains(403), LavaErrorNodeUnauthorized},
 		{HTTPStatusContains(404), LavaErrorNodeEndpointNotFound},
 		{HTTPStatusContains(405), LavaErrorNodeMethodNotAllowed},
+		{HTTPStatusContains(410), LavaErrorChainStatePruned},
 		{HTTPStatusContains(413), LavaErrorUserRequestTooLarge},
+		{HTTPStatusContains(422), LavaErrorUserInvalidParams},
 		{HTTPStatusContains(429), LavaErrorNodeRateLimited},
 		{HTTPStatusContains(500), LavaErrorNodeInternalError},
 		// 501 Not Implemented: node lacks this method/endpoint. Non-retryable.

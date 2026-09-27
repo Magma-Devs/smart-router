@@ -206,7 +206,11 @@ func TestRESTRelay_404_NotFound(t *testing.T) {
 	require.NotNil(t, result)
 
 	assert.Equal(t, http.StatusNotFound, result.StatusCode)
-	assert.False(t, result.IsNodeError)
+	// A node error, classified by the registry's 404 row: non-retryable (the answer is the same
+	// everywhere), not the endpoint's fault, body returned to the caller unchanged.
+	assert.True(t, result.IsNodeError)
+	assert.True(t, result.IsNonRetryable)
+	assert.False(t, result.IsNodeAtFault)
 	assert.Contains(t, string(result.Reply.Data), "block not found")
 }
 
@@ -245,11 +249,10 @@ func sendRESTThroughMockUpstream(t *testing.T, status int, body string) *common.
 	return result
 }
 
-// TestRESTRelay_404_EmptyBody_IsRouteRefusal pins the sender's side of the route-refusal rule: an
-// empty 404 is the gateway in front of the node refusing the path, so the reply is tagged a node
-// error — the same verdict the relay processor reaches through CheckResponseError — while the
-// registry keeps it non-retryable and not the endpoint's fault.
-func TestRESTRelay_404_EmptyBody_IsRouteRefusal(t *testing.T) {
+// TestRESTRelay_404_EmptyBody_IsANodeError pins the sender's side for the dfns incident: an empty
+// 404 from a gateway is a node error (a broadcast keeps waiting for its sibling), classified by
+// the registry's 404 row as non-retryable and not the endpoint's fault.
+func TestRESTRelay_404_EmptyBody_IsANodeError(t *testing.T) {
 	result := sendRESTThroughMockUpstream(t, http.StatusNotFound, "")
 
 	assert.Equal(t, http.StatusNotFound, result.StatusCode)
@@ -259,8 +262,9 @@ func TestRESTRelay_404_EmptyBody_IsRouteRefusal(t *testing.T) {
 	assert.Empty(t, result.Reply.Data)
 }
 
-// TestRESTRelay_405_IsRouteRefusal: a 405 says the request was never executed, whatever its body.
-func TestRESTRelay_405_IsRouteRefusal(t *testing.T) {
+// TestRESTRelay_405_IsANodeError: whatever its body, a 405 is a node error, classified by the
+// registry's 405 row.
+func TestRESTRelay_405_IsANodeError(t *testing.T) {
 	result := sendRESTThroughMockUpstream(t, http.StatusMethodNotAllowed, `{"message":"method not allowed"}`)
 
 	assert.Equal(t, http.StatusMethodNotAllowed, result.StatusCode)
@@ -269,14 +273,45 @@ func TestRESTRelay_405_IsRouteRefusal(t *testing.T) {
 	assert.False(t, result.IsNodeAtFault)
 }
 
-// TestRESTRelay_404_ProblemDocument_IsTheNodesAnswer: a 404 with a JSON body is data the caller
-// asked for, and the sender leaves it a plain pass-through — the other side of the same line.
-func TestRESTRelay_404_ProblemDocument_IsTheNodesAnswer(t *testing.T) {
+// TestRESTRelay_404_ProblemDocument_IsANodeError: a Horizon problem document is the chain's answer
+// to the caller — and, like every other non-2xx, a node error the router classifies. The body
+// travels unchanged; the flags keep a write waiting and a read from being retried for nothing.
+func TestRESTRelay_404_ProblemDocument_IsANodeError(t *testing.T) {
 	result := sendRESTThroughMockUpstream(t, http.StatusNotFound, `{"type":"https://stellar.org/horizon-errors/not_found","title":"Resource Missing","status":404}`)
 
 	assert.Equal(t, http.StatusNotFound, result.StatusCode)
-	assert.False(t, result.IsNodeError)
+	assert.True(t, result.IsNodeError)
+	assert.True(t, result.IsNonRetryable)
+	assert.False(t, result.IsNodeAtFault)
 	assert.Contains(t, string(result.Reply.Data), "Resource Missing")
+}
+
+// TestRESTRelay_400_RejectedWrite_IsANodeError: Horizon reports a transaction the chain rejected
+// as a 400 problem document with result codes. Node error, non-retryable (the registry's new 400
+// row), not the endpoint's fault — and on a broadcast the sibling is still waited for.
+func TestRESTRelay_400_RejectedWrite_IsANodeError(t *testing.T) {
+	result := sendRESTThroughMockUpstream(t, http.StatusBadRequest, `{"type":"https://stellar.org/horizon-errors/transaction_failed","status":400,"extras":{"result_codes":{"transaction":"tx_bad_seq"}}}`)
+
+	assert.Equal(t, http.StatusBadRequest, result.StatusCode)
+	assert.True(t, result.IsNodeError)
+	assert.True(t, result.IsNonRetryable)
+	assert.False(t, result.IsNodeAtFault)
+	assert.False(t, shouldFailSessionForResult(nil, result), "a rejected request must not score the endpoint")
+	assert.Contains(t, string(result.Reply.Data), "tx_bad_seq")
+}
+
+// TestRESTRelay_410_Pruned_IsRetriedElsewhere: Aptos and Horizon answer 410 for data the node no
+// longer holds. The registry's new 410 row makes it data-scope: retryable on an archive node, and
+// not the endpoint's fault.
+func TestRESTRelay_410_Pruned_IsRetriedElsewhere(t *testing.T) {
+	result := sendRESTThroughMockUpstream(t, http.StatusGone, `{"error_code":"version_pruned","message":"Ledger version(1) has been pruned"}`)
+
+	assert.Equal(t, http.StatusGone, result.StatusCode)
+	assert.True(t, result.IsNodeError)
+	assert.False(t, result.IsNonRetryable)
+	assert.True(t, result.IsDataScope)
+	assert.False(t, result.IsNodeAtFault)
+	assert.False(t, shouldFailSessionForResult(nil, result), "a pruned answer is truthful, not a fault")
 }
 
 func TestRESTRelay_429_RateLimit(t *testing.T) {
