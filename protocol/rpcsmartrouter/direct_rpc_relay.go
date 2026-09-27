@@ -801,6 +801,16 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		)
 	}
 
+	// Let the chain message parse domain-specific REST errors (e.g. Cosmos tx errors on HTTP 200),
+	// and say which 4xx are the caller's answer and which are a refused route.
+	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
+	if hasError && errorMessage != "" {
+		utils.LavaFormatDebug("REST response contains error",
+			utils.LogAttr("endpoint", d.endpointName),
+			utils.LogAttr("error", errorMessage),
+		)
+	}
+
 	// Proper error classification (don't treat all 4xx as node errors)
 	var isNodeError bool
 	switch {
@@ -809,19 +819,16 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	case response.StatusCode == 429:
 		isNodeError = false // Rate limit (not node issue)
 	case response.StatusCode >= 400:
-		isNodeError = false // Client error
+		// A 4xx is the caller's answer, passed through — unless the message's classifier says the
+		// route was refused (any 405, or a 404 without a JSON body), in which case the endpoint
+		// never served the request. One rule, owned by CheckResponseError, so this flag and the
+		// relay processor's verdict cannot disagree: this flag is what gates the
+		// lava-identified-node-error header and the cache write.
+		isNodeError = hasError
 	default:
-		isNodeError = false // Success
-	}
-
-	// Let the chain message parse domain-specific REST errors (e.g. Cosmos tx errors on HTTP 200).
-	// NOTE: This should NOT be treated as "node error" by default; it is typically a request/application error.
-	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
-	if hasError && errorMessage != "" {
-		utils.LavaFormatDebug("REST response contains error",
-			utils.LogAttr("endpoint", d.endpointName),
-			utils.LogAttr("error", errorMessage),
-		)
+		// A 2xx carrying an application error in its body (a Cosmos tx_response.code) is NOT a
+		// node error at the transport level; it is a request/application error.
+		isNodeError = false
 	}
 
 	// Convert response headers to metadata

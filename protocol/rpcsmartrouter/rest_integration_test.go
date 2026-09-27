@@ -210,6 +210,75 @@ func TestRESTRelay_404_NotFound(t *testing.T) {
 	assert.Contains(t, string(result.Reply.Data), "block not found")
 }
 
+// sendRESTThroughMockUpstream drives the real REST sender against a mock upstream that answers
+// every request with the given status and body, for a POST to a stateful path.
+func sendRESTThroughMockUpstream(t *testing.T, status int, body string) *common.RelayResult {
+	t.Helper()
+	ctx := context.Background()
+	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+		ctx,
+		"LAVA",
+		spectypes.APIInterfaceRest,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			if body != "" {
+				_, _ = w.Write([]byte(body))
+			}
+		}),
+		nil,
+		"../../",
+		nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(closeServer)
+
+	chainMessage, err := chainParser.ParseMsg("/cosmos/tx/v1beta1/txs", []byte("data"), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+
+	directConn, err := lavasession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, "")
+	require.NoError(t, err)
+	sender := &DirectRPCRelaySender{directConnection: directConn, endpointName: "test-cosmos-lcd"}
+
+	result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	return result
+}
+
+// TestRESTRelay_404_EmptyBody_IsRouteRefusal pins the sender's side of the route-refusal rule: an
+// empty 404 is the gateway in front of the node refusing the path, so the reply is tagged a node
+// error — the same verdict the relay processor reaches through CheckResponseError — while the
+// registry keeps it non-retryable and not the endpoint's fault.
+func TestRESTRelay_404_EmptyBody_IsRouteRefusal(t *testing.T) {
+	result := sendRESTThroughMockUpstream(t, http.StatusNotFound, "")
+
+	assert.Equal(t, http.StatusNotFound, result.StatusCode)
+	assert.True(t, result.IsNodeError)
+	assert.True(t, result.IsNonRetryable)
+	assert.False(t, result.IsNodeAtFault)
+	assert.Empty(t, result.Reply.Data)
+}
+
+// TestRESTRelay_405_IsRouteRefusal: a 405 says the request was never executed, whatever its body.
+func TestRESTRelay_405_IsRouteRefusal(t *testing.T) {
+	result := sendRESTThroughMockUpstream(t, http.StatusMethodNotAllowed, `{"message":"method not allowed"}`)
+
+	assert.Equal(t, http.StatusMethodNotAllowed, result.StatusCode)
+	assert.True(t, result.IsNodeError)
+	assert.True(t, result.IsNonRetryable)
+	assert.False(t, result.IsNodeAtFault)
+}
+
+// TestRESTRelay_404_ProblemDocument_IsTheNodesAnswer: a 404 with a JSON body is data the caller
+// asked for, and the sender leaves it a plain pass-through — the other side of the same line.
+func TestRESTRelay_404_ProblemDocument_IsTheNodesAnswer(t *testing.T) {
+	result := sendRESTThroughMockUpstream(t, http.StatusNotFound, `{"type":"https://stellar.org/horizon-errors/not_found","title":"Resource Missing","status":404}`)
+
+	assert.Equal(t, http.StatusNotFound, result.StatusCode)
+	assert.False(t, result.IsNodeError)
+	assert.Contains(t, string(result.Reply.Data), "Resource Missing")
+}
+
 func TestRESTRelay_429_RateLimit(t *testing.T) {
 	ctx := context.Background()
 	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
