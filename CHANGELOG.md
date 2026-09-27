@@ -8,6 +8,44 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.5.4 — 2026-09-27
+
+### Highlights
+
+This release optimizes upstream networking and response processing, starting with the ability for node URLs to explicitly request `gzip` compression from their upstreams. To further reduce allocation overhead, upstream response bodies are now read into a single buffer when the content length is announced, and cache writes now snapshot the reply instead of performing a deep copy. Solana RPC processing is notably faster; the router now extracts tip slots directly by path, skips `getBlock` replies, evaluates list-based results from the first byte, and safely handles truncated replies. Finally, JSON-RPC block extraction is now strictly capped at 1 MiB and skips block-hash rules to prevent excessive memory consumption on oversized payloads.
+
+### Changes
+
+#### New Features
+- feat(lavasession): let a node url ask its upstream for gzip (MAG-3844) ([#432]) [`887e2bc`]
+
+#### Bug fixes
+- fix(rpcsmartrouter): skip block-hash rules and cap JSON-RPC block extraction at 1 MiB ([#430]) [`a81a695`]
+- fix(rpcsmartrouter): a cut Solana reply yields no tip slot, and say what the harvest reads (MAG-3843) ([#428]) [`2cbe875`]
+- fix(rpcsmartrouter): snapshot the reply for the cache write instead of deep-copying it ([#431]) [`7f92995`]
+
+#### Documentation updates
+- docs(rpcsmartrouter): drop stale deep-copy wording, pin the snapshot's Metadata clone end to end ([#431]) [`17d4414`]
+
+#### Other work
+- perf(rpcsmartrouter): read the Solana tip slot by path, and skip getBlock replies (MAG-3843) ([#428]) [`686dc92`]
+- perf(rpcsmartrouter): answer a Solana reply whose result is a list from its first byte (MAG-3843) ([#428]) [`cfb21b3`]
+- perf(lavasession): read an upstream body into one buffer when its length is announced (MAG-3845) ([#429]) [`8d2ad1d`]
+
+[#428]: https://github.com/magma-Devs/smart-router/pull/428
+[#429]: https://github.com/magma-Devs/smart-router/pull/429
+[#430]: https://github.com/magma-Devs/smart-router/pull/430
+[#431]: https://github.com/magma-Devs/smart-router/pull/431
+[#432]: https://github.com/magma-Devs/smart-router/pull/432
+[`17d4414`]: https://github.com/magma-Devs/smart-router/commit/17d4414f53a5cef987e989a34039f7ec4112edfb
+[`2cbe875`]: https://github.com/magma-Devs/smart-router/commit/2cbe875222049f33727a7d16062bbabaf69fd834
+[`686dc92`]: https://github.com/magma-Devs/smart-router/commit/686dc92223296cce759ff02085eab723b0e767f7
+[`7f92995`]: https://github.com/magma-Devs/smart-router/commit/7f929956a6ba3545583ea79842a513bf19f9ac02
+[`887e2bc`]: https://github.com/magma-Devs/smart-router/commit/887e2bcf09538a936adb5ebda9b25c74f76cd650
+[`8d2ad1d`]: https://github.com/magma-Devs/smart-router/commit/8d2ad1d075bd5e47ad8e4e87118e4f2e9c44752e
+[`a81a695`]: https://github.com/magma-Devs/smart-router/commit/a81a6954fd1094962bb2acdc880bceabb73d120a
+[`cfb21b3`]: https://github.com/magma-Devs/smart-router/commit/cfb21b33c28c1bf9fc92f3a58b7b7f4a9e4fcfc5
+
 ## v1.5.3 — 2026-09-23
 
 ### Highlights
