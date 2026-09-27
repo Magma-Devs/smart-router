@@ -1076,6 +1076,13 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
 
+	// A binary request goes to the node as the caller's bytes, and the reply comes
+	// back as the node's bytes. Nothing here reads either, so no descriptor is
+	// needed; only a JSON body has to be converted through the method's descriptor.
+	if !isJSONRequest(data) {
+		return g.invokeRaw(ctx, conn, methodPath, data)
+	}
+
 	// Parse service and method name
 	svc, methodName := rpcInterfaceMessages.ParseSymbol(methodPath)
 
@@ -2103,7 +2110,7 @@ func (g *GRPCDirectRPCConnection) parseInputMessage(
 	conn *grpc.ClientConn,
 ) error {
 	// Detect if input is JSON or binary proto
-	if len(data) > 0 && (data[0] == '{' || data[0] == '[') {
+	if isJSONRequest(data) {
 		// JSON input - use grpcurl parser. The parser resolves any message types the
 		// request references, so it needs the same descriptor source as the method
 		// lookup did — reflection-only here would defeat "file" mode (MAG-2350).
@@ -2140,6 +2147,55 @@ func (g *GRPCDirectRPCConnection) parseInputMessage(
 
 	return nil
 }
+
+// isJSONRequest reports whether a gRPC request body is JSON rather than binary
+// protobuf. A protobuf message never starts with '{' or '[': both are start-group
+// tags, which proto3 encoders do not emit.
+func isJSONRequest(data []byte) bool {
+	return len(data) > 0 && (data[0] == '{' || data[0] == '[')
+}
+
+// invokeRaw sends a binary request to the node unchanged and returns the node's
+// reply unchanged, with the response headers. It needs no descriptor, so it works
+// whether or not the node serves reflection.
+func (g *GRPCDirectRPCConnection) invokeRaw(ctx context.Context, conn *grpc.ClientConn, methodPath string, data []byte) (*DirectRPCResponse, error) {
+	var reply []byte
+	var respHeaders metadata.MD
+	err := conn.Invoke(ctx, "/"+methodPath, data, &reply, grpc.ForceCodec(rawProtoCodec{}), grpc.Header(&respHeaders))
+	if err != nil {
+		return g.handleGRPCError(ctx, err, respHeaders)
+	}
+	return &DirectRPCResponse{
+		Data:       reply,
+		Metadata:   respHeaders,
+		StatusCode: http.StatusOK,
+	}, nil
+}
+
+// rawProtoCodec carries protobuf messages as their wire bytes. It is named "proto"
+// so calls go out as application/grpc+proto, which every gRPC server reads.
+type rawProtoCodec struct{}
+
+func (rawProtoCodec) Marshal(v any) ([]byte, error) {
+	b, ok := v.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("raw proto codec: cannot marshal %T", v)
+	}
+	return b, nil
+}
+
+// Unmarshal keeps data as the reply: grpc-go hands a codec of this kind its own
+// copy of the message, so nothing else reuses the slice.
+func (rawProtoCodec) Unmarshal(data []byte, v any) error {
+	b, ok := v.(*[]byte)
+	if !ok {
+		return fmt.Errorf("raw proto codec: cannot unmarshal into %T", v)
+	}
+	*b = data
+	return nil
+}
+
+func (rawProtoCodec) Name() string { return "proto" }
 
 // handleGRPCError handles gRPC errors and returns an appropriate response
 func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error, respHeaders metadata.MD) (*DirectRPCResponse, error) {
