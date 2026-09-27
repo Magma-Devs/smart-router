@@ -20,7 +20,53 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 )
+
+// grpcChannelLiveness is the part of GRPCStreamingConfig every pooled channel dials with.
+// A flow that a NAT or load balancer drops without a reset still looks open to the channel,
+// so the idle timeout closes an unused transport before a middlebox can forget it, and
+// keepalive pings find a transport that died under live streams. 0 disables each.
+type grpcChannelLiveness struct {
+	idleTimeout      time.Duration
+	keepaliveTime    time.Duration
+	keepaliveTimeout time.Duration
+}
+
+func newGRPCChannelLiveness(config *GRPCStreamingConfig) grpcChannelLiveness {
+	return grpcChannelLiveness{
+		idleTimeout:      config.PoolIdleTimeout,
+		keepaliveTime:    config.PoolKeepaliveTime,
+		keepaliveTimeout: config.PoolKeepaliveTimeout,
+	}
+}
+
+// keepaliveParams returns the client keepalive, or false when either value is 0.
+// PermitWithoutStream stays false because gRPC servers penalise pings on connections without
+// streams. A grpc-go server by default also GOAWAYs (too_many_pings) a client pinging more
+// often than every 5m while it writes nothing; grpc-go then doubles the channel's interval.
+func (l grpcChannelLiveness) keepaliveParams() (keepalive.ClientParameters, bool) {
+	if l.keepaliveTime <= 0 || l.keepaliveTimeout <= 0 {
+		return keepalive.ClientParameters{}, false
+	}
+	return keepalive.ClientParameters{
+		Time:                l.keepaliveTime,
+		Timeout:             l.keepaliveTimeout,
+		PermitWithoutStream: false,
+	}, true
+}
+
+// dialOptions always sets the idle timeout, so 0 turns idleness off rather than leaving
+// grpc-go's 30-minute default in place; a negative one is clamped to 0, as grpc-go would fire
+// it at once. Keepalive is left out when disabled, because grpc-go raises a zero ping
+// interval to its 10s minimum instead of treating it as off.
+func (l grpcChannelLiveness) dialOptions() []grpc.DialOption {
+	opts := []grpc.DialOption{grpc.WithIdleTimeout(max(l.idleTimeout, 0))}
+	if params, ok := l.keepaliveParams(); ok {
+		opts = append(opts, grpc.WithKeepaliveParams(params))
+	}
+	return opts
+}
 
 // UpstreamGRPCStreamConnection wraps a grpc.ClientConn with health tracking and stream count.
 // Unlike the unary GRPCConnector, this is designed for long-lived streaming connections.
@@ -29,6 +75,7 @@ type UpstreamGRPCStreamConnection struct {
 	endpoint         string
 	sanitizedURL     string // For logging (no auth info)
 	nodeUrl          *common.NodeUrl
+	liveness         grpcChannelLiveness
 	healthy          atomic.Bool
 	lastError        atomic.Value // stores error
 	createdAt        time.Time
@@ -39,11 +86,12 @@ type UpstreamGRPCStreamConnection struct {
 }
 
 // NewUpstreamGRPCStreamConnection creates a new upstream gRPC connection for streaming
-func NewUpstreamGRPCStreamConnection(ctx context.Context, nodeUrl *common.NodeUrl, timeout time.Duration) (*UpstreamGRPCStreamConnection, error) {
+func NewUpstreamGRPCStreamConnection(ctx context.Context, nodeUrl *common.NodeUrl, timeout time.Duration, liveness grpcChannelLiveness) (*UpstreamGRPCStreamConnection, error) {
 	conn := &UpstreamGRPCStreamConnection{
 		endpoint:         nodeUrl.Url,
 		sanitizedURL:     sanitizeEndpointURL(nodeUrl.Url),
 		nodeUrl:          nodeUrl,
+		liveness:         liveness,
 		createdAt:        time.Now(),
 		descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
 	}
@@ -115,6 +163,10 @@ func (c *UpstreamGRPCStreamConnection) connect(ctx context.Context, timeout time
 	// manager's upstream streams, which this pool backs.
 	c.nodeUrl.TokenOverInsecureWarning(transportIsSecure)
 	dialOpts = append(dialOpts, c.nodeUrl.GrpcAuthDialOptions()...)
+
+	// MAG-3887: idle timeout and keepalive, so a flow a middlebox dropped is neither
+	// reused after an idle spell nor left silently under live streams.
+	dialOpts = append(dialOpts, c.liveness.dialOptions()...)
 
 	// grpc.NewClient is lazy — it does not establish a connection here.
 	// We force a state transition under the configured timeout so the
@@ -303,10 +355,11 @@ type UpstreamGRPCPool struct {
 	onReconnect  func() // Callback when reconnected (for stream restoration)
 
 	// Pool configuration
-	minConnections int           // Minimum connections to maintain (default: 1)
-	maxConnections int           // Maximum connections allowed (default: 5)
-	streamsPerConn int           // Target streams per connection (default: 100)
-	connectTimeout time.Duration // Connection establishment timeout
+	minConnections int                 // Minimum connections to maintain (default: 1)
+	maxConnections int                 // Maximum connections allowed (default: 5)
+	streamsPerConn int                 // Target streams per connection (default: 100)
+	connectTimeout time.Duration       // Connection establishment timeout
+	liveness       grpcChannelLiveness // Idle timeout and keepalive every connection dials with
 }
 
 // NewUpstreamGRPCPool creates a new gRPC connection pool for streaming
@@ -320,6 +373,7 @@ func NewUpstreamGRPCPool(nodeUrl *common.NodeUrl) *UpstreamGRPCPool {
 		maxConnections: 5,
 		streamsPerConn: 100,
 		connectTimeout: 30 * time.Second,
+		liveness:       newGRPCChannelLiveness(DefaultGRPCStreamingConfig()),
 	}
 }
 
@@ -331,6 +385,7 @@ func NewUpstreamGRPCPoolWithConfig(nodeUrl *common.NodeUrl, config *GRPCStreamin
 		pool.maxConnections = config.PoolMaxConnections
 		pool.streamsPerConn = config.StreamsPerConnection
 		pool.connectTimeout = config.ConnectionTimeout
+		pool.liveness = newGRPCChannelLiveness(config)
 	}
 	return pool
 }
@@ -408,7 +463,7 @@ func (p *UpstreamGRPCPool) GetConnectionForStream(ctx context.Context) (*Upstrea
 
 // createConnectionLocked creates a new connection (caller must hold lock)
 func (p *UpstreamGRPCPool) createConnectionLocked(ctx context.Context) (*UpstreamGRPCStreamConnection, error) {
-	conn, err := NewUpstreamGRPCStreamConnection(ctx, p.nodeUrl, p.connectTimeout)
+	conn, err := NewUpstreamGRPCStreamConnection(ctx, p.nodeUrl, p.connectTimeout, p.liveness)
 	if err != nil {
 		return nil, err
 	}
@@ -511,7 +566,7 @@ func (p *UpstreamGRPCPool) ReconnectWithBackoff(ctx context.Context) error {
 
 	// Try to create a new connection
 	p.lock.Lock()
-	newConn, err := NewUpstreamGRPCStreamConnection(ctx, p.nodeUrl, p.connectTimeout)
+	newConn, err := NewUpstreamGRPCStreamConnection(ctx, p.nodeUrl, p.connectTimeout, p.liveness)
 	if err != nil {
 		p.lock.Unlock()
 		return fmt.Errorf("failed to reconnect: %w", err)

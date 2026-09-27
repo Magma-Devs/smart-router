@@ -26,6 +26,11 @@ func TestNewUpstreamGRPCPool(t *testing.T) {
 	assert.Equal(t, 5, pool.maxConnections)
 	assert.Equal(t, 100, pool.streamsPerConn)
 	assert.Equal(t, 30*time.Second, pool.connectTimeout)
+	assert.Equal(t, grpcChannelLiveness{
+		idleTimeout:      2 * time.Minute,
+		keepaliveTime:    time.Minute,
+		keepaliveTimeout: 20 * time.Second,
+	}, pool.liveness)
 	assert.NotNil(t, pool.backoff)
 	assert.Empty(t, pool.connections)
 }
@@ -40,6 +45,9 @@ func TestNewUpstreamGRPCPoolWithConfig(t *testing.T) {
 		PoolMaxConnections:   10,
 		StreamsPerConnection: 50,
 		ConnectionTimeout:    60 * time.Second,
+		PoolIdleTimeout:      3 * time.Minute,
+		PoolKeepaliveTime:    45 * time.Second,
+		PoolKeepaliveTimeout: 10 * time.Second,
 	}
 
 	pool := NewUpstreamGRPCPoolWithConfig(nodeUrl, config)
@@ -49,6 +57,11 @@ func TestNewUpstreamGRPCPoolWithConfig(t *testing.T) {
 	assert.Equal(t, 10, pool.maxConnections)
 	assert.Equal(t, 50, pool.streamsPerConn)
 	assert.Equal(t, 60*time.Second, pool.connectTimeout)
+	assert.Equal(t, grpcChannelLiveness{
+		idleTimeout:      3 * time.Minute,
+		keepaliveTime:    45 * time.Second,
+		keepaliveTimeout: 10 * time.Second,
+	}, pool.liveness)
 }
 
 func TestNewUpstreamGRPCPoolWithConfig_NilConfig(t *testing.T) {
@@ -62,6 +75,7 @@ func TestNewUpstreamGRPCPoolWithConfig_NilConfig(t *testing.T) {
 	// Should use defaults
 	assert.Equal(t, 1, pool.minConnections)
 	assert.Equal(t, 5, pool.maxConnections)
+	assert.Equal(t, newGRPCChannelLiveness(DefaultGRPCStreamingConfig()), pool.liveness)
 }
 
 func TestUpstreamGRPCPool_SetReconnectCallback(t *testing.T) {
