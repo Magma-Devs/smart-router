@@ -4291,7 +4291,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 			SharedStateId:         sharedStateId,
 			AverageBlockTime:      int64(averageBlockTime),
 			IsNodeError:           false, // node errors are rejected by the eligibility checks above
-			BlocksHashesToHeights: nil,   // Not available in direct RPC mode
+			BlocksHashesToHeights: nil,   // the router learns no heights (MAG-3807, MAG-3892)
 			// The local captured above, not relayResult.StatusCode: this goroutine outlives
 			// the call and the response path keeps mutating relayResult, so reading a field
 			// off it here would be a cross-goroutine read of live state.

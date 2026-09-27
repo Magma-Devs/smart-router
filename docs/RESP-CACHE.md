@@ -89,7 +89,7 @@ a word.
 | `expiration.non-finalized` | `500ms` | Floor for a recent (non-finalized) answer; the effective TTL is max(averageBlockTime/8, this). The sidecar's `--expiration-non-finalized`. |
 | `expiration.non-finalized-multiplier` | `1` | Multiplier on `expiration.non-finalized`. The sidecar's `--expiration-non-finalized-multiplier`. |
 | `expiration.node-errors` | `250ms` | Cap on a cached node error for a finalized block. The sidecar's `--expiration-finalized-node-errors`. |
-| `expiration.blocks-hashes-to-heights` | `48h` | Lifetime of a block-hash→height mapping. The sidecar's `--expiration-blocks-hashes-to-heights`. |
+| `expiration.blocks-hashes-to-heights` | `48h` | Lifetime of a block-hash→height mapping. The sidecar's `--expiration-blocks-hashes-to-heights`. The router writes no mappings, so this governs nothing on it: see [Block-hash to height mappings](#block-hash-to-height-mappings). |
 
 TTLs default to the cache engine's own table (finalized 1h, non-finalized scaled to the chain's
 block time with a 500ms floor, short-lived node errors) — the same defaults the sidecar applies
@@ -402,12 +402,24 @@ polls would look healthy *because of* the first poll.
 > `--debug-address 127.0.0.1:6161` rather than `:6161`, and reach it through
 > `kubectl port-forward` in a cluster.
 
+## Block-hash to height mappings
+
+The cache has a keyspace for which block a hash belongs to (`h2h:` keys), with its own lifetime,
+`expiration.blocks-hashes-to-heights` (the sidecar's `--expiration-blocks-hashes-to-heights`).
+The router writes no mappings, so the keyspace stays empty and the setting governs nothing on it
+(MAG-3807). No request is routed by a mapping either. A lookup asks only for the hashes a spec's
+`BLOCK_HASH` parser finds, and a request whose parser finds one parses to no block number, which
+the router serves without a cache lookup.
+
+A state replay that names an old block by hash, such as `debug_traceTransaction`, therefore goes
+to whichever endpoint selection picks, and reaches an archive node only when a retry adds archive.
+Routing it to archive by a known height is tracked in MAG-3892.
+
 ## Sharing a backend between routers
 
 A keyspace is one cache. Every router in it reads and writes the same entries, resolves
-`latest` / `safe` / `finalized` / `pending` through the same chain tip, shares the same
-block-hash→height mappings, and — under `--shared-state` — the same seen-block and
-sticky-session claims. That is exactly right for **replicas of one deployment**: they read
+`latest` / `safe` / `finalized` / `pending` through the same chain tip, and — under
+`--shared-state` — shares the same seen-block and sticky-session claims. That is exactly right for **replicas of one deployment**: they read
 the same nodes, so an answer one of them cached is the answer any of them would have fetched.
 
 It is wrong for two routers that declare the same chain but read **different nodes** — a
@@ -481,7 +493,7 @@ Switching backends is a configuration change; the RESP cache starts cold (no dat
   travel through the key/value seam this backend implements. A router on the RESP backend logs
   a warning once per listen endpoint and **polls locally** — the same degradation already
   applied to a `cache-be` that predates the RPC. Everything else the sidecar caches (relay
-  entries, chain tip, shared-state seen-block, block-hash→height) works identically. If you
+  entries, chain tip, shared-state seen-block) works identically. If you
   need the peer gate, stay on `cache-be`.
 - **Sentinel credential rotation** applies per connection attempt, not in place — see
   [Credential rotation](#credential-rotation).
