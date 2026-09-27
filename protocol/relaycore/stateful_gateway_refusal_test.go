@@ -97,24 +97,27 @@ func TestStatefulBroadcastWaitsThroughGatewayRefusal(t *testing.T) {
 	require.Equal(t, "node@test", returnedResult.ProviderInfo.ProviderAddress)
 }
 
-// TestStatefulBroadcastAcceptsNodeProblemDocument pins the other side of the line: a 404 carrying
-// a problem document is the node's own answer, and a stateful relay returns it without waiting.
-func TestStatefulBroadcastAcceptsNodeProblemDocument(t *testing.T) {
+// TestStatefulBroadcastWaitsThroughProblemDocumentToo: a 404 carrying a problem document is the
+// chain's own refusal — a node error like any other non-2xx — so a write keeps waiting for its
+// sibling instead of accepting the refusal as the result.
+func TestStatefulBroadcastWaitsThroughProblemDocumentToo(t *testing.T) {
 	relayProcessor := newStatefulRestProcessor(t)
 
 	problem := `{"type":"https://stellar.org/horizon-errors/not_found","title":"Resource Missing","status":404}`
 	go sendRestReply(relayProcessor, "gateway@test", 5*time.Millisecond, http.StatusNotFound, problem)
-	go sendRestReply(relayProcessor, "node@test", 200*time.Millisecond, http.StatusOK, "ok")
+	go sendRestReply(relayProcessor, "node@test", 80*time.Millisecond, http.StatusOK, "ok")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	shortCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
-	require.NoError(t, relayProcessor.WaitForResults(ctx), "a 404 with a problem document must end the wait as an answer")
+	require.Error(t, relayProcessor.WaitForResults(shortCtx), "a JSON 404 ended the wait — it was counted as the answer")
 	hasResults, _ := relayProcessor.HasRequiredNodeResults(1)
-	require.True(t, hasResults)
+	require.False(t, hasResults)
 
+	longCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	require.NoError(t, relayProcessor.WaitForResults(longCtx))
 	returnedResult, err := relayProcessor.ProcessingResult()
 	require.NoError(t, err)
-	require.Equal(t, http.StatusNotFound, returnedResult.StatusCode)
-	require.Equal(t, problem, string(returnedResult.Reply.Data))
-	require.Equal(t, "gateway@test", returnedResult.ProviderInfo.ProviderAddress)
+	require.Equal(t, http.StatusOK, returnedResult.StatusCode)
+	require.Equal(t, "node@test", returnedResult.ProviderInfo.ProviderAddress)
 }

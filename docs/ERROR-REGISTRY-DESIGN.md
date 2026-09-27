@@ -629,3 +629,39 @@ _Blocked on protocol upgrade: sdkerrors carry ABCI codes used in the gRPC wire f
 | **Aptos** | Partial — custom REST error format | No (generic codes sufficient) | Error format differs but semantics map to generic codes |
 | **Stellar** | Yes — typed error URIs + result_codes | No (generic codes sufficient) | REST-based, HTTP codes sufficient for retry decisions |
 | **Cosmos SDK** | Standard — tx_response.code | No (generic codes sufficient) | Standard patterns, well-covered by generic tier |
+
+## 9. REST replies: any status outside 2xx is a node error
+
+REST has no error object, so the "is this a node error" question JSON-RPC answers from the
+envelope has to be answered from the status. Twelve REST chain families were probed live on
+2026-09-27 (Cosmos gRPC-gateway, Horizon, Aptos, Substrate sidecar, Tezos, Algorand, Beacon,
+Stacks, Tron, TON, nodeos, MultiversX). No status-code *range* separates a chain's refusal from a
+success across them: Horizon reports a rejected transaction as a 400 problem document and a
+missing account as a 404, Aptos a pruned version as a 410, Cosmos a missing transaction as a 404
+and a bad address as a 500, the sidecar a missing block hash as a 500. Every one of those is the
+node answering "no".
+
+So `RestMessage.CheckResponseError` treats **every status outside 2xx as a node error** (a 429
+keeps its rate-limit handling; a 2xx is a success unless its body carries a Cosmos transaction
+error; a status of 0 is "not set" and reads as a success). The body travels to the caller
+unchanged. What "node error" changes is the same as on JSON-RPC:
+
+- A write broadcast keeps waiting for a sibling's success instead of taking the first refusal
+  as the result (the dfns incident: a gateway's empty 404 ended the fan-out while the other
+  vendor broadcast the transaction).
+- The error registry classifies the reply, and its REST status rows decide the rest. Rows
+  added with this rule: `400`, `422` → user error (non-retryable, not the endpoint's fault),
+  `403` → unauthorized (non-retryable), `410` → data the node no longer holds (retryable
+  elsewhere, not a fault). Already there: `401`, `404`, `405`, `413`, `501` non-retryable,
+  `429` rate limit, `5xx` retryable. A status with no row classifies as unknown: retried and,
+  by the availability gate's documented default, scored.
+- Every REST node error is logged and counted the way a JSON-RPC one is ("received node error
+  reply from provider" at ERROR, `lava-identified-node-error: true` on the reply), and is not
+  cached.
+
+Not covered by this rule, on purpose: Tron and TON report errors inside a 200 body (`{"Error":…}`,
+`{"code":"SIGERROR"}`, `{"ok":false}`) and need a body check that is a separate decision; a 5xx
+that carries a chain envelope (a Cosmos "bad address" 500) is still converted to a transport error
+by the relay path and scored, as before; cross-validation counts only successes toward a quorum,
+so on a REST interface under a CV policy identical not-found answers no longer form one (no
+tenant runs CV on REST today).

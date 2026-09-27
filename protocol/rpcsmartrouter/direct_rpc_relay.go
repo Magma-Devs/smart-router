@@ -801,8 +801,8 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		)
 	}
 
-	// Let the chain message parse domain-specific REST errors (e.g. Cosmos tx errors on HTTP 200),
-	// and say which 4xx are the caller's answer and which are a refused route.
+	// Let the chain message parse domain-specific REST errors (e.g. Cosmos tx errors on HTTP 200)
+	// and say whether the status is a success at all.
 	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
 	if hasError && errorMessage != "" {
 		utils.LavaFormatDebug("REST response contains error",
@@ -811,24 +811,20 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		)
 	}
 
-	// Proper error classification (don't treat all 4xx as node errors)
+	// The transport-level flag follows CheckResponseError, so this and the relay processor's
+	// node-error list cannot disagree: any status outside 2xx is a node error. Two carve-outs
+	// keep their old meaning: a 429 is capacity (the registry's rate-limit row and the hold-off
+	// own it, and the flag stays false so the availability gate reads the carve-out), and a 2xx
+	// carrying an application error in its body (a Cosmos tx_response.code) is a
+	// request/application error, not a node error at the transport level.
 	var isNodeError bool
 	switch {
-	case response.StatusCode >= 500:
-		isNodeError = true // Server error
 	case response.StatusCode == 429:
-		isNodeError = false // Rate limit (not node issue)
-	case response.StatusCode >= 400:
-		// A 4xx is the caller's answer, passed through — unless the message's classifier says the
-		// route was refused (any 405, or a 404 without a JSON body), in which case the endpoint
-		// never served the request. One rule, owned by CheckResponseError, so this flag and the
-		// relay processor's verdict cannot disagree: this flag is what gates the
-		// lava-identified-node-error header and the cache write.
-		isNodeError = hasError
-	default:
-		// A 2xx carrying an application error in its body (a Cosmos tx_response.code) is NOT a
-		// node error at the transport level; it is a request/application error.
 		isNodeError = false
+	case response.StatusCode == 0 || (response.StatusCode >= 200 && response.StatusCode < 300):
+		isNodeError = false
+	default:
+		isNodeError = hasError
 	}
 
 	// Convert response headers to metadata
