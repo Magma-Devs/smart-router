@@ -35,6 +35,14 @@ type GRPCStreamingConfig struct {
 	PoolMinConnections   int // Minimum gRPC connections per endpoint (default: 1)
 	PoolMaxConnections   int // Maximum gRPC connections per endpoint (default: 5)
 	StreamsPerConnection int // Target concurrent streams per connection (default: 100)
+
+	// Upstream channel liveness, 0 disables each (keepalive needs both of its values). A
+	// pooled channel with no RPCs for PoolIdleTimeout closes its transport and the next
+	// stream dials a new one. Nothing holds a new connection out of idle before its first
+	// stream, so it must also reach READY within PoolIdleTimeout.
+	PoolIdleTimeout      time.Duration // Close an unused channel's transport after this long (default: 2m)
+	PoolKeepaliveTime    time.Duration // Ping after this long without reads while streams are open (default: 1m, grpc-go minimum 10s)
+	PoolKeepaliveTimeout time.Duration // Close the transport when a ping or sent data goes unacknowledged this long (default: 20s)
 }
 
 // DefaultGRPCStreamingConfig returns a GRPCStreamingConfig with sensible defaults
@@ -65,6 +73,11 @@ func DefaultGRPCStreamingConfig() *GRPCStreamingConfig {
 		PoolMinConnections:   1,
 		PoolMaxConnections:   5,
 		StreamsPerConnection: 100,
+
+		// Upstream channel liveness - idle timeout below common NAT and load balancer idle timeouts
+		PoolIdleTimeout:      2 * time.Minute,
+		PoolKeepaliveTime:    1 * time.Minute,
+		PoolKeepaliveTimeout: 20 * time.Second,
 	}
 }
 
