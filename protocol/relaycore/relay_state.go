@@ -140,6 +140,15 @@ func (rs *RelayState) SetIsArchive(isArchive bool) {
 	rs.archiveStatus.isArchive.Store(isArchive)
 }
 
+// SetIsUpgraded marks the archive extension as added speculatively rather than asked for, so the
+// retry policy may take it off again (decideMutation), as it does after its own upgrade.
+func (rs *RelayState) SetIsUpgraded(isUpgraded bool) {
+	if rs == nil || rs.archiveStatus == nil {
+		return
+	}
+	rs.archiveStatus.isUpgraded.Store(isUpgraded)
+}
+
 func (rs *RelayState) GetStateNumber() int {
 	if rs == nil {
 		return 0

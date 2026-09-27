@@ -1573,14 +1573,6 @@ func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlo
 	return reqBlock
 }
 
-func (rpcss *RPCSmartRouterServer) newBlocksHashesToHeightsSliceFromRequestedBlockHashes(requestedBlockHashes []string) []*pairingtypes.BlockHashToHeight {
-	var blocksHashesToHeights []*pairingtypes.BlockHashToHeight
-	for _, blockHash := range requestedBlockHashes {
-		blocksHashesToHeights = append(blocksHashesToHeights, &pairingtypes.BlockHashToHeight{Hash: blockHash, Height: spectypes.NOT_APPLICABLE})
-	}
-	return blocksHashesToHeights
-}
-
 func deepCopyRelayPrivateData(original *pairingtypes.RelayPrivateData) *pairingtypes.RelayPrivateData {
 	if original == nil {
 		return nil
@@ -3787,14 +3779,27 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	latestBlock := relayResult.Reply.LatestBlock
 	// Finalization uses the GATED getLatestBlock (fresh tip or 0), never getLatestBlockAllowStale:
 	// a stale or too-high head here would falsely finalize a mutable block into the long-TTL store.
-	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
+	trackedTip := int64(rpcss.getLatestBlock())
+	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, trackedTip, int64(blockDistanceForFinalizedData))
 	byHash := identityKeyed(protocolMessage)
+	var hashHeight *hashHeightClaim
 	if byHash {
 		// The object's own block decides the store, re-read from the response rather than
 		// taken from Reply.LatestBlock: a reply that carried no block (a pending
 		// transaction answers null) is stamped downstream with the endpoint's observed
 		// tip, and that value must never settle an answer that can still change.
-		finalized = byHashFinalized(extractBlockHeightFromJSONResponse(relayResult.Reply.Data, protocolMessage), int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
+		answerBlock := extractBlockHeightFromJSONResponse(relayResult.Reply.Data, protocolMessage)
+		finalized = byHashFinalized(answerBlock, trackedTip, int64(blockDistanceForFinalizedData))
+		// The same block is the height of the hash the request named, and later requests
+		// naming that hash read it back (MAG-3807). Only an answer from this router's own
+		// upstream teaches it. A primary hit is served without a write, and a secondary-tier
+		// answer is another zone's word, which must never steer routing here
+		// (docs/SECONDARY-CACHE.md). The check that reads the answer runs in the write below,
+		// off the response path.
+		servedTier := relayResult.CacheLookup.ServedTier
+		if servedTier != common.CacheTierPrimary && servedTier != common.CacheTierSecondary {
+			hashHeight = hashHeightToLearn(protocolMessage, answerBlock, finalized, trackedTip)
+		}
 	}
 
 	// Convert LATEST_BLOCK to the concrete block the cache key carries. This MUST be the
@@ -3917,7 +3922,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 			SharedStateId:         sharedStateId,
 			AverageBlockTime:      int64(averageBlockTime),
 			IsNodeError:           false, // node errors are rejected by the eligibility checks above
-			BlocksHashesToHeights: nil,   // Not available in direct RPC mode
+			BlocksHashesToHeights: hashHeight.confirmedBy(copyReply.Data),
 			// The local captured above, not relayResult.StatusCode: this goroutine outlives
 			// the call and the response path keeps mutating relayResult, so reading a field
 			// off it here would be a cross-goroutine read of live state.
@@ -4148,7 +4153,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 								Finalized:             lookupFinalized,
 								SharedStateId:         sharedStateId,
 								SeenBlock:             localRelayData.SeenBlock,
-								BlocksHashesToHeights: rpcss.newBlocksHashesToHeightsSliceFromRequestedBlockHashes(protocolMessage.GetRequestedBlocksHashes()),
+								BlocksHashesToHeights: hashHeightsToAsk(protocolMessage),
 							}) // caching in the consumer doesn't care about hashes, and we don't have data on finalization yet
 							cancel()
 							latencyMs := float64(time.Since(cacheStart).Milliseconds())
@@ -4315,6 +4320,20 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 
 	_, sessSpan := tracing.StartInternalSpan(ctx, tracing.SpanGetSessions)
 	sessions, err := rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, extensions, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider, sessionOpts)
+	if rebuilt, routedByHeight := protocolMessage.(cacheKeyedAs); routedByHeight && rebuilt.addsExtension() && errors.Is(err, lavasession.PairingListEmptyError) {
+		// The extension came from a height the cache knew, not from the request, and no endpoint
+		// serves the request with it: an archive node without the request's add-on is not one.
+		// The request goes as it arrived, where it went before the height was known, rather than
+		// fail where an endpoint without the extension may serve it (MAG-3807). Endpoints already
+		// tried stay excluded across the change of key (MAG-2228).
+		usedProviders.MigrateUnwantedProviders(lavasession.NewRouterKeyFromExtensions(extensions), lavasession.NewRouterKeyFromExtensions(rebuilt.lookup.GetExtensions()))
+		protocolMessage = rebuilt.lookup
+		relayState.SetProtocolMessage(protocolMessage)
+		relayState.SetIsArchive(relayState.CheckIsArchive(protocolMessage.RelayPrivateData()))
+		relayState.SetIsUpgraded(false)
+		extensions = protocolMessage.GetExtensions()
+		sessions, err = rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, extensions, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider, sessionOpts)
+	}
 	tracing.RecordSessionStats(sessSpan, numOfEndpoints, len(sessions))
 	if err != nil {
 		tracing.RecordError(sessSpan, err)
@@ -5541,6 +5560,12 @@ func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestD
 		// and update the extension rules with the new earliest block data as it might be archive.
 		// Setting earliest used to attempt this only once.
 		relayState.SetIsEarliestUsed()
+		// With no tip known yet, nothing says the block the cache named is old, and the rule sends
+		// every request to archive at a tip of 0. The request goes where it was parsed to go.
+		latestBlock := rpcss.getLatestBlockAllowStale()
+		if latestBlock == 0 {
+			return protocolMessage
+		}
 		relayRequestData := protocolMessage.RelayPrivateData()
 		userData := protocolMessage.GetUserData()
 		// Preserve the client's directive headers (e.g. lava-extension, force-cache-refresh) across
@@ -5554,12 +5579,28 @@ func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestD
 			return protocolMessage
 		}
 
-		extensionAdded := newProtocolMessage.UpdateEarliestAndValidateExtensionRules(rpcss.chainParser.ExtensionsParser(), earliestBlockHashRequested, addon, relayRequestData.SeenBlock)
+		// The rebuilt request is the same request at the same moment, so it keeps the lookup's
+		// parse-time tip: a tip-keyed answer is filed under that block, where the lookup looked.
+		newProtocolMessage.RelayPrivateData().SeenBlock = relayRequestData.SeenBlock
+		// The archive rule reads the stale-tolerant tip, as the parse-time rule does
+		// (getExtensionsFromDirectiveHeaders). The seen block is the strict tip, 0 once it goes
+		// stale, and the rule sends everything to archive at 0, however recent the block the
+		// cache named (MAG-3807).
+		extensionAdded := newProtocolMessage.UpdateEarliestAndValidateExtensionRules(rpcss.chainParser.ExtensionsParser(), earliestBlockHashRequested, addon, int64(latestBlock))
 		if extensionAdded && relayState.CheckIsArchive(newProtocolMessage.RelayPrivateData()) {
 			relayState.SetIsArchive(true)
+			// Archive is preferred here, not required: the request never asked for it. Marked as
+			// an upgrade, the way a retry adds it, the retry policy takes it off again when
+			// archive does not answer, and the request goes where it went before the height was
+			// known. sendRelayToEndpoint does the same when no endpoint serves it with archive.
+			relayState.SetIsUpgraded(true)
 		}
-		relayState.SetProtocolMessage(newProtocolMessage)
-		return newProtocolMessage
+		// Routed as rebuilt, keyed as looked up: an extension added here is a routing decision made
+		// after the lookup, and must not move the answer, on this attempt or a retry, to a key the
+		// lookup never asks for (cacheKeyedAs).
+		rebuilt := cacheKeyedAs{ProtocolMessage: newProtocolMessage, lookup: protocolMessage}
+		relayState.SetProtocolMessage(rebuilt)
+		return rebuilt
 	}
 	return protocolMessage
 }

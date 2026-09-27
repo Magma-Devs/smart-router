@@ -385,6 +385,69 @@ polls would look healthy *because of* the first poll.
 > `--debug-address 127.0.0.1:6161` rather than `:6161`, and reach it through
 > `kubectl port-forward` in a cluster.
 
+## Block-hash→height mappings
+
+The `h2h:` keys record which block a hash belongs to. They let the router send a request that
+replays historical state straight to an archive node when the state it needs is older than the
+archive rule's threshold (127 blocks on Ethereum), instead of to a full node that has pruned it.
+
+**What reads them.** `debug_traceTransaction`, `debug_traceBlockByHash`, `debug_storageRangeAt`
+and `trace_get` name a transaction or a block by hash and no block number, so they parse as
+`latest`, which the archive rule never sends to archive. Without a known height such a request
+goes to whichever endpoint selection picks. A full node that has pruned the state fails it, and
+the request reaches archive only when the retry adds it. Its lookup asks for the height of the
+hash it names. When the store knows it, the rule judges the request by that block, against the
+router's last known tip, and an old one goes to archive first.
+
+Archive is preferred, not required, because the request never asked for it. When no endpoint
+serves the request's add-on (`debug`, `trace`) with archive, the request goes where it would
+have gone without the height. So does its retry, if archive fails it. A router that has not yet
+learned a tip judges nothing, and routes as parsed.
+
+Object lookups (`eth_getBlockByHash`, `eth_getTransactionReceipt` and the like) do not ask. Full
+nodes serve them at any age: the rule's threshold is how much state a full node keeps, not how
+many blocks.
+
+Two kinds of request are not routed this way, because the router does no cache lookup for a
+request that has no block number:
+
+- A request whose spec parses a block hash out of it: `trace_transaction` and
+  `trace_replayTransaction` on Ethereum, and any method with a `BLOCK_HASH` parser on other
+  chains.
+- A state read that names its block by hash in an EIP-1898 object, such as
+  `eth_call(…, {"blockHash": …})`.
+
+In both, the parsed hash leaves the request no block number, so nothing asks for its height.
+
+**What writes them.** The router learns a height from an answer that states the block of the
+object the request named: `eth_getBlockByHash`, `eth_getTransactionByBlockHashAndIndex`,
+`eth_getTransactionByHash` and `eth_getTransactionReceipt`. A replay is routed once one of these
+has taught its hash's height, as when an indexer fetches a receipt and then traces the
+transaction. A mapping is written only when:
+
+- the answer came from this router's own upstream, not from a cache hit or a secondary-tier
+  answer;
+- the answer names the hash that was asked, in its own `hash`, `blockHash` or
+  `transactionHash` field;
+- the height is no higher than the router's own tip; and
+- for a transaction, its block is at least `block_distance_for_finalized_data` below the tip
+  (8 on Ethereum), because a reorg can mine it again at another height. A block's mapping is
+  written at once, because a block hash commits to its height.
+
+A request routed by a height is cached under the key its lookup used, like any other request.
+
+**What it costs.** One key per distinct hash learned in the last
+`expiration.blocks-hashes-to-heights` (48h by default), about 150 bytes each (153 bytes measured
+on Redis 8, expiry included). A router that looks up a million distinct final receipts a day
+holds about two million mappings, roughly 300 MB, so size `maxmemory` for them. Under
+`volatile-lru` a mapping is evicted like any entry, and a replay whose mapping is gone is routed
+as it was before mappings were written. Each mapping is one more `SET` in the background cache
+write, which is also where the answer is read to check the hash. Each replay's lookup makes one
+more read, for its hash's height.
+
+A fleet in which every node declares `archive` gains nothing from the mappings, because archive
+routing picks from the same nodes. It still pays for them.
+
 ## Sharing a backend between routers
 
 A keyspace is one cache. Every router in it reads and writes the same entries, resolves
