@@ -866,10 +866,10 @@ func TestExtractBlockHeightFromJSONResponse_EVMFallback(t *testing.T) {
 	assert.Equal(t, int64(4096), result, "EVM methods should work via fallback parsing")
 }
 
-// solanaGetBlockReply builds a jsonParsed-shaped Solana getBlock reply with txCount
+// solanaGetBlockReplyWithTxs builds a jsonParsed-shaped Solana getBlock reply with txCount
 // transactions: the header fields, blockhash among them, followed by the transactions array
 // that makes a real block 2-7 MB.
-func solanaGetBlockReply(txCount int) []byte {
+func solanaGetBlockReplyWithTxs(txCount int) []byte {
 	var b strings.Builder
 	b.WriteString(`{"jsonrpc":"2.0","id":1,"result":{"blockHeight":331234567,"blockTime":1758700000,` +
 		`"blockhash":"5Q7xZr8k2mDsV9cWb3hJfLqE1nTa6YpRuKoG4iXzBv2N","parentSlot":353000000,"transactions":[`)
@@ -909,7 +909,7 @@ func TestBlockExtractionSkipsHashRule(t *testing.T) {
 			},
 		}
 	}
-	reply := solanaGetBlockReply(500)
+	reply := solanaGetBlockReplyWithTxs(500)
 
 	extractors := []struct {
 		name    string
