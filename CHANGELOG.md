@@ -8,6 +8,20 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.5.5 — 2026-09-27
+
+### Highlights
+
+This release refines upstream error handling by changing how the router interprets empty HTTP 404 and 405 status codes from provider gateways. Previously, an empty 404 or 405 was treated as a valid canonical answer from the underlying blockchain node, which could result in returning false empty responses to clients. The router now correctly classifies these specific gateway responses as node-level errors rather than valid payload data. By recognizing these as infrastructure failures, the router immediately triggers provider failover and correctly penalizes the failing upstream in the QoS scoring matrix. This classification also prevents the finalization-aware cache from being poisoned with incorrect missing-data states, ensuring accurate RPC results even when individual upstream gateways misbehave.
+
+### Changes
+
+#### Bug fixes
+- fix(chainlib): treat a gateway's empty 404/405 as a node error, not the node's answer ([#435]) [`8804058`]
+
+[#435]: https://github.com/magma-Devs/smart-router/pull/435
+[`8804058`]: https://github.com/magma-Devs/smart-router/commit/880405853d1ea5a7885175aa68245423ddd01df2
+
 ## v1.5.4 — 2026-09-27
 
 ### Highlights
