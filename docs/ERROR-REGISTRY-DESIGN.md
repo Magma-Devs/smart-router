@@ -650,9 +650,11 @@ unchanged. What "node error" changes is the same as on JSON-RPC:
   as the result (the dfns incident: a gateway's empty 404 ended the fan-out while the other
   vendor broadcast the transaction).
 - The error registry classifies the reply, and its REST status rows decide the rest. Rows
-  added with this rule: `400`, `422` → user error (non-retryable, not the endpoint's fault),
-  `403` → unauthorized (non-retryable), `410` → data the node no longer holds (retryable
-  elsewhere, not a fault). Already there: `401`, `404`, `405`, `413`, `501` non-retryable,
+  added with this rule, in the REST-only table: `400`, `422` → user error (non-retryable, not
+  the endpoint's fault), `403` → unauthorized (non-retryable), `410` → data the node no longer
+  holds (retryable elsewhere, not a fault). They are deliberately not in the shared HTTP
+  tables: on JSON-RPC and gRPC a bare 400 or 403 is a gateway or WAF in front of the node,
+  where "unknown ⇒ retry elsewhere" stays the right call. Already there: `401`, `404`, `405`, `413`, `501` non-retryable,
   `429` rate limit, `5xx` retryable. A status with no row classifies as unknown: retried and,
   by the availability gate's documented default, scored.
 - Every REST node error is logged and counted the way a JSON-RPC one is ("received node error
