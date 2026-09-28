@@ -38,6 +38,18 @@ func dispatchedTo(providers ...string) *lavasession.UsedProviders {
 	return usedProviders
 }
 
+// dispatchedTogether records a single batch holding every provider, the way a stateful fan-out
+// goes out.
+func dispatchedTogether(providers ...string) *lavasession.UsedProviders {
+	batch := lavasession.ConsumerSessionsMap{}
+	for _, provider := range providers {
+		batch[provider] = &lavasession.SessionInfo{}
+	}
+	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders.AddUsed(batch, nil)
+	return usedProviders
+}
+
 func replyHeader(metadata []pairingtypes.Metadata, name string) (string, bool) {
 	for _, entry := range metadata {
 		if entry.Name == name {
@@ -263,7 +275,7 @@ func TestRetryCountHeader_CountsAttemptsWithoutResult(t *testing.T) {
 			name: "a stateful fan-out still absorbs the providers that did not answer",
 			rp: &MockRelayProcessorForHeaders{
 				selection:      relaycore.Stateful,
-				usedProviders:  dispatchedTo("p1", "p2", "p3"),
+				usedProviders:  dispatchedTogether("p1", "p2", "p3"),
 				successResults: []common.RelayResult{from("p1")},
 			},
 			resolver:      "p1",
