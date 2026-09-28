@@ -26,12 +26,12 @@ func (archiveRequest) GetExtensions() []*spectypes.Extension {
 	return []*spectypes.Extension{{Name: "archive"}}
 }
 
-// A session the consistency filter rejects was never asked, so it must leave the request's
-// dispatch history. UsedProviders filed it under the key it was taken with, and on the degraded
-// path that is the plain key, not the request's. A release under the request's key found nothing,
-// so the provider stayed in the history, and Lava-Retries then counted an attempt at a node that
-// never received the request (MAG-3762).
-func TestSendRelayToDirectEndpoints_ReleasesADegradedSessionUnderItsOwnKey(t *testing.T) {
+// rejectEveryDegradedSession takes two sessions for msg under the plain key, as a request that
+// degraded does, and sends them with both endpoints far behind the chain tip. The consistency
+// filter rejects both and no relay is launched, so the release is the only thing that touches the
+// request's dispatch history.
+func rejectEveryDegradedSession(t *testing.T, msg archiveRequest) *relaycore.RelayProcessor {
+	t.Helper()
 	ctx := context.Background()
 
 	noopHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -40,12 +40,10 @@ func TestSendRelayToDirectEndpoints_ReleasesADegradedSessionUnderItsOwnKey(t *te
 	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
 		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
 	if closeServer != nil {
-		defer closeServer()
+		t.Cleanup(closeServer)
 	}
 	require.NoError(t, err)
 
-	// Both endpoints are far behind the chain tip, so the filter rejects both and no relay is
-	// launched: the release is the only thing that touches the dispatch history.
 	chainTip := seedChainTip(200)
 	endpointtip.Default().Reset()
 	staleEp1 := &lavasession.Endpoint{NetworkAddress: "http://stale1:8545"}
@@ -80,11 +78,6 @@ func TestSendRelayToDirectEndpoints_ReleasesADegradedSessionUnderItsOwnKey(t *te
 	usedProviders.AddUsed(sessionsMap, nil)
 	require.ElementsMatch(t, []string{"lava@provider1", "lava@provider2"}, usedProviders.DispatchedProviders())
 
-	msg := archiveRequest{&MockProtocolMessage{
-		api:            &spectypes.Api{Name: "/cosmos/base/tendermint/v1beta1/blocks/latest"},
-		requestedBlock: spectypes.LATEST_BLOCK,
-		userData:       common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"},
-	}}
 	require.NotEqual(t, plainKey.String(), lavasession.NewRouterKeyFromExtensions(msg.GetExtensions()).String(),
 		"setup: the request's key must differ from the key its sessions were taken under, or this measures nothing")
 
@@ -106,9 +99,46 @@ func TestSendRelayToDirectEndpoints_ReleasesADegradedSessionUnderItsOwnKey(t *te
 	defer cancel()
 	err = rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, msg, relayProcessor, nil, nil, common.CacheLookupReport{})
 	require.ErrorIs(t, err, lavasession.ConsistencyPreValidationError, "setup: both sessions must have been rejected as stale")
+	return relayProcessor
+}
 
+// A session the consistency filter rejects was never asked, so it must leave the request's
+// dispatch history. UsedProviders filed it under the key it was taken with, and on the degraded
+// path that is the plain key, not the request's. A release under the request's key found nothing,
+// so the provider stayed in the history, and Lava-Retries then counted an attempt at a node that
+// never received the request (MAG-3762).
+func TestSendRelayToDirectEndpoints_ReleasesADegradedSessionUnderItsOwnKey(t *testing.T) {
+	relayProcessor := rejectEveryDegradedSession(t, archiveRequest{&MockProtocolMessage{
+		api:            &spectypes.Api{Name: "/cosmos/base/tendermint/v1beta1/blocks/latest"},
+		requestedBlock: spectypes.LATEST_BLOCK,
+		userData:       common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"},
+	}})
+
+	usedProviders := relayProcessor.GetUsedProviders()
 	require.Empty(t, usedProviders.DispatchedProviders(),
 		"a rejected session was never asked, so it must not stay in the history Lava-Retries counts")
 	require.Equal(t, 0, usedProviders.SessionsLatestBatch())
 	require.Equal(t, 0, usedProviders.CurrentlyUsed())
+}
+
+// The write verdict reads the same history, through SessionsDispatched. With the rejected nodes
+// left in it, a write that reached no node read as one sent to two nodes that never answered, and
+// once the budget ran out it came back as "transaction status unclear": a 500 telling the client
+// the transaction may already be on chain. Neither node received it.
+func TestWriteOutcomeIsUnknown_ADegradedWriteTheFilterKeptFromEveryNode(t *testing.T) {
+	msg := archiveRequest{&MockProtocolMessage{
+		api: &spectypes.Api{
+			Name:     "/cosmos/tx/v1beta1/txs",
+			Category: spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS},
+		},
+		requestedBlock: spectypes.LATEST_BLOCK,
+		userData:       common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"},
+	}}
+	relayProcessor := rejectEveryDegradedSession(t, msg)
+	relayProcessor.SetStopReason(relaycore.StopReasonProcessingTimeout)
+
+	require.Zero(t, relayProcessor.GetUsedProviders().SessionsDispatched(),
+		"the filter kept the write from both nodes, so the verdict must count none as asked")
+	require.False(t, writeOutcomeIsUnknown(msg, relayProcessor),
+		"no node received the write, so none can be holding it: this is a failure, not an unclear write")
 }
