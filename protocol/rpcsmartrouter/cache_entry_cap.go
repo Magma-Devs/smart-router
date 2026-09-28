@@ -11,7 +11,7 @@ import (
 
 // cacheMaxEntryBytesFrom reads --cache-max-entry-bytes from the flag or the config file. A
 // value that is not a whole, non-negative byte count is refused rather than read as 0, which
-// would silently lift the cap.
+// would silently leave the cap off.
 func cacheMaxEntryBytesFrom(v *viper.Viper) (int64, error) {
 	raw := strings.TrimSpace(v.GetString(common.CacheMaxEntryBytesFlagName))
 	maxEntryBytes, err := strconv.ParseInt(raw, 10, 64)

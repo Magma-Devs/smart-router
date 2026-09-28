@@ -162,7 +162,7 @@ func TestSmartRouterRecordCacheWriteSkipped_CountsByReason(t *testing.T) {
 	require.Equal(t, float64(2), testutil.ToFloat64(m.cacheWriteSkippedTotalMetric.WithLabelValues("SOLANA", "jsonrpc", "getBlock", CacheWriteSkipReasonSize)))
 }
 
-// The default 1 MiB cap is a bucket boundary, so "entries at or under the cap" is one bucket.
+// A 1 MiB cap is a bucket boundary, so "entries at or under the cap" is one bucket.
 func TestSmartRouterRecordCacheEntryWritten_ObservesBodySize(t *testing.T) {
 	m := newSmartRouterForCacheTest()
 	m.cacheEntryBytesHistogram = prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "t_sr_cache_entry_bytes", Buckets: cacheEntryBytesBuckets}, []string{"spec", "apiInterface", "method"})
@@ -183,7 +183,7 @@ func TestSmartRouterRecordCacheEntryWritten_ObservesBodySize(t *testing.T) {
 		cumulative[bucket.GetUpperBound()] = bucket.GetCumulativeCount()
 	}
 	require.Equal(t, uint64(1), cumulative[1<<10])
-	require.Equal(t, uint64(2), cumulative[1<<20], "an entry of exactly the default cap lands in the 1 MiB bucket")
+	require.Equal(t, uint64(2), cumulative[1<<20], "an entry of exactly a 1 MiB cap lands in the 1 MiB bucket")
 	require.Equal(t, uint64(3), cumulative[1<<22])
 }
 

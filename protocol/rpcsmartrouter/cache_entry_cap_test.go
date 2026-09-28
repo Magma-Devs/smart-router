@@ -30,6 +30,8 @@ const (
 	capTestTip = int64(20000000)
 	// How long a skipped write is watched for, to show that no late async write lands.
 	capTestNoWriteWindow = 300 * time.Millisecond
+	// The cap the write tests run under. The flag's own default is 0, no cap.
+	capTestMaxEntryBytes = int64(1 << 20)
 )
 
 // recordingCacheBackend records every SetEntry, so a test can tell "the router never issued
@@ -128,7 +130,7 @@ func cacheWriteSeries(t *testing.T) (skipped float64, written uint64, writtenByt
 // (a) A reply over the cap is never handed to the backend, and is counted once.
 func TestCacheWriteSkipsReplyOverEntryCap(t *testing.T) {
 	backend := &recordingCacheBackend{}
-	f := newCapFixture(t, backend, common.DefaultCacheMaxEntryBytes)
+	f := newCapFixture(t, backend, capTestMaxEntryBytes)
 	skippedBefore, writtenBefore, _ := cacheWriteSeries(t)
 
 	f.write(replyOfSize(t, 2<<20))
@@ -159,7 +161,7 @@ func TestCacheWriteEntryCapBoundary(t *testing.T) {
 // (b) A reply under the cap is written exactly as before, through a real cache server.
 func TestCacheWriteUnderEntryCapLandsInCache(t *testing.T) {
 	primary, rcs := startCacheServerForTest(t)
-	f := newCapFixture(t, primary, common.DefaultCacheMaxEntryBytes)
+	f := newCapFixture(t, primary, capTestMaxEntryBytes)
 	body := replyOfSize(t, 100<<10)
 	skippedBefore, writtenBefore, bytesBefore := cacheWriteSeries(t)
 
@@ -201,8 +203,8 @@ func TestCacheWriteEntryCapOnRespBackend(t *testing.T) {
 		size          int
 		wantWritten   bool
 	}{
-		{name: "over the cap is skipped", maxEntryBytes: common.DefaultCacheMaxEntryBytes, size: 2 << 20, wantWritten: false},
-		{name: "under the cap is written", maxEntryBytes: common.DefaultCacheMaxEntryBytes, size: 100 << 10, wantWritten: true},
+		{name: "over the cap is skipped", maxEntryBytes: capTestMaxEntryBytes, size: 2 << 20, wantWritten: false},
+		{name: "under the cap is written", maxEntryBytes: capTestMaxEntryBytes, size: 100 << 10, wantWritten: true},
 		{name: "cap 0 writes a large reply", maxEntryBytes: 0, size: 2 << 20, wantWritten: true},
 	}
 	for _, tc := range cases {
@@ -247,7 +249,7 @@ func TestCacheWriteEntryCapOnRespBackend(t *testing.T) {
 // or encodes the body before the check.
 func TestCacheWriteSkipCopiesNoBody(t *testing.T) {
 	backend := &recordingCacheBackend{}
-	f := newCapFixture(t, backend, common.DefaultCacheMaxEntryBytes)
+	f := newCapFixture(t, backend, capTestMaxEntryBytes)
 	const calls = 50
 	for _, size := range []int{2 << 20, 8 << 20} {
 		body := replyOfSize(t, size)
@@ -277,7 +279,7 @@ func TestCacheMaxEntryBytesFlag(t *testing.T) {
 		want    int64
 		wantErr bool
 	}{
-		{name: "default", want: 1 << 20},
+		{name: "default is no cap", want: 0},
 		{name: "flag", args: []string{"--cache-max-entry-bytes=4194304"}, want: 4 << 20},
 		{name: "flag zero is no cap", args: []string{"--cache-max-entry-bytes=0"}, want: 0},
 		{name: "config file", yaml: "cache-max-entry-bytes: 262144\n", want: 256 << 10},
@@ -291,7 +293,7 @@ func TestCacheMaxEntryBytesFlag(t *testing.T) {
 			cmd := CreateRPCSmartRouterCobraCommand()
 			flag := cmd.Flags().Lookup(common.CacheMaxEntryBytesFlagName)
 			require.NotNil(t, flag, "the shipped command registers --%s", common.CacheMaxEntryBytesFlagName)
-			require.Equal(t, "1048576", flag.DefValue)
+			require.Equal(t, "0", flag.DefValue, "the cap is off unless the flag carries a value")
 
 			require.NoError(t, cmd.Flags().Parse(tc.args))
 			require.NoError(t, viper.BindPFlags(cmd.Flags()))

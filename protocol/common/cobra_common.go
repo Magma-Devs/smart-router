@@ -144,9 +144,10 @@ const (
 	MinRelayTimeoutFlagName          = "min-relay-timeout"          // minimum relay timeout floor (default 1s)
 	CacheTimeoutFlagName             = "cache-timeout"              // per-relay cache lookup budget (default 50ms)
 	// CacheMaxEntryBytesFlagName caps the reply body the router writes to its cache: a larger
-	// reply is served but not written. 0 disables the cap.
+	// reply is served but not written. Off by default (0): the cap applies only when the flag
+	// carries a value.
 	CacheMaxEntryBytesFlagName       = "cache-max-entry-bytes"
-	DefaultCacheMaxEntryBytes  int64 = 1 << 20
+	DefaultCacheMaxEntryBytes  int64 = 0
 
 	// ResponseCompressionFlag controls the encoding used by the fiber compress
 	// middleware on client-facing responses. Accepted values: "gzip", "brotli", "off".
