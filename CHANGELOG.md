@@ -8,6 +8,20 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.5.6 — 2026-09-28
+
+### Highlights
+
+This release introduces an opt-in size limit for payloads written to the finalization-aware cache, providing operators with tighter control over memory and storage consumption. Previously, unusually large RPC responses—such as extensive log filters or bulk block fetches—could consume disproportionate cache space and trigger premature eviction of frequently accessed data. By configuring a maximum byte size for cacheable entries, the router will now evaluate the payload size before committing it to the cache backend. If a response exceeds the configured threshold, the gateway bypasses the storage layer entirely and returns the data directly to the client. This selective caching strategy protects the cache hit rate for standard-sized, high-volume queries while still successfully fulfilling massive requests via the upstream provider.
+
+### Changes
+
+#### New Features
+- feat(cache): opt-in cap on the size of entries the router writes ([#434]) [`a613e7b`]
+
+[#434]: https://github.com/magma-Devs/smart-router/pull/434
+[`a613e7b`]: https://github.com/magma-Devs/smart-router/commit/a613e7bd498801403c596ff012566ce4b7f7ea90
+
 ## v1.5.5 — 2026-09-27
 
 ### Highlights
