@@ -187,19 +187,64 @@ func TestRetryCountHeader_CountsAttemptsWithoutResult(t *testing.T) {
 			wantProviders: "p1,p2",
 		},
 		{
-			// An attempt still out is listed with the protocol errors, where its cancellation
-			// would be recorded, ahead of the node errors.
-			name: "an attempt still out sits between the protocol errors and the node errors",
+			// The providers are named in the order they were asked, whatever became of each
+			// attempt. p1's node error came back, the retry to p2 was overtaken by a hedge, and the
+			// hedge answered. Placing the attempt still out ahead of every node error read p2,p1,p3.
+			name: "a node error asked before the attempt still out is named before it",
 			rp: &MockRelayProcessorForHeaders{
 				selection:      relaycore.Stateless,
-				usedProviders:  dispatchedTo("p1", "p2", "p3", "p4"),
-				protocolErrors: []relaycore.RelayError{{ProviderInfo: common.ProviderInfo{ProviderAddress: "p1"}}},
-				nodeErrors:     []common.RelayResult{from("p3")},
-				successResults: []common.RelayResult{from("p4")},
+				usedProviders:  dispatchedTo("p1", "p2", "p3"),
+				nodeErrors:     []common.RelayResult{from("p1")},
+				successResults: []common.RelayResult{from("p3")},
 			},
-			resolver:      "p4",
-			wantRetries:   "3",
-			wantProviders: "p1,p2,p3,p4",
+			resolver:      "p3",
+			wantRetries:   "2",
+			wantProviders: "p1,p2,p3",
+		},
+		{
+			// The same rule the other way round: the attempt still out went first, and the
+			// protocol error came from the hedge after it. Placing the attempt still out behind
+			// every protocol error read p2,p1,p3.
+			name: "a protocol error asked after the attempt still out is named after it",
+			rp: &MockRelayProcessorForHeaders{
+				selection:      relaycore.Stateless,
+				usedProviders:  dispatchedTo("p1", "p2", "p3"),
+				protocolErrors: []relaycore.RelayError{{ProviderInfo: common.ProviderInfo{ProviderAddress: "p2"}}},
+				successResults: []common.RelayResult{from("p3")},
+			},
+			resolver:      "p3",
+			wantRetries:   "2",
+			wantProviders: "p1,p2,p3",
+		},
+		{
+			// No hedge, every attempt reported back: a sequential retry is listed in the order it
+			// went out as well. Walking the results by kind named the later protocol error first.
+			name: "a sequential retry names its attempts in the order they went out",
+			rp: &MockRelayProcessorForHeaders{
+				selection:      relaycore.Stateless,
+				usedProviders:  dispatchedTo("p1", "p2", "p3"),
+				nodeErrors:     []common.RelayResult{from("p1")},
+				protocolErrors: []relaycore.RelayError{{ProviderInfo: common.ProviderInfo{ProviderAddress: "p2"}}},
+				successResults: []common.RelayResult{from("p3")},
+			},
+			resolver:      "p3",
+			wantRetries:   "2",
+			wantProviders: "p1,p2,p3",
+		},
+		{
+			// A result whose provider the dispatch history does not hold is still named, after
+			// the history, by kind. A live request records every provider it asks, so this is the
+			// fallback, not the path a reply normally takes.
+			name: "a result the dispatch history does not hold is still named",
+			rp: &MockRelayProcessorForHeaders{
+				selection:      relaycore.Stateless,
+				usedProviders:  dispatchedTo("p2"),
+				protocolErrors: []relaycore.RelayError{{ProviderInfo: common.ProviderInfo{ProviderAddress: "p1"}}},
+				successResults: []common.RelayResult{from("p2")},
+			},
+			resolver:      "p2",
+			wantRetries:   "1",
+			wantProviders: "p1,p2",
 		},
 		{
 			// The hedge was served from the cache while the first attempt was still running.

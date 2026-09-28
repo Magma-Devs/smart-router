@@ -5745,7 +5745,8 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// then cancels it, and the loser posts its result to a channel that nothing reads again.
 		// Counting results alone reported a two-attempt hedge race as zero retries. Lava-Retries
 		// counts every attempt the router sent (MAG-1818), so the attempts still out count too.
-		unfinished := attemptsWithoutResult(relayProcessor.GetUsedProviders().DispatchedProviders(), successResults, nodeErrorResults, protocolErrorResults)
+		dispatched := relayProcessor.GetUsedProviders().DispatchedProviders()
+		unfinished := attemptsWithoutResult(dispatched, successResults, nodeErrorResults, protocolErrorResults)
 
 		// The caller read its protocol-error count before this snapshot. On a failure path a
 		// reader still draining the responses can record one more in between. That attempt is in
@@ -5778,32 +5779,35 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				go rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
 			}
 
-			// When there are retries, show all attempted providers in
-			// chronological-ish order (failures before the resolver, the resolver
-			// last). "Cached" stays in the list so the entry count matches
-			// Lava-Retries — without it, retries=N and a single provider name
-			// disagree on how many actors participated (MAG-1653 Bug #2).
+			// When there are retries, show every attempted provider in the order
+			// the router asked them, the resolver last. "Cached" stays in the
+			// list so the entry count matches Lava-Retries — without it,
+			// retries=N and a single provider name disagree on how many actors
+			// participated (MAG-1653 Bug #2).
 			//
-			// Ordering rule: walk protocol errors → attempts without a result
-			// → node errors → successes, skipping any entry whose address
-			// matches the resolver, then append the resolver
-			// (`providerAddress`, which is "Cached" when
-			// relayResult.GetProvider() was empty). An attempt without a
-			// result sits with the protocol errors, which is where v1.5.1
-			// listed the attempt a hedge overtook: its window killed it and it
-			// was recorded as a timeout. The skip-then-append is
-			// load-bearing: dedup alone preserves first-seen position, so if
-			// the resolver happened to be in successResults[0] (e.g. it
-			// completed before the loser was even recorded), the final
-			// addProvider(providerAddress) would be a no-op and the chain
-			// tail would be a *loser*, violating "last entry == response
-			// source" (MAG-1871). Walking slices makes the value
-			// deterministic across runs; the explicit final append makes
-			// the contract structurally true.
+			// Ordering rule: walk the dispatch history, then protocol errors →
+			// node errors → successes, skipping the resolver, then append the
+			// resolver (`providerAddress`, which is "Cached" when
+			// relayResult.GetProvider() was empty). The history lists the
+			// batches in the order they went out, and a batch that reaches this
+			// list holds one session (a stateful fan-out never reports retries,
+			// and cross-validation has its own headers), so the list is
+			// chronological whether an attempt errored, answered or is still out.
+			// Walking the results by kind instead named every protocol error
+			// before every node error, whatever order they were asked in, and
+			// left an attempt still out with no true place (MAG-3762). On a live
+			// request every result's provider is in the history, so the result
+			// lists only add a provider the history does not hold. The
+			// skip-then-append is load-bearing: dedup alone preserves first-seen
+			// position, so if the resolver went out first (a hedge overtook it
+			// and it answered anyway), the chain tail would be a *loser*,
+			// violating "last entry == response source" (MAG-1871). Walking
+			// slices makes the value deterministic across runs; the explicit
+			// final append makes the contract structurally true.
 			seen := make(map[string]struct{})
 			allProvidersList := make([]string, 0)
-			addProvider := func(addr string) {
-				if addr == "" {
+			addEarlierAttempt := func(addr string) {
+				if addr == "" || addr == providerAddress {
 					return
 				}
 				if _, ok := seen[addr]; ok {
@@ -5812,31 +5816,19 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				seen[addr] = struct{}{}
 				allProvidersList = append(allProvidersList, addr)
 			}
-			for _, r := range protocolErrorResults {
-				if r.ProviderInfo.ProviderAddress == providerAddress {
-					continue
-				}
-				addProvider(r.ProviderInfo.ProviderAddress)
+			for _, addr := range dispatched {
+				addEarlierAttempt(addr)
 			}
-			for _, addr := range unfinished {
-				if addr == providerAddress {
-					continue
-				}
-				addProvider(addr)
+			for _, r := range protocolErrorResults {
+				addEarlierAttempt(r.ProviderInfo.ProviderAddress)
 			}
 			for _, r := range nodeErrorResults {
-				if r.ProviderInfo.ProviderAddress == providerAddress {
-					continue
-				}
-				addProvider(r.ProviderInfo.ProviderAddress)
+				addEarlierAttempt(r.ProviderInfo.ProviderAddress)
 			}
 			for _, r := range successResults {
-				if r.ProviderInfo.ProviderAddress == providerAddress {
-					continue
-				}
-				addProvider(r.ProviderInfo.ProviderAddress)
+				addEarlierAttempt(r.ProviderInfo.ProviderAddress)
 			}
-			addProvider(providerAddress) // resolver — "Cached" or the winning real provider, always last
+			allProvidersList = append(allProvidersList, providerAddress) // resolver — "Cached" or the winning real provider, always last
 
 			if len(allProvidersList) > 0 {
 				allProvidersString := strings.Join(allProvidersList, ",")
