@@ -2297,8 +2297,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// from the request's extensions. A request that degrades to a regular provider
 	// takes its sessions under the plain key, so a release under the request's
 	// key found nothing and did nothing, and the provider stayed in the dispatch
-	// history. Lava-Retries reads that history (MAG-3762), so the reply then
-	// counted an attempt at a node that never received the request.
+	// history. Two readers take that history at its word. Lava-Retries (MAG-3762)
+	// counted an attempt at a node that never received the request, and
+	// writeOutcomeIsUnknown counted the node as one asked that never answered, so
+	// a write could come back as "transaction status unclear" for a node it never
+	// reached.
 	usedProviders := relayProcessor.GetUsedProviders()
 	for endpointAddress, sessionInfo := range failedSessions {
 		if sessionInfo != nil && sessionInfo.Session != nil {
