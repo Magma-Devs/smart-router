@@ -410,7 +410,10 @@ User Request --> Smart Router --> Provider Selection (QoS-based)
 
 1. **Primary Attempt**: Tries direct-rpc providers first (best QoS selected)
 2. **Failure Detection**: Detects errors, timeouts, or unavailability
-3. **Automatic Failover**: Switches to backup providers transparently
+3. **Automatic Failover**: Switches to backup providers transparently. A primary that stops answering
+   (rather than refusing) is still "busy" until the budget ends, so a read with no answer yet is also
+   hedged to a backup one attempt window (`--min-relay-timeout` floor) before the processing budget
+   runs out, so the backup still has a full window to answer. Writes are never hedged.
 4. **Recovery**: Monitors primary providers and switches back when healthy
 
 ## Monitoring

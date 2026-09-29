@@ -42,13 +42,11 @@ func SetDebugProbes(enabled bool) { debugProbes.Store(enabled) }
 // DebugProbesEnabled reports whether verbose probe logging is on.
 func DebugProbesEnabled() bool { return debugProbes.Load() }
 
-var (
-	// ProbeLoopInterval is the configurable cadence (MAG-2161 D5) of the proactive health prober
-	// (rpcsmartrouter.runProbeLoop) — the single source of truth for direct-RPC endpoint health and
-	// probe-fed QoS. Default 5s; validated at startup (a non-positive value is rejected back to the
-	// default).
-	ProbeLoopInterval = 5 * time.Second
-)
+// ProbeLoopInterval is the configurable cadence (MAG-2161 D5) of the proactive health prober
+// (rpcsmartrouter.runProbeLoop) — the single source of truth for direct-RPC endpoint health and
+// probe-fed QoS. Default 5s; validated at startup (a non-positive value is rejected back to the
+// default).
+var ProbeLoopInterval = 5 * time.Second
 
 // created with NewConsumerSessionManager
 type ConsumerSessionManager struct {
@@ -1710,6 +1708,17 @@ type GetSessionsOptions struct {
 	// enables a root collection alongside versioned ones (STRK) must keep its
 	// root traffic on the root url.
 	InternalPath *string
+	// PreferBackup routes this selection to the backup tier ahead of any primary still unused on
+	// the request — the backup-reserve hedge (MAG-3923). With no eligible backup it falls back to
+	// ordinary selection. A pinned provider (header or fleet claim) always wins over it.
+	PreferBackup bool
+}
+
+// HasBackupProviders reports whether this endpoint has a backup tier configured.
+func (csm *ConsumerSessionManager) HasBackupProviders() bool {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	return len(csm.backupProviders) > 0
 }
 
 func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProviderNumber int, cuNeededForSession uint64, usedProviders UsedProvidersInf, requestedBlock int64, addon string, extensions []*spectypes.Extension, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, opts ...GetSessionsOptions) (
@@ -1720,7 +1729,9 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	minGroups := groupBlindMinGroups
 	perGroupTarget := groupBlindPerGroupTarget
 	var internalPath *string
+	preferBackup := false
 	if len(opts) > 0 {
+		preferBackup = opts[0].PreferBackup
 		if opts[0].MinGroups > 1 {
 			minGroups = opts[0].MinGroups
 		}
@@ -1847,8 +1858,20 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	}
 	utils.LavaFormatTrace("GetSessions tempIgnoredProviders", utils.LogAttr("tempIgnoredProviders", tempIgnoredProviders), utils.LogAttr("GUID", ctx))
 
-	// Get a valid consumerSessionsWithProvider
-	sessionWithProviderMap, err := csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+	// Get a valid consumerSessionsWithProvider. The backup-reserve hedge asks for the backup tier
+	// first; a pin still wins, so it only applies to an unpinned selection.
+	var sessionWithProviderMap SessionWithProviderMap
+	var err error
+	if preferBackup && selectedProvider == "" && csm.HasBackupProviders() {
+		sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
+		if err != nil {
+			utils.LavaFormatDebug("backup-reserve hedge found no eligible backup, using ordinary selection", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
+			sessionWithProviderMap = nil
+		}
+	}
+	if sessionWithProviderMap == nil {
+		sessionWithProviderMap, err = csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+	}
 	if err != nil {
 		utils.LavaFormatTrace("GetSessions error", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 		return nil, err
