@@ -535,3 +535,74 @@ func TestRelayProcessor_PerGroupNilReplyRealPath(t *testing.T) {
 	require.NoError(t, err, "real per-group quorum must succeed despite earlier nil replies")
 	require.Equal(t, "A", string(result.Reply.Data))
 }
+
+// TestCrossValidationMissingOnlyGroups covers the predicate the state machine reads at the attempt window
+// (MAG-3993): true only when some real hash reached the agreement count but the quorum rule still fails, so
+// the only missing answers are from groups that have not answered yet.
+func TestCrossValidationMissingOnlyGroups(t *testing.T) {
+	zero := [32]byte{}
+	hashA := [32]byte{0xA1}
+	hashB := [32]byte{0xB2}
+	defaultParams := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 3, MinGroups: 2}
+	perGroupParams := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 4, MinGroups: 2, PerGroupQuorum: true}
+
+	for _, tc := range []struct {
+		name      string
+		selection Selection
+		params    *common.CrossValidationParams
+		quorum    map[[32]byte]*quorumStat
+		want      bool
+	}{
+		{
+			name: "count met in one group: only the group is missing", selection: CrossValidation, params: defaultParams,
+			quorum: map[[32]byte]*quorumStat{hashA: {count: 2, groupCounts: map[string]int{"g1": 2}}},
+			want:   true,
+		},
+		{
+			name: "count not met: agreement itself is missing", selection: CrossValidation, params: defaultParams,
+			quorum: map[[32]byte]*quorumStat{
+				hashA: {count: 1, groupCounts: map[string]int{"g1": 1}},
+				hashB: {count: 1, groupCounts: map[string]int{"g2": 1}},
+			},
+			want: false,
+		},
+		{
+			name: "quorum reached: nothing is missing", selection: CrossValidation, params: defaultParams,
+			quorum: map[[32]byte]*quorumStat{hashA: {count: 2, groupCounts: map[string]int{"g1": 1, "g2": 1}}},
+			want:   false,
+		},
+		{
+			name: "no answers yet", selection: CrossValidation, params: defaultParams,
+			quorum: map[[32]byte]*quorumStat{},
+			want:   false,
+		},
+		{
+			name: "nil replies are a fallback, not a reason to stop", selection: CrossValidation, params: defaultParams,
+			quorum: map[[32]byte]*quorumStat{zero: {count: 2, groupCounts: map[string]int{"g1": 2}}},
+			want:   false,
+		},
+		{
+			name: "per-group: one group corroborated, the second has not", selection: CrossValidation, params: perGroupParams,
+			quorum: map[[32]byte]*quorumStat{hashA: {count: 3, groupCounts: map[string]int{"g1": 2, "g2": 1}}},
+			want:   true,
+		},
+		{
+			name: "min-groups 1 is reached on count alone", selection: CrossValidation,
+			params: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 3, MinGroups: 1},
+			quorum: map[[32]byte]*quorumStat{hashA: {count: 2, groupCounts: map[string]int{"g1": 2}}},
+			want:   false,
+		},
+		{
+			name: "not cross-validation", selection: Stateless, params: defaultParams,
+			quorum: map[[32]byte]*quorumStat{hashA: {count: 2, groupCounts: map[string]int{"g1": 2}}},
+			want:   false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rp := &RelayProcessor{crossValidationParams: tc.params, selection: tc.selection, quorumMap: tc.quorum}
+			require.Equal(t, tc.want, rp.CrossValidationMissingOnlyGroups())
+		})
+	}
+	var nilRP *RelayProcessor
+	require.False(t, nilRP.CrossValidationMissingOnlyGroups())
+}
