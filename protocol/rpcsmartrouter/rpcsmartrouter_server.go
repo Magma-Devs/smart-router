@@ -5366,7 +5366,16 @@ func (rpcss *RPCSmartRouterServer) HandleDirectiveHeadersForMessage(chainMessage
 	timeoutStr, ok := directiveHeaders[common.RELAY_TIMEOUT_HEADER_NAME]
 	if ok {
 		timeout, err := time.ParseDuration(timeoutStr)
-		if err == nil {
+		switch {
+		case err != nil:
+			// Unparseable: ignored, so the request keeps the router's own timeout.
+		case timeout <= 0:
+			// time.ParseDuration accepts "-1s". A non-positive window is not a timeout at all, and a
+			// negative one reached time.NewTicker in the relay goroutine, whose panic ended the whole
+			// process (MAG-3988). Ignored exactly like an unparseable value. A positive value below
+			// --min-relay-timeout stays honoured: the docs promise the override is used verbatim.
+			utils.LavaFormatDebug("ignoring non-positive lava-relay-timeout", utils.LogAttr("timeout", timeoutStr))
+		default:
 			// set an override timeout
 			utils.LavaFormatDebug("User indicated to set the timeout using flag", utils.LogAttr("timeout", timeoutStr))
 			chainMessage.TimeoutOverride(timeout)
