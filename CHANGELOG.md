@@ -8,6 +8,20 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.5.7 — 2026-09-29
+
+### Highlights
+
+This release resolves an issue in the routing layer where the gateway failed to preserve the client's original `Content-Type` header when proxying REST requests to upstream providers. Previously, submitting REST payloads through the router could result in upstream parsing errors or rejected requests, as the destination server received bodies without the necessary media type context. The router now explicitly extracts the `Content-Type` header from the incoming client request and forwards it alongside the payload to the selected upstream node. This correction ensures that standard JSON payloads and custom encoding formats are accurately interpreted by backend services, restoring expected behavior for REST-based API integrations.
+
+### Changes
+
+#### Bug fixes
+- fix(chainlib): forward the client's Content-Type on REST bodies (MAG-2745) ([#385]) [`ea59ca8`]
+
+[#385]: https://github.com/magma-Devs/smart-router/pull/385
+[`ea59ca8`]: https://github.com/magma-Devs/smart-router/commit/ea59ca8d4fbde6c0afc2a8b8e9dc0c2a4598acd2
+
 ## v1.5.6 — 2026-09-28
 
 ### Highlights
