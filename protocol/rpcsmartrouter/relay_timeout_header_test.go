@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -282,5 +283,64 @@ func TestRelayTimeoutHeader_BoundIsTheCallsOwnBudgetNotItsCategory(t *testing.T)
 			require.Equal(t, ownWindow, window, "a header above the call's own budget is held to that budget")
 			require.Equal(t, ownBudget, budget, "asking for more time must never leave the call with less than no header gives it")
 		})
+	}
+}
+
+// relayTimeoutBudgetSender is the router's real timeout schedule on an otherwise mocked sender:
+// GetProcessingTimeout is the one method the state machine asks it for the request's clocks.
+type relayTimeoutBudgetSender struct {
+	SmartRouterRelaySenderMock
+	srv *RPCSmartRouterServer
+}
+
+func (s *relayTimeoutBudgetSender) GetProcessingTimeout(chainMessage chainlib.ChainMessage) (time.Duration, time.Duration) {
+	return s.srv.GetProcessingTimeout(chainMessage)
+}
+
+// MAG-3992: a huge lava-relay-timeout against a node that never answers. Since PR #374 an attempt
+// lives on the request budget, so before the bound the header itself was that budget and one request
+// held its worker for as long as the caller asked. The request must give up when the router's own
+// budget runs out, measured on the clock, not at the header's value.
+func TestRelayTimeoutHeader_QuietNodeGivesUpAtTheRouterBudgetNotTheHeader(t *testing.T) {
+	pinRelayTimeoutGlobals(t, 2*time.Second, 0)
+	srv := relayTimeoutTestServer(t)
+
+	ownBudget, _ := srv.GetProcessingTimeout(parseWithRelayTimeout(t, srv, relayTimeoutLightRequest, ""))
+	protocolMessage := parseWithRelayTimeout(t, srv, relayTimeoutLightRequest, "10m")
+	budget, _ := srv.GetProcessingTimeout(protocolMessage)
+	require.Equal(t, ownBudget, budget, "a 10m header must not raise the budget past the call's own")
+
+	ctx := context.Background()
+	usedProviders := lavasession.NewUsedProviders(nil)
+	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders,
+		&relayTimeoutBudgetSender{srv: srv}, protocolMessage, nil, false)
+	require.NoError(t, err)
+	relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams,
+		relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics,
+		relaycoretest.RelayRetriesManagerInstance, stateMachine)
+	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
+	require.NoError(t, err)
+
+	// Every attempt, first and hedged, goes to a node that stays quiet: it is marked in flight and
+	// never answers, so only the budget can end the request.
+	started := time.Now()
+	deadline := time.After(ownBudget + 5*time.Second)
+	for attempt := 0; ; attempt++ {
+		select {
+		case task := <-relayTaskChannel:
+			if task.IsDone() {
+				elapsed := time.Since(started)
+				require.Equal(t, relaycore.StopReasonProcessingTimeout, task.StopReason)
+				require.GreaterOrEqual(t, elapsed, ownBudget-100*time.Millisecond)
+				require.Less(t, elapsed, ownBudget+2*time.Second,
+					"the request must end at the router's budget (%s), not at the caller's 10m", ownBudget)
+				return
+			}
+			usedProviders.AddUsed(lavasession.ConsumerSessionsMap{fmt.Sprintf("quiet-%d", attempt): &lavasession.SessionInfo{}}, nil)
+			relayProcessor.UpdateBatch(nil)
+		case <-deadline:
+			t.Fatalf("still holding the request after %s: the caller's 10m set the budget, not the router (own budget %s)",
+				time.Since(started), ownBudget)
+		}
 	}
 }
