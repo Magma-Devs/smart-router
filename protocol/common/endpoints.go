@@ -35,6 +35,11 @@ const (
 	LAVA_IDENTIFIED_NODE_ERROR_HEADER               = "lava-identified-node-error"
 	LAVA_HEDGE_TRIGGERED_HEADER                     = "lava-hedge-triggered"
 	SMART_ROUTER_VERSION_HEADER_NAME                = "Smart-Router-Version"
+	// EXTENSION_UNAVAILABLE_HEADER_NAME lists, comma-separated, the extensions the caller asked for
+	// with lava-extension that no node on this router offers. The request was served WITHOUT them
+	// — e.g. from a non-archive node — so a caller that needs the extension must not trust the
+	// answer (MAG-3935).
+	EXTENSION_UNAVAILABLE_HEADER_NAME = "Lava-Extension-Unavailable"
 	// CACHE_BACKEND_HEADER_NAME names the cache backend that served a hit — the
 	// cache-be address, or the RESP node actually dialled (the current master
 	// under sentinel, the touched shard under cluster). Debug-only: it exposes

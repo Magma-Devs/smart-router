@@ -1929,6 +1929,13 @@ type MockProtocolMessage struct {
 	// express a node error at ALL, which is why "one endpoint answered with an error while a sibling
 	// was still silent" — the write case that reached a customer as a success — had no test.
 	repliesAreNodeErrors bool
+	// unavailableExtensions is what GetUnavailableExtensions reports: extensions the caller asked
+	// for that no node offers (MAG-3935). Nil for an ordinary request.
+	unavailableExtensions []string
+}
+
+func (m *MockProtocolMessage) GetUnavailableExtensions() []string {
+	return m.unavailableExtensions
 }
 
 func (m *MockProtocolMessage) GetApi() *spectypes.Api {

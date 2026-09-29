@@ -28,10 +28,14 @@ type baseChainMessageContainer struct {
 	msg                    updatableRPCInput
 	apiCollection          *spectypes.ApiCollection
 	extensions             []*spectypes.Extension
-	timeoutOverride        time.Duration
-	forceCacheRefresh      bool
-	parseDirective         *spectypes.ParseDirective // setting the parse directive related to the api, can be nil
-	usedDefaultValue       bool
+	// unavailableExtensions are extensions the caller asked for (lava-extension) that the spec
+	// knows but no node on this router offers. The request is served without them; they are kept
+	// so the reply can say so (MAG-3935).
+	unavailableExtensions []string
+	timeoutOverride       time.Duration
+	forceCacheRefresh     bool
+	parseDirective        *spectypes.ParseDirective // setting the parse directive related to the api, can be nil
+	usedDefaultValue      bool
 
 	// resultErrorParsingMethod passed by each api interface message to parse the result of the message
 	// and validate it doesn't contain a node error
@@ -157,6 +161,11 @@ func (bcnc *baseChainMessageContainer) OverrideExtensions(extensionNames []strin
 	for _, extension := range bcnc.extensions {
 		existingExtensions[extension.Name] = struct{}{}
 	}
+	// Already reported as unavailable by an earlier call (override, then additional): looking it
+	// up again would only record it twice.
+	for _, extensionName := range bcnc.unavailableExtensions {
+		existingExtensions[extensionName] = struct{}{}
+	}
 	for _, extensionName := range extensionNames {
 		if _, ok := existingExtensions[extensionName]; !ok {
 			existingExtensions[extensionName] = struct{}{}
@@ -173,6 +182,7 @@ func (bcnc *baseChainMessageContainer) OverrideExtensions(extensionNames []strin
 				bcnc.updateCUForApi(extension)
 				utils.LavaFormatTrace("[Archive Debug] Extension added", utils.LogAttr("extensionName", extensionName), utils.LogAttr("totalExtensions", len(bcnc.extensions)))
 			} else {
+				bcnc.unavailableExtensions = append(bcnc.unavailableExtensions, extensionName)
 				utils.LavaFormatTrace("[Archive Debug] Extension not found", utils.LogAttr("extensionName", extensionName), utils.LogAttr("extensionKey", extensionKey))
 			}
 		} else {
@@ -180,6 +190,12 @@ func (bcnc *baseChainMessageContainer) OverrideExtensions(extensionNames []strin
 		}
 	}
 	utils.LavaFormatTrace("[Archive Debug] OverrideExtensions completed", utils.LogAttr("finalExtensions", len(bcnc.extensions)))
+}
+
+// GetUnavailableExtensions returns the extensions the caller requested that no node on this
+// router offers, in request order. The request was served without them.
+func (bcnc *baseChainMessageContainer) GetUnavailableExtensions() []string {
+	return bcnc.unavailableExtensions
 }
 
 func (bcnc *baseChainMessageContainer) GetUsedDefaultValue() bool {
