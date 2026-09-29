@@ -240,24 +240,6 @@ func createGRPCServer(changeListener string, probeDelay time.Duration) (string, 
 
 const providerStr = "provider"
 
-type DirectiveHeaders struct {
-	directiveHeaders map[string]string
-}
-
-func (bpm DirectiveHeaders) GetBlockedProviders() []string {
-	if bpm.directiveHeaders == nil {
-		return nil
-	}
-	blockedProviders, ok := bpm.directiveHeaders[common.BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME]
-	if ok {
-		blockProviders := strings.Split(blockedProviders, ",")
-		if len(blockProviders) <= 2 {
-			return blockProviders
-		}
-	}
-	return nil
-}
-
 func createPairingList(providerPrefixAddress string, enabled bool) map[uint64]*ConsumerSessionsWithProvider {
 	cswpList := make(map[uint64]*ConsumerSessionsWithProvider, 0)
 	pairingEndpoints := make([]*Endpoint, 1)
