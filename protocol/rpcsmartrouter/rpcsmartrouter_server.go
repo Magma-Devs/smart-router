@@ -845,11 +845,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		// endpoint from consuming a client-sized budget. Cancelled on both exits below rather than
 		// deferred, so a hung attempt from this try does not outlive it.
 		tryCtx, cancelTry := context.WithTimeout(ctx, internalRelayTryTimeout)
-		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(tryCtx, protocolMessage), relayProcessor, nil, nil)
+		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(tryCtx, protocolMessage), relayProcessor, nil, nil, false)
 		if errors.Is(err, lavasession.PairingListEmptyError) {
 			// we don't have pairings anymore, could be related to unwanted endpoints
 			relayProcessor.GetUsedProviders().ClearUnwanted()
-			err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(tryCtx, protocolMessage), relayProcessor, nil, nil)
+			err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(tryCtx, protocolMessage), relayProcessor, nil, nil, false)
 		}
 		if err != nil {
 			utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
@@ -1442,7 +1442,7 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 			consistencyFallback,
 			relayProcessor.GetUsedProviders(),
 			func() error {
-				return rpcss.sendRelayToEndpoint(ctx, task.NumOfProviders, task.RelayState, relayProcessor, consistencyFallback, task.Analytics)
+				return rpcss.sendRelayToEndpoint(ctx, task.NumOfProviders, task.RelayState, relayProcessor, consistencyFallback, task.Analytics, task.BackupReserve)
 			},
 		)
 
@@ -4018,6 +4018,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	relayProcessor *relaycore.RelayProcessor,
 	consistencyFallback *consistencyFallbackState,
 	analytics *metrics.RelayMetrics,
+	backupReserve bool,
 ) (errRet error) {
 	// Send relay to direct RPC endpoints:
 	// - Get sessions from ConsumerSessionManager for the requested endpoints
@@ -4320,7 +4321,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// least MinGroups distinct provider groups (1.2a). Default 1 leaves selection group-blind. For
 	// per-group quorum (2.3), also front-load AgreementThreshold providers per group so each group can
 	// independently reach its internal quorum — otherwise QoS-skewed selection starves the smaller groups.
-	sessionOpts := lavasession.GetSessionsOptions{MinGroups: 1, PerGroupTarget: 1}
+	sessionOpts := lavasession.GetSessionsOptions{MinGroups: 1, PerGroupTarget: 1, PreferBackup: backupReserve}
 	// Which internal path this api is served under, so selection can pick the
 	// endpoint whose URL is that path's root. In direct mode the path lives in
 	// the upstream url — one node-url per API version — and dialing the wrong
@@ -4753,6 +4754,12 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	)
 
 	return relayLatency, nil, false
+}
+
+// HasBackupTier implements relaycore.BackupTierReporter: the state machine arms its backup-reserve
+// hedge only for an endpoint that has a backup tier to send it to.
+func (rpcss *RPCSmartRouterServer) HasBackupTier() bool {
+	return rpcss.sessionManager != nil && rpcss.sessionManager.HasBackupProviders()
 }
 
 func (rpcss *RPCSmartRouterServer) GetProcessingTimeout(chainMessage chainlib.ChainMessage) (processingTimeout time.Duration, relayTimeout time.Duration) {

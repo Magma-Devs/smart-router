@@ -348,6 +348,27 @@ func (sm *UnifiedRelayStateMachine) GetProtocolMessage() chainlib.ProtocolMessag
 	return latestState.GetProtocolMessage()
 }
 
+// backupReserveDelay is when, after the first dispatch, the backup-reserve hedge goes out: one
+// window before the budget ends, so a backup that answers at the pace every endpoint is expected to
+// keep still lands inside the budget. It never fires before the first window has passed — the first
+// primary keeps its full window even when the budget is short. ok is false when the budget cannot
+// fit a reserve after that window, and so no reserve is armed.
+func backupReserveDelay(processingTimeout, relayTimeout time.Duration) (delay time.Duration, ok bool) {
+	if relayTimeout <= 0 {
+		return 0, false
+	}
+	delay = max(processingTimeout-relayTimeout, relayTimeout)
+	if delay >= processingTimeout {
+		return 0, false
+	}
+	return delay, true
+}
+
+func (sm *UnifiedRelayStateMachine) senderHasBackupTier() bool {
+	reporter, ok := sm.relaySender.(BackupTierReporter)
+	return ok && reporter.HasBackupTier()
+}
+
 // endOfRoadReason names why processingCtx ended, distinguishing our own budget expiring from the
 // caller cancelling from outside.
 //
@@ -449,6 +470,18 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 		// kills the attempt in flight, so this genuinely hedges rather than replaces.
 		startNewBatchTicker := time.NewTicker(relayTimeout)
 		defer startNewBatchTicker.Stop()
+
+		// The backup tier is otherwise reached only once every primary is busy on this request, one
+		// window each, so with primaries x window >= budget its turn falls after the budget and a
+		// quiet primary set fails the request while healthy backups sit idle (MAG-3923). Hold one
+		// hedge back for it, early enough that a backup still gets a full window. nil channel =
+		// never fires, for a sender with no backup tier or a budget too short to reserve from.
+		var backupReserveC <-chan time.Time
+		if reserveDelay, ok := backupReserveDelay(processingTimeout, relayTimeout); ok && sm.senderHasBackupTier() {
+			backupReserveTimer := time.NewTimer(reserveDelay)
+			defer backupReserveTimer.Stop()
+			backupReserveC = backupReserveTimer.C
+		}
 
 		// Start the relay state machine
 		for {
@@ -590,6 +623,29 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
 					// Counted when the dispatch is confirmed, in the batchUpdate arm — asking for a
 					// hedge is not the same as sending one.
+					sm.hedgePending = true
+				}
+
+			case <-backupReserveC:
+				backupReserveC = nil // one reserve hedge per request
+				if sm.config.EnableTimeoutPriority {
+					if sm.checkAndHandleTimeout(processingCtx, relayTaskChannel, processingTimeout, "backup_reserve") {
+						return
+					}
+				}
+
+				// Same gate as a ticker hedge: a stateful write, cross-validation, or a request that
+				// has hit its retry ceiling gets no reserve hedge either.
+				nodeErrors := numberOfNodeErrorsAtomic.Load()
+				output := sm.policy.Decide(sm.buildDecisionInput(nodeErrors, true))
+				if output.Action == ActionRetry {
+					utils.LavaFormatInfo("[StateMachine] no answer yet, sending the backup-reserve hedge",
+						utils.LogAttr("GUID", sm.ctx),
+						utils.LogAttr("batchNumber", sm.usedProviders.BatchNumber()),
+						utils.LogAttr("stillInFlight", sm.usedProviders.CurrentlyUsed()),
+					)
+					sm.stateTransition(sm.getLatestState(), nodeErrors, &output.Mutation)
+					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1, BackupReserve: true}
 					sm.hedgePending = true
 				}
 
