@@ -67,7 +67,10 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
 - **Per-method operator policy** (config-driven, below). An operator policy can *mandate*
   cross-validation even with no caller headers (`enabled: true`), set a **floor** the caller
   may exceed, a **cap** that overrides a stricter caller, or *forbid* caller-driven
-  cross-validation entirely for a method (`forbid-caller-cv: true`).
+  cross-validation entirely for a method (`forbid-caller-cv: true`). A floor or cap takes
+  effect only under `enabled: true` today: a policy that sets a bound without enabling
+  cross-validation clamps nothing (a caller with no headers still gets pure caller-driven
+  behavior), though such a policy is still checked at startup for naming a served target.
 
 > **Write / stateful methods.** An **operator policy** that enables cross-validation on a
 > stateful (write) method is **rejected at startup** — that path is guarded. By default the

@@ -105,7 +105,14 @@ At startup the router logs the resolved provider→group layout and **rejects** 
 configured fleet can never satisfy (e.g. `min-groups: 3` with only two groups), so a
 misconfiguration fails fast rather than silently degrading. It also rejects a policy that could never
 apply at all: one whose `chain-id`/`api-interface` no endpoint serves, or whose `method` the spec does
-not serve. A REST policy names the spec's path template, not the gRPC method name.
+not serve. A REST policy names the spec's path template, not the gRPC method name. These refusals happen
+before any endpoint binds its listener — the spec-backed checks run as each endpoint loads its spec and
+wait on a boot barrier, so one refused policy stops the whole router before it announces itself, rather
+than after some endpoints are already serving.
+
+A `floor` or `cap` only clamps a caller's headers under `enabled: true` today; a bound written on a
+policy that does not also enable cross-validation changes nothing at request time, but is still checked
+here for naming a chain/api and method the router serves.
 
 ## What the caller sees
 
