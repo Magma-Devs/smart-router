@@ -45,12 +45,11 @@ var DefaultTimeout = time.Duration(DefaultTimeoutSeconds) * time.Second
 // observed about the endpoint rather than inferring it from whose clock ran out
 // (redisstore.ErrEndpointUnreachable, MAG-3653).
 //
-// One case still turns on this budget, so "latency only" would be too strong: a
-// black-holed endpoint, which swallows the handshake rather than refusing it, is
-// only provably gone once a dial spends its whole DialTimeout — and a budget
-// below that cuts the dial short first, which is indistinguishable from a
-// healthy backend too far away to answer in time. That one reads as a timeout by
-// design; a refused or unroutable endpoint reads as an outage at any budget.
+// One case is never read as an outage, at any budget: a black-holed endpoint,
+// which swallows the handshake rather than refusing it, fails a dial exactly
+// the way a healthy backend too far away to answer in time does, and the store
+// does not guess between them. That one reads as a timeout by design; a refused
+// or unroutable endpoint reads as an outage at any budget.
 var CacheTimeout = DefaultCacheTimeout
 
 // MinimumTimePerRelayDelay is the minimum relay timeout floor used by GetTimePerCu.
