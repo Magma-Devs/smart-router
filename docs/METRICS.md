@@ -469,6 +469,21 @@ max_over_time(smartrouter_csm_blocked_providers_by_reason[5m]) > 0
 For "is this chain serving at all", prefer `smartrouter_endpoint_serving_tier` (below): it is not
 drained by the release path, and `0` means dark unambiguously.
 
+**Alert on the metrics page's own error counter.** `/metrics` leaves out a family the registry
+cannot gather and serves the rest with `200` (see the endpoints table), so scrape-success and `up`
+read healthy while that family is missing from every scrape until the process restarts. The page
+counts each such scrape itself:
+
+```promql
+# some family is missing from the page, and stays missing until the pod restarts
+increase(promhttp_metric_handler_errors_total{cause="gathering"}[5m]) > 0
+```
+
+While that fires, read this counter and the router log (`metrics page: a metric could not be
+served`), not the affected family: a family that gathers inconsistently keeps whichever of its
+colliding children the registry met first, which can differ from one scrape to the next, so its
+remaining values are not to be trusted.
+
 #### Serving tier (availability)
 
 | Metric | Type | Labels | Description |
