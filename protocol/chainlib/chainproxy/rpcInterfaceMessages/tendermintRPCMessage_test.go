@@ -396,4 +396,20 @@ func TestTendermintrpcMessage_CheckResponseError(t *testing.T) {
 		require.True(t, hasError)
 		require.Contains(t, msg, "missing both 'result' and 'error'")
 	})
+
+	t.Run("envelope_error_with_empty_message", func(t *testing.T) {
+		// MAG-3991: no message text does not make an error object a success.
+		hasError, msg := tm.CheckResponseError([]byte(`{"jsonrpc":"2.0","id":-1,"error":{"code":-32603,"message":""}}`), 200)
+		require.True(t, hasError)
+		require.Equal(t, "Tendermint RPC error with an empty message", msg)
+	})
+
+	t.Run("zero_value_error_beside_result_keeps_inner_inspection", func(t *testing.T) {
+		// A zero-value error object states no failure, so the result is read —
+		// including the embedded response.code/log.
+		data := []byte(`{"jsonrpc":"2.0","id":1,"result":{"response":{"code":5,"log":"insufficient fees"}},"error":{"code":0,"message":""}}`)
+		hasError, msg := tm.CheckResponseError(data, 200)
+		require.True(t, hasError)
+		require.Equal(t, "insufficient fees", msg)
+	})
 }
