@@ -2,6 +2,8 @@ package redisstore
 
 import (
 	"errors"
+	"net"
+	"syscall"
 	"time"
 )
 
@@ -51,37 +53,63 @@ func (t *endpointTracker) noteFault(cause error) {
 	t.fault.Store(&endpointFault{at: time.Now(), cause: cause})
 }
 
-// clearFault records that the endpoint answered a handshake, which is direct
-// proof it is there.
-func (t *endpointTracker) clearFault() {
+// noteReached records that a dial begun at started completed its handshake,
+// which is direct proof the endpoint was there — and retires a fault observed
+// BEFORE that dial began. A fault observed after it began is left standing: the
+// pool dials from many slots at once and go-redis's own prober dials on its own
+// schedule, so a handshake that began before a refusal ran side by side with
+// it, and its success does not say the endpoint was back after the refusal.
+// The reader this protects is an operation that saw the refusal inside its
+// window and is about to be labelled by it.
+func (t *endpointTracker) noteReached(started time.Time) {
 	if t == nil {
 		return
 	}
-	t.fault.Store(nil)
+	for {
+		fault := t.fault.Load()
+		if fault == nil || !fault.at.Before(started) {
+			return
+		}
+		if t.fault.CompareAndSwap(fault, nil) {
+			return
+		}
+	}
 }
 
-// dialFailureProvesEndpointGone classifies a failed dial by WHOSE clock ran out,
-// which is the only thing separating an endpoint that is gone from a budget too
-// small for a healthy one.
+// dialErrorProvesEndpointGone classifies a failed dial by WHAT ANSWERED, which
+// is the only thing separating an endpoint that is gone from a budget too small
+// for a healthy one.
 //
-// An attempt that spent its own whole budget was answered by nobody: a black
-// hole. One that failed with budget to spare was answered — refused, no route,
-// no such name. One the CALLER's context cut short proves neither: go-redis
-// abandons a queued dial whose caller has gone, and a healthy cache a network
-// away cannot finish a handshake inside a same-zone read budget either.
-// Reporting that as an outage would send an operator hunting a cache that is up
-// — the same wrong turn as the bug this exists to fix, reversed. It is also the
-// reading docs/RESP-CACHE.md already promises for a too-distant backend.
+// A refused connection, no route to the host or the network, a reset during the
+// handshake and a name that does not resolve are each an answer: something on
+// the path said the endpoint is not there. A timeout is the absence of one — a
+// black hole and a healthy cache a network away that cannot finish a handshake
+// inside the dial budget fail identically, and nothing in the error tells them
+// apart. Neither does a dial the caller cut short (go-redis abandons a queued
+// dial whose caller has gone). Reporting either as an outage would send an
+// operator hunting a cache that is up — the same wrong turn as the bug this
+// exists to fix, reversed — and docs/RESP-CACHE.md already promises the timeout
+// reading for a too-distant backend. Everything else is left unclassified for
+// the same reason: a TLS alert or an EOF mid-handshake came from an endpoint
+// that answered, and a local resource error (descriptors, ephemeral ports) says
+// nothing about the endpoint at all.
 //
-// A pure function of its three inputs so each quadrant is testable on its own.
-// Inside the dialer the cheap disjunct alone decided every case a test could
-// reach, and the black-hole term could be deleted with the suite still green —
-// a term that cannot fail is not a term.
-func dialFailureProvesEndpointGone(elapsed, dialTimeout time.Duration, ctxErr error) bool {
-	if dialTimeout > 0 && elapsed >= dialTimeout {
-		return true
+// Classified on the error rather than on whose clock ran out, because on this
+// path the clocks cannot tell: go-redis bounds every attempt with a context
+// carrying the same DialTimeout the net.Dialer holds (pool.dialConn), so which
+// of the two expired first — and with it the verdict — was decided by
+// microseconds, and no dial ever arrived under the caller's own deadline.
+func dialErrorProvesEndpointGone(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return dnsErr.IsNotFound
 	}
-	return ctxErr == nil
+	for _, answered := range []error{syscall.ECONNREFUSED, syscall.ECONNRESET, syscall.EHOSTUNREACH, syscall.ENETUNREACH} {
+		if errors.Is(err, answered) {
+			return true
+		}
+	}
+	return false
 }
 
 // faultSince returns the endpoint's failure to be reached if one was observed at
@@ -111,10 +139,14 @@ func (t *endpointTracker) faultSince(since time.Time) error {
 // refusal long since recovered would then label every later saturation timeout
 // an outage.
 //
-// The observation need not be this operation's own — a concurrent lookup or the
-// health probe dials the same endpoint — and that is the right answer either
-// way: what it establishes is that the endpoint was unreachable while this
-// operation was failing against it, which is the question the label asks.
+// The observation need not be this operation's own — a concurrent lookup, the
+// 10s health probe or go-redis's own 1 Hz dial prober (pool.tryDial, which has
+// no operation behind it) dials the same endpoint — and that is the right answer
+// either way: what it establishes is that the endpoint was unreachable while
+// this operation was failing against it, which is the question the label asks.
+// A write's window is as wide as its budget (common.CacheWriteTimeout, 5s), so
+// a refusal anywhere in those seconds marks a write that then failed; a dial
+// that began after the refusal and succeeded retires it (noteReached).
 //
 // It holds only where ONE endpoint stands behind the tracker, which is why
 // faults are recorded for standalone alone (see trackingDialer). Under sentinel

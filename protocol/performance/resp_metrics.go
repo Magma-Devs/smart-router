@@ -108,13 +108,15 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 // exhaustion (the caller's budget) and network timeouts (read/write limits)
 // classify as timeouts — the backend was reachable and did not answer in time.
 //
-// A failure of the CONNECTION is an outage whatever it looked like, and is
-// decided last, because on reads it is the only thing the timeout test above
-// can get wrong. A dial that ran out of its own DialTimeout is an endpoint that
-// cannot be reached, not a slow one; and a caller budget that expired while the
-// endpoint was refusing connections is an outage the budget merely hid, which a
-// read's budget — a fraction of the dial budget — did on every read of a dead
-// cache before ErrEndpointUnreachable carried the reason out (MAG-3653).
+// A failure to CONNECT is an outage whatever the operation's own error looked
+// like, and is asked first, because on reads it is the only thing the timeout
+// test can get wrong: a caller budget that expired while the endpoint was
+// refusing connections is an outage the budget merely hid, which a read's
+// budget — a fraction of the dial budget — did on every read of a dead cache
+// before ErrEndpointUnreachable carried the reason out (MAG-3653). The store
+// records that only for a dial the path answered (refused, no route, no such
+// name); a dial that merely timed out could as well be a healthy backend too far
+// away, and stays a timeout here.
 func (m *respCacheMetricsSet) recordOpFailure(op string, err error) {
 	m.opsFailed.WithLabelValues(op, respCacheFailureKind(err)).Inc()
 }

@@ -547,12 +547,13 @@ func baseDialer(tlsCfg *tls.Config, dialTimeout time.Duration, faults *endpointT
 		started := time.Now()
 		conn, err := dial(ctx, network, addr)
 		if err == nil {
-			// The endpoint answered a handshake: whatever it refused before, it
-			// is there now, and a later failure is that failure's own.
-			faults.clearFault()
+			// The endpoint answered a handshake: whatever it refused before this
+			// dial began, it is there now, and a later failure is that failure's
+			// own.
+			faults.noteReached(started)
 			return conn, nil
 		}
-		if dialFailureProvesEndpointGone(time.Since(started), dialTimeout, ctx.Err()) {
+		if dialErrorProvesEndpointGone(err) {
 			faults.noteFault(err)
 		}
 		return conn, err
