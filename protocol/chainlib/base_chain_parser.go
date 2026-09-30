@@ -87,6 +87,13 @@ func (bcp *BaseChainParser) SkipWebsocketVerification() bool {
 	return bcp.skipWebsocketVerification
 }
 
+// chainFamily is the error-registry family of the spec this parser serves.
+func (bcp *BaseChainParser) chainFamily() common.ChainFamily {
+	bcp.rwLock.RLock()
+	defer bcp.rwLock.RUnlock()
+	return common.GetChainFamilyOrDefault(bcp.spec.Index)
+}
+
 // SetSkipWebsocketVerification overrides the process default for this parser only.
 // Callers probing multiple endpoints concurrently must build one parser per endpoint
 // and set it here rather than reaching for the package-level default.

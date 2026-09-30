@@ -240,6 +240,37 @@ func CreateMockSpec() spectypes.Spec {
 	return spec
 }
 
+// CreateMockXRPLSpec returns the part of an XRP Ledger spec that a transaction submission needs:
+// one JSON-RPC collection holding submit and submit_multisigned, stateful and hanging as in the
+// catalog's ripple.json. The router's bundled specs carry no XRPL chain.
+func CreateMockXRPLSpec(index string) spectypes.Spec {
+	submission := func(name string) *spectypes.Api {
+		return &spectypes.Api{
+			Name:         name,
+			Enabled:      true,
+			ComputeUnits: 10,
+			BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
+			Category:     spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS, HangingApi: true},
+		}
+	}
+	spec := spectypes.Spec{}
+	spec.Name = index
+	spec.Index = index
+	spec.Enabled = true
+	spec.AverageBlockTime = 4000
+	spec.ApiCollections = []*spectypes.ApiCollection{
+		{
+			Enabled: true,
+			CollectionData: spectypes.CollectionData{
+				ApiInterface: spectypes.APIInterfaceJsonRPC,
+				Type:         http.MethodPost,
+			},
+			Apis: []*spectypes.Api{submission("submit"), submission("submit_multisigned")},
+		},
+	}
+	return spec
+}
+
 // generates a chain parser, a chain fetcher messages based on it
 // apiInterface can either be an ApiInterface string as in spectypes.ApiInterfaceXXX or a number for an index in the apiCollections
 // setMockLogLevelOnce guards the one-time global log-level set in CreateChainLibMocks (see there).

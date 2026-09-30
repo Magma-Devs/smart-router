@@ -757,6 +757,53 @@
     },
 
     {
+      "_comment": "--- XRP Ledger (submit engine results, HTTP 200) ---",
+      "name": "xrpl_tef_past_seq",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "tefPAST_SEQ: This sequence number has already passed.",
+      "expected_lava_code": 3001,
+      "expected_name": "CHAIN_NONCE_TOO_LOW"
+    },
+    {
+      "name": "xrpl_tef_already",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "tefALREADY: The exact transaction was already in this ledger.",
+      "expected_lava_code": 3007,
+      "expected_name": "CHAIN_TX_ALREADY_KNOWN"
+    },
+    {
+      "name": "xrpl_ter_pre_seq",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "terPRE_SEQ: Missing/inapplicable prior transaction.",
+      "expected_lava_code": 3002,
+      "expected_name": "CHAIN_NONCE_TOO_HIGH"
+    },
+    {
+      "name": "xrpl_tem_bad_fee",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "temBAD_FEE: Invalid fee, negative or not XRP.",
+      "expected_lava_code": 3014,
+      "expected_name": "CHAIN_TX_REJECTED"
+    },
+    {
+      "name": "xrpl_tel_insuf_fee_p",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "telINSUF_FEE_P: Fee insufficient.",
+      "expected_lava_code": 3014,
+      "expected_name": "CHAIN_TX_REJECTED"
+    },
+
+    {
       "_comment": "--- Cosmos SDK (gRPC) ---",
       "name": "cosmos_grpc_unavailable",
       "chain_family": "CosmosSDK",
