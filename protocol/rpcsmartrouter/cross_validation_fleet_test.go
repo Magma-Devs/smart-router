@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -16,6 +18,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/rs/zerolog"
 	zerologlog "github.com/rs/zerolog/log"
@@ -63,27 +66,41 @@ func TestValidateCrossValidationFleet(t *testing.T) {
 
 	t.Run("the only primary of a group failed verification -> starts", func(t *testing.T) {
 		verified := map[string][]string{"group-a": {"sim-1", "sim-2"}}
-		require.NoError(t, validateCrossValidationFleet(fleetTestResolver(t, minGroups), parser, "ETH1", "jsonrpc", configured, verified))
+		_, err := validateCrossValidationFleet(fleetTestResolver(t, minGroups), parser, "ETH1", "jsonrpc", configured, verified)
+		require.NoError(t, err)
 	})
 	t.Run("every primary failed verification -> starts", func(t *testing.T) {
-		require.NoError(t, validateCrossValidationFleet(fleetTestResolver(t, minGroups), parser, "ETH1", "jsonrpc", configured, map[string][]string{}))
+		_, err := validateCrossValidationFleet(fleetTestResolver(t, minGroups), parser, "ETH1", "jsonrpc", configured, map[string][]string{})
+		require.NoError(t, err)
 	})
 	t.Run("too few configured groups -> refused, even with every primary verified", func(t *testing.T) {
 		oneGroup := map[string][]string{"group-a": {"sim-1", "sim-2", "sim-3"}}
-		err := validateCrossValidationFleet(fleetTestResolver(t, minGroups), parser, "ETH1", "jsonrpc", oneGroup, oneGroup)
+		_, err := validateCrossValidationFleet(fleetTestResolver(t, minGroups), parser, "ETH1", "jsonrpc", oneGroup, oneGroup)
 		require.ErrorContains(t, err, "min-groups policy cannot be satisfied")
 	})
 	t.Run("per-group: a group below the threshold only among verified primaries -> starts", func(t *testing.T) {
 		configured := map[string][]string{"group-a": {"sim-1", "sim-2"}, "group-b": {"sim-3", "sim-4"}}
 		verified := map[string][]string{"group-a": {"sim-1", "sim-2"}, "group-b": {"sim-3"}}
-		require.NoError(t, validateCrossValidationFleet(fleetTestResolver(t, perGroup), parser, "ETH1", "jsonrpc", configured, verified))
+		_, err := validateCrossValidationFleet(fleetTestResolver(t, perGroup), parser, "ETH1", "jsonrpc", configured, verified)
+		require.NoError(t, err)
 	})
 	t.Run("per-group: a configured group below the threshold -> refused", func(t *testing.T) {
-		err := validateCrossValidationFleet(fleetTestResolver(t, perGroup), parser, "ETH1", "jsonrpc", configured, configured)
+		_, err := validateCrossValidationFleet(fleetTestResolver(t, perGroup), parser, "ETH1", "jsonrpc", configured, configured)
 		require.ErrorContains(t, err, "per-group-quorum policy cannot be satisfied")
 	})
 	t.Run("a policy on a stateful method -> refused, whatever the fleet", func(t *testing.T) {
-		require.Error(t, validateCrossValidationFleet(fleetTestResolver(t, write), parser, "ETH1", "jsonrpc", configured, configured))
+		_, err := validateCrossValidationFleet(fleetTestResolver(t, write), parser, "ETH1", "jsonrpc", configured, configured)
+		require.Error(t, err)
+	})
+	// A backup-only endpoint has no configured primary, so no capacity guard can run: it starts, and the
+	// advisory says its policies can never be met (cross-validation never draws on backups).
+	t.Run("no configured primary (backup-only endpoint) -> starts, with an advisory", func(t *testing.T) {
+		advisory, err := validateCrossValidationFleet(fleetTestResolver(t, minGroups), parser, "ETH1", "jsonrpc", map[string][]string{}, map[string][]string{})
+		require.NoError(t, err)
+		require.NotNil(t, advisory)
+		require.True(t, advisory.configuredShort, "no provider can ever be re-admitted into an empty primary list")
+		require.Empty(t, advisory.unavailable)
+		require.Empty(t, advisory.configuredSizes)
 	})
 }
 
@@ -166,6 +183,12 @@ func TestCreateSmartRouterEndpoint_GroupDownAtBoot(t *testing.T) {
 	t.Cleanup(down.Close)
 
 	t.Run("a group whose only primary is down at boot -> the endpoint starts", func(t *testing.T) {
+		// The debug ring buffer is a second, process-global log sink that every LavaFormat* call feeds
+		// through an atomic pointer, so the boot's own goroutines can keep logging while it is read.
+		utils.EnableDebugLogBuffer(5000)
+		t.Cleanup(utils.DisableDebugLogBuffer)
+		utils.ClearDebugLogBuffer()
+
 		rpsr, err := bootFleetTestEndpoint(t,
 			fleetTestPrimary("sim-1", "group-a", up1.URL),
 			fleetTestPrimary("sim-2", "group-a", up2.URL),
@@ -176,6 +199,28 @@ func TestCreateSmartRouterEndpoint_GroupDownAtBoot(t *testing.T) {
 			"sim-3 failed verification, so only group-a is serving")
 		require.Len(t, rpsr.failedStaticProviders[key], 1, "and sim-3 is queued for the background retry")
 		require.Equal(t, "sim-3", rpsr.failedStaticProviders[key][0].Name)
+
+		// The router said so: the ATTENTION line names the provider that is out and the requirement it
+		// breaks, and the layout line kept its meaning (distinctGroups counts the groups serving now).
+		boot := bytes.Join(utils.ReadDebugLogBuffer("", time.Time{}, time.Time{}, 5000), []byte("\n"))
+		require.Contains(t, string(boot), "ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy")
+		require.Contains(t, string(boot), `"unavailableProviders":"sim-3"`)
+		require.Contains(t, string(boot), `"requiredGroups":"2"`)
+		require.Contains(t, string(boot), `"distinctGroups":"1"`)
+		require.Contains(t, string(boot), `"configuredGroups":"2"`)
+
+		// And the endpoint serves: through the policy the booted server loaded, a governed request is
+		// refused by the request-time guard with insufficient-groups while a plain request is not.
+		server := rpsr.rpcServers[key]
+		require.NotNil(t, server)
+		params, applies := server.crossValidationResolver.Resolve("ETH1", "jsonrpc", "eth_getBalance", common.CrossValidationParams{}, false)
+		require.True(t, applies, "the policy from the config applies to the booted endpoint")
+		reason, err := server.validateCrossValidationCapacity(context.Background(), relaycore.CrossValidation, &params, "", nil)
+		require.Error(t, err)
+		require.Equal(t, common.CrossValidationReasonInsufficientGroups, reason)
+		reason, err = server.validateCrossValidationCapacity(context.Background(), relaycore.Stateless, nil, "", nil)
+		require.NoError(t, err, "a request without cross-validation is served")
+		require.Empty(t, reason)
 	})
 	// The control: the same boot with a config that can never meet the policy still fails, which shows the
 	// policy was loaded and checked above rather than skipped.
@@ -200,21 +245,25 @@ func TestCrossValidationFleet_GroupDownAtBoot(t *testing.T) {
 		{Name: "sim-3", GroupLabel: "group-b"},
 	})
 
-	// sim-3 answered 503 at boot, so only sim-1 and sim-2 reached the session manager.
-	degraded := newCapacityTestServer(t, map[string]string{"sim-1": "group-a", "sim-2": "group-a"})
+	// sim-3 answered 503 at boot, so only sim-1 and sim-2 reached the session manager. The server is the
+	// endpoint the policy is written for, and it carries the resolver, so the params below reach the guard
+	// the way a request's do: resolved for the server's own chain/api-interface.
+	degraded := newCapacityTestServerFor(t, "ETH1", "jsonrpc", map[string]string{"sim-1": "group-a", "sim-2": "group-a"})
+	degraded.crossValidationResolver = resolver
 	verified := degraded.sessionManager.ProviderGroupAssignments()
 
 	require.Error(t, validateCrossValidationStartup(resolver, parser, "ETH1", "jsonrpc", len(verified), groupSizesOf(verified)),
 		"judged by the verified primaries, the policy looks unsatisfiable: this is the error that ended the process")
-	require.NoError(t, validateCrossValidationFleet(resolver, parser, "ETH1", "jsonrpc", configured, verified),
-		"judged by the configured primaries, the endpoint starts")
-	requiredProviders, requiredGroups := crossValidationShortfall(resolver, "ETH1", "jsonrpc", groupSizesOf(verified))
-	require.Equal(t, [2]int{0, 2}, [2]int{requiredProviders, requiredGroups},
-		"and the startup warning reports the requirement the verified primaries cannot meet")
-	require.Equal(t, []string{"sim-3"}, providersMissingFrom(configured, verified), "naming the provider that is out")
+	advisory, err := validateCrossValidationFleet(resolver, parser, "ETH1", "jsonrpc", configured, verified)
+	require.NoError(t, err, "judged by the configured primaries, the endpoint starts")
+	require.NotNil(t, advisory, "and the startup warning reports the requirement the verified primaries cannot meet")
+	require.Equal(t, [2]int{0, 2}, [2]int{advisory.requiredProviders, advisory.requiredGroups}, "[requiredProviders, requiredGroups]")
+	require.Equal(t, []string{"sim-3"}, advisory.unavailable, "naming the provider that is out")
+	require.False(t, advisory.configuredShort, "re-admitting sim-3 closes the gap")
 
 	ctx := context.Background()
-	params, _ := resolver.Resolve("ETH1", "jsonrpc", "eth_getBalance", common.CrossValidationParams{}, false)
+	params, applies := degraded.crossValidationResolver.Resolve(degraded.listenEndpoint.ChainID, degraded.listenEndpoint.ApiInterface, "eth_getBalance", common.CrossValidationParams{}, false)
+	require.True(t, applies)
 	reason, err := degraded.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, &params, "", nil)
 	require.Error(t, err)
 	require.Equal(t, common.CrossValidationReasonInsufficientGroups, reason)
@@ -224,10 +273,14 @@ func TestCrossValidationFleet_GroupDownAtBoot(t *testing.T) {
 	require.Empty(t, reason)
 
 	// The pairing after sim-3 is re-admitted (by retryFailedProviders or the epoch re-verification).
-	recovered := newCapacityTestServer(t, map[string]string{"sim-1": "group-a", "sim-2": "group-a", "sim-3": "group-b"})
+	recovered := newCapacityTestServerFor(t, "ETH1", "jsonrpc", map[string]string{"sim-1": "group-a", "sim-2": "group-a", "sim-3": "group-b"})
+	recovered.crossValidationResolver = resolver
 	reason, err = recovered.validateCrossValidationCapacity(ctx, relaycore.CrossValidation, &params, "", nil)
 	require.NoError(t, err)
 	require.Empty(t, reason)
+	advisory, err = validateCrossValidationFleet(resolver, parser, "ETH1", "jsonrpc", configured, recovered.sessionManager.ProviderGroupAssignments())
+	require.NoError(t, err)
+	require.Nil(t, advisory, "nothing to report once the fleet is whole")
 }
 
 // TestCrossValidationShortfall pins the prediction behind the startup warning: the largest max-participants
@@ -276,7 +329,7 @@ func TestHeaderlessParams(t *testing.T) {
 	)
 	want, applies := resolver.Resolve("ETH1", "jsonrpc", "eth_getBalance", common.CrossValidationParams{}, false)
 	require.True(t, applies)
-	require.Equal(t, []common.CrossValidationParams{want}, resolver.HeaderlessParams("ETH1", "jsonrpc"),
+	require.Equal(t, []common.CrossValidationParams{want}, resolver.headerlessParams("ETH1", "jsonrpc"),
 		"only the enabled ETH1 policy; a disabled, a forbidding and another chain's policy are not shapes a request is held to")
 }
 
@@ -302,41 +355,90 @@ type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
-// TestValidateCrossValidationFleet_Warning pins the ATTENTION line, the "router says so" of the ticket: it
-// names the provider that is out and the requirement it breaks, for both reasons the request-time guard
-// refuses, and it is absent when every primary verified. Every capture must also hold the "policies loaded"
-// line, or an empty capture would pass the absence check.
+// TestValidateCrossValidationFleet_Warning pins the ATTENTION line, the "router says so" of the ticket. It
+// fires for every shortfall the request-time guard will refuse on, worded by what closes the gap: the
+// provider that is out recovering, or a change to the policy or the fleet when the configured primaries fall
+// short themselves. It is absent only when every enabled policy is met. Every capture must also hold the
+// "policies loaded" line, or an empty capture would pass the absence check.
 func TestValidateCrossValidationFleet_Warning(t *testing.T) {
 	parser := fleetTestParser(t)
-	resolver := fleetTestResolver(t, fleetTestPolicy("eth_getBlockByNumber", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2), Cap: new(3)}, MaxParticipants: Bound{Floor: new(3), Cap: new(3)}, MinGroups: Bound{Floor: new(2)}}))
+	// The eth-sim router's policy: max-participants pinned at 3, min-groups 2.
+	ethSim := fleetTestResolver(t, fleetTestPolicy("eth_getBlockByNumber", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2), Cap: new(3)}, MaxParticipants: Bound{Floor: new(3), Cap: new(3)}, MinGroups: Bound{Floor: new(2)}}))
+	// The same fleet asked for more participants than it has.
+	fiveOfThree := fleetTestResolver(t, fleetTestPolicy("eth_getBlockByNumber", CrossValidationPolicy{Enabled: true, AgreementThreshold: Bound{Floor: new(2)}, MaxParticipants: Bound{Floor: new(5)}, MinGroups: Bound{Floor: new(2)}}))
 	configured := map[string][]string{"voting-group-1": {"EthPrimaryProvider1", "EthPrimaryProvider2"}, "voting-group-2": {"EthPrimaryProvider3"}}
-	boot := func(verified map[string][]string) string {
+	boot := func(resolver *CrossValidationPolicyResolver, configured, verified map[string][]string) string {
 		return captureFleetLog(t, func() {
-			require.NoError(t, validateCrossValidationFleet(resolver, parser, "ETH1", "jsonrpc", configured, verified))
+			advisory, err := validateCrossValidationFleet(resolver, parser, "ETH1", "jsonrpc", configured, verified)
+			require.NoError(t, err)
+			advisory.log()
 		})
 	}
-	const attention = "ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy"
+	const (
+		loaded      = "cross-validation per-method policies loaded"
+		recovers    = "ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy"
+		configShort = "ATTENTION: the configured primaries cannot meet a cross-validation policy"
+		backupOnly  = "ATTENTION: this endpoint has no configured primary, and cross-validation never draws on backup providers"
+	)
 
 	t.Run("the only member of a group is out", func(t *testing.T) {
-		log := boot(map[string][]string{"voting-group-1": {"EthPrimaryProvider1", "EthPrimaryProvider2"}})
-		require.Contains(t, log, "cross-validation per-method policies loaded")
-		require.Contains(t, log, attention)
+		log := boot(ethSim, configured, map[string][]string{"voting-group-1": {"EthPrimaryProvider1", "EthPrimaryProvider2"}})
+		require.Contains(t, log, loaded)
+		require.Contains(t, log, recovers)
 		require.Contains(t, log, `"unavailableProviders":"EthPrimaryProvider3"`)
 		require.Contains(t, log, `"requiredGroups":"2"`)
 		require.Contains(t, log, `"requiredProviders":"3"`)
+		require.NotContains(t, log, configShort)
 	})
 	t.Run("one of two members of a group is out: groups still met, providers are not", func(t *testing.T) {
-		log := boot(map[string][]string{"voting-group-1": {"EthPrimaryProvider2"}, "voting-group-2": {"EthPrimaryProvider3"}})
-		require.Contains(t, log, "cross-validation per-method policies loaded")
-		require.Contains(t, log, attention)
+		log := boot(ethSim, configured, map[string][]string{"voting-group-1": {"EthPrimaryProvider2"}, "voting-group-2": {"EthPrimaryProvider3"}})
+		require.Contains(t, log, loaded)
+		require.Contains(t, log, recovers)
 		require.Contains(t, log, `"unavailableProviders":"EthPrimaryProvider1"`)
 		require.Contains(t, log, `"requiredProviders":"3"`)
 		require.NotContains(t, log, `"requiredGroups"`)
 	})
-	t.Run("every primary verified: nothing to report", func(t *testing.T) {
-		log := boot(configured)
-		require.Contains(t, log, "cross-validation per-method policies loaded")
+	t.Run("every primary verified and the policy is satisfiable: nothing to report", func(t *testing.T) {
+		log := boot(ethSim, configured, configured)
+		require.Contains(t, log, loaded)
 		require.NotContains(t, log, "ATTENTION")
+	})
+	t.Run("every primary verified but max-participants exceeds the configured fleet: warns", func(t *testing.T) {
+		log := boot(fiveOfThree, configured, configured)
+		require.Contains(t, log, loaded)
+		require.Contains(t, log, configShort)
+		require.Contains(t, log, `"requiredProviders":"5"`)
+		require.NotContains(t, log, `"unavailableProviders"`, "nothing is out; recovery cannot close this gap")
+		require.NotContains(t, log, recovers)
+	})
+	t.Run("a provider is out AND max-participants exceeds the configured fleet: the permanent wording, naming the provider", func(t *testing.T) {
+		log := boot(fiveOfThree, configured, map[string][]string{"voting-group-1": {"EthPrimaryProvider1", "EthPrimaryProvider2"}})
+		require.Contains(t, log, loaded)
+		require.Contains(t, log, configShort)
+		require.Contains(t, log, `"unavailableProviders":"EthPrimaryProvider3"`)
+		require.Contains(t, log, `"requiredProviders":"5"`)
+		require.NotContains(t, log, recovers, "re-admitting EthPrimaryProvider3 still leaves three of five")
+	})
+	t.Run("no configured primary: the policies can never be met", func(t *testing.T) {
+		log := boot(ethSim, map[string][]string{}, map[string][]string{})
+		require.Contains(t, log, loaded)
+		require.Contains(t, log, backupOnly)
+		require.NotContains(t, log, `"unavailableProviders"`)
+	})
+	t.Run("the layout line keeps its keys: distinctGroups counts the groups serving now", func(t *testing.T) {
+		log := boot(ethSim, configured, map[string][]string{"voting-group-1": {"EthPrimaryProvider1", "EthPrimaryProvider2"}})
+		var layout string
+		for _, line := range strings.Split(log, "\n") {
+			if strings.Contains(line, loaded) {
+				layout = line
+			}
+		}
+		require.NotEmpty(t, layout)
+		require.Contains(t, layout, `"distinctGroups":"1"`, "the groups serving now, as before MAG-3751 (the cv demo script greps this key)")
+		require.Contains(t, layout, `"groupSizes":"map[voting-group-1:2]"`)
+		require.Contains(t, layout, `"configuredGroups":"2"`)
+		require.Contains(t, layout, `"configuredGroupSizes":"map[voting-group-1:2 voting-group-2:1]"`)
+		require.NotContains(t, layout, `"verifiedGroupSizes"`, "the layout line has no second name for what groupSizes already says")
 	})
 }
 

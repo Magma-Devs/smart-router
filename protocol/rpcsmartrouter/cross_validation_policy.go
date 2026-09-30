@@ -399,9 +399,10 @@ func (r *CrossValidationPolicyResolver) Resolve(chainID, apiInterface, method st
 	return eff, true
 }
 
-// HeaderlessParams returns what Resolve gives a request that sends no cross-validation headers, for every
+// headerlessParams returns what Resolve gives a request that sends no cross-validation headers, for every
 // ENABLED policy of the given chain/api: the shape the request-time capacity guard holds such a request to.
-func (r *CrossValidationPolicyResolver) HeaderlessParams(chainID, apiInterface string) []common.CrossValidationParams {
+// Its one caller is the startup prediction in crossValidationShortfall.
+func (r *CrossValidationPolicyResolver) headerlessParams(chainID, apiInterface string) []common.CrossValidationParams {
 	if r == nil {
 		return nil
 	}
