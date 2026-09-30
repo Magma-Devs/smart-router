@@ -325,33 +325,31 @@ var (
 		Description: "Endpoint does not hold the requested data (pruned or never existed)", Retryable: true,
 	})
 
-	// NODE_ABORTED and NODE_DATA_LOSS are a node answering with gRPC ABORTED (10) or DATA_LOSS
-	// (15) (MAG-3995). They classified as UNKNOWN_ERROR before. Retryable and MayHaveReachedNode
-	// keep UNKNOWN_ERROR's values, so routing and the write verdict are unchanged. A retry on
-	// another endpoint is right for both: data loss is this endpoint's own storage, and an abort is
-	// a conflict on this node that another may not hit.
+	// NODE_ABORTED is a node answering with gRPC ABORTED (10) (MAG-3995). It classified as
+	// UNKNOWN_ERROR before.
 	//
-	// What changes is the fault verdict. UNKNOWN_ERROR is never EndpointAtFault, so these answers
-	// lowered the endpoint's score but never counted toward benching it. As named node errors they
-	// do. That takes --bench-after (default 50) of them in a row, and any served relay resets the
-	// count. A node that aborts or loses data on every request for that long is not serving, and
-	// the recovery probe brings it back.
+	// The only node known to send it is Sui, and only when a transaction is submitted
+	// (sui-rpc-api maps TransactionSubmissionError's Aborted category to it). Cosmos SDK, CometBFT,
+	// ibc-go, wasmd, Lava and Concordium never send it. Sui uses it for the TRANSACTION's outcome:
+	// - rejected by consensus, or its status expired;
+	// - an input object or package that does not exist yet;
+	// - already finalized, under different signatures.
+	// Every endpoint gives the same answer, and resubmitting is the client's call.
 	//
-	// MayHaveReachedNode: the node answered, but neither status says whether a write committed
-	// before the abort or the loss. For a write, "unclear" is the recoverable direction.
+	// So it is not the endpoint's fault, and Retryable=false says exactly that. Asking another
+	// endpoint cannot change the answer. CategoryExternal + !Retryable is excused by
+	// EndpointAtFault, and IsNonRetryable keeps it out of the availability score. Left as
+	// UNKNOWN_ERROR, it was scored against every endpoint the write was broadcast to.
 	//
-	// These are node errors, not the PROTOCOL_PROVIDER_ABORTED / PROTOCOL_PROVIDER_DATA_LOSS
-	// codes (1013/1014). Those are CategoryInternal, which would report the endpoint as
-	// unreachable and rank the node's own message below internal errors. They also claim the
-	// request never reached the node.
+	// MayHaveReachedNode: the already-finalized case means a transaction answered with ABORTED can
+	// be on chain. For a write, "unclear" is the recoverable direction.
+	//
+	// A node error, not PROTOCOL_PROVIDER_ABORTED (1013). That code is CategoryInternal, which
+	// would report the endpoint as unreachable and rank the node's own message below internal
+	// errors. It also claims the request never reached the node.
 	LavaErrorNodeAborted = registerError(&LavaError{
 		Code: 2019, Name: "NODE_ABORTED", Category: CategoryExternal,
-		Description: "Node aborted the operation (gRPC ABORTED), typically a concurrency conflict", Retryable: true,
-		MayHaveReachedNode: true,
-	})
-	LavaErrorNodeDataLoss = registerError(&LavaError{
-		Code: 2020, Name: "NODE_DATA_LOSS", Category: CategoryExternal,
-		Description: "Node reported unrecoverable data loss or corruption (gRPC DATA_LOSS)", Retryable: true,
+		Description: "Node aborted the operation (gRPC ABORTED); on Sui, a transaction outcome such as a consensus rejection", Retryable: false,
 		MayHaveReachedNode: true,
 	})
 

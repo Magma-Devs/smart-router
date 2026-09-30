@@ -384,12 +384,10 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{GRPCCodeEquals(11), LavaErrorNodeDataNotHeld},        // codes.OutOfRange
 		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented},      // codes.Unimplemented
 		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
-		// codes.Aborted and codes.DataLoss were UNKNOWN_ERROR (MAG-3995). Neither row
-		// exempts anything: both stay retryable, scored, and with an unclear write outcome.
-		// They now name what the node said, and they count toward benching the endpoint;
-		// see LavaErrorNodeAborted for why that is right.
-		{GRPCCodeEquals(10), LavaErrorNodeAborted},  // codes.Aborted
-		{GRPCCodeEquals(15), LavaErrorNodeDataLoss}, // codes.DataLoss
+		// codes.Aborted (MAG-3995): on Sui, the one node that sends it, it is a transaction's
+		// outcome and the same from every endpoint. It is not the endpoint's fault, so it is
+		// non-retryable; see LavaErrorNodeAborted.
+		{GRPCCodeEquals(10), LavaErrorNodeAborted}, // codes.Aborted
 		// Deliberately NOT registered, each for its own reason — do not add them
 		// as a block, which is how `Code >= 13` went wrong in the first place:
 		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
@@ -403,6 +401,9 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		//   1  Canceled          - a LOCAL cancellation never reaches this table;
 		//                          handleGRPCError resolves it structurally. One that
 		//                          does reach here is remote and unproven.
+		//   15 DataLoss          - no node we route to sends it: not Cosmos SDK, CometBFT,
+		//                          ibc-go, wasmd, Lava, Concordium or Sui (MAG-3995). A row
+		//                          would be a verdict on a status nobody has seen.
 		// Message-based matchers for gRPC errors conveyed without status codes
 		{MessageContains("rate limit"), LavaErrorNodeRateLimited},
 		{MessageContains("enhance_your_calm"), LavaErrorNodeRateLimited}, // HTTP/2 GOAWAY ENHANCE_YOUR_CALM
