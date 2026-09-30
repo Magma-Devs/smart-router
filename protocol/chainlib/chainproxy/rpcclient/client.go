@@ -17,6 +17,7 @@
 package rpcclient
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -303,6 +304,18 @@ func (c *Client) CallContext(ctx context.Context, id json.RawMessage, method str
 		return nil, err
 	}
 
+	// A socket delivers a reply only to the request whose id it carries, and a
+	// null id is one rippled (XRPL) answers with no id at all — the reply is
+	// never matched and the call waits out its deadline. So on a socket a null
+	// id travels as one of the client's own, and the caller gets its original
+	// id back on the reply. HTTP pairs one request with one response and sends
+	// the id as given.
+	callerID := msg.ID
+	substituted := !c.isHTTP && isNullID(msg.ID)
+	if substituted {
+		msg.ID = c.nextID()
+	}
+
 	op := &requestOp{ids: []json.RawMessage{msg.ID}, resp: make(chan *JsonrpcMessage, 1)}
 
 	if c.isHTTP {
@@ -320,8 +333,17 @@ func (c *Client) CallContext(ctx context.Context, id json.RawMessage, method str
 	if err != nil {
 		return nil, err
 	}
+	if substituted {
+		resp.ID = callerID
+	}
 
 	return resp, nil
+}
+
+// isNullID reports a request id that names no request: absent, or JSON null.
+func isNullID(id json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(id)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
 // BatchCall sends all given requests as a single batch and waits for the server
