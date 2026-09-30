@@ -95,6 +95,9 @@ type RPCSmartRouterServer struct {
 	secondaryCache        performance.CacheReader
 	secondaryCacheTimeout time.Duration
 
+	// Largest reply body tryCacheWriteResolved writes (--cache-max-entry-bytes); 0 = no cap.
+	cacheMaxEntryBytes int64
+
 	// Per-endpoint ChainTracker manager for continuous block polling
 	endpointChainTrackerManager *endpointstate.EndpointMonitor
 
@@ -139,6 +142,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	cache performance.CacheBackend,
 	secondaryCache performance.CacheReader,
 	secondaryCacheTimeout time.Duration,
+	cacheMaxEntryBytes int64,
 	rpcSmartRouterLogs *metrics.RPCConsumerLogs,
 	relaysMonitor *metrics.RelaysMonitor,
 	cmdFlags common.ConsumerCmdFlags,
@@ -151,6 +155,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.cache = cache
 	rpcss.secondaryCache = secondaryCache
 	rpcss.secondaryCacheTimeout = secondaryCacheTimeout
+	rpcss.cacheMaxEntryBytes = cacheMaxEntryBytes
 	rpcss.rpcSmartRouterLogs = rpcSmartRouterLogs
 	rpcss.chainParser = chainParser
 	rpcss.sharedState = sharedState
@@ -3670,6 +3675,7 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 // - Quorum is enabled (quorum requires fresh endpoint validation)
 // - Request is stateful or node-bound (cacheExclusionReason)
 // - Response is a node error
+// - Response body is larger than cacheMaxEntryBytes (--cache-max-entry-bytes)
 // - Requested block is NOT_APPLICABLE
 // - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
 func (rpcss *RPCSmartRouterServer) tryCacheWrite(
@@ -3764,9 +3770,25 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
+	// Checked before anything that reads the body: encoding a multi-MB entry costs the router
+	// and the cache backend more than its rare hits save. Covers every backend and the
+	// secondary tier's backfill, which all write through here.
+	chainId, apiInterface := rpcss.GetChainIdAndApiInterface()
+	apiName := protocolMessage.GetApi().GetName()
+	bodyBytes := len(relayResult.Reply.Data)
+	if rpcss.cacheMaxEntryBytes > 0 && int64(bodyBytes) > rpcss.cacheMaxEntryBytes {
+		utils.LavaFormatDebug("cache write skipped: reply over the entry size cap",
+			utils.LogAttr("chainId", chainId),
+			utils.LogAttr("api", apiName),
+			utils.LogAttr("size", bodyBytes),
+			utils.LogAttr("GUID", ctx),
+		)
+		rpcss.smartRouterEndpointMetrics.RecordCacheWriteSkipped(chainId, apiInterface, apiName, metrics.CacheWriteSkipReasonSize)
+		return
+	}
+
 	// Compute cache key via the protocol message so the SET key matches the GET key,
 	// including any explicit lava-extension directive folded in by HashCacheRequest.
-	chainId := rpcss.listenEndpoint.ChainID
 	hashKey, _, hashErr := protocolMessage.HashCacheRequest(chainId)
 	if hashErr != nil {
 		utils.LavaFormatDebug("cache write skipped: hash computation failed",
@@ -3899,6 +3921,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 
 	// Snapshot the reply for the async write; see cacheWriteReplySnapshot for what it shares.
 	copyReply := cacheWriteReplySnapshot(relayResult.Reply)
+	rpcss.smartRouterEndpointMetrics.RecordCacheEntryWritten(chainId, apiInterface, apiName, bodyBytes)
 
 	// Write to cache in a non-blocking goroutine
 	go func() {
