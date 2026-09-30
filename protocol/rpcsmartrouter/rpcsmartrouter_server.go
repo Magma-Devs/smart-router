@@ -838,6 +838,11 @@ func (rpcss *RPCSmartRouterServer) crossValidationFailFast(reason string, protoc
 // A client request is unaffected: it goes through SendParsedRelay, and an operator policy on the
 // latest-block method still cross-validates what the caller is actually given.
 func (rpcss *RPCSmartRouterServer) internalRelayStateMachine(ctx context.Context, usedProviders *lavasession.UsedProviders, protocolMessage chainlib.ProtocolMessage) (RelayStateMachine, error) {
+	config := SmartRouterStateMachineConfig()
+	// The forbid flag below takes the machine's forbid-caller-cv branch, whose debug line would
+	// otherwise name a per-method policy — one nobody wrote — on every health tick under
+	// --debug-relays. Say what is actually happening instead.
+	config.CallerCVIgnoredReason = "internal relay: the router's own health check is never cross-validated"
 	return relaycore.NewUnifiedRelayStateMachine(
 		ctx,
 		usedProviders,
@@ -845,7 +850,7 @@ func (rpcss *RPCSmartRouterServer) internalRelayStateMachine(ctx context.Context
 		protocolMessage,
 		nil, // no analytics: this relay is not a client request
 		rpcss.debugRelays,
-		SmartRouterStateMachineConfig(),
+		config,
 		relaypolicy.NewPolicy(SmartRouterPolicyConfig()),
 		nil,  // no policy override: an operator policy must not reach a health check
 		true, // and no caller headers either, whatever a future craftRelay puts on one
