@@ -20,12 +20,16 @@ func sharesMemory(a, b string) bool {
 // strings back zero-copy, and every one the router keeps must be its own. The comparison runs inside
 // the handler, while the request buffer is still live, and is asserted after.
 func TestDetachedReqHeaders_OwnsEveryString(t *testing.T) {
-	var equal, shared []string
+	var equal, shared, missing []string
 	var viewsShared int
 	app := fiber.New()
 	app.Post("/", func(c *fiber.Ctx) error {
 		detached := detachedReqHeaders(c)
 		for name, values := range c.GetReqHeaders() {
+			if len(detached[name]) != len(values) {
+				missing = append(missing, name)
+				continue
+			}
 			for i, value := range values {
 				if detached[name][i] == value {
 					equal = append(equal, name)
@@ -47,7 +51,8 @@ func TestDetachedReqHeaders_OwnsEveryString(t *testing.T) {
 	_, err := app.Test(req)
 	require.NoError(t, err)
 
-	require.Equal(t, 1, viewsShared, "control: fiber's views of one header share memory")
+	require.Equal(t, 1, viewsShared, "control failed: two zero-copy reads of one header were expected to share memory, without which sharesMemory cannot see aliasing")
+	require.Empty(t, missing, "these headers were dropped, or lost a value, in the detached copy")
 	require.Contains(t, equal, "Lava-Select-Provider")
 	require.Contains(t, equal, "X-Request-Id")
 	require.Empty(t, shared, "these headers still point into the request buffer")
