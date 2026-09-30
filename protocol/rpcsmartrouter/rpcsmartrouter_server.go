@@ -1465,6 +1465,11 @@ func (rpcss *RPCSmartRouterServer) CancelSubscriptionContext(subscriptionKey str
 	// Direct RPC subscription managers handle their own lifecycle.
 }
 
+// getEarliestBlockHashRequestedFromCacheReply folds the reply's BlocksHashesToHeights into
+// (latest, earliest). Every reply carries an empty list today: the router writes no
+// block-hash→height mappings (MAG-3807), so the lookup's question is always answered empty and
+// this returns (NOT_APPLICABLE, NOT_APPLICABLE) on every request. Kept, with its callers, for
+// MAG-3892 — the day something writes them, the read side is already in place.
 func (rpcss *RPCSmartRouterServer) getEarliestBlockHashRequestedFromCacheReply(cacheReply *pairingtypes.CacheRelayReply) (int64, int64) {
 	blocksHashesToHeights := cacheReply.GetBlocksHashesToHeights()
 	earliestRequestedBlock := spectypes.NOT_APPLICABLE
@@ -1566,7 +1571,10 @@ func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlo
 	}
 
 	// Following logic to set the requested block as a new value fetched from the cache reply.
-	// 1. We managed to get a value from the cache reply. (latestBlockHashRequested >= 0)
+	// It cannot act today: latestBlockHashRequested is folded from the reply's
+	// BlocksHashesToHeights, and the router writes no block-hash→height mappings (MAG-3807), so
+	// it is NOT_APPLICABLE on every request. Kept for MAG-3892.
+	// 1. The cache reply carried a height for a requested hash. (latestBlockHashRequested >= 0)
 	// 2. We didn't manage to parse the block and used the default value meaning we didnt have knowledge of the requested block (reqBlock == spectypes.LATEST_BLOCK && protocolMessage.GetUsedDefaultValue())
 	// 3. The requested block is smaller than the latest block hash requested from the cache reply (reqBlock >= 0 && reqBlock < latestBlockHashRequested)
 	// 4. The requested block is not applicable meaning block parsing failed completely (reqBlock == spectypes.NOT_APPLICABLE)
@@ -1578,6 +1586,11 @@ func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlo
 	return reqBlock
 }
 
+// newBlocksHashesToHeightsSliceFromRequestedBlockHashes builds the lookup's block-hash→height
+// question, one entry per hash the spec's BLOCK_HASH parser found. It is always answered empty
+// today: nothing writes the mappings (both cache writes pass BlocksHashesToHeights nil —
+// MAG-3807), so the engine finds no h2h: key for any hash. Kept so MAG-3892 has the question in
+// place once a writer exists.
 func (rpcss *RPCSmartRouterServer) newBlocksHashesToHeightsSliceFromRequestedBlockHashes(requestedBlockHashes []string) []*pairingtypes.BlockHashToHeight {
 	var blocksHashesToHeights []*pairingtypes.BlockHashToHeight
 	for _, blockHash := range requestedBlockHashes {
@@ -4163,6 +4176,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							_, cacheSpan := tracing.StartInternalSpan(ctx, tracing.SpanCacheLookup)
 							defer cacheSpan.End()
 							cacheStart := time.Now()
+							// The BlocksHashesToHeights question below is always answered empty today: the
+							// router writes no mappings (MAG-3807). See
+							// newBlocksHashesToHeightsSliceFromRequestedBlockHashes.
 							cacheReply, cacheError = rpcss.cache.GetEntry(cacheCtx, &pairingtypes.RelayCacheGet{
 								RequestHash:           hashKey,
 								RequestedBlock:        requestedBlockForCache,
@@ -4278,8 +4294,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 					// produced no hit — including primary inactive or unconfigured. A hit is
 					// sanitized, served, and backfilled through the populator. A miss leaves
 					// latestBlockHashRequested/earliestBlockHashRequested exactly as the primary
-					// left them: those scalars steer local block resolution and archive routing,
-					// and the secondary is a trust boundary, not a second source of chain state.
+					// left them — NOT_APPLICABLE today, since the router writes none of the
+					// mappings they are folded from (MAG-3807). Were they ever set they would
+					// steer local block resolution and archive routing, and the secondary is a
+					// trust boundary, not a second source of chain state.
 					if secondaryCacheActive {
 						if rpcss.trySecondaryCacheLookup(ctx, protocolMessage, localRelayData, relayProcessor, analytics, hashKey, outputFormatter, requestedBlockForCache, &cacheReport) {
 							return nil
@@ -5552,6 +5570,12 @@ func dedupSortedStrings(s []string) []string {
 	return out
 }
 
+// updateProtocolMessageIfNeededWithNewEarliestData rebuilds the protocol message once a cache
+// reply has named the height of a requested hash, so the archive rule can be applied to it. The
+// branch cannot open today: earliestBlockHashRequested is folded from the reply's
+// BlocksHashesToHeights, and the router writes no block-hash→height mappings (MAG-3807), so it
+// is NOT_APPLICABLE on every request. Kept for MAG-3892, which needs the rebuild once a writer
+// exists.
 func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestData(
 	ctx context.Context,
 	relayState *relaycore.RelayState,
@@ -5560,8 +5584,8 @@ func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestD
 	addon string,
 ) chainlib.ProtocolMessage {
 	if !relayState.GetIsEarliestUsed() && earliestBlockHashRequested != spectypes.NOT_APPLICABLE {
-		// We got a earliest block data from cache, we need to create a new protocol message with the new earliest block hash parsed
-		// and update the extension rules with the new earliest block data as it might be archive.
+		// A cache reply carried a height for a requested hash: rebuild the protocol message with
+		// the earliest block parsed, and update the extension rules with it as it might be archive.
 		// Setting earliest used to attempt this only once.
 		relayState.SetIsEarliestUsed()
 		relayRequestData := protocolMessage.RelayPrivateData()
