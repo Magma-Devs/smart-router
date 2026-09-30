@@ -177,7 +177,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.crossValidationResolver = cvResolver
 	// Scoped to this endpoint: a policy for another chain or interface is not this endpoint's to check or
 	// to report (MAG-3604).
-	if endpointPolicies := cvResolver.PolicyMethods(listenEndpoint.ChainID, listenEndpoint.ApiInterface); len(endpointPolicies) > 0 {
+	if endpointPolicies := cvResolver.PolicyRefs(listenEndpoint.ChainID, listenEndpoint.ApiInterface); len(endpointPolicies) > 0 {
 		// Providers are already registered (UpdateAllProviders runs before ServeRPCRequests), so the
 		// configured group layout is the upper bound for the startup capacity checks.
 		groupAssignments := sessionManager.ProviderGroupAssignments()
@@ -189,10 +189,13 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 			return cvStartupErr
 		}
 		// Log the resolved provider->group layout once at startup so operators can confirm the diversity
-		// their config yields (a min-groups policy is only as good as the group spread of the fleet).
+		// their config yields (a min-groups policy is only as good as the group spread of the fleet). Each
+		// method is named with its position in cross-validation.policies: the log redactor mistakes a gRPC
+		// method name for a url and prints "cosmos.bank.v1beta1.Query/[redacted]", and the position is what
+		// still tells two policies on one service apart (MAG-3604).
 		utils.LavaFormatInfo("cross-validation per-method policies loaded",
 			utils.LogAttr("policies", len(endpointPolicies)),
-			utils.LogAttr("methods", endpointPolicies),
+			utils.LogAttr("methods", policyRefStrings(endpointPolicies)),
 			utils.LogAttr("chainID", listenEndpoint.ChainID),
 			utils.LogAttr("apiInterface", listenEndpoint.ApiInterface),
 			utils.LogAttr("distinctGroups", len(groupAssignments)),
@@ -464,11 +467,11 @@ func (rpcss *RPCSmartRouterServer) craftRelay(ctx context.Context) (ok bool, rel
 
 // validateCrossValidationStartup enforces, at startup, the cross-validation policy guards that need
 // spec/provider context:
-//   - The stateful-write guard: an enabled CV policy on a CONSISTENCY_SELECT_ALL_PROVIDERS method is a
-//     no-op and must be rejected. It FAILS CLOSED — if the parser cannot classify stateful methods we
-//     refuse to start rather than silently allow a write-method policy through.
-//   - The method guard: a policy for this endpoint whose method the spec does not serve can never apply
-//     and is rejected. It fails closed the same way.
+//   - The spec-only guards (the stateful-write guard and the method guard, see
+//     validateCrossValidationSpecGuards). On the boot path they already ran in CreateSmartRouterEndpoint
+//     as soon as the spec was loaded, before any provider was dialed and behind the boot configuration
+//     barrier, so a failure here is unreachable there; the re-check is cheap and keeps this function a
+//     complete guard for a caller that reaches it directly.
 //   - The min-groups capacity bound: an enabled min-groups policy that requires more distinct groups than
 //     the endpoint has configured can never be satisfied.
 //
@@ -480,43 +483,8 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 	if !resolver.HasPolicies() {
 		return nil
 	}
-	statefulChecker, ok := chainParser.(interface{ ApiHasStatefulCategory(string) bool })
-	if !ok {
-		return utils.LavaFormatError("cross-validation policies are configured but the chain parser cannot classify stateful methods; cannot enforce the write-method guard", nil,
-			utils.LogAttr("chainID", chainID),
-			utils.LogAttr("apiInterface", apiInterface))
-	}
-	isStateful := func(c, a, method string) bool {
-		if !strings.EqualFold(c, chainID) || !strings.EqualFold(a, apiInterface) {
-			return false // only this endpoint's parser can classify its own chain/api
-		}
-		return statefulChecker.ApiHasStatefulCategory(method)
-	}
-	if guardErr := resolver.ValidateNoStatefulPolicies(isStateful); guardErr != nil {
+	if guardErr := validateCrossValidationSpecGuards(resolver, chainParser, chainID, apiInterface); guardErr != nil {
 		return guardErr
-	}
-	// A request finds its policy by the name of the API it resolved to, so a policy naming a method this
-	// endpoint's spec does not serve never applies (MAG-3604). Same fail-closed rule as the guard above.
-	methodChecker, ok := chainParser.(interface{ ApiNameDefined(string) bool })
-	if !ok {
-		return utils.LavaFormatError("cross-validation policies are configured but the chain parser cannot list its methods; cannot check the methods the policies name", nil,
-			utils.LogAttr("chainID", chainID),
-			utils.LogAttr("apiInterface", apiInterface))
-	}
-	// Each is named by its position in the policy list as well: the log redactor mistakes a gRPC method name
-	// for a url and hides its method part, and the position still points at the one policy.
-	var unservedPolicies []string
-	for _, method := range resolver.PolicyMethods(chainID, apiInterface) {
-		if !methodChecker.ApiNameDefined(method) {
-			unservedPolicies = append(unservedPolicies, fmt.Sprintf("policy #%d %s", resolver.PolicyPosition(chainID, apiInterface, method), method))
-		}
-	}
-	if len(unservedPolicies) > 0 {
-		return utils.LavaFormatError("cross-validation policies name methods this endpoint's spec does not serve, so they would never apply", nil,
-			utils.LogAttr("policies", unservedPolicies),
-			utils.LogAttr("chainID", chainID),
-			utils.LogAttr("apiInterface", apiInterface),
-			utils.LogAttr("hint", "a policy names the method exactly as the spec does: the JSON-RPC method, the REST path template, or the gRPC service/method"))
 	}
 	if requiredGroups := resolver.MaxResolvedMinGroups(chainID, apiInterface); requiredGroups > 1 && configuredGroups > 0 && configuredGroups < requiredGroups {
 		return utils.LavaFormatError("cross-validation min-groups policy cannot be satisfied: configured provider groups are fewer than required", nil,
