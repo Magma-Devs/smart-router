@@ -185,19 +185,20 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 				"only because ApplyNodeErrorClassification assigns the whole flag set, not IsNonRetryable alone",
 		},
 		{
-			name:        "Aborted is named but still scored, like the UNKNOWN_ERROR it was",
-			code:        codes.Aborted,
-			nodeMessage: "transaction aborted: concurrent modification",
-			wantScored:  true,
-			why: "MAG-3995 names the status without exempting it; another endpoint may not hit " +
-				"the same conflict, so the retry and the score both stay",
+			name:             "Aborted is a transaction outcome, not the endpoint's fault",
+			code:             codes.Aborted,
+			nodeMessage:      "Transaction execution failed: rejected by consensus",
+			wantNonRetryable: true,
+			wantScored:       false,
+			why: "MAG-3995: Sui sends ABORTED only on transaction submission, and every endpoint " +
+				"it is broadcast to gives the same answer; scoring it charges them all for the transaction",
 		},
 		{
-			name:        "DataLoss is this endpoint's own storage and stays scoreable",
+			name:        "DataLoss stays unregistered and scored",
 			code:        codes.DataLoss,
 			nodeMessage: "unrecoverable data loss",
 			wantScored:  true,
-			why:         "MAG-3995: data loss is the clearest case of an endpoint at fault",
+			why:         "MAG-3995: no node we route to sends it, so it keeps the uncatalogued default",
 		},
 		{
 			name:        "Unavailable is the endpoint's fault and stays scoreable",
@@ -354,34 +355,24 @@ func TestHealthResetRequiresPositiveProof(t *testing.T) {
 		"an unrecognised 4xx must not wipe the endpoint's failure record")
 }
 
-// MAG-3995: gRPC ABORTED and DATA_LOSS used to classify as UNKNOWN_ERROR. They now carry their own
-// node codes, and the one verdict that moves is fault: UNKNOWN_ERROR is never EndpointAtFault, so a
-// node answering these never counted toward benching. The relay-level flags are pinned here so the
-// change stays exactly that. Internal (13) is the unregistered control: still unknown, not at fault.
-func TestSendGRPCRelay_AbortedAndDataLossAreNamedNodeFaults(t *testing.T) {
-	for _, tc := range []struct {
-		code codes.Code
-		want *common.LavaError
-	}{
-		{codes.Aborted, common.LavaErrorNodeAborted},
-		{codes.DataLoss, common.LavaErrorNodeDataLoss},
-	} {
-		t.Run(tc.code.String(), func(t *testing.T) {
-			require.Equal(t, tc.want, common.ClassifyError(nil, common.ChainFamilyCosmosSDK, common.TransportGRPC, int(tc.code), "node said so"))
+// MAG-3995: gRPC ABORTED used to classify as UNKNOWN_ERROR, which scored it against every endpoint a
+// Sui transaction was broadcast to. It is a transaction's outcome, so it is now non-retryable and
+// neither scored nor counted toward benching. DataLoss is the unregistered control.
+func TestSendGRPCRelay_AbortedIsATransactionOutcome(t *testing.T) {
+	require.Equal(t, common.LavaErrorNodeAborted,
+		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.Aborted), "rejected by consensus"))
 
-			result := grpcStatusRelay(t, tc.code, "node said so")
-			require.True(t, result.IsNodeError)
-			require.True(t, result.IsNodeAtFault, "a named node fault counts toward --bench-after")
-			require.False(t, result.IsNonRetryable, "another endpoint may serve it, as it could when this was UNKNOWN_ERROR")
-			require.False(t, result.IsRateLimited)
-			require.False(t, result.IsDataScope)
-			require.False(t, result.IsNodeCapability)
-			require.False(t, relayProvesEndpointHealthy(result))
-		})
-	}
+	aborted := grpcStatusRelay(t, codes.Aborted, "rejected by consensus")
+	require.True(t, aborted.IsNodeError, "still a node error, so it is never served as a success or cached")
+	require.True(t, aborted.IsNonRetryable, "every endpoint gives the same answer")
+	require.False(t, aborted.IsNodeAtFault, "the transaction's outcome must not count toward --bench-after")
+	require.False(t, shouldFailSessionForResult(nil, aborted), "nor lower the endpoint's availability score")
+	require.False(t, relayProvesEndpointHealthy(aborted), "and it is not proof of health either")
 
-	control := grpcStatusRelay(t, codes.Internal, "node said so")
-	require.Equal(t, common.LavaErrorUnknown, common.ClassifyError(nil, common.ChainFamilyCosmosSDK, common.TransportGRPC, int(codes.Internal), "node said so"),
-		"precondition: Internal has no row, so it shows what these two classified as before")
-	require.False(t, control.IsNodeAtFault, "an unclassified answer is never evidence against the endpoint")
+	dataLoss := grpcStatusRelay(t, codes.DataLoss, "unrecoverable data loss")
+	require.Equal(t, common.LavaErrorUnknown,
+		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.DataLoss), "unrecoverable data loss"),
+		"DataLoss has no row")
+	require.False(t, dataLoss.IsNodeAtFault, "an unclassified answer is never evidence against the endpoint")
+	require.True(t, shouldFailSessionForResult(nil, dataLoss), "but it keeps the uncatalogued default: scored")
 }
