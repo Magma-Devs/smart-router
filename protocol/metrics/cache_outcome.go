@@ -31,6 +31,10 @@ const (
 	CacheOutcomeTimeout = common.CacheOutcomeTimeout
 )
 
+// CacheWriteSkipReasonSize labels smartrouter_cache_write_skipped_total for a reply whose
+// body exceeded --cache-max-entry-bytes. The reason label is a closed enum.
+const CacheWriteSkipReasonSize = "size"
+
 // ClassifyCacheLookupOutcome maps a cache GetEntry result onto the closed outcome
 // enum: hit, clean miss (no error, no reply), deadline-bounded timeout, or any
 // other transport/server error. Timeouts are detected both as a raw
