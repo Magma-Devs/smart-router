@@ -384,6 +384,12 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{GRPCCodeEquals(11), LavaErrorNodeDataNotHeld},        // codes.OutOfRange
 		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented},      // codes.Unimplemented
 		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
+		// codes.Aborted and codes.DataLoss were UNKNOWN_ERROR (MAG-3995). Neither row
+		// exempts anything: both stay retryable, scored, and with an unclear write outcome.
+		// They now name what the node said, and they count toward benching the endpoint;
+		// see LavaErrorNodeAborted for why that is right.
+		{GRPCCodeEquals(10), LavaErrorNodeAborted},  // codes.Aborted
+		{GRPCCodeEquals(15), LavaErrorNodeDataLoss}, // codes.DataLoss
 		// Deliberately NOT registered, each for its own reason — do not add them
 		// as a block, which is how `Code >= 13` went wrong in the first place:
 		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
