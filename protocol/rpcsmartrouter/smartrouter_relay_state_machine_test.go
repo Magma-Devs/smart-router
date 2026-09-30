@@ -1299,3 +1299,21 @@ func TestSmartRouterStateMachine_CallerCVHeadersOnAWrite(t *testing.T) {
 			"the enabled policy on the read method still applies")
 	})
 }
+
+// TestCallerCVSkipReason pins the reason the --debug-relays line gives when the caller's
+// cross-validation headers are not consulted. The write reason used to overwrite the policy
+// reason outright, so an operator who had written `forbid-caller-cv: true` on a write under the
+// advice given before MAG-3603 read a line that never mentioned the policy they wrote — the
+// misdirection the reason string was added to prevent. Both causes are named when both hold.
+func TestCallerCVSkipReason(t *testing.T) {
+	forbidOnly := callerCVSkipReason(true, false)
+	writeOnly := callerCVSkipReason(false, true)
+	both := callerCVSkipReason(true, true)
+
+	require.Equal(t, "forbidden by per-method policy", forbidOnly)
+	require.Equal(t, "method routes as a write", writeOnly)
+	require.Contains(t, both, "routes as a write", "the write is what decides the routing, so it leads")
+	require.Contains(t, both, "forbid-caller-cv", "the policy the operator wrote must still be named")
+	require.NotEqual(t, writeOnly, both, "both causes must read differently from the write alone")
+	require.NotEqual(t, forbidOnly, both, "both causes must read differently from the policy alone")
+}
