@@ -12,6 +12,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -363,8 +364,17 @@ func TestPreflightValidateCrossValidationConfig(t *testing.T) {
 		assert.Contains(t, err.Error(), "policy #0 ETH1/json-rpc/eth_getBalance")
 		assert.Contains(t, err.Error(), "endpoints: ETH1/jsonrpc")
 	})
-	t.Run("a policy with neither enabled nor forbid-caller-cv is a no-op and is left alone", func(t *testing.T) {
+	t.Run("a policy with neither enabled nor forbid-caller-cv and no bounds is a no-op and is left alone", func(t *testing.T) {
 		require.NoError(t, preflight(t, policyFor("ETH1", "json-rpc", "      enabled: false\n")))
+	})
+	t.Run("a cap-only policy names a target too, and is rejected when no endpoint serves it", func(t *testing.T) {
+		// The one shape that was invisible in every direction: not refused, not counted, not logged — and
+		// inert as well, since a bound only clamps under enabled: true.
+		err := preflight(t, policyFor("ETH1", "json-rpc", "      max-participants: {cap: 2}\n      agreement-threshold: {cap: 2}\n"))
+		require.ErrorContains(t, err, "no endpoint serves")
+		require.ErrorContains(t, err, "policy #0 ETH1/json-rpc/eth_getBalance")
+		require.NoError(t, preflight(t, policyFor("ETH1", "jsonrpc", "      max-participants: {cap: 2}\n")), "the same policy on the served endpoint loads")
+		require.ErrorContains(t, preflight(t, policyFor("ETH1", "json-rpc", "      min-groups: 2\n")), "no endpoint serves", "a floor is a bound too")
 	})
 	t.Run("a misspelled chain-id is rejected before boot", func(t *testing.T) {
 		require.ErrorContains(t, preflight(t, policyFor("ETH", "jsonrpc", "      enabled: true\n")), "ETH/jsonrpc/eth_getBalance")
@@ -454,9 +464,23 @@ func TestValidateCrossValidationStartup(t *testing.T) {
 		require.ErrorContains(t, err, "does not serve")
 		require.ErrorContains(t, err, "policy #1 eth_getbalance", "named by its position in the list and its method")
 	})
-	t.Run("a policy with neither enabled nor forbid-caller-cv is a no-op and is not checked", func(t *testing.T) {
+	t.Run("a policy with neither enabled nor forbid-caller-cv and no bounds is a no-op and is not checked", func(t *testing.T) {
 		noop := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getbalance", CrossValidationPolicy: CrossValidationPolicy{}}
 		require.NoError(t, validateCrossValidationStartup(mkResolver(t, readPolicy, noop), realParser, "ETH1", "jsonrpc", 5, nil))
+	})
+	t.Run("a cap-only policy naming an unserved method -> rejected, a served one loads", func(t *testing.T) {
+		capOnly := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_getbalance", CrossValidationPolicy: CrossValidationPolicy{MaxParticipants: Bound{Cap: new(2)}}}
+		require.ErrorContains(t, validateCrossValidationStartup(mkResolver(t, readPolicy, capOnly), realParser, "ETH1", "jsonrpc", 5, nil), "policy #1 eth_getbalance")
+		capOnly.Method = "eth_getBalance"
+		capOnlyServed := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_gasPrice", CrossValidationPolicy: CrossValidationPolicy{MaxParticipants: Bound{Cap: new(2)}}}
+		require.NoError(t, validateCrossValidationStartup(mkResolver(t, readPolicy, capOnlyServed), realParser, "ETH1", "jsonrpc", 5, nil))
+	})
+	t.Run("the method error names the spec name that differs only by case", func(t *testing.T) {
+		misspelled := readPolicy
+		misspelled.Method = "eth_getbalance"
+		err := validateCrossValidationStartup(mkResolver(t, misspelled), realParser, "ETH1", "jsonrpc", 5, nil)
+		require.ErrorContains(t, err, "policy #0: eth_getBalance", "servedAs points at the name a request resolves to")
+		require.ErrorContains(t, err, "does not serve under that name", "the error claims what the check proves: no api by that name, not that the policy could never apply")
 	})
 	t.Run("a forbid-caller-cv policy naming an unserved method -> rejected too", func(t *testing.T) {
 		forbid := CrossValidationPolicyEntry{ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_gasprice", CrossValidationPolicy: CrossValidationPolicy{ForbidCallerCV: true}}
@@ -514,8 +538,31 @@ func TestPolicyMethods(t *testing.T) {
 	require.Equal(t, []string{"eth_gasPrice", "eth_getBalance"}, r.PolicyMethods("eth1", "JSONRPC"), "matched as a request's lookup matches")
 	require.Equal(t, []string{"getEpochInfo"}, r.PolicyMethods("SOLANA", "jsonrpc"))
 	require.Empty(t, r.PolicyMethods("ETH1", "rest"))
-	require.Equal(t, 2, r.PolicyPosition("SOLANA", "jsonrpc", "getEpochInfo"), "the index in the configured list")
-	require.Equal(t, -1, r.PolicyPosition("SOLANA", "jsonrpc", "getBalance"))
+	require.Equal(t, []PolicyRef{{Position: 1, Method: "eth_gasPrice"}, {Position: 0, Method: "eth_getBalance"}}, r.PolicyRefs("ETH1", "jsonrpc"),
+		"each method comes with its index in the configured list, so no caller can print a position that does not exist")
+	require.Equal(t, []PolicyRef{{Position: 2, Method: "getEpochInfo"}}, r.PolicyRefs("SOLANA", "jsonrpc"))
+	require.Nil(t, r.PolicyRefs("ETH1", "rest"))
+	require.Nil(t, (*CrossValidationPolicyResolver)(nil).PolicyRefs("ETH1", "jsonrpc"))
+}
+
+// TestPolicyRef_SurvivesTheLogRedactor pins why the startup line and the two startup errors name a policy
+// by its position (MAG-3604): the log redactor takes a gRPC method name for a url and prints its method
+// part as [redacted], so the position is the only part of the entry that still identifies the policy.
+func TestPolicyRef_SurvivesTheLogRedactor(t *testing.T) {
+	r, err := NewCrossValidationPolicyResolver(CrossValidationConfig{Policies: []CrossValidationPolicyEntry{
+		{ChainID: "COSMOSHUB", ApiInterface: "grpc", Method: "cosmos.bank.v1beta1.Query/Balance", CrossValidationPolicy: CrossValidationPolicy{Enabled: true}},
+		{ChainID: "COSMOSHUB", ApiInterface: "grpc", Method: "cosmos.bank.v1beta1.Query/AllBalances", CrossValidationPolicy: CrossValidationPolicy{Enabled: true}},
+	}})
+	require.NoError(t, err)
+	rendered := policyRefStrings(r.PolicyRefs("COSMOSHUB", "grpc"))
+	require.Equal(t, []string{"policy #1 cosmos.bank.v1beta1.Query/AllBalances", "policy #0 cosmos.bank.v1beta1.Query/Balance"}, rendered)
+	redacted := make([]string, 0, len(rendered))
+	for _, entry := range rendered {
+		redacted = append(redacted, utils.RedactSecrets(entry))
+	}
+	require.Equal(t, []string{"policy #1 cosmos.bank.v1beta1.Query/[redacted]", "policy #0 cosmos.bank.v1beta1.Query/[redacted]"}, redacted,
+		"the redactor hides the method part of both entries; the positions are what still tell them apart")
+	require.Equal(t, "policy #0 eth_getBalance", PolicyRef{Position: 0, Method: "eth_getBalance"}.String())
 }
 
 // TestGroupsBelowThreshold pins the pure helper behind the startup SPOF advisory: it returns the
