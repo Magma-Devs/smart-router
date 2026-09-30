@@ -74,8 +74,9 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
 > `/cosmos/base/tendermint/v1beta1/blocks/latest`, whatever the spec tags
 > `FUNCTION_TAG_GET_BLOCKNUM`) and takes one provider's answer, so a policy on that method does not
 > apply to it: the check asks whether a provider can answer, and one answer can never meet an
-> agreement threshold above 1. Before MAG-3746 it did apply, and every health check failed for as
-> long as the policy stood — `/readyz` 503, and under a readiness probe on that path the pod never
+> agreement threshold above 1, nor a `min-groups` floor above 1. Before MAG-3746 it did apply, and
+> every health check failed for as long as the policy stood — `/readyz` 503, and under a readiness
+> probe on that path the pod never
 > became Ready, while client requests under the same policy were succeeding. Readiness therefore
 > does **not** attest that a policied method currently has quorum capacity; it answers whether the
 > chain can serve relays at all.
