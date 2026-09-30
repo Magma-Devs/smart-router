@@ -133,13 +133,19 @@ recording path) for test suites that cannot scrape the metrics port — see
   latest-block request (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`, whatever
   the spec tags) and takes one provider's answer. A policy on that method does **not** apply to it,
   deliberately: the check asks whether a provider can answer, and a single answer can never meet an
-  agreement threshold above 1. Before MAG-3746 the policy did apply, so every health check failed
-  for as long as the policy stood — `/readyz` answered 503 after each one and, under a readiness
+  agreement threshold above 1, nor a `min-groups` floor above 1. Before MAG-3746 the policy did
+  apply, so every health check failed for as long as the policy stood — `/readyz` answered 503
+  after each one and, under a readiness
   probe on that path, the pod never became Ready, while its providers were healthy and client
   requests were passing with the agreement the policy asked for. (A successful client request flips
   the flag back to healthy until the next check, so the 503 was persistent rather than literally
-  uninterrupted.) A threshold of 1 was unaffected — one session is not fewer than one — which
-  `TestInternalRelayIgnoresCrossValidationPolicy` now pins for 1, 2 and 3.
+  uninterrupted.) With the agreement threshold as the only knob, a threshold of 1 was unaffected —
+  one session is not fewer than one — and 2 and 3 were refused; with the reported policy's
+  `min-groups: 2` the group floor refused even threshold 1. `TestHealthRelayUnderThePreFixWiring`
+  pins both against the pre-fix wiring, and `TestSendCraftedRelays_IgnoresCrossValidationPolicy`
+  drives the real health path under the same policies now. The exemption leaves one trace at
+  runtime: under `--debug-relays` each health relay logs `caller cross-validation headers ignored`
+  with `reason=internal relay: the router's own health check is never cross-validated`.
 - **Readiness does not attest that a cross-validated method has quorum capacity.** It never did for
   any other method, and since MAG-3746 it does not for the latest-block one either. `/readyz`
   answers for the chain — can it serve relays — so a policy temporarily short of participants or
@@ -503,6 +509,6 @@ policy floor instead.
 | A dissent shows up as *pending* instead of *disagreeing* | The quorum early-exited before the outlier answered. Give the honest providers a `latency_ms` so the outlier wins the race — that is exactly what the lane does to pick the reply-time path. |
 | `finality="unknown"` on the mismatch metric | The request did not carry a resolvable block number, or the chain tracker had not learned the head yet. Query a concrete finalized block, not `latest`. |
 | A cross-validated method answers without fanning out | Something served it from cache. These lanes configure no cache for that reason; if you add one, vary the request parameters. |
-| The pod never becomes Ready / `/readyz` answers 503 while client requests succeed | Fixed in MAG-3746. On a build before it, a policy on the **latest-block** method (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`) made the router's own health check impossible to pass, because the check takes one session and one session cannot meet a threshold above 1. Tell-tale: repeated `insufficient sessions for cross-validation consensus` with `sessionsAcquired 1`, and no `[+] init relay succeeded`. Workarounds on such a build: drop the policy from that method, set its `agreement-threshold` to 1, or probe readiness elsewhere. |
+| The pod never becomes Ready / `/readyz` answers 503 while client requests succeed | Fixed in MAG-3746. On a build before it, a policy on the **latest-block** method (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`) made the router's own health check impossible to pass, because the check takes one session and one session cannot meet a threshold above 1. Tell-tale: repeated `insufficient sessions for cross-validation consensus` with `sessionsAcquired 1`, and no `[+] init relay succeeded`. Workarounds on such a build: drop the policy from that method, set its `agreement-threshold` to 1 (only if the policy has no `min-groups` floor above 1 — that floor refuses a one-session check on its own), or probe readiness elsewhere. |
 | Router exits at startup with a cross-validation error | Working as intended for an unsatisfiable policy. The error itself carries the numbers: `requiredGroups` / `configuredGroups` on the `min-groups` refusal, `groupSizes` on the per-group one. Don't look for the `distinctGroups` startup line — the validation runs *before* it, so a router that exits this way never logs it. |
 | `/debug/cross-validation-events` is refused / connection reset | The router was started without `--debug-address`, so there is no debug listener at all. A **503** is a different state — the listener is up but the recorder was never installed — and it is not an empty result: "nothing was recorded" and "nothing dissented" are opposite answers. |

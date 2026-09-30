@@ -25,6 +25,11 @@ import (
 // Both interfaces the report measured are covered, and LAVA/rest is the one it reproduced on first.
 // The method per interface is whatever the spec tags FUNCTION_TAG_GET_BLOCKNUM, which is what
 // craftRelay asks for.
+//
+// These cases prove internalRelayStateMachine's contract, one frame below the call site that
+// carried the bug; they stay green with that call site reverted. The wiring itself, and what the
+// pre-fix wiring did at each threshold, is pinned in health_check_crafted_relay_test.go, which
+// drives the real health path against a live upstream.
 type healthCheckCVCase struct {
 	name         string
 	specID       string
@@ -131,19 +136,6 @@ func TestInternalRelayIgnoresCrossValidationPolicy(t *testing.T) {
 				require.Equal(t, relaycore.Stateless, sm.GetSelection(),
 					"the internal path must forbid cross-validation outright, not merely lack a resolver")
 				require.Nil(t, sm.GetCrossValidationParams())
-			})
-
-			// Every threshold an operator could write, including the one that used to slip through.
-			// This is the artifact behind the claim that threshold 1 was an accidental workaround:
-			// the refusal is len(sessions) < AgreementThreshold, and a health check holds one session.
-			t.Run("no threshold can refuse the health check any more", func(t *testing.T) {
-				for _, threshold := range []int{1, 2, 3} {
-					server := serverWith(resolverFor(t, threshold))
-					sm, smErr := server.internalRelayStateMachine(ctx, lavasession.NewUsedProviders(nil), message(t, nil))
-					require.NoError(t, smErr)
-					require.Equal(t, relaycore.Stateless, sm.GetSelection(),
-						"threshold %d must not reach the health check", threshold)
-				}
 			})
 
 			// The control, and the half that must NOT change: the same policy on the same method
