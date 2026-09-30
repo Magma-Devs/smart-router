@@ -278,10 +278,40 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// blame nobody. They live HERE and not in the shared HTTP tables on purpose: on
 		// JSON-RPC and gRPC a bare 400 or 403 is a gateway or WAF in front of the node, where
 		// the classifier's "unknown ⇒ retry elsewhere" default is the right call.
+		//
+		// Evidence for every row below: agent_docs/.../rest-stateful-bug/rest-status-code-map.md
+		// (live probes 2026-09-27 and chain docs). Declaration order matters: the first match
+		// wins, so the message rows that make a specific 400 retryable come before CodeEquals(400).
+		//
+		// "The block you asked for is beyond my head": a lagging node says this while a synced
+		// node has the block. Retryable elsewhere, not the node's fault.
+		{MessageContains("larger than the current largest block"), LavaErrorChainBlockNotFound},                  // Substrate sidecar, 400
+		{MessageContains("requested block height is bigger then the chain length"), LavaErrorChainBlockNotFound}, // Cosmos gRPC-gateway, 400
+		{MessageContains("unknown block"), LavaErrorChainBlockNotFound},                                          // nodeos unknown_block_exception, 400
+		// 4xx that describe the request: non-retryable, never the endpoint's fault.
 		{CodeEquals(400), LavaErrorUserInvalidRequest},
-		{CodeEquals(403), LavaErrorNodeUnauthorized},
-		{CodeEquals(410), LavaErrorChainStatePruned},
+		{CodeEquals(406), LavaErrorUserInvalidRequest},
+		{CodeEquals(411), LavaErrorUserInvalidRequest},
+		{CodeEquals(412), LavaErrorUserInvalidRequest},
+		{CodeEquals(414), LavaErrorUserInvalidRequest},
+		{CodeEquals(415), LavaErrorUserInvalidRequest},
+		{CodeEquals(416), LavaErrorUserInvalidRequest},
+		{CodeEquals(417), LavaErrorUserInvalidRequest},
+		{CodeEquals(428), LavaErrorUserInvalidRequest},
+		{CodeEquals(431), LavaErrorUserInvalidRequest},
 		{CodeEquals(422), LavaErrorUserInvalidParams},
+		// The endpoint refused the router (credentials, plan, WAF, proxy, protocol, region):
+		// another provider can serve it, and the refusing endpoint is at fault. 401 is in
+		// httpStatusCodeMappings, which is appended to REST only.
+		{CodeEquals(402), LavaErrorNodeAccessDenied},
+		{CodeEquals(403), LavaErrorNodeAccessDenied},
+		{CodeEquals(407), LavaErrorNodeAccessDenied},
+		{CodeEquals(426), LavaErrorNodeAccessDenied},
+		{CodeEquals(451), LavaErrorNodeAccessDenied},
+		// 408: the endpoint gave up waiting for the request. Retry elsewhere; at fault, like a 503.
+		{CodeEquals(408), LavaErrorNodeServiceUnavailable},
+		// 404 is in httpStatusCodeMappings (REST only), mapped to data-scope.
+		{CodeEquals(410), LavaErrorChainStatePruned},
 		// 409 is "I already have this transaction": Horizon answers a re-submitted transaction
 		// with 409 {"tx_status":"DUPLICATE"}. Non-retryable and never the endpoint's fault. On a
 		// write broadcast it is a node error, so a sibling's 201 with the transaction hash wins
@@ -366,8 +396,16 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 // These are used for REST transport where the error code is the HTTP status code itself.
 func httpStatusCodeMappings() []errorMapping {
 	return []errorMapping{
-		{CodeEquals(401), LavaErrorNodeUnauthorized},
-		{CodeEquals(404), LavaErrorNodeEndpointNotFound},
+		// These CodeEquals rows are appended to the REST table only (see init); JSON-RPC and
+		// gRPC get the HTTPStatusContains rows below instead, which keep their own verdicts.
+		//
+		// 401: the endpoint rejected the router's credentials. Each provider has its own, so
+		// another provider can serve the request: retryable, and the endpoint is at fault.
+		{CodeEquals(401), LavaErrorNodeAccessDenied},
+		// 404: "not here". Either the data does not exist on this node (yet), or the gateway in
+		// front of it does not route the path. Both mean "try another node", as JSON-RPC's
+		// transaction / block not-found rows already do: retryable, data-scope, not scored.
+		{CodeEquals(404), LavaErrorNodeDataNotHeld},
 		{CodeEquals(405), LavaErrorNodeMethodNotAllowed},
 		{CodeEquals(413), LavaErrorUserRequestTooLarge},
 		{CodeEquals(429), LavaErrorNodeRateLimited},
