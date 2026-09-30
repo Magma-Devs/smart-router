@@ -140,9 +140,12 @@ func extractDappIDFromFiberContext(c *fiber.Ctx) (dappID string) {
 func extractDappIDFromGrpcHeader(metadataValues metadata.MD) string {
 	dappId := generateNewDappID()
 	if values, ok := metadataValues[ProjectIDHeader]; ok && len(values) > 0 {
-		// Same hazard as the HTTP path: gRPC metadata strings can alias
-		// the receive buffer depending on the transport implementation.
-		// Clone before retaining past the handler return.
+		// Not the HTTP path's hazard: grpc-go decodes every metadata value into
+		// its own string (x/net's hpack decoder allocates, and a -bin value is
+		// base64-decoded into a fresh one), so incoming metadata never points
+		// into the transport's receive buffer. The clone is kept as a cheap
+		// guard against a transport that does not make that promise; nothing
+		// depends on it (MAG-3881).
 		dappId = strings.Clone(values[0])
 	}
 	return dappId
