@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/require"
 )
@@ -72,4 +73,29 @@ func TestExtractWantedHeadersFromCachedMap_EmptyHeaderIsNotFound(t *testing.T) {
 	require.False(t, found, "an empty header must not register as a present id")
 	_, found = GetTaskId(ctx)
 	require.False(t, found, "a header that was never sent must not register as a present id")
+}
+
+// The stamped ids must not share storage with the header map's values: the HTTP listeners
+// hand over strings that alias fasthttp's per-connection buffers, which the next request on
+// the connection overwrites, and a context outlives its handler (MAG-3798).
+func TestExtractWantedHeadersFromCachedMap_OwnsTheIds(t *testing.T) {
+	headers := map[string][]string{"X-Request-Id": {"req-42"}, "x-task-id": {"task-7"}, "X-Tx-Id": {"tx-9"}}
+	ctx := ExtractWantedHeadersFromCachedMap(headers, context.Background())
+
+	for _, tc := range []struct {
+		name string
+		sent string
+		read func(context.Context) (string, bool)
+	}{
+		{"request id", headers["X-Request-Id"][0], GetRequestId},
+		{"task id, looked up in lower case", headers["x-task-id"][0], GetTaskId},
+		{"tx id", headers["X-Tx-Id"][0], GetTxId},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found := tc.read(ctx)
+			require.True(t, found)
+			require.Equal(t, tc.sent, got)
+			require.NotSame(t, unsafe.StringData(tc.sent), unsafe.StringData(got), "the stamped id shares the header map's storage")
+		})
+	}
 }
