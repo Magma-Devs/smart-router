@@ -18,7 +18,6 @@ import (
 	metrics "github.com/magma-Devs/smart-router/protocol/metrics"
 	relay "github.com/magma-Devs/smart-router/types/relay"
 	spec "github.com/magma-Devs/smart-router/types/spec"
-	grpc "google.golang.org/grpc"
 )
 
 // MockChainParser is a mock of ChainParser interface.
@@ -854,45 +853,6 @@ func (m *MockHealthReporter) IsHealthy() bool {
 func (mr *MockHealthReporterMockRecorder) IsHealthy() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsHealthy", reflect.TypeOf((*MockHealthReporter)(nil).IsHealthy))
-}
-
-// MockGRPCReflectionProvider is a mock of GRPCReflectionProvider interface.
-type MockGRPCReflectionProvider struct {
-	ctrl     *gomock.Controller
-	recorder *MockGRPCReflectionProviderMockRecorder
-}
-
-// MockGRPCReflectionProviderMockRecorder is the mock recorder for MockGRPCReflectionProvider.
-type MockGRPCReflectionProviderMockRecorder struct {
-	mock *MockGRPCReflectionProvider
-}
-
-// NewMockGRPCReflectionProvider creates a new mock instance.
-func NewMockGRPCReflectionProvider(ctrl *gomock.Controller) *MockGRPCReflectionProvider {
-	mock := &MockGRPCReflectionProvider{ctrl: ctrl}
-	mock.recorder = &MockGRPCReflectionProviderMockRecorder{mock}
-	return mock
-}
-
-// EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockGRPCReflectionProvider) EXPECT() *MockGRPCReflectionProviderMockRecorder {
-	return m.recorder
-}
-
-// GetGRPCReflectionConnection mocks base method.
-func (m *MockGRPCReflectionProvider) GetGRPCReflectionConnection(ctx context.Context) (*grpc.ClientConn, func(), error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetGRPCReflectionConnection", ctx)
-	ret0, _ := ret[0].(*grpc.ClientConn)
-	ret1, _ := ret[1].(func())
-	ret2, _ := ret[2].(error)
-	return ret0, ret1, ret2
-}
-
-// GetGRPCReflectionConnection indicates an expected call of GetGRPCReflectionConnection.
-func (mr *MockGRPCReflectionProviderMockRecorder) GetGRPCReflectionConnection(ctx interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetGRPCReflectionConnection", reflect.TypeOf((*MockGRPCReflectionProvider)(nil).GetGRPCReflectionConnection), ctx)
 }
 
 // MockRelaySender is a mock of RelaySender interface.

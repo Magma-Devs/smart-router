@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,13 +32,11 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/protocopy"
 	"github.com/magma-Devs/smart-router/version"
 
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/spf13/viper"
-	"google.golang.org/grpc"
 	grpcmetadata "google.golang.org/grpc/metadata"
 )
 
@@ -96,6 +95,9 @@ type RPCSmartRouterServer struct {
 	secondaryCache        performance.CacheReader
 	secondaryCacheTimeout time.Duration
 
+	// Largest reply body tryCacheWriteResolved writes (--cache-max-entry-bytes); 0 = no cap.
+	cacheMaxEntryBytes int64
+
 	// Per-endpoint ChainTracker manager for continuous block polling
 	endpointChainTrackerManager *endpointstate.EndpointMonitor
 
@@ -140,6 +142,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	cache performance.CacheBackend,
 	secondaryCache performance.CacheReader,
 	secondaryCacheTimeout time.Duration,
+	cacheMaxEntryBytes int64,
 	rpcSmartRouterLogs *metrics.RPCConsumerLogs,
 	relaysMonitor *metrics.RelaysMonitor,
 	cmdFlags common.ConsumerCmdFlags,
@@ -152,6 +155,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.cache = cache
 	rpcss.secondaryCache = secondaryCache
 	rpcss.secondaryCacheTimeout = secondaryCacheTimeout
+	rpcss.cacheMaxEntryBytes = cacheMaxEntryBytes
 	rpcss.rpcSmartRouterLogs = rpcSmartRouterLogs
 	rpcss.chainParser = chainParser
 	rpcss.sharedState = sharedState
@@ -359,17 +363,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 
 func (rpcss *RPCSmartRouterServer) GetListeningAddress() string {
 	return rpcss.chainListener.GetListeningAddress()
-}
-
-// GetGRPCReflectionConnection implements chainlib.GRPCReflectionProvider.
-// This enables gRPC reflection for tools like grpcurl when using Direct RPC mode.
-// Returns a connection to the upstream gRPC server for reflection requests.
-func (rpcss *RPCSmartRouterServer) GetGRPCReflectionConnection(ctx context.Context) (*grpc.ClientConn, func(), error) {
-	if rpcss.grpcSubscriptionManager == nil {
-		return nil, nil, fmt.Errorf("gRPC reflection not available: no gRPC subscription manager configured")
-	}
-
-	return rpcss.grpcSubscriptionManager.GetReflectionConnection(ctx)
 }
 
 // GetGRPCSubscriptionManager implements chainlib.GRPCSubscriptionProvider, which is how
@@ -1273,9 +1266,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// detached dissenting straggler would land last and overwrite the cache with the data the
 	// quorum just outvoted). The consensus WINNER is written exactly once, here — and BEFORE
 	// appendHeadersToRelayResult appends this request's cross-validation response headers to
-	// returnedResult.Reply.Metadata, so the cached entry (a deep copy of the whole reply, metadata
-	// included) does not carry per-request CV/GUID headers that would then be replayed verbatim to
-	// unrelated stateless requests on a cache hit.
+	// returnedResult.Reply.Metadata, so the cached entry (a snapshot of the reply taken here, see
+	// cacheWriteReplySnapshot) does not carry per-request CV/GUID headers that would then be
+	// replayed verbatim to unrelated stateless requests on a cache hit.
 	if err == nil && relayProcessor.GetSelection() == relaycore.CrossValidation && returnedResult != nil && returnedResult.Reply != nil {
 		rpcss.tryCacheWrite(ctx, protocolMessage, returnedResult)
 	}
@@ -3258,7 +3251,9 @@ func (rpcss *RPCSmartRouterServer) endpointObservationGeneration(endpointURL str
 //   - Solana family (JSON-RPC): result.context.slot — the slot the query was processed at,
 //     i.e. the node's current tip — present on most successful Solana responses
 //     (getBalance, getAccountInfo, getLatestBlockhash, ...). Chain-aware; never applied to
-//     other chains. See extractSolanaContextSlot.
+//     other chains. See extractSolanaContextSlot. The GET_BLOCK_BY_NUM method (getBlock) is
+//     skipped without reading the reply: it answers with the block itself, never with a
+//     context, and looking for one would walk every transaction in a multi-MB block.
 //   - Otherwise (EVM/gRPC): Reply.LatestBlock is the tip ONLY for a method whose semantics make the
 //     reply's block the node's current tip, identified by SPEC TAG (not by RequestedBlock alone):
 //     1. GET_BLOCKNUM (eth_blockNumber-equivalent): the result IS the tip.
@@ -3279,6 +3274,9 @@ func (rpcss *RPCSmartRouterServer) tipBlockFromRelay(chainMessage chainlib.Chain
 		return 0, false
 	}
 	if common.IsSolanaFamily(rpcss.listenEndpoint.ChainID) {
+		if rpcss.isGetBlockByNumMethod(chainMessage) {
+			return 0, false
+		}
 		return extractSolanaContextSlot(reply.Data)
 	}
 	if reply.LatestBlock <= 0 {
@@ -3677,6 +3675,7 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 // - Quorum is enabled (quorum requires fresh endpoint validation)
 // - Request is stateful or node-bound (cacheExclusionReason)
 // - Response is a node error
+// - Response body is larger than cacheMaxEntryBytes (--cache-max-entry-bytes)
 // - Requested block is NOT_APPLICABLE
 // - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
 func (rpcss *RPCSmartRouterServer) tryCacheWrite(
@@ -3771,9 +3770,25 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
+	// Checked before anything that reads the body: encoding a multi-MB entry costs the router
+	// and the cache backend more than its rare hits save. Covers every backend and the
+	// secondary tier's backfill, which all write through here.
+	chainId, apiInterface := rpcss.GetChainIdAndApiInterface()
+	apiName := protocolMessage.GetApi().GetName()
+	bodyBytes := len(relayResult.Reply.Data)
+	if rpcss.cacheMaxEntryBytes > 0 && int64(bodyBytes) > rpcss.cacheMaxEntryBytes {
+		utils.LavaFormatDebug("cache write skipped: reply over the entry size cap",
+			utils.LogAttr("chainId", chainId),
+			utils.LogAttr("api", apiName),
+			utils.LogAttr("size", bodyBytes),
+			utils.LogAttr("GUID", ctx),
+		)
+		rpcss.smartRouterEndpointMetrics.RecordCacheWriteSkipped(chainId, apiInterface, apiName, metrics.CacheWriteSkipReasonSize)
+		return
+	}
+
 	// Compute cache key via the protocol message so the SET key matches the GET key,
 	// including any explicit lava-extension directive folded in by HashCacheRequest.
-	chainId := rpcss.listenEndpoint.ChainID
 	hashKey, _, hashErr := protocolMessage.HashCacheRequest(chainId)
 	if hashErr != nil {
 		utils.LavaFormatDebug("cache write skipped: hash computation failed",
@@ -3911,18 +3926,12 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		sharedStateId = rpcss.listenEndpoint.Key()
 	}
 
-	// Deep copy reply to avoid race conditions (cache write is async)
-	copyReply := &pairingtypes.RelayReply{}
-	if copyErr := protocopy.DeepCopyProtoObject(relayResult.Reply, copyReply); copyErr != nil {
-		utils.LavaFormatDebug("cache write skipped: failed to copy reply",
-			utils.LogAttr("error", copyErr),
-			utils.LogAttr("GUID", ctx),
-		)
-		return
-	}
-	// The copy is what the cache server reads: it carries the bounded claim, not the
-	// upstream's (MAG-3755).
+	// Snapshot the reply for the async write; see cacheWriteReplySnapshot for what it shares.
+	copyReply := cacheWriteReplySnapshot(relayResult.Reply)
+	// The snapshot is what the cache server reads: it carries the bounded claim, not the
+	// upstream's, while the live reply keeps the block the node answered with (MAG-3755).
 	copyReply.LatestBlock = latestBlock
+	rpcss.smartRouterEndpointMetrics.RecordCacheEntryWritten(chainId, apiInterface, apiName, bodyBytes)
 
 	// Write to cache in a non-blocking goroutine
 	go func() {
@@ -3963,6 +3972,30 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 			)
 		}
 	}()
+}
+
+// cacheWriteReplySnapshot returns the copy of a reply the async cache write reads while the
+// response path keeps using the original. The write outlives this call, and the response path
+// then mutates the reply: the relay goroutine stamps LatestBlock with the endpoint's observed
+// tip when the reply carried none, and appendHeadersToRelayResult appends this request's
+// headers to Metadata. So the struct is copied and Metadata cloned, and the snapshot is
+// immune to both.
+//
+// The byte slices are shared, not copied. Data is the body, up to tens of MB on a block
+// reply, and nothing writes into it after it is read off the wire — every later change
+// (the JSON-RPC id restore, the secondary cache's rewrites) builds a new slice and
+// reassigns the field, which leaves the snapshot's slice alone. This replaced a
+// JSON-and-base64 deep copy that cost 33 ms and a second full copy of the body per write
+// on a 5 MB Solana block. Anything that starts writing into Data in place would corrupt
+// cached entries: TestCacheWriteSnapshotSurvivesResponseMutation pins the contract.
+//
+// The snapshot is also private to the write, which mutates it: the RESP backend's
+// NewEnvelope reassigns Response.Sig and, for a compressed body, Response.Data. Handing the
+// write relayResult.Reply itself would race the response path even with nothing appended.
+func cacheWriteReplySnapshot(reply *pairingtypes.RelayReply) *pairingtypes.RelayReply {
+	snapshot := *reply
+	snapshot.Metadata = slices.Clone(reply.Metadata)
+	return &snapshot
 }
 
 // resolvePinDirectives returns the lava-select-provider and lava-stickiness directives,
@@ -4476,20 +4509,16 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		}
 
 		// Second line of defence for methods the spec does not declare as
-		// subscriptions. Reflection may be unavailable, in which case we have nothing
-		// left to check and the call proceeds as unary, which is the correct handling
-		// for the overwhelming majority of gRPC methods.
-		if rpcss.grpcSubscriptionManager != nil {
-			// Bound the reflection lookup explicitly: it dials + queries the upstream's reflection
-			// service, and detached CV relay contexts carry no deadline — an upstream that accepts the
-			// connection but never answers would otherwise block this goroutine (and leak its session)
-			// forever, since the attempt-budget bound is only applied later inside SendDirectRelay.
-			// Bounded by the WINDOW rather than the budget on purpose: this is a cheap capability
-			// probe, not the relay, and it should not be allowed to consume the whole request.
+		// subscriptions, from the descriptor this call needs anyway: cached on its
+		// connection, and resolved in the background when cold. Without one the call
+		// proceeds as unary, which is right for the overwhelming majority of methods.
+		if resolver, ok := directConnection.(lavasession.GRPCMethodResolver); ok {
+			// Bounded by the WINDOW, not the budget: detached CV relay contexts carry no
+			// deadline, and a capability check must not consume the whole request.
 			streamCheckCtx, streamCheckCancel := context.WithTimeout(ctx, relayTimeout)
-			isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(streamCheckCtx, methodPath)
+			methodDesc, streamErr := resolver.ResolveMethodDescriptor(streamCheckCtx, methodPath)
 			streamCheckCancel()
-			if streamErr == nil && isStreaming {
+			if streamErr == nil && methodDesc.IsServerStreaming() {
 				utils.LavaFormatWarning("gRPC method is server-streaming upstream but carries no SUBSCRIBE directive in the spec", nil,
 					utils.LogAttr("method", methodPath),
 					utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),

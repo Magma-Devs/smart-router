@@ -21,7 +21,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
+	"github.com/tidwall/gjson"
 )
 
 // DirectRPCRelaySender handles sending relay requests directly to RPC endpoints
@@ -34,44 +36,50 @@ type DirectRPCRelaySender struct {
 	groupLabel          string             // Cross-validation group label of this provider (may be empty)
 }
 
-// maxResponseSizeForBlockExtraction is the threshold above which block-height extraction
-// is skipped, on every transport (MAG-2557). One cap rather than one per transport: what
-// differs between JSON-RPC and gRPC is the encoding, not the size of the thing we want to
-// read, so splitting the number by transport would be two knobs serving one decision.
+// maxGRPCResponseSizeForBlockExtraction is the threshold above which gRPC block-height
+// extraction is skipped (MAG-2557).
 //
-// The value is derived, not chosen. A block-extraction cap has to sit ABOVE the largest
-// response we legitimately want to parse, because on both transports the biggest response
-// IS the block source:
-//
-//   - gRPC: GET_BLOCKNUM resolves to cosmos.base.tendermint.v1beta1.Service/GetLatestBlock
-//     across the Cosmos family (AKASH, BABYLON, COSMOSSDK, DYDX, KAVA, SEI) and
-//     GET_BLOCK_BY_NUM to GetBlockByHeight — the whole block, every tx included.
-//   - JSON-RPC: GET_BLOCK_BY_NUM is eth_getBlockByNumber, which with full transaction
-//     objects measures ~460 KB median and ~670 KB peak over recent Ethereum mainnet blocks
-//     (Base ~385/577 KB) — already inside 1.5x of the 1 MB this constant used to carry,
-//     and that was a quiet sample.
+// The value is derived, not chosen. The cap has to sit ABOVE the largest response we
+// legitimately want to parse, because on gRPC the biggest response IS the block source:
+// GET_BLOCKNUM resolves to cosmos.base.tendermint.v1beta1.Service/GetLatestBlock across the
+// Cosmos family (AKASH, BABYLON, COSMOSSDK, DYDX, KAVA, SEI) — the whole block, every tx
+// included — and it is the chain's tip. (GET_BLOCK_BY_NUM's GetBlockByHeight is the same
+// size but is never parsed here: its rule reads a hash, see resultRuleReadsBlockHash.)
 //
 // The ceiling to clear is therefore the largest block a chain can legally produce: its
 // consensus block.max_bytes — 4 MB on dYdX, 3 MB on Osmosis, 2 MB on Cosmos Hub, and
 // Tendermint's own default 21 MB. 32 MB is the next power of two above that default. A cap
 // below it fires only on full blocks — during congestion, silently, exactly when tip
-// accuracy matters most. A cap belongs above the range of legitimate responses, not inside
-// it.
+// accuracy matters most.
 //
 // Deliberately not the transport's own MaxCallRecvMsgSize (512 MB): gRPC refuses to decode
 // a message larger than that before extraction ever runs, so a cap set there could never
-// fire. It would read as a guard and behave as none.
+// fire. It would read as a guard and behave as none. It is defense in depth: extraction
+// returns early unless the method carries a spec parse_directive, and only ~17 exist across
+// all 55 gRPC collections in the catalog.
+const maxGRPCResponseSizeForBlockExtraction = 32 * 1024 * 1024 // 32 MB
+
+// maxJSONRPCResponseSizeForBlockExtraction is the threshold above which JSON-RPC
+// block-height extraction is skipped: 1 MiB, the value this path carried before MAG-2557
+// folded it into the gRPC cap.
 //
-// What it buys differs by path, and neither is the primary filter:
-//   - On gRPC it is defense in depth. Extraction returns early unless the method carries a
-//     spec parse_directive, and only ~17 exist across all 55 gRPC collections in the
-//     catalog, so an untagged multi-MB response never reaches the unmarshal/marshal
-//     expansion at any size.
-//   - On JSON-RPC the EVM fallback is a switch over named methods with no default branch,
-//     so debug_traceTransaction and friends already return without unmarshalling whatever
-//     their size. The one method this genuinely bounds is eth_getLogs, which unmarshals the
-//     full array to read a block number off its first element.
-const maxResponseSizeForBlockExtraction = 32 * 1024 * 1024 // 32 MB
+// Unlike gRPC, a JSON-RPC reply above 1 MiB is almost never a tip. The tip methods
+// (eth_blockNumber, Tendermint status, Solana getLatestBlockhash) answer in bytes, and the
+// router's tip does not depend on this path: the per-endpoint ChainTracker polls it, and
+// Solana harvests result.context.slot separately. What reaches the cap is the heavy
+// traffic — eth_getLogs, full-transaction blocks, traces — where decoding the reply to read
+// one field costs tens of milliseconds and tens of MB per request.
+//
+// What skipping gives up, for replies above the cap only:
+//   - eth_getBlockByNumber("latest", true) on a full block no longer feeds the tip harvest
+//     (the ChainTracker poll still does), and at cache-write time its block is unknown, so
+//     the stale-head guard in tryCacheWriteResolved cannot tell a lagging node's head from
+//     the tip's for that reply.
+//   - A block or receipt fetched by hash above the cap has no block to settle on
+//     (byHashFinalized), so it takes the short non-finalized cache lifetime.
+//   - The Provider-Latest-Block response header carries the endpoint's observed tip
+//     instead of the reply's block.
+const maxJSONRPCResponseSizeForBlockExtraction = 1 * 1024 * 1024 // 1 MiB
 
 // extractBlockHeightFromJSONResponse extracts block height using spec-driven parsing.
 // This works for any API interface (EVM, Tendermint, etc.) by using the chain's
@@ -81,15 +89,14 @@ func extractBlockHeightFromJSONResponse(
 	responseData []byte,
 	chainMessage chainlib.ChainMessage,
 ) int64 {
-	// Guard: skip block extraction for very large responses. Parsing multi-MB responses
-	// is expensive (CPU + GC pressure) and the ones that reach an unmarshal here without
-	// carrying a height are led by eth_getLogs — see maxResponseSizeForBlockExtraction,
-	// which is shared with the gRPC path. Per-endpoint ChainTracker provides block
-	// tracking independently as a fallback when it fires.
-	if len(responseData) > maxResponseSizeForBlockExtraction {
+	// Guard: skip block extraction for large responses. Parsing a multi-MB response to read
+	// one field is expensive (CPU + GC pressure) and a reply that large is almost never a
+	// tip — see maxJSONRPCResponseSizeForBlockExtraction for what the skip gives up.
+	// Per-endpoint ChainTracker provides block tracking independently when it fires.
+	if len(responseData) > maxJSONRPCResponseSizeForBlockExtraction {
 		utils.LavaFormatDebug("skipping block extraction for large response",
 			utils.LogAttr("response_size", len(responseData)),
-			utils.LogAttr("threshold", maxResponseSizeForBlockExtraction),
+			utils.LogAttr("threshold", maxJSONRPCResponseSizeForBlockExtraction),
 			utils.LogAttr("method", chainMessage.GetApi().Name),
 		)
 		return 0
@@ -97,7 +104,7 @@ func extractBlockHeightFromJSONResponse(
 
 	// First try spec-driven parsing (works for all API interfaces including Tendermint)
 	parseDirective := chainMessage.GetParseDirective()
-	if parseDirective != nil {
+	if parseDirective != nil && !resultRuleReadsBlockHash(parseDirective) {
 		parserInput, err := chainlib.FormatResponseForParsing(
 			&pairingtypes.RelayReply{Data: responseData},
 			chainMessage,
@@ -118,6 +125,19 @@ func extractBlockHeightFromJSONResponse(
 	return extractBlockHeightFromEVMResponse(responseData, chainMessage.GetApi().Name)
 }
 
+// resultRuleReadsBlockHash reports whether a parse directive's result rule reads a block
+// hash rather than a height, so running it as a height parse can only fail. A
+// GET_BLOCK_BY_NUM rule exists so the chain tracker can fetch the hash of block N — its
+// only reader is ParseBlockHashFromReplyAndDecode — and every spec points it at one
+// (Solana getBlock reads result.blockhash, EVM eth_getBlockByNumber result.hash, Cosmos
+// GetBlockByHeight blockId.hash). Those are the largest replies a chain serves, and the
+// parse decodes the whole of one to reach the field: a 5 MB Solana block cost 33 ms and
+// 786k allocations per reply to learn nothing. Skipping it changes no result — a method
+// that carries a height still reaches the EVM fallback, which reads result.number itself.
+func resultRuleReadsBlockHash(parseDirective *spectypes.ParseDirective) bool {
+	return parseDirective.FunctionTag == spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM
+}
+
 // extractSolanaContextSlot returns result.context.slot from a SINGLE successful Solana
 // JSON-RPC response, and whether it was found. Solana stamps most successful responses
 // (getBalance, getAccountInfo, getLatestBlockhash, ...) with the slot the query was
@@ -127,7 +147,16 @@ func extractBlockHeightFromJSONResponse(
 //     since per-call slots can't be attributed to one endpoint tip;
 //   - successful responses only (a present, non-null "error" member → false);
 //   - only the nested result.context.slot envelope — a bare numeric "slot" elsewhere is
-//     NOT interpreted, avoiding coincidental matches.
+//     NOT interpreted, avoiding coincidental matches — and only a positive integer.
+//
+// It never decodes the reply (MAG-3843): it reads result.context.slot by path, and the error
+// member only once a slot is found. Decoding copied the whole body first, on every Solana reply.
+// The path read does not validate the reply, and the relay checks json.Valid only on 2xx
+// replies while the harvest also runs on 4xx ones, so a body that does not close its top-level
+// object yields no slot: a cut inside the slot's digits would otherwise read as a smaller slot
+// than the node wrote. A member that appears twice counts the first time, and member names match
+// exactly. A result that is not an object is recognised from its first byte (see
+// resultIsNotAnObject): the path read would otherwise walk every element of a list.
 //
 // The caller (tipBlockFromRelay) additionally gates on chain family so this is never
 // applied to non-Solana chains.
@@ -136,27 +165,118 @@ func extractSolanaContextSlot(data []byte) (int64, bool) {
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return 0, false // not a single JSON object (e.g. a batch array)
 	}
-	var resp struct {
-		Error  json.RawMessage `json:"error"`
-		Result *struct {
-			Context *struct {
-				Slot *int64 `json:"slot"`
-			} `json:"context"`
-		} `json:"result"`
+	if end := bytes.TrimRight(trimmed, " \t\r\n"); end[len(end)-1] != '}' {
+		return 0, false // cut short: the top-level object never closes
 	}
-	if err := json.Unmarshal(trimmed, &resp); err != nil {
+	if resultIsNotAnObject(trimmed) {
+		return 0, false // a list, a number, a string or null: no context to find
+	}
+	// The slot first: a reply without one never pays for the second read.
+	slot := gjson.GetBytes(trimmed, "result.context.slot")
+	if slot.Type != gjson.Number {
 		return 0, false
 	}
-	if e := bytes.TrimSpace(resp.Error); len(e) > 0 && string(e) != "null" {
+	value, err := strconv.ParseInt(slot.Raw, 10, 64)
+	if err != nil || value <= 0 {
+		return 0, false // a fraction, an exponent, out of range, or not positive
+	}
+	if errorMember := gjson.GetBytes(trimmed, "error"); errorMember.Exists() && errorMember.Type != gjson.Null {
 		return 0, false // JSON-RPC error response
 	}
-	if resp.Result == nil || resp.Result.Context == nil || resp.Result.Context.Slot == nil {
-		return 0, false
+	return value, true
+}
+
+// resultIsNotAnObject reports whether the top-level result member of obj, a JSON object, holds
+// something other than an object: a list, a number, a string or null. Solana answers
+// getProgramAccounts (without withContext), getSignaturesForAddress and getBlocks with a list,
+// which cannot carry result.context.slot, and gjson would walk every element to find that out.
+// This reads only the members in front of result: "jsonrpc", and "id", which some upstreams
+// (tatum) write first, so a fixed prefix would not do.
+//
+// It answers false whenever it cannot tell cheaply: a member in front of result that holds an
+// object or a list, an escaped member name, no result at all, or bytes that are not a reply. The
+// caller then does the full read, so this only saves work. Two kinds of reply read differently
+// from the path read alone, both as main's decode read them: one with two result members, the
+// first not an object (the first decides; gjson goes on to the second), and bytes that are not
+// valid JSON (no slot; gjson reads leniently and can find one). No node sends either.
+func resultIsNotAnObject(obj []byte) bool {
+	i := 1 // past the opening brace
+	for {
+		i = skipJSONSpace(obj, i)
+		if i >= len(obj) || obj[i] != '"' {
+			return false
+		}
+		nameEnd := bytes.IndexByte(obj[i+1:], '"')
+		if nameEnd < 0 {
+			return false
+		}
+		name := obj[i+1 : i+1+nameEnd]
+		if bytes.IndexByte(name, '\\') >= 0 {
+			return false // an escaped name; leave it to the full read
+		}
+		i = skipJSONSpace(obj, i+nameEnd+2)
+		if i >= len(obj) || obj[i] != ':' {
+			return false
+		}
+		i = skipJSONSpace(obj, i+1)
+		if i >= len(obj) {
+			return false
+		}
+		if string(name) == "result" {
+			return obj[i] != '{'
+		}
+		if i = skipJSONScalar(obj, i); i < 0 {
+			return false
+		}
+		i = skipJSONSpace(obj, i)
+		if i >= len(obj) || obj[i] != ',' {
+			return false // the object ended, or a member was malformed, before result
+		}
+		i++
 	}
-	if slot := *resp.Result.Context.Slot; slot > 0 {
-		return slot, true
+}
+
+// skipJSONSpace returns the index of the first byte at or after i that is not JSON whitespace.
+func skipJSONSpace(b []byte, i int) int {
+	for i < len(b) {
+		switch b[i] {
+		case ' ', '\t', '\r', '\n':
+			i++
+		default:
+			return i
+		}
 	}
-	return 0, false
+	return i
+}
+
+// skipJSONScalar returns the index just past the string, number, true, false or null that
+// starts at b[i]. It returns -1 for an object or a list, which it does not step over, and for a
+// value that is cut short.
+func skipJSONScalar(b []byte, i int) int {
+	switch b[i] {
+	case '{', '[':
+		return -1
+	case '"':
+		for j := i + 1; j < len(b); j++ {
+			switch b[j] {
+			case '\\':
+				j++ // the escaped byte cannot close the string
+			case '"':
+				return j + 1
+			}
+		}
+		return -1
+	}
+	for j := i; j < len(b); j++ {
+		switch b[j] {
+		case ',', '}', ']', ' ', '\t', '\r', '\n':
+			if j == i {
+				return -1
+			}
+			return j
+		}
+	}
+	return -1
 }
 
 // extractBlockHeightFromEVMResponse extracts block height from EVM JSON-RPC responses.
@@ -259,13 +379,13 @@ func extractBlockHeightFromGRPCResponse(
 	// full-size representation, and JSON is several times the width of the packed proto it
 	// came from, so an oversized response multiplies into the router's heap.
 	//
-	// See maxResponseSizeForBlockExtraction for why the cap sits above every legal block
+	// See maxGRPCResponseSizeForBlockExtraction for why the cap sits above every legal block
 	// rather than at some smaller round number. Per-endpoint ChainTracker provides block
 	// tracking independently as a fallback when it does fire.
-	if len(responseData) > maxResponseSizeForBlockExtraction {
+	if len(responseData) > maxGRPCResponseSizeForBlockExtraction {
 		utils.LavaFormatDebug("skipping gRPC block extraction for large response",
 			utils.LogAttr("response_size", len(responseData)),
-			utils.LogAttr("threshold", maxResponseSizeForBlockExtraction),
+			utils.LogAttr("threshold", maxGRPCResponseSizeForBlockExtraction),
 			utils.LogAttr("method", chainMessage.GetApi().Name),
 		)
 		return 0
@@ -273,7 +393,7 @@ func extractBlockHeightFromGRPCResponse(
 
 	// Get parse directive from chain message (contains spec-defined parsing rules)
 	parseDirective := chainMessage.GetParseDirective()
-	if parseDirective == nil {
+	if parseDirective == nil || resultRuleReadsBlockHash(parseDirective) {
 		return 0
 	}
 
@@ -681,6 +801,16 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		)
 	}
 
+	// Let the chain message parse domain-specific REST errors (e.g. Cosmos tx errors on HTTP 200),
+	// and say which 4xx are the caller's answer and which are a refused route.
+	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
+	if hasError && errorMessage != "" {
+		utils.LavaFormatDebug("REST response contains error",
+			utils.LogAttr("endpoint", d.endpointName),
+			utils.LogAttr("error", errorMessage),
+		)
+	}
+
 	// Proper error classification (don't treat all 4xx as node errors)
 	var isNodeError bool
 	switch {
@@ -689,19 +819,16 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	case response.StatusCode == 429:
 		isNodeError = false // Rate limit (not node issue)
 	case response.StatusCode >= 400:
-		isNodeError = false // Client error
+		// A 4xx is the caller's answer, passed through — unless the message's classifier says the
+		// route was refused (any 405, or a 404 without a JSON body), in which case the endpoint
+		// never served the request. One rule, owned by CheckResponseError, so this flag and the
+		// relay processor's verdict cannot disagree: this flag is what gates the
+		// lava-identified-node-error header and the cache write.
+		isNodeError = hasError
 	default:
-		isNodeError = false // Success
-	}
-
-	// Let the chain message parse domain-specific REST errors (e.g. Cosmos tx errors on HTTP 200).
-	// NOTE: This should NOT be treated as "node error" by default; it is typically a request/application error.
-	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
-	if hasError && errorMessage != "" {
-		utils.LavaFormatDebug("REST response contains error",
-			utils.LogAttr("endpoint", d.endpointName),
-			utils.LogAttr("error", errorMessage),
-		)
+		// A 2xx carrying an application error in its body (a Cosmos tx_response.code) is NOT a
+		// node error at the transport level; it is a request/application error.
+		isNodeError = false
 	}
 
 	// Convert response headers to metadata

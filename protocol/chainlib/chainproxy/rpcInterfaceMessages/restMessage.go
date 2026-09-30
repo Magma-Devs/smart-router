@@ -59,6 +59,11 @@ func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 		return true, extractErrorMessage(data, httpStatusCode)
 	}
 
+	// A refused route is not the node answering. See isRouteRefusal.
+	if isRouteRefusal(httpStatusCode, data) {
+		return true, extractErrorMessage(data, httpStatusCode)
+	}
+
 	// Check Cosmos SDK transaction errors (HTTP 2xx with error code in JSON body)
 	if httpStatusCode >= 200 && httpStatusCode < 300 {
 		if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
@@ -67,8 +72,36 @@ func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 		return false, ""
 	}
 
-	// 4xx (except 429) are client errors — not node errors, pass through to consumer
+	// Any other 4xx is the caller's answer — not a node error, passed through to the consumer.
 	return false, ""
+}
+
+// isRouteRefusal reports a reply saying the request was never executed: any 405, or a 404 whose
+// body is not JSON.
+//
+// A 405 never carries what the caller asked for, whoever sends it — a node's own router (Horizon
+// answers a wrong method with an empty 405) or the framework behind it (Aptos answers with a JSON
+// "method not allowed"). A 404 is different: a node that answers 404 does so with a problem
+// document — Horizon, Aptos and the Cosmos gRPC-gateway all send JSON — and that answer is data
+// the caller asked for (an unfunded account, a missing resource). An empty or non-JSON 404 is the
+// gateway in front of the node refusing the route: the endpoint never served the request.
+//
+// The distinction is load-bearing on a stateful broadcast, where the first success ends the
+// fan-out. Counted as a success, a gateway's instant empty 404 was returned to the caller while a
+// sibling upstream was still executing the same write, which it then broadcast anyway. The
+// registry already classifies both codes as non-retryable and not the endpoint's fault, so a read
+// that meets one is still returned as-is, and nothing is scored against the endpoint.
+//
+// Known gap: a gateway that refuses a route with a JSON body (Kong's "no Route matched") still
+// reads as the node's answer. Telling that apart needs a signal the body shape cannot give.
+func isRouteRefusal(httpStatusCode int, data []byte) bool {
+	switch httpStatusCode {
+	case 405:
+		return true
+	case 404:
+		return !json.Valid(data)
+	}
+	return false
 }
 
 // checkCosmosTxError detects errors in Cosmos SDK transaction responses
