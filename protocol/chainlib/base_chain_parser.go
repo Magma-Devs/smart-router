@@ -111,6 +111,34 @@ func (bcp *BaseChainParser) UpdateBlockTime(newBlockTime time.Duration) {
 	bcp.spec.AverageBlockTime = newBlockTime.Milliseconds()
 }
 
+// clientBodyHeaders are the request headers that describe the body the client authored.
+// The REST interface forwards that body to the node byte-for-byte, so the client's own
+// description of it is the correct one and is forwarded without a spec directive
+// (MAG-2745). Before this, an undeclared content-type was dropped here and the hardcoded
+// application/json default reached the node instead, so every REST chain whose node
+// takes a non-JSON body needed a per-spec pass_send/pass_override to work at all.
+//
+// JSON-RPC and tendermint re-marshal the body the router sends, so application/json
+// stays theirs; gRPC's content-type is transport-owned (see grpc.go). And only the
+// methods that carry a body qualify: on a GET there is nothing to describe, and the
+// header would only fragment the cache key, which hashes the forwarded metadata.
+var clientBodyHeaders = map[string]struct{}{"content-type": {}}
+
+// forwardsClientBodyHeader reports whether lowercase headerName is a client body header
+// that is forwarded for this collection without a spec directive.
+func forwardsClientBodyHeader(apiCollection *spectypes.ApiCollection, headerName string) bool {
+	if apiCollection.CollectionData.ApiInterface != spectypes.APIInterfaceRest {
+		return false
+	}
+	switch apiCollection.CollectionData.Type {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
+	default:
+		return false
+	}
+	_, ok := clientBodyHeaders[headerName]
+	return ok
+}
+
 func (bcp *BaseChainParser) HandleHeaders(metadata []pairingtypes.Metadata, apiCollection *spectypes.ApiCollection, headersDirection spectypes.Header_HeaderType) (filteredHeaders []pairingtypes.Metadata, overwriteRequestedBlock string, ignoredMetadata []pairingtypes.Metadata) {
 	bcp.rwLock.RLock()
 	defer bcp.rwLock.RUnlock()
@@ -123,7 +151,12 @@ func (bcp *BaseChainParser) HandleHeaders(metadata []pairingtypes.Metadata, apiC
 		apiKey := ApiKey{Name: headerName, ConnectionType: apiCollection.CollectionData.Type}
 		headerDirective, ok := bcp.headers[apiKey]
 		if !ok {
-			// this header is not handled
+			// Undeclared. A client body header on a REST body is forwarded anyway; a spec
+			// that declares the name keeps its exact say, and a pass_override or
+			// pass_nullify is appended below and so wins when the request reaches the wire.
+			if headersDirection == spectypes.Header_pass_send && header.Value != "" && forwardsClientBodyHeader(apiCollection, headerName) {
+				retMetadata = append(retMetadata, header)
+			}
 			continue
 		}
 		if headerDirective.Kind == headersDirection || headerDirective.Kind == spectypes.Header_pass_both {
