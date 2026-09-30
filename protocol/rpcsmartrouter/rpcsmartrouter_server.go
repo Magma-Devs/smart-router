@@ -98,6 +98,10 @@ type RPCSmartRouterServer struct {
 	// Largest reply body tryCacheWriteResolved writes (--cache-max-entry-bytes); 0 = no cap.
 	cacheMaxEntryBytes int64
 
+	// Read-your-writes pins (MAG-4032, --read-your-writes-window). Nil — off — unless this
+	// listener is JSON-RPC and the window is positive.
+	readYourWrites *readYourWrites
+
 	// Per-endpoint ChainTracker manager for continuous block polling
 	endpointChainTrackerManager *endpointstate.EndpointMonitor
 
@@ -156,6 +160,9 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.secondaryCache = secondaryCache
 	rpcss.secondaryCacheTimeout = secondaryCacheTimeout
 	rpcss.cacheMaxEntryBytes = cacheMaxEntryBytes
+	if listenEndpoint.ApiInterface == spectypes.APIInterfaceJsonRPC {
+		rpcss.readYourWrites = newReadYourWrites(cmdFlags.ReadYourWritesWindow)
+	}
 	rpcss.rpcSmartRouterLogs = rpcSmartRouterLogs
 	rpcss.chainParser = chainParser
 	rpcss.sharedState = sharedState
@@ -1306,6 +1313,12 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	}
 	if err != nil {
 		return returnedResult, utils.LavaFormatError("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
+	}
+
+	// MAG-4032: pin what a served write names to the upstream that accepted it, before the caller
+	// can read it back. A node error is a refusal, not an acceptance.
+	if returnedResult != nil && returnedResult.Reply != nil && !returnedResult.IsNodeError {
+		rpcss.readYourWrites.recordWrite(protocolMessage, returnedResult.GetProvider(), returnedResult.Reply.Data)
 	}
 
 	if analytics != nil {
@@ -4356,8 +4369,46 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		}
 	}
 
+	// MAG-4032: a pending-nonce read or a transaction lookup that names a write this router just
+	// served goes to the upstream that accepted the write. The caller's own directives outrank
+	// it, cross-validation needs more than one upstream, and like the directives it holds for the
+	// first attempt only.
+	readYourWritesPin := ""
+	if selectedProvider == "" && stickiness == "" && selection != relaycore.CrossValidation && usedProviders.BatchNumber() == 0 {
+		if pin := rpcss.readYourWrites.pinFor(protocolMessage); pin != "" {
+			if rpcss.sessionManager.CanServeNow(pin, addon, common.GetExtensionNames(extensions), ctx) {
+				readYourWritesPin = pin
+				selectedProvider = pin
+				utils.LavaFormatDebug("read-your-writes: routing to the upstream that accepted the write",
+					utils.LogAttr("upstream", pin),
+					utils.LogAttr("api", protocolMessage.GetApi().GetName()),
+					utils.LogAttr("GUID", ctx),
+				)
+			} else {
+				utils.LavaFormatDebug("read-your-writes: the upstream that accepted the write cannot take this read, selecting normally",
+					utils.LogAttr("upstream", pin),
+					utils.LogAttr("api", protocolMessage.GetApi().GetName()),
+					utils.LogAttr("GUID", ctx),
+				)
+			}
+		}
+	}
+
 	_, sessSpan := tracing.StartInternalSpan(ctx, tracing.SpanGetSessions)
 	sessions, err := rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, extensions, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider, sessionOpts)
+	if readYourWritesPin != "" && (errors.Is(err, lavasession.SelectedProviderUnavailableError) || errors.Is(err, lavasession.SelectedProviderAlreadyFailedError)) {
+		// A read-your-writes pin is the router's preference, not the caller's demand: an upstream
+		// that passed CanServeNow and still cannot take the read — no connection up, or blocked
+		// since — gives way to ordinary selection instead of failing the read the way a header pin
+		// does. A failed selection adds nothing to usedProviders, so asking again is clean.
+		utils.LavaFormatDebug("read-your-writes: upstream cannot take the read, selecting normally",
+			utils.LogAttr("upstream", readYourWritesPin),
+			utils.LogAttr("error", err),
+			utils.LogAttr("GUID", ctx),
+		)
+		selectedProvider = ""
+		sessions, err = rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, extensions, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider, sessionOpts)
+	}
 	tracing.RecordSessionStats(sessSpan, numOfEndpoints, len(sessions))
 	if err != nil {
 		tracing.RecordError(sessSpan, err)
