@@ -300,6 +300,20 @@ func TestRESTRelay_400_RejectedWrite_IsANodeError(t *testing.T) {
 	assert.Contains(t, string(result.Reply.Data), "tx_bad_seq")
 }
 
+// TestRESTRelay_409_Duplicate_IsANodeErrorNotScored: Horizon answers a transaction it already has
+// with 409 {"tx_status":"DUPLICATE"}. A node error (so on a broadcast the sibling's 201 wins),
+// classified as "already known": non-retryable, never the endpoint's fault, not scored.
+func TestRESTRelay_409_Duplicate_IsANodeErrorNotScored(t *testing.T) {
+	result := sendRESTThroughMockUpstream(t, http.StatusConflict, `{"tx_status":"DUPLICATE","hash":"f39835424ff755846b5982836812ee08f29df926fb87bf48be2048231a99dc24"}`)
+
+	assert.Equal(t, http.StatusConflict, result.StatusCode)
+	assert.True(t, result.IsNodeError)
+	assert.True(t, result.IsNonRetryable)
+	assert.False(t, result.IsNodeAtFault)
+	assert.False(t, shouldFailSessionForResult(nil, result), "a duplicate is not the endpoint's fault")
+	assert.Contains(t, string(result.Reply.Data), "DUPLICATE")
+}
+
 // TestRESTRelay_410_Pruned_IsRetriedElsewhere: Aptos and Horizon answer 410 for data the node no
 // longer holds. The registry's new 410 row makes it data-scope: retryable on an archive node, and
 // not the endpoint's fault.

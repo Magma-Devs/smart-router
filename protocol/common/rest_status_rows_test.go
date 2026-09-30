@@ -21,6 +21,7 @@ func TestRESTStatusRowsAreRESTOnly(t *testing.T) {
 		{403, LavaErrorNodeUnauthorized},
 		{410, LavaErrorChainStatePruned},
 		{422, LavaErrorUserInvalidParams},
+		{409, LavaErrorChainTxAlreadyKnown},
 	}
 	for _, tc := range cases {
 		rest := ClassifyError(nil, ChainFamilyUnknown, TransportREST, tc.status, "HTTP 400: whatever the body said")

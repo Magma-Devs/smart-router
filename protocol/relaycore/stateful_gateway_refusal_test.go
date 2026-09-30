@@ -121,3 +121,49 @@ func TestStatefulBroadcastWaitsThroughProblemDocumentToo(t *testing.T) {
 	require.Equal(t, http.StatusOK, returnedResult.StatusCode)
 	require.Equal(t, "node@test", returnedResult.ProviderInfo.ProviderAddress)
 }
+
+// TestStatefulBroadcastPrefersTheHashOverDuplicate: a write goes to every node; the one that
+// broadcasts it answers 201 with the transaction hash, the others answer 409 DUPLICATE because the
+// transaction is already known. The caller must see the 201, even when the 409s arrive first.
+func TestStatefulBroadcastPrefersTheHashOverDuplicate(t *testing.T) {
+	relayProcessor := newStatefulRestProcessor(t)
+
+	duplicate := `{"tx_status":"DUPLICATE","hash":"f398"}`
+	pending := `{"tx_status":"PENDING","hash":"f398"}`
+	go sendRestReply(relayProcessor, "gateway@test", 5*time.Millisecond, http.StatusConflict, duplicate)
+	go sendRestReply(relayProcessor, "node@test", 60*time.Millisecond, http.StatusCreated, pending)
+
+	shortCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	require.Error(t, relayProcessor.WaitForResults(shortCtx), "a 409 DUPLICATE ended the wait — it was counted as the answer")
+
+	longCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	require.NoError(t, relayProcessor.WaitForResults(longCtx))
+	returnedResult, err := relayProcessor.ProcessingResult()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, returnedResult.StatusCode)
+	require.Equal(t, pending, string(returnedResult.Reply.Data))
+	require.Equal(t, "node@test", returnedResult.ProviderInfo.ProviderAddress)
+}
+
+// TestStatefulBroadcastAllDuplicateReturnsTheDuplicate: a client re-sends a transaction that is
+// already known everywhere. Every node answers 409 DUPLICATE, and the caller sees that answer as-is.
+func TestStatefulBroadcastAllDuplicateReturnsTheDuplicate(t *testing.T) {
+	relayProcessor := newStatefulRestProcessor(t)
+
+	duplicate := `{"tx_status":"DUPLICATE","hash":"f398"}`
+	go sendRestReply(relayProcessor, "gateway@test", 5*time.Millisecond, http.StatusConflict, duplicate)
+	go sendRestReply(relayProcessor, "node@test", 20*time.Millisecond, http.StatusConflict, duplicate)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	require.NoError(t, relayProcessor.WaitForResults(ctx), "both answered, nothing left in flight")
+	hasResults, _ := relayProcessor.HasRequiredNodeResults(1)
+	require.False(t, hasResults, "two duplicates are not a success")
+
+	returnedResult, err := relayProcessor.ProcessingResult()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusConflict, returnedResult.StatusCode)
+	require.Equal(t, duplicate, string(returnedResult.Reply.Data))
+}
