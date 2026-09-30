@@ -112,7 +112,8 @@ merely implemented:
   carrying the entry's true state. A cached node error or an error status is
   served to the caller but rejected for backfill by that component's own
   rules — so the two tiers can never drift apart in what they consider
-  cacheable.
+  cacheable. The same holds for size: with
+  `--cache-max-entry-bytes` set, a hit larger than it is served but not backfilled.
 
 ## Configuration
 
@@ -141,11 +142,14 @@ secondary-cache-mode: read-only     # optional (the default and only mode)
 Configuration comes from flags or the YAML config file (an explicitly passed
 flag overrides the YAML value). Environment variables are not supported.
 
-The router fails fast on misconfiguration: a timeout or mode set *without* an
-address, a zero/negative timeout, or `read-write` mode all abort startup with a
-clear error. It warns (but starts) when the secondary equals the primary
-address, or when a secondary is configured with no primary. When enabled, the
-startup log prints the full secondary configuration on one line.
+Once an address is set, the router fails fast on misconfiguration: a
+zero/negative timeout or `read-write` mode aborts startup with a clear error. It
+warns (but starts) when a timeout or mode is set *without* an address — the
+secondary is left disabled; see [Bonus — misconfiguration is caught at
+startup](#bonus--misconfiguration-is-caught-at-startup) for why — when the
+secondary equals the primary address, or when a secondary is configured with no
+primary. When enabled, the startup log prints the full secondary configuration
+on one line.
 
 Removing the configuration fully reverts the router to single-cache behavior;
 with no secondary configured, behavior is unchanged from previous releases.

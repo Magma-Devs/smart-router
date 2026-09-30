@@ -322,10 +322,17 @@ smartrouter config.yml --use-static-spec specs/
 
 ```bash
 --cache-be "127.0.0.1:7778"          # Enable caching
+--cache-max-entry-bytes 1048576      # Largest reply written to the cache (off by default)
 --strategy balanced                   # Provider selection strategy
 --metrics-listen-address ":7779"     # Prometheus metrics
 --log_level debug                    # Log verbosity
 ```
+
+The cap is off unless the flag carries a value. With one set, a reply larger than it is served
+but not written to the cache, on either backend: encoding a multi-MB entry costs the router and
+the cache more than its rare hits save. 1 MiB fits Solana `getBlock` replies (1.6–7 MB, hit about
+16% of the time). On ETH and Base, `eth_getBlockReceipts` replies run up to and past 1 MiB, so a
+cap that low there cuts those entries; size the cap per chain from `smartrouter_cache_entry_bytes`.
 
 ### Request tracing headers
 

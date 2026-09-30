@@ -67,6 +67,11 @@ func (ext *RPCStaticProviderEndpoint) Validate() error {
 	if ext.ApiInterface == "" {
 		return fmt.Errorf("provider api-interface cannot be empty")
 	}
+	for i := range ext.NodeUrls {
+		if err := ext.NodeUrls[i].ValidateAcceptEncoding(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
