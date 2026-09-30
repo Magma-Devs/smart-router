@@ -292,8 +292,10 @@ func (rpccl *RPCConsumerLogs) AddMetricForGrpc(data *RelayMetrics, err error, me
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
 	refererHeaderValue := getMetadataHeaderOrDefault(RefererHeaderKey)
 	userAgentHeaderValue := getMetadataHeaderOrDefault(UserAgentHeaderKey)
-	// gRPC metadata values can alias the receive buffer; detach before the
-	// value crosses into the async OTel emit path.
+	// Origin crosses into the async OTel emit path, so it must be an owned string. It is one
+	// already on every listener: the HTTP listeners hand over chainlib's detached copy of fiber's
+	// zero-copy headers, and grpc-go's transport allocates a string for every metadata value it
+	// decodes. The clone stays as a cheap guard at the boundary (MAG-3881).
 	data.Origin = strings.Clone(getMetadataHeaderOrDefault(OriginHeaderKey))
 	rpccl.usageSink.Emit(NewRelayUsageEvent(data))
 	if rpccl.StoreMetricData && rpccl.shouldCountMetrics(refererHeaderValue, userAgentHeaderValue) {
