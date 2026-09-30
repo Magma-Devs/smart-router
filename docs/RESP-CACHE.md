@@ -404,23 +404,32 @@ polls would look healthy *because of* the first poll.
 
 ## Block-hash to height mappings
 
-The cache has a keyspace for which block a hash belongs to (`h2h:` keys), with its own lifetime,
-`expiration.blocks-hashes-to-heights` (the sidecar's `--expiration-blocks-hashes-to-heights`).
-The router writes no mappings, so the keyspace stays empty and the setting governs nothing on it
-(MAG-3807). No request is routed by a mapping either. A lookup asks only for the hashes a spec's
-`BLOCK_HASH` parser finds, and a request whose parser finds one parses to no block number, which
-the router serves without a cache lookup.
+The cache has a keyspace for which block a hash belongs to (`h2h:` keys), with its own
+lifetime, `expiration.blocks-hashes-to-heights` (the sidecar's
+`--expiration-blocks-hashes-to-heights`). The router writes no mappings, so the keyspace stays
+empty and the setting governs nothing on it (MAG-3807). No request is routed by a mapping
+either. A lookup asks only for the hashes a spec's `BLOCK_HASH` parser finds, and a request
+whose parser finds one parses to no block number, which the router serves without a cache
+lookup. That rule rests on parser order inside a spec: BTC's `getblockstats` lists a
+`BLOCK_HASH` parser before a `BLOCK_LATEST` one on the same argument, so a hash argument takes
+no lookup and a height argument does. `TestBTCGetblockstatsHashArgumentTakesNoCacheLookup`
+(`protocol/chainlib`) pins that order.
 
-A state replay that names an old block by hash, such as `debug_traceTransaction`, therefore goes
-to whichever endpoint selection picks, and reaches an archive node only when a retry adds archive.
-Routing it to archive by a known height is tracked in MAG-3892.
+A state replay that names an old transaction or block by hash therefore goes to whichever
+endpoint selection picks, and reaches an archive node only when a retry adds archive. Of the
+bundled replays, `trace_transaction` and `trace_replayTransaction` are the hash-parsed ones;
+`debug_traceTransaction` has no `BLOCK_HASH` parser, resolves to `latest` and does take a
+lookup, with an empty hash list, and ends in the same place. The retry route is itself going
+away: open PR #389 (stop rewriting the request on retry) removes it, after which nothing routes
+such a replay to archive. Routing it there by a known height is MAG-3892.
 
 ## Sharing a backend between routers
 
 A keyspace is one cache. Every router in it reads and writes the same entries, resolves
 `latest` / `safe` / `finalized` / `pending` through the same chain tip, and — under
-`--shared-state` — shares the same seen-block and sticky-session claims. That is exactly right for **replicas of one deployment**: they read
-the same nodes, so an answer one of them cached is the answer any of them would have fetched.
+`--shared-state` — shares the same seen-block and sticky-session claims. That is exactly right
+for **replicas of one deployment**: they read the same nodes, so an answer one of them cached is
+the answer any of them would have fetched.
 
 It is wrong for two routers that declare the same chain but read **different nodes** — a
 paid tier beside a free one, a canary beside production, a router being migrated onto a new
