@@ -78,11 +78,18 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
 > is needed for this; `forbid-caller-cv: true` is what an operator reaches for on a **stateless**
 > method they want protected from caller-driven cross-validation.
 >
-> Two consequences worth knowing. The four cosmos `tx` endpoints that carry the stateful
-> category without broadcasting anything (`encode`, `encode/amino`, `decode`, `simulate`) are
-> covered by the same rule and so cannot be cross-validated by a caller either. And the rule is
-> only as complete as the spec: a submit endpoint the spec does not mark stateful — Aptos
-> `POST /transactions` today — is not covered.
+> Four consequences worth knowing. The four cosmos `tx` **REST** endpoints that carry the
+> stateful category without broadcasting anything (`/cosmos/tx/v1beta1/encode`, `encode/amino`,
+> `decode`, `simulate`) are covered by the same rule and so cannot be cross-validated by a caller
+> either — and the split is per interface, not per operation: the spec marks the gRPC
+> `cosmos.tx.v1beta1.Service/Simulate` `stateful: 0`, so a caller keeps cross-validating
+> simulate on gRPC and loses it on REST. A malformed header pair on a stateful method (a value
+> that does not parse, one header without its companion, a threshold above `max-participants`)
+> used to refuse the request before anything was dispatched; it is now ignored like a well-formed
+> pair, and the request goes out as a write. A `forbid-caller-cv: true` policy written on a
+> stateful method under the earlier advice is now redundant; it still loads and is harmless. And
+> the rule is only as complete as the spec: a submit endpoint the spec does not mark stateful —
+> Aptos `POST /transactions` today — is not covered.
 
 ### Provider group labels
 
@@ -144,7 +151,7 @@ cross-validation:
 | Knob | Meaning |
 | --- | --- |
 | `enabled` | `true` mandates CV for this method even with no caller headers. |
-| `forbid-caller-cv` | `true` disables CV for this method: the caller's CV headers are ignored and the method routes by its normal category. Mutually exclusive with `enabled` (rejected at startup if both set); the other knobs are ignored when set. |
+| `forbid-caller-cv` | `true` disables CV for this method: the caller's CV headers are ignored and the method routes by its normal category. Mutually exclusive with `enabled` (rejected at startup if both set); the other knobs are ignored when set. Redundant on a stateful method, which ignores the headers on its own (MAG-3603); such an entry still loads and is harmless. |
 | `max-participants` | How many providers to fan out to. |
 | `agreement-threshold` | How many identical responses form a quorum (in per-group mode, *within each group*). |
 | `min-groups` | Distinct provider groups the quorum must span (`1` = no diversity requirement). |

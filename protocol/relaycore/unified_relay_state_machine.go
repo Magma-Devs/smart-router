@@ -199,7 +199,12 @@ func NewUnifiedRelayStateMachine(
 		// already refuses an operator's cross-validation policy on every stateful method, those
 		// four included (ValidateNoStatefulPolicies, which fails closed), so keying on the
 		// category keeps one definition of the boundary instead of two that can drift. A
-		// narrower rule would need a signal the spec does not carry.
+		// narrower rule would need a signal the spec does not carry. That one definition is
+		// only as consistent as the spec that carries it: specs/cosmossdk.json marks the REST
+		// /cosmos/tx/v1beta1/simulate stateful:1 and the gRPC cosmos.tx.v1beta1.Service/Simulate
+		// stateful:0, so a caller keeps cross-validating simulate on gRPC and loses it on REST.
+		// Keying on the category inherits that mismark rather than avoiding it, and the repair
+		// is the spec's, not this branch's.
 		//
 		// This is also exactly as complete as the spec data: a submit endpoint the spec does not
 		// mark stateful is not covered. specs/aptos.json marks POST /transactions and
