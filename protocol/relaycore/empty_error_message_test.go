@@ -16,11 +16,11 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
-// sendJsonrpcReply hands the processor a completed JSON-RPC attempt: HTTP 200, the status a
+// deliverJsonrpcReply hands the processor a completed JSON-RPC attempt: HTTP 200, the status a
 // JSON-RPC node answers with whether or not it failed, leaving the verdict to the message's
-// CheckResponseError.
-func sendJsonrpcReply(relayProcessor *RelayProcessor, provider string, delay time.Duration, body string) {
-	time.Sleep(delay)
+// CheckResponseError. SetResponse writes to a buffered channel, so the caller decides the order
+// replies arrive in rather than racing timers against WaitForResults.
+func deliverJsonrpcReply(relayProcessor *RelayProcessor, provider string, body string) {
 	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
 	relayProcessor.SetResponse(&RelayResponse{
 		RelayResult: common.RelayResult{
@@ -36,7 +36,7 @@ func sendJsonrpcReply(relayProcessor *RelayProcessor, provider string, delay tim
 }
 
 // TestReadWaitsThroughEmptyMessageError reproduces MAG-3991: a read is in flight at two nodes, one
-// answers at once with a JSON-RPC error whose message is empty, and a healthy one answers later. The
+// answers first with a JSON-RPC error whose message is empty, and a healthy one answers after it. The
 // error is not an answer, so the read must keep waiting and return the healthy node's result. Before
 // the fix the processor counted the error as the success a read needs and returned it to the caller.
 func TestReadWaitsThroughEmptyMessageError(t *testing.T) {
@@ -53,20 +53,27 @@ func TestReadWaitsThroughEmptyMessageError(t *testing.T) {
 	usedProviders := lavasession.NewUsedProviders(nil)
 	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateless))
 
-	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
-	defer cancel()
-	require.Nil(t, usedProviders.TryLockSelection(lockCtx))
+	// Nothing else contends for the selection lock, so it is taken at once; a short deadline here
+	// would only add a way to fail on a loaded machine.
+	require.NoError(t, usedProviders.TryLockSelection(ctx))
 	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{"empty-error@test": &lavasession.SessionInfo{}, "healthy@test": &lavasession.SessionInfo{}}, nil)
 
-	healthy := `{"jsonrpc":"2.0","id":1,"result":"0x0"}`
-	go sendJsonrpcReply(relayProcessor, "empty-error@test", 5*time.Millisecond, `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":""}}`)
-	go sendJsonrpcReply(relayProcessor, "healthy@test", 80*time.Millisecond, healthy)
-
-	// The window closes after the empty-message error and before the healthy answer. Waiting must
-	// not end here: the error is a node error, and a healthy node is still answering.
-	shortCtx, cancel := context.WithTimeout(ctx, 40*time.Millisecond)
-	defer cancel()
-	require.Error(t, relayProcessor.WaitForResults(shortCtx), "an empty-message error ended the read — it was counted as the answer")
+	// Only the empty-message error has arrived, so nothing but that error can end a wait now. Each
+	// wait must run out its deadline instead: the error is a node error, and the healthy node has yet
+	// to answer. Waiting again until the error has been read keeps a wait whose deadline fired before
+	// it read the buffered reply from passing without ever judging it.
+	deliverJsonrpcReply(relayProcessor, "empty-error@test", `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":""}}`)
+	readDeadline := time.Now().Add(5 * time.Second)
+	for {
+		waitCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		err := relayProcessor.WaitForResults(waitCtx)
+		cancel()
+		require.Error(t, err, "an empty-message error ended the read — it was counted as the answer")
+		if _, nodeErrors, _, _ := relayProcessor.GetResults(); nodeErrors > 0 {
+			break
+		}
+		require.True(t, time.Now().Before(readDeadline), "the empty-message error was never read")
+	}
 	hasResults, _ := relayProcessor.HasRequiredNodeResults(1)
 	require.False(t, hasResults, "an empty-message error satisfied the read")
 	successes, nodeErrors, _, protocolErrors := relayProcessor.GetResults()
@@ -74,10 +81,13 @@ func TestReadWaitsThroughEmptyMessageError(t *testing.T) {
 	require.Equal(t, 1, nodeErrors)
 	require.Equal(t, 0, protocolErrors)
 
-	// Now the healthy node answers, and that answer is the one returned.
-	longCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	// Now the healthy node answers, and that answer is the one returned. The deadline only bounds a
+	// failure: the wait returns as soon as it reads the answer.
+	healthy := `{"jsonrpc":"2.0","id":1,"result":"0x0"}`
+	deliverJsonrpcReply(relayProcessor, "healthy@test", healthy)
+	answerCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	require.NoError(t, relayProcessor.WaitForResults(longCtx))
+	require.NoError(t, relayProcessor.WaitForResults(answerCtx))
 	hasResults, _ = relayProcessor.HasRequiredNodeResults(1)
 	require.True(t, hasResults)
 
