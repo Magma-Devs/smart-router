@@ -96,13 +96,23 @@ func NewConnector(ctx context.Context, nConns uint, nodeUrl common.NodeUrl) (*Co
 	}
 
 	connector.client = rpcClient
-	utils.LavaFormatInfo("Created HTTP connector with shared client",
+	utils.LavaFormatInfo("Created "+connectorTransport(nodeUrl.Url)+" connector with shared client",
 		utils.Attribute{Key: "url", Value: connector.nodeUrl.String()})
 
 	// Start the connector loop to handle graceful shutdown
 	go connector.connectorLoop(ctx)
 
 	return connector, nil
+}
+
+// connectorTransport names what a connector dials, for its log lines: rpcclient
+// dials a ws(s) url as a websocket and anything else over HTTP.
+func connectorTransport(rawURL string) string {
+	lower := strings.ToLower(rawURL)
+	if strings.HasPrefix(lower, "ws://") || strings.HasPrefix(lower, "wss://") {
+		return "WebSocket"
+	}
+	return "HTTP"
 }
 
 func (connector *Connector) getRpcClient(ctx context.Context, nodeUrl common.NodeUrl) (*rpcclient.Client, error) {
@@ -147,7 +157,7 @@ func (connector *Connector) createConnection(ctx context.Context, nodeUrl common
 
 func (connector *Connector) connectorLoop(ctx context.Context) {
 	<-ctx.Done()
-	utils.LavaFormatDebug("HTTP connector shutting down", utils.Attribute{Key: "url", Value: connector.nodeUrl.String()})
+	utils.LavaFormatDebug(connectorTransport(connector.nodeUrl.Url)+" connector shutting down", utils.Attribute{Key: "url", Value: connector.nodeUrl.String()})
 	connector.Close()
 }
 

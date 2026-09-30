@@ -2,8 +2,6 @@ package rpcsmartrouter
 
 import (
 	"context"
-	"errors"
-	"strings"
 	"sync"
 	"time"
 
@@ -83,6 +81,14 @@ type chainReverifyInputs struct {
 	// It returns true when the admitted set actually moved, which is what tells
 	// applyReverification to rebuild that provider's session.
 	recordAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool
+	// recordReverifiedAdmission is recordAdmission for an epoch pass: a url that
+	// fails for the first time keeps its place until it has failed
+	// reverifyDemoteThreshold passes running. Nil falls back to recordAdmission.
+	recordReverifiedAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool
+	// admissionFor reads the admission last published for a provider, so the
+	// subscription tiers leave out the urls it refused and a rate-limited pass can
+	// keep what the last one knew. Nil in tests that do not build endpoints.
+	admissionFor func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission
 	// demoteFailStreak counts CONSECUTIVE failed re-verify cycles per active provider, keyed
 	// "<tier>|<name>" so a name configured in both tiers cannot share a counter. It is the only
 	// state that survives between epoch ticks, and it exists so a transient outage overlapping
@@ -110,43 +116,15 @@ func holdoffURLKey(p *lavasession.RPCStaticProviderEndpoint) string {
 	return p.Name
 }
 
-// rateLimitTextSignatures covers the one transport where no status code exists to check.
-//
-// Every HTTP-family transport reaches us as common.StatusCodeError429 — ValidateStatusCodes
-// mints it, each proxy propagates it as LavaFormat's cause, so Unwrap survives and errors.Is
-// below is the real check. gRPC is different in kind: there is no HTTP status in the error at
-// all. grpc-go reports codes.Unavailable and the vendor's 429 survives only inside the status
-// description, so there is nothing structural to match on.
-//
-// Verbatim from a production failure. Keep this list minimal — a new entry here is usually a
-// signal that some path is discarding a typed error, which is worth fixing at the source
-// instead.
-var rateLimitTextSignatures = []string{
-	"429 (Too Many Requests)", // grpc transport: no status code, only the status description
-}
-
 // isRateLimitFailure reports whether a failed validation was the upstream refusing us for
 // asking too fast, rather than the upstream being unable to serve what it declares.
 //
 // The distinction is already settled elsewhere in this codebase — see the IsRateLimited
 // comment on common.RelayResult: "the endpoint is healthy but busy. Callers back off but
 // must not mark it unhealthy, which is why the direct-RPC availability gate excludes it."
-// The relay path honours that; re-verification did not, and a rate-limited probe demoted
-// providers that were serving traffic perfectly well.
+// The relay path honours that; re-verification does too.
 func isRateLimitFailure(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, common.StatusCodeError429) {
-		return true
-	}
-	msg := err.Error()
-	for _, sig := range rateLimitTextSignatures {
-		if strings.Contains(msg, sig) {
-			return true
-		}
-	}
-	return false
+	return chainlib.IsRateLimitFailure(err)
 }
 
 // applyReverification revalidates configured providers for one tier and
@@ -205,31 +183,42 @@ func applyReverification(
 	var admissionMovedMu sync.Mutex
 	admissionMoved := map[string]struct{}{}
 
-	probe := inputs.validateFn
-	if probe == nil {
-		probe = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
-			// Per-collection here too (MAG-3326). With the all-or-nothing Validate
-			// this path re-probed the UNSTRIPPED config every tick, failed on the
-			// same refused service, and demoted the whole provider once
-			// demoteFailStreak reached reverifyDemoteThreshold — undoing the boot
-			// admission about two ticks after boot, into a worse state than before.
-			//
-			// Recording the fresh admission on every tick is also what keeps a
-			// refusal from outliving the failure that caused it: a service that
-			// recovers is re-admitted at the next tick instead of staying refused
-			// until the process restarts.
-			admission, err := validateProviderCollections(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
-			if err != nil {
-				return err
-			}
-			if inputs.recordAdmission != nil && inputs.recordAdmission(p, admission) {
-				// Probes run concurrently, so the set of movers is guarded.
-				admissionMovedMu.Lock()
-				admissionMoved[p.Name] = struct{}{}
-				admissionMovedMu.Unlock()
-			}
-			return nil
+	// probe returns the validation's error, and the rate limit a pass that otherwise
+	// succeeded met on part of the provider.
+	probe := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) (err, throttle error) {
+		if inputs.validateFn != nil {
+			return inputs.validateFn(c, p), nil
 		}
+		// Per-collection here too (MAG-3326). With the all-or-nothing Validate
+		// this path re-probed the UNSTRIPPED config every tick, failed on the
+		// same refused service, and demoted the whole provider once
+		// demoteFailStreak reached reverifyDemoteThreshold — undoing the boot
+		// admission about two ticks after boot, into a worse state than before.
+		//
+		// Recording the fresh admission on every tick is also what keeps a
+		// refusal from outliving the failure that caused it: a service that
+		// recovers is re-admitted at the next tick instead of staying refused
+		// until the process restarts.
+		admission, err := validateProviderCollections(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
+		if err != nil {
+			return err, nil
+		}
+		// A url or service that was only rate-limited keeps what the last pass knew.
+		throttle = admission.Throttled()
+		if throttle != nil && inputs.admissionFor != nil {
+			admission = admission.KeepingThrottledFrom(inputs.admissionFor(p))
+		}
+		record := inputs.recordReverifiedAdmission
+		if record == nil {
+			record = inputs.recordAdmission
+		}
+		if record != nil && record(p, admission) {
+			// Probes run concurrently, so the set of movers is guarded.
+			admissionMovedMu.Lock()
+			admissionMoved[p.Name] = struct{}{}
+			admissionMovedMu.Unlock()
+		}
+		return nil, throttle
 	}
 	if inputs.rateLimitHoldoff == nil {
 		inputs.rateLimitHoldoff = holdoff.Shared
@@ -250,11 +239,14 @@ func applyReverification(
 			)
 			return common.StatusCodeError429
 		}
-		err := probe(c, p)
+		err, throttle := probe(c, p)
 		if isRateLimitFailure(err) {
-			retryAfter, _ := common.RetryAfterFrom(err)
+			throttle = err
+		}
+		if throttle != nil {
+			retryAfter, _ := common.RetryAfterFrom(throttle)
 			delay := inputs.rateLimitHoldoff.RecordRateLimit(p.Name, urlKey, retryAfter)
-			utils.LavaFormatWarning("re-verify: provider rate-limited, backing off", err,
+			utils.LavaFormatWarning("re-verify: provider rate-limited, backing off", throttle,
 				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 				utils.LogAttr("provider", p.Name),
 				utils.LogAttr("holdoff", delay.String()),
@@ -552,80 +544,23 @@ func validateProviderTier(
 	return failedSet, failedOrdered
 }
 
-// validateProvider runs a single spec-verification pass against one provider.
-// It builds a fresh ChainRouter + ChainFetcher under a bounded attempt context
-// (so a hung upstream cannot stall a whole reconcile cycle), calls Validate,
-// and tears the temporary resources down regardless of outcome.
-// verificationEndpoints splits the two endpoints a validation attempt needs.
-//
-// The ROUTER one expands every add-on url into a with-addon and a without-addon
-// route, the same way startup PHASE 1 does, because chain_router.go requires both
-// for routing flexibility.
-//
-// The FETCHER one carries only the urls the provider actually declared. The
-// stripped copies are a routing artifact, not a claim the provider made, and
-// MAG-3296 is what validating them costs: it makes every add-on node answer for
-// the base collection as well. Where an add-on extends the base surface that is
-// merely redundant; where it REPLACES it — Acala's `evm` against a Substrate base
-// — the stripped copy asks a question the node cannot answer. Validate returns on
-// the first failing url, so the copy's verdict became the provider's verdict and
-// an EVM-only node was dropped for failing to be a Substrate node.
-func verificationEndpoints(provider *lavasession.RPCStaticProviderEndpoint) (routerEndpoint, fetcherEndpoint *lavasession.RPCProviderEndpoint) {
-	routedNodeUrls := make([]common.NodeUrl, 0, len(provider.NodeUrls)*2)
-	for _, nodeUrl := range provider.NodeUrls {
-		routedNodeUrls = append(routedNodeUrls, nodeUrl)
-		if len(nodeUrl.Addons) > 0 {
-			noAddonUrl := nodeUrl
-			noAddonUrl.Addons = []string{}
-			routedNodeUrls = append(routedNodeUrls, noAddonUrl)
-		}
-	}
-
-	newEndpoint := func(nodeUrls []common.NodeUrl) *lavasession.RPCProviderEndpoint {
-		return &lavasession.RPCProviderEndpoint{
-			NetworkAddress: provider.NetworkAddress,
-			ChainID:        provider.ChainID,
-			ApiInterface:   provider.ApiInterface,
-			NodeUrls:       nodeUrls,
-		}
-	}
-	return newEndpoint(routedNodeUrls), newEndpoint(provider.NodeUrls)
-}
-
-func validateProvider(
-	ctx context.Context,
-	provider *lavasession.RPCStaticProviderEndpoint,
-	chainParser chainlib.ChainParser,
-	timeout time.Duration,
-) error {
-	_, err := validateProviderImpl(ctx, provider, chainParser, timeout, false)
-	return err
-}
-
-// validateProviderCollections is validateProvider with per-collection admission
-// (MAG-3326): a service whose verification fails is refused on its own and the
-// provider survives with the rest.
+// validateProviderCollections runs one spec-verification pass against one
+// provider: every node url over its own connection, under a bounded attempt
+// context so a hung upstream cannot stall a whole reconcile cycle. A failure
+// refuses the service that owns it, else its url, and the provider survives with
+// the rest (MAG-3326).
 func validateProviderCollections(
 	ctx context.Context,
 	provider *lavasession.RPCStaticProviderEndpoint,
 	chainParser chainlib.ChainParser,
 	timeout time.Duration,
 ) (chainlib.ProviderAdmission, error) {
-	return validateProviderImpl(ctx, provider, chainParser, timeout, true)
-}
-
-// validateProviderImpl is the one body both share. The boot probe and the epoch
-// probe must behave identically apart from their attribution mode, and this area
-// has already paid for a hand-kept copy once — keeping them one function means a
-// change to the temporary router's lifetime cannot land in only one of them.
-func validateProviderImpl(
-	ctx context.Context,
-	provider *lavasession.RPCStaticProviderEndpoint,
-	chainParser chainlib.ChainParser,
-	timeout time.Duration,
-	perCollection bool,
-) (chainlib.ProviderAdmission, error) {
-	routerEndpoint, fetcherEndpoint := verificationEndpoints(provider)
+	endpoint := &lavasession.RPCProviderEndpoint{
+		NetworkAddress: provider.NetworkAddress,
+		ChainID:        provider.ChainID,
+		ApiInterface:   provider.ApiInterface,
+		NodeUrls:       provider.NodeUrls,
+	}
 
 	attemptCtx, attemptCancel := context.WithTimeout(ctx, timeout)
 	defer attemptCancel()
@@ -637,22 +572,21 @@ func validateProviderImpl(
 	// would hit a nil connector. For non-gRPC interfaces this is a no-op
 	// (returns the original parser).
 	validationParser := chainlib.CloneChainParserForValidation(chainParser)
+	if err := chainlib.ProviderShapeError(endpoint, validationParser); err != nil {
+		return chainlib.ProviderAdmission{}, err
+	}
 
 	parallelConnections := uint(lavasession.DefaultMaximumStreamsOverASingleConnection)
-	verificationRouter, err := chainlib.GetChainRouter(attemptCtx, parallelConnections, routerEndpoint, validationParser)
+	nodeUrlRouter, err := chainlib.NewNodeUrlRouterFactory(parallelConnections, endpoint)
 	if err != nil {
 		return chainlib.ProviderAdmission{}, err
 	}
 
 	verificationFetcher := chainlib.NewChainFetcher(attemptCtx, &chainlib.ChainFetcherOptions{
-		ChainRouter: verificationRouter,
-		ChainParser: validationParser,
-		Endpoint:    fetcherEndpoint,
-		Cache:       nil,
+		ChainParser:   validationParser,
+		Endpoint:      endpoint,
+		NodeUrlRouter: nodeUrlRouter,
 	})
 
-	if perCollection {
-		return verificationFetcher.ValidateCollections(attemptCtx)
-	}
-	return chainlib.ProviderAdmission{}, verificationFetcher.Validate(attemptCtx)
+	return verificationFetcher.ValidateCollections(attemptCtx)
 }

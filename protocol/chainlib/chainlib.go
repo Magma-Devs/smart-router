@@ -238,18 +238,9 @@ type ChainProxy interface {
 }
 
 func GetChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint *lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainRouter, error) {
-	var proxyConstructor func(context.Context, uint, lavasession.RPCProviderEndpoint, ChainParser) (ChainProxy, error)
-	switch rpcProviderEndpoint.ApiInterface {
-	case spectypes.APIInterfaceJsonRPC:
-		proxyConstructor = NewJrpcChainProxy
-	case spectypes.APIInterfaceTendermintRPC:
-		proxyConstructor = NewtendermintRpcChainProxy
-	case spectypes.APIInterfaceRest:
-		proxyConstructor = NewRestChainProxy
-	case spectypes.APIInterfaceGrpc:
-		proxyConstructor = NewGrpcChainProxy
-	default:
-		return nil, fmt.Errorf("chain proxy for apiInterface (%s) not found", rpcProviderEndpoint.ApiInterface)
+	proxyConstructor, err := chainProxyConstructor(rpcProviderEndpoint.ApiInterface)
+	if err != nil {
+		return nil, err
 	}
 	return newChainRouter(ctx, nConns, *rpcProviderEndpoint, chainParser, proxyConstructor)
 }

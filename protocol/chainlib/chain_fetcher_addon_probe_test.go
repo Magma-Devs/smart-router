@@ -45,6 +45,11 @@ func TestValidateProbesHeadWithTheUrlsOwnCollections(t *testing.T) {
 			defer ctrl.Finish()
 
 			parser := NewMockChainParser(ctrl)
+			// Every declared service reads as an add-on, so each url's checks come from one
+			// GetVerifications call — the one these tests pin.
+			parser.EXPECT().SeparateAddonsExtensions(gomock.Any(), gomock.Any()).
+				DoAndReturn(func(_ context.Context, supported []string) ([]string, []string, error) { return supported, nil, nil }).
+				AnyTimes()
 			endpoint := &lavasession.RPCProviderEndpoint{
 				ChainID:      "ACA",
 				ApiInterface: spectypes.APIInterfaceJsonRPC,
@@ -84,6 +89,11 @@ func TestFetchLatestBlockNumKeepsBaseCollectionSemantics(t *testing.T) {
 	defer ctrl.Finish()
 
 	parser := NewMockChainParser(ctrl)
+	// Every declared service reads as an add-on, so each url's checks come from one
+	// GetVerifications call — the one these tests pin.
+	parser.EXPECT().SeparateAddonsExtensions(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, supported []string) ([]string, []string, error) { return supported, nil, nil }).
+		AnyTimes()
 	parser.EXPECT().
 		GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, nil, "", true).
 		Return(nil, nil, false)
