@@ -61,10 +61,13 @@ type ConsumerSessionManager struct {
 	stickyClaimCounts [numStickyOutcomes]atomic.Uint64
 	// sharedSticky is the fleet-wide claim registry. Nil leaves stickiness pod-local, which is
 	// the pre-existing behaviour. stickyEpochDuration sizes a claim's backstop lifetime.
-	sharedSticky        SharedStickyStore
-	stickyEpochDuration time.Duration
-	currentEpoch        uint64
-	numberOfResets      uint64
+	// sharedStickyRequested records that a registry was asked for at all (SetSharedStickyStore ran),
+	// so a nil registry can be told apart from one never requested (MAG-3860).
+	sharedSticky          SharedStickyStore
+	sharedStickyRequested bool
+	stickyEpochDuration   time.Duration
+	currentEpoch          uint64
+	numberOfResets        uint64
 
 	// original pairingAddresses for current epoch
 	// contains all addresses from the initial pairing. and the keys are the indexes of the pairing query (these indexes are used for data reliability)
@@ -3991,6 +3994,7 @@ var stickyOutcomes = [numStickyOutcomes]string{
 // claim's lifetime. Called once at construction; nil leaves stickiness pod-local.
 func (csm *ConsumerSessionManager) SetSharedStickyStore(store SharedStickyStore, epochDuration time.Duration) {
 	csm.sharedSticky = store
+	csm.sharedStickyRequested = true
 	csm.stickyEpochDuration = epochDuration
 }
 
@@ -4120,11 +4124,20 @@ func (csm *ConsumerSessionManager) recordStickyOutcome(outcome stickyOutcome) {
 // StickyClaimCounts reports whether the fleet-wide claim registry is wired (shared) and how many times
 // each outcome has resolved on this pod since it started: the resolutions smartrouter_csm_sticky_claims_total
 // counts, readable without the metrics port (MAG-3860). Every outcome is present, zero included, and without
-// the registry every count stays zero, so shared is what tells "off" from "never fired".
+// the registry every count stays zero, so shared is what tells "off" from "never fired". The counts are
+// this process's alone: a reset does not touch them, and no pod sees another's.
 func (csm *ConsumerSessionManager) StickyClaimCounts() (shared bool, outcomes map[string]uint64) {
 	outcomes = make(map[string]uint64, numStickyOutcomes)
 	for outcome, label := range stickyOutcomes {
 		outcomes[label] = csm.stickyClaimCounts[outcome].Load()
 	}
 	return csm.sharedSticky != nil, outcomes
+}
+
+// SharedStickyRequested reports whether a claim registry was asked for, whether or not one could be
+// wired. With StickyClaimCounts' shared flag it tells apart the three states a reader of
+// GET /debug/sticky-claims needs: never requested (--shared-state off), requested and wired, and
+// requested but left pod-local because the configured cache backend cannot hold claims (MAG-3860).
+func (csm *ConsumerSessionManager) SharedStickyRequested() bool {
+	return csm.sharedStickyRequested
 }

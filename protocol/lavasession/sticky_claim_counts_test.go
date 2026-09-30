@@ -58,6 +58,54 @@ func TestStickyClaimCounts_APodReadingBackItsOwnClaimCountsAdopted(t *testing.T)
 	require.Equal(t, uint64(1), counts["adopted"], "one pod, reading back its own claim")
 }
 
+// TestStickyClaimCounts_AResetReclaimsRatherThanAdopts pins what /debug/reset-all does to the counts. The
+// reset clears the pod's local pins (ResetTransientFailureState) and flushes the cache that holds the
+// claims (one backend serves both), so the pod's next request makes a new claim rather than reading one
+// back: claimed moves, adopted does not. The pins go through Clear(), not invalidateStickyPin, so
+// invalidated does not move either. A peer that kept its confirmed pin never re-reads the registry, and
+// keeps serving the upstream the flushed claim named: the fleet is split until that pin ages out.
+func TestStickyClaimCounts_AResetReclaimsRatherThanAdopts(t *testing.T) {
+	store := newFakeSharedSticky()
+	pod := stickyCSM(t, store)
+	peer := stickyCSM(t, store)
+	resolvedProvider(t, pod, "session-1")  // pod makes the fleet claim
+	resolvedProvider(t, peer, "session-1") // peer takes it
+
+	pod.ResetTransientFailureState()
+	store.purge()
+
+	resolvedProvider(t, pod, "session-1")
+	resolvedProvider(t, peer, "session-1")
+
+	_, counts := pod.StickyClaimCounts()
+	require.Equal(t, uint64(2), counts["claimed"], "the reset pod claims the session again")
+	require.Zero(t, counts["adopted"], "the flush left nothing in the registry to read back")
+	require.Zero(t, counts["invalidated"], "a reset drops the pins without counting them")
+	_, peerCounts := peer.StickyClaimCounts()
+	require.Equal(t, uint64(1), peerCounts["adopted"])
+	require.Equal(t, uint64(1), peerCounts["local_hit"], "the peer's confirmed pin survived the other pod's reset")
+	require.Zero(t, peerCounts["claimed"])
+}
+
+// TestStickyClaimCounts_SharedStickyRequestedTellsRefusedFromNeverAsked is the third state a reader of
+// the route needs: --shared-state asked for a registry and the cache backend could not hold claims
+// (NewCacheStickyStore returned nil). It reads as not shared, like a router that never asked, and only
+// SharedStickyRequested tells the two apart.
+func TestStickyClaimCounts_SharedStickyRequestedTellsRefusedFromNeverAsked(t *testing.T) {
+	neverAsked := CreateConsumerSessionManager()
+	require.False(t, neverAsked.SharedStickyRequested())
+
+	refused := stickyCSM(t, nil)
+	shared, _ := refused.StickyClaimCounts()
+	require.False(t, shared)
+	require.True(t, refused.SharedStickyRequested())
+
+	wired := stickyCSM(t, newFakeSharedSticky())
+	shared, _ = wired.StickyClaimCounts()
+	require.True(t, shared)
+	require.True(t, wired.SharedStickyRequested())
+}
+
 // TestStickyClaimCounts_WithoutARegistryTheFeatureReadsOff is what lets a test tell "off" from
 // "never fired": pod-local stickiness resolves no claim, so the counts stay zero and shared is false.
 func TestStickyClaimCounts_WithoutARegistryTheFeatureReadsOff(t *testing.T) {
