@@ -185,6 +185,21 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 				"only because ApplyNodeErrorClassification assigns the whole flag set, not IsNonRetryable alone",
 		},
 		{
+			name:        "Aborted is named but still scored, like the UNKNOWN_ERROR it was",
+			code:        codes.Aborted,
+			nodeMessage: "transaction aborted: concurrent modification",
+			wantScored:  true,
+			why: "MAG-3995 names the status without exempting it; another endpoint may not hit " +
+				"the same conflict, so the retry and the score both stay",
+		},
+		{
+			name:        "DataLoss is this endpoint's own storage and stays scoreable",
+			code:        codes.DataLoss,
+			nodeMessage: "unrecoverable data loss",
+			wantScored:  true,
+			why:         "MAG-3995: data loss is the clearest case of an endpoint at fault",
+		},
+		{
 			name:        "Unavailable is the endpoint's fault and stays scoreable",
 			code:        codes.Unavailable,
 			nodeMessage: "upstream connect error",
@@ -337,4 +352,36 @@ func TestHealthResetRequiresPositiveProof(t *testing.T) {
 	// a strange 403 looked perfectly healthy again.
 	require.False(t, relayProvesEndpointHealthy(&common.RelayResult{StatusCode: 403}),
 		"an unrecognised 4xx must not wipe the endpoint's failure record")
+}
+
+// MAG-3995: gRPC ABORTED and DATA_LOSS used to classify as UNKNOWN_ERROR. They now carry their own
+// node codes, and the one verdict that moves is fault: UNKNOWN_ERROR is never EndpointAtFault, so a
+// node answering these never counted toward benching. The relay-level flags are pinned here so the
+// change stays exactly that. Internal (13) is the unregistered control: still unknown, not at fault.
+func TestSendGRPCRelay_AbortedAndDataLossAreNamedNodeFaults(t *testing.T) {
+	for _, tc := range []struct {
+		code codes.Code
+		want *common.LavaError
+	}{
+		{codes.Aborted, common.LavaErrorNodeAborted},
+		{codes.DataLoss, common.LavaErrorNodeDataLoss},
+	} {
+		t.Run(tc.code.String(), func(t *testing.T) {
+			require.Equal(t, tc.want, common.ClassifyError(nil, common.ChainFamilyCosmosSDK, common.TransportGRPC, int(tc.code), "node said so"))
+
+			result := grpcStatusRelay(t, tc.code, "node said so")
+			require.True(t, result.IsNodeError)
+			require.True(t, result.IsNodeAtFault, "a named node fault counts toward --bench-after")
+			require.False(t, result.IsNonRetryable, "another endpoint may serve it, as it could when this was UNKNOWN_ERROR")
+			require.False(t, result.IsRateLimited)
+			require.False(t, result.IsDataScope)
+			require.False(t, result.IsNodeCapability)
+			require.False(t, relayProvesEndpointHealthy(result))
+		})
+	}
+
+	control := grpcStatusRelay(t, codes.Internal, "node said so")
+	require.Equal(t, common.LavaErrorUnknown, common.ClassifyError(nil, common.ChainFamilyCosmosSDK, common.TransportGRPC, int(codes.Internal), "node said so"),
+		"precondition: Internal has no row, so it shows what these two classified as before")
+	require.False(t, control.IsNodeAtFault, "an unclassified answer is never evidence against the endpoint")
 }

@@ -867,6 +867,21 @@ func TestClassifyError_TransportScoping(t *testing.T) {
 	// gRPC code should NOT match in JSON-RPC transport
 	result = ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 14, "service unavailable")
 	assert.NotEqual(t, LavaErrorNodeServiceUnavailable, result)
+
+	// MAG-3995: gRPC ABORTED (10) and DATA_LOSS (15) are node errors with their own names. They
+	// keep UNKNOWN_ERROR's routing flags and are not the internal PROTOCOL_PROVIDER_* codes.
+	for code, want := range map[int]*LavaError{10: LavaErrorNodeAborted, 15: LavaErrorNodeDataLoss} {
+		result = ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, code, "")
+		assert.Equal(t, want, result, "gRPC %d", code)
+		assert.Equal(t, CategoryExternal, result.Category, "the node answered; internal would read as unreachable")
+		assert.Equal(t, LavaErrorUnknown.Retryable, result.Retryable)
+		assert.Equal(t, LavaErrorUnknown.MayHaveReachedNode, result.MayHaveReachedNode,
+			"a write's outcome stays unclear, as it was when this was UNKNOWN_ERROR")
+		assert.True(t, result.EndpointAtFault())
+
+		// JSON-RPC 10 / 15 are not gRPC statuses.
+		assert.NotEqual(t, want, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, code, ""))
+	}
 }
 
 func TestClassifyError_ChainSpecificMappings(t *testing.T) {
