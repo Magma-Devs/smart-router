@@ -135,13 +135,9 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		} else if debugRelays {
 			// Two reasons reach here now, and naming the wrong one sends an operator looking for
 			// a policy nobody wrote: before the write skip above, this branch was reachable only
-			// when a forbid policy existed.
-			reason := "forbidden by per-method policy"
-			if routesAsWrite {
-				reason = "method routes as a write"
-			}
+			// when a forbid policy existed. Both can hold at once, and then both are named.
 			utils.LavaFormatDebug("[CrossValidation] caller cross-validation headers not consulted",
-				utils.LogAttr("reason", reason),
+				utils.LogAttr("reason", callerCVSkipReason(forbidCallerCV, routesAsWrite)),
 				utils.LogAttr("chainID", chainID),
 				utils.LogAttr("apiInterface", apiInterface),
 				utils.LogAttr("method", method),
@@ -162,4 +158,20 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		cvOverride,
 		forbidCallerCV,
 	)
+}
+
+// callerCVSkipReason names, for the --debug-relays line, why the caller's cross-validation headers
+// were not consulted. Both causes can hold at once: an operator who followed the advice given before
+// MAG-3603 wrote `forbid-caller-cv: true` on a write, and a write now ignores the headers on its own
+// account. Naming only the write then hides the policy they wrote, which is the confusion the reason
+// exists to prevent, so both are named. Reached only when at least one cause holds.
+func callerCVSkipReason(forbidCallerCV, routesAsWrite bool) string {
+	switch {
+	case routesAsWrite && forbidCallerCV:
+		return "method routes as a write (a forbid-caller-cv policy also applies; it is redundant on a write)"
+	case routesAsWrite:
+		return "method routes as a write"
+	default:
+		return "forbidden by per-method policy"
+	}
 }
