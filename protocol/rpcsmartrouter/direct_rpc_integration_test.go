@@ -205,6 +205,47 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 	// here would require full chain-parser construction.
 }
 
+// TestDirectRPCRelaySender_EmptyMessageErrorIsNodeError pins MAG-3991 at the
+// sender, with the real JSON-RPC verdict plugged in: a node that answers
+// {"error":{"code":-32000,"message":""}} failed the request exactly as one whose
+// message has text. Read as a success, the reply carried IsNodeError=false, so
+// the relay ended on it — no lava-identified-node-error header, no failover, a
+// cache write of the error as the answer, and nothing scored against the node.
+func TestDirectRPCRelaySender_EmptyMessageErrorIsNodeError(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":""}}`))
+	}))
+	defer mockServer.Close()
+
+	ctx := context.Background()
+	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+	require.NoError(t, err)
+
+	sender := &DirectRPCRelaySender{
+		directConnection: directConn,
+		endpointName:     "empty-error-upstream",
+		chainFamily:      common.ChainFamilyEVM,
+	}
+	chainMessage := &mockChainMessage{
+		requestData:        []byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xDEAD","latest"],"id":1}`),
+		checkResponseError: rpcInterfaceMessages.JsonrpcMessage{}.CheckResponseError,
+	}
+
+	result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.IsNodeError,
+		"an empty-message error must be a node error: the flag gates the header, the cache write and failover")
+	// -32000 classifies as NODE_SERVER_ERROR by its code, as it would with any message the
+	// registry does not recognise: retryable, and the endpoint's fault.
+	require.False(t, result.IsNonRetryable, "the relay must be free to fail over to a healthy node")
+	require.True(t, result.IsNodeAtFault, "the node that failed must count against its health")
+	require.True(t, shouldFailSessionForResult(nil, result), "the session must be scored as a failure")
+	require.False(t, relayProvesEndpointHealthy(result), "a failed relay must not reset the endpoint's health")
+}
+
 func TestDirectRPCRelaySender_SendDirectRelay_Timeout(t *testing.T) {
 	// Create slow mock server that exceeds timeout
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
