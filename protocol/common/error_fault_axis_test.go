@@ -70,8 +70,6 @@ var faultAxisTable = []faultAxisCase{
 	{2007, "NODE_SYNCING", SubCategoryNone, true, "cannot serve yet, which is a health fact"},
 	{2014, "NODE_GATEWAY_TIMEOUT", SubCategoryNone, true, ""},
 	{2015, "NODE_BAD_GATEWAY", SubCategoryNone, true, ""},
-	{2018, "NODE_ABORTED", SubCategoryNone, true, "gRPC ABORTED; scored as it was when it read UNKNOWN_ERROR"},
-	{2019, "NODE_DATA_LOSS", SubCategoryNone, true, "gRPC DATA_LOSS; this endpoint's own storage"},
 	{2101, "NODE_BITCOIN_WARMUP", SubCategoryNone, true, ""},
 	{2102, "NODE_BITCOIN_INITIAL_DOWNLOAD", SubCategoryNone, true, ""},
 	{2103, "NODE_BITCOIN_NOT_CONNECTED", SubCategoryNone, true, ""},
@@ -82,6 +80,7 @@ var faultAxisTable = []faultAxisCase{
 	// The caller's fault. Non-retryable, and no fault-axis label needed — the default arm of
 	// classifyEndpointHealth already excuses CategoryExternal + !Retryable.
 	{2016, "NODE_UNAUTHORIZED", SubCategoryNone, false, "credentials rejected; see the note below"},
+	{2018, "NODE_ABORTED", SubCategoryNone, false, "Sui transaction outcome, the same from every endpoint"},
 	{3001, "CHAIN_NONCE_TOO_LOW", SubCategoryNone, false, ""},
 	{3002, "CHAIN_NONCE_TOO_HIGH", SubCategoryNone, false, ""},
 	{3003, "CHAIN_INSUFFICIENT_FUNDS", SubCategoryNone, false, ""},

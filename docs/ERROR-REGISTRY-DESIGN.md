@@ -30,7 +30,7 @@ Errors raised from within the Lava protocol itself — not from nodes or chains.
 | 1011 | `PROTOCOL_ALL_ENDPOINTS_DISABLED` | All provider endpoints disabled | No |
 | 1012 | `PROTOCOL_PROVIDER_UNAVAILABLE` | Provider service unavailable (gRPC UNAVAILABLE). Not produced by the smart router: a node's gRPC status is a node error (2006) | Yes |
 | 1013 | `PROTOCOL_PROVIDER_ABORTED` | Provider aborted (gRPC ABORTED). Not produced by the smart router: a node's gRPC status is a node error (2018) | Yes |
-| 1014 | `PROTOCOL_PROVIDER_DATA_LOSS` | Provider data loss (gRPC DATA_LOSS). Not produced by the smart router: a node's gRPC status is a node error (2019) | Yes |
+| 1014 | `PROTOCOL_PROVIDER_DATA_LOSS` | Provider data loss (gRPC DATA_LOSS). Not produced by the smart router. No node it routes to sends gRPC DATA_LOSS; if one did, it would classify `UNKNOWN_ERROR` | Yes |
 | 1020 | `PROTOCOL_RATE_LIMITED` | Lava-side rate limit exceeded (SubCategoryRateLimit) | No |
 | 1021 | `PROTOCOL_MAX_CU_EXCEEDED` | Maximum compute units exceeded for session | No |
 | 1022 | `PROTOCOL_BATCH_SIZE_EXCEEDED` | Batch request size exceeded limit | No |
@@ -72,8 +72,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2015 | `NODE_BAD_GATEWAY` | Bad gateway (HTTP 502 from provider) | Yes | HTTP 502 |
 | 2016 | `NODE_UNAUTHORIZED` | Upstream rejected router credentials (HTTP 401) | No | HTTP 401 |
 | 2017 | `NODE_DATA_NOT_HELD` | Endpoint does not hold the requested data — pruned or never existed (SubCategoryDataScope) | Yes | gRPC 5, gRPC 11 |
-| 2018 | `NODE_ABORTED` | Node aborted the operation, typically a concurrency conflict | Yes | gRPC 10 |
-| 2019 | `NODE_DATA_LOSS` | Node reported unrecoverable data loss or corruption | Yes | gRPC 15 |
+| 2018 | `NODE_ABORTED` | Node aborted the operation. On Sui (the only sender), a transaction outcome such as a consensus rejection; same from every endpoint | No | gRPC 10 |
 
 > **SubCategoryDataScope is no longer 2017 alone.** FAILOVER-TASKS section 2 extended it to every
 > "the answer you want is not here" code: 2012, 2013, 3201-3206, and the chain-specific not-found
