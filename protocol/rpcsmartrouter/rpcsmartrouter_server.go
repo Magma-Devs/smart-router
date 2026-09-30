@@ -186,9 +186,11 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// The session manager holds only the primaries that passed boot verification, so the configured
 		// layout comes from the caller: judging the policy by the verified ones turned one node that was
 		// down at boot into an exit (MAG-3751).
-		if cvStartupErr := validateCrossValidationFleet(cvResolver, chainParser, listenEndpoint.ChainID, listenEndpoint.ApiInterface, configuredProviderGroups, sessionManager.ProviderGroupAssignments()); cvStartupErr != nil {
+		advisory, cvStartupErr := validateCrossValidationFleet(cvResolver, chainParser, listenEndpoint.ChainID, listenEndpoint.ApiInterface, configuredProviderGroups, sessionManager.ProviderGroupAssignments())
+		if cvStartupErr != nil {
 			return cvStartupErr
 		}
+		advisory.log()
 	}
 
 	// Initialize consistency validation config from chain spec values. The finalization distance
@@ -485,6 +487,10 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 	if guardErr := resolver.ValidateNoStatefulPolicies(isStateful); guardErr != nil {
 		return guardErr
 	}
+	// Every capacity check below is skipped when no primary is configured: the endpoint serves from backup
+	// providers only, cross-validation never draws on backups, and validateCrossValidationFleet warns about
+	// the endpoint as a whole (MAG-3751). The input is the static config, so an empty layout is that shape,
+	// not missing data.
 	if requiredGroups := resolver.MaxResolvedMinGroups(chainID, apiInterface); requiredGroups > 1 && configuredGroups > 0 && configuredGroups < requiredGroups {
 		return utils.LavaFormatError("cross-validation min-groups policy cannot be satisfied: configured provider groups are fewer than required", nil,
 			utils.LogAttr("requiredGroups", requiredGroups),
@@ -495,7 +501,7 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 	// Per-group-quorum capacity: each per-group policy needs MinGroups groups that EACH have >= Threshold
 	// providers. Without enough adequately-staffed groups the policy can never succeed (every request would
 	// fail group-quorum-unmet), so reject it at startup rather than at runtime. Skipped when groupSizes is
-	// empty (provider data unavailable) to avoid a false negative.
+	// empty (no configured primary, see above).
 	if len(groupSizes) > 0 {
 		for _, req := range resolver.PerGroupRequirements(chainID, apiInterface) {
 			adequateGroups := 0
@@ -521,7 +527,7 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 	// the diversity guarantee rests on single points of failure (two such groups colluding, or both wrong at a
 	// block boundary, outvote a larger honest group). This is still a SATISFIABLE config (default mode counts
 	// agreement across groups, not within them), so it is a WARNING, not a startup error. Skipped when
-	// groupSizes is empty (provider data unavailable) to avoid a false warning.
+	// groupSizes is empty (no configured primary, see above).
 	if len(groupSizes) > 0 {
 		for _, req := range resolver.MinGroupsRequirements(chainID, apiInterface) {
 			if req.MinGroups <= 1 {
@@ -569,61 +575,124 @@ func groupsBelowThreshold(groupSizes map[string]int, threshold int) []string {
 // validateCrossValidationStartup run against the configured layout, and an error from them stops the
 // endpoint from starting. A primary that failed boot verification is a runtime condition: it is retried in
 // the background and re-admitted when it recovers (MAG-2525). A shortfall among the verified primaries is
-// therefore logged, not returned. The endpoint starts and serves what it can, and
-// validateCrossValidationCapacity refuses only the cross-validated requests the verified primaries cannot meet.
-// Judging the policy by the verified primaries turned one node that was down at boot into a crash loop
-// (MAG-3751).
-func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chainParser chainlib.ChainParser, chainID, apiInterface string, configured, verified map[string][]string) error {
+// therefore reported, not returned: the endpoint starts and serves what it can, and
+// validateCrossValidationCapacity refuses only the cross-validated requests the verified primaries cannot
+// meet. Judging the policy by the verified primaries turned one node that was down at boot into a crash
+// loop (MAG-3751).
+//
+// The report is the returned advisory, nil when every enabled policy is met; the caller logs it. It also
+// covers the two shortfalls the guards do not refuse: a max-participants above the configured primaries,
+// which has never been a startup error, and an endpoint with no configured primary at all, which serves from
+// backups that cross-validation never draws on.
+func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chainParser chainlib.ChainParser, chainID, apiInterface string, configured, verified map[string][]string) (*crossValidationFleetAdvisory, error) {
 	configuredSizes := groupSizesOf(configured)
 	if err := validateCrossValidationStartup(resolver, chainParser, chainID, apiInterface, len(configured), configuredSizes); err != nil {
-		return err
+		return nil, err
 	}
 	verifiedSizes := groupSizesOf(verified)
-	// Log the resolved provider->group layout once at startup so operators can confirm the diversity
-	// their config yields (a min-groups policy is only as good as the group spread of the fleet).
+	// Log the provider->group layout once at startup so operators can confirm the diversity their config
+	// yields (a min-groups policy is only as good as the group spread of the fleet). distinctGroups,
+	// groupSizes and groupAssignments describe the primaries that passed verification and are serving, as
+	// they did before MAG-3751 (scripts/pre_setups/init_smartrouter_cv_demo.sh reads distinctGroups to prove
+	// its fleet verified); the configured* fields describe the layout the startup guards judged.
 	utils.LavaFormatInfo("cross-validation per-method policies loaded",
 		utils.LogAttr("policies", resolver.NumPolicies()),
 		utils.LogAttr("chainID", chainID),
 		utils.LogAttr("apiInterface", apiInterface),
-		utils.LogAttr("distinctGroups", len(configured)),
-		utils.LogAttr("groupSizes", configuredSizes),
-		utils.LogAttr("groupAssignments", configured),
-		utils.LogAttr("verifiedGroupSizes", verifiedSizes))
-	// Reported only when a configured primary is missing: that is the runtime condition this line is for.
-	// A shortfall of the configured primaries themselves belongs to the config: validateCrossValidationStartup
-	// rejects its group shapes above, and max-participants has never been checked at startup.
-	unavailable := providersMissingFrom(configured, verified)
-	if requiredProviders, requiredGroups := crossValidationShortfall(resolver, chainID, apiInterface, verifiedSizes); (requiredProviders > 0 || requiredGroups > 0) && len(unavailable) > 0 {
-		attrs := []utils.Attribute{
-			utils.LogAttr("chainID", chainID),
-			utils.LogAttr("apiInterface", apiInterface),
-		}
-		if requiredProviders > 0 {
-			attrs = append(attrs, utils.LogAttr("requiredProviders", requiredProviders))
-		}
-		if requiredGroups > 0 {
-			attrs = append(attrs, utils.LogAttr("requiredGroups", requiredGroups))
-		}
-		attrs = append(attrs,
-			utils.LogAttr("verifiedGroupSizes", verifiedSizes),
-			utils.LogAttr("configuredGroupSizes", configuredSizes),
-			utils.LogAttr("unavailableProviders", unavailable),
-			utils.LogAttr("hint", "providers that failed verification are retried in the background; requests without cross-validation are served meanwhile"))
-		utils.LavaFormatWarning("ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy — the requests it governs are refused until the failed providers recover", nil, attrs...)
+		utils.LogAttr("distinctGroups", len(verified)),
+		utils.LogAttr("groupSizes", verifiedSizes),
+		utils.LogAttr("groupAssignments", verified),
+		utils.LogAttr("configuredGroups", len(configured)),
+		utils.LogAttr("configuredGroupSizes", configuredSizes),
+		utils.LogAttr("configuredGroupAssignments", configured))
+	requiredProviders, requiredGroups := crossValidationShortfall(resolver, chainID, apiInterface, verifiedSizes)
+	backupOnly := len(configured) == 0 && len(resolver.headerlessParams(chainID, apiInterface)) > 0
+	if requiredProviders == 0 && requiredGroups == 0 && !backupOnly {
+		return nil, nil
 	}
-	return nil
+	configuredProviders, configuredGroups := crossValidationShortfall(resolver, chainID, apiInterface, configuredSizes)
+	return &crossValidationFleetAdvisory{
+		chainID:           chainID,
+		apiInterface:      apiInterface,
+		requiredProviders: requiredProviders,
+		requiredGroups:    requiredGroups,
+		configuredShort:   backupOnly || configuredProviders > 0 || configuredGroups > 0,
+		unavailable:       providersMissingFrom(configured, verified),
+		configuredSizes:   configuredSizes,
+		verifiedSizes:     verifiedSizes,
+	}, nil
+}
+
+// crossValidationFleetAdvisory is what validateCrossValidationFleet found worth an ATTENTION line: an
+// enabled policy of the endpoint that the primaries serving now cannot meet. It is a value, logged by log,
+// so the boot path can be tested without capturing the log.
+type crossValidationFleetAdvisory struct {
+	chainID, apiInterface string
+	// requiredProviders and requiredGroups are the largest max-participants and min-groups the VERIFIED
+	// primaries cannot reach, each 0 when met: the shortfall the request-time guard refuses on now.
+	requiredProviders, requiredGroups int
+	// configuredShort is true when the CONFIGURED primaries fall short as well, so re-admitting the
+	// unavailable ones cannot close the gap: the policy or the fleet has to change.
+	configuredShort bool
+	// unavailable names the configured primaries that failed boot verification, sorted; empty when every
+	// primary verified.
+	unavailable                    []string
+	configuredSizes, verifiedSizes map[string]int
+}
+
+// log writes the ATTENTION line for the advisory, worded by what closes the gap: a provider recovering, a
+// change to the policy or the fleet, or primaries for an endpoint that has none. A nil advisory logs nothing.
+func (a *crossValidationFleetAdvisory) log() {
+	if a == nil {
+		return
+	}
+	attrs := []utils.Attribute{
+		utils.LogAttr("chainID", a.chainID),
+		utils.LogAttr("apiInterface", a.apiInterface),
+	}
+	if a.requiredProviders > 0 {
+		attrs = append(attrs, utils.LogAttr("requiredProviders", a.requiredProviders))
+	}
+	if a.requiredGroups > 0 {
+		attrs = append(attrs, utils.LogAttr("requiredGroups", a.requiredGroups))
+	}
+	attrs = append(attrs,
+		utils.LogAttr("verifiedGroupSizes", a.verifiedSizes),
+		utils.LogAttr("configuredGroupSizes", a.configuredSizes))
+	if len(a.unavailable) > 0 {
+		attrs = append(attrs, utils.LogAttr("unavailableProviders", a.unavailable))
+	}
+	// crossValidationShortfall counts every verified primary; the request-time guard counts only the
+	// candidates that serve the request's addon and extensions, so it can refuse with fewer.
+	const scope = "the count covers every verified primary; a request that needs an addon or extension draws only on the primaries serving it and can be refused with fewer"
+	switch {
+	case len(a.configuredSizes) == 0:
+		utils.LavaFormatWarning("ATTENTION: this endpoint has no configured primary, and cross-validation never draws on backup providers — the requests its cross-validation policies govern can never be met", nil,
+			append(attrs, utils.LogAttr("hint", "add primaries to the endpoint or remove its policies; requests without cross-validation are served from the backups"))...)
+	case a.configuredShort:
+		utils.LavaFormatWarning("ATTENTION: the configured primaries cannot meet a cross-validation policy — the requests it governs are refused until the policy or the fleet changes", nil,
+			append(attrs, utils.LogAttr("hint", "a max-participants above the configured primaries is not a startup error: lower it or add primaries; "+scope))...)
+	default:
+		utils.LavaFormatWarning("ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy — the requests it governs are refused until the failed providers recover", nil,
+			append(attrs, utils.LogAttr("hint", "providers that failed verification are retried in the background; requests without cross-validation are served meanwhile; "+scope))...)
+	}
 }
 
 // crossValidationShortfall predicts what the request-time guard (validateCrossValidationCapacity) will do
 // with a request that sends no cross-validation headers when the candidates are the given primaries. It
 // returns the largest max-participants and the largest min-groups among the enabled policies it would refuse
 // for that reason, each 0 when none. Groups are judged by crossValidationGroupShortfall, the guards' own test.
+//
+// The prediction is for a request of the base collection. groupSizes counts every primary, while the guard
+// counts only the candidates that support the request's addon and extensions
+// (ProviderAndGroupCountsForRequest), a subset. A request scoped to an addon or extension can therefore be
+// refused when this predicts nothing; never the other way round.
 func crossValidationShortfall(resolver *CrossValidationPolicyResolver, chainID, apiInterface string, groupSizes map[string]int) (requiredProviders, requiredGroups int) {
 	providers := 0
 	for _, size := range groupSizes {
 		providers += size
 	}
-	for _, params := range resolver.HeaderlessParams(chainID, apiInterface) {
+	for _, params := range resolver.headerlessParams(chainID, apiInterface) {
 		if params.MaxParticipants > providers {
 			requiredProviders = max(requiredProviders, params.MaxParticipants)
 		}
