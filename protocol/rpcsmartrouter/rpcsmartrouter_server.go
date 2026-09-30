@@ -3278,6 +3278,9 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistencyWithLag(
 	validSessions = make(lavasession.ConsumerSessionsMap, len(sessions))
 	failedSessions = make(lavasession.ConsumerSessionsMap)
 	lags = make(map[string]consistencyLag)
+	threshold := rpcss.consistencyConfig.EndpointLagThreshold
+	// One "<endpoint> latest=<block> lag=<blocks>" entry per rejected endpoint, for the batch line.
+	rejected := make([]string, 0, len(sessions))
 
 	for endpointAddress, sessionInfo := range sessions {
 		if sessionInfo == nil || sessionInfo.Session == nil {
@@ -3339,10 +3342,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistencyWithLag(
 			// its err. Recompute them rather than promote the inner line as well — one INFO
 			// line per rejected endpoint, carrying the endpoint identity the inner line lacks.
 			lag := chainTip - endpointLatest
-			threshold := int64(0)
-			if rpcss.consistencyConfig != nil {
-				threshold = rpcss.consistencyConfig.EndpointLagThreshold
-			}
+			rejected = append(rejected, fmt.Sprintf("%s latest=%d lag=%d", endpointAddress, endpointLatest, lag))
 			utils.LavaFormatInfo("skipping endpoint due to consistency check",
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("endpointLatest", endpointLatest),
@@ -3368,34 +3368,32 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistencyWithLag(
 	}
 
 	skippedCount := len(failedSessions)
+	sort.Strings(rejected)
 
-	// If ALL endpoints failed validation, return error to trigger retry
+	// Every endpoint picked for this attempt is behind. The caller picks again without them, so this
+	// is not a failed request: WARN, not ERROR, and one record of it — the returned error is not
+	// logged again, so anything counting the sentinel counts each rejection once. `selected` counts
+	// this attempt's pick, not the pool. Log and response-body checks match on this message; keep it.
 	if len(validSessions) == 0 && skippedCount > 0 {
-		utils.LavaFormatDebug("all endpoints failed consistency pre-validation, triggering retry",
-			utils.LogAttr("totalEndpoints", len(sessions)),
-			utils.LogAttr("skippedCount", skippedCount),
+		const rejectedAll = "all endpoints failed consistency pre-validation"
+		utils.LavaFormatWarning(rejectedAll, lavasession.ConsistencyPreValidationError,
+			utils.LogAttr("selected", len(sessions)),
+			utils.LogAttr("rejected", strings.Join(rejected, "; ")),
 			utils.LogAttr("chainTip", chainTip),
+			utils.LogAttr("threshold", threshold),
 			utils.LogAttr("GUID", ctx),
 		)
-		// The error below carries the same sentinel and is visible at every level, so this
-		// stays at DEBUG rather than WARN — two records of one event made anything counting
-		// the sentinel double-count it. skippedCount and GUID moved onto the error so the
-		// single surviving line still carries them.
-		return nil, failedSessions, lags, utils.LavaFormatError("all endpoints failed consistency pre-validation",
-			lavasession.ConsistencyPreValidationError,
-			utils.LogAttr("totalEndpoints", len(sessions)),
-			utils.LogAttr("skippedCount", skippedCount),
-			utils.LogAttr("chainTip", chainTip),
-			utils.LogAttr("GUID", ctx),
-		)
+		// Cross-validation fails fast with this error and a client can read it, so it names no endpoint.
+		return nil, failedSessions, lags, fmt.Errorf("%s: %w", rejectedAll, lavasession.ConsistencyPreValidationError)
 	}
 
 	if skippedCount > 0 {
 		utils.LavaFormatInfo("filtered endpoints by consistency",
-			utils.LogAttr("totalEndpoints", len(sessions)),
+			utils.LogAttr("selected", len(sessions)),
 			utils.LogAttr("validEndpoints", len(validSessions)),
-			utils.LogAttr("skippedCount", skippedCount),
+			utils.LogAttr("rejected", strings.Join(rejected, "; ")),
 			utils.LogAttr("chainTip", chainTip),
+			utils.LogAttr("threshold", threshold),
 			utils.LogAttr("GUID", ctx),
 		)
 	}
