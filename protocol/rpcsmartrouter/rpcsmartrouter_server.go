@@ -1866,6 +1866,17 @@ func relayProvesEndpointHealthy(relayResult *common.RelayResult) bool {
 	return relayResult.StatusCode == 0 || (relayResult.StatusCode >= 200 && relayResult.StatusCode < 300)
 }
 
+// relayParentContext is the context a batch's relays run under. Cross-validation's stragglers and a
+// stateful broadcast's deliveries must finish after the request has its answer, so they are
+// detached from the batch cancel (see sendRelayToDirectEndpoints); a stateless relay keeps it, and
+// a hedge's loser is cancelled on purpose.
+func relayParentContext(ctx context.Context, selection relaycore.Selection) context.Context {
+	if selection == relaycore.CrossValidation || selection == relaycore.Stateful {
+		return context.WithoutCancel(ctx)
+	}
+	return ctx
+}
+
 // sendRelayToDirectEndpoints handles relay for direct RPC sessions (smart router direct mode)
 func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	ctx context.Context,
@@ -2063,9 +2074,19 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// stragglers run to completion (bounded by the reflection pre-check + SendDirectRelay's
 	// attemptBudget+url.Timeout window) and always push their response via the deferred SetResponse,
 	// feeding the post-reply straggler watcher. Values (GUID, IP forwarding metadata) are preserved
-	// by WithoutCancel. Non-CV selections keep the batch cancel: aborting the hedged losers on first
-	// success is a deliberate resource-saver there. Trade-off: in CV mode a client disconnect no
-	// longer aborts in-flight relays; they run out their bounded timeout.
+	// by WithoutCancel. Trade-off: a client disconnect no longer aborts in-flight relays; they run out
+	// their bounded timeout.
+	//
+	// A stateful broadcast is detached too, for its own reason (MAG-4032). Each of its relays
+	// delivers the caller's transaction to one upstream, and the first acceptance used to cancel the
+	// rest mid-flight. The request is often on the wire by then, but what an upstream does with a
+	// request whose client hung up is its gateway's business, and one that drops it learns of the
+	// transaction by gossip, seconds later. A read routed there in the meantime saw the state from
+	// before the write: the pending nonce the caller had just used. Letting every delivery finish is
+	// what makes the broadcast one. Nothing reads a late stateful response — it lands in a buffer
+	// sized for the whole broadcast (statefulFanOutCeiling) — and a stateful request is never
+	// cache-written (cacheExclusionReason). Stateless keeps the batch cancel: aborting a hedge's
+	// loser on first success is a deliberate resource-saver, and a read has nothing to deliver.
 	//
 	// Post-reply side-effect audit (the detachment reintroduces every post-relay side effect the
 	// batch cancel used to suppress, so each is classified here rather than one review round at a
@@ -2084,10 +2105,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// but the session manager already bounds outstanding sessions at MaxSessionsAllowedPerProvider,
 	// so a dead provider self-limits (it stops being granted new sessions and is excluded) without a
 	// second CV-specific cap to keep in sync.
-	relayParentCtx := ctx
+	relayParentCtx := relayParentContext(ctx, selection)
 	if selection == relaycore.CrossValidation {
-		relayParentCtx = context.WithoutCancel(ctx)
-
 		// Re-snapshot the queried-providers set to the post-filter survivors. The pre-filter
 		// snapshot in sendRelayToEndpoint includes consistency-filtered endpoints that were
 		// released above without ever being dispatched a relay (no SetResponse), so they would be
@@ -2219,14 +2238,15 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// whether a relay that produced nothing is a hang or a race loser.
 			ranOutOfRoad := requestRanOutOfRoad(relayProcessor.GetStopReason())
 
-			// Did WE stop this relay? On a stateful broadcast every endpoint is queried and the
-			// first answer cancels the rest, so N-1 goroutines land here holding context.Canceled
-			// through no fault of their endpoint. Same for a client that hung up. Resolved once,
-			// here, and reused by both the metric outcome and the session release below so the two
-			// can never disagree about what happened (MAG-2648).
+			// Did WE stop this relay? When a hedged read races two endpoints the first answer
+			// cancels the other, which lands here holding context.Canceled through no fault of its
+			// endpoint. Same for a client that hung up. Resolved once, here, and reused by both the
+			// metric outcome and the session release below so the two can never disagree about
+			// what happened (MAG-2648).
 			//
-			// goroutineCtx is the right context to ask: for cross-validation it is derived from a
-			// WithoutCancel parent, so a detached straggler is correctly NOT seen as cancelled.
+			// goroutineCtx is the right context to ask: for cross-validation and for a stateful
+			// broadcast it is derived from a WithoutCancel parent, so a detached relay is correctly
+			// NOT seen as cancelled.
 			isClientCancel := err != nil && common.IsClientCancellation(err, goroutineCtx)
 
 			if rpcss.smartRouterEndpointMetrics != nil {
@@ -2258,11 +2278,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// Handle response
 			if err != nil {
 				tracing.RecordError(provSpan, err)
-				// A relay WE cancelled is not an endpoint failure: on a stateful broadcast the
-				// first answer cancels the rest, so promoting this unconditionally would emit
-				// N-1 INFO lines per request for endpoints that did nothing wrong — the same
-				// mis-attribution MAG-2648 removed from scoring. Keep those at DEBUG; a genuine
-				// endpoint failure is the exceptional path an operator needs at INFO.
+				// A relay WE cancelled is not an endpoint failure: a hedge's loser is cancelled
+				// when the other answers, so promoting this unconditionally would emit an INFO
+				// line per race for endpoints that did nothing wrong — the same mis-attribution
+				// MAG-2648 removed from scoring. Keep those at DEBUG; a genuine endpoint failure
+				// is the exceptional path an operator needs at INFO.
 				logRelayFailure := utils.LavaFormatInfo
 				if isClientCancel {
 					logRelayFailure = utils.LavaFormatDebug
@@ -2326,7 +2346,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			} else if isClientCancel {
 				// Cancelled while it still had budget left, so availability was never tested —
 				// release without a QoS penalty (MAG-2648). OnSessionFailure here would feed the
-				// optimizer a 0 and, on a broadcast, hit every healthy node but the fastest.
+				// optimizer a 0 for every race a healthy node happened to lose.
 				//
 				// This branch precedes the shouldFailSession test on purpose — a cancelled relay
 				// always has err != nil, so it would otherwise be swallowed by the failure arm.
