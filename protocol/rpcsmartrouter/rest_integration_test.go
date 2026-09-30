@@ -206,11 +206,14 @@ func TestRESTRelay_404_NotFound(t *testing.T) {
 	require.NotNil(t, result)
 
 	assert.Equal(t, http.StatusNotFound, result.StatusCode)
-	// A node error, classified by the registry's 404 row: non-retryable (the answer is the same
-	// everywhere), not the endpoint's fault, body returned to the caller unchanged.
+	// A node error, classified by the registry's 404 row: "not here" — retryable on another
+	// node (a lagging node or a gateway may say it while another node has the data), data-scope
+	// so the endpoint is not scored, body returned to the caller unchanged.
 	assert.True(t, result.IsNodeError)
-	assert.True(t, result.IsNonRetryable)
+	assert.False(t, result.IsNonRetryable)
+	assert.True(t, result.IsDataScope)
 	assert.False(t, result.IsNodeAtFault)
+	assert.False(t, shouldFailSessionForResult(nil, result), "a 404 is not scored against the endpoint")
 	assert.Contains(t, string(result.Reply.Data), "block not found")
 }
 
@@ -251,13 +254,14 @@ func sendRESTThroughMockUpstream(t *testing.T, status int, body string) *common.
 
 // TestRESTRelay_404_EmptyBody_IsANodeError pins the sender's side for the dfns incident: an empty
 // 404 from a gateway is a node error (a broadcast keeps waiting for its sibling), classified by
-// the registry's 404 row as non-retryable and not the endpoint's fault.
+// the registry's 404 row as data-scope: retried elsewhere on a read, not the endpoint's fault.
 func TestRESTRelay_404_EmptyBody_IsANodeError(t *testing.T) {
 	result := sendRESTThroughMockUpstream(t, http.StatusNotFound, "")
 
 	assert.Equal(t, http.StatusNotFound, result.StatusCode)
 	assert.True(t, result.IsNodeError)
-	assert.True(t, result.IsNonRetryable)
+	assert.False(t, result.IsNonRetryable)
+	assert.True(t, result.IsDataScope)
 	assert.False(t, result.IsNodeAtFault)
 	assert.Empty(t, result.Reply.Data)
 }
@@ -275,13 +279,14 @@ func TestRESTRelay_405_IsANodeError(t *testing.T) {
 
 // TestRESTRelay_404_ProblemDocument_IsANodeError: a Horizon problem document is the chain's answer
 // to the caller — and, like every other non-2xx, a node error the router classifies. The body
-// travels unchanged; the flags keep a write waiting and a read from being retried for nothing.
+// travels unchanged; a write keeps waiting, a read is tried on another node first.
 func TestRESTRelay_404_ProblemDocument_IsANodeError(t *testing.T) {
 	result := sendRESTThroughMockUpstream(t, http.StatusNotFound, `{"type":"https://stellar.org/horizon-errors/not_found","title":"Resource Missing","status":404}`)
 
 	assert.Equal(t, http.StatusNotFound, result.StatusCode)
 	assert.True(t, result.IsNodeError)
-	assert.True(t, result.IsNonRetryable)
+	assert.False(t, result.IsNonRetryable)
+	assert.True(t, result.IsDataScope)
 	assert.False(t, result.IsNodeAtFault)
 	assert.Contains(t, string(result.Reply.Data), "Resource Missing")
 }
@@ -312,6 +317,31 @@ func TestRESTRelay_409_Duplicate_IsANodeErrorNotScored(t *testing.T) {
 	assert.False(t, result.IsNodeAtFault)
 	assert.False(t, shouldFailSessionForResult(nil, result), "a duplicate is not the endpoint's fault")
 	assert.Contains(t, string(result.Reply.Data), "DUPLICATE")
+}
+
+// TestRESTRelay_403_AccessDenied_IsRetriedAndBlamed: a 403 on REST is the endpoint refusing the
+// router (a WAF, a plan, an operator's filter). Another provider can serve the request, and the
+// refusing endpoint is the one at fault.
+func TestRESTRelay_403_AccessDenied_IsRetriedAndBlamed(t *testing.T) {
+	result := sendRESTThroughMockUpstream(t, http.StatusForbidden, `<!DOCTYPE html><html>blocked</html>`)
+
+	assert.Equal(t, http.StatusForbidden, result.StatusCode)
+	assert.True(t, result.IsNodeError)
+	assert.False(t, result.IsNonRetryable)
+	assert.True(t, result.IsNodeAtFault)
+	assert.True(t, shouldFailSessionForResult(nil, result), "the refusing endpoint is scored")
+}
+
+// TestRESTRelay_400_BeyondHead_IsRetriedElsewhere: a lagging sidecar answers "the block you asked
+// for is beyond my head" with a 400. A synced node has the block: retry, do not blame.
+func TestRESTRelay_400_BeyondHead_IsRetriedElsewhere(t *testing.T) {
+	result := sendRESTThroughMockUpstream(t, http.StatusBadRequest, `{"code":400,"message":"Specified block number is larger than the current largest block. The largest known block number is 21144972."}`)
+
+	assert.True(t, result.IsNodeError)
+	assert.False(t, result.IsNonRetryable)
+	assert.True(t, result.IsDataScope)
+	assert.False(t, result.IsNodeAtFault)
+	assert.False(t, shouldFailSessionForResult(nil, result))
 }
 
 // TestRESTRelay_410_Pruned_IsRetriedElsewhere: Aptos and Horizon answer 410 for data the node no

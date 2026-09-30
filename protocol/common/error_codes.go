@@ -281,6 +281,17 @@ var (
 		Code: 2016, Name: "NODE_UNAUTHORIZED", Category: CategoryExternal,
 		Description: "Upstream rejected router credentials (HTTP 401)", Retryable: false,
 	})
+	// NODE_ACCESS_DENIED: the endpoint refused the router itself — its credentials (401), its
+	// plan or quota (402), a WAF or IP rule (403), a proxy wanting credentials (407), a protocol
+	// it will not speak (426), or a region it will not serve (451). Used on REST, where the status
+	// is the endpoint's own answer. Unlike NODE_UNAUTHORIZED it is retryable: each provider has its
+	// own credentials and its own rules, so another provider can serve the same request, and the
+	// refusing endpoint is at fault (its configuration, not the client's request). JSON-RPC and
+	// gRPC keep NODE_UNAUTHORIZED for 401.
+	LavaErrorNodeAccessDenied = registerError(&LavaError{
+		Code: 2018, Name: "NODE_ACCESS_DENIED", Category: CategoryExternal,
+		Description: "Endpoint refused the router (credentials, plan, WAF, region); another provider may serve it", Retryable: true,
+	})
 	// NODE_DATA_NOT_HELD: the endpoint answered correctly and the answer is "I do
 	// not have this" — a pruned height, an object that never existed, a request
 	// outside the range this node retains.
