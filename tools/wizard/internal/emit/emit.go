@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"slices"
 	"sort"
 	"strings"
 )
@@ -109,35 +108,11 @@ func (c *Config) YAML() string {
 // ONE provider whose node-urls are: the base http url (URLs[0]), then any ws urls,
 // then one addon-tagged node-url per capability — all sharing the same provider.
 //
-// This single-provider / multi-node-url layout is load-bearing; it's the only shape
-// that boots clean on the real router for the capabilities the wizard emits. The
-// reasoning, verified live against lava.build:
-//
-//   - The chain router is built PER PROVIDER (chain_router.go:240) and requires the
-//     base "||" collection plus, for a subscription-tagged spec (EVM jsonrpc declares
-//     eth_subscribe), a "|websocket|" collection. Both the base http url and the ws
-//     url live in this one provider, so both collections are satisfied here.
-//
-//   - An "extension" (archive is the only one across Lava specs) is only routable
-//     when the base collection coexists in the SAME provider's router: archive's
-//     required set always includes the base "||" it extends. A separate archive-only
-//     provider therefore fails "not all requirements supported in chainRouter" in
-//     BOTH `health` and a real boot. Putting the archive node-url on the base
-//     provider gives it that base collection. (For non-subscription interfaces —
-//     rest/grpc — this is the shape that boots; archive verifies cleanly.)
-//
-//   - Add_ons (debug/trace/bundler/…) are admitted straight from the node-url
-//     declaration and verify fine as extra node-urls on the base provider.
-//
-// Note on EVM-jsonrpc + archive specifically: the router widens an archive
-// verification to "archive,websocket" on a subscription-tagged spec
-// (getExtensionsForVerification, chain_fetcher.go:274), which no single public
-// gateway serves over one connection — so archive is unservable for EVM-jsonrpc via
-// a public gateway in ANY layout. The wizard never emits it there: probeOneAddon
-// (flow/endpoints.go) gates every addon on a live `health` verification, and that
-// widening makes the archive probe fail for EVM-jsonrpc. The public gateways are
-// themselves archive nodes, so archive-depth reads still resolve through the base
-// url. This emitter just lays out whatever the probe confirmed; it doesn't decide
+// The router verifies every node url over its own connection and keeps the
+// provider while it has an http url left: the base url carries base traffic, the
+// ws url subscriptions (a spec that subscribes needs one unless the router runs
+// with --skip-websocket-verification), and each addon url the capability it
+// declares. This emitter lays out whatever the probe confirmed; it doesn't decide
 // which capabilities are supported.
 func writeRPCBlock(b *strings.Builder, key string, ups []Upstream) {
 	fmt.Fprintf(b, "%s:\n", key)
@@ -149,37 +124,6 @@ func writeRPCBlock(b *strings.Builder, key string, ups []Upstream) {
 	}
 }
 
-// subscriptionIface reports whether an api-interface's spec carries subscriptions
-// (eth_subscribe for jsonrpc, /websocket for tendermintrpc). On such a spec the
-// router ws-widens an archive verification — see archiveNeedsSkipPruning.
-func subscriptionIface(iface string) bool {
-	return iface == "jsonrpc" || iface == "tendermintrpc"
-}
-
-// archiveNeedsSkipPruning reports whether this upstream's archive node-url must
-// carry `skip-verifications: ["pruning"]` to boot.
-//
-// On a subscription-tagged spec the router widens the archive extension's startup
-// verification (named "pruning" in the specs) to {archive,websocket}
-// (getExtensionsForVerification, chain_fetcher.go:283). When the upstream ALSO
-// declares a ws url, that widened verification is exercised and no single public
-// gateway serves the {archive,websocket} combination over one connection, so the
-// provider is excluded ("no chain proxy supporting requested extensions") and the
-// endpoint can't be served. Skipping just the `pruning` verification on the
-// archive node-url removes exactly that widened probe; the base + ws node-urls keep
-// all their verifications, and archive-depth state reads still route via the base
-// url. (Live-proven: ETH1 jsonrpc base+ws+archive boots clean with this and nothing
-// else — no --skip-websocket-verification flag needed.)
-//
-// Without a ws url there's nothing to widen the archive verification against, so the
-// skip isn't needed (and isn't emitted) — archive verifies cleanly on its own.
-func archiveNeedsSkipPruning(u Upstream) bool {
-	if !subscriptionIface(u.Iface) || len(u.URLs) < 2 {
-		return false
-	}
-	return slices.Contains(u.Addons, "archive")
-}
-
 // writeProvider emits a single provider entry: the upstream's base http url
 // (URLs[0]) with auth attached, then any further urls (ws), then one addon-tagged
 // node-url per capability in u.Addons. Every capability shares this one provider so
@@ -189,24 +133,21 @@ func writeProvider(b *strings.Builder, name string, u Upstream) {
 	fmt.Fprintf(b, "    chain-id: %q\n", u.ChainID)
 	fmt.Fprintf(b, "    api-interface: %q\n", u.Iface)
 	b.WriteString("    node-urls:\n")
-	for i, url := range u.URLs {
-		fmt.Fprintf(b, "      - url: %q\n", url)
-		// Auth attaches to the base (first) url only.
-		if i == 0 && u.Auth != nil && u.Auth.Var != "" {
+	// Auth goes on every node url: the router verifies and dials each on its own.
+	auth := func() {
+		if u.Auth != nil && u.Auth.Var != "" {
 			writeAuth(b, u.Auth)
 		}
 	}
+	for _, url := range u.URLs {
+		fmt.Fprintf(b, "      - url: %q\n", url)
+		auth()
+	}
 	// One addon-tagged node-url per capability, reusing the base http url (URLs[0]).
-	skipPruning := archiveNeedsSkipPruning(u)
 	for _, a := range u.Addons {
 		fmt.Fprintf(b, "      - url: %q\n", u.URLs[0])
+		auth()
 		fmt.Fprintf(b, "        addons: [%s]\n", quoteList([]string{a}))
-		// archive + ws on a subscription spec: skip the ws-widened `pruning`
-		// verification so the provider isn't excluded at startup (see
-		// archiveNeedsSkipPruning). Scoped to the archive node-url only.
-		if a == "archive" && skipPruning {
-			fmt.Fprintf(b, "        skip-verifications: [%s]\n", quoteList([]string{"pruning"}))
-		}
 	}
 }
 
