@@ -109,6 +109,17 @@ with the backend: a hit always costs ~1 RTT, and a miss waits out the budget bef
 through to the upstream. (`--secondary-cache-timeout` is the same knob for the secondary
 tier.)
 
+A backend that is **gone** rather than far reads differently, but only under
+`topology: standalone`: there a lookup that failed while the store's dial was being refused
+(connection refused, no route, no such host) is counted as `kind="error"` even though the
+lookup's own budget expired first, so an outage and a too-distant backend no longer share
+one series (MAG-3653). A dial that only timed out stays `timeout` — a black-holed endpoint
+and a healthy one too far away fail identically. Under `sentinel` and `cluster` a dial
+cannot be attributed to the one endpoint a lookup used, so an unreachable endpoint still
+reads `kind="timeout"` on reads there; for those topologies alert on
+`smartrouter_resp_cache_endpoint_connected{role}` / `smartrouter_resp_cache_connected`, the
+10s PING probe, which reaches each endpoint under every topology.
+
 The router also decides what it **writes**: when `--cache-max-entry-bytes` is set (it is off
 by default), a reply body larger than it is served but never written, on this backend as on
 cache-be. Each one counts in `smartrouter_cache_write_skipped_total{reason="size"}`.
@@ -278,7 +289,9 @@ Alert on the dedicated series (full reference in
   half** is down; `GET /debug/cache-state` names it too, in `detail`.
 - `smartrouter_resp_cache_failed_total{op, kind}` — backend-level operation failures (never
   clean misses), with `kind` splitting `error` from `timeout` so saturation reads differently
-  from outage.
+  from outage. Under `standalone` a read that failed while the endpoint was refusing
+  connections reads `error` even though its budget expired first; under `sentinel` and
+  `cluster` it still reads `timeout`, so alert on the two gauges above for an outage there.
 - `smartrouter_resp_cache_connection_errors_total`, pool gauges.
 
 - `smartrouter_resp_cache_breaker_open{role}` and `smartrouter_resp_cache_skipped_total{op}` —
@@ -635,7 +648,10 @@ smartrouter_resp_cache_failed_total{kind="timeout",op="set"} 1
 ```
 
 No request failed and the router never restarted. `kind` separates a frozen backend
-(`timeout`) from one that is gone (`error`), so saturation alerts differently from an outage.
+(`timeout`) from one that is gone (`error`), so saturation alerts differently from an outage;
+a backend stopped with `docker stop` refuses connections, so under `standalone` its reads
+land on `kind="error"` too (see [Configuration reference](#configuration-reference) for the
+topology limits of that reading).
 
 ```bash
 docker unpause smartrouter-demo-redis
