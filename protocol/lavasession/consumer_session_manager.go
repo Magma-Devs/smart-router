@@ -2937,7 +2937,7 @@ func blockScope(backup bool) string {
 	return "primary"
 }
 
-// releaseWithoutPenalty is the shared body of the two "this told us nothing about the
+// releaseWithoutPenalty is the shared body of the "this told us nothing about the
 // provider" release paths. It returns the reserved compute units and unlocks the session,
 // deliberately recording NO QoS failure, NO consecutive provider error, and NO optimizer
 // availability sample. caller names the entry point so a lock-order violation still
@@ -2989,6 +2989,31 @@ func (csm *ConsumerSessionManager) OnSessionCancelled(consumerSession *SingleCon
 // not session scoring, is what keeps traffic away from it (docs/RATE-LIMIT-HOLDOFF.md).
 func (csm *ConsumerSessionManager) OnSessionRateLimited(consumerSession *SingleConsumerSession, reason error) error {
 	return csm.releaseWithoutPenalty(consumerSession, reason, "OnSessionRateLimited")
+}
+
+// OnSessionDataNotHeld releases a session whose endpoint answered that it does not hold the
+// requested data (SubCategoryDataScope). The fast error says nothing about availability or latency,
+// so neither is sampled; the endpoint's tip still is evidence, so a lagging node keeps losing sync.
+func (csm *ConsumerSessionManager) OnSessionDataNotHeld(consumerSession *SingleConsumerSession, reason error) error {
+	if err := consumerSession.VerifyLock(); err != nil {
+		return fmt.Errorf("OnSessionDataNotHeld, consumerSession.lock must be locked before accessing this method: %w", err)
+	}
+	if endpointBlock := csm.endpointTipBlock(consumerSession); endpointBlock > 0 {
+		go csm.providerOptimizer.AppendSyncData(consumerSession.Parent.PublicLavaAddress, uint64(endpointBlock), csm.resolveSyncReference())
+	}
+	return csm.releaseWithoutPenalty(consumerSession, reason, "OnSessionDataNotHeld")
+}
+
+// endpointTipBlock reads the session endpoint's tip from the shared endpointtip store, 0 when unknown.
+// It can be a PEER pod's observation (the fleet tracker gate): block height belongs to the endpoint,
+// not to the path, so a provider lagging only on this pod's path may not be demoted.
+func (csm *ConsumerSessionManager) endpointTipBlock(consumerSession *SingleConsumerSession) int64 {
+	drsc, ok := consumerSession.Connection.(*DirectRPCSessionConnection)
+	if !ok || drsc.Endpoint == nil {
+		return 0
+	}
+	info := csm.RPCEndpoint()
+	return endpointtip.Default().Block(endpointtip.Key(info.ChainID, info.ApiInterface, drsc.Endpoint.NetworkAddress))
 }
 
 // Report session failure, mark it as blocked from future usages, report if timeout happened.
@@ -3334,21 +3359,8 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		// Prefer the per-endpoint ChainTracker block (Endpoint.LatestBlock, kept current regardless of
 		// method) so a lagging provider is actually demoted.
 		syncBlock := uint64(latestServicedBlock)
-		if drsc, ok := consumerSession.Connection.(*DirectRPCSessionConnection); ok && drsc.Endpoint != nil {
-			// Read the per-endpoint tip from the shared single-source-of-truth store (keyed
-			// by chain+apiInterface+url). This used to read drsc.Endpoint.LatestBlock, a
-			// second copy written ungated; the store is fed through the gated poll/relay
-			// observers, so a lagging provider is demoted against a consistent tip.
-			//
-			// It can also carry a PEER pod's observation (the fleet tracker gate), i.e. a height
-			// this pod did not itself serve. Accepted deliberately — block height is a property
-			// of the endpoint, not of the path to it — but it means a provider lagging only on
-			// THIS pod's path may not be demoted.
-			info := csm.RPCEndpoint()
-			tipKey := endpointtip.Key(info.ChainID, info.ApiInterface, drsc.Endpoint.NetworkAddress)
-			if endpointBlock := endpointtip.Default().Block(tipKey); endpointBlock > 0 {
-				syncBlock = uint64(endpointBlock)
-			}
+		if endpointBlock := csm.endpointTipBlock(consumerSession); endpointBlock > 0 {
+			syncBlock = uint64(endpointBlock)
 		}
 		// F4/F5: resolve THIS interface's consensus baseline so the optimizer measures sync lag
 		// against the agreed tip — or omits sync when there is no fresh majority — instead of the

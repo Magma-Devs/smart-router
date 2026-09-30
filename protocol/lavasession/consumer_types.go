@@ -110,6 +110,7 @@ type ProviderOptimizer interface {
 	AppendRelayFailure(providerAddress string)
 	AppendRelayData(providerAddress string, latency time.Duration, cu, syncBlock uint64)
 	AppendRelayDataConsensus(providerAddress string, latency time.Duration, cu, syncBlock uint64, syncRef provideroptimizer.SyncReference)
+	AppendSyncData(providerAddress string, syncBlock uint64, syncRef provideroptimizer.SyncReference)
 	ChooseUpstream(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
 	ChooseUpstreamWithStats(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string, stats *provideroptimizer.SelectionStats)
 	GetReputationReportForProvider(string) (*pairingtypes.QualityOfServiceReport, time.Time)
