@@ -162,7 +162,12 @@ func NewUnifiedRelayStateMachine(
 		// category — exactly as if the request had sent no CV headers. This is what makes `forbid-caller-cv`
 		// truly disable cross-validation for the method; without skipping the header read below, a caller
 		// could still turn CV on via headers.
-		utils.LavaFormatDebug("[StateMachine] caller cross-validation headers ignored (forbidden by per-method policy)",
+		reason := config.CallerCVIgnoredReason
+		if reason == "" {
+			reason = "forbidden by per-method policy"
+		}
+		utils.LavaFormatDebug("[StateMachine] caller cross-validation headers ignored",
+			utils.LogAttr("reason", reason),
 			utils.LogAttr("GUID", ctx))
 		if chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 			selection = Stateful

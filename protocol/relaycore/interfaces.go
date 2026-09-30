@@ -149,4 +149,10 @@ type StateMachineConfig struct {
 	MaxRetries int
 	// SendRelayAttempts is the number of consecutive batch errors before giving up
 	SendRelayAttempts int
+	// CallerCVIgnoredReason names, for the debug line only, why a request's cross-validation headers
+	// are ignored when forbidCallerCrossValidation is set. Empty reads as the operator's
+	// forbid-caller-cv policy, which is the only way a CLIENT request reaches that branch. The
+	// router's own internal relays set it, so a health check does not log a policy nobody wrote
+	// (MAG-3746).
+	CallerCVIgnoredReason string
 }
