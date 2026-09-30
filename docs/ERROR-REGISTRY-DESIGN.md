@@ -651,7 +651,9 @@ unchanged. What "node error" changes is the same as on JSON-RPC:
   vendor broadcast the transaction).
 - The error registry classifies the reply, and its REST status rows decide the rest. Rows
   added with this rule, in the REST-only table: `400`, `422` → user error (non-retryable, not
-  the endpoint's fault), `403` → unauthorized (non-retryable), `410` → data the node no longer
+  the endpoint's fault), `403` → unauthorized (non-retryable), `409` → transaction already known (Horizon
+  `DUPLICATE`; non-retryable, not a fault — on a broadcast the sibling's 201 wins over it),
+  `410` → data the node no longer
   holds (retryable elsewhere, not a fault). They are deliberately not in the shared HTTP
   tables: on JSON-RPC and gRPC a bare 400 or 403 is a gateway or WAF in front of the node,
   where "unknown ⇒ retry elsewhere" stays the right call. Already there: `401`, `404`, `405`, `413`, `501` non-retryable,

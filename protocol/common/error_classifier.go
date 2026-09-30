@@ -282,6 +282,11 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{CodeEquals(403), LavaErrorNodeUnauthorized},
 		{CodeEquals(410), LavaErrorChainStatePruned},
 		{CodeEquals(422), LavaErrorUserInvalidParams},
+		// 409 is "I already have this transaction": Horizon answers a re-submitted transaction
+		// with 409 {"tx_status":"DUPLICATE"}. Non-retryable and never the endpoint's fault. On a
+		// write broadcast it is a node error, so a sibling's 201 with the transaction hash wins
+		// over it; when every node answers 409 (a client re-sending), the caller gets the 409.
+		{CodeEquals(409), LavaErrorChainTxAlreadyKnown},
 		// Message-based matchers for common REST error patterns
 		{MessageContains("endpoint not found"), LavaErrorNodeEndpointNotFound},
 		{MessageContains("route not found"), LavaErrorNodeEndpointNotFound},
