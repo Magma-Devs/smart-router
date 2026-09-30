@@ -463,6 +463,29 @@ func (csm *ConsumerSessionManager) IsStaticProvider(providerAddr string) bool {
 	return false
 }
 
+// CanServeNow reports whether providerAddr is, right now, a primary that selection would hand a
+// request for addon and extensions to on its own: valid, not blocked, serving that collection,
+// and not held off after a rate limit. A routing preference asks it before pinning. A header pin
+// does not, on purpose: it is the caller's explicit ask, it outranks the rate-limit hold-off, and
+// on an empty pool it releases the blocked list to reach its provider — none of which a
+// preference may do. Read-only.
+func (csm *ConsumerSessionManager) CanServeNow(providerAddr string, addon string, extensions []string, ctx context.Context) bool {
+	if csm == nil || providerAddr == "" {
+		return false
+	}
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	if !slices.Contains(csm.getValidAddresses(addon, slices.Clone(extensions), ctx), providerAddr) {
+		return false
+	}
+	if csm.rateLimitHoldoff != nil {
+		if _, held := csm.rateLimitHoldoff.ProviderReadyAt(providerAddr); held {
+			return false
+		}
+	}
+	return true
+}
+
 // this is being read in multiple locations and but never changes so no need to lock.
 func (csm *ConsumerSessionManager) RPCEndpoint() RPCEndpoint {
 	return *csm.rpcEndpoint

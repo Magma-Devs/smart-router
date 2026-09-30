@@ -3569,6 +3569,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				DebugAddress:                      viper.GetString("debug-address"),
 				ResponseCompression:               viper.GetString(common.ResponseCompressionFlag),
 				ShutdownGracePeriod:               viper.GetDuration(common.ShutdownGracePeriodFlag),
+				ReadYourWritesWindow:              viper.GetDuration(common.ReadYourWritesWindowFlag),
 			}
 
 			rpcSmartRouterSharedState := viper.GetBool(common.SharedStateFlag)
@@ -3719,6 +3720,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().Duration(common.ShutdownGracePeriodFlag, common.DefaultShutdownGracePeriod, "graceful shutdown deadline for in-flight requests and WebSocket clients")
 	cmdRPCSmartRouter.Flags().IntVar(&relaycore.RelayRetryLimit, common.SetRelayRetryLimitFlag, 2, "max total relay retry attempts across all error types (node and protocol errors combined; 0 disables retries)")
 	cmdRPCSmartRouter.Flags().Bool(common.StatefulToBackupFlag, false, "also broadcast stateful relays (transaction submission) to the backup tier. OFF by default: a stateful relay reaches every provider it selects, so this sends EVERY stateful request to the backup — including the ones the primaries serve fine — and a fast backup can answer the caller first. Turn it on to maximise the chance a transaction lands, accepting the backup spend")
+	cmdRPCSmartRouter.Flags().Duration(common.ReadYourWritesWindowFlag, common.DefaultReadYourWritesWindow, "how long an eth_sendRawTransaction's sender and hash stay pinned to the upstream that accepted it: the sender's pending-nonce reads and lookups of the hash go there, so a wallet reads back its own write instead of an upstream the write has not reached yet. Pod-local, and a preference — an upstream that cannot take the read gives way to ordinary selection. 0 turns it off")
 	if err := viper.BindPFlag(common.StatefulToBackupFlag, cmdRPCSmartRouter.Flags().Lookup(common.StatefulToBackupFlag)); err != nil {
 		utils.LavaFormatFatal("failed to bind stateful-to-backup flag", err)
 	}
