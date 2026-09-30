@@ -279,18 +279,31 @@ func (*JsonRPCChainParser) newBatchChainMessage(serviceApi *spectypes.Api, reque
 	return nodeMsg, err
 }
 
-func (*JsonRPCChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedBlockHashes []string, msg *rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
+func (apip *JsonRPCChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedBlockHashes []string, msg *rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
 	nodeMsg := &baseChainMessageContainer{
 		api:                      serviceApi,
 		apiCollection:            apiCollection,
 		latestRequestedBlock:     requestedBlock,
 		requestedBlockHashes:     requestedBlockHashes,
 		msg:                      msg,
-		resultErrorParsingMethod: msg.CheckResponseError,
+		resultErrorParsingMethod: apip.resultErrorParsingMethod(msg),
 		parseDirective:           GetParseDirective(serviceApi, apiCollection),
 		usedDefaultValue:         usedDefaultValue,
 	}
 	return nodeMsg
+}
+
+// resultErrorParsingMethod picks the classifier for a single JSON-RPC reply. An XRP Ledger node
+// reports a rejected transaction inside an ordinary result, so an XRP chain also reads the engine
+// result of a submission (CheckXRPLResponseError); every other chain reads the envelope alone.
+//
+// Keyed on the chain family because the error registry's XRP rows are: every rejection this
+// classifier flags is one those rows classify, so none reaches the availability gate unclassified.
+func (apip *JsonRPCChainParser) resultErrorParsingMethod(msg *rpcInterfaceMessages.JsonrpcMessage) func(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
+	if apip.chainFamily() == common.ChainFamilyXRP {
+		return msg.CheckXRPLResponseError
+	}
+	return msg.CheckResponseError
 }
 
 // SetSpec sets the spec for the JsonRPCChainParser
