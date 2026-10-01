@@ -867,6 +867,21 @@ func TestClassifyError_TransportScoping(t *testing.T) {
 	// gRPC code should NOT match in JSON-RPC transport
 	result = ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 14, "service unavailable")
 	assert.NotEqual(t, LavaErrorNodeServiceUnavailable, result)
+
+	// MAG-3995: gRPC ABORTED (10) is a node error with its own name. On Sui it is a transaction's
+	// outcome, so it is non-retryable and not the endpoint's fault, and the write outcome stays
+	// unclear. It is not the internal PROTOCOL_PROVIDER_ABORTED code.
+	result = ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 10, "")
+	assert.Equal(t, LavaErrorNodeAborted, result)
+	assert.Equal(t, CategoryExternal, result.Category, "the node answered; internal would read as unreachable")
+	assert.False(t, result.Retryable, "every endpoint gives the same answer")
+	assert.True(t, result.MayHaveReachedNode, "Sui's already-finalized case can mean the transaction is on chain")
+	assert.False(t, result.EndpointAtFault())
+	assert.NotEqual(t, LavaErrorNodeAborted, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 10, ""),
+		"JSON-RPC 10 is not a gRPC status")
+
+	// DATA_LOSS (15) stays unregistered: no node we route to sends it.
+	assert.Equal(t, LavaErrorUnknown, ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 15, ""))
 }
 
 func TestClassifyError_ChainSpecificMappings(t *testing.T) {

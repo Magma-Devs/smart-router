@@ -80,6 +80,7 @@ var faultAxisTable = []faultAxisCase{
 	// The caller's fault. Non-retryable, and no fault-axis label needed — the default arm of
 	// classifyEndpointHealth already excuses CategoryExternal + !Retryable.
 	{2016, "NODE_UNAUTHORIZED", SubCategoryNone, false, "credentials rejected; see the note below"},
+	{2018, "NODE_ABORTED", SubCategoryNone, false, "Sui transaction outcome, the same from every endpoint"},
 	{3001, "CHAIN_NONCE_TOO_LOW", SubCategoryNone, false, ""},
 	{3002, "CHAIN_NONCE_TOO_HIGH", SubCategoryNone, false, ""},
 	{3003, "CHAIN_INSUFFICIENT_FUNDS", SubCategoryNone, false, ""},
