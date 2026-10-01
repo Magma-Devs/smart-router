@@ -652,6 +652,19 @@ func TestRESTRelay_503_TryAgainLater_KeepsTheNodesReply(t *testing.T) {
 	assert.True(t, shouldFailSessionForResult(relayErr, relayResult), "and still scored")
 }
 
+// TestRESTRelay_500_TonRejection_KeepsTheNodesReply: toncenter rejects a sendBoc with a JSON 500
+// (MAG-3974, seen live on dfns TON testnet). The client must get toncenter's reason, not the router's
+// "insufficient results" 500, or it cannot tell that the message will never be accepted.
+func TestRESTRelay_500_TonRejection_KeepsTheNodesReply(t *testing.T) {
+	body := `{"ok":false,"error":"duplicate message","code":500}`
+	relayResult, relayErr := relayInnerDirectREST(t, http.StatusInternalServerError, body)
+
+	require.NoError(t, relayErr, "a 5xx with the node's JSON reply must not become a transport error")
+	assert.Equal(t, http.StatusInternalServerError, relayResult.StatusCode)
+	assert.True(t, relayResult.IsNodeError)
+	assert.Equal(t, body, string(relayResult.Reply.Data), "the client must be able to read toncenter's reason")
+}
+
 // TestRESTRelay_5xx_TransportPathUnchanged: the shapes that must keep the old path — an empty 500, a
 // proxy's HTML 502, and a JSON 502 or 504 (a gateway that may already have forwarded the request:
 // the write may still apply, so it must stay "may have reached the node").
