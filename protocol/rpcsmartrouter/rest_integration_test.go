@@ -320,17 +320,66 @@ func TestRESTRelay_409_Duplicate_IsANodeErrorNotScored(t *testing.T) {
 	assert.Contains(t, string(result.Reply.Data), "DUPLICATE")
 }
 
-// TestRESTRelay_403_AccessDenied_IsRetriedAndBlamed: a 403 on REST is the endpoint refusing the
-// router (a WAF, a plan, an operator's filter). Another provider can serve the request, and the
-// refusing endpoint is the one at fault.
-func TestRESTRelay_403_AccessDenied_IsRetriedAndBlamed(t *testing.T) {
+// TestRESTRelay_403_AccessDenied_IsRetriedButNotBlamed: a 403 on REST is the endpoint refusing the
+// router (a WAF, a plan, an operator's filter). Another provider can serve the request, so it is
+// retried — and the refusing endpoint keeps its health, because it answered truthfully about its
+// own configuration rather than failing.
+//
+// Blaming it was the bug: IsNodeAtFault takes the MarkUnhealthy arm, which walks
+// Endpoint.ConnectionRefusals, and that counter disables the URL for EVERY path at
+// MaxConsecutiveConnectionAttempts (--bench-after, default 50) and is reset only by a 2xx. A vendor
+// gating one path behind a plan took out the whole endpoint; a wrong or expired shared credential
+// answering 401 on every path took out every endpoint using it, with nothing ever resetting the
+// counter. REST gets no replayable probe evidence either (recordRelayProbeEvidence is JSON-RPC
+// only), so recovery was poll-only.
+func TestRESTRelay_403_AccessDenied_IsRetriedButNotBlamed(t *testing.T) {
 	result := sendRESTThroughMockUpstream(t, http.StatusForbidden, `<!DOCTYPE html><html>blocked</html>`)
 
 	assert.Equal(t, http.StatusForbidden, result.StatusCode)
 	assert.True(t, result.IsNodeError)
+	assert.False(t, result.IsNonRetryable, "another provider can serve it")
+	assert.True(t, result.IsNodeCapability, "it is a property of the endpoint's configuration")
+	assert.False(t, result.IsNodeAtFault, "so the endpoint is not marked unhealthy")
+	assert.False(t, shouldFailSessionForResult(nil, result),
+		"and not demoted through the availability signal either — one answer, one verdict")
+}
+
+// TestRESTRelay_401_Unauthorized_IsRetriedButNotBlamed is the same rule on the status that makes it
+// load-bearing: a 401 from a wrong or expired credential fails every path, so unlike a 403 on one
+// gated path there is never a 2xx in between to reset the refusal counter.
+func TestRESTRelay_401_Unauthorized_IsRetriedButNotBlamed(t *testing.T) {
+	result := sendRESTThroughMockUpstream(t, http.StatusUnauthorized, `{"message":"invalid api key"}`)
+
+	assert.Equal(t, http.StatusUnauthorized, result.StatusCode)
+	assert.True(t, result.IsNodeError)
 	assert.False(t, result.IsNonRetryable)
-	assert.True(t, result.IsNodeAtFault)
-	assert.True(t, shouldFailSessionForResult(nil, result), "the refusing endpoint is scored")
+	assert.False(t, result.IsNodeAtFault)
+	assert.False(t, shouldFailSessionForResult(nil, result))
+}
+
+// TestRESTRelay_500_CosmosPrunedHeight_IsNotBlamed: Cosmos answers a pruned height with a 500, and
+// it is the node telling the truth about what it holds. Through the sender it must stay a node
+// error the client receives unchanged, retried on an archive node, and not counted against the
+// endpoint that answered honestly.
+func TestRESTRelay_500_CosmosPrunedHeight_IsNotBlamed(t *testing.T) {
+	body := `{"code":2,"message":"height 1 is not available, lowest height is 25280088","details":[]}`
+	result := sendRESTThroughMockUpstream(t, http.StatusInternalServerError, body)
+
+	assert.Equal(t, http.StatusInternalServerError, result.StatusCode)
+	assert.True(t, result.IsNodeError)
+	assert.False(t, result.IsNonRetryable, "an archive node may hold it")
+	assert.True(t, result.IsDataScope)
+	assert.False(t, result.IsNodeAtFault, "the node answered truthfully about what it holds")
+}
+
+// TestRESTRelay_500_Opaque_StaysBlamed is the other side of that line: a 500 the router cannot read
+// as the caller's answer is still the endpoint's fault. Each 500 carve-out is gated on a probed
+// body precisely so this case does not move.
+func TestRESTRelay_500_Opaque_StaysBlamed(t *testing.T) {
+	result := sendRESTThroughMockUpstream(t, http.StatusInternalServerError, `{"message":"database connection lost"}`)
+
+	assert.True(t, result.IsNodeError)
+	assert.True(t, result.IsNodeAtFault, "an unexplained 500 is still the endpoint's problem")
 }
 
 // TestRESTRelay_400_BeyondHead_IsRetriedElsewhere: a lagging sidecar answers "the block you asked
