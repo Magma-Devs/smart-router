@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,10 @@ const (
 	xrplSubmitRequest = `{"method":"submit","params":[{"tx_blob":"1200002280000000"}]}`
 	xrplApplied       = `{"result":{"accepted":true,"applied":true,"broadcast":true,"engine_result":"tesSUCCESS","engine_result_code":0,"engine_result_message":"The transaction was applied. Only final in a validated ledger.","kept":true,"queued":false,"status":"success"}}`
 	xrplPastSeq       = `{"result":{"accepted":false,"applied":false,"broadcast":false,"engine_result":"tefPAST_SEQ","engine_result_code":-190,"engine_result_message":"This sequence number has already passed.","kept":false,"queued":false,"status":"success"}}`
+	xrplFeeClaimed    = `{"result":{"accepted":true,"applied":true,"broadcast":true,"engine_result":"tecUNFUNDED_PAYMENT","engine_result_code":104,"engine_result_message":"Insufficient XRP balance to send.","kept":true,"queued":false,"status":"success"}}`
+	xrplNoNetwork     = `{"result":{"error":"noNetwork","error_code":17,"error_message":"Not synced to the network.","request":{"command":"submit","tx_blob":"1200002280000000"},"status":"error"}}`
+	xrplTooBusy       = `{"result":{"error":"tooBusy","error_code":9,"error_message":"The server is too busy to help you now.","request":{"command":"submit","tx_blob":"1200002280000000"},"status":"error"}}`
+	xrplBadBlob       = `{"result":{"error":"invalidTransaction","error_exception":"Transaction length invalid","error_message":null,"request":{"command":"submit","tx_blob":"00"},"status":"error"}}`
 )
 
 // xrplSubmitMessage parses a submit the way an XRPT router does.
@@ -42,19 +47,26 @@ func xrplSubmitMessage(t *testing.T) chainlib.ChainMessage {
 	return chainMessage
 }
 
-// TestDirectRPCRelaySender_XRPLRejectionIsNotScored: a node that answers a submit with tefPAST_SEQ
-// has told the truth about the transaction — often it received it by gossip before our copy arrived.
-// The reply is a node error, so a broadcast keeps waiting for a sibling (MAG-4033), and it must not
-// cost the node availability: every node rejects a re-sent transaction the same way, so scoring the
-// rejection would demote the whole pairing whenever a client resubmits.
-func TestDirectRPCRelaySender_XRPLRejectionIsNotScored(t *testing.T) {
+// TestDirectRPCRelaySender_XRPLSubmitVerdicts pins how each kind of submit reply is scored. A
+// rejected transaction (MAG-4033) and a request every node refuses are node errors that must not
+// cost the node availability: every node answers a re-sent or malformed transaction the same way,
+// so scoring them would demote the whole pairing whenever a client resubmits. A node that cannot
+// serve (noNetwork) is the one that should be scored; a busy one is held off, not scored.
+func TestDirectRPCRelaySender_XRPLSubmitVerdicts(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		reply       string
-		wantRejects bool
+		name            string
+		reply           string
+		wantNodeError   bool
+		wantRateLimited bool
+		wantAtFault     bool
+		wantScored      bool
+		wantHealthy     bool
 	}{
-		{"rejected", xrplPastSeq, true},
-		{"applied", xrplApplied, false},
+		{name: "applied", reply: xrplApplied, wantHealthy: true},
+		{name: "rejected", reply: xrplPastSeq, wantNodeError: true},
+		{name: "malformed request", reply: xrplBadBlob, wantNodeError: true},
+		{name: "busy", reply: xrplTooBusy, wantNodeError: true, wantRateLimited: true},
+		{name: "not synced", reply: xrplNoNetwork, wantNodeError: true, wantAtFault: true, wantScored: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +79,7 @@ func TestDirectRPCRelaySender_XRPLRejectionIsNotScored(t *testing.T) {
 			ctx := context.Background()
 			directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
 			require.NoError(t, err)
+			t.Cleanup(func() { directConn.Close() })
 			sender := &DirectRPCRelaySender{
 				directConnection: directConn,
 				endpointName:     "xrpl-upstream",
@@ -78,32 +91,89 @@ func TestDirectRPCRelaySender_XRPLRejectionIsNotScored(t *testing.T) {
 			require.NotNil(t, result)
 			require.Equal(t, http.StatusOK, result.StatusCode)
 			require.Equal(t, tc.reply, string(result.Reply.Data), "the body travels unchanged either way")
-			require.Equal(t, tc.wantRejects, result.IsNodeError)
-			require.False(t, shouldFailSessionForResult(nil, result), "the node answered correctly and must not be scored as failing")
-			require.False(t, result.IsNodeAtFault)
-			if tc.wantRejects {
-				require.True(t, result.IsNonRetryable, "the carve-out that keeps the availability gate off the node")
-				require.False(t, relayProvesEndpointHealthy(result), "a rejection neither blames nor certifies the node")
-			} else {
-				require.True(t, relayProvesEndpointHealthy(result))
-			}
+			require.Equal(t, tc.wantNodeError, result.IsNodeError)
+			require.Equal(t, tc.wantRateLimited, result.IsRateLimited)
+			require.Equal(t, tc.wantRateLimited, isRateLimitedRelayOutcome(nil, result), "a busy node is held off")
+			require.Equal(t, tc.wantAtFault, result.IsNodeAtFault)
+			require.Equal(t, tc.wantScored, shouldFailSessionForResult(nil, result))
+			require.Equal(t, tc.wantHealthy, relayProvesEndpointHealthy(result))
 		})
 	}
 }
 
-// TestJSONRPCListener_XRPLSubmitBroadcast drives MAG-4033 end to end: the JSON-RPC listener, the
-// XRPT parser, the session manager, the real state machine and policy, the direct sender and the
-// write verdict, with two XRPL upstreams answering one submit.
+// startXRPLRouter serves an XRPT JSON-RPC listener over the given upstreams, each a direct-rpc
+// provider, through the real parser, session manager, state machine, policy, sender and write
+// verdict. It returns the listener's address.
+func startXRPLRouter(t *testing.T, ctx context.Context, upstreams map[string]string) string {
+	t.Helper()
+	providers := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	for name, url := range upstreams {
+		conn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, spectypes.APIInterfaceJsonRPC)
+		require.NoError(t, err)
+		t.Cleanup(func() { conn.Close() })
+		endpoint := &lavasession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{conn}}
+		provider := lavasession.NewConsumerSessionWithProvider(name, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
+		provider.StaticProvider = true
+		providers[uint64(len(providers))] = provider
+	}
+	sessionManager, rpcEndpoint := createTestSessionManager("XRPT", spectypes.APIInterfaceJsonRPC)
+	rpcEndpoint.NetworkAddress = "127.0.0.1:0"
+	require.NoError(t, sessionManager.UpdateAllProviders(1, providers, nil))
+
+	chainParser, err := chainlib.NewChainParser(spectypes.APIInterfaceJsonRPC)
+	require.NoError(t, err)
+	chainParser.SetSpec(chainlib.CreateMockXRPLSpec("XRPT"))
+	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	server := &RPCSmartRouterServer{
+		chainParser: chainParser, sessionManager: sessionManager, listenEndpoint: rpcEndpoint,
+		rpcSmartRouterLogs: logs, relayRetriesManager: lavaprotocol.NewRelayRetriesManager(),
+		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
+	}
+	listener := chainlib.NewJrpcChainListener(ctx, rpcEndpoint, server, nil, logs, nil, nil)
+	listenerDone := make(chan struct{})
+	go func() {
+		defer close(listenerDone)
+		listener.Serve(ctx, common.ConsumerCmdFlags{})
+	}()
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+		defer shutdownCancel()
+		assert.NoError(t, listener.Shutdown(shutdownCtx))
+		select {
+		case <-listenerDone:
+		case <-shutdownCtx.Done():
+			t.Error("JSON-RPC listener did not stop")
+		}
+	})
+	require.Eventually(t, func() bool { return listener.GetListeningAddress() != "" }, time.Second, time.Millisecond)
+	return listener.GetListeningAddress()
+}
+
+// postToRouter sends body to the router and returns the reply.
+func postToRouter(t *testing.T, ctx context.Context, address, body string) (*http.Response, []byte) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+address+"/", bytes.NewReader([]byte(body)))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	reply, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	return response, reply
+}
+
+// TestJSONRPCListener_XRPLSubmitBroadcast drives MAG-4033 end to end with two XRPL upstreams
+// answering one submit: the node that has the transaction by gossip answers at once, the other
+// answers after the first has been served.
 func TestJSONRPCListener_XRPLSubmitBroadcast(t *testing.T) {
 	rand.InitRandomSeed()
-	const (
-		feeClaimed    = `{"result":{"accepted":true,"applied":true,"broadcast":true,"engine_result":"tecUNFUNDED_PAYMENT","engine_result_code":104,"engine_result_message":"Insufficient XRP balance to send.","kept":true,"queued":false,"status":"success"}}`
-		answerLatency = 150 * time.Millisecond
-	)
+	const answerLatency = 150 * time.Millisecond
 	for _, tc := range []struct {
 		name            string
-		firstReply      string // the node that has the transaction by gossip answers at once
-		laterReply      string // the node that applied it answers after the first has been served
+		firstReply      string
+		laterReply      string
 		wantReply       string
 		wantNodeErrFlag bool
 	}{
@@ -114,8 +184,14 @@ func TestJSONRPCListener_XRPLSubmitBroadcast(t *testing.T) {
 		},
 		{
 			// Applied with the fee claimed is the transaction's outcome, not a refusal.
-			name: "fee claimed after a gossip rejection", firstReply: xrplPastSeq, laterReply: feeClaimed,
-			wantReply: feeClaimed,
+			name: "fee claimed after a gossip rejection", firstReply: xrplPastSeq, laterReply: feeClaimedReply(),
+			wantReply: xrplFeeClaimed,
+		},
+		{
+			// An unsynced node's API error is a failed call, not an answer: it must not outrank the
+			// rejection, which is the only thing either node said about the transaction.
+			name: "API error after a gossip rejection", firstReply: xrplPastSeq, laterReply: xrplNoNetwork,
+			wantReply: xrplPastSeq, wantNodeErrFlag: true,
 		},
 		{
 			// A resubmitted transaction: everyone rejects, and the first rejection goes out as-is.
@@ -153,68 +229,11 @@ func TestJSONRPCListener_XRPLSubmitBroadcast(t *testing.T) {
 			}))
 			defer later.Close()
 
-			newProvider := func(name, url string) *lavasession.ConsumerSessionsWithProvider {
-				conn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, spectypes.APIInterfaceJsonRPC)
-				require.NoError(t, err)
-				t.Cleanup(func() { conn.Close() })
-				endpoint := &lavasession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{conn}}
-				provider := lavasession.NewConsumerSessionWithProvider(name, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
-				provider.StaticProvider = true
-				return provider
-			}
-			sessionManager, rpcEndpoint := createTestSessionManager("XRPT", spectypes.APIInterfaceJsonRPC)
-			rpcEndpoint.NetworkAddress = "127.0.0.1:0"
-			require.NoError(t, sessionManager.UpdateAllProviders(1, map[uint64]*lavasession.ConsumerSessionsWithProvider{
-				0: newProvider("gossip-node", first.URL),
-				1: newProvider("applier-node", later.URL),
-			}, nil))
-
-			chainParser, err := chainlib.NewChainParser(spectypes.APIInterfaceJsonRPC)
-			require.NoError(t, err)
-			chainParser.SetSpec(chainlib.CreateMockXRPLSpec("XRPT"))
-			logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
-			require.NoError(t, err)
-			server := &RPCSmartRouterServer{
-				chainParser: chainParser, sessionManager: sessionManager, listenEndpoint: rpcEndpoint,
-				rpcSmartRouterLogs: logs, relayRetriesManager: lavaprotocol.NewRelayRetriesManager(),
-				consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
-			}
-			listener := chainlib.NewJrpcChainListener(ctx, rpcEndpoint, server, nil, logs, nil, nil)
-			listenerDone := make(chan struct{})
-			go func() {
-				defer close(listenerDone)
-				listener.Serve(ctx, common.ConsumerCmdFlags{})
-			}()
-			t.Cleanup(func() {
-				shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
-				defer shutdownCancel()
-				assert.NoError(t, listener.Shutdown(shutdownCtx))
-				select {
-				case <-listenerDone:
-				case <-shutdownCtx.Done():
-					t.Error("JSON-RPC listener did not stop")
-				}
-			})
-			require.Eventually(t, func() bool { return listener.GetListeningAddress() != "" }, time.Second, time.Millisecond)
-
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+listener.GetListeningAddress()+"/", bytes.NewReader([]byte(xrplSubmitRequest)))
-			require.NoError(t, err)
-			req.Header.Set("Content-Type", "application/json")
-			response, err := http.DefaultClient.Do(req)
-			require.NoError(t, err)
-			defer response.Body.Close()
-			body, err := io.ReadAll(response.Body)
-			require.NoError(t, err)
+			address := startXRPLRouter(t, ctx, map[string]string{"gossip-node": first.URL, "later-node": later.URL})
+			response, body := postToRouter(t, ctx, address, xrplSubmitRequest)
 
 			require.Equal(t, http.StatusOK, response.StatusCode, string(body))
-			var got, want struct {
-				Result struct {
-					EngineResult string `json:"engine_result"`
-				} `json:"result"`
-			}
-			require.NoError(t, json.Unmarshal(body, &got), string(body))
-			require.NoError(t, json.Unmarshal([]byte(tc.wantReply), &want))
-			require.Equal(t, want.Result.EngineResult, got.Result.EngineResult, string(body))
+			require.Equal(t, engineVerdictOf(t, []byte(tc.wantReply)), engineVerdictOf(t, body), string(body))
 			if tc.wantNodeErrFlag {
 				require.Equal(t, "true", response.Header.Get(common.LAVA_IDENTIFIED_NODE_ERROR_HEADER))
 			} else {
@@ -222,4 +241,60 @@ func TestJSONRPCListener_XRPLSubmitBroadcast(t *testing.T) {
 			}
 		})
 	}
+}
+
+func feeClaimedReply() string { return xrplFeeClaimed }
+
+// engineVerdictOf names what a submit reply says: its engine result, or its API error.
+func engineVerdictOf(t *testing.T, reply []byte) string {
+	t.Helper()
+	var parsed struct {
+		Result struct {
+			EngineResult string `json:"engine_result"`
+			Error        string `json:"error"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(reply, &parsed), string(reply))
+	if parsed.Result.EngineResult != "" {
+		return parsed.Result.EngineResult
+	}
+	return parsed.Result.Error
+}
+
+// TestJSONRPCListener_XRPLBatchedSubmitRefused: rippled answers any JSON-RPC batch with HTTP 400
+// "Unable to parse request", so a batched submit reaches a node only through a gateway that splits
+// it — where the batch classifier would read a rejection inside it as a success. The router refuses
+// it the way the node would, before any upstream sees it, and still serves a batch of reads.
+func TestJSONRPCListener_XRPLBatchedSubmitRefused(t *testing.T) {
+	rand.InitRandomSeed()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var submitsReceived atomic.Int32
+	upstream := func() *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			assert.NoError(t, err)
+			if bytes.Contains(body, []byte(`"submit"`)) {
+				submitsReceived.Add(1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"result":{"account_data":{},"status":"success"}}]`))
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+	address := startXRPLRouter(t, ctx, map[string]string{"node-a": upstream().URL, "node-b": upstream().URL})
+
+	response, body := postToRouter(t, ctx, address, "["+xrplSubmitRequest+"]")
+	require.Equal(t, http.StatusBadRequest, response.StatusCode, string(body))
+	var refused common.JsonRPCErrorMessage
+	require.NoError(t, json.Unmarshal(body, &refused), string(body))
+	require.Equal(t, -32600, refused.Error.Code)
+	require.Contains(t, refused.Error.Data, "single request")
+	require.Zero(t, submitsReceived.Load(), "a refused batch must not reach any upstream")
+
+	response, body = postToRouter(t, ctx, address, `[{"method":"account_info","params":[{"account":"rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"}]}]`)
+	require.Equal(t, http.StatusOK, response.StatusCode, string(body))
 }

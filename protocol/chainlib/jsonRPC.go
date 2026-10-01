@@ -126,6 +126,11 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			utils.LogAttr("maxAllowed", MaxBatchRequestSize),
 		)
 	}
+	if isBatch {
+		if err := rpcInterfaceMessages.CheckJsonrpcBatch(apip.chainFamily(), msgs); err != nil {
+			return nil, utils.LavaFormatWarning("JSON-RPC batch refused", err, utils.LogAttr("batchSize", len(msgs)))
+		}
+	}
 	var api *spectypes.Api
 	var apiCollection *spectypes.ApiCollection
 	var latestRequestedBlock, earliestRequestedBlock int64 = 0, 0
@@ -286,24 +291,11 @@ func (apip *JsonRPCChainParser) newChainMessage(serviceApi *spectypes.Api, reque
 		latestRequestedBlock:     requestedBlock,
 		requestedBlockHashes:     requestedBlockHashes,
 		msg:                      msg,
-		resultErrorParsingMethod: apip.resultErrorParsingMethod(msg),
+		resultErrorParsingMethod: rpcInterfaceMessages.JsonrpcResponseErrorChecker(apip.chainFamily(), msg),
 		parseDirective:           GetParseDirective(serviceApi, apiCollection),
 		usedDefaultValue:         usedDefaultValue,
 	}
 	return nodeMsg
-}
-
-// resultErrorParsingMethod picks the classifier for a single JSON-RPC reply. An XRP Ledger node
-// reports a rejected transaction inside an ordinary result, so an XRP chain also reads the engine
-// result of a submission (CheckXRPLResponseError); every other chain reads the envelope alone.
-//
-// Keyed on the chain family because the error registry's XRP rows are: every rejection this
-// classifier flags is one those rows classify, so none reaches the availability gate unclassified.
-func (apip *JsonRPCChainParser) resultErrorParsingMethod(msg *rpcInterfaceMessages.JsonrpcMessage) func(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
-	if apip.chainFamily() == common.ChainFamilyXRP {
-		return msg.CheckXRPLResponseError
-	}
-	return msg.CheckResponseError
 }
 
 // SetSpec sets the spec for the JsonRPCChainParser
@@ -516,6 +508,15 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			if errors.Is(err, ErrBatchRequestSizeExceeded) {
 				errorResponse, _ := json.Marshal(common.JsonRpcBatchSizeExceededError)
 				return fiberCtx.Status(fiber.StatusTooManyRequests).SendString(string(errorResponse))
+			}
+
+			// A batch the chain cannot take (an XRPL submit inside one). The node itself would refuse it
+			// with a 400, so the caller gets the same verdict, as a JSON-RPC invalid request.
+			if errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused) {
+				refused := common.JsonRpcInvalidRequestError
+				refused.Error.Data = rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error()
+				errorResponse, _ := json.Marshal(refused)
+				return fiberCtx.Status(fiber.StatusBadRequest).SendString(string(errorResponse))
 			}
 
 			if errors.Is(err, common.APINotSupportedError) {

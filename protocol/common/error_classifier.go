@@ -94,18 +94,10 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{MessageContains("INVALID_SHARD_ID"), LavaErrorChainNEARInvalidShardID},
 		{MessageContains("NOT_SYNCED_YET"), LavaErrorChainNEARNotSyncedYet},
 	},
-	ChainFamilyXRP: {
-		// Source: rippled transaction result codes (xrpl.org, "Transaction Results"). A submit
-		// reply carries one in result.engine_result, and CheckXRPLResponseError turns every code
-		// it does not accept into a node error whose message starts with the code. Each says what
-		// happened to the transaction, never that the node is broken, so each is a non-retryable
-		// chain error: that keeps the availability gate off the node that answered, and a write
-		// is not retried in any case. Case-sensitive, as the codes are.
-		{MessageRegex(`\btefPAST_SEQ\b`), LavaErrorChainNonceTooLow},            // sequence already used, often by this very transaction arriving by gossip
-		{MessageRegex(`\btefALREADY\b`), LavaErrorChainTxAlreadyKnown},          // this exact transaction is already in the ledger
-		{MessageRegex(`\bterPRE_SEQ\b`), LavaErrorChainNonceTooHigh},            // an earlier sequence has not been applied yet
-		{MessageRegex(`\bte[fmlr][A-Z][A-Z0-9_]*\b`), LavaErrorChainTxRejected}, // any other failed (tef), malformed (tem), local (tel) or retry (ter) code
-	},
+	// Source: rippled's transaction results and API errors, the verdicts a submit reply carries
+	// inside an ordinary result. Built from the same definitions the XRPL classifier flags by;
+	// see error_xrpl.go.
+	ChainFamilyXRP: xrplErrorMappings(),
 }
 
 // ---------------------------------------------------------------------------

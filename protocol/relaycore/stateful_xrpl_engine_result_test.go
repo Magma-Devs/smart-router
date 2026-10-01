@@ -17,13 +17,16 @@ const (
 	xrplApplied     = `{"result":{"engine_result":"tesSUCCESS","engine_result_code":0,"engine_result_message":"The transaction was applied. Only final in a validated ledger.","status":"success"}}`
 	xrplPastSeq     = `{"result":{"engine_result":"tefPAST_SEQ","engine_result_code":-190,"engine_result_message":"This sequence number has already passed.","status":"success"}}`
 	xrplFeeClaimed  = `{"result":{"engine_result":"tecUNFUNDED_PAYMENT","engine_result_code":104,"engine_result_message":"Insufficient XRP balance to send.","status":"success"}}`
+	xrplNoNetwork   = `{"result":{"error":"noNetwork","error_code":17,"error_message":"Not synced to the network.","request":{"command":"submit"},"status":"error"}}`
 	xrplGossipNode  = "gossip@test"
 	xrplApplierNode = "applier@test"
+	xrplUnsynced    = "unsynced@test"
 )
 
 // newStatefulXRPLProcessor builds a relay processor for an XRPL submit broadcast to two providers,
-// parsed by an XRPT parser so the reply goes through the chain's own classifier.
-func newStatefulXRPLProcessor(t *testing.T) *RelayProcessor {
+// gossip@test and applier@test unless named, parsed by an XRPT parser so the reply goes through the
+// chain's own classifier.
+func newStatefulXRPLProcessor(t *testing.T, providers ...string) *RelayProcessor {
 	t.Helper()
 	ctx := context.Background()
 	chainParser, err := chainlib.NewChainParser("jsonrpc")
@@ -36,7 +39,14 @@ func newStatefulXRPLProcessor(t *testing.T) *RelayProcessor {
 	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateful))
 
 	require.NoError(t, usedProviders.TryLockSelection(ctx))
-	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{xrplGossipNode: &lavasession.SessionInfo{}, xrplApplierNode: &lavasession.SessionInfo{}}, nil)
+	if len(providers) == 0 {
+		providers = []string{xrplGossipNode, xrplApplierNode}
+	}
+	sessions := lavasession.ConsumerSessionsMap{}
+	for _, provider := range providers {
+		sessions[provider] = &lavasession.SessionInfo{}
+	}
+	usedProviders.AddUsed(sessions, nil)
 	return relayProcessor
 }
 
@@ -127,6 +137,29 @@ func TestStatefulXRPLBroadcastAllRejectReturnsTheFirstRejection(t *testing.T) {
 	returnedResult, err := relayProcessor.ProcessingResult()
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, returnedResult.StatusCode)
+	require.Equal(t, xrplPastSeq, string(returnedResult.Reply.Data))
+	require.Equal(t, xrplGossipNode, returnedResult.ProviderInfo.ProviderAddress)
+}
+
+// TestStatefulXRPLBroadcastAPIErrorDoesNotOutrankARejection: an unsynced node's noNetwork is a failed
+// call, not an answer about the transaction. Left a success, it ended the broadcast whenever it
+// arrived, so a payment already on the ledger was reported as noNetwork — and once rejections became
+// node errors, it would win every time. Both are node errors now; the first to arrive is returned.
+func TestStatefulXRPLBroadcastAPIErrorDoesNotOutrankARejection(t *testing.T) {
+	relayProcessor := newStatefulXRPLProcessor(t, xrplGossipNode, xrplUnsynced)
+
+	deliverJsonrpcReply(relayProcessor, xrplGossipNode, xrplPastSeq)
+	deliverJsonrpcReply(relayProcessor, xrplUnsynced, xrplNoNetwork)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, relayProcessor.WaitForResults(ctx), "both answered, nothing left in flight")
+	successes, nodeErrors, _, _ := relayProcessor.GetResults()
+	require.Equal(t, 0, successes, "noNetwork is not an answer")
+	require.Equal(t, 2, nodeErrors)
+
+	returnedResult, err := relayProcessor.ProcessingResult()
+	require.NoError(t, err)
 	require.Equal(t, xrplPastSeq, string(returnedResult.Reply.Data))
 	require.Equal(t, xrplGossipNode, returnedResult.ProviderInfo.ProviderAddress)
 }

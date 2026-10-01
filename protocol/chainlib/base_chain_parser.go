@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
@@ -77,6 +78,10 @@ type BaseChainParser struct {
 	// that probe several endpoints concurrently. Guarded by rwLock like every other
 	// mutable field here.
 	skipWebsocketVerification bool
+
+	// family is the error-registry family of spec, resolved by Construct so that classifying each
+	// parsed message reads it without taking rwLock. nil until a spec is set.
+	family atomic.Pointer[common.ChainFamily]
 }
 
 // SkipWebsocketVerification reports whether this parser's endpoint opts out of
@@ -87,11 +92,13 @@ func (bcp *BaseChainParser) SkipWebsocketVerification() bool {
 	return bcp.skipWebsocketVerification
 }
 
-// chainFamily is the error-registry family of the spec this parser serves.
+// chainFamily is the error-registry family of the spec this parser serves, ChainFamilyUnknown before
+// a spec is set (the zero ChainFamily is EVM, so an unset parser must not read as zero).
 func (bcp *BaseChainParser) chainFamily() common.ChainFamily {
-	bcp.rwLock.RLock()
-	defer bcp.rwLock.RUnlock()
-	return common.GetChainFamilyOrDefault(bcp.spec.Index)
+	if family := bcp.family.Load(); family != nil {
+		return *family
+	}
+	return common.ChainFamilyUnknown
 }
 
 // SetSkipWebsocketVerification overrides the process default for this parser only.
@@ -349,6 +356,8 @@ func (bcp *BaseChainParser) Construct(spec spectypes.Spec, internalPaths map[str
 	verifications map[VerificationKey]map[string][]VerificationContainer,
 ) {
 	bcp.spec = spec
+	family := common.GetChainFamilyOrDefault(spec.Index)
+	bcp.family.Store(&family)
 	bcp.internalPaths = internalPaths
 	bcp.serverApis = serverApis
 	bcp.taggedApis = taggedApis
