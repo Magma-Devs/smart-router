@@ -75,11 +75,27 @@ func (apip *GraphQLChainParser) getSupportedApi(name, connectionType, internalPa
 // head poll. The directive's function_template is the GraphQL request body.
 func (apip *GraphQLChainParser) CraftMessage(parsing *spectypes.ParseDirective, connectionType string, craftData *CraftData, metadata []pairingtypes.Metadata) (ChainMessageForSend, error) {
 	if craftData != nil {
-		chainMessage, err := apip.ParseMsg("", craftData.Data, craftData.ConnectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-		if err == nil {
-			chainMessage.AppendHeader(metadata)
+		// GraphQL has no request path, so craftData.Path is ignored: the operation is named in
+		// the body, which is what ParseMsg resolves the api from.
+		chainMessage, err := apip.ParseMsg(craftData.InternalPath, craftData.Data, craftData.ConnectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
+		if err != nil {
+			return nil, err
 		}
-		return chainMessage, err
+		// A directive's template must invoke the operation the directive names. When it does
+		// not, ParseMsg resolves the api from the template's own root field and the crafted
+		// message carries a different api than the caller asked for — and for a tagged
+		// directive, GetParseDirective then attaches nothing. The poll path happens not to read
+		// the directive back off the crafted message today, so a mismatch would be invisible:
+		// refuse it here rather than let a spec typo degrade silently.
+		if parsing != nil && parsing.ApiName != "" && chainMessage.GetApi().Name != parsing.ApiName {
+			return nil, utils.LavaFormatError("graphql parse directive template does not invoke the operation it names", nil,
+				utils.LogAttr("apiName", parsing.ApiName),
+				utils.LogAttr("templateOperation", chainMessage.GetApi().Name),
+				utils.LogAttr("functionTag", parsing.FunctionTag),
+			)
+		}
+		chainMessage.AppendHeader(metadata)
+		return chainMessage, nil
 	}
 
 	apiCont, err := apip.getSupportedApi(parsing.ApiName, connectionType, "")
@@ -226,6 +242,15 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 			},
 		}
 		latestRequestedBlock, earliestRequestedBlock = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
+	}
+
+	// ParseGraphQLMsg rejects an operation that selects no root field, so this is unreachable
+	// today. It is guarded anyway because the loop below it dereferences both values, and the
+	// guarantee lives in another file.
+	if combinedApi == nil || apiCollection == nil {
+		return nil, utils.LavaFormatError("graphql request resolved to no api", nil,
+			utils.LogAttr("method", graphqlMessage.GetMethod()),
+		)
 	}
 
 	parsedInput := parser.NewParsedInput()

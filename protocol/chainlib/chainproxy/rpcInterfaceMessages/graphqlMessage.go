@@ -158,7 +158,12 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 	// Guards a fragment cycle. gqlparser accepts a document whose fragments reference each other
 	// (cycle detection is a validation rule, which needs a schema), so an unguarded walk here
 	// would not return.
-	visited := map[string]struct{}{}
+	//
+	// The guard is scoped to the current descent, not to the whole document: a fragment is only
+	// cyclic if it reappears while it is still being expanded. A document that spreads the same
+	// fragment under two different root fields is perfectly valid, and a document-wide guard
+	// would refuse it.
+	expanding := map[string]struct{}{}
 
 	var walk func(selectionSet ast.SelectionSet) error
 	walk = func(selectionSet ast.SelectionSet) error {
@@ -174,15 +179,17 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 					return err
 				}
 			case *ast.FragmentSpread:
-				if _, seen := visited[typed.Name]; seen {
+				if _, cyclic := expanding[typed.Name]; cyclic {
 					return fmt.Errorf("graphql fragment %q is cyclic", typed.Name)
 				}
-				visited[typed.Name] = struct{}{}
 				fragment := doc.Fragments.ForName(typed.Name)
 				if fragment == nil {
 					return fmt.Errorf("graphql query spreads undefined fragment %q", typed.Name)
 				}
-				if err := walk(fragment.SelectionSet); err != nil {
+				expanding[typed.Name] = struct{}{}
+				err := walk(fragment.SelectionSet)
+				delete(expanding, typed.Name)
+				if err != nil {
 					return err
 				}
 			}

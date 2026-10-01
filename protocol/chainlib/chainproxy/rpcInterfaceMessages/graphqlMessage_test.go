@@ -321,3 +321,21 @@ func TestGraphQLMessageRawRequestHash(t *testing.T) {
 	require.NotEqual(t, firstHash, secondHash)
 	require.Equal(t, firstHash, sameHash)
 }
+
+func TestParseGraphQLMsgSharedFragmentIsNotCyclic(t *testing.T) {
+	// The same fragment spread under two root fields is a valid document. A document-wide
+	// visited set would refuse it as cyclic, which rejects legitimate traffic — client
+	// libraries that factor shared selections into a fragment emit exactly this shape.
+	body := `{"query":"fragment Ids on Checkpoint { digest } { a: checkpoint { ...Ids } b: checkpoint(sequenceNumber: 1) { ...Ids } }"}`
+	message, err := ParseGraphQLMsg([]byte(body))
+	require.NoError(t, err)
+	require.Equal(t, []string{"checkpoint", "checkpoint"}, message.RootFieldNames())
+}
+
+func TestParseGraphQLMsgSiblingFragmentsAreNotCyclic(t *testing.T) {
+	// Two different fragments that both spread a third are also valid.
+	body := `{"query":"fragment Base on Query { chainIdentifier } fragment L on Query { ...Base } fragment R on Query { ...Base } { ...L ...R }"}`
+	message, err := ParseGraphQLMsg([]byte(body))
+	require.NoError(t, err)
+	require.Equal(t, []string{"chainIdentifier", "chainIdentifier"}, message.RootFieldNames())
+}

@@ -264,3 +264,43 @@ func TestGraphQLInterfaceIsRegistered(t *testing.T) {
 	require.NoError(t, err)
 	require.IsType(t, &GraphQLChainParser{}, chainParser)
 }
+
+func TestGraphQLChainParserCraftMessageFromCraftData(t *testing.T) {
+	chainParser := newGraphQLTestParser(t)
+
+	directive, apiCollection, found := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
+	require.True(t, found)
+
+	// The poll path crafts with craftData carrying the template as the body — the branch the
+	// head poll actually takes (endpoint_poller.go). The crafted message must land on the
+	// directive's own api, so the response is formatted against the right api's rules.
+	crafted, err := chainParser.CraftMessage(directive, apiCollection.CollectionData.Type, &CraftData{
+		Path:           directive.ApiName,
+		Data:           []byte(directive.FunctionTemplate),
+		ConnectionType: apiCollection.CollectionData.Type,
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "latestCheckpoint", crafted.GetApi().Name)
+	require.True(t, IsFunctionTagOfType(crafted, spectypes.FUNCTION_TAG_GET_BLOCKNUM))
+}
+
+func TestGraphQLChainParserCraftMessageRejectsTemplateApiMismatch(t *testing.T) {
+	chainParser := newGraphQLTestParser(t)
+
+	// A directive whose template invokes a different operation than the directive names would
+	// otherwise craft a message carrying the wrong api, and no parse directive at all. Nothing
+	// on the poll path reads the directive back, so the degradation would be silent.
+	_, err := chainParser.CraftMessage(
+		&spectypes.ParseDirective{
+			FunctionTag:      spectypes.FUNCTION_TAG_GET_BLOCKNUM,
+			ApiName:          "latestCheckpoint",
+			FunctionTemplate: `{"query":"{ chainIdentifier }"}`,
+		},
+		graphqlConnectionType,
+		&CraftData{
+			Path:           "latestCheckpoint",
+			Data:           []byte(`{"query":"{ chainIdentifier }"}`),
+			ConnectionType: graphqlConnectionType,
+		}, nil)
+	require.Error(t, err)
+}
