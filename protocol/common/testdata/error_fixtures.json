@@ -341,6 +341,26 @@
       "expected_name": "CHAIN_TX_ALREADY_KNOWN"
     },
     {
+      "name": "besu_known_transaction",
+      "chain_family": "EVM",
+      "transport": "jsonrpc",
+      "error_code": -32000,
+      "error_message": "Known transaction",
+      "expected_lava_code": 3007,
+      "expected_name": "CHAIN_TX_ALREADY_KNOWN",
+      "_note": "Besu's duplicate-submission rejection (MAG-4032). Without its matcher the -32000 code classified it NODE_SERVER_ERROR, retryable and at fault."
+    },
+    {
+      "name": "solana_already_processed",
+      "chain_family": "Solana",
+      "transport": "jsonrpc",
+      "error_code": -32002,
+      "error_message": "Transaction simulation failed: This transaction has already been processed",
+      "expected_lava_code": 3305,
+      "expected_name": "CHAIN_SOLANA_SIMULATION_FAILED",
+      "_note": "Solana's duplicate-submission rejection. The -32002 code already makes it non-retryable, so it is not scored against the node (MAG-4032)."
+    },
+    {
       "name": "nethermind_gas_limit_below_intrinsic",
       "chain_family": "EVM",
       "transport": "jsonrpc",
