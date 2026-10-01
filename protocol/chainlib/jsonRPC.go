@@ -456,8 +456,6 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// Set response header content-type to application/json
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		startTime := time.Now()
-		endTx := apil.logger.LogStartTransaction("jsonRpc-http post")
-		defer endTx()
 		dappID := extractDappIDFromFiberContext(fiberCtx)
 		metricsData := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
