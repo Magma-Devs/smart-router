@@ -662,13 +662,26 @@ unchanged. What "node error" changes is the same as on JSON-RPC:
 Retried = the registry marks it retryable, so the relay policy has no stop reason until the
 retry budget is spent (`relaycore.RelayRetryLimit`, default 2 ⇒ up to 3 upstream calls). At fault
 = `LavaError.EndpointAtFault`, which drives `MarkUnhealthy` and the endpoint's consecutive-refusal
-counter (`--bench-after`, default 50, reset only by a 2xx).
+counter (`--bench-after`, default 50, reset only by a 2xx) — and, through
+`shouldFailSessionForResult`, the availability signal.
 
-| status | code | retried | at fault |
+**Order is the contract.** Rows run specific-to-general: what the node *said*, then what status it
+used. A status code is the fallback, never the specialisation. The reverse order silently
+reclassified anything whose body carried a specific message under a generic status — a 400 saying
+"method not allowed" or "route not found" lost its unsupported-method verdict, which
+`chainlib.IsUnsupportedMethodError` reads on the protocol-error path.
+
+| matched on | code | retried | at fault |
 | --- | --- | --- | --- |
+| body: "endpoint/route/path not found" | `NODE_ENDPOINT_NOT_FOUND` | no | no |
+| body: "method not allowed" | `NODE_METHOD_NOT_ALLOWED` | no | no |
+| body: sidecar/gateway "block beyond head"; `400` + "unknown block" | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
+| `500` + "is not available, lowest height" (Cosmos) | `CHAIN_STATE_PRUNED` | yes | no (data-scope) |
+| `500` + "decoding bech32 failed" (Cosmos) | `USER_INVALID_PARAMS` | no | no |
+| `500` + "unable to retrieve header and parent" (sidecar) | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
+| `500` + "transaction not found" (MultiversX) | `CHAIN_TX_NOT_FOUND` | yes | no (data-scope) |
 | `400` `406` `411` `412` `414`–`417` `428` `431` | `USER_INVALID_REQUEST` | no | no |
-| `400` saying "block beyond head" | `CHAIN_BLOCK_NOT_FOUND` | yes | no |
-| `401` `402` `403` `407` `426` `451` | `NODE_ACCESS_DENIED` (2018) | yes | **yes** |
+| `401` `402` `403` `407` `426` `451` | `NODE_ACCESS_DENIED` (2018) | yes | no (node-capability) |
 | `404` | `NODE_DATA_NOT_HELD` | yes | no (data-scope) |
 | `405` | `NODE_METHOD_NOT_ALLOWED` | no | no |
 | `408` | `NODE_SERVICE_UNAVAILABLE` | yes | yes |
@@ -677,10 +690,23 @@ counter (`--bench-after`, default 50, reset only by a 2xx).
 | `413` | `USER_REQUEST_TOO_LARGE` | no | no |
 | `422` | `USER_INVALID_PARAMS` | no | no |
 | `429` | `NODE_RATE_LIMITED` | yes | no (capacity) |
-| `500` `503` `520`–`530` | `NODE_INTERNAL_ERROR` / `NODE_SERVICE_UNAVAILABLE` / `NODE_SERVER_ERROR` | yes | **yes** |
+| `500` `503` `520`–`530`, otherwise | `NODE_INTERNAL_ERROR` / `NODE_SERVICE_UNAVAILABLE` / `NODE_SERVER_ERROR` | yes | **yes** |
 | `501` | `NODE_UNIMPLEMENTED` | no | no |
 | `502` `504` | `NODE_BAD_GATEWAY` / `NODE_GATEWAY_TIMEOUT` | yes | yes |
 | no row (including every `3xx`) | `UNKNOWN_ERROR` | yes | no, but **scored** by the availability gate |
+
+Two rules hold the "at fault" column together:
+
+- **A reply the node produced by refusing the request is never the endpoint's fault.** It answered
+  truthfully about what it holds (`404`, `410`, a pruned height) or what its configuration will
+  serve (`401`–`451`), and neither is evidence it cannot serve. Blaming it walks the refusal
+  counter and disables the URL for *every* path, which is how a vendor gating one path behind a
+  plan, or one wrong shared credential, could take an endpoint out.
+- **A 5xx the router cannot read as the caller's answer still is.** The four `500` rows above are
+  gated on bodies probed live on 2026-09-27, so an empty, HTML or unexplained 500 stays
+  `NODE_INTERNAL_ERROR` and at fault. Four families answer a caller's mistake with a 500 (finding
+  3 of the research doc), and excusing *every* 500 to cover them would have thrown away the signal
+  for a genuinely broken node.
 
 These rows live in the REST-only table on purpose: on JSON-RPC and gRPC a bare 400 or 403 is a
 gateway or WAF in front of the node, where "unknown ⇒ retry elsewhere" stays the right call.
@@ -688,6 +714,7 @@ gateway or WAF in front of the node, where "unknown ⇒ retry elsewhere" stays t
 untouched — but note that the transport-looping helpers (`IsNonRetryableNodeError`,
 `IsUnsupportedMethodError`, `chainlib.IsUnsupportedMethodError`) walk the REST table whatever the
 caller's transport is, so a REST row can still be reached from a JSON-RPC call site.
+`TestRESTRowsDoNotBreakTheUnsupportedMethodCarveOut` covers that reach.
 
 ### 9.2 A REST 5xx keeps the node's own JSON reply
 
@@ -699,32 +726,27 @@ the old path: a gateway that failed may already have forwarded the request, so a
 stays "unclear". Blame and retry are unchanged by this step — the status rows above still decide
 them.
 
-### 9.3 Open decisions
+### 9.3 Decisions taken in review
 
-These are under review on PR #448 and are **not** settled. The table in 9.1 describes the code as
-it stands, not an agreed design.
+Raised on PR #448 and settled there. Recorded because each one is a place where the obvious
+reading was the wrong one.
 
-1. **401/403 at fault.** §5 of the research doc reserves at-fault for 429/502/503/504 and makes
-   every other non-2xx "not the endpoint's fault". As implemented, a 401 from a wrong or expired
-   shared credential fails every path, so nothing resets the refusal counter and the URL is
-   disabled. `SubCategoryNodeCapability` would stop the disable but not the availability drop,
-   because `shouldFailSessionForResult` exempts `IsDataScope` and not `IsNodeCapability`.
-2. **500 at fault.** Cosmos, nodeos, MultiversX and the Substrate sidecar all answer a *caller's*
-   mistake with a 500 (pruned height, bad bech32, "transaction not found", unknown block hash, a
-   rejected `push_transaction`). All of them are `NODE_INTERNAL_ERROR`, at fault, and scored
-   today. §5 says they must not be. dfns runs POLKADOTASSETHUB on the sidecar.
-3. **404 retried.** Keeps the lagging-node and gateway case working, at up to 3 upstream calls per
-   not-found read — the dominant REST read pattern is a client polling for an unmined transaction.
-4. **Retry for 400/409/422.** §5 makes every blockchain error retryable because it deferred
-   retry-worthiness; these rows decide it as non-retryable instead.
-5. **Rule order.** The new `CodeEquals` rows sit above the table's pre-existing message rows, so
-   for those statuses the status beats the body. Measured effect: a 400 whose body says "method
-   not allowed" or "route not found" loses the unsupported-method carve-out, and the bare
-   `"unknown block"` substring — matched against the raw body — makes any status carrying it
-   retryable and unscored.
-6. **Log level.** §5 chose debug for a not-at-fault blockchain error. Today every REST non-2xx is
-   an ERROR line with the request payload plus a `smartrouter_errors_total` increment, three per
-   not-found poll.
+1. **401/403 are not at fault.** Retryable, node-capability. See the first rule in 9.1.
+2. **A 500 that is the caller's answer is not at fault** — but only the probed shapes, not every
+   500. See the second rule in 9.1.
+3. **A 404 is retried.** It keeps the lagging-node and gateway case working, at up to 3 upstream
+   calls per not-found read, which is the dominant REST read pattern (a client polling for an
+   unmined transaction). Accepted together with 6, which is what makes the cost bearable.
+4. **400, 405, 409, 413, 422 and 501 are not retried.** The research doc made every blockchain
+   error retryable only because it deferred retry-worthiness to a later step; the probe data
+   settles it, and no other node can answer these.
+5. **Message rows above status rows.** The ordering contract in 9.1.
+6. **A not-at-fault node error logs at DEBUG**, not ERROR. The metric is unchanged
+   (`LogCodedNodeAnswer` fires `EmitErrorMetric` exactly as `LogCodedError` does), so
+   `smartrouter_errors_total` keeps counting; only the level moves.
+
+Still open: whether the broadcast fix (MAG-3972/3974/3976, which needs nothing but
+`IsNodeError = true`) ships separately from this status map.
 
 ### 9.4 Not covered by this rule, on purpose
 
