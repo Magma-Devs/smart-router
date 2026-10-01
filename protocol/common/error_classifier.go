@@ -202,6 +202,11 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{MessageContains("fee too low"), LavaErrorChainTxUnderpriced},                              // Erigon: "fee too low"
 		{MessageContains("already known"), LavaErrorChainTxAlreadyKnown},                           // Geth + Erigon
 		{MessageContains("alreadyknown"), LavaErrorChainTxAlreadyKnown},                            // Nethermind PascalCase
+		// Besu answers a duplicate submission with -32000 "Known transaction", which otherwise falls
+		// to the -32000 code as a retryable NODE_SERVER_ERROR and blames a healthy node for every
+		// broadcast it loses (MAG-4032). Word-bounded, so "unknown transaction ..." is not read as a
+		// duplicate.
+		{MessageRegex(`(?i)\bknown transaction\b`), LavaErrorChainTxAlreadyKnown},
 		{MessageContains("txpool is full"), LavaErrorChainMempoolFull},
 		{MessageContains("max fee per gas less than block base fee"), LavaErrorChainMaxFeeBelowBase},
 		// Node is still catching up to the chain head. NEAR carries its own

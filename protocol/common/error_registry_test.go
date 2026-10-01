@@ -959,6 +959,30 @@ func TestClassifyError_GenericJsonRPCMappings(t *testing.T) {
 	}
 }
 
+// Besu's duplicate-submission wording is matched on whole words: "unknown transaction" is not a
+// duplicate, and reading it as one would stop the retry and pin a wallet to a node that never
+// took its transaction (MAG-4032).
+func TestClassifyError_KnownTransactionIsWordBounded(t *testing.T) {
+	tests := []struct {
+		message   string
+		duplicate bool
+	}{
+		{"Known transaction", true},
+		{"known transaction", true},
+		{"Error: Known transaction", true},
+		{"unknown transaction type", false},
+		{"Unknown transaction", false},
+	}
+	for tcIndex, tc := range tests {
+		result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32000, tc.message)
+		if tc.duplicate {
+			assert.Equal(t, LavaErrorChainTxAlreadyKnown, result, "tc #%d %q", tcIndex, tc.message)
+		} else {
+			assert.NotEqual(t, LavaErrorChainTxAlreadyKnown, result, "tc #%d %q", tcIndex, tc.message)
+		}
+	}
+}
+
 // TestClassifyError_UnsupportedMethodMatchersAreNarrow locks in the tight scope
 // of the zero-CU unsupported-method matchers. A false positive here silently
 // stops retries and bills nothing, so these cases must stay precise.
