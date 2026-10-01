@@ -304,3 +304,47 @@ func TestGraphQLChainParserCraftMessageRejectsTemplateApiMismatch(t *testing.T) 
 		}, nil)
 	require.Error(t, err)
 }
+
+func TestGraphQLChainParserBlockParsingFromArguments(t *testing.T) {
+	// The spec shape sui.json will use for `checkpoint`: PARSE_DICTIONARY reads the named
+	// GraphQL argument out of the request body, defaulting to latest when it is absent. This is
+	// what separates a pinned historical read from a bare latest read — both on the same root
+	// field — and it is what crossValidationFinalityLabel needs to label finality at all.
+	chainParser, err := NewGraphQLChainParser()
+	require.NoError(t, err)
+	spec := graphqlTestSpec()
+	for _, apiCollection := range spec.ApiCollections {
+		for _, api := range apiCollection.Apis {
+			if api.Name == "checkpoint" {
+				api.BlockParsing = spectypes.BlockParser{
+					ParserArg:    []string{"sequenceNumber", "="},
+					ParserFunc:   spectypes.PARSER_FUNC_PARSE_DICTIONARY,
+					DefaultValue: "latest",
+				}
+			}
+		}
+	}
+	chainParser.SetSpec(spec)
+
+	pinned, err := chainParser.ParseMsg("",
+		[]byte(`{"query":"{ checkpoint(sequenceNumber: 329083865) { digest } }"}`),
+		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+	require.NoError(t, err)
+	pinnedBlock, _ := pinned.RequestedBlock()
+	require.EqualValues(t, 329083865, pinnedBlock, "a pinned checkpoint must parse to its own block")
+
+	bare, err := chainParser.ParseMsg("",
+		[]byte(`{"query":"{ checkpoint { sequenceNumber } }"}`),
+		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+	require.NoError(t, err)
+	bareBlock, _ := bare.RequestedBlock()
+	require.EqualValues(t, spectypes.LATEST_BLOCK, bareBlock, "a bare checkpoint query asks for latest")
+
+	// A variable-pinned read resolves the same as a literal one.
+	viaVariable, err := chainParser.ParseMsg("",
+		[]byte(`{"query":"query P($n: UInt53!) { checkpoint(sequenceNumber: $n) { digest } }","variables":{"n":314800000}}`),
+		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+	require.NoError(t, err)
+	variableBlock, _ := viaVariable.RequestedBlock()
+	require.EqualValues(t, 314800000, variableBlock, "a variable-pinned checkpoint must parse to its own block")
+}

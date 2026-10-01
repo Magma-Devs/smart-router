@@ -46,8 +46,11 @@ type GraphQLChainParser struct {
 // NewGraphQLChainParser creates a new instance of GraphQLChainParser
 func NewGraphQLChainParser() (chainParser *GraphQLChainParser, err error) {
 	parser := &GraphQLChainParser{}
-	// GraphQL-over-HTTP is POST only. Sui's schema declares no subscription type and its
-	// production streaming path is gRPC, so there is no websocket route to verify.
+	// GraphQL-over-HTTP is POST only, so there is no websocket route to verify. Sui's schema
+	// does declare a Subscription type as of server 1.80.1 (checkpoints, transactions, events),
+	// but subscriptions need a websocket or SSE transport that GraphQL-over-HTTP POST cannot
+	// carry, and the production streaming path on this chain is gRPC, which already has its
+	// own SUBSCRIBE directives.
 	parser.skipWebsocketVerification = true
 	return parser, nil
 }
@@ -342,8 +345,9 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		return
 	}
 
-	// false: GraphQL serves no websockets and registers no GET route, so handing an upgrade on
-	// here would turn a health probe into a chain request.
+	// false: this listener serves no websockets and registers no GET route, so handing an
+	// upgrade on here would turn a health probe into a chain request. GraphQL subscriptions
+	// would need their own transport; gRPC carries streaming on this chain.
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, false)
 	apil.app = app
 
