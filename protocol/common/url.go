@@ -19,6 +19,19 @@ func JoinURLPath(base, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid path: %w", err)
 	}
+	// The path is the client's; the scheme and host are the operator's. A path that parses with a
+	// host — "//other.example" is a network-path reference, "http://other.example" an absolute URL —
+	// would otherwise replace the configured node's host and carry its auth headers there (MAG-3970).
+	// Read it as a plain path on the configured node instead, byte for byte: the node answers it
+	// (usually 404), as it would any other path the client sends.
+	if pathURL.Scheme != "" || pathURL.Host != "" || pathURL.User != nil {
+		rawPath, rawQuery, _ := strings.Cut(path, "?")
+		unescaped, err := url.PathUnescape(rawPath)
+		if err != nil {
+			return "", fmt.Errorf("invalid path: %w", err)
+		}
+		pathURL = &url.URL{Path: unescaped, RawQuery: rawQuery}
+	}
 
 	// If path is absolute, append it to base path instead of replacing (preserves e.g. /gateway/lava/rest/KEY).
 	if strings.HasPrefix(pathURL.Path, "/") {
@@ -37,5 +50,9 @@ func JoinURLPath(base, path string) (string, error) {
 	}
 
 	// Relative path: use ResolveReference (handles ., .., query params)
-	return baseURL.ResolveReference(pathURL).String(), nil
+	joined := baseURL.ResolveReference(pathURL)
+	if joined.Scheme != baseURL.Scheme || joined.Host != baseURL.Host || joined.User.String() != baseURL.User.String() {
+		return "", fmt.Errorf("path %q would leave the configured host", path)
+	}
+	return joined.String(), nil
 }
