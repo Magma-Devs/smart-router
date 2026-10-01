@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -297,4 +298,46 @@ func TestJSONRPCListener_XRPLBatchedSubmitRefused(t *testing.T) {
 
 	response, body = postToRouter(t, ctx, address, `[{"method":"account_info","params":[{"account":"rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"}]}]`)
 	require.Equal(t, http.StatusOK, response.StatusCode, string(body))
+}
+
+// TestJSONRPCListener_XRPLBatchedSubmitRefusedOverWebsocket: the refusal is raised in ParseMsg, which
+// every listener shares, so the WebSocket transport must report it the same way the POST handler
+// does. Before the ws branch existed the caller got the generic masked-GUID error here, so the same
+// request shape was actionable over HTTP and opaque over ws.
+func TestJSONRPCListener_XRPLBatchedSubmitRefusedOverWebsocket(t *testing.T) {
+	rand.InitRandomSeed()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var submitsReceived atomic.Int32
+	upstream := func() *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			assert.NoError(t, err)
+			if bytes.Contains(body, []byte(`"submit"`)) {
+				submitsReceived.Add(1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"result":{"account_data":{},"status":"success"}}`))
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+	address := startXRPLRouter(t, ctx, map[string]string{"node-a": upstream().URL, "node-b": upstream().URL})
+
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, "ws://"+address+"/ws", nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { conn.Close() })
+
+	require.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte("["+xrplSubmitRequest+"]")))
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	_, reply, err := conn.ReadMessage()
+	require.NoError(t, err)
+
+	var refused common.JsonRPCErrorMessage
+	require.NoError(t, json.Unmarshal(reply, &refused), string(reply))
+	require.Equal(t, -32600, refused.Error.Code, string(reply))
+	require.Contains(t, refused.Error.Data, "single request", string(reply))
+	require.Zero(t, submitsReceived.Load(), "a refused batch must not reach any upstream over ws either")
 }

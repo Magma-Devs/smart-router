@@ -10,10 +10,13 @@ func TestIsXRPLRejection(t *testing.T) {
 	for engineResult, want := range map[string]bool{
 		"tefPAST_SEQ": true, "tefALREADY": true, "temBAD_FEE": true, "telINSUF_FEE_P": true, "terPRE_SEQ": true,
 		"terQUEUED": false, "tesSUCCESS": false, "tecUNFUNDED_PAYMENT": false,
-		"ERROR": false, "unknown": false, "tefpast_seq": false, "tef": false, "": false, "xtefPAST_SEQ": false, "tefPAST_SEQ ": false,
+		"ERROR": false, "unknown": false, "tefpast_seq": false, "tef": false, "": false, "xtefPAST_SEQ": false,
 	} {
 		require.Equal(t, want, IsXRPLRejection(engineResult), "%q", engineResult)
 	}
+	// Kept out of the map literal above: gocritic's mapKey check reads a trailing space in a key
+	// as a typo, and the whole point of this case is that the space is there on purpose.
+	require.False(t, IsXRPLRejection("tefPAST_SEQ "), "a trailing space is not a ledger code")
 }
 
 // Every catalogued API error is classified by its own row, on both message forms the classifier
@@ -44,4 +47,20 @@ func TestXRPLRowsAreXRPOnly(t *testing.T) {
 		require.NotEqual(t, LavaErrorChainNonceTooLow.Name, ClassifyError(nil, family, TransportJsonRPC, 200, "tefPAST_SEQ: This sequence number has already passed.").Name, family.String())
 		require.NotEqual(t, LavaErrorNodeSyncing.Name, ClassifyError(nil, family, TransportJsonRPC, 200, "noNetwork: Not synced to the network.").Name, family.String())
 	}
+}
+
+// terQUEUED is carved out of IsXRPLRejection but still matches the catch-all row. That is the
+// deliberate trade documented in error_xrpl.go: a queued verdict arriving from some other path is
+// better labelled a rejection, which is non-retryable and not at fault, than left UNKNOWN_ERROR,
+// which is retryable and does cost the node its score.
+func TestXRPLTerQueuedRowKeepsTheGateOff(t *testing.T) {
+	require.False(t, IsXRPLRejection("terQUEUED"), "the classifier must never flag a queued verdict")
+
+	queued := ClassifyNodeErrorForRetry(ChainFamilyXRP, TransportJsonRPC, 0, "terQUEUED: Held until escalated fee drops.")
+	require.True(t, queued.IsNonRetryable, "a queued verdict must not be retried")
+	require.False(t, queued.IsDataScope)
+
+	// Control: an XRP message that matches no row at all is the outcome this trade avoids.
+	unmatched := ClassifyNodeErrorForRetry(ChainFamilyXRP, TransportJsonRPC, 0, "zzNOTAVERDICT: detail")
+	require.False(t, unmatched.IsNonRetryable, "an unmatched message is retryable and scored")
 }
