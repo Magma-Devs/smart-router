@@ -76,6 +76,22 @@ func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasEr
 	return true, extractErrorMessage(data, httpStatusCode)
 }
 
+// ServerErrorIsNodeReply reports whether a REST 5xx is the node's own answer rather than a failure
+// in front of it: its body is JSON, and the status is not one the registry marks MayHaveReachedNode.
+//
+// CheckResponseError already calls every 5xx a node error. This answers the narrower question the
+// relay path asks before turning a 5xx into a transport error: can the body be handed to the client?
+// Horizon's 503 {"tx_status":"TRY_AGAIN_LATER"} can — it tells the client nothing was submitted and a
+// retry is safe. A proxy's HTML 502 cannot. A 502 or 504 (and Cloudflare's 522/524) stays a transport
+// failure even with a JSON body: a gateway that failed may already have forwarded the request, so a
+// write's outcome is unknown, and "may have reached the node" is what keeps it "unclear".
+func ServerErrorIsNodeReply(httpStatusCode int, data []byte) bool {
+	if httpStatusCode < 500 || len(data) == 0 || !json.Valid(data) {
+		return false
+	}
+	return !common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, httpStatusCode, "").MayHaveReachedNode
+}
+
 // checkCosmosTxError detects errors in Cosmos SDK transaction responses
 // Cosmos returns HTTP 200 for both success and failed txs - must check tx_response.code
 func checkCosmosTxError(data []byte) (bool, string) {
