@@ -8,18 +8,27 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
-## v1.5.7 — 2026-09-29
+## v1.5.7 — 2026-09-30
 
 ### Highlights
 
-This release resolves an issue in the routing layer where the gateway failed to preserve the client's original `Content-Type` header when proxying REST requests to upstream providers. Previously, submitting REST payloads through the router could result in upstream parsing errors or rejected requests, as the destination server received bodies without the necessary media type context. The router now explicitly extracts the `Content-Type` header from the incoming client request and forwards it alongside the payload to the selected upstream node. This correction ensures that standard JSON payloads and custom encoding formats are accurately interpreted by backend services, restoring expected behavior for REST-based API integrations.
+This release focuses on improving protocol compliance and error handling across the gateway's supported interfaces. For REST payloads, the router now correctly forwards the client's original `Content-Type` header to upstream providers. JSON-RPC routing behavior has also been corrected so that an error response containing an empty message string is treated as a node failure rather than a valid client answer, ensuring these responses correctly trigger provider failover. Additionally, websocket connections can now successfully match asynchronous replies to requests that were originally dispatched with a `null` ID. Finally, for operators verifying release artifacts in their deployment pipelines, the release checksum file is now signed and distributed as a cosign v3 bundle.
 
 ### Changes
 
 #### Bug fixes
 - fix(chainlib): forward the client's Content-Type on REST bodies (MAG-2745) ([#385]) [`ea59ca8`]
+- fix(chainlib): treat a JSON-RPC error with an empty message as a node error, not the answer ([#453]) [`50aef72`]
+- fix(rpcclient): match a websocket reply to a request sent with a null id ([#461]) [`105da39`]
+- fix(release): sign the checksum file as a cosign v3 bundle ([#465]) [`1e9b620`]
 
 [#385]: https://github.com/magma-Devs/smart-router/pull/385
+[#453]: https://github.com/magma-Devs/smart-router/pull/453
+[#461]: https://github.com/magma-Devs/smart-router/pull/461
+[#465]: https://github.com/magma-Devs/smart-router/pull/465
+[`105da39`]: https://github.com/magma-Devs/smart-router/commit/105da39f4a24f2cd73a228cd274ae1211b63f66c
+[`1e9b620`]: https://github.com/magma-Devs/smart-router/commit/1e9b620cb7b946752d6836e2455e6eb7ab036907
+[`50aef72`]: https://github.com/magma-Devs/smart-router/commit/50aef7251a3f451cc5cb84526a9a5fc5f7d8e5b1
 [`ea59ca8`]: https://github.com/magma-Devs/smart-router/commit/ea59ca8d4fbde6c0afc2a8b8e9dc0c2a4598acd2
 
 ## v1.5.6 — 2026-09-28
