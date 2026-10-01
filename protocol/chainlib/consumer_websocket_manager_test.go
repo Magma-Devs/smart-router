@@ -63,6 +63,27 @@ func TestBuildUnsubscribeSuccessReply(t *testing.T) {
 	}
 }
 
+// TestBuildUnsubscribeAllSuccessReply: the reply to an unsubscribe_all the router
+// satisfied locally echoes the caller's id and carries the empty object a Tendermint
+// node answers with (MAG-4064).
+func TestBuildUnsubscribeAllSuccessReply(t *testing.T) {
+	cases := []struct {
+		name string
+		req  string
+		want string
+	}{
+		{name: "numeric id", req: `{"jsonrpc":"2.0","id":99,"method":"unsubscribe_all","params":{}}`, want: `{"jsonrpc":"2.0","id":99,"result":{}}`},
+		{name: "string id", req: `{"jsonrpc":"2.0","id":"all","method":"unsubscribe_all","params":{}}`, want: `{"jsonrpc":"2.0","id":"all","result":{}}`},
+		{name: "null id", req: `{"jsonrpc":"2.0","id":null,"method":"unsubscribe_all","params":{}}`, want: `{"jsonrpc":"2.0","id":null,"result":{}}`},
+		{name: "missing id falls back to null", req: `{"jsonrpc":"2.0","method":"unsubscribe_all","params":{}}`, want: `{"jsonrpc":"2.0","id":null,"result":{}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, string(buildUnsubscribeAllSuccessReply([]byte(tc.req))))
+		})
+	}
+}
+
 func TestWebsocketConnectionLimiter(t *testing.T) {
 	tests := []struct {
 		name            string
