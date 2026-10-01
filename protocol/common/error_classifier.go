@@ -269,26 +269,48 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 	},
 
 	TransportREST: {
-		// REST-only status rows. On REST the HTTP status IS the node's answer: a 400 is a
-		// rejected request (Horizon transaction_failed and bad_request, a sidecar "block beyond
-		// head", Aptos "failed to parse"), 403 is the same door as 401, 422 is toncenter's
-		// "failed to parse" — non-retryable and never the endpoint's fault, so a read returns
-		// the answer as-is without a second attempt and nothing is scored. 410 is data the node
-		// no longer holds (Horizon before_history, Aptos version_pruned): retry elsewhere,
-		// blame nobody. They live HERE and not in the shared HTTP tables on purpose: on
-		// JSON-RPC and gRPC a bare 400 or 403 is a gateway or WAF in front of the node, where
-		// the classifier's "unknown ⇒ retry elsewhere" default is the right call.
+		// ORDER IS THE CONTRACT HERE. First match wins, so the rows are arranged
+		// specific-to-general: what the node SAID, then what status it used. A status code is
+		// the fallback, never the specialisation — the reverse order silently reclassified
+		// anything whose body carried a specific message under a generic status (a 400 saying
+		// "method not allowed" or "route not found" lost its unsupported-method verdict, which
+		// chainlib.IsUnsupportedMethodError reads on the protocol-error path).
 		//
-		// Evidence for every row below: agent_docs/.../rest-stateful-bug/rest-status-code-map.md
-		// (live probes 2026-09-27 and chain docs). Declaration order matters: the first match
-		// wins, so the message rows that make a specific 400 retryable come before CodeEquals(400).
-		//
-		// "The block you asked for is beyond my head": a lagging node says this while a synced
-		// node has the block. Retryable elsewhere, not the node's fault.
+		// Evidence for every row: agent_docs/.../rest-stateful-bug/rest-status-code-map.md and
+		// rest-blockchain-errors-research.md (twelve families probed live 2026-09-27).
+
+		// --- 1. What the node said: the route does not exist, whoever answered. ---
+		{MessageContains("endpoint not found"), LavaErrorNodeEndpointNotFound},
+		{MessageContains("route not found"), LavaErrorNodeEndpointNotFound},
+		{MessageContains("path not found"), LavaErrorNodeEndpointNotFound},
+		{MessageContains("method not allowed"), LavaErrorNodeMethodNotAllowed},
+
+		// --- 2. What the node said: "the block you asked for is beyond my head". ---
+		// A lagging node says this while a synced node has the block: retryable elsewhere, and
+		// not the node's fault. The first two phrases are long enough to stand alone; "unknown
+		// block" is two common English words, and on REST the matcher is fed the raw response
+		// body (extractErrorMessage's fallback), so it is gated on the 400 nodeos sends with it.
+		// Ungated it fired on any status — a 500 saying "unknown blockchain id" classified as
+		// block-not-found and the endpoint was never scored for it.
 		{MessageContains("larger than the current largest block"), LavaErrorChainBlockNotFound},                  // Substrate sidecar, 400
 		{MessageContains("requested block height is bigger then the chain length"), LavaErrorChainBlockNotFound}, // Cosmos gRPC-gateway, 400
-		{MessageContains("unknown block"), LavaErrorChainBlockNotFound},                                          // nodeos unknown_block_exception, 400
-		// 4xx that describe the request: non-retryable, never the endpoint's fault.
+		{CodeAndMessage(400, "unknown block"), LavaErrorChainBlockNotFound},                                      // nodeos unknown_block_exception, 400
+
+		// --- 3. What the node said, under a 500 that is really the CALLER's answer. ---
+		// Cosmos, nodeos, MultiversX and the Substrate sidecar all answer a caller's mistake, or
+		// "I do not hold that", with a 500 (research doc finding 3). Left to the generic 500 row
+		// these classified as NODE_INTERNAL_ERROR — at fault — so a customer polling for an
+		// unmined transaction or asking for a pruned height walked the endpoint's refusal counter
+		// to the disable threshold. Each row below is a body probed live, gated on the 500 so a
+		// genuinely broken node answering 500 with anything else STAYS at fault.
+		{CodeAndMessage(500, "is not available, lowest height"), LavaErrorChainStatePruned},        // Cosmos: pruned height
+		{CodeAndMessage(500, "decoding bech32 failed"), LavaErrorUserInvalidParams},                // Cosmos: malformed address
+		{CodeAndMessage(500, "unable to retrieve header and parent"), LavaErrorChainBlockNotFound}, // Sidecar: unknown block hash
+		{CodeAndMessage(500, "transaction not found"), LavaErrorChainTxNotFound},                   // MultiversX: tx not found
+
+		// --- 4. The status, as the fallback: 4xx that describe the request. ---
+		// Non-retryable and never the endpoint's fault, so a read returns the answer as-is
+		// without a second attempt and nothing is scored.
 		{CodeEquals(400), LavaErrorUserInvalidRequest},
 		{CodeEquals(406), LavaErrorUserInvalidRequest},
 		{CodeEquals(411), LavaErrorUserInvalidRequest},
@@ -301,8 +323,9 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{CodeEquals(431), LavaErrorUserInvalidRequest},
 		{CodeEquals(422), LavaErrorUserInvalidParams},
 		// The endpoint refused the router (credentials, plan, WAF, proxy, protocol, region):
-		// another provider can serve it, and the refusing endpoint is at fault. 401 is in
-		// httpStatusCodeMappings, which is appended to REST only.
+		// another provider can serve it, and the refusing endpoint is NOT at fault — it answered
+		// truthfully about its own configuration. See LavaErrorNodeAccessDenied for why blaming it
+		// disabled whole URLs. 401 is in httpStatusCodeMappings, appended to REST only.
 		{CodeEquals(402), LavaErrorNodeAccessDenied},
 		{CodeEquals(403), LavaErrorNodeAccessDenied},
 		{CodeEquals(407), LavaErrorNodeAccessDenied},
@@ -317,11 +340,6 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// write broadcast it is a node error, so a sibling's 201 with the transaction hash wins
 		// over it; when every node answers 409 (a client re-sending), the caller gets the 409.
 		{CodeEquals(409), LavaErrorChainTxAlreadyKnown},
-		// Message-based matchers for common REST error patterns
-		{MessageContains("endpoint not found"), LavaErrorNodeEndpointNotFound},
-		{MessageContains("route not found"), LavaErrorNodeEndpointNotFound},
-		{MessageContains("path not found"), LavaErrorNodeEndpointNotFound},
-		{MessageContains("method not allowed"), LavaErrorNodeMethodNotAllowed},
 		// CodeEquals and HTTPStatusContains matchers are appended by init()
 		// via httpStatusCodeMappings() and httpStatusMessageMappings()
 	},

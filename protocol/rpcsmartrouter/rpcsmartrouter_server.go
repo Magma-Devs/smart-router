@@ -1842,10 +1842,19 @@ func shouldFailSessionForResult(err error, relayResult *common.RelayResult) bool
 		return true
 	}
 	// Node error delivered inside a 2xx body — scoreable unless a carve-out claims it.
+	//
+	// IsNodeCapability is here for the same reason as IsDataScope, one level up: the endpoint
+	// answered truthfully about what it will serve, so the answer is no evidence it cannot serve.
+	// It used to be absent, which was inert only because every node-capability code was also
+	// non-retryable and so already excused by IsNonRetryable. NODE_ACCESS_DENIED is retryable
+	// AND node-capability, so without this clause a 403 would be kept off MarkUnhealthy by
+	// EndpointAtFault and still demote the endpoint through the availability signal — one answer
+	// blaming the endpoint in one place and excusing it in the other.
 	return relayResult.IsNodeError &&
 		!relayResult.IsNonRetryable &&
 		!relayResult.IsRateLimited &&
-		!relayResult.IsDataScope
+		!relayResult.IsDataScope &&
+		!relayResult.IsNodeCapability
 }
 
 // relayProvesEndpointHealthy reports whether a completed direct-RPC relay is POSITIVE proof that

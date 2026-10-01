@@ -284,12 +284,22 @@ var (
 	// NODE_ACCESS_DENIED: the endpoint refused the router itself — its credentials (401), its
 	// plan or quota (402), a WAF or IP rule (403), a proxy wanting credentials (407), a protocol
 	// it will not speak (426), or a region it will not serve (451). Used on REST, where the status
-	// is the endpoint's own answer. Unlike NODE_UNAUTHORIZED it is retryable: each provider has its
-	// own credentials and its own rules, so another provider can serve the same request, and the
-	// refusing endpoint is at fault (its configuration, not the client's request). JSON-RPC and
-	// gRPC keep NODE_UNAUTHORIZED for 401.
+	// is the endpoint's own answer. Unlike NODE_UNAUTHORIZED it is retryable: each provider has
+	// its own credentials and its own rules, so another provider can serve the same request.
+	// JSON-RPC and gRPC keep NODE_UNAUTHORIZED for 401.
+	//
+	// SubCategoryNodeCapability, so the endpoint is NOT at fault. This is the same shape as
+	// NODE_METHOD_NOT_SUPPORTED: the endpoint answered truthfully about what it will serve, and
+	// what it will serve is a property of its configuration, not evidence that it is broken.
+	// Blaming it instead walks the consecutive-refusal counter (MaxConsecutiveConnectionAttempts,
+	// default 50, reset only by a 2xx) and disables the URL for EVERY path — so a vendor gating
+	// one path behind a plan took out the whole endpoint, and a wrong or expired shared credential
+	// took out every endpoint that uses it, because a 401 fails every path and nothing ever resets
+	// the counter. REST also gets no replayable probe evidence (recordRelayProbeEvidence is
+	// JSON-RPC only), so recovery would be poll-only.
 	LavaErrorNodeAccessDenied = registerError(&LavaError{
 		Code: 2018, Name: "NODE_ACCESS_DENIED", Category: CategoryExternal,
+		SubCategory: SubCategoryNodeCapability,
 		Description: "Endpoint refused the router (credentials, plan, WAF, region); another provider may serve it", Retryable: true,
 	})
 	// NODE_DATA_NOT_HELD: the endpoint answered correctly and the answer is "I do

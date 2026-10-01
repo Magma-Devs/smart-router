@@ -81,9 +81,11 @@ var faultAxisTable = []faultAxisCase{
 	// classifyEndpointHealth already excuses CategoryExternal + !Retryable.
 	{2016, "NODE_UNAUTHORIZED", SubCategoryNone, false, "credentials rejected; see the note below"},
 	// The endpoint refused the router (REST 401/402/403/407/426/451). Each provider has its own
-	// credentials and rules, so another provider can serve the request: retryable, and the
-	// refusing endpoint is at fault — the default for CategoryExternal + Retryable, chosen on purpose.
-	{2018, "NODE_ACCESS_DENIED", SubCategoryNone, true, "endpoint configuration: credentials, plan, WAF, region"},
+	// credentials and rules, so another provider can serve the request: retryable. NOT at fault —
+	// node-capability, the same axis as NODE_METHOD_NOT_SUPPORTED: the endpoint answered truthfully
+	// about what its configuration will serve, which is not evidence that it is broken. Blaming it
+	// walked the refusal counter and disabled the URL for every path.
+	{2018, "NODE_ACCESS_DENIED", SubCategoryNodeCapability, true, "endpoint configuration: credentials, plan, WAF, region"},
 	{3001, "CHAIN_NONCE_TOO_LOW", SubCategoryNone, false, ""},
 	{3002, "CHAIN_NONCE_TOO_HIGH", SubCategoryNone, false, ""},
 	{3003, "CHAIN_INSUFFICIENT_FUNDS", SubCategoryNone, false, ""},
