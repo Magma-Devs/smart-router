@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
@@ -34,10 +35,12 @@ import (
 // handful of addresses — and pinning by caller would send wallet A's nonce read to the upstream
 // that accepted wallet B's write.
 //
-// Best effort throughout. The pin is soft: an upstream that cannot take the read right now gives
-// way to ordinary selection rather than failing it. It is honoured on the first attempt only, it
-// is pod-local, and a hedge is free to answer from elsewhere. The window only has to outlast the
-// time the other upstreams take to see the transaction, by gossip or in a block.
+// Best effort throughout. The pin travels as a preference (GetSessionsOptions.PreferredProvider):
+// an upstream that cannot take the read right now gives way to ordinary selection rather than
+// failing it. It may name a backup — a write a backup accepted is read back from that backup,
+// which spends the metered tier on that wallet's reads for the window. It is honoured on the first
+// attempt only, it is pod-local, and a hedge is free to answer from elsewhere. The window only has
+// to outlast the time the other upstreams take to see the transaction, by gossip or in a block.
 
 // Method names. The hash lookups are the transaction-shaped subset of evmByHashMethods: a block
 // hash names no transaction this router could have submitted.
@@ -89,12 +92,24 @@ func newReadYourWrites(window time.Duration) *readYourWrites {
 	}
 }
 
-// recordWrite pins what a served eth_sendRawTransaction names to the upstream that accepted it.
-// replyData is the reply the caller is about to receive; its result is the transaction hash.
-func (r *readYourWrites) recordWrite(protocolMessage chainlib.ProtocolMessage, provider string, replyData []byte) {
-	if r == nil || provider == "" || protocolMessage.GetApi().GetName() != rywWriteMethod {
+// recordWrite pins what a served eth_sendRawTransaction names to the upstream that answered it,
+// when the answer shows that upstream holds the transaction: a result (the hash), or a rejection
+// saying it already has it. The second is how a resubmission is answered — a wallet that timed out
+// and sent the same raw transaction again — and is as good evidence as the first. Any other
+// rejection pins nothing. chainFamily is the listener's, so a rejection is read the way the relay
+// path read it.
+func (r *readYourWrites) recordWrite(protocolMessage chainlib.ProtocolMessage, result *common.RelayResult, chainFamily common.ChainFamily) {
+	if r == nil || result == nil || result.Reply == nil || protocolMessage.GetApi().GetName() != rywWriteMethod {
 		return
 	}
+	provider := result.GetProvider()
+	if provider == "" {
+		return
+	}
+	if result.IsNodeError && !rywReplyIsAlreadyKnown(result.Reply.Data, chainFamily) {
+		return
+	}
+	replyData := result.Reply.Data
 	// The hash the upstream returned is the one the caller will look up. The computed one is the
 	// same for every type go-ethereum knows, and covers a reply that is not the usual JSON; a
 	// duplicate key costs nothing.
@@ -198,6 +213,21 @@ func firstStringParam(protocolMessage chainlib.ProtocolMessage) (string, bool) {
 	}
 	value, ok := params[0].(string)
 	return value, ok && value != ""
+}
+
+// rywReplyIsAlreadyKnown reports whether an error reply is the upstream saying it already holds the
+// transaction, in any wording the error registry maps to CHAIN_TX_ALREADY_KNOWN.
+func rywReplyIsAlreadyKnown(replyData []byte, chainFamily common.ChainFamily) bool {
+	var reply struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(replyData, &reply) != nil || reply.Error == nil {
+		return false
+	}
+	return common.ClassifyError(nil, chainFamily, common.TransportJsonRPC, reply.Error.Code, reply.Error.Message) == common.LavaErrorChainTxAlreadyKnown
 }
 
 // rywReplyTxHash reads the transaction hash out of an eth_sendRawTransaction reply, lowercased, or
