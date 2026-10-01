@@ -564,7 +564,15 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				err := cwm.wsSubscriptionManager.UnsubscribeAll(webSocketCtx, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
 				if err != nil {
 					utils.LavaFormatWarning("error unsubscribing from all subscription", err, utils.LogAttr("GUID", webSocketCtx))
+					formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+					if formatterMsg != nil {
+						sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
+					}
+					continue
 				}
+				// The manager tears this client's subscriptions down itself and hands back no
+				// node frame, so the router answers, as the node would have (MAG-4064).
+				sendWS(webSocketMsgWithType{messageType: messageType, msg: buildUnsubscribeAllSuccessReply(msg)})
 				continue
 			} else {
 				// Normal relay over websocket. (not subscription related)
@@ -682,9 +690,23 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 // upstreams typically return `{}` here; we optimize for "client unblocks"
 // rather than exact upstream parity.
 func buildUnsubscribeSuccessReply(requestBytes []byte) []byte {
+	return buildLocalSuccessReply(requestBytes, "true")
+}
+
+// buildUnsubscribeAllSuccessReply synthesizes the reply to an unsubscribe_all the
+// router satisfied locally. Only the Tendermint spec tags a method UNSUBSCRIBE_ALL,
+// and a Tendermint node answers it with an empty object, so result is `{}`.
+func buildUnsubscribeAllSuccessReply(requestBytes []byte) []byte {
+	return buildLocalSuccessReply(requestBytes, "{}")
+}
+
+// buildLocalSuccessReply builds a JSON-RPC 2.0 success response carrying resultRaw,
+// with the request's id substituted as raw JSON to keep its exact type (§4.2). A
+// request with no id gets a null one.
+func buildLocalSuccessReply(requestBytes []byte, resultRaw string) []byte {
 	idRaw := "null"
 	if r := gjson.GetBytes(requestBytes, "id"); r.Exists() {
 		idRaw = r.Raw
 	}
-	return []byte(`{"jsonrpc":"2.0","id":` + idRaw + `,"result":true}`)
+	return []byte(`{"jsonrpc":"2.0","id":` + idRaw + `,"result":` + resultRaw + `}`)
 }
