@@ -802,6 +802,43 @@
       "expected_lava_code": 3014,
       "expected_name": "CHAIN_TX_REJECTED"
     },
+    {
+      "_comment": "--- XRP Ledger (submit API errors, inside result with status:error) ---",
+      "name": "xrpl_api_no_network",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "noNetwork: Not synced to the network.",
+      "expected_lava_code": 2007,
+      "expected_name": "NODE_SYNCING"
+    },
+    {
+      "name": "xrpl_api_too_busy",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "tooBusy: The server is too busy to help you now.",
+      "expected_lava_code": 2005,
+      "expected_name": "NODE_RATE_LIMITED"
+    },
+    {
+      "name": "xrpl_api_slow_down_http_429",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 429,
+      "error_message": "HTTP 429: slowDown: You are placing too much load on the server.",
+      "expected_lava_code": 2005,
+      "expected_name": "NODE_RATE_LIMITED"
+    },
+    {
+      "name": "xrpl_api_invalid_transaction",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "invalidTransaction: Transaction length invalid",
+      "expected_lava_code": 4003,
+      "expected_name": "USER_INVALID_PARAMS"
+    },
 
     {
       "_comment": "--- Cosmos SDK (gRPC) ---",

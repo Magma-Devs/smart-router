@@ -213,61 +213,52 @@ func genericWebSocketHandler() http.HandlerFunc {
 	}
 }
 
-// CreateMockSpec returns a minimal spectypes.Spec suitable for unit tests.
-func CreateMockSpec() spectypes.Spec {
-	specName := "mockspec"
+// newMockSpec is the scaffolding the mock specs share: an enabled spec named after its index, with
+// one enabled collection of the given interface and type.
+func newMockSpec(index string, collectionData spectypes.CollectionData, apis ...*spectypes.Api) spectypes.Spec {
 	spec := spectypes.Spec{}
-	spec.Name = specName
-	spec.Index = specName
+	spec.Name = index
+	spec.Index = index
 	spec.Enabled = true
-	spec.BlockDistanceForFinalizedData = 0
 	spec.ApiCollections = []*spectypes.ApiCollection{
 		{
-			Enabled: true,
-			CollectionData: spectypes.CollectionData{
-				ApiInterface: "stub",
-				Type:         "GET",
-			},
-			Apis: []*spectypes.Api{
-				{
-					Name:         specName + "API",
-					ComputeUnits: 100,
-					Enabled:      true,
-				},
-			},
+			Enabled:        true,
+			CollectionData: collectionData,
+			Apis:           apis,
 		},
 	}
 	return spec
 }
 
-// CreateMockXRPLSpec returns the part of an XRP Ledger spec that a transaction submission needs:
-// one JSON-RPC collection holding submit and submit_multisigned, stateful and hanging as in the
-// catalog's ripple.json. The router's bundled specs carry no XRPL chain.
+// CreateMockSpec returns a minimal spectypes.Spec suitable for unit tests.
+func CreateMockSpec() spectypes.Spec {
+	specName := "mockspec"
+	return newMockSpec(specName,
+		spectypes.CollectionData{ApiInterface: "stub", Type: "GET"},
+		&spectypes.Api{Name: specName + "API", ComputeUnits: 100, Enabled: true},
+	)
+}
+
+// CreateMockXRPLSpec returns the part of an XRP Ledger spec a transaction submission needs: one
+// JSON-RPC collection holding submit and submit_multisigned, stateful and hanging as in the
+// catalog's ripple.json, beside one read (account_info). The router's bundled specs carry no XRPL
+// chain.
 func CreateMockXRPLSpec(index string) spectypes.Spec {
-	submission := func(name string) *spectypes.Api {
+	api := func(name string, category spectypes.SpecCategory) *spectypes.Api {
 		return &spectypes.Api{
 			Name:         name,
 			Enabled:      true,
 			ComputeUnits: 10,
 			BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
-			Category:     spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS, HangingApi: true},
+			Category:     category,
 		}
 	}
-	spec := spectypes.Spec{}
-	spec.Name = index
-	spec.Index = index
-	spec.Enabled = true
+	submission := spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS, HangingApi: true}
+	spec := newMockSpec(index,
+		spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceJsonRPC, Type: http.MethodPost},
+		api("submit", submission), api("submit_multisigned", submission), api("account_info", spectypes.SpecCategory{}),
+	)
 	spec.AverageBlockTime = 4000
-	spec.ApiCollections = []*spectypes.ApiCollection{
-		{
-			Enabled: true,
-			CollectionData: spectypes.CollectionData{
-				ApiInterface: spectypes.APIInterfaceJsonRPC,
-				Type:         http.MethodPost,
-			},
-			Apis: []*spectypes.Api{submission("submit"), submission("submit_multisigned")},
-		},
-	}
 	return spec
 }
 
