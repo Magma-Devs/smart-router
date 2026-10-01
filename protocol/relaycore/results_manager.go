@@ -179,7 +179,16 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// (zero CU, no retry) — a silent retry-starvation bug.
 		chainFamily := common.GetChainFamilyOrDefault(rp.chainID)
 		nodeClassified := common.ClassifyError(common.DetectConnectionError(err), chainFamily, transport, errorCode, err.Error())
-		common.LogCodedError("received node error reply from provider", err, nodeClassified, rp.chainID, errorCode, err.Error(),
+		// ERROR only when the endpoint is to blame. A not-found, a pruned height, a rejected
+		// transaction is the node answering the question it was asked, and on REST those are
+		// routine — see LogCodedNodeAnswer. The metric fires either way.
+		logNodeError := common.LogCodedNodeAnswer
+		if nodeClassified.EndpointAtFault() {
+			logNodeError = func(description string, err error, lavaError *common.LavaError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) {
+				common.LogCodedError(description, err, lavaError, chainID, chainErrorCode, chainErrorMessage, attributes...)
+			}
+		}
+		logNodeError("received node error reply from provider", err, nodeClassified, rp.chainID, errorCode, err.Error(),
 			utils.LogAttr("GUID", rp.guid),
 			utils.LogAttr("provider", response.RelayResult.ProviderInfo),
 			utils.LogAttr("statusCode", response.RelayResult.StatusCode),
