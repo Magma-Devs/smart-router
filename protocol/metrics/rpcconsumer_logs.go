@@ -49,8 +49,16 @@ func NewRPCConsumerLogs(consumerMetricsManager ConsumerMetricsManagerInf, usageS
 	}
 	isMetricEnabled, _ := strconv.ParseBool(os.Getenv("IS_METRICS_ENABLED"))
 	if isMetricEnabled {
+		// NewMetricService returns nil when its report env is unset. Every relay
+		// sends to the service once StoreMetricData is on, so the flag follows
+		// the service rather than the env var.
+		metricService := NewMetricService()
+		if metricService == nil {
+			utils.LavaFormatWarning("IS_METRICS_ENABLED is set but REPORT_METRICS_URL or METRICS_INTERVAL_FOR_SENDING_DATA_MIN is missing, relay metrics reporting stays off", nil)
+			return rpcConsumerLogs, nil
+		}
 		rpcConsumerLogs.StoreMetricData = true
-		rpcConsumerLogs.MetricService = NewMetricService()
+		rpcConsumerLogs.MetricService = metricService
 		rpcConsumerLogs.excludeMetricsReferrers = os.Getenv("TO_EXCLUDE_METRICS_REFERRERS")
 		agentsValue := os.Getenv("TO_EXCLUDE_METRICS_AGENTS")
 		if len(agentsValue) > 0 {
