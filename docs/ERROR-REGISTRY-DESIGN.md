@@ -63,14 +63,15 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2006 | `NODE_SERVICE_UNAVAILABLE` | Node temporarily unavailable | Yes | HTTP 503 |
 | 2007 | `NODE_SYNCING` | Node is syncing/catching up | Yes | MessageContains("node is syncing" / "catching up to the chain") |
 | 2008 | `NODE_UNIMPLEMENTED` | gRPC method unimplemented (SubCategoryUnsupportedMethod) | No | gRPC 12 |
-| 2009 | `NODE_ENDPOINT_NOT_FOUND` | REST endpoint not found (SubCategoryUnsupportedMethod) | No | HTTP 404 |
+| 2009 | `NODE_ENDPOINT_NOT_FOUND` | REST endpoint not found (SubCategoryUnsupportedMethod) | No | REST message rows ("endpoint/route/path not found"); JSON-RPC and gRPC `HTTPStatusContains(404)`. A REST HTTP 404 is 2017 — see §9 |
 | 2010 | `NODE_METHOD_NOT_ALLOWED` | REST method not allowed (SubCategoryUnsupportedMethod) | No | HTTP 405 |
 | 2011 | `NODE_LIMIT_EXCEEDED` | Request exceeds node limit (e.g., eth_getLogs range) (SubCategoryRateLimit) | No | JSON-RPC -32005 |
 | 2012 | `NODE_RESOURCE_NOT_FOUND` | Resource not found at node level (SubCategoryDataScope) | Yes | JSON-RPC -32001 |
 | 2013 | `NODE_RESOURCE_UNAVAILABLE` | Resource exists but unavailable (SubCategoryDataScope) | Yes | JSON-RPC -32002 |
 | 2014 | `NODE_GATEWAY_TIMEOUT` | Gateway timeout (HTTP 504 from provider) | Yes | HTTP 504 |
 | 2015 | `NODE_BAD_GATEWAY` | Bad gateway (HTTP 502 from provider) | Yes | HTTP 502 |
-| 2016 | `NODE_UNAUTHORIZED` | Upstream rejected router credentials (HTTP 401) | No | HTTP 401 |
+| 2016 | `NODE_UNAUTHORIZED` | Upstream rejected router credentials (HTTP 401) | No | JSON-RPC and gRPC `HTTPStatusContains(401)`. A REST HTTP 401 is 2018 — see §9 |
+| 2018 | `NODE_ACCESS_DENIED` | Endpoint refused the router itself — credentials, plan or quota, WAF or IP rule, proxy auth, protocol, region | Yes | REST HTTP 401, 402, 403, 407, 426, 451 |
 | 2017 | `NODE_DATA_NOT_HELD` | Endpoint does not hold the requested data — pruned or never existed (SubCategoryDataScope) | Yes | gRPC 5, gRPC 11 |
 
 > **SubCategoryDataScope is no longer 2017 alone.** FAILOVER-TASKS section 2 extended it to every
@@ -376,7 +377,7 @@ var GenericErrorMappings = map[TransportType][]GenericMapping{
     TransportREST: {
         {HTTPStatusEquals(429),                     NODE_RATE_LIMITED},
         {HTTPStatusEquals(503),                     NODE_SERVICE_UNAVAILABLE},
-        {HTTPStatusEquals(404),                     NODE_ENDPOINT_NOT_FOUND},
+        {HTTPStatusEquals(404),                     NODE_DATA_NOT_HELD},   // REST only; see §9
         {HTTPStatusEquals(405),                     NODE_METHOD_NOT_ALLOWED},
         // ...
     },
@@ -639,7 +640,9 @@ Stacks, Tron, TON, nodeos, MultiversX). No status-code *range* separates a chain
 success across them: Horizon reports a rejected transaction as a 400 problem document and a
 missing account as a 404, Aptos a pruned version as a 410, Cosmos a missing transaction as a 404
 and a bad address as a 500, the sidecar a missing block hash as a 500. Every one of those is the
-node answering "no".
+node answering "no". Full write-up:
+`agent_docs/bug-reports/dfns-investigations/rest-stateful-bug/rest-blockchain-errors-research.md`
+(local).
 
 So `RestMessage.CheckResponseError` treats **every status outside 2xx as a node error** (a 429
 keeps its rate-limit handling; a 2xx is a success unless its body carries a Cosmos transaction
@@ -648,24 +651,89 @@ unchanged. What "node error" changes is the same as on JSON-RPC:
 
 - A write broadcast keeps waiting for a sibling's success instead of taking the first refusal
   as the result (the dfns incident: a gateway's empty 404 ended the fan-out while the other
-  vendor broadcast the transaction).
-- The error registry classifies the reply, and its REST status rows decide the rest. Rows
-  added with this rule, in the REST-only table: `400`, `422` → user error (non-retryable, not
-  the endpoint's fault), `403` → unauthorized (non-retryable), `409` → transaction already known (Horizon
-  `DUPLICATE`; non-retryable, not a fault — on a broadcast the sibling's 201 wins over it),
-  `410` → data the node no longer
-  holds (retryable elsewhere, not a fault). They are deliberately not in the shared HTTP
-  tables: on JSON-RPC and gRPC a bare 400 or 403 is a gateway or WAF in front of the node,
-  where "unknown ⇒ retry elsewhere" stays the right call. Already there: `401`, `404`, `405`, `413`, `501` non-retryable,
-  `429` rate limit, `5xx` retryable. A status with no row classifies as unknown: retried and,
-  by the availability gate's documented default, scored.
+  vendor broadcast the transaction). This is the whole of what MAG-3972/3974/3976 need.
+- The error registry classifies the reply, and its REST status rows decide the rest.
 - Every REST node error is logged and counted the way a JSON-RPC one is ("received node error
-  reply from provider" at ERROR, `lava-identified-node-error: true` on the reply), and is not
-  cached.
+  reply from provider" at ERROR with the payload, `lava-identified-node-error: true` on the
+  reply), and is not cached.
 
-Not covered by this rule, on purpose: Tron and TON report errors inside a 200 body (`{"Error":…}`,
-`{"code":"SIGERROR"}`, `{"ok":false}`) and need a body check that is a separate decision; a 5xx
-that carries a chain envelope (a Cosmos "bad address" 500) is still converted to a transport error
-by the relay path and scored, as before; cross-validation counts only successes toward a quorum,
-so on a REST interface under a CV policy identical not-found answers no longer form one (no
-tenant runs CV on REST today).
+### 9.1 Status rows — current verdicts
+
+Retried = the registry marks it retryable, so the relay policy has no stop reason until the
+retry budget is spent (`relaycore.RelayRetryLimit`, default 2 ⇒ up to 3 upstream calls). At fault
+= `LavaError.EndpointAtFault`, which drives `MarkUnhealthy` and the endpoint's consecutive-refusal
+counter (`--bench-after`, default 50, reset only by a 2xx).
+
+| status | code | retried | at fault |
+| --- | --- | --- | --- |
+| `400` `406` `411` `412` `414`–`417` `428` `431` | `USER_INVALID_REQUEST` | no | no |
+| `400` saying "block beyond head" | `CHAIN_BLOCK_NOT_FOUND` | yes | no |
+| `401` `402` `403` `407` `426` `451` | `NODE_ACCESS_DENIED` (2018) | yes | **yes** |
+| `404` | `NODE_DATA_NOT_HELD` | yes | no (data-scope) |
+| `405` | `NODE_METHOD_NOT_ALLOWED` | no | no |
+| `408` | `NODE_SERVICE_UNAVAILABLE` | yes | yes |
+| `409` | `CHAIN_TX_ALREADY_KNOWN` | no | no |
+| `410` | `CHAIN_STATE_PRUNED` | yes | no (data-scope) |
+| `413` | `USER_REQUEST_TOO_LARGE` | no | no |
+| `422` | `USER_INVALID_PARAMS` | no | no |
+| `429` | `NODE_RATE_LIMITED` | yes | no (capacity) |
+| `500` `503` `520`–`530` | `NODE_INTERNAL_ERROR` / `NODE_SERVICE_UNAVAILABLE` / `NODE_SERVER_ERROR` | yes | **yes** |
+| `501` | `NODE_UNIMPLEMENTED` | no | no |
+| `502` `504` | `NODE_BAD_GATEWAY` / `NODE_GATEWAY_TIMEOUT` | yes | yes |
+| no row (including every `3xx`) | `UNKNOWN_ERROR` | yes | no, but **scored** by the availability gate |
+
+These rows live in the REST-only table on purpose: on JSON-RPC and gRPC a bare 400 or 403 is a
+gateway or WAF in front of the node, where "unknown ⇒ retry elsewhere" stays the right call.
+`TestRESTStatusRowsDoNotReachOtherTransports` pins that `ClassifyError` on those two transports is
+untouched — but note that the transport-looping helpers (`IsNonRetryableNodeError`,
+`IsUnsupportedMethodError`, `chainlib.IsUnsupportedMethodError`) walk the REST table whatever the
+caller's transport is, so a REST row can still be reached from a JSON-RPC call site.
+
+### 9.2 A REST 5xx keeps the node's own JSON reply
+
+`relayInnerDirect` used to turn every 5xx except 501 into a Go error before the reply was read, so
+when every node answered Horizon's `503 {"tx_status":"TRY_AGAIN_LATER"}` the client got a
+router-made 500. It now skips a 5xx whose body is JSON and whose status the registry does not mark
+`MayHaveReachedNode` (`rpcInterfaceMessages.ServerErrorIsNodeReply`). `502`/`504`/`522`/`524` keep
+the old path: a gateway that failed may already have forwarded the request, so a write's outcome
+stays "unclear". Blame and retry are unchanged by this step — the status rows above still decide
+them.
+
+### 9.3 Open decisions
+
+These are under review on PR #448 and are **not** settled. The table in 9.1 describes the code as
+it stands, not an agreed design.
+
+1. **401/403 at fault.** §5 of the research doc reserves at-fault for 429/502/503/504 and makes
+   every other non-2xx "not the endpoint's fault". As implemented, a 401 from a wrong or expired
+   shared credential fails every path, so nothing resets the refusal counter and the URL is
+   disabled. `SubCategoryNodeCapability` would stop the disable but not the availability drop,
+   because `shouldFailSessionForResult` exempts `IsDataScope` and not `IsNodeCapability`.
+2. **500 at fault.** Cosmos, nodeos, MultiversX and the Substrate sidecar all answer a *caller's*
+   mistake with a 500 (pruned height, bad bech32, "transaction not found", unknown block hash, a
+   rejected `push_transaction`). All of them are `NODE_INTERNAL_ERROR`, at fault, and scored
+   today. §5 says they must not be. dfns runs POLKADOTASSETHUB on the sidecar.
+3. **404 retried.** Keeps the lagging-node and gateway case working, at up to 3 upstream calls per
+   not-found read — the dominant REST read pattern is a client polling for an unmined transaction.
+4. **Retry for 400/409/422.** §5 makes every blockchain error retryable because it deferred
+   retry-worthiness; these rows decide it as non-retryable instead.
+5. **Rule order.** The new `CodeEquals` rows sit above the table's pre-existing message rows, so
+   for those statuses the status beats the body. Measured effect: a 400 whose body says "method
+   not allowed" or "route not found" loses the unsupported-method carve-out, and the bare
+   `"unknown block"` substring — matched against the raw body — makes any status carrying it
+   retryable and unscored.
+6. **Log level.** §5 chose debug for a not-at-fault blockchain error. Today every REST non-2xx is
+   an ERROR line with the request payload plus a `smartrouter_errors_total` increment, three per
+   not-found poll.
+
+### 9.4 Not covered by this rule, on purpose
+
+- Tron and TON report errors inside a 200 body (`{"Error":…}`, `{"code":"SIGERROR"}`,
+  `{"ok":false}`) and need a body check per chain family — §5 step 2, a separate decision.
+- An empty or non-JSON **2xx** is still served as the answer and still ends a broadcast
+  (MAG-3971). The fix site is the sender's existing malformed-2xx guard, not
+  `CheckResponseError`, which cannot see whether the request is a write.
+- A 5xx whose body is the JSON literal `null` passes `json.Valid` and reaches the client as the
+  node's reply (MAG-4060).
+- Cross-validation counts only successes toward a quorum, so on a REST interface under a CV
+  policy identical not-found answers no longer form one. No tenant runs CV on REST today.
