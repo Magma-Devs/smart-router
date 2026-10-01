@@ -1315,11 +1315,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		return returnedResult, utils.LavaFormatError("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
 	}
 
-	// MAG-4032: pin what a served write names to the upstream that accepted it, before the caller
-	// can read it back. A node error is a refusal, not an acceptance.
-	if returnedResult != nil && returnedResult.Reply != nil && !returnedResult.IsNodeError {
-		rpcss.readYourWrites.recordWrite(protocolMessage, returnedResult.GetProvider(), returnedResult.Reply.Data)
-	}
+	// MAG-4032: pin what a served write names to the upstream that holds it, before the caller can
+	// read it back. recordWrite decides which answers show that: a result, or "already known".
+	rpcss.readYourWrites.recordWrite(protocolMessage, returnedResult, rpcss.directRelayChainFamily())
 
 	if analytics != nil {
 		currentLatency := time.Since(relaySentTime)
@@ -1879,15 +1877,60 @@ func relayProvesEndpointHealthy(relayResult *common.RelayResult) bool {
 	return relayResult.StatusCode == 0 || (relayResult.StatusCode >= 200 && relayResult.StatusCode < 300)
 }
 
-// relayParentContext is the context a batch's relays run under. Cross-validation's stragglers and a
-// stateful broadcast's deliveries must finish after the request has its answer, so they are
-// detached from the batch cancel (see sendRelayToDirectEndpoints); a stateless relay keeps it, and
-// a hedge's loser is cancelled on purpose.
-func relayParentContext(ctx context.Context, selection relaycore.Selection) context.Context {
-	if selection == relaycore.CrossValidation || selection == relaycore.Stateful {
-		return context.WithoutCancel(ctx)
+// statefulDeliveryLinger is how long a stateful broadcast's delivery may keep running after the
+// request has its answer (MAG-4032). Long enough for any healthy upstream: a submission is answered
+// in well under a second, and one still silent this long after another upstream accepted the write
+// is either hung or will see the transaction by gossip first. Short enough to bound what a hung
+// upstream costs: a write's attempt budget is 180 s (it is stateful and a hanging API), and without
+// this a vendor that accepts the connection but never answers would hold a session that long per
+// write, filling the default cap of 1000 sessions at about 6 writes a second. At 5 s it takes 200.
+const statefulDeliveryLinger = 5 * time.Second
+
+// relayContext returns the context one relay of a batch runs under, and the cancel that ends it.
+//
+//   - Stateless: a child of the batch context, so a hedge's loser is cut off the moment the other
+//     attempt answers. A read has nothing to deliver.
+//   - CrossValidation: detached from the batch cancel, so a straggler runs to its own bound and is
+//     compared against the consensus (MAG-2187).
+//   - Stateful: detached, so every upstream receives the transaction even after the first
+//     acceptance has answered the caller, then cut off linger after the batch ends (MAG-4032).
+//
+// Values (GUID, IP forwarding metadata) are preserved in every case.
+func relayContext(batchCtx context.Context, selection relaycore.Selection, linger time.Duration) (context.Context, context.CancelFunc) {
+	switch selection {
+	case relaycore.CrossValidation:
+		return context.WithCancel(context.WithoutCancel(batchCtx))
+	case relaycore.Stateful:
+		relayCtx, cancel := context.WithCancel(context.WithoutCancel(batchCtx))
+		stopLinger := context.AfterFunc(batchCtx, func() {
+			cutOff := time.AfterFunc(linger, cancel)
+			context.AfterFunc(relayCtx, func() { cutOff.Stop() })
+		})
+		return relayCtx, func() {
+			stopLinger()
+			cancel()
+		}
+	default:
+		return context.WithCancel(batchCtx)
 	}
-	return ctx
+}
+
+// errLostBroadcastRejection is the release reason for a lostBroadcastRejection.
+var errLostBroadcastRejection = errors.New("stateful delivery rejected after another upstream accepted the write")
+
+// lostBroadcastRejection reports whether a relay is a stateful delivery that answered with a
+// rejection after another upstream had already accepted the write (MAG-4032).
+//
+// Such an answer says nothing about the upstream's health. A loser's rejection is almost always
+// about the transaction itself: it is already in the pool, by gossip or from this very broadcast,
+// and each client words that differently ("already known", "Known transaction", "AlreadyKnown",
+// "nonce too low" once the winner's block lands). Scoring it would blame a healthy upstream for
+// every write it loses, and a wording the registry does not know reads as the node's fault, so it
+// would mark the endpoint unhealthy too. It is released without a score instead, which is what a
+// loser got while the broadcast was still cancelled on the first acceptance. A delivery that fails
+// at the transport (refused, reset, never answered) is not a rejection, and still counts.
+func lostBroadcastRejection(selection relaycore.Selection, answeredWithNodeError bool, acceptedElsewhere int) bool {
+	return selection == relaycore.Stateful && answeredWithNodeError && acceptedElsewhere > 0
 }
 
 // sendRelayToDirectEndpoints handles relay for direct RPC sessions (smart router direct mode)
@@ -2095,11 +2138,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// rest mid-flight. The request is often on the wire by then, but what an upstream does with a
 	// request whose client hung up is its gateway's business, and one that drops it learns of the
 	// transaction by gossip, seconds later. A read routed there in the meantime saw the state from
-	// before the write: the pending nonce the caller had just used. Letting every delivery finish is
-	// what makes the broadcast one. Nothing reads a late stateful response — it lands in a buffer
-	// sized for the whole broadcast (statefulFanOutCeiling) — and a stateful request is never
-	// cache-written (cacheExclusionReason). Stateless keeps the batch cancel: aborting a hedge's
-	// loser on first success is a deliberate resource-saver, and a read has nothing to deliver.
+	// before the write: the pending nonce the caller had just used. Letting every delivery finish,
+	// within statefulDeliveryLinger of the answer, is what makes the broadcast one. Nothing reads a
+	// late stateful response — it lands in a buffer sized for the whole broadcast
+	// (statefulFanOutCeiling) — a stateful request is never cache-written (cacheExclusionReason),
+	// and a late rejection is released without a score (lostBroadcastRejection). Stateless keeps
+	// the batch cancel: aborting a hedge's loser on first success is a deliberate resource-saver,
+	// and a read has nothing to deliver. relayContext holds all three rules.
 	//
 	// Post-reply side-effect audit (the detachment reintroduces every post-relay side effect the
 	// batch cancel used to suppress, so each is classified here rather than one review round at a
@@ -2114,11 +2159,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// write (skipped for CV in the goroutine; the consensus winner is cached once in SendParsedRelay)
 	// and analytics.Success (removed from relayInnerDirect; set once on the request goroutine).
 	//
-	// No explicit per-provider detachment cap: a detached relay holds its session until it resolves,
-	// but the session manager already bounds outstanding sessions at MaxSessionsAllowedPerProvider,
-	// so a dead provider self-limits (it stops being granted new sessions and is excluded) without a
-	// second CV-specific cap to keep in sync.
-	relayParentCtx := relayParentContext(ctx, selection)
+	// No explicit per-provider detachment cap for cross-validation: a detached straggler holds its
+	// session until it resolves, but the session manager already bounds outstanding sessions at
+	// MaxSessionsAllowedPerProvider, so a dead provider self-limits (it stops being granted new
+	// sessions and is excluded) without a second CV-specific cap to keep in sync. A stateful delivery
+	// does get its own bound, statefulDeliveryLinger: cross-validation is opt-in per method, while
+	// every write on every chain takes this path, at a write's 180 s attempt budget.
 	if selection == relaycore.CrossValidation {
 		// Re-snapshot the queried-providers set to the post-filter survivors. The pre-filter
 		// snapshot in sendRelayToEndpoint includes consistency-filtered endpoints that were
@@ -2161,9 +2207,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 
 	// Launch goroutines for each direct RPC endpoint (parallel relay pattern)
 	for endpointAddress, sessionInfo := range sessions {
-		go func(endpointAddress string, sessionInfo *lavasession.SessionInfo, relayParentCtx context.Context) {
-			// Derive from relayParentCtx so IP forwarding metadata (and other values) are preserved.
-			goroutineCtx, goroutineCtxCancel := context.WithCancel(relayParentCtx)
+		go func(endpointAddress string, sessionInfo *lavasession.SessionInfo) {
+			goroutineCtx, goroutineCtxCancel := relayContext(ctx, selection, statefulDeliveryLinger)
 
 			guid, found := utils.GetUniqueIdentifier(ctx)
 			if found {
@@ -2235,6 +2280,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				harvestGen = rpcss.endpointObservationGeneration(targetEndpoint.NetworkAddress)
 			}
 
+			// This relay's own result is recorded only by the deferred SetResponse above, so a
+			// success already in the processor is another upstream's acceptance.
+			lostBroadcast := func(answeredWithNodeError bool) bool {
+				if selection != relaycore.Stateful || !answeredWithNodeError {
+					return false
+				}
+				accepted, _, _, _ := relayProcessor.GetResults()
+				return lostBroadcastRejection(selection, answeredWithNodeError, accepted)
+			}
+
 			relayLatency, err, _ := rpcss.relayInnerDirect(
 				spanCtx,
 				singleConsumerSession,
@@ -2245,6 +2300,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				originalRequestData,
 				analytics,
 				func() bool { return requestRanOutOfRoad(relayProcessor.GetStopReason()) },
+				lostBroadcast,
 			)
 
 			// Did the request run out of road, or did we cut this attempt short? Decides below
@@ -2368,6 +2424,20 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
+			} else if err == nil && !localRelayResult.IsRateLimited && lostBroadcast(localRelayResult.IsNodeError) {
+				// A rejection after another upstream accepted the write is about the transaction,
+				// not this upstream (lostBroadcastRejection): no score either way, as when a loser
+				// was still cancelled on the first acceptance. A rate limit is excluded so it keeps
+				// its own treatment below — the hold-off is worth having whoever won.
+				utils.LavaFormatDebug("stateful delivery rejected after another upstream accepted the write, releasing without a score",
+					utils.LogAttr("endpoint", endpointAddress),
+					utils.LogAttr("GUID", goroutineCtx),
+				)
+				if errSession := rpcss.sessionManager.OnSessionCancelled(singleConsumerSession, errLostBroadcastRejection); errSession != nil {
+					utils.LavaFormatWarning("OnSessionCancelled failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
 			} else if isRateLimitedRelayOutcome(err, localRelayResult) {
 				// A rate-limit is neither failure nor success — the upstream is healthy but
 				// busy, and both scoring directions get it wrong: OnSessionFailure lets a
@@ -2478,7 +2548,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			}
 
 			// NOTE: Don't call Free() here - OnSessionDone/OnSessionFailure already do it!
-		}(endpointAddress, sessionInfo, relayParentCtx)
+		}(endpointAddress, sessionInfo)
 	}
 
 	// NOTE: Don't call WaitForResults here!
@@ -4370,45 +4440,23 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	}
 
 	// MAG-4032: a pending-nonce read or a transaction lookup that names a write this router just
-	// served goes to the upstream that accepted the write. The caller's own directives outrank
-	// it, cross-validation needs more than one upstream, and like the directives it holds for the
-	// first attempt only.
-	readYourWritesPin := ""
+	// served prefers the upstream that accepted the write. A preference, not a pin: selection falls
+	// back on its own when that upstream cannot take the read (GetSessionsOptions.PreferredProvider).
+	// The caller's own directives outrank it, cross-validation needs more than one upstream, and
+	// like the directives it holds for the first attempt only.
 	if selectedProvider == "" && stickiness == "" && selection != relaycore.CrossValidation && usedProviders.BatchNumber() == 0 {
 		if pin := rpcss.readYourWrites.pinFor(protocolMessage); pin != "" {
-			if rpcss.sessionManager.CanServeNow(pin, addon, common.GetExtensionNames(extensions), ctx) {
-				readYourWritesPin = pin
-				selectedProvider = pin
-				utils.LavaFormatDebug("read-your-writes: routing to the upstream that accepted the write",
-					utils.LogAttr("upstream", pin),
-					utils.LogAttr("api", protocolMessage.GetApi().GetName()),
-					utils.LogAttr("GUID", ctx),
-				)
-			} else {
-				utils.LavaFormatDebug("read-your-writes: the upstream that accepted the write cannot take this read, selecting normally",
-					utils.LogAttr("upstream", pin),
-					utils.LogAttr("api", protocolMessage.GetApi().GetName()),
-					utils.LogAttr("GUID", ctx),
-				)
-			}
+			sessionOpts.PreferredProvider = pin
+			utils.LavaFormatDebug("read-your-writes: preferring the upstream that accepted the write",
+				utils.LogAttr("upstream", pin),
+				utils.LogAttr("api", protocolMessage.GetApi().GetName()),
+				utils.LogAttr("GUID", ctx),
+			)
 		}
 	}
 
 	_, sessSpan := tracing.StartInternalSpan(ctx, tracing.SpanGetSessions)
 	sessions, err := rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, extensions, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider, sessionOpts)
-	if readYourWritesPin != "" && (errors.Is(err, lavasession.SelectedProviderUnavailableError) || errors.Is(err, lavasession.SelectedProviderAlreadyFailedError)) {
-		// A read-your-writes pin is the router's preference, not the caller's demand: an upstream
-		// that passed CanServeNow and still cannot take the read — no connection up, or blocked
-		// since — gives way to ordinary selection instead of failing the read the way a header pin
-		// does. A failed selection adds nothing to usedProviders, so asking again is clean.
-		utils.LavaFormatDebug("read-your-writes: upstream cannot take the read, selecting normally",
-			utils.LogAttr("upstream", readYourWritesPin),
-			utils.LogAttr("error", err),
-			utils.LogAttr("GUID", ctx),
-		)
-		selectedProvider = ""
-		sessions, err = rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, extensions, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider, sessionOpts)
-	}
 	tracing.RecordSessionStats(sessSpan, numOfEndpoints, len(sessions))
 	if err != nil {
 		tracing.RecordError(sessSpan, err)
@@ -4512,6 +4560,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 // decision is made rather than passed as a value, because it is only knowable once the attempt has
 // ended. It is what separates a hang from a cancellation for the per-URL health machinery: nil is
 // treated as "not expired", which is the safe default for callers with no request context (tests).
+//
+// lostBroadcast reports whether this relay is a lostBroadcastRejection — a stateful delivery whose
+// rejection arrived after another upstream accepted the write — and is likewise asked only once the
+// answer is in, because the other acceptance can land while this relay is in flight. Such a
+// rejection is not the endpoint's fault, whatever its wording, so it never marks the endpoint
+// unhealthy. nil means "never", the right answer for a caller outside a broadcast.
 func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	ctx context.Context,
 	singleConsumerSession *lavasession.SingleConsumerSession,
@@ -4522,6 +4576,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	originalRequestData []byte,
 	analytics *metrics.RelayMetrics,
 	budgetExpired func() bool,
+	lostBroadcast func(answeredWithNodeError bool) bool,
 ) (relayLatency time.Duration, err error, needsBackoff bool) {
 	// Get direct connection from session
 	directConnection, ok := singleConsumerSession.GetDirectConnection()
@@ -4769,7 +4824,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// load-bearing — there IsNodeError comes from the HTTP status alone, so a 200 carrying a fault
 	// would take BOTH arms, counting up and then resetting to zero in the same relay. No registry
 	// row produces that shape today; the chaining is what keeps it impossible when one is added.
-	if result.IsNodeAtFault && targetEndpoint != nil {
+	if result.IsNodeAtFault && targetEndpoint != nil && (lostBroadcast == nil || !lostBroadcast(result.IsNodeError)) {
 		rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 		// EndpointDisableNodeError unconditionally, rather than through endpointDisableReasonFor:
 		// reaching this arm REQUIRES an answer to have arrived (err == nil, and the status was

@@ -11,6 +11,9 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/stretchr/testify/require"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
 // Signed with go-ethereum's own typed signers (core/types, v1.17.5) from one throwaway key, so
@@ -81,8 +84,10 @@ func TestEvmTxSenderAndHash_RejectsWhatItCannotRead(t *testing.T) {
 	var items []rlp.RawValue
 	require.NoError(t, rlp.DecodeBytes(dynamicFee[1:], &items))
 
-	// The same transaction with its signature flipped to the high-s twin. It recovers a
-	// different key, and a node refuses it, so it must not pin anyone.
+	// The same transaction with its signature swapped for its high-s twin, (r, N-s) with the parity
+	// flipped. The twin recovers the SAME sender; it is refused because every node enforcing EIP-2
+	// rejects high-s, so pinning on it would pin a write no node accepted. Do not relax the low-s
+	// check on the belief that it guards against pinning the wrong sender.
 	malleable := func() []byte {
 		secp256k1N := crypto.S256().Params().N
 		var s big.Int
@@ -137,7 +142,7 @@ func TestReadYourWrites_OffIsANoOp(t *testing.T) {
 	var off *readYourWrites
 	chainParser := ethJsonRPCParser(t)
 	write := ethProtocolMessage(t, chainParser, rywSendRawTx(rywGethVectors[4].raw), 0)
-	require.NotPanics(t, func() { off.recordWrite(write, "vendor-a", rywReply(rywGethVectors[4].hash)) })
+	require.NotPanics(t, func() { off.recordWrite(write, rywServed("vendor-a", rywGethVectors[4].hash), common.ChainFamilyEVM) })
 	require.Empty(t, off.pinFor(ethProtocolMessage(t, chainParser, rywNonceRead(rywTestSender, "pending"), 0)))
 }
 
@@ -148,7 +153,7 @@ func TestReadYourWrites_WriteThenRead(t *testing.T) {
 	pins.now = func() time.Time { return now }
 
 	dynamicFee := rywGethVectors[4]
-	pins.recordWrite(ethProtocolMessage(t, chainParser, rywSendRawTx(dynamicFee.raw), 0), "vendor-a", rywReply(dynamicFee.hash))
+	pins.recordWrite(ethProtocolMessage(t, chainParser, rywSendRawTx(dynamicFee.raw), 0), rywServed("vendor-a", dynamicFee.hash), common.ChainFamilyEVM)
 
 	read := func(body string) string {
 		return pins.pinFor(ethProtocolMessage(t, chainParser, body, 0))
@@ -170,7 +175,7 @@ func TestReadYourWrites_WriteThenRead(t *testing.T) {
 	// A later write from the same sender moves the pin: the newest acceptance is the one the
 	// next nonce read must see.
 	now = now.Add(10 * time.Second)
-	pins.recordWrite(ethProtocolMessage(t, chainParser, rywSendRawTx(rywGethVectors[0].raw), 0), "vendor-b", rywReply(rywGethVectors[0].hash))
+	pins.recordWrite(ethProtocolMessage(t, chainParser, rywSendRawTx(rywGethVectors[0].raw), 0), rywServed("vendor-b", rywGethVectors[0].hash), common.ChainFamilyEVM)
 	require.Equal(t, "vendor-b", read(rywNonceRead(checksummedSender, "pending")))
 	require.Equal(t, "vendor-a", read(rywByHash("eth_getTransactionByHash", dynamicFee.hash)), "each hash keeps its own acceptor")
 
@@ -189,24 +194,49 @@ func TestReadYourWrites_WhatAWriteMustBeToPin(t *testing.T) {
 
 	t.Run("a raw transaction the rule cannot read still pins its hash from the reply", func(t *testing.T) {
 		pins := newReadYourWrites(time.Minute)
-		pins.recordWrite(ethProtocolMessage(t, chainParser, rywSendRawTx("0x02f8"), 0), "vendor-a", rywReply(dynamicFee.hash))
+		pins.recordWrite(ethProtocolMessage(t, chainParser, rywSendRawTx("0x02f8"), 0), rywServed("vendor-a", dynamicFee.hash), common.ChainFamilyEVM)
 		require.Equal(t, "vendor-a", pins.pinFor(ethProtocolMessage(t, chainParser, rywByHash("eth_getTransactionByHash", dynamicFee.hash), 0)))
 		require.Empty(t, pins.pinFor(nonceRead))
 	})
 	t.Run("a reply without a hash still pins what the transaction names", func(t *testing.T) {
 		pins := newReadYourWrites(time.Minute)
-		pins.recordWrite(ethProtocolMessage(t, chainParser, rywSendRawTx(dynamicFee.raw), 0), "vendor-a", []byte(`{"jsonrpc":"2.0","id":1,"result":null}`))
+		pins.recordWrite(ethProtocolMessage(t, chainParser, rywSendRawTx(dynamicFee.raw), 0), rywServedReply("vendor-a", `{"jsonrpc":"2.0","id":1,"result":null}`), common.ChainFamilyEVM)
 		require.Equal(t, "vendor-a", pins.pinFor(nonceRead))
 		require.Equal(t, "vendor-a", pins.pinFor(ethProtocolMessage(t, chainParser, rywByHash("eth_getTransactionByHash", dynamicFee.hash), 0)))
 	})
 	t.Run("only eth_sendRawTransaction pins", func(t *testing.T) {
 		pins := newReadYourWrites(time.Minute)
-		pins.recordWrite(ethProtocolMessage(t, chainParser, `{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x1111111111111111111111111111111111111111","data":"`+dynamicFee.raw+`"},"latest"]}`, 0), "vendor-a", rywReply(dynamicFee.hash))
+		pins.recordWrite(ethProtocolMessage(t, chainParser, `{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x1111111111111111111111111111111111111111","data":"`+dynamicFee.raw+`"},"latest"]}`, 0), rywServed("vendor-a", dynamicFee.hash), common.ChainFamilyEVM)
 		require.Empty(t, pins.pinFor(nonceRead))
 	})
+	// A resubmission — the same raw transaction sent again after a client-side timeout — is
+	// answered "already known" by every upstream that has it. That is as good evidence as a hash
+	// that the upstream holds the transaction, in whichever wording its client uses.
+	for tcIndex, tc := range []struct {
+		name    string
+		code    int
+		message string
+		pins    bool
+	}{
+		{"Geth and Erigon: already known", -32000, "already known", true},
+		{"Nethermind: AlreadyKnown", -32010, "AlreadyKnown", true},
+		{"Besu: Known transaction", -32000, "Known transaction", true},
+		{"nonce too low: the transaction, or another, is already mined", -32000, "nonce too low: next nonce 8, tx nonce 7", false},
+		{"any other rejection", -32000, "insufficient funds for gas * price + value", false},
+	} {
+		t.Run("a rejection: "+tc.name, func(t *testing.T) {
+			pins := newReadYourWrites(time.Minute)
+			pins.recordWrite(ethProtocolMessage(t, chainParser, rywSendRawTx(dynamicFee.raw), 0), rywRejected("vendor-a", tc.code, tc.message), common.ChainFamilyEVM)
+			if tc.pins {
+				require.Equal(t, "vendor-a", pins.pinFor(nonceRead), "tc #%d", tcIndex)
+			} else {
+				require.Empty(t, pins.pinFor(nonceRead), "tc #%d", tcIndex)
+			}
+		})
+	}
 	t.Run("a write nobody is named as having accepted pins nothing", func(t *testing.T) {
 		pins := newReadYourWrites(time.Minute)
-		pins.recordWrite(ethProtocolMessage(t, chainParser, rywSendRawTx(dynamicFee.raw), 0), "", rywReply(dynamicFee.hash))
+		pins.recordWrite(ethProtocolMessage(t, chainParser, rywSendRawTx(dynamicFee.raw), 0), rywServed("", dynamicFee.hash), common.ChainFamilyEVM)
 		require.Empty(t, pins.pinFor(nonceRead))
 	})
 }
@@ -247,6 +277,21 @@ func rywByHash(method, hash string) string {
 	return `{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":["` + hash + `"]}`
 }
 
-func rywReply(hash string) []byte {
-	return []byte(`{"jsonrpc":"2.0","id":1,"result":"` + hash + `"}`)
+// rywServed is a write the upstream accepted: its reply carries the transaction hash.
+func rywServed(provider, hash string) *common.RelayResult {
+	return rywServedReply(provider, `{"jsonrpc":"2.0","id":1,"result":"`+hash+`"}`)
+}
+
+func rywServedReply(provider, body string) *common.RelayResult {
+	return &common.RelayResult{
+		Reply:        &pairingtypes.RelayReply{Data: []byte(body)},
+		ProviderInfo: common.ProviderInfo{ProviderAddress: provider},
+	}
+}
+
+// rywRejected is a write the upstream answered with a JSON-RPC error.
+func rywRejected(provider string, code int, message string) *common.RelayResult {
+	result := rywServedReply(provider, fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"error":{"code":%d,"message":%q}}`, code, message))
+	result.IsNodeError = true
+	return result
 }
