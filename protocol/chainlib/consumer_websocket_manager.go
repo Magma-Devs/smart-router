@@ -353,6 +353,8 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 
 	websocketConn := cwm.websocketConn
 	logger := cwm.rpcConsumerLogs
+	// Stashed by the upgrade handler; one value for every relay on this connection.
+	origin, _ := websocketConn.Locals(metrics.OriginHeaderKey).(string)
 
 	webSocketCtx, cancelWebSocketCtx := context.WithCancel(context.Background())
 	guid := utils.GenerateUniqueIdentifier()
@@ -492,6 +494,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		)
 
 		metricsData := metrics.NewRelayAnalytics(dappID, cwm.chainId, cwm.apiInterface)
+		metricsData.Origin = origin
 
 		protocolMessage, err := cwm.relaySender.ParseRelay(webSocketCtx, "", string(msg), cwm.connectionType, dappID, userIp, nil)
 		if err != nil {
