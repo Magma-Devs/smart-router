@@ -341,8 +341,11 @@ var (
 	// EndpointAtFault, and IsNonRetryable keeps it out of the availability score. Left as
 	// UNKNOWN_ERROR, it was scored against every endpoint the write was broadcast to.
 	//
-	// MayHaveReachedNode: the already-finalized case means a transaction answered with ABORTED can
-	// be on chain. For a write, "unclear" is the recoverable direction.
+	// MayHaveReachedNode is true because the node answered: the already-finalized case means a
+	// transaction answered with ABORTED can be on chain. It does not decide a write's verdict
+	// here. A gRPC status error comes back as a node error carrying the node's own message, and
+	// writeOutcomeIsUnknown reads this flag only from protocol errors, so the caller gets Sui's
+	// ABORTED answer, a known outcome, rather than errUnknownWriteOutcome.
 	//
 	// A node error, not PROTOCOL_PROVIDER_ABORTED (1013). That code is CategoryInternal, which
 	// would report the endpoint as unreachable and rank the node's own message below internal
