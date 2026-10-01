@@ -41,11 +41,14 @@ type UnifiedRelayStateMachine struct {
 	stopReason     string
 	stopReasonLock sync.RWMutex
 
-	// hedgePending records that the ticker has asked for a hedge whose dispatch has not yet been
-	// reported back. HedgeCount is incremented when that dispatch SUCCEEDS rather than when the
-	// ticker asks, because the two are not the same event: with an attempt in flight and the pool
+	// pendingHedges counts the hedges a timer has asked for whose dispatch has not yet been
+	// reported back. HedgeCount is incremented when such a dispatch SUCCEEDS rather than when the
+	// timer asks, because the two are not the same event: with an attempt in flight and the pool
 	// empty, the ticker asks every window and every ask fails, which inflated the count by one per
-	// window for the life of the request.
+	// window for the life of the request. It is a count, not a flag, because two timers can ask in
+	// the same instant: with a budget that is a whole number of windows the backup-reserve hedge is
+	// due together with a ticker hedge, and a real dispatch takes longer than this loop, so both
+	// are asked for before either is confirmed (MAG-3923). A flag counted that pair once.
 	//
 	// pairingEmptyWarned keeps the "all providers exhausted" WARNING to the first time it is true
 	// for a request. It is a fact about the request, not about the window, so repeating it once per
@@ -57,7 +60,7 @@ type UnifiedRelayStateMachine struct {
 	//
 	// All three are touched only from the select loop in GetRelayTaskChannel, which is a single
 	// goroutine, so none needs a lock.
-	hedgePending       bool
+	pendingHedges      int
 	pairingEmptyWarned bool
 	pendingStopReason  string
 }
@@ -501,8 +504,8 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 				case SendSuccess:
 					// An attempt actually went out. If the ticker asked for this one, that is a
 					// hedge that fired, and the only point at which counting it is truthful.
-					if sm.hedgePending {
-						sm.hedgePending = false
+					if sm.pendingHedges > 0 {
+						sm.pendingHedges--
 						if sm.analytics != nil {
 							sm.analytics.HedgeCount++
 						}
@@ -545,8 +548,8 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					} else {
 						sm.recordStopReason("BatchSendFailed")
 					}
-					// The request is ending; a hedge the ticker asked for will never go out.
-					sm.hedgePending = false
+					// The request is ending; a hedge a timer asked for will never go out.
+					sm.pendingHedges = 0
 					go validateReturnCondition(err)
 				case SendRetry:
 					if sm.config.EnableTimeoutPriority {
@@ -590,9 +593,9 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 				)
 
 				if output.Action == ActionRetry {
-					// A retry after a completed attempt, not a hedge. Clear any hedge the ticker asked
+					// A retry after a completed attempt, not a hedge. Clear any hedge a timer asked
 					// for and never got out, so this dispatch is not counted as that hedge firing.
-					sm.hedgePending = false
+					sm.pendingHedges = 0
 					sm.stateTransition(sm.getLatestState(), nodeErrors, &output.Mutation)
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
 				} else {
@@ -623,7 +626,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
 					// Counted when the dispatch is confirmed, in the batchUpdate arm — asking for a
 					// hedge is not the same as sending one.
-					sm.hedgePending = true
+					sm.pendingHedges++
 				}
 
 			case <-backupReserveC:
@@ -646,7 +649,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					)
 					sm.stateTransition(sm.getLatestState(), nodeErrors, &output.Mutation)
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1, BackupReserve: true}
-					sm.hedgePending = true
+					sm.pendingHedges++
 				}
 
 			case returnErr := <-returnCondition:
