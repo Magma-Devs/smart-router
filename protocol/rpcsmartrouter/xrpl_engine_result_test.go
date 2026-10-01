@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
@@ -293,7 +294,7 @@ func TestJSONRPCListener_XRPLBatchedSubmitRefused(t *testing.T) {
 	var refused common.JsonRPCErrorMessage
 	require.NoError(t, json.Unmarshal(body, &refused), string(body))
 	require.Equal(t, -32600, refused.Error.Code)
-	require.Contains(t, refused.Error.Data, "single request")
+	require.Equal(t, rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error(), refused.Error.Data)
 	require.Zero(t, submitsReceived.Load(), "a refused batch must not reach any upstream")
 
 	response, body = postToRouter(t, ctx, address, `[{"method":"account_info","params":[{"account":"rHb9CJAWyB4rj91VRWn96DkukG4bwdtyTh"}]}]`)
@@ -338,6 +339,8 @@ func TestJSONRPCListener_XRPLBatchedSubmitRefusedOverWebsocket(t *testing.T) {
 	var refused common.JsonRPCErrorMessage
 	require.NoError(t, json.Unmarshal(reply, &refused), string(reply))
 	require.Equal(t, -32600, refused.Error.Code, string(reply))
-	require.Contains(t, refused.Error.Data, "single request", string(reply))
+	// The same text as the POST handler, whatever the log level: the wrapped parse error's text is
+	// log formatting, so it is not what the caller is told.
+	require.Equal(t, rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error(), refused.Error.Data, string(reply))
 	require.Zero(t, submitsReceived.Load(), "a refused batch must not reach any upstream over ws either")
 }

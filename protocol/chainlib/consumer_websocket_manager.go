@@ -503,7 +503,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			// HTTP and an opaque one here.
 			if errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused) {
 				refused := common.JsonRpcInvalidRequestError
-				refused.Error.Data = err.Error()
+				refused.Error.Data = rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error()
 				if msgData, marshalErr := json.Marshal(refused); marshalErr == nil {
 					sendWS(webSocketMsgWithType{messageType: messageType, msg: msgData})
 					continue
