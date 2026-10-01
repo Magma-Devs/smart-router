@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -4757,8 +4758,17 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// flow through as the NodeError the REST sender already produced
 	// (IsNodeError=true), where it classifies as NODE_UNIMPLEMENTED
 	// (non-retryable) and is returned to the client.
+	//
+	// A 5xx that is the node's own JSON reply (rpcInterfaceMessages.ServerErrorIsNodeReply) is
+	// excluded for the same reason: when every node answers Horizon's
+	// 503 {"tx_status":"TRY_AGAIN_LATER"}, the client must get that reply, not a router-made 500.
+	// Nothing else changes for it: the registry's 500/503 rows are retryable and at fault, so a
+	// read is still retried, and the endpoint is still marked unhealthy and scored, through the
+	// IsNodeAtFault arm and the availability gate. result.IsNodeError is true only for a REST
+	// reply here (the JSON-RPC sender returns every 5xx as an error before this point).
 	statusCode := result.StatusCode
-	if (statusCode >= 500 && statusCode != http.StatusNotImplemented) || statusCode == 429 {
+	carriesNodeReply := result.IsNodeError && rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData())
+	if (statusCode >= 500 && statusCode != http.StatusNotImplemented && !carriesNodeReply) || statusCode == 429 {
 		shouldMarkUnhealthy, needsBackoffHTTP := classifyHTTPStatus(statusCode)
 		needsBackoff = needsBackoffHTTP
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -587,4 +588,89 @@ func TestRESTRelay_501_NotImplemented_relayInnerDirect(t *testing.T) {
 	// unsupported method. This ties the routing fix (Part 1) to the classifier
 	// fix (Part 2).
 	assert.True(t, relayResult.IsNonRetryable, "REST 501 should be a non-retryable node error")
+}
+
+// relayInnerDirectREST drives relayInnerDirect — the arm that turns a REST 5xx into a transport
+// error — against a mock upstream answering with the given status and body. Endpoint is left nil,
+// as in the 501 test above, so the MarkUnhealthy blocks are skipped; the fault verdict is read from
+// the result's flags instead.
+func relayInnerDirectREST(t *testing.T, status int, body string) (*common.RelayResult, error) {
+	t.Helper()
+	ctx := context.Background()
+	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+		ctx,
+		"LAVA",
+		spectypes.APIInterfaceRest,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			if body != "" {
+				_, _ = w.Write([]byte(body))
+			}
+		}),
+		nil,
+		"../../",
+		nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(closeServer)
+
+	chainMessage, err := chainParser.ParseMsg("/cosmos/tx/v1beta1/txs", []byte("data"), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+
+	nodeUrl := endpoint.NodeUrls[0]
+	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	require.NoError(t, err)
+	session := &lavasession.SingleConsumerSession{
+		Parent: &lavasession.ConsumerSessionsWithProvider{PublicLavaAddress: "test-rest"},
+		Connection: &lavasession.DirectRPCSessionConnection{
+			DirectConnection: directConn,
+			EndpointAddress:  nodeUrl.Url,
+		},
+	}
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+	}
+	relayResult := &common.RelayResult{}
+	_, relayErr, _ := rpcss.relayInnerDirect(ctx, session, relayResult, 5*time.Second, 5*time.Second, chainMessage, nil, nil, nil)
+	return relayResult, relayErr
+}
+
+// TestRESTRelay_503_TryAgainLater_KeepsTheNodesReply is the ticket's case: Horizon answers a submit
+// with 503 {"tx_status":"TRY_AGAIN_LATER"} — nothing was submitted, a retry is safe. The reply must
+// stay a node error carrying Horizon's status and body, instead of becoming a transport error that
+// drops the body. The endpoint is still at fault (the registry's 503 row) and still scored.
+func TestRESTRelay_503_TryAgainLater_KeepsTheNodesReply(t *testing.T) {
+	body := `{"tx_status":"TRY_AGAIN_LATER","hash":"0000000000000000000000000000000000000000000000000000000000000007"}`
+	relayResult, relayErr := relayInnerDirectREST(t, http.StatusServiceUnavailable, body)
+
+	require.NoError(t, relayErr, "a 5xx with the node's JSON reply must not become a transport error")
+	assert.Equal(t, http.StatusServiceUnavailable, relayResult.StatusCode)
+	assert.True(t, relayResult.IsNodeError)
+	assert.Equal(t, body, string(relayResult.Reply.Data), "the client must be able to read TRY_AGAIN_LATER")
+	assert.True(t, relayResult.IsNodeAtFault, "blame unchanged: the endpoint is still at fault")
+	assert.False(t, relayResult.IsNonRetryable, "a read is still retried on another node")
+	assert.True(t, shouldFailSessionForResult(relayErr, relayResult), "and still scored")
+}
+
+// TestRESTRelay_5xx_TransportPathUnchanged: the shapes that must keep the old path — an empty 500, a
+// proxy's HTML 502, and a JSON 502 or 504 (a gateway that may already have forwarded the request:
+// the write may still apply, so it must stay "may have reached the node").
+func TestRESTRelay_5xx_TransportPathUnchanged(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"empty 500", http.StatusInternalServerError, ""},
+		{"HTML 502", http.StatusBadGateway, `<html><body><h1>502 Bad Gateway</h1></body></html>`},
+		{"JSON 504 (Horizon timeout)", http.StatusGatewayTimeout, `{"type":"https://stellar.org/horizon-errors/timeout","status":504}`},
+		{"JSON 502 (a gateway that may have forwarded the request)", http.StatusBadGateway, `{"message":"bad gateway"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, relayErr := relayInnerDirectREST(t, tc.status, tc.body)
+			require.Error(t, relayErr, "still a transport error")
+			assert.Contains(t, relayErr.Error(), strconv.Itoa(tc.status))
+		})
+	}
 }

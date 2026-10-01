@@ -754,3 +754,29 @@ func TestCheckResponseError_AnyNonSuccessIsANodeError(t *testing.T) {
 		})
 	}
 }
+
+// TestServerErrorIsNodeReply pins which REST 5xx replies keep their body for the client.
+func TestServerErrorIsNodeReply(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"Horizon 503 TRY_AGAIN_LATER", 503, `{"tx_status":"TRY_AGAIN_LATER","hash":"07"}`, true},
+		{"Cosmos 500 with the gateway envelope", 500, `{"code":2,"message":"height 1 is not available"}`, true},
+		{"sidecar 500", 500, `{"code":500,"message":"Unable to retrieve header and parent from supplied hash"}`, true},
+		{"empty 500", 500, ``, false},
+		{"HTML 502", 502, `<html><body>502 Bad Gateway</body></html>`, false},
+		{"text 503", 503, `Service Unavailable`, false},
+		{"JSON 502 — may have forwarded the request", 502, `{"message":"bad gateway"}`, false},
+		{"JSON 504 — Horizon timeout, the tx may still apply", 504, `{"type":"https://stellar.org/horizon-errors/timeout","status":504}`, false},
+		{"JSON 524 — Cloudflare timeout", 524, `{"message":"timeout"}`, false},
+		{"not a 5xx", 404, `{"message":"not found"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, ServerErrorIsNodeReply(tc.status, []byte(tc.body)))
+		})
+	}
+}

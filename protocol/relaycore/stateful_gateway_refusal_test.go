@@ -167,3 +167,25 @@ func TestStatefulBroadcastAllDuplicateReturnsTheDuplicate(t *testing.T) {
 	require.Equal(t, http.StatusConflict, returnedResult.StatusCode)
 	require.Equal(t, duplicate, string(returnedResult.Reply.Data))
 }
+
+// TestStatefulBroadcastAllTryAgainLaterReturnsTheNodesReply: every node answers Horizon's
+// 503 {"tx_status":"TRY_AGAIN_LATER"} — nothing was submitted, a retry is safe. The caller must get
+// that reply (status and body), not a router-made 500.
+func TestStatefulBroadcastAllTryAgainLaterReturnsTheNodesReply(t *testing.T) {
+	relayProcessor := newStatefulRestProcessor(t)
+
+	tryAgain := `{"tx_status":"TRY_AGAIN_LATER","hash":"0007"}`
+	go sendRestReply(relayProcessor, "gateway@test", 5*time.Millisecond, http.StatusServiceUnavailable, tryAgain)
+	go sendRestReply(relayProcessor, "node@test", 20*time.Millisecond, http.StatusServiceUnavailable, tryAgain)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	require.NoError(t, relayProcessor.WaitForResults(ctx), "both answered, nothing left in flight")
+	hasResults, _ := relayProcessor.HasRequiredNodeResults(1)
+	require.False(t, hasResults)
+
+	returnedResult, err := relayProcessor.ProcessingResult()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, returnedResult.StatusCode)
+	require.Equal(t, tryAgain, string(returnedResult.Reply.Data))
+}
