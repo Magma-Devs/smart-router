@@ -11,6 +11,15 @@ import (
 // IsXRPLRejection and IsXRPLAPIError accept, and xrplErrorMappings classifies exactly those, so
 // nothing the classifier flags reaches the availability gate unclassified. Both sides read the
 // definitions below; neither keeps a list of its own.
+//
+// One asymmetry is deliberate. terQUEUED is carved out of IsXRPLRejection, so the classifier never
+// flags it and never writes a message starting with it. The catch-all row still matches the token,
+// which only matters for a message that reaches ClassifyError some other way — an upstream
+// lava-identified-node-error hint, or a provider-supplied body. There it resolves to
+// CHAIN_TX_REJECTED: the name reads worse than "queued for a later ledger" deserves, but it is
+// non-retryable and not at fault, so the node that queued the transaction keeps its score.
+// Excluding the token from the row instead would leave such a message UNKNOWN_ERROR, which IS
+// retryable and IS scored. TestXRPLTerQueuedRowKeepsTheGateOff pins that trade.
 
 // xrplRejectionCode is the shape of an engine result that refuses the transaction: tef (failed),
 // tem (malformed), tel (refused locally) or ter (not applied now).
