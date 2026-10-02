@@ -680,7 +680,7 @@ func relayInnerDirectREST(t *testing.T, status int, body string) (*common.RelayR
 		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
 	}
 	relayResult := &common.RelayResult{}
-	_, relayErr, _ := rpcss.relayInnerDirect(ctx, session, relayResult, 5*time.Second, 5*time.Second, chainMessage, nil, nil, nil)
+	_, relayErr, _ := rpcss.relayInnerDirect(ctx, session, relayResult, 5*time.Second, 5*time.Second, chainMessage, nil, nil, nil, nil)
 	return relayResult, relayErr
 }
 
