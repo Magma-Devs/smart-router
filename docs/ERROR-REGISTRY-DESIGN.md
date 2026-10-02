@@ -746,8 +746,12 @@ reading was the wrong one.
    (`LogCodedNodeAnswer` fires `EmitErrorMetric` exactly as `LogCodedError` does), so
    `smartrouter_errors_total` keeps counting; only the level moves.
 
-Still open: whether the broadcast fix (MAG-3972/3974/3976, which needs nothing but
-`IsNodeError = true`) ships separately from this status map.
+7. **The broadcast fix and the status map ship together.** Change 1 alone would make every REST
+   non-2xx a node error with no row to govern it, and the table's default for a status with no
+   row is "unknown": retried on up to three providers *and* scored by the availability gate. A
+   Horizon 400 `transaction_failed` would cost three upstream calls and three availability hits,
+   worse than main, where it was a success. The map is what makes change 1 safe to deploy
+   (decided 2026-10-02 on PR #448).
 
 ### 9.4 Not covered by this rule, on purpose
 
