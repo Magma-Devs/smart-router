@@ -653,9 +653,10 @@ unchanged. What "node error" changes is the same as on JSON-RPC:
   as the result (the dfns incident: a gateway's empty 404 ended the fan-out while the other
   vendor broadcast the transaction). This is the whole of what MAG-3972/3974/3976 need.
 - The error registry classifies the reply, and its REST status rows decide the rest.
-- Every REST node error is logged and counted the way a JSON-RPC one is ("received node error
-  reply from provider" at ERROR with the payload, `lava-identified-node-error: true` on the
-  reply), and is not cached.
+- Every REST node error is counted the way a JSON-RPC one is (`smartrouter_errors_total`,
+  `lava-identified-node-error: true` on the reply) and logged as "received node error reply from
+  provider": at ERROR when the endpoint is at fault, at DEBUG when it is not (9.3, item 6). It is
+  not cached — no non-2xx reply ever was.
 
 ### 9.1 Status rows — current verdicts
 
