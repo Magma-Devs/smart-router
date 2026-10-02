@@ -418,7 +418,9 @@ func httpStatusCodeMappings() []errorMapping {
 		// gRPC get the HTTPStatusContains rows below instead, which keep their own verdicts.
 		//
 		// 401: the endpoint rejected the router's credentials. Each provider has its own, so
-		// another provider can serve the request: retryable, and the endpoint is at fault.
+		// another provider can serve the request: retryable, and NOT the endpoint's fault — it
+		// answered truthfully about its own configuration (node-capability; see
+		// LavaErrorNodeAccessDenied for what blaming it cost).
 		{CodeEquals(401), LavaErrorNodeAccessDenied},
 		// 404: "not here". Either the data does not exist on this node (yet), or the gateway in
 		// front of it does not route the path. Both mean "try another node", as JSON-RPC's

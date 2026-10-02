@@ -674,7 +674,7 @@ func TestCheckResponseError_ServerErrors(t *testing.T) {
 			name:          "404 Not Found",
 			httpStatus:    404,
 			response:      `{"code":5,"message":"block not found"}`,
-			expectedError: true, // a node error, classified by the registry's 404 row (non-retryable, not the node's fault)
+			expectedError: true, // a node error, classified by the registry's 404 row (retryable on another node, data-scope, not the node's fault)
 		},
 		{
 			name:          "400 Bad Request",
