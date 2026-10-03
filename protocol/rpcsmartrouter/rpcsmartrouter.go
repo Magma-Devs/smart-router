@@ -1171,6 +1171,21 @@ type routerConfigResponse struct {
 // — this is the rpcsmartrouter copy, extended with /debug/reset-all (a single endpoint
 // that flushes every router-internal state store so black-box tests can return to a
 // known-clean state without restarting the pod).
+// sharedStickyReason spells out why SharedSticky reads as it does on GET /debug/sticky-claims. False on
+// its own conflates a router that never asked for the claim registry with one that asked and could not
+// get it, and the two call for different fixes: the first is a values change, the second a cache backend
+// that cannot hold claims (NewCacheStickyStore warned once at boot and left stickiness pod-local).
+func sharedStickyReason(wired, requested bool) string {
+	switch {
+	case wired:
+		return "registry wired"
+	case requested:
+		return "--shared-state set, but the cache backend cannot hold claims"
+	default:
+		return "--shared-state not set"
+	}
+}
+
 func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	optimizers := deps.optimizers
 	currentOffsetNano := deps.offsetNano
@@ -1718,6 +1733,53 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					// MAG-2202 suite reads them by name.
 					"Blocked": s.Blocked,
 					"HeldOff": s.HeldOff,
+				})
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
+	// GET /debug/sticky-claims — per-endpoint cross-pod sticky-session claim outcomes (MAG-3860). Flat
+	// array of self-describing records (ChainID + ApiInterface). SharedSticky says whether the fleet-wide
+	// claim registry is wired (--shared-state with a cache backend that holds claims), and
+	// SharedStickyReason says why when it is not: never requested, or requested and refused by the backend.
+	// Outcomes holds the seven counts smartrouter_csm_sticky_claims_total carries, cumulative since the
+	// process started, every outcome present. The counts are this process's alone: PodID names the process
+	// that answered (endpointstate.LocalPodID: the host name and a per-process suffix), and the debug
+	// Service balances across a router's pods, so a reader pins one pod (a port-forward) or compares two
+	// readings only when their PodID matches. "adopted" is how a peer's claim shows up, which
+	// Lava-Provider-Address cannot show, because it reads the same whether a pod used its own claim or a
+	// peer's; a pod that dropped its local copy of its own claim (invalidated) reads it back as adopted
+	// too, and the registry does not say whose claim it holds, so the two cannot be split here.
+	// /debug/reset-all is not such a case: it clears this pod's local pins and flushes the shared claims
+	// with them (one cache backs both), so the next request re-claims (claimed), while peers keep their
+	// confirmed local pins and keep serving the old upstream from local_hit until those pins age out.
+	// That reset drops the pins through Clear(), so invalidated does not move on it. Without the registry
+	// every count stays 0, so SharedSticky is what tells "off" from "never fired". Read-only; nil-router
+	// safe.
+	mux.HandleFunc("/debug/sticky-claims", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			podID := endpointstate.LocalPodID()
+			deps.router.mu.Lock()
+			for _, csm := range deps.router.sessionManagers {
+				if csm == nil {
+					continue
+				}
+				ep := csm.RPCEndpoint()
+				shared, outcomes := csm.StickyClaimCounts()
+				rows = append(rows, map[string]any{
+					"ChainID":            ep.ChainID,
+					"ApiInterface":       ep.ApiInterface,
+					"PodID":              podID,
+					"SharedSticky":       shared,
+					"SharedStickyReason": sharedStickyReason(shared, csm.SharedStickyRequested()),
+					"Outcomes":           outcomes,
 				})
 			}
 			deps.router.mu.Unlock()
