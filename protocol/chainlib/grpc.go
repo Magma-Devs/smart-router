@@ -667,10 +667,12 @@ func streamResponseHeaders(md []pairingtypes.Metadata) metadata.MD {
 	return headers
 }
 
-// snapshotMetricsHeaders detaches the headers AddMetricForGrpc reads from the request
-// metadata. gRPC metadata strings can alias the transport receive buffer, and a
-// subscription's per-delivery emits keep referring to them for as long as the stream
-// lives — far past the point where the unary path would have released them.
+// snapshotMetricsHeaders copies the headers AddMetricForGrpc reads out of the request
+// metadata, because a subscription's per-delivery emits keep referring to them for as long
+// as the stream lives — far past the point where the unary path would have released them.
+// The copy is a guard, not a requirement: grpc-go decodes every metadata value into its own
+// string (x/net's hpack decoder allocates, and a -bin value is base64-decoded into a fresh
+// one), so incoming metadata never aliases the transport receive buffer (MAG-3881).
 func snapshotMetricsHeaders(metadataValues metadata.MD) metadata.MD {
 	snapshot := metadata.MD{}
 	for _, key := range []string{metrics.RefererHeaderKey, metrics.UserAgentHeaderKey, metrics.OriginHeaderKey} {

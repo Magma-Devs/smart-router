@@ -255,7 +255,9 @@ func (rpccl *RPCConsumerLogs) AddMetricForHttp(data *RelayMetrics, err error, he
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
 	refererHeaderValue := strings.Join(headers[RefererHeaderKey], ", ")
 	userAgentHeaderValue := strings.Join(headers[UserAgentHeaderKey], ", ")
-	// strings.Join always allocates; result is independent of any request buffer.
+	// headers must hold owned strings: this runs in a goroutine after the reply, and strings.Join
+	// of a single value returns that value itself rather than a copy. The HTTP listeners pass
+	// chainlib's detached map (MAG-3881).
 	data.Origin = strings.Join(headers[OriginHeaderKey], ", ")
 	rpccl.usageSink.Emit(NewRelayUsageEvent(data))
 	if rpccl.StoreMetricData && rpccl.shouldCountMetrics(refererHeaderValue, userAgentHeaderValue) {
@@ -290,8 +292,10 @@ func (rpccl *RPCConsumerLogs) AddMetricForGrpc(data *RelayMetrics, err error, me
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
 	refererHeaderValue := getMetadataHeaderOrDefault(RefererHeaderKey)
 	userAgentHeaderValue := getMetadataHeaderOrDefault(UserAgentHeaderKey)
-	// gRPC metadata values can alias the receive buffer; detach before the
-	// value crosses into the async OTel emit path.
+	// Origin crosses into the async OTel emit path, so it must be an owned string. It is one
+	// already on every listener: the HTTP listeners hand over chainlib's detached copy of fiber's
+	// zero-copy headers, and grpc-go's transport allocates a string for every metadata value it
+	// decodes. The clone stays as a cheap guard at the boundary (MAG-3881).
 	data.Origin = strings.Clone(getMetadataHeaderOrDefault(OriginHeaderKey))
 	rpccl.usageSink.Emit(NewRelayUsageEvent(data))
 	if rpccl.StoreMetricData && rpccl.shouldCountMetrics(refererHeaderValue, userAgentHeaderValue) {

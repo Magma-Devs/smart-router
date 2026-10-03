@@ -39,7 +39,10 @@ func GetTxId(ctx context.Context) (txId string, found bool) {
 
 // ExtractWantedHeadersFromCachedMap extracts specific headers from a pre-cached headers map
 // and adds them to the Go context. This avoids repeated header lookups when headers
-// are already cached via GetReqHeaders().
+// are already cached. The ids are stored as they are in the map, and the context outlives the
+// request, so the map must hold owned strings. Both listener families do: the HTTP listeners pass
+// chainlib's detached copy of fiber's zero-copy headers, and gRPC incoming metadata is owned as
+// decoded, because grpc-go's transport allocates a string for every header value (MAG-3881).
 func ExtractWantedHeadersFromCachedMap(headers map[string][]string, ctx context.Context) context.Context {
 	if reqId := getHeaderValue(headers, "X-Request-Id"); reqId != "" {
 		ctx = WithRequestId(ctx, reqId)
