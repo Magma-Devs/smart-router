@@ -491,7 +491,7 @@ func (gc *GrpcConfig) ValidateReflectionTimeout() error {
 
 func ValidateEndpoint(endpoint, apiInterface string) error {
 	switch apiInterface {
-	case spectypes.APIInterfaceRest:
+	case spectypes.APIInterfaceRest, spectypes.APIInterfaceGraphQL:
 		parsedUrl, err := url.Parse(endpoint)
 		if err != nil {
 			return utils.LavaFormatError("could not parse node url", err,
