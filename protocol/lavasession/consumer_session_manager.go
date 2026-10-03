@@ -42,13 +42,11 @@ func SetDebugProbes(enabled bool) { debugProbes.Store(enabled) }
 // DebugProbesEnabled reports whether verbose probe logging is on.
 func DebugProbesEnabled() bool { return debugProbes.Load() }
 
-var (
-	// ProbeLoopInterval is the configurable cadence (MAG-2161 D5) of the proactive health prober
-	// (rpcsmartrouter.runProbeLoop) — the single source of truth for direct-RPC endpoint health and
-	// probe-fed QoS. Default 5s; validated at startup (a non-positive value is rejected back to the
-	// default).
-	ProbeLoopInterval = 5 * time.Second
-)
+// ProbeLoopInterval is the configurable cadence (MAG-2161 D5) of the proactive health prober
+// (rpcsmartrouter.runProbeLoop) — the single source of truth for direct-RPC endpoint health and
+// probe-fed QoS. Default 5s; validated at startup (a non-positive value is rejected back to the
+// default).
+var ProbeLoopInterval = 5 * time.Second
 
 // created with NewConsumerSessionManager
 type ConsumerSessionManager struct {
@@ -421,6 +419,19 @@ func (csm *ConsumerSessionManager) GroupCountsForRequest(addon string, extension
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 	return csm.countByGroup(csm.CalculateAddonValidAddresses(addon, extensions, ctx))
+}
+
+// IsBackupProvider reports whether providerAddr belongs to the backup tier. The relay server asks it
+// once per completed request, to count a request a backup answered on
+// smartrouter_backup_tier_served_total (MAG-3536).
+func (csm *ConsumerSessionManager) IsBackupProvider(providerAddr string) bool {
+	if csm == nil || providerAddr == "" {
+		return false
+	}
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	_, ok := csm.backupProviders[providerAddr]
+	return ok
 }
 
 // IsStaticProvider returns true when the given provider address belongs to a
