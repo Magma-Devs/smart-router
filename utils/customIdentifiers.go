@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"strings"
 )
 
 type request_id_ctx_key struct{}
@@ -37,9 +38,19 @@ func GetTxId(ctx context.Context) (txId string, found bool) {
 	return txId, found
 }
 
-// ExtractWantedHeadersFromCachedMap extracts specific headers from a pre-cached headers map
-// and adds them to the Go context. This avoids repeated header lookups when headers
-// are already cached via GetReqHeaders().
+// ExtractWantedHeadersFromCachedMap reads the caller's tracing headers (X-Request-Id,
+// X-Task-Id, X-Tx-Id) out of a request's header map and stamps them on the context, so
+// they reach the log lines and the relay. Every listener calls it once per request with
+// the map it already holds: fiber's GetReqHeaders() on the HTTP interfaces, the incoming
+// metadata on gRPC (MAG-3798).
+//
+// The ids are copied before they are stored. fiber hands over strings that alias
+// fasthttp's per-connection buffers, and the next request on the same keep-alive
+// connection writes its headers over them in place, while a request's context outlives
+// its handler: the relay to the provider, log lines written after the reply and any
+// asynchronous work all read the ids later. gRPC metadata is already owned by the
+// request, so the copy is redundant there; three short strings per request is not worth
+// a second code path.
 func ExtractWantedHeadersFromCachedMap(headers map[string][]string, ctx context.Context) context.Context {
 	if reqId := getHeaderValue(headers, "X-Request-Id"); reqId != "" {
 		ctx = WithRequestId(ctx, reqId)
@@ -56,10 +67,19 @@ func ExtractWantedHeadersFromCachedMap(headers map[string][]string, ctx context.
 	return ctx
 }
 
-// getHeaderValue extracts the first value for a header key from a cached headers map.
+// getHeaderValue returns the first value stored under key, looking the key up as written
+// and then in lower case. The HTTP listeners hand over canonical keys (X-Request-Id:
+// fasthttp normalises them), while gRPC metadata keys are always lower case
+// (x-request-id: HTTP/2 field names are, and grpc-go lowers them on the way in), so a
+// single lookup shape would honour the headers on one transport and drop them on the other.
+//
+// The value is returned as an owned string (see ExtractWantedHeadersFromCachedMap).
 func getHeaderValue(headers map[string][]string, key string) string {
 	if values, ok := headers[key]; ok && len(values) > 0 {
-		return values[0]
+		return strings.Clone(values[0])
+	}
+	if values, ok := headers[strings.ToLower(key)]; ok && len(values) > 0 {
+		return strings.Clone(values[0])
 	}
 	return ""
 }
