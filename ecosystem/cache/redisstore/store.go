@@ -57,7 +57,11 @@ type Store struct {
 	// each client, so the store can name the node actually serving it. Static
 	// configuration cannot answer this: under sentinel the serving node changes
 	// on every failover, and under cluster it depends on the key's slot.
-	// Observability only — nothing in the cache path reads these.
+	//
+	// The address half is observability only. The reachability half these also
+	// carry IS read on the relay path, through OpWindow, to tell an endpoint that
+	// is gone from one that is merely slow — recorded for standalone alone, which
+	// is the only topology where one endpoint stands behind one tracker.
 	readEndpoint  *endpointTracker
 	writeEndpoint *endpointTracker
 
@@ -87,12 +91,18 @@ type Store struct {
 	credentials *StreamingProvider
 }
 
-// endpointTracker holds the last successfully dialled address. Written from
-// dial callbacks on arbitrary goroutines, read from the relay path, so it is
-// atomic; a slightly stale value is fine for its purpose (naming a node in a
-// debug header) and never affects routing.
+// endpointTracker holds the last successfully dialled address, and the last
+// observation that the endpoint could not be reached at all. Written from dial
+// callbacks on arbitrary goroutines, read from the relay path, so both are
+// atomic; neither affects routing.
+//
+// The address is an answer about identity — which node served this — and a
+// slightly stale one is fine for its purpose, naming a node in a debug header.
+// The fault is an answer about reachability, read through OpWindow, and there
+// staleness is the whole difficulty: see OpWindow for why it is timestamped.
 type endpointTracker struct {
-	addr atomic.Value // string
+	addr  atomic.Value // string
+	fault atomic.Pointer[endpointFault]
 }
 
 func (t *endpointTracker) note(addr string) {
