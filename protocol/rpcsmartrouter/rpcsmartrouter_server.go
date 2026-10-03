@@ -630,6 +630,39 @@ func crossValidationPendingProviders(allProviders []string, successResults, node
 	return pending
 }
 
+// attemptsWithoutResult returns the dispatched attempts that have no recorded result, in dispatch
+// order: dispatched minus one entry for each result that carries the same provider. It is the
+// non-cross-validation counterpart of crossValidationPendingProviders, which works on a set. This
+// one subtracts per attempt, because a retry path may ask the same provider twice, and a provider
+// asked twice but answered once still has an attempt out.
+//
+// A cache hit is recorded without being dispatched and carries no provider, so it never settles
+// a dispatched attempt.
+func attemptsWithoutResult(dispatched []string, successResults, nodeErrorResults []common.RelayResult, protocolErrorResults []relaycore.RelayError) []string {
+	if len(dispatched) == 0 {
+		return nil
+	}
+	recorded := make(map[string]int, len(successResults)+len(nodeErrorResults)+len(protocolErrorResults))
+	for _, result := range successResults {
+		recorded[result.ProviderInfo.ProviderAddress]++
+	}
+	for _, result := range nodeErrorResults {
+		recorded[result.ProviderInfo.ProviderAddress]++
+	}
+	for _, result := range protocolErrorResults {
+		recorded[result.ProviderInfo.ProviderAddress]++
+	}
+	var withoutResult []string
+	for _, addr := range dispatched {
+		if recorded[addr] > 0 {
+			recorded[addr]--
+			continue
+		}
+		withoutResult = append(withoutResult, addr)
+	}
+	return withoutResult
+}
+
 // preferStructuralFailureReason overwrites a cross-validation FAILURE result's reason with a structural
 // request-time fail-fast reason (insufficient-capacity / insufficient-groups) when one was set. The
 // structural reason means the fleet cannot satisfy the policy at all — strictly more actionable for the
@@ -2008,8 +2041,17 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// - OnSessionDiscarded returns reserved CU and unlocks the session without
 	//   QoS punishment. No request reached the upstream, so this is a routing
 	//   exclusion rather than an availability failure.
+	//
+	// Every release names the key the session was taken under, not one derived
+	// from the request's extensions. A request that degrades to a regular provider
+	// takes its sessions under the plain key, so a release under the request's
+	// key found nothing and did nothing, and the provider stayed in the dispatch
+	// history. Two readers take that history at its word. Lava-Retries (MAG-3762)
+	// counted an attempt at a node that never received the request, and
+	// writeOutcomeIsUnknown counted the node as one asked that never answered, so
+	// a write could come back as "transaction status unclear" for a node it never
+	// reached.
 	usedProviders := relayProcessor.GetUsedProviders()
-	releaseRouterKey := lavasession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())
 	for endpointAddress, sessionInfo := range failedSessions {
 		if sessionInfo != nil && sessionInfo.Session != nil {
 			utils.LavaFormatDebug("discarding stale session before relay dispatch",
@@ -2017,7 +2059,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				utils.LogAttr("error", lavasession.ConsistencyPreValidationError),
 				utils.LogAttr("GUID", ctx),
 			)
-			usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, lavasession.ConsistencyPreValidationError)
+			usedProviders.ReleaseFromLatestBatch(endpointAddress, sessionInfo.Session.RouterKey(), lavasession.ConsistencyPreValidationError)
 			if err := rpcss.sessionManager.OnSessionDiscarded(sessionInfo.Session, lavasession.ConsistencyPreValidationError); err != nil {
 				utils.LavaFormatError("failed discarding consistency-rejected session", err,
 					utils.LogAttr("endpoint", endpointAddress),
@@ -2057,7 +2099,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		// full processingTimeout (~30s) instead of failing fast.
 		for endpointAddress, sessionInfo := range validSessions {
 			if sessionInfo != nil && sessionInfo.Session != nil {
-				usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, nil)
+				usedProviders.ReleaseFromLatestBatch(endpointAddress, sessionInfo.Session.RouterKey(), nil)
 				sessionInfo.Session.Free(nil)
 			}
 		}
@@ -2096,7 +2138,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		if qualifyingGroups, failReason := crossValidationGroupShortfall(survivingGroupCounts, crossValidationParams); failReason != "" {
 			for endpointAddress, sessionInfo := range validSessions {
 				if sessionInfo != nil && sessionInfo.Session != nil {
-					usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, nil)
+					usedProviders.ReleaseFromLatestBatch(endpointAddress, sessionInfo.Session.RouterKey(), nil)
 					sessionInfo.Session.Free(nil)
 				}
 			}
@@ -5364,7 +5406,23 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 
 		// add the relay retried count: total attempts minus 1 (the initial attempt is not a retry)
 		successResults, nodeErrorResults, protocolErrorResults := relayProcessor.GetResultsData()
-		totalAttempts := uint64(len(successResults)) + uint64(len(nodeErrorResults)) + protocolErrors
+
+		// The three lists hold only the attempts whose result was recorded before this reply was
+		// built, and a hedge's loser is not among them (MAG-3762). An attempt outlives the window
+		// that dispatches the hedge, so the loser is still running when the hedge wins. The router
+		// then cancels it, and the loser posts its result to a channel that nothing reads again.
+		// Counting results alone reported a two-attempt hedge race as zero retries. Lava-Retries
+		// counts every attempt the router sent (MAG-1818), so the attempts still out count too.
+		dispatched := relayProcessor.GetUsedProviders().DispatchedProviders()
+		unfinished := attemptsWithoutResult(dispatched, successResults, nodeErrorResults, protocolErrorResults)
+
+		// The caller read its protocol-error count before this snapshot. On a failure path a
+		// reader still draining the responses can record one more in between. That attempt is in
+		// protocolErrorResults, so attemptsWithoutResult no longer counts it, and the caller's
+		// count does not either. Counting from the same snapshot keeps it counted once. The list
+		// only grows, so the larger of the two is the snapshot's own count.
+		protocolErrorCount := max(protocolErrors, uint64(len(protocolErrorResults)))
+		totalAttempts := uint64(len(successResults)) + uint64(len(nodeErrorResults)) + protocolErrorCount + uint64(len(unfinished))
 
 		// Stateful selection fans out to all top providers in a single batch and
 		// never retries (relaypolicy.Decide returns Stop for Stateful). Failures
@@ -5389,28 +5447,35 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				go rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
 			}
 
-			// When there are retries, show all attempted providers in
-			// chronological-ish order (failures before the resolver, the resolver
-			// last). "Cached" stays in the list so the entry count matches
-			// Lava-Retries — without it, retries=N and a single provider name
-			// disagree on how many actors participated (MAG-1653 Bug #2).
+			// When there are retries, show every attempted provider in the order
+			// the router asked them, the resolver last. "Cached" stays in the
+			// list so the entry count matches Lava-Retries — without it,
+			// retries=N and a single provider name disagree on how many actors
+			// participated (MAG-1653 Bug #2).
 			//
-			// Ordering rule: walk protocol errors → node errors → successes,
-			// skipping any entry whose address matches the resolver, then
-			// append the resolver (`providerAddress`, which is "Cached" when
-			// relayResult.GetProvider() was empty). The skip-then-append is
-			// load-bearing: dedup alone preserves first-seen position, so if
-			// the resolver happened to be in successResults[0] (e.g. it
-			// completed before the loser was even recorded), the final
-			// addProvider(providerAddress) would be a no-op and the chain
-			// tail would be a *loser*, violating "last entry == response
-			// source" (MAG-1871). Walking slices makes the value
-			// deterministic across runs; the explicit final append makes
-			// the contract structurally true.
+			// Ordering rule: walk the dispatch history, then protocol errors →
+			// node errors → successes, skipping the resolver, then append the
+			// resolver (`providerAddress`, which is "Cached" when
+			// relayResult.GetProvider() was empty). The history lists the
+			// batches in the order they went out, and a batch that reaches this
+			// list holds one session (a stateful fan-out never reports retries,
+			// and cross-validation has its own headers), so the list is
+			// chronological whether an attempt errored, answered or is still out.
+			// Walking the results by kind instead named every protocol error
+			// before every node error, whatever order they were asked in, and
+			// left an attempt still out with no true place (MAG-3762). On a live
+			// request every result's provider is in the history, so the result
+			// lists only add a provider the history does not hold. The
+			// skip-then-append is load-bearing: dedup alone preserves first-seen
+			// position, so if the resolver went out first (a hedge overtook it
+			// and it answered anyway), the chain tail would be a *loser*,
+			// violating "last entry == response source" (MAG-1871). Walking
+			// slices makes the value deterministic across runs; the explicit
+			// final append makes the contract structurally true.
 			seen := make(map[string]struct{})
 			allProvidersList := make([]string, 0)
-			addProvider := func(addr string) {
-				if addr == "" {
+			addEarlierAttempt := func(addr string) {
+				if addr == "" || addr == providerAddress {
 					return
 				}
 				if _, ok := seen[addr]; ok {
@@ -5419,25 +5484,19 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				seen[addr] = struct{}{}
 				allProvidersList = append(allProvidersList, addr)
 			}
+			for _, addr := range dispatched {
+				addEarlierAttempt(addr)
+			}
 			for _, r := range protocolErrorResults {
-				if r.ProviderInfo.ProviderAddress == providerAddress {
-					continue
-				}
-				addProvider(r.ProviderInfo.ProviderAddress)
+				addEarlierAttempt(r.ProviderInfo.ProviderAddress)
 			}
 			for _, r := range nodeErrorResults {
-				if r.ProviderInfo.ProviderAddress == providerAddress {
-					continue
-				}
-				addProvider(r.ProviderInfo.ProviderAddress)
+				addEarlierAttempt(r.ProviderInfo.ProviderAddress)
 			}
 			for _, r := range successResults {
-				if r.ProviderInfo.ProviderAddress == providerAddress {
-					continue
-				}
-				addProvider(r.ProviderInfo.ProviderAddress)
+				addEarlierAttempt(r.ProviderInfo.ProviderAddress)
 			}
-			addProvider(providerAddress) // resolver — "Cached" or the winning real provider, always last
+			allProvidersList = append(allProvidersList, providerAddress) // resolver — "Cached" or the winning real provider, always last
 
 			if len(allProvidersList) > 0 {
 				allProvidersString := strings.Join(allProvidersList, ",")
