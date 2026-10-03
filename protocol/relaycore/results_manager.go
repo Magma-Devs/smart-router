@@ -57,7 +57,7 @@ func NewResultsManager(guid uint64, chainID string) ResultsManager {
 	}
 }
 
-func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
+func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse, protocolMessage chainlib.ProtocolMessage) {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
 	// Protocol errors come from the lavasession/protocolerrors packages and carry an sdkerrors ABCI
@@ -70,6 +70,7 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
 	// error still surfaces via the err argument.
 	common.LogCodedError("could not send relay to provider", response.Err, classified, rp.chainID, 0, "",
 		utils.Attribute{Key: "GUID", Value: rp.guid},
+		chainlib.StatefulLogAttr(protocolMessage),
 		utils.Attribute{Key: "provider", Value: response.RelayResult.ProviderInfo.ProviderAddress},
 		utils.Attribute{Key: "statusCode", Value: response.RelayResult.StatusCode},
 		utils.Attribute{Key: "providerTrailer", Value: response.RelayResult.ProviderTrailer},
@@ -190,6 +191,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		}
 		logNodeError("received node error reply from provider", err, nodeClassified, rp.chainID, errorCode, err.Error(),
 			utils.LogAttr("GUID", rp.guid),
+			chainlib.StatefulLogAttr(protocolMessage),
 			utils.LogAttr("provider", response.RelayResult.ProviderInfo),
 			utils.LogAttr("statusCode", response.RelayResult.StatusCode),
 			utils.LogAttr("api", protocolMessage.GetApi().Name),
@@ -284,7 +286,7 @@ func (rp *ResultsManagerInst) SetResponse(response *RelayResponse, protocolMessa
 		return nil
 	}
 	if response.Err != nil {
-		rp.setErrorResponse(response)
+		rp.setErrorResponse(response, protocolMessage)
 	} else {
 		return rp.setValidResponse(response, protocolMessage)
 	}

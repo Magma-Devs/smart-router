@@ -1373,7 +1373,7 @@ func (rp *RelayProcessor) buildFailureResult(
 	if bestLavaError != nil {
 		chainID, _ := rp.chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
 		common.LogCodedError("failed relay, insufficient results", processingError, bestLavaError,
-			chainID, 0, "", utils.LogAttr("GUID", rp.guid))
+			chainID, 0, "", utils.LogAttr("GUID", rp.guid), chainlib.StatefulLogAttr(rp.RelayStateMachine.GetProtocolMessage()))
 	}
 
 	return returnedResult, utils.LavaFormatError("failed relay, insufficient results", processingError, utils.LogAttr("GUID", rp.guid))
