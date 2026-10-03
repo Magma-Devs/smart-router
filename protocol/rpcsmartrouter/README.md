@@ -161,7 +161,15 @@ selection so a QoS-dominant group cannot starve the others.
 
 A policy that cannot be satisfied by the configured fleet (too few groups, or too few providers
 per group for per-group quorum) is **rejected at startup**, and the resolved
-provider→group layout is logged.
+provider→group layout is logged. A provider that fails its startup verification does not count
+against that check, and the endpoint starts. If the providers left cannot meet a policy (fewer
+groups than its `min-groups`, or fewer providers than its `max-participants`), it logs an
+`ATTENTION` line naming the missing providers and refuses only the requests that policy governs
+until the background retry re-admits them. Two shortfalls are warned about rather than refused:
+a `max-participants` larger than the configured primaries, and an endpoint configured with
+backup providers only, which cross-validation never draws on. The startup line counts every
+verified primary; a request that needs an addon or extension draws only on the primaries serving
+it and can be refused with fewer.
 
 ### Response headers
 
