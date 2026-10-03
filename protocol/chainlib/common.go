@@ -579,8 +579,11 @@ func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRe
 // It is NOT how long an attempt may live — that is the processing budget, see
 // GetTimeoutForProcessing and sendRelayToDirectEndpoints.
 func GetRelayTimeout(chainMessage ChainMessageForSend, averageBlockTime time.Duration) time.Duration {
-	if chainMessage.TimeoutOverride() != 0 {
-		return chainMessage.TimeoutOverride()
+	// Only a positive override is a window. The header parser already drops a non-positive one, and
+	// this guard keeps any other path that sets an override from handing time.NewTicker a value it
+	// panics on (MAG-3988).
+	if override := chainMessage.TimeoutOverride(); override > 0 {
+		return override
 	}
 	// Calculate extra RelayTimeout
 	extraRelayTimeout := time.Duration(0)
