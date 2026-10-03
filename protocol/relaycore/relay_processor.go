@@ -255,6 +255,33 @@ func (rp *RelayProcessor) crossValidationQuorumReached() bool {
 	return false
 }
 
+// CrossValidationMissingOnlyGroups reports whether the answers so far agree often enough, but across too
+// few groups: some real response hash reached the agreement threshold without satisfying the quorum
+// rule. The count is not what is missing, only group coverage, so only a provider from a group that has
+// not answered yet can complete the quorum. The state machine uses this at the attempt window to stop
+// waiting on such providers rather than holding the request for its whole budget (MAG-3993).
+//
+// The zero hash is skipped for the same reason crossValidationQuorumReached skips it: a nil reply is a
+// fallback resolved at final evaluation, not a value to stop early on.
+func (rp *RelayProcessor) CrossValidationMissingOnlyGroups() bool {
+	if rp == nil || rp.selection != CrossValidation {
+		return false
+	}
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	threshold := rp.getAgreementThreshold()
+	minGroups := rp.getMinGroups()
+	for hash, stat := range rp.quorumMap {
+		if hash == ([32]byte{}) {
+			continue
+		}
+		if stat.count >= threshold && !rp.hashQuorumReached(stat.count, stat.groupCounts, threshold, minGroups) {
+			return true
+		}
+	}
+	return false
+}
+
 // quorumGroupOf returns the group label used for diversity counting for a result, folding an empty label
 // into the implicit common.DefaultProviderGroup.
 func quorumGroupOf(result common.RelayResult) string {
@@ -697,6 +724,10 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	// Stateless/Stateful traffic skips the bookkeeping entirely — the hash was
 	// already canonicalized above (before SetResponse) only when in CV mode.
 	if rp.selection == CrossValidation && response != nil && nodeError == nil && response.Err == nil {
+		// Written under the lock because the state machine's ticker reads the tally from its own
+		// goroutine (CrossValidationMissingOnlyGroups); every other reader shares this one's goroutine.
+		rp.lock.Lock()
+		defer rp.lock.Unlock()
 		hash := response.RelayResult.ResponseHash // already cached above (before SetResponse), canonicalized
 		stat := rp.quorumMap[hash]
 		if stat == nil {

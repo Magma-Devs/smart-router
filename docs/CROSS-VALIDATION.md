@@ -130,6 +130,16 @@ recording path) for test suites that cannot scrape the metrics port — see
   To also block the legacy *caller-header* path on a specific write, set
   `forbid-caller-cv: true` on its policy.
 - **Cost & latency.** N relays per request. Scope policies to the methods that warrant it.
+- **A group smaller than the agreement threshold is an availability risk.** Cross-validation
+  does not retry, hedge or use backups. With `min-groups: 2` and a group of one provider,
+  that provider going quiet leaves the quorum only group diversity short. The request then
+  fails `diversity-unmet` (or `group-quorum-unmet` in per-group mode) when the attempt
+  window expires, rather than waiting out the processing budget. This is the same window
+  that paces hedging: usually `--min-relay-timeout`, but longer for a heavy or hanging
+  method. The spec's `timeout_ms` or the caller's `lava-relay-timeout` replaces it where
+  set. A provider in that group slower than the window fails the request, even if it would
+  have answered within the budget. The router warns at startup when a group is smaller
+  than the threshold; give every required group at least two providers.
 - **Public endpoints are best-effort.** The example fleets use rate-limited community
   endpoints; for production, point at your own nodes or keyed gateways.
 - **No value-threshold escalation.** There is no knob that raises a method's policy for an

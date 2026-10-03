@@ -535,13 +535,17 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 	// block boundary, outvote a larger honest group). This is still a SATISFIABLE config (default mode counts
 	// agreement across groups, not within them), so it is a WARNING, not a startup error. Skipped when
 	// groupSizes is empty (provider data unavailable) to avoid a false warning.
+	//
+	// The same shape costs availability too (MAG-3993): cross-validation neither retries nor draws on
+	// backups, so when every member of a required group goes quiet no request can reach the quorum, and
+	// each one fails diversity-unmet at the attempt window. The warning names both halves.
 	if len(groupSizes) > 0 {
 		for _, req := range resolver.MinGroupsRequirements(chainID, apiInterface) {
 			if req.MinGroups <= 1 {
 				continue // no diversity requirement, so nothing rests on under-staffed groups
 			}
 			if below := groupsBelowThreshold(groupSizes, req.Threshold); len(below) > 0 {
-				utils.LavaFormatWarning("cross-validation group-diversity may rest on single points of failure: some provider groups are smaller than the agreement threshold and cannot corroborate a response on their own, yet can still carry the required group diversity", nil,
+				utils.LavaFormatWarning("cross-validation group-diversity may rest on single points of failure: some provider groups are smaller than the agreement threshold and cannot corroborate a response on their own, yet can still carry the required group diversity. Each such group is also an availability single point of failure: cross-validation does not retry or use backups, so while its members are quiet every request fails diversity-unmet at the attempt window", nil,
 					utils.LogAttr("groupsBelowThreshold", below),
 					utils.LogAttr("agreementThreshold", req.Threshold),
 					utils.LogAttr("minGroups", req.MinGroups),
