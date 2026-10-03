@@ -1,0 +1,58 @@
+name: Unit coverage
+
+# Runs the unit tests of every Go module on the pull request's merge commit,
+# and fails when a test fails or when the tests run less than 80% of the
+# statements the change adds or edits. A reviewer's no-unit-coverage label lets
+# a shortfall pass, so a label change runs the check again. docs/PR-GATES.md
+# describes the check; `make patch-coverage` runs the same thing locally.
+#
+# The job has no `if:`: a skipped job reports success, and on a label event
+# that would replace a failing result.
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+      - labeled
+      - unlabeled
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: unit-coverage-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  unit-coverage:
+    name: unit-coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      # Depth 2 fetches the merge commit and both parents: HEAD^1 is main,
+      # the base the change is measured against.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            tools/*/go.sum
+
+      - name: Unit tests and the coverage of the change
+        env:
+          PATCH_COVERAGE_MIN: "80"
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/patch-coverage.sh HEAD^1

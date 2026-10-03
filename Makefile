@@ -133,6 +133,12 @@ test:
 test-short:
 	go test ./protocol/rpcsmartrouter/... -count=1 -timeout 120s
 
+# The unit-coverage pull request check, run locally: every Go module's unit
+# tests with coverage, then the share of the lines changed since the merge base
+# with origin/main that a test runs. See docs/PR-GATES.md.
+patch-coverage:
+	scripts/patch-coverage.sh "$$(git merge-base origin/main HEAD)"
+
 # Maintenance
 tidy:
 	go mod tidy
@@ -143,4 +149,4 @@ lint:
 clean:
 	rm -rf build/ dist/
 
-.PHONY: install build wizard wizard-preflight wizard-last wizard-build wizard-test setup snapshot changelog test test-short tidy lint clean
+.PHONY: install build wizard wizard-preflight wizard-last wizard-build wizard-test setup snapshot changelog test test-short patch-coverage tidy lint clean
