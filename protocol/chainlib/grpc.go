@@ -163,14 +163,11 @@ func (apip *GrpcChainParser) setupForConsumer(relayer grpcproxy.ProxyCallBack) {
 // a node that does not serve reflection would otherwise boot and then fail here,
 // at parse time, instead of at connect time (MAG-2350).
 func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientConn, grpcConfig *common.GrpcConfig) error {
-	// registry/codec are per chain; grpc-config is per node-url. newChainRouter
-	// builds one proxy per node-url batch entry and hands every one of them THIS
-	// parser, so each call overwrites the last — and since the batch is a map, "last"
-	// is whatever Go's randomized iteration order picks that boot. That was benign
-	// while every iteration produced an equivalent reflection registry; now that the
-	// registry follows the node-url's grpc-config, a chain whose gRPC node-urls
-	// disagree would parse blocks against a different descriptor set on each restart.
-	// Refuse the config rather than pick one of them at random (MAG-2350).
+	// registry/codec are per parser; grpc-config is per node-url. A parser shared
+	// across node-urls — the chain router's — is bound by each proxy in turn, in map
+	// order, so node-urls that disagree would parse blocks against a different
+	// descriptor set on each run: refuse that rather than pick one at random
+	// (MAG-2350). Verification builds each connection's proxy on a clone of its own.
 	wanted := grpcDescriptorConfig{source: grpcConfig.GetDescriptorSource(), path: grpcConfig.DescriptorSetPath}
 	if apip.descriptorConfig != nil && *apip.descriptorConfig != wanted {
 		return utils.LavaFormatError("conflicting gRPC descriptor-source across a chain's node-urls", nil,

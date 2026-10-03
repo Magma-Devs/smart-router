@@ -310,11 +310,6 @@ func (s *State) printChainUpstreams(chain, tier string) {
 // APPLICABLE one (skipping steps that don't apply for this chain/interface,
 // e.g. websocket on non-jsonrpc, addons when the chain has none) — otherwise
 // Esc would bounce into an auto-skipped step and loop.
-//
-// The websocket steps run BEFORE addons on purpose: the addon probe's verdict
-// for `archive` depends on whether a ws url is present (a subscription spec
-// ws-widens the archive verification), so the ws decision must be known by the
-// time addons are probed. See probeOneAddon.
 const (
 	pURL = iota
 	pAuthAsk
@@ -589,12 +584,9 @@ func (s *State) probeLive(url, chain, iface string, auth *emit.Auth) (ok bool, d
 // gateWS verifies a paired ws url the same way probeLive verifies the http url,
 // so a dead/misrouted ws url is caught here rather than silently failing
 // subscriptions at runtime. It probes a throwaway config that pairs the ws url
-// with its http base on ONE upstream — NOT the ws url alone: a ws-only provider
-// can't be probed, because the chain router always requires the base (no-extension)
-// collection, which only an http(s) url serves (see health_cmd.go → "ws-only
-// endpoint cannot be probed alone"). Pairing reproduces the real emitted config,
-// so health verifies the exact shape that boots. The probe carries no addons (ws
-// is chosen before addons in this flow), so no archive ws-widening applies here.
+// with its http base on ONE upstream — NOT the ws url alone: the router refuses a
+// provider with no http url, and pairing reproduces the real emitted config, so
+// health verifies the exact shape that boots.
 // One config probe is a single short round-trip, so it stays under lava.build's
 // per-connection ws burst cap (which only trips on many rapid reqs on one conn —
 // that's the router's full STARTUP verification, not this one check). The verdict
@@ -633,8 +625,7 @@ func (s *State) gateWS(l Listener, base, ws string) bool {
 
 // wsProbeConfig builds the throwaway base+ws config gateWS probes: one upstream
 // carrying the http base url first, then the ws url — the real boot shape for a
-// subscription upstream. No addons (ws is verified before addons are chosen), so
-// no archive ws-widening / skip-verifications applies at this step.
+// subscription upstream. No addons: ws is verified before addons are chosen.
 func wsProbeConfig(l Listener, base, ws string) *emit.Config {
 	return &emit.Config{
 		Metrics:   "disabled",
@@ -723,9 +714,6 @@ func (s *State) verifyExplicitAddons(l Listener, url string, addWs bool, picked 
 	for _, a := range picked {
 		if supported[a] {
 			fmt.Println("  " + ui.Tick(a) + ui.Hint.Render(" — verified"))
-			if c := archiveWsCaveat(l, addWs, a); c != "" {
-				fmt.Println("    " + ui.Hint.Render(c))
-			}
 			kept = append(kept, a)
 			continue
 		}
@@ -743,25 +731,10 @@ func (s *State) verifyExplicitAddons(l Listener, url string, addWs bool, picked 
 
 // addonFailHint gives a one-line reason an explicitly-chosen addon didn't verify,
 // so the warning is actionable rather than opaque. Addons are probed over the http
-// base collection (see probeOneAddon — never ws-widened now), so a failure here is
-// genuine: the endpoint didn't answer the addon's verification probe.
+// url itself (see probeOneAddon), so a failure here is genuine: the endpoint
+// didn't answer the addon's verification probe.
 func addonFailHint() string {
 	return "the endpoint didn't answer the addon's verification probe — it may not serve this addon, or auth/the URL may be off."
-}
-
-// archiveWsCaveat returns a one-line note shown when `archive` is KEPT alongside a
-// paired ws url on a subscription interface. archive verified over the http base
-// (where archive-depth reads route), but no public gateway serves the ws-widened
-// {archive,websocket} combination over one connection — so the emitter adds
-// skip-verifications:[pruning] to boot, and archive over the ws transport (e.g.
-// archive-depth subscriptions) is NOT served. Empty string when it doesn't apply.
-func archiveWsCaveat(l Listener, addWs bool, addon string) string {
-	subscriptionIface := l.Iface == "jsonrpc" || l.Iface == "tendermintrpc"
-	if addon == "archive" && subscriptionIface && addWs {
-		return "archive verified over the http base (archive-depth reads route there). Public gateways don't serve " +
-			"{archive,websocket} over one connection, so it boots via skip-verifications:[pruning] — archive over ws is not served."
-	}
-	return ""
 }
 
 // detectAddons writes a throwaway config declaring the candidate addons on a
@@ -802,9 +775,6 @@ func (s *State) detectAddons(l Listener, url string, addWs bool) []string {
 	for _, a := range cand {
 		if supported[a] {
 			fmt.Println("  " + ui.Tick(a) + ui.Hint.Render(" — supported"))
-			if c := archiveWsCaveat(l, addWs, a); c != "" {
-				fmt.Println("    " + ui.Hint.Render(c))
-			}
 		} else {
 			fmt.Println("  " + ui.Hint.Render(ui.Cross+" "+a+" — not detected"))
 		}
@@ -821,24 +791,9 @@ func (s *State) detectAddons(l Listener, url string, addWs bool) []string {
 // router construction. A router-construction failure surfaces as zero
 // verifications for that addon, so SupportedAddons correctly returns it unmet.
 //
-// The probe is ALWAYS http-only — it declares NO ws url, even when the user paired
-// one. An addon is a property of the ENDPOINT, verified over the http base
-// collection; the ws url's own health is proven separately at the ws gate (gateWS).
-// This matters for `archive` specifically: on a subscription-tagged spec the router
-// widens an archive startup-verification to {archive,websocket} (chain_fetcher.go
-// getExtensionsForVerification) IFF a ws url is present, and no public gateway serves
-// that combination over one connection. Probing archive WITH the ws url therefore
-// reproduced the widening, and the `skip-verifications:[pruning]` the emitter adds to
-// survive it ALSO strips the archive verification entirely — leaving the archive row
-// with zero verifications, which SupportedAddons reads as "unsupported". That was a
-// false negative: the config boots and archive-depth reads route via the base url.
-//
-// Probing http-only runs the real {archive} verification (no widening, no skip), so
-// archive verifies genuinely. The emitted config still pairs archive WITH the ws url
-// (and the skip), reflecting the true capability split: archive reads work over the
-// http base; archive over ws is not served by public gateways and isn't claimed.
-// add_ons (debug/trace) are never ws-widened, so dropping the ws url never affected
-// their verdict either. See the live-capability note on emit.archiveNeedsSkipPruning.
+// The probe declares no ws url, even when the user paired one: an addon is a
+// property of the http endpoint and is verified over it, and the ws url's own
+// health is proven separately at the ws gate (gateWS).
 func (s *State) probeOneAddon(l Listener, url string, addon string) bool {
 	cfg := addonProbeConfig(l, url, addon)
 	rel, cleanup, err := s.writeProbeConfig(cfg)
@@ -854,11 +809,7 @@ func (s *State) probeOneAddon(l Listener, url string, addon string) bool {
 }
 
 // addonProbeConfig builds the throwaway config probeOneAddon writes: ONE http-only
-// upstream (base url + the single candidate addon), NO ws url. Declaring no ws url
-// is deliberate — it keeps the archive verification from being ws-widened to
-// {archive,websocket} (which would then be stripped by skip-verifications:[pruning]
-// and report archive as unsupported). The real emitted config still pairs the ws
-// url; here we only verify the addon over the http base where it actually serves.
+// upstream (base url + the single candidate addon), no ws url — see probeOneAddon.
 func addonProbeConfig(l Listener, url, addon string) *emit.Config {
 	return &emit.Config{
 		Metrics:   "disabled",
