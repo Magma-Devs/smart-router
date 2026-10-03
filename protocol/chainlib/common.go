@@ -18,6 +18,7 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	common "github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -161,6 +162,12 @@ func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled f
 		// fiber context for the websocket handler to read after the upgrade.
 		dappID := extractDappIDFromFiberContext(c)
 		c.Locals(ProjectIDHeader, dappID)
+		// Origin arrives on the handshake only, so it is stashed next to the
+		// project id for the websocket manager to read once per connection.
+		// Clone it: it crosses into the websocket handler and from there into
+		// RelayMetrics, which the OTel sink serializes after fasthttp has
+		// recycled the request buffer.
+		c.Locals(metrics.OriginHeaderKey, strings.Clone(c.Get(metrics.OriginHeaderKey)))
 		return webSocketCallback(c) // uses external dappID
 	}
 	return handler
