@@ -16,6 +16,13 @@ metrics manager.
 | `/metrics/overall-health` | text | `200 Health status OK` if ≥1 endpoint is healthy, else `503 Unhealthy` |
 | `/metrics/health-overall` | text | Alias of the above (backward-compat path) |
 
+> **What the health readings attest.** `/metrics/overall-health` and `/readyz` (served on this same
+> port) answer whether a chain can serve relays: the router's own health check takes one provider's
+> latest block. That check is exempt from per-method cross-validation policies
+> (MAG-3746), and neither reading attests that a policy-governed method currently has quorum
+> capacity — a router reporting healthy and Ready can still refuse such a method with
+> `insufficient-capacity`. Alert on the cross-validation series below for that, not on readiness.
+
 ### Configuration
 
 | Flag / env | Default | Effect |
