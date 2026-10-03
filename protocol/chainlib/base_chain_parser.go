@@ -144,9 +144,7 @@ func forwardsClientBodyHeader(apiCollection *spectypes.ApiCollection, headerName
 	if apiCollection.CollectionData.ApiInterface != spectypes.APIInterfaceRest {
 		return false
 	}
-	switch apiCollection.CollectionData.Type {
-	case http.MethodPost, http.MethodPut, http.MethodPatch:
-	default:
+	if !restMethodCarriesBody(apiCollection.CollectionData.Type) {
 		return false
 	}
 	_, ok := clientBodyHeaders[headerName]
