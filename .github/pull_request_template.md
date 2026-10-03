@@ -13,6 +13,10 @@ exists in Jira. -->
 
 Jira ticket:
 
+<!-- unit-coverage gates the merge (docs/PR-GATES.md): unit tests must run at
+least 80% of the Go statements this pull request adds or edits.
+`make patch-coverage` runs the same check locally. -->
+
 ---
 
 ## Author Checklist
