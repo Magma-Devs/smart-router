@@ -20,6 +20,10 @@
 /.github/workflows/     @Magma-Devs/r-d
 /docker/                @Magma-Devs/r-d
 
+# The pull request gates: what blocks a merge, and the tool that decides it.
+/tools/prgate/                @Magma-Devs/r-d
+/scripts/patch-coverage.sh    @Magma-Devs/r-d
+
 # Licensing & legal text — keep dual-license wording under review so a
 # stray edit can't quietly change the commercial terms.
 /LICENSE.md             @Magma-Devs/r-d
