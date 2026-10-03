@@ -467,6 +467,13 @@ func (s *tendermintGetRelayStub) seen() []string {
 // drives a plain GET: the handler dereferences it).
 func startTestTendermintListenerWithOptions(t *testing.T, ctx context.Context, healthPath string, relaySender RelaySender) (*TendermintRpcChainListener, string) {
 	t.Helper()
+	return startTestTendermintListenerWithSubscriptions(t, ctx, healthPath, relaySender, nil)
+}
+
+// startTestTendermintListenerWithSubscriptions also hands the listener a websocket
+// subscription manager (nil when a test never reaches the subscription paths).
+func startTestTendermintListenerWithSubscriptions(t *testing.T, ctx context.Context, healthPath string, relaySender RelaySender, wsSubscriptionManager WSSubscriptionManager) (*TendermintRpcChainListener, string) {
+	t.Helper()
 	// ListenToMessages uses the custom rand package which requires initialization.
 	// The package-level TestMain (chain_router_test.go) does not call InitRandomSeed,
 	// so we do it here. InitRandomSeed is idempotent.
@@ -481,7 +488,7 @@ func startTestTendermintListenerWithOptions(t *testing.T, ctx context.Context, h
 	}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	listener := NewTendermintRpcChainListener(ctx, endpoint, relaySender, alwaysHealthyReporter{}, logger, nil, nil)
+	listener := NewTendermintRpcChainListener(ctx, endpoint, relaySender, alwaysHealthyReporter{}, logger, nil, wsSubscriptionManager)
 
 	cmdFlags := common.ConsumerCmdFlags{}
 	go listener.Serve(ctx, cmdFlags)
@@ -612,4 +619,115 @@ func TestTendermintRpcChainListener_PlainGetReachesTheRelayPath(t *testing.T) {
 	require.Equal(t, http.StatusSwitchingProtocols, wsResp.StatusCode)
 	_ = client.Close()
 	require.Len(t, stub.seen(), 1, "an upgrade must never reach the relay path")
+}
+
+// unsubscribeAllMessage is a parsed unsubscribe_all. It only answers GetParseDirective:
+// any other call reaches the nil ProtocolMessage and fails the test loudly.
+type unsubscribeAllMessage struct {
+	ProtocolMessage
+}
+
+func (unsubscribeAllMessage) GetParseDirective() *spectypes.ParseDirective {
+	return &spectypes.ParseDirective{FunctionTag: spectypes.FUNCTION_TAG_UNSUBSCRIBE_ALL}
+}
+
+// unsubscribeAllRelaySender parses every websocket message as an unsubscribe_all.
+type unsubscribeAllRelaySender struct{}
+
+func (unsubscribeAllRelaySender) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
+	return nil, errors.New("not used")
+}
+
+func (unsubscribeAllRelaySender) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
+	return unsubscribeAllMessage{}, nil
+}
+
+func (unsubscribeAllRelaySender) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
+	return nil, errors.New("not used")
+}
+
+func (unsubscribeAllRelaySender) CancelSubscriptionContext(subscriptionKey string) {}
+
+// unsubscribeAllRecorder is the slice of WSSubscriptionManager an unsubscribe_all uses.
+// It counts the client's own unsubscribe_all calls (they carry the request's metrics;
+// the cleanup when the connection closes passes none) and answers them with err.
+type unsubscribeAllRecorder struct {
+	err   error
+	mu    sync.Mutex
+	calls int
+}
+
+func (m *unsubscribeAllRecorder) StartSubscription(ctx context.Context, protocolMessage ProtocolMessage, dappID, consumerIp, webSocketConnectionUniqueId string, metricsData *metrics.RelayMetrics) (*pairingtypes.RelayReply, <-chan *pairingtypes.RelayReply, error) {
+	return nil, nil, errors.New("not used")
+}
+
+func (m *unsubscribeAllRecorder) Unsubscribe(ctx context.Context, protocolMessage ProtocolMessage, dappID, consumerIp, webSocketConnectionUniqueId string, metricsData *metrics.RelayMetrics) ([]byte, error) {
+	return nil, errors.New("not used")
+}
+
+func (m *unsubscribeAllRecorder) UnsubscribeAll(ctx context.Context, dappID, consumerIp, webSocketConnectionUniqueId string, metricsData *metrics.RelayMetrics) error {
+	if metricsData == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	return m.err
+}
+
+func (m *unsubscribeAllRecorder) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
+// MAG-4064: an unsubscribe_all sent over the router's websocket gets a reply: the
+// caller's id with the empty result a Tendermint node answers with, or the formatted
+// error when the teardown fails. It used to get nothing, and the client waited out
+// its own timeout.
+func TestTendermintRpcChainListener_UnsubscribeAllReplies(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		managerErr error
+		check      func(t *testing.T, reply string)
+	}{
+		{
+			name: "teardown succeeds",
+			check: func(t *testing.T, reply string) {
+				require.JSONEq(t, `{"jsonrpc":"2.0","id":99,"result":{}}`, reply)
+			},
+		},
+		{
+			name:       "teardown fails",
+			managerErr: errors.New("teardown failed"),
+			check: func(t *testing.T, reply string) {
+				var envelope map[string]string
+				require.NoError(t, json.Unmarshal([]byte(reply), &envelope))
+				require.Contains(t, envelope["Error_Received"], "teardown failed")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveCtx, cancelServe := context.WithCancel(context.Background())
+			defer cancelServe()
+			manager := &unsubscribeAllRecorder{err: tc.managerErr}
+			listener, addr := startTestTendermintListenerWithSubscriptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, unsubscribeAllRelaySender{}, manager)
+			t.Cleanup(func() {
+				shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancelShutdown()
+				_ = listener.Shutdown(shutdownCtx)
+			})
+
+			client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/websocket", nil)
+			require.NoError(t, err)
+			defer client.Close()
+
+			require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":99,"method":"unsubscribe_all","params":{}}`)))
+			_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+			_, reply, err := client.ReadMessage()
+			require.NoError(t, err, "unsubscribe_all got no reply")
+			tc.check(t, string(reply))
+			require.Equal(t, 1, manager.callCount(), "the client's unsubscribe_all reaches the subscription manager once")
+		})
+	}
 }
