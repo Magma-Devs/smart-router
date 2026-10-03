@@ -20,7 +20,6 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/metadata"
 )
 
 type WebSocketError struct {
@@ -328,45 +327,4 @@ func TestGetUniqueGuidResponseForError_RedactsUpstreamURL(t *testing.T) {
 	// Still actionable: the host and the cause survive, only the credential goes.
 	assert.Contains(t, errObject.Error1, "eth-mainnet.example.com")
 	assert.Contains(t, errObject.Error1, "connection reset by peer")
-}
-
-// IS_METRICS_ENABLED alone leaves the report service nil (NewMetricService
-// needs its url and interval), and every relay sends to that service once
-// StoreMetricData is on. The metric calls run in bare goroutines, so a nil
-// dereference there takes the whole router down.
-func TestNewRPCConsumerLogs_MetricsEnabledWithoutReportEnv(t *testing.T) {
-	t.Setenv("IS_METRICS_ENABLED", "true")
-	t.Setenv("REPORT_METRICS_URL", "")
-	t.Setenv("METRICS_INTERVAL_FOR_SENDING_DATA_MIN", "")
-	utils.SetGlobalLoggingLevel("fatal") // the constructor warns; keep the output quiet
-
-	plog, err := NewRPCConsumerLogs(nil, nil, nil)
-	require.Nil(t, err)
-	require.Nil(t, plog.MetricService)
-	assert.False(t, plog.StoreMetricData, "the flag must stay off without a service to send to")
-
-	assert.NotPanics(t, func() {
-		plog.AddMetricForHttp(&RelayMetrics{}, nil, map[string][]string{})
-	})
-	assert.NotPanics(t, func() {
-		plog.AddMetricForGrpc(&RelayMetrics{}, nil, &metadata.MD{})
-	})
-}
-
-func TestNewRPCConsumerLogs_MetricsEnabledWithReportEnv(t *testing.T) {
-	t.Setenv("IS_METRICS_ENABLED", "true")
-	// Never dialed: the service only posts on its ticker, an hour out.
-	t.Setenv("REPORT_METRICS_URL", "http://127.0.0.1:0/unused")
-	t.Setenv("METRICS_INTERVAL_FOR_SENDING_DATA_MIN", "60")
-	t.Setenv("TO_EXCLUDE_METRICS_AGENTS", "probe;healthcheck")
-
-	plog, err := NewRPCConsumerLogs(nil, nil, nil)
-	require.Nil(t, err)
-	require.NotNil(t, plog.MetricService)
-	assert.True(t, plog.StoreMetricData)
-	assert.Equal(t, []string{"probe", "healthcheck"}, plog.excludedUserAgent)
-
-	assert.NotPanics(t, func() {
-		plog.AddMetricForHttp(&RelayMetrics{}, nil, map[string][]string{})
-	})
 }

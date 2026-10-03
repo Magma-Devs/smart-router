@@ -3,7 +3,6 @@ package metrics
 import (
 	"fmt"
 	"math/rand"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -11,7 +10,6 @@ import (
 	"github.com/goccy/go-json"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc/metadata"
@@ -21,16 +19,10 @@ var ReturnMaskedErrors = "false"
 
 const (
 	webSocketCloseMessage = "websocket: close "
-	RefererHeaderKey      = "Referer"
 	OriginHeaderKey       = "Origin"
-	UserAgentHeaderKey    = "User-Agent"
 )
 
 type RPCConsumerLogs struct {
-	MetricService              *MetricService
-	StoreMetricData            bool
-	excludeMetricsReferrers    string
-	excludedUserAgent          []string
 	consumerMetricsManager     ConsumerMetricsManagerInf
 	usageSink                  UsageEventSink
 	consumerOptimizerQoSClient *ConsumerOptimizerQoSClient
@@ -41,31 +33,11 @@ func NewRPCConsumerLogs(consumerMetricsManager ConsumerMetricsManagerInf, usageS
 	if usageSink == nil {
 		usageSink = NoopUsageSink{}
 	}
-	rpcConsumerLogs := &RPCConsumerLogs{
-		StoreMetricData:            false,
+	return &RPCConsumerLogs{
 		consumerMetricsManager:     consumerMetricsManager,
 		usageSink:                  usageSink,
 		consumerOptimizerQoSClient: consumerOptimizerQoSClient,
-	}
-	isMetricEnabled, _ := strconv.ParseBool(os.Getenv("IS_METRICS_ENABLED"))
-	if isMetricEnabled {
-		// NewMetricService returns nil when its report env is unset. Every relay
-		// sends to the service once StoreMetricData is on, so the flag follows
-		// the service rather than the env var.
-		metricService := NewMetricService()
-		if metricService == nil {
-			utils.LavaFormatWarning("IS_METRICS_ENABLED is set but REPORT_METRICS_URL or METRICS_INTERVAL_FOR_SENDING_DATA_MIN is missing, relay metrics reporting stays off", nil)
-			return rpcConsumerLogs, nil
-		}
-		rpcConsumerLogs.StoreMetricData = true
-		rpcConsumerLogs.MetricService = metricService
-		rpcConsumerLogs.excludeMetricsReferrers = os.Getenv("TO_EXCLUDE_METRICS_REFERRERS")
-		agentsValue := os.Getenv("TO_EXCLUDE_METRICS_AGENTS")
-		if len(agentsValue) > 0 {
-			rpcConsumerLogs.excludedUserAgent = strings.Split(agentsValue, ";")
-		}
-	}
-	return rpcConsumerLogs, nil
+	}, nil
 }
 
 func (rpccl *RPCConsumerLogs) SetWebSocketConnectionActive(chainId string, apiInterface string, add bool) {
@@ -200,28 +172,15 @@ func (rpccl *RPCConsumerLogs) AddMetricForHttp(data *RelayMetrics, err error, he
 	// path too, where consumerMetricsManager.SetRelayMetrics is a no-op.
 	data.Success = err == nil
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
-	refererHeaderValue := strings.Join(headers[RefererHeaderKey], ", ")
-	userAgentHeaderValue := strings.Join(headers[UserAgentHeaderKey], ", ")
 	// strings.Join always allocates; result is independent of any request buffer.
 	data.Origin = strings.Join(headers[OriginHeaderKey], ", ")
 	rpccl.usageSink.Emit(NewRelayUsageEvent(data))
-	if rpccl.StoreMetricData && rpccl.shouldCountMetrics(refererHeaderValue, userAgentHeaderValue) {
-		rpccl.SendMetrics(data)
-	}
 }
 
-func (rpccl *RPCConsumerLogs) AddMetricForWebSocket(data *RelayMetrics, err error, c *websocket.Conn) {
+func (rpccl *RPCConsumerLogs) AddMetricForWebSocket(data *RelayMetrics, err error) {
 	data.Success = err == nil
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
-	refererHeaderValue, _ := c.Locals(RefererHeaderKey).(string)
-	userAgentHeaderValue, _ := c.Locals(UserAgentHeaderKey).(string)
-	// Origin was cloned at Locals-storage time in constructFiberCallback...
-	originHeaderValue, _ := c.Locals(OriginHeaderKey).(string)
-	data.Origin = originHeaderValue
 	rpccl.usageSink.Emit(NewRelayUsageEvent(data))
-	if rpccl.StoreMetricData && rpccl.shouldCountMetrics(refererHeaderValue, userAgentHeaderValue) {
-		rpccl.SendMetrics(data)
-	}
 }
 
 func (rpccl *RPCConsumerLogs) AddMetricForGrpc(data *RelayMetrics, err error, metadataValues *metadata.MD) {
@@ -235,36 +194,10 @@ func (rpccl *RPCConsumerLogs) AddMetricForGrpc(data *RelayMetrics, err error, me
 	}
 	data.Success = err == nil
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
-	refererHeaderValue := getMetadataHeaderOrDefault(RefererHeaderKey)
-	userAgentHeaderValue := getMetadataHeaderOrDefault(UserAgentHeaderKey)
 	// gRPC metadata values can alias the receive buffer; detach before the
 	// value crosses into the async OTel emit path.
 	data.Origin = strings.Clone(getMetadataHeaderOrDefault(OriginHeaderKey))
 	rpccl.usageSink.Emit(NewRelayUsageEvent(data))
-	if rpccl.StoreMetricData && rpccl.shouldCountMetrics(refererHeaderValue, userAgentHeaderValue) {
-		rpccl.SendMetrics(data)
-	}
-}
-
-func (rpccl *RPCConsumerLogs) shouldCountMetrics(refererHeaderValue string, userAgentHeaderValue string) bool {
-	if len(rpccl.excludeMetricsReferrers) > 0 && len(refererHeaderValue) > 0 {
-		if strings.Contains(refererHeaderValue, rpccl.excludeMetricsReferrers) {
-			return false
-		}
-	}
-
-	if len(userAgentHeaderValue) > 0 {
-		for _, excludedAgent := range rpccl.excludedUserAgent {
-			if strings.Contains(userAgentHeaderValue, excludedAgent) {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func (rpccl *RPCConsumerLogs) SendMetrics(data *RelayMetrics) {
-	rpccl.MetricService.SendData(*data)
 }
 
 func (rpccl *RPCConsumerLogs) LogTestMode(fiberCtx *fiber.Ctx) {
