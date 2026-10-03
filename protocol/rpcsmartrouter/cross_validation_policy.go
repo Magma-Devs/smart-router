@@ -17,9 +17,11 @@ import (
 // clamp(caller, floor, cap):
 //
 //   - floor — operator minimum: a caller may always ask stricter (higher) and get it, up to cap.
-//   - cap   — operator maximum: it overrides a stricter caller request (clamps it down). This is the
-//     only mechanism that can make the router validate less strictly than a caller asked, and it is an
-//     explicit, documented operator decision.
+//   - cap   — operator maximum: it overrides a stricter caller request (clamps it down). It is the only
+//     CONFIGURED mechanism that can make the router validate less strictly than a caller asked, and it is
+//     an explicit, documented operator decision. One unconfigured mechanism also does: a method in the
+//     stateful category ignores the caller's cross-validation headers outright, since cross-validating a
+//     broadcast only one node can accept cannot succeed (MAG-3603).
 //   - floor == cap expresses an exact/authoritative value.
 //
 // With no policy for a method, behavior is exactly caller-driven (backwards compatible). A policy with
@@ -423,6 +425,16 @@ func resolveKnob(callerVal int, callerPresent bool, b Bound, def int) int {
 // a deterministic acknowledgement, not an observation), and selection-mode precedence would route such a
 // method into CrossValidation — so an enabled policy on a write is a configuration error. isStateful is
 // injected (it needs loaded specs) and is called per enabled policy at startup.
+//
+// This covers the OPERATOR direction only — an enabled policy whose own method is stateful — and that is
+// all it covers. It says nothing about a write with no policy of its own, whose caller headers Resolve
+// would return as an override; the skip in NewSmartRouterRelayStateMachineWithPolicy is what stops that,
+// and the stateful branch in the state machine is what routes the write once nothing has overridden it.
+// So the caller direction is refused in both layers, not in the state machine alone (MAG-3603).
+//
+// The two directions differ deliberately: a misconfigured operator should not be able to start the
+// router, while a caller whose client library cross-validates everything should still be able to submit
+// a transaction.
 func (r *CrossValidationPolicyResolver) ValidateNoStatefulPolicies(isStateful func(chainID, apiInterface, method string) bool) error {
 	if r == nil || isStateful == nil {
 		return nil

@@ -69,15 +69,27 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
   may exceed, a **cap** that overrides a stricter caller, or *forbid* caller-driven
   cross-validation entirely for a method (`forbid-caller-cv: true`).
 
-> **Write / stateful methods.** An **operator policy** that enables cross-validation on a
-> stateful (write) method is **rejected at startup** — that path is guarded. By default the
-> legacy **caller-header** path is *not* guarded: a request that sends the headers above still
-> selects cross-validation on any method, *including writes*, ahead of the normal stateful
-> fan-out (backwards compatibility). To close that off for a specific method, set
-> `forbid-caller-cv: true` on its policy (see below) — the router then ignores the CV headers
-> and routes the method normally. Cross-validating a write *response* (e.g. a transaction hash
-> echoed back) does not independently verify anything, so prefer policy-driven cross-validation
-> on read methods and leave writes to the stateful path.
+> **Write / stateful methods.** Both paths are guarded. An **operator policy** that enables
+> cross-validation on a stateful (write) method is **rejected at startup**. The
+> **caller-header** path is ignored on such a method: the request routes by its stateful
+> category and the `lava-cross-validation-*` headers have no effect, whatever they contain
+> (MAG-3603 — cross-validating a broadcast only one node can accept cannot reach any agreement
+> threshold, so the router used to answer HTTP 500 after submitting the transaction). No policy
+> is needed for this; `forbid-caller-cv: true` is what an operator reaches for on a **stateless**
+> method they want protected from caller-driven cross-validation.
+>
+> Four consequences worth knowing. The four cosmos `tx` **REST** endpoints that carry the
+> stateful category without broadcasting anything (`/cosmos/tx/v1beta1/encode`, `encode/amino`,
+> `decode`, `simulate`) are covered by the same rule and so cannot be cross-validated by a caller
+> either — and the split is per interface, not per operation: the spec marks the gRPC
+> `cosmos.tx.v1beta1.Service/Simulate` `stateful: 0`, so a caller keeps cross-validating
+> simulate on gRPC and loses it on REST. A malformed header pair on a stateful method (a value
+> that does not parse, one header without its companion, a threshold above `max-participants`)
+> used to refuse the request before anything was dispatched; it is now ignored like a well-formed
+> pair, and the request goes out as a write. A `forbid-caller-cv: true` policy written on a
+> stateful method under the earlier advice is now redundant; it still loads and is harmless. And
+> the rule is only as complete as the spec: a submit endpoint the spec does not mark stateful —
+> Aptos `POST /transactions` today — is not covered.
 
 ### Provider group labels
 
@@ -139,7 +151,7 @@ cross-validation:
 | Knob | Meaning |
 | --- | --- |
 | `enabled` | `true` mandates CV for this method even with no caller headers. |
-| `forbid-caller-cv` | `true` disables CV for this method: the caller's CV headers are ignored and the method routes by its normal category. Mutually exclusive with `enabled` (rejected at startup if both set); the other knobs are ignored when set. |
+| `forbid-caller-cv` | `true` disables CV for this method: the caller's CV headers are ignored and the method routes by its normal category. Mutually exclusive with `enabled` (rejected at startup if both set); the other knobs are ignored when set. Redundant on a stateful method, which ignores the headers on its own (MAG-3603); such an entry still loads and is harmless. |
 | `max-participants` | How many providers to fan out to. |
 | `agreement-threshold` | How many identical responses form a quorum (in per-group mode, *within each group*). |
 | `min-groups` | Distinct provider groups the quorum must span (`1` = no diversity requirement). |
