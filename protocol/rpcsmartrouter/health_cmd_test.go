@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -283,4 +284,52 @@ func TestNonNilStrings(t *testing.T) {
 func TestSortedKeys(t *testing.T) {
 	got := sortedKeys(map[string]struct{}{"archive": {}, "debug": {}, "": {}})
 	assert.Equal(t, []string{"", "archive", "debug"}, got)
+}
+
+// TestEndpointsForProviders reduces probe targets to the distinct (chain, api) pairs the cross-validation
+// preflight matches policies against, so a policy for an interface the config does serve is not reported
+// as unserved just because two providers share it.
+func TestEndpointsForProviders(t *testing.T) {
+	got := endpointsForProviders([]healthProvider{
+		{name: "a", chainID: "ETH1", apiInterface: "jsonrpc"},
+		{name: "b", chainID: "ETH1", apiInterface: "jsonrpc"},
+		{name: "c", chainID: "COSMOSHUB", apiInterface: "rest"},
+	})
+	require.Len(t, got, 2, "the two ETH1/jsonrpc providers collapse to one endpoint")
+	pairs := map[string]bool{}
+	for _, e := range got {
+		pairs[e.ChainID+"/"+e.ApiInterface] = true
+	}
+	require.True(t, pairs["ETH1/jsonrpc"])
+	require.True(t, pairs["COSMOSHUB/rest"])
+}
+
+// TestHealthCommand_RejectsUnbootableCrossValidation drives the real health command against a config whose
+// cross-validation policy names a chain/api no endpoint serves. The router refuses to boot on it, so the
+// diagnostic command an operator reaches for to find out why must fail too, non-zero (MAG-3604).
+func TestHealthCommand_RejectsUnbootableCrossValidation(t *testing.T) {
+	dir := t.TempDir()
+	cfg := dir + "/router.yml"
+	require.NoError(t, os.WriteFile(cfg, []byte(
+		"direct-rpc:\n"+
+			"  - name: sim-1\n"+
+			"    chain-id: ETH1\n"+
+			"    api-interface: jsonrpc\n"+
+			"    node-urls:\n"+
+			"      - url: http://127.0.0.1:1\n"+
+			"cross-validation:\n"+
+			"  policies:\n"+
+			"    - chain-id: ETH1\n"+
+			"      api-interface: json-rpc\n"+ // typo: the served interface is jsonrpc
+			"      method: eth_getBalance\n"+
+			"      enabled: true\n"), 0o600))
+
+	cmd := CreateHealthCobraCommand()
+	cmd.SetArgs([]string{cfg, "--use-static-spec", "../../specs/ethereum.json"})
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	err := cmd.Execute()
+	require.Error(t, err, "a config the router would refuse to boot must fail the health command")
+	require.ErrorContains(t, err, "cross-validation")
+	require.ErrorContains(t, err, "no endpoint serves")
 }

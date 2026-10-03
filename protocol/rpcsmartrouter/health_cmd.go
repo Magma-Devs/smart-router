@@ -140,6 +140,24 @@ running directory, ./config, then ` + defaultNodeHome + `.`,
 				return emitFatal(fmt.Errorf("no endpoints to probe — config has no direct-rpc providers and no inline endpoints were given"))
 			}
 
+			// A cross-validation config the router would refuse to boot must fail this command too — it is
+			// what an operator reaches for to find out why a config will not start (MAG-3604). This is the
+			// context-free half (a policy naming a chain-id/api-interface no endpoint serves, the
+			// enabled/forbid contradiction), decidable without a spec. The spec-dependent method guard is
+			// applied per endpoint inside probeProvider, where the parser is already built, and surfaces as
+			// a row error rather than a fatal one — consistent with how this command reports endpoint faults.
+			cvConfig, err := ParseCrossValidationConfig(viper.GetViper())
+			if err != nil {
+				return emitFatal(utils.LavaFormatError("invalid cross-validation configuration", err))
+			}
+			cvResolver, err := NewCrossValidationPolicyResolver(cvConfig)
+			if err != nil {
+				return emitFatal(utils.LavaFormatError("invalid cross-validation configuration", err))
+			}
+			if err := validatePolicyEndpoints(cvConfig, endpointsForProviders(providers)); err != nil {
+				return emitFatal(utils.LavaFormatError("invalid cross-validation configuration", err))
+			}
+
 			// Specs whose collection supports subscriptions augment every verification with the
 			// websocket extension, and ws:// node URLs are probed by default — this is what makes
 			// the health check exercise the full surface a supported chain exposes. The ws connector
@@ -154,7 +172,7 @@ running directory, ./config, then ` + defaultNodeHome + `.`,
 			// verified) — see the note there.
 
 			timeout, _ := cmd.Flags().GetDuration("timeout")
-			results := runHealthProbes(ctx, providers, staticSpecPaths, timeout, verifyWs)
+			results := runHealthProbes(ctx, providers, staticSpecPaths, timeout, verifyWs, cvResolver)
 			report := buildHealthReport(results, nil)
 			writeHealthReport(report)
 			// Always exit 0 for a completed run; the JSON is the source of truth.
@@ -170,6 +188,22 @@ running directory, ./config, then ` + defaultNodeHome + `.`,
 	cmdHealth.Flags().Bool(chainproxy.GRPCUseTls, true, "use tls for grpc connections")
 	cmdHealth.Flags().StringArray(commonlib.UseStaticSpecFlag, nil, "load specs from file, directory, or remote URL — required (same paths as rpcsmartrouter --use-static-spec)")
 	return cmdHealth
+}
+
+// endpointsForProviders reduces the probe targets to the distinct (chain-id, api-interface) pairs the
+// cross-validation preflight matches policies against — the same identity a request's policy lookup uses.
+func endpointsForProviders(providers []healthProvider) []*lavasession.RPCEndpoint {
+	seen := map[string]struct{}{}
+	var endpoints []*lavasession.RPCEndpoint
+	for _, p := range providers {
+		key := p.chainID + "\x00" + p.apiInterface
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		endpoints = append(endpoints, &lavasession.RPCEndpoint{ChainID: p.chainID, ApiInterface: p.apiInterface})
+	}
+	return endpoints
 }
 
 // collectHealthProviders normalizes probe targets from either inline args or a config file.
@@ -253,7 +287,7 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 
 // runHealthProbes probes every provider concurrently per (chain, interface) and flattens
 // the per-node-url outcomes into report rows.
-func runHealthProbes(ctx context.Context, providers []healthProvider, staticSpecPaths []string, timeout time.Duration, verifyWs bool) []healthEndpointResult {
+func runHealthProbes(ctx context.Context, providers []healthProvider, staticSpecPaths []string, timeout time.Duration, verifyWs bool, cvResolver *CrossValidationPolicyResolver) []healthEndpointResult {
 	type indexed struct {
 		idx  int
 		rows []healthEndpointResult
@@ -261,7 +295,7 @@ func runHealthProbes(ctx context.Context, providers []healthProvider, staticSpec
 	out := make(chan indexed, len(providers))
 	for i, provider := range providers {
 		go func(i int, provider healthProvider) {
-			out <- indexed{idx: i, rows: probeProvider(ctx, provider, staticSpecPaths, timeout, verifyWs)}
+			out <- indexed{idx: i, rows: probeProvider(ctx, provider, staticSpecPaths, timeout, verifyWs, cvResolver)}
 		}(i, provider)
 	}
 
@@ -332,7 +366,7 @@ func timedOutRows(provider healthProvider, timeout time.Duration) []healthEndpoi
 // probeProvider sets up the spec + chain router for one provider and runs the spec
 // verifications against each of its node URLs. A spec-load failure yields one ok:false
 // row per node URL (specValid:false) with no relay attempted.
-func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths []string, timeout time.Duration, verifyWs bool) []healthEndpointResult {
+func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths []string, timeout time.Duration, verifyWs bool, cvResolver *CrossValidationPolicyResolver) []healthEndpointResult {
 	// Bound the whole probe (router construction through every verification relay) so a
 	// slow or blocked node aborts at the deadline instead of grinding through the full
 	// connector retry budget. Every connector (HTTP / gRPC / ws) derives each attempt's
@@ -401,6 +435,14 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 	rpcEndpoint := lavasession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
 	if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, staticSpecPaths, rpcEndpoint, "", ""); err != nil {
 		return rowsFromError(fmt.Errorf("load spec: %w", err))
+	}
+
+	// The spec-dependent cross-validation guard the router runs at boot: a policy naming a method this
+	// endpoint's spec does not serve can never apply (MAG-3604). The parser is loaded, so check it here and
+	// report a violation as a row error — a config the router would refuse to boot then shows as not-ok. The
+	// resolver is parsed once in RunE and shared read-only, so the concurrent probes touch no global config.
+	if cvErr := validateCrossValidationSpecGuards(cvResolver, chainParser, provider.chainID, provider.apiInterface); cvErr != nil {
+		return rowsFromError(cvErr)
 	}
 
 	// ws:// URLs are probed by default. When --skip-websocket-verification is set, exclude
