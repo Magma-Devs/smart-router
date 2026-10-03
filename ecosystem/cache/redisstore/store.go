@@ -29,11 +29,11 @@ const (
 
 	// chainTipRetention is how long the chain-tip KEY persists. Reader
 	// freshness is the embedded deadline (core.DefaultExpirationForNonFinalized,
-	// much shorter); the key outliving it keeps the monotonic write guard
-	// fencing lower writes long after the tip goes stale for readers —
-	// mirroring the in-memory adapter, where the stored block fences forever.
-	// Bounded (instead of no TTL) so every key stays volatile and
-	// maxmemory-policy volatile-* strategies see the whole keyspace.
+	// much shorter), and the write guard honours that same deadline: a stale
+	// tip fences nothing (MAG-3755), so retention only bounds the key's
+	// lifetime and never how long a lower write is refused. Bounded (instead
+	// of no TTL) so every key stays volatile and maxmemory-policy volatile-*
+	// strategies see the whole keyspace.
 	chainTipRetention = 24 * time.Hour
 
 	scanBatchSize = 512
@@ -690,22 +690,31 @@ func (s *Store) SetInt64IfGreaterOrEqual(ctx context.Context, key string, value 
 // ---------------------------------------------------------------------------
 
 // The chain tip stores "block:freshnessDeadlineUnixMs". Readers honour the
-// embedded deadline; the monotonic guard compares against the raw stored
-// block for as long as the key is retained (chainTipRetention), stale or not.
+// embedded deadline, and so does the write guard: a lower block is refused
+// only while the stored tip is still fresh by that deadline. ARGV[4] is the
+// writer's clock: the deadline was stamped by whichever replica wrote last and
+// readers judge it by their own clock (GetChainTip), so the guard assumes the
+// same clock alignment across replicas that readers already do, and the script
+// never needs redis TIME. Once the deadline has passed the stored block fences
+// nothing and any write replaces it: the downward path a false high tip needs
+// in order to age out once nobody refreshes it (MAG-3755). An equal or higher
+// block always writes, which moves the deadline.
 //
-// The match result is bound before tonumber rather than nested inside it, which
-// is a TEST-INFRASTRUCTURE requirement, not a correctness one: on a corrupt
-// value string.match returns nil, and real Redis (PUC Lua 5.1) returns nil from
-// tonumber(nil) while miniredis (gopher-lua) raises "bad argument #1 to
-// tonumber (value expected)". Nesting it makes the corrupt-value path
+// The match results are bound before tonumber rather than nested inside it,
+// which is a TEST-INFRASTRUCTURE requirement, not a correctness one: on a
+// corrupt value string.match returns nil, and real Redis (PUC Lua 5.1) returns
+// nil from tonumber(nil) while miniredis (gopher-lua) raises "bad argument #1
+// to tonumber (value expected)". Nesting it makes the corrupt-value path
 // untestable under miniredis and invites someone to "fix" a script that is
-// already correct against a real backend.
-var setChainTipGEScript = redis.NewScript(`
+// already correct against a real backend. A value that is not
+// "block:deadline" fences nothing.
+var setChainTipGuardedScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 if cur then
-	local match = string.match(cur, '^(-?%d+)')
-	local curb = match and tonumber(match)
-	if curb and tonumber(ARGV[1]) < curb then
+	local b, d = string.match(cur, '^(-?%d+):(-?%d+)$')
+	local curb = b and tonumber(b)
+	local curd = d and tonumber(d)
+	if curb and curd and tonumber(ARGV[1]) < curb and tonumber(ARGV[4]) < curd then
 		return 0
 	end
 end
@@ -752,10 +761,11 @@ func (s *Store) GetChainTip(ctx context.Context, key string) (int64, bool, error
 	return spectypes.NOT_APPLICABLE, false, nil
 }
 
-func (s *Store) SetChainTipIfGreaterOrEqual(ctx context.Context, key string, block int64) error {
-	deadline := time.Now().Add(core.DefaultExpirationForNonFinalized).UnixMilli()
+func (s *Store) SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error {
+	now := time.Now()
+	deadline := now.Add(core.DefaultExpirationForNonFinalized).UnixMilli()
 	encoded := encodeChainTip(block, deadline)
-	return setChainTipGEScript.Run(ctx, s.write, []string{s.key(key)}, block, encoded, chainTipRetention.Milliseconds()).Err()
+	return setChainTipGuardedScript.Run(ctx, s.write, []string{s.key(key)}, block, encoded, chainTipRetention.Milliseconds(), now.UnixMilli()).Err()
 }
 
 // ---------------------------------------------------------------------------
