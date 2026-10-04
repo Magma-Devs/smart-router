@@ -56,6 +56,10 @@ type InternalPath struct {
 	ApiInterface   string
 	ConnectionType string
 	Addon          string
+	// ServesRoot: this path's base collection answers every non-subscription
+	// api of the root base collection, so a url pinned here can stand in for a
+	// root url (STRK's /rpc/v0_x and its root both inherit HTTP-ONLY).
+	ServesRoot bool
 }
 
 type BaseChainParser struct {
@@ -502,6 +506,15 @@ func (bcp *BaseChainParser) IsInternalPathEnabled(internalPath string, apiInterf
 	return ok && internalPathObj.Enabled && internalPathObj.ApiInterface == apiInterface && internalPathObj.Addon == addon
 }
 
+// ServesRootCollection reports whether a url pinned to internalPath can stand
+// in for the spec's root url. See InternalPath.ServesRoot.
+func (bcp *BaseChainParser) ServesRootCollection(internalPath string) bool {
+	bcp.rwLock.RLock()
+	defer bcp.rwLock.RUnlock()
+	internalPathObj, ok := bcp.internalPaths[internalPath]
+	return ok && internalPath != "" && internalPathObj.ServesRoot
+}
+
 func (bcp *BaseChainParser) ExtensionParsing(addon string, parsedMessageArg *baseChainMessageContainer, extensionInfo extensionslib.ExtensionInfo) {
 	// Only emit archive debug traces for user relays (LatestBlock > 0), not internal chain tracker polls
 	debugLog := extensionInfo.LatestBlock > 0
@@ -730,6 +743,8 @@ func getServiceApis(
 	headers := map[ApiKey]*spectypes.Header{}
 	apiCollections := map[CollectionKey]*spectypes.ApiCollection{}
 	verifications := map[VerificationKey]map[string][]VerificationContainer{}
+	baseApis := map[string]map[baseApiKey]struct{}{}
+	subscriptionApis := map[string]struct{}{}
 	if spec.Enabled {
 		for _, apiCollection := range spec.ApiCollections {
 			if !apiCollection.Enabled {
@@ -744,13 +759,21 @@ func getServiceApis(
 				Addon:          apiCollection.CollectionData.AddOn,
 			}
 
-			// add as a valid internal path
-			retInternalPaths[apiCollection.CollectionData.InternalPath] = InternalPath{
-				Path:           apiCollection.CollectionData.InternalPath,
-				Enabled:        apiCollection.Enabled,
-				ApiInterface:   apiCollection.CollectionData.ApiInterface,
-				ConnectionType: apiCollection.CollectionData.Type,
-				Addon:          apiCollection.CollectionData.AddOn,
+			// add as a valid internal path. A path's base collection owns its
+			// entry: an add-on collection on the same path (ETH1's and STRK's
+			// root debug/trace) must not replace it, or the entry describes the
+			// add-on depending on collection order.
+			if existing, ok := retInternalPaths[apiCollection.CollectionData.InternalPath]; !ok || existing.Addon != "" || apiCollection.CollectionData.AddOn == "" {
+				retInternalPaths[apiCollection.CollectionData.InternalPath] = InternalPath{
+					Path:           apiCollection.CollectionData.InternalPath,
+					Enabled:        apiCollection.Enabled,
+					ApiInterface:   apiCollection.CollectionData.ApiInterface,
+					ConnectionType: apiCollection.CollectionData.Type,
+					Addon:          apiCollection.CollectionData.AddOn,
+				}
+			}
+			if apiCollection.CollectionData.AddOn == "" {
+				collectBaseApis(baseApis, subscriptionApis, apiCollection)
 			}
 
 			for _, parsing := range apiCollection.ParseDirectives {
@@ -880,7 +903,64 @@ func getServiceApis(
 			apiCollections[collectionKey] = apiCollection
 		}
 	}
+	markPathsServingRoot(retInternalPaths, baseApis, subscriptionApis)
 	return retInternalPaths, serverApis, taggedApis, apiCollections, headers, verifications
+}
+
+// baseApiKey is one api a base collection answers, by name and connection type.
+type baseApiKey struct {
+	name           string
+	connectionType string
+}
+
+// collectBaseApis records the enabled apis of a base (add-on-less) collection
+// under its internal path, and the names its subscription directives use.
+func collectBaseApis(baseApis map[string]map[baseApiKey]struct{}, subscriptionApis map[string]struct{}, apiCollection *spectypes.ApiCollection) {
+	path := apiCollection.CollectionData.InternalPath
+	if baseApis[path] == nil {
+		baseApis[path] = map[baseApiKey]struct{}{}
+	}
+	for _, api := range apiCollection.Apis {
+		if api.Enabled {
+			baseApis[path][baseApiKey{name: api.Name, connectionType: apiCollection.CollectionData.Type}] = struct{}{}
+		}
+	}
+	for _, parsing := range apiCollection.ParseDirectives {
+		switch parsing.FunctionTag {
+		case spectypes.FUNCTION_TAG_SUBSCRIBE, spectypes.FUNCTION_TAG_UNSUBSCRIBE, spectypes.FUNCTION_TAG_UNSUBSCRIBE_ALL:
+			subscriptionApis[parsing.ApiName] = struct{}{}
+		}
+	}
+}
+
+// markPathsServingRoot sets ServesRoot on every non-root base path that answers
+// all of the root base collection's apis. Subscription apis are left out: they
+// travel over ws, and the question is whether an http url can take root
+// traffic. A root with no such apis is served by nothing.
+func markPathsServingRoot(internalPaths map[string]InternalPath, baseApis map[string]map[baseApiKey]struct{}, subscriptionApis map[string]struct{}) {
+	rootApis := make([]baseApiKey, 0, len(baseApis[""]))
+	for api := range baseApis[""] {
+		if _, subscription := subscriptionApis[api.name]; !subscription {
+			rootApis = append(rootApis, api)
+		}
+	}
+	if len(rootApis) == 0 {
+		return
+	}
+	for path, entry := range internalPaths {
+		if path == "" || entry.Addon != "" {
+			continue
+		}
+		servesAll := true
+		for _, api := range rootApis {
+			if _, ok := baseApis[path][api]; !ok {
+				servesAll = false
+				break
+			}
+		}
+		entry.ServesRoot = servesAll
+		internalPaths[path] = entry
+	}
 }
 
 func (bcp *BaseChainParser) ExtensionsParser() *extensionslib.ExtensionParser {
