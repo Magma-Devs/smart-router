@@ -4101,6 +4101,36 @@ func cacheWriteReplySnapshot(reply *pairingtypes.RelayReply) *pairingtypes.Relay
 	return &snapshot
 }
 
+// replyHeaderDirectives is the reply-direction header directives of the served API
+// interface, from the chain parser (ChainParser.ReplyHeaderDirectives), or nil for a server
+// built without one (tests). The relay sender and the primary cache hit path filter an
+// upstream's headers by them (MAG-3104).
+func (rpcss *RPCSmartRouterServer) replyHeaderDirectives() []*spectypes.Header {
+	if rpcss.chainParser == nil {
+		return nil
+	}
+	return rpcss.chainParser.ReplyHeaderDirectives()
+}
+
+// filterCachedReplyMetadata applies the live path's upstream-header filter to a reply
+// served from the primary cache, so a hit replays the same reduced set as a live reply
+// whoever wrote the entry: a pod on an older binary during a rollout, or this one before
+// the filter existed. Entries are written before the router's own headers are appended,
+// so nothing the router minted is in the set. The reply is the lookup's own unmarshalled
+// copy and is filtered in place.
+func (rpcss *RPCSmartRouterServer) filterCachedReplyMetadata(reply *pairingtypes.RelayReply, protocolMessage chainlib.ProtocolMessage) {
+	if reply == nil || len(reply.Metadata) == 0 {
+		return
+	}
+	var collectionDirectives []*spectypes.Header
+	if protocolMessage != nil {
+		if apiCollection := protocolMessage.GetApiCollection(); apiCollection != nil {
+			collectionDirectives = apiCollection.Headers
+		}
+	}
+	reply.Metadata = filterUpstreamReplyMetadata(reply.Metadata, rpcss.replyHeaderDirectives(), collectionDirectives)
+}
+
 // resolvePinDirectives returns the lava-select-provider and lava-stickiness directives,
 // honored only on the first attempt. On a retry (firstAttempt == false) both are returned
 // empty so the relay falls through to a different provider instead of re-pinning the one
@@ -4336,6 +4366,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 								utils.LogAttr("GUID", ctx),
 							)
 							reply.Data = outputFormatter(reply.Data)
+							// Whoever wrote the entry, the client gets the live reply's header set.
+							rpcss.filterCachedReplyMetadata(reply, protocolMessage)
 
 							// Entry kind: the label its writer attached, or its contents. Shared
 							// with the secondary tier so both label a replayed node error
@@ -4665,11 +4697,12 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		senderChainFamily = family
 	}
 	directSender := &DirectRPCRelaySender{
-		directConnection:    directConnection,
-		endpointName:        endpointName,
-		originalRequestData: originalRequestData,
-		chainFamily:         senderChainFamily,
-		groupLabel:          singleConsumerSession.Parent.GroupLabel,
+		directConnection:      directConnection,
+		endpointName:          endpointName,
+		originalRequestData:   originalRequestData,
+		chainFamily:           senderChainFamily,
+		groupLabel:            singleConsumerSession.Parent.GroupLabel,
+		replyHeaderDirectives: rpcss.replyHeaderDirectives(),
 	}
 
 	// Send relay directly to RPC endpoint

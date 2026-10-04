@@ -116,3 +116,47 @@ func TestDirectRelay429KeepsWhatTheRetryAfterComputationNeeds(t *testing.T) {
 	require.True(t, ok, "a 429 must still carry the upstream's Retry-After")
 	require.Equal(t, 90*time.Second, wait)
 }
+
+func TestDirectRelayKeepsTheInterfacesReplyHeadersWhenTheCollectionDeclaresNone(t *testing.T) {
+	// Aptos POST: the matched collection declares no headers, the GET collection declares
+	// the ledger-state set, and the node sends it on both. The server hands the sender the
+	// interface's union (ChainParser.ReplyHeaderDirectives); without it, the seven the
+	// Aptos Rust SDK requires on every reply would be dropped.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Type", "application/json; charset=utf-8")
+		for name, value := range aptosLedgerStateHeaders {
+			h.Set(name, value)
+		}
+		h.Set("X-Aptos-Gas-Used", "10")
+		h.Set("Server", "cloudflare")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`["1"]`))
+	}))
+	defer upstream.Close()
+
+	newMessage := func() *mockChainMessage {
+		return &mockChainMessage{
+			apiInterface: "rest",
+			httpMethod:   "POST",
+			rpcMessage:   &rpcInterfaceMessages.RestMessage{Path: "/view", Msg: []byte(`{"function":"0x1::chain_id::get","type_arguments":[],"arguments":[]}`)},
+		}
+	}
+
+	sender := newTestDirectSender(t, upstream)
+	sender.replyHeaderDirectives = aptosGETDirectives
+	result, err := sender.SendDirectRelay(context.Background(), newMessage(), 5*time.Second)
+	require.NoError(t, err)
+	names := metadataNames(result.Reply.Metadata)
+	for name := range aptosLedgerStateHeaders {
+		require.Contains(t, names, name)
+	}
+	require.NotContains(t, names, "X-Aptos-Gas-Used", "APT1 does not declare it (MOVEMENT does)")
+	require.NotContains(t, names, "Server")
+
+	bare := newTestDirectSender(t, upstream)
+	result, err = bare.SendDirectRelay(context.Background(), newMessage(), 5*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, []string{"Content-Type", "Date"}, metadataNames(result.Reply.Metadata),
+		"a sender without the interface's directives runs on the matched collection alone, which declares none")
+}

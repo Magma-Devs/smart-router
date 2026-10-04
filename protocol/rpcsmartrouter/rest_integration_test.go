@@ -736,3 +736,67 @@ func TestRESTRelay_5xx_TransportPathUnchanged(t *testing.T) {
 		})
 	}
 }
+
+// TestRESTRelay_AptosLedgerStateHeadersSurviveOnGETAndPOST pins, through the real APT1
+// spec, that the seven headers aptos-rest-client's State::from_headers requires on every
+// successful reply survive the filter on a GET and on a POST (MAG-3104). The spec declares
+// them on the GET collection only, one of them as pass_ignore, and the node sends them on
+// POST too: the directives are resolved for the whole API interface, and pass_ignore passes.
+func TestRESTRelay_AptosLedgerStateHeadersSurviveOnGETAndPOST(t *testing.T) {
+	ctx := context.Background()
+	chainParser, _, _, closeServer, endpoint, err := chainlib.CreateChainLibMocks(
+		ctx,
+		"APT1",
+		spectypes.APIInterfaceRest,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := w.Header()
+			h.Set("Content-Type", "application/json; charset=utf-8")
+			for name, value := range aptosLedgerStateHeaders {
+				h.Set(name, value)
+			}
+			h.Set("X-Aptos-Gas-Used", "10")
+			h.Set("Server", "cloudflare")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"chain_id":1}`))
+		}),
+		nil,
+		"../../",
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, endpoint)
+	defer closeServer()
+
+	directConn, err := lavasession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, "")
+	require.NoError(t, err)
+	sender := &DirectRPCRelaySender{
+		directConnection:      directConn,
+		endpointName:          "test-aptos-endpoint",
+		replyHeaderDirectives: chainParser.ReplyHeaderDirectives(),
+	}
+
+	for _, tc := range []struct {
+		name, path, method string
+		body               []byte
+	}{
+		{name: "GET /", path: "/", method: http.MethodGet},
+		{name: "POST /view", path: "/view", method: http.MethodPost, body: []byte(`{"function":"0x1::chain_id::get","type_arguments":[],"arguments":[]}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chainMessage, err := chainParser.ParseMsg(tc.path, tc.body, tc.method, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+			require.NoError(t, err)
+			result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.NotNil(t, result.Reply)
+
+			names := metadataNames(result.Reply.Metadata)
+			for name := range aptosLedgerStateHeaders {
+				require.Containsf(t, names, name, "%s must survive on %s, got: %+v", name, tc.name, result.Reply.Metadata)
+			}
+			require.Contains(t, names, "Content-Type")
+			require.NotContains(t, names, "Server", "the vendor's own header must not reach the reply")
+			require.NotContains(t, names, "X-Aptos-Gas-Used", "APT1 does not declare it")
+		})
+	}
+}
