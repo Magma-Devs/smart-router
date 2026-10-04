@@ -329,30 +329,38 @@ var (
 	// UNKNOWN_ERROR before.
 	//
 	// The only node known to send it is Sui, and only when a transaction is submitted
-	// (sui-rpc-api maps TransactionSubmissionError's Aborted category to it). Cosmos SDK, CometBFT,
-	// ibc-go, wasmd, Lava and Concordium never send it. Sui uses it for the TRANSACTION's outcome:
-	// - rejected by consensus, or its status expired;
-	// - an input object or package that does not exist yet;
-	// - already finalized, under different signatures.
-	// Every endpoint gives the same answer, and resubmitting is the client's call.
+	// (sui-rpc-api maps the transaction driver's Aborted category to it, plus one direct case,
+	// "already finalized but with different user signatures"). Cosmos SDK, CometBFT, ibc-go,
+	// wasmd, Lava and Concordium never send it. Sui's own definition, in sui-core's
+	// transaction_driver/error.rs, is "transient failure during transaction processing that
+	// prevents the transaction from finalization. Retriable with new transaction submission",
+	// and the message a client receives starts "Transaction processing aborted (retriable with
+	// another submission)". The named cases are a consensus rejection, a status dropped from the
+	// validator's cache, and an input object or package that does not exist yet; categorize()
+	// falls back to Aborted for every validator error Sui does not list otherwise.
 	//
-	// So it is not the endpoint's fault, and Retryable=false says exactly that. Asking another
-	// endpoint cannot change the answer. CategoryExternal + !Retryable is excused by
-	// EndpointAtFault, and IsNonRetryable keeps it out of the availability score. Left as
-	// UNKNOWN_ERROR, it was scored against every endpoint the write was broadcast to.
+	// So ABORTED is what the validators answered when the fullnode's transaction driver
+	// submitted the write. It is not evidence against the fullnode the router sent it to, and
+	// whether to submit again is the client's call: ExecuteTransaction is stateful, so the
+	// router never re-sends a write, and policy.Decide stops a stateful relay before it reads
+	// HasNonRetryableNodeError. What Retryable=false does here is keep the answer off the
+	// endpoint: CategoryExternal + !Retryable is excused by EndpointAtFault, and IsNonRetryable
+	// keeps it out of the availability score. Left as UNKNOWN_ERROR, it was scored against every
+	// endpoint the write was broadcast to.
 	//
 	// MayHaveReachedNode is true because the node answered: the already-finalized case means a
 	// transaction answered with ABORTED can be on chain. It does not decide a write's verdict
 	// here. A gRPC status error comes back as a node error carrying the node's own message, and
 	// writeOutcomeIsUnknown reads this flag only from protocol errors, so the caller gets Sui's
-	// ABORTED answer, a known outcome, rather than errUnknownWriteOutcome.
+	// ABORTED answer, with its "retriable with another submission" text, rather than
+	// errUnknownWriteOutcome.
 	//
 	// A node error, not PROTOCOL_PROVIDER_ABORTED (1013). That code is CategoryInternal, which
 	// would report the endpoint as unreachable and rank the node's own message below internal
 	// errors. It also claims the request never reached the node.
 	LavaErrorNodeAborted = registerError(&LavaError{
 		Code: 2019, Name: "NODE_ABORTED", Category: CategoryExternal,
-		Description: "Node aborted the operation (gRPC ABORTED); on Sui, a transaction outcome such as a consensus rejection", Retryable: false,
+		Description: "Node aborted the operation (gRPC ABORTED); on Sui, the validators' answer to a submitted transaction, retriable by the client with a new submission", Retryable: false,
 		MayHaveReachedNode: true,
 	})
 

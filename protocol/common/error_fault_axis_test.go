@@ -86,7 +86,11 @@ var faultAxisTable = []faultAxisCase{
 	// about what its configuration will serve, which is not evidence that it is broken. Blaming it
 	// walked the refusal counter and disabled the URL for every path.
 	{2018, "NODE_ACCESS_DENIED", SubCategoryNodeCapability, true, "endpoint configuration: credentials, plan, WAF, region"},
-	{2019, "NODE_ABORTED", SubCategoryNone, false, "Sui transaction outcome, the same from every endpoint"},
+	// The validators' answer to a Sui transaction, relayed by the fullnode the router sent it to.
+	// Not evidence against that endpoint. Sui's own message calls it retriable with another
+	// submission, and that is the client's call: ExecuteTransaction is stateful, so the router
+	// never re-sends a write. Non-retryable here keeps the answer out of the endpoint's score.
+	{2019, "NODE_ABORTED", SubCategoryNone, false, "validators' verdict on a Sui write; resubmitting is the client's call"},
 	{3001, "CHAIN_NONCE_TOO_LOW", SubCategoryNone, false, ""},
 	{3002, "CHAIN_NONCE_TOO_HIGH", SubCategoryNone, false, ""},
 	{3003, "CHAIN_INSUFFICIENT_FUNDS", SubCategoryNone, false, ""},
