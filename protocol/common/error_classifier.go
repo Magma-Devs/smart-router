@@ -384,9 +384,10 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{GRPCCodeEquals(11), LavaErrorNodeDataNotHeld},        // codes.OutOfRange
 		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented},      // codes.Unimplemented
 		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
-		// codes.Aborted (MAG-3995): on Sui, the one node that sends it, it is a transaction's
-		// outcome and the same from every endpoint. It is not the endpoint's fault, so it is
-		// non-retryable; see LavaErrorNodeAborted.
+		// codes.Aborted (MAG-3995): on Sui, the one node that sends it, it is the validators'
+		// answer to a submitted transaction, relayed by the fullnode, and Sui's own message calls
+		// it retriable with another submission. Not evidence against the endpoint, and the
+		// resubmission is the client's call, so non-retryable; see LavaErrorNodeAborted.
 		{GRPCCodeEquals(10), LavaErrorNodeAborted}, // codes.Aborted
 		// Deliberately NOT registered, each for its own reason — do not add them
 		// as a block, which is how `Code >= 13` went wrong in the first place:

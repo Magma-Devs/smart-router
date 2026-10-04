@@ -185,13 +185,13 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 				"only because ApplyNodeErrorClassification assigns the whole flag set, not IsNonRetryable alone",
 		},
 		{
-			name:             "Aborted is a transaction outcome, not the endpoint's fault",
+			name:             "Aborted is the validators' verdict on a write, not the endpoint's fault",
 			code:             codes.Aborted,
 			nodeMessage:      "Transaction execution failed: rejected by consensus",
 			wantNonRetryable: true,
 			wantScored:       false,
-			why: "MAG-3995: Sui sends ABORTED only on transaction submission, and every endpoint " +
-				"it is broadcast to gives the same answer; scoring it charges them all for the transaction",
+			why: "MAG-3995: Sui sends ABORTED only on transaction submission, relaying what the validators " +
+				"answered; scoring it charged every endpoint the write was broadcast to for a verdict none of them made",
 		},
 		{
 			name:        "DataLoss stays unregistered and scored",
@@ -356,16 +356,17 @@ func TestHealthResetRequiresPositiveProof(t *testing.T) {
 }
 
 // MAG-3995: gRPC ABORTED used to classify as UNKNOWN_ERROR, which scored it against every endpoint a
-// Sui transaction was broadcast to. It is a transaction's outcome, so it is now non-retryable and
-// neither scored nor counted toward benching. DataLoss is the unregistered control.
-func TestSendGRPCRelay_AbortedIsATransactionOutcome(t *testing.T) {
+// Sui transaction was broadcast to. It is the validators' answer to the write, relayed by the
+// fullnode, so it is now non-retryable and neither scored nor counted toward benching. DataLoss is
+// the unregistered control.
+func TestSendGRPCRelay_AbortedIsNotTheEndpointsFault(t *testing.T) {
 	require.Equal(t, common.LavaErrorNodeAborted,
 		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.Aborted), "rejected by consensus"))
 
 	aborted := grpcStatusRelay(t, codes.Aborted, "rejected by consensus")
 	require.True(t, aborted.IsNodeError, "still a node error, so it is never served as a success or cached")
-	require.True(t, aborted.IsNonRetryable, "every endpoint gives the same answer")
-	require.False(t, aborted.IsNodeAtFault, "the transaction's outcome must not count toward --bench-after")
+	require.True(t, aborted.IsNonRetryable, "resubmitting is the client's call; the flag keeps the answer off the endpoint")
+	require.False(t, aborted.IsNodeAtFault, "the validators' verdict must not count toward --bench-after")
 	require.False(t, shouldFailSessionForResult(nil, aborted), "nor lower the endpoint's availability score")
 	require.False(t, relayProvesEndpointHealthy(aborted), "and it is not proof of health either")
 
