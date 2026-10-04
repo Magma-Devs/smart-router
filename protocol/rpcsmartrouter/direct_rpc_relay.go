@@ -34,6 +34,12 @@ type DirectRPCRelaySender struct {
 	originalRequestData []byte             // Original request bytes (for batch support)
 	chainFamily         common.ChainFamily // Chain family for Tier 2 classification (-1 if unknown)
 	groupLabel          string             // Cross-validation group label of this provider (may be empty)
+	// replyHeaderDirectives is the reply-direction header directives of the relay's API
+	// interface, resolved by the server from the chain parser across every collection of
+	// the interface (ChainParser.ReplyHeaderDirectives). SendDirectRelay keeps these
+	// upstream headers, and the matched collection's own, in the reply; a sender built
+	// without them (tests) runs on the matched collection alone. MAG-3104.
+	replyHeaderDirectives []*spectypes.Header
 }
 
 // maxGRPCResponseSizeForBlockExtraction is the threshold above which gRPC block-height
@@ -476,9 +482,24 @@ func (d *DirectRPCRelaySender) SendDirectRelay(
 	chainMessage chainlib.ChainMessage,
 	attemptBudget time.Duration,
 ) (*common.RelayResult, error) {
-	// Branch based on API interface
 	apiCollection := chainMessage.GetApiCollection()
+	result, err := d.sendForInterface(ctx, chainMessage, apiCollection, attemptBudget)
+	if result != nil && result.Reply != nil {
+		// An upstream's headers reach the client only through this filter (MAG-3104). It
+		// runs here, once, for every transport and every arm of the senders, a gRPC error
+		// body returned as a result included; the senders hand it the raw set.
+		result.Reply.Metadata = filterUpstreamReplyMetadata(result.Reply.Metadata, d.replyHeaderDirectives, apiCollection.Headers)
+	}
+	return result, err
+}
 
+// sendForInterface dispatches to the sender for the API interface of the matched collection.
+func (d *DirectRPCRelaySender) sendForInterface(
+	ctx context.Context,
+	chainMessage chainlib.ChainMessage,
+	apiCollection *spectypes.ApiCollection,
+	attemptBudget time.Duration,
+) (*common.RelayResult, error) {
 	switch apiCollection.CollectionData.ApiInterface {
 	case "jsonrpc", "tendermintrpc":
 		return d.sendJSONRPCRelay(ctx, chainMessage, attemptBudget)
@@ -637,9 +658,9 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	// Uses spec-driven parsing for all API interfaces (EVM, Tendermint, etc.)
 	latestBlockFromResponse := extractBlockHeightFromJSONResponse(responseData, chainMessage)
 
-	// Keep only the upstream headers the client is entitled to (MAG-3104): the transport
-	// set and the spec's own reply headers. See upstreamReplyMetadata for what is dropped.
-	responseMetadata := upstreamReplyMetadata(response.Headers, chainMessage.GetApiCollection())
+	// Convert response headers to metadata (same as REST path)
+	// This enables Provider-Latest-Block, lava-identified-node-error, and upstream hints
+	responseMetadata := convertHTTPHeadersToMetadata(response.Headers)
 
 	result := &common.RelayResult{
 		Reply: &pairingtypes.RelayReply{
@@ -827,8 +848,8 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		isNodeError = hasError
 	}
 
-	// Keep only the upstream headers the client is entitled to (MAG-3104).
-	responseMetadata := upstreamReplyMetadata(response.Headers, chainMessage.GetApiCollection())
+	// Convert response headers to metadata
+	responseMetadata := convertHTTPHeadersToMetadata(response.Headers)
 
 	// Build result (include body even for 4xx/5xx!)
 	providerAddress := d.endpointName
@@ -994,9 +1015,8 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			}
 			result := &common.RelayResult{
 				Reply: &pairingtypes.RelayReply{
-					// Error body in JSON; its metadata allow-listed like a success's (MAG-3104)
-					Data:     response.Data,
-					Metadata: upstreamReplyMetadata(response.Metadata, chainMessage.GetApiCollection()),
+					Data:     response.Data,                                   // Error response in JSON format
+					Metadata: convertHTTPHeadersToMetadata(response.Metadata), // Include metadata even for errors
 				},
 				Finalized:  true,
 				StatusCode: response.StatusCode,
@@ -1068,7 +1088,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		Reply: &pairingtypes.RelayReply{
 			Data:        response.Data,
 			LatestBlock: latestBlockFromResponse,
-			Metadata:    upstreamReplyMetadata(response.Metadata, chainMessage.GetApiCollection()), // allow-listed (MAG-3104)
+			Metadata:    convertHTTPHeadersToMetadata(response.Metadata), // Include gRPC response metadata
 		},
 		Finalized:  true,
 		StatusCode: response.StatusCode,
@@ -1101,4 +1121,22 @@ func looksLikeJSONOpening(data []byte) bool {
 		}
 	}
 	return false
+}
+
+// convertHTTPHeadersToMetadata turns an upstream's response headers (http.Header or gRPC
+// metadata, both map[string][]string) into reply metadata, one entry per name with the
+// first value. The set is raw: SendDirectRelay passes it through
+// filterUpstreamReplyMetadata before it leaves the sender (MAG-3104).
+func convertHTTPHeadersToMetadata(headers map[string][]string) []pairingtypes.Metadata {
+	metadata := make([]pairingtypes.Metadata, 0, len(headers))
+	for name, values := range headers {
+		if len(values) > 0 {
+			// Use first value (most headers are single-value)
+			metadata = append(metadata, pairingtypes.Metadata{
+				Name:  name,
+				Value: values[0],
+			})
+		}
+	}
+	return metadata
 }

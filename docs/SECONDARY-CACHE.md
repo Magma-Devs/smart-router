@@ -568,9 +568,11 @@ set, and the body is the same bytes. (The one difference is invisible here and
 by design: an entry that came from the secondary replays only its
 `Content-Type` / `Content-Encoding`, not whatever other upstream headers the
 writer's node happened to send. Since MAG-3104 the live path is nearly as
-strict — `upstreamReplyMetadata` keeps those two, `Retry-After`, `Date` and the
-spec's own reply headers, and drops the rest before the reply is built — so
-the primary stores and replays the same reduced set.)
+strict — `filterUpstreamReplyMetadata` keeps those two, `Retry-After`, `Date`
+and the spec's own reply headers, and drops the rest before the reply leaves
+the sender — and a primary hit is passed through the same filter when it is
+served, so the primary replays that reduced set whichever router wrote the
+entry.)
 
 `Lava-Cache-Tier` names the tier that answered, and `Lava-Cache-Outcome` says
 what each tier did on the way. Both are part of the reply, so there is nothing
