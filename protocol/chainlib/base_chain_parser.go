@@ -25,15 +25,9 @@ import (
 var (
 	// SkipWebsocketVerificationDefault seeds every parser built by NewChainParser and
 	// is bound to --skip-websocket-verification. It is written once during flag parsing,
-	// before any parser or goroutine exists, and is read-only from then on.
-	//
-	// It is deliberately NOT consulted at the point of use. The `health` command probes
-	// each direct-rpc entry concurrently and needs a different answer per entry (ws
-	// augmentation only routes for an entry that actually has a ws:// URL), so it used to
-	// flip a package global under a mutex around ValidateCollect. That missed the second
-	// reader — newChainRouter — which runs outside that mutex, so entries raced each other
-	// into the wrong ws enforcement and healthy legs reported red (MAG-2333). Per-parser
-	// state removes the shared cell entirely.
+	// before any parser or goroutine exists, and is read-only from then on. Nothing reads
+	// it at the point of use: a caller that needs another answer for one parser sets it
+	// there (SetSkipWebsocketVerification), as the `health` command does per provider.
 	SkipWebsocketVerificationDefault = false
 
 	// SkipAllVerifications is the process-wide off switch behind --skip-all-verifications.

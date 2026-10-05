@@ -77,18 +77,18 @@ See [tools/wizard/README.md](tools/wizard/README.md) for the full walkthrough.
 
 ### Health check (`smartrouter health`)
 
-A spec-driven, one-shot diagnostic that crafts and sends the relays each spec defines to every
-configured upstream node URL, then prints a single JSON report to stdout. It's **chain-agnostic** —
+A spec-driven, one-shot diagnostic that sends every configured node URL the relays its spec defines,
+over that URL's own connection, then prints a single JSON report to stdout. It's **chain-agnostic** —
 it relies entirely on the loaded specs, so any chain or interface with a spec works out of the box
-with no per-chain code. For each node URL it runs the standard latest-block call plus every
-verification the spec declares for that node's `addons`/`extensions` (archive / debug / trace and,
-when the spec supports subscriptions, a websocket check on `wss://` URLs).
+with no per-chain code. Each node URL gets the standard latest-block call plus every verification the
+spec declares for what that URL serves (the base collection and its `addons`/`extensions`). A
+`ws(s)://` URL answers for the checks of a collection that subscribes.
 
 ```bash
 # Probe every node-url under direct-rpc in a config file
 smartrouter health config/smartrouter_examples/smartrouter_eth.yml --use-static-spec specs/
 
-# Or probe an ad-hoc endpoint inline (address chain-id api-interface)
+# Or probe an ad-hoc endpoint inline (node-url chain-id api-interface)
 smartrouter health https://ethereum-rpc.publicnode.com ETH1 jsonrpc --use-static-spec specs/
 ```
 
@@ -96,7 +96,7 @@ The report is the only thing on **stdout** (all logs go to stderr), so it pipes 
 or a downstream verifier:
 
 ```bash
-smartrouter health smartrouter_eth.yml --use-static-spec specs/ 2>/dev/null | jq '.results[] | {name, url, ok}'
+smartrouter health smartrouter_eth.yml --use-static-spec specs/ 2>/dev/null | jq '.results[] | {name, url, ok, router}'
 ```
 
 The document is a uniform envelope — consumers always `JSON.parse` stdout and read `.ok` / `.error` /
@@ -114,42 +114,55 @@ is printed first.
       "name": "eth-publicnode",
       "chainId": "ETH1",
       "apiInterface": "jsonrpc",
-      "url": "wss://ethereum-rpc.publicnode.com",
-      "transport": "ws",
-      "addons": ["debug"],
+      "url": "https://ethereum-rpc.publicnode.com",
+      "transport": "http",
+      "addons": ["archive"],
       "extensions": ["archive"],
       "specValid": true,
       "latestBlock": 25374584,
       "ok": false,
       "verifications": [
-        { "name": "chain-id", "addon": "",      "extension": "",        "ok": true },
-        { "name": "archive",  "addon": "",      "extension": "archive", "ok": false, "error": "block not found" }
-      ]
+        { "name": "chain-id", "addon": "", "extension": "",        "severity": "Fail", "ok": true },
+        { "name": "pruning",  "addon": "", "extension": "archive", "severity": "Fail", "ok": false, "error": "block not found" }
+      ],
+      "router": { "verdict": "admitted", "refusedServices": ["archive"] }
     }
   ]
 }
 ```
 
-An upstream with multiple node URLs (e.g. an `https://` and a `wss://` endpoint) yields **one row per
-URL**, distinguished by `url`/`transport`. An endpoint's `ok` is `true` only when the spec loaded
-(`specValid`) **and** every verification passed. Top-level `ok` is the AND of all rows.
+There is **one row per node URL**, and every field in it is that URL's own: its checks ran over its
+own connection, and `latestBlock` is its own height — `0` when the spec gives it no height request,
+`-1` when the request failed (`latestBlockError` says why). A row's `ok` is `true` only when the spec
+loaded (`specValid`), the URL was reached, and every verification passed, whatever its `severity`.
+Top-level `ok` is the AND of all rows.
+
+`router` is what a router started with the same flags does with that URL:
+
+| `verdict` | Meaning |
+| --- | --- |
+| `admitted` | Served, minus any `refusedServices` — the add-ons and extensions whose own checks failed |
+| `refused` | Dropped: it failed a check no single service owns, or could not be dialed. The provider serves from its other URLs |
+| `excluded` | The whole provider is dropped: a path it serves has no URL left, or its node URLs are a list the router cannot serve from (`reason` says which) |
+| `unknown` | The probe could not decide — its spec did not load, or it timed out |
+
+A failed `Warning` check fails the row but never the verdict: the router logs it and serves.
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--use-static-spec` | (required) | Spec source(s) — file, directory, or remote URL (same paths as the main command) |
+| `--github-token` / `--gitlab-token` | none | Token for a private spec repository |
 | `--include-backup` | `false` | Also probe upstreams under `backup-direct-rpc` |
-| `--timeout` | `30s` | Per-upstream timeout, and the basis for the global wall-clock cap (upstreams probe concurrently; the run never exceeds `timeout + 5s`). A slow/blocked node aborts instead of hanging |
-| `--skip-websocket-verification` | `false` | Exclude `ws://`/`wss://` endpoints and the spec's websocket verification (see note) |
+| `--timeout` | `30s` | Per-upstream budget for dialing and every relay; a slow or blocked node aborts instead of hanging, and an upstream that has not finished `5s` after it is reported as a timed-out row |
+| `--concurrency` | `8` | How many upstreams are probed at once |
+| `--skip-websocket-verification` | `false` | Only dial `ws(s)://` URLs, running no check over them (see note) |
+| `--use-tls` / `--allow-insecure-connection` | `true` / `false` | Inline gRPC endpoints only; a config's node URLs carry their own `auth-config` |
 | `--log-level` | `info` | Log verbosity (written to stderr) |
 
-> **Websocket is verified by default.** For any chain whose spec supports subscriptions, the command
-> probes the configured `ws://`/`wss://` endpoints and runs the spec's websocket verification — so the
-> health check exercises the full surface a supported chain exposes. A blocked or slow ws node can't
-> stall the run: each upstream is bounded by `--timeout`, upstreams probe concurrently, and a global
-> wall-clock cap (`timeout + 5s`) guarantees the command returns even if a connector wedges (an upstream
-> that doesn't finish in time is reported as a timed-out row). Pass `--skip-websocket-verification` to
-> exclude ws endpoints — useful for a fast HTTP-only sanity check; each excluded URL is then reported as
-> a row marked `"websocket verification skipped"`.
+> **Websockets mirror the router's flag.** By default a `ws(s)://` URL runs, over the socket, every
+> check of a collection that subscribes, as a router does without `--skip-websocket-verification`.
+> With the flag the socket is only dialed, as it is by a router started with it. Run health with the
+> same flag your routers run with, and `router` reads as theirs.
 
 ### Run with Docker Compose
 

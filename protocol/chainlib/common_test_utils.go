@@ -267,6 +267,13 @@ func CreateMockXRPLSpec(index string) spectypes.Spec {
 // setMockLogLevelOnce guards the one-time global log-level set in CreateChainLibMocks (see there).
 var setMockLogLevelOnce sync.Once
 
+// UseMockLogLevel makes the one global log-level write CreateChainLibMocks does. A
+// test that starts logging goroutines without the mocks calls it first, so the write
+// never lands under a goroutine it left running.
+func UseMockLogLevel() {
+	setMockLogLevelOnce.Do(func() { utils.SetGlobalLoggingLevel("debug") })
+}
+
 func CreateChainLibMocks(
 	ctx context.Context,
 	specIndex string,
@@ -281,7 +288,7 @@ func CreateChainLibMocks(
 	// invocation, so a later test's setup wrote those globals while an earlier test's leaked goroutine
 	// still read them in LavaFormatLog — a data race under -race. It is always "debug", so once is
 	// enough: the sole write happens before any test goroutine exists.
-	setMockLogLevelOnce.Do(func() { utils.SetGlobalLoggingLevel("debug") })
+	UseMockLogLevel()
 	// Create a cancellable context for the connector to prevent leaks
 	connectorCtx, cancelConnector := context.WithCancel(ctx)
 
@@ -393,6 +400,6 @@ func CreateChainLibMocks(
 			return nil, nil, nil, closeServer, nil, err
 		}
 	}
-	chainFetcher := NewChainFetcher(ctx, &ChainFetcherOptions{chainRouter, chainParser, endpoint, nil})
+	chainFetcher := NewChainFetcher(ctx, &ChainFetcherOptions{ChainRouter: chainRouter, ChainParser: chainParser, Endpoint: endpoint})
 	return chainParser, chainRouter, chainFetcher, closeServer, endpoint, err
 }
