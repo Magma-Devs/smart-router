@@ -104,11 +104,19 @@ func TestLiveRotationAgainstRealValkey(t *testing.T) {
 	// for the bound.
 	established := map[string]bool{strconv.FormatInt(connID, 10): true}
 	var inPlace, replaced int
-	require.Eventually(t, func() bool {
-		settled, ip, rp := rotationSettled(ctx, t, admin, established, "rotuser2")
-		inPlace, replaced = ip, rp
-		return settled
-	}, rotationSettleTimeout, 100*time.Millisecond, "CLIENT LIST must show the ORIGINAL connection re-authenticated as rotuser2 or replaced, within the pool timeout")
+	deadline := time.Now().Add(rotationSettleTimeout)
+	for {
+		settled, ip, rp, err := rotationSettled(ctx, admin, established, "rotuser2")
+		require.NoError(t, err)
+		if settled {
+			inPlace, replaced = ip, rp
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("CLIENT LIST must show the ORIGINAL connection re-authenticated as rotuser2 or replaced, within the pool timeout")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	t.Logf("rotation outcome: %d connection re-authenticated in place, %d replaced", inPlace, replaced)
 	require.NoError(t, servedAs(ctx, admin, client, "rotuser1", "rotuser2"),
 		"after the rotation the store's traffic must run as the new ACL user, whichever path the rotation took")
@@ -184,20 +192,22 @@ func TestLiveRotationThroughConfiguredStore(t *testing.T) {
 	require.NoError(t, os.WriteFile(credFile, []byte("rotwatch2:rotwatch2-pw"), 0o600))
 
 	// Operations keep flowing throughout; a failure is reported at once rather
-	// than retried (require cannot be used inside the polled condition).
-	var opErr error
+	// than retried. The poll runs on the test goroutine (see rotationSettled).
 	var inPlace, replaced int
-	require.Eventually(t, func() bool {
-		if err := op(); err != nil {
-			opErr = err
-			return true
+	deadline := time.Now().Add(rotationSettleTimeout)
+	for {
+		require.NoError(t, op(), "operations must continue through the rotation")
+		settled, ip, rp, err := rotationSettled(ctx, admin, established, "rotwatch2")
+		require.NoError(t, err)
+		if settled {
+			inPlace, replaced = ip, rp
+			break
 		}
-		settled, ip, rp := rotationSettled(ctx, t, admin, established, "rotwatch2")
-		inPlace, replaced = ip, rp
-		return settled
-	}, rotationSettleTimeout, 250*time.Millisecond,
-		"the Store's own credential watcher must get every established connection re-authenticated as the new ACL user, or replaced by one that is, within the pool timeout — no Refresh call, no restart")
-	require.NoError(t, opErr, "operations must continue through the rotation")
+		if time.Now().After(deadline) {
+			t.Fatal("the Store's own credential watcher must get every established connection re-authenticated as the new ACL user, or replaced by one that is, within the pool timeout — no Refresh call, no restart")
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 	t.Logf("rotation outcome: %d connection(s) re-authenticated in place, %d replaced", inPlace, replaced)
 	require.NoError(t, servedAs(ctx, admin, store.write, "rotwatch1", "rotwatch2"),
 		"after the rotation the store's traffic must run as the new ACL user, whichever path the rotation took")
@@ -261,7 +271,8 @@ func TestLiveRotationProofsRejectReplacementUnderPreviousUser(t *testing.T) {
 	require.Eventually(t, func() bool { return op() == nil }, 5*time.Second, 50*time.Millisecond,
 		"the client must reconnect after the server dropped its connection")
 
-	settled, inPlace, replaced := rotationSettled(ctx, t, admin, established, "rotneg2")
+	settled, inPlace, replaced, err := rotationSettled(ctx, admin, established, "rotneg2")
+	require.NoError(t, err)
 	require.True(t, settled, "retirement of the original id alone reads as a settled rotation; this is the gap the identity proof closes")
 	require.Equal(t, 0, inPlace)
 	require.Equal(t, 1, replaced)
@@ -383,10 +394,18 @@ const rotationSettleTimeout = 15 * time.Second
 // (MAG-3769, reported upstream as redis/go-redis#4027); the earlier assertion
 // that the same id must re-authenticate
 // failed on exactly those runs. No operation fails either way.
-func rotationSettled(ctx context.Context, t *testing.T, admin *redis.Client, established map[string]bool, newUser string) (settled bool, inPlace, replaced int) {
-	t.Helper()
+//
+// It returns a CLIENT LIST failure rather than asserting, as servedAs does, and
+// the tests poll it in a plain loop on the test goroutine rather than through
+// require.Eventually, whose condition runs on a goroutine of its own. A failed
+// require there cannot stop the test, so an admin-connection error would
+// surface as a rotation that never settled, and once Eventually gives up, a
+// condition still running writes the outcome the test is reading.
+func rotationSettled(ctx context.Context, admin *redis.Client, established map[string]bool, newUser string) (settled bool, inPlace, replaced int, err error) {
 	list, err := admin.Do(ctx, "CLIENT", "LIST").Text()
-	require.NoError(t, err)
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("CLIENT LIST: %w", err)
+	}
 	listedAs := map[string]string{} // connection id -> ACL user
 	for _, line := range strings.Split(list, "\n") {
 		id, user := "", ""
@@ -410,10 +429,10 @@ func rotationSettled(ctx context.Context, t *testing.T, admin *redis.Client, est
 		case user == newUser:
 			inPlace++
 		default:
-			return false, 0, 0 // still authenticated as the previous user
+			return false, 0, 0, nil // still authenticated as the previous user
 		}
 	}
-	return true, inPlace, replaced
+	return true, inPlace, replaced, nil
 }
 
 // connectionIDsForUser reports the server-side connection ids currently
