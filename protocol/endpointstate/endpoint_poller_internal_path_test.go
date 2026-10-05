@@ -4,32 +4,20 @@ import (
 	"context"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/stretchr/testify/require"
 )
 
-// newTONTRestParser builds a real REST ChainParser from the trimmed TON/TONT spec
-// the chainlib package keeps for exactly this shape: two internal paths, each
-// with its own head and block-hash directives, no add-ons.
-func newTONTRestParser(t *testing.T) chainlib.ChainParser {
-	t.Helper()
-	spec, err := specutils.GetSpecFromLocalDirs([]string{"../chainlib/testdata"}, "TONT")
-	require.NoError(t, err)
-	cp, err := chainlib.NewChainParser(spectypes.APIInterfaceRest)
-	require.NoError(t, err)
-	cp.SetSpec(spec)
-	return cp
-}
-
+// newTONTPoller builds a poller over a real REST ChainParser from the trimmed
+// TON/TONT spec the chainlib package keeps for exactly this shape: two internal
+// paths, each with its own head and block-hash directives, no add-ons.
 func newTONTPoller(t *testing.T, conn *recordingConnection, internalPath string) *EndpointPoller {
 	t.Helper()
 	return NewEndpointPoller(
 		&lavasession.Endpoint{NetworkAddress: conn.url, InternalPath: internalPath, Enabled: true},
 		conn,
-		newTONTRestParser(t),
+		newRealChainParser(t, "TONT", spectypes.APIInterfaceRest, "../chainlib/testdata"),
 		"TONT",
 		spectypes.APIInterfaceRest,
 	)
@@ -44,7 +32,7 @@ func newTONTPoller(t *testing.T, conn *recordingConnection, internalPath string)
 // 404, and the per-url ChainTracker never started. The /v3 case here fails on
 // that build with exactly that url.
 func TestEndpointPoller_InternalPathUrlPollsItsOwnCollection(t *testing.T) {
-	t.Run("/v3 polls /masterchainInfo and parses last.seqno", func(t *testing.T) {
+	t.Run("v3 polls /masterchainInfo and parses last.seqno", func(t *testing.T) {
 		conn := &recordingConnection{
 			url:      "https://vendor.example/api/v3",
 			respBody: []byte(`{"last":{"workchain":-1,"seqno":88713185,"root_hash":"xfHBPEGmJ6HXvCkYgqBxUdn+MGi9ijSkoh/8pKoVnqY="}}`),
@@ -61,7 +49,7 @@ func TestEndpointPoller_InternalPathUrlPollsItsOwnCollection(t *testing.T) {
 			"a /v3 url must be asked for the /v3 collection's head, not /v2's /getMasterchainInfo")
 	})
 
-	t.Run("/v2 polls /getMasterchainInfo and parses result.last.seqno", func(t *testing.T) {
+	t.Run("v2 polls /getMasterchainInfo and parses result.last.seqno", func(t *testing.T) {
 		conn := &recordingConnection{
 			url:      "https://vendor.example/api/v2",
 			respBody: []byte(`{"ok":true,"result":{"last":{"workchain":-1,"seqno":88713190}}}`),
@@ -76,7 +64,7 @@ func TestEndpointPoller_InternalPathUrlPollsItsOwnCollection(t *testing.T) {
 		require.Equal(t, "https://vendor.example/api/v2/getMasterchainInfo", conn.httpCalls[0].URL)
 	})
 
-	t.Run("/v3 fetches a block hash from /blocks, not /v2's /lookupBlock", func(t *testing.T) {
+	t.Run("v3 fetches a block hash from /blocks, not /v2's /lookupBlock", func(t *testing.T) {
 		conn := &recordingConnection{
 			url:      "https://vendor.example/api/v3",
 			respBody: []byte(`{"blocks":[{"workchain":-1,"seqno":42,"root_hash":"xfHBPEGmJ6HXvCkYgqBxUdn+MGi9ijSkoh/8pKoVnqY="}]}`),
