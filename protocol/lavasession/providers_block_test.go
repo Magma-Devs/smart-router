@@ -83,3 +83,16 @@ func TestProvidersBlock_EverythingBlockedFailsRatherThanServeABlockedOne(t *test
 	served, err := servedBy(t, csm, []string{"p1", "p2", "p3", "b1"})
 	require.Error(t, err, "served %q although every provider was blocked", served)
 }
+
+// Every primary health-blocked and named, no backup: the last resort walks the health-blocked
+// list itself, and the caller's names must hold there too. That path runs only when the router
+// is already degraded, so a regression in it would go unnoticed.
+func TestProvidersBlock_HealthBlockedAndNamedFailsRatherThanServeFromTheBlockedList(t *testing.T) {
+	csm := setupBlockListCSM(t, []string{"p1", "p2", "p3"}, nil)
+	blockEveryPrimary(csm)
+	served, err := servedBy(t, csm, []string{"p1", "p2", "p3"})
+	require.Error(t, err, "served %q from the health-blocked list although the caller named it", served)
+	// The block is still standing, so the walk had providers to serve from: the request failed
+	// because they were skipped, not because the list was empty.
+	require.Len(t, csm.currentlyBlockedProviderAddresses, 3)
+}
