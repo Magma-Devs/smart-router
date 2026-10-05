@@ -10,8 +10,10 @@ import (
 )
 
 const (
-	respCacheOpGet = "get"
-	respCacheOpSet = "set"
+	respCacheOpGet       = "get"
+	respCacheOpSet       = "set"
+	respCacheOpStickyGet = "sticky_get"
+	respCacheOpStickySet = "sticky_set"
 
 	respCacheFailureKindError   = "error"
 	respCacheFailureKindTimeout = "timeout"
@@ -27,9 +29,22 @@ type respCacheMetricsSet struct {
 	connectionErrors prometheus.Counter
 	opsFailed        *prometheus.CounterVec
 	connected        prometheus.Gauge
-	poolTotalConns   prometheus.Gauge
-	poolIdleConns    prometheus.Gauge
-	poolStaleConns   prometheus.Gauge
+	// endpointConnected / endpointConnectionErrors are the per-endpoint form
+	// of connected / connectionErrors, labelled by role (write | read). The
+	// unlabelled pair stays as the whole-cache verdict so existing alerts keep
+	// their meaning; these are what tells an operator WHICH half of a split
+	// cache is down, which the unlabelled pair cannot (MAG-3674).
+	endpointConnected        *prometheus.GaugeVec
+	endpointConnectionErrors *prometheus.CounterVec
+	// skipped counts operations answered by an open breaker without I/O, by
+	// op, and breakerOpen is 1 per side while that side's breaker is open —
+	// together they are what an outage costs the relay path, as distinct from
+	// the failures that opened it.
+	skipped        *prometheus.CounterVec
+	breakerOpen    *prometheus.GaugeVec
+	poolTotalConns prometheus.Gauge
+	poolIdleConns  prometheus.Gauge
+	poolStaleConns prometheus.Gauge
 }
 
 var (
@@ -50,8 +65,24 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 			}, []string{"op", "kind"}),
 			connected: prometheus.NewGauge(prometheus.GaugeOpts{
 				Name: "smartrouter_resp_cache_connected",
-				Help: "1 while the last health probe (PING) against the RESP cache backend succeeded, 0 after a failed probe.",
+				Help: "1 while the last health probe (PING) against every RESP cache endpoint succeeded, 0 after any endpoint failed its probe.",
 			}),
+			endpointConnected: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Name: "smartrouter_resp_cache_endpoint_connected",
+				Help: "Per endpoint: 1 while the last health probe (PING) against it succeeded, 0 after a failed probe. role=write is the write endpoint; role=read is the separate read endpoint when reads are split.",
+			}, []string{"role"}),
+			endpointConnectionErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: "smartrouter_resp_cache_endpoint_connection_errors_total",
+				Help: "Per endpoint: health-probe (PING) failures, by role (write | read).",
+			}, []string{"role"}),
+			skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: "smartrouter_resp_cache_skipped_total",
+				Help: "RESP cache operations skipped without I/O while the breaker on their side was open (endpoint unreachable or slower than its budget), by op (get|set|sticky_get|sticky_set). Never counted as failed: the backend never saw them.",
+			}, []string{"op"}),
+			breakerOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Name: "smartrouter_resp_cache_breaker_open",
+				Help: "Per side of the relay path: 1 while that side's breaker is open, 0 otherwise. role=write: writes are being skipped (the write endpoint failed writes or its probe); role=read: lookups are being skipped (the read endpoint failed lookups or its probe). Without a read split one breaker stands behind both roles and the two series move together.",
+			}, []string{"role"}),
 			poolTotalConns: prometheus.NewGauge(prometheus.GaugeOpts{
 				Name: "smartrouter_resp_cache_pool_total_conns",
 				Help: "Connections currently held by the RESP client pool(s) (write + read when split).",
@@ -65,7 +96,7 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 				Help: "Stale connections removed from the RESP client pool(s).",
 			}),
 		}
-		prometheus.MustRegister(m.connectionErrors, m.opsFailed, m.connected, m.poolTotalConns, m.poolIdleConns, m.poolStaleConns)
+		prometheus.MustRegister(m.connectionErrors, m.opsFailed, m.connected, m.endpointConnected, m.endpointConnectionErrors, m.skipped, m.breakerOpen, m.poolTotalConns, m.poolIdleConns, m.poolStaleConns)
 		respCacheMetrics = m
 	})
 	return respCacheMetrics

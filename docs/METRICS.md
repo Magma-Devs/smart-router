@@ -83,7 +83,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | --- | --- | --- | --- |
 | `rpc_endpoint_total_relays_serviced` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays successfully served by this endpoint. |
 | `rpc_endpoint_total_errored` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Errored relays for this endpoint. Excludes relays the router itself cancelled — see `rpc_endpoint_total_cancelled`. |
-| `rpc_endpoint_total_cancelled` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays the router aborted before completion: relay-race losers on stateful broadcasts, and client disconnects. **Not an endpoint fault** — excluded from `rpc_endpoint_total_errored` and from QoS/availability scoring. |
+| `rpc_endpoint_total_cancelled` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays the router aborted before completion: the losing side of a hedged read, a broadcast delivery still running 5 s after the caller was answered, and client disconnects. **Not an endpoint fault** — excluded from `rpc_endpoint_total_errored` and from QoS/availability scoring. |
 | `rpc_endpoint_requests_in_flight` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays currently in flight to this endpoint. |
 | `rpc_endpoint_end_to_end_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `endpoint_id`, `function` | End-to-end latency per function for this endpoint. |
 | `rpc_endpoint_overall_health` | Gauge | `spec`, `apiInterface`, `endpoint_id` | Endpoint health (1 healthy / 0 unhealthy). |
@@ -160,20 +160,31 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 > URL, so `endpoint_id` carries a provider name. Group by `endpoint_id` when reading it — a bare
 > `sum()` counts one physical request once per provider sharing that URL.
 
-> **Reading cancelled relays.** A stateful method (`stateful: 1` in the spec — e.g.
-> `eth_sendRawTransaction`, Solana `sendTransaction`) is broadcast to *every* endpoint; the
-> first response wins and the rest are cancelled. A healthy endpoint under write traffic will
-> therefore show a high `rpc_endpoint_total_cancelled` rate **by design** — with N endpoints,
-> roughly `(N-1)/N` of every broadcast. That is the number to watch when tuning broadcast
-> fan-out; it is not a fault signal.
+> **Reading cancelled relays.** A cancelled relay is one the router stopped: the losing side of a
+> hedged read, whose other attempt answered first; a broadcast delivery still running 5 s after the
+> caller was answered (below); or a relay whose client hung up. It is not a fault signal.
+>
+> A stateful method (`stateful: 1` in the spec — e.g. `eth_sendRawTransaction`, Solana
+> `sendTransaction`) is broadcast to *every* endpoint. The caller gets the first acceptance, and
+> since MAG-4032 the other deliveries keep running for up to 5 s after that answer, so that every
+> endpoint actually receives the transaction. One still running then is cut off and counted here,
+> unscored, as every loser was before MAG-4032. A delivery that finishes is recorded like any
+> other relay, with one exception: when it finishes with a rejection after another endpoint
+> accepted the write — `already known`, `Known transaction`, `nonce too low`, any JSON-RPC error
+> in an HTTP 2xx answer — it is neither scored nor held against the endpoint's health, because the
+> rejection is about the transaction, not the endpoint. A delivery refused or reset at the
+> transport, or answered with an HTTP error status, still counts. Before
+> MAG-4032 the other deliveries were cancelled on the first acceptance, and a healthy endpoint
+> under write traffic showed roughly `(N-1)/N` of every broadcast in
+> `rpc_endpoint_total_cancelled`.
 >
 > The two counters partition the non-success outcomes: `total_errored` is the endpoint's
 > fault, `total_cancelled` is ours. Cancelled relays still decrement
 > `rpc_endpoint_requests_in_flight`, and never move the `smartrouter_requests_*` family, so
 > `requests_total == requests_success + requests_failed` remains exact.
 >
-> Measured on a 3-endpoint SOLANAT router (MAG-2648): 90 stateful broadcasts produced 103
-> serviced + 167 cancelled = 270 relays = 90 × 3, with zero errored.
+> Measured on a 3-endpoint SOLANAT router before MAG-4032 (MAG-2648): 90 stateful broadcasts
+> produced 103 serviced + 167 cancelled = 270 relays = 90 × 3, with zero errored.
 
 ### Optimizer
 
@@ -349,6 +360,8 @@ histogram_quantile(0.9,
 | `smartrouter_cache_success_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier` | Cache hits per tier. |
 | `smartrouter_cache_failed_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier`, `outcome` | Non-hit lookups, split by the closed enum `outcome` = `miss` (clean not-found) \| `error` (transport/server error) \| `timeout` (per-lookup budget exceeded). |
 | `smartrouter_cache_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `method`, `cache_tier` | Cache lookup latency, observed on **every attempted lookup** (hits and non-hits). |
+| `smartrouter_cache_write_skipped_total` | Counter | `spec`, `apiInterface`, `method`, `reason` | Replies served but not written to the cache, by the closed enum `reason` = `size` (the body exceeded `--cache-max-entry-bytes`; off by default). Same on the gRPC and RESP backends, and counts secondary-tier hits too large to backfill. |
+| `smartrouter_cache_entry_bytes` | Histogram | `spec`, `apiInterface`, `method` | Body size of every reply handed to the cache backend for writing, before the backend encodes it. Buckets 1 KiB to 64 MiB in steps of 4, so a 1 MiB cap is a bucket boundary. |
 
 Per tier, `cache_requests_total` = `cache_success_total` + `sum without (outcome) (cache_failed_total)`.
 Note the `sum without` — recovering the identity now takes an explicit aggregation
@@ -386,9 +399,13 @@ are the alerting surface for cache degradation.
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_resp_cache_failed_total` | Counter | `op`, `kind` | Backend-level operation failures (never clean misses): `op` = `get` \| `set`; `kind` = `error` (unreachable / protocol error) \| `timeout` (budget exceeded — saturation reads differently from outage). |
-| `smartrouter_resp_cache_connection_errors_total` | Counter | — | Failed background health probes (PING, every 10s). |
-| `smartrouter_resp_cache_connected` | Gauge | — | 1 while the last health probe succeeded, 0 after a failure. Reachability *transitions* are also logged; steady state stays quiet. |
+| `smartrouter_resp_cache_failed_total` | Counter | `op`, `kind` | Backend-level operation failures (never clean misses): `op` = `get` \| `set` \| `sticky_get` \| `sticky_set`; `kind` = `error` (unreachable / protocol error) \| `timeout` (budget exceeded — saturation reads differently from outage). |
+| `smartrouter_resp_cache_connection_errors_total` | Counter | — | Failed background health probes (PING, every 10s), whole cache: one per probe in which any endpoint failed. |
+| `smartrouter_resp_cache_connected` | Gauge | — | Whole cache: 1 while the last health probe succeeded against every endpoint, 0 after any endpoint failed. Reachability *transitions* are also logged, naming the failing endpoint; steady state stays quiet. |
+| `smartrouter_resp_cache_endpoint_connected` | Gauge | `role` | Per endpoint: 1 while its last probe succeeded, 0 after a failure. `role` = `write` \| `read` (`read` exists only with the read/write split configured). This is the series that says **which half** of a split cache is down; the unlabelled gauge cannot. |
+| `smartrouter_resp_cache_endpoint_connection_errors_total` | Counter | `role` | Per endpoint: failed health probes, by `role`. A read outage never counts against the write endpoint, and vice versa. |
+| `smartrouter_resp_cache_breaker_open` | Gauge | `role` | Per side of the relay path: 1 while that side's breaker is open. `role` = `write` (writes are being skipped: three consecutive write failures or a failed probe of the write endpoint opened it) \| `read` (lookups are being skipped: the same for the read endpoint). While open, the probe runs every second, and the breaker closes on the first probe that answers within the side's budget, once at least one interval has passed. Without a read/write split one breaker stands behind both roles and the two series move together; both exist as 0 from startup. |
+| `smartrouter_resp_cache_skipped_total` | Counter | `op` | Operations an open breaker answered without I/O, `op` = `get` \| `set` \| `sticky_get` \| `sticky_set` (a skipped sticky call is an error to its caller, never a missing claim). Never counted in `smartrouter_resp_cache_failed_total`: the backend never saw them. A rising rate is what an outage costs the relay path — nothing per relay beyond this. |
 | `smartrouter_resp_cache_pool_total_conns` | Gauge | — | Connections currently held by the client pool(s) (write + read summed when the read/write split is configured). |
 | `smartrouter_resp_cache_pool_idle_conns` | Gauge | — | Idle pool connections. |
 | `smartrouter_resp_cache_pool_stale_conns` | Gauge | — | Stale connections removed from the pool. |
@@ -396,7 +413,10 @@ are the alerting surface for cache degradation.
 A failing backend never fails relays: lookups degrade to misses within the
 caller's budget and requests proceed to the upstreams. Alert on
 `smartrouter_resp_cache_connected == 0` or a `smartrouter_resp_cache_failed_total`
-rate, not on request errors.
+rate, not on request errors. With the read/write split configured, alert on
+`smartrouter_resp_cache_endpoint_connected == 0` instead and put `role` in the
+alert text, so the page names the endpoint to check rather than sending the
+operator to whichever address they remember.
 
 #### CSM state-store sizes (diagnostics)
 
@@ -411,7 +431,7 @@ went out, and which" — so read the alerting note under the table before buildi
 | `smartrouter_csm_blocked_providers` | Gauge | `spec`, `apiInterface` | Providers currently blocked. **Non-zero means the chain is degraded** — but zero does not prove it is healthy; see the sampling note below. Previously this reported the previous-epoch store instead and read 0 during outages. |
 | `smartrouter_csm_previous_epoch_blocked_providers` | Gauge | `spec`, `apiInterface` | Size of the previous-epoch blocked-providers store (cross-epoch carry-over, briefly populated at an epoch boundary). This is what `smartrouter_csm_blocked_providers` reported before it was corrected. |
 | `smartrouter_csm_provider_blocked` | Gauge | `spec`, `apiInterface`, `provider_address` | Whether one specific provider is blocked (1=blocked, 0=serving) — which provider went out, versus how many. Labelled by provider name only: a node URL can embed an API key and must never reach a series. |
-| `smartrouter_csm_blocked_providers_by_reason` | Gauge | `spec`, `apiInterface`, `reason` | How many providers are blocked, split by **why**: `all-endpoints-disabled`, `too-many-dead-sessions`, `never-served-successfully`, `explicit-block-signal`, `blocked-in-previous-epoch`, `unspecified`. Every reason is republished on every tick including the zeros, so a reason that stops applying returns to 0 rather than sticking. It counts **both pools**, so the identity is `sum()` == `smartrouter_csm_blocked_providers` + `smartrouter_csm_blocked_backup_providers` — not the first alone. One caveat: those two gauges count **memberships** while this one counts **providers**, so a provider configured in both pools and blocked in both is counted twice by the sum of the other two and once here. That is deliberate — the question this gauge answers is *how many providers are out, and why*. Deliberately carries **no provider label** — with one, a provider re-blocked under a different reason would leave the old reason's series stuck at 1. Use `smartrouter_csm_provider_blocked` or `/debug/provider-routing` for *which* provider. |
+| `smartrouter_csm_blocked_providers_by_reason` | Gauge | `spec`, `apiInterface`, `reason` | How many providers are blocked, split by **why**: `all-endpoints-disabled`, `explicit-block-signal`, `blocked-in-previous-epoch`, `unspecified`. (`too-many-dead-sessions` and `never-served-successfully` were removed with FAILOVER-TASKS section 2 — both block triggers are gone, so the series no longer exist.) Every reason is republished on every tick including the zeros, so a reason that stops applying returns to 0 rather than sticking. It counts **both pools**, so the identity is `sum()` == `smartrouter_csm_blocked_providers` + `smartrouter_csm_blocked_backup_providers` — not the first alone. One caveat: those two gauges count **memberships** while this one counts **providers**, so a provider configured in both pools and blocked in both is counted twice by the sum of the other two and once here. That is deliberate — the question this gauge answers is *how many providers are out, and why*. Deliberately carries **no provider label** — with one, a provider re-blocked under a different reason would leave the old reason's series stuck at 1. Use `smartrouter_csm_provider_blocked` or `/debug/provider-routing` for *which* provider. |
 | `smartrouter_csm_blocked_backup_providers` | Gauge | `spec`, `apiInterface` | Size of the blocked-backup-providers store. Backups are tracked here only — they never appear in `smartrouter_csm_provider_blocked`. |
 | `smartrouter_csm_sticky_sessions` | Gauge | `spec`, `apiInterface` | Live sticky-session affinities held by THIS pod. With `--shared-state` this is a read-through cache of the fleet's claims, not the fleet total. |
 | `smartrouter_csm_sticky_claims_total` | Counter | `spec`, `apiInterface`, `outcome` | Cross-pod sticky-session claim resolutions. `outcome`: `local_hit` (answered from this pod, no round trip), `adopted` (took a claim a peer had already made), `claimed` (this pod made the claim), `lost_race` (claimed simultaneously with a peer and adopted its winner), `error` (the registry could not be reached, so the request failed rather than being served off an unverified pin), `no_candidate` (this pod had no upstream to offer at all — a pairing problem, not a registry one), `invalidated` (a local claim was dropped because its upstream could not serve here). **`adopted` staying at zero on a multi-replica fleet means the feature is wired but never firing** — and note that `no_candidate` and `invalidated` are the two series that climb during an incident, so an alert built only on `error` will read healthy while every sticky request for those sessions is failing. |

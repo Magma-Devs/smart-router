@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Smart Router — Solana DIRECT RPC test setup.
 #
 # Purpose: reproduce / verify the Solana consistency bug fixed in PR #21

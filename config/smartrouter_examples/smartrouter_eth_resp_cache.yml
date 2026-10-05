@@ -30,7 +30,11 @@
 cache-be: "cache:20100"
 resp-cache:
   addresses: ["valkey:6379"]
-  key-prefix: "sr" # [A-Za-z0-9._-]+ — used in SCAN MATCH globs; distinct prefixes isolate flushes on a shared backend
+  # [A-Za-z0-9._-]+ — the keyspace this router occupies. Routers on one prefix
+  # serve each other's cached answers (right for replicas, wrong for a second
+  # deployment on different nodes) and share one flush. docs/RESP-CACHE.md,
+  # "Sharing a backend between routers". Flag form: --resp-cache-key-prefix.
+  key-prefix: "sr"
 
 # Prometheus metrics (scrape at http://<host>:7779/metrics). Set to
 # "disabled" to turn off. The resp backend adds smartrouter_resp_cache_*.

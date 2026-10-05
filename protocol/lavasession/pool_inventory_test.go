@@ -102,7 +102,7 @@ func TestSnapshotPoolInventory_ReadsTheRealState(t *testing.T) {
 
 	// Block every member: the pool is empty for a routing reason, and the reset can undo it.
 	for _, address := range append([]string{}, csm.validAddresses...) {
-		require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonTooManyDeadSessions, false, csm.atomicReadCurrentEpoch(), 0, 0, false, nil))
+		require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonExplicitSignal, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
 	}
 	blocked := csm.snapshotPoolInventory("", nil, context.Background())
 	require.Equal(t, "all-blocked", blocked.reason("", nil))
@@ -146,7 +146,7 @@ func TestReleaseBlockedProvidersIfPoolEmpty_ReportsARecoveredPool(t *testing.T) 
 	csm := CreateConsumerSessionManager()
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
 	for _, address := range append([]string{}, csm.validAddresses...) {
-		require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonTooManyDeadSessions, false, csm.atomicReadCurrentEpoch(), 0, 0, false, nil))
+		require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonExplicitSignal, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
 	}
 
 	records := captureLogs(t, func() {

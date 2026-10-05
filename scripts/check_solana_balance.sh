@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Check the SOL balance of one or more Solana addresses.
 #
 # Queries the getBalance JSON-RPC method (result.value is lamports;

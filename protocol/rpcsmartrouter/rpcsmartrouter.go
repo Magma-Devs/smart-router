@@ -238,6 +238,7 @@ type rpcSmartRouterStartOptions struct {
 	cache                    performance.CacheBackend
 	secondaryCache           performance.CacheReader // optional read-only fallback tier (docs/SECONDARY-CACHE.md); nil when unconfigured
 	secondaryCacheTimeout    time.Duration
+	cacheMaxEntryBytes       int64 // largest reply body written to the cache; 0 = no cap
 	strategy                 provideroptimizer.Strategy
 	analyticsServerAddresses AnalyticsServerAddresses
 	cmdFlags                 common.ConsumerCmdFlags
@@ -1038,6 +1039,10 @@ type debugCacheTier struct {
 	// previously read from the router's own viper, which returns zero on every
 	// deployment because those flags are registered on the cache-server command.
 	Lifetimes *performance.CacheLifetimes `json:"lifetimes"`
+	// Breaker is null for a tier without one (cache-be); the RESP tier reports
+	// which side of the relay path is being skipped, since with a read/write
+	// split reachable:false alone cannot say whether it is lookups or writes.
+	Breaker *performance.CacheBreakerState `json:"breaker"`
 }
 
 // buildCacheStateResponse renders both tiers. Split out of the handler so the shape
@@ -1094,6 +1099,7 @@ func debugCacheTierFrom(backend any) debugCacheTier {
 		ReachableDetail:    state.Detail,
 		WhenUnreachable:    state.WhenUnreachable,
 		Lifetimes:          state.Lifetimes,
+		Breaker:            state.Breaker,
 	}
 }
 
@@ -1108,8 +1114,8 @@ type routerConfigResponse struct {
 	SchemaVersion int
 
 	// lavasession
-	MaxConsecutiveConnectionAttempts                 int
-	TimeoutForEstablishingAConnection                int64 // milliseconds
+	MaxConsecutiveConnectionAttempts                 uint64 // the --bench-after setting
+	TimeoutForEstablishingAConnection                int64  // milliseconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession int
 
 	// relaycore (flag-bound package vars — these report the live value)
@@ -3066,8 +3072,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		grpcEndpoints = collectGRPCEndpoints(healthyStaticProviders, "primary")
 		grpcBackupEndpoints = collectGRPCEndpoints(healthyBackupProviders, "backup")
 		// Same reasoning as wsConfigured above: keyed off the configured providers so a
-		// dark boot still gets a manager. Leaving grpcSubscriptionManager nil would also
-		// disable gRPC reflection permanently (GetGRPCReflectionConnection nil-checks it).
+		// dark boot still gets a manager.
 		grpcConfigured = len(collectGRPCEndpoints(relevantStaticProviderList, "")) > 0 ||
 			len(collectGRPCEndpoints(relevantBackupProviderList, "")) > 0
 	}
@@ -3100,7 +3105,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// ServeRPCRequests. No single-node tip, no fire-and-forget poller per pod.
 
 	// Convert smartRouterIdentifier string to empty sdk.AccAddress for smart router
-	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, options.cache, options.secondaryCache, options.secondaryCacheTimeout, rpcSmartRouterMetrics, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
+	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, options.cache, options.secondaryCache, options.secondaryCacheTimeout, options.cacheMaxEntryBytes, rpcSmartRouterMetrics, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
 	if err != nil {
 		err = utils.LavaFormatError("failed serving rpc requests", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		errCh <- err
@@ -3422,6 +3427,10 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			if err != nil {
 				return utils.LavaFormatError("invalid cache backend configuration", err)
 			}
+			cacheMaxEntryBytes, err := cacheMaxEntryBytesFrom(viper.GetViper())
+			if err != nil {
+				return utils.LavaFormatError("invalid cache configuration", err)
+			}
 
 			// Optional read-only secondary cache tier (docs/SECONDARY-CACHE.md).
 			// Deliberately independent of the primary: valid with cache-be unset.
@@ -3491,6 +3500,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			if err := scoreutils.SetProbeUpdateWeight(viper.GetFloat64(common.ProbeUpdateWeightFlagName)); err != nil {
 				return err
 			}
+			lavasession.SetBenchAfter(viper.GetUint64(common.BenchAfterFlagName))
 			upstreamSelectorConfig, err := resolveSelectionWeights(cmd.Flags())
 			if err != nil {
 				return err
@@ -3559,6 +3569,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				DebugAddress:                      viper.GetString("debug-address"),
 				ResponseCompression:               viper.GetString(common.ResponseCompressionFlag),
 				ShutdownGracePeriod:               viper.GetDuration(common.ShutdownGracePeriodFlag),
+				ReadYourWritesWindow:              viper.GetDuration(common.ReadYourWritesWindowFlag),
 			}
 
 			rpcSmartRouterSharedState := viper.GetBool(common.SharedStateFlag)
@@ -3583,6 +3594,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				cache:                    cache,
 				secondaryCache:           secondaryCacheReader,
 				secondaryCacheTimeout:    secondaryCacheConfig.Timeout,
+				cacheMaxEntryBytes:       cacheMaxEntryBytes,
 				strategy:                 strategyFlag.Strategy,
 				analyticsServerAddresses: analyticsServerAddresses,
 				cmdFlags:                 consumerPropagatedFlags,
@@ -3624,6 +3636,8 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(performance.CacheFlagName, "", "address for a cache server to improve performance")
 	cmdRPCSmartRouter.Flags().String(performance.RespCacheAddressesFlagName, "", "RESP-compatible (Redis/Valkey) cache backend address(es), comma-separated — enables the RESP backend, which takes precedence over cache-be. Standalone: the node address; sentinel: the sentinel addresses; cluster: the configuration endpoint. The full surface (TLS, credentials, read/write split) lives in the resp-cache config block")
 	cmdRPCSmartRouter.Flags().String(performance.RespCacheTopologyFlagName, "", "RESP cache topology: standalone (default), sentinel, or cluster")
+	cmdRPCSmartRouter.Flags().String(performance.RespCacheKeyPrefixFlagName, "", "RESP cache key prefix — the keyspace this router occupies on the backend ([A-Za-z0-9._-]+, default sr). Routers that share a keyspace serve each other's cached answers and resolve latest off one chain tip, so give every deployment that reads a different node set its own prefix (docs/RESP-CACHE.md, 'Sharing a backend between routers'). Outranks resp-cache.key-prefix in the config block")
+	cmdRPCSmartRouter.Flags().String(performance.CacheKeyPrefixFlagName, "", "cache-be key prefix — the keyspace this router occupies on the gRPC cache server ([A-Za-z0-9._-]+, empty = the shared keyspace every router used before this setting). Routers that share a keyspace serve each other's cached answers and resolve latest off one chain tip, so give every deployment that reads a different node set its own prefix. Needs a cache server from this version or newer: an older one drops the field and isolates nothing, which the router reports once per connection and marks on /debug/cache-state. The RESP backend's counterpart is resp-cache.key-prefix")
 	cmdRPCSmartRouter.Flags().String(performance.SecondaryCacheFlagName, "", "address for an optional read-only secondary cache, queried when the primary cache produces no hit (docs/SECONDARY-CACHE.md)")
 	cmdRPCSmartRouter.Flags().Duration(performance.SecondaryCacheTimeoutFlagName, performance.DefaultSecondaryCacheTimeout, "per-lookup time budget for the secondary cache; an exceeded lookup is treated as a miss")
 	cmdRPCSmartRouter.Flags().String(performance.SecondaryCacheModeFlagName, performance.SecondaryCacheModeReadOnly, "secondary cache access mode; only read-only is supported")
@@ -3705,7 +3719,8 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().Duration(common.EpochDurationFlag, 0, "duration of each epoch for time-based epoch system (e.g., 30m, 1h). If not set, epochs are disabled")
 	cmdRPCSmartRouter.Flags().Duration(common.ShutdownGracePeriodFlag, common.DefaultShutdownGracePeriod, "graceful shutdown deadline for in-flight requests and WebSocket clients")
 	cmdRPCSmartRouter.Flags().IntVar(&relaycore.RelayRetryLimit, common.SetRelayRetryLimitFlag, 2, "max total relay retry attempts across all error types (node and protocol errors combined; 0 disables retries)")
-	cmdRPCSmartRouter.Flags().Bool(common.StatefulToBackupFlag, false, "also broadcast stateful relays (transaction submission) to the backup tier. OFF by default: a stateful relay reaches every provider it selects, so this sends EVERY stateful request to the backup — including the ones the primaries serve fine — and a fast backup can win the race and cancel the primaries. Turn it on to maximise the chance a transaction lands, accepting the backup spend")
+	cmdRPCSmartRouter.Flags().Bool(common.StatefulToBackupFlag, false, "also broadcast stateful relays (transaction submission) to the backup tier. OFF by default: a stateful relay reaches every provider it selects, so this sends EVERY stateful request to the backup — including the ones the primaries serve fine — and a fast backup can answer the caller first. Turn it on to maximise the chance a transaction lands, accepting the backup spend")
+	cmdRPCSmartRouter.Flags().Duration(common.ReadYourWritesWindowFlag, common.DefaultReadYourWritesWindow, "how long an eth_sendRawTransaction's sender and hash stay pinned to the upstream that accepted it: the sender's pending-nonce reads and lookups of the hash go there, so a wallet reads back its own write instead of an upstream the write has not reached yet. Pod-local, and a preference — an upstream that cannot take the read gives way to ordinary selection. 0 turns it off")
 	if err := viper.BindPFlag(common.StatefulToBackupFlag, cmdRPCSmartRouter.Flags().Lookup(common.StatefulToBackupFlag)); err != nil {
 		utils.LavaFormatFatal("failed to bind stateful-to-backup flag", err)
 	}
@@ -3733,6 +3748,15 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().DurationVar(&common.DefaultTimeout, common.DefaultProcessingTimeoutFlagName, common.DefaultTimeout, "default timeout for relay processing (e.g., 30s, 1m)")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.MinimumTimePerRelayDelay, common.MinRelayTimeoutFlagName, common.MinimumTimePerRelayDelay, "minimum relay timeout floor applied to all methods when CU-based timeout is lower (e.g., 1s, 5s)")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.CacheTimeout, common.CacheTimeoutFlagName, common.CacheTimeout, "per-relay cache lookup budget; must exceed the network round trip to the cache backend, so raise it for a remote (e.g. cross-region RESP) backend (e.g., 400ms)")
+	cmdRPCSmartRouter.Flags().Int64(common.CacheMaxEntryBytesFlagName, common.DefaultCacheMaxEntryBytes, "largest reply body, in bytes, written to the cache (gRPC or RESP backend); a larger reply is served but not written, since encoding a multi-MB entry costs more than its rare hits save. Off by default (0); set a value to turn it on")
+	cmdRPCSmartRouter.Flags().Uint64(common.BenchAfterFlagName, lavasession.DefaultBenchAfter,
+		"consecutive failed requests to one endpoint address before it is taken out of rotation; a successful relay resets the count. Must be > 0")
+	// Bound to viper so the value is readable from config.yml, not just the command line. Without
+	// this, viper.GetUint64 below reads 0 for every operator who sets it in YAML — and 0 is exactly
+	// the value SetBenchAfter rejects, so the setting would silently do nothing.
+	if err := viper.BindPFlag(common.BenchAfterFlagName, cmdRPCSmartRouter.Flags().Lookup(common.BenchAfterFlagName)); err != nil {
+		utils.LavaFormatFatal("failed binding bench-after flag", err)
+	}
 	cmdRPCSmartRouter.Flags().IntVar(&lavasession.MaxSessionsAllowedPerProvider, common.MaxSessionsPerProviderFlagName, lavasession.MaxSessionsAllowedPerProvider, "max number of sessions allowed per provider")
 
 	// batch request size limit

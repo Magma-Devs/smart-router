@@ -31,6 +31,14 @@ import (
 // listener and returns its address.
 func startLoopbackCacheServer(t *testing.T) string {
 	t.Helper()
+	return startLoopbackCacheServerWith(t, func(srv *cache.RelayerCacheServer) pairingtypes.RelayerCacheServer { return srv })
+}
+
+// startLoopbackCacheServerWith is startLoopbackCacheServer with the service
+// implementation chosen by the caller, so a test can stand in an older build's
+// behaviour around the real one (see legacyCacheServer).
+func startLoopbackCacheServerWith(t *testing.T, wrap func(*cache.RelayerCacheServer) pairingtypes.RelayerCacheServer) string {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
@@ -42,7 +50,7 @@ func startLoopbackCacheServer(t *testing.T) string {
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	grpcServer := grpc.NewServer()
-	pairingtypes.RegisterRelayerCacheServer(grpcServer, &cache.RelayerCacheServer{CacheServer: cs})
+	pairingtypes.RegisterRelayerCacheServer(grpcServer, wrap(&cache.RelayerCacheServer{CacheServer: cs}))
 	go func() { _ = grpcServer.Serve(lis) }()
 	t.Cleanup(grpcServer.Stop)
 	return lis.Addr().String()

@@ -128,9 +128,54 @@ gate would ask about. Then write down, before anything else:
 2. Anything that stands out — surprising, out of place, half-finished, or that
    you do not understand.
 3. Any file you skimmed instead of reading, named.
+4. **What does this cost, and what does it buy — measured?** See below.
 
 Item 2 is the output that matters, and it has no fixed shape on purpose. If it is
 empty on a change of more than a few lines, you skimmed. Go back.
+
+### Item 4 — is this the right size for the job
+
+Every gate in this skill asks whether a change is **correct and finished**. None
+asks whether it is **the right size**, and a change can be entirely correct and
+still be the wrong answer. That kind of finding has no gate, so it has to be
+caught here or not at all.
+
+Four questions. Each wants a number or a name, not a judgement:
+
+1. **What event does this detect or prevent, and how often has it actually
+   happened?** From git history, not from an estimate. Read the thing being
+   guarded at each commit that touched it and count the changes.
+2. **Is any part of this re-deriving an answer another system already owns?**
+   Name that system, and what it would cost to ask it instead. Re-implementing
+   somebody else's rules means a second implementation that can disagree with
+   the first, and the disagreement is silent.
+3. **Does something already do this job** — upstream, in a sibling repository, in
+   a test next to the thing itself? Look before accepting that it must be built
+   here.
+4. **Where does it run, and is that where the event is noticed?** A guard that
+   skips on every pull request and fires once a day is a different product from
+   the one the PR body describes.
+
+**One smell worth naming, because it points straight at question 2.** A large
+test file whose subject is **our own helper** rather than the product. Tests of a
+helper are ordinary; hundreds of lines of them usually mean the helper is
+modelling rules that belong to something else, and the right change is to delete
+the model rather than to test it harder.
+
+**This is not a veto.** Disproportion is a discussion, not a blocker: it belongs
+in the report under Non-blocking unless the author agrees. Say what you measured
+and what the cheaper shape would be, then let the author decide.
+
+Worked example, 2026-09-13, from the automation repository that tests this
+router. A pull request added 1,727 lines to notice when a Go structure in this
+repository grows a field: 451 of them re-implementing Go's own serialisation
+rules in Python, and 846 more testing that re-implementation. Every gate in this
+skill would have passed it — the ticket was satisfied, no caller broke, the run
+was green, the body was true. The four questions above gave: the field list had
+changed twice in five months; Go answers the same question in about 40 lines;
+`types/relay/cache_test.go` already existed next to the structure; and the guard
+skipped on every pull request. The pull request came down to 991 lines and kept
+every claim it made.
 
 **Why the order is fixed.** A checklist read first fills your attention, and
 whatever fills attention also excludes. Run the gates first and they find exactly
@@ -155,6 +200,11 @@ evidence are required, and neither decides on its own — you do.
 
 The overall verdict is the worst one present. One unproven item makes the whole
 answer `INSUFFICIENT EVIDENCE`, even when nothing is failing.
+
+**`READY` also needs a filled review seat**, whoever wrote the pull request:
+either Copilot reviewed and every thread it opened is cleared, or gate 2b's
+review round ran and every verified finding is fixed or answered. Neither means
+not `READY`. That is axis 0, and the reasoning for it sits with gate 2b.
 
 **`NOT READY` and `INSUFFICIENT EVIDENCE` are different answers.** The first is a
 proven negative: you checked, the answer is bad. The second is the absence of an
@@ -319,6 +369,56 @@ a Blocking or Non-blocking line. **An objection you checked and disproved still 
 one line**, saying you checked it — that is how a reader tells "looked at, and it is
 fine" from "never looked".
 
+#### This same adversary fills the review seat when Copilot cannot
+
+A Copilot review has a monthly quota, and the bot can be down. When one cannot be
+requested, run 2b again as a **review round** rather than skipping the seat:
+
+1. Dispatch a fresh-context subagent with the 2b prompt above, **rendered** —
+   the PR number, the repository, and the worktree path substituted for its
+   placeholders, because a fresh context cannot resolve `<repo>` or run
+   `git -C <worktree>`. Nothing else: no summary of the change, no list of what
+   you already checked.
+2. Verify every objection against the code before acting, then split on whose
+   pull request it is. **Yours:** real, so fix it, commit and push to the branch
+   this pull request already proposes; wrong, so record the reason you rejected
+   it. **Somebody else's:** report and stop. Every finding goes to the author
+   and the author decides. A commit on a colleague's branch, made by a reviewer,
+   from a subagent's finding, with no ask, is a write nobody approved — and
+   axis 0 below puts other people's pull requests in scope, so this case is the
+   common one, not the edge. **The subagent never commits in either case.** It
+   reports; you verify.
+3. Findings and dispositions go to the author, **never as comments on the PR**.
+   An external bot posting on a PR is the author's call; this round is not a bot
+   and does not post. **Anything that outlives the session — a deferred item, an
+   accepted gap, an objection answered rather than fixed — takes a durable
+   reference per gate 7.** Chat is where the author reads it; it is not where it
+   is kept.
+
+**This round is default-on** — that covers RUNNING it, not what you do with what
+it finds. Unlike asking Copilot, it needs no permission, it posts no comment,
+and it consumes no quota. On your OWN pull request it also pushes a fix, the
+same as any other change to your own work. On anybody else's it writes
+nothing. Measured cost on a
+single-module pull request, 2026-08-24: 100k to 170k tokens a round. It fills
+the Copilot seat only. The human merge word is unchanged.
+
+#### Axis 0 — is the review seat filled?
+
+Before reporting **any** pull request as ready, and always before reporting one
+you wrote yourself, one of these must be true:
+
+- a Copilot review posted, and every thread it opened is cleared, or
+- the round above ran, and every verified finding is fixed or answered.
+
+Neither true means the pull request is not reportable as ready. Run the round
+now; it needs no ask.
+
+This axis exists because a step that waits to be remembered gets skipped. On
+2026-08-24 the Copilot quota ran out and several pull requests went to a reader
+with an empty review seat and nothing saying so. The report's adversary block
+carries the answer, so a reader can see which of the two filled the seat.
+
 ## Gate 3 — verification evidence
 
 Two questions, and the second is the one usually skipped.
@@ -353,6 +453,12 @@ watches the backup serve.
 
 Also re-run the PR body's own "How to verify" commands where possible, and report
 how many you actually confirmed.
+
+**If the diff ADDS a test, a guard, a lint rule or a CI step, that thing is
+itself unverified until you have made it fail.** A green check proves nothing
+until you know what it examined. Work the two questions under *A guard or a test
+that cannot fail* below, and put the count and the deliberate break in the
+report's Evidence block.
 
 ## Gate 4 — regression: whose failures are these
 
@@ -591,7 +697,81 @@ two commits is a false claim even though it was true when written.
 Then check the body against your step 1 notes. A body that omits a limitation you
 found is not merely incomplete — it is the reason the reviewer will not look for it.
 
-## A search that returns zero may be broken, not clean
+### 9b — the diff against itself
+
+Gate 9 checks the body against the diff. This one checks the diff against the
+diff. A change lands on one line and the sentence beside it still describes what
+used to happen, so the code is right and the thing a reader reads is wrong.
+
+Three sub-checks. Each is reading, not grepping, and each takes a minute:
+
+**1. Prose beside changed code.** For every declaration this diff touched, read
+the comment or docstring attached to it and ask whether it is still true.
+
+```bash
+BASE=$(git merge-base origin/main HEAD)
+git diff "$BASE...HEAD" -U0 -- ':!*.pb.go' \
+  | grep -oE '^@@.*@@ .+' | sed 's/^@@[^@]*@@ //' | sort -u
+```
+
+**Git already names the enclosing declaration in every hunk header, in every
+language.** That list is where to read. Open each one and read its comment or
+docstring against the body beneath it.
+
+Two things the list does not tell you, both measured:
+
+- **It names the nearest context GIT recognises, which is not always the
+  declaration you changed.** On a Go commit of five files it gave 11
+  declarations over 14 hunks, one per `func`. On a Python commit of three files
+  it gave two names over 13 hunks, because twelve of those hunks sat inside one
+  class and git named the class.
+- **A hunk in a brand-new file can carry no context at all.** That Python commit
+  had one such hunk; the Go commit had none. A new file contributes nothing to
+  the list, so read its prose whole.
+
+**Where the prose sits differs by language and that changes only where you
+look, not how you find it.** A comment above the declaration is visible the
+moment you open it. A docstring inside the body may already be in the diff — so
+there the miss is the docstring that did NOT change, and you read it from `HEAD`
+against the new body.
+
+**Do not count the list.** An earlier version of this section ran
+`-U5 | grep '(//|func )'` and reported its 43 matches as the answer. Of those 43,
+9 were changed lines, 34 were context, and 5 were a comment directly above a
+`func`. The number answered "how many comment-ish lines sit near a change",
+which is not the question — and it fails the discrimination test this same file
+makes 80 lines below. A window also misses any doc comment longer than the
+window: 398 of this repository's 1,936 documented top-level functions carry one
+longer than five lines.
+
+**2. A name against what the thing does.** A test named for a condition its own
+setup contradicts is worse than a bad name: the failure message and the report
+both repeat it. Read every name this diff added or changed beside the body under
+it.
+
+**3. Two places in the same diff that disagree.** A table and the paragraph
+under it. A document describing a file this PR did not change. A log line naming
+the source the assertion no longer reads.
+
+**For this one, re-read every Markdown file in the diff whole, not by hunk.**
+This contradiction lives outside the hunk by definition, so a reviewer who reads
+only the diff cannot see it.
+
+```bash
+git diff "$BASE...HEAD" --name-only -- '*.md'
+```
+
+Five real cases, all from the automation repository that tests this router, all
+found by a reviewer after the change had passed its own checks: a docstring and
+a summary line still naming the data source the new assertion stopped reading; a
+class contract promising "all rows" where the code returns on one; a test named
+"not last" whose setup puts the row last; a table assigning ownership its own
+next paragraph reassigns; and a document stating an exclusion the workflow it
+names does not carry.
+
+## A clean answer may mean the check never ran
+
+### A search that returns zero
 
 A broken search and a clean repo produce the same output. Every zero needs a
 positive control: the same search, run against something known present, must
@@ -623,6 +803,98 @@ nothing had flagged.
 Same family: **compare against the merge base, not `origin/main`.** Against a main
 that has moved, every test that landed meanwhile reads as one this branch deleted.
 
+### A guard or a test that cannot fail
+
+The same shape, one level up. "Nothing failed" and "nothing ran" produce the
+same green, and the second one is invisible. This applies to anything the diff
+adds whose job is to *notice* something: a test, a guard, a lint rule, a CI
+step, an assertion inside a helper.
+
+Two questions, and a PR that adds a guard is `INSUFFICIENT EVIDENCE` until both
+are answered in the report:
+
+1. **What did it examine, as a number?** Tests run, files matched, rows
+   returned. Not "it passed".
+2. **Can it fail?** Break the thing it guards, on purpose, and watch it go red.
+   Put the break back.
+
+```bash
+go test ./<pkg>/ -run '<TheGuard>' -count=1 -v    # names every case it ran
+go test ./<pkg>/ -run '<TheGuard>' -cover         # did the assertion branch execute
+```
+
+**Read the runner's own warning.** `testing: warning: no tests to run` means a
+`-run` pattern matched nothing, and the exit status is still zero. A guard
+selected by a pattern that matches nothing is a permanent green.
+
+**Both commands are local steps, and that is not a preference.** No workflow in
+this repository runs the Go tests at all — searched every file under
+`.github/workflows/` for `go test`, `make test` and `gotestsum`, zero hits,
+against a control finding `go build` in exactly 2 of the 9 workflow files.
+Coverage likewise.
+
+**Pick the control for what it discriminates, not for how many hits it gets.**
+`runs-on` was the first control used here and it matches all 9 of 9, so it
+proves only that the search reaches the files — it would return non-zero against
+any workflow directory in existence. `go build` is topical: it is the same shape
+of thing being searched for, it appears in some files and not others, so a zero
+beside it means something.
+So a pull request's green board says the non-test code compiled, and **nothing
+at all** about a guard that lives in a `_test.go` file — `go build` does not
+compile test files. Making it fail on your own machine is the only verification
+there is. This is filed as MAG-3105, which adds the part worth knowing: the
+`Makefile` has a `test` target and no workflow calls it.
+
+**The one thing that comes close is not a board check either.** `.golangci.yml`
+sets `nolintlint` to `allow-unused: false`, so a suppression that no longer
+suppresses anything fails the linter — locally. The lint job runs
+`golangci-lint-action` with `continue-on-error: true` on the first attempt and
+on every retry (`.github/workflows/lint.yml`, deliberately, for a stated
+toolchain reason), so it cannot fail a pull request. A counter-example that is
+itself a check unable to fail is the shape this section exists to name.
+
+Three real cases, all from the automation repository that tests this router,
+all found by a reviewer after the change had passed its own checks:
+
+| What was added | Why it could not fail |
+|---|---|
+| A guard reading a record of offending files | The plugin creates that record, empty, before collection starts. An import error still left the file there, so the guard passed on a tree it never read |
+| A check that a test carries a marker | It searched the file's raw text, and the marker's name appears in the file's own docstring. Deleting the real marker still passed |
+| A test waiting for its own entry in a store | It matched on a key prefix the router also writes under, so a background entry satisfied the wait |
+
+The first two examined nothing. The third examined somebody else's work and
+called it its own.
+
+## The excuses, and what is actually true
+
+Every row is something said on a real pull request, and every reality beside it
+was then measured. Read the left column when you catch yourself thinking it.
+
+| Excuse | Reality |
+|---|---|
+| "CI is green" | The job that runs the tests was skipped. A board shows the same green whether a check ran or was never selected |
+| "Copilot reviewed it" | Its threads were still open. A posted review is not a cleared one |
+| "The command returned 43, so it found things" | 43 of what? Nine were changed lines, thirty-four were context, five were the thing being looked for |
+| "The control came back non-zero, so the search works" | It matched 9 of 9 files. A control that matches everything discriminates nothing |
+| "It is my own pull request, I know what is in it" | The author is the worst judge of whether the author finished. A reviewer using the same gates found four faults the author missed, three of them outside the hunks |
+| "The gates all passed" | The gates name the ways this repository has shipped a false ready before, not every way a change can be wrong |
+| "I fixed the instances the search reported" | Re-run the same search. A fix is not done until it returns zero, and the count before and after both cost one command |
+| "The ticket says it is done" | Read the status field, not the resolution. They can say opposite things |
+
+## Red flags — stop, and go back
+
+- You finished the gates and have nothing to put in "Looked at beyond the gates".
+- You are about to report a number you did not take yourself.
+- You reported a count and never ran a control, or ran one that could not have come out differently.
+- You are reviewing your own pull request and found nothing.
+- You read a Markdown file by its hunks rather than whole.
+- You are about to write `READY` with a review seat you cannot name.
+- A later finding contradicts something you said earlier, and you are writing a new explanation instead of re-running the first check.
+
+**Each of these means the review is not finished.** None of them is a reason to
+lower the verdict on its own; all of them are a reason to go back to the gate
+that should have caught it.
+
 ## The report
 
 Compact. One screen. No narrative.
@@ -645,6 +917,8 @@ Non-blocking
 Evidence
 - <environment>: <result>
 - PR How-to-verify: <n>/<m> commands confirmed
+- guard added: <what it examined, as a number> | none added
+- guard made to fail: <what you broke, and what it reported> | n/a
 
 Independent ticket review (gate 2a)
 - <n> implemented
@@ -653,7 +927,8 @@ Independent ticket review (gate 2a)
 - <n> cannot determine
 
 Adversary review (gate 2b)
-- <objection>: confirmed | checked and disproved
+- review seat: Copilot, every thread cleared | Copilot, <n> threads STILL OPEN | 2b review round, run <date> | EMPTY
+- <objection>: confirmed and fixed in <commit> | confirmed and answered, <where the answer is kept> | checked and disproved
 - <one line if it found nothing, naming where it looked>
 
 Looked at beyond the gates

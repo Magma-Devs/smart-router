@@ -110,6 +110,9 @@ type SmartRouterMetricsManager struct {
 	cacheSuccessTotalMetric  *prometheus.CounterVec   // smartrouter_cache_success_total
 	cacheFailedTotalMetric   *prometheus.CounterVec   // smartrouter_cache_failed_total {…, outcome=miss|error|timeout}
 	cacheLatencyHistogram    *prometheus.HistogramVec // smartrouter_cache_latency_milliseconds — observed on EVERY attempted lookup
+	// Cache writes (labels: spec, apiInterface, method; skipped adds reason)
+	cacheWriteSkippedTotalMetric *prometheus.CounterVec   // smartrouter_cache_write_skipped_total {…, reason=size}
+	cacheEntryBytesHistogram     *prometheus.HistogramVec // smartrouter_cache_entry_bytes — body size of every entry handed to the backend
 
 	// CSM state-store size gauges (labels: spec, apiInterface). Expose otherwise
 	// black-box internal state so integration tests can verify /debug/reset-all
@@ -517,7 +520,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, []string{"spec", "apiInterface", "provider_address"})
 	csmBlockedProvidersByReason := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_providers_by_reason",
-		Help: "How many providers are currently blocked, split by WHY (MAG-2599): all-endpoints-disabled, too-many-dead-sessions, never-served-successfully, explicit-block-signal, blocked-in-previous-epoch, unspecified. Counts both the regular and the backup pool, so it sums to smartrouter_csm_blocked_providers + smartrouter_csm_blocked_backup_providers. Those two count memberships and this one counts providers, so a provider blocked in both pools is counted twice there and once here. Deliberately carries no provider label — every reason is republished on every state-size tick, including the zeros, which is what keeps the series self-correcting; a provider label would leave the previous reason's series stuck at 1 after a provider is re-blocked for a different reason. Use smartrouter_csm_provider_blocked or /debug/provider-routing for WHICH provider.",
+		Help: "How many providers are currently blocked, split by WHY (MAG-2599): all-endpoints-disabled, explicit-block-signal, blocked-in-previous-epoch, unspecified. Counts both the regular and the backup pool, so it sums to smartrouter_csm_blocked_providers + smartrouter_csm_blocked_backup_providers. Those two count memberships and this one counts providers, so a provider blocked in both pools is counted twice there and once here. Deliberately carries no provider label — every reason is republished on every state-size tick, including the zeros, which is what keeps the series self-correcting; a provider label would leave the previous reason's series stuck at 1 after a provider is re-blocked for a different reason. Use smartrouter_csm_provider_blocked or /debug/provider-routing for WHICH provider.",
 	}, []string{"spec", "apiInterface", "reason"})
 	csmBlockedBackupProvidersCount := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_backup_providers",
@@ -620,6 +623,16 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Help:    "Distribution of cache lookup latency in milliseconds, per cache tier, observed on every attempted lookup (hits and non-hits).",
 		Buckets: latencyBuckets,
 	}, cacheLabels)
+	cacheWriteLabels := []string{"spec", "apiInterface", "method"}
+	cacheWriteSkippedTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_cache_write_skipped_total",
+		Help: "Replies the router served but did not write to its cache, by reason. reason=size: the reply body exceeded --cache-max-entry-bytes.",
+	}, append(append([]string{}, cacheWriteLabels...), "reason"))
+	cacheEntryBytesHistogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "smartrouter_cache_entry_bytes",
+		Help:    "Body size in bytes of every reply the router hands to its cache backend for writing, before the backend encodes it.",
+		Buckets: cacheEntryBytesBuckets,
+	}, cacheWriteLabels)
 
 	// Register router-scoped and histogram metrics.
 	// On duplicate registration, reuse the already-registered collector so the
@@ -669,6 +682,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	cacheSuccessTotalMetric = registerOrReuse(cacheSuccessTotalMetric)
 	cacheFailedTotalMetric = registerOrReuse(cacheFailedTotalMetric)
 	cacheLatencyHistogram = registerOrReuse(cacheLatencyHistogram)
+	cacheWriteSkippedTotalMetric = registerOrReuse(cacheWriteSkippedTotalMetric)
+	cacheEntryBytesHistogram = registerOrReuse(cacheEntryBytesHistogram)
 	csmBlockedProvidersCount = registerOrReuse(csmBlockedProvidersCount)
 	csmPrevEpochBlockedProviders = registerOrReuse(csmPrevEpochBlockedProviders)
 	csmProviderBlocked = registerOrReuse(csmProviderBlocked)
@@ -766,6 +781,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		cacheSuccessTotalMetric:  cacheSuccessTotalMetric,
 		cacheFailedTotalMetric:   cacheFailedTotalMetric,
 		cacheLatencyHistogram:    cacheLatencyHistogram,
+
+		// Cache writes
+		cacheWriteSkippedTotalMetric: cacheWriteSkippedTotalMetric,
+		cacheEntryBytesHistogram:     cacheEntryBytesHistogram,
 
 		// CSM state-store gauges
 		csmBlockedProvidersCount:       csmBlockedProvidersCount,
@@ -1403,6 +1422,25 @@ func (m *SmartRouterMetricsManager) RecordCacheResult(chainId, apiInterface, met
 	// Every attempted lookup is observed — hit-only latency hid exactly the tail
 	// that matters for a network-hop tier.
 	m.cacheLatencyHistogram.WithLabelValues(chainId, apiInterface, method, cacheTier).Observe(latencyMs)
+}
+
+// RecordCacheWriteSkipped counts a reply the router served but chose not to write to its
+// cache; reason is the closed CacheWriteSkipReason* enum.
+func (m *SmartRouterMetricsManager) RecordCacheWriteSkipped(chainId, apiInterface, method, reason string) {
+	if m == nil {
+		return
+	}
+	method = m.normalizeMethodLabel(chainId, method)
+	m.cacheWriteSkippedTotalMetric.WithLabelValues(chainId, apiInterface, method, reason).Inc()
+}
+
+// RecordCacheEntryWritten observes the body size of a reply handed to the cache backend.
+func (m *SmartRouterMetricsManager) RecordCacheEntryWritten(chainId, apiInterface, method string, bodyBytes int) {
+	if m == nil {
+		return
+	}
+	method = m.normalizeMethodLabel(chainId, method)
+	m.cacheEntryBytesHistogram.WithLabelValues(chainId, apiInterface, method).Observe(float64(bodyBytes))
 }
 
 func (m *SmartRouterMetricsManager) SetProtocolError(chainId string, apiInterface string, providerAddress string, method string) {

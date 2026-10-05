@@ -306,7 +306,7 @@ func TestCheckResponseError_HTTPStatusCodeVariations(t *testing.T) {
 				"message": "bad request",
 				"code": 400
 			}`,
-			expectedError: false, // 4xx are client errors, not node errors - pass through to consumer
+			expectedError: true, // any status outside 2xx is a node error; the body is returned to the caller as-is
 		},
 		{
 			name:       "HTTP 500 (Server Error)",
@@ -327,7 +327,7 @@ func TestCheckResponseError_HTTPStatusCodeVariations(t *testing.T) {
 				"message": "not found",
 				"code": 404
 			}`,
-			expectedError: false, // 4xx are client errors, not node errors - pass through to consumer
+			expectedError: true, // any status outside 2xx is a node error; the body is returned to the caller as-is
 		},
 	}
 
@@ -383,7 +383,7 @@ func TestCheckResponseError_NonTransactionCalls(t *testing.T) {
 				"code": 404
 			}`,
 			httpStatus:    404,
-			expectedError: false, // 4xx are client errors, not node errors - pass through to consumer
+			expectedError: true, // any status outside 2xx is a node error; the body is returned to the caller as-is
 		},
 		{
 			name: "Query Block - Success",
@@ -671,16 +671,16 @@ func TestCheckResponseError_ServerErrors(t *testing.T) {
 			},
 		},
 		{
-			name:          "404 Not Found (client error)",
+			name:          "404 Not Found",
 			httpStatus:    404,
 			response:      `{"code":5,"message":"block not found"}`,
-			expectedError: false, // NOT a node error - client error
+			expectedError: true, // a node error, classified by the registry's 404 row (retryable on another node, data-scope, not the node's fault)
 		},
 		{
-			name:          "400 Bad Request (client error)",
+			name:          "400 Bad Request",
 			httpStatus:    400,
 			response:      `{"error":"invalid request"}`,
-			expectedError: false, // NOT a node error
+			expectedError: true, // a node error, classified by the registry's 400 row (non-retryable, not the node's fault)
 		},
 	}
 
@@ -696,6 +696,87 @@ func TestCheckResponseError_ServerErrors(t *testing.T) {
 			if tc.errorCheck != nil {
 				tc.errorCheck(t, errorMessage)
 			}
+		})
+	}
+}
+
+// TestCheckResponseError_AnyNonSuccessIsANodeError pins the rule: every status outside 2xx is a
+// node error whatever the body says, a 2xx is a success unless it carries a Cosmos transaction
+// error, and a status of 0 is "not set" and reads as a success. The bodies are what real nodes
+// and gateways answered with on 2026-09-27 (docs/ERROR-REGISTRY-DESIGN.md, "REST replies").
+func TestCheckResponseError_AnyNonSuccessIsANodeError(t *testing.T) {
+	testCases := []struct {
+		name          string
+		httpStatus    int
+		response      string
+		expectedError bool
+		msgContains   string
+	}{
+		{"200 JSON", 200, `{"balances":[]}`, false, ""},
+		{"200 non-JSON body is still a success (a raw Tezos balance)", 200, `"459159730"`, false, ""},
+		{"201 Horizon async submit accepted", 201, `{"tx_status":"PENDING","hash":"1a3b"}`, false, ""},
+		{"status 0 is unset and reads as a success", 0, `{"result":"x"}`, false, ""},
+		{"Aptos unknown account is a 200 with a fresh account, not an error", 200, `{"sequence_number":"0","authentication_key":"0xdead"}`, false, ""},
+		{"Cosmos broadcast rejected inside a 200", 200, `{"tx_response":{"code":2,"raw_log":"invalid length"}}`, true, "invalid length"},
+		{"Horizon not_found problem document", 404, `{"type":"https://stellar.org/horizon-errors/not_found","title":"Resource Missing","status":404}`, true, ""},
+		{"Horizon transaction_failed (a rejected write)", 400, `{"type":"https://stellar.org/horizon-errors/transaction_failed","status":400,"extras":{"result_codes":{"transaction":"tx_bad_seq"}}}`, true, ""},
+		{"Horizon async submit ERROR", 400, `{"tx_status":"ERROR","error_result_xdr":"AAAA","hash":"0367"}`, true, ""},
+		{"Horizon before_history (410)", 410, `{"type":"https://stellar.org/horizon-errors/before_history","status":410}`, true, ""},
+		{"Aptos resource_not_found", 404, `{"message":"Resource not found","error_code":"resource_not_found","vm_error_code":null}`, true, "Resource not found"},
+		{"Aptos version_pruned (410)", 410, `{"error_code":"version_pruned","message":"Ledger version(1) has been pruned"}`, true, "pruned"},
+		{"Cosmos tx not found (404, code 5)", 404, `{"code":5,"message":"tx not found: 0000","details":[]}`, true, "tx not found"},
+		{"Cosmos pruned height (500 with the gateway envelope)", 500, `{"code":2,"message":"height 1 is not available, lowest height is 25280088","details":[]}`, true, "not available"},
+		{"Sidecar unknown block hash (500)", 500, `{"code":500,"message":"Unable to retrieve header and parent from supplied hash"}`, true, "Unable to retrieve"},
+		{"nodeos rejected transaction (500)", 500, `{"code":500,"message":"Internal Service Error","error":{"code":3010010,"name":"packed_transaction_type_exception"}}`, true, ""},
+		{"Tezos injection failure is a JSON array in a 500", 500, `[{"kind":"temporary","id":"failure","msg":"Can't parse the operation"}]`, true, ""},
+		{"Beacon NOT_FOUND", 404, `{"code":404,"message":"NOT_FOUND: beacon block at slot 9","stacktraces":[]}`, true, "NOT_FOUND"},
+		{"toncenter ok:false with a 422", 422, `{"ok":false,"error":"failed to parse ton_addr","code":422}`, true, "failed to parse"},
+		{"tatum gateway empty 404 (the dfns incident)", 404, ``, true, "HTTP 404"},
+		{"nginx HTML 404", 404, `<html><head><title>404 Not Found</title></head></html>`, true, "404 Not Found"},
+		{"Horizon's own empty 405", 405, ``, true, "HTTP 405"},
+		{"Tezos missing block is an empty 404", 404, ``, true, "HTTP 404"},
+		{"Stacks rejects a submit with text/plain 400", 400, `Failed to decode: unrecognized auth flags 103`, true, "Failed to decode"},
+		{"Cloudflare HTML 403", 403, `<!DOCTYPE html><html>blocked</html>`, true, ""},
+		{"gateway 302 redirect page", 302, `<html><body>302 Found</body></html>`, true, ""},
+		{"empty 500", 500, ``, true, "HTTP 500"},
+		{"HTML 502", 502, `<html><body>502 Bad Gateway</body></html>`, true, ""},
+		{"429 with a body", 429, `{"error":"rate limit exceeded"}`, true, "rate limit"},
+		{"429 with an empty body", 429, ``, true, "HTTP 429"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			hasError, errorMessage := RestMessage{}.CheckResponseError([]byte(tc.response), tc.httpStatus)
+			require.Equal(t, tc.expectedError, hasError)
+			if tc.msgContains != "" {
+				require.Contains(t, errorMessage, tc.msgContains)
+			}
+		})
+	}
+}
+
+// TestServerErrorIsNodeReply pins which REST 5xx replies keep their body for the client.
+func TestServerErrorIsNodeReply(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"Horizon 503 TRY_AGAIN_LATER", 503, `{"tx_status":"TRY_AGAIN_LATER","hash":"07"}`, true},
+		{"Cosmos 500 with the gateway envelope", 500, `{"code":2,"message":"height 1 is not available"}`, true},
+		{"sidecar 500", 500, `{"code":500,"message":"Unable to retrieve header and parent from supplied hash"}`, true},
+		{"empty 500", 500, ``, false},
+		{"HTML 502", 502, `<html><body>502 Bad Gateway</body></html>`, false},
+		{"text 503", 503, `Service Unavailable`, false},
+		{"JSON 502 — may have forwarded the request", 502, `{"message":"bad gateway"}`, false},
+		{"JSON 504 — Horizon timeout, the tx may still apply", 504, `{"type":"https://stellar.org/horizon-errors/timeout","status":504}`, false},
+		{"JSON 524 — Cloudflare timeout", 524, `{"message":"timeout"}`, false},
+		{"not a 5xx", 404, `{"message":"not found"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, ServerErrorIsNodeReply(tc.status, []byte(tc.body)))
 		})
 	}
 }

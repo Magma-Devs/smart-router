@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Shared helpers for the cross-validation lanes.
 #
 #   init_smartrouter_cv_demo.sh      the policies + groups lane

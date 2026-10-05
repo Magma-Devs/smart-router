@@ -38,6 +38,20 @@ type CacheRelayReply struct {
 	// status (e.g. the caching populator's 429/504/non-2xx checks) treat zero as
 	// no-signal rather than as a failure.
 	StatusCode int `json:"status_code"`
+	// KeyPrefix echoes the keyspace the server scoped this lookup by: the
+	// request's KeyPrefix as the server read it. A cache server that predates
+	// the field drops the prefix on the way in and echoes nothing, and an empty
+	// echo against a non-empty request is how a router learns that it is
+	// unisolated — the only sign there is, since the server is otherwise
+	// silent about it (see performance.Cache).
+	KeyPrefix string `json:"key_prefix"`
+}
+
+func (c *CacheRelayReply) GetKeyPrefix() string {
+	if c != nil {
+		return c.KeyPrefix
+	}
+	return ""
 }
 
 func (c *CacheRelayReply) GetReply() *RelayReply {
@@ -92,6 +106,22 @@ type RelayCacheGet struct {
 	ChainId               string               `json:"chain_id"`
 	SeenBlock             int64                `json:"seen_block"`
 	BlocksHashesToHeights []*BlockHashToHeight `json:"blocks_hashes_to_heights"`
+	// KeyPrefix names the keyspace this router occupies on a shared cache server
+	// (the cache-be-key-prefix setting). The server folds it into every key it
+	// derives for the request — the relay entry, the chain tip that resolves
+	// LATEST, block-hash heights, the shared-state tip — so two routers on one
+	// chain with different prefixes share nothing. Empty is the unscoped keyspace
+	// every router occupied before the field existed. A cache server predating
+	// the field drops it on the wire without a word, so isolation needs the
+	// server upgraded alongside the router.
+	KeyPrefix string `json:"key_prefix"`
+}
+
+func (r *RelayCacheGet) GetKeyPrefix() string {
+	if r != nil {
+		return r.KeyPrefix
+	}
+	return ""
 }
 
 func (r *RelayCacheGet) GetRequestHash() []byte {
@@ -168,6 +198,15 @@ type RelayCacheSet struct {
 	// the writer does not know it (legacy writers, non-HTTP flows). See
 	// CacheRelayReply.StatusCode for reader semantics.
 	StatusCode int `json:"status_code"`
+	// KeyPrefix scopes every key this write derives; see RelayCacheGet.KeyPrefix.
+	KeyPrefix string `json:"key_prefix"`
+}
+
+func (r *RelayCacheSet) GetKeyPrefix() string {
+	if r != nil {
+		return r.KeyPrefix
+	}
+	return ""
 }
 
 func (r *RelayCacheSet) GetRequestHash() []byte {
@@ -376,6 +415,10 @@ type StickySessionSet struct {
 	Provider string `json:"provider"`
 	Epoch    uint64 `json:"epoch"`
 	TtlMs    int64  `json:"ttl_ms"`
+	// KeyPrefix scopes the claim to the router's keyspace, like every other key
+	// (see RelayCacheGet.KeyPrefix): a claim names an upstream by NAME, and a
+	// router on a different node set has no upstream by that name to route to.
+	KeyPrefix string `json:"key_prefix"`
 }
 
 // StickySessionGet asks the cache backend which upstream the fleet has pinned for one sticky
@@ -385,6 +428,8 @@ type StickySessionGet struct {
 	ApiInterface string `json:"api_interface"`
 	Service      string `json:"service"`
 	StickyId     string `json:"sticky_id"`
+	// KeyPrefix scopes the read to the router's keyspace; see StickySessionSet.
+	KeyPrefix string `json:"key_prefix"`
 }
 
 // StickySessionReply carries the EFFECTIVE pin — the entry the store actually holds after the
@@ -395,6 +440,16 @@ type StickySessionReply struct {
 	Found    bool   `json:"found"`
 	Provider string `json:"provider"`
 	Epoch    uint64 `json:"epoch"`
+	// KeyPrefix echoes the keyspace the server scoped the claim by; see
+	// CacheRelayReply.KeyPrefix.
+	KeyPrefix string `json:"key_prefix"`
+}
+
+func (r *StickySessionReply) GetKeyPrefix() string {
+	if r != nil {
+		return r.KeyPrefix
+	}
+	return ""
 }
 
 func (r *StickySessionReply) GetFound() bool {

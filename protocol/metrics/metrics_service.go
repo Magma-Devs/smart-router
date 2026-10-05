@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"bytes"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -34,13 +35,23 @@ func NewMetricService() *MetricService {
 	if reportMetricsUrl == "" || intervalData == "" {
 		return nil
 	}
+	// time.NewTicker panics on a non-positive interval, and a parse error leaves 0.
+	// Past MaxInt64/Minute minutes the Duration overflows, to a negative interval
+	// or to a short positive one.
+	intervalForMetrics, err := strconv.ParseInt(intervalData, 10, 32)
+	if err != nil || intervalForMetrics <= 0 || intervalForMetrics > int64(math.MaxInt64/time.Minute) {
+		return nil
+	}
 
 	if reportMetricsAuthorization == "" {
 		utils.LavaFormatInfo("Authorization is not set for metrics")
 	}
-	intervalForMetrics, _ := strconv.ParseInt(intervalData, 10, 32)
 	metricChannelBufferSizeData := os.Getenv("METRICS_BUFFER_SIZE_NR")
 	metricChannelBufferSize, _ := strconv.ParseInt(metricChannelBufferSizeData, 10, 64)
+	if metricChannelBufferSize < 0 {
+		// make panics on a negative size; treat it like an unset one.
+		metricChannelBufferSize = 0
+	}
 	mChannel := make(chan RelayMetrics, metricChannelBufferSize)
 	result := &MetricService{
 		MetricsChannel:      mChannel,

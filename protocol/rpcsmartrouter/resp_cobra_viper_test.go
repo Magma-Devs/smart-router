@@ -44,6 +44,10 @@ func wireLikeRunE(t *testing.T, yamlBody string, flagArgs ...string) {
 		"--%s must be registered on the real command", performance.RespCacheAddressesFlagName)
 	require.NotNil(t, cmd.Flags().Lookup(performance.RespCacheTopologyFlagName),
 		"--%s must be registered on the real command", performance.RespCacheTopologyFlagName)
+	require.NotNil(t, cmd.Flags().Lookup(performance.RespCacheKeyPrefixFlagName),
+		"--%s must be registered on the real command", performance.RespCacheKeyPrefixFlagName)
+	require.NotNil(t, cmd.Flags().Lookup(performance.CacheKeyPrefixFlagName),
+		"--%s must be registered on the real command", performance.CacheKeyPrefixFlagName)
 
 	if yamlBody != "" {
 		dir := t.TempDir()
@@ -85,13 +89,16 @@ resp-cache:
 }
 
 // Explicit flags outrank the YAML block — the precedence the plan requires.
+// The YAML-only keys are ones every topology reads, so the overlay's result
+// is a configuration that validates; a key the flagged topology does not read
+// is a different case, below.
 func TestRealCommand_FlagsOutrankYAML(t *testing.T) {
 	wireLikeRunE(t, `
 resp-cache:
-  topology: sentinel
-  addresses: ["yaml-a:26379", "yaml-b:26379"]
-  master-name: mymaster
+  topology: standalone
+  addresses: ["yaml-a:6379"]
   key-prefix: "yamlpfx"
+  pool-size: 7
 `,
 		"--"+performance.RespCacheAddressesFlagName, "flag-1:6379,flag-2:6379",
 		"--"+performance.RespCacheTopologyFlagName, "cluster",
@@ -108,8 +115,28 @@ resp-cache:
 		"--%s must replace, not append to, the YAML addresses", performance.RespCacheAddressesFlagName)
 
 	// ...and YAML still supplies everything the flags do not cover.
-	require.Equal(t, "mymaster", cfg.MasterName, "unflagged YAML keys survive the overlay")
-	require.Equal(t, "yamlpfx", cfg.KeyPrefix)
+	require.Equal(t, "yamlpfx", cfg.KeyPrefix, "unflagged YAML keys survive the overlay")
+	require.Equal(t, 7, cfg.PoolSize)
+}
+
+// The overlay runs before validation, so a flag that moves a YAML sentinel
+// block to another topology leaves its master-name dangling, and the merged
+// configuration is refused as such rather than started with a key nothing
+// reads (MAG-3671). This used to pass as a precedence case; it is the shape
+// the master-name rule exists for, seen through the real command.
+func TestRealCommand_FlaggedTopologyLeavesYAMLMasterNameDangling(t *testing.T) {
+	wireLikeRunE(t, `
+resp-cache:
+  topology: sentinel
+  addresses: ["yaml-a:26379", "yaml-b:26379"]
+  master-name: mymaster
+`,
+		"--"+performance.RespCacheTopologyFlagName, "cluster",
+	)
+
+	_, _, err := performance.LoadRespCacheConfig(viper.GetViper())
+	require.ErrorContains(t, err, "master-name")
+	require.ErrorContains(t, err, "dangling")
 }
 
 // RESP settings are never sourced from the environment: this repo binds no env
@@ -168,4 +195,39 @@ func TestRealCommand_FlagOnlyConfiguration(t *testing.T) {
 	require.Equal(t, []string{"only-flag:6379"}, cfg.Addresses)
 	require.Equal(t, redisstore.Topology(""), cfg.Topology,
 		"topology stays unset so the client defaults to standalone")
+}
+
+// Both keyspace flags exist on the shipped command and land where the loaders
+// look: --resp-cache-key-prefix outranks the YAML block's key-prefix, and
+// --cache-be-key-prefix is readable through viper for the gRPC selection
+// (MAG-3521 / MAG-3687).
+func TestRealCommand_KeyPrefixFlags(t *testing.T) {
+	wireLikeRunE(t, `
+resp-cache:
+  addresses: ["yaml-a:6379"]
+  key-prefix: "yamlpfx"
+cache-be: "cache:20100"
+`,
+		"--"+performance.RespCacheKeyPrefixFlagName, "flagpfx",
+		"--"+performance.CacheKeyPrefixFlagName, "grpcpfx",
+	)
+
+	cfg, enabled, err := performance.LoadRespCacheConfig(viper.GetViper())
+	require.NoError(t, err)
+	require.True(t, enabled)
+	require.Equal(t, "flagpfx", cfg.KeyPrefix, "--%s must outrank the YAML key-prefix", performance.RespCacheKeyPrefixFlagName)
+	require.Equal(t, "grpcpfx", viper.GetString(performance.CacheKeyPrefixFlagName))
+}
+
+// A misspelled key in the YAML block is refused through the real command's
+// viper too (MAG-3677) — the loader test proves the rule, this proves the
+// shipped wiring reaches it.
+func TestRealCommand_RespCacheUnknownKeyIsRefused(t *testing.T) {
+	wireLikeRunE(t, `
+resp-cache:
+  addresses: ["yaml-a:6379"]
+  key_prefix: "yamlpfx"
+`)
+	_, _, err := performance.LoadRespCacheConfig(viper.GetViper())
+	require.ErrorContains(t, err, "key_prefix")
 }

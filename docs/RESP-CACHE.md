@@ -45,6 +45,10 @@ resp-cache:
   addresses: ["my-valkey:6379"]
 ```
 
+If more than one router deployment shares the backend, also give each its own `key-prefix`
+(or `--resp-cache-key-prefix`) — see
+[Sharing a backend between routers](#sharing-a-backend-between-routers).
+
 Docker Compose (starts a valkey next to the router):
 
 ```bash
@@ -57,30 +61,42 @@ SR_CONFIG=config/smartrouter_examples/smartrouter_eth_resp_cache.yml \
 
 Everything lives under the `resp-cache:` block. Setting any of it **without `addresses`** is
 rejected at startup (dangling configuration), as is every invalid combination below — the
-router never starts half-configured.
+router never starts half-configured. A key the block does not define is rejected too: a
+misspelled `key-prefix` used to be ignored and put the router on the shared default without
+a word.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `topology` | `standalone` | `standalone` \| `sentinel` \| `cluster`. |
-| `addresses` | — (required) | Standalone: the node address. Sentinel: the **sentinel** addresses. Cluster: the **configuration endpoint** used as the discovery seed — never a node list; the client discovers topology itself. |
+| `addresses` | — (required) | Standalone: the node address — **exactly one**; a longer list is refused at startup rather than silently truncated to its first element, because standalone has no failover to give a spare to. Sentinel: the **sentinel** addresses. Cluster: the **configuration endpoint** used as the discovery seed — never a node list; the client discovers topology itself. |
 | `read-addresses` | *(unset)* | Optional separate endpoint(s) for **reads** (reader endpoints). Writes stay on `addresses`. Selects an *endpoint*, not a replica role — see the caveat under [Multi-region reads](#multi-region-reads-readwrite-split). |
-| `master-name` | — | Sentinel only (required there): the monitored master set name. |
-| `username` / `password` | *(unset)* | Static data-node credentials (AUTH / ACL). |
-| `password-file` | *(unset)* | Rotation-capable credentials: the file is polled and changes are pushed to **live connections**, which re-authenticate in place — no restart, no connection loss (standalone and cluster; under sentinel rotation applies on reconnect — see [Credential rotation](#credential-rotation)). Holds the password, or `username:password` to rotate the ACL user too — so a password containing `:` cannot be expressed here. Mutually exclusive with `password`. |
+| `master-name` | — | Sentinel only (required there): the monitored master set name. Refused under any other topology — a `master-name` with the `topology: sentinel` line forgotten is dangling configuration, since the router would otherwise dial the first sentinel address as a plain data node. |
+| `username` / `password` | *(unset)* | Static data-node credentials (AUTH / ACL). Without `tls.enabled: true` they are sent readable on every new connection; the router warns about that once at startup (`credentials are configured without tls`), which is fine for a loopback or private-network backend and the thing to fix for any other. |
+| `password-file` | *(unset)* | Rotation-capable credentials: the file is polled and changes are pushed to **live connections**, which re-authenticate in place — no restart, no connection loss (standalone and cluster; under sentinel rotation applies on reconnect — see [Credential rotation](#credential-rotation)). Holds the password, or `username:password` to rotate the ACL user too — so a password containing `:` cannot be expressed here. Surrounding ASCII whitespace (spaces, tabs, CR, LF) and a leading UTF-8 byte order mark are trimmed, from the file and from each half of `username:password`; every other byte is sent as part of the credential, and a file that is empty once trimmed is refused at startup. Mutually exclusive with `password`. |
 | `credential-refresh-interval` | `10s` | Poll cadence for `password-file`. |
-| `sentinel-username` / `sentinel-password` / `sentinel-password-file` | *(unset)* | **Sentinel control-plane** credentials — sentinels authenticate independently of the data nodes; hardened deployments fail discovery without these. Only valid with `topology: sentinel`, and read once at startup (rotating them needs a restart). |
+| `sentinel-username` / `sentinel-password` / `sentinel-password-file` | *(unset)* | **Sentinel control-plane** credentials — sentinels authenticate independently of the data nodes; hardened deployments fail discovery without these. Only valid with `topology: sentinel`, and read once at startup (rotating them needs a restart). The file is read like `password-file`: ASCII whitespace and a leading byte order mark trimmed, every other byte kept, an empty file refused. |
 | `db` | `0` | Logical database (standalone/sentinel only; rejected for cluster). |
-| `key-prefix` | `sr` | Namespace for every key. Restricted to `[A-Za-z0-9._-]+` (flush uses it as a `SCAN MATCH` glob). Give each deployment sharing a backend its own prefix — flush isolation follows from it. |
-| `tls.enabled` | `false` | TLS to the backend. |
+| `key-prefix` | `sr` | The keyspace this router occupies; flag form `--resp-cache-key-prefix` (outranks the block). Restricted to `[A-Za-z0-9._-]+` (flush uses it as a `SCAN MATCH` glob). **Routers on one prefix serve each other's cached answers and resolve `latest` off one chain tip**, and the default puts every router that leaves it unset in one keyspace — give each deployment sharing a backend its own prefix unless its routers are replicas reading the same nodes; flush isolation follows from it. See [Sharing a backend between routers](#sharing-a-backend-between-routers). |
+| `tls.enabled` | `false` | TLS to the backend. **Required (`true`) whenever any other `tls.*` key is set** — a `tls` block without it is refused at startup as dangling configuration, because the alternative is a plaintext connection carrying `username`/`password` readable on the wire. That holds for an explicit `enabled: false` beside those keys too. To run without TLS, remove the other `tls.*` keys or the whole block; `tls: {enabled: false}` on its own is accepted. |
 | `tls.ca-file` | *(system pool)* | PEM CA bundle for server verification. |
 | `tls.cert-file` / `tls.key-file` | *(unset)* | Client keypair for mTLS (both or neither). |
 | `tls.server-name` | *(unset)* | Overrides the verification/SNI name. |
-| `tls.insecure-skip-verify` | `false` | Skips server verification (testing only). |
+| `tls.insecure-skip-verify` | `false` | Skips server verification (testing only). Warned about at startup, carried on the "backend configured" line, and shown in `GET /debug/cache-state` as `tls=insecure-skip-verify` in the tier's `address`, so a development setting that travelled to production is visible to whoever reads the deployment later. |
 | `dial-timeout` / `read-timeout` / `write-timeout` | `500ms` dial; client defaults for read/write | Per-operation network limits. A **fresh** connection's dial and TLS handshake are bounded by `dial-timeout` *and* by the caller's own deadline, whichever is sooner — the default is deliberately sub-second so a black-holed backend cannot make cold lookups linger. |
 | `pool-size` | client default | Connection pool size (per client; the read client has its own). |
+| `expiration.finalized` | `1h` | Lifetime of a settled (finalized) answer. The sidecar's `--expiration`. Every `expiration.*` duration needs a unit (`1h`, `3600s`, `250ms`): a bare number is read as nanoseconds, so `3600` is 3.6µs, and any lifetime that resolves below one millisecond — the precision a RESP expiry has — is refused at startup with a message saying what the number became. |
+| `expiration.finalized-multiplier` | `1` | Multiplier on `expiration.finalized`. The sidecar's `--expiration-multiplier`, which the published chart sets to `1.5` (90 minutes) — this is where a router on a RESP backend keeps that. A multiplied lifetime that resolves below one millisecond (the precision a RESP expiry has), or past what a duration can hold, is refused at startup: below that the client would round every write up to 1ms, and to the store a zero lifetime is a key that never expires, not one that expires at once. |
+| `expiration.non-finalized` | `500ms` | Floor for a recent (non-finalized) answer; the effective TTL is max(averageBlockTime/8, this). The sidecar's `--expiration-non-finalized`. |
+| `expiration.non-finalized-multiplier` | `1` | Multiplier on `expiration.non-finalized`. The sidecar's `--expiration-non-finalized-multiplier`. |
+| `expiration.node-errors` | `250ms` | Cap on a cached node error for a finalized block. The sidecar's `--expiration-finalized-node-errors`. |
+| `expiration.blocks-hashes-to-heights` | `48h` | Lifetime of a block-hash→height mapping. The sidecar's `--expiration-blocks-hashes-to-heights`. |
 
-TTLs are the cache engine's own (finalized ~1h, non-finalized scaled to the chain's block
-time, short-lived node errors) — the same table the default cache uses.
+TTLs default to the cache engine's own table (finalized 1h, non-finalized scaled to the chain's
+block time with a 500ms floor, short-lived node errors) — the same defaults the sidecar applies
+from its flags. The sidecar's flags are set by the chart; a router on a RESP backend takes the
+same values from the `expiration` block above, and `GET /debug/cache-state` reports the
+lifetimes actually in force under `lifetimes`. Without the block, a cache moved from the sidecar
+to a RESP backend runs on the defaults, not on whatever the chart had set for the sidecar.
 
 One budget lives on the **router**, not in this block: every cache **lookup** runs inside
 the per-relay `--cache-timeout` flag (default `50ms`, sized for a same-zone backend; writes
@@ -92,6 +108,10 @@ above the round-trip time (e.g. `--cache-timeout 400ms`), and prefer co-locating
 with the backend: a hit always costs ~1 RTT, and a miss waits out the budget before falling
 through to the upstream. (`--secondary-cache-timeout` is the same knob for the secondary
 tier.)
+
+The router also decides what it **writes**: when `--cache-max-entry-bytes` is set (it is off
+by default), a reply body larger than it is served but never written, on this backend as on
+cache-be. Each one counts in `smartrouter_cache_write_skipped_total{reason="size"}`.
 
 Config values are **not** environment-expanded: a `${VAR}` written here is read literally as
 the value.
@@ -143,7 +163,8 @@ resp-cache:
   read-addresses: ["reader.eu-west-1.cache:6379"] # reads
 ```
 
-Reads go to `read-addresses`, writes (including cache population and flush) to `addresses`.
+Reads go to `read-addresses` and writes (cache population) to `addresses`; a reset reaches both,
+see **Resets reach both endpoints** below.
 Replication lag is safe by construction: an entry that hasn't replicated yet is a plain cache
 miss, and the router's block-freshness validation (seen-block rules) runs on every hit — a
 lagging replica can never serve data older than what the client has already seen.
@@ -156,6 +177,18 @@ pointing it at replicas of the *same* deployment routes your reads straight back
 primary. It is still meaningful pointed at a **separate replicated deployment**, which is why
 the router logs a warning rather than rejecting the config. Replica reads within one sentinel
 set or cluster are not supported; use the managed reader endpoint in `standalone` shape.
+
+**Resets reach both endpoints.** `/debug/reset-all` scans and unlinks under the key prefix on
+the read endpoint as well as the write endpoint, because a separate read store is one the
+write endpoint never feeds, and an entry left there kept being served after every reset. Before
+scanning the read endpoint the router asks it `ROLE` (or `INFO replication` where `ROLE` is not
+answered): one that reports itself a replica is not scanned at all, since every unlink there
+would answer `READONLY` and a `SCAN` walks the node's whole keyspace whatever the `MATCH`, which
+on a shared managed reader is a full walk per reset for no effect. The master it names, and
+whether that is the configured write address, are logged at debug level. A read endpoint that
+answers neither is scanned, and a `READONLY` at the unlink is left to replication the same way;
+the reset still succeeds. A read endpoint that cannot be reached fails the reset, naming the
+read side.
 
 ## Credential rotation
 
@@ -181,6 +214,37 @@ applies on reconnect, rather than reporting rotations it cannot deliver.
 > warning once at startup when the file contains a colon, naming only the parsed username.
 > Either avoid `:` in the password or use the explicit `username:password` form deliberately.
 
+> **What the file trim removes, and what it keeps.** Surrounding ASCII whitespace (spaces,
+> tabs, CR, LF) and a leading UTF-8 byte order mark are trimmed, on the file and on each half of
+> `username:password`; every other byte is the credential. A credential that begins with another
+> invisible rune (a zero-width space, a non-breaking space) is sent as written, and the router
+> warns once at startup naming the file and the code point, never the value. A file that is empty
+> once trimmed is refused at startup; one that is empty for a moment mid-rotation (a secret mount
+> being rewritten) is a failed read, and the live connections keep the credentials they have.
+
+If the file becomes unreadable while the router runs — a mount that dropped, a rotation that
+failed, a permission change, a file that is empty once trimmed — the router keeps the credentials
+it last read, on every connection: live connections are untouched, and a connection opened during
+the outage (pool growth, a reconnect after a network blip, an idle replacement) is handed the same
+credentials rather than failing its setup on the unreadable file. The router says so **once** when
+the outage starts, once more if its cause changes, and once when the file is readable again; a
+rotation that lands with the recovery is pushed to every connection, including those opened
+during the outage. It does not repeat the warning on every poll, so a long outage costs one
+log line rather than one per interval.
+
+A store that closes or refuses connections while requests are flowing does not cost the router
+memory: a connection whose setup failed is released, buffers and socket included, once the
+garbage collector reclaims it, rather than being kept by the rotation machinery for the life of
+the process. Its file descriptor therefore closes at the next collection, not at the failure,
+and a collection is triggered by heap growth (`GOGC`), not by the failure. Every failed
+handshake allocates the same two 32 KiB buffers, so the sockets open at once during an outage
+are roughly `live heap × GOGC/100 ÷ 64 KiB`: about 4,000 for a router with 256 MiB live, one
+cycle's worth, which is where the figure the defect was measured at came from. Under a low
+`nofile` limit (1024 is a common service default) that is exhaustion before the first cycle,
+and the router's other sockets fail alongside. Bounding how many connections an outage opens at
+all is the job of the request-path breaker (MAG-3676), a separate change; this one bounds how
+long each failed connection is held. Together they are the fix.
+
 ## Sizing and eviction (`maxmemory-policy`)
 
 Recommended: **`volatile-lru`** with a `maxmemory` fitting your working set.
@@ -205,13 +269,44 @@ budget and requests proceed to your upstreams; writes are best-effort. Recovery 
 Alert on the dedicated series (full reference in
 [METRICS.md](METRICS.md#resp-cache-backend--smartrouter_resp_cache_)):
 
-- `smartrouter_resp_cache_connected` — 0 after a failed health probe (PING, 10s cadence);
-  reachability transitions are also logged, and an authentication rejection is reported as
-  such rather than as "unreachable" (the credential itself is never logged).
+- `smartrouter_resp_cache_connected` — 0 after a failed health probe (PING, 10s cadence)
+  against any endpoint, or once the breaker below opens; reachability transitions are also
+  logged, naming the failing endpoint, and an authentication rejection is reported as such
+  rather than as "unreachable" (the credential itself is never logged).
+- `smartrouter_resp_cache_endpoint_connected{role}` — the same verdict per endpoint, `role` =
+  `write` | `read`. With reads split this is the series to alert on, because it says **which
+  half** is down; `GET /debug/cache-state` names it too, in `detail`.
 - `smartrouter_resp_cache_failed_total{op, kind}` — backend-level operation failures (never
   clean misses), with `kind` splitting `error` from `timeout` so saturation reads differently
   from outage.
 - `smartrouter_resp_cache_connection_errors_total`, pool gauges.
+
+- `smartrouter_resp_cache_breaker_open{role}` and `smartrouter_resp_cache_skipped_total{op}` —
+  the breaker, below.
+
+**An unreachable backend trips a breaker, per side.** Writes and the write endpoint's probe
+steer one breaker; lookups (entries, the chain tip, sticky claims) and the read endpoint's probe
+steer another. Three consecutive failures on a side, or one failed probe of its endpoint, open
+that side's breaker; while it is open every operation on that side returns at once with no I/O
+(counted on `smartrouter_resp_cache_skipped_total`, never as a failure the backend saw), the
+probe runs every second instead of every ten, and the breaker closes on the first probe that
+answers **within that side's budget**, once it has been open for at least one probe interval.
+The other side is untouched: with reads split, a writer outage skips writes while lookups keep
+hitting on the reader, and a reader outage skips lookups while the writer keeps being populated.
+Without a read split one breaker stands behind both sides. Without any of this, every lookup
+paid its full budget against a dead backend and every asynchronous write held a connection for
+its 5s budget, so under steady traffic the pool filled with stalled writes and lookups queued
+behind them — a forty-fold drop in serving rate for the length of the outage, and one more
+connection opened per operation. An outage now costs the relay path the handful of failures
+that opened the breaker, and recovery is noticed within about a second.
+
+The budget matters for a backend that is **slow rather than dead**: one that answers `PING`
+but cannot answer a lookup within the relay's 50 ms budget keeps its read breaker open, in one
+transition, instead of closing it on every probe and reopening it on the next three lookups.
+`smartrouter_resp_cache_connected` can therefore read 1 while `smartrouter_resp_cache_breaker_open{role="read"}`
+reads 1: the endpoint answers, and is too slow to serve lookups. The write side's budget is the
+5 s write budget, beyond the probe's own deadline, so a write breaker closes on any answered
+probe.
 
 The shared `smartrouter_cache_*` hit/miss series keep working unchanged.
 
@@ -236,29 +331,41 @@ curl -s http://127.0.0.1:6161/debug/cache-state | jq
     "primary": {
       "configured": true,
       "engine": "resp",
-      "address": "redis-primary:6379 read=reader.eu-west-1:6379 prefix=sr",
+      "address": "redis-primary:6379 read=reader.eu-west-1:6379 topology=standalone prefix=sr tls=insecure-skip-verify",
       "reachable": true,
       "reachable_checked_at": "2026-09-09T14:31:02Z",
       "reachable_detail": "no error reported",
-      "when_unreachable": "attempted",
-      "lifetimes": {"finalized_seconds": 3600, "non_finalized_seconds": 0.5, "node_errors_seconds": 60}
+      "when_unreachable": "skipped",
+      "lifetimes": {"finalized_seconds": 3600, "non_finalized_seconds": 0.5, "node_errors_seconds": 60},
+      "breaker": {"write_open": false, "read_open": false}
     },
     "secondary": {"configured": false, "engine": "", "address": "", "reachable": null,
-                  "reachable_checked_at": "", "reachable_detail": "", "when_unreachable": "", "lifetimes": null}
+                  "reachable_checked_at": "", "reachable_detail": "", "when_unreachable": "", "lifetimes": null,
+                  "breaker": null}
   }
 }
 ```
 
-Four things are easy to misread:
+Five things are easy to misread:
 
+- **`address` is the tier's configuration summary, not one address.** For a RESP tier it
+  carries the write addresses, `read=` when reads are split, `topology=` as **resolved** (an
+  omitted `topology:` line shows as `standalone`, which is how a sentinel block missing that
+  line reads at runtime), `master=` under sentinel, `prefix=` for the keyspace, and
+  `tls=insecure-skip-verify` only when certificate verification is off — its presence on a
+  production deployment is the finding, which is why the example above shows it. The startup
+  line says the same and then scrolls away; this field does not.
 - **`reachable` has three values.** `true`, `false`, and `null` for *not yet determined* — a
   RESP backend before its first probe returns, a `cache-be` connection mid-dial. `null` is not
   "unreachable"; a router polled immediately after startup legitimately answers it. Whether a
   tier exists is `configured`, never the presence of this field.
-- **`when_unreachable` is why `reachable: false` is not one fact.** For a RESP tier it is
-  `attempted`: the backend is still asked on every relay and pays the full cache timeout each
-  time. For a `cache-be` tier it is `skipped`: the client returns not-connected before any
-  I/O, so an unreachable tier costs nothing. Same flag, opposite bill.
+- **`when_unreachable` says what an unreachable tier costs the relay path.** Both shipped tiers
+  report `skipped`. A `cache-be` tier returns not-connected before any I/O. A RESP tier opens
+  its breaker (above) and skips that side until a probe answers within its budget, so an outage
+  costs the few failures that opened it and nothing per relay afterwards; `breaker` says which
+  side, since with a read/write split `reachable` alone cannot (`null` for a `cache-be` tier,
+  which has none). Older routers reported `attempted` for a RESP tier: every relay paid the
+  full cache timeout.
 - **`reachable_checked_at` marks a snapshot.** The RESP verdict comes from the 10s health
   probe, so it can be up to ~13s old. The `cache-be` verdict is read live from the connection
   and carries no timestamp.
@@ -282,12 +389,63 @@ polls would look healthy *because of* the first poll.
 > `--debug-address 127.0.0.1:6161` rather than `:6161`, and reach it through
 > `kubectl port-forward` in a cluster.
 
+## Sharing a backend between routers
+
+A keyspace is one cache. Every router in it reads and writes the same entries, resolves
+`latest` / `safe` / `finalized` / `pending` through the same chain tip, shares the same
+block-hash→height mappings, and — under `--shared-state` — the same seen-block and
+sticky-session claims. That is exactly right for **replicas of one deployment**: they read
+the same nodes, so an answer one of them cached is the answer any of them would have fetched.
+
+It is wrong for two routers that declare the same chain but read **different nodes** — a
+paid tier beside a free one, a canary beside production, a router being migrated onto a new
+node set while the old one still serves. In one keyspace whichever router asks first decides
+the answer both give for as long as the entry lives, the response reports `Cached` in place
+of a node name, and nothing on either side signals it (MAG-3521). The condition is therefore:
+**routers sharing a keyspace must read the same nodes.** Anything else needs its own
+keyspace:
+
+| Backend | Setting | Default |
+| --- | --- | --- |
+| RESP (this page) | `resp-cache.key-prefix` / `--resp-cache-key-prefix` | `sr` — one shared keyspace for every router that leaves it unset |
+| gRPC sidecar (`cache-be`) | `cache-be-key-prefix` / `--cache-be-key-prefix` | empty — the shared keyspace every router occupied before the setting existed |
+
+Both take the same character set (`[A-Za-z0-9._-]+`), so one value works on either backend.
+On the RESP backend the prefix heads every key (`<prefix>:rel:f:ETH1:…`); on the sidecar it
+travels inside each request and the server folds it into every key it derives
+(`rel:f:<prefix>:ETH1:…`), which is why **the sidecar has to be a build that knows the
+field** — an older `smart-router cache` drops it on the wire and isolates nothing. The router
+does not have to take that on trust: the server echoes the prefix it scoped by on every reply,
+and a router that sent one and reads no echo warns once per connection
+(`cache-be-key-prefix is set but the cache server did not echo it`) and keeps serving from the
+shared keyspace. `GET /debug/cache-state` names the keyspace in the tier's `address`
+(`prefix=…`) on both backends, so two routers can be checked for separation without sending
+traffic; on the sidecar the prefix reads `prefix=… (unconfirmed)` until the first reply on a
+connection and `prefix=… (ignored by the cache server)` once a reply came back without the
+echo, and bare `prefix=…` only once the server has confirmed it.
+
+A prefix is a **cooperative namespace, not a tenant boundary**. The sidecar has no
+authentication, so any client that can reach it can name any keyspace; the server refuses a
+prefix that is malformed (outside the character set, `InvalidArgument`), never one that
+belongs to someone else. Isolation between deployments that must not read each other's
+answers is a network question, not a naming one.
+
+What a prefix does **not** do: replicas that share a keyspace on purpose still share one
+chain tip, and that tip is a monotonic maximum with no downward path before expiry — one
+replica publishing a false high block pins `latest` resolution for its whole fleet. That is a
+trust problem rather than a naming one and is tracked separately (MAG-3755).
+
 ## Flush semantics
 
 The router's `/debug/reset-all` flushes the RESP backend **prefix-scoped**: `SCAN` over
 `key-prefix:*` with single-key `UNLINK`s. `FLUSHDB` is never issued, so a shared backend's
 other tenants (and other prefixes) are untouched. If two deployments must be flush-isolated,
 give them distinct prefixes.
+
+The gRPC sidecar is the exception: its in-memory store cannot enumerate keys by prefix, so a
+`/debug/reset-all` on any router empties **every** keyspace on that sidecar — the prefix
+scopes what a router reads and writes, and is not a flush boundary there. Routers that must
+be flush-isolated from each other need separate sidecars, or the RESP backend.
 
 ## Precedence and rollback
 
@@ -694,6 +852,7 @@ Router 2 stays up on `:3365`; `--stop` removes both.
 | Header names an unexpected backend | You are talking to a different lane's router — check the port (standalone `:3360`, sentinel `:3370`, multi-region `:3380`/`:3381`). |
 | `resp_cache_connected` is 0 | Backend unreachable — the container may have been `docker stop`ped, which deletes it (`--rm`). Re-run the lane. |
 | Relays fail or the smoke check fails | Public endpoint rate limits. Set `ETH_RPC_URL_1/2` and `ETH_WS_URL_1/2` to your own endpoints. |
+| Startup fails: `tls.* options are set but tls.enabled is not true` | The `tls` block carries `ca-file`, `cert-file`, `key-file`, `server-name` or `insecure-skip-verify` while `enabled` is missing or written as anything but `true` (`false`, `0`, `null`, `""`). The router will not open a plaintext connection on a block that reads as encrypted, and a switch turned off by hand with the paths left in place is refused the same way. Set `enabled: true` (the files are then read and verified at startup), or drop the other `tls.*` keys: a bare `tls: {enabled: false}`, or no block at all, runs without TLS. |
 
 Readiness timing note: `/metrics/overall-health` (and the container health that follows it)
 starts **fail-closed** and turns 200 once at least one chain has verified a provider — at

@@ -185,6 +185,22 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 				"only because ApplyNodeErrorClassification assigns the whole flag set, not IsNonRetryable alone",
 		},
 		{
+			name:             "Aborted is the validators' verdict on a write, not the endpoint's fault",
+			code:             codes.Aborted,
+			nodeMessage:      "Transaction execution failed: rejected by consensus",
+			wantNonRetryable: true,
+			wantScored:       false,
+			why: "MAG-3995: Sui sends ABORTED only on transaction submission, relaying what the validators " +
+				"answered; scoring it charged every endpoint the write was broadcast to for a verdict none of them made",
+		},
+		{
+			name:        "DataLoss stays unregistered and scored",
+			code:        codes.DataLoss,
+			nodeMessage: "unrecoverable data loss",
+			wantScored:  true,
+			why:         "MAG-3995: no node we route to sends it, so it keeps the uncatalogued default",
+		},
+		{
 			name:        "Unavailable is the endpoint's fault and stays scoreable",
 			code:        codes.Unavailable,
 			nodeMessage: "upstream connect error",
@@ -292,35 +308,72 @@ func TestSendGRPCRelay_DataScopeCodesStayRetryable(t *testing.T) {
 	}
 }
 
-// TestHealthResetAgreesWithScoring pins the coherence fix in relayInnerDirect.
+// TestHealthResetRequiresPositiveProof pins the three outcomes the endpoint counter has.
 //
-// The endpoint-health path and the QoS path read the same relay and used to reach
-// opposite conclusions about it: relayInnerDirect's `statusCode >= 500 || == 429`
-// gate cannot fire on a gRPC status (the codes are 0-16), so every gRPC node error
-// fell through to "Success — reset endpoint health" at the same moment
-// shouldFailSessionForResult was reporting it to the session manager as an
-// availability failure. The endpoint was demoted and certified healthy by one
-// relay.
+// It used to have two: shouldResetEndpointHealth was the exact negation of
+// shouldFailSessionForResult, so every relay either counted against the endpoint or cleared it.
+// FAILOVER-TASKS section 2 decision 4 adds a middle band — answers that tell us nothing about
+// whether the endpoint can serve must neither punish it nor certify it.
 //
-// UNAVAILABLE is the witness because it is the one gRPC status this PR agrees
-// should demote — before the fix it also called ResetHealth.
-func TestHealthResetAgreesWithScoring(t *testing.T) {
+// The UNAVAILABLE case is unchanged and is the original coherence fix: relayInnerDirect's
+// `statusCode >= 500 || == 429` gate cannot fire on a gRPC status (the codes are 0-16), so every
+// gRPC node error once fell through to "Success — reset endpoint health" at the same moment the QoS
+// path was scoring it as an availability failure. One relay demoted the endpoint and certified it
+// healthy.
+func TestHealthResetRequiresPositiveProof(t *testing.T) {
 	scored := grpcStatusRelay(t, codes.Unavailable, "upstream connect error")
 	require.True(t, shouldFailSessionForResult(nil, scored),
 		"precondition: an UNAVAILABLE endpoint is scored against")
-	require.False(t, shouldResetEndpointHealth(scored),
+	require.False(t, relayProvesEndpointHealthy(scored),
 		"a relay the optimizer is told to score against the endpoint must not also certify it healthy")
 
-	// A carved-out node error is the mirror image: not scored, so health still
-	// resets. The endpoint answered correctly, it simply does not hold the data —
-	// and the carve-out must not cost it the recovery the answer earned.
+	// A data-scope answer is the middle band, and this REVERSES what this test asserted before.
+	//
+	// It used to reset health, on the reasoning that the endpoint answered correctly and the
+	// carve-out must not cost it the recovery the answer earned. Decision 4 disagrees: "I do not
+	// hold that" is not proof the endpoint can serve. It rejected the request without doing the
+	// work, so it neither earns the reset nor deserves the blame — the counter is left alone.
 	carvedOut := grpcStatusRelay(t, codes.NotFound, "object not found")
-	require.False(t, shouldFailSessionForResult(nil, carvedOut))
-	require.True(t, shouldResetEndpointHealth(carvedOut),
-		"a data-scope answer proves the endpoint is working and must still restore its health")
+	require.False(t, shouldFailSessionForResult(nil, carvedOut),
+		"still not scored against — the endpoint did nothing wrong")
+	require.False(t, relayProvesEndpointHealthy(carvedOut),
+		"but it is not positive proof of health either; the counter must be left where it is")
 
-	// A plain success is unchanged — the gate that matters most, since it is the
-	// path virtually every relay takes.
-	require.True(t, shouldResetEndpointHealth(&common.RelayResult{StatusCode: 200}),
+	// A plain success is unchanged — the gate that matters most, since it is the path virtually
+	// every relay takes.
+	require.True(t, relayProvesEndpointHealthy(&common.RelayResult{StatusCode: 200}),
 		"a clean relay must still reset health; narrowing this gate would strand recovering endpoints")
+
+	// gRPC success carries codes.OK (0), which never reaches the 2xx range.
+	require.True(t, relayProvesEndpointHealthy(&common.RelayResult{StatusCode: 0}),
+		"a clean gRPC relay must reset health too")
+
+	// The unrecognised-4xx hole. Under the old negation this was not a failure, so it was a
+	// success, so it RESET the counter — an endpoint 49 failures into its budget that then answered
+	// a strange 403 looked perfectly healthy again.
+	require.False(t, relayProvesEndpointHealthy(&common.RelayResult{StatusCode: 403}),
+		"an unrecognised 4xx must not wipe the endpoint's failure record")
+}
+
+// MAG-3995: gRPC ABORTED used to classify as UNKNOWN_ERROR, which scored it against every endpoint a
+// Sui transaction was broadcast to. It is the validators' answer to the write, relayed by the
+// fullnode, so it is now non-retryable and neither scored nor counted toward benching. DataLoss is
+// the unregistered control.
+func TestSendGRPCRelay_AbortedIsNotTheEndpointsFault(t *testing.T) {
+	require.Equal(t, common.LavaErrorNodeAborted,
+		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.Aborted), "rejected by consensus"))
+
+	aborted := grpcStatusRelay(t, codes.Aborted, "rejected by consensus")
+	require.True(t, aborted.IsNodeError, "still a node error, so it is never served as a success or cached")
+	require.True(t, aborted.IsNonRetryable, "resubmitting is the client's call; the flag keeps the answer off the endpoint")
+	require.False(t, aborted.IsNodeAtFault, "the validators' verdict must not count toward --bench-after")
+	require.False(t, shouldFailSessionForResult(nil, aborted), "nor lower the endpoint's availability score")
+	require.False(t, relayProvesEndpointHealthy(aborted), "and it is not proof of health either")
+
+	dataLoss := grpcStatusRelay(t, codes.DataLoss, "unrecoverable data loss")
+	require.Equal(t, common.LavaErrorUnknown,
+		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.DataLoss), "unrecoverable data loss"),
+		"DataLoss has no row")
+	require.False(t, dataLoss.IsNodeAtFault, "an unclassified answer is never evidence against the endpoint")
+	require.True(t, shouldFailSessionForResult(nil, dataLoss), "but it keeps the uncatalogued default: scored")
 }

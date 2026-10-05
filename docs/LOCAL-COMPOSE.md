@@ -79,6 +79,12 @@ intentionally does **not** pass `--cache-be` — an explicitly-passed flag (even
 YAML `cache-be:`. To make any config cached, add `cache-be: "cache:20100"` to
 it (see `smartrouter_eth_cached.yml`) and run it with the overlay.
 
+If more than one router deployment shares the cache service, give each its own
+keyspace with `cache-be-key-prefix:` — routers in one keyspace serve each
+other's cached answers, which is right for replicas reading the same nodes and
+wrong for anything else (docs/RESP-CACHE.md, "Sharing a backend between
+routers").
+
 ## Enabling a read-only secondary cache
 
 The optional secondary tier (docs/SECONDARY-CACHE.md) is a second cache

@@ -111,3 +111,51 @@ func TestProbeErrorNilIsNotAuthFailure(t *testing.T) {
 	require.Equal(t, probeFailureConnection, classifyProbeError(nil))
 	require.Equal(t, "no error reported", safeProbeDetail(nil))
 }
+
+// With reads split, the two halves can fail for two different reasons, and
+// the transition line used to classify the whole probe from whichever failed
+// first: a writer that was unreachable beside a reader that rejected the
+// credentials logged failure=connection with a detail naming the rejected
+// credential. The auth verdict has to win whichever half reports it, and the
+// detail has to name both halves.
+func TestProbeClassificationPromotesAuthFromEitherEndpoint(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	refusedAddr := lis.Addr().String()
+	require.NoError(t, lis.Close())
+	refused := redis.NewClient(&redis.Options{Addr: refusedAddr, DialTimeout: time.Second})
+	t.Cleanup(func() { _ = refused.Close() })
+	connectionErr := pingErr(t, refused)
+	require.Equal(t, probeFailureConnection, classifyProbeError(connectionErr))
+
+	mr := miniredis.RunT(t)
+	mr.RequireUserAuth(authTestUser, authTestPassword)
+	rejected := redis.NewClient(&redis.Options{Addr: mr.Addr(), Username: authTestUser, Password: authTestPassword + "-wrong"})
+	t.Cleanup(func() { _ = rejected.Close() })
+	authErr := pingErr(t, rejected)
+	require.Equal(t, probeFailureAuth, classifyProbeError(authErr))
+
+	writerDownReaderRejected := []redisstore.ProbeResult{
+		{Role: redisstore.EndpointRoleWrite, Addresses: refusedAddr, Err: connectionErr},
+		{Role: redisstore.EndpointRoleRead, Addresses: mr.Addr(), Err: authErr},
+	}
+	require.Equal(t, probeFailureAuth, classifyProbeResults(writerDownReaderRejected),
+		"an auth rejection on the second half must not hide behind the first half's network fault")
+	detail := probeDetail(writerDownReaderRejected)
+	require.Contains(t, detail, "write endpoint "+refusedAddr+": ")
+	require.Contains(t, detail, "read endpoint "+mr.Addr()+": backend rejected the configured credentials")
+	require.NotContains(t, detail, authTestPassword)
+	require.NotContains(t, detail, authTestUser)
+
+	require.Equal(t, probeFailureAuth, classifyProbeResults([]redisstore.ProbeResult{
+		{Role: redisstore.EndpointRoleWrite, Err: authErr},
+		{Role: redisstore.EndpointRoleRead, Err: connectionErr},
+	}), "and the same the other way round")
+	require.Equal(t, probeFailureConnection, classifyProbeResults([]redisstore.ProbeResult{
+		{Role: redisstore.EndpointRoleWrite, Err: connectionErr},
+		{Role: redisstore.EndpointRoleRead, Err: connectionErr},
+	}), "two network faults are a connection failure")
+	require.Equal(t, probeFailureConnection, classifyProbeResults([]redisstore.ProbeResult{
+		{Role: redisstore.EndpointRoleWrite},
+	}), "a probe with no failure keeps the default, as classifyProbeError(nil) does")
+}

@@ -23,12 +23,17 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	protov2 "google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 )
 
 // DirectRPCProtocol represents the transport protocol for direct RPC connections
@@ -113,6 +118,142 @@ type GRPCDescriptorProvider interface {
 	GetCachedMethodDescriptor(methodPath string) *desc.MethodDescriptor
 }
 
+// GRPCMethodResolver is implemented by gRPC connections: it resolves a method's
+// descriptor through the connection's cached lookup, which keeps running and
+// caches its result even when ctx ends first.
+type GRPCMethodResolver interface {
+	// ResolveMethodDescriptor takes methodPath as "service/method".
+	ResolveMethodDescriptor(ctx context.Context, methodPath string) (*desc.MethodDescriptor, error)
+}
+
+var _ GRPCMethodResolver = (*GRPCDirectRPCConnection)(nil)
+
+// GRPCReflectionSnapshot is one consistent view of what a gRPC node serves: its
+// service names and the files those services need, read in one descriptor session.
+// A service whose files would clash with another build of a file is left out, so
+// no path has two builds. Complete says no listed service was left out.
+type GRPCReflectionSnapshot struct {
+	Services []string
+	Taken    time.Time
+	Complete bool
+
+	// lookup finds the file declaring a name on the node the snapshot was taken
+	// from. Nil holds the snapshot to the files it was built with.
+	lookup func(ctx context.Context, name string) (protoreflect.FileDescriptor, error)
+
+	// files holds the services' files and those lookups add later, under the same
+	// rule, so a path keeps one build for the snapshot's life. missed records the
+	// names a lookup did not add. Both are guarded by mu.
+	mu     sync.RWMutex
+	files  *protoregistry.Files
+	missed map[protoreflect.FullName]time.Time
+}
+
+var _ grpcproxy.ReflectionSnapshot = (*GRPCReflectionSnapshot)(nil)
+
+// reflectionLookupMisses bounds the names a snapshot remembers as missed; the
+// record starts over once it is full.
+const reflectionLookupMisses = 1024
+
+// ServiceNames implements grpcproxy.ReflectionSnapshot.
+func (s *GRPCReflectionSnapshot) ServiceNames() []string {
+	return s.Services
+}
+
+// FindFileByPath implements grpcproxy.ReflectionSnapshot.
+func (s *GRPCReflectionSnapshot) FindFileByPath(path string) (protoreflect.FileDescriptor, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.files == nil {
+		return nil, protoregistry.NotFound
+	}
+	return s.files.FindFileByPath(path)
+}
+
+// FindDescriptorByName implements grpcproxy.ReflectionSnapshot.
+func (s *GRPCReflectionSnapshot) FindDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.files == nil {
+		return nil, protoregistry.NotFound
+	}
+	return s.files.FindDescriptorByName(name)
+}
+
+// LookupDescriptor implements grpcproxy.ReflectionSnapshot. The router's own
+// reflection services are never looked up, and a name that was not added is not
+// looked up again within reflectionSnapshotRetry.
+func (s *GRPCReflectionSnapshot) LookupDescriptor(ctx context.Context, name protoreflect.FullName) (protoreflect.Descriptor, error) {
+	if d, err := s.FindDescriptorByName(name); err == nil {
+		return d, nil
+	}
+	if s.lookup == nil || s.files == nil || strings.HasPrefix(string(name), "grpc.reflection.") {
+		return nil, protoregistry.NotFound
+	}
+	s.mu.RLock()
+	missedAt, missed := s.missed[name]
+	s.mu.RUnlock()
+	if missed && time.Since(missedAt) < reflectionSnapshotRetry {
+		return nil, protoregistry.NotFound
+	}
+
+	fd, err := s.lookup(ctx, string(name))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil {
+		err = registerFileGraph(s.files, fd)
+	}
+	var d protoreflect.Descriptor
+	if err == nil {
+		d, err = s.files.FindDescriptorByName(name)
+	}
+	if err != nil && ctx.Err() == nil {
+		if s.missed == nil || len(s.missed) >= reflectionLookupMisses {
+			s.missed = make(map[protoreflect.FullName]time.Time)
+		}
+		s.missed[name] = time.Now()
+		utils.LavaFormatDebug("gRPC reflection lookup added nothing",
+			utils.LogAttr("name", string(name)),
+			utils.LogAttr("error", err.Error()))
+	}
+	return d, err
+}
+
+// Current reports whether the snapshot is complete and within its TTL.
+func (s *GRPCReflectionSnapshot) Current() bool {
+	return s.Complete && time.Since(s.Taken) < reflectionSnapshotTTL
+}
+
+// GRPCReflectionSnapshotter is implemented by gRPC connections. The router answers
+// gRPC server reflection from these snapshots and never forwards reflection upstream.
+type GRPCReflectionSnapshotter interface {
+	// PeekReflectionSnapshot returns the snapshot held now, or nil, and nothing else.
+	PeekReflectionSnapshot() *GRPCReflectionSnapshot
+	// ReflectionSnapshot returns the snapshot held now, or nil, and starts taking a
+	// new one in the background when a refresh is due.
+	ReflectionSnapshot() *GRPCReflectionSnapshot
+	// AwaitReflectionSnapshot returns the snapshot held now or waits for one until
+	// ctx ends. A snapshot being taken is kept even if the wait gives up.
+	AwaitReflectionSnapshot(ctx context.Context) (*GRPCReflectionSnapshot, error)
+}
+
+var _ GRPCReflectionSnapshotter = (*GRPCDirectRPCConnection)(nil)
+
+// A snapshot is refreshed once older than reflectionSnapshotTTL; a partial one
+// already after reflectionSnapshotRetry, unless its last refresh came back partial
+// too. The one held keeps being served meanwhile, and after a failure the next
+// attempt waits reflectionSnapshotRetry. A partial refresh displaces a complete
+// snapshot only once that one is two TTLs old.
+var (
+	reflectionSnapshotTTL   = 10 * time.Minute
+	reflectionSnapshotRetry = 30 * time.Second
+)
+
+// errNotInitialized refuses descriptor work on a connection no relay or prewarm has
+// initialized. Dialing is left to those: a lookup that dialed first would hold
+// initMu, which relays wait on, and double the cost of reaching a dead node.
+var errNotInitialized = errors.New("gRPC connection not initialized yet")
+
 // HTTPDirectRPCResponse contains complete HTTP response data (Phase 4 REST support)
 type HTTPDirectRPCResponse struct {
 	StatusCode int                 // HTTP status code (200, 404, 500, etc.)
@@ -169,11 +310,10 @@ type WebSocketDirectRPCConnection struct {
 	client *rpcclient.Client // lazily dialed on first SendRequest, then cached
 	closed bool              // set by Close(); prevents re-dialing a closed connection
 
-	// wireID issues a connection-unique JSON-RPC id per request. rpcclient.Client
-	// multiplexes concurrent requests on one socket and routes replies by id
-	// (handler.respWait is a plain id→op map), so reusing a caller-supplied id
-	// across concurrent calls would misroute responses. We send a unique wire id
-	// and restore the caller's original id on the reply before returning.
+	// wireID issues a connection-unique JSON-RPC id per request, and the caller's
+	// original id is restored on the reply before returning. rpcclient.Client
+	// draws an id of its own for every call on a socket too; this connection keeps
+	// one so that matching a reply to its request does not rest on the client alone.
 	wireID atomic.Uint64
 }
 
@@ -222,6 +362,21 @@ type GRPCDirectRPCConnection struct {
 	// guards it and is a leaf lock — no other lock is taken while it is held.
 	inflight  map[string]*descriptorResolution
 	resolveMu sync.Mutex
+
+	// Reflection snapshot state, guarded by snapshotMu and usable at its zero value.
+	// snapshotting is non-nil while a snapshot is being taken and closed when it
+	// finishes; snapshotErr and snapshotFailedAt hold the last failure, and
+	// snapshotSettledPartial says a partial snapshot was refreshed to a partial one.
+	snapshotMu             sync.Mutex
+	snapshot               *GRPCReflectionSnapshot
+	snapshotting           chan struct{}
+	snapshotErr            error
+	snapshotFailedAt       time.Time
+	snapshotSettledPartial bool
+
+	// snapshotReader reads a snapshot. Production leaves it nil and gets
+	// readReflectionSnapshot; tests substitute it to drive the state without a node.
+	snapshotReader func() (*GRPCReflectionSnapshot, error)
 
 	// The descriptor warm-up runs exactly once per connection, whichever path
 	// triggers it: Prewarm during endpoint setup, or initialize() on a connection
@@ -441,10 +596,13 @@ func NewDirectRPCConnection(
 	case DirectRPCProtocolHTTP, DirectRPCProtocolHTTPS:
 		// Use the shared optimized client so every smart-router HTTP connection
 		// benefits from:
-		//   - DisableCompression=true        (skips ~30% CPU on auto-gunzip inflate)
 		//   - MaxIdleConnsPerHost pooling    (reuses TCP conns under load)
 		//   - TLS session cache              (faster reconnects, less handshake CPU)
 		//   - ForceAttemptHTTP2              (multiplexes streams on one conn)
+		//
+		// Compression is not a transport setting: the transport leaves it on for
+		// the chainlib proxies, and every request from this connection sets its own
+		// Accept-Encoding (see SendRequest).
 		//
 		// The backing transport is a singleton from common.SharedHttpTransport(),
 		// so all HTTPDirectRPCConnection instances share one connection pool.
@@ -540,14 +698,16 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// Advertise Accept-Encoding: identity so Go's http client neither auto-adds
-	// `gzip` nor auto-decodes the response. This scoping is smart-router-only:
-	// the shared transport still lets provider chain proxies keep their
-	// standard auto-gzip behavior. Production pprof attributed ~30-39% of CPU
-	// to the auto-decode path (http2gzipReader → compress/flate.decompressor);
-	// removing it dropped the eth router from 2.47 cores to 1.23 cores.
+	// Accept-Encoding is the url's own (NodeUrl.AcceptEncoding): identity unless
+	// the operator opted it in to gzip. Setting any value keeps Go's http client
+	// from adding `gzip` and decoding it on its own. That path cost the eth router
+	// ~30-39% of its CPU (http2gzipReader → compress/flate.decompressor), and
+	// asking for identity took it from 2.47 cores to 1.23 (MAG-1589). This
+	// scoping is smart-router-only: the shared transport still lets provider
+	// chain proxies keep their standard auto-gzip behavior. A gzip reply is
+	// inflated by readHTTPResponseBody instead.
 	// Set *after* caller headers so it cannot be accidentally overridden.
-	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Accept-Encoding", h.nodeUrl.UpstreamAcceptEncoding())
 
 	resp, err := h.client.Do(req)
 	if err != nil {
@@ -555,7 +715,7 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readHTTPResponseBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed reading response body: %w", err)
 	}
@@ -582,6 +742,47 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	}
 
 	return response, nil
+}
+
+// maxPresizedResponseBytes is the largest Content-Length readResponseBody trusts for its one
+// up-front allocation. It sits above the block replies these routers serve today: a Solana block
+// reply is 5–7 MB, and Tendermint's default block.max_bytes is 21 MB. A chain can raise
+// block.max_bytes past it (CometBFT allows 100 MB), and a reply is larger than the block it
+// carries. It exists because the length is the upstream's claim: without a bound, a wrong one
+// would allocate memory before the transport finds out the body is shorter. A longer
+// announcement is read as it arrives, as it was before.
+const maxPresizedResponseBytes = 32 << 20
+
+// readResponseBody reads an upstream response body. When the upstream announced a length, the
+// body is read into one buffer of exactly that size (MAG-3845). io.ReadAll cannot know the
+// size, so it reads into a chain of growing buffers and then copies them all into a final one:
+// for a 5.9 MB Solana block that is 14.6 MB allocated and a full extra copy, against 5.9 MB and
+// none. A body with no announced length, or one above maxPresizedResponseBytes, still goes
+// through io.ReadAll. Read errors, including a body shorter than announced, come back as they
+// did before.
+func readResponseBody(resp *http.Response) ([]byte, error) {
+	size := resp.ContentLength
+	if size <= 0 || size > maxPresizedResponseBytes {
+		return io.ReadAll(resp.Body)
+	}
+	// One spare byte, so a body of exactly the announced length reaches EOF without growing
+	// the buffer (the same approach as os.ReadFile).
+	body := make([]byte, 0, size+1)
+	for {
+		n, err := resp.Body.Read(body[len(body):cap(body)])
+		body = body[:len(body)+n]
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return body, nil
+			}
+			return body, err
+		}
+		if len(body) == cap(body) {
+			// Longer than announced. The transport enforces Content-Length, so this should not
+			// happen; grow rather than cut the body short if it ever does.
+			body = append(body, 0)[:len(body)]
+		}
+	}
 }
 
 // HTTPStatusError represents an HTTP error response (4xx/5xx)
@@ -671,10 +872,10 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 		}
 	}
 
-	// Scoped smart-router override: skip upstream gzip auto-negotiation. See
+	// The url's own Accept-Encoding, identity unless it opted in to gzip. See
 	// SendRequest above for the full rationale. Set last so it cannot be
 	// overridden by per-request headers.
-	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Accept-Encoding", h.nodeUrl.UpstreamAcceptEncoding())
 
 	// Send request
 	resp, err := h.client.Do(req)
@@ -683,8 +884,8 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
+	// Read response body, inflated if the upstream gzipped it
+	body, err := readHTTPResponseBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed reading response: %w", err)
 	}
@@ -724,8 +925,8 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 		return nil, fmt.Errorf("failed to parse JSON-RPC request for WebSocket %s: %w", w.nodeUrl.UrlStr(), err)
 	}
 
-	// Send a connection-unique wire id so concurrent requests can't collide in
-	// the client's id→response map, then restore the caller's id on the reply.
+	// Call under a connection-unique id rather than the caller's, so concurrent
+	// requests cannot collide, then restore the caller's id on the reply.
 	wireID := json.RawMessage(strconv.FormatUint(w.wireID.Add(1), 10))
 
 	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
@@ -733,10 +934,8 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 		return nil, err
 	}
 
-	// Restore the caller's id on a COPY of the reply. The rpcclient dispatch
-	// goroutine may still read the returned reply concurrently, so mutating it
-	// in place is a data race — we only read it (to copy) and write the id on
-	// our own value.
+	// Restore the caller's id on a copy of the reply, so that this does not
+	// depend on the client handing back a message of its own.
 	out := *reply
 	out.ID = reqMsg.ID // caller's id (omitted/empty for notifications)
 
@@ -1593,6 +1792,302 @@ func (g *GRPCDirectRPCConnection) GetCachedMethodDescriptor(methodPath string) *
 		return methodDesc
 	}
 	return nil
+}
+
+// ResolveMethodDescriptor implements GRPCMethodResolver. It never dials: see
+// errNotInitialized.
+func (g *GRPCDirectRPCConnection) ResolveMethodDescriptor(ctx context.Context, methodPath string) (*desc.MethodDescriptor, error) {
+	if !g.initialized.Load() {
+		return nil, errNotInitialized
+	}
+	service, method := rpcInterfaceMessages.ParseSymbol(methodPath)
+	return g.getMethodDescriptor(ctx, service, method)
+}
+
+// PeekReflectionSnapshot implements GRPCReflectionSnapshotter.
+func (g *GRPCDirectRPCConnection) PeekReflectionSnapshot() *GRPCReflectionSnapshot {
+	g.snapshotMu.Lock()
+	defer g.snapshotMu.Unlock()
+	return g.snapshot
+}
+
+// ReflectionSnapshot implements GRPCReflectionSnapshotter.
+func (g *GRPCDirectRPCConnection) ReflectionSnapshot() *GRPCReflectionSnapshot {
+	g.snapshotMu.Lock()
+	defer g.snapshotMu.Unlock()
+	g.refreshSnapshotLocked()
+	return g.snapshot
+}
+
+// AwaitReflectionSnapshot implements GRPCReflectionSnapshotter.
+func (g *GRPCDirectRPCConnection) AwaitReflectionSnapshot(ctx context.Context) (*GRPCReflectionSnapshot, error) {
+	g.snapshotMu.Lock()
+	g.refreshSnapshotLocked()
+	snapshot, taking, lastErr := g.snapshot, g.snapshotting, g.snapshotErr
+	g.snapshotMu.Unlock()
+
+	if snapshot != nil {
+		return snapshot, nil
+	}
+	if taking == nil {
+		// Nothing is being taken: the last attempt failed within
+		// reflectionSnapshotRetry, the connection is closed, or it is not initialized.
+		switch {
+		case lastErr != nil:
+			return nil, lastErr
+		case g.closed.Load():
+			return nil, ErrGRPCConnectionClosed
+		default:
+			return nil, errNotInitialized
+		}
+	}
+	select {
+	case <-taking:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	g.snapshotMu.Lock()
+	defer g.snapshotMu.Unlock()
+	if g.snapshot != nil {
+		return g.snapshot, nil
+	}
+	return nil, g.snapshotErr
+}
+
+// refreshSnapshotLocked starts taking a snapshot when one is due (see
+// reflectionSnapshotTTL). It does not while one is being taken, once the
+// connection is closed, before a relay or prewarm has initialized it (see
+// errNotInitialized), or within reflectionSnapshotRetry of a failure. Callers
+// hold snapshotMu.
+func (g *GRPCDirectRPCConnection) refreshSnapshotLocked() {
+	if g.snapshotting != nil || g.closed.Load() || !g.initialized.Load() {
+		return
+	}
+	now := time.Now()
+	if g.snapshotErr != nil && now.Sub(g.snapshotFailedAt) < reflectionSnapshotRetry {
+		return
+	}
+	if held := g.snapshot; held != nil {
+		age := now.Sub(held.Taken)
+		partialDue := !held.Complete && !g.snapshotSettledPartial && age >= reflectionSnapshotRetry
+		if age < reflectionSnapshotTTL && !partialDue {
+			return
+		}
+	}
+	done := make(chan struct{})
+	g.snapshotting = done
+	go g.takeReflectionSnapshot(done)
+}
+
+// errPartialRefresh records a refresh that resolved fewer services than the
+// complete snapshot it would have replaced.
+var errPartialRefresh = errors.New("gRPC reflection snapshot refresh came back partial")
+
+func (g *GRPCDirectRPCConnection) takeReflectionSnapshot(done chan struct{}) {
+	read := g.readReflectionSnapshot
+	if g.snapshotReader != nil {
+		read = g.snapshotReader
+	}
+	snapshot, err := read()
+
+	g.snapshotMu.Lock()
+	switch {
+	case err != nil:
+		// A failed refresh leaves the snapshot it would have replaced in service.
+		g.snapshotErr, g.snapshotFailedAt = err, time.Now()
+	case !snapshot.Complete && g.snapshot != nil && g.snapshot.Complete && time.Since(g.snapshot.Taken) < 2*reflectionSnapshotTTL:
+		// A complete snapshot outlasts partial refreshes for one TTL past its own,
+		// retried on the failure spacing; after that the partial one takes over.
+		g.snapshotErr, g.snapshotFailedAt = errPartialRefresh, time.Now()
+	default:
+		g.snapshotSettledPartial = !snapshot.Complete && g.snapshot != nil && !g.snapshot.Complete
+		g.snapshot, g.snapshotErr = snapshot, nil
+	}
+	g.snapshotting = nil
+	g.snapshotMu.Unlock()
+	close(done)
+}
+
+// readReflectionSnapshot reads the node through one session of its configured
+// descriptor source, on the warm-up sweep's budget. The snapshot looks up names it
+// does not hold through lookupReflectionSymbol.
+func (g *GRPCDirectRPCConnection) readReflectionSnapshot() (*GRPCReflectionSnapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(),
+		descriptorWarmupBudgetFactor*g.nodeUrl.GrpcConfig.GetReflectionTimeout())
+	defer cancel()
+
+	var snapshot *GRPCReflectionSnapshot
+	err := g.withDescriptorSource(ctx, func(source grpcurl.DescriptorSource) (err error) {
+		snapshot, err = buildReflectionSnapshot(source)
+		return err
+	})
+	if err != nil {
+		return nil, utils.LavaFormatWarning("gRPC reflection snapshot failed", err,
+			utils.LogAttr("url", g.nodeUrl.Url))
+	}
+	if !snapshot.Complete {
+		utils.LavaFormatWarning("gRPC reflection snapshot is partial", nil,
+			utils.LogAttr("services", len(snapshot.Services)),
+			utils.LogAttr("url", g.nodeUrl.Url))
+	}
+	snapshot.lookup = g.lookupReflectionSymbol
+	return snapshot, nil
+}
+
+// lookupReflectionSymbol finds the file declaring name through one session of the
+// node's configured descriptor source, within the reflection timeout.
+func (g *GRPCDirectRPCConnection) lookupReflectionSymbol(ctx context.Context, name string) (protoreflect.FileDescriptor, error) {
+	ctx, cancel := context.WithTimeout(ctx, g.nodeUrl.GrpcConfig.GetReflectionTimeout())
+	defer cancel()
+
+	var fd protoreflect.FileDescriptor
+	err := g.withDescriptorSource(ctx, func(source grpcurl.DescriptorSource) error {
+		d, err := source.FindSymbol(name)
+		if err != nil {
+			return err
+		}
+		fd = d.GetFile().UnwrapFile()
+		return nil
+	})
+	return fd, err
+}
+
+// withDescriptorSource runs use on one session of the node's configured descriptor
+// source over a pooled client. The session ends with ctx or the connection, and
+// never dials: it needs a connection a relay or prewarm has initialized.
+func (g *GRPCDirectRPCConnection) withDescriptorSource(ctx context.Context, use func(grpcurl.DescriptorSource) error) error {
+	if !g.initialized.Load() {
+		return errNotInitialized
+	}
+	if g.connectorCtx != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		defer context.AfterFunc(g.connectorCtx, cancel)()
+	}
+
+	g.connMu.RLock()
+	connector := g.connector
+	if connector == nil {
+		g.connMu.RUnlock()
+		return ErrGRPCConnectionClosed
+	}
+	conn, err := connector.GetRpc(ctx, true)
+	g.connMu.RUnlock()
+	if err != nil {
+		return fmt.Errorf("no connection: %w", err)
+	}
+	defer connector.ReturnRpc(conn)
+
+	cl := grpcreflect.NewClientAuto(ctx, conn)
+	defer cl.Reset()
+	source, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&g.nodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
+	if err != nil {
+		return err
+	}
+	return use(source)
+}
+
+// buildReflectionSnapshot resolves every service the source lists and registers
+// the files each needs. A service that does not resolve, or whose files clash with
+// a build already registered, is left out, and the snapshot is partial.
+func buildReflectionSnapshot(source grpcurl.DescriptorSource) (*GRPCReflectionSnapshot, error) {
+	names, err := source.ListServices()
+	if err != nil {
+		return nil, err
+	}
+	snapshot := &GRPCReflectionSnapshot{files: new(protoregistry.Files), Complete: true}
+	for _, name := range names {
+		// The router describes its own reflection services.
+		if strings.HasPrefix(name, "grpc.reflection.") {
+			continue
+		}
+		serviceDescriptor, err := resolveServiceFrom(source, name)
+		if err == nil {
+			err = registerFileGraph(snapshot.files, serviceDescriptor.GetFile().UnwrapFile())
+		}
+		if err != nil {
+			snapshot.Complete = false
+			utils.LavaFormatDebug("gRPC reflection snapshot left out a service",
+				utils.LogAttr("service", name),
+				utils.LogAttr("error", err.Error()))
+			continue
+		}
+		snapshot.Services = append(snapshot.Services, name)
+	}
+	if len(snapshot.Services) == 0 {
+		return nil, fmt.Errorf("none of the %d listed services resolved", len(names))
+	}
+	snapshot.Taken = time.Now()
+	return snapshot, nil
+}
+
+// registerFileGraph registers fd and the files it imports that files lacks, or
+// nothing. Every path in the graph must be new to files, or hold this build or one
+// with the same content, down to the leaves: reflection serializes a file's imports
+// from the file itself, so a matching file that imports a changed one would still
+// deliver a second build. One path, one build. The well-known types are exempt,
+// being identical in every build. Unresolved imports are skipped, as reflection
+// serialization skips them.
+func registerFileGraph(files *protoregistry.Files, fd protoreflect.FileDescriptor) error {
+	visited := make(map[string]protoreflect.FileDescriptor)
+	var fresh []protoreflect.FileDescriptor
+	var walk func(fd protoreflect.FileDescriptor) error
+	walk = func(fd protoreflect.FileDescriptor) error {
+		if fd.IsPlaceholder() {
+			return nil
+		}
+		if seen, ok := visited[fd.Path()]; ok {
+			return oneBuild(seen, fd)
+		}
+		visited[fd.Path()] = fd
+		registered, err := files.FindFileByPath(fd.Path())
+		if err == nil {
+			if err := oneBuild(registered, fd); err != nil {
+				return err
+			}
+		}
+		imports := fd.Imports()
+		for i := 0; i < imports.Len(); i++ {
+			if err := walk(imports.Get(i).FileDescriptor); err != nil {
+				return err
+			}
+		}
+		if registered == nil {
+			fresh = append(fresh, fd)
+		}
+		return nil
+	}
+	if err := walk(fd); err != nil {
+		return err
+	}
+	for _, fd := range fresh {
+		if err := files.RegisterFile(fd); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// oneBuild refuses b where a, another build of its path, is already taken.
+func oneBuild(a, b protoreflect.FileDescriptor) error {
+	if a == b || strings.HasPrefix(b.Path(), "google/protobuf/") || sameFileContent(a, b) {
+		return nil
+	}
+	return fmt.Errorf("a second build of %q", b.Path())
+}
+
+// sameFileContent reports whether two builds of one file declare the same thing.
+// Source info is left out of the comparison: a protoset compiled with it and a
+// node's reflection without it are still one file, as hybrid mode produces.
+func sameFileContent(a, b protoreflect.FileDescriptor) bool {
+	content := func(fd protoreflect.FileDescriptor) protov2.Message {
+		fdp := protodesc.ToFileDescriptorProto(fd)
+		fdp.SourceCodeInfo = nil
+		return fdp
+	}
+	return protov2.Equal(content(a), content(b))
 }
 
 // parseInputMessage parses the input data into the dynamic message.

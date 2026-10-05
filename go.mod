@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/cometbft/cometbft v0.38.21
-	github.com/ethereum/go-ethereum v1.17.5
+	github.com/ethereum/go-ethereum v1.17.6
 	github.com/gofiber/fiber/v2 v2.52.15
 	github.com/gofiber/websocket/v2 v2.2.1
 	github.com/gogo/protobuf v1.3.3
@@ -20,15 +20,14 @@ require (
 	github.com/caio/go-tdigest/v5 v5.0.0
 	github.com/dgraph-io/ristretto/v2 v2.4.2
 	github.com/fullstorydev/grpcurl v1.9.4
-	github.com/goccy/go-json v0.10.6
+	github.com/go-viper/mapstructure/v2 v2.5.0
+	github.com/goccy/go-json v0.11.1
 	github.com/gogo/status v1.1.1
 	github.com/golang/mock v1.6.0
 	github.com/golang/protobuf v1.5.4
 	github.com/grafana/pyroscope-go v1.4.1
 	github.com/itchyny/gojq v0.12.19
 	github.com/jhump/protoreflect v1.18.1
-	github.com/joho/godotenv v1.5.1
-	github.com/newrelic/go-agent/v3 v3.44.2
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/spf13/pflag v1.0.10
 	github.com/tidwall/gjson v1.19.0
@@ -49,18 +48,19 @@ require (
 )
 
 require (
+	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
 	github.com/cenkalti/backoff/v4 v4.2.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/clipperhouse/stringish v0.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.3.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 // indirect
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
 	github.com/gin-gonic/gin v1.9.1 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/gogo/googleapis v1.4.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grafana/pyroscope-go/godeltaprof v0.1.11 // indirect
@@ -113,7 +113,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/improbable-eng/grpc-web v0.15.0
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/compress v1.20.1
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mitchellh/mapstructure v1.5.0

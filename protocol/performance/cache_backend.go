@@ -43,12 +43,14 @@ const (
 	CacheEngineRESP = "resp"
 
 	// CacheWhenUnreachableSkipped: the tier is bypassed before any I/O, so an
-	// unreachable backend costs nothing per relay (the gRPC client returns
-	// NotConnectedError up front).
+	// unreachable backend costs nothing per relay. The gRPC client returns
+	// NotConnectedError up front; the RESP backend opens a breaker after
+	// consecutive failures or a failed probe and skips until a probe succeeds.
 	CacheWhenUnreachableSkipped = "skipped"
 	// CacheWhenUnreachableAttempted: every lookup and write is still issued against
-	// the dead backend and pays the full timeout (the RESP backend degrades
-	// per-operation rather than flipping itself off).
+	// the dead backend and pays the full timeout. No shipped tier reports it any
+	// more (the RESP backend did before its breaker, MAG-3676); kept as a wire
+	// value so a reader of older payloads can still name it.
 	CacheWhenUnreachableAttempted = "attempted"
 )
 
@@ -67,6 +69,15 @@ type CacheLifetimes struct {
 	FinalizedSeconds    float64 `json:"finalized_seconds"`
 	NonFinalizedSeconds float64 `json:"non_finalized_seconds"`
 	NodeErrorsSeconds   float64 `json:"node_errors_seconds"`
+}
+
+// CacheBreakerState is a RESP tier's breaker, per side of the relay path:
+// WriteOpen while writes are being skipped, ReadOpen while lookups are. A tier
+// without one (the gRPC client returns not-connected before any I/O) reports
+// none.
+type CacheBreakerState struct {
+	WriteOpen bool `json:"write_open"`
+	ReadOpen  bool `json:"read_open"`
 }
 
 // DebugCacheState is one cache tier as GET /debug/cache-state reports it.
@@ -103,6 +114,11 @@ type DebugCacheState struct {
 	WhenUnreachable string
 	// Lifetimes is nil when this backend cannot answer for its own TTLs.
 	Lifetimes *CacheLifetimes
+	// Breaker is nil for a tier that has none. Reported per side because a
+	// store split by role fails by role: Reachable=false and WhenUnreachable
+	// together cannot say whether it is the lookups or the writes that are
+	// being skipped.
+	Breaker *CacheBreakerState
 }
 
 // DebugCacheStateReporter exposes the runtime facts needed by the debug cache

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -23,7 +24,9 @@ func newViperWithYAML(t *testing.T, yaml string) (*viper.Viper, *pflag.FlagSet) 
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	flags.String(RespCacheAddressesFlagName, "", "")
 	flags.String(RespCacheTopologyFlagName, "", "")
+	flags.String(RespCacheKeyPrefixFlagName, "", "")
 	flags.String(CacheFlagName, "", "")
+	flags.String(CacheKeyPrefixFlagName, "", "")
 	require.NoError(t, v.BindPFlags(flags))
 	return v, flags
 }
@@ -50,11 +53,22 @@ resp-cache:
     enabled: true
     ca-file: /certs/ca.pem
     server-name: cache.internal
+  expiration:
+    finalized: 2h
+    finalized-multiplier: 1.5
+    non-finalized: 1s
+    non-finalized-multiplier: 1.25
+    node-errors: 100ms
+    blocks-hashes-to-heights: 24h
 `)
 	cfg, enabled, err := LoadRespCacheConfig(v)
 	require.NoError(t, err)
 	require.True(t, enabled)
 	require.Equal(t, redisstore.TopologySentinel, cfg.Topology)
+	require.Equal(t, 3*time.Hour, cfg.Expiration.Policy().Finalized, "the expiration block reaches the engine's TTL table (MAG-3631)")
+	require.Equal(t, 1250*time.Millisecond, cfg.Expiration.Policy().NonFinalized)
+	require.Equal(t, 100*time.Millisecond, cfg.Expiration.Policy().NodeErrors)
+	require.Equal(t, 24*time.Hour, cfg.Expiration.Policy().BlocksHashesToHeights)
 	require.Equal(t, []string{"s1:26379", "s2:26379"}, cfg.Addresses)
 	require.Equal(t, []string{"reader:6379"}, cfg.ReadAddresses)
 	require.Equal(t, "mymaster", cfg.MasterName)
@@ -73,6 +87,81 @@ resp-cache:
 	require.Equal(t, "cache.internal", cfg.TLS.ServerName)
 }
 
+// MAG-3631: a partial expiration block keeps the defaults for what it does
+// not name, and — because the block is decoded strictly — a misspelled key is
+// refused rather than silently leaving the router on the defaults, which is
+// the exact shape of the original defect.
+func TestLoadRespCacheConfigExpirationBlock(t *testing.T) {
+	v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  expiration:
+    finalized-multiplier: 1.5
+`)
+	cfg, enabled, err := LoadRespCacheConfig(v)
+	require.NoError(t, err)
+	require.True(t, enabled)
+	policy := cfg.Expiration.Policy()
+	require.Equal(t, 90*time.Minute, policy.Finalized, "the chart's shipped multiplier, now reachable on a RESP backend")
+	require.Equal(t, core.DefaultExpirationForNonFinalized, policy.NonFinalized, "unnamed fields keep the engine's defaults")
+
+	v, _ = newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  expiration:
+    finalised: 2h
+`)
+	_, _, err = LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "finalised", "a misspelled expiration key must not fall back to the defaults in silence")
+
+	v, _ = newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  expiration:
+    finalized: -1h
+`)
+	_, _, err = LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "expiration.finalized")
+}
+
+// MAG-3631 review: a duration written without a unit is not refused by the
+// decoder — mapstructure maps a bare YAML integer onto the nanoseconds behind
+// the duration, and viper's duration hook converts strings only — so
+// `finalized: 3600`, the row an operator types by analogy with the sidecar's
+// `--expiration 3600` (which pflag refuses: "missing unit"), used to pass
+// validation as 3.6µs and be stored as a 1ms lifetime, with go-redis printing
+// a truncation warning to stderr on every write. Every resolved lifetime is now
+// held to the one millisecond a RESP expiry can express, and the message says
+// what the bare number became.
+func TestLoadRespCacheConfigRefusesALifetimeBelowOneMillisecond(t *testing.T) {
+	refused := func(block, want string) {
+		t.Helper()
+		v, _ := newViperWithYAML(t, "resp-cache:\n  addresses: [\"a:6379\"]\n  expiration:\n"+block)
+		_, _, err := LoadRespCacheConfig(v)
+		require.ErrorContains(t, err, want)
+	}
+	refused("    finalized: 3600\n", "expiration.finalized is 3.6µs")
+	refused("    finalized: 3600\n", "3600 is 3.6µs")
+	refused("    finalized: 1h\n    finalized-multiplier: 1e-12\n", "expiration.finalized (1h0m0s) with expiration.finalized-multiplier (1e-12) is 3ns")
+	refused("    node-errors: 250\n    blocks-hashes-to-heights: 172800\n", "expiration.node-errors is 250ns")
+
+	v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  expiration:
+    finalized: 3600s
+    node-errors: 250ms
+    blocks-hashes-to-heights: 172800s
+`)
+	cfg, enabled, err := LoadRespCacheConfig(v)
+	require.NoError(t, err, "the same numbers with their units are what the operator meant")
+	require.True(t, enabled)
+	policy := cfg.Expiration.Policy()
+	require.Equal(t, time.Hour, policy.Finalized)
+	require.Equal(t, 250*time.Millisecond, policy.NodeErrors)
+	require.Equal(t, 48*time.Hour, policy.BlocksHashesToHeights)
+}
+
 func TestLoadRespCacheConfigAbsentIsDisabled(t *testing.T) {
 	v, _ := newViperWithYAML(t, `cache-be: "cache:20100"`)
 	_, enabled, err := LoadRespCacheConfig(v)
@@ -85,9 +174,11 @@ func TestLoadRespCacheConfigFlagsOutrankYAML(t *testing.T) {
 resp-cache:
   topology: standalone
   addresses: ["from-yaml:6379"]
+  key-prefix: from-yaml
 `)
 	require.NoError(t, flags.Set(RespCacheAddressesFlagName, "from-flag-1:6379, from-flag-2:6379"))
 	require.NoError(t, flags.Set(RespCacheTopologyFlagName, "cluster"))
+	require.NoError(t, flags.Set(RespCacheKeyPrefixFlagName, "from-flag"))
 
 	cfg, enabled, err := LoadRespCacheConfig(v)
 	require.NoError(t, err)
@@ -95,6 +186,21 @@ resp-cache:
 	require.Equal(t, []string{"from-flag-1:6379", "from-flag-2:6379"}, cfg.Addresses,
 		"an explicitly passed flag outranks the YAML value")
 	require.Equal(t, redisstore.TopologyCluster, cfg.Topology)
+	require.Equal(t, "from-flag", cfg.KeyPrefix,
+		"the keyspace is the one setting that must differ per deployment, so it needs a flag form (MAG-3687)")
+}
+
+// A flag is a complete route to the keyspace: the address flag plus the
+// prefix flag, no YAML block at all — what a deployment that can only pass
+// flags needs.
+func TestLoadRespCacheConfigKeyPrefixByFlagsAlone(t *testing.T) {
+	v, flags := newViperWithYAML(t, ``)
+	require.NoError(t, flags.Set(RespCacheAddressesFlagName, "solo:6379"))
+	require.NoError(t, flags.Set(RespCacheKeyPrefixFlagName, "tenant-a"))
+	cfg, enabled, err := LoadRespCacheConfig(v)
+	require.NoError(t, err)
+	require.True(t, enabled)
+	require.Equal(t, "tenant-a", cfg.KeyPrefix)
 }
 
 func TestLoadRespCacheConfigFlagOnlyEnables(t *testing.T) {
@@ -124,6 +230,58 @@ resp-cache:
 		_, _, err := LoadRespCacheConfig(v)
 		require.ErrorContains(t, err, "dangling")
 	})
+
+	t.Run("key-prefix flag without addresses", func(t *testing.T) {
+		v, flags := newViperWithYAML(t, ``)
+		require.NoError(t, flags.Set(RespCacheKeyPrefixFlagName, "tenant-a"))
+		_, _, err := LoadRespCacheConfig(v)
+		require.ErrorContains(t, err, "dangling")
+	})
+}
+
+// MAG-3677: a key the block does not define must fail loudly. The block decides
+// which keyspace the router occupies, and a `key_prefix` that was ignored put
+// the router on the shared default without a word.
+func TestLoadRespCacheConfigRejectsUnknownKeys(t *testing.T) {
+	t.Run("top-level typo", func(t *testing.T) {
+		v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  key_prefix: prod-eu
+`)
+		_, _, err := LoadRespCacheConfig(v)
+		require.ErrorContains(t, err, "key_prefix")
+		require.ErrorContains(t, err, "unknown keys are rejected")
+	})
+
+	t.Run("typo inside the tls block", func(t *testing.T) {
+		v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  tls:
+    enable: true
+    ca-file: /certs/ca.pem
+`)
+		_, _, err := LoadRespCacheConfig(v)
+		require.ErrorContains(t, err, "enable", "nested blocks are held to the same rule")
+	})
+
+	t.Run("every defined key still loads", func(t *testing.T) {
+		// The full-block test above is the positive control for this rule; this
+		// pins that strictness did not start rejecting a key the block defines.
+		v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["a:6379"]
+  key-prefix: prod-eu
+  tls:
+    enabled: true
+    insecure-skip-verify: true
+`)
+		cfg, enabled, err := LoadRespCacheConfig(v)
+		require.NoError(t, err)
+		require.True(t, enabled)
+		require.Equal(t, "prod-eu", cfg.KeyPrefix)
+	})
 }
 
 func TestLoadRespCacheConfigValidationSurfaces(t *testing.T) {
@@ -142,4 +300,100 @@ resp-cache:
 `)
 	_, _, err = LoadRespCacheConfig(v)
 	require.ErrorContains(t, err, "master-name")
+}
+
+// MAG-3683: the ticket's configuration — credentials plus a tls block carrying
+// all three file paths and no tls.enabled — must not load. Before this the
+// block was inert (the files are only opened when the switch is on) and the
+// router started in plaintext with the password in its first write.
+func TestLoadRespCacheConfigRefusesTLSBlockWithoutSwitch(t *testing.T) {
+	v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["cache.internal:6379"]
+  username: "cacheuser"
+  password: "placeholder-cache-credential"
+  tls:
+    ca-file:   "/nonexistent/path/ca.pem"
+    cert-file: "/nonexistent/path/ca.pem"
+    key-file:  "/nonexistent/path/ca.pem"
+`)
+	_, enabled, err := LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "tls.enabled")
+	require.False(t, enabled)
+
+	// Control: the same block with the switch on passes configuration and then
+	// fails at construction on the first file — the failure this configuration
+	// should always have produced.
+	v, _ = newViperWithYAML(t, `
+resp-cache:
+  addresses: ["cache.internal:6379"]
+  username: "cacheuser"
+  password: "placeholder-cache-credential"
+  tls:
+    enabled: true
+    ca-file:   "/nonexistent/path/ca.pem"
+    cert-file: "/nonexistent/path/ca.pem"
+    key-file:  "/nonexistent/path/ca.pem"
+`)
+	cfg, enabled, err := LoadRespCacheConfig(v)
+	require.NoError(t, err)
+	require.True(t, enabled)
+	_, err = redisstore.New(cfg)
+	require.ErrorContains(t, err, "/nonexistent/path/ca.pem", "with the switch on the files are read, and the missing one names itself")
+}
+
+// MAG-3671: the trap configuration — sentinel addresses and a master-name, no
+// topology line. It used to load, run as standalone, and dial the first
+// sentinel as a data node.
+func TestLoadRespCacheConfigRefusesMasterNameWithoutSentinelTopology(t *testing.T) {
+	v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["s1:26379", "s2:26379"]
+  master-name: mymaster
+`)
+	_, enabled, err := LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "master-name")
+	require.False(t, enabled)
+
+	// Control: the same block with the line present is the documented sentinel
+	// configuration and loads.
+	v, _ = newViperWithYAML(t, `
+resp-cache:
+  topology: sentinel
+  addresses: ["s1:26379", "s2:26379"]
+  master-name: mymaster
+`)
+	cfg, enabled, err := LoadRespCacheConfig(v)
+	require.NoError(t, err)
+	require.True(t, enabled)
+	require.Equal(t, redisstore.TopologySentinel, cfg.EffectiveTopology())
+}
+
+// MAG-3672: a standalone block with a "spare" address. Both routes an operator
+// takes to it — the YAML list and the comma-separated flag — must be refused,
+// naming the address that would have been dropped.
+func TestLoadRespCacheConfigRefusesExtraAddressesUnderStandalone(t *testing.T) {
+	v, _ := newViperWithYAML(t, `
+resp-cache:
+  addresses: ["primary:6379", "spare:6379"]
+`)
+	_, enabled, err := LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "spare:6379 would be ignored")
+	require.False(t, enabled)
+
+	v, flags := newViperWithYAML(t, ``)
+	require.NoError(t, flags.Set(RespCacheAddressesFlagName, "primary:6379,spare:6379"))
+	_, enabled, err = LoadRespCacheConfig(v)
+	require.ErrorContains(t, err, "spare:6379 would be ignored", "the flag form reaches the same rule")
+	require.False(t, enabled)
+
+	// Control: the same list under a topology that takes a list loads.
+	v, _ = newViperWithYAML(t, `
+resp-cache:
+  topology: cluster
+  addresses: ["primary:6379", "spare:6379"]
+`)
+	_, enabled, err = LoadRespCacheConfig(v)
+	require.NoError(t, err)
+	require.True(t, enabled)
 }

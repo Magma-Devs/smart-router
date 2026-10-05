@@ -60,30 +60,29 @@ func NewGRPCProxy(cb ProxyCallBack, healthCheckPath string, cmdFlags common.Cons
 	return NewGRPCProxyWithReflection(cb, healthCheckPath, cmdFlags, healthReporter, nil, nil)
 }
 
-// NewGRPCProxyWithReflection creates a gRPC proxy with optional reflection support.
-// If reflectionCallback is provided, a separate gRPC server is created for reflection
-// that uses standard protobuf codec (not RawBytesCodec), allowing proper serialization.
-// This enables tools like grpcurl to work with the smart router.
+// NewGRPCProxyWithReflection creates a gRPC proxy. A separate gRPC server answers
+// reflection, v1 and v1alpha, from reflectionSource, which is what lets tools like
+// grpcurl work against the router; without a source it answers for the reflection
+// services alone. Either way, no reflection request reaches cb.
 //
-// streamCallback is optional too; when non-nil the proxy offers every request to it
+// streamCallback is optional; when non-nil the proxy offers every request to it
 // first, so server-streaming methods are served as streams instead of being forced
 // through the single-message unary path.
-func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionCallback ReflectionProxyCallback, streamCallback StreamProxyCallBack) (*grpc.Server, *http.Server, error) {
+func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionSource ReflectionSource, streamCallback StreamProxyCallBack) (*grpc.Server, *http.Server, error) {
 	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(MaxCallRecvMsgSize) // setting receive size to 32mb instead of 4mb default
 	s := grpc.NewServer(grpc.UnknownServiceHandler(makeProxyFunc(cb, streamCallback)), grpc.ForceServerCodec(RawBytesCodec{}), serverReceiveMaxMessageSize)
 	grpc_health_v1.RegisterHealthServer(s, health.NewServer())
 
 	wrappedServer := grpcweb.WrapServer(s)
 
-	// Create a separate gRPC server for reflection with standard protobuf codec
-	// This is needed because the main proxy server uses RawBytesCodec which breaks
-	// the reflection service's protobuf message serialization
-	var wrappedReflectionServer *grpcweb.WrappedGrpcServer
-	if reflectionCallback != nil {
-		reflectionGrpcServer := grpc.NewServer(serverReceiveMaxMessageSize)
-		RegisterReflectionProxy(reflectionGrpcServer, reflectionCallback)
-		wrappedReflectionServer = grpcweb.WrapServer(reflectionGrpcServer)
+	// Reflection gets a server of its own with the standard protobuf codec: the
+	// main server's RawBytesCodec cannot serialize reflection messages.
+	if reflectionSource == nil {
+		reflectionSource = noUpstreamReflection{}
 	}
+	reflectionGrpcServer := grpc.NewServer(serverReceiveMaxMessageSize)
+	RegisterReflection(reflectionGrpcServer, reflectionSource)
+	wrappedReflectionServer := grpcweb.WrapServer(reflectionGrpcServer)
 
 	handler := func(resp http.ResponseWriter, req *http.Request) {
 		// Set CORS headers
@@ -119,7 +118,7 @@ func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFla
 		}
 
 		// Route reflection requests to the dedicated reflection server
-		if wrappedReflectionServer != nil && isReflectionRequest(req.URL.Path) {
+		if isReflectionRequest(req.URL.Path) {
 			wrappedReflectionServer.ServeHTTP(resp, req)
 			return
 		}

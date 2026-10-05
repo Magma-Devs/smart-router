@@ -22,7 +22,7 @@ var probeBase = time.Unix(1_700_000_000, 0)
 // wants "some disable happened" and passes EndpointDisableUnreachable via disableAtDefault.
 func disableAtWithReason(t *testing.T, e *Endpoint, at time.Time, reason EndpointDisableReason) {
 	t.Helper()
-	for i := 0; i < MaxConsecutiveConnectionAttempts; i++ {
+	for i := uint64(0); i < MaxConsecutiveConnectionAttempts; i++ {
 		e.markUnhealthyAt(at, reason)
 	}
 	require.False(t, e.Enabled, "endpoint must be disabled after the relay disable threshold")
@@ -144,7 +144,7 @@ func TestRecordProbeVerdict_NeverTouchesEnabledEndpoint(t *testing.T) {
 	const k = 3
 	e := &Endpoint{NetworkAddress: "http://ep:8545", Enabled: true}
 
-	for i := 0; i < MaxConsecutiveConnectionAttempts-1; i++ {
+	for i := uint64(0); i < MaxConsecutiveConnectionAttempts-1; i++ {
 		e.markUnhealthyAt(probeBase, EndpointDisableUnreachable)
 	}
 	require.True(t, e.Enabled)
@@ -194,7 +194,7 @@ func TestRecordProbeVerdict_TrialBudgetOnProbeReEnable(t *testing.T) {
 	}
 	require.True(t, healthyPoll(e, probeBase.Add(time.Duration(3+2*k)*time.Second), k))
 	require.True(t, e.ResetHealth(), "a successful relay validates the trial")
-	for i := 0; i < MaxConsecutiveConnectionAttempts-1; i++ {
+	for i := uint64(0); i < MaxConsecutiveConnectionAttempts-1; i++ {
 		e.markUnhealthyAt(probeBase.Add(6*time.Second), EndpointDisableUnreachable)
 	}
 	require.True(t, e.Enabled, "after relay validation the endpoint has the full failure budget again")

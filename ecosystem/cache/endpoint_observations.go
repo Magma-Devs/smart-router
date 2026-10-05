@@ -49,6 +49,12 @@ func newEndpointObservationStore() *endpointObservationStore {
 	return &endpointObservationStore{byKey: make(map[string]endpointObservation), now: time.Now}
 }
 
+// endpointObservationKey is deliberately NOT scoped to the router's key prefix,
+// unlike every key the cache engine derives. An observation is a fact about one
+// upstream endpoint — "this URL answered at block N" — and two routers polling
+// the same upstream are entitled to share it; a router on a different node set
+// has different endpoint ids and never matches. Scoping it would only cost the
+// fleet the polls the gate exists to save.
 func endpointObservationKey(chainID, apiInterface, endpointID string) string {
 	return chainID + "|" + apiInterface + "|" + endpointID
 }

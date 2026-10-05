@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # =============================================================================
 # Smart Router — Solana integration smoke test.
 #

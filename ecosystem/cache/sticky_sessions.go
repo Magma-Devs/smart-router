@@ -107,14 +107,21 @@ func (s *RelayerCacheServer) SetStickySession(ctx context.Context, req *relaytyp
 	if s.CacheServer == nil {
 		return nil, status.Error(codes.Unavailable, "cache server is not initialized")
 	}
-	pin, err := s.engine().SetStickyIfAbsent(ctx, req.ChainId, req.ApiInterface, req.Service, req.StickyId,
+	if err := refuseInvalidKeyPrefix(req.KeyPrefix); err != nil {
+		return nil, err
+	}
+	// The claim lives in the router's keyspace, like every relay key: a claim
+	// names an upstream by NAME, which means nothing to a router on other nodes.
+	pin, err := s.engine().SetStickyIfAbsent(ctx, core.ScopedChainId(req.KeyPrefix, req.ChainId), req.ApiInterface, req.Service, req.StickyId,
 		core.StickyPin{Provider: req.Provider, Epoch: req.Epoch},
 		time.Duration(req.TtlMs)*time.Millisecond,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return &relaytypes.StickySessionReply{Found: true, Provider: pin.Provider, Epoch: pin.Epoch}, nil
+	// The keyspace is echoed on every sticky reply for the same reason the relay
+	// reply carries it: it is how a router learns whether the claim was scoped.
+	return &relaytypes.StickySessionReply{Found: true, Provider: pin.Provider, Epoch: pin.Epoch, KeyPrefix: req.KeyPrefix}, nil
 }
 
 // GetStickySession returns the fleet's live claim for one sticky session id. Found=false is a
@@ -124,12 +131,15 @@ func (s *RelayerCacheServer) GetStickySession(ctx context.Context, req *relaytyp
 	if s.CacheServer == nil {
 		return nil, status.Error(codes.Unavailable, "cache server is not initialized")
 	}
-	pin, found, err := s.engine().GetSticky(ctx, req.ChainId, req.ApiInterface, req.Service, req.StickyId)
+	if err := refuseInvalidKeyPrefix(req.KeyPrefix); err != nil {
+		return nil, err
+	}
+	pin, found, err := s.engine().GetSticky(ctx, core.ScopedChainId(req.KeyPrefix, req.ChainId), req.ApiInterface, req.Service, req.StickyId)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
-		return &relaytypes.StickySessionReply{}, nil
+		return &relaytypes.StickySessionReply{KeyPrefix: req.KeyPrefix}, nil
 	}
-	return &relaytypes.StickySessionReply{Found: true, Provider: pin.Provider, Epoch: pin.Epoch}, nil
+	return &relaytypes.StickySessionReply{Found: true, Provider: pin.Provider, Epoch: pin.Epoch, KeyPrefix: req.KeyPrefix}, nil
 }

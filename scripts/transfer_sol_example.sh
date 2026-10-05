@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Transfer SOL from one account to another.
 #
 # Defaults are wired to the requested transfer (0.05 SOL between two addresses),

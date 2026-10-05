@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,6 +24,12 @@ func TestConfigValidateMatrix(t *testing.T) {
 	valid := Config{Topology: TopologyStandalone, Addresses: []string{"h:6379"}}
 	require.NoError(t, valid.Validate())
 	require.NoError(t, Config{Addresses: []string{"h:6379"}}.Validate(), "empty topology defaults to standalone")
+	// Controls for the standalone address-count rule below: the two
+	// discovering topologies genuinely take a list.
+	require.NoError(t, Config{Topology: TopologySentinel, MasterName: "m", Addresses: []string{"s1:26379", "s2:26379", "s3:26379"}}.Validate(),
+		"sentinel takes the whole address list")
+	require.NoError(t, Config{Topology: TopologyCluster, Addresses: []string{"c1:6379", "c2:6379"}, ReadAddresses: []string{"r1:6379", "r2:6379"}}.Validate(),
+		"cluster takes the whole address list, for reads too")
 
 	cases := []struct {
 		name string
@@ -33,10 +40,32 @@ func TestConfigValidateMatrix(t *testing.T) {
 		{"no addresses", Config{Topology: TopologyStandalone}, "no addresses"},
 		{"sentinel without master-name", Config{Topology: TopologySentinel, Addresses: []string{"s:26379"}}, "master-name"},
 		{"sentinel creds on standalone", Config{Addresses: []string{"h:1"}, SentinelPassword: "pw"}, "dangling"},
+		// MAG-3671: the reverse of the case above. A master-name with the
+		// topology line forgotten used to be accepted, and the router dialled the
+		// first sentinel as a data node. The message must name master-name — a
+		// refusal that does not would pass "the router refuses" and leave the
+		// operator exactly as lost.
+		{"master-name with topology omitted", Config{Addresses: []string{"s1:26379", "s2:26379"}, MasterName: "mymaster"}, "master-name"},
+		{"master-name on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, MasterName: "mymaster"}, "master-name"},
+		// MAG-3672: standalone dials exactly one address; a longer list was
+		// truncated in silence. The message must name what would be dropped.
+		{"two addresses under standalone", Config{Topology: TopologyStandalone, Addresses: []string{"a:6379", "b:6379"}}, "b:6379 would be ignored"},
+		{"two addresses with topology omitted", Config{Addresses: []string{"a:6379", "b:6379", "c:6379"}}, "b:6379, c:6379 would be ignored"},
+		{"two read-addresses under standalone", Config{Addresses: []string{"a:6379"}, ReadAddresses: []string{"r1:6379", "r2:6379"}}, "r2:6379 would be ignored"},
 		{"sentinel cred file on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, SentinelPasswordFile: "/p"}, "dangling"},
 		{"db on cluster", Config{Topology: TopologyCluster, Addresses: []string{"c:6379"}, DB: 2}, "db selection"},
 		{"password and password-file", Config{Addresses: []string{"h:1"}, Password: "a", PasswordFile: "/f"}, "mutually exclusive"},
 		{"sentinel password and file", Config{Topology: TopologySentinel, MasterName: "m", Addresses: []string{"s:1"}, SentinelPassword: "a", SentinelPasswordFile: "/f"}, "mutually exclusive"},
+		// MAG-3683: a tls block without the switch. One case per key that can
+		// make the block look complete, because each on its own reads as "TLS
+		// is configured" to whoever wrote it.
+		{"tls ca-file without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{CAFile: "/ca.pem"}}, "tls.enabled"},
+		{"tls client keypair without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{CertFile: "/c.pem", KeyFile: "/k.pem"}}, "tls.enabled"},
+		{"tls server-name without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{ServerName: "cache.internal"}}, "tls.enabled"},
+		{"tls insecure-skip-verify without enabled", Config{Addresses: []string{"h:1"}, TLS: TLSConfig{InsecureSkipVerify: true}}, "tls.enabled"},
+		// MAG-3631: a lifetime cannot be negative; zero means the default.
+		{"negative expiration", Config{Addresses: []string{"h:1"}, Expiration: ExpirationConfig{Finalized: -time.Second}}, "expiration.finalized"},
+		{"negative multiplier", Config{Addresses: []string{"h:1"}, Expiration: ExpirationConfig{NonFinalizedMultiplier: -1}}, "expiration.non-finalized-multiplier"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -45,6 +74,94 @@ func TestConfigValidateMatrix(t *testing.T) {
 			require.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+// The plaintext-credential warning (warnIfCredentialsCrossPlaintext) names the
+// credential keys the block sets, data node and sentinel alike, and only the
+// keys: what it says is what would cross the network readable, and it must
+// never say the values.
+func TestConfiguredCredentialKeys(t *testing.T) {
+	require.Empty(t, Config{Addresses: []string{"h:1"}}.configuredCredentialKeys(), "nothing configured, nothing to name")
+	require.Equal(t, []string{"username", "password"},
+		Config{Addresses: []string{"h:1"}, Username: "u", Password: "p"}.configuredCredentialKeys())
+	require.Equal(t, []string{"password-file"},
+		Config{Addresses: []string{"h:1"}, PasswordFile: "/run/secrets/cache"}.configuredCredentialKeys())
+	require.Equal(t, []string{"sentinel-username", "sentinel-password", "sentinel-password-file"},
+		Config{Topology: TopologySentinel, MasterName: "m", Addresses: []string{"s:1"}, SentinelUsername: "u", SentinelPassword: "p", SentinelPasswordFile: "/f"}.configuredCredentialKeys())
+}
+
+// MAG-3631: the expiration block builds the engine's TTL table the way the
+// sidecar builds its own from flags. The case that matters is the chart's: its
+// shipped multiplier of 1.5 on settled answers used to be unreachable on a RESP
+// backend, so every customer who moved their cache silently went from 90
+// minutes to 60.
+func TestExpirationConfigPolicy(t *testing.T) {
+	require.Equal(t, core.DefaultPolicy(), ExpirationConfig{}.Policy(), "an empty block is the engine's defaults, exactly")
+
+	chart := ExpirationConfig{FinalizedMultiplier: 1.5}.Policy()
+	require.Equal(t, 90*time.Minute, chart.Finalized, "the chart's default multiplier on the default hour")
+	require.Equal(t, core.DefaultExpirationForNonFinalized, chart.NonFinalized, "an unrelated field keeps its default")
+
+	fullConfig := ExpirationConfig{
+		Finalized:              2 * time.Hour,
+		FinalizedMultiplier:    1.5,
+		NonFinalized:           time.Second,
+		NonFinalizedMultiplier: 1.25,
+		NodeErrors:             100 * time.Millisecond,
+		BlocksHashesToHeights:  24 * time.Hour,
+	}
+	full := fullConfig.Policy()
+	require.Equal(t, 3*time.Hour, full.Finalized, "duration times multiplier, as the sidecar computes it")
+	require.Equal(t, 1250*time.Millisecond, full.NonFinalized)
+	require.Equal(t, 100*time.Millisecond, full.NodeErrors)
+	require.Equal(t, 24*time.Hour, full.BlocksHashesToHeights)
+
+	require.NoError(t, Config{Addresses: []string{"h:1"}, Expiration: fullConfig}.Validate())
+}
+
+// Every row of the table is checked as the lifetime it resolves to, against the
+// one millisecond a RESP expiry can express (minLifetime). Below that the
+// client rounds every write up to 1ms and logs it to stderr, and a product
+// under one nanosecond truncates to a zero TTL, which the store writes as a key
+// with no expiry at all (Codex review of #405). The row an operator actually
+// types is a number without a unit — 3600 for an hour is 3.6µs — so the message
+// says so; a tiny multiplier on a sound base is refused without that hint. A
+// valid product is applied exactly, and a block that skipped validation is
+// clamped to the floor rather than yielding a zero.
+func TestExpirationConfigRejectsALifetimeBelowTheStoresPrecision(t *testing.T) {
+	validate := func(e ExpirationConfig) error {
+		return Config{Addresses: []string{"h:1"}, Expiration: e}.Validate()
+	}
+	unitless := validate(ExpirationConfig{Finalized: 3600})
+	require.ErrorContains(t, unitless, "expiration.finalized is 3.6µs, shorter than the 1ms")
+	require.ErrorContains(t, unitless, "3600 is 3.6µs", "the message shows the operator what their number became")
+	require.ErrorContains(t, unitless, "such as 3600s", "and how to write it")
+
+	require.ErrorContains(t, validate(ExpirationConfig{NodeErrors: 250, BlocksHashesToHeights: 172800}),
+		"expiration.node-errors is 250ns", "rows without a multiplier are held to the same floor, in table order")
+
+	tinyMultiplier := validate(ExpirationConfig{Finalized: time.Hour, FinalizedMultiplier: 1e-12})
+	require.ErrorContains(t, tinyMultiplier, "expiration.finalized (1h0m0s) with expiration.finalized-multiplier (1e-12) is 3ns, shorter than the 1ms")
+	require.NotContains(t, tinyMultiplier.Error(), "bare number", "the base had a unit; the multiplier is the problem")
+
+	require.ErrorContains(t, validate(ExpirationConfig{Finalized: time.Nanosecond, FinalizedMultiplier: 0.5}),
+		"shorter than the 1ms", "a product under one nanosecond is caught by the same floor")
+	require.ErrorContains(t, validate(ExpirationConfig{NonFinalizedMultiplier: 1e-15}),
+		"expiration.non-finalized (500ms) with expiration.non-finalized-multiplier (1e-15)", "the default base counts too")
+	require.ErrorContains(t, validate(ExpirationConfig{Finalized: 100 * time.Hour, FinalizedMultiplier: 1e15}),
+		"longer than a duration can hold")
+
+	require.NoError(t, validate(ExpirationConfig{Finalized: time.Millisecond, NodeErrors: time.Millisecond}), "one millisecond is the floor, inclusive")
+
+	halved := ExpirationConfig{Finalized: 2 * time.Second, FinalizedMultiplier: 0.5, NonFinalized: 400 * time.Millisecond, NonFinalizedMultiplier: 0.5}
+	require.NoError(t, validate(halved))
+	policy := halved.Policy()
+	require.Equal(t, time.Second, policy.Finalized)
+	require.Equal(t, 200*time.Millisecond, policy.NonFinalized)
+
+	clamped := ExpirationConfig{Finalized: 3600, NonFinalizedMultiplier: 1e-15}.Policy()
+	require.Equal(t, time.Millisecond, clamped.Finalized, "a block that skipped validation is clamped to what the store can express, never a zero")
+	require.Equal(t, time.Millisecond, clamped.NonFinalized, "every row is clamped, not only the first that failed")
 }
 
 func listenLocal(t *testing.T) net.Listener {
@@ -153,7 +270,9 @@ func TestTrackingDialerRecordsEveryDial(t *testing.T) {
 // the mapping must carry BOTH credential sets, or discovery against hardened
 // sentinels fails before a data connection is ever attempted.
 func TestFailoverOptionsMapping(t *testing.T) {
-	sentinelPwFile := writeTempFile(t, "sentinel-pass", "placeholder-sentinel-credential\n")
+	// Leading whitespace as well as the trailing newline: the control-plane
+	// file goes through the same trim as the data-node file (MAG-3685).
+	sentinelPwFile := writeTempFile(t, "sentinel-pass", " \nplaceholder-sentinel-credential\n")
 	cfg := Config{
 		Topology:             TopologySentinel,
 		Addresses:            []string{"s1:26379", "s2:26379", "s3:26379"},
@@ -175,7 +294,7 @@ func TestFailoverOptionsMapping(t *testing.T) {
 	require.Equal(t, "mymaster", opts.MasterName)
 	require.Equal(t, cfg.Addresses, opts.SentinelAddrs)
 	require.Equal(t, "sentineluser", opts.SentinelUsername)
-	require.Equal(t, "placeholder-sentinel-credential", opts.SentinelPassword, "control-plane password comes from the file, trimmed")
+	require.Equal(t, "placeholder-sentinel-credential", opts.SentinelPassword, "control-plane password comes from the file, trimmed on both sides")
 	require.Equal(t, 1, opts.DB)
 	require.Equal(t, 7, opts.PoolSize)
 
@@ -188,6 +307,32 @@ func TestFailoverOptionsMapping(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "datauser", user)
 	require.Equal(t, "datapass", pass)
+}
+
+// The sentinel control-plane file is read by the same reader as the data-node
+// file: whitespace on both sides and a leading byte order mark are trimmed,
+// and an empty file is refused naming the path and the setting.
+func TestSentinelPasswordFileIsReadLikeTheDataNodeFile(t *testing.T) {
+	sentinelCfg := func(path string) Config {
+		return Config{Topology: TopologySentinel, Addresses: []string{"s1:26379"}, MasterName: "mymaster", SentinelPasswordFile: path}
+	}
+	for _, tc := range []struct{ name, content, want string }{
+		{"trailing newline", "placeholder-sentinel-credential\n", "placeholder-sentinel-credential"},
+		{"leading whitespace", "\n placeholder-sentinel-credential\n", "placeholder-sentinel-credential"},
+		{"UTF-8 BOM", utf8BOMBytes + "placeholder-sentinel-credential", "placeholder-sentinel-credential"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pw, err := sentinelCfg(writeTempFile(t, "sentinel-pass", tc.content)).sentinelPassword()
+			require.NoError(t, err)
+			require.Equal(t, tc.want, pw)
+		})
+	}
+	t.Run("empty file is refused naming the path", func(t *testing.T) {
+		path := writeTempFile(t, "sentinel-pass", " \n")
+		_, err := sentinelCfg(path).sentinelPassword()
+		require.ErrorContains(t, err, path)
+		require.ErrorContains(t, err, "sentinel-password-file")
+	})
 }
 
 func TestClusterOptionsMapping(t *testing.T) {
@@ -205,16 +350,55 @@ func TestClusterOptionsMapping(t *testing.T) {
 	require.Same(t, provider, opts.StreamingCredentialsProvider.(*StreamingProvider))
 }
 
+// MAG-3728: the streaming provider is the piece that kept abandoned
+// connections alive, and static credentials never needed it. They go straight
+// into the client options; only a file-backed credential builds the provider.
+func TestStaticCredentialsSkipTheStreamingProvider(t *testing.T) {
+	static := Config{Addresses: []string{"h:6379"}, Username: "u", Password: "placeholder-credential"}
+	opts := static.standaloneOptions(static.Addresses, nil, nil, &endpointTracker{})
+	require.Nil(t, opts.StreamingCredentialsProvider)
+	require.Equal(t, "u", opts.Username)
+	require.Equal(t, "placeholder-credential", opts.Password)
+	clusterOpts := Config{Topology: TopologyCluster, Addresses: static.Addresses, Password: "placeholder-credential"}.clusterOptions(static.Addresses, nil, nil, &endpointTracker{})
+	require.Nil(t, clusterOpts.StreamingCredentialsProvider)
+	require.Equal(t, "placeholder-credential", clusterOpts.Password)
+
+	provider := NewStreamingProvider(static.credentialsSource())
+	withProvider := static.standaloneOptions(static.Addresses, nil, provider, &endpointTracker{})
+	require.Same(t, provider, withProvider.StreamingCredentialsProvider)
+	require.Empty(t, withProvider.Password, "with a provider the credentials come from it, never from both")
+
+	plain, err := New(static)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = plain.Close() })
+	require.Nil(t, plain.credentials, "no file, no provider")
+
+	fileBacked, err := New(Config{Addresses: []string{"h:6379"}, PasswordFile: writeTempFile(t, "pw", "placeholder-credential\n")})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = fileBacked.Close() })
+	require.NotNil(t, fileBacked.credentials, "a file to rotate from is what the provider is for")
+}
+
 func TestNewFailsFastOnBadInputs(t *testing.T) {
 	_, err := New(Config{Addresses: []string{"h:1"}, PasswordFile: "/does/not/exist"})
-	require.Error(t, err, "unreadable credential file must fail construction, not first dial")
+	require.ErrorContains(t, err, "/does/not/exist", "unreadable credential file must fail construction naming the file, not first dial")
 
 	_, err = New(Config{Addresses: []string{"h:1"}, TLS: TLSConfig{Enabled: true, CAFile: "/does/not/exist"}})
-	require.Error(t, err, "unreadable CA must fail construction")
+	require.ErrorContains(t, err, "/does/not/exist", "unreadable CA must fail construction naming the file")
 
 	_, err = New(Config{Addresses: []string{"h:1"}, TLS: TLSConfig{Enabled: true, CertFile: "/only/cert"}})
 	require.Error(t, err, "client cert without key must fail construction")
 
 	_, err = New(Config{Addresses: []string{"h:1"}, KeyPrefix: "glob*"})
 	require.Error(t, err, "glob-unsafe prefix must fail construction")
+
+	_, err = New(Config{Addresses: []string{"h:1"}, Password: "placeholder-credential", TLS: TLSConfig{CAFile: "/does/not/exist"}})
+	require.ErrorContains(t, err, "tls.enabled", "a tls block without the switch must fail construction, not dial in plaintext (MAG-3683)")
+}
+
+// The topology an operator is shown must be the one the client is built with.
+func TestEffectiveTopologyResolvesTheDefault(t *testing.T) {
+	require.Equal(t, TopologyStandalone, Config{}.EffectiveTopology(), "an omitted topology is standalone, and must be reported as such")
+	require.Equal(t, TopologySentinel, Config{Topology: TopologySentinel}.EffectiveTopology())
+	require.Equal(t, TopologyCluster, Config{Topology: TopologyCluster}.EffectiveTopology())
 }

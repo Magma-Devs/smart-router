@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # =============================================================================
 # Boot a smart router with --debug-address so GET /debug/cross-validation-events
 # (MAG-2772) can be exercised by hand, then prove it end to end.

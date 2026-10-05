@@ -11,6 +11,7 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -188,6 +189,21 @@ func (cwm *ConsumerWebsocketManager) handleRateLimitReached(inpData []byte) ([]b
 		return []byte{}, utils.LavaFormatError("failed marshalling jsonrpc rate limit error", err)
 	}
 	return bytesRateLimitError, nil
+}
+
+// subscriptionReplyFormatter remembers the caller's request id and returns the formatter
+// that restores it on what the router answers for the subscription: the subscribe reply,
+// a method-not-found error, an unsubscribe acknowledgement. Every frame the subscription
+// loop pushes goes through the same formatter, and a streamed notification comes out
+// untouched: it has no top-level result or error, so there is nothing to restore an id
+// into, and the formatter does not manufacture one. It used to, and every
+// eth_subscription push carried an id that JSON-RPC 2.0 says a notification does not
+// have (MAG-3597). A Tendermint event does carry a result, and keeps getting the
+// caller's id restored as before.
+func subscriptionReplyFormatter(apiInterface string, request []byte) func([]byte) []byte {
+	inputFormatter, outputFormatter := cacheformat.FormatterForRelayRequestAndResponse(apiInterface)
+	inputFormatter(request) // remembers the caller's id; the normalized request is not needed here
+	return outputFormatter
 }
 
 // webSocketMsgWithType is one frame queued for the connection's writer goroutine.
@@ -481,6 +497,18 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		protocolMessage, err := cwm.relaySender.ParseRelay(webSocketCtx, "", string(msg), cwm.connectionType, dappID, userIp, nil)
 		if err != nil {
 			utils.LavaFormatDebug("ws manager could not parse message", utils.LogAttr("message", msg), utils.LogAttr("err", err))
+			// A batch the chain cannot take is a request the caller can fix, so it gets the same
+			// -32600 the POST handler returns rather than the masked GUID the generic formatter
+			// writes. Without this the identical request shape yields an actionable error over
+			// HTTP and an opaque one here.
+			if errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused) {
+				refused := common.JsonRpcInvalidRequestError
+				refused.Error.Data = rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error()
+				if msgData, marshalErr := json.Marshal(refused); marshalErr == nil {
+					sendWS(webSocketMsgWithType{messageType: messageType, msg: msgData})
+					continue
+				}
+			}
 			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
@@ -558,8 +586,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		}
 
 		// Subscription flow
-		inputFormatter, outputFormatter := cacheformat.FormatterForRelayRequestAndResponse(protocolMessage.GetApiCollection().CollectionData.ApiInterface) // we use this to preserve the original jsonrpc id
-		inputFormatter(protocolMessage.RelayPrivateData().Data)                                                                                            // set the extracted jsonrpc id
+		outputFormatter := subscriptionReplyFormatter(protocolMessage.GetApiCollection().CollectionData.ApiInterface, protocolMessage.RelayPrivateData().Data)
 
 		reply, subscriptionMsgsChan, err := cwm.wsSubscriptionManager.StartSubscription(webSocketCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
 		if err != nil {

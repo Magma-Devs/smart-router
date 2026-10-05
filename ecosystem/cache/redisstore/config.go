@@ -5,10 +5,13 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"math"
 	"net"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -74,6 +77,14 @@ type Config struct {
 	KeyPrefix string    `mapstructure:"key-prefix"`
 	TLS       TLSConfig `mapstructure:"tls"`
 
+	// Expiration is the TTL table the router's in-process cache engine applies
+	// over this backend. It mirrors the cache sidecar's expiration flags, which
+	// the chart sets; without it a router that moved its cache to a RESP
+	// backend silently lost the chart's settings — the shipped default
+	// multiplier of 1.5 on settled answers among them — with no way to set
+	// them back (MAG-3631). Unset fields keep the engine's built-in defaults.
+	Expiration ExpirationConfig `mapstructure:"expiration"`
+
 	DialTimeout  time.Duration `mapstructure:"dial-timeout"`
 	ReadTimeout  time.Duration `mapstructure:"read-timeout"`
 	WriteTimeout time.Duration `mapstructure:"write-timeout"`
@@ -81,6 +92,13 @@ type Config struct {
 }
 
 // TLSConfig is the file-based TLS surface (config-file friendly).
+//
+// Enabled is the switch, and it is the ONLY key that turns TLS on: build reads
+// nothing else while it is false. A block that carries any other tls.* key
+// without it is therefore refused by Config.Validate rather than accepted —
+// otherwise the router starts, opens a plaintext connection, and its first
+// write puts the configured username and password on the wire readable, while
+// the operator who wrote three certificate paths believes the opposite.
 type TLSConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// CAFile roots server verification; empty falls back to the system pool.
@@ -92,6 +110,171 @@ type TLSConfig struct {
 	// that differs from the certificate).
 	ServerName         string `mapstructure:"server-name"`
 	InsecureSkipVerify bool   `mapstructure:"insecure-skip-verify"`
+}
+
+// ExpirationConfig is the operator-facing form of core.Policy: one key per
+// cache-sidecar expiration flag, with the same meaning and the same defaults,
+// so a value moved from the chart's sidecar settings to this block yields the
+// same lifetimes. Zero means "the default" for every field.
+type ExpirationConfig struct {
+	// Finalized is the lifetime of a settled (finalized) answer; the sidecar's
+	// --expiration. Default one hour.
+	Finalized time.Duration `mapstructure:"finalized"`
+	// FinalizedMultiplier scales Finalized; the sidecar's
+	// --expiration-multiplier, which the published chart sets to 1.5.
+	FinalizedMultiplier float64 `mapstructure:"finalized-multiplier"`
+	// NonFinalized is the floor for a recent (non-finalized) answer — the
+	// effective TTL is max(averageBlockTime/8, NonFinalized); the sidecar's
+	// --expiration-non-finalized. Default 500ms.
+	NonFinalized time.Duration `mapstructure:"non-finalized"`
+	// NonFinalizedMultiplier scales NonFinalized; the sidecar's
+	// --expiration-non-finalized-multiplier.
+	NonFinalizedMultiplier float64 `mapstructure:"non-finalized-multiplier"`
+	// NodeErrors caps a cached node error on a finalized block; the sidecar's
+	// --expiration-finalized-node-errors. Default 250ms.
+	NodeErrors time.Duration `mapstructure:"node-errors"`
+	// BlocksHashesToHeights is the lifetime of a block-hash→height mapping; the
+	// sidecar's --expiration-blocks-hashes-to-heights. Default 48h.
+	BlocksHashesToHeights time.Duration `mapstructure:"blocks-hashes-to-heights"`
+}
+
+// minLifetime is the shortest lifetime the store can express. A RESP expiry is
+// set with PX, whole milliseconds, and go-redis rounds anything shorter up to
+// one millisecond on every write while printing a warning through its own
+// logger (formatMs), so a lifetime below it is refused at startup instead.
+// It is also where a value written without a unit shows itself: mapstructure
+// maps a bare YAML integer onto the duration as nanoseconds, so `finalized:
+// 3600` is 3.6µs rather than an hour, and the sidecar's flag would have
+// refused it outright ("missing unit").
+const minLifetime = time.Millisecond
+
+// Policy builds the engine's TTL table from the block, the way the sidecar
+// builds its own from flags: each unset duration keeps its default, and each
+// multiplier (default 1) scales the duration it belongs to.
+//
+// The table comes from resolve, the same computation validate checks, so a
+// block that passed validation yields exactly what it promised and one that
+// bypassed it is clamped to the nearest lifetime the store can express — it
+// still never yields a zero, which to the store is a key with no expiry.
+func (e ExpirationConfig) Policy() core.Policy {
+	policy, _ := e.resolve()
+	return policy
+}
+
+// resolve computes every row of the TTL table and reports the first row that
+// is no lifetime, naming its keys. Rows are visited in a fixed order so the
+// same block always yields the same message. Every row is resolved even after
+// an error, clamped, so Policy has a complete table to hand out.
+func (e ExpirationConfig) resolve() (core.Policy, error) {
+	policy := core.DefaultPolicy()
+	rows := []struct {
+		name           string
+		multiplierName string
+		configured     time.Duration
+		multiplier     float64
+		target         *time.Duration
+	}{
+		{"expiration.finalized", "expiration.finalized-multiplier", e.Finalized, e.FinalizedMultiplier, &policy.Finalized},
+		{"expiration.non-finalized", "expiration.non-finalized-multiplier", e.NonFinalized, e.NonFinalizedMultiplier, &policy.NonFinalized},
+		{"expiration.node-errors", "", e.NodeErrors, 0, &policy.NodeErrors},
+		{"expiration.blocks-hashes-to-heights", "", e.BlocksHashesToHeights, 0, &policy.BlocksHashesToHeights},
+	}
+	var firstErr error
+	for _, row := range rows {
+		base := *row.target
+		if row.configured > 0 {
+			base = row.configured
+		}
+		lifetime, err := effectiveLifetime(base, row.multiplier)
+		*row.target = lifetime
+		if err == nil || firstErr != nil {
+			continue
+		}
+		what := row.name
+		if row.multiplier > 0 {
+			what = fmt.Sprintf("%s (%s) with %s (%g)", row.name, base, row.multiplierName, row.multiplier)
+		}
+		firstErr = fmt.Errorf("resp-cache: %s %w", what, err)
+		if row.configured > 0 && row.configured < minLifetime {
+			// The configured value itself is below the floor, whatever the
+			// multiplier did to it: almost always a number written without a unit.
+			firstErr = fmt.Errorf("%w; a bare number is read as nanoseconds (%d is %s), so write the value with a unit such as %ds",
+				firstErr, int64(row.configured), row.configured, int64(row.configured))
+		}
+	}
+	return policy, firstErr
+}
+
+// effectiveLifetime is the lifetime a duration and its multiplier produce, as
+// Policy applies it, and the reason it must not be applied when there is one.
+// A multiplier of zero means "unset" and leaves the base alone.
+//
+// The product is checked before it becomes a duration, because the conversion
+// hides two failures. A product past the range of a duration wraps. A product
+// below minLifetime is one the store cannot express: it would be rounded up to
+// one millisecond by the client on every write, and the shape that matters
+// most, a product under one nanosecond, would truncate to a zero TTL first —
+// and a zero TTL is not "expire at once" to the store but "no expiry at all",
+// since SetEntry writes a plain SET, so a setting meant to shorten retention
+// created a permanent key that no volatile-* eviction policy can reclaim
+// (Codex review of #405). The value returned alongside an error is clamped to
+// the nearest lifetime the store can express.
+func effectiveLifetime(base time.Duration, multiplier float64) (time.Duration, error) {
+	product := float64(base)
+	if multiplier > 0 {
+		product *= multiplier
+	}
+	if product >= math.MaxInt64 {
+		return time.Duration(math.MaxInt64), fmt.Errorf("is longer than a duration can hold")
+	}
+	if product < float64(minLifetime) {
+		return minLifetime, fmt.Errorf("is %s, shorter than the %s a RESP expiry can express", time.Duration(product), minLifetime)
+	}
+	return time.Duration(product), nil
+}
+
+// validate rejects what no lifetime can mean: a negative duration, a negative
+// multiplier, or a resolved lifetime the store cannot express (see resolve and
+// effectiveLifetime). Zero is "the default" everywhere and is accepted.
+func (e ExpirationConfig) validate() error {
+	for _, field := range []struct {
+		name  string
+		value time.Duration
+	}{
+		{"expiration.finalized", e.Finalized},
+		{"expiration.non-finalized", e.NonFinalized},
+		{"expiration.node-errors", e.NodeErrors},
+		{"expiration.blocks-hashes-to-heights", e.BlocksHashesToHeights},
+	} {
+		if field.value < 0 {
+			return fmt.Errorf("resp-cache: %s must not be negative (got %s; leave it unset for the default)", field.name, field.value)
+		}
+	}
+	for _, field := range []struct {
+		name  string
+		value float64
+	}{
+		{"expiration.finalized-multiplier", e.FinalizedMultiplier},
+		{"expiration.non-finalized-multiplier", e.NonFinalizedMultiplier},
+	} {
+		if field.value < 0 {
+			return fmt.Errorf("resp-cache: %s must not be negative (got %g; leave it unset for 1)", field.name, field.value)
+		}
+	}
+	_, err := e.resolve()
+	return err
+}
+
+// hasMaterial reports whether the block carries any setting other than the
+// switch itself — the operator wrote a tls section, whatever Enabled says.
+//
+// It compares the whole struct with the switch cleared rather than naming the
+// keys, so a key added to TLSConfig is covered by the rule without anyone
+// remembering to list it here; it stops compiling if a non-comparable field is
+// ever added, which is the moment to revisit it.
+func (c TLSConfig) hasMaterial() bool {
+	c.Enabled = false
+	return c != TLSConfig{}
 }
 
 // build materialises the tls.Config, nil when disabled. Files are read
@@ -132,7 +315,7 @@ func (c TLSConfig) build() (*tls.Config, error) {
 // Validate applies the fail-fast startup rules for the connection config.
 // (The key prefix has its own validation in NewWithClient.)
 func (cfg Config) Validate() error {
-	switch cfg.topology() {
+	switch cfg.EffectiveTopology() {
 	case TopologyStandalone, TopologySentinel, TopologyCluster:
 	default:
 		return fmt.Errorf("resp-cache: unknown topology %q (want standalone, sentinel, or cluster)", cfg.Topology)
@@ -140,13 +323,43 @@ func (cfg Config) Validate() error {
 	if len(cfg.Addresses) == 0 {
 		return fmt.Errorf("resp-cache: no addresses configured")
 	}
-	if cfg.topology() == TopologySentinel && cfg.MasterName == "" {
+	if cfg.EffectiveTopology() == TopologySentinel && cfg.MasterName == "" {
 		return fmt.Errorf("resp-cache: sentinel topology requires master-name")
 	}
-	if cfg.topology() != TopologySentinel && (cfg.SentinelUsername != "" || cfg.SentinelPassword != "" || cfg.SentinelPasswordFile != "") {
-		return fmt.Errorf("resp-cache: sentinel-* credentials are set but topology is %q — dangling configuration", cfg.topology())
+	if cfg.EffectiveTopology() != TopologySentinel && (cfg.SentinelUsername != "" || cfg.SentinelPassword != "" || cfg.SentinelPasswordFile != "") {
+		return fmt.Errorf("resp-cache: sentinel-* credentials are set but topology is %q — dangling configuration", cfg.EffectiveTopology())
 	}
-	if cfg.topology() == TopologyCluster && cfg.DB != 0 {
+	// The other half of the check above. A master-name is read by nothing
+	// except the sentinel client, so under any other topology the operator
+	// wrote a sentinel configuration and left out the line that says so: the
+	// router then dialled the first sentinel address as an ordinary data node,
+	// every cache operation failed, and the startup line printed a blank
+	// topology — byte for byte what a configuration with no master-name at all
+	// produced (MAG-3671).
+	if cfg.EffectiveTopology() != TopologySentinel && cfg.MasterName != "" {
+		return fmt.Errorf("resp-cache: master-name %q is set but topology is %q — dangling configuration: master-name is only read under topology: sentinel (set it, or remove master-name)", cfg.MasterName, cfg.EffectiveTopology())
+	}
+	// Standalone dials exactly one address (standaloneOptions takes the first
+	// element), where sentinel and cluster take the whole list. A longer list
+	// here used to be truncated in silence while the startup line echoed every
+	// address back at the operator, so a "spare" written for redundancy — or a
+	// list left behind when moving a block from a multi-node topology — read as
+	// confirmed and did nothing (MAG-3672). Refused rather than warned: there is
+	// no reading of a two-address standalone block under which the operator
+	// wanted the second one ignored. Checked after the master-name rule on
+	// purpose: a sentinel block that forgot its topology line trips both, and
+	// the master-name message is the precise diagnosis of that mistake.
+	if cfg.EffectiveTopology() == TopologyStandalone {
+		if len(cfg.Addresses) > 1 {
+			return fmt.Errorf("resp-cache: %d addresses are configured but topology is standalone, which dials exactly one — %s would be ignored (dangling configuration: set topology: sentinel or cluster, or configure a single address)",
+				len(cfg.Addresses), strings.Join(cfg.Addresses[1:], ", "))
+		}
+		if len(cfg.ReadAddresses) > 1 {
+			return fmt.Errorf("resp-cache: %d read-addresses are configured but topology is standalone, which dials exactly one — %s would be ignored (dangling configuration: set topology: sentinel or cluster, or configure a single read address)",
+				len(cfg.ReadAddresses), strings.Join(cfg.ReadAddresses[1:], ", "))
+		}
+	}
+	if cfg.EffectiveTopology() == TopologyCluster && cfg.DB != 0 {
 		return fmt.Errorf("resp-cache: db selection is not available in cluster topology")
 	}
 	if cfg.Password != "" && cfg.PasswordFile != "" {
@@ -155,10 +368,25 @@ func (cfg Config) Validate() error {
 	if cfg.SentinelPassword != "" && cfg.SentinelPasswordFile != "" {
 		return fmt.Errorf("resp-cache: sentinel-password and sentinel-password-file are mutually exclusive")
 	}
-	return nil
+	// The same rule as the sentinel-* credentials above: a half-written section
+	// is a deployment mistake, not a configuration. Here the cost of accepting
+	// it is a credential crossing the network in the clear, so this is the one
+	// combination that must not be able to start quietly. The message keeps to
+	// the shape of its siblings; the reasoning lives on TLSConfig.
+	if !cfg.TLS.Enabled && cfg.TLS.hasMaterial() {
+		return fmt.Errorf("resp-cache: tls.* options are set but tls.enabled is not true — dangling configuration (set tls.enabled: true, or remove the other tls.* keys)")
+	}
+	return cfg.Expiration.validate()
 }
 
-func (cfg Config) topology() Topology {
+// EffectiveTopology is the topology the client is actually built with:
+// standalone when the field is empty. Every decision in this package goes
+// through it, and so must anything that reports the configuration back to an
+// operator — the startup line used to print the raw field, so an omitted
+// topology showed up as a blank, and a sentinel configuration missing its
+// topology line left no trace that it had been resolved as standalone
+// (MAG-3671).
+func (cfg Config) EffectiveTopology() Topology {
 	if cfg.Topology == "" {
 		return TopologyStandalone
 	}
@@ -170,6 +398,30 @@ func (cfg Config) refreshInterval() time.Duration {
 		return DefaultCredentialRefreshInterval
 	}
 	return cfg.CredentialRefreshInterval
+}
+
+// configuredCredentialKeys names every credential key the block sets, data
+// node and sentinel control plane alike — the keys, never the values. Every
+// one of them is sent to the backend on each new connection, so together they
+// are what crosses the network readable when TLS is off.
+func (cfg Config) configuredCredentialKeys() []string {
+	var keys []string
+	for _, key := range []struct {
+		name string
+		set  bool
+	}{
+		{"username", cfg.Username != ""},
+		{"password", cfg.Password != ""},
+		{"password-file", cfg.PasswordFile != ""},
+		{"sentinel-username", cfg.SentinelUsername != ""},
+		{"sentinel-password", cfg.SentinelPassword != ""},
+		{"sentinel-password-file", cfg.SentinelPasswordFile != ""},
+	} {
+		if key.set {
+			keys = append(keys, key.name)
+		}
+	}
+	return keys
 }
 
 // credentialsSource picks the data-node credential source: file-backed when
@@ -189,15 +441,60 @@ func (cfg Config) credentialsSource() CredentialsSource {
 // effect on a running router. This differs from the DATA-node credentials,
 // which are resolved per connection attempt (sentinel) or refreshed in place
 // (standalone/cluster). Documented in docs/RESP-CACHE.md.
+//
+// The file is read by the same reader as the data-node file, so the same
+// rules hold: a leading byte order mark and the four ASCII whitespace bytes
+// are trimmed, an empty file is refused, and a credential beginning with an
+// invisible rune is reported (MAG-3685 review).
 func (cfg Config) sentinelPassword() (string, error) {
 	if cfg.SentinelPasswordFile == "" {
 		return cfg.SentinelPassword, nil
 	}
-	pw, err := os.ReadFile(cfg.SentinelPasswordFile)
+	pw, err := readCredentialFile(cfg.SentinelPasswordFile)
 	if err != nil {
 		return "", fmt.Errorf("resp-cache: reading sentinel-password-file: %w", err)
 	}
-	return trimCredential(string(pw)), nil
+	if field, r, ok := invisibleStart("", pw); ok {
+		warnCredentialBeginsInvisibly(cfg.SentinelPasswordFile, "sentinel-"+field, r)
+	}
+	return pw, nil
+}
+
+// clientCredentials is what a client build takes from the credential
+// settings, resolved once per store: one source for the data-node
+// credentials, the provider that pushes a file-backed one to live
+// connections, and the sentinel control-plane password, read once. One of
+// each however many clients the store builds, so a file is read once at
+// startup and the once-only lines about it fire once — New used to build a
+// FileCredentials for its fail-fast, another for the provider and a third for
+// the sentinel client, and the "read as username:password" line fired for
+// each (MAG-3685 review).
+type clientCredentials struct {
+	source           CredentialsSource
+	provider         *StreamingProvider
+	sentinelPassword string
+}
+
+func (cfg Config) resolveClientCredentials() (clientCredentials, error) {
+	creds := clientCredentials{source: cfg.credentialsSource()}
+	// The streaming provider exists to push a rotated file-backed credential
+	// to live connections. Static credentials used to ride it too, for
+	// uniformity, which put every connection of every RESP client on the path
+	// that kept abandoned connections alive (MAG-3728); they now go straight
+	// into the client options, and the provider is built only when it has a
+	// file to watch and a client that subscribes (sentinel resolves the file
+	// per connection attempt instead, see failoverOptions).
+	if cfg.PasswordFile != "" && cfg.EffectiveTopology() != TopologySentinel {
+		creds.provider = NewStreamingProvider(creds.source)
+	}
+	if cfg.EffectiveTopology() == TopologySentinel {
+		pw, err := cfg.sentinelPassword()
+		if err != nil {
+			return clientCredentials{}, err
+		}
+		creds.sentinelPassword = pw
+	}
+	return creds, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -308,23 +605,33 @@ func trackingDialerMarkedOnly(tlsCfg *tls.Config, dialTimeout time.Duration, tra
 	}
 }
 
+// standaloneOptions builds the single-node client options. provider is nil
+// for static credentials, which then travel in the options themselves; only a
+// file-backed credential rides the streaming provider (see New).
 func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) *redis.Options {
-	return &redis.Options{
-		Dialer:                       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
-		Addr:                         addrs[0],
-		DB:                           cfg.DB,
-		StreamingCredentialsProvider: provider,
-		TLSConfig:                    tlsCfg,
-		DialTimeout:                  cfg.dialTimeout(),
-		ReadTimeout:                  cfg.ReadTimeout,
-		WriteTimeout:                 cfg.WriteTimeout,
-		PoolSize:                     cfg.PoolSize,
+	opts := &redis.Options{
+		Dialer:       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
+		Addr:         addrs[0],
+		DB:           cfg.DB,
+		TLSConfig:    tlsCfg,
+		DialTimeout:  cfg.dialTimeout(),
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+		PoolSize:     cfg.PoolSize,
 		// The caller's context deadline must bound socket I/O: the router
 		// gives cache lookups a tight per-relay budget, and without this
 		// go-redis uses only Read/WriteTimeout (seconds) for socket deadlines,
 		// letting a slow backend inject latency far past that budget.
 		ContextTimeoutEnabled: true,
 	}
+	// A typed-nil provider must never reach the interface field: go-redis
+	// would call it and nil-panic on the first connection.
+	if provider != nil {
+		opts.StreamingCredentialsProvider = provider
+	} else {
+		opts.Username, opts.Password = cfg.Username, cfg.Password
+	}
+	return opts
 }
 
 // failoverOptions carries data-node credentials through
@@ -361,38 +668,42 @@ func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source Cre
 	}
 }
 
+// clusterOptions builds the cluster client options; the credential rule is
+// standaloneOptions's.
 func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) *redis.ClusterOptions {
-	return &redis.ClusterOptions{
-		Dialer:                       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
-		Addrs:                        addrs,
-		StreamingCredentialsProvider: provider,
-		TLSConfig:                    tlsCfg,
-		DialTimeout:                  cfg.dialTimeout(),
-		ReadTimeout:                  cfg.ReadTimeout,
-		WriteTimeout:                 cfg.WriteTimeout,
-		PoolSize:                     cfg.PoolSize,
+	opts := &redis.ClusterOptions{
+		Dialer:       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
+		Addrs:        addrs,
+		TLSConfig:    tlsCfg,
+		DialTimeout:  cfg.dialTimeout(),
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+		PoolSize:     cfg.PoolSize,
 		// See standaloneOptions: the caller's deadline must bound socket I/O.
 		ContextTimeoutEnabled: true,
 	}
+	if provider != nil {
+		opts.StreamingCredentialsProvider = provider
+	} else {
+		opts.Username, opts.Password = cfg.Username, cfg.Password
+	}
+	return opts
 }
 
-// buildClient constructs one client for the given address set.
-func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) (redis.UniversalClient, error) {
-	switch cfg.topology() {
+// buildClient constructs one client for the given address set, from the
+// credentials New resolved once for every client of the store.
+func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, creds clientCredentials, tracker *endpointTracker) (redis.UniversalClient, error) {
+	switch cfg.EffectiveTopology() {
 	case TopologySentinel:
-		sentinelPassword, err := cfg.sentinelPassword()
-		if err != nil {
-			return nil, err
-		}
-		client := redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, cfg.credentialsSource(), sentinelPassword, tracker))
+		client := redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, creds.source, creds.sentinelPassword, tracker))
 		// The mark half of the tracker pair (trackingDialerMarkedOnly is the
 		// other): this hook chain wraps only the returned client's own data-pool
 		// dials, never the internal sentinel clients' — see markDataDialsHook.
 		client.AddHook(markDataDialsHook{})
 		return client, nil
 	case TopologyCluster:
-		return redis.NewClusterClient(cfg.clusterOptions(addrs, tlsCfg, provider, tracker)), nil
+		return redis.NewClusterClient(cfg.clusterOptions(addrs, tlsCfg, creds.provider, tracker)), nil
 	default:
-		return redis.NewClient(cfg.standaloneOptions(addrs, tlsCfg, provider, tracker)), nil
+		return redis.NewClient(cfg.standaloneOptions(addrs, tlsCfg, creds.provider, tracker)), nil
 	}
 }

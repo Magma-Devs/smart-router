@@ -9,8 +9,24 @@ import (
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	relaytypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
+
+// refuseInvalidKeyPrefix holds the key grammar at the one place that makes the
+// keys. The router validates the prefix it sends, but the server folds whatever
+// arrives into every key it derives, and a prefix carrying the component
+// separator ("a:ETH1" on chain X) derives the same keys as prefix "a" on chain
+// "ETH1:X" — an ambiguity no client of this repo produces, and one the server
+// must not depend on clients to avoid (MAG-3521 review). A regexp match on a
+// string that is usually empty.
+func refuseInvalidKeyPrefix(prefix string) error {
+	if err := core.ValidateKeyPrefix(prefix); err != nil {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
+	return nil
+}
 
 // Cache semantics live in core (a storage-agnostic Engine over a KVStore);
 // this file is the gRPC shim: delegation, hit/miss accounting, and metrics.
@@ -62,8 +78,18 @@ func (s *RelayerCacheServer) setSeenBlockOnSharedStateMode(chainId, sharedStateI
 }
 
 func (s *RelayerCacheServer) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCacheGet) (*relaytypes.CacheRelayReply, error) {
+	if err := refuseInvalidKeyPrefix(relayCacheGet.GetKeyPrefix()); err != nil {
+		return nil, err
+	}
 	originalRequestedBlock := relayCacheGet.RequestedBlock
 	cacheReply, cacheHit, err := s.engine().GetRelay(ctx, relayCacheGet)
+	if cacheReply != nil {
+		// Echo the keyspace this lookup was scoped by, hit or miss. A server
+		// that predates the field never sets it, and an empty echo against a
+		// non-empty request is the router's one way of learning its prefix was
+		// dropped on the wire and it is unisolated (MAG-3521).
+		cacheReply.KeyPrefix = relayCacheGet.KeyPrefix
+	}
 
 	go func() {
 		cacheMetricsContext, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -82,6 +108,9 @@ func (s *RelayerCacheServer) GetRelay(ctx context.Context, relayCacheGet *relayt
 }
 
 func (s *RelayerCacheServer) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCacheSet) (*emptypb.Empty, error) {
+	if err := refuseInvalidKeyPrefix(relayCacheSet.GetKeyPrefix()); err != nil {
+		return nil, err
+	}
 	if err := s.engine().SetRelay(ctx, relayCacheSet); err != nil {
 		return nil, err
 	}

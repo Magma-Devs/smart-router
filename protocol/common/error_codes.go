@@ -205,6 +205,7 @@ var (
 	// description and the Retryable flag.
 	LavaErrorNodeMethodNotSupported = registerError(&LavaError{
 		Code: 2002, Name: "NODE_METHOD_NOT_SUPPORTED", Category: CategoryExternal,
+		SubCategory: SubCategoryNodeCapability,
 		Description: "Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider. Distinct from NODE_METHOD_NOT_FOUND (2001) which means the method does not exist at all.", Retryable: true,
 	})
 	LavaErrorNodeInternalError = registerError(&LavaError{
@@ -250,10 +251,12 @@ var (
 	})
 	LavaErrorNodeResourceNotFound = registerError(&LavaError{
 		Code: 2012, Name: "NODE_RESOURCE_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Resource not found at node level", Retryable: true,
 	})
 	LavaErrorNodeResourceUnavailable = registerError(&LavaError{
 		Code: 2013, Name: "NODE_RESOURCE_UNAVAILABLE", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Resource exists but unavailable", Retryable: true,
 	})
 	// MayHaveReachedNode on both: a 502/504 is the PROXY reporting that its own upstream did not
@@ -278,12 +281,40 @@ var (
 		Code: 2016, Name: "NODE_UNAUTHORIZED", Category: CategoryExternal,
 		Description: "Upstream rejected router credentials (HTTP 401)", Retryable: false,
 	})
+	// NODE_ACCESS_DENIED: the endpoint refused the router itself — its credentials (401), its
+	// plan or quota (402), a WAF or IP rule (403), a proxy wanting credentials (407), a protocol
+	// it will not speak (426), or a region it will not serve (451). Used on REST, where the status
+	// is the endpoint's own answer. Unlike NODE_UNAUTHORIZED it is retryable: each provider has
+	// its own credentials and its own rules, so another provider can serve the same request.
+	// JSON-RPC and gRPC keep NODE_UNAUTHORIZED for 401.
+	//
+	// SubCategoryNodeCapability, so the endpoint is NOT at fault. This is the same shape as
+	// NODE_METHOD_NOT_SUPPORTED: the endpoint answered truthfully about what it will serve, and
+	// what it will serve is a property of its configuration, not evidence that it is broken.
+	// Blaming it instead walks the consecutive-refusal counter (MaxConsecutiveConnectionAttempts,
+	// default 50, reset only by a 2xx) and disables the URL for EVERY path — so a vendor gating
+	// one path behind a plan took out the whole endpoint, and a wrong or expired shared credential
+	// took out every endpoint that uses it, because a 401 fails every path and nothing ever resets
+	// the counter. REST also gets no replayable probe evidence (recordRelayProbeEvidence is
+	// JSON-RPC only), so recovery would be poll-only.
+	LavaErrorNodeAccessDenied = registerError(&LavaError{
+		Code: 2018, Name: "NODE_ACCESS_DENIED", Category: CategoryExternal,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "Endpoint refused the router (credentials, plan, WAF, region); another provider may serve it", Retryable: true,
+	})
 	// NODE_DATA_NOT_HELD: the endpoint answered correctly and the answer is "I do
 	// not have this" — a pruned height, an object that never existed, a request
-	// outside the range this node retains. Distinct from NODE_RESOURCE_NOT_FOUND
-	// (2012) in the fault axis, not the symptom: 2012 stays scoreable because a
-	// JSON-RPC -32001 is an error the node RAISED, whereas this is the node
-	// truthfully describing its own data scope.
+	// outside the range this node retains.
+	//
+	// This used to be the ONLY code on this fault axis, and was documented as
+	// distinct from NODE_RESOURCE_NOT_FOUND (2012) on the grounds that a JSON-RPC
+	// -32001 is an error the node RAISED rather than a description of itself.
+	// FAILOVER-TASKS section 2 reversed that: from the endpoint's side both are
+	// "the answer you want is not here", and the distinction does not survive the
+	// case that motivated it — a customer polling for a transaction that is not
+	// mined yet gets not-found from EVERY endpoint, so scoring it walks the whole
+	// fleet toward being taken out for a question none of them could answer. 2012,
+	// 2013 and 3201-3206 now carry this subcategory too.
 	//
 	// Retryable stays true so a pruned node still falls through to an archive one.
 	// SubCategoryDataScope is what keeps it out of the availability signal, which
@@ -292,6 +323,45 @@ var (
 		Code: 2017, Name: "NODE_DATA_NOT_HELD", Category: CategoryExternal,
 		SubCategory: SubCategoryDataScope,
 		Description: "Endpoint does not hold the requested data (pruned or never existed)", Retryable: true,
+	})
+
+	// NODE_ABORTED is a node answering with gRPC ABORTED (10) (MAG-3995). It classified as
+	// UNKNOWN_ERROR before.
+	//
+	// The only node known to send it is Sui, and only when a transaction is submitted
+	// (sui-rpc-api maps the transaction driver's Aborted category to it, plus one direct case,
+	// "already finalized but with different user signatures"). Cosmos SDK, CometBFT, ibc-go,
+	// wasmd, Lava and Concordium never send it. Sui's own definition, in sui-core's
+	// transaction_driver/error.rs, is "transient failure during transaction processing that
+	// prevents the transaction from finalization. Retriable with new transaction submission",
+	// and the message a client receives starts "Transaction processing aborted (retriable with
+	// another submission)". The named cases are a consensus rejection, a status dropped from the
+	// validator's cache, and an input object or package that does not exist yet; categorize()
+	// falls back to Aborted for every validator error Sui does not list otherwise.
+	//
+	// So ABORTED is what the validators answered when the fullnode's transaction driver
+	// submitted the write. It is not evidence against the fullnode the router sent it to, and
+	// whether to submit again is the client's call: ExecuteTransaction is stateful, so the
+	// router never re-sends a write, and policy.Decide stops a stateful relay before it reads
+	// HasNonRetryableNodeError. What Retryable=false does here is keep the answer off the
+	// endpoint: CategoryExternal + !Retryable is excused by EndpointAtFault, and IsNonRetryable
+	// keeps it out of the availability score. Left as UNKNOWN_ERROR, it was scored against every
+	// endpoint the write was broadcast to.
+	//
+	// MayHaveReachedNode is true because the node answered: the already-finalized case means a
+	// transaction answered with ABORTED can be on chain. It does not decide a write's verdict
+	// here. A gRPC status error comes back as a node error carrying the node's own message, and
+	// writeOutcomeIsUnknown reads this flag only from protocol errors, so the caller gets Sui's
+	// ABORTED answer, with its "retriable with another submission" text, rather than
+	// errUnknownWriteOutcome.
+	//
+	// A node error, not PROTOCOL_PROVIDER_ABORTED (1013). That code is CategoryInternal, which
+	// would report the endpoint as unreachable and rank the node's own message below internal
+	// errors. It also claims the request never reached the node.
+	LavaErrorNodeAborted = registerError(&LavaError{
+		Code: 2019, Name: "NODE_ABORTED", Category: CategoryExternal,
+		Description: "Node aborted the operation (gRPC ABORTED); on Sui, the validators' answer to a submitted transaction, retriable by the client with a new submission", Retryable: false,
+		MayHaveReachedNode: true,
 	})
 
 	// Bitcoin/UTXO node errors (2100-2149)
@@ -425,26 +495,32 @@ var (
 	// State/data errors (3200-3299)
 	LavaErrorChainBlockNotFound = registerError(&LavaError{
 		Code: 3201, Name: "CHAIN_BLOCK_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Block not found", Retryable: true,
 	})
 	LavaErrorChainTxNotFound = registerError(&LavaError{
 		Code: 3202, Name: "CHAIN_TX_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Transaction not found", Retryable: true,
 	})
 	LavaErrorChainReceiptNotFound = registerError(&LavaError{
 		Code: 3203, Name: "CHAIN_RECEIPT_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Transaction receipt not found", Retryable: true,
 	})
 	LavaErrorChainStatePruned = registerError(&LavaError{
 		Code: 3204, Name: "CHAIN_STATE_PRUNED", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "State pruned/missing trie node", Retryable: true,
 	})
 	LavaErrorChainDataNotAvailable = registerError(&LavaError{
 		Code: 3205, Name: "CHAIN_DATA_NOT_AVAILABLE", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Historical data not available", Retryable: true,
 	})
 	LavaErrorChainBlockTooOld = registerError(&LavaError{
 		Code: 3206, Name: "CHAIN_BLOCK_TOO_OLD", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Block results only for recent blocks", Retryable: true,
 	})
 	LavaErrorChainLogResponseTooLarge = registerError(&LavaError{
@@ -460,6 +536,7 @@ var (
 	})
 	LavaErrorChainSolanaLedgerJump = registerError(&LavaError{
 		Code: 3303, Name: "CHAIN_SOLANA_LEDGER_JUMP", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Missing due to ledger jump/snapshot (-32007)", Retryable: true,
 	})
 	LavaErrorChainSolanaBlockhashNotFound = registerError(&LavaError{
@@ -484,6 +561,7 @@ var (
 	})
 	LavaErrorChainSolanaBlockStatusUnavailable = registerError(&LavaError{
 		Code: 3309, Name: "CHAIN_SOLANA_BLOCK_STATUS_UNAVAILABLE", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Block status unavailable (-32014)", Retryable: true,
 	})
 	LavaErrorChainSolanaTxVersionUnsupported = registerError(&LavaError{
@@ -492,6 +570,7 @@ var (
 	})
 	LavaErrorChainSolanaMinContextSlotNotReached = registerError(&LavaError{
 		Code: 3311, Name: "CHAIN_SOLANA_MIN_CONTEXT_SLOT_NOT_REACHED", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Minimum context slot not reached (-32016)", Retryable: true,
 	})
 
@@ -543,10 +622,12 @@ var (
 	})
 	LavaErrorChainStarknetBlockNotFound = registerError(&LavaError{
 		Code: 3331, Name: "CHAIN_STARKNET_BLOCK_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Block not found (code 24)", Retryable: true,
 	})
 	LavaErrorChainStarknetTxHashNotFound = registerError(&LavaError{
 		Code: 3332, Name: "CHAIN_STARKNET_TX_HASH_NOT_FOUND", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Transaction hash not found (code 29)", Retryable: true,
 	})
 	LavaErrorChainStarknetDuplicateTx = registerError(&LavaError{
@@ -585,10 +666,12 @@ var (
 	// Source: NEAR RPC docs (error names in JSON-RPC error.cause.name)
 	LavaErrorChainNEARUnknownBlock = registerError(&LavaError{
 		Code: 3360, Name: "CHAIN_NEAR_UNKNOWN_BLOCK", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Block not found or garbage-collected (UNKNOWN_BLOCK)", Retryable: true,
 	})
 	LavaErrorChainNEARUnknownChunk = registerError(&LavaError{
 		Code: 3361, Name: "CHAIN_NEAR_UNKNOWN_CHUNK", Category: CategoryExternal,
+		SubCategory: SubCategoryDataScope,
 		Description: "Chunk not found (UNKNOWN_CHUNK)", Retryable: true,
 	})
 	LavaErrorChainNEARInvalidShardID = registerError(&LavaError{

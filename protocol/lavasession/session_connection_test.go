@@ -301,7 +301,6 @@ func TestGetConsumerSessionInstanceFromEndpoint_Integration(t *testing.T) {
 	// Get/Create a session (this is the real production path)
 	session, epoch, err := cswp.GetConsumerSessionInstanceFromEndpoint(
 		endpointConnection,
-		0, // numberOfResets
 		qosManager,
 		networkAddress,
 	)

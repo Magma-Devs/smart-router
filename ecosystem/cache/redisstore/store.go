@@ -9,10 +9,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,12 +42,6 @@ const (
 	// codec) can be introduced additively.
 	envelopeVersion = 1
 )
-
-// keyPrefixPattern restricts prefixes to characters with no glob meaning:
-// Purge feeds the prefix into SCAN MATCH, whose patterns are globs, so an
-// unsafe prefix could silently match and delete unrelated keys on a shared
-// backend.
-var keyPrefixPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // Store implements core.KVStore over a RESP backend. Reads and writes may be
 // routed to distinct clients (D8: reader endpoints in multi-region
@@ -80,8 +75,16 @@ type Store struct {
 	configuredEndpoints storeEndpoints
 
 	// stopWatcher terminates the credential poll loop (nil when the
-	// credentials are static).
+	// credentials are static); watcherDone is closed by the loop on its way
+	// out, so Close can wait for it.
 	stopWatcher chan struct{}
+	watcherDone chan struct{}
+	// credentials is the streaming provider behind the standalone and cluster
+	// clients when the password is file-backed, nil otherwise: static
+	// credentials go straight into the client options, and sentinel resolves
+	// the file per connection attempt. Held so tests can read its subscriber
+	// count.
+	credentials *StreamingProvider
 }
 
 // endpointTracker holds the last successfully dialled address. Written from
@@ -121,6 +124,13 @@ func (s *Store) ReadEndpoint() string {
 	return s.writeEndpoint.current()
 }
 
+// ReadSplit reports whether reads go to a separate endpoint from writes, so a
+// caller can hold state per endpoint (a breaker per side) where the store has
+// two, and one where it has one.
+func (s *Store) ReadSplit() bool {
+	return s != nil && s.read != s.write
+}
+
 var _ core.KVStore = (*Store)(nil)
 
 // New validates the config and builds the client(s): topology-appropriate
@@ -134,16 +144,26 @@ func New(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	provider := NewStreamingProvider(cfg.credentialsSource())
-	// Fail fast on an unreadable credential source (e.g. missing file) before
-	// any client exists.
-	if _, _, err := cfg.credentialsSource().Credentials(); err != nil {
+	// One credential set for every client of this store (see clientCredentials);
+	// the provider in it exists only for a file-backed credential on a client
+	// that subscribes (MAG-3728, see resolveClientCredentials).
+	creds, err := cfg.resolveClientCredentials()
+	if err != nil {
+		return nil, err
+	}
+	// Fail fast on an unreadable credential source (a missing file, one that
+	// is empty once trimmed) before any client exists.
+	if _, _, err := creds.source.Credentials(); err != nil {
 		return nil, fmt.Errorf("resp-cache: reading credentials: %w", err)
 	}
+	provider := creds.provider
+
+	warnIfCredentialsCrossPlaintext(cfg)
+	warnIfTLSSkipsVerification(cfg)
 
 	writeTracker := &endpointTracker{}
 	readTracker := writeTracker
-	writeClient, err := cfg.buildClient(cfg.Addresses, tlsCfg, provider, writeTracker)
+	writeClient, err := cfg.buildClient(cfg.Addresses, tlsCfg, creds, writeTracker)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +171,7 @@ func New(cfg Config) (*Store, error) {
 	if len(cfg.ReadAddresses) > 0 {
 		warnIfReadSplitIsDiscoveryScoped(cfg)
 		readTracker = &endpointTracker{}
-		readClient, err = cfg.buildClient(cfg.ReadAddresses, tlsCfg, provider, readTracker)
+		readClient, err = cfg.buildClient(cfg.ReadAddresses, tlsCfg, creds, readTracker)
 		if err != nil {
 			_ = writeClient.Close()
 			return nil, err
@@ -166,17 +186,21 @@ func New(cfg Config) (*Store, error) {
 		}
 		return nil, err
 	}
+	store.credentials = provider
 	// The operator's own configuration is authoritative, so it replaces whatever
 	// newStore derived from the clients.
 	store.configuredEndpoints = storeEndpoints{
 		Addresses:     append([]string(nil), cfg.Addresses...),
 		ReadAddresses: append([]string(nil), cfg.ReadAddresses...),
+		Topology:      cfg.EffectiveTopology(),
+		MasterName:    cfg.MasterName,
 		KeyPrefix:     store.prefix,
+		TLSInsecure:   cfg.TLS.Enabled && cfg.TLS.InsecureSkipVerify,
 	}
 	store.writeEndpoint = writeTracker
 	store.readEndpoint = readTracker
 	if cfg.PasswordFile != "" {
-		if cfg.topology() == TopologySentinel {
+		if cfg.EffectiveTopology() == TopologySentinel {
 			// Sentinel carries data-node credentials through
 			// CredentialsProviderContext, not the streaming provider (see
 			// failoverOptions), so the provider has no subscribers here. A
@@ -189,7 +213,8 @@ func New(cfg Config) (*Store, error) {
 			)
 		} else {
 			store.stopWatcher = make(chan struct{})
-			go watchCredentials(provider, cfg.refreshInterval(), store.stopWatcher)
+			store.watcherDone = make(chan struct{})
+			go watchCredentials(provider, cfg.refreshInterval(), store.stopWatcher, store.watcherDone)
 		}
 	}
 	return store, nil
@@ -209,10 +234,25 @@ func New(cfg Config) (*Store, error) {
 //   - KeyPrefix, because it decides which keyspace this router occupies. Two
 //     routers on one Valkey with different prefixes share zero entries and are
 //     otherwise indistinguishable in this output.
+//   - Topology and MasterName, because they say which client was built from
+//     those addresses: a sentinel quorum being asked for a master, or the first
+//     address dialled as a data node. The startup line names the resolved
+//     topology too, but it scrolls away; this endpoint does not (MAG-3671).
+//     Always the RESOLVED topology, so an omitted line reads as the standalone
+//     it became. Empty only for the NewWithClient seams, which see no Config.
 type storeEndpoints struct {
 	Addresses     []string
 	ReadAddresses []string
+	Topology      Topology
+	MasterName    string
 	KeyPrefix     string
+	// TLSInsecure records that the connection is encrypted but the backend's
+	// certificate is NOT verified (tls.insecure-skip-verify). Rendered so a
+	// deployment running without that check is distinguishable from one running
+	// with it — the setting is set once for a development environment and then
+	// travels, and the person reading the deployment months later is not the
+	// person who set it (MAG-3684).
+	TLSInsecure bool
 }
 
 // String renders the endpoints for the debug payload's address field. Read
@@ -222,15 +262,24 @@ func (e storeEndpoints) String() string {
 	if len(e.Addresses) == 0 && len(e.ReadAddresses) == 0 {
 		return ""
 	}
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 6)
 	if len(e.Addresses) > 0 {
 		parts = append(parts, strings.Join(e.Addresses, ","))
 	}
 	if len(e.ReadAddresses) > 0 {
 		parts = append(parts, "read="+strings.Join(e.ReadAddresses, ","))
 	}
+	if e.Topology != "" {
+		parts = append(parts, "topology="+string(e.Topology))
+	}
+	if e.MasterName != "" {
+		parts = append(parts, "master="+e.MasterName)
+	}
 	if e.KeyPrefix != "" {
 		parts = append(parts, "prefix="+e.KeyPrefix)
+	}
+	if e.TLSInsecure {
+		parts = append(parts, "tls=insecure-skip-verify")
 	}
 	return strings.Join(parts, " ")
 }
@@ -280,11 +329,58 @@ func clientAddresses(client redis.UniversalClient) []string {
 // regional cluster or sentinel set fed by the infrastructure's replication),
 // which is why this warns rather than rejecting.
 func warnIfReadSplitIsDiscoveryScoped(cfg Config) {
-	if cfg.topology() == TopologyStandalone {
+	if cfg.EffectiveTopology() == TopologyStandalone {
 		return
 	}
 	utils.LavaFormatWarning("resp-cache read-addresses under a discovering topology: the read client performs its own discovery and resolves to the master(s) of the topology those addresses front — it yields replica reads only when it points at a separate replicated deployment (e.g. a regional cluster), not at replicas of the write topology", nil,
-		utils.LogAttr("topology", cfg.topology()),
+		utils.LogAttr("topology", cfg.EffectiveTopology()),
+		utils.LogAttr("read-addresses", cfg.ReadAddresses),
+	)
+}
+
+// warnIfCredentialsCrossPlaintext says, once at construction, that the
+// configured credentials will be sent to the backend in the clear.
+//
+// Validate refuses the one shape that READS as encrypted and is not (a tls
+// block without its switch). Every other plaintext shape — credentials with no
+// tls block at all — is deliberate and stays allowed: a loopback or
+// private-network backend is the ordinary case, and the gRPC upstreams take
+// the same decision (TokenOverInsecureWarning in protocol/common). But the
+// harm the refusal names is just as real here and used to be silent: the
+// startup line said tls=false in one word among six, and the first write of
+// every new connection carried the password readable. So it is said out loud,
+// naming the endpoints and which credential keys are set — never their values.
+func warnIfCredentialsCrossPlaintext(cfg Config) {
+	if cfg.TLS.Enabled {
+		return
+	}
+	keys := cfg.configuredCredentialKeys()
+	if len(keys) == 0 {
+		return
+	}
+	utils.LavaFormatWarning("resp-cache credentials are configured without tls: they cross the network readable on every new connection to the backend (set tls.enabled: true to protect them in transit; on a loopback or private-network backend this may be intended)", nil,
+		utils.LogAttr("addresses", cfg.Addresses),
+		utils.LogAttr("read-addresses", cfg.ReadAddresses),
+		utils.LogAttr("credential-keys", keys),
+	)
+}
+
+// warnIfTLSSkipsVerification says, once at construction, that the connection
+// will be encrypted to a backend whose certificate is not checked.
+//
+// Skipping verification is legitimate on a development backend and serious
+// anywhere else, and it is the kind of setting that is set once and then
+// travels. It lives here, next to the plaintext-credential warning and in the
+// package that honours the opt-in (TLSConfig.build), so every caller of New
+// gets it and a production deployment running with it is not
+// indistinguishable from one running without (MAG-3684). The debug endpoint
+// carries the same fact as tls=insecure-skip-verify on the tier's address.
+func warnIfTLSSkipsVerification(cfg Config) {
+	if !cfg.TLS.Enabled || !cfg.TLS.InsecureSkipVerify {
+		return
+	}
+	utils.LavaFormatWarning("resp-cache tls.insecure-skip-verify is set: the connection is encrypted but the backend's certificate is NOT verified, so the store's identity is unchecked — a development setting that must not travel to production", nil,
+		utils.LogAttr("addresses", cfg.Addresses),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 	)
 }
@@ -304,8 +400,11 @@ func newStore(writeClient, readClient redis.UniversalClient, keyPrefix string) (
 	if keyPrefix == "" {
 		keyPrefix = DefaultKeyPrefix
 	}
-	if !keyPrefixPattern.MatchString(keyPrefix) {
-		return nil, fmt.Errorf("invalid resp-cache key prefix %q: must match %s — SCAN MATCH patterns are globs, so glob characters could purge unrelated keys", keyPrefix, keyPrefixPattern.String())
+	// The character set is core's (shared with the gRPC client's key prefix) so
+	// one value works on either backend; Purge feeds this prefix into SCAN
+	// MATCH, which is where a glob character would do damage.
+	if err := core.ValidateKeyPrefix(keyPrefix); err != nil {
+		return nil, fmt.Errorf("resp-cache: %w", err)
 	}
 	// Derived rather than left empty so the exported NewWithClient/NewWithClients
 	// seams produce a usable address. New() overwrites this with the operator's
@@ -348,22 +447,83 @@ func (s *Store) PoolStats() PoolStats {
 	return out
 }
 
-// Ping probes backend connectivity — both endpoints when reads are split.
-func (s *Store) Ping(ctx context.Context) error {
-	if err := s.write.Ping(ctx).Err(); err != nil {
-		return err
-	}
+// Endpoint roles, as health reporting names the two halves of a split store.
+const (
+	EndpointRoleWrite = "write"
+	EndpointRoleRead  = "read"
+)
+
+// ProbeResult is one endpoint's health probe: which half, the addresses the
+// operator configured for it, the error when the probe failed, and the round
+// trip it took — so a reader of the probe can tell an endpoint that answered
+// from one that answered within the budget the relay path gives it.
+type ProbeResult struct {
+	Role      string
+	Addresses string
+	Err       error
+	Latency   time.Duration
+}
+
+// Probe pings every endpoint the store uses and reports each one on its own.
+// With no read split there is a single result, the write endpoint. Ping folds
+// these into the first failure; the health loop reads them apart, because with
+// reads split "the cache is unreachable" cannot say which half, and an alert
+// that cannot say sends the operator to the healthy address half the time
+// (MAG-3674).
+//
+// Every endpoint is pinged on its own goroutine, all within the caller's one
+// deadline. Pinged one after the other with the same context, a writer that
+// stalled until the deadline handed the reader a context already expired, and a
+// healthy reader was reported down, with its error counted, for the writer's
+// fault: the very diagnosis this split exists to give (Codex review of #404).
+func (s *Store) Probe(ctx context.Context) []ProbeResult {
+	results := []ProbeResult{{
+		Role:      EndpointRoleWrite,
+		Addresses: strings.Join(s.configuredEndpoints.Addresses, ","),
+	}}
+	clients := []redis.UniversalClient{s.write}
 	if s.read != s.write {
-		return s.read.Ping(ctx).Err()
+		results = append(results, ProbeResult{
+			Role:      EndpointRoleRead,
+			Addresses: strings.Join(s.configuredEndpoints.ReadAddresses, ","),
+		})
+		clients = append(clients, s.read)
+	}
+	var probes sync.WaitGroup
+	for i := range results {
+		probes.Add(1)
+		go func(i int, client redis.UniversalClient) {
+			defer probes.Done()
+			start := time.Now()
+			results[i].Err = client.Ping(ctx).Err()
+			results[i].Latency = time.Since(start)
+		}(i, clients[i])
+	}
+	probes.Wait()
+	return results
+}
+
+// Ping probes backend connectivity — both endpoints when reads are split —
+// and returns the first failure.
+func (s *Store) Ping(ctx context.Context) error {
+	for _, result := range s.Probe(ctx) {
+		if result.Err != nil {
+			return result.Err
+		}
 	}
 	return nil
 }
 
-// Close stops the credential watcher and releases both clients.
+// Close stops the credential watcher and releases both clients. It returns
+// only once the watcher has returned: a tick in flight finishes first, so
+// nothing owned by this store logs or pushes after Close. Waiting is safe
+// because a tick is bounded work: a file read, and per live connection a
+// go-redis OnNext that only marks the connection for a background re-auth.
 func (s *Store) Close() error {
 	if s.stopWatcher != nil {
 		close(s.stopWatcher)
 		s.stopWatcher = nil
+		<-s.watcherDone
 	}
 	err := s.write.Close()
 	if s.read != s.write {
@@ -743,14 +903,141 @@ func decodeStickyPin(raw string) (core.StickyPin, error) {
 	return core.StickyPin{Provider: value.Provider, Epoch: value.Epoch}, nil
 }
 
+// Purge drops every key under this store's prefix from every endpoint the
+// store reads from. The write endpoint is scanned and unlinked; when reads are
+// split, the read endpoint is scanned and unlinked the same way, because it may
+// be a separate store the write endpoint never feeds — the shape read-addresses
+// is documented for — and a purge that left it alone kept serving the entries
+// it was meant to remove, reset after reset (MAG-3673). Ping, PoolStats and
+// Close already touch both clients; this was the one operation that did not.
+//
+// A read endpoint that is a read-only REPLICA of the write endpoint is not
+// scanned at all when it says so (readEndpointReplicaOf): the write-side
+// unlinks reach it through replication, and a scan there would walk its whole
+// keyspace to queue unlinks it answers READONLY. One that answers READONLY
+// without having said so is treated the same way, noted at debug level, and
+// the purge succeeds. Any other failure on the read side is a failed purge and
+// says so, naming the read side, because a reset that silently did half the
+// job is the defect this exists to close.
 func (s *Store) Purge(ctx context.Context) error {
 	match := s.prefix + ":*"
-	if clusterClient, ok := s.write.(*redis.ClusterClient); ok {
+	if err := purgeClient(ctx, s.write, match); err != nil {
+		return err
+	}
+	if s.read == s.write {
+		return nil
+	}
+	if master, isReplica := s.readEndpointReplicaOf(ctx); isReplica {
+		utils.LavaFormatDebug("resp-cache purge: the read endpoint reports itself a replica, so it is not scanned; the write-side purge reaches it through replication",
+			utils.LogAttr("read-endpoint", s.readEndpoint.current()),
+			utils.LogAttr("replica-of", master),
+			utils.LogAttr("replica-of-write-endpoint", addressListed(master, s.configuredEndpoints.Addresses)))
+		return nil
+	}
+	if err := purgeClient(ctx, s.read, match); err != nil {
+		if redis.HasErrorPrefix(err, "READONLY") {
+			utils.LavaFormatDebug("resp-cache purge: the read endpoint is a read-only replica, so the write-side purge reaches it through replication",
+				utils.LogAttr("read-endpoint", s.readEndpoint.current()))
+			return nil
+		}
+		return fmt.Errorf("resp-cache: purging the read endpoint: %w", err)
+	}
+	return nil
+}
+
+// readEndpointReplicaOf asks the read endpoint what it is before Purge scans
+// it, and reports whether it calls itself a replica and of which master
+// ("host:port", empty when it did not say).
+//
+// A replica answers READONLY to every unlink, so scanning it is a walk of its
+// whole keyspace for no effect: SCAN visits every key on the node whatever the
+// MATCH, so on a shared managed reader — the shape read-addresses is
+// documented for — every reset cost one round trip per scanBatchSize keys of
+// everything stored there, on the read path (review of #403). ROLE is asked
+// first; a backend that does not answer it (a proxy, a managed service that
+// hides it) is asked INFO replication; one that answers neither is scanned as
+// before, with READONLY still tolerated at the unlink. A cluster read client
+// resolves to writable masters and is scanned per master, so it is not asked.
+//
+// Whether the named master is the configured write endpoint is logged, not
+// acted on: a replica of some other deployment would keep its entries, but
+// it would also have answered READONLY to every unlink, so the outcome is the
+// same as before this check and the attribute is what makes it visible. The
+// comparison is textual, and a replica names its master by IP where the
+// operator may have written a hostname, so a false there is a hint, not a
+// finding.
+func (s *Store) readEndpointReplicaOf(ctx context.Context) (master string, isReplica bool) {
+	if _, isCluster := s.read.(*redis.ClusterClient); isCluster {
+		return "", false
+	}
+	if reply, err := s.read.Do(ctx, "ROLE").Slice(); err == nil {
+		return replicaOfFromRole(reply)
+	}
+	if info, err := s.read.Info(ctx, "replication").Result(); err == nil {
+		return replicaOfFromInfo(info)
+	}
+	return "", false
+}
+
+// replicaOfFromRole reads a ROLE reply: ["master", ...], ["sentinel", ...] or
+// ["slave", host, port, link-state, offset], "slave" being the wire word for
+// a replica.
+func replicaOfFromRole(reply []interface{}) (master string, isReplica bool) {
+	if len(reply) == 0 {
+		return "", false
+	}
+	if role, _ := reply[0].(string); role != "slave" {
+		return "", false
+	}
+	if len(reply) < 3 {
+		return "", true
+	}
+	host, _ := reply[1].(string)
+	port, _ := reply[2].(int64)
+	if host == "" {
+		return "", true
+	}
+	return net.JoinHostPort(host, strconv.FormatInt(port, 10)), true
+}
+
+// replicaOfFromInfo reads the replication section of INFO: role:slave names
+// a replica, master_host and master_port name its master.
+func replicaOfFromInfo(info string) (master string, isReplica bool) {
+	fields := map[string]string{}
+	for _, line := range strings.Split(info, "\n") {
+		key, value, found := strings.Cut(strings.TrimSpace(line), ":")
+		if found {
+			fields[key] = value
+		}
+	}
+	if fields["role"] != "slave" {
+		return "", false
+	}
+	if fields["master_host"] == "" {
+		return "", true
+	}
+	return net.JoinHostPort(fields["master_host"], fields["master_port"]), true
+}
+
+// addressListed reports whether addr is one of the configured addresses.
+func addressListed(addr string, addresses []string) bool {
+	for _, candidate := range addresses {
+		if candidate == addr {
+			return true
+		}
+	}
+	return false
+}
+
+// purgeClient scans and unlinks under match on one client — per master when
+// the client is a cluster, since SCAN is per node.
+func purgeClient(ctx context.Context, client redis.UniversalClient, match string) error {
+	if clusterClient, ok := client.(*redis.ClusterClient); ok {
 		return clusterClient.ForEachMaster(ctx, func(ctx context.Context, master *redis.Client) error {
 			return purgeByScan(ctx, master, match)
 		})
 	}
-	return purgeByScan(ctx, s.write, match)
+	return purgeByScan(ctx, client, match)
 }
 
 func purgeByScan(ctx context.Context, client redis.UniversalClient, match string) error {

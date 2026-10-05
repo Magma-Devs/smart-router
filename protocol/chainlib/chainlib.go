@@ -15,7 +15,6 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"google.golang.org/grpc"
 )
 
 const (
@@ -74,6 +73,7 @@ type ChainParser interface {
 	IsInternalPathEnabled(internalPath string, apiInterface string, addon string) bool
 	CraftMessage(parser *spectypes.ParseDirective, connectionType string, craftData *CraftData, metadata []pairingtypes.Metadata) (ChainMessageForSend, error)
 	HandleHeaders(metadata []pairingtypes.Metadata, apiCollection *spectypes.ApiCollection, headersDirection spectypes.Header_HeaderType) (filtered []pairingtypes.Metadata, overwriteReqBlock string, ignoredMetadata []pairingtypes.Metadata)
+	ReplyHeaderDirectives() []*spectypes.Header
 	GetVerifications(supported []string, internalPath string, apiInterface string) ([]VerificationContainer, error)
 	SeparateAddonsExtensions(ctx context.Context, supported []string) (addons, extensions []string, err error)
 	SetPolicy(policy PolicyInf, chainId string, apiInterface string) error
@@ -146,16 +146,6 @@ type HealthReporter interface {
 	IsHealthy() bool
 }
 
-// GRPCReflectionProvider is an optional interface that can be implemented by RelaySender
-// to provide gRPC reflection support. When implemented, the gRPC listener will register
-// a reflection proxy service that enables tools like grpcurl to discover services.
-type GRPCReflectionProvider interface {
-	// GetGRPCReflectionConnection returns a gRPC connection for reflection requests.
-	// The cleanup function should be called when the connection is no longer needed.
-	// Returns nil if reflection is not supported.
-	GetGRPCReflectionConnection(ctx context.Context) (conn *grpc.ClientConn, cleanup func(), err error)
-}
-
 // GRPCSubscriptionManager is the gRPC server-streaming counterpart of
 // WSSubscriptionManager, implemented by rpcsmartrouter.DirectGRPCSubscriptionManager.
 //
@@ -187,8 +177,8 @@ type GRPCSubscriptionManager interface {
 	ClientKey(dappID, consumerIp, connectionUniqueId string) string
 }
 
-// GRPCSubscriptionProvider is an optional interface on RelaySender, mirroring
-// GRPCReflectionProvider. When it is implemented and returns a non-nil manager, the
+// GRPCSubscriptionProvider is an optional interface on RelaySender, like
+// grpcproxy.ReflectionSource. When it is implemented and returns a non-nil manager, the
 // gRPC listener serves server-streaming methods through it; otherwise streaming
 // methods are refused, since serving one as a unary call returns a truncated stream.
 type GRPCSubscriptionProvider interface {
