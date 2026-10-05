@@ -867,6 +867,21 @@ func TestClassifyError_TransportScoping(t *testing.T) {
 	// gRPC code should NOT match in JSON-RPC transport
 	result = ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 14, "service unavailable")
 	assert.NotEqual(t, LavaErrorNodeServiceUnavailable, result)
+
+	// MAG-3995: gRPC ABORTED (10) is a node error with its own name. On Sui it is the validators'
+	// answer to a submitted transaction, so it is non-retryable and not the endpoint's fault. It
+	// is not the internal PROTOCOL_PROVIDER_ABORTED code.
+	result = ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 10, "")
+	assert.Equal(t, LavaErrorNodeAborted, result)
+	assert.Equal(t, CategoryExternal, result.Category, "the node answered; internal would read as unreachable")
+	assert.False(t, result.Retryable, "resubmitting is the client's call; the flag keeps the answer off the endpoint")
+	assert.True(t, result.MayHaveReachedNode, "Sui's already-finalized case can mean the transaction is on chain")
+	assert.False(t, result.EndpointAtFault())
+	assert.NotEqual(t, LavaErrorNodeAborted, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 10, ""),
+		"JSON-RPC 10 is not a gRPC status")
+
+	// DATA_LOSS (15) stays unregistered: no node we route to sends it.
+	assert.Equal(t, LavaErrorUnknown, ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 15, ""))
 }
 
 func TestClassifyError_ChainSpecificMappings(t *testing.T) {
@@ -956,6 +971,30 @@ func TestClassifyError_GenericJsonRPCMappings(t *testing.T) {
 			result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, tt.code, tt.message)
 			assert.Equal(t, tt.expected, result, "expected %s but got %s", tt.expected.Name, result.Name)
 		})
+	}
+}
+
+// Besu's duplicate-submission wording is matched on whole words: "unknown transaction" is not a
+// duplicate, and reading it as one would stop the retry and pin a wallet to a node that never
+// took its transaction (MAG-4032).
+func TestClassifyError_KnownTransactionIsWordBounded(t *testing.T) {
+	tests := []struct {
+		message   string
+		duplicate bool
+	}{
+		{"Known transaction", true},
+		{"known transaction", true},
+		{"Error: Known transaction", true},
+		{"unknown transaction type", false},
+		{"Unknown transaction", false},
+	}
+	for tcIndex, tc := range tests {
+		result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32000, tc.message)
+		if tc.duplicate {
+			assert.Equal(t, LavaErrorChainTxAlreadyKnown, result, "tc #%d %q", tcIndex, tc.message)
+		} else {
+			assert.NotEqual(t, LavaErrorChainTxAlreadyKnown, result, "tc #%d %q", tcIndex, tc.message)
+		}
 	}
 }
 

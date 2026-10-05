@@ -42,7 +42,7 @@ func newProcessorForLeakTest(t *testing.T, ctx context.Context, selection Select
 		params := common.DefaultCrossValidationParams
 		crossValidationParams = &params
 	}
-	return NewRelayProcessor(ctx, crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance,
+	return NewRelayProcessor(ctx, crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics,
 		newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, selection))
 }
 
