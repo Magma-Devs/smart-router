@@ -65,6 +65,23 @@ func TestExtractWantedHeadersFromCachedMap(t *testing.T) {
 	}
 }
 
+// Every request on every interface goes through the lookup, and most send no tracing header
+// at all, so finding none must cost no allocation, in either spelling's map (MAG-3798).
+func TestExtractWantedHeadersFromCachedMap_NoTracingHeaderAllocatesNothing(t *testing.T) {
+	for name, headers := range map[string]map[string][]string{
+		"canonical keys, as fasthttp normalises them":    {"Content-Type": {"application/json"}, "User-Agent": {"curl/8.7.1"}},
+		"lower-case keys, as gRPC metadata carries them": {"content-type": {"application/grpc"}, "user-agent": {"grpc-go/1.79.3"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			var got context.Context
+			allocs := testing.AllocsPerRun(100, func() { got = ExtractWantedHeadersFromCachedMap(headers, ctx) })
+			require.Zero(t, allocs, "a request without tracing headers paid for the lookup")
+			require.Equal(t, ctx, got, "nothing to stamp, so the context comes back as it went in")
+		})
+	}
+}
+
 // An absent or empty header must read back as "not found", not as an empty id: the log
 // formatter and the relay builder branch on that flag.
 func TestExtractWantedHeadersFromCachedMap_EmptyHeaderIsNotFound(t *testing.T) {
