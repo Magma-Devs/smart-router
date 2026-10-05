@@ -355,11 +355,19 @@ A value below the router's own window replaces it. On most calls that only makes
 On a call whose budget comes from its own window, such as that Bitcoin write, it also shortens the
 budget, as it did before these bounds.
 
+A value at or above the request's own budget turns hedging off for that request. The window is also
+the hedge interval, and the budget is never shorter than the window, so such a value makes the two
+equal and a hedge could only fire as the budget runs out. Retrying after a failed attempt works as
+it does without the header, but an endpoint that goes quiet holds the request for the whole budget.
+
 `--max-caller-relay-timeout` lets callers extend the budget, up to its value:
 
 ```bash
 --max-caller-relay-timeout 2m        # default 0: callers cannot extend a request's budget
 ```
+
+A request extended this way is one of those: its window is its whole budget, so one quiet endpoint
+can hold it for as long as the caller asked, up to the flag's value.
 
 A reply to a request that carried the header includes `Lava-Relay-Timeout-Applied`: the window the
 router actually used, as a Go duration. Like the router's other reply headers, it is absent when the
