@@ -306,8 +306,9 @@ func (sm *UnifiedRelayStateMachine) GetProtocolMessage() chainlib.ProtocolMessag
 // backupReserveDelay is when, after the first dispatch, the backup-reserve hedge goes out: one
 // window before the budget ends, so a backup that answers at the pace every endpoint is expected to
 // keep still lands inside the budget. It never fires before the first window has passed — the first
-// primary keeps its full window even when the budget is short. ok is false when the budget cannot
-// fit a reserve after that window, and so no reserve is armed.
+// primary keeps its full window even when the budget is short, and with a budget under two windows
+// the backup then gets only what remains (budget 15s, window 10s: 5s). ok is false when the budget
+// cannot fit a reserve after that window, and so no reserve is armed.
 func backupReserveDelay(processingTimeout, relayTimeout time.Duration) (delay time.Duration, ok bool) {
 	if relayTimeout <= 0 {
 		return 0, false
@@ -542,9 +543,10 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 				)
 
 				if output.Action == ActionRetry {
-					// A retry after a completed attempt, not a hedge. Clear any hedge a timer asked
-					// for and never got out, so this dispatch is not counted as that hedge firing.
-					sm.pendingHedges = 0
+					// A retry after a completed attempt, not a hedge, so it leaves pendingHedges as it
+					// is. The sender confirms dispatches one at a time, in the order they were asked
+					// for, so a hedge still in flight is confirmed and counted before this retry is.
+					// Clearing the count here dropped that hedge from HedgeCount.
 					sm.stateTransition(sm.getLatestState())
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
 				} else {
