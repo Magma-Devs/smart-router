@@ -11,6 +11,7 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -496,6 +497,18 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		protocolMessage, err := cwm.relaySender.ParseRelay(webSocketCtx, "", string(msg), cwm.connectionType, dappID, userIp, nil)
 		if err != nil {
 			utils.LavaFormatDebug("ws manager could not parse message", utils.LogAttr("message", msg), utils.LogAttr("err", err))
+			// A batch the chain cannot take is a request the caller can fix, so it gets the same
+			// -32600 the POST handler returns rather than the masked GUID the generic formatter
+			// writes. Without this the identical request shape yields an actionable error over
+			// HTTP and an opaque one here.
+			if errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused) {
+				refused := common.JsonRpcInvalidRequestError
+				refused.Error.Data = rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error()
+				if msgData, marshalErr := json.Marshal(refused); marshalErr == nil {
+					sendWS(webSocketMsgWithType{messageType: messageType, msg: msgData})
+					continue
+				}
+			}
 			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
@@ -567,7 +580,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				// (success or failure). The pre-existing flow `continue`d
 				// before reaching AddMetricForWebSocket below, so normal WS
 				// relays were silently dropped from the analytics pipeline.
-				go logger.AddMetricForWebSocket(metricsData, err, websocketConn)
+				go logger.AddMetricForWebSocket(metricsData, err)
 				continue
 			}
 		}
@@ -606,7 +619,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		// Snapshot the populated RelayMetrics fields for per-delivery
 		// emits. The start-of-subscription emit below races with the
 		// per-message emits on the same pointer (AddMetricForWebSocket
-		// mutates Success and Origin) — copy by value so each per-message
+		// mutates Success) — copy by value so each per-message
 		// goroutine works on its own struct.
 		subscriptionFields := *metricsData
 
@@ -631,7 +644,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					perMessage.Timestamp = time.Now()
 					perMessage.ApiMethod = SubscriptionDeliveryMethod
 					perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
-					go logger.AddMetricForWebSocket(&perMessage, nil, websocketConn)
+					go logger.AddMetricForWebSocket(&perMessage, nil)
 				}
 
 				utils.LavaFormatTrace("subscriptionMsgsChan was closed",
@@ -643,7 +656,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			}()
 		}
 
-		go logger.AddMetricForWebSocket(metricsData, err, websocketConn)
+		go logger.AddMetricForWebSocket(metricsData, err)
 
 		if reply != nil {
 			reply.Data = outputFormatter(reply.Data) // use that id for the reply

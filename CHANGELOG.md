@@ -8,18 +8,86 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
-## v1.5.7 — 2026-09-29
+## v1.5.8 — 2026-10-03
 
 ### Highlights
 
-This release resolves an issue in the routing layer where the gateway failed to preserve the client's original `Content-Type` header when proxying REST requests to upstream providers. Previously, submitting REST payloads through the router could result in upstream parsing errors or rejected requests, as the destination server received bodies without the necessary media type context. The router now explicitly extracts the `Content-Type` header from the incoming client request and forwards it alongside the payload to the selected upstream node. This correction ensures that standard JSON payloads and custom encoding formats are accurately interpreted by backend services, restoring expected behavior for REST-based API integrations.
+This release introduces a breaking change to upstream QoS scoring and routing behavior; operators must update their monitoring thresholds and routing configurations because the router no longer scores late write deliveries against an upstream, and routing pins are now evaluated as a preference rather than a strict constraint. For transaction broadcasts, writes now run to completion instead of cancelling slower upstreams, and subsequent nonce reads or hash lookups are explicitly routed to the specific upstream that accepted the initial write. REST payload handling has been updated to assign deliberate retry and fault verdicts to every HTTP status code, treating all non-2xx responses as node errors while ensuring that 5xx errors return the upstream's original JSON payload instead of a generic router-generated 500 status. Error classification has also been corrected across protocols to identify REST 409 codes and Besu's "Known transaction" messages as duplicate submissions. Finally, rejected XRPL submissions are now correctly categorized as node errors rather than valid client answers, and websocket connections now return the exact same batch refusal messages as their HTTP counterparts.
+
+### Changes
+
+#### ⚠ Breaking changes
+- fix(rpcsmartrouter)!: cap and stop scoring a write's late deliveries, and send pins as a preference (MAG-4032) ([#476]) [`19894e3`]
+
+#### New Features
+- feat(rpcsmartrouter): send a write's nonce read and hash lookups to the upstream that accepted it (MAG-4032) ([#476]) [`00b33c4`]
+- feat(chainlib): treat every REST status outside 2xx as a node error ([#448]) [`3be46ec`]
+- feat(common): classify a REST 409 as "transaction already known" ([#448]) [`5edb3f4`]
+- feat(common): give every REST status a deliberate retry and fault verdict ([#448]) [`bb1e708`]
+
+#### Bug fixes
+- fix(chainlib): treat a rejected XRPL submit as a node error, not the answer (MAG-4033) ([#462]) [`6c32999`]
+- fix(chainlib): address #462 review: XRPL API errors, batched submits, one rule shape (MAG-4033) ([#462]) [`a24c811`]
+- fix(chainlib): close three of the #462 review blockers (MAG-4033) ([#462]) [`3b5d84e`]
+- fix(chainlib): tell a websocket caller the same batch refusal as HTTP (MAG-4033) ([#462]) [`b34b6f9`]
+- fix(rpcsmartrouter): let a write's broadcast finish instead of cancelling the slower upstreams (MAG-4032) ([#476]) [`d109e6d`]
+- fix(common): read Besu's "Known transaction" as a duplicate submission (MAG-4032) ([#476]) [`a27d724`]
+- fix(rpcsmartrouter)!: cap and stop scoring a write's late deliveries, and send pins as a preference (MAG-4032) ([#476]) [`19894e3`]
+- fix(common): keep the new REST status rows out of the JSON-RPC and gRPC tables ([#448]) [`d41f422`]
+- fix(rpcsmartrouter): return a REST 5xx's own JSON reply instead of a router-made 500 ([#448]) [`839a842`]
+- fix(common): stop blaming the endpoint for a REST reply that is the caller's answer ([#448]) [`4394a0c`]
+- fix(relaycore): a node error the endpoint is not at fault for is not an ERROR ([#448]) [`314d498`]
+
+#### Documentation updates
+- docs(error-registry): make section 9 describe this branch, not its first commit ([#448]) [`2f83948`]
+- docs(error-registry): record the verdicts and the two rules behind them ([#448]) [`e017423`]
+- docs(error-registry): make the prose match the verdicts the review settled ([#448]) [`9b80ad8`]
+- docs(error-registry): record decision 7, the broadcast fix and the status map ship together ([#448]) [`e541b11`]
+
+[#448]: https://github.com/magma-Devs/smart-router/pull/448
+[#462]: https://github.com/magma-Devs/smart-router/pull/462
+[#476]: https://github.com/magma-Devs/smart-router/pull/476
+[`00b33c4`]: https://github.com/magma-Devs/smart-router/commit/00b33c48154b5498f695d2cf1becea031f65da49
+[`19894e3`]: https://github.com/magma-Devs/smart-router/commit/19894e3b2f5061b9e9d7cd109a5f293595e72ab8
+[`2f83948`]: https://github.com/magma-Devs/smart-router/commit/2f83948aca2175cee700d6e7ae9eac6b32c93eb6
+[`314d498`]: https://github.com/magma-Devs/smart-router/commit/314d498568dbfdcc430948291c5eeec207f83c91
+[`3b5d84e`]: https://github.com/magma-Devs/smart-router/commit/3b5d84eb58b2800f13d4cd266c9147eab5a8b220
+[`3be46ec`]: https://github.com/magma-Devs/smart-router/commit/3be46ec794efeaded922a82dbfa06455f0759e74
+[`4394a0c`]: https://github.com/magma-Devs/smart-router/commit/4394a0ce8beccb71ff91fc2b5cce5c19960fbd87
+[`5edb3f4`]: https://github.com/magma-Devs/smart-router/commit/5edb3f4c63d78d8c706358503153f9969da2d519
+[`6c32999`]: https://github.com/magma-Devs/smart-router/commit/6c32999d2d56c36e2c0761792fed808f3f78c77d
+[`839a842`]: https://github.com/magma-Devs/smart-router/commit/839a84223e3e3442e8ffffb2e3b30a2ba2c34eae
+[`9b80ad8`]: https://github.com/magma-Devs/smart-router/commit/9b80ad888ebf6f310556ab1c608a729e990fa4ec
+[`a24c811`]: https://github.com/magma-Devs/smart-router/commit/a24c811cd6301a9815eb232a9c108d55f4a3353f
+[`a27d724`]: https://github.com/magma-Devs/smart-router/commit/a27d7241bc5f45b4c2170a5c0d1392746d15903d
+[`b34b6f9`]: https://github.com/magma-Devs/smart-router/commit/b34b6f99641f95379699b3ab6a0f31115b7a6ae7
+[`bb1e708`]: https://github.com/magma-Devs/smart-router/commit/bb1e708da1a60dcaa21a7fb6959c041ef806f40d
+[`d109e6d`]: https://github.com/magma-Devs/smart-router/commit/d109e6d3b17e246efbc80fb1d242926c3fdccb76
+[`d41f422`]: https://github.com/magma-Devs/smart-router/commit/d41f4224285b4f245debc3cfd9d7ac21d3722271
+[`e017423`]: https://github.com/magma-Devs/smart-router/commit/e01742397b039f64d1fa51117f3c604fe394055a
+[`e541b11`]: https://github.com/magma-Devs/smart-router/commit/e541b1130e1ff51cb783e236812d3c42c0339a51
+
+## v1.5.7 — 2026-09-30
+
+### Highlights
+
+This release focuses on improving protocol compliance and error handling across the gateway's supported interfaces. For REST payloads, the router now correctly forwards the client's original `Content-Type` header to upstream providers. JSON-RPC routing behavior has also been corrected so that an error response containing an empty message string is treated as a node failure rather than a valid client answer, ensuring these responses correctly trigger provider failover. Additionally, websocket connections can now successfully match asynchronous replies to requests that were originally dispatched with a `null` ID. Finally, for operators verifying release artifacts in their deployment pipelines, the release checksum file is now signed and distributed as a cosign v3 bundle.
 
 ### Changes
 
 #### Bug fixes
 - fix(chainlib): forward the client's Content-Type on REST bodies (MAG-2745) ([#385]) [`ea59ca8`]
+- fix(chainlib): treat a JSON-RPC error with an empty message as a node error, not the answer ([#453]) [`50aef72`]
+- fix(rpcclient): match a websocket reply to a request sent with a null id ([#461]) [`105da39`]
+- fix(release): sign the checksum file as a cosign v3 bundle ([#465]) [`1e9b620`]
 
 [#385]: https://github.com/magma-Devs/smart-router/pull/385
+[#453]: https://github.com/magma-Devs/smart-router/pull/453
+[#461]: https://github.com/magma-Devs/smart-router/pull/461
+[#465]: https://github.com/magma-Devs/smart-router/pull/465
+[`105da39`]: https://github.com/magma-Devs/smart-router/commit/105da39f4a24f2cd73a228cd274ae1211b63f66c
+[`1e9b620`]: https://github.com/magma-Devs/smart-router/commit/1e9b620cb7b946752d6836e2455e6eb7ab036907
+[`50aef72`]: https://github.com/magma-Devs/smart-router/commit/50aef7251a3f451cc5cb84526a9a5fc5f7d8e5b1
 [`ea59ca8`]: https://github.com/magma-Devs/smart-router/commit/ea59ca8d4fbde6c0afc2a8b8e9dc0c2a4598acd2
 
 ## v1.5.6 — 2026-09-28

@@ -310,11 +310,10 @@ type WebSocketDirectRPCConnection struct {
 	client *rpcclient.Client // lazily dialed on first SendRequest, then cached
 	closed bool              // set by Close(); prevents re-dialing a closed connection
 
-	// wireID issues a connection-unique JSON-RPC id per request. rpcclient.Client
-	// multiplexes concurrent requests on one socket and routes replies by id
-	// (handler.respWait is a plain id→op map), so reusing a caller-supplied id
-	// across concurrent calls would misroute responses. We send a unique wire id
-	// and restore the caller's original id on the reply before returning.
+	// wireID issues a connection-unique JSON-RPC id per request, and the caller's
+	// original id is restored on the reply before returning. rpcclient.Client
+	// draws an id of its own for every call on a socket too; this connection keeps
+	// one so that matching a reply to its request does not rest on the client alone.
 	wireID atomic.Uint64
 }
 
@@ -926,8 +925,8 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 		return nil, fmt.Errorf("failed to parse JSON-RPC request for WebSocket %s: %w", w.nodeUrl.UrlStr(), err)
 	}
 
-	// Send a connection-unique wire id so concurrent requests can't collide in
-	// the client's id→response map, then restore the caller's id on the reply.
+	// Call under a connection-unique id rather than the caller's, so concurrent
+	// requests cannot collide, then restore the caller's id on the reply.
 	wireID := json.RawMessage(strconv.FormatUint(w.wireID.Add(1), 10))
 
 	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
@@ -935,10 +934,8 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 		return nil, err
 	}
 
-	// Restore the caller's id on a COPY of the reply. The rpcclient dispatch
-	// goroutine may still read the returned reply concurrently, so mutating it
-	// in place is a data race — we only read it (to copy) and write the id on
-	// our own value.
+	// Restore the caller's id on a copy of the reply, so that this does not
+	// depend on the client handing back a message of its own.
 	out := *reply
 	out.ID = reqMsg.ID // caller's id (omitted/empty for notifications)
 

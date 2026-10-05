@@ -6,7 +6,6 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 )
@@ -21,7 +20,6 @@ type RelayStateMachine interface {
 	GetCrossValidationParams() *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
 	GetUsedProviders() *lavasession.UsedProviders
 	SetResultsChecker(resultsChecker ResultsCheckerInf)
-	SetRelayRetriesManager(relayRetriesManager *lavaprotocol.RelayRetriesManager)
 }
 
 // ResultsCheckerInf interface for checking results
@@ -114,26 +112,13 @@ const (
 	SendStop
 )
 
-// ArchiveAction represents the archive mutation to apply.
-type ArchiveAction int
-
-const (
-	ArchiveNoChange ArchiveAction = iota
-	ArchiveAdd
-	ArchiveRemove
-)
-
-// MutationOutput holds archive + cache side effects.
-type MutationOutput struct {
-	ArchiveAction ArchiveAction
-	CacheHashes   bool
-}
-
 // DecisionOutput tells the state machine what to do.
+//
+// There is no mutation field: a retry re-sends the same request elsewhere, it does not rewrite
+// it. See Policy.Decide for why the archive add/remove that used to live here is gone.
 type DecisionOutput struct {
-	Action   Action
-	Mutation MutationOutput
-	Reason   string
+	Action Action
+	Reason string
 }
 
 // DecisionInput is assembled by the state machine for the policy engine.
@@ -142,11 +127,6 @@ type DecisionInput struct {
 	AttemptNumber int
 	IsBatch       bool
 	Summary       ResultsSummary
-	ArchiveStatus *ArchiveStatus
-	// NodeErrors is from the state machine's atomic counter (set by HasRequiredNodeResults).
-	// Used only by decideMutation() for archive threshold checks. Differs from
-	// Summary.NodeErrors (from GetResultsSummary scan) in source but should converge.
-	NodeErrors    uint64
 	IsTickerHedge bool // true when called from ticker.C (hedge), false from gotResults (retry)
 }
 

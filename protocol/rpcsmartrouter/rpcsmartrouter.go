@@ -500,14 +500,14 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 }
 
 // debugMuxDeps bundles the state the debug HTTP handlers reach into. Bundling
-// rather than positional args lets us add stores (router-wide retry caches,
+// rather than positional args lets us add stores (router-wide caches,
 // session managers, etc.) without breaking the existing test fixtures, which
 // can leave router=nil and exercise just the optimizer+offset surface.
 type debugMuxDeps struct {
 	optimizers *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]
 	offsetNano *atomic.Int64
 	// router is optional. When provided, /debug/reset-all also flushes
-	// per-server RelayRetriesManagers and per-CSM transient failure state.
+	// per-CSM transient failure state and the blocked-providers list.
 	router *RPCSmartRouter
 	// qosClient is the optional optimizer-QoS sampler. When provided,
 	// GET /debug/provider-scores reads the live per-provider quality scores
@@ -1350,8 +1350,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/reset-all — flush every state store the test framework
 	// cares about in a single call: in-process Ristretto, optimizer scores,
-	// relay retry bans, sticky
-	// sessions, reported providers, cross-epoch blocked-provider memory,
+	// sticky sessions, reported providers, cross-epoch blocked-provider memory,
 	// and — when --cache-be is configured — the external cache-be pod
 	// (MAG-1764). Equivalent to the legacy time-warp(+3600) → time-warp(0)
 	// → reset-scores dance plus the surviving state above.
@@ -1393,9 +1392,8 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    Surfaced in the response body as the "chain-state" capability below.
 		resetAllChainStates(deps)
 		//
-		// 3. Per-server RelayRetriesManagers (6h hash ban cache), 4. per-CSM
-		//    transient failure state, and 4b. per-CSM blocked-providers list.
-		//    All require the router to be present; test fixtures without a
+		// 3. Per-CSM transient failure state, and 3b. per-CSM blocked-providers
+		//    list. Both require the router to be present; test fixtures without a
 		//    router still get a useful partial reset above and we report which
 		//    stores actually moved.
 		//
@@ -1410,11 +1408,6 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    for /debug/* paths; production relay paths never reach it.
 		if deps.router != nil {
 			deps.router.mu.Lock()
-			for _, server := range deps.router.rpcServers {
-				if server != nil && server.relayRetriesManager != nil {
-					server.relayRetriesManager.Reset()
-				}
-			}
 			for _, csm := range deps.router.sessionManagers {
 				if csm != nil {
 					csm.ResetTransientFailureState()
@@ -1480,6 +1473,13 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// signals MAG-1764 end-to-end coverage, "blocked-providers" signals
 		// MAG-1810, and "endpoint-health" + "pairing" signal the MAG-2186
 		// endpoint-health reset and cold pairing rebuild added above.
+		//
+		// "retries-manager" is retained on the same grounds as "seen-block": the
+		// store it named is gone (the relay-retries hash cache went with the
+		// speculative archive retry, which was its only writer), and the key is
+		// part of the contract an out-of-repo prober reads. Its postcondition —
+		// "no retry hash bans survive this call" — still holds, vacuously. Drop
+		// the key only together with the prober that requires it.
 		w.Header().Set("Content-Type", "application/json")
 		if cacheBeFlushed {
 			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","cache-be"]}`)
@@ -3569,6 +3569,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				DebugAddress:                      viper.GetString("debug-address"),
 				ResponseCompression:               viper.GetString(common.ResponseCompressionFlag),
 				ShutdownGracePeriod:               viper.GetDuration(common.ShutdownGracePeriodFlag),
+				ReadYourWritesWindow:              viper.GetDuration(common.ReadYourWritesWindowFlag),
 			}
 
 			rpcSmartRouterSharedState := viper.GetBool(common.SharedStateFlag)
@@ -3718,7 +3719,8 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().Duration(common.EpochDurationFlag, 0, "duration of each epoch for time-based epoch system (e.g., 30m, 1h). If not set, epochs are disabled")
 	cmdRPCSmartRouter.Flags().Duration(common.ShutdownGracePeriodFlag, common.DefaultShutdownGracePeriod, "graceful shutdown deadline for in-flight requests and WebSocket clients")
 	cmdRPCSmartRouter.Flags().IntVar(&relaycore.RelayRetryLimit, common.SetRelayRetryLimitFlag, 2, "max total relay retry attempts across all error types (node and protocol errors combined; 0 disables retries)")
-	cmdRPCSmartRouter.Flags().Bool(common.StatefulToBackupFlag, false, "also broadcast stateful relays (transaction submission) to the backup tier. OFF by default: a stateful relay reaches every provider it selects, so this sends EVERY stateful request to the backup — including the ones the primaries serve fine — and a fast backup can win the race and cancel the primaries. Turn it on to maximise the chance a transaction lands, accepting the backup spend")
+	cmdRPCSmartRouter.Flags().Bool(common.StatefulToBackupFlag, false, "also broadcast stateful relays (transaction submission) to the backup tier. OFF by default: a stateful relay reaches every provider it selects, so this sends EVERY stateful request to the backup — including the ones the primaries serve fine — and a fast backup can answer the caller first. Turn it on to maximise the chance a transaction lands, accepting the backup spend")
+	cmdRPCSmartRouter.Flags().Duration(common.ReadYourWritesWindowFlag, common.DefaultReadYourWritesWindow, "how long an eth_sendRawTransaction's sender and hash stay pinned to the upstream that accepted it: the sender's pending-nonce reads and lookups of the hash go there, so a wallet reads back its own write instead of an upstream the write has not reached yet. Pod-local, and a preference — an upstream that cannot take the read gives way to ordinary selection. 0 turns it off")
 	if err := viper.BindPFlag(common.StatefulToBackupFlag, cmdRPCSmartRouter.Flags().Lookup(common.StatefulToBackupFlag)); err != nil {
 		utils.LavaFormatFatal("failed to bind stateful-to-backup flag", err)
 	}

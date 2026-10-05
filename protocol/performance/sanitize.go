@@ -3,6 +3,7 @@ package performance
 import (
 	"strings"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
@@ -29,10 +30,10 @@ import (
 //
 // Content-Length is deliberately NOT here: the payload is re-stamped by the request's
 // outputFormatter before it is served, so a replayed length can disagree with the body.
-var foreignReplyMetadataAllowlist = []string{
-	"Content-Type",
-	"Content-Encoding",
-}
+//
+// The list itself is common.TransportReplyHeaders, shared with the live relay path's
+// filter so the two tiers cannot drift apart on what a client needs to decode a body.
+var foreignReplyMetadataAllowlist = common.TransportReplyHeaders
 
 // SanitizeForeignCacheReply strips identity-bearing data from a cache reply that
 // crossed a trust boundary — the secondary cache (docs/SECONDARY-CACHE.md).

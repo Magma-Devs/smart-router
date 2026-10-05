@@ -50,58 +50,46 @@ func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
 	return sigs.HashMsg(append(append(pathByteArray, rm.Msg...), headersByteArray...)), nil
 }
 
+// CheckResponseError reports whether a REST reply is a node error and, if so, its message.
+//
+// Any status outside 2xx is a node error. REST has no error object, and no status-code rule
+// separates a chain's refusal from a success across the chains the fleet serves: Horizon reports
+// a rejected transaction as a 400 problem document and a missing account as a 404, Aptos a pruned
+// version as a 410, Cosmos a missing transaction as a 404 and a bad address as a 500, the
+// Substrate sidecar a missing block hash as a 500. Every one of those is the node answering
+// "no", and the caller receives that answer unchanged. What "node error" adds is the same thing
+// it adds on JSON-RPC: a write broadcast keeps waiting for a sibling's success instead of taking
+// the first refusal as the result, and the error registry classifies the reply — its REST rows
+// decide whether a read is retried elsewhere and whether the endpoint is scored. A 2xx is a
+// success unless its body carries a Cosmos transaction error.
+//
+// A status of 0 is "not set" — a cache entry written before statuses were stored, a test
+// fixture, gRPC's codes.OK on the shared RelayResult — and reads as a success, the way the
+// health gate reads it. A REST upstream always answers with a real status.
 func (jm RestMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
-	// Treat 5xx and 429 as node errors (triggers retries).
-	// Using status-code ranges here (rather than the error registry) is intentional:
-	// the registry only maps a fixed set of known codes, so registry-gated filtering
-	// would silently turn unmapped 5xx variants into successes.
-	if httpStatusCode >= 500 || httpStatusCode == 429 {
-		return true, extractErrorMessage(data, httpStatusCode)
-	}
-
-	// A refused route is not the node answering. See isRouteRefusal.
-	if isRouteRefusal(httpStatusCode, data) {
-		return true, extractErrorMessage(data, httpStatusCode)
-	}
-
-	// Check Cosmos SDK transaction errors (HTTP 2xx with error code in JSON body)
-	if httpStatusCode >= 200 && httpStatusCode < 300 {
+	if httpStatusCode == 0 || (httpStatusCode >= 200 && httpStatusCode < 300) {
 		if cosmosTxErr, errMsg := checkCosmosTxError(data); cosmosTxErr {
 			return cosmosTxErr, errMsg
 		}
 		return false, ""
 	}
-
-	// Any other 4xx is the caller's answer — not a node error, passed through to the consumer.
-	return false, ""
+	return true, extractErrorMessage(data, httpStatusCode)
 }
 
-// isRouteRefusal reports a reply saying the request was never executed: any 405, or a 404 whose
-// body is not JSON.
+// ServerErrorIsNodeReply reports whether a REST 5xx is the node's own answer rather than a failure
+// in front of it: its body is JSON, and the status is not one the registry marks MayHaveReachedNode.
 //
-// A 405 never carries what the caller asked for, whoever sends it — a node's own router (Horizon
-// answers a wrong method with an empty 405) or the framework behind it (Aptos answers with a JSON
-// "method not allowed"). A 404 is different: a node that answers 404 does so with a problem
-// document — Horizon, Aptos and the Cosmos gRPC-gateway all send JSON — and that answer is data
-// the caller asked for (an unfunded account, a missing resource). An empty or non-JSON 404 is the
-// gateway in front of the node refusing the route: the endpoint never served the request.
-//
-// The distinction is load-bearing on a stateful broadcast, where the first success ends the
-// fan-out. Counted as a success, a gateway's instant empty 404 was returned to the caller while a
-// sibling upstream was still executing the same write, which it then broadcast anyway. The
-// registry already classifies both codes as non-retryable and not the endpoint's fault, so a read
-// that meets one is still returned as-is, and nothing is scored against the endpoint.
-//
-// Known gap: a gateway that refuses a route with a JSON body (Kong's "no Route matched") still
-// reads as the node's answer. Telling that apart needs a signal the body shape cannot give.
-func isRouteRefusal(httpStatusCode int, data []byte) bool {
-	switch httpStatusCode {
-	case 405:
-		return true
-	case 404:
-		return !json.Valid(data)
+// CheckResponseError already calls every 5xx a node error. This answers the narrower question the
+// relay path asks before turning a 5xx into a transport error: can the body be handed to the client?
+// Horizon's 503 {"tx_status":"TRY_AGAIN_LATER"} can — it tells the client nothing was submitted and a
+// retry is safe. A proxy's HTML 502 cannot. A 502 or 504 (and Cloudflare's 522/524) stays a transport
+// failure even with a JSON body: a gateway that failed may already have forwarded the request, so a
+// write's outcome is unknown, and "may have reached the node" is what keeps it "unclear".
+func ServerErrorIsNodeReply(httpStatusCode int, data []byte) bool {
+	if httpStatusCode < 500 || len(data) == 0 || !json.Valid(data) {
+		return false
 	}
-	return false
+	return !common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, httpStatusCode, "").MayHaveReachedNode
 }
 
 // checkCosmosTxError detects errors in Cosmos SDK transaction responses

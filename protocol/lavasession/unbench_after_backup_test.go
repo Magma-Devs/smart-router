@@ -226,3 +226,200 @@ func TestPinnedProvider_UnknownNameWithHealthyPoolStillFails(t *testing.T) {
 	require.Equal(t, uint64(0), csm.numberOfResets, "a bad pin must not release anyone's block")
 	require.Len(t, csm.validAddresses, 2)
 }
+
+// The empty-pool half of TestPinnedProvider_UnknownNameWithHealthyPoolStillFails above, which is
+// where that test's own assertion — "a bad pin must not release anyone's block" — actually has
+// teeth. With a healthy pool the release never runs at all: releaseBlockedProvidersIfPoolEmpty
+// returns on its first line. Only once the pool is empty does the request reach the guard, and the
+// guard used to answer on the strength of a provider this request can never be served by.
+//
+// The damage is not to this request, which fails either way. It is that one relay carrying a
+// misspelled header wiped the standing blocked list for every other relay on the router — the
+// state section 5 exists to keep, and the state bench-after and cooldown are built on.
+func TestPinnedProvider_UnknownNameWithEmptyPoolDoesNotRelease(t *testing.T) {
+	ctx := context.Background()
+	csm := setupBenchTestCSM(t, true)
+	blockEveryPrimary(csm)
+
+	// Ordinary traffic cannot move this state: it is served by backup and returns before the
+	// release. The pinned path has no backup tier by design, so it reaches the guard alone.
+	for i := 0; i < 3; i++ {
+		_, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+		require.NoError(t, err)
+	}
+	require.Equal(t, uint64(0), csm.numberOfResets, "ordinary traffic must leave the block standing")
+
+	_, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "lava@doesnotexist")
+	require.ErrorIs(t, err, SelectedProviderUnavailableError, "an unknown pin must still fail")
+
+	require.Equal(t, uint64(0), csm.numberOfResets, "an unknown pin must not release anyone's block")
+	require.Empty(t, csm.validAddresses, "the pool must still be empty")
+	require.ElementsMatch(t, []string{"lava@primary0", "lava@primary1"}, csm.currentlyBlockedProviderAddresses,
+		"the standing blocked list must survive a bad header")
+}
+
+// The third way a pinned request reaches the guard: the name IS configured, but that provider
+// cannot serve the collection asked for. A release refills validAddresses from the pairing, which
+// cannot teach a provider an addon it never registered, so it is as useless here as for a name that
+// does not exist — and the guard has to decline it for the same reason.
+//
+// The other primary DOES serve the addon, which is what made the old guard say yes. That provider
+// is exactly the one a pinned request can never be handed.
+func TestPinnedProvider_UnservableAddonWithEmptyPoolDoesNotRelease(t *testing.T) {
+	ctx := context.Background()
+	const addon = "archive"
+
+	pinned := mkProviderForBenchTest("lava@primary0") // no addons: cannot serve the pin's collection
+	capable := mkProviderForBenchTest("lava@primary1")
+	capable.Endpoints[0].Addons = map[string]struct{}{addon: {}}
+
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{0: pinned, 1: capable}, nil))
+	blockEveryPrimary(csm)
+
+	_, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, addon, nil, common.NO_STATE, 0, "", "lava@primary0")
+	require.ErrorIs(t, err, SelectedProviderUnavailableError)
+
+	require.Equal(t, uint64(0), csm.numberOfResets,
+		"another provider serving the addon cannot justify a release for a request pinned to one that does not")
+	require.ElementsMatch(t, []string{"lava@primary0", "lava@primary1"}, csm.currentlyBlockedProviderAddresses)
+}
+
+// A group-diversity mandate drops the caller's pin, and the request is served by the diverse set
+// rather than by the one pinned provider.
+//
+// The drop itself is not new, and this test passes on the code before the move as well. Where the
+// drop happens is what changed: it used to run at the one selection call that needed it, leaving
+// GetSessions holding a directive that selection had already discarded. This pins the outcome the
+// move has to keep; TestGroupDiversity_UnknownPinStillReleasesTheBlock covers what the move fixes.
+func TestGroupDiversity_DropsThePinAndServesTheDiverseSet(t *testing.T) {
+	ctx := context.Background()
+	csm := setupBenchTestCSM(t, false)
+
+	css, err := csm.GetSessions(ctx, 2, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber,
+		"", nil, common.NO_STATE, 0, "", "lava@primary0",
+		GetSessionsOptions{MinGroups: 2, PerGroupTarget: 1})
+	require.NoError(t, err)
+
+	require.Len(t, css, 2, "a group-diversity mandate outranks the pin: it must not collapse to the pinned provider")
+}
+
+// The blocked-pool half of the same thing, and the reason the drop had to move up rather than stay
+// where it was.
+//
+// With group diversity mandated the pin is discarded before selection, so an unknown name fails as
+// an ordinary empty pool — PairingListEmptyError, not SelectedProviderUnavailableError. The
+// failover cascade then reaches the release. If this frame were still carrying the discarded pin,
+// the release guard would ask whether "lava@doesnotexist" could be served, answer no, and decline
+// a release that this request genuinely needs: the cascade would fall through to the
+// blocked-provider walk and return ONE provider for a policy that asked for two.
+func TestGroupDiversity_UnknownPinStillReleasesTheBlock(t *testing.T) {
+	ctx := context.Background()
+	csm := setupBenchTestCSM(t, false) // no backup, so the release is actually reached
+	blockEveryPrimary(csm)
+
+	css, err := csm.GetSessions(ctx, 2, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber,
+		"", nil, common.NO_STATE, 0, "", "lava@doesnotexist",
+		GetSessionsOptions{MinGroups: 2, PerGroupTarget: 1})
+	require.NoError(t, err, "the pin is not in force here, so an unknown name must not fail the request")
+
+	require.Len(t, css, 2, "the release must restore the whole pool, not leave the diverse fetch one short")
+	require.Equal(t, uint64(1), csm.numberOfResets)
+	require.Empty(t, csm.currentlyBlockedProviderAddresses)
+}
+
+// The release guard folds case when it matches the pin, and this is what defends that choice.
+//
+// Provider names are free-form config strings whose case the pipeline does not preserve, which is
+// why resolveSelectedProviderAddress folds. The guard has to fold the same way or it declines a
+// release for a pin that resolution would then have honoured — the pinned provider would be
+// sitting in the blocked list, reachable, and refused on spelling alone.
+func TestPinnedProvider_CaseFoldedNameStillReleasesTheBlock(t *testing.T) {
+	ctx := context.Background()
+	csm := setupBenchTestCSM(t, true)
+	blockEveryPrimary(csm)
+
+	css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber,
+		"", nil, common.NO_STATE, 0, "", "LAVA@PRIMARY0")
+	require.NoError(t, err, "a pin differing only in case must still reach its provider")
+	require.Len(t, css, 1)
+	for providerAddress := range css {
+		require.Equal(t, "lava@primary0", providerAddress, "the router's own spelling must win downstream")
+	}
+	require.Equal(t, uint64(1), csm.numberOfResets)
+}
+
+// Why the caller must drop the pin itself, rather than leaving it to selection to sort out.
+//
+// A pin makes getValidProviderAddresses return exactly one address, and the fetch loop then sets
+// its own target to the number of addresses it was given. So a caller asking for 3 providers gets
+// 1, and gets it with err == nil — the shortfall is not an error anywhere in this layer.
+//
+// For ordinary traffic that is correct and is the whole point of pinning. For a cross-validation
+// relay it leaves one session where the quorum needs several, and rpcsmartrouter's session-count
+// guard then fails the request with insufficient-capacity. That is why crossValidationOverridesPin
+// clears the directive before it ever arrives here.
+func TestPinnedProvider_CollapsesTheRequestedProviderCount(t *testing.T) {
+	ctx := context.Background()
+	csm := setupBenchTestCSM(t, false)
+
+	css, err := csm.GetSessions(ctx, 2, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber,
+		"", nil, common.NO_STATE, 0, "", "lava@primary0")
+	require.NoError(t, err, "the shortfall is silent: this layer reports no error for it")
+	require.Len(t, css, 1, "a pin collapses the count to one, whatever the caller asked for")
+}
+
+// newCaseTwinCSM pairs two providers whose names differ only in case and blocks both. Boot
+// validation compares provider names exactly, so this is a configuration the router accepts.
+func newCaseTwinCSM(t *testing.T) *ConsumerSessionManager {
+	t.Helper()
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{
+		0: mkProviderForBenchTest("lava@Node-A"),
+		1: mkProviderForBenchTest("lava@node-a"),
+	}, nil))
+	blockEveryPrimary(csm)
+	return csm
+}
+
+// A pin spelled a third way folds onto both case-twins and matches neither exactly. A release
+// cannot create an exact spelling, so after any release selection rejects the pin as ambiguous all
+// over again. Releasing for it would only wipe the blocked list for every other relay.
+func TestPinnedProvider_AmbiguousCaseTwinsWithEmptyPoolDoNotRelease(t *testing.T) {
+	csm := newCaseTwinCSM(t)
+
+	_, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "LAVA@NODE-A")
+	require.ErrorIs(t, err, SelectedProviderUnavailableError, "an ambiguous pin must still fail")
+
+	require.Equal(t, uint64(0), csm.numberOfResets, "no release can make an ambiguous pin resolve")
+	require.ElementsMatch(t, []string{"lava@Node-A", "lava@node-a"}, csm.currentlyBlockedProviderAddresses,
+		"the standing blocked list must survive an ambiguous pin")
+}
+
+// The ambiguity a release CAN fix: the pin is spelled exactly like one of the twins. Once the
+// release puts it back, the exact spelling wins and the request reaches the provider it named.
+func TestPinnedProvider_ExactSpellingAmongCaseTwinsStillReleases(t *testing.T) {
+	csm := newCaseTwinCSM(t)
+
+	css, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "lava@Node-A")
+	require.NoError(t, err, "the exact spelling is a pin a release can satisfy")
+	require.Len(t, css, 1)
+	for providerAddress := range css {
+		require.Equal(t, "lava@Node-A", providerAddress, "the exact spelling must win over its case-twin")
+	}
+	require.Equal(t, uint64(1), csm.numberOfResets)
+}
+
+// A pin this request already tried cannot be served after a release: selection looks it up by its
+// exact address and fails it as already-failed. Its untried case-twin does not change that, so it
+// must not justify a release either.
+func TestPinnedProvider_TriedPinIsNotAnsweredForByItsCaseTwin(t *testing.T) {
+	csm := newCaseTwinCSM(t)
+	ctx := context.Background()
+
+	tried := map[string]struct{}{"lava@Node-A": {}}
+	require.False(t, csm.releaseCouldServeThisRequest(tried, "", nil, "lava@Node-A", ctx),
+		"a release for a pin that already failed in this request only destroys state")
+	require.True(t, csm.releaseCouldServeThisRequest(map[string]struct{}{}, "", nil, "lava@Node-A", ctx),
+		"control: the same pin, not yet tried, is a release that can help")
+}

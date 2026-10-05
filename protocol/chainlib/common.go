@@ -18,7 +18,6 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -155,23 +154,13 @@ func generateNewDappID() string {
 	return "DefaultDappID"
 }
 
-func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled fiber.Handler, isMetricEnabled bool) fiber.Handler {
+func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled fiber.Handler) fiber.Handler {
 	webSocketCallback := callbackToBeCalled
 	handler := func(c *fiber.Ctx) error {
 		// Extract project id from headers and stash it in the request-scoped
 		// fiber context for the websocket handler to read after the upgrade.
 		dappID := extractDappIDFromFiberContext(c)
 		c.Locals(ProjectIDHeader, dappID)
-
-		if isMetricEnabled {
-			c.Locals(metrics.RefererHeaderKey, c.Get(metrics.RefererHeaderKey, ""))
-			c.Locals(metrics.UserAgentHeaderKey, c.Get(metrics.UserAgentHeaderKey, ""))
-			// Clone Origin: it crosses the request boundary into the
-			// websocket handler and from there into RelayMetrics, which the
-			// OTel sink serializes asynchronously after fasthttp has
-			// recycled the request buffer.
-			c.Locals(metrics.OriginHeaderKey, strings.Clone(c.Get(metrics.OriginHeaderKey, "")))
-		}
 		return webSocketCallback(c) // uses external dappID
 	}
 	return handler
