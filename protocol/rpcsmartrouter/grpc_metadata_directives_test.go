@@ -14,6 +14,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -94,7 +95,23 @@ func dialGrpcDirectivesListener(t *testing.T) (*grpc.ClientConn, *parsingRelaySe
 	require.NoError(t, err)
 
 	listener := chainlib.NewGrpcChainListener(ctx, endpoint, sender, healthyReporter{}, logger, parser)
-	go listener.Serve(ctx, common.ConsumerCmdFlags{})
+	listenerDone := make(chan struct{})
+	go func() {
+		defer close(listenerDone)
+		listener.Serve(ctx, common.ConsumerCmdFlags{})
+	}()
+	// Serve does not watch ctx; only Shutdown stops it. Registered before the client
+	// connection, so the client is closed first.
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+		defer shutdownCancel()
+		assert.NoError(t, listener.Shutdown(shutdownCtx))
+		select {
+		case <-listenerDone:
+		case <-shutdownCtx.Done():
+			t.Error("gRPC listener did not stop")
+		}
+	})
 
 	var addr string
 	deadline := time.Now().Add(3 * time.Second)
@@ -118,11 +135,16 @@ func invokeWithMetadata(t *testing.T, conn *grpc.ClientConn, kv ...string) {
 	require.NoError(t, conn.Invoke(ctx, "/"+grpcDirectivesTestMethod, &emptypb.Empty{}, &emptypb.Empty{}))
 }
 
-// A gRPC client pins a call the same way an HTTP client does: lava-select-provider
+// A gRPC client pins a unary call the same way an HTTP client does: lava-select-provider
 // travels as call metadata, the gRPC listener hands its metadata to the same
 // directive parser as an HTTP header, and the pin reaches resolvePinDirectives. What
 // the session manager does with a pin is covered in lavasession; this guards the
 // listener-to-directive seam no other test crosses for gRPC.
+//
+// Unary calls only. A server-streaming subscription parses the pin into the same
+// directive map, but DirectGRPCSubscriptionManager picks its upstream without reading
+// it (selectEndpoint: the stream's sticky claim, then the optimizer), so a pinned
+// subscription is not pinned.
 func TestGrpcMetadataPinReachesPinResolution(t *testing.T) {
 	conn, sender := dialGrpcDirectivesListener(t)
 
