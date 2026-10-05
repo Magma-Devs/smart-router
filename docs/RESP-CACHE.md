@@ -498,6 +498,9 @@ lower write once the stored value has gone stale for readers (the embedded sub-s
 deadline), so a false high value that nobody keeps refreshing stops fencing honest
 writers as soon as readers stop trusting it, on both backends. A lie that passes the
 router's own outlier guard is still shared, for as long as the router itself believes it.
+On a primary-cache hit, `Provider-Latest-Block` is read from the stored reply, so it carries
+the writing router's bounded value rather than the node's raw claim at write time: for a
+node that was ahead of that router's tip, the header reads the tip.
 
 ## Flush semantics
 

@@ -705,10 +705,15 @@ func (s *Store) SetInt64IfGreaterOrEqual(ctx context.Context, key string, value 
 // writer's clock: the deadline was stamped by whichever replica wrote last and
 // readers judge it by their own clock (GetChainTip), so the guard assumes the
 // same clock alignment across replicas that readers already do, and the script
-// never needs redis TIME. Once the deadline has passed the stored block fences
-// nothing and any write replaces it: the downward path a false high tip needs
-// in order to age out once nobody refreshes it (MAG-3755). An equal or higher
-// block always writes, which moves the deadline.
+// never needs redis TIME. Leaving TIME out is a choice, not a limit: a script
+// may read it and still write (after redis.replicate_commands() on a server
+// that replicates scripts verbatim), but TIME against a deadline a router
+// stamped still compares two clocks. Taking skew out of the guard would mean
+// stamping the deadline from TIME in the script as well, and readers would
+// still judge it by their own clocks. Once the deadline has passed the stored
+// block fences nothing and any write replaces it: the downward path a false
+// high tip needs in order to age out once nobody refreshes it (MAG-3755). An
+// equal or higher block always writes, which moves the deadline.
 //
 // The match results are bound before tonumber rather than nested inside it,
 // which is a TEST-INFRASTRUCTURE requirement, not a correctness one: on a
