@@ -477,9 +477,9 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		msgSeed := strconv.FormatUint(guid, 10)
 		// Cache headers once at the start to avoid repeated lookups
 		metadataValues := fiberCtx.GetReqHeaders()
-		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		headers := convertToMetadataMap(metadataValues)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 
 		msg := string(fiberCtx.Body())
 		logFormattedMsg := msg
@@ -558,9 +558,9 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
 		// Cache headers once at the start to avoid repeated lookups
 		metadataValues := fiberCtx.GetReqHeaders()
-		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		headers := convertToMetadataMap(metadataValues)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		utils.LavaFormatDebug("urirpc in <<<",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
