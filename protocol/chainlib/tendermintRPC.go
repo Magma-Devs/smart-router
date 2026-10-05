@@ -459,7 +459,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 
 		consumerWebsocketManager.ListenToMessages(ctx)
 	})
-	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, apil.logger.StoreMetricData)
+	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback)
 	app.Get("/ws", wsUpgradeMiddleware, websocketCallbackWithDappID)
 	app.Get("/websocket", wsUpgradeMiddleware, websocketCallbackWithDappID) // catching http://HOST:PORT/1/websocket requests.
 
@@ -467,8 +467,6 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		// Set response header content-type to application/json
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		startTime := time.Now()
-		endTx := apil.logger.LogStartTransaction("tendermint-WebSocket")
-		defer endTx()
 		dappID := extractDappIDFromFiberContext(fiberCtx)
 		metricsData := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
@@ -478,9 +476,10 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		defer cancel() // incase there's a problem make sure to cancel the connection
 		msgSeed := strconv.FormatUint(guid, 10)
 		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := fiberCtx.GetReqHeaders()
+		metadataValues := detachedReqHeaders(fiberCtx)
 		headers := convertToMetadataMap(metadataValues)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 
 		msg := string(fiberCtx.Body())
 		logFormattedMsg := msg
@@ -488,8 +487,11 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			logFormattedMsg = utils.FormatLongString(logFormattedMsg, relayMsgLogMaxChars)
 		}
 
-		utils.LavaFormatDebug("in <<<",
+		utils.LavaFormatInfo("in <<<",
 			utils.LogAttr("GUID", ctx),
+			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+			utils.LogAttr(utils.KEY_TASK_ID, ctx),
+			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("seed", msgSeed),
 			utils.LogAttr("_msg", logFormattedMsg),
 			utils.LogAttr("dappID", dappID),
@@ -544,8 +546,6 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		// Set response header content-type to application/json
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 
-		endTx := apil.logger.LogStartTransaction("tendermint-WebSocket")
-		defer endTx()
 		startTime := time.Now()
 		query := "?" + string(fiberCtx.Request().URI().QueryString())
 		path := fiberCtx.Params("*")
@@ -557,11 +557,15 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		metricsData := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
 		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := fiberCtx.GetReqHeaders()
+		metadataValues := detachedReqHeaders(fiberCtx)
 		headers := convertToMetadataMap(metadataValues)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
-		utils.LavaFormatDebug("urirpc in <<<",
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
+		utils.LavaFormatInfo("urirpc in <<<",
 			utils.LogAttr("GUID", ctx),
+			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+			utils.LogAttr(utils.KEY_TASK_ID, ctx),
+			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("_msg", path),
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("headers", common.RedactMetadata(headers)),

@@ -61,7 +61,7 @@ func TestRestoreRecoveredProvider_BackupBecomesSelectable(t *testing.T) {
 	// Before recovery: not selectable.
 	ignored := &ignoredProviders{providers: make(map[string]struct{}), currentEpoch: firstEpochHeight}
 	_, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
-		context.Background(), ignored, 1, servicedBlockNumber, "", nil, 0, 0, NewUsedProviders(nil),
+		context.Background(), backupTierFallback, ignored, 1, servicedBlockNumber, "", nil, 0, 0, NewUsedProviders(nil),
 	)
 	require.Error(t, err, "precondition: blocked backup is not selectable")
 
@@ -75,7 +75,7 @@ func TestRestoreRecoveredProvider_BackupBecomesSelectable(t *testing.T) {
 	// After recovery: selectable again.
 	ignored = &ignoredProviders{providers: make(map[string]struct{}), currentEpoch: firstEpochHeight}
 	_, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
-		context.Background(), ignored, 1, servicedBlockNumber, "", nil, 0, 0, NewUsedProviders(nil),
+		context.Background(), backupTierFallback, ignored, 1, servicedBlockNumber, "", nil, 0, 0, NewUsedProviders(nil),
 	)
 	require.NoError(t, err, "a recovered backup provider is selectable again without an epoch transition")
 }

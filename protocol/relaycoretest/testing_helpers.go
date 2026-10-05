@@ -8,7 +8,6 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -27,12 +26,8 @@ func (romm *RelayProcessorMetricsMock) GetChainIdAndApiInterface() (string, stri
 	return "testId", "testInterface"
 }
 
-var (
-	// RelayRetriesManagerInstance is a shared instance for tests
-	RelayRetriesManagerInstance = lavaprotocol.NewRelayRetriesManager()
-	// RelayProcessorMetrics is a mock metrics implementation for tests
-	RelayProcessorMetrics = &RelayProcessorMetricsMock{}
-)
+// RelayProcessorMetrics is a mock metrics implementation for tests
+var RelayProcessorMetrics = &RelayProcessorMetricsMock{}
 
 // SendSuccessRespJsonRpc sends a successful JSON-RPC response to the relay processor
 func SendSuccessRespJsonRpc(relayProcessor *relaycore.RelayProcessor, provider string, delay time.Duration) {

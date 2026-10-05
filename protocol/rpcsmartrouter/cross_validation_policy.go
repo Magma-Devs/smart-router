@@ -150,7 +150,7 @@ func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidati
 // The checks that need spec or provider context cannot move here. The two that need only the spec (the
 // stateful-write guard and the method guard) run in CreateSmartRouterEndpoint as soon as the spec is
 // loaded, behind the boot configuration barrier, so their refusal still precedes every listener (see
-// cross_validation_boot.go). The capacity bounds need the registered providers and stay in
+// cross_validation_boot.go). The capacity bounds need the endpoint's configured providers and stay in
 // validateCrossValidationStartup.
 func PreflightValidateCrossValidationConfig(v *viper.Viper, endpoints []*lavasession.RPCEndpoint) error {
 	cfg, err := ParseCrossValidationConfig(v)
@@ -512,6 +512,25 @@ func (r *CrossValidationPolicyResolver) Resolve(chainID, apiInterface, method st
 	// enforced by Validate(); a caller-induced infeasibility surfaces at runtime as group-quorum-unmet.
 	eff.PerGroupQuorum = policy.PerGroupQuorum && eff.MinGroups > 1
 	return eff, true
+}
+
+// headerlessParams returns what Resolve gives a request that sends no cross-validation headers, for every
+// ENABLED policy of the given chain/api: the shape the request-time capacity guard holds such a request to.
+// Its one caller is the startup prediction in crossValidationShortfall.
+func (r *CrossValidationPolicyResolver) headerlessParams(chainID, apiInterface string) []common.CrossValidationParams {
+	if r == nil {
+		return nil
+	}
+	prefix := policyKeyPrefix(chainID, apiInterface)
+	var shapes []common.CrossValidationParams
+	for key, policy := range r.policies {
+		if !policy.Enabled || !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		params, _ := r.Resolve(chainID, apiInterface, strings.TrimPrefix(key, prefix), common.CrossValidationParams{}, false)
+		shapes = append(shapes, params)
+	}
+	return shapes
 }
 
 // resolveKnob computes one knob's effective value: start from the caller value (if present), else the

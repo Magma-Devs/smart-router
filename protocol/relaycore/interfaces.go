@@ -6,7 +6,6 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 )
@@ -21,7 +20,6 @@ type RelayStateMachine interface {
 	GetCrossValidationParams() *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
 	GetUsedProviders() *lavasession.UsedProviders
 	SetResultsChecker(resultsChecker ResultsCheckerInf)
-	SetRelayRetriesManager(relayRetriesManager *lavaprotocol.RelayRetriesManager)
 }
 
 // ResultsCheckerInf interface for checking results
@@ -53,6 +51,10 @@ type RelayStateSendInstructions struct {
 	// on the Done instruction so the request's final log line can say why there was no further
 	// attempt. Empty on a non-Done instruction.
 	StopReason string
+	// BackupReserve marks the hedge the state machine holds back for the backup tier: the sender
+	// should route it to a backup endpoint ahead of any primary still unused on this request, and
+	// fall back to ordinary selection when no backup is eligible. See backupReserveDelay.
+	BackupReserve bool
 }
 
 func (rssi *RelayStateSendInstructions) IsDone() bool {
@@ -65,6 +67,13 @@ type RelaySenderInf interface {
 	RelayParserInf
 	GetProcessingTimeout(chainMessage chainlib.ChainMessage) (processingTimeout time.Duration, relayTimeout time.Duration)
 	GetChainIdAndApiInterface() (string, string)
+}
+
+// BackupTierReporter is implemented by a relay sender that can route to a backup tier. It is
+// optional — the state machine type-asserts for it — so senders without a backup tier, and the
+// many test mocks, need not implement it and never get a backup-reserve hedge.
+type BackupTierReporter interface {
+	HasBackupTier() bool
 }
 
 // ResultsSummary is pure data reported by the RelayProcessor for the policy engine.
@@ -114,26 +123,13 @@ const (
 	SendStop
 )
 
-// ArchiveAction represents the archive mutation to apply.
-type ArchiveAction int
-
-const (
-	ArchiveNoChange ArchiveAction = iota
-	ArchiveAdd
-	ArchiveRemove
-)
-
-// MutationOutput holds archive + cache side effects.
-type MutationOutput struct {
-	ArchiveAction ArchiveAction
-	CacheHashes   bool
-}
-
 // DecisionOutput tells the state machine what to do.
+//
+// There is no mutation field: a retry re-sends the same request elsewhere, it does not rewrite
+// it. See Policy.Decide for why the archive add/remove that used to live here is gone.
 type DecisionOutput struct {
-	Action   Action
-	Mutation MutationOutput
-	Reason   string
+	Action Action
+	Reason string
 }
 
 // DecisionInput is assembled by the state machine for the policy engine.
@@ -142,11 +138,6 @@ type DecisionInput struct {
 	AttemptNumber int
 	IsBatch       bool
 	Summary       ResultsSummary
-	ArchiveStatus *ArchiveStatus
-	// NodeErrors is from the state machine's atomic counter (set by HasRequiredNodeResults).
-	// Used only by decideMutation() for archive threshold checks. Differs from
-	// Summary.NodeErrors (from GetResultsSummary scan) in source but should converge.
-	NodeErrors    uint64
 	IsTickerHedge bool // true when called from ticker.C (hedge), false from gotResults (retry)
 }
 
@@ -169,4 +160,10 @@ type StateMachineConfig struct {
 	MaxRetries int
 	// SendRelayAttempts is the number of consecutive batch errors before giving up
 	SendRelayAttempts int
+	// CallerCVIgnoredReason names, for the debug line only, why a request's cross-validation headers
+	// are ignored when forbidCallerCrossValidation is set. Empty reads as the operator's
+	// forbid-caller-cv policy, which is the only way a CLIENT request reaches that branch. The
+	// router's own internal relays set it, so a health check does not log a policy nobody wrote
+	// (MAG-3746).
+	CallerCVIgnoredReason string
 }
