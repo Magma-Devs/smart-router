@@ -2571,7 +2571,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			}
 			var harvestGen uint64
 			if targetEndpoint != nil && directConn != nil {
-				rpcss.ensureEndpointChainTracker(goroutineCtx, targetEndpoint, directConn)
+				rpcss.ensureEndpointChainTracker(goroutineCtx, singleConsumerSession.Parent.PublicLavaAddress, targetEndpoint, directConn)
 				harvestGen = rpcss.endpointObservationGeneration(targetEndpoint.NetworkAddress)
 			}
 
@@ -3734,6 +3734,7 @@ func (rpcss *RPCSmartRouterServer) isGetBlockByNumMethod(chainMessage chainlib.C
 
 func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 	ctx context.Context,
+	providerName string,
 	endpoint *lavasession.Endpoint,
 	directConnection lavasession.DirectRPCConnection,
 ) {
@@ -3755,7 +3756,7 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 	// 0 (no tracker yet), so its harvested tip was recorded against a generation that the real
 	// tracker would never match — silently dropping the first relay's tip. The poll loop stays
 	// async, so dispatch is not blocked on the network.
-	if _, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(endpoint, directConnection); err != nil {
+	if _, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(providerName, endpoint, directConnection); err != nil {
 		utils.LavaFormatWarning("failed to create ChainTracker for endpoint", err,
 			utils.LogAttr("endpoint", endpointURL),
 		)
@@ -3913,7 +3914,7 @@ func (rpcss *RPCSmartRouterServer) reconcileChainTrackers(ctx context.Context, f
 			}
 		}
 
-		_, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(ep.Endpoint, ep.DirectConnection)
+		_, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(ep.ProviderAddress, ep.Endpoint, ep.DirectConnection)
 		if err != nil {
 			utils.LavaFormatWarning("failed to initialize ChainTracker", err,
 				utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),

@@ -337,7 +337,14 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 
 // GetOrCreateTracker returns an existing ChainTracker for the endpoint or creates a new one.
 // Thread-safe - uses lazy initialization to avoid creating trackers for unused endpoints.
+//
+// providerName is the name the relay path records rate-limit hold-offs under (the provider's
+// public address); the tracker records and consults the hold-off registry under the same
+// (provider, url) keys, so a 429 met by a poll and a 429 met by a relay land on one entry and
+// two held-off urls of one provider escalate to the provider. Callers with no provider in hand
+// pass "" and the tracker keys on the url alone (MAG-4165).
 func (m *EndpointMonitor) GetOrCreateTracker(
+	providerName string,
 	endpoint *lavasession.Endpoint,
 	directConnection lavasession.DirectRPCConnection,
 ) (chaintracker.IChainTracker, error) {
@@ -418,6 +425,10 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The global tracker
 		// leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
 		FlatPollInterval: m.flatPollInterval,
+		// Rate-limit hold-off keys: the relay path's provider name and this url, so the
+		// tracker's 429s and the relays' 429s share one registry entry (MAG-4165).
+		RateLimitProvider: providerName,
+		RateLimitURL:      endpointURL,
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
 		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker
 		// (above the generic/SVM wrapper split) so it suppresses Solana polls too — the old

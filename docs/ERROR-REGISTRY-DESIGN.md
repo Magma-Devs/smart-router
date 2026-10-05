@@ -59,7 +59,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider (SubCategoryNodeCapability) | Yes | JSON-RPC -32004 |
 | 2003 | `NODE_INTERNAL_ERROR` | Internal node error | Yes | JSON-RPC -32603 |
 | 2004 | `NODE_SERVER_ERROR` | Generic server error | Yes | JSON-RPC -32000 |
-| 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / MessageContains("rate limit") |
+| 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / JSON-RPC code 429 / MessageContains("rate limit", "too many requests") |
 | 2006 | `NODE_SERVICE_UNAVAILABLE` | Node temporarily unavailable | Yes | HTTP 503 |
 | 2007 | `NODE_SYNCING` | Node is syncing/catching up | Yes | MessageContains("node is syncing" / "catching up to the chain") |
 | 2008 | `NODE_UNIMPLEMENTED` | gRPC method unimplemented (SubCategoryUnsupportedMethod) | No | gRPC 12 |

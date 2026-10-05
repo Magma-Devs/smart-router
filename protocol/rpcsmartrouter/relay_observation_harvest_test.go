@@ -322,7 +322,7 @@ func TestRecordRelayBlockObservation_GenerationPassThrough(t *testing.T) {
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
 	// GetOrCreateTracker registers the generation synchronously (a nil connection just
 	// makes the background poll fail gracefully — we only need the generation here).
-	_, err := m.GetOrCreateTracker(ep, nil)
+	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 
 	gen, ok := m.ObservationGeneration(url)
@@ -457,7 +457,7 @@ func TestHarvestAndUpdateTipFromRelay_HistoricalDoesNotPoisonTip(t *testing.T) {
 	const url = "http://ep:8545"
 	const addr = "lava@provider1"
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-	_, err := m.GetOrCreateTracker(ep, nil)
+	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
@@ -574,7 +574,7 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 	}
 
 	// Incarnation A: tracker created, generation captured "before dispatch" of relay A.
-	_, err := m.GetOrCreateTracker(ep, nil)
+	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	genA := rpcss.endpointObservationGeneration(url)
 	require.NotZero(t, genA)
@@ -582,7 +582,7 @@ func TestHarvest_GenerationCapturedBeforeDispatch_RejectsAfterReplacement(t *tes
 	// While relay A is "in flight", the endpoint's tracker is removed and recreated for the
 	// same URL (incarnation B) — a new generation.
 	m.RemoveTracker(url)
-	_, err = m.GetOrCreateTracker(ep, nil)
+	_, err = m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	genB := rpcss.endpointObservationGeneration(url)
 	require.NotEqual(t, genA, genB, "a recreated same-URL tracker must get a new generation")
@@ -672,7 +672,7 @@ func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.
 	// SYNCHRONOUS contract: immediately after ensureEndpointChainTracker returns — with NO sleep,
 	// poll, or Eventually — the generation must already exist and be nonzero. This is exactly the
 	// capture order the relay path uses (ensure → endpointObservationGeneration → dispatch).
-	rpcss.ensureEndpointChainTracker(ctx, ep, directConn)
+	rpcss.ensureEndpointChainTracker(ctx, "", ep, directConn)
 	gen := rpcss.endpointObservationGeneration(url)
 	require.NotZero(t, gen, "the generation must be allocated synchronously, before the relay captures it")
 

@@ -181,6 +181,12 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// Rate limiting
 		{MessageContains("rate limit"), LavaErrorNodeRateLimited},
 		{MessageContains("enhance_your_calm"), LavaErrorNodeRateLimited}, // HTTP/2 GOAWAY with ENHANCE_YOUR_CALM — server-side rate limit
+		// A 429 a gateway mirrors into the error body — of a 200, or of a reply on an open
+		// WebSocket connection, where no HTTP status reaches the transport layer. JSON-RPC's
+		// standard codes are negative and no chain this router serves defines 429, so the code
+		// is that mirror; "Too Many Requests" is its reason phrase (MAG-4165).
+		{CodeEquals(429), LavaErrorNodeRateLimited},
+		{MessageContains("too many requests"), LavaErrorNodeRateLimited},
 
 		// Chain transaction errors — matchers cover Geth, Erigon, and Nethermind variants
 		{MessageContains("nonce too low"), LavaErrorChainNonceTooLow},

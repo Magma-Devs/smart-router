@@ -13,6 +13,7 @@ import (
 	rand "github.com/magma-Devs/smart-router/utils/rand"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/lavaslices"
@@ -169,11 +170,19 @@ type ChainTracker struct {
 	// surfaced by /debug/endpoint-state as PollIntervalMs (MAG-2395). Written only by the poll
 	// goroutine (updateTimer), read by any goroutine.
 	currentPollIntervalNanos atomic.Int64
-	// rateLimitedUntil (unix nanos, 0 = none) is the instant the polled upstream asked us to
-	// stay away until, taken from the typed rate-limit error's Retry-After. computePollInterval
-	// floors the next interval with it, so a 429 with "Retry-After: 300" is not re-polled at the
-	// generic backoff's 60s ceiling. Written on each real poll outcome, cleared by any answer.
+	// rateLimitedUntil (unix nanos, 0 = none) is the instant until which the polled upstream is
+	// held off after a rate-limited fetch: the hold-off the registry applied — the upstream's
+	// Retry-After when it named one, else the strike schedule. computePollInterval floors the
+	// next interval with it, so a 429 with "Retry-After: 300" is not re-polled at the generic
+	// backoff's 60s ceiling. Written on each real fetch outcome, cleared by any answer.
 	rateLimitedUntil atomic.Int64
+	// rateLimitHoldoff, holdoffProvider and holdoffURL: see ChainTrackerConfig.RateLimitHoldoff.
+	// Every rate-limited fetch — first fetch or poll — is recorded here, the first fetch waits an
+	// existing hold-off out, and the poll is floored with whatever the registry holds for this
+	// endpoint, whoever recorded it. nil disables all three (a tracker with no URL to key on).
+	rateLimitHoldoff *holdoff.Registry
+	holdoffProvider  string
+	holdoffURL       string
 	// resetBackoffCh signals the poll goroutine to clear the failure backoff — zero fetchFails and
 	// reschedule the next poll at base cadence. Buffered(1) with a non-blocking send in
 	// ResetBackoff, so /debug/reset-probe-backoff never blocks on the poll goroutine (MAG-2395).
@@ -861,40 +870,90 @@ func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchF
 	return cs.floorWithRetryAfter(exponentialBackoff(newPollingTime, fetchFails))
 }
 
-// noteFetchOutcome keeps the rate-limit floor current: a poll that failed with the typed
-// rate-limit error records how long the upstream asked us to stay away; any other real
-// poll outcome — success or a different failure — clears it, because the upstream
-// answered and its Retry-After is spent.
+// noteFetchOutcome keeps the rate-limit floor current and the shared hold-off registry
+// informed. A fetch the upstream refused for rate — the typed error, with or without a
+// Retry-After — is recorded into the registry under this endpoint's keys, and the hold-off the
+// registry applied (the upstream's Retry-After when it named one, else the strike schedule) is
+// what the next fetch is floored with. Any other real outcome — success or a different failure —
+// clears the floor, because the upstream answered. It clears the registry entry too, but only
+// when this tracker's own 429 set the floor: a poll that fits under a vendor's cap does not
+// prove relay traffic will, so a hold-off the relay path recorded is the relay path's to clear
+// (docs/RATE-LIMIT-HOLDOFF.md, MAG-4165).
 func (cs *ChainTracker) noteFetchOutcome(err error) {
-	if d, ok := common.RetryAfterFrom(err); ok {
-		cs.rateLimitedUntil.Store(time.Now().Add(d).UnixNano())
+	if errors.Is(err, common.StatusCodeError429) {
+		wait, _ := common.RetryAfterFrom(err)
+		if cs.rateLimitHoldoff != nil {
+			wait = cs.rateLimitHoldoff.RecordRateLimit(cs.holdoffProvider, cs.holdoffURL, wait)
+		}
+		if wait > 0 {
+			cs.rateLimitedUntil.Store(time.Now().Add(wait).UnixNano())
+		}
 		return
 	}
-	cs.rateLimitedUntil.Store(0)
+	if cs.rateLimitedUntil.Swap(0) != 0 && cs.rateLimitHoldoff != nil {
+		cs.rateLimitHoldoff.RecordAnswer(cs.holdoffProvider, cs.holdoffURL)
+	}
 }
 
-// floorWithRetryAfter stretches the computed poll interval to honour an upstream's
-// Retry-After when it named a longer wait than the generic failure backoff — a 429 with
-// "Retry-After: 300" must not be re-polled at the backoff's 60s ceiling. It never
-// shortens an interval.
+// floorWithRetryAfter stretches the computed poll interval to honour a rate-limit hold-off
+// that outlasts the generic failure backoff — a 429 with "Retry-After: 300" must not be
+// re-polled at the backoff's 60s ceiling. Two sources: this tracker's own last rate-limited
+// fetch (rateLimitedUntil), and whatever the registry holds for the endpoint right now — a
+// hold-off a relay, a probe or the provider's other leg recorded, or the provider-wide
+// escalation. The vendor said stop, whoever it said it to. It never shortens an interval.
 func (cs *ChainTracker) floorWithRetryAfter(interval time.Duration) time.Duration {
-	until := cs.rateLimitedUntil.Load()
-	if until == 0 {
-		return interval
+	wait := interval
+	if until := cs.rateLimitedUntil.Load(); until != 0 {
+		wait = max(wait, time.Until(time.Unix(0, until)))
 	}
-	wait := time.Until(time.Unix(0, until))
-	if wait <= interval {
-		return interval
+	if cs.rateLimitHoldoff != nil {
+		if readyAt := cs.rateLimitHoldoff.ReadyAt(cs.holdoffProvider, cs.holdoffURL); !readyAt.IsZero() {
+			wait = max(wait, time.Until(readyAt))
+		}
 	}
 	return wait
+}
+
+// waitOutRateLimitHoldoff blocks until the registry stops holding this endpoint off, or ctx
+// ends. The first fetch calls it before every attempt, so a tracker whose previous start met a
+// 429 — or whose endpoint a relay, a probe or the provider's other leg found rate-limited —
+// does not retry into the limit and re-arm it (MAG-4165). The wait is bounded by the registry's
+// own cap on a hold-off.
+func (cs *ChainTracker) waitOutRateLimitHoldoff(ctx context.Context) error {
+	if cs.rateLimitHoldoff == nil {
+		return nil
+	}
+	readyAt := cs.rateLimitHoldoff.ReadyAt(cs.holdoffProvider, cs.holdoffURL)
+	if readyAt.IsZero() {
+		return nil
+	}
+	wait := time.Until(readyAt)
+	if wait <= 0 {
+		return nil
+	}
+	utils.LavaFormatInfo("ChainTracker first fetch waits out a rate-limit hold-off",
+		utils.LogAttr("endpoint", cs.endpoint.String()),
+		utils.LogAttr("wait", wait.Round(time.Second)),
+	)
+	return sleepCtx(ctx, wait)
 }
 
 func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) {
 	var newLatestBlock int64
 	for idx := 0; idx < initRetriesCount+1; idx++ {
+		if err = cs.waitOutRateLimitHoldoff(ctx); err != nil {
+			return err
+		}
 		newLatestBlock, err = cs.iChainFetcherWrapper.FetchLatestBlockNum(ctx)
+		// Every init outcome informs the rate-limit floor and the registry, as a poll's does.
+		cs.noteFetchOutcome(err)
 		if err == nil {
 			break
+		}
+		if errors.Is(err, common.StatusCodeError429) {
+			// The upstream refused for rate: the burst ends here. Another attempt now would
+			// re-arm a ban-type limit; the next start waits the recorded hold-off out first.
+			return utils.LavaFormatWarning("chain tracker init: upstream rate-limited the first fetch, backing off", err, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
 		}
 		utils.LavaFormatDebug("failed fetching block num data on chain tracker init, retry", utils.Attribute{Key: "retry Num", Value: idx}, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
 		// MAG-2159 finding 3: space out failed init retries for per-endpoint (flat) trackers
@@ -936,6 +995,11 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 		_, err = cs.fetchAllPreviousBlocks(ctx, newLatestBlock)
 		if err == nil {
 			break
+		}
+		if errors.Is(err, common.StatusCodeError429) {
+			// Same rule as the head fetch: a rate limit ends the burst and is waited out next start.
+			cs.noteFetchOutcome(err)
+			return utils.LavaFormatWarning("chain tracker init: upstream rate-limited the block fetch, backing off", err, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
 		}
 		utils.LavaFormatDebug("failed fetching data on chain tracker init, retry", utils.Attribute{Key: "retry Num", Value: idx}, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
 		// MAG-2159 finding 3: same startup spacing for the previous-blocks init retries.
@@ -1039,6 +1103,22 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 	}
 	endpoint := chainFetcher.FetchEndpoint()
 
+	holdoffURL := config.RateLimitURL
+	if holdoffURL == "" && len(endpoint.NodeUrls) > 0 {
+		holdoffURL = endpoint.NodeUrls[0].Url
+	}
+	holdoffProvider := config.RateLimitProvider
+	if holdoffProvider == "" {
+		holdoffProvider = holdoffURL
+	}
+	rateLimitHoldoff := config.RateLimitHoldoff
+	if rateLimitHoldoff == nil {
+		rateLimitHoldoff = holdoff.Shared
+	}
+	if holdoffURL == "" {
+		rateLimitHoldoff = nil // nothing to key an entry on
+	}
+
 	chainTracker := &ChainTracker{
 		consistencyCallback:     config.ConsistencyCallback,
 		forkCallback:            config.ForkCallback,
@@ -1060,6 +1140,9 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		relayTipFresh:           config.RelayTipFresh,
 		maxRelaySkipsBeforePoll: maxRelaySkips,
 		endpoint:                endpoint,
+		rateLimitHoldoff:        rateLimitHoldoff,
+		holdoffProvider:         holdoffProvider,
+		holdoffURL:              holdoffURL,
 		resetBackoffCh:          make(chan struct{}, 1),
 		pollNowCh:               make(chan pollNowRequest), // unbuffered: handled by the poll goroutine only
 	}

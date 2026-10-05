@@ -534,7 +534,7 @@ func TestGate_RelayBeforePeer(t *testing.T) {
 		},
 		matchSubstr: "getLatestBlockhash",
 	}
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
@@ -604,7 +604,7 @@ func TestEndpointMonitor_PeerGate_SuppressesUpstreamPoll(t *testing.T) {
 	})
 	t.Cleanup(m.Stop)
 
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	// ~600ms / 50ms ≈ 12 ticks. The gate forces ~1 real poll per 5 ticks plus init polls.
