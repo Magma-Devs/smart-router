@@ -354,6 +354,34 @@ the cache more than its rare hits save. 1 MiB fits Solana `getBlock` replies (1.
 16% of the time). On ETH and Base, `eth_getBlockReceipts` replies run up to and past 1 MiB, so a
 cap that low there cuts those entries; size the cap per chain from `smartrouter_cache_entry_bytes`.
 
+### Request tracing headers
+
+A caller can label a request so it can be found again in the router's logs and matched to
+their own records. Three headers are read, on every interface:
+
+| Header | Log field |
+| --- | --- |
+| `X-Request-Id` | `request_id` |
+| `X-Task-Id` | `task_id` |
+| `X-Tx-Id` | `tx_id` |
+
+On JSON-RPC, REST and Tendermint RPC they travel as HTTP request headers; on gRPC they travel
+as request metadata (`x-request-id` and so on: gRPC lower-cases metadata keys in transit, and
+the router accepts either casing). The values are stamped on the request's context as it enters
+the listener. Each listener logs them on the info-level line it writes when a request arrives,
+and the errors logged when that request's relay fails carry them too; in debug mode
+(`--debug-address`), `/debug/logs?request_id=<id>` returns those lines. They are not forwarded
+to the upstream node, which is sent only the request headers its chain's spec declares, and
+they are stripped before the cache key is built, so two callers asking the same question under
+different ids still share one cache entry.
+
+The headers are read per HTTP request or gRPC call. A gRPC streaming call is one subscribe
+request on its own stream, so its ids stay per request: they label the subscribe, not the
+notifications the stream delivers afterwards. A WebSocket connection's upgrade request is not
+read, so messages sent over a WebSocket carry no caller ids today. Reading the upgrade's ids
+would not be the same fix: one socket multiplexes many subscriptions and requests, so those ids
+would label every request on the connection rather than the one the caller tagged.
+
 ### Usage telemetry (OTel)
 
 Off by default. When enabled, the smart router emits two event types as

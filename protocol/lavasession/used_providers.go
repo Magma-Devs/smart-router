@@ -293,6 +293,27 @@ func (up *UsedProviders) ReleaseFromLatestBatch(provider string, routerKey Route
 	}
 }
 
+// ReleaseSessionsFromLatestBatch is ReleaseFromLatestBatch for every entry of a
+// GetSessions result, each under the router key AddUsed filed it under: the
+// session's own key, or the empty key for an entry without a session. A key the
+// caller recomputes from the request can differ from the session's (extension
+// degradation picks sessions under the empty key while the message keeps its
+// extensions), and a mismatched key releases nothing.
+//
+// Call it before the sessions are freed: Free resets the session's key.
+func (up *UsedProviders) ReleaseSessionsFromLatestBatch(sessions ConsumerSessionsMap, err error) {
+	for provider, sessionInfo := range sessions {
+		if sessionInfo == nil { // AddUsed would have dereferenced it, so it was never registered
+			continue
+		}
+		routerKey := NewRouterKey(nil)
+		if sessionInfo.Session != nil {
+			routerKey = sessionInfo.Session.routerKey
+		}
+		up.ReleaseFromLatestBatch(provider, routerKey, err)
+	}
+}
+
 func (up *UsedProviders) RemoveUsed(provider string, routerKey RouterKey, err error) {
 	if up == nil {
 		return

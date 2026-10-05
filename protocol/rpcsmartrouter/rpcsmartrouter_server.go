@@ -2227,6 +2227,32 @@ func lostBroadcastRejection(selection relaycore.Selection, answeredWithNodeError
 	return selection == relaycore.Stateful && answeredWithNodeError && acceptedElsewhere > 0
 }
 
+// releaseUndispatchedSessions hands back sessions GetSessions gave us that no relay will be sent
+// on. Every return between GetSessions and dispatch owes this (MAG-3286): GetSessions' deferred
+// AddUsed already registered them in UsedProviders, no relay goroutine will ever remove them, and
+// the state machine's validateReturnCondition only delivers an error once CurrentlyUsed() == 0, so
+// a skipped release holds the caller for the full processingTimeout (~30s).
+//
+// OnSessionDiscarded rather than a bare Session.Free: the relay was never sent, so the endpoint
+// takes no QoS hit, and the compute units GetSessions reserved go back to the provider. A nil
+// reason keeps the providers out of the errored set.
+func (rpcss *RPCSmartRouterServer) releaseUndispatchedSessions(ctx context.Context, usedProviders *lavasession.UsedProviders, sessions lavasession.ConsumerSessionsMap, reason error) {
+	// Before the discard below: it frees the sessions, which resets the router key this releases under.
+	usedProviders.ReleaseSessionsFromLatestBatch(sessions, reason)
+	for endpointAddress, sessionInfo := range sessions {
+		if sessionInfo == nil || sessionInfo.Session == nil {
+			continue
+		}
+		if err := rpcss.sessionManager.OnSessionDiscarded(sessionInfo.Session, reason); err != nil {
+			utils.LavaFormatError("failed releasing an undispatched session", err,
+				utils.LogAttr("endpoint", endpointAddress),
+				utils.LogAttr("reason", reason),
+				utils.LogAttr("GUID", ctx),
+			)
+		}
+	}
+}
+
 // sendRelayToDirectEndpoints handles relay for direct RPC sessions (smart router direct mode)
 func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	ctx context.Context,
@@ -2284,41 +2310,23 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		consistencyFallback.recordRejected(failedSessions)
 	}
 
-	// Release failed sessions:
-	// - ReleaseFromLatestBatch decrements UsedProviders.sessionsLatestBatch so
-	//   RelayProcessor.checkEndProcessing matches the goroutines we will
-	//   actually launch. Without this the CV path can wait the full
-	//   processingTimeout (~30s) for responses that never arrive.
-	// - OnSessionDiscarded returns reserved CU and unlocks the session without
-	//   QoS punishment. No request reached the upstream, so this is a routing
-	//   exclusion rather than an availability failure.
+	// Release the consistency-rejected sessions: no relay goes to them. This is a routing exclusion
+	// rather than an availability failure, so the release carries no QoS punishment; the reason marks
+	// them errored so a retry batch skips them.
 	//
-	// Every release names the key the session was taken under, not one derived
-	// from the request's extensions. A request that degrades to a regular provider
-	// takes its sessions under the plain key, so a release under the request's
-	// key found nothing and did nothing, and the provider stayed in the dispatch
-	// history. Two readers take that history at its word. Lava-Retries (MAG-3762)
-	// counted an attempt at a node that never received the request, and
-	// writeOutcomeIsUnknown counted the node as one asked that never answered, so
-	// a write could come back as "transaction status unclear" for a node it never
-	// reached.
+	// The helper releases each session under the key it was taken with, not one derived from the
+	// request's extensions: a request that degrades to a regular provider takes its sessions under
+	// the plain key, and a release under the request's key would leave the provider in the dispatch
+	// history that Lava-Retries (MAG-3762) and writeOutcomeIsUnknown read.
 	usedProviders := relayProcessor.GetUsedProviders()
-	for endpointAddress, sessionInfo := range failedSessions {
-		if sessionInfo != nil && sessionInfo.Session != nil {
-			utils.LavaFormatDebug("discarding stale session before relay dispatch",
-				utils.LogAttr("endpoint", endpointAddress),
-				utils.LogAttr("error", lavasession.ConsistencyPreValidationError),
-				utils.LogAttr("GUID", ctx),
-			)
-			usedProviders.ReleaseFromLatestBatch(endpointAddress, sessionInfo.Session.RouterKey(), lavasession.ConsistencyPreValidationError)
-			if err := rpcss.sessionManager.OnSessionDiscarded(sessionInfo.Session, lavasession.ConsistencyPreValidationError); err != nil {
-				utils.LavaFormatError("failed discarding consistency-rejected session", err,
-					utils.LogAttr("endpoint", endpointAddress),
-					utils.LogAttr("GUID", ctx),
-				)
-			}
-		}
+	if len(failedSessions) > 0 {
+		utils.LavaFormatDebug("discarding stale sessions before relay dispatch",
+			utils.LogAttr("endpoints", len(failedSessions)),
+			utils.LogAttr("error", lavasession.ConsistencyPreValidationError),
+			utils.LogAttr("GUID", ctx),
+		)
 	}
+	rpcss.releaseUndispatchedSessions(ctx, usedProviders, failedSessions, lavasession.ConsistencyPreValidationError)
 
 	// If ALL sessions failed consistency validation, return error to trigger retry with different providers
 	if filterErr != nil {
@@ -2342,18 +2350,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	crossValidationParams := relayProcessor.GetCrossValidationParams()
 	if selection == relaycore.CrossValidation && crossValidationParams != nil &&
 		len(validSessions) < crossValidationParams.AgreementThreshold {
-		// Release the surviving valid sessions before returning. No goroutines
-		// will be launched for them, so without this they stay in
-		// UsedProviders.providers (CurrentlyUsed > 0). The state machine's
-		// validateReturnCondition only delivers the err to returnCondition when
-		// CurrentlyUsed == 0, so the request would otherwise stall for the
-		// full processingTimeout (~30s) instead of failing fast.
-		for endpointAddress, sessionInfo := range validSessions {
-			if sessionInfo != nil && sessionInfo.Session != nil {
-				usedProviders.ReleaseFromLatestBatch(endpointAddress, sessionInfo.Session.RouterKey(), nil)
-				sessionInfo.Session.Free(nil)
-			}
-		}
+		rpcss.releaseUndispatchedSessions(ctx, usedProviders, validSessions, nil)
 		// Carry the structured reason on the shared processor so SendParsedRelay can surface the
 		// failure-reason header; the error itself is left unchanged so the state machine's
 		// PairingListEmptyError stop logic is unaffected.
@@ -2387,12 +2384,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			survivingGroupCounts[label]++
 		}
 		if qualifyingGroups, failReason := crossValidationGroupShortfall(survivingGroupCounts, crossValidationParams); failReason != "" {
-			for endpointAddress, sessionInfo := range validSessions {
-				if sessionInfo != nil && sessionInfo.Session != nil {
-					usedProviders.ReleaseFromLatestBatch(endpointAddress, sessionInfo.Session.RouterKey(), nil)
-					sessionInfo.Session.Free(nil)
-				}
-			}
+			rpcss.releaseUndispatchedSessions(ctx, usedProviders, validSessions, nil)
 			relayProcessor.SetCrossValidationFailFastReason(failReason)
 			return utils.LavaFormatError("insufficient provider groups for cross-validation after consistency filter ("+failReason+")",
 				lavasession.PairingListEmptyError,
@@ -4093,8 +4085,8 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 }
 
 // tryCacheWriteResolved is tryCacheWrite with an optional pre-resolved cache-key
-// block. resolvedBlock == nil preserves the
-// legacy resolution (Reply.LatestBlock → SeenBlock → skip). A non-nil resolvedBlock
+// block. resolvedBlock == nil preserves the normal resolution (latestCacheBlock: the
+// parse-time seen block, else the gated tip, else skip). A non-nil resolvedBlock
 // carries the exact block that produced a secondary-cache hit, so the backfill SET
 // lands on the identical server-side key (hash ‖ block) — re-deriving it here could
 // land on a different key (tip advance between parse and lookup) or skip the write
@@ -4212,7 +4204,13 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	// value is the requested block itself (extractBlockHeightFromEVMResponse
 	// reads result.number), so the naive check never marks any historical
 	// block finalized and every entry takes the ~625 ms non-finalized TTL.
-	latestBlock := relayResult.Reply.LatestBlock
+	//
+	// The reply's claim is bounded by what this router vouches for before it is
+	// used anywhere here — finalization, the older-than-tip guard below, and the
+	// copy SetRelay reads — so an upstream cannot publish a head the router did
+	// not believe as the cache's chain-level tip or the entry's floor (MAG-3755;
+	// see replyLatestBlockForCacheWrite).
+	latestBlock := replyLatestBlockForCacheWrite(relayResult.Reply.LatestBlock, int64(rpcss.getLatestBlock()), relayData.SeenBlock)
 	// Finalization uses the GATED getLatestBlock (fresh tip or 0), never getLatestBlockAllowStale:
 	// a stale or too-high head here would falsely finalize a mutable block into the long-TTL store.
 	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
@@ -4302,9 +4300,10 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		// request it is the RAW user-requested height — vouched for by nothing but
 		// the foreign tier's willingness to answer that key — and SetRelay publishes
 		// max(Response.LatestBlock, SeenBlock) as the cache server's chain-level tip
-		// through a monotonic-max write that resolves LATEST/SAFE/FINALIZED/PENDING
-		// for the whole chain. Lifted past the local tip, one request at a far-future
-		// key would retarget negative-tag resolution on this router's own primary
+		// through a write that only ever moves up while the tip is fresh (MAG-3755)
+		// and resolves LATEST/SAFE/FINALIZED/PENDING for the whole chain. Lifted past
+		// the local tip, one request at a far-future key would retarget negative-tag
+		// resolution on this router's own primary
 		// until expiry (TestSecondaryFutureKeyBackfillNeverRaisesPrimaryChainTip).
 		// Clamping costs the legitimate cases nothing: the entry still lands on its
 		// exact key, and it stays visible to its own follow-up GET because a
@@ -4327,6 +4326,9 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 
 	// Snapshot the reply for the async write; see cacheWriteReplySnapshot for what it shares.
 	copyReply := cacheWriteReplySnapshot(relayResult.Reply)
+	// The snapshot is what the cache server reads: it carries the bounded claim, not the
+	// upstream's, while the live reply keeps the block the node answered with (MAG-3755).
+	copyReply.LatestBlock = latestBlock
 	rpcss.smartRouterEndpointMetrics.RecordCacheEntryWritten(chainId, apiInterface, apiName, bodyBytes)
 
 	// Write to cache in a non-blocking goroutine
@@ -4885,6 +4887,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		// Verify we have enough sessions to meet the agreement threshold
 		// If not, fail early with a clear error rather than proceeding knowing consensus is impossible
 		if crossValidationParams != nil && len(sessions) < crossValidationParams.AgreementThreshold {
+			rpcss.releaseUndispatchedSessions(ctx, usedProviders, sessions, nil)
 			relayProcessor.SetCrossValidationFailFastReason(common.CrossValidationReasonInsufficientCapacity)
 			return utils.LavaFormatError("insufficient sessions for cross-validation consensus",
 				lavasession.PairingListEmptyError,
@@ -4918,6 +4921,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	}
 	for endpointAddress, sessionInfo := range sessions {
 		if sessionInfo == nil || sessionInfo.Session == nil || !sessionInfo.Session.IsDirectRPC() {
+			rpcss.releaseUndispatchedSessions(ctx, usedProviders, sessions, nil)
 			return utils.LavaFormatError("rpcsmartrouter only supports direct RPC sessions", nil,
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("GUID", ctx),

@@ -140,9 +140,12 @@ func extractDappIDFromFiberContext(c *fiber.Ctx) (dappID string) {
 func extractDappIDFromGrpcHeader(metadataValues metadata.MD) string {
 	dappId := generateNewDappID()
 	if values, ok := metadataValues[ProjectIDHeader]; ok && len(values) > 0 {
-		// Same hazard as the HTTP path: gRPC metadata strings can alias
-		// the receive buffer depending on the transport implementation.
-		// Clone before retaining past the handler return.
+		// Not the HTTP path's hazard: grpc-go decodes every metadata value into
+		// its own string (x/net's hpack decoder allocates, and a -bin value is
+		// base64-decoded into a fresh one), so incoming metadata never points
+		// into the transport's receive buffer. The clone is kept as a cheap
+		// guard against a transport that does not make that promise; nothing
+		// depends on it (MAG-3881).
 		dappId = strings.Clone(values[0])
 	}
 	return dappId
@@ -469,9 +472,31 @@ func GetListenerWithRetryGrpc(protocol, addr string) net.Listener {
 	}
 }
 
+// detachedReqHeaders returns the request's headers with every name and value copied out of
+// fasthttp's per-request buffers. fiber's GetReqHeaders hands them back zero-copy (no Immutable
+// config), and fasthttp reuses a header slot's buffer for the next request on the connection, so a
+// header string kept past the handler changes under whoever kept it: a pinned provider name held as
+// a metric label, a request id read by a goroutine after the reply, an Origin serialized by the usage
+// sink (MAG-3881). Every consumer of the map below this point gets owned strings. It builds the map
+// the way GetReqHeaders does, copying each string as it goes, rather than copying GetReqHeaders'
+// map, which would build it twice.
+//
+// That covers the tracing ids utils.ExtractWantedHeadersFromCachedMap stamps from this map on the
+// request's context, which outlives the handler.
+func detachedReqHeaders(c *fiber.Ctx) map[string][]string {
+	headers := make(map[string][]string)
+	c.Request().Header.VisitAll(func(name, value []byte) {
+		key := string(name)
+		headers[key] = append(headers[key], string(value))
+	})
+	return headers
+}
+
 // GetHeaderFromCachedMap extracts a header value from a cached headers map.
 // Returns the first value if present, or the defaultValue if not found.
 // This avoids repeated calls to fiberCtx.Get() which has overhead.
+// The value is returned as stored, so a caller that keeps it needs a map of owned strings,
+// which is what the listeners pass (detachedReqHeaders).
 func GetHeaderFromCachedMap(headers map[string][]string, key string, defaultValue string) string {
 	if values, ok := headers[key]; ok && len(values) > 0 {
 		return values[0]
