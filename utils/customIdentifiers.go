@@ -48,34 +48,37 @@ func GetTxId(ctx context.Context) (txId string, found bool) {
 // header strings, which the next request on the same keep-alive connection overwrites in
 // place.
 func ExtractWantedHeadersFromCachedMap(headers map[string][]string, ctx context.Context) context.Context {
-	if reqId := getHeaderValue(headers, "X-Request-Id"); reqId != "" {
+	if reqId := getHeaderValue(headers, "X-Request-Id", "x-request-id"); reqId != "" {
 		ctx = WithRequestId(ctx, reqId)
 	}
 
-	if taskId := getHeaderValue(headers, "X-Task-Id"); taskId != "" {
+	if taskId := getHeaderValue(headers, "X-Task-Id", "x-task-id"); taskId != "" {
 		ctx = WithTaskId(ctx, taskId)
 	}
 
-	if txId := getHeaderValue(headers, "X-Tx-Id"); txId != "" {
+	if txId := getHeaderValue(headers, "X-Tx-Id", "x-tx-id"); txId != "" {
 		ctx = WithTxId(ctx, txId)
 	}
 
 	return ctx
 }
 
-// getHeaderValue returns the first value stored under key, looking the key up as written
-// and then in lower case. The HTTP listeners hand over canonical keys (X-Request-Id:
-// fasthttp normalises them), while gRPC metadata keys are always lower case
-// (x-request-id: HTTP/2 field names are, and grpc-go lowers them on the way in), so a
-// single lookup shape would honour the headers on one transport and drop them on the other.
+// getHeaderValue returns the first value stored under key, the header's canonical
+// spelling, or failing that under lowerKey, the same name in lower case. The HTTP listeners
+// hand over canonical keys (X-Request-Id: fasthttp normalises them), while gRPC metadata
+// keys are always lower case (x-request-id: HTTP/2 field names are, and grpc-go lowers them
+// on the way in), so a single lookup shape would honour the headers on one transport and
+// drop them on the other. The caller spells out both rather than this lowering key: this
+// runs on every request, lowering allocates, and a request that sends no tracing header
+// would pay for it three times over.
 //
 // The value is copied, so the id is owned whatever map a caller hands over, including one
 // whose strings alias a listener's buffers (see ExtractWantedHeadersFromCachedMap).
-func getHeaderValue(headers map[string][]string, key string) string {
+func getHeaderValue(headers map[string][]string, key, lowerKey string) string {
 	if values, ok := headers[key]; ok && len(values) > 0 {
 		return strings.Clone(values[0])
 	}
-	if values, ok := headers[strings.ToLower(key)]; ok && len(values) > 0 {
+	if values, ok := headers[lowerKey]; ok && len(values) > 0 {
 		return strings.Clone(values[0])
 	}
 	return ""
