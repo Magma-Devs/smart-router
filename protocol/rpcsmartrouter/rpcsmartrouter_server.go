@@ -4841,7 +4841,7 @@ func (rpcss *RPCSmartRouterServer) warnUnavailableExtensions(ctx context.Context
 		if rpcss.listenEndpoint != nil {
 			chainID, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
 		}
-		utils.LavaFormatWarning("requested extension is not offered by any node, serving without it", nil,
+		utils.LavaFormatWarning("a caller's lava-extension names an extension no node offers, serving without it", nil,
 			utils.LogAttr("extension", extension),
 			utils.LogAttr("chainID", chainID),
 			utils.LogAttr("apiInterface", apiInterface),

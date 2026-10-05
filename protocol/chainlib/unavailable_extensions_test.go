@@ -1,10 +1,13 @@
 package chainlib
 
 import (
+	"fmt"
+	"net/http"
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/stretchr/testify/require"
 )
 
@@ -57,4 +60,36 @@ func TestOverrideExtensions_RepeatedRequestReportedOnce(t *testing.T) {
 	msg.OverrideExtensions([]string{extensionslib.ArchiveExtension}, &parser)
 
 	require.Equal(t, []string{extensionslib.ArchiveExtension}, msg.GetUnavailableExtensions())
+}
+
+// The router's own archive promotion for a deep eth_call is kept apart from the caller's
+// lava-extension so that it is never reported back, but it must still be applied when a node
+// offers archive.
+func TestParseMsg_DeepEthCallStillGetsArchiveWhenANodeOffersIt(t *testing.T) {
+	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "ETH1")
+	require.NoError(t, err)
+	chainParser, err := NewJrpcChainParser()
+	require.NoError(t, err)
+	chainParser.SetSpec(spec)
+	chainParser.SetPolicyFromAddonAndExtensionMap(map[string]struct{}{extensionslib.ArchiveExtension: {}})
+
+	// One block deeper than ethCallArchiveBlockDepth: deep enough for the eth_call promotion, but
+	// not for ETH1's archive rule, which starts a block further back. So archive on the eth_call can
+	// only come from the promotion, and the eth_getBalance at the same block shows the rule is idle.
+	const tip = 1_000_000
+	block := uint64(tip - ethCallArchiveBlockDepth - 1)
+	parse := func(body string) ChainMessage {
+		t.Helper()
+		chainMessage, err := chainParser.ParseMsg("", []byte(body), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: tip})
+		require.NoError(t, err)
+		return chainMessage
+	}
+
+	ethCall := parse(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[{"to":"0x1111111111111111111111111111111111111111","data":"0x"},"0x%x"]}`, block))
+	require.Len(t, ethCall.GetExtensions(), 1, "the promotion must still route a deep eth_call to archive")
+	require.Equal(t, extensionslib.ArchiveExtension, ethCall.GetExtensions()[0].Name)
+	require.Empty(t, ethCall.GetUnavailableExtensions())
+
+	getBalance := parse(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x1111111111111111111111111111111111111111","0x%x"]}`, block))
+	require.Empty(t, getBalance.GetExtensions(), "the archive rule does not reach this block")
 }

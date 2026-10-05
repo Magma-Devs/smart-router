@@ -154,8 +154,22 @@ func (bcnc *baseChainMessageContainer) GetExtensions() []*spectypes.Extension {
 	return bcnc.extensions
 }
 
-// adds the following extensions
+// OverrideExtensions adds the extensions the request's lava-extension directive names. One that
+// no node on this router offers is recorded, so the reply can tell the caller it was dropped.
 func (bcnc *baseChainMessageContainer) OverrideExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser) {
+	bcnc.addExtensions(extensionNames, extensionParser, true)
+}
+
+// addRouterExtensions adds extensions the router requires on its own, such as archive for an
+// eth_call deep behind the head. The caller did not ask for them, so one that no node offers is
+// not recorded: the reply names only what the caller requested (MAG-3935).
+func (bcnc *baseChainMessageContainer) addRouterExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser) {
+	bcnc.addExtensions(extensionNames, extensionParser, false)
+}
+
+// adds the following extensions. callerRequested says whether the caller asked for them; only
+// then is one that no node offers recorded as unavailable.
+func (bcnc *baseChainMessageContainer) addExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser, callerRequested bool) {
 	utils.LavaFormatTrace("[Archive Debug] OverrideExtensions called", utils.LogAttr("extensionNames", extensionNames), utils.LogAttr("existingExtensions", len(bcnc.extensions)))
 	existingExtensions := map[string]struct{}{}
 	for _, extension := range bcnc.extensions {
@@ -182,7 +196,9 @@ func (bcnc *baseChainMessageContainer) OverrideExtensions(extensionNames []strin
 				bcnc.updateCUForApi(extension)
 				utils.LavaFormatTrace("[Archive Debug] Extension added", utils.LogAttr("extensionName", extensionName), utils.LogAttr("totalExtensions", len(bcnc.extensions)))
 			} else {
-				bcnc.unavailableExtensions = append(bcnc.unavailableExtensions, extensionName)
+				if callerRequested {
+					bcnc.unavailableExtensions = append(bcnc.unavailableExtensions, extensionName)
+				}
 				utils.LavaFormatTrace("[Archive Debug] Extension not found", utils.LogAttr("extensionName", extensionName), utils.LogAttr("extensionKey", extensionKey))
 			}
 		} else {

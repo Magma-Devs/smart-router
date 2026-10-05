@@ -38,7 +38,8 @@ const (
 	// EXTENSION_UNAVAILABLE_HEADER_NAME lists, comma-separated, the extensions the caller asked for
 	// with lava-extension that no node on this router offers. The request was served WITHOUT them
 	// — e.g. from a non-archive node — so a caller that needs the extension must not trust the
-	// answer (MAG-3935).
+	// answer (MAG-3935). An extension the router adds on its own, such as archive for an eth_call
+	// deep behind the head, is never listed: the caller did not ask for it.
 	EXTENSION_UNAVAILABLE_HEADER_NAME = "Lava-Extension-Unavailable"
 	// CACHE_BACKEND_HEADER_NAME names the cache backend that served a hit — the
 	// cache-be address, or the RESP node actually dialled (the current master

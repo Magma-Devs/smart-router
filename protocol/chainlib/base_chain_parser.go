@@ -476,6 +476,9 @@ func (bcp *BaseChainParser) ExtensionParsing(addon string, parsedMessageArg *bas
 		}
 		parsedMessageArg.OverrideExtensions(extensionInfo.AdditionalExtensions, &bcp.extensionParser)
 	}
+	if extensionInfo.RouterExtensions != nil {
+		parsedMessageArg.addRouterExtensions(extensionInfo.RouterExtensions, &bcp.extensionParser)
+	}
 }
 
 func (bcp *BaseChainParser) extensionParsingInner(addon string, parsedMessageArg *baseChainMessageContainer, latestBlock uint64) {
