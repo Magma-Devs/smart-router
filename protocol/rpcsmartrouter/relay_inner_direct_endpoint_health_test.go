@@ -37,6 +37,8 @@ type directRelayHarness struct {
 	rpcss    *RPCSmartRouterServer
 	session  *lavasession.SingleConsumerSession
 	endpoint *lavasession.Endpoint
+	// lostBroadcast is handed to relayInnerDirect as is; nil is a relay outside a broadcast.
+	lostBroadcast func(answeredWithNodeError bool) bool
 }
 
 // relay runs one relay and reports the endpoint's refusal count and enabled bit afterwards.
@@ -55,7 +57,7 @@ func (h *directRelayHarness) relay(t *testing.T, hasNodeError bool, message stri
 	// that never expires keeps these tests about endpoint health, which is what they pin.
 	_, _, _ = h.rpcss.relayInnerDirect(
 		context.Background(), h.session, relayResult, 5*time.Second, 30*time.Second,
-		msg, msg.requestData, nil, func() bool { return false },
+		msg, msg.requestData, nil, func() bool { return false }, h.lostBroadcast,
 	)
 	// Read directly: the relay above ran synchronously on this goroutine, so there is no
 	// concurrent writer. IsEnabled takes the lock; ConnectionRefusals has no exported accessor.
@@ -123,6 +125,29 @@ func TestRelayInnerDirect_NodeErrorInA200DisablesTheEndpoint(t *testing.T) {
 	require.Equal(t, uint64(3), refusals)
 	require.False(t, enabled,
 		"the third consecutive node error must disable the endpoint — this is the whole freeze fix")
+}
+
+// MAG-4032. A write's slower deliveries used to be cancelled before they could answer; now they
+// answer, and a client whose duplicate-submission wording the registry does not know reads as the
+// node's fault. A rejection that arrives after another upstream accepted the write must not climb
+// the counter, whatever it says, or every write would bench the upstreams that lost the race. An
+// at-fault wording is used on purpose: the carve-out is the lost broadcast, not the wording.
+func TestRelayInnerDirect_LostBroadcastRejectionDoesNotBlameTheEndpoint(t *testing.T) {
+	benchAfter(t, 3)
+	h := newDirectRelayHarness(t, http.StatusOK,
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}`)
+
+	h.lostBroadcast = func(answeredWithNodeError bool) bool { return answeredWithNodeError }
+	for i := 0; i < 5; i++ {
+		refusals, enabled := h.relay(t, true, "internal error")
+		require.Zero(t, refusals, "relay #%d: a lost broadcast's rejection must not raise the counter", i)
+		require.True(t, enabled, "relay #%d", i)
+	}
+
+	h.lostBroadcast = func(bool) bool { return false }
+	refusals, enabled := h.relay(t, true, "internal error")
+	require.Equal(t, uint64(1), refusals, "the same answer outside a lost broadcast still counts")
+	require.True(t, enabled)
 }
 
 // A clean answer is the only thing that clears the count.

@@ -89,7 +89,7 @@ a word.
 | `expiration.non-finalized` | `500ms` | Floor for a recent (non-finalized) answer; the effective TTL is max(averageBlockTime/8, this). The sidecar's `--expiration-non-finalized`. |
 | `expiration.non-finalized-multiplier` | `1` | Multiplier on `expiration.non-finalized`. The sidecar's `--expiration-non-finalized-multiplier`. |
 | `expiration.node-errors` | `250ms` | Cap on a cached node error for a finalized block. The sidecar's `--expiration-finalized-node-errors`. |
-| `expiration.blocks-hashes-to-heights` | `48h` | Lifetime of a block-hash→height mapping. The sidecar's `--expiration-blocks-hashes-to-heights`. |
+| `expiration.blocks-hashes-to-heights` | `48h` | Lifetime of a block-hash→height mapping. The sidecar's `--expiration-blocks-hashes-to-heights`. The router writes no mappings, so this governs nothing on it: see [Block-hash to height mappings](#block-hash-to-height-mappings). |
 
 TTLs default to the cache engine's own table (finalized 1h, non-finalized scaled to the chain's
 block time with a 500ms floor, short-lived node errors) — the same defaults the sidecar applies
@@ -108,6 +108,17 @@ above the round-trip time (e.g. `--cache-timeout 400ms`), and prefer co-locating
 with the backend: a hit always costs ~1 RTT, and a miss waits out the budget before falling
 through to the upstream. (`--secondary-cache-timeout` is the same knob for the secondary
 tier.)
+
+A backend that is **gone** rather than far reads differently, but only under
+`topology: standalone`: there a lookup that failed while the store's dial was being refused
+(connection refused, no route, no such host) is counted as `kind="error"` even though the
+lookup's own budget expired first, so an outage and a too-distant backend no longer share
+one series (MAG-3653). A dial that only timed out stays `timeout` — a black-holed endpoint
+and a healthy one too far away fail identically. Under `sentinel` and `cluster` a dial
+cannot be attributed to the one endpoint a lookup used, so an unreachable endpoint still
+reads `kind="timeout"` on reads there; for those topologies alert on
+`smartrouter_resp_cache_endpoint_connected{role}` / `smartrouter_resp_cache_connected`, the
+10s PING probe, which reaches each endpoint under every topology.
 
 The router also decides what it **writes**: when `--cache-max-entry-bytes` is set (it is off
 by default), a reply body larger than it is served but never written, on this backend as on
@@ -194,9 +205,34 @@ read side.
 
 Use `password-file` with whatever refreshes the file (Kubernetes secret mounts, a sidecar
 token refresher). On change, the router pushes the new credentials to every live connection,
-which re-authenticates **in place** — no reconnect, no dropped operations. Custom credential
-sources (e.g. an IAM SigV4 signer) can implement the `CredentialsSource` interface in
+and go-redis re-authenticates each one **in place** — no restart, no dropped operations. Custom
+credential sources (e.g. an IAM SigV4 signer) can implement the `CredentialsSource` interface in
 `ecosystem/cache/redisstore`; the router deliberately bundles no cloud SDKs.
+
+Two caveats come from go-redis (v9.22) itself. First, re-authentication is driven by traffic:
+the push only marks each connection, and the worker that re-authenticates a connection starts
+when that connection is next checked out and returned (a checkout of a marked connection is
+refused, which is what schedules the work). A connection that sits idle after the push, with no
+operation or probe reaching it, stays authenticated as the previous user for as long as it
+stays idle, so a fixed wait after rewriting the secret proves nothing about retirement. Second,
+the scheduled worker can miss the notification that the connection went idle (the pool's hot
+path marks a connection idle without notifying waiters; reported upstream as
+redis/go-redis#4027, fix opened as redis/go-redis#4028; tracked here as MAG-3769). Such a
+connection serves no traffic while the worker waits, and when the wait expires after the pool
+timeout the client closes it and dials a fresh connection under the new credentials. That
+timeout bounds the scheduled worker's wait only, not the time from rewriting the secret; it is
+`read-timeout` + 1s when a read timeout is set (six seconds with the client's default of five)
+and thirty seconds when `read-timeout` is negative, which go-redis reads as "no read timeout".
+The stalled connection also keeps its pool slot until then, so a pool already at `pool-size`
+dials and drops a replacement for every operation in that window; leave the pool headroom.
+
+No operation is dropped either way. What an operator may see is one connection replaced rather
+than re-authenticated per rotation, and connections that stay authenticated as the previous
+user for a while. Do not treat a rotation as complete after a timed wait: verify it on the
+server with `CLIENT LIST`, whose `user=` field names the ACL user of every connection, and to
+force it, delete the previous ACL user (`ACL DELUSER`) or run `CLIENT KILL USER <previous>`;
+both disconnect every session still authenticated as it, and the client reconnects with the
+current credentials. Keep the previous credential valid until then.
 
 Under `topology: sentinel` the go-redis failover client (v9.22) does not support in-place
 streaming re-auth, so rotated credentials are resolved fresh **per connection attempt** — they
@@ -278,7 +314,9 @@ Alert on the dedicated series (full reference in
   half** is down; `GET /debug/cache-state` names it too, in `detail`.
 - `smartrouter_resp_cache_failed_total{op, kind}` — backend-level operation failures (never
   clean misses), with `kind` splitting `error` from `timeout` so saturation reads differently
-  from outage.
+  from outage. Under `standalone` a read that failed while the endpoint was refusing
+  connections reads `error` even though its budget expired first; under `sentinel` and
+  `cluster` it still reads `timeout`, so alert on the two gauges above for an outage there.
 - `smartrouter_resp_cache_connection_errors_total`, pool gauges.
 
 - `smartrouter_resp_cache_breaker_open{role}` and `smartrouter_resp_cache_skipped_total{op}` —
@@ -389,13 +427,34 @@ polls would look healthy *because of* the first poll.
 > `--debug-address 127.0.0.1:6161` rather than `:6161`, and reach it through
 > `kubectl port-forward` in a cluster.
 
+## Block-hash to height mappings
+
+The cache has a keyspace for which block a hash belongs to (`h2h:` keys), with its own
+lifetime, `expiration.blocks-hashes-to-heights` (the sidecar's
+`--expiration-blocks-hashes-to-heights`). The router writes no mappings, so the keyspace stays
+empty and the setting governs nothing on it (MAG-3807). No request is routed by a mapping
+either. A lookup asks only for the hashes a spec's `BLOCK_HASH` parser finds, and a request
+whose parser finds one parses to no block number, which the router serves without a cache
+lookup. That rule rests on parser order inside a spec: BTC's `getblockstats` lists a
+`BLOCK_HASH` parser before a `BLOCK_LATEST` one on the same argument, so a hash argument takes
+no lookup and a height argument does. `TestBTCGetblockstatsHashArgumentTakesNoCacheLookup`
+(`protocol/chainlib`) pins that order.
+
+A state replay that names an old transaction or block by hash therefore goes to whichever
+endpoint selection picks, and reaches an archive node only when a retry adds archive. Of the
+bundled replays, `trace_transaction` and `trace_replayTransaction` are the hash-parsed ones;
+`debug_traceTransaction` has no `BLOCK_HASH` parser, resolves to `latest` and does take a
+lookup, with an empty hash list, and ends in the same place. The retry route is itself going
+away: open PR #389 (stop rewriting the request on retry) removes it, after which nothing routes
+such a replay to archive. Routing it there by a known height is MAG-3892.
+
 ## Sharing a backend between routers
 
 A keyspace is one cache. Every router in it reads and writes the same entries, resolves
-`latest` / `safe` / `finalized` / `pending` through the same chain tip, shares the same
-block-hash→height mappings, and — under `--shared-state` — the same seen-block and
-sticky-session claims. That is exactly right for **replicas of one deployment**: they read
-the same nodes, so an answer one of them cached is the answer any of them would have fetched.
+`latest` / `safe` / `finalized` / `pending` through the same chain tip, and — under
+`--shared-state` — shares the same seen-block and sticky-session claims. That is exactly right
+for **replicas of one deployment**: they read the same nodes, so an answer one of them cached is
+the answer any of them would have fetched.
 
 It is wrong for two routers that declare the same chain but read **different nodes** — a
 paid tier beside a free one, a canary beside production, a router being migrated onto a new
@@ -431,9 +490,17 @@ belongs to someone else. Isolation between deployments that must not read each o
 answers is a network question, not a naming one.
 
 What a prefix does **not** do: replicas that share a keyspace on purpose still share one
-chain tip, and that tip is a monotonic maximum with no downward path before expiry — one
-replica publishing a false high block pins `latest` resolution for its whole fleet. That is a
-trust problem rather than a naming one and is tracked separately (MAG-3755).
+chain tip, so what one replica publishes is what the others resolve block tags against.
+Two rules keep a single replica from poisoning it (MAG-3755): a router only ever publishes
+the head it itself believed — a reply's claimed latest block is bounded by the router's
+own anti-lie-guarded tip before the cache write — and the tip's write guard yields to a
+lower write once the stored value has gone stale for readers (the embedded sub-second
+deadline), so a false high value that nobody keeps refreshing stops fencing honest
+writers as soon as readers stop trusting it, on both backends. A lie that passes the
+router's own outlier guard is still shared, for as long as the router itself believes it.
+On a primary-cache hit, `Provider-Latest-Block` is read from the stored reply, so it carries
+the writing router's bounded value rather than the node's raw claim at write time: for a
+node that was ahead of that router's tip, the header reads the tip.
 
 ## Flush semantics
 
@@ -468,7 +535,7 @@ Switching backends is a configuration change; the RESP cache starts cold (no dat
   travel through the key/value seam this backend implements. A router on the RESP backend logs
   a warning once per listen endpoint and **polls locally** — the same degradation already
   applied to a `cache-be` that predates the RPC. Everything else the sidecar caches (relay
-  entries, chain tip, shared-state seen-block, block-hash→height) works identically. If you
+  entries, chain tip, shared-state seen-block) works identically. If you
   need the peer gate, stay on `cache-be`.
 - **Sentinel credential rotation** applies per connection attempt, not in place — see
   [Credential rotation](#credential-rotation).
@@ -635,7 +702,10 @@ smartrouter_resp_cache_failed_total{kind="timeout",op="set"} 1
 ```
 
 No request failed and the router never restarted. `kind` separates a frozen backend
-(`timeout`) from one that is gone (`error`), so saturation alerts differently from an outage.
+(`timeout`) from one that is gone (`error`), so saturation alerts differently from an outage;
+a backend stopped with `docker stop` refuses connections, so under `standalone` its reads
+land on `kind="error"` too (see [Configuration reference](#configuration-reference) for the
+topology limits of that reading).
 
 ```bash
 docker unpause smartrouter-demo-redis

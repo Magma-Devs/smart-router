@@ -62,6 +62,13 @@ func isJSONNull(data []byte) bool {
 	return len(data) == 4 && string(data) == "null"
 }
 
+// isZeroErrorCode reports whether an error object's code is absent, null or 0.
+// Together with an empty message that is the zero value of both members JSON-RPC
+// requires of an error object: the object states no failure at all.
+func isZeroErrorCode(code json.RawMessage) bool {
+	return len(code) == 0 || isJSONNull(code) || string(code) == "0"
+}
+
 // maxLoggedBodyBytes caps the size of the malformed-response body included in
 // warning logs. A persistently flaky upstream returning megabyte-scale garbage
 // would otherwise saturate the log pipeline.
@@ -75,7 +82,7 @@ func truncateForLog(data []byte) string {
 }
 
 // checkJsonrpcEnvelope runs the JSON-RPC envelope shape check shared by both
-// JsonrpcMessage and TendermintrpcMessage. It distinguishes three outcomes:
+// JsonrpcMessage and TendermintrpcMessage. It distinguishes two outcomes:
 //
 //   - hasError=true with a non-empty message → caller propagates as a
 //     node-error verdict (scanner parse failure, schema violation, or a
@@ -83,15 +90,23 @@ func truncateForLog(data []byte) string {
 //   - hasError=false, resultBytes != nil    → envelope success. Caller may
 //     inspect resultBytes for protocol-specific inner errors (e.g.
 //     Tendermint's response.code/log)
-//   - hasError=false, resultBytes == nil    → envelope success with no
-//     result content to inspect (rare; happens when "error" was present
-//     with an empty message)
+//
+// The message is never empty on an error verdict. An error object without
+// message text is still the node failing the request (MAG-3991), so it gets a
+// synthetic message: CheckResponseErrorForJsonRpcBatch reads an empty aggregate
+// as "no faults", and the relay pipeline's classifiers match on the text. That
+// text holds no digits and no phrase a classifier matches, so the error's code
+// alone decides its class, as it would with no message at all.
 //
 // kind is woven into synthetic error messages — "JSON-RPC" or "Tendermint RPC".
 //
-// Edge case: "error": null is treated as if the error key were absent, since
+// Edge cases: "error": null is treated as if the error key were absent, since
 // JSON-RPC clients can't act on a null error. A response that has neither a
-// result nor a real error is still flagged as a schema violation.
+// result nor a real error is still flagged as a schema violation. A zero-value
+// error object ({"code":0,"message":""}, or {}) beside a result reads as that
+// result, like error:null: it is how an encoder whose error field is a struct
+// rather than a pointer writes "no error". With no result beside it, it is an
+// error object like any other.
 func checkJsonrpcEnvelope(data []byte, kind string) (hasError bool, errorMessage string, resultBytes []byte) {
 	scan, err := scanJsonrpcEnvelope(data)
 	if err != nil {
@@ -105,16 +120,22 @@ func checkJsonrpcEnvelope(data []byte, kind string) (hasError bool, errorMessage
 	if !hasErr {
 		return false, "", scan.resultBytes
 	}
+	// Code stays raw: only whether it is zero is read, so an off-spec type (a
+	// string, a float) cannot turn a readable message into a decode failure.
 	var je struct {
-		Message string `json:"message"`
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
 	}
 	if err := json.Unmarshal(scan.errorBytes, &je); err != nil {
 		return true, fmt.Sprintf("malformed %s response: error field is not a valid object", kind), nil
 	}
-	if je.Message == "" {
+	if je.Message != "" {
+		return true, je.Message, nil
+	}
+	if scan.hasResult && isZeroErrorCode(je.Code) {
 		return false, "", scan.resultBytes
 	}
-	return true, je.Message, nil
+	return true, fmt.Sprintf("%s error with an empty message", kind), nil
 }
 
 // CheckResponseError classifies a JSON-RPC response body for the smart-router

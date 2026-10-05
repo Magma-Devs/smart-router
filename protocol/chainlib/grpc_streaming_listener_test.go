@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ type stubGRPCSubscriptionManager struct {
 	startedWith   string // clientKey passed to StartSubscription, via ClientKey
 	unsubscribed  chan string
 	lastChainName string
+	tracing       tracingIds // the caller ids on the context StartSubscription was given
 }
 
 func newStubGRPCSubscriptionManager() *stubGRPCSubscriptionManager {
@@ -53,6 +55,7 @@ func (s *stubGRPCSubscriptionManager) StartSubscription(
 	s.startCalls++
 	s.startedWith = s.ClientKey(dappID, consumerIp, connectionUniqueId)
 	s.lastChainName = chainMessage.GetApi().Name
+	s.tracing = tracingIdsFromContext(ctx)
 	if s.startErr != nil {
 		return nil, nil, s.startErr
 	}
@@ -68,18 +71,45 @@ func (s *stubGRPCSubscriptionManager) ClientKey(dappID, consumerIp, connectionUn
 	return dappID + ":" + consumerIp + ":" + connectionUniqueId
 }
 
-// stubRelaySender implements the slice of RelaySender the streaming callback uses.
+// stubRelaySender implements the slice of RelaySender the streaming callback uses, and
+// the unary path's SendRelay when a reply is configured.
 type stubRelaySender struct {
 	parser     *GrpcChainParser
 	parseErr   error
 	parseCalls int
+	reply      []byte // when set, SendRelay answers with it instead of refusing the call
+
+	mu      sync.Mutex
+	tracing *tracingIds // the caller ids on the context of the last ParseRelay or SendRelay
 }
 
 func (s *stubRelaySender) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
-	return nil, errors.New("not used")
+	s.noteTracing(ctx)
+	if s.reply == nil {
+		return nil, errors.New("not used")
+	}
+	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: s.reply}}, nil
+}
+
+func (s *stubRelaySender) noteTracing(ctx context.Context) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := tracingIdsFromContext(ctx)
+	s.tracing = &ids
+}
+
+// lastTracing reports the caller ids seen on the most recent call, and whether there was one.
+func (s *stubRelaySender) lastTracing() (tracingIds, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.tracing == nil {
+		return tracingIds{}, false
+	}
+	return *s.tracing, true
 }
 
 func (s *stubRelaySender) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
+	s.noteTracing(ctx)
 	s.parseCalls++
 	if s.parseErr != nil {
 		return nil, s.parseErr

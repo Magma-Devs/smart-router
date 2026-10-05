@@ -4,12 +4,6 @@ import (
 	"time"
 )
 
-type RelaySource int
-
-const (
-	GatewaySource RelaySource = iota + 1
-)
-
 type RelayMetrics struct {
 	ProjectHash         string
 	Timestamp           time.Time
@@ -18,7 +12,6 @@ type RelayMetrics struct {
 	Latency             int64
 	Success             bool
 	ComputeUnits        uint64
-	Source              RelaySource
 	Origin              string
 	ApiMethod           string
 	ProcessingTimestamp time.Time
@@ -33,26 +26,12 @@ type RelayMetrics struct {
 	HedgeCount uint64 // number of hedge relays sent by the batch ticker for this request
 }
 
-type RelayAnalyticsDTO struct {
-	ProjectHash  string
-	Timestamp    string
-	ChainID      string
-	APIType      string
-	Latency      uint64
-	SuccessCount int64
-	RelayCounts  int64
-	TotalCu      uint64
-	Source       RelaySource
-	Origin       string
-}
-
 func NewRelayAnalytics(projectHash, chainId, apiType string) *RelayMetrics {
 	return &RelayMetrics{
 		Timestamp:   time.Now(),
 		ProjectHash: projectHash,
 		ChainID:     chainId,
 		APIType:     apiType,
-		Source:      GatewaySource,
 	}
 }
 
