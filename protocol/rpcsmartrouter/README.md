@@ -373,8 +373,12 @@ sent to the provider, and `/debug/logs?request_id=<id>` returns the lines that d
 stripped before the cache key is built, so two callers asking the same question under different
 ids still share one cache entry.
 
-The headers are read per HTTP request or gRPC call. A WebSocket connection's upgrade request
-is not read, so messages sent over a WebSocket carry no caller ids today.
+The headers are read per HTTP request or gRPC call. A gRPC streaming call is one subscribe
+request on its own stream, so the ids it opens with label that stream for its whole life, and
+that is still per request. A WebSocket connection's upgrade request is not read, so messages
+sent over a WebSocket carry no caller ids today. Reading the upgrade's ids would not be the
+same fix: one socket multiplexes many subscriptions and requests, so those ids would label
+every request on the connection rather than the one the caller tagged.
 
 ### Usage telemetry (OTel)
 
