@@ -4161,7 +4161,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// - Send the relay request directly to the RPC node
 	// - Handle QoS updates based on response latency and success
 	// - Update endpoint health status on connection failures
-	// Use the latest protocol message from the relay state machine to ensure we have any archive upgrades
+	// Use the latest protocol message from the relay state machine: the earliest-block re-parse may
+	// have replaced it with one that carries the archive extension.
 	protocolMessage := relayProcessor.GetProtocolMessage()
 	// IMPORTANT: Create an isolated copy of RelayPrivateData at function entry to prevent race conditions.
 	// This ensures that modifications in this call don't affect goroutines from previous calls,

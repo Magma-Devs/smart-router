@@ -17,7 +17,8 @@ func NewPolicy(config PolicyConfig) *Policy {
 }
 
 // Decide makes all post-relay retry decisions. Called from the state machine's
-// gotResults and ticker.C cases. Replaces DP#1, DP#2, DP#3, DP#5, and archive mutation.
+// gotResults and ticker.C cases. Replaces DP#1, DP#2, DP#3 and DP#5. It never rewrites the
+// request: see step 6 for why the archive mutation that used to live here is gone.
 func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	// 1. MODE CHECKS
 	if input.Selection == relaycore.CrossValidation {
