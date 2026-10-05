@@ -97,7 +97,7 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams, protocolMessage: protocolMsg}
 	metricsStub := cvGuardMetrics{}
 	relayProcessor := relaycore.NewRelayProcessor(
-		ctx, cvParams, metricsStub, metricsStub, lavaprotocol.NewRelayRetriesManager(), sm)
+		ctx, cvParams, metricsStub, metricsStub, sm)
 
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:    rpcEndpoint,
@@ -109,7 +109,7 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	sendErr := rpcss.sendRelayToEndpoint(callCtx, cvParams.MaxParticipants,
-		relaycore.GetEmptyRelayState(callCtx, protocolMsg), relayProcessor, nil, nil)
+		relaycore.GetEmptyRelayState(protocolMsg), relayProcessor, nil, nil)
 
 	require.Error(t, sendErr)
 	require.Truef(t, errors.Is(sendErr, lavasession.PairingListEmptyError),
@@ -173,7 +173,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesASessionlessEntr
 	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
 	metricsStub := cvGuardMetrics{}
 	relayProcessor := relaycore.NewRelayProcessor(
-		ctx, cvParams, metricsStub, metricsStub, lavaprotocol.NewRelayRetriesManager(), sm)
+		ctx, cvParams, metricsStub, metricsStub, sm)
 
 	// No chain state, so the consistency filter skips validation and passes the entry through:
 	// the guard fires on 1 < 2 with it among the survivors.
@@ -195,4 +195,71 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesASessionlessEntr
 		"setup: the post-filter guard must have fired; got: %v", sendErr)
 	require.Equal(t, 0, usedProviders.CurrentlyUsed(), "the entry without a session leaked into CurrentlyUsed")
 	require.Equal(t, 0, usedProviders.SessionsLatestBatch(), "the entry without a session leaked into SessionsLatestBatch")
+}
+
+// Extension degradation picks sessions under the empty router key, but sendRelayToDirectEndpoints
+// still sees the message's extensions, so a release key recomputed from the message misses the
+// bucket AddUsed filed the session in and releases nothing. The guard must release each session
+// under its own key, and through OnSessionDiscarded so the reserved compute units come back.
+func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesADegradedSession(t *testing.T) {
+	ctx := context.Background()
+	noopHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	const providerAddress = "lava@degraded"
+	const reservedCu = uint64(10)
+	endpoint := &lavasession.Endpoint{NetworkAddress: "http://degraded:8545"}
+	parent := &lavasession.ConsumerSessionsWithProvider{
+		PublicLavaAddress: providerAddress,
+		Endpoints:         []*lavasession.Endpoint{endpoint},
+		UsedComputeUnits:  reservedCu,
+	}
+	session := &lavasession.SingleConsumerSession{
+		Parent:     parent,
+		Connection: &lavasession.DirectRPCSessionConnection{Endpoint: endpoint},
+	}
+	_, ok := session.TryUseSession()
+	require.True(t, ok, "setup: failed to lock session")
+
+	// What GetSessions does for a degraded request: the session is keyed without the extension.
+	usedProviders := lavasession.NewUsedProviders(nil)
+	require.NoError(t, session.SetUsageForSession(reservedCu, nil, usedProviders, lavasession.NewRouterKey(nil)))
+	sessions := lavasession.ConsumerSessionsMap{providerAddress: &lavasession.SessionInfo{Session: session}}
+	usedProviders.AddUsed(sessions, nil)
+	require.Equal(t, 1, usedProviders.CurrentlyUsed(), "setup: AddUsed must register the session")
+
+	cvParams := &common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 2}
+	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
+	metricsStub := cvGuardMetrics{}
+	relayProcessor := relaycore.NewRelayProcessor(ctx, cvParams, metricsStub, metricsStub, sm)
+
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+		chainParser:       chainParser,
+		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
+	}
+	// The message still carries the extension the degraded session was picked without.
+	protocolMsg := &extensionMockProtocolMessage{
+		MockProtocolMessage: &MockProtocolMessage{
+			api:            &spectypes.Api{Name: "/cosmos/base/tendermint/v1beta1/blocks/latest"},
+			requestedBlock: spectypes.LATEST_BLOCK,
+		},
+		extensions: []*spectypes.Extension{{Name: "archive"}},
+	}
+
+	sendErr := rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{})
+	require.Truef(t, errors.Is(sendErr, lavasession.PairingListEmptyError),
+		"setup: the post-filter guard must have fired; got: %v", sendErr)
+	require.Equal(t, 0, usedProviders.CurrentlyUsed(), "the degraded session leaked into CurrentlyUsed")
+	require.Equal(t, 0, usedProviders.SessionsLatestBatch(),
+		"SessionsLatestBatch leaked: the release went to the message's router key, not the session's")
+	require.Zero(t, parent.UsedComputeUnits,
+		"the compute units reserved for the discarded session were not returned to the provider")
 }
