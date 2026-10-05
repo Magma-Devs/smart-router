@@ -12,10 +12,8 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
-	"github.com/joho/godotenv"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/newrelic/go-agent/v3/newrelic"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -29,7 +27,6 @@ const (
 )
 
 type RPCConsumerLogs struct {
-	newRelicApplication        *newrelic.Application
 	MetricService              *MetricService
 	StoreMetricData            bool
 	excludeMetricsReferrers    string
@@ -44,50 +41,7 @@ func NewRPCConsumerLogs(consumerMetricsManager ConsumerMetricsManagerInf, usageS
 	if usageSink == nil {
 		usageSink = NoopUsageSink{}
 	}
-	err := godotenv.Load()
-	if err != nil {
-		utils.LavaFormatInfo("New relic missing environment file")
-		return &RPCConsumerLogs{
-			consumerMetricsManager:     consumerMetricsManager,
-			usageSink:                  usageSink,
-			consumerOptimizerQoSClient: consumerOptimizerQoSClient,
-		}, nil // newRelicApplication is nil safe to use
-	}
-
-	newRelicAppName := os.Getenv("NEW_RELIC_APP_NAME")
-	newRelicLicenseKey := os.Getenv("NEW_RELIC_LICENSE_KEY")
-	if newRelicAppName == "" || newRelicLicenseKey == "" {
-		utils.LavaFormatInfo("New relic missing environment variables")
-		return &RPCConsumerLogs{
-			consumerMetricsManager:     consumerMetricsManager,
-			usageSink:                  usageSink,
-			consumerOptimizerQoSClient: consumerOptimizerQoSClient,
-		}, nil
-	}
-
-	newRelicApplication, err := newrelic.NewApplication(
-		newrelic.ConfigAppName(newRelicAppName),
-		newrelic.ConfigLicense(newRelicLicenseKey),
-		func(cfg *newrelic.Config) {
-			// Set specific Config fields inside a custom ConfigOption.
-			sMaxSamplesStored, ok := os.LookupEnv("NEW_RELIC_TRANSACTION_EVENTS_MAX_SAMPLES_STORED")
-			if ok {
-				utils.LavaFormatDebug("Setting NEW_RELIC_TRANSACTION_EVENTS_MAX_SAMPLES_STORED", utils.Attribute{Key: "sMaxSamplesStored", Value: sMaxSamplesStored})
-				maxSamplesStored, err := strconv.Atoi(sMaxSamplesStored)
-				if err != nil {
-					utils.LavaFormatError("Failed converting sMaxSamplesStored to number", err, utils.Attribute{Key: "sMaxSamplesStored", Value: sMaxSamplesStored})
-				} else {
-					cfg.TransactionEvents.MaxSamplesStored = maxSamplesStored
-				}
-			} else {
-				utils.LavaFormatDebug("Did not find NEW_RELIC_TRANSACTION_EVENTS_MAX_SAMPLES_STORED in env")
-			}
-		},
-		newrelic.ConfigFromEnvironment(),
-	)
-
 	rpcConsumerLogs := &RPCConsumerLogs{
-		newRelicApplication:        newRelicApplication,
 		StoreMetricData:            false,
 		consumerMetricsManager:     consumerMetricsManager,
 		usageSink:                  usageSink,
@@ -95,15 +49,25 @@ func NewRPCConsumerLogs(consumerMetricsManager ConsumerMetricsManagerInf, usageS
 	}
 	isMetricEnabled, _ := strconv.ParseBool(os.Getenv("IS_METRICS_ENABLED"))
 	if isMetricEnabled {
+		// NewMetricService returns nil when its report env is unset or invalid.
+		// Every relay sends to the service once StoreMetricData is on, so the
+		// flag follows the service rather than the env var.
+		metricService := NewMetricService()
+		if metricService == nil {
+			// Log the interval only: REPORT_METRICS_URL can carry a key.
+			utils.LavaFormatWarning("IS_METRICS_ENABLED is set but REPORT_METRICS_URL or METRICS_INTERVAL_FOR_SENDING_DATA_MIN is missing or invalid, relay metrics reporting stays off", nil,
+				utils.LogAttr("METRICS_INTERVAL_FOR_SENDING_DATA_MIN", os.Getenv("METRICS_INTERVAL_FOR_SENDING_DATA_MIN")))
+			return rpcConsumerLogs, nil
+		}
 		rpcConsumerLogs.StoreMetricData = true
-		rpcConsumerLogs.MetricService = NewMetricService()
+		rpcConsumerLogs.MetricService = metricService
 		rpcConsumerLogs.excludeMetricsReferrers = os.Getenv("TO_EXCLUDE_METRICS_REFERRERS")
 		agentsValue := os.Getenv("TO_EXCLUDE_METRICS_AGENTS")
 		if len(agentsValue) > 0 {
 			rpcConsumerLogs.excludedUserAgent = strings.Split(agentsValue, ";")
 		}
 	}
-	return rpcConsumerLogs, err
+	return rpcConsumerLogs, nil
 }
 
 func (rpccl *RPCConsumerLogs) SetWebSocketConnectionActive(chainId string, apiInterface string, add bool) {
@@ -219,21 +183,6 @@ func (rpccl *RPCConsumerLogs) LogRequestAndResponse(module string, hasError bool
 		return
 	}
 	utils.LavaFormatDebug(module, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
-}
-
-func (rpccl *RPCConsumerLogs) LogStartTransaction(name string) func() {
-	if rpccl.newRelicApplication == nil {
-		return func() {
-		}
-	}
-
-	tx := rpccl.newRelicApplication.StartTransaction(name)
-
-	return func() {
-		if tx != nil {
-			tx.End()
-		}
-	}
 }
 
 func (rpccl *RPCConsumerLogs) RecordEndToEndLatency(chainId string, apiInterface string, method string, latencyMs float64) {

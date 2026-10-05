@@ -272,8 +272,6 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		// Set response header content-type to application/json
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		startTime := time.Now()
-		endTx := apil.logger.LogStartTransaction("rest-http")
-		defer endTx()
 
 		msgSeed := apil.logger.GetMessageSeed()
 		query := "?" + string(fiberCtx.Request().URI().QueryString())
@@ -345,8 +343,6 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		// Set response header content-type to application/json
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		startTime := time.Now()
-		endTx := apil.logger.LogStartTransaction("rest-http")
-		defer endTx()
 		msgSeed := apil.logger.GetMessageSeed()
 
 		query := "?" + string(fiberCtx.Request().URI().QueryString())

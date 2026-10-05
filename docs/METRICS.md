@@ -83,7 +83,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | --- | --- | --- | --- |
 | `rpc_endpoint_total_relays_serviced` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays successfully served by this endpoint. |
 | `rpc_endpoint_total_errored` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Errored relays for this endpoint. Excludes relays the router itself cancelled — see `rpc_endpoint_total_cancelled`. |
-| `rpc_endpoint_total_cancelled` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays the router aborted before completion: relay-race losers on stateful broadcasts, and client disconnects. **Not an endpoint fault** — excluded from `rpc_endpoint_total_errored` and from QoS/availability scoring. |
+| `rpc_endpoint_total_cancelled` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays the router aborted before completion: the losing side of a hedged read, a broadcast delivery still running 5 s after the caller was answered, and client disconnects. **Not an endpoint fault** — excluded from `rpc_endpoint_total_errored` and from QoS/availability scoring. |
 | `rpc_endpoint_requests_in_flight` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays currently in flight to this endpoint. |
 | `rpc_endpoint_end_to_end_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `endpoint_id`, `function` | End-to-end latency per function for this endpoint. |
 | `rpc_endpoint_overall_health` | Gauge | `spec`, `apiInterface`, `endpoint_id` | Endpoint health (1 healthy / 0 unhealthy). |
@@ -160,20 +160,31 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 > URL, so `endpoint_id` carries a provider name. Group by `endpoint_id` when reading it — a bare
 > `sum()` counts one physical request once per provider sharing that URL.
 
-> **Reading cancelled relays.** A stateful method (`stateful: 1` in the spec — e.g.
-> `eth_sendRawTransaction`, Solana `sendTransaction`) is broadcast to *every* endpoint; the
-> first response wins and the rest are cancelled. A healthy endpoint under write traffic will
-> therefore show a high `rpc_endpoint_total_cancelled` rate **by design** — with N endpoints,
-> roughly `(N-1)/N` of every broadcast. That is the number to watch when tuning broadcast
-> fan-out; it is not a fault signal.
+> **Reading cancelled relays.** A cancelled relay is one the router stopped: the losing side of a
+> hedged read, whose other attempt answered first; a broadcast delivery still running 5 s after the
+> caller was answered (below); or a relay whose client hung up. It is not a fault signal.
+>
+> A stateful method (`stateful: 1` in the spec — e.g. `eth_sendRawTransaction`, Solana
+> `sendTransaction`) is broadcast to *every* endpoint. The caller gets the first acceptance, and
+> since MAG-4032 the other deliveries keep running for up to 5 s after that answer, so that every
+> endpoint actually receives the transaction. One still running then is cut off and counted here,
+> unscored, as every loser was before MAG-4032. A delivery that finishes is recorded like any
+> other relay, with one exception: when it finishes with a rejection after another endpoint
+> accepted the write — `already known`, `Known transaction`, `nonce too low`, any JSON-RPC error
+> in an HTTP 2xx answer — it is neither scored nor held against the endpoint's health, because the
+> rejection is about the transaction, not the endpoint. A delivery refused or reset at the
+> transport, or answered with an HTTP error status, still counts. Before
+> MAG-4032 the other deliveries were cancelled on the first acceptance, and a healthy endpoint
+> under write traffic showed roughly `(N-1)/N` of every broadcast in
+> `rpc_endpoint_total_cancelled`.
 >
 > The two counters partition the non-success outcomes: `total_errored` is the endpoint's
 > fault, `total_cancelled` is ours. Cancelled relays still decrement
 > `rpc_endpoint_requests_in_flight`, and never move the `smartrouter_requests_*` family, so
 > `requests_total == requests_success + requests_failed` remains exact.
 >
-> Measured on a 3-endpoint SOLANAT router (MAG-2648): 90 stateful broadcasts produced 103
-> serviced + 167 cancelled = 270 relays = 90 × 3, with zero errored.
+> Measured on a 3-endpoint SOLANAT router before MAG-4032 (MAG-2648): 90 stateful broadcasts
+> produced 103 serviced + 167 cancelled = 270 relays = 90 × 3, with zero errored.
 
 ### Optimizer
 
@@ -349,6 +360,8 @@ histogram_quantile(0.9,
 | `smartrouter_cache_success_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier` | Cache hits per tier. |
 | `smartrouter_cache_failed_total` | Counter | `spec`, `apiInterface`, `method`, `cache_tier`, `outcome` | Non-hit lookups, split by the closed enum `outcome` = `miss` (clean not-found) \| `error` (transport/server error) \| `timeout` (per-lookup budget exceeded). |
 | `smartrouter_cache_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `method`, `cache_tier` | Cache lookup latency, observed on **every attempted lookup** (hits and non-hits). |
+| `smartrouter_cache_write_skipped_total` | Counter | `spec`, `apiInterface`, `method`, `reason` | Replies served but not written to the cache, by the closed enum `reason` = `size` (the body exceeded `--cache-max-entry-bytes`; off by default). Same on the gRPC and RESP backends, and counts secondary-tier hits too large to backfill. |
+| `smartrouter_cache_entry_bytes` | Histogram | `spec`, `apiInterface`, `method` | Body size of every reply handed to the cache backend for writing, before the backend encodes it. Buckets 1 KiB to 64 MiB in steps of 4, so a 1 MiB cap is a bucket boundary. |
 
 Per tier, `cache_requests_total` = `cache_success_total` + `sum without (outcome) (cache_failed_total)`.
 Note the `sum without` — recovering the identity now takes an explicit aggregation

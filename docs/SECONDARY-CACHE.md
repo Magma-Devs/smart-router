@@ -112,7 +112,8 @@ merely implemented:
   carrying the entry's true state. A cached node error or an error status is
   served to the caller but rejected for backfill by that component's own
   rules — so the two tiers can never drift apart in what they consider
-  cacheable.
+  cacheable. The same holds for size: with
+  `--cache-max-entry-bytes` set, a hit larger than it is served but not backfilled.
 
 ## Configuration
 
@@ -141,11 +142,14 @@ secondary-cache-mode: read-only     # optional (the default and only mode)
 Configuration comes from flags or the YAML config file (an explicitly passed
 flag overrides the YAML value). Environment variables are not supported.
 
-The router fails fast on misconfiguration: a timeout or mode set *without* an
-address, a zero/negative timeout, or `read-write` mode all abort startup with a
-clear error. It warns (but starts) when the secondary equals the primary
-address, or when a secondary is configured with no primary. When enabled, the
-startup log prints the full secondary configuration on one line.
+Once an address is set, the router fails fast on misconfiguration: a
+zero/negative timeout or `read-write` mode aborts startup with a clear error. It
+warns (but starts) when a timeout or mode is set *without* an address — the
+secondary is left disabled; see [Bonus — misconfiguration is caught at
+startup](#bonus--misconfiguration-is-caught-at-startup) for why — when the
+secondary equals the primary address, or when a secondary is configured with no
+primary. When enabled, the startup log prints the full secondary configuration
+on one line.
 
 Removing the configuration fully reverts the router to single-cache behavior;
 with no secondary configured, behavior is unchanged from previous releases.
@@ -563,7 +567,12 @@ secondary hit both report `Cached`, both carry the same locally minted header
 set, and the body is the same bytes. (The one difference is invisible here and
 by design: an entry that came from the secondary replays only its
 `Content-Type` / `Content-Encoding`, not whatever other upstream headers the
-writer's node happened to send.)
+writer's node happened to send. Since MAG-3104 the live path is nearly as
+strict — `filterUpstreamReplyMetadata` keeps those two, `Retry-After`, `Date`
+and the spec's own reply headers, and drops the rest before the reply leaves
+the sender — and a primary hit is passed through the same filter when it is
+served, so the primary replays that reduced set whichever router wrote the
+entry.)
 
 `Lava-Cache-Tier` names the tier that answered, and `Lava-Cache-Outcome` says
 what each tier did on the way. Both are part of the reply, so there is nothing

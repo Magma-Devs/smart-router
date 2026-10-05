@@ -463,6 +463,50 @@ func (csm *ConsumerSessionManager) IsStaticProvider(providerAddr string) bool {
 	return false
 }
 
+// usablePreferredProvider returns the request's preferred provider when selection may hand it this
+// request right now, or "" and the reason it may not, in which case the request is selected as
+// usual. The reason is "" too when there is no preference to judge, or it has already been tried.
+//
+// Usable means: not already tried by this request, which also keeps a refill after it fails from
+// handing it back; not held off after a rate limit; and either a valid primary serving the
+// collection, or an unblocked backup serving it. Backups count because a write can be accepted by
+// one — under --stateful-to-backup, or when every primary is blocked — and the follow-up read
+// belongs where the write landed.
+//
+// Decided under the same lock as the selection it feeds, so the answer cannot go stale before it
+// is used, and never through the selectedProvider path: a preference that fails falls back, it does
+// not fail the request or release the blocked list.
+//
+// csm must be rlocked here.
+func (csm *ConsumerSessionManager) usablePreferredProvider(ctx context.Context, request *ignoredProviders, addon string, extensions []string) (provider string, reason string) {
+	preferred := request.preferredProvider
+	if preferred == "" {
+		return "", ""
+	}
+	if _, tried := request.providers[preferred]; tried {
+		return "", ""
+	}
+	if csm.rateLimitHoldoff != nil {
+		if _, held := csm.rateLimitHoldoff.ProviderReadyAt(preferred); held {
+			return "", "held off after a rate limit"
+		}
+	}
+	if slices.Contains(csm.getValidAddresses(addon, extensions, ctx), preferred) {
+		return preferred, ""
+	}
+	backup, isBackup := csm.backupProviders[preferred]
+	if !isBackup || backup == nil {
+		return "", "not a valid primary for this request, and not a backup"
+	}
+	if _, blocked := csm.blockedBackupProviders[preferred]; blocked {
+		return "", "blocked backup"
+	}
+	if !backup.IsSupportingAddon(addon) || !backup.IsSupportingExtensions(extensions, ctx) {
+		return "", "backup does not serve this collection"
+	}
+	return preferred, ""
+}
+
 // this is being read in multiple locations and but never changes so no need to lock.
 func (csm *ConsumerSessionManager) RPCEndpoint() RPCEndpoint {
 	return *csm.rpcEndpoint
@@ -699,6 +743,7 @@ type EndpointWithDirectConnection struct {
 	Endpoint         *Endpoint
 	DirectConnection DirectRPCConnection
 	ProviderAddress  string
+	Backup           bool // from the backup provider list rather than the pairing
 }
 
 // GetAllDirectRPCEndpoints returns all endpoints with direct RPC connections from both
@@ -720,7 +765,7 @@ func (csm *ConsumerSessionManager) GetAllDirectRPCEndpoints() []*EndpointWithDir
 
 	var results []*EndpointWithDirectConnection
 
-	collect := func(providers map[string]*ConsumerSessionsWithProvider) {
+	collect := func(providers map[string]*ConsumerSessionsWithProvider, backup bool) {
 		for providerAddr, cswp := range providers {
 			for _, endpoint := range cswp.Endpoints {
 				// The length check is redundant today (IsDirectRPC IS len(DirectConnections) > 0)
@@ -731,14 +776,15 @@ func (csm *ConsumerSessionManager) GetAllDirectRPCEndpoints() []*EndpointWithDir
 						Endpoint:         endpoint,
 						DirectConnection: endpoint.DirectConnections[0],
 						ProviderAddress:  providerAddr,
+						Backup:           backup,
 					})
 				}
 			}
 		}
 	}
 
-	collect(csm.pairing)
-	collect(csm.backupProviders)
+	collect(csm.pairing, false)
+	collect(csm.backupProviders, true)
 
 	return results
 }
@@ -1585,6 +1631,13 @@ const (
 )
 
 type GetSessionsOptions struct {
+	// PreferredProvider routes the request to this provider when selection could hand it the
+	// request right now (usablePreferredProvider), and leaves the request to ordinary selection
+	// when it could not. Unlike a header pin it is the router's preference rather than the caller's
+	// demand: it never fails a request, never releases the blocked list, never outranks the caller's
+	// lava-select-provider or lava-stickiness, and is ignored under a group-diversity policy. It may
+	// name a backup, which a header pin cannot reach. Read-your-writes pins use it (MAG-4032).
+	PreferredProvider string
 	// MinGroups > 1 makes selection fan out across at least this many distinct provider groups so a
 	// group-diversity cross-validation policy can be satisfied. Default 0/1 means group-blind selection.
 	MinGroups int
@@ -1706,6 +1759,11 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	tempIgnoredProviders := &ignoredProviders{
 		providers:    initUnwantedProviders,
 		currentEpoch: csm.atomicReadCurrentEpoch(),
+	}
+	// Read here, after the fleet sticky claim has been resolved into selectedProvider above: any
+	// directive of the caller's outranks the router's own preference.
+	if selectedProvider == "" && stickiness == "" && len(opts) > 0 {
+		tempIgnoredProviders.preferredProvider = opts[0].PreferredProvider
 	}
 	utils.LavaFormatTrace("GetSessions tempIgnoredProviders", utils.LogAttr("tempIgnoredProviders", tempIgnoredProviders), utils.LogAttr("GUID", ctx))
 
@@ -2578,7 +2636,20 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 			return nil, rankErr
 		}
 		providerAddresses = csm.orderForGroupDiversity(ranked, wantedProviderNumber, minGroups, perGroupTarget)
+	} else if preferred, reason := csm.usablePreferredProvider(ctx, ignoredProviders, addon, extensions); preferred != "" {
+		utils.LavaFormatDebug("routing to the preferred provider",
+			utils.LogAttr("provider", preferred),
+			utils.LogAttr("GUID", ctx),
+		)
+		providerAddresses = []string{preferred}
 	} else {
+		if reason != "" {
+			utils.LavaFormatDebug("preferred provider cannot take this request, selecting normally",
+				utils.LogAttr("provider", ignoredProviders.preferredProvider),
+				utils.LogAttr("reason", reason),
+				utils.LogAttr("GUID", ctx),
+			)
+		}
 		providerAddresses, err = csm.getValidProviderAddresses(ctx, wantedProviderNumber, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider)
 		if err != nil {
 			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get a provider addresses", utils.LogAttr("error", err), utils.LogAttr("GUID", ctx))

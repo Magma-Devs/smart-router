@@ -109,6 +109,10 @@ with the backend: a hit always costs ~1 RTT, and a miss waits out the budget bef
 through to the upstream. (`--secondary-cache-timeout` is the same knob for the secondary
 tier.)
 
+The router also decides what it **writes**: when `--cache-max-entry-bytes` is set (it is off
+by default), a reply body larger than it is served but never written, on this backend as on
+cache-be. Each one counts in `smartrouter_cache_write_skipped_total{reason="size"}`.
+
 Config values are **not** environment-expanded: a `${VAR}` written here is read literally as
 the value.
 
@@ -227,6 +231,19 @@ the outage starts, once more if its cause changes, and once when the file is rea
 rotation that lands with the recovery is pushed to every connection, including those opened
 during the outage. It does not repeat the warning on every poll, so a long outage costs one
 log line rather than one per interval.
+
+A store that closes or refuses connections while requests are flowing does not cost the router
+memory: a connection whose setup failed is released, buffers and socket included, once the
+garbage collector reclaims it, rather than being kept by the rotation machinery for the life of
+the process. Its file descriptor therefore closes at the next collection, not at the failure,
+and a collection is triggered by heap growth (`GOGC`), not by the failure. Every failed
+handshake allocates the same two 32 KiB buffers, so the sockets open at once during an outage
+are roughly `live heap × GOGC/100 ÷ 64 KiB`: about 4,000 for a router with 256 MiB live, one
+cycle's worth, which is where the figure the defect was measured at came from. Under a low
+`nofile` limit (1024 is a common service default) that is exhaustion before the first cycle,
+and the router's other sockets fail alongside. Bounding how many connections an outage opens at
+all is the job of the request-path breaker (MAG-3676), a separate change; this one bounds how
+long each failed connection is held. Together they are the fix.
 
 ## Sizing and eviction (`maxmemory-policy`)
 

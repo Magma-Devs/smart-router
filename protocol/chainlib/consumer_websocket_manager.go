@@ -11,6 +11,7 @@ import (
 	"github.com/goccy/go-json"
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -496,6 +497,18 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		protocolMessage, err := cwm.relaySender.ParseRelay(webSocketCtx, "", string(msg), cwm.connectionType, dappID, userIp, nil)
 		if err != nil {
 			utils.LavaFormatDebug("ws manager could not parse message", utils.LogAttr("message", msg), utils.LogAttr("err", err))
+			// A batch the chain cannot take is a request the caller can fix, so it gets the same
+			// -32600 the POST handler returns rather than the masked GUID the generic formatter
+			// writes. Without this the identical request shape yields an actionable error over
+			// HTTP and an opaque one here.
+			if errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused) {
+				refused := common.JsonRpcInvalidRequestError
+				refused.Error.Data = rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error()
+				if msgData, marshalErr := json.Marshal(refused); marshalErr == nil {
+					sendWS(webSocketMsgWithType{messageType: messageType, msg: msgData})
+					continue
+				}
+			}
 			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})

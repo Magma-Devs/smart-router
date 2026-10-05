@@ -17,10 +17,14 @@ func NewRelayerRemote(relay grpcproxy.ProxyCallBack) *RelayerRemote {
 }
 
 type RelayerRemote struct {
-	relay grpcproxy.ProxyCallBack
+	relay   grpcproxy.ProxyCallBack
+	replies replyFiles
 }
 
-func (r RelayerRemote) ProtoFileByPath(path string) (*descriptorpb.FileDescriptorProto, error) {
+func (r *RelayerRemote) ProtoFileByPath(path string) (*descriptorpb.FileDescriptorProto, error) {
+	if fd, ok := r.replies.byPath(path); ok {
+		return fd, nil
+	}
 	return r.sendReq(&grpc_reflection_v1alpha.ServerReflectionRequest{
 		MessageRequest: &grpc_reflection_v1alpha.ServerReflectionRequest_FileByFilename{
 			FileByFilename: path,
@@ -28,7 +32,7 @@ func (r RelayerRemote) ProtoFileByPath(path string) (*descriptorpb.FileDescripto
 	})
 }
 
-func (r RelayerRemote) ProtoFileContainingSymbol(name protoreflect.FullName) (*descriptorpb.FileDescriptorProto, error) {
+func (r *RelayerRemote) ProtoFileContainingSymbol(name protoreflect.FullName) (*descriptorpb.FileDescriptorProto, error) {
 	return r.sendReq(&grpc_reflection_v1alpha.ServerReflectionRequest{
 		MessageRequest: &grpc_reflection_v1alpha.ServerReflectionRequest_FileContainingSymbol{
 			FileContainingSymbol: string(name),
@@ -36,7 +40,7 @@ func (r RelayerRemote) ProtoFileContainingSymbol(name protoreflect.FullName) (*d
 	})
 }
 
-func (r RelayerRemote) sendReq(req *grpc_reflection_v1alpha.ServerReflectionRequest) (*descriptorpb.FileDescriptorProto, error) {
+func (r *RelayerRemote) sendReq(req *grpc_reflection_v1alpha.ServerReflectionRequest) (*descriptorpb.FileDescriptorProto, error) {
 	reqBytes, err := proto.Marshal(req)
 	if err != nil {
 		return nil, err
@@ -56,9 +60,9 @@ func (r RelayerRemote) sendReq(req *grpc_reflection_v1alpha.ServerReflectionRequ
 	if err != nil {
 		return nil, err
 	}
-	return parseFileDescriptorResponse(respOneof)
+	return r.replies.keep(respOneof)
 }
 
-func (r RelayerRemote) Close() error {
+func (r *RelayerRemote) Close() error {
 	return nil
 }

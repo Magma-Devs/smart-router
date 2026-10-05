@@ -232,8 +232,8 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	// Backfill: the populator owns ALL eligibility — node-error, status-code,
 	// stateful, NOT_APPLICABLE, finalization — so this call is unconditional and the
 	// checks see the entry's real state. It runs BEFORE SetResponse so the
-	// populator's synchronous deep copy cannot race the response path's later header
-	// appends; the actual SET stays async inside the populator. When the primary is
+	// populator's synchronous snapshot (cacheWriteReplySnapshot) is taken before the
+	// response path's later header appends; the actual SET stays async inside the populator. When the primary is
 	// inactive the populator skips itself (secondary-only topology).
 	rpcss.tryCacheWriteResolved(ctx, protocolMessage, &relayResult, &requestedBlockForCache)
 

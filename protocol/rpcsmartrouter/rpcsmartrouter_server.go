@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -31,13 +33,11 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/protocopy"
 	"github.com/magma-Devs/smart-router/version"
 
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/spf13/viper"
-	"google.golang.org/grpc"
 	grpcmetadata "google.golang.org/grpc/metadata"
 )
 
@@ -95,6 +95,13 @@ type RPCSmartRouterServer struct {
 	secondaryCache        performance.CacheReader
 	secondaryCacheTimeout time.Duration
 
+	// Largest reply body tryCacheWriteResolved writes (--cache-max-entry-bytes); 0 = no cap.
+	cacheMaxEntryBytes int64
+
+	// Read-your-writes pins (MAG-4032, --read-your-writes-window). Nil — off — unless this
+	// listener is JSON-RPC and the window is positive.
+	readYourWrites *readYourWrites
+
 	// Per-endpoint ChainTracker manager for continuous block polling
 	endpointChainTrackerManager *endpointstate.EndpointMonitor
 
@@ -139,6 +146,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	cache performance.CacheBackend,
 	secondaryCache performance.CacheReader,
 	secondaryCacheTimeout time.Duration,
+	cacheMaxEntryBytes int64,
 	rpcSmartRouterLogs *metrics.RPCConsumerLogs,
 	relaysMonitor *metrics.RelaysMonitor,
 	cmdFlags common.ConsumerCmdFlags,
@@ -151,6 +159,10 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.cache = cache
 	rpcss.secondaryCache = secondaryCache
 	rpcss.secondaryCacheTimeout = secondaryCacheTimeout
+	rpcss.cacheMaxEntryBytes = cacheMaxEntryBytes
+	if listenEndpoint.ApiInterface == spectypes.APIInterfaceJsonRPC {
+		rpcss.readYourWrites = newReadYourWrites(cmdFlags.ReadYourWritesWindow)
+	}
 	rpcss.rpcSmartRouterLogs = rpcSmartRouterLogs
 	rpcss.chainParser = chainParser
 	rpcss.sharedState = sharedState
@@ -357,17 +369,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 
 func (rpcss *RPCSmartRouterServer) GetListeningAddress() string {
 	return rpcss.chainListener.GetListeningAddress()
-}
-
-// GetGRPCReflectionConnection implements chainlib.GRPCReflectionProvider.
-// This enables gRPC reflection for tools like grpcurl when using Direct RPC mode.
-// Returns a connection to the upstream gRPC server for reflection requests.
-func (rpcss *RPCSmartRouterServer) GetGRPCReflectionConnection(ctx context.Context) (*grpc.ClientConn, func(), error) {
-	if rpcss.grpcSubscriptionManager == nil {
-		return nil, nil, fmt.Errorf("gRPC reflection not available: no gRPC subscription manager configured")
-	}
-
-	return rpcss.grpcSubscriptionManager.GetReflectionConnection(ctx)
 }
 
 // GetGRPCSubscriptionManager implements chainlib.GRPCSubscriptionProvider, which is how
@@ -1270,9 +1271,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// detached dissenting straggler would land last and overwrite the cache with the data the
 	// quorum just outvoted). The consensus WINNER is written exactly once, here — and BEFORE
 	// appendHeadersToRelayResult appends this request's cross-validation response headers to
-	// returnedResult.Reply.Metadata, so the cached entry (a deep copy of the whole reply, metadata
-	// included) does not carry per-request CV/GUID headers that would then be replayed verbatim to
-	// unrelated stateless requests on a cache hit.
+	// returnedResult.Reply.Metadata, so the cached entry (a snapshot of the reply taken here, see
+	// cacheWriteReplySnapshot) does not carry per-request CV/GUID headers that would then be
+	// replayed verbatim to unrelated stateless requests on a cache hit.
 	if err == nil && relayProcessor.GetSelection() == relaycore.CrossValidation && returnedResult != nil && returnedResult.Reply != nil {
 		rpcss.tryCacheWrite(ctx, protocolMessage, returnedResult)
 	}
@@ -1311,6 +1312,10 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	if err != nil {
 		return returnedResult, utils.LavaFormatError("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
 	}
+
+	// MAG-4032: pin what a served write names to the upstream that holds it, before the caller can
+	// read it back. recordWrite decides which answers show that: a result, or "already known".
+	rpcss.readYourWrites.recordWrite(protocolMessage, returnedResult, rpcss.directRelayChainFamily())
 
 	if analytics != nil {
 		currentLatency := time.Since(relaySentTime)
@@ -1832,10 +1837,19 @@ func shouldFailSessionForResult(err error, relayResult *common.RelayResult) bool
 		return true
 	}
 	// Node error delivered inside a 2xx body — scoreable unless a carve-out claims it.
+	//
+	// IsNodeCapability is here for the same reason as IsDataScope, one level up: the endpoint
+	// answered truthfully about what it will serve, so the answer is no evidence it cannot serve.
+	// It used to be absent, which was inert only because every node-capability code was also
+	// non-retryable and so already excused by IsNonRetryable. NODE_ACCESS_DENIED is retryable
+	// AND node-capability, so without this clause a 403 would be kept off MarkUnhealthy by
+	// EndpointAtFault and still demote the endpoint through the availability signal — one answer
+	// blaming the endpoint in one place and excusing it in the other.
 	return relayResult.IsNodeError &&
 		!relayResult.IsNonRetryable &&
 		!relayResult.IsRateLimited &&
-		!relayResult.IsDataScope
+		!relayResult.IsDataScope &&
+		!relayResult.IsNodeCapability
 }
 
 // relayProvesEndpointHealthy reports whether a completed direct-RPC relay is POSITIVE proof that
@@ -1866,6 +1880,62 @@ func relayProvesEndpointHealthy(relayResult *common.RelayResult) bool {
 		return false
 	}
 	return relayResult.StatusCode == 0 || (relayResult.StatusCode >= 200 && relayResult.StatusCode < 300)
+}
+
+// statefulDeliveryLinger is how long a stateful broadcast's delivery may keep running after the
+// request has its answer (MAG-4032). Long enough for any healthy upstream: a submission is answered
+// in well under a second, and one still silent this long after another upstream accepted the write
+// is either hung or will see the transaction by gossip first. Short enough to bound what a hung
+// upstream costs: a write's attempt budget is 180 s (it is stateful and a hanging API), and without
+// this a vendor that accepts the connection but never answers would hold a session that long per
+// write, filling the default cap of 1000 sessions at about 6 writes a second. At 5 s it takes 200.
+const statefulDeliveryLinger = 5 * time.Second
+
+// relayContext returns the context one relay of a batch runs under, and the cancel that ends it.
+//
+//   - Stateless: a child of the batch context, so a hedge's loser is cut off the moment the other
+//     attempt answers. A read has nothing to deliver.
+//   - CrossValidation: detached from the batch cancel, so a straggler runs to its own bound and is
+//     compared against the consensus (MAG-2187).
+//   - Stateful: detached, so every upstream receives the transaction even after the first
+//     acceptance has answered the caller, then cut off linger after the batch ends (MAG-4032).
+//
+// Values (GUID, IP forwarding metadata) are preserved in every case.
+func relayContext(batchCtx context.Context, selection relaycore.Selection, linger time.Duration) (context.Context, context.CancelFunc) {
+	switch selection {
+	case relaycore.CrossValidation:
+		return context.WithCancel(context.WithoutCancel(batchCtx))
+	case relaycore.Stateful:
+		relayCtx, cancel := context.WithCancel(context.WithoutCancel(batchCtx))
+		stopLinger := context.AfterFunc(batchCtx, func() {
+			cutOff := time.AfterFunc(linger, cancel)
+			context.AfterFunc(relayCtx, func() { cutOff.Stop() })
+		})
+		return relayCtx, func() {
+			stopLinger()
+			cancel()
+		}
+	default:
+		return context.WithCancel(batchCtx)
+	}
+}
+
+// errLostBroadcastRejection is the release reason for a lostBroadcastRejection.
+var errLostBroadcastRejection = errors.New("stateful delivery rejected after another upstream accepted the write")
+
+// lostBroadcastRejection reports whether a relay is a stateful delivery that answered with a
+// rejection after another upstream had already accepted the write (MAG-4032).
+//
+// Such an answer says nothing about the upstream's health. A loser's rejection is almost always
+// about the transaction itself: it is already in the pool, by gossip or from this very broadcast,
+// and each client words that differently ("already known", "Known transaction", "AlreadyKnown",
+// "nonce too low" once the winner's block lands). Scoring it would blame a healthy upstream for
+// every write it loses, and a wording the registry does not know reads as the node's fault, so it
+// would mark the endpoint unhealthy too. It is released without a score instead, which is what a
+// loser got while the broadcast was still cancelled on the first acceptance. A delivery that fails
+// at the transport (refused, reset, never answered) is not a rejection, and still counts.
+func lostBroadcastRejection(selection relaycore.Selection, answeredWithNodeError bool, acceptedElsewhere int) bool {
+	return selection == relaycore.Stateful && answeredWithNodeError && acceptedElsewhere > 0
 }
 
 // sendRelayToDirectEndpoints handles relay for direct RPC sessions (smart router direct mode)
@@ -2065,9 +2135,21 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// stragglers run to completion (bounded by the reflection pre-check + SendDirectRelay's
 	// attemptBudget+url.Timeout window) and always push their response via the deferred SetResponse,
 	// feeding the post-reply straggler watcher. Values (GUID, IP forwarding metadata) are preserved
-	// by WithoutCancel. Non-CV selections keep the batch cancel: aborting the hedged losers on first
-	// success is a deliberate resource-saver there. Trade-off: in CV mode a client disconnect no
-	// longer aborts in-flight relays; they run out their bounded timeout.
+	// by WithoutCancel. Trade-off: a client disconnect no longer aborts in-flight relays; they run out
+	// their bounded timeout.
+	//
+	// A stateful broadcast is detached too, for its own reason (MAG-4032). Each of its relays
+	// delivers the caller's transaction to one upstream, and the first acceptance used to cancel the
+	// rest mid-flight. The request is often on the wire by then, but what an upstream does with a
+	// request whose client hung up is its gateway's business, and one that drops it learns of the
+	// transaction by gossip, seconds later. A read routed there in the meantime saw the state from
+	// before the write: the pending nonce the caller had just used. Letting every delivery finish,
+	// within statefulDeliveryLinger of the answer, is what makes the broadcast one. Nothing reads a
+	// late stateful response — it lands in a buffer sized for the whole broadcast
+	// (statefulFanOutCeiling) — a stateful request is never cache-written (cacheExclusionReason),
+	// and a late rejection is released without a score (lostBroadcastRejection). Stateless keeps
+	// the batch cancel: aborting a hedge's loser on first success is a deliberate resource-saver,
+	// and a read has nothing to deliver. relayContext holds all three rules.
 	//
 	// Post-reply side-effect audit (the detachment reintroduces every post-relay side effect the
 	// batch cancel used to suppress, so each is classified here rather than one review round at a
@@ -2082,14 +2164,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// write (skipped for CV in the goroutine; the consensus winner is cached once in SendParsedRelay)
 	// and analytics.Success (removed from relayInnerDirect; set once on the request goroutine).
 	//
-	// No explicit per-provider detachment cap: a detached relay holds its session until it resolves,
-	// but the session manager already bounds outstanding sessions at MaxSessionsAllowedPerProvider,
-	// so a dead provider self-limits (it stops being granted new sessions and is excluded) without a
-	// second CV-specific cap to keep in sync.
-	relayParentCtx := ctx
+	// No explicit per-provider detachment cap for cross-validation: a detached straggler holds its
+	// session until it resolves, but the session manager already bounds outstanding sessions at
+	// MaxSessionsAllowedPerProvider, so a dead provider self-limits (it stops being granted new
+	// sessions and is excluded) without a second CV-specific cap to keep in sync. A stateful delivery
+	// does get its own bound, statefulDeliveryLinger: cross-validation is opt-in per method, while
+	// every write on every chain takes this path, at a write's 180 s attempt budget.
 	if selection == relaycore.CrossValidation {
-		relayParentCtx = context.WithoutCancel(ctx)
-
 		// Re-snapshot the queried-providers set to the post-filter survivors. The pre-filter
 		// snapshot in sendRelayToEndpoint includes consistency-filtered endpoints that were
 		// released above without ever being dispatched a relay (no SetResponse), so they would be
@@ -2131,9 +2212,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 
 	// Launch goroutines for each direct RPC endpoint (parallel relay pattern)
 	for endpointAddress, sessionInfo := range sessions {
-		go func(endpointAddress string, sessionInfo *lavasession.SessionInfo, relayParentCtx context.Context) {
-			// Derive from relayParentCtx so IP forwarding metadata (and other values) are preserved.
-			goroutineCtx, goroutineCtxCancel := context.WithCancel(relayParentCtx)
+		go func(endpointAddress string, sessionInfo *lavasession.SessionInfo) {
+			goroutineCtx, goroutineCtxCancel := relayContext(ctx, selection, statefulDeliveryLinger)
 
 			guid, found := utils.GetUniqueIdentifier(ctx)
 			if found {
@@ -2205,6 +2285,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				harvestGen = rpcss.endpointObservationGeneration(targetEndpoint.NetworkAddress)
 			}
 
+			// This relay's own result is recorded only by the deferred SetResponse above, so a
+			// success already in the processor is another upstream's acceptance.
+			lostBroadcast := func(answeredWithNodeError bool) bool {
+				if selection != relaycore.Stateful || !answeredWithNodeError {
+					return false
+				}
+				accepted, _, _, _ := relayProcessor.GetResults()
+				return lostBroadcastRejection(selection, answeredWithNodeError, accepted)
+			}
+
 			relayLatency, err, _ := rpcss.relayInnerDirect(
 				spanCtx,
 				singleConsumerSession,
@@ -2215,20 +2305,22 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				originalRequestData,
 				analytics,
 				func() bool { return requestRanOutOfRoad(relayProcessor.GetStopReason()) },
+				lostBroadcast,
 			)
 
 			// Did the request run out of road, or did we cut this attempt short? Decides below
 			// whether a relay that produced nothing is a hang or a race loser.
 			ranOutOfRoad := requestRanOutOfRoad(relayProcessor.GetStopReason())
 
-			// Did WE stop this relay? On a stateful broadcast every endpoint is queried and the
-			// first answer cancels the rest, so N-1 goroutines land here holding context.Canceled
-			// through no fault of their endpoint. Same for a client that hung up. Resolved once,
-			// here, and reused by both the metric outcome and the session release below so the two
-			// can never disagree about what happened (MAG-2648).
+			// Did WE stop this relay? When a hedged read races two endpoints the first answer
+			// cancels the other, which lands here holding context.Canceled through no fault of its
+			// endpoint. Same for a client that hung up. Resolved once, here, and reused by both the
+			// metric outcome and the session release below so the two can never disagree about
+			// what happened (MAG-2648).
 			//
-			// goroutineCtx is the right context to ask: for cross-validation it is derived from a
-			// WithoutCancel parent, so a detached straggler is correctly NOT seen as cancelled.
+			// goroutineCtx is the right context to ask: for cross-validation and for a stateful
+			// broadcast it is derived from a WithoutCancel parent, so a detached relay is correctly
+			// NOT seen as cancelled.
 			isClientCancel := err != nil && common.IsClientCancellation(err, goroutineCtx)
 
 			if rpcss.smartRouterEndpointMetrics != nil {
@@ -2260,11 +2352,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			// Handle response
 			if err != nil {
 				tracing.RecordError(provSpan, err)
-				// A relay WE cancelled is not an endpoint failure: on a stateful broadcast the
-				// first answer cancels the rest, so promoting this unconditionally would emit
-				// N-1 INFO lines per request for endpoints that did nothing wrong — the same
-				// mis-attribution MAG-2648 removed from scoring. Keep those at DEBUG; a genuine
-				// endpoint failure is the exceptional path an operator needs at INFO.
+				// A relay WE cancelled is not an endpoint failure: a hedge's loser is cancelled
+				// when the other answers, so promoting this unconditionally would emit an INFO
+				// line per race for endpoints that did nothing wrong — the same mis-attribution
+				// MAG-2648 removed from scoring. Keep those at DEBUG; a genuine endpoint failure
+				// is the exceptional path an operator needs at INFO.
 				logRelayFailure := utils.LavaFormatInfo
 				if isClientCancel {
 					logRelayFailure = utils.LavaFormatDebug
@@ -2328,11 +2420,25 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			} else if isClientCancel {
 				// Cancelled while it still had budget left, so availability was never tested —
 				// release without a QoS penalty (MAG-2648). OnSessionFailure here would feed the
-				// optimizer a 0 and, on a broadcast, hit every healthy node but the fastest.
+				// optimizer a 0 for every race a healthy node happened to lose.
 				//
 				// This branch precedes the shouldFailSession test on purpose — a cancelled relay
 				// always has err != nil, so it would otherwise be swallowed by the failure arm.
 				if errSession := rpcss.sessionManager.OnSessionCancelled(singleConsumerSession, err); errSession != nil {
+					utils.LavaFormatWarning("OnSessionCancelled failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if err == nil && !localRelayResult.IsRateLimited && lostBroadcast(localRelayResult.IsNodeError) {
+				// A rejection after another upstream accepted the write is about the transaction,
+				// not this upstream (lostBroadcastRejection): no score either way, as when a loser
+				// was still cancelled on the first acceptance. A rate limit is excluded so it keeps
+				// its own treatment below — the hold-off is worth having whoever won.
+				utils.LavaFormatDebug("stateful delivery rejected after another upstream accepted the write, releasing without a score",
+					utils.LogAttr("endpoint", endpointAddress),
+					utils.LogAttr("GUID", goroutineCtx),
+				)
+				if errSession := rpcss.sessionManager.OnSessionCancelled(singleConsumerSession, errLostBroadcastRejection); errSession != nil {
 					utils.LavaFormatWarning("OnSessionCancelled failed for direct RPC", errSession,
 						utils.LogAttr("GUID", goroutineCtx),
 					)
@@ -2447,7 +2553,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			}
 
 			// NOTE: Don't call Free() here - OnSessionDone/OnSessionFailure already do it!
-		}(endpointAddress, sessionInfo, relayParentCtx)
+		}(endpointAddress, sessionInfo)
 	}
 
 	// NOTE: Don't call WaitForResults here!
@@ -3253,7 +3359,9 @@ func (rpcss *RPCSmartRouterServer) endpointObservationGeneration(endpointURL str
 //   - Solana family (JSON-RPC): result.context.slot — the slot the query was processed at,
 //     i.e. the node's current tip — present on most successful Solana responses
 //     (getBalance, getAccountInfo, getLatestBlockhash, ...). Chain-aware; never applied to
-//     other chains. See extractSolanaContextSlot.
+//     other chains. See extractSolanaContextSlot. The GET_BLOCK_BY_NUM method (getBlock) is
+//     skipped without reading the reply: it answers with the block itself, never with a
+//     context, and looking for one would walk every transaction in a multi-MB block.
 //   - Otherwise (EVM/gRPC): Reply.LatestBlock is the tip ONLY for a method whose semantics make the
 //     reply's block the node's current tip, identified by SPEC TAG (not by RequestedBlock alone):
 //     1. GET_BLOCKNUM (eth_blockNumber-equivalent): the result IS the tip.
@@ -3274,6 +3382,9 @@ func (rpcss *RPCSmartRouterServer) tipBlockFromRelay(chainMessage chainlib.Chain
 		return 0, false
 	}
 	if common.IsSolanaFamily(rpcss.listenEndpoint.ChainID) {
+		if rpcss.isGetBlockByNumMethod(chainMessage) {
+			return 0, false
+		}
 		return extractSolanaContextSlot(reply.Data)
 	}
 	if reply.LatestBlock <= 0 {
@@ -3672,6 +3783,7 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 // - Quorum is enabled (quorum requires fresh endpoint validation)
 // - Request is stateful or node-bound (cacheExclusionReason)
 // - Response is a node error
+// - Response body is larger than cacheMaxEntryBytes (--cache-max-entry-bytes)
 // - Requested block is NOT_APPLICABLE
 // - Requested block is a tag the resolution above leaves negative (EARLIEST/PENDING/SAFE/FINALIZED)
 func (rpcss *RPCSmartRouterServer) tryCacheWrite(
@@ -3766,9 +3878,25 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		return
 	}
 
+	// Checked before anything that reads the body: encoding a multi-MB entry costs the router
+	// and the cache backend more than its rare hits save. Covers every backend and the
+	// secondary tier's backfill, which all write through here.
+	chainId, apiInterface := rpcss.GetChainIdAndApiInterface()
+	apiName := protocolMessage.GetApi().GetName()
+	bodyBytes := len(relayResult.Reply.Data)
+	if rpcss.cacheMaxEntryBytes > 0 && int64(bodyBytes) > rpcss.cacheMaxEntryBytes {
+		utils.LavaFormatDebug("cache write skipped: reply over the entry size cap",
+			utils.LogAttr("chainId", chainId),
+			utils.LogAttr("api", apiName),
+			utils.LogAttr("size", bodyBytes),
+			utils.LogAttr("GUID", ctx),
+		)
+		rpcss.smartRouterEndpointMetrics.RecordCacheWriteSkipped(chainId, apiInterface, apiName, metrics.CacheWriteSkipReasonSize)
+		return
+	}
+
 	// Compute cache key via the protocol message so the SET key matches the GET key,
 	// including any explicit lava-extension directive folded in by HashCacheRequest.
-	chainId := rpcss.listenEndpoint.ChainID
 	hashKey, _, hashErr := protocolMessage.HashCacheRequest(chainId)
 	if hashErr != nil {
 		utils.LavaFormatDebug("cache write skipped: hash computation failed",
@@ -3899,15 +4027,9 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		sharedStateId = rpcss.listenEndpoint.Key()
 	}
 
-	// Deep copy reply to avoid race conditions (cache write is async)
-	copyReply := &pairingtypes.RelayReply{}
-	if copyErr := protocopy.DeepCopyProtoObject(relayResult.Reply, copyReply); copyErr != nil {
-		utils.LavaFormatDebug("cache write skipped: failed to copy reply",
-			utils.LogAttr("error", copyErr),
-			utils.LogAttr("GUID", ctx),
-		)
-		return
-	}
+	// Snapshot the reply for the async write; see cacheWriteReplySnapshot for what it shares.
+	copyReply := cacheWriteReplySnapshot(relayResult.Reply)
+	rpcss.smartRouterEndpointMetrics.RecordCacheEntryWritten(chainId, apiInterface, apiName, bodyBytes)
 
 	// Write to cache in a non-blocking goroutine
 	go func() {
@@ -3948,6 +4070,60 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 			)
 		}
 	}()
+}
+
+// cacheWriteReplySnapshot returns the copy of a reply the async cache write reads while the
+// response path keeps using the original. The write outlives this call, and the response path
+// then mutates the reply: the relay goroutine stamps LatestBlock with the endpoint's observed
+// tip when the reply carried none, and appendHeadersToRelayResult appends this request's
+// headers to Metadata. So the struct is copied and Metadata cloned, and the snapshot is
+// immune to both.
+//
+// The byte slices are shared, not copied. Data is the body, up to tens of MB on a block
+// reply, and nothing writes into it after it is read off the wire — every later change
+// (the JSON-RPC id restore, the secondary cache's rewrites) builds a new slice and
+// reassigns the field, which leaves the snapshot's slice alone. This replaced a
+// JSON-and-base64 deep copy that cost 33 ms and a second full copy of the body per write
+// on a 5 MB Solana block. Anything that starts writing into Data in place would corrupt
+// cached entries: TestCacheWriteSnapshotSurvivesResponseMutation pins the contract.
+//
+// The snapshot is also private to the write, which mutates it: the RESP backend's
+// NewEnvelope reassigns Response.Sig and, for a compressed body, Response.Data. Handing the
+// write relayResult.Reply itself would race the response path even with nothing appended.
+func cacheWriteReplySnapshot(reply *pairingtypes.RelayReply) *pairingtypes.RelayReply {
+	snapshot := *reply
+	snapshot.Metadata = slices.Clone(reply.Metadata)
+	return &snapshot
+}
+
+// replyHeaderDirectives is the reply-direction header directives of the served API
+// interface, from the chain parser (ChainParser.ReplyHeaderDirectives), or nil for a server
+// built without one (tests). The relay sender and the primary cache hit path filter an
+// upstream's headers by them (MAG-3104).
+func (rpcss *RPCSmartRouterServer) replyHeaderDirectives() []*spectypes.Header {
+	if rpcss.chainParser == nil {
+		return nil
+	}
+	return rpcss.chainParser.ReplyHeaderDirectives()
+}
+
+// filterCachedReplyMetadata applies the live path's upstream-header filter to a reply
+// served from the primary cache, so a hit replays the same reduced set as a live reply
+// whoever wrote the entry: a pod on an older binary during a rollout, or this one before
+// the filter existed. Entries are written before the router's own headers are appended,
+// so nothing the router minted is in the set. The reply is the lookup's own unmarshalled
+// copy and is filtered in place.
+func (rpcss *RPCSmartRouterServer) filterCachedReplyMetadata(reply *pairingtypes.RelayReply, protocolMessage chainlib.ProtocolMessage) {
+	if reply == nil || len(reply.Metadata) == 0 {
+		return
+	}
+	var collectionDirectives []*spectypes.Header
+	if protocolMessage != nil {
+		if apiCollection := protocolMessage.GetApiCollection(); apiCollection != nil {
+			collectionDirectives = apiCollection.Headers
+		}
+	}
+	reply.Metadata = filterUpstreamReplyMetadata(reply.Metadata, rpcss.replyHeaderDirectives(), collectionDirectives)
 }
 
 // resolvePinDirectives returns the lava-select-provider and lava-stickiness directives,
@@ -4184,6 +4360,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 								utils.LogAttr("GUID", ctx),
 							)
 							reply.Data = outputFormatter(reply.Data)
+							// Whoever wrote the entry, the client gets the live reply's header set.
+							rpcss.filterCachedReplyMetadata(reply, protocolMessage)
 
 							// Entry kind: the label its writer attached, or its contents. Shared
 							// with the secondary tier so both label a replayed node error
@@ -4297,6 +4475,22 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		}
 	}
 
+	// MAG-4032: a pending-nonce read or a transaction lookup that names a write this router just
+	// served prefers the upstream that accepted the write. A preference, not a pin: selection falls
+	// back on its own when that upstream cannot take the read (GetSessionsOptions.PreferredProvider).
+	// The caller's own directives outrank it, cross-validation needs more than one upstream, and
+	// like the directives it holds for the first attempt only.
+	if selectedProvider == "" && stickiness == "" && selection != relaycore.CrossValidation && usedProviders.BatchNumber() == 0 {
+		if pin := rpcss.readYourWrites.pinFor(protocolMessage); pin != "" {
+			sessionOpts.PreferredProvider = pin
+			utils.LavaFormatDebug("read-your-writes: preferring the upstream that accepted the write",
+				utils.LogAttr("upstream", pin),
+				utils.LogAttr("api", protocolMessage.GetApi().GetName()),
+				utils.LogAttr("GUID", ctx),
+			)
+		}
+	}
+
 	_, sessSpan := tracing.StartInternalSpan(ctx, tracing.SpanGetSessions)
 	sessions, err := rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, extensions, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider, sessionOpts)
 	tracing.RecordSessionStats(sessSpan, numOfEndpoints, len(sessions))
@@ -4402,6 +4596,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 // decision is made rather than passed as a value, because it is only knowable once the attempt has
 // ended. It is what separates a hang from a cancellation for the per-URL health machinery: nil is
 // treated as "not expired", which is the safe default for callers with no request context (tests).
+//
+// lostBroadcast reports whether this relay is a lostBroadcastRejection — a stateful delivery whose
+// rejection arrived after another upstream accepted the write — and is likewise asked only once the
+// answer is in, because the other acceptance can land while this relay is in flight. Such a
+// rejection is not the endpoint's fault, whatever its wording, so it never marks the endpoint
+// unhealthy. nil means "never", the right answer for a caller outside a broadcast.
 func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	ctx context.Context,
 	singleConsumerSession *lavasession.SingleConsumerSession,
@@ -4412,6 +4612,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	originalRequestData []byte,
 	analytics *metrics.RelayMetrics,
 	budgetExpired func() bool,
+	lostBroadcast func(answeredWithNodeError bool) bool,
 ) (relayLatency time.Duration, err error, needsBackoff bool) {
 	// Get direct connection from session
 	directConnection, ok := singleConsumerSession.GetDirectConnection()
@@ -4460,20 +4661,16 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		}
 
 		// Second line of defence for methods the spec does not declare as
-		// subscriptions. Reflection may be unavailable, in which case we have nothing
-		// left to check and the call proceeds as unary, which is the correct handling
-		// for the overwhelming majority of gRPC methods.
-		if rpcss.grpcSubscriptionManager != nil {
-			// Bound the reflection lookup explicitly: it dials + queries the upstream's reflection
-			// service, and detached CV relay contexts carry no deadline — an upstream that accepts the
-			// connection but never answers would otherwise block this goroutine (and leak its session)
-			// forever, since the attempt-budget bound is only applied later inside SendDirectRelay.
-			// Bounded by the WINDOW rather than the budget on purpose: this is a cheap capability
-			// probe, not the relay, and it should not be allowed to consume the whole request.
+		// subscriptions, from the descriptor this call needs anyway: cached on its
+		// connection, and resolved in the background when cold. Without one the call
+		// proceeds as unary, which is right for the overwhelming majority of methods.
+		if resolver, ok := directConnection.(lavasession.GRPCMethodResolver); ok {
+			// Bounded by the WINDOW, not the budget: detached CV relay contexts carry no
+			// deadline, and a capability check must not consume the whole request.
 			streamCheckCtx, streamCheckCancel := context.WithTimeout(ctx, relayTimeout)
-			isStreaming, _, streamErr := rpcss.grpcSubscriptionManager.IsStreamingMethod(streamCheckCtx, methodPath)
+			methodDesc, streamErr := resolver.ResolveMethodDescriptor(streamCheckCtx, methodPath)
 			streamCheckCancel()
-			if streamErr == nil && isStreaming {
+			if streamErr == nil && methodDesc.IsServerStreaming() {
 				utils.LavaFormatWarning("gRPC method is server-streaming upstream but carries no SUBSCRIBE directive in the spec", nil,
 					utils.LogAttr("method", methodPath),
 					utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
@@ -4494,11 +4691,12 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		senderChainFamily = family
 	}
 	directSender := &DirectRPCRelaySender{
-		directConnection:    directConnection,
-		endpointName:        endpointName,
-		originalRequestData: originalRequestData,
-		chainFamily:         senderChainFamily,
-		groupLabel:          singleConsumerSession.Parent.GroupLabel,
+		directConnection:      directConnection,
+		endpointName:          endpointName,
+		originalRequestData:   originalRequestData,
+		chainFamily:           senderChainFamily,
+		groupLabel:            singleConsumerSession.Parent.GroupLabel,
+		replyHeaderDirectives: rpcss.replyHeaderDirectives(),
 	}
 
 	// Send relay directly to RPC endpoint
@@ -4596,8 +4794,17 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// flow through as the NodeError the REST sender already produced
 	// (IsNodeError=true), where it classifies as NODE_UNIMPLEMENTED
 	// (non-retryable) and is returned to the client.
+	//
+	// A 5xx that is the node's own JSON reply (rpcInterfaceMessages.ServerErrorIsNodeReply) is
+	// excluded for the same reason: when every node answers Horizon's
+	// 503 {"tx_status":"TRY_AGAIN_LATER"}, the client must get that reply, not a router-made 500.
+	// Nothing else changes for it: the registry's 500/503 rows are retryable and at fault, so a
+	// read is still retried, and the endpoint is still marked unhealthy and scored, through the
+	// IsNodeAtFault arm and the availability gate. result.IsNodeError is true only for a REST
+	// reply here (the JSON-RPC sender returns every 5xx as an error before this point).
 	statusCode := result.StatusCode
-	if (statusCode >= 500 && statusCode != http.StatusNotImplemented) || statusCode == 429 {
+	carriesNodeReply := result.IsNodeError && rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData())
+	if (statusCode >= 500 && statusCode != http.StatusNotImplemented && !carriesNodeReply) || statusCode == 429 {
 		shouldMarkUnhealthy, needsBackoffHTTP := classifyHTTPStatus(statusCode)
 		needsBackoff = needsBackoffHTTP
 
@@ -4663,13 +4870,15 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// load-bearing — there IsNodeError comes from the HTTP status alone, so a 200 carrying a fault
 	// would take BOTH arms, counting up and then resetting to zero in the same relay. No registry
 	// row produces that shape today; the chaining is what keeps it impossible when one is added.
-	if result.IsNodeAtFault && targetEndpoint != nil {
+	if result.IsNodeAtFault && targetEndpoint != nil && (lostBroadcast == nil || !lostBroadcast(result.IsNodeError)) {
 		rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 		// EndpointDisableNodeError unconditionally, rather than through endpointDisableReasonFor:
-		// reaching this arm REQUIRES an answer to have arrived (err == nil, and the status was
-		// neither 5xx nor 429), so the node replied and the reply carried its own failure. That is
-		// the definition of node-error, and unreachable is unrepresentable here by construction —
-		// a stronger guarantee than the category check the other two arms need, not a weaker one.
+		// reaching this arm REQUIRES an answer to have arrived (err == nil): a non-2xx the sender
+		// kept as the node's reply — any 4xx, or a 5xx whose JSON body is the node's own answer
+		// (carriesNodeReply above). A 5xx the sender could not read as the node's answer, and every
+		// 429, took the transport branch before this point. So the node replied and the reply carried
+		// its own failure: that is the definition of node-error, and unreachable is unrepresentable
+		// here by construction — a stronger guarantee than the category check the other arms need.
 		targetEndpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
 		rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 	} else if targetEndpoint != nil && relayProvesEndpointHealthy(result) {

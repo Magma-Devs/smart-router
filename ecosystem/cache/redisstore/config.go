@@ -477,7 +477,16 @@ type clientCredentials struct {
 
 func (cfg Config) resolveClientCredentials() (clientCredentials, error) {
 	creds := clientCredentials{source: cfg.credentialsSource()}
-	creds.provider = NewStreamingProvider(creds.source)
+	// The streaming provider exists to push a rotated file-backed credential
+	// to live connections. Static credentials used to ride it too, for
+	// uniformity, which put every connection of every RESP client on the path
+	// that kept abandoned connections alive (MAG-3728); they now go straight
+	// into the client options, and the provider is built only when it has a
+	// file to watch and a client that subscribes (sentinel resolves the file
+	// per connection attempt instead, see failoverOptions).
+	if cfg.PasswordFile != "" && cfg.EffectiveTopology() != TopologySentinel {
+		creds.provider = NewStreamingProvider(creds.source)
+	}
 	if cfg.EffectiveTopology() == TopologySentinel {
 		pw, err := cfg.sentinelPassword()
 		if err != nil {
@@ -596,23 +605,33 @@ func trackingDialerMarkedOnly(tlsCfg *tls.Config, dialTimeout time.Duration, tra
 	}
 }
 
+// standaloneOptions builds the single-node client options. provider is nil
+// for static credentials, which then travel in the options themselves; only a
+// file-backed credential rides the streaming provider (see New).
 func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) *redis.Options {
-	return &redis.Options{
-		Dialer:                       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
-		Addr:                         addrs[0],
-		DB:                           cfg.DB,
-		StreamingCredentialsProvider: provider,
-		TLSConfig:                    tlsCfg,
-		DialTimeout:                  cfg.dialTimeout(),
-		ReadTimeout:                  cfg.ReadTimeout,
-		WriteTimeout:                 cfg.WriteTimeout,
-		PoolSize:                     cfg.PoolSize,
+	opts := &redis.Options{
+		Dialer:       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
+		Addr:         addrs[0],
+		DB:           cfg.DB,
+		TLSConfig:    tlsCfg,
+		DialTimeout:  cfg.dialTimeout(),
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+		PoolSize:     cfg.PoolSize,
 		// The caller's context deadline must bound socket I/O: the router
 		// gives cache lookups a tight per-relay budget, and without this
 		// go-redis uses only Read/WriteTimeout (seconds) for socket deadlines,
 		// letting a slow backend inject latency far past that budget.
 		ContextTimeoutEnabled: true,
 	}
+	// A typed-nil provider must never reach the interface field: go-redis
+	// would call it and nil-panic on the first connection.
+	if provider != nil {
+		opts.StreamingCredentialsProvider = provider
+	} else {
+		opts.Username, opts.Password = cfg.Username, cfg.Password
+	}
+	return opts
 }
 
 // failoverOptions carries data-node credentials through
@@ -649,19 +668,26 @@ func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source Cre
 	}
 }
 
+// clusterOptions builds the cluster client options; the credential rule is
+// standaloneOptions's.
 func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) *redis.ClusterOptions {
-	return &redis.ClusterOptions{
-		Dialer:                       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
-		Addrs:                        addrs,
-		StreamingCredentialsProvider: provider,
-		TLSConfig:                    tlsCfg,
-		DialTimeout:                  cfg.dialTimeout(),
-		ReadTimeout:                  cfg.ReadTimeout,
-		WriteTimeout:                 cfg.WriteTimeout,
-		PoolSize:                     cfg.PoolSize,
+	opts := &redis.ClusterOptions{
+		Dialer:       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker),
+		Addrs:        addrs,
+		TLSConfig:    tlsCfg,
+		DialTimeout:  cfg.dialTimeout(),
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+		PoolSize:     cfg.PoolSize,
 		// See standaloneOptions: the caller's deadline must bound socket I/O.
 		ContextTimeoutEnabled: true,
 	}
+	if provider != nil {
+		opts.StreamingCredentialsProvider = provider
+	} else {
+		opts.Username, opts.Password = cfg.Username, cfg.Password
+	}
+	return opts
 }
 
 // buildClient constructs one client for the given address set, from the

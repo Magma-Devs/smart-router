@@ -80,6 +80,17 @@ var faultAxisTable = []faultAxisCase{
 	// The caller's fault. Non-retryable, and no fault-axis label needed — the default arm of
 	// classifyEndpointHealth already excuses CategoryExternal + !Retryable.
 	{2016, "NODE_UNAUTHORIZED", SubCategoryNone, false, "credentials rejected; see the note below"},
+	// The endpoint refused the router (REST 401/402/403/407/426/451). Each provider has its own
+	// credentials and rules, so another provider can serve the request: retryable. NOT at fault —
+	// node-capability, the same axis as NODE_METHOD_NOT_SUPPORTED: the endpoint answered truthfully
+	// about what its configuration will serve, which is not evidence that it is broken. Blaming it
+	// walked the refusal counter and disabled the URL for every path.
+	{2018, "NODE_ACCESS_DENIED", SubCategoryNodeCapability, true, "endpoint configuration: credentials, plan, WAF, region"},
+	// The validators' answer to a Sui transaction, relayed by the fullnode the router sent it to.
+	// Not evidence against that endpoint. Sui's own message calls it retriable with another
+	// submission, and that is the client's call: ExecuteTransaction is stateful, so the router
+	// never re-sends a write. Non-retryable here keeps the answer out of the endpoint's score.
+	{2019, "NODE_ABORTED", SubCategoryNone, false, "validators' verdict on a Sui write; resubmitting is the client's call"},
 	{3001, "CHAIN_NONCE_TOO_LOW", SubCategoryNone, false, ""},
 	{3002, "CHAIN_NONCE_TOO_HIGH", SubCategoryNone, false, ""},
 	{3003, "CHAIN_INSUFFICIENT_FUNDS", SubCategoryNone, false, ""},

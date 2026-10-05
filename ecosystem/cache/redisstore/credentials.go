@@ -3,11 +3,13 @@ package redisstore
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
+	"weak"
 
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/redis/go-redis/v9/auth"
@@ -182,11 +184,24 @@ func (c basicCredentials) RawCredentials() string      { return c.username + ":"
 // subscribed connection, which re-AUTHs IN PLACE — rotation without
 // disconnect or redial. A poll loop (Store-owned) drives Refresh for
 // file-backed sources; tests and custom integrations may call it directly.
+//
+// Subscriptions are held WEAKLY, anchored only by the unsubscribe closure that
+// go-redis stores on the connection itself. A connection whose setup fails —
+// the store closed or reset it during HELLO — is moved to the closed state and
+// abandoned: the client never calls Close on it, so the unsubscribe never runs,
+// and a provider holding the listener strongly kept the connection, its two
+// 32 KiB buffers and its socket for the life of the process — about eight of
+// them per request for as long as an outage lasted, until the router was
+// killed for memory (MAG-3728). Anchored to the connection instead, a
+// subscription lives exactly as long as the connection is reachable: a live
+// pooled connection carries its own unsubscribe closure, so rotation still
+// reaches it, and an abandoned one becomes garbage with everything it held;
+// the runtime closes its socket when it reclaims it.
 type StreamingProvider struct {
 	source CredentialsSource
 
 	mu        sync.Mutex
-	listeners map[int]auth.CredentialsListener
+	listeners map[int]weak.Pointer[subscription]
 	nextID    int
 	// lastRaw is the credential set the subscribers were last given, the
 	// baseline Refresh compares a read against to decide whether to push.
@@ -211,10 +226,17 @@ type StreamingProvider struct {
 
 var _ auth.StreamingCredentialsProvider = (*StreamingProvider)(nil)
 
+// subscription is one subscribed connection's listener, a separate allocation
+// so the provider can hold it weakly while the unsubscribe closure handed back
+// to go-redis holds it strongly.
+type subscription struct {
+	listener auth.CredentialsListener
+}
+
 func NewStreamingProvider(source CredentialsSource) *StreamingProvider {
 	return &StreamingProvider{
 		source:    source,
-		listeners: map[int]auth.CredentialsListener{},
+		listeners: map[int]weak.Pointer[subscription]{},
 	}
 }
 
@@ -239,23 +261,67 @@ func (p *StreamingProvider) Subscribe(listener auth.CredentialsListener) (auth.C
 			return nil, nil, err
 		}
 	}
+	sub := &subscription{listener: listener}
 
 	p.mu.Lock()
+	// Every subscription forgets the collected ones first, so the registry is
+	// bounded by the live connections plus those not yet collected, however
+	// many handshakes an outage fails and however rarely the watcher polls.
+	// This walks the whole registry under mu on every connection init, the
+	// hot path of an outage, and that is acceptable only because the walk is
+	// bounded by the records not yet collected: thousands between two
+	// collections, microseconds per walk. Pruning from the watcher alone
+	// would leave the registry to grow for a whole poll interval per outage,
+	// which is the shape the Codex review of #407 found.
+	p.pruneCollectedLocked()
 	id := p.nextID
 	p.nextID++
-	p.listeners[id] = listener
+	p.listeners[id] = weak.Make(sub)
 	if p.lastRaw == "" {
 		p.lastRaw = creds.RawCredentials()
 	}
 	p.mu.Unlock()
 
+	// The closure is the subscription's only strong anchor (see the type
+	// comment): go-redis stores it on the connection, so the subscription is
+	// reachable exactly while the connection is, and no longer.
 	unsubscribe := func() error {
 		p.mu.Lock()
 		delete(p.listeners, id)
 		p.mu.Unlock()
+		// Not a no-op: this mention is what captures sub in the closure, and
+		// the capture is the strong reference the weak pointer above needs.
+		runtime.KeepAlive(sub)
 		return nil
 	}
 	return creds, unsubscribe, nil
+}
+
+// pruneCollectedLocked forgets the records of subscriptions the collector has
+// reclaimed: each belonged to a connection the client abandoned without
+// unsubscribing. Called from every Subscribe and every Refresh, whether or
+// not the credentials changed, so the registry cannot grow across outages
+// while a file-backed password stays the same (Codex review of #407). Caller
+// holds mu.
+func (p *StreamingProvider) pruneCollectedLocked() {
+	for id, ref := range p.listeners {
+		if ref.Value() == nil {
+			delete(p.listeners, id)
+		}
+	}
+}
+
+// liveListenersLocked returns the listeners of subscriptions whose connection
+// is still reachable, after forgetting the rest. Caller holds mu.
+func (p *StreamingProvider) liveListenersLocked() []auth.CredentialsListener {
+	p.pruneCollectedLocked()
+	listeners := make([]auth.CredentialsListener, 0, len(p.listeners))
+	for _, ref := range p.listeners {
+		if sub := ref.Value(); sub != nil {
+			listeners = append(listeners, sub.listener)
+		}
+	}
+	return listeners
 }
 
 // Refresh re-reads the source and, when the credentials changed, pushes them
@@ -269,15 +335,15 @@ func (p *StreamingProvider) Refresh() {
 	}
 
 	p.mu.Lock()
+	// Housekeeping on every tick, not only on a rotation: the unchanged-file
+	// case is the ordinary one for the whole life of a process.
+	p.pruneCollectedLocked()
 	if creds.RawCredentials() == p.lastRaw {
 		p.mu.Unlock()
 		return
 	}
 	p.lastRaw = creds.RawCredentials()
-	listeners := make([]auth.CredentialsListener, 0, len(p.listeners))
-	for _, l := range p.listeners {
-		listeners = append(listeners, l)
-	}
+	listeners := p.liveListenersLocked()
 	p.mu.Unlock()
 
 	utils.LavaFormatInfo("resp-cache credentials rotated; re-authenticating live connections", utils.LogAttr("connections", len(listeners)))
@@ -346,8 +412,18 @@ func (p *StreamingProvider) noteSourceRecovered() {
 	}
 }
 
-// subscriberCount reports live subscriptions (observability/tests).
+// subscriberCount reports live subscriptions (observability/tests): those
+// whose connection is still reachable. It prunes as it counts.
 func (p *StreamingProvider) subscriberCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.liveListenersLocked())
+}
+
+// registrySize is the raw number of records held, collected or not, with no
+// pruning: what a test reads to check that production's own housekeeping,
+// not the counting helper, keeps the registry bounded.
+func (p *StreamingProvider) registrySize() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.listeners)
