@@ -173,7 +173,15 @@ selection so a QoS-dominant group cannot starve the others.
 
 A policy that cannot be satisfied by the configured fleet (too few groups, or too few providers
 per group for per-group quorum) is **rejected at startup**, and the resolved
-provider→group layout is logged.
+provider→group layout is logged. A provider that fails its startup verification does not count
+against that check, and the endpoint starts. If the providers left cannot meet a policy (fewer
+groups than its `min-groups`, or fewer providers than its `max-participants`), it logs an
+`ATTENTION` line naming the missing providers and refuses only the requests that policy governs
+until the background retry re-admits them. Two shortfalls are warned about rather than refused:
+a `max-participants` larger than the configured primaries, and an endpoint configured with
+backup providers only, which cross-validation never draws on. The startup line counts every
+verified primary; a request that needs an addon or extension draws only on the primaries serving
+it and can be refused with fewer.
 
 ### Response headers
 
@@ -346,6 +354,34 @@ the cache more than its rare hits save. 1 MiB fits Solana `getBlock` replies (1.
 16% of the time). On ETH and Base, `eth_getBlockReceipts` replies run up to and past 1 MiB, so a
 cap that low there cuts those entries; size the cap per chain from `smartrouter_cache_entry_bytes`.
 
+### Request tracing headers
+
+A caller can label a request so it can be found again in the router's logs and matched to
+their own records. Three headers are read, on every interface:
+
+| Header | Log field |
+| --- | --- |
+| `X-Request-Id` | `request_id` |
+| `X-Task-Id` | `task_id` |
+| `X-Tx-Id` | `tx_id` |
+
+On JSON-RPC, REST and Tendermint RPC they travel as HTTP request headers; on gRPC they travel
+as request metadata (`x-request-id` and so on: gRPC lower-cases metadata keys in transit, and
+the router accepts either casing). The values are stamped on the request's context as it enters
+the listener. Each listener logs them on the info-level line it writes when a request arrives,
+and the errors logged when that request's relay fails carry them too; in debug mode
+(`--debug-address`), `/debug/logs?request_id=<id>` returns those lines. They are not forwarded
+to the upstream node, which is sent only the request headers its chain's spec declares, and
+they are stripped before the cache key is built, so two callers asking the same question under
+different ids still share one cache entry.
+
+The headers are read per HTTP request or gRPC call. A gRPC streaming call is one subscribe
+request on its own stream, so its ids stay per request: they label the subscribe, not the
+notifications the stream delivers afterwards. A WebSocket connection's upgrade request is not
+read, so messages sent over a WebSocket carry no caller ids today. Reading the upgrade's ids
+would not be the same fix: one socket multiplexes many subscriptions and requests, so those ids
+would label every request on the connection rather than the one the caller tagged.
+
 ### Usage telemetry (OTel)
 
 Off by default. When enabled, the smart router emits two event types as
@@ -402,7 +438,10 @@ User Request --> Smart Router --> Provider Selection (QoS-based)
 
 1. **Primary Attempt**: Tries direct-rpc providers first (best QoS selected)
 2. **Failure Detection**: Detects errors, timeouts, or unavailability
-3. **Automatic Failover**: Switches to backup providers transparently
+3. **Automatic Failover**: Switches to backup providers transparently. A primary that stops answering
+   (rather than refusing) is still "busy" until the budget ends, so a read with no answer yet is also
+   hedged to a backup one attempt window (`--min-relay-timeout` floor) before the processing budget
+   runs out, so the backup still has a full window to answer. Writes are never hedged.
 4. **Recovery**: Monitors primary providers and switches back when healthy
 
 ## Monitoring

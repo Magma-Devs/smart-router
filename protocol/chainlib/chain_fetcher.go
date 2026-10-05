@@ -465,6 +465,11 @@ func (cf *ChainFetcher) populateCache(relayData *pairingtypes.RelayPrivateData, 
 		}
 
 		_, averageBlockTime, _, _ := cf.chainParser.ChainBlockStats()
+		// BlocksHashesToHeights is left unset on purpose: the router learns no
+		// block-hash→height mappings (MAG-3807). In the router this write is unreachable
+		// anyway — every NewChainFetcher passes Cache: nil (health_cmd.go, spec_reverifier.go,
+		// testing.go) — but it is the site a future writer would most plausibly wire up
+		// first, so the omission is stated here rather than implied (MAG-3892).
 		err = cf.cache.SetEntry(new_ctx, &pairingtypes.RelayCacheSet{
 			RequestHash:      hash,
 			BlockHash:        requestedBlockHash,
