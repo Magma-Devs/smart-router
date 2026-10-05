@@ -37,9 +37,19 @@ func TestBuildUnsubscribeSuccessReply(t *testing.T) {
 			want: `{"jsonrpc":"2.0","id":null,"result":true}`,
 		},
 		{
-			name: "missing id falls back to null",
+			name: "missing id is a notification and gets no reply",
 			req:  `{"jsonrpc":"2.0","method":"eth_unsubscribe","params":["0xabc"]}`,
-			want: `{"jsonrpc":"2.0","id":null,"result":true}`,
+			want: "",
+		},
+		{
+			name: "one-element batch gets an array",
+			req:  `[{"jsonrpc":"2.0","id":7,"method":"eth_unsubscribe","params":["0xabc"]}]`,
+			want: `[{"jsonrpc":"2.0","id":7,"result":true}]`,
+		},
+		{
+			name: "one-element batch of a notification gets no reply",
+			req:  `[{"jsonrpc":"2.0","method":"eth_unsubscribe","params":["0xabc"]}]`,
+			want: "",
 		},
 		{
 			name: "string id containing escaped quote round-trips",
@@ -58,6 +68,10 @@ func TestBuildUnsubscribeSuccessReply(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			got := buildUnsubscribeSuccessReply([]byte(tc.req))
+			if tc.want == "" {
+				require.Nil(t, got, "a notification gets no reply")
+				return
+			}
 			require.Equal(t, tc.want, string(got))
 		})
 	}
@@ -65,21 +79,54 @@ func TestBuildUnsubscribeSuccessReply(t *testing.T) {
 
 // TestBuildUnsubscribeAllSuccessReply: the reply to an unsubscribe_all the router
 // satisfied locally echoes the caller's id and carries the empty object a Tendermint
-// node answers with (MAG-4064).
+// node answers with (MAG-4064). A notification gets no reply.
 func TestBuildUnsubscribeAllSuccessReply(t *testing.T) {
 	cases := []struct {
 		name string
 		req  string
-		want string
+		want string // "" means no reply
 	}{
 		{name: "numeric id", req: `{"jsonrpc":"2.0","id":99,"method":"unsubscribe_all","params":{}}`, want: `{"jsonrpc":"2.0","id":99,"result":{}}`},
 		{name: "string id", req: `{"jsonrpc":"2.0","id":"all","method":"unsubscribe_all","params":{}}`, want: `{"jsonrpc":"2.0","id":"all","result":{}}`},
 		{name: "null id", req: `{"jsonrpc":"2.0","id":null,"method":"unsubscribe_all","params":{}}`, want: `{"jsonrpc":"2.0","id":null,"result":{}}`},
-		{name: "missing id falls back to null", req: `{"jsonrpc":"2.0","method":"unsubscribe_all","params":{}}`, want: `{"jsonrpc":"2.0","id":null,"result":{}}`},
+		{name: "missing id is a notification and gets no reply", req: `{"jsonrpc":"2.0","method":"unsubscribe_all","params":{}}`, want: ""},
+		{name: "one-element batch gets an array", req: `[{"jsonrpc":"2.0","id":7,"method":"unsubscribe_all","params":{}}]`, want: `[{"jsonrpc":"2.0","id":7,"result":{}}]`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, string(buildUnsubscribeAllSuccessReply([]byte(tc.req))))
+			got := buildUnsubscribeAllSuccessReply([]byte(tc.req))
+			if tc.want == "" {
+				require.Nil(t, got, "a notification gets no reply")
+				return
+			}
+			require.Equal(t, tc.want, string(got))
+		})
+	}
+}
+
+// TestBuildUnsubscribeAllErrorReply: a failed unsubscribe_all teardown is answered with
+// a JSON-RPC error under the caller's id, so the client waiting on that id unblocks
+// (MAG-4064). A notification gets no reply.
+func TestBuildUnsubscribeAllErrorReply(t *testing.T) {
+	const failed = `"error":{"code":-32603,"message":"Internal error","data":"unsubscribe_all failed"}`
+	cases := []struct {
+		name string
+		req  string
+		want string // "" means no reply
+	}{
+		{name: "numeric id", req: `{"jsonrpc":"2.0","id":99,"method":"unsubscribe_all","params":{}}`, want: `{"jsonrpc":"2.0","id":99,` + failed + `}`},
+		{name: "string id", req: `{"jsonrpc":"2.0","id":"all","method":"unsubscribe_all","params":{}}`, want: `{"jsonrpc":"2.0","id":"all",` + failed + `}`},
+		{name: "missing id is a notification and gets no reply", req: `{"jsonrpc":"2.0","method":"unsubscribe_all","params":{}}`, want: ""},
+		{name: "one-element batch gets an array", req: `[{"jsonrpc":"2.0","id":7,"method":"unsubscribe_all","params":{}}]`, want: `[{"jsonrpc":"2.0","id":7,` + failed + `}]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildUnsubscribeAllErrorReply([]byte(tc.req))
+			if tc.want == "" {
+				require.Nil(t, got, "a notification gets no reply")
+				return
+			}
+			require.JSONEq(t, tc.want, string(got))
 		})
 	}
 }

@@ -633,32 +633,40 @@ func TestTendermintRpcChainListener_PlainGetReachesTheRelayPath(t *testing.T) {
 	require.Len(t, stub.seen(), 1, "an upgrade must never reach the relay path")
 }
 
-// unsubscribeAllMessage is a parsed unsubscribe_all. It only answers GetParseDirective:
-// any other call reaches the nil ProtocolMessage and fails the test loudly.
-type unsubscribeAllMessage struct {
-	ProtocolMessage
+// tendermintParsingRelaySender parses each websocket message with the real LAVA
+// Tendermint parser, as the router's ParseRelay does, so the manager sees the function
+// tag a client's request really gets. Sending a relay is not used and errors.
+type tendermintParsingRelaySender struct {
+	parser ChainParser
 }
 
-func (unsubscribeAllMessage) GetParseDirective() *spectypes.ParseDirective {
-	return &spectypes.ParseDirective{FunctionTag: spectypes.FUNCTION_TAG_UNSUBSCRIBE_ALL}
+func newTendermintParsingRelaySender(t *testing.T) tendermintParsingRelaySender {
+	t.Helper()
+	parser, _, _, closeServer, _, err := CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), nil, "../../", nil)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	require.NoError(t, err)
+	return tendermintParsingRelaySender{parser: parser}
 }
 
-// unsubscribeAllRelaySender parses every websocket message as an unsubscribe_all.
-type unsubscribeAllRelaySender struct{}
-
-func (unsubscribeAllRelaySender) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
+func (tendermintParsingRelaySender) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
 	return nil, errors.New("not used")
 }
 
-func (unsubscribeAllRelaySender) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
-	return unsubscribeAllMessage{}, nil
+func (s tendermintParsingRelaySender) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
+	chainMessage, err := s.parser.ParseMsg(url, []byte(req), connectionType, metadata, extensionslib.ExtensionInfo{})
+	if err != nil {
+		return nil, err
+	}
+	return NewProtocolMessage(chainMessage, nil, nil, dappID, consumerIp), nil
 }
 
-func (unsubscribeAllRelaySender) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
+func (tendermintParsingRelaySender) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
 	return nil, errors.New("not used")
 }
 
-func (unsubscribeAllRelaySender) CancelSubscriptionContext(subscriptionKey string) {}
+func (tendermintParsingRelaySender) CancelSubscriptionContext(subscriptionKey string) {}
 
 // unsubscribeAllRecorder is the slice of WSSubscriptionManager an unsubscribe_all uses.
 // It counts the client's own unsubscribe_all calls (they carry the request's metrics;
@@ -693,37 +701,55 @@ func (m *unsubscribeAllRecorder) callCount() int {
 	return m.calls
 }
 
-// MAG-4064: an unsubscribe_all sent over the router's websocket gets a reply: the
-// caller's id with the empty result a Tendermint node answers with, or the formatted
-// error when the teardown fails. It used to get nothing, and the client waited out
-// its own timeout.
+// MAG-4064: an unsubscribe_all sent over the router's websocket gets a reply under the
+// caller's id: the empty result a Tendermint node answers with, or a JSON-RPC error when
+// the teardown fails. It used to get nothing, and the client waited out its own timeout.
+// A notification still gets no reply, and a one-element batch is answered with an array.
 func TestTendermintRpcChainListener_UnsubscribeAllReplies(t *testing.T) {
+	const (
+		withID       = `{"jsonrpc":"2.0","id":99,"method":"unsubscribe_all","params":{}}`
+		notification = `{"jsonrpc":"2.0","method":"unsubscribe_all","params":{}}`
+	)
 	for _, tc := range []struct {
 		name       string
 		managerErr error
-		check      func(t *testing.T, reply string)
+		requests   []string // sent in order
+		want       string   // the first frame the client reads
+		calls      int
 	}{
 		{
-			name: "teardown succeeds",
-			check: func(t *testing.T, reply string) {
-				require.JSONEq(t, `{"jsonrpc":"2.0","id":99,"result":{}}`, reply)
-			},
+			name:     "teardown succeeds",
+			requests: []string{withID},
+			want:     `{"jsonrpc":"2.0","id":99,"result":{}}`,
+			calls:    1,
 		},
 		{
 			name:       "teardown fails",
 			managerErr: errors.New("teardown failed"),
-			check: func(t *testing.T, reply string) {
-				var envelope map[string]string
-				require.NoError(t, json.Unmarshal([]byte(reply), &envelope))
-				require.Contains(t, envelope["Error_Received"], "teardown failed")
-			},
+			requests:   []string{withID},
+			want:       `{"jsonrpc":"2.0","id":99,"error":{"code":-32603,"message":"Internal error","data":"unsubscribe_all failed"}}`,
+			calls:      1,
+		},
+		{
+			// The notification is torn down but not answered, so the first frame back
+			// is the reply to the request sent after it.
+			name:     "notification gets no reply",
+			requests: []string{notification, withID},
+			want:     `{"jsonrpc":"2.0","id":99,"result":{}}`,
+			calls:    2,
+		},
+		{
+			name:     "one-element batch gets an array",
+			requests: []string{`[{"jsonrpc":"2.0","id":7,"method":"unsubscribe_all","params":{}}]`},
+			want:     `[{"jsonrpc":"2.0","id":7,"result":{}}]`,
+			calls:    1,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			serveCtx, cancelServe := context.WithCancel(context.Background())
 			defer cancelServe()
 			manager := &unsubscribeAllRecorder{err: tc.managerErr}
-			listener, addr := startTestTendermintListenerWithSubscriptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, unsubscribeAllRelaySender{}, manager)
+			listener, addr := startTestTendermintListenerWithSubscriptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, newTendermintParsingRelaySender(t), manager)
 			t.Cleanup(func() {
 				shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancelShutdown()
@@ -734,12 +760,14 @@ func TestTendermintRpcChainListener_UnsubscribeAllReplies(t *testing.T) {
 			require.NoError(t, err)
 			defer client.Close()
 
-			require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":99,"method":"unsubscribe_all","params":{}}`)))
+			for _, request := range tc.requests {
+				require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(request)))
+			}
 			_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
 			_, reply, err := client.ReadMessage()
 			require.NoError(t, err, "unsubscribe_all got no reply")
-			tc.check(t, string(reply))
-			require.Equal(t, 1, manager.callCount(), "the client's unsubscribe_all reaches the subscription manager once")
+			require.JSONEq(t, tc.want, string(reply))
+			require.Equal(t, tc.calls, manager.callCount(), "each of the client's unsubscribe_all requests reaches the subscription manager once")
 		})
 	}
 }
