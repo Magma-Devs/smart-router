@@ -158,3 +158,79 @@ func TestBackupReserveHedge_CountsBesideTheTickerHedge(t *testing.T) {
 	require.GreaterOrEqual(t, hedgesInTime, uint64(3), "a ticker hedge, then the ticker and reserve hedges together: %v", dispatches)
 	require.Equal(t, hedgesInTime, analytics.HedgeCount, "every hedge that went out is counted, the two due in the same instant included: %v", dispatches)
 }
+
+// A primary answers with a node error while the reserve hedge's dispatch is still in flight. The
+// error drives a retry, and the sender confirms dispatches one at a time in the order they were
+// asked for, so the reserve's dispatch is confirmed after that retry was asked for. The reserve
+// still went out, so HedgeCount must count it.
+func TestBackupReserveHedge_CountedWhenANodeErrorRetriesWhileItIsInFlight(t *testing.T) {
+	const window = 200 * time.Millisecond
+	// 2.5 windows: the reserve goes out alone at 1.5 windows, between the ticker's hedges.
+	sender := &backupTierSenderMock{budget: 5 * window / 2, window: window, hasBackupTier: true}
+	analytics := &metrics.RelayMetrics{}
+
+	ctx := context.Background()
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+		ctx, "LAVA", spectypes.APIInterfaceRest,
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
+		nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil,
+		extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
+
+	usedProviders := lavasession.NewUsedProviders(nil)
+	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, sender, protocolMessage, analytics, false)
+	require.NoError(t, err)
+	relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams,
+		relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine)
+	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
+	require.NoError(t, err)
+
+	next := func() relaycore.RelayStateSendInstructions {
+		t.Helper()
+		select {
+		case task := <-relayTaskChannel:
+			return task
+		case <-time.After(sender.budget * 3):
+			t.Fatal("the state machine sent no further task")
+			return relaycore.RelayStateSendInstructions{}
+		}
+	}
+	dispatch := func(provider string) {
+		usedProviders.AddUsed(lavasession.ConsumerSessionsMap{provider: &lavasession.SessionInfo{}}, nil)
+	}
+
+	first := next()
+	require.False(t, first.IsDone())
+	dispatch("primary-1")
+	relayProcessor.UpdateBatch(nil)
+
+	tickerHedge := next()
+	require.False(t, tickerHedge.IsDone() || tickerHedge.BackupReserve, "expected the ticker hedge, got %+v", tickerHedge)
+	dispatch("primary-2")
+	relayProcessor.UpdateBatch(nil)
+
+	reserve := next()
+	require.True(t, reserve.BackupReserve, "expected the reserve hedge, got %+v", reserve)
+	dispatch("backup")
+	relaycoretest.SendNodeError(relayProcessor, "primary-1", 0)
+	retry := next()
+	require.False(t, retry.IsDone() || retry.BackupReserve, "the node error must drive a retry, got %+v", retry)
+	// Only now does the sender report the reserve's dispatch, then the retry's.
+	relayProcessor.UpdateBatch(nil)
+	dispatch("primary-3")
+	relayProcessor.UpdateBatch(nil)
+
+	// batchUpdate is buffered and select picks among ready cases at random, so give the state
+	// machine time to read both confirmations before an answer ends the request.
+	time.Sleep(window / 4)
+	relaycoretest.SendSuccessResp(relayProcessor, "primary-3", 0)
+	done := next()
+	require.True(t, done.IsDone())
+	require.Equal(t, uint64(2), analytics.HedgeCount, "the ticker hedge and the reserve hedge both went out")
+}
