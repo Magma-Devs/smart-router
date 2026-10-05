@@ -1620,7 +1620,7 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 			if len(csm.backupProviders) > 0 {
 				utils.LavaFormatDebug("No regular providers available, trying backup providers", utils.LogAttr("GUID", ctx))
 				// try to get a session from the backup providers
-				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
+				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
 				if err == nil {
 					// backup providers succeeded, return the session
 					utils.LavaFormatDebug("Successfully got session from backup providers", utils.LogAttr("GUID", ctx))
@@ -1862,8 +1862,8 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	// first; a pin still wins, so it only applies to an unpinned selection.
 	var sessionWithProviderMap SessionWithProviderMap
 	var err error
-	if preferBackup && selectedProvider == "" && csm.HasBackupProviders() {
-		sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
+	if preferBackup && selectedProvider == "" {
+		sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierReserveHedge, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
 		if err != nil {
 			utils.LavaFormatDebug("backup-reserve hedge found no eligible backup, using ordinary selection", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 			sessionWithProviderMap = nil
@@ -2595,16 +2595,51 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	return nil, utils.LavaFormatError(csm.rpcEndpoint.ChainID+" could not get a provider address from blocked provider list", PairingListEmptyError, utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("addons", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("ignoredProviders", ignoredProviders.providers), utils.LogAttr("GUID", ctx))
 }
 
-// getValidConsumerSessionsWithProviderFromBackupProviderList retrieves valid backup provider sessions for emergency fallback when no regular providers are available.
-func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) {
+// backupTierAsk is why a selection reads the backup tier, which decides how it reports itself.
+type backupTierAsk int
+
+const (
+	// backupTierFallback is the emergency fallback: no regular provider can serve the request.
+	backupTierFallback backupTierAsk = iota
+	// backupTierReserveHedge is the backup-reserve hedge (MAG-3923). Primaries are still in the
+	// pool, so finding no eligible backup is routine: the caller falls back to ordinary selection.
+	backupTierReserveHedge
+)
+
+// errNoEligibleBackupProvider is returned when the backup tier has nothing this request can use.
+// It is a sentinel rather than a logged error so each caller reports it at the level its own ask
+// warrants.
+var errNoEligibleBackupProvider = errors.New("no eligible backup provider")
+
+// noEligibleBackup returns errNoEligibleBackupProvider for reason. The emergency fallback keeps
+// its ERROR line; the reserve hedge leaves the reporting to its caller.
+func noEligibleBackup(ctx context.Context, ask backupTierAsk, reason string) error {
+	if ask == backupTierFallback {
+		utils.LavaFormatError(reason, nil, utils.LogAttr("GUID", ctx))
+	}
+	return fmt.Errorf("%s: %w", reason, errNoEligibleBackupProvider)
+}
+
+// getValidConsumerSessionsWithProviderFromBackupProviderList retrieves valid backup provider
+// sessions, for the emergency fallback when no regular providers are available and for the
+// backup-reserve hedge; ask says which.
+func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ask backupTierAsk, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
-	utils.LavaFormatInfo("[BackupProviders] Static providers exhausted — entering backup fallback",
-		utils.LogAttr("ignored_providers", ignoredProviders.providers),
-		utils.LogAttr("backup_pool_size", len(csm.backupProviders)),
-		utils.LogAttr("GUID", ctx),
-	)
+	if ask == backupTierReserveHedge {
+		utils.LavaFormatDebug("[BackupProviders] reserve hedge selecting from the backup tier",
+			utils.LogAttr("ignored_providers", ignoredProviders.providers),
+			utils.LogAttr("backup_pool_size", len(csm.backupProviders)),
+			utils.LogAttr("GUID", ctx),
+		)
+	} else {
+		utils.LavaFormatInfo("[BackupProviders] Static providers exhausted — entering backup fallback",
+			utils.LogAttr("ignored_providers", ignoredProviders.providers),
+			utils.LogAttr("backup_pool_size", len(csm.backupProviders)),
+			utils.LogAttr("GUID", ctx),
+		)
+	}
 
 	currentEpoch := csm.atomicReadCurrentEpoch() // reading the epoch here while locked, to get the epoch of the pairing.
 	if ignoredProviders.currentEpoch < currentEpoch {
@@ -2616,7 +2651,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	// Check if backup providers exist
 	if len(csm.backupProviders) == 0 {
 		utils.LavaFormatDebug("No backup providers configured", utils.LogAttr("GUID", ctx))
-		return nil, utils.LavaFormatError("no backup providers configured", nil, utils.LogAttr("GUID", ctx))
+		return nil, noEligibleBackup(ctx, ask, "no backup providers configured")
 	}
 
 	// Get valid backup provider addresses that support the required addon and extensions
@@ -2645,7 +2680,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 			utils.LogAttr("ignored_providers", ignoredProviders.providers),
 			utils.LogAttr("GUID", ctx),
 		)
-		return nil, utils.LavaFormatError("no valid backup providers available", nil, utils.LogAttr("GUID", ctx))
+		return nil, noEligibleBackup(ctx, ask, "no valid backup providers available")
 	}
 
 	utils.LavaFormatInfo("[BackupProviders] Asking optimizer to select from backup candidates",
@@ -2664,7 +2699,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 			utils.LogAttr("candidates", backupProviderAddresses),
 			utils.LogAttr("GUID", ctx),
 		)
-		return nil, utils.LavaFormatError("optimizer returned no backup provider", nil, utils.LogAttr("GUID", ctx))
+		return nil, noEligibleBackup(ctx, ask, "optimizer returned no backup provider")
 	}
 	selectedAddress := selectedAddresses[0]
 
