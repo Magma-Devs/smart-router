@@ -2349,10 +2349,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		// CurrentlyUsed == 0, so the request would otherwise stall for the
 		// full processingTimeout (~30s) instead of failing fast.
 		for endpointAddress, sessionInfo := range validSessions {
-			if sessionInfo != nil && sessionInfo.Session != nil {
-				usedProviders.ReleaseFromLatestBatch(endpointAddress, sessionInfo.Session.RouterKey(), nil)
-				sessionInfo.Session.Free(nil)
+			if sessionInfo == nil {
+				continue
 			}
+			if sessionInfo.Session == nil {
+				// AddUsed registered it under the empty router key; there is no session to free.
+				usedProviders.ReleaseFromLatestBatch(endpointAddress, lavasession.NewRouterKey(nil), nil)
+				continue
+			}
+			usedProviders.ReleaseFromLatestBatch(endpointAddress, sessionInfo.Session.RouterKey(), nil)
+			sessionInfo.Session.Free(nil)
 		}
 		// Carry the structured reason on the shared processor so SendParsedRelay can surface the
 		// failure-reason header; the error itself is left unchanged so the state machine's
@@ -4909,7 +4915,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 			// nothing wrong; there simply were not enough of them.
 			releaseRouterKey := lavasession.NewRouterKeyFromExtensions(extensions)
 			for endpointAddress, sessionInfo := range sessions {
-				if sessionInfo == nil || sessionInfo.Session == nil {
+				if sessionInfo == nil {
+					continue
+				}
+				if sessionInfo.Session == nil {
+					// AddUsed registers an entry without a session under the empty router key rather
+					// than skipping it, so release it under that key; there is no session to discard.
+					// GetSessions always sets Session today; this keeps the two in step.
+					usedProviders.ReleaseFromLatestBatch(endpointAddress, lavasession.NewRouterKey(nil), nil)
 					continue
 				}
 				usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, nil)

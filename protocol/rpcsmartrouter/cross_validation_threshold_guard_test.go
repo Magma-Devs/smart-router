@@ -32,7 +32,9 @@ import (
 // What gates the stall is CurrentlyUsed, and that is what this asserts — together with the session
 // lock and the reserved compute units, which distinguish OnSessionDiscarded from a bare Free.
 func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T) {
-	// Session ids are drawn from the seeded rand package; run alone, nothing else has seeded it.
+	// utils/rand panics until InitRandomSeed has run, and UpdateAllProviders and GetSessions both
+	// draw from it, so the test cannot run alone without this. The source is crypto/rand with no
+	// seed, so calling it again changes nothing for other tests in the package.
 	rand.InitRandomSeed()
 	ctx := context.Background()
 
@@ -134,4 +136,63 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 	}
 	require.Zero(t, provider.UsedComputeUnits,
 		"the compute units reserved for the discarded session were not returned to the provider")
+}
+
+// extensionMockProtocolMessage is a MockProtocolMessage that carries extensions, so the release key
+// a guard computes from the message differs from the empty key.
+type extensionMockProtocolMessage struct {
+	*MockProtocolMessage
+	extensions []*spectypes.Extension
+}
+
+func (m *extensionMockProtocolMessage) GetExtensions() []*spectypes.Extension { return m.extensions }
+
+// AddUsed files an entry that has no session under the empty router key rather than skipping it, so
+// a guard that undoes the registration must release that entry under the same key: neither skip it
+// nor use the key it computes from the message's extensions. GetSessions always sets a session, so
+// the threshold guard above cannot be handed such an entry through a real session manager; the
+// post-filter guard takes its sessions as an argument, so it is driven directly here.
+func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesASessionlessEntry(t *testing.T) {
+	ctx := context.Background()
+	noopHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(
+		ctx, "LAVA", spectypes.APIInterfaceRest, noopHandler, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	usedProviders := lavasession.NewUsedProviders(nil)
+	sessions := lavasession.ConsumerSessionsMap{"lava@sessionless": &lavasession.SessionInfo{}}
+	usedProviders.AddUsed(sessions, nil)
+	require.Equal(t, 1, usedProviders.CurrentlyUsed(), "setup: AddUsed must register the entry")
+
+	cvParams := &common.CrossValidationParams{MaxParticipants: 2, AgreementThreshold: 2}
+	sm := &cvGuardStateMachine{usedProviders: usedProviders, cvParams: cvParams}
+	metricsStub := cvGuardMetrics{}
+	relayProcessor := relaycore.NewRelayProcessor(
+		ctx, cvParams, metricsStub, metricsStub, lavaprotocol.NewRelayRetriesManager(), sm)
+
+	// No chain state, so the consistency filter skips validation and passes the entry through:
+	// the guard fires on 1 < 2 with it among the survivors.
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+		chainParser:       chainParser,
+		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
+	}
+	protocolMsg := &extensionMockProtocolMessage{
+		MockProtocolMessage: &MockProtocolMessage{
+			api:            &spectypes.Api{Name: "/cosmos/base/tendermint/v1beta1/blocks/latest"},
+			requestedBlock: spectypes.LATEST_BLOCK,
+		},
+		extensions: []*spectypes.Extension{{Name: "archive"}},
+	}
+
+	sendErr := rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{})
+	require.Truef(t, errors.Is(sendErr, lavasession.PairingListEmptyError),
+		"setup: the post-filter guard must have fired; got: %v", sendErr)
+	require.Equal(t, 0, usedProviders.CurrentlyUsed(), "the entry without a session leaked into CurrentlyUsed")
+	require.Equal(t, 0, usedProviders.SessionsLatestBatch(), "the entry without a session leaked into SessionsLatestBatch")
 }
