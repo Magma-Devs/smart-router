@@ -269,11 +269,77 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 	},
 
 	TransportREST: {
-		// Message-based matchers for common REST error patterns
+		// ORDER IS THE CONTRACT HERE. First match wins, so the rows are arranged
+		// specific-to-general: what the node SAID, then what status it used. A status code is
+		// the fallback, never the specialisation — the reverse order silently reclassified
+		// anything whose body carried a specific message under a generic status (a 400 saying
+		// "method not allowed" or "route not found" lost its unsupported-method verdict, which
+		// chainlib.IsUnsupportedMethodError reads on the protocol-error path).
+		//
+		// Evidence for every row: agent_docs/.../rest-stateful-bug/rest-status-code-map.md and
+		// rest-blockchain-errors-research.md (twelve families probed live 2026-09-27).
+
+		// --- 1. What the node said: the route does not exist, whoever answered. ---
 		{MessageContains("endpoint not found"), LavaErrorNodeEndpointNotFound},
 		{MessageContains("route not found"), LavaErrorNodeEndpointNotFound},
 		{MessageContains("path not found"), LavaErrorNodeEndpointNotFound},
 		{MessageContains("method not allowed"), LavaErrorNodeMethodNotAllowed},
+
+		// --- 2. What the node said: "the block you asked for is beyond my head". ---
+		// A lagging node says this while a synced node has the block: retryable elsewhere, and
+		// not the node's fault. The first two phrases are long enough to stand alone; "unknown
+		// block" is two common English words, and on REST the matcher is fed the raw response
+		// body (extractErrorMessage's fallback), so it is gated on the 400 nodeos sends with it.
+		// Ungated it fired on any status — a 500 saying "unknown blockchain id" classified as
+		// block-not-found and the endpoint was never scored for it.
+		{MessageContains("larger than the current largest block"), LavaErrorChainBlockNotFound},                  // Substrate sidecar, 400
+		{MessageContains("requested block height is bigger then the chain length"), LavaErrorChainBlockNotFound}, // Cosmos gRPC-gateway, 400
+		{CodeAndMessage(400, "unknown block"), LavaErrorChainBlockNotFound},                                      // nodeos unknown_block_exception, 400
+
+		// --- 3. What the node said, under a 500 that is really the CALLER's answer. ---
+		// Cosmos, nodeos, MultiversX and the Substrate sidecar all answer a caller's mistake, or
+		// "I do not hold that", with a 500 (research doc finding 3). Left to the generic 500 row
+		// these classified as NODE_INTERNAL_ERROR — at fault — so a customer polling for an
+		// unmined transaction or asking for a pruned height walked the endpoint's refusal counter
+		// to the disable threshold. Each row below is a body probed live, gated on the 500 so a
+		// genuinely broken node answering 500 with anything else STAYS at fault.
+		{CodeAndMessage(500, "is not available, lowest height"), LavaErrorChainStatePruned},        // Cosmos: pruned height
+		{CodeAndMessage(500, "decoding bech32 failed"), LavaErrorUserInvalidParams},                // Cosmos: malformed address
+		{CodeAndMessage(500, "unable to retrieve header and parent"), LavaErrorChainBlockNotFound}, // Sidecar: unknown block hash
+		{CodeAndMessage(500, "transaction not found"), LavaErrorChainTxNotFound},                   // MultiversX: tx not found
+
+		// --- 4. The status, as the fallback: 4xx that describe the request. ---
+		// Non-retryable and never the endpoint's fault, so a read returns the answer as-is
+		// without a second attempt and nothing is scored.
+		{CodeEquals(400), LavaErrorUserInvalidRequest},
+		{CodeEquals(406), LavaErrorUserInvalidRequest},
+		{CodeEquals(411), LavaErrorUserInvalidRequest},
+		{CodeEquals(412), LavaErrorUserInvalidRequest},
+		{CodeEquals(414), LavaErrorUserInvalidRequest},
+		{CodeEquals(415), LavaErrorUserInvalidRequest},
+		{CodeEquals(416), LavaErrorUserInvalidRequest},
+		{CodeEquals(417), LavaErrorUserInvalidRequest},
+		{CodeEquals(428), LavaErrorUserInvalidRequest},
+		{CodeEquals(431), LavaErrorUserInvalidRequest},
+		{CodeEquals(422), LavaErrorUserInvalidParams},
+		// The endpoint refused the router (credentials, plan, WAF, proxy, protocol, region):
+		// another provider can serve it, and the refusing endpoint is NOT at fault — it answered
+		// truthfully about its own configuration. See LavaErrorNodeAccessDenied for why blaming it
+		// disabled whole URLs. 401 is in httpStatusCodeMappings, appended to REST only.
+		{CodeEquals(402), LavaErrorNodeAccessDenied},
+		{CodeEquals(403), LavaErrorNodeAccessDenied},
+		{CodeEquals(407), LavaErrorNodeAccessDenied},
+		{CodeEquals(426), LavaErrorNodeAccessDenied},
+		{CodeEquals(451), LavaErrorNodeAccessDenied},
+		// 408: the endpoint gave up waiting for the request. Retry elsewhere; at fault, like a 503.
+		{CodeEquals(408), LavaErrorNodeServiceUnavailable},
+		// 404 is in httpStatusCodeMappings (REST only), mapped to data-scope.
+		{CodeEquals(410), LavaErrorChainStatePruned},
+		// 409 is "I already have this transaction": Horizon answers a re-submitted transaction
+		// with 409 {"tx_status":"DUPLICATE"}. Non-retryable and never the endpoint's fault. On a
+		// write broadcast it is a node error, so a sibling's 201 with the transaction hash wins
+		// over it; when every node answers 409 (a client re-sending), the caller gets the 409.
+		{CodeEquals(409), LavaErrorChainTxAlreadyKnown},
 		// CodeEquals and HTTPStatusContains matchers are appended by init()
 		// via httpStatusCodeMappings() and httpStatusMessageMappings()
 	},
@@ -318,6 +384,11 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		{GRPCCodeEquals(11), LavaErrorNodeDataNotHeld},        // codes.OutOfRange
 		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented},      // codes.Unimplemented
 		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
+		// codes.Aborted (MAG-3995): on Sui, the one node that sends it, it is the validators'
+		// answer to a submitted transaction, relayed by the fullnode, and Sui's own message calls
+		// it retriable with another submission. Not evidence against the endpoint, and the
+		// resubmission is the client's call, so non-retryable; see LavaErrorNodeAborted.
+		{GRPCCodeEquals(10), LavaErrorNodeAborted}, // codes.Aborted
 		// Deliberately NOT registered, each for its own reason — do not add them
 		// as a block, which is how `Code >= 13` went wrong in the first place:
 		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
@@ -331,6 +402,9 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		//   1  Canceled          - a LOCAL cancellation never reaches this table;
 		//                          handleGRPCError resolves it structurally. One that
 		//                          does reach here is remote and unproven.
+		//   15 DataLoss          - no node we route to sends it: not Cosmos SDK, CometBFT,
+		//                          ibc-go, wasmd, Lava, Concordium or Sui (MAG-3995). A row
+		//                          would be a verdict on a status nobody has seen.
 		// Message-based matchers for gRPC errors conveyed without status codes
 		{MessageContains("rate limit"), LavaErrorNodeRateLimited},
 		{MessageContains("enhance_your_calm"), LavaErrorNodeRateLimited}, // HTTP/2 GOAWAY ENHANCE_YOUR_CALM
@@ -348,8 +422,18 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 // These are used for REST transport where the error code is the HTTP status code itself.
 func httpStatusCodeMappings() []errorMapping {
 	return []errorMapping{
-		{CodeEquals(401), LavaErrorNodeUnauthorized},
-		{CodeEquals(404), LavaErrorNodeEndpointNotFound},
+		// These CodeEquals rows are appended to the REST table only (see init); JSON-RPC and
+		// gRPC get the HTTPStatusContains rows below instead, which keep their own verdicts.
+		//
+		// 401: the endpoint rejected the router's credentials. Each provider has its own, so
+		// another provider can serve the request: retryable, and NOT the endpoint's fault — it
+		// answered truthfully about its own configuration (node-capability; see
+		// LavaErrorNodeAccessDenied for what blaming it cost).
+		{CodeEquals(401), LavaErrorNodeAccessDenied},
+		// 404: "not here". Either the data does not exist on this node (yet), or the gateway in
+		// front of it does not route the path. Both mean "try another node", as JSON-RPC's
+		// transaction / block not-found rows already do: retryable, data-scope, not scored.
+		{CodeEquals(404), LavaErrorNodeDataNotHeld},
 		{CodeEquals(405), LavaErrorNodeMethodNotAllowed},
 		{CodeEquals(413), LavaErrorUserRequestTooLarge},
 		{CodeEquals(429), LavaErrorNodeRateLimited},

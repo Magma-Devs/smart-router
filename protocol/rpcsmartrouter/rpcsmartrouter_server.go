@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -1841,10 +1842,19 @@ func shouldFailSessionForResult(err error, relayResult *common.RelayResult) bool
 		return true
 	}
 	// Node error delivered inside a 2xx body — scoreable unless a carve-out claims it.
+	//
+	// IsNodeCapability is here for the same reason as IsDataScope, one level up: the endpoint
+	// answered truthfully about what it will serve, so the answer is no evidence it cannot serve.
+	// It used to be absent, which was inert only because every node-capability code was also
+	// non-retryable and so already excused by IsNonRetryable. NODE_ACCESS_DENIED is retryable
+	// AND node-capability, so without this clause a 403 would be kept off MarkUnhealthy by
+	// EndpointAtFault and still demote the endpoint through the availability signal — one answer
+	// blaming the endpoint in one place and excusing it in the other.
 	return relayResult.IsNodeError &&
 		!relayResult.IsNonRetryable &&
 		!relayResult.IsRateLimited &&
-		!relayResult.IsDataScope
+		!relayResult.IsDataScope &&
+		!relayResult.IsNodeCapability
 }
 
 // relayProvesEndpointHealthy reports whether a completed direct-RPC relay is POSITIVE proof that
@@ -4091,6 +4101,36 @@ func cacheWriteReplySnapshot(reply *pairingtypes.RelayReply) *pairingtypes.Relay
 	return &snapshot
 }
 
+// replyHeaderDirectives is the reply-direction header directives of the served API
+// interface, from the chain parser (ChainParser.ReplyHeaderDirectives), or nil for a server
+// built without one (tests). The relay sender and the primary cache hit path filter an
+// upstream's headers by them (MAG-3104).
+func (rpcss *RPCSmartRouterServer) replyHeaderDirectives() []*spectypes.Header {
+	if rpcss.chainParser == nil {
+		return nil
+	}
+	return rpcss.chainParser.ReplyHeaderDirectives()
+}
+
+// filterCachedReplyMetadata applies the live path's upstream-header filter to a reply
+// served from the primary cache, so a hit replays the same reduced set as a live reply
+// whoever wrote the entry: a pod on an older binary during a rollout, or this one before
+// the filter existed. Entries are written before the router's own headers are appended,
+// so nothing the router minted is in the set. The reply is the lookup's own unmarshalled
+// copy and is filtered in place.
+func (rpcss *RPCSmartRouterServer) filterCachedReplyMetadata(reply *pairingtypes.RelayReply, protocolMessage chainlib.ProtocolMessage) {
+	if reply == nil || len(reply.Metadata) == 0 {
+		return
+	}
+	var collectionDirectives []*spectypes.Header
+	if protocolMessage != nil {
+		if apiCollection := protocolMessage.GetApiCollection(); apiCollection != nil {
+			collectionDirectives = apiCollection.Headers
+		}
+	}
+	reply.Metadata = filterUpstreamReplyMetadata(reply.Metadata, rpcss.replyHeaderDirectives(), collectionDirectives)
+}
+
 // resolvePinDirectives returns the lava-select-provider and lava-stickiness directives,
 // honored only on the first attempt. On a retry (firstAttempt == false) both are returned
 // empty so the relay falls through to a different provider instead of re-pinning the one
@@ -4326,6 +4366,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 								utils.LogAttr("GUID", ctx),
 							)
 							reply.Data = outputFormatter(reply.Data)
+							// Whoever wrote the entry, the client gets the live reply's header set.
+							rpcss.filterCachedReplyMetadata(reply, protocolMessage)
 
 							// Entry kind: the label its writer attached, or its contents. Shared
 							// with the secondary tier so both label a replayed node error
@@ -4655,11 +4697,12 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		senderChainFamily = family
 	}
 	directSender := &DirectRPCRelaySender{
-		directConnection:    directConnection,
-		endpointName:        endpointName,
-		originalRequestData: originalRequestData,
-		chainFamily:         senderChainFamily,
-		groupLabel:          singleConsumerSession.Parent.GroupLabel,
+		directConnection:      directConnection,
+		endpointName:          endpointName,
+		originalRequestData:   originalRequestData,
+		chainFamily:           senderChainFamily,
+		groupLabel:            singleConsumerSession.Parent.GroupLabel,
+		replyHeaderDirectives: rpcss.replyHeaderDirectives(),
 	}
 
 	// Send relay directly to RPC endpoint
@@ -4757,8 +4800,17 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// flow through as the NodeError the REST sender already produced
 	// (IsNodeError=true), where it classifies as NODE_UNIMPLEMENTED
 	// (non-retryable) and is returned to the client.
+	//
+	// A 5xx that is the node's own JSON reply (rpcInterfaceMessages.ServerErrorIsNodeReply) is
+	// excluded for the same reason: when every node answers Horizon's
+	// 503 {"tx_status":"TRY_AGAIN_LATER"}, the client must get that reply, not a router-made 500.
+	// Nothing else changes for it: the registry's 500/503 rows are retryable and at fault, so a
+	// read is still retried, and the endpoint is still marked unhealthy and scored, through the
+	// IsNodeAtFault arm and the availability gate. result.IsNodeError is true only for a REST
+	// reply here (the JSON-RPC sender returns every 5xx as an error before this point).
 	statusCode := result.StatusCode
-	if (statusCode >= 500 && statusCode != http.StatusNotImplemented) || statusCode == 429 {
+	carriesNodeReply := result.IsNodeError && rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData())
+	if (statusCode >= 500 && statusCode != http.StatusNotImplemented && !carriesNodeReply) || statusCode == 429 {
 		shouldMarkUnhealthy, needsBackoffHTTP := classifyHTTPStatus(statusCode)
 		needsBackoff = needsBackoffHTTP
 
@@ -4827,10 +4879,12 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	if result.IsNodeAtFault && targetEndpoint != nil && (lostBroadcast == nil || !lostBroadcast(result.IsNodeError)) {
 		rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 		// EndpointDisableNodeError unconditionally, rather than through endpointDisableReasonFor:
-		// reaching this arm REQUIRES an answer to have arrived (err == nil, and the status was
-		// neither 5xx nor 429), so the node replied and the reply carried its own failure. That is
-		// the definition of node-error, and unreachable is unrepresentable here by construction —
-		// a stronger guarantee than the category check the other two arms need, not a weaker one.
+		// reaching this arm REQUIRES an answer to have arrived (err == nil): a non-2xx the sender
+		// kept as the node's reply — any 4xx, or a 5xx whose JSON body is the node's own answer
+		// (carriesNodeReply above). A 5xx the sender could not read as the node's answer, and every
+		// 429, took the transport branch before this point. So the node replied and the reply carried
+		// its own failure: that is the definition of node-error, and unreachable is unrepresentable
+		// here by construction — a stronger guarantee than the category check the other arms need.
 		targetEndpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
 		rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 	} else if targetEndpoint != nil && relayProvesEndpointHealthy(result) {

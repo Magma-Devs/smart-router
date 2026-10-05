@@ -470,6 +470,31 @@ func MessageRegex(pattern string) ErrorMatcher {
 	return messageRegexMatcher{re: regexp.MustCompile(pattern)}
 }
 
+// CodeAndMessage matches only when BOTH the error code and a case-insensitive
+// message substring match. It exists for rows whose message alone is too broad to
+// stand on its own: nodeos says "unknown block" in a 400, but the same words in a
+// 500 body are not evidence of a block-not-found, and on REST the raw response body
+// is what reaches the matcher as the message (extractErrorMessage's fallback), so a
+// bare substring row is matched against whatever the upstream happened to print.
+type codeAndMessageMatcher struct {
+	code      int
+	substring string // pre-lowercased at construction time
+}
+
+func (m codeAndMessageMatcher) Matches(errorCode int, errorMessage string) bool {
+	return errorCode == m.code && strings.Contains(strings.ToLower(errorMessage), m.substring)
+}
+
+// matchesLowered keeps this matcher on ClassifyError's fast path, so adding rows of
+// this kind costs no extra strings.ToLower per classification.
+func (m codeAndMessageMatcher) matchesLowered(errorCode int, loweredMessage string) bool {
+	return errorCode == m.code && strings.Contains(loweredMessage, m.substring)
+}
+
+func CodeAndMessage(code int, substring string) ErrorMatcher {
+	return codeAndMessageMatcher{code: code, substring: strings.ToLower(substring)}
+}
+
 // HTTPStatusContains matches an HTTP status code in the error message with non-digit
 // boundary checks. This prevents false positives like "500" matching inside "25001500".
 // Prefer structured status codes (CodeEquals) when the HTTP status is available as an int.

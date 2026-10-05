@@ -97,24 +97,95 @@ func TestStatefulBroadcastWaitsThroughGatewayRefusal(t *testing.T) {
 	require.Equal(t, "node@test", returnedResult.ProviderInfo.ProviderAddress)
 }
 
-// TestStatefulBroadcastAcceptsNodeProblemDocument pins the other side of the line: a 404 carrying
-// a problem document is the node's own answer, and a stateful relay returns it without waiting.
-func TestStatefulBroadcastAcceptsNodeProblemDocument(t *testing.T) {
+// TestStatefulBroadcastWaitsThroughProblemDocumentToo: a 404 carrying a problem document is the
+// chain's own refusal — a node error like any other non-2xx — so a write keeps waiting for its
+// sibling instead of accepting the refusal as the result.
+func TestStatefulBroadcastWaitsThroughProblemDocumentToo(t *testing.T) {
 	relayProcessor := newStatefulRestProcessor(t)
 
 	problem := `{"type":"https://stellar.org/horizon-errors/not_found","title":"Resource Missing","status":404}`
 	go sendRestReply(relayProcessor, "gateway@test", 5*time.Millisecond, http.StatusNotFound, problem)
-	go sendRestReply(relayProcessor, "node@test", 200*time.Millisecond, http.StatusOK, "ok")
+	go sendRestReply(relayProcessor, "node@test", 80*time.Millisecond, http.StatusOK, "ok")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	shortCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
-	require.NoError(t, relayProcessor.WaitForResults(ctx), "a 404 with a problem document must end the wait as an answer")
+	require.Error(t, relayProcessor.WaitForResults(shortCtx), "a JSON 404 ended the wait — it was counted as the answer")
 	hasResults, _ := relayProcessor.HasRequiredNodeResults(1)
-	require.True(t, hasResults)
+	require.False(t, hasResults)
+
+	longCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	require.NoError(t, relayProcessor.WaitForResults(longCtx))
+	returnedResult, err := relayProcessor.ProcessingResult()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, returnedResult.StatusCode)
+	require.Equal(t, "node@test", returnedResult.ProviderInfo.ProviderAddress)
+}
+
+// TestStatefulBroadcastPrefersTheHashOverDuplicate: a write goes to every node; the one that
+// broadcasts it answers 201 with the transaction hash, the others answer 409 DUPLICATE because the
+// transaction is already known. The caller must see the 201, even when the 409s arrive first.
+func TestStatefulBroadcastPrefersTheHashOverDuplicate(t *testing.T) {
+	relayProcessor := newStatefulRestProcessor(t)
+
+	duplicate := `{"tx_status":"DUPLICATE","hash":"f398"}`
+	pending := `{"tx_status":"PENDING","hash":"f398"}`
+	go sendRestReply(relayProcessor, "gateway@test", 5*time.Millisecond, http.StatusConflict, duplicate)
+	go sendRestReply(relayProcessor, "node@test", 60*time.Millisecond, http.StatusCreated, pending)
+
+	shortCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	require.Error(t, relayProcessor.WaitForResults(shortCtx), "a 409 DUPLICATE ended the wait — it was counted as the answer")
+
+	longCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	require.NoError(t, relayProcessor.WaitForResults(longCtx))
+	returnedResult, err := relayProcessor.ProcessingResult()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, returnedResult.StatusCode)
+	require.Equal(t, pending, string(returnedResult.Reply.Data))
+	require.Equal(t, "node@test", returnedResult.ProviderInfo.ProviderAddress)
+}
+
+// TestStatefulBroadcastAllDuplicateReturnsTheDuplicate: a client re-sends a transaction that is
+// already known everywhere. Every node answers 409 DUPLICATE, and the caller sees that answer as-is.
+func TestStatefulBroadcastAllDuplicateReturnsTheDuplicate(t *testing.T) {
+	relayProcessor := newStatefulRestProcessor(t)
+
+	duplicate := `{"tx_status":"DUPLICATE","hash":"f398"}`
+	go sendRestReply(relayProcessor, "gateway@test", 5*time.Millisecond, http.StatusConflict, duplicate)
+	go sendRestReply(relayProcessor, "node@test", 20*time.Millisecond, http.StatusConflict, duplicate)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	require.NoError(t, relayProcessor.WaitForResults(ctx), "both answered, nothing left in flight")
+	hasResults, _ := relayProcessor.HasRequiredNodeResults(1)
+	require.False(t, hasResults, "two duplicates are not a success")
 
 	returnedResult, err := relayProcessor.ProcessingResult()
 	require.NoError(t, err)
-	require.Equal(t, http.StatusNotFound, returnedResult.StatusCode)
-	require.Equal(t, problem, string(returnedResult.Reply.Data))
-	require.Equal(t, "gateway@test", returnedResult.ProviderInfo.ProviderAddress)
+	require.Equal(t, http.StatusConflict, returnedResult.StatusCode)
+	require.Equal(t, duplicate, string(returnedResult.Reply.Data))
+}
+
+// TestStatefulBroadcastAllTryAgainLaterReturnsTheNodesReply: every node answers Horizon's
+// 503 {"tx_status":"TRY_AGAIN_LATER"} — nothing was submitted, a retry is safe. The caller must get
+// that reply (status and body), not a router-made 500.
+func TestStatefulBroadcastAllTryAgainLaterReturnsTheNodesReply(t *testing.T) {
+	relayProcessor := newStatefulRestProcessor(t)
+
+	tryAgain := `{"tx_status":"TRY_AGAIN_LATER","hash":"0007"}`
+	go sendRestReply(relayProcessor, "gateway@test", 5*time.Millisecond, http.StatusServiceUnavailable, tryAgain)
+	go sendRestReply(relayProcessor, "node@test", 20*time.Millisecond, http.StatusServiceUnavailable, tryAgain)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	require.NoError(t, relayProcessor.WaitForResults(ctx), "both answered, nothing left in flight")
+	hasResults, _ := relayProcessor.HasRequiredNodeResults(1)
+	require.False(t, hasResults)
+
+	returnedResult, err := relayProcessor.ProcessingResult()
+	require.NoError(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, returnedResult.StatusCode)
+	require.Equal(t, tryAgain, string(returnedResult.Reply.Data))
 }

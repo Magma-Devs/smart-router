@@ -351,6 +351,27 @@ inlinable no-op call and nothing else.
 --usage-otel-service-instance-id "$HOSTNAME-eth"  # default: hostname-pid
 ```
 
+## Upstream response headers
+
+The router does not pass an upstream's response headers through to the client. Before its
+own headers are appended, the reply keeps only:
+
+| Kept | Why |
+| --- | --- |
+| `Content-Type`, `Content-Encoding` | the client needs them to decode the body (`common.TransportReplyHeaders`, the same pair the secondary cache keeps) |
+| `Retry-After`, `Date` | a 429's wait is computed from them: an HTTP-date `Retry-After` is measured against the upstream's own `Date`. `Date` is kept for that reading; the HTTP response the client sees carries fasthttp's own |
+| headers the chain spec declares in the reply direction (`pass_reply`, `pass_both`, `pass_ignore`) | part of that chain's API contract: today the Cosmos block-height header and Aptos's eight ledger-state headers, pagination cursor included. Resolved for the whole API interface, not the matched collection: Aptos declares them on its GET collection, its nodes send them on POST too, and the Aptos Rust SDK fails a call that comes back without all seven |
+
+Everything else the upstream or its CDN sends — server and ray ids, its CORS policy, cookies,
+quota counters, product headers — is dropped, and so is any header an upstream sends under a
+name the router owns (`lava-*`, `Provider-Latest-Block`, `Smart-Router-Version`,
+`status-code`), whether or not a spec lists it. A primary cache hit goes through the same
+filter when it is served, so an entry written by an older router replays the same reduced
+set; a secondary hit keeps only `Content-Type` and `Content-Encoding`
+(`docs/SECONDARY-CACHE.md`). The filter is `filterUpstreamReplyMetadata` in
+`upstream_reply_headers.go`, applied once in `SendDirectRelay`; the spec's directives come
+from `ChainParser.ReplyHeaderDirectives` (MAG-3104).
+
 ## Architecture
 
 ```

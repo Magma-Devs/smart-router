@@ -3,6 +3,9 @@ package metrics
 import (
 	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_StoreAggregatedData_OnMetricService(t *testing.T) {
@@ -228,6 +231,41 @@ func Test_PrepareArrayForProject_OnMetricService(t *testing.T) {
 			t.Error("Invalid Latency on the result array")
 		}
 	})
+}
+
+// NewMetricService runs at router startup once IS_METRICS_ENABLED is set, so a
+// panic here stops the router before it serves anything. A bad interval leaves
+// reporting off, and a negative buffer size counts as unset.
+func TestNewMetricService_InvalidEnv(t *testing.T) {
+	cases := []struct {
+		name        string
+		interval    string
+		bufferSize  string
+		wantService bool
+	}{
+		{name: "zero interval", interval: "0"},
+		{name: "negative interval", interval: "-1"},
+		{name: "interval with a unit", interval: "5m"},
+		{name: "fractional interval", interval: "1.5"},
+		// A Duration holds at most 153722867 minutes. Past that the interval
+		// wraps: 153722868 to a negative one, 307445735 to about 26 seconds.
+		{name: "longest interval a Duration holds", interval: "153722867", wantService: true},
+		{name: "interval that wraps negative", interval: "153722868"},
+		{name: "interval that wraps to 26s", interval: "307445735"},
+		{name: "negative buffer size", interval: "60", bufferSize: "-1", wantService: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Never dialed: a service only posts on its ticker, an hour or more out.
+			t.Setenv("REPORT_METRICS_URL", "http://127.0.0.1:0/unused")
+			t.Setenv("METRICS_INTERVAL_FOR_SENDING_DATA_MIN", tc.interval)
+			t.Setenv("METRICS_BUFFER_SIZE_NR", tc.bufferSize)
+
+			var service *MetricService
+			require.NotPanics(t, func() { service = NewMetricService() })
+			assert.Equal(t, tc.wantService, service != nil)
+		})
+	}
 }
 
 func checkThatMetricDtoInAggregatedMetricMap(mapData map[string]map[string]map[string]map[RelaySource]map[string]*AggregatedMetric, expectedData RelayAnalyticsDTO) error {
