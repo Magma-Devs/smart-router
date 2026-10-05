@@ -1437,19 +1437,55 @@ func (csm *ConsumerSessionManager) cacheAddonAddresses(addon string, extensions 
 // every other relay depends on. That happens whenever the pool empties *during* a request rather
 // than before it: each provider is blocked as it fails, and by the time the last one goes the
 // request has already tried them all.
-func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[string]struct{}, addon string, extensions []string, ctx context.Context) bool {
+//
+// selectedProvider narrows "any of those providers" to the one the request pinned, and is the
+// difference between a release that rescues the request and one that only destroys state. A pinned
+// request can only ever be handed the provider its pin resolves to, so the question becomes whether
+// a release would let the pin resolve to a provider this request has not tried. The pinned path
+// reaches this guard when the name is not in the pairing at all, when it is in the pairing but
+// blocked, when it is in the pairing but cannot serve this addon, or when it folds onto more than
+// one address. A release fixes the blocked case, and an ambiguous pin whose exact spelling is among
+// the addresses it restores. It fixes nothing else. Without the narrowing the guard answered on the
+// strength of some OTHER provider being available, which is a fact a pinned request can never use:
+// it released every blocked provider for every other relay and then failed anyway.
+func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[string]struct{}, addon string, extensions []string, selectedProvider string, ctx context.Context) bool {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
+
+	// The same predicates CalculateAddonValidAddresses filters on, so "capable" means exactly
+	// "selectable for this request once a release has put it back".
+	capable := func(address string) bool {
+		provider, ok := csm.pairing[address]
+		return ok && provider != nil && provider.IsSupportingAddon(addon) && provider.IsSupportingExtensions(extensions, ctx)
+	}
+
+	if selectedProvider != "" {
+		// A release refills the pool with the capable pairing addresses, so resolve the pin against
+		// those, the way getValidProviderAddresses will resolve it once the pool is back. An exact
+		// spelling wins and a single case-insensitive match is accepted. A name that is not there,
+		// or one that folds onto several addresses with no exact spelling among them, resolves to
+		// nothing after any release too, so releasing could not serve this request.
+		var candidates []string
+		for _, address := range csm.pairingAddresses {
+			if capable(address) {
+				candidates = append(candidates, address)
+			}
+		}
+		resolved, _ := resolveSelectedProviderAddress(selectedProvider, candidates)
+		if resolved == "" {
+			return false
+		}
+		// Looked up by the resolved address exactly, as selection does: a pin this request has
+		// already tried fails as already-failed after a release, whatever its case-twin looks like.
+		_, alreadyTried := ignored[resolved]
+		return !alreadyTried
+	}
 
 	for _, address := range csm.pairingAddresses {
 		if _, alreadyTried := ignored[address]; alreadyTried {
 			continue
 		}
-		provider, ok := csm.pairing[address]
-		if !ok || provider == nil {
-			continue
-		}
-		if provider.IsSupportingAddon(addon) && provider.IsSupportingExtensions(extensions, ctx) {
+		if capable(address) {
 			return true
 		}
 	}
@@ -1479,7 +1515,7 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 	// snapshot after the guard put the diagnosis on the far side of the branch that swallows it.
 	inventory := csm.snapshotPoolInventory(addon, extensionNames, ctx)
 
-	if !csm.releaseCouldServeThisRequest(tempIgnoredProviders.providers, addon, extensionNames, ctx) {
+	if !csm.releaseCouldServeThisRequest(tempIgnoredProviders.providers, addon, extensionNames, selectedProvider, ctx) {
 		// A declined release is usually ordinary retry exhaustion: this request has already tried
 		// every provider, releasing rescues nothing, and that stays at DEBUG.
 		//
@@ -1491,6 +1527,24 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 		// default collection). In all three nothing was tried, and "every provider has already been
 		// tried" is not merely unhelpful, it is false — the request tried nothing. Keying on
 		// pairingSize rescued only the first of the three and left the other two on the false line.
+		//
+		// A pinned request is none of that, so it is answered first. Both lines below describe the
+		// pool, and for a pin the pool is not the finding — the named provider is. It stays at DEBUG
+		// because the loud signal already exists: getValidProviderAddresses logged the pin itself at
+		// ERROR before this chain was ever entered.
+		if selectedProvider != "" {
+			utils.LavaFormatDebug("no release can serve this pinned provider, leaving the blocked list standing",
+				utils.LogAttr("selectedProvider", selectedProvider),
+				// The pin is the finding, but the pool state is why we were called at all, and this
+				// is the branch that would otherwise swallow it: an all-pinned deployment would
+				// never report an all-blocked pool. It rides along here rather than on a second
+				// line, which is also what stops the snapshot above being taken for nothing.
+				utils.LogAttr("reason", inventory.reason(addon, extensionNames)),
+				utils.LogAttr("addon", addon),
+				utils.LogAttr("extensions", extensionNames),
+				utils.LogAttr("GUID", ctx))
+			return nil, false
+		}
 		if len(tempIgnoredProviders.providers) == 0 {
 			csm.logPoolEmpty(ctx, inventory, addon, extensionNames)
 			return nil, false
@@ -1677,6 +1731,34 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		}
 		internalPath = opts[0].InternalPath
 	}
+
+	// A group-diversity mandate outranks any caller directive, and the drop happens HERE, before
+	// anything else in this call reads either value.
+	//
+	// It used to happen deep inside getValidConsumerSessionsWithProvider, at the one call that
+	// needed it. That left this frame and the failover cascade below holding a pin that selection
+	// had already discarded — and the cascade reads selectedProvider to decide whether releasing
+	// the blocked provider list could serve this request. Answering that for an address nobody
+	// will be routed to declines a release the request genuinely needs, so a cross-validation
+	// relay that the pool could still have satisfied comes back short of its required providers.
+	//
+	// Doing it before the cross-pod resolution below also saves a fleet round trip for a claim
+	// that would be discarded the moment it came back.
+	//
+	// The rpcsmartrouter caller drops these earlier still, for cross-validation at ANY minGroups.
+	// This one is the library's own invariant: GetSessions must not carry a directive that its own
+	// selection will ignore, whoever called it.
+	if minGroups > 1 && (selectedProvider != "" || stickiness != "") {
+		utils.LavaFormatWarning("group-diversity selection overrides caller provider selection / stickiness", nil,
+			utils.LogAttr("selectedProvider", selectedProvider),
+			utils.LogAttr("stickiness", stickiness),
+			utils.LogAttr("minGroups", minGroups),
+			utils.LogAttr("chainID", csm.rpcEndpoint.ChainID),
+			utils.LogAttr("GUID", ctx))
+		selectedProvider = ""
+		stickiness = ""
+	}
+
 	// Cross-pod stickiness resolves BEFORE any lock is taken, because it may call the fleet
 	// store and no network round trip may happen while csm.lock is held.
 	//
@@ -2616,20 +2698,15 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 	// diverse set exists. minGroups <= 1 keeps the original group-blind selection byte-identical.
 	var providerAddresses []string
 	if minGroups > 1 {
-		// A group-diversity policy (an operator mandate) needs >= minGroups distinct provider groups, which
-		// is fundamentally incompatible with a single-provider directive: lava-select-provider and a sticky
-		// session each pin selection to exactly ONE provider (getValidProviderAddresses returns just that
-		// address). The operator policy wins (UC-1: stricter validation regardless of what the caller asked),
-		// so we intentionally pass empty stickiness/selectedProvider into the diverse fetch below — but make
-		// the override OBSERVABLE instead of silently discarding the caller's directive.
-		if selectedProvider != "" || stickiness != "" {
-			utils.LavaFormatWarning("cross-validation group-diversity policy overrides caller provider selection / stickiness", nil,
-				utils.LogAttr("selectedProvider", selectedProvider),
-				utils.LogAttr("stickiness", stickiness),
-				utils.LogAttr("minGroups", minGroups),
-				utils.LogAttr("chainID", csm.rpcEndpoint.ChainID),
-				utils.LogAttr("GUID", ctx))
-		}
+		// A group-diversity policy (an operator mandate) needs >= minGroups distinct provider groups,
+		// which is fundamentally incompatible with a single-provider directive: lava-select-provider
+		// and a sticky session each pin selection to exactly ONE provider (getValidProviderAddresses
+		// returns just that address). The operator policy wins (UC-1: stricter validation regardless
+		// of what the caller asked).
+		//
+		// Both are still passed empty explicitly, so this fetch says what it selects on rather than
+		// inheriting it. GetSessions has already cleared them for minGroups > 1 and reported the
+		// override, so by the time we get here there is nothing left to discard or to warn about.
 		ranked, rankErr := csm.getValidProviderAddresses(ctx, len(csm.validAddresses), ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "")
 		if rankErr != nil {
 			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get group-diverse provider addresses", utils.LogAttr("error", rankErr), utils.LogAttr("GUID", ctx))

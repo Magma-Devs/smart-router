@@ -20,7 +20,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -129,8 +128,8 @@ func startXRPLRouter(t *testing.T, ctx context.Context, upstreams map[string]str
 	require.NoError(t, err)
 	server := &RPCSmartRouterServer{
 		chainParser: chainParser, sessionManager: sessionManager, listenEndpoint: rpcEndpoint,
-		rpcSmartRouterLogs: logs, relayRetriesManager: lavaprotocol.NewRelayRetriesManager(),
-		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
+		rpcSmartRouterLogs: logs,
+		consistencyConfig:  relaycore.DefaultConsistencyValidationConfig(),
 	}
 	listener := chainlib.NewJrpcChainListener(ctx, rpcEndpoint, server, nil, logs, nil, nil)
 	listenerDone := make(chan struct{})

@@ -42,8 +42,6 @@ func (m *budgetCallSiteStateMachine) GetUsedProviders() *lavasession.UsedProvide
 	return m.usedProviders
 }
 func (m *budgetCallSiteStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf) {}
-func (m *budgetCallSiteStateMachine) SetRelayRetriesManager(rm *lavaprotocol.RelayRetriesManager) {
-}
 
 // The behavioural fix is one line: which of two durations the dispatcher hands to SendDirectRelay.
 //
@@ -122,7 +120,7 @@ func TestSendRelayToDirectEndpoints_PassesTheBudgetNotTheWindow(t *testing.T) {
 	sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}
 	metricsStub := cvGuardMetrics{}
 	relayProcessor := relaycore.NewRelayProcessor(
-		ctx, nil, metricsStub, metricsStub, lavaprotocol.NewRelayRetriesManager(), sm)
+		ctx, nil, metricsStub, metricsStub, sm)
 
 	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")

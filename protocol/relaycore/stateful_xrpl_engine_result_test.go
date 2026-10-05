@@ -36,7 +36,7 @@ func newStatefulXRPLProcessor(t *testing.T, providers ...string) *RelayProcessor
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "127.0.0.1")
 	usedProviders := lavasession.NewUsedProviders(nil)
-	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateful))
+	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateful))
 
 	require.NoError(t, usedProviders.TryLockSelection(ctx))
 	if len(providers) == 0 {

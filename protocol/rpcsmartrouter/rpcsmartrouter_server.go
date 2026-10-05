@@ -86,7 +86,6 @@ type RPCSmartRouterServer struct {
 	relaysMonitor        *metrics.RelaysMonitor
 	debugRelays          bool
 	chainListener        chainlib.ChainListener
-	relayRetriesManager  *lavaprotocol.RelayRetriesManager
 	initialized          atomic.Bool
 	enableSelectionStats bool // feature flag to enable selection stats header
 
@@ -170,7 +169,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.wsSubscriptionManager = wsSubscriptionManager
 	rpcss.debugRelays = cmdFlags.DebugRelays
 	rpcss.enableSelectionStats = cmdFlags.EnableSelectionStats
-	rpcss.relayRetriesManager = lavaprotocol.NewRelayRetriesManager()
 
 	// Load optional per-method cross-validation policies (empty => header-driven CV only, fully
 	// backwards compatible). Fail fast on invalid config.
@@ -836,7 +834,6 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		crossValidationParams,
 		rpcss.rpcSmartRouterLogs,
 		rpcss,
-		rpcss.relayRetriesManager,
 		stateMachine,
 	)
 	usedEndpointsResets := 1
@@ -853,11 +850,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		// endpoint from consuming a client-sized budget. Cancelled on both exits below rather than
 		// deferred, so a hung attempt from this try does not outlive it.
 		tryCtx, cancelTry := context.WithTimeout(ctx, internalRelayTryTimeout)
-		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(tryCtx, protocolMessage), relayProcessor, nil, nil)
+		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil)
 		if errors.Is(err, lavasession.PairingListEmptyError) {
 			// we don't have pairings anymore, could be related to unwanted endpoints
 			relayProcessor.GetUsedProviders().ClearUnwanted()
-			err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(tryCtx, protocolMessage), relayProcessor, nil, nil)
+			err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil)
 		}
 		if err != nil {
 			utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
@@ -1388,7 +1385,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 			&failFastParams,
 			rpcss.rpcSmartRouterLogs,
 			rpcss,
-			rpcss.relayRetriesManager,
 			stateMachine,
 		)
 		if reason != "" {
@@ -1407,7 +1403,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 		crossValidationParams,
 		rpcss.rpcSmartRouterLogs,
 		rpcss,
-		rpcss.relayRetriesManager,
 		stateMachine,
 	)
 	// Cross-validation remains strict: accepting stale participants would change
@@ -4137,8 +4132,7 @@ func (rpcss *RPCSmartRouterServer) filterCachedReplyMetadata(reply *pairingtypes
 // that just failed — otherwise a pinned provider that returned a retryable node error gets
 // re-selected, or the retry dead-ends on "Selected provider cannot be retried"
 // (MAG-2228). firstAttempt is BatchNumber()==0, which stays 0 when attempt 1 never reached a
-// provider (e.g. PairingListEmpty), so the pin is correctly re-honored in that case. Mirrors
-// preserveRetrySafeDirectives, which omits both directives on a rebuilt archive retry.
+// provider (e.g. PairingListEmpty), so the pin is correctly re-honored in that case.
 func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]string, firstAttempt bool) (selectedProvider, stickiness string) {
 	if !firstAttempt {
 		return "", ""
@@ -4154,6 +4148,29 @@ func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]strin
 	return selectedProvider, stickiness
 }
 
+// crossValidationOverridesPin reports whether cross-validation displaces the caller's
+// single-provider directives.
+//
+// lava-select-provider and a sticky claim each pin selection to exactly ONE provider, while a
+// cross-validation relay needs several providers to have anything to compare. The two cannot both
+// be honoured, so the cross-validation wins. An operator policy outranks the caller anyway (UC-1:
+// stricter validation regardless of what the caller asked). A caller who switched cross-validation
+// on with its own headers asked for both, and the quorum is the stricter of the two asks.
+//
+// Before this existed the pin stayed in force. Selection returned the one pinned session, and the
+// session-count guard further down this function then failed the request with insufficient-capacity
+// before any upstream was asked. That guard does not release the session it took (MAG-3286), so the
+// request first waited out its whole deadline. Only a threshold of 1 got through, served by the
+// pinned provider alone. A pinned request on a cross-validated method hung and failed; it never came
+// back validated.
+//
+// Keyed on cross-validation being active AT ALL, not on the policy also mandating group diversity.
+// The override existed before, deep inside selection, keyed on minGroups > 1; MinGroups defaults to
+// 1 whenever a policy is merely enabled, so the common configuration never reached it.
+func crossValidationOverridesPin(crossValidationEnabled bool, selectedProvider, stickiness string) bool {
+	return crossValidationEnabled && (selectedProvider != "" || stickiness != "")
+}
+
 func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	ctx context.Context,
 	numOfEndpoints int,
@@ -4167,7 +4184,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// - Send the relay request directly to the RPC node
 	// - Handle QoS updates based on response latency and success
 	// - Update endpoint health status on connection failures
-	// Use the latest protocol message from the relay state machine to ensure we have any archive upgrades
+	// Use the latest protocol message from the relay state machine: the earliest-block re-parse may
+	// have replaced it with one that carries the archive extension.
 	protocolMessage := relayProcessor.GetProtocolMessage()
 	// IMPORTANT: Create an isolated copy of RelayPrivateData at function entry to prevent race conditions.
 	// This ensures that modifications in this call don't affect goroutines from previous calls,
@@ -4460,6 +4478,22 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// On a retry (a provider batch has already been dispatched, so BatchNumber > 0) the
 	// relay must be free to fall through to a different provider. See resolvePinDirectives.
 	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders, usedProviders.BatchNumber() == 0)
+
+	// Dropped here rather than inside lavasession so the rest of this call stays coherent: the
+	// failover cascade reads selectedProvider to decide whether releasing the blocked provider
+	// list could serve this request, and a pin that selection has already discarded makes it
+	// answer for an address nobody will be routed to.
+	if crossValidationOverridesPin(crossValidationEnabled, selectedProvider, stickiness) {
+		utils.LavaFormatWarning("cross-validation overrides caller provider selection / stickiness", nil,
+			utils.LogAttr("selectedProvider", selectedProvider),
+			utils.LogAttr("stickiness", stickiness),
+			utils.LogAttr("maxParticipants", crossValidationParams.MaxParticipants),
+			utils.LogAttr("minGroups", crossValidationParams.MinGroups),
+			utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
+			utils.LogAttr("GUID", ctx))
+		selectedProvider = ""
+		stickiness = ""
+	}
 
 	// Group-aware fan-out: when a cross-validation policy requires group diversity, select across at
 	// least MinGroups distinct provider groups (1.2a). Default 1 leaves selection group-blind. For
@@ -5757,10 +5791,7 @@ func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestD
 			return protocolMessage
 		}
 
-		extensionAdded := newProtocolMessage.UpdateEarliestAndValidateExtensionRules(rpcss.chainParser.ExtensionsParser(), earliestBlockHashRequested, addon, relayRequestData.SeenBlock)
-		if extensionAdded && relayState.CheckIsArchive(newProtocolMessage.RelayPrivateData()) {
-			relayState.SetIsArchive(true)
-		}
+		newProtocolMessage.UpdateEarliestAndValidateExtensionRules(rpcss.chainParser.ExtensionsParser(), earliestBlockHashRequested, addon, relayRequestData.SeenBlock)
 		relayState.SetProtocolMessage(newProtocolMessage)
 		return newProtocolMessage
 	}

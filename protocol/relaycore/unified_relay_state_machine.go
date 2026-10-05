@@ -4,12 +4,10 @@ import (
 	context "context"
 	"errors"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	lavasession "github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/utils"
@@ -28,7 +26,6 @@ type UnifiedRelayStateMachine struct {
 	debugRelays           bool
 	batchUpdate           chan error
 	usedProviders         *lavasession.UsedProviders
-	relayRetriesManager   *lavaprotocol.RelayRetriesManager
 	relayState            []*RelayState
 	protocolMessage       chainlib.ProtocolMessage
 	relayStateLock        sync.RWMutex
@@ -204,11 +201,7 @@ func NewUnifiedRelayStateMachine(
 }
 
 func (sm *UnifiedRelayStateMachine) Initialized() bool {
-	return sm.relayRetriesManager != nil && sm.resultsChecker != nil
-}
-
-func (sm *UnifiedRelayStateMachine) SetRelayRetriesManager(relayRetriesManager *lavaprotocol.RelayRetriesManager) {
-	sm.relayRetriesManager = relayRetriesManager
+	return sm.resultsChecker != nil
 }
 
 func (sm *UnifiedRelayStateMachine) SetResultsChecker(resultsChecker ResultsCheckerInf) {
@@ -242,58 +235,20 @@ func (sm *UnifiedRelayStateMachine) getLatestState() *RelayState {
 	return sm.relayState[len(sm.relayState)-1]
 }
 
-// stateTransition creates the next relay state. If the policy returned a mutation,
-// it is applied here via applyMutation. Otherwise falls back to UpgradeToArchiveIfNeeded.
-func (sm *UnifiedRelayStateMachine) stateTransition(relayState *RelayState, numberOfNodeErrors uint64, mutation *MutationOutput) {
-	batchNumber := sm.usedProviders.BatchNumber()
+// stateTransition creates the next relay state.
+//
+// The next state carries the SAME protocol message as the one before it. A retry changes which
+// endpoint serves the request, never what the request asks for — see Policy.Decide for why the
+// archive add/remove that used to happen here is gone. Nothing here changes the routerKey, so
+// MAG-2228's exclusion migration has nothing left to migrate at this site.
+func (sm *UnifiedRelayStateMachine) stateTransition(relayState *RelayState) {
 	var nextState *RelayState
 	if relayState == nil {
-		nextState = NewRelayState(sm.ctx, sm.protocolMessage, 0, sm.relayRetriesManager, sm.relaySender, &ArchiveStatus{})
+		nextState = NewRelayState(sm.protocolMessage, 0, &ArchiveStatus{})
 	} else {
-		protocolMessage := sm.GetProtocolMessage()
-		archiveStatus := relayState.GetArchiveStatus()
-
-		var upgradedProtocolMessage chainlib.ProtocolMessage
-		if mutation != nil && (mutation.ArchiveAction != ArchiveNoChange || mutation.CacheHashes) {
-			upgradedProtocolMessage = sm.applyMutation(protocolMessage, archiveStatus, *mutation)
-		} else {
-			// Fallback: policy.Decide() returned no archive mutation (e.g. epoch-mismatch
-			// retry at step 4, or initial state). Legacy UpgradeToArchiveIfNeeded applies
-			// batch-number-based archive logic that mirrors decideMutation(). Both paths
-			// must stay in sync until the fallback is eliminated.
-			upgradedProtocolMessage = UpgradeToArchiveIfNeeded(sm.ctx, protocolMessage, archiveStatus, sm.relaySender, sm.relayRetriesManager, batchNumber, numberOfNodeErrors)
-		}
-
-		// MAG-2228: a mutation that changes the extensions (archive add/remove) rebuilds the
-		// message under a different routerKey. The used/unwanted-provider exclusion is keyed
-		// by routerKey, so providers already tried under the old key would not be excluded
-		// under the new one and a just-failed provider could be re-selected for the retry.
-		// Carry the exclusion across the toggle.
-		oldRouterKey := lavasession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())
-		newRouterKey := lavasession.NewRouterKeyFromExtensions(upgradedProtocolMessage.GetExtensions())
-		if oldRouterKey.String() != newRouterKey.String() {
-			sm.usedProviders.MigrateUnwantedProviders(oldRouterKey, newRouterKey)
-		}
-
-		nextState = NewRelayState(sm.ctx, upgradedProtocolMessage, relayState.GetStateNumber()+1, sm.relayRetriesManager, sm.relaySender, archiveStatus)
+		nextState = NewRelayState(sm.GetProtocolMessage(), relayState.GetStateNumber()+1, relayState.GetArchiveStatus())
 	}
 	sm.appendRelayState(nextState)
-}
-
-// applyMutation applies the policy's archive/cache mutation to the protocol message.
-func (sm *UnifiedRelayStateMachine) applyMutation(protocolMessage chainlib.ProtocolMessage, archiveStatus *ArchiveStatus, mutation MutationOutput) chainlib.ProtocolMessage {
-	if mutation.CacheHashes {
-		cacheBlockHashes(protocolMessage, archiveStatus, sm.relayRetriesManager)
-	}
-
-	switch mutation.ArchiveAction {
-	case ArchiveAdd:
-		return addArchiveExtension(sm.ctx, protocolMessage, archiveStatus, sm.relaySender)
-	case ArchiveRemove:
-		return removeArchiveExtension(sm.ctx, protocolMessage, archiveStatus, sm.relaySender)
-	default:
-		return protocolMessage
-	}
 }
 
 // getResultsSummary retrieves the ResultsSummary from the results checker.
@@ -318,20 +273,12 @@ func signalReturnCondition(returnCondition chan<- error, err error) {
 }
 
 // buildDecisionInput assembles the DecisionInput for the policy engine.
-func (sm *UnifiedRelayStateMachine) buildDecisionInput(numberOfNodeErrors uint64, isTickerHedge bool) DecisionInput {
-	latestState := sm.getLatestState()
-	var archiveStatus *ArchiveStatus
-	if latestState != nil {
-		archiveStatus = latestState.GetArchiveStatus()
-	}
-
+func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) DecisionInput {
 	return DecisionInput{
 		Selection:     sm.selection,
 		AttemptNumber: sm.usedProviders.BatchNumber(),
 		IsBatch:       sm.protocolMessage.IsBatch(),
 		Summary:       sm.getResultsSummary(),
-		ArchiveStatus: archiveStatus,
-		NodeErrors:    numberOfNodeErrors,
 		IsTickerHedge: isTickerHedge,
 	}
 }
@@ -407,12 +354,10 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 		processingCtx, processingCtxCancel := context.WithTimeout(sm.ctx, processingTimeout)
 		defer processingCtxCancel()
 
-		numberOfNodeErrorsAtomic := atomic.Uint64{}
 		readResultsFromProcessor := func() {
 			utils.LavaFormatTrace("[StateMachine] Waiting for results", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
 			sm.resultsChecker.WaitForResults(processingCtx)
-			metRequiredNodeResults, numberOfNodeErrors := sm.resultsChecker.HasRequiredNodeResults(sm.usedProviders.BatchNumber())
-			numberOfNodeErrorsAtomic.Store(uint64(numberOfNodeErrors))
+			metRequiredNodeResults, _ := sm.resultsChecker.HasRequiredNodeResults(sm.usedProviders.BatchNumber())
 			gotResults <- metRequiredNodeResults
 		}
 		go readResultsFromProcessor()
@@ -428,7 +373,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 		}
 
 		// initialize relay state
-		sm.stateTransition(nil, 0, nil)
+		sm.stateTransition(nil)
 
 		// Determine number of providers for initial batch
 		var numProviders int
@@ -539,8 +484,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					}
 				}
 
-				nodeErrors := numberOfNodeErrorsAtomic.Load()
-				output := sm.policy.Decide(sm.buildDecisionInput(nodeErrors, false))
+				output := sm.policy.Decide(sm.buildDecisionInput(false))
 				// A retry is the exceptional path — the common case is a single attempt that
 				// stops — and it is the one an operator needs in order to explain a slow or
 				// multi-provider relay from production INFO logs. Log those at INFO; leave the
@@ -560,7 +504,7 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					// A retry after a completed attempt, not a hedge. Clear any hedge the ticker asked
 					// for and never got out, so this dispatch is not counted as that hedge firing.
 					sm.hedgePending = false
-					sm.stateTransition(sm.getLatestState(), nodeErrors, &output.Mutation)
+					sm.stateTransition(sm.getLatestState())
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
 				} else {
 					// Held back, not filed, while relays are still in flight — the same reason the
@@ -582,11 +526,10 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 					}
 				}
 
-				nodeErrors := numberOfNodeErrorsAtomic.Load()
-				output := sm.policy.Decide(sm.buildDecisionInput(nodeErrors, true))
+				output := sm.policy.Decide(sm.buildDecisionInput(true))
 				if output.Action == ActionRetry {
 					utils.LavaFormatTrace("[StateMachine] ticker triggered", utils.LogAttr("batch", sm.usedProviders.BatchNumber()), utils.LogAttr("GUID", sm.ctx))
-					sm.stateTransition(sm.getLatestState(), nodeErrors, &output.Mutation)
+					sm.stateTransition(sm.getLatestState())
 					relayTaskChannel <- RelayStateSendInstructions{RelayState: sm.getLatestState(), NumOfProviders: 1}
 					// Counted when the dispatch is confirmed, in the batchUpdate arm — asking for a
 					// hedge is not the same as sending one.
