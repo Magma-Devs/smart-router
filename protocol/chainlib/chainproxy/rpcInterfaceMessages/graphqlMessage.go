@@ -3,6 +3,7 @@ package rpcInterfaceMessages
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/goccy/go-json"
@@ -35,11 +36,14 @@ const GraphQLMethodSeparator = "&"
 // successful reply. Observed live on mainnet: GRAPHQL_VALIDATION_FAILED (client) and errors with
 // no extensions block at all (client, see graphQLErrorIsNodeFault).
 var graphQLNodeErrorCodes = map[string]struct{}{
-	"RESOURCE_EXHAUSTED":    {},
+	graphQLRateLimitCode:    {},
 	"INTERNAL_SERVER_ERROR": {},
 	"UNAVAILABLE":           {},
 	"DEADLINE_EXCEEDED":     {},
 }
+
+// graphQLRateLimitCode is the code Sui answers a rate or query-cost limit with inside a 200.
+const graphQLRateLimitCode = "RESOURCE_EXHAUSTED"
 
 // graphQLRequestEnvelope is the GraphQL-over-HTTP POST body.
 type graphQLRequestEnvelope struct {
@@ -317,6 +321,12 @@ func (gm *GraphQLMessage) GetRawRequestHash() ([]byte, error) {
 //     answer: passed through, not retried, not counted against the endpoint. A wrong argument
 //     type returns an error with no code whatsoever, and that query fails the same way on every
 //     provider in the fleet.
+//
+// A mutation is the exception to rule 3: any error on it is a node error. A write is broadcast,
+// and the first reply that is not a node error ends the broadcast as its result, so a rejection
+// read as a success would be returned while a sibling was still executing the same transaction.
+// That is what JSON-RPC does with every error object. ClassificationStatus keeps the caller's
+// errors among them out of retries and scoring.
 func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	if httpStatusCode != 0 && (httpStatusCode < 200 || httpStatusCode >= 300) {
 		return true, extractErrorMessage(data, httpStatusCode)
@@ -334,7 +344,38 @@ func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (h
 			return true, entry.Message
 		}
 	}
+	if gm.IsMutation() && len(envelope.Errors) > 0 {
+		return true, envelope.Errors[0].Message
+	}
 	return false, ""
+}
+
+// ClassificationStatus returns the HTTP status the error registry should classify a GraphQL
+// node error under. A status outside 2xx is its own answer. Inside a 2xx the status says nothing,
+// so the error's code stands in for it: RESOURCE_EXHAUSTED is Sui's 429 and classifies as one,
+// which is what engages the rate-limit hold-off and keeps a busy endpoint's score intact, and a
+// mutation error that is not a node fault (CheckResponseError's mutation rule) is the caller's
+// and classifies as a 400, not retried and not scored. Anything else keeps the reply's status.
+func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) int {
+	if httpStatusCode != 0 && (httpStatusCode < 200 || httpStatusCode >= 300) {
+		return httpStatusCode
+	}
+	envelope := graphQLResponseEnvelope{}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return httpStatusCode
+	}
+	for _, entry := range envelope.Errors {
+		if graphQLErrorIsNodeFault(entry) {
+			if entry.Extensions.Code == graphQLRateLimitCode {
+				return http.StatusTooManyRequests
+			}
+			return httpStatusCode
+		}
+	}
+	if gm.IsMutation() && len(envelope.Errors) > 0 {
+		return http.StatusBadRequest
+	}
+	return httpStatusCode
 }
 
 // graphQLErrorIsNodeFault reports whether one error entry is the node's fault. An entry with no

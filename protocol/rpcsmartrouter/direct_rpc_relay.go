@@ -960,7 +960,9 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	}
 
 	// As on REST, a 429 is capacity rather than a node error at the transport level: the
-	// registry's rate-limit row and the hold-off own it.
+	// registry's rate-limit row and the hold-off own it. An in-body RESOURCE_EXHAUSTED stays a
+	// node error and reaches the same handling through IsRateLimited, as a JSON-RPC body's
+	// rate limit does.
 	isNodeError := hasError && response.StatusCode != 429
 
 	providerAddress := d.endpointName
@@ -983,7 +985,11 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		IsNodeError: isNodeError,
 	}
 	if hasError {
-		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, response.StatusCode, errorMessage)
+		// A GraphQL node error usually arrives inside a 200, so the status alone would leave
+		// the registry with nothing to go on: the message stands in for it (RESOURCE_EXHAUSTED
+		// classifies as a 429, a caller's error on a mutation as a 400).
+		classificationStatus := graphqlMessage.ClassificationStatus(response.Body, response.StatusCode)
+		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, classificationStatus, errorMessage)
 	}
 
 	utils.LavaFormatTrace("GraphQL request completed",

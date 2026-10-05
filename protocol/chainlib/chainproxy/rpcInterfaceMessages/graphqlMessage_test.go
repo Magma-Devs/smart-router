@@ -310,6 +310,35 @@ func TestGraphQLMessageCheckResponseError(t *testing.T) {
 	}
 }
 
+func TestGraphQLMessageMutationErrors(t *testing.T) {
+	mutation, err := ParseGraphQLMsg([]byte(`{"query":"mutation { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } }"}`))
+	require.NoError(t, err)
+	query, err := ParseGraphQLMsg([]byte(`{"query":"{ chainIdentifier }"}`))
+	require.NoError(t, err)
+
+	codeless := []byte(`{"data":null,"errors":[{"message":"Invalid user signature"}]}`)
+	rateLimited := []byte(`{"data":null,"errors":[{"message":"slow down","extensions":{"code":"RESOURCE_EXHAUSTED"}}]}`)
+	internal := []byte(`{"data":null,"errors":[{"message":"boom","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`)
+
+	// A rejected write must not end the broadcast as a success, so any error on a mutation is a
+	// node error. The same code-less error on a read stays the caller's answer (rule 3).
+	hasError, message := mutation.CheckResponseError(codeless, 200)
+	require.True(t, hasError)
+	require.Equal(t, "Invalid user signature", message)
+	hasError, _ = query.CheckResponseError(codeless, 200)
+	require.False(t, hasError)
+
+	// The registry gets a status that says what the error is: the caller's mutation error is a
+	// 400 (not retried, not scored), RESOURCE_EXHAUSTED is a 429 on either operation type, and a
+	// server fault keeps the reply's status.
+	require.Equal(t, 400, mutation.ClassificationStatus(codeless, 200))
+	require.Equal(t, 429, mutation.ClassificationStatus(rateLimited, 200))
+	require.Equal(t, 429, query.ClassificationStatus(rateLimited, 200))
+	require.Equal(t, 200, mutation.ClassificationStatus(internal, 200))
+	require.Equal(t, 200, query.ClassificationStatus(codeless, 200))
+	require.Equal(t, 503, mutation.ClassificationStatus(codeless, 503), "a non-2xx status is its own answer")
+}
+
 func TestGraphQLMessageRawRequestHash(t *testing.T) {
 	first, err := ParseGraphQLMsg([]byte(`{"query":"{ checkpoint(sequenceNumber: 1) { digest } }"}`))
 	require.NoError(t, err)

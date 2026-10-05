@@ -32,23 +32,37 @@ func TestGraphQLDirectRelay(t *testing.T) {
 		ApiCollections: []*spectypes.ApiCollection{{
 			Enabled:        true,
 			CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGraphQL, Type: http.MethodPost},
-			Apis: []*spectypes.Api{{
-				Name:         "chainIdentifier",
-				Enabled:      true,
-				ComputeUnits: 10,
-				BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
-			}},
+			Apis: []*spectypes.Api{
+				{
+					Name:         "chainIdentifier",
+					Enabled:      true,
+					ComputeUnits: 10,
+					BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
+				},
+				{
+					Name:         "executeTransaction",
+					Enabled:      true,
+					ComputeUnits: 100,
+					Category:     spectypes.SpecCategory{Stateful: 1},
+					BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
+				},
+			},
 		}},
 	})
 
-	const requestBody = `{"query":"{ chainIdentifier }"}`
+	const (
+		readBody     = `{"query":"{ chainIdentifier }"}`
+		mutationBody = `{"query":"mutation { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } }"}`
+	)
 
 	tests := []struct {
 		name            string
+		request         string
 		status          int
 		reply           string
 		wantNodeError   bool
 		wantNonRetrying bool
+		wantRateLimited bool
 	}{
 		{
 			name:   "a success is passed through",
@@ -73,10 +87,31 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			wantNodeError:   true,
 			wantNonRetrying: true,
 		},
+		{
+			// Sui's 429 arrives inside a 200; it must reach the rate-limit hold-off.
+			name:            "RESOURCE_EXHAUSTED inside a 200 is a rate limit",
+			status:          http.StatusOK,
+			reply:           `{"data":null,"errors":[{"message":"slow down","extensions":{"code":"RESOURCE_EXHAUSTED"}}]}`,
+			wantNodeError:   true,
+			wantRateLimited: true,
+		},
+		{
+			// A rejected write must not end the broadcast as a success, and is the caller's.
+			name:            "a rejected mutation is a node error filed as the caller's",
+			request:         mutationBody,
+			status:          http.StatusOK,
+			reply:           `{"data":null,"errors":[{"message":"Invalid user signature"}]}`,
+			wantNodeError:   true,
+			wantNonRetrying: true,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			requestBody := test.request
+			if requestBody == "" {
+				requestBody = readBody
+			}
 			var gotMethod, gotPath, gotBody string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				body, _ := io.ReadAll(r.Body)
@@ -104,6 +139,7 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			require.Equal(t, test.reply, string(result.Reply.Data))
 			require.Equal(t, test.wantNodeError, result.IsNodeError)
 			require.Equal(t, test.wantNonRetrying, result.IsNonRetryable)
+			require.Equal(t, test.wantRateLimited, result.IsRateLimited)
 		})
 	}
 }
