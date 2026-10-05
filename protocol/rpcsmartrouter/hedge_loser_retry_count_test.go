@@ -146,7 +146,9 @@ func TestRetryCountHeader_CountsAttemptsWithoutResult(t *testing.T) {
 		rp            *MockRelayProcessorForHeaders
 		resolver      string
 		wantRetries   string // "" means the header must be absent
-		wantProviders string
+		wantProviders string // "" means the header must be absent
+		// wantCrossValidation holds cross-validation's own provider headers, checked when set.
+		wantCrossValidation map[string]string
 	}{
 		{
 			// The ticket's reproduction: the pinned provider is slow, the ticker hedges to a peer,
@@ -281,6 +283,24 @@ func TestRetryCountHeader_CountsAttemptsWithoutResult(t *testing.T) {
 			resolver:      "p1",
 			wantProviders: "p1",
 		},
+		{
+			// Unchanged as well: a cross-validation round sends every participant in one batch and
+			// names them in its own headers. The participant still out when the reply was built is
+			// pending, not a retry, so neither Lava-Retries nor Lava-Provider-Address is set.
+			name: "a cross-validation round is one batch, not N retries",
+			rp: &MockRelayProcessorForHeaders{
+				selection:                       relaycore.CrossValidation,
+				crossValidationParams:           &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 3},
+				crossValidationQueriedProviders: []string{"p3", "p1", "p2"},
+				usedProviders:                   dispatchedTogether("p1", "p2", "p3"),
+				successResults:                  []common.RelayResult{from("p1"), from("p2")},
+			},
+			resolver: "p1",
+			wantCrossValidation: map[string]string{
+				common.CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME: "p1,p2,p3",
+				common.CROSS_VALIDATION_PENDING_PROVIDERS_HEADER:  "p3",
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			metadata := headersFor(t, tc.rp, tc.resolver, uint64(len(tc.rp.protocolErrors)))
@@ -293,8 +313,17 @@ func TestRetryCountHeader_CountsAttemptsWithoutResult(t *testing.T) {
 				require.Equal(t, tc.wantRetries, retries)
 			}
 			providers, found := replyHeader(metadata, common.PROVIDER_ADDRESS_HEADER_NAME)
-			require.True(t, found)
-			require.Equal(t, tc.wantProviders, providers)
+			if tc.wantProviders == "" {
+				require.False(t, found, "no provider header expected, got %q", providers)
+			} else {
+				require.True(t, found, "the provider header is missing")
+				require.Equal(t, tc.wantProviders, providers)
+			}
+			for name, want := range tc.wantCrossValidation {
+				got, found := replyHeader(metadata, name)
+				require.True(t, found, "%s is missing", name)
+				require.Equal(t, want, got, name)
+			}
 		})
 	}
 
