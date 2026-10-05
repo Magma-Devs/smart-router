@@ -86,7 +86,7 @@ func (h *directRelayHarness) relayGRPC(method string) (*common.RelayResult, erro
 	relayResult := &common.RelayResult{}
 	_, err, _ := h.rpcss.relayInnerDirect(
 		context.Background(), h.session, relayResult, 5*time.Second, 30*time.Second,
-		msg, msg.requestData, nil, func() bool { return false },
+		msg, msg.requestData, nil, func() bool { return false }, nil,
 	)
 	return relayResult, err
 }

@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
@@ -25,8 +24,7 @@ func (romm *RelayProcessorMetricsMock) GetChainIdAndApiInterface() (string, stri
 }
 
 var (
-	RelayRetriesManagerInstance = lavaprotocol.NewRelayRetriesManager()
-	RelayProcessorMetrics       = &RelayProcessorMetricsMock{}
+	RelayProcessorMetrics = &RelayProcessorMetricsMock{}
 )
 
 func SendSuccessResp(relayProcessor *RelayProcessor, provider string, delay time.Duration) {

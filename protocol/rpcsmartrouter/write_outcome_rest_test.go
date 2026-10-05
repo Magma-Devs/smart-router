@@ -147,8 +147,8 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			require.NoError(t, err)
 			server := &RPCSmartRouterServer{
 				chainParser: parser, sessionManager: sessionManager, listenEndpoint: rpcEndpoint,
-				rpcSmartRouterLogs: logs, relayRetriesManager: lavaprotocol.NewRelayRetriesManager(),
-				consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
+				rpcSmartRouterLogs: logs,
+				consistencyConfig:  relaycore.DefaultConsistencyValidationConfig(),
 			}
 			if tc.hang {
 				server.smartRouterEndpointMetrics = metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})

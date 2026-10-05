@@ -19,10 +19,17 @@ import (
 // deferred to a background goroutine), so dummy endpoint addresses are sufficient.
 func newCapacityTestServer(t *testing.T, groupByAddr map[string]string) *RPCSmartRouterServer {
 	t.Helper()
+	return newCapacityTestServerFor(t, "LAVA", "rest", groupByAddr)
+}
+
+// newCapacityTestServerFor is newCapacityTestServer for a given endpoint, so a test can drive the guard on
+// the same chain/api-interface its policy resolver is written for.
+func newCapacityTestServerFor(t *testing.T, chainID, apiInterface string, groupByAddr map[string]string) *RPCSmartRouterServer {
+	t.Helper()
 	rand.InitRandomSeed()
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, 0, 1, nil, "dontcare")
 	csm := lavasession.NewConsumerSessionManager(
-		&lavasession.RPCEndpoint{NetworkAddress: "stub", ChainID: "LAVA", ApiInterface: "rest"},
+		&lavasession.RPCEndpoint{NetworkAddress: "stub", ChainID: chainID, ApiInterface: apiInterface},
 		optimizer, nil, "lava@test", lavasession.NewActiveSubscriptionProvidersStorage())
 
 	pairingList := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(groupByAddr))
@@ -41,7 +48,7 @@ func newCapacityTestServer(t *testing.T, groupByAddr map[string]string) *RPCSmar
 	require.NoError(t, csm.UpdateAllProviders(1, pairingList, nil))
 	return &RPCSmartRouterServer{
 		sessionManager: csm,
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"},
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface},
 	}
 }
 

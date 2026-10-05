@@ -69,6 +69,18 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
   may exceed, a **cap** that overrides a stricter caller, or *forbid* caller-driven
   cross-validation entirely for a method (`forbid-caller-cv: true`).
 
+> **The router's own health check is exempt.** A mandate applies to client requests. The readiness
+> health check crafts a latest-block request (`eth_blockNumber`,
+> `/cosmos/base/tendermint/v1beta1/blocks/latest`, whatever the spec tags
+> `FUNCTION_TAG_GET_BLOCKNUM`) and takes one provider's answer, so a policy on that method does not
+> apply to it: the check asks whether a provider can answer, and one answer can never meet an
+> agreement threshold above 1, nor a `min-groups` floor above 1. Before MAG-3746 it did apply, and
+> every health check failed for as long as the policy stood — `/readyz` 503, and under a readiness
+> probe on that path the pod never
+> became Ready, while client requests under the same policy were succeeding. Readiness therefore
+> does **not** attest that a policied method currently has quorum capacity; it answers whether the
+> chain can serve relays at all.
+
 > **Write / stateful methods.** An **operator policy** that enables cross-validation on a
 > stateful (write) method is **rejected at startup** — that path is guarded. By default the
 > legacy **caller-header** path is *not* guarded: a request that sends the headers above still
@@ -161,7 +173,15 @@ selection so a QoS-dominant group cannot starve the others.
 
 A policy that cannot be satisfied by the configured fleet (too few groups, or too few providers
 per group for per-group quorum) is **rejected at startup**, and the resolved
-provider→group layout is logged.
+provider→group layout is logged. A provider that fails its startup verification does not count
+against that check, and the endpoint starts. If the providers left cannot meet a policy (fewer
+groups than its `min-groups`, or fewer providers than its `max-participants`), it logs an
+`ATTENTION` line naming the missing providers and refuses only the requests that policy governs
+until the background retry re-admits them. Two shortfalls are warned about rather than refused:
+a `max-participants` larger than the configured primaries, and an endpoint configured with
+backup providers only, which cross-validation never draws on. The startup line counts every
+verified primary; a request that needs an addon or extension draws only on the primaries serving
+it and can be refused with fewer.
 
 ### Response headers
 
@@ -350,6 +370,27 @@ inlinable no-op call and nothing else.
 --usage-otel-service-name "smartrouter"
 --usage-otel-service-instance-id "$HOSTNAME-eth"  # default: hostname-pid
 ```
+
+## Upstream response headers
+
+The router does not pass an upstream's response headers through to the client. Before its
+own headers are appended, the reply keeps only:
+
+| Kept | Why |
+| --- | --- |
+| `Content-Type`, `Content-Encoding` | the client needs them to decode the body (`common.TransportReplyHeaders`, the same pair the secondary cache keeps) |
+| `Retry-After`, `Date` | a 429's wait is computed from them: an HTTP-date `Retry-After` is measured against the upstream's own `Date`. `Date` is kept for that reading; the HTTP response the client sees carries fasthttp's own |
+| headers the chain spec declares in the reply direction (`pass_reply`, `pass_both`, `pass_ignore`) | part of that chain's API contract: today the Cosmos block-height header and Aptos's eight ledger-state headers, pagination cursor included. Resolved for the whole API interface, not the matched collection: Aptos declares them on its GET collection, its nodes send them on POST too, and the Aptos Rust SDK fails a call that comes back without all seven |
+
+Everything else the upstream or its CDN sends — server and ray ids, its CORS policy, cookies,
+quota counters, product headers — is dropped, and so is any header an upstream sends under a
+name the router owns (`lava-*`, `Provider-Latest-Block`, `Smart-Router-Version`,
+`status-code`), whether or not a spec lists it. A primary cache hit goes through the same
+filter when it is served, so an entry written by an older router replays the same reduced
+set; a secondary hit keeps only `Content-Type` and `Content-Encoding`
+(`docs/SECONDARY-CACHE.md`). The filter is `filterUpstreamReplyMetadata` in
+`upstream_reply_headers.go`, applied once in `SendDirectRelay`; the spec's directives come
+from `ChainParser.ReplyHeaderDirectives` (MAG-3104).
 
 ## Architecture
 

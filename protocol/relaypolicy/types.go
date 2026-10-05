@@ -6,8 +6,6 @@ import "github.com/magma-Devs/smart-router/protocol/relaycore"
 type (
 	Action         = relaycore.Action
 	SendResult     = relaycore.SendResult
-	ArchiveAction  = relaycore.ArchiveAction
-	MutationOutput = relaycore.MutationOutput
 	DecisionOutput = relaycore.DecisionOutput
 	DecisionInput  = relaycore.DecisionInput
 	ResultsSummary = relaycore.ResultsSummary
@@ -21,10 +19,6 @@ const (
 	SendSuccess = relaycore.SendSuccess
 	SendRetry   = relaycore.SendRetry
 	SendStop    = relaycore.SendStop
-
-	NoChange      = relaycore.ArchiveNoChange
-	AddArchive    = relaycore.ArchiveAdd
-	RemoveArchive = relaycore.ArchiveRemove
 )
 
 // PolicyConfig configures the policy engine. Consumer and SmartRouter may use different values.

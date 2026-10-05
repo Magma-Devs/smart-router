@@ -401,6 +401,13 @@ func (up *UsedProviders) tryLockSelection() bool {
 	return false
 }
 
+// GetErroredProviders returns the providers that reported a protocol error under routerKey, as a
+// COPY taken while the lock is held. The live map keeps changing after this returns: the router
+// answers as soon as enough providers agree, and the slower ones then land in RemoveUsed and
+// ReleaseFromLatestBatch, which write to it. Handing out the map itself let a caller iterate it
+// concurrently with those writes, which Go's runtime treats as a fatal throw rather than a panic:
+// nothing on the path can recover it and the process ends (MAG-3103). GetUnwantedProvidersToSend
+// below already copies for the same reason.
 func (up *UsedProviders) GetErroredProviders(routerKey RouterKey) map[string]struct{} {
 	if up == nil {
 		return map[string]struct{}{}
@@ -408,7 +415,7 @@ func (up *UsedProviders) GetErroredProviders(routerKey RouterKey) map[string]str
 	up.lock.Lock()
 	defer up.lock.Unlock()
 	uniqueUsedProviders := up.createOrUseUniqueUsedProvidersForKey(routerKey)
-	return uniqueUsedProviders.erroredProviders
+	return maps.Clone(uniqueUsedProviders.erroredProviders)
 }
 
 func (up *UsedProviders) GetUnwantedProvidersToSend(routerKey RouterKey) map[string]struct{} {

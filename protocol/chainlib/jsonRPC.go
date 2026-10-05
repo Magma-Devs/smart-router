@@ -126,6 +126,11 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			utils.LogAttr("maxAllowed", MaxBatchRequestSize),
 		)
 	}
+	if isBatch {
+		if err := rpcInterfaceMessages.CheckJsonrpcBatch(apip.chainFamily(), msgs); err != nil {
+			return nil, utils.LavaFormatWarning("JSON-RPC batch refused", err, utils.LogAttr("batchSize", len(msgs)))
+		}
+	}
 	var api *spectypes.Api
 	var apiCollection *spectypes.ApiCollection
 	var latestRequestedBlock, earliestRequestedBlock int64 = 0, 0
@@ -279,14 +284,14 @@ func (*JsonRPCChainParser) newBatchChainMessage(serviceApi *spectypes.Api, reque
 	return nodeMsg, err
 }
 
-func (*JsonRPCChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedBlockHashes []string, msg *rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
+func (apip *JsonRPCChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedBlockHashes []string, msg *rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
 	nodeMsg := &baseChainMessageContainer{
 		api:                      serviceApi,
 		apiCollection:            apiCollection,
 		latestRequestedBlock:     requestedBlock,
 		requestedBlockHashes:     requestedBlockHashes,
 		msg:                      msg,
-		resultErrorParsingMethod: msg.CheckResponseError,
+		resultErrorParsingMethod: rpcInterfaceMessages.JsonrpcResponseErrorChecker(apip.chainFamily(), msg),
 		parseDirective:           GetParseDirective(serviceApi, apiCollection),
 		usedDefaultValue:         usedDefaultValue,
 	}
@@ -448,7 +453,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 
 		consumerWebsocketManager.ListenToMessages(ctx)
 	})
-	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, apil.logger.StoreMetricData)
+	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback)
 	app.Get("/ws", wsUpgradeMiddleware, websocketCallbackWithDappID)
 	app.Get("/websocket", wsUpgradeMiddleware, websocketCallbackWithDappID) // catching http://HOST:PORT/1/websocket requests.
 
@@ -456,8 +461,6 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// Set response header content-type to application/json
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		startTime := time.Now()
-		endTx := apil.logger.LogStartTransaction("jsonRpc-http post")
-		defer endTx()
 		dappID := extractDappIDFromFiberContext(fiberCtx)
 		metricsData := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
@@ -503,6 +506,15 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			if errors.Is(err, ErrBatchRequestSizeExceeded) {
 				errorResponse, _ := json.Marshal(common.JsonRpcBatchSizeExceededError)
 				return fiberCtx.Status(fiber.StatusTooManyRequests).SendString(string(errorResponse))
+			}
+
+			// A batch the chain cannot take (an XRPL submit inside one). The node itself would refuse it
+			// with a 400, so the caller gets the same verdict, as a JSON-RPC invalid request.
+			if errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused) {
+				refused := common.JsonRpcInvalidRequestError
+				refused.Error.Data = rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error()
+				errorResponse, _ := json.Marshal(refused)
+				return fiberCtx.Status(fiber.StatusBadRequest).SendString(string(errorResponse))
 			}
 
 			if errors.Is(err, common.APINotSupportedError) {

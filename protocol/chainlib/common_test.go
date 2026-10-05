@@ -19,7 +19,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
@@ -308,7 +307,7 @@ func TestExtractDappIDFromWebsocketConnection(t *testing.T) {
 		websockConn.WriteMessage(mt, []byte(dappID))
 	})
 
-	app.Get("/ws", constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, false))
+	app.Get("/ws", constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback))
 
 	// Bind before serving so the port is known and the bind error is not swallowed:
 	// a hardcoded port silently loses the race to anything else holding it, and the
@@ -1054,76 +1053,6 @@ func TestCreateAndSetupBaseAppListener_HandlesLargeHeaders(t *testing.T) {
 				"expected %d, got %d (header size = %d B). 431 means fasthttp's ReadBufferSize is back at the 4 KiB default.",
 				tc.wantStatus, resp.StatusCode, len(tc.xfcc))
 		})
-	}
-}
-
-// TestConstructFiberCallback_StashesOriginInLocals exercises the end-to-end
-// flow that AddMetricForWebSocket relies on: the HTTP-upgrade handler
-// extracts Origin from the fasthttp request headers, clones it, and stashes
-// it in fiber Locals under metrics.OriginHeaderKey so the websocket handler
-// can read it after the upgrade. Catches regressions where the Locals
-// storage is moved out of the metric-enabled branch or the key is changed.
-func TestConstructFiberCallback_StashesOriginInLocals(t *testing.T) {
-	app := fiber.New()
-	captured := make(chan string, 1)
-
-	webSocketCallback := websocket.New(func(c *websocket.Conn) {
-		origin, _ := c.Locals(metrics.OriginHeaderKey).(string)
-		captured <- origin
-		c.Close()
-	})
-
-	app.Get("/ws", constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, true))
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	go func() { _ = app.Listener(ln) }()
-	defer func() { _ = app.Shutdown() }()
-
-	dialer := &websocket2.Dialer{}
-	conn, _, err := dialer.Dial("ws://"+ln.Addr().String()+"/ws", http.Header{"Origin": {"https://test.example"}})
-	require.NoError(t, err)
-	defer conn.Close()
-
-	select {
-	case got := <-captured:
-		require.Equal(t, "https://test.example", got)
-	case <-time.After(2 * time.Second):
-		t.Fatal("Origin never reached websocket handler via Locals")
-	}
-}
-
-// TestConstructFiberCallback_NoOriginWhenMetricsDisabled covers the negative
-// branch: when isMetricEnabled=false the Origin Locals is intentionally
-// absent, so AddMetricForWebSocket reads back an empty string. Ensures the
-// flag still gates the extraction work.
-func TestConstructFiberCallback_NoOriginWhenMetricsDisabled(t *testing.T) {
-	app := fiber.New()
-	captured := make(chan string, 1)
-
-	webSocketCallback := websocket.New(func(c *websocket.Conn) {
-		origin, _ := c.Locals(metrics.OriginHeaderKey).(string)
-		captured <- origin
-		c.Close()
-	})
-
-	app.Get("/ws", constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, false))
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	go func() { _ = app.Listener(ln) }()
-	defer func() { _ = app.Shutdown() }()
-
-	dialer := &websocket2.Dialer{}
-	conn, _, err := dialer.Dial("ws://"+ln.Addr().String()+"/ws", http.Header{"Origin": {"https://test.example"}})
-	require.NoError(t, err)
-	defer conn.Close()
-
-	select {
-	case got := <-captured:
-		require.Empty(t, got)
-	case <-time.After(2 * time.Second):
-		t.Fatal("websocket handler never ran")
 	}
 }
 
