@@ -11,6 +11,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -176,6 +177,28 @@ func TestArchiveAddDoesNotInventRelayTimeout(t *testing.T) {
 
 	require.Equal(t, time.Duration(0), upgraded.TimeoutOverride(), "must not synthesize a timeout the client did not request")
 	require.NotContains(t, upgraded.GetDirectiveHeaders(), common.RELAY_TIMEOUT_HEADER_NAME)
+}
+
+// TestArchiveAddDropsNonPositiveRelayTimeout: the header parser never stores a non-positive
+// lava-relay-timeout (MAG-3988), and the rebuild must not depend on that. An override that reached
+// the message some other way is no override, so the rebuilt message neither carries it nor lists
+// it as a lava-relay-timeout directive header.
+func TestArchiveAddDropsNonPositiveRelayTimeout(t *testing.T) {
+	for _, timeout := range []time.Duration{-time.Nanosecond, -time.Second, time.Duration(-1 << 63)} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			pm, parser := newTestProtocolMessage(t, testProtocolMessageOpts{timeoutOverride: timeout})
+			require.Equal(t, timeout, pm.TimeoutOverride(), "precondition: the source message carries the override")
+			relayParser := &passthroughRelayParser{chainParser: parser}
+
+			upgraded := addArchiveExtension(context.Background(), pm, &ArchiveStatus{}, relayParser)
+
+			require.NotSame(t, pm, upgraded, "upgrade should produce a new protocol message")
+			assert.Equal(t, time.Duration(0), upgraded.TimeoutOverride(),
+				"a non-positive override must not be copied onto the rebuilt message")
+			assert.NotContains(t, upgraded.GetDirectiveHeaders(), common.RELAY_TIMEOUT_HEADER_NAME,
+				"a non-positive override must not be re-materialised as a lava-relay-timeout header")
+		})
+	}
 }
 
 // TestArchiveAddPreservesDebugRelay covers the directive-map-only directive.
