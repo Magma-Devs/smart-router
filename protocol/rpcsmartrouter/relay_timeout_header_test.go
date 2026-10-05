@@ -145,9 +145,16 @@ func TestRelayTimeoutHeader_BoundedBetweenParseAndTheStateMachine(t *testing.T) 
 		{name: "negative is ignored", header: "-45s", wantWindow: ownWindow},
 		{name: "one nanosecond below zero is ignored", header: "-1ns", wantWindow: ownWindow},
 		{name: "zero is ignored", header: "0s", wantWindow: ownWindow},
+		{name: "bare zero is ignored", header: "0", wantWindow: ownWindow},
+		// The most negative duration a header can spell (MAG-3988 / PR 452).
+		{name: "most negative is ignored", header: "-2562047h", wantWindow: ownWindow},
 		{name: "not a duration is ignored", header: "not-a-duration", wantWindow: ownWindow},
 		// Raised to the floor, or every tick would dispatch another endpoint.
 		{name: "one nanosecond is raised to the floor", header: "1ns", wantWindow: common.MinCallerRelayTimeout},
+		// PR 452 honoured 250ms verbatim, below any floor. This PR deliberately changes that rule:
+		// a caller's window is now raised to MinCallerRelayTimeout (300ms). The breaking change is
+		// this PR's, carried under its `!`.
+		{name: "250ms is raised to the floor", header: "250ms", wantWindow: common.MinCallerRelayTimeout},
 		// Honoured as sent: the automation hedges sooner with these, below --min-relay-timeout.
 		{name: "300ms is honoured", header: "300ms", wantWindow: 300 * time.Millisecond},
 		{name: "1s is honoured", header: "1s", wantWindow: time.Second},

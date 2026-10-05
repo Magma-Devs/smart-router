@@ -268,7 +268,9 @@ func preserveForceCacheRefresh(src, dst chainlib.ProtocolMessage) {
 
 func preserveRelayTimeout(src, dst chainlib.ProtocolMessage) {
 	timeout := src.TimeoutOverride()
-	if timeout == 0 {
+	// A non-positive override is no override (MAG-3988), however it was set: never copy one, nor
+	// re-send it as a lava-relay-timeout header.
+	if timeout <= 0 {
 		return
 	}
 	dst.TimeoutOverride(timeout)
