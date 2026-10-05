@@ -6160,8 +6160,8 @@ func (rpcss *RPCSmartRouterServer) directRelayTransport(directConnection lavases
 	case lavasession.DirectRPCProtocolGRPC:
 		return common.TransportGRPC
 	case lavasession.DirectRPCProtocolHTTP, lavasession.DirectRPCProtocolHTTPS:
-		// HTTP could be JSON-RPC or REST — use the endpoint's API interface
-		if rpcss.listenEndpoint.ApiInterface == "rest" {
+		// HTTP could be JSON-RPC, REST or GraphQL — use the endpoint's API interface
+		if common.ApiInterfaceToTransport(rpcss.listenEndpoint.ApiInterface) == common.TransportREST {
 			return common.TransportREST
 		}
 	}
