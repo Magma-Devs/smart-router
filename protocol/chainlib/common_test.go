@@ -19,7 +19,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
@@ -1053,50 +1052,6 @@ func TestCreateAndSetupBaseAppListener_HandlesLargeHeaders(t *testing.T) {
 			require.Equal(t, tc.wantStatus, resp.StatusCode,
 				"expected %d, got %d (header size = %d B). 431 means fasthttp's ReadBufferSize is back at the 4 KiB default.",
 				tc.wantStatus, resp.StatusCode, len(tc.xfcc))
-		})
-	}
-}
-
-// TestConstructFiberCallback_StashesOriginInLocals covers the hand-off a websocket
-// relay's Origin depends on: the upgrade handler reads the header, clones it, and
-// stashes it in fiber Locals under metrics.OriginHeaderKey, where the websocket
-// manager reads it after the upgrade. A client that sends no Origin reads back "".
-func TestConstructFiberCallback_StashesOriginInLocals(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		header http.Header
-		want   string
-	}{
-		{name: "origin sent", header: http.Header{"Origin": {"https://test.example"}}, want: "https://test.example"},
-		{name: "no origin", header: nil, want: ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			app := fiber.New()
-			captured := make(chan string, 1)
-
-			webSocketCallback := websocket.New(func(c *websocket.Conn) {
-				origin, _ := c.Locals(metrics.OriginHeaderKey).(string)
-				captured <- origin
-				c.Close()
-			})
-
-			app.Get("/ws", constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback))
-
-			ln, err := net.Listen("tcp", "127.0.0.1:0")
-			require.NoError(t, err)
-			go func() { _ = app.Listener(ln) }()
-			defer func() { _ = app.Shutdown() }()
-
-			conn, _, err := websocket2.DefaultDialer.Dial("ws://"+ln.Addr().String()+"/ws", tc.header)
-			require.NoError(t, err)
-			defer conn.Close()
-
-			select {
-			case got := <-captured:
-				require.Equal(t, tc.want, got)
-			case <-time.After(2 * time.Second):
-				t.Fatal("websocket handler never ran")
-			}
 		})
 	}
 }

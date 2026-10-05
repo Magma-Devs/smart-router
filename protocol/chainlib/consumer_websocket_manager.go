@@ -354,8 +354,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 
 	websocketConn := cwm.websocketConn
 	logger := cwm.rpcConsumerLogs
-	// Stashed by the upgrade handler; one value for every relay on this connection.
-	origin, _ := websocketConn.Locals(metrics.OriginHeaderKey).(string)
+	// gofiber/websocket copies the handshake headers onto the conn before the
+	// upgrade; one value for every relay on this connection.
+	origin := websocketConn.Headers(metrics.OriginHeaderKey)
 
 	webSocketCtx, cancelWebSocketCtx := context.WithCancel(context.Background())
 	guid := utils.GenerateUniqueIdentifier()
