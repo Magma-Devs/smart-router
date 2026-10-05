@@ -264,6 +264,35 @@ func (e *Endpoint) IsDirectRPC() bool {
 	return len(e.DirectConnections) > 0
 }
 
+// ServesDirectRelays reports whether a relay sent to this endpoint can ever be answered.
+//
+// A ws:// or wss:// url listed under an interface (a vendor's websocket door next to its
+// https one, the shape most jsonrpc configs take) becomes an endpoint of its own, but no
+// relay can use it: the JSON-RPC and REST relay paths require an HTTPDirectRPCDoer and
+// refuse a websocket connection outright, and the gRPC path needs a gRPC one. The url is
+// there for subscriptions, which never come through endpoint selection — they are served
+// by DirectWSSubscriptionManager from its own ws url list (collectWSEndpoints).
+//
+// While the https sibling is enabled this never shows, because selection returns the first
+// enabled endpoint and the https url is listed first. Once that sibling is backed off for
+// timing out, the websocket endpoint became the first enabled one and every relay to the
+// provider failed in microseconds with "connection does not support HTTP requests
+// (protocol: wss)" — burning the request's retry budget on an answer known in advance
+// instead of moving to another provider.
+//
+// A provider-relay endpoint (no direct connection) is unaffected.
+func (e *Endpoint) ServesDirectRelays() bool {
+	if !e.IsDirectRPC() || e.DirectConnections[0] == nil {
+		return true
+	}
+	switch e.DirectConnections[0].GetProtocol() {
+	case DirectRPCProtocolWS, DirectRPCProtocolWSS:
+		return false
+	default:
+		return true
+	}
+}
+
 // ServesInternalPath reports whether this endpoint's url is the one to dial for
 // an api served under `internalPath`.
 func (e *Endpoint) ServesInternalPath(internalPath string) bool {
@@ -1230,6 +1259,13 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			enabled := endpoint.Enabled
 			endpoint.mu.RUnlock()
 			if !retryDisabledEndpoints && !enabled {
+				continue
+			}
+			// A websocket-only endpoint can never answer a relay — see ServesDirectRelays.
+			// Skipping it leaves the provider with no selectable endpoint once its https url
+			// is backed off, so the caller ignores the provider for this request and picks
+			// another, rather than handing out a session that fails on the spot.
+			if !endpoint.ServesDirectRelays() {
 				continue
 			}
 			if retryDisabledEndpoints {
