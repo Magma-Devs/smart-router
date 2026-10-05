@@ -673,10 +673,8 @@ func streamResponseHeaders(md []pairingtypes.Metadata) metadata.MD {
 // lives — far past the point where the unary path would have released them.
 func snapshotMetricsHeaders(metadataValues metadata.MD) metadata.MD {
 	snapshot := metadata.MD{}
-	for _, key := range []string{metrics.RefererHeaderKey, metrics.UserAgentHeaderKey, metrics.OriginHeaderKey} {
-		if values := metadataValues.Get(key); len(values) > 0 {
-			snapshot.Set(key, strings.Clone(values[0]))
-		}
+	if values := metadataValues.Get(metrics.OriginHeaderKey); len(values) > 0 {
+		snapshot.Set(metrics.OriginHeaderKey, strings.Clone(values[0]))
 	}
 	return snapshot
 }

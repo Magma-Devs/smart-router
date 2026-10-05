@@ -459,7 +459,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 
 		consumerWebsocketManager.ListenToMessages(ctx)
 	})
-	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, apil.logger.StoreMetricData)
+	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback)
 	app.Get("/ws", wsUpgradeMiddleware, websocketCallbackWithDappID)
 	app.Get("/websocket", wsUpgradeMiddleware, websocketCallbackWithDappID) // catching http://HOST:PORT/1/websocket requests.
 
