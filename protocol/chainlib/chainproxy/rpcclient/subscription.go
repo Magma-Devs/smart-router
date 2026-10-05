@@ -328,10 +328,9 @@ func (sub *ClientSubscription) run() {
 
 // sendErr hands err to the reader of Err, unless Unsubscribe has already closed the channel.
 //
-// That happens when the connection goes down and the client is unsubscribed at about the same
-// time, as on shutdown: the dispatcher's close fills the one-slot quit channel with the
-// connection error, Unsubscribe finds it full, skips its own signal and closes err, and the
-// forwarding loop then ends on the connection error rather than errUnsubscribed. Sending on the
+// Unsubscribe closes err without waiting for the forwarding loop. So whenever the loop ends on
+// anything but errUnsubscribed (connection loss, Client.Close, queue overflow), this send can
+// come after that close, whether or not Unsubscribe's own signal reached quit. Sending on the
 // closed channel would panic, so the error is dropped: nobody can receive it once err is closed.
 func (sub *ClientSubscription) sendErr(err error) {
 	sub.errMu.Lock()
