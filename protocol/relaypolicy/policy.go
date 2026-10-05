@@ -87,18 +87,28 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	// misclassified historical request was cheap to paper over by forcing archive and seeing
 	// what happened. It does not hold here: the spec's own archive rule
 	// (extensionslib.ArchiveParserRule) already decides whether a request needs archive, and it
-	// decides on attempt 0, from the requested block. A historical request is therefore ALREADY
-	// on an archive endpoint before any retry exists, and the only requests the upgrade could
-	// still fire on were the ones that rule had just judged non-archive — including plain
-	// `latest` reads, which no reading of "archive" covers.
+	// decides on attempt 0, from the requested block. A historical request whose block the parser
+	// can read is therefore ALREADY on an archive endpoint before any retry exists, and the
+	// upgrade fired on requests that rule had just judged non-archive — including plain `latest`
+	// reads, which no reading of "archive" covers.
+	//
+	// The rule can only judge a block it can read. Two kinds of request parse to NOT_APPLICABLE,
+	// never reach it, and lose their only automatic route to archive with this removal:
+	//   - methods that name a block or transaction by hash (eth_getTransactionReceipt,
+	//     debug_traceTransaction, trace_transaction, block_by_hash, ...), whose spec parsing is
+	//     DEFAULT/latest;
+	//   - EIP-1898 block objects, {"blockHash": ...} AND {"blockNumber": ...}, on eth_call,
+	//     eth_getBalance, eth_getStorageAt, eth_getTransactionCount, eth_getCode and eth_getProof.
+	// A rule.block change cannot fix either. Callers can still send `lava-extension: archive`.
+	// Routing them at attempt 0 is MAG-4142.
 	//
 	// Adding it anyway inverted the retry: the extension filter dropped every endpoint without
 	// archive, so one failed attempt narrowed a five-endpoint pool to whichever single endpoint
 	// declared the addon — skipping healthy untried endpoints, reaching into the backup tier,
 	// and charging the archive CU multiplier for a request that was never archive.
 	//
-	// So a misclassification is now fixed where it is made — in the spec's rule.block threshold
-	// for that chain — and not compensated for once per request, forever, by spending a retry.
+	// So a misclassified block height is now fixed where it is made — in the spec's rule.block
+	// threshold for that chain — and not compensated for once per request by spending a retry.
 	return DecisionOutput{Action: Retry, Reason: "Default"}
 }
 
