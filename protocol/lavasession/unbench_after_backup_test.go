@@ -288,11 +288,10 @@ func TestPinnedProvider_UnservableAddonWithEmptyPoolDoesNotRelease(t *testing.T)
 // A group-diversity mandate drops the caller's pin, and the request is served by the diverse set
 // rather than by the one pinned provider.
 //
-// The drop itself is not new. Where it happens is: it used to run at the one selection call that
-// needed it, leaving this frame holding a directive that selection had already discarded. The
-// visible half of that is here — with the pin still in force, selection returns the single pinned
-// address and then lowers its own target to match, so a caller asking for 2 providers is handed 1
-// and told nothing went wrong.
+// The drop itself is not new, and this test passes on the code before the move as well. Where the
+// drop happens is what changed: it used to run at the one selection call that needed it, leaving
+// GetSessions holding a directive that selection had already discarded. This pins the outcome the
+// move has to keep; TestGroupDiversity_UnknownPinStillReleasesTheBlock covers what the move fixes.
 func TestGroupDiversity_DropsThePinAndServesTheDiverseSet(t *testing.T) {
 	ctx := context.Background()
 	csm := setupBenchTestCSM(t, false)
@@ -357,9 +356,9 @@ func TestPinnedProvider_CaseFoldedNameStillReleasesTheBlock(t *testing.T) {
 // 1, and gets it with err == nil — the shortfall is not an error anywhere in this layer.
 //
 // For ordinary traffic that is correct and is the whole point of pinning. For a cross-validation
-// relay it is a policy asking for 3 participants being satisfied by a single answer that was
-// compared against nothing, which is why crossValidationOverridesPin clears the directive before
-// it ever arrives here.
+// relay it leaves one session where the quorum needs several, and rpcsmartrouter's session-count
+// guard then fails the request with insufficient-capacity. That is why crossValidationOverridesPin
+// clears the directive before it ever arrives here.
 func TestPinnedProvider_CollapsesTheRequestedProviderCount(t *testing.T) {
 	ctx := context.Background()
 	csm := setupBenchTestCSM(t, false)
