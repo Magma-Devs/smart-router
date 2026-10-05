@@ -55,6 +55,14 @@ type KVStore interface {
 	// tip (MAG-3755). An equal or higher block always writes and refreshes the
 	// horizon. In a keyspace written less often than the horizon the tip is
 	// simply the last writer's value, which is also all a reader could use.
+	// Fresh is judged on the incoming writer's clock against a deadline the
+	// previous writer stamped on its own, so on a store that routers write with
+	// their own clocks (the RESP backend; the in-memory store has just one) a
+	// writer whose clock runs ahead sees the fence shortened by its lead, and
+	// gone once the lead reaches DefaultExpirationForNonFinalized (500ms): the
+	// guard fails open and adopts that writer's lower write, which costs tip
+	// lag rather than trust, because a router only ever publishes a head it
+	// believed itself (replyLatestBlockForCacheWrite).
 	SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error
 
 	// Block-hash → height scalars. Missing key reads as (0, false).
