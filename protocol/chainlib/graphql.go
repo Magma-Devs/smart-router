@@ -142,6 +142,11 @@ func (apip *GraphQLChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 // taken across all roots. That combination is what keeps a mutation from riding in on a read's
 // policy: a request pairing executeTransaction with a query resolves to a stateful api, so the
 // cross-validation stateful guard still sees the write.
+//
+// A root field the spec does not declare is refused, introspection included: `__schema`,
+// `__type` and a root-level `__typename` are served only if the spec declares them as apis, like
+// any other operation. GraphiQL and schema codegen introspect on connect, so they need either
+// that or a direct connection to a node.
 func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType string, metadata []pairingtypes.Metadata, extensionInfo extensionslib.ExtensionInfo) (ChainMessage, error) {
 	if apip == nil {
 		return nil, errors.New("GraphQLChainParser not defined")
@@ -254,6 +259,18 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 		return nil, utils.LavaFormatError("graphql request resolved to no api", nil,
 			utils.LogAttr("method", graphqlMessage.GetMethod()),
 		)
+	}
+
+	// A mutation is a write whatever the spec says about its root fields. The stateful guard reads
+	// the spec's category, and identity is the root field name alone, so a mutation whose root
+	// shares a name with a read (or a spec that forgot stateful:1) would otherwise be fanned out
+	// for cross-validation and cached like a read. The operation type is in the document, so the
+	// guard does not have to trust the spec for it.
+	if graphqlMessage.IsMutation() && combinedApi.Category.Stateful != common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+		mutationApi := *combinedApi
+		mutationApi.Category.Stateful = common.CONSISTENCY_SELECT_ALL_PROVIDERS
+		mutationApi.Category.Deterministic = false
+		combinedApi = &mutationApi
 	}
 
 	parsedInput := parser.NewParsedInput()

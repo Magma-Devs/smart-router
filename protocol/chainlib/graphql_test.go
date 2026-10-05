@@ -167,6 +167,29 @@ func TestGraphQLChainParserMutationAmongReadsStaysStateful(t *testing.T) {
 	require.False(t, api.Category.Deterministic, "a request carrying a mutation must not be deterministic")
 }
 
+func TestGraphQLChainParserMutationIsStatefulWhateverTheSpecSays(t *testing.T) {
+	chainParser := newGraphQLTestParser(t)
+
+	// checkpoint is a deterministic read in the spec. Selected under a mutation it is a write:
+	// the operation type is in the document, and the stateful guard must not have to trust the
+	// spec to have no Query/Mutation name overlap.
+	chainMessage, err := chainParser.ParseMsg("",
+		[]byte(`{"query":"mutation { checkpoint { digest } }"}`),
+		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+	require.NoError(t, err)
+	api := chainMessage.GetApi()
+	require.EqualValues(t, 1, api.Category.Stateful)
+	require.False(t, api.Category.Deterministic)
+
+	// The spec's own api is untouched: the same field under a query is still the read.
+	readMessage, err := chainParser.ParseMsg("",
+		[]byte(`{"query":"{ checkpoint { digest } }"}`),
+		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+	require.NoError(t, err)
+	require.EqualValues(t, 0, readMessage.GetApi().Category.Stateful)
+	require.True(t, readMessage.GetApi().Category.Deterministic)
+}
+
 func TestGraphQLChainParserTipObservationIsNotPoisonable(t *testing.T) {
 	chainParser := newGraphQLTestParser(t)
 
