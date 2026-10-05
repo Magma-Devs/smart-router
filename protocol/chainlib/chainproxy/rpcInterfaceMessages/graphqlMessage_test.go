@@ -280,9 +280,17 @@ func TestGraphQLMessageCheckResponseError(t *testing.T) {
 			expectedHasError: true,
 		},
 		{
-			name:             "plain 400 is the caller's",
+			// A node error, as on REST: the registry's 400 row files it as the caller's, so it is
+			// not retried and not scored, and a mutation's broadcast does not end on it.
+			name:             "plain 400 is a node error the registry classifies",
 			body:             `{"message":"bad request"}`,
 			httpStatusCode:   400,
+			expectedHasError: true,
+		},
+		{
+			name:             "status 0 is not set and the body decides",
+			body:             `{"data":{"chainIdentifier":"x"}}`,
+			httpStatusCode:   0,
 			expectedHasError: false,
 		},
 		{

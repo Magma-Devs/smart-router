@@ -357,8 +357,6 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	handlerPost := func(fiberCtx *fiber.Ctx) error {
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		startTime := time.Now()
-		endTx := apil.logger.LogStartTransaction("graphql-http")
-		defer endTx()
 
 		msgSeed := apil.logger.GetMessageSeed()
 		path := "/" + fiberCtx.Params("*")

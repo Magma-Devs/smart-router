@@ -274,8 +274,8 @@ func (gm *GraphQLMessage) RootFieldNames() []string {
 }
 
 func (gm *GraphQLMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	// Sui's GraphQL schema has no subscription type and the production streaming path is gRPC,
-	// so this interface serves no subscriptions.
+	// GraphQL-over-HTTP POST cannot carry a subscription, and the production streaming path on
+	// Sui is gRPC, so this interface serves no subscriptions. See NewGraphQLChainParser.
 	return ""
 }
 
@@ -301,7 +301,13 @@ func (gm *GraphQLMessage) GetRawRequestHash() ([]byte, error) {
 //
 // GraphQL answers everything over HTTP 200 — a validation failure, a rate limit and a successful
 // read all carry the same status — so the status code alone cannot say whether the node failed.
-// Three rules, each one measured against live Sui mainnet:
+// A status outside 2xx never got that far, and follows RestMessage.CheckResponseError: it is a
+// node error, and the error registry's REST rows classify it (a 400 as the caller's, not retried
+// and not scored). Counted as a success, a gateway's instant 4xx would end a mutation's broadcast
+// while a sibling was still executing it. A status of 0 is "not set" and reads as 2xx, as it does
+// for REST.
+//
+// Inside a 2xx, three rules, each one measured against live Sui mainnet:
 //
 //  1. An empty or absent `errors` array is a success, even when `data` is null. A read for a
 //     checkpoint that does not exist returns exactly `{"data":{"checkpoint":null}}` with no
@@ -312,19 +318,8 @@ func (gm *GraphQLMessage) GetRawRequestHash() ([]byte, error) {
 //     type returns an error with no code whatsoever, and that query fails the same way on every
 //     provider in the fleet.
 func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
-	// 5xx and 429 never carry a GraphQL document worth inspecting.
-	if httpStatusCode >= 500 || httpStatusCode == 429 {
+	if httpStatusCode != 0 && (httpStatusCode < 200 || httpStatusCode >= 300) {
 		return true, extractErrorMessage(data, httpStatusCode)
-	}
-
-	// A refused route is not the node answering. Shared with REST; see isRouteRefusal.
-	if isRouteRefusal(httpStatusCode, data) {
-		return true, extractErrorMessage(data, httpStatusCode)
-	}
-
-	if httpStatusCode < 200 || httpStatusCode >= 300 {
-		// Any other 4xx is the caller's answer, as in REST.
-		return false, ""
 	}
 
 	envelope := graphQLResponseEnvelope{}
