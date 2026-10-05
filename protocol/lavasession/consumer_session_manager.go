@@ -1439,39 +1439,53 @@ func (csm *ConsumerSessionManager) cacheAddonAddresses(addon string, extensions 
 // request has already tried them all.
 //
 // selectedProvider narrows "any of those providers" to the one the request pinned, and is the
-// difference between a release that rescues the request and one that only destroys state. The
-// pinned path reaches this guard for four different reasons — the name is not in the pairing at
-// all, it is in the pairing but blocked, it is in the pairing but cannot serve this addon, or it
-// folds onto more than one address — and only the blocked one is fixed by a release. Without the narrowing the guard answered on the
+// difference between a release that rescues the request and one that only destroys state. A pinned
+// request can only ever be handed the provider its pin resolves to, so the question becomes whether
+// a release would let the pin resolve to a provider this request has not tried. The pinned path
+// reaches this guard when the name is not in the pairing at all, when it is in the pairing but
+// blocked, when it is in the pairing but cannot serve this addon, or when it folds onto more than
+// one address. A release fixes the blocked case, and an ambiguous pin whose exact spelling is among
+// the addresses it restores. It fixes nothing else. Without the narrowing the guard answered on the
 // strength of some OTHER provider being available, which is a fact a pinned request can never use:
-// it releases every blocked provider for every other relay and then fails anyway. The addon and
-// extension checks below still run, so the third case is declined on its own merits.
+// it released every blocked provider for every other relay and then failed anyway.
 func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[string]struct{}, addon string, extensions []string, selectedProvider string, ctx context.Context) bool {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
-	for _, address := range csm.pairingAddresses {
-		// Folded rather than resolved through resolveSelectedProviderAddress, which needs a single
-		// winner and returns none for a case collision. The question here is only "could this
-		// address be the pinned one", so the fold is the right superset: an ambiguous pin is one of
-		// the cases a release genuinely can fix, by restoring the exact spelling that resolves it.
-		//
-		// Known limit of the superset: with case-twin names configured, a pin already in the
-		// ignored set can still be answered for by its twin, and that release is as useless as the
-		// one this guard exists to stop. It needs two names differing only in case, and it shares a
-		// root cause with resolveSelectedProviderAddress folding against validAddresses rather than
-		// the pairing — both belong to that fix, not this one.
-		if selectedProvider != "" && !strings.EqualFold(address, selectedProvider) {
-			continue
+	// The same predicates CalculateAddonValidAddresses filters on, so "capable" means exactly
+	// "selectable for this request once a release has put it back".
+	capable := func(address string) bool {
+		provider, ok := csm.pairing[address]
+		return ok && provider != nil && provider.IsSupportingAddon(addon) && provider.IsSupportingExtensions(extensions, ctx)
+	}
+
+	if selectedProvider != "" {
+		// A release refills the pool with the capable pairing addresses, so resolve the pin against
+		// those, the way getValidProviderAddresses will resolve it once the pool is back. An exact
+		// spelling wins and a single case-insensitive match is accepted. A name that is not there,
+		// or one that folds onto several addresses with no exact spelling among them, resolves to
+		// nothing after any release too, so releasing could not serve this request.
+		var candidates []string
+		for _, address := range csm.pairingAddresses {
+			if capable(address) {
+				candidates = append(candidates, address)
+			}
 		}
+		resolved, _ := resolveSelectedProviderAddress(selectedProvider, candidates)
+		if resolved == "" {
+			return false
+		}
+		// Looked up by the resolved address exactly, as selection does: a pin this request has
+		// already tried fails as already-failed after a release, whatever its case-twin looks like.
+		_, alreadyTried := ignored[resolved]
+		return !alreadyTried
+	}
+
+	for _, address := range csm.pairingAddresses {
 		if _, alreadyTried := ignored[address]; alreadyTried {
 			continue
 		}
-		provider, ok := csm.pairing[address]
-		if !ok || provider == nil {
-			continue
-		}
-		if provider.IsSupportingAddon(addon) && provider.IsSupportingExtensions(extensions, ctx) {
+		if capable(address) {
 			return true
 		}
 	}
