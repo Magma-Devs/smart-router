@@ -4851,6 +4851,18 @@ func (rpcss *RPCSmartRouterServer) warnUnavailableExtensions(ctx context.Context
 	}
 }
 
+// countUnavailableExtensions counts this request against each extension it asked for that no node
+// offers. Unlike the WARN it fires on every request, so operators can see how much traffic
+// depends on an extension the deployment lacks, not just that some did once.
+func (rpcss *RPCSmartRouterServer) countUnavailableExtensions(unavailable []string) {
+	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	for _, extension := range unavailable {
+		rpcss.smartRouterEndpointMetrics.RecordExtensionUnavailable(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, extension)
+	}
+}
+
 // requestRanOutOfRoad reports whether the request ended because its budget expired, rather than
 // because an attempt answered or the policy stopped it.
 //
@@ -5359,6 +5371,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			Value: strings.Join(unavailable, ","),
 		})
 		rpcss.warnUnavailableExtensions(ctx, unavailable)
+		rpcss.countUnavailableExtensions(unavailable)
 	}
 
 	// Add selection stats header if feature is enabled

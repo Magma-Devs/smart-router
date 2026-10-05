@@ -137,6 +137,11 @@ type SmartRouterMetricsManager struct {
 	routerRequestsArchive    *prometheus.CounterVec
 	routerRequestsBatch      *prometheus.CounterVec
 
+	// extensionUnavailableTotal counts replies served without an extension the caller asked for
+	// (MAG-3935). Labels: spec, apiInterface, extension — the extension label is bounded by the
+	// spec's extension names, see RecordExtensionUnavailable.
+	extensionUnavailableTotal *prometheus.CounterVec // smartrouter_extension_unavailable_total
+
 	// Batch-request shape metrics. The `method` label on every family above is collapsed
 	// for batches (see batch_method_label.go) — batchSize carries the element count the
 	// collapse drops, and batchSignatureOverflow reports when the signature cap binds.
@@ -588,6 +593,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_requests_batch_total",
 		Help: "Total number of batch requests on the smart router.",
 	}, routerRequestLabels)
+	extensionUnavailableTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_extension_unavailable_total",
+		Help: "Requests served without an extension the caller asked for with lava-extension, because no node on this router offers it, per extension. Counted once per request per such extension, on the same replies that carry the Lava-Extension-Unavailable response header. An extension the router adds on its own (archive for a deep eth_call) is never counted. Non-zero means callers depend on an extension this deployment has no node for.",
+	}, []string{"spec", "apiInterface", "extension"})
 
 	batchSize := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "smartrouter_batch_size",
@@ -675,6 +684,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerRequestsDebugTrace = registerOrReuse(routerRequestsDebugTrace)
 	routerRequestsArchive = registerOrReuse(routerRequestsArchive)
 	routerRequestsBatch = registerOrReuse(routerRequestsBatch)
+	extensionUnavailableTotal = registerOrReuse(extensionUnavailableTotal)
 	batchSize = registerOrReuse(batchSize)
 	batchSignatureOverflow = registerOrReuse(batchSignatureOverflow)
 	defaultMethodOverflow = registerOrReuse(defaultMethodOverflow)
@@ -766,6 +776,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		routerRequestsDebugTrace: routerRequestsDebugTrace,
 		routerRequestsArchive:    routerRequestsArchive,
 		routerRequestsBatch:      routerRequestsBatch,
+
+		extensionUnavailableTotal: extensionUnavailableTotal,
 
 		// Batch shape group
 		batchSize:              batchSize,
@@ -1422,6 +1434,18 @@ func (m *SmartRouterMetricsManager) RecordCacheResult(chainId, apiInterface, met
 	// Every attempted lookup is observed — hit-only latency hid exactly the tail
 	// that matters for a network-hop tier.
 	m.cacheLatencyHistogram.WithLabelValues(chainId, apiInterface, method, cacheTier).Observe(latencyMs)
+}
+
+// RecordExtensionUnavailable counts one request served without extension, a caller-requested
+// extension no node on this router offers (MAG-3935). The extension label is bounded without a
+// registry of its own: only names the spec defines as extensions (plus "websocket") survive
+// SeparateAddonsExtensions before they can be recorded as unavailable, so a caller cannot mint
+// series by sending arbitrary lava-extension values.
+func (m *SmartRouterMetricsManager) RecordExtensionUnavailable(chainId, apiInterface, extension string) {
+	if m == nil {
+		return
+	}
+	m.extensionUnavailableTotal.WithLabelValues(chainId, apiInterface, extension).Inc()
 }
 
 // RecordCacheWriteSkipped counts a reply the router served but chose not to write to its

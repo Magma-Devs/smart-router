@@ -369,7 +369,11 @@ HTTP response header on JSON-RPC, REST and Tendermint RPC, and as response metad
 messages over a WebSocket carry no headers.
 
 On the operator side the router logs a WARN once per extension per endpoint, the first time a
-reply reports it, naming the extension, chain and interface.
+reply reports it, naming the extension, chain and interface, and counts every such request in
+`smartrouter_extension_unavailable_total{spec, apiInterface, extension}`
+([METRICS.md](../../docs/METRICS.md#extensions-no-node-offers)). The WARN says a gap exists; the
+counter says how much traffic depends on it. Its `extension` label only takes names the spec
+defines, so a caller sending made-up values cannot grow it.
 
 ## Architecture
 
