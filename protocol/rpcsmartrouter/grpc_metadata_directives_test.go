@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,7 +23,11 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-const grpcDirectivesTestMethod = "sui.rpc.v2.LedgerService/GetServiceInfo"
+const (
+	grpcDirectivesTestMethod = "sui.rpc.v2.LedgerService/GetServiceInfo"
+	// grpcDirectivesPassthroughHeader is an ordinary header the test spec forwards to the node.
+	grpcDirectivesPassthroughHeader = "x-passthrough"
+)
 
 // parsingRelaySender stands in for the router behind a real gRPC listener: SendRelay
 // runs the router's own ParseRelay on exactly what the listener handed over, keeps the
@@ -85,6 +90,16 @@ func dialGrpcDirectivesListener(t *testing.T) (*grpc.ClientConn, *parsingRelaySe
     }`
 	var spec spectypes.Spec
 	require.NoError(t, json.Unmarshal([]byte(raw), &spec))
+	// The spec passes one ordinary header and every directive's name through to the
+	// node. ParseRelay takes the directives out before the spec's header rules run, so
+	// none may reach the node all the same. Without these declarations the rules would
+	// drop an undeclared directive anyway, and the "not forwarded" asserts could not
+	// fail; the ordinary header shows the forwarding path is live.
+	collection := spec.ApiCollections[0]
+	collection.Headers = append(collection.Headers, &spectypes.Header{Name: grpcDirectivesPassthroughHeader, Kind: spectypes.Header_pass_send})
+	for name := range common.SPECIAL_LAVA_DIRECTIVE_HEADERS {
+		collection.Headers = append(collection.Headers, &spectypes.Header{Name: name, Kind: spectypes.Header_pass_send})
+	}
 	parser, err := chainlib.NewGrpcChainParser()
 	require.NoError(t, err)
 	parser.SetSpec(spec)
@@ -135,11 +150,22 @@ func invokeWithMetadata(t *testing.T, conn *grpc.ClientConn, kv ...string) {
 	require.NoError(t, conn.Invoke(ctx, "/"+grpcDirectivesTestMethod, &emptypb.Empty{}, &emptypb.Empty{}))
 }
 
+// forwardedHeaders returns the metadata the router would send the node for this call:
+// sendGRPCRelay forwards the RPC message's headers.
+func forwardedHeaders(protocolMessage chainlib.ProtocolMessage) map[string]string {
+	forwarded := map[string]string{}
+	for _, header := range protocolMessage.GetRPCMessage().GetHeaders() {
+		forwarded[strings.ToLower(header.Name)] = header.Value
+	}
+	return forwarded
+}
+
 // A gRPC client pins a unary call the same way an HTTP client does: lava-select-provider
 // travels as call metadata, the gRPC listener hands its metadata to the same
-// directive parser as an HTTP header, and the pin reaches resolvePinDirectives. What
-// the session manager does with a pin is covered in lavasession; this guards the
-// listener-to-directive seam no other test crosses for gRPC.
+// directive parser as an HTTP header, the pin is kept out of the metadata the node
+// receives, and it reaches resolvePinDirectives. What the session manager does with a
+// pin is covered in lavasession; this guards the listener-to-directive seam no other
+// test crosses for gRPC.
 //
 // Unary calls only. A server-streaming subscription parses the pin into the same
 // directive map, but DirectGRPCSubscriptionManager picks its upstream without reading
@@ -148,11 +174,15 @@ func invokeWithMetadata(t *testing.T, conn *grpc.ClientConn, kv ...string) {
 func TestGrpcMetadataPinReachesPinResolution(t *testing.T) {
 	conn, sender := dialGrpcDirectivesListener(t)
 
-	invokeWithMetadata(t, conn, common.SELECT_PROVIDER_HEADER_NAME, "upstream-b")
+	invokeWithMetadata(t, conn, common.SELECT_PROVIDER_HEADER_NAME, "upstream-b", grpcDirectivesPassthroughHeader, "kept")
 
-	directives := sender.only(t).GetDirectiveHeaders()
+	parsed := sender.only(t)
+	directives := parsed.GetDirectiveHeaders()
 	require.Equal(t, "upstream-b", directives[common.SELECT_PROVIDER_HEADER_NAME],
 		"a pin sent as gRPC metadata must land in the directive map")
+	forwarded := forwardedHeaders(parsed)
+	require.Equal(t, "kept", forwarded[grpcDirectivesPassthroughHeader], "a header the spec passes must reach the node")
+	require.NotContains(t, forwarded, common.SELECT_PROVIDER_HEADER_NAME, "the pin is for the router and must not reach the node")
 	selected, _ := resolvePinDirectives(context.Background(), directives, true)
 	require.Equal(t, "upstream-b", selected, "the first attempt must be pinned to the named upstream")
 }
@@ -169,8 +199,9 @@ func TestGrpcMetadataWithoutPinLeavesSelectionToTheRouter(t *testing.T) {
 }
 
 // Every registered directive is read off gRPC metadata, not just the pin — the
-// public Directives page tells gRPC clients to send them all that way. Ranging over
-// the registry means a directive added later is covered without touching this test.
+// public Directives page tells gRPC clients to send them all that way — and none is
+// forwarded to the node. Ranging over the registry means a directive added later is
+// covered without touching this test.
 func TestGrpcMetadataCarriesEveryDirective(t *testing.T) {
 	values := map[string]string{
 		common.RELAY_TIMEOUT_HEADER_NAME: "12s",
@@ -187,8 +218,10 @@ func TestGrpcMetadataCarriesEveryDirective(t *testing.T) {
 
 			invokeWithMetadata(t, conn, name, value)
 
-			require.Equal(t, value, sender.only(t).GetDirectiveHeaders()[name],
+			parsed := sender.only(t)
+			require.Equal(t, value, parsed.GetDirectiveHeaders()[name],
 				"a directive sent as gRPC metadata must land in the directive map")
+			require.NotContains(t, forwardedHeaders(parsed), name, "a directive is for the router and must not reach the node")
 		})
 	}
 }
