@@ -52,7 +52,7 @@ func newStatefulRestProcessor(t *testing.T) *RelayProcessor {
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
 	usedProviders := lavasession.NewUsedProviders(nil)
-	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateful))
+	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateful))
 
 	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 	defer cancel()
