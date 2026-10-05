@@ -717,3 +717,10 @@ func RedactMetadata(md []pairingtypes.Metadata) string {
 	b.WriteByte('}')
 	return b.String()
 }
+
+// TransportReplyHeaders are the upstream response headers a client needs to decode the
+// body, and so the only ones every reply path keeps regardless of chain: the live relay
+// (rpcsmartrouter's filterUpstreamReplyMetadata) and a reply that crossed in from the
+// secondary cache (performance.SanitizeForeignCacheReply). Content-Length is not here:
+// the body is re-stamped before it is served.
+var TransportReplyHeaders = []string{"Content-Type", "Content-Encoding"}

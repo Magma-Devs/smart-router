@@ -3,6 +3,7 @@ package performance
 import (
 	"strings"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
@@ -29,10 +30,10 @@ import (
 //
 // Content-Length is deliberately NOT here: the payload is re-stamped by the request's
 // outputFormatter before it is served, so a replayed length can disagree with the body.
-var foreignReplyMetadataAllowlist = []string{
-	"Content-Type",
-	"Content-Encoding",
-}
+//
+// The list itself is common.TransportReplyHeaders, shared with the live relay path's
+// filter so the two tiers cannot drift apart on what a client needs to decode a body.
+var foreignReplyMetadataAllowlist = common.TransportReplyHeaders
 
 // SanitizeForeignCacheReply strips identity-bearing data from a cache reply that
 // crossed a trust boundary — the secondary cache (docs/SECONDARY-CACHE.md).
@@ -56,10 +57,11 @@ var foreignReplyMetadataAllowlist = []string{
 //     floor, and GetRelay only ever rejects a floor that is too LOW, so an inflated
 //     one makes the entry outlive every staleness check;
 //   - SetRelay then publishes that value as the cache server's chain-level latest
-//     block via a monotonic-max write that nothing can lower until expiry. That key is
-//     what resolves LATEST/SAFE/FINALIZED/PENDING, so one over-high foreign value
-//     shifts negative-tag resolution for the WHOLE chain on this router's own primary,
-//     and those lanes then look up keys nobody wrote and miss permanently.
+//     block via a write guard that only ever moves up while the tip is fresh (a lower
+//     write is taken only once it has gone stale, MAG-3755). That key is what resolves
+//     LATEST/SAFE/FINALIZED/PENDING, so one over-high foreign value shifts negative-tag
+//     resolution for the WHOLE chain on this router's own primary for as long as
+//     anything keeps refreshing it, and those lanes then look up keys nobody wrote.
 //
 // Zeroing costs nothing: isFinalizedForCacheWrite falls back to the tracked tip alone
 // (what its own comment says it wants), and the backfill's stored floor falls back to

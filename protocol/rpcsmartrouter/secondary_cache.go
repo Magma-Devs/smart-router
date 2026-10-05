@@ -56,17 +56,19 @@ func (rpcss *RPCSmartRouterServer) secondaryCacheActive() bool {
 //     adoptSharedStateTip: shared-state tip exchange is fleet-scoped, and a
 //     foreign-zone cache is not this router's fleet.
 //   - The reply's BlocksHashesToHeights is discarded rather than folded into
-//     latestBlockHashRequested/earliestBlockHashRequested. Those two scalars steer
-//     local decisions — resolveRequestedBlock raises reqBlock to the latest, which
-//     gates endpoint sync and optimizer selection, and the earliest drives
+//     latestBlockHashRequested/earliestBlockHashRequested. Those two scalars would
+//     steer local decisions — resolveRequestedBlock raises reqBlock to the latest,
+//     which gates endpoint sync and optimizer selection, and the earliest drives
 //     UpdateEarliestAndValidateExtensionRules into archive routing — and the fold
 //     took max-for-latest / min-for-earliest, so the more extreme value always won
 //     and a foreign tier beat this router's own primary by construction. That is the
 //     same class SanitizeForeignCacheReply exists to close for LatestBlock: a foreign
-//     scalar must not reach local chain-scoped state. The cost is that hash-keyed
-//     archive detection falls back to the primary's mappings alone (and, in a
-//     secondary-only topology, to none) — the same position a router with no cache is
-//     already in.
+//     scalar must not reach local chain-scoped state. Today there is nothing to
+//     discard: the router writes no block-hash→height mappings (every cache write
+//     passes BlocksHashesToHeights nil — MAG-3807, docs/RESP-CACHE.md "Block-hash to
+//     height mappings"), so no tier holds any, and hash-keyed archive detection has
+//     no mappings in any topology — the position a router with no cache is already
+//     in. Routing a replay to archive by a known height is MAG-3892.
 //   - The lookup runs under the operator-configured secondary-cache-timeout rather
 //     than the primary's fixed budget.
 //   - Every attempted lookup is recorded with cache_tier=secondary and its outcome

@@ -103,7 +103,12 @@ smartrouter config/smartrouter_examples/smartrouter_multichain_cross_validation.
 
 At startup the router logs the resolved provider→group layout and **rejects** a policy the
 configured fleet can never satisfy (e.g. `min-groups: 3` with only two groups), so a
-misconfiguration fails fast rather than silently degrading.
+misconfiguration fails fast rather than silently degrading. Three cases are warnings instead,
+and none of them stops the router: a provider that is down when the router starts, a
+`max-participants` larger than the configured primaries (never a startup error), and an
+endpoint with no configured primary at all (cross-validation never draws on backup providers,
+so a policy there can never be met). See the `ATTENTION` rows under
+[Troubleshooting](#troubleshooting).
 
 ## What the caller sees
 
@@ -129,13 +134,36 @@ recording path) for test suites that cannot scrape the metrics port — see
   Cross-validating a write response verifies nothing — leave writes to the stateful fan-out.
   To also block the legacy *caller-header* path on a specific write, set
   `forbid-caller-cv: true` on its policy.
+- **The readiness health check is not cross-validated.** The router's own health check crafts a
+  latest-block request (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`, whatever
+  the spec tags) and takes one provider's answer. A policy on that method does **not** apply to it,
+  deliberately: the check asks whether a provider can answer, and a single answer can never meet an
+  agreement threshold above 1, nor a `min-groups` floor above 1. Before MAG-3746 the policy did
+  apply, so every health check failed for as long as the policy stood — `/readyz` answered 503
+  after each one and, under a readiness
+  probe on that path, the pod never became Ready, while its providers were healthy and client
+  requests were passing with the agreement the policy asked for. (A successful client request flips
+  the flag back to healthy until the next check, so the 503 was persistent rather than literally
+  uninterrupted.) With the agreement threshold as the only knob, a threshold of 1 was unaffected —
+  one session is not fewer than one — and 2 and 3 were refused; with the reported policy's
+  `min-groups: 2` the group floor refused even threshold 1. `TestHealthRelayUnderThePreFixWiring`
+  pins both against the pre-fix wiring, and `TestSendCraftedRelays_IgnoresCrossValidationPolicy`
+  drives the real health path under the same policies now. The exemption leaves one trace at
+  runtime: under `--debug-relays` each health relay logs `caller cross-validation headers ignored`
+  with `reason=internal relay: the router's own health check is never cross-validated`.
+- **Readiness does not attest that a cross-validated method has quorum capacity.** It never did for
+  any other method, and since MAG-3746 it does not for the latest-block one either. `/readyz`
+  answers for the chain — can it serve relays — so a policy temporarily short of participants or
+  groups leaves it 200 while requests for *that* method are refused with `insufficient-capacity`.
+  That is deliberate: gating a whole chain and interface on one method's quorum is the over-coupling
+  MAG-3746 was. Alert on the cross-validation failure series for policy capacity, not on readiness.
 - **Cost & latency.** N relays per request. Scope policies to the methods that warrant it.
 - **Public endpoints are best-effort.** The example fleets use rate-limited community
   endpoints; for production, point at your own nodes or keyed gateways.
 - **No value-threshold escalation.** There is no knob that raises a method's policy for an
   individual request based on the value it carries (parsing `eth_sendRawTransaction` for a
   native amount, decoding ERC-20 calldata). That was descoped; a method's policy is the same
-  for every request to it. Callers that need a stricter quorum on a specific request can still
+  for every client request to it (the router's own health check is the one exception — see above). Callers that need a stricter quorum on a specific request can still
   ask for one with the headers, up to the policy's cap.
 
 ## Local testing lanes
@@ -217,7 +245,11 @@ It ends with a self-check, so a broken stack is caught before you start:
 
 `policies=7` and `distinctGroups=3` come from the router's own startup line — the resolved
 provider→group layout, logged once so an operator can confirm the diversity a config actually
-yields rather than the diversity it looks like it asks for.
+yields rather than the diversity it looks like it asks for. `distinctGroups`, `groupSizes` and
+`groupAssignments` describe the primaries that passed verification and are serving;
+`configuredGroups`, `configuredGroupSizes` and `configuredGroupAssignments` on the same line
+describe the configured fleet the startup checks judged. The two differ only while a primary
+that failed verification is out.
 
 Knobs, all optional: `SIM_DIR` for the simulator checkout, `ROUTER_PORT` / `METRICS_PORT` /
 `DEBUG_PORT` / `NEG_PORT` to move ports, `SKIP_SMOKE=1`.
@@ -486,5 +518,10 @@ policy floor instead.
 | A dissent shows up as *pending* instead of *disagreeing* | The quorum early-exited before the outlier answered. Give the honest providers a `latency_ms` so the outlier wins the race — that is exactly what the lane does to pick the reply-time path. |
 | `finality="unknown"` on the mismatch metric | The request did not carry a resolvable block number, or the chain tracker had not learned the head yet. Query a concrete finalized block, not `latest`. |
 | A cross-validated method answers without fanning out | Something served it from cache. These lanes configure no cache for that reason; if you add one, vary the request parameters. |
+| The pod never becomes Ready / `/readyz` answers 503 while client requests succeed | Fixed in MAG-3746. On a build before it, a policy on the **latest-block** method (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`) made the router's own health check impossible to pass, because the check takes one session and one session cannot meet a threshold above 1. Tell-tale: repeated `insufficient sessions for cross-validation consensus` with `sessionsAcquired 1`, and no `[+] init relay succeeded`. Workarounds on such a build: drop the policy from that method, set its `agreement-threshold` to 1 (only if the policy has no `min-groups` floor above 1 — that floor refuses a one-session check on its own), or probe readiness elsewhere. |
 | Router exits at startup with a cross-validation error | Working as intended for an unsatisfiable policy. The error itself carries the numbers: `requiredGroups` / `configuredGroups` on the `min-groups` refusal, `groupSizes` on the per-group one. Don't look for the `distinctGroups` startup line — the validation runs *before* it, so a router that exits this way never logs it. |
+| Startup logs `ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy` | A primary failed its startup verification (it is named in `unavailableProviders`), and the primaries left cannot meet a policy: fewer groups than its `min-groups` (`requiredGroups`), or fewer providers than its `max-participants` (`requiredProviders`). The router is serving: requests without cross-validation are answered, and requests under that policy fail fast with `insufficient-groups` or `insufficient-capacity` until the background retry re-admits the provider, which happens at most 3 minutes after it recovers. `configuredGroupSizes` is the configured layout and `verifiedGroupSizes` the one serving now. |
+| Startup logs `ATTENTION: the configured primaries cannot meet a cross-validation policy` | The configured primaries themselves are too few for a policy's `max-participants` (`requiredProviders`), so no recovery closes the gap: lower the bound or add primaries. A `max-participants` above the fleet is reported here rather than refused at startup. `unavailableProviders` may name a primary that is out as well; re-admitting it still leaves the policy unmet. |
+| Startup logs `ATTENTION: this endpoint has no configured primary, and cross-validation never draws on backup providers` | The endpoint is configured with backup providers only. Its plain requests are served from them, but cross-validation selects among primaries, so every request one of its policies governs is refused. Add primaries or remove the policies. |
+| A request is refused with `insufficient-capacity` / `insufficient-groups` and no `ATTENTION` line was logged | The startup prediction counts every verified primary of the endpoint; the request-time guard counts only the primaries that serve the request's addon and extensions (`archive`, `debug`, …). A request scoped that way can be refused with fewer candidates than the startup line accounts for. The refusal's own log line carries `candidateEndpoints` / `candidateProviderGroups` with the addon and extensions it counted. |
 | `/debug/cross-validation-events` is refused / connection reset | The router was started without `--debug-address`, so there is no debug listener at all. A **503** is a different state — the listener is up but the recorder was never installed — and it is not an empty result: "nothing was recorded" and "nothing dissented" are opposite answers. |

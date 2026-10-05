@@ -40,6 +40,11 @@ const (
 	// a stateful relay reaches every provider it selects, so turning this on sends every
 	// stateful request to the backup as well — including the ones the primaries serve fine.
 	StatefulToBackupFlag = "stateful-to-backup"
+	// ReadYourWritesWindowFlag is how long an EVM write's sender and hash stay pinned to the
+	// upstream that accepted it, so the pending-nonce read and the lookup that follow it see the
+	// write (MAG-4032). 0 turns the pins off.
+	ReadYourWritesWindowFlag    = "read-your-writes-window"
+	DefaultReadYourWritesWindow = 30 * time.Second
 	// BatchNodeErrorOnAny controls batch request error detection for JSON-RPC batch requests
 	BatchNodeErrorOnAnyFlag = "batch-node-error-on-any"
 
@@ -190,6 +195,7 @@ type ConsumerCmdFlags struct {
 	DebugAddress                      string        // address for the debug HTTP server, e.g. ":9999". Empty = disabled.
 	ResponseCompression               string        // "gzip" (default), "brotli", or "off" — controls client-facing response compression
 	ShutdownGracePeriod               time.Duration // graceful shutdown deadline; passed to chain listeners and upstream cleanup
+	ReadYourWritesWindow              time.Duration // how long a write's sender and hash stay pinned to the upstream that accepted it; 0 = off
 }
 
 // default rolling logs behavior (if enabled) will store 3 files each 100MB for up to 1 day every time.

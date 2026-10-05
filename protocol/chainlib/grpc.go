@@ -410,13 +410,17 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		ctx = utils.WithUniqueIdentifier(ctx, guid)
 		msgSeed := strconv.FormatUint(guid, 10)
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		startTime := time.Now()
 		// Extract dappID from grpc header
 		dappID := extractDappIDFromGrpcHeader(metadataValues)
 
 		grpcHeaders := convertToMetadataMapOfSlices(metadataValues)
-		utils.LavaFormatDebug("in <<< GRPC Relay ",
+		utils.LavaFormatInfo("in <<< GRPC Relay ",
 			utils.LogAttr("GUID", ctx),
+			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+			utils.LogAttr(utils.KEY_TASK_ID, ctx),
+			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("_method", method),
 			utils.LogAttr("headers", common.RedactMetadata(grpcHeaders)),
 		)
@@ -526,6 +530,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCSubscriptionManager) grpcproxy.StreamProxyCallBack {
 	return func(ctx context.Context, method string, reqBody []byte) (*grpcproxy.StreamResponse, error) {
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		dappID := extractDappIDFromGrpcHeader(metadataValues)
 		consumerIp := common.GetIpFromGrpcContext(ctx)
 
@@ -559,8 +564,11 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		metricsData := metrics.NewRelayAnalytics(dappID, apil.endpoint.ChainID, apil.endpoint.ApiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
 
-		utils.LavaFormatDebug("in <<< GRPC stream subscribe",
+		utils.LavaFormatInfo("in <<< GRPC stream subscribe",
 			utils.LogAttr("GUID", ctx),
+			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+			utils.LogAttr(utils.KEY_TASK_ID, ctx),
+			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("_method", method),
 			utils.LogAttr("dappID", dappID),
 		)
@@ -667,16 +675,16 @@ func streamResponseHeaders(md []pairingtypes.Metadata) metadata.MD {
 	return headers
 }
 
-// snapshotMetricsHeaders detaches the headers AddMetricForGrpc reads from the request
-// metadata. gRPC metadata strings can alias the transport receive buffer, and a
-// subscription's per-delivery emits keep referring to them for as long as the stream
-// lives — far past the point where the unary path would have released them.
+// snapshotMetricsHeaders copies the headers AddMetricForGrpc reads out of the request
+// metadata, because a subscription's per-delivery emits keep referring to them for as long
+// as the stream lives — far past the point where the unary path would have released them.
+// The copy is a guard, not a requirement: grpc-go decodes every metadata value into its own
+// string (x/net's hpack decoder allocates, and a -bin value is base64-decoded into a fresh
+// one), so incoming metadata never aliases the transport receive buffer (MAG-3881).
 func snapshotMetricsHeaders(metadataValues metadata.MD) metadata.MD {
 	snapshot := metadata.MD{}
-	for _, key := range []string{metrics.RefererHeaderKey, metrics.UserAgentHeaderKey, metrics.OriginHeaderKey} {
-		if values := metadataValues.Get(key); len(values) > 0 {
-			snapshot.Set(key, strings.Clone(values[0]))
-		}
+	if values := metadataValues.Get(metrics.OriginHeaderKey); len(values) > 0 {
+		snapshot.Set(metrics.OriginHeaderKey, strings.Clone(values[0]))
 	}
 	return snapshot
 }

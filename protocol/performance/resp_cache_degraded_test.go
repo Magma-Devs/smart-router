@@ -137,6 +137,71 @@ func TestRespCacheBackendDiesMidRun(t *testing.T) {
 	require.GreaterOrEqual(t, delta(), float64(1))
 }
 
+// MAG-3653: the same outage as TestRespCacheBackendDiesMidRun, read at the
+// budget the PRODUCT gives a lookup instead of the unbounded context that test
+// passes. That difference was the whole bug. With no deadline go-redis surfaces
+// the dial failure and the label is right; with common.CacheTimeout — a
+// fraction of DefaultDialTimeout, let alone its retries — the failure arrived
+// as a bare context.DeadlineExceeded with the refusal lost behind it, so every
+// read of a dead cache was recorded as a slow one. In a real sixteen-hour
+// outage op="get",kind="error" never incremented once while
+// op="set",kind="error" did, for the same incident: writes have a budget long
+// enough for the dial to fail on its own terms, reads do not.
+//
+// Both halves are asserted. Counting the outage is not the fix on its own —
+// counting it as saturation as well would leave the dashboard saying both.
+func TestRespCacheUnreachableBackendReadsAsOutageAtTheShippedBudget(t *testing.T) {
+	mr := miniredis.RunT(t)
+	cache := respCacheOverAddr(t, mr.Addr())
+	ctx := context.Background()
+
+	require.NoError(t, cache.SetEntry(ctx, &pairingtypes.RelayCacheSet{
+		RequestHash:      []byte("degraded-hash"),
+		ChainId:          "ETH1",
+		RequestedBlock:   100,
+		SeenBlock:        100,
+		AverageBlockTime: int64(12 * time.Second),
+		Response:         &pairingtypes.RelayReply{Data: []byte(`alive`), LatestBlock: 100},
+	}))
+	require.NotNil(t, degradedGet(t, cache, ctx).GetReply(), "sanity: served while the backend lives")
+
+	mr.Close()
+	outage := failedDelta(respCacheOpGet, respCacheFailureKindError)
+	saturation := failedDelta(respCacheOpGet, respCacheFailureKindTimeout)
+
+	budgeted, cancel := context.WithTimeout(ctx, common.CacheTimeout)
+	defer cancel()
+	require.Nil(t, degradedGet(t, cache, budgeted).GetReply(), "the relay still proceeds to the upstreams")
+
+	require.GreaterOrEqual(t, outage(), float64(1),
+		"a cache that refuses connections is an outage at the shipped read budget, not only at an unbounded one")
+	require.Zero(t, saturation(),
+		"and never saturation as well: outage and overload call for opposite first moves")
+}
+
+// The other half of the split, at the same budget: a backend that is REACHABLE
+// and silent must keep reading as a timeout. The marker above must not simply
+// relabel every read failure an outage — a dial that succeeds is proof the
+// endpoint is there, whatever happens after it.
+func TestRespCacheSilentBackendStillReadsAsSaturationAtTheShippedBudget(t *testing.T) {
+	blackhole := newBlackholeListener(t)
+	store, err := redisstore.New(redisstore.Config{Addresses: []string{blackhole.addr()}})
+	require.NoError(t, err)
+	cache := newRespCacheWithHealthInterval(store, core.DefaultPolicy(), time.Hour)
+	t.Cleanup(func() { _ = cache.Close() })
+
+	saturation := failedDelta(respCacheOpGet, respCacheFailureKindTimeout)
+	outage := failedDelta(respCacheOpGet, respCacheFailureKindError)
+
+	budgeted, cancel := context.WithTimeout(context.Background(), common.CacheTimeout)
+	defer cancel()
+	require.Nil(t, degradedGet(t, cache, budgeted).GetReply())
+
+	require.GreaterOrEqual(t, saturation(), float64(1), "a reachable backend that will not answer is slow, not gone")
+	require.Zero(t, outage(), "its connections were accepted: nothing here says unreachable")
+	require.Greater(t, blackhole.accepted.Load(), int64(0), "sanity: the dial this asserts on actually happened")
+}
+
 // A reachable-but-hung backend must cost at most the caller's budget and read
 // as a timeout, not an error — saturation and outage alert differently.
 func TestRespCacheSlowBackendTimesOutWithinBudget(t *testing.T) {
