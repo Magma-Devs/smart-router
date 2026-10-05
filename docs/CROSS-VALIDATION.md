@@ -146,6 +146,13 @@ recording path) for test suites that cannot scrape the metrics port — see
   corroborate a response on its own, so there the early stop only ends a request that could
   no longer succeed. The router warns at startup when a group is smaller than the
   threshold; give every required group at least as many providers as the threshold.
+  This early stop applies only when cross-validation policies are loaded (a
+  `cross-validation:` block): the group sizes it reads are recorded at startup together
+  with that warning. Cross-validation turned on by caller headers alone, with no policies
+  loaded, does not treat any group as smaller than the threshold, so a quiet provider still
+  counts as able to complete the quorum and the request waits out the processing budget
+  as before. It stops at the window only when no provider still in flight could complete
+  a quorum at all, which cannot change the outcome.
 - **Public endpoints are best-effort.** The example fleets use rate-limited community
   endpoints; for production, point at your own nodes or keyed gateways.
 - **No value-threshold escalation.** There is no knob that raises a method's policy for an

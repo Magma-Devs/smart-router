@@ -117,8 +117,14 @@ type RPCSmartRouterServer struct {
 	// validateCrossValidationStartup reads. The dispatcher derives a request's under-staffed groups from
 	// it with the warning's own groupsBelowThreshold and the request's threshold. At a policy's own
 	// threshold those are the groups the warning names; a caller that raises the threshold can make
-	// more groups under-staffed for its request (MAG-3993). Nil without cross-validation policies.
-	// Read-only after startup.
+	// more groups under-staffed for its request (MAG-3993).
+	//
+	// Nil without cross-validation policies, deliberately: the early stop covers only fleets the
+	// SPOF warning has been able to name. Header-driven cross-validation on a router with no
+	// policies sees no under-staffed group, so a quiet provider still counts as able to complete
+	// the quorum and the request keeps the full-budget wait; it stops at the window only when no
+	// provider in flight could complete a quorum at all, which cannot change the outcome.
+	// Written once in ServeRPCRequests before the listener starts; read-only after that.
 	crossValidationGroupSizes map[string]int
 
 	// probeStats holds the most-recent runProbeLoop cycle telemetry for /debug/probe-loop
@@ -193,6 +199,8 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		if cvStartupErr := validateCrossValidationStartup(cvResolver, chainParser, listenEndpoint.ChainID, listenEndpoint.ApiInterface, sessionManager.NumberOfValidProviderGroups(), groupSizes); cvStartupErr != nil {
 			return cvStartupErr
 		}
+		// Recorded only here, beside the SPOF warning, so the attempt-window stop (MAG-3993) is
+		// scoped to policy-driven cross-validation; see the field comment for the header-only case.
 		rpcss.crossValidationGroupSizes = groupSizes
 		// Log the resolved provider->group layout once at startup so operators can confirm the diversity
 		// their config yields (a min-groups policy is only as good as the group spread of the fleet).
