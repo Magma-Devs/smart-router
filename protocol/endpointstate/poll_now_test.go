@@ -115,7 +115,7 @@ func newPollNowMonitor(t *testing.T, ctx context.Context, url string, startBlock
 
 	conn := &pollNowConn{url: url}
 	conn.block.Store(startBlock)
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -264,7 +264,7 @@ func TestEndpointMonitor_PollNow_TrackerNotPolling_NamesTheState(t *testing.T) {
 	const url = "http://eth-pollnow-dead:8545"
 	conn := &pollNowConn{url: url}
 	conn.fail.Store(true) // every fetch fails → init never completes → no poll goroutine
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	triggerCtx, triggerCancel := context.WithTimeout(ctx, 300*time.Millisecond)

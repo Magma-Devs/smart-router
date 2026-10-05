@@ -218,7 +218,7 @@ func TestIdleMode_WakeBurstPollsEveryEndpoint(t *testing.T) {
 
 	conn := &pollNowConn{url: url}
 	conn.block.Store(1000)
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		state, _, exists := m.GetTrackerState(url)
@@ -310,7 +310,7 @@ func TestIdleMode_WakeChannelStaysOpenWhileTrackerIsStarting(t *testing.T) {
 
 	conn := &pollNowConn{url: url}
 	conn.fail.Store(true) // the init fetch fails; the tracker sits in starting/retrying_start
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	m.forceIdleForTest(2 * MinIdleAfter)
@@ -350,7 +350,7 @@ func TestIdleMode_IdleOrWakingHoldsUntilTheBurstEnds(t *testing.T) {
 
 	conn := &pollNowConn{url: url}
 	conn.fail.Store(true) // an unstarted tracker holds the burst open for pollNowUnstartedGrace
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	m.forceIdleForTest(2 * MinIdleAfter)

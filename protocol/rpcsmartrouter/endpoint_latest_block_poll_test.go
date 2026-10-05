@@ -129,7 +129,7 @@ func trackProviderURLsEvery(t *testing.T, blockTime time.Duration, provider stri
 		conn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: u.srv.URL}, 5, "jsonrpc")
 		require.NoError(t, err)
 		ep := &lavasession.Endpoint{NetworkAddress: u.srv.URL, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{conn}}
-		_, err = m.GetOrCreateTracker(ep, conn)
+		_, err = m.GetOrCreateTracker("", ep, conn)
 		require.NoError(t, err)
 	}
 	return rpcss, mm
@@ -277,7 +277,7 @@ func TestHarvest_MovesTheRelayedToURLsSeries(t *testing.T) {
 	const url = "http://harvest.mag4204:8545"
 	const provider = "lava@mag4204Harvest"
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-	_, err := m.GetOrCreateTracker(ep, nil)
+	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
@@ -336,7 +336,7 @@ func TestHarvest_LateWriteForARemovedURLIsUndone(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-	_, err := m.GetOrCreateTracker(ep, nil)
+	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)

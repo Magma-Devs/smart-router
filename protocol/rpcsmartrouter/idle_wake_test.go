@@ -99,7 +99,7 @@ func TestAwaitWakeIfIdle_CapBoundsTheWait(t *testing.T) {
 	rpcss := &RPCSmartRouterServer{endpointChainTrackerManager: m}
 
 	conn := &fakeDirectConn{err: errors.New("upstream down")}
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: "http://fake:8545", Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: "http://fake:8545", Enabled: true}, conn)
 	require.NoError(t, err)
 
 	wakeAt := time.Now().Add(2 * endpointstate.MinIdleAfter)
@@ -117,7 +117,7 @@ func TestAwaitWakeIfIdle_RespectsRequestContext(t *testing.T) {
 	defer cancel()
 	m := idleWakeMonitor(t, ctx, true)
 	rpcss := &RPCSmartRouterServer{endpointChainTrackerManager: m}
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: "http://fake:8545", Enabled: true}, &fakeDirectConn{err: errors.New("upstream down")})
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: "http://fake:8545", Enabled: true}, &fakeDirectConn{err: errors.New("upstream down")})
 	require.NoError(t, err)
 
 	reqCtx, cancelReq := context.WithCancel(ctx)
