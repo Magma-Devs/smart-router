@@ -45,14 +45,16 @@ func TestResolvePinDirectives(t *testing.T) {
 }
 
 // TestCrossValidationOverridesPin covers the other half of the pin's life: a directive that
-// survives resolvePinDirectives can still be displaced by an operator mandate.
+// survives resolvePinDirectives can still be displaced by cross-validation.
 //
 // The case that matters is cross-validation enabled WITHOUT group diversity, which is the default
 // shape of an enabled policy (MinGroups defaults to 1). The override used to be keyed on
 // minGroups > 1 and applied deep inside selection, so this configuration kept the pin: selection
-// returned the one pinned address, lowered its own target to match, and a policy asking for
-// MaxParticipants participants was satisfied by a single provider with no error — an answer
-// returned as validated having been compared against nothing.
+// returned the one pinned session, and the request then hung and failed with insufficient-capacity
+// at the session-count guard in sendRelayToEndpoint.
+//
+// This checks the rule. TestCrossValidationOverridesPin_ThroughTheSendPath checks that the send
+// path applies it.
 func TestCrossValidationOverridesPin(t *testing.T) {
 	cases := []struct {
 		name             string

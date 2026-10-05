@@ -4148,22 +4148,25 @@ func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]strin
 	return selectedProvider, stickiness
 }
 
-// crossValidationOverridesPin reports whether an active cross-validation policy displaces the
-// caller's single-provider directives.
+// crossValidationOverridesPin reports whether cross-validation displaces the caller's
+// single-provider directives.
 //
 // lava-select-provider and a sticky claim each pin selection to exactly ONE provider, while a
-// cross-validation relay needs MaxParticipants of them to have anything to compare against. The
-// two cannot both be honoured, and the operator mandate wins (UC-1: stricter validation regardless
-// of what the caller asked).
+// cross-validation relay needs several providers to have anything to compare. The two cannot both
+// be honoured, so the cross-validation wins. An operator policy outranks the caller anyway (UC-1:
+// stricter validation regardless of what the caller asked). A caller who switched cross-validation
+// on with its own headers asked for both, and the quorum is the stricter of the two asks.
 //
-// Silently, before this existed: selection returns the single pinned address and then lowers its
-// own target to match what it got, so a policy asking for 3 participants is satisfied by 1, with
-// no error — and the answer goes back marked validated having been compared against nothing.
+// Before this existed the pin stayed in force. Selection returned the one pinned session, and the
+// session-count guard further down this function then failed the request with insufficient-capacity
+// before any upstream was asked. That guard does not release the session it took (MAG-3286), so the
+// request first waited out its whole deadline. Only a threshold of 1 got through, served by the
+// pinned provider alone. A pinned request on a cross-validated method hung and failed; it never came
+// back validated.
 //
-// Keyed on cross-validation being enabled AT ALL, not on the policy also mandating group
-// diversity. The override existed before, deep inside selection, keyed on minGroups > 1; MinGroups
-// defaults to 1 whenever a policy is merely enabled, so the common configuration never reached it.
-// Group diversity was only ever the loudest case of the rule, never the rule itself.
+// Keyed on cross-validation being active AT ALL, not on the policy also mandating group diversity.
+// The override existed before, deep inside selection, keyed on minGroups > 1; MinGroups defaults to
+// 1 whenever a policy is merely enabled, so the common configuration never reached it.
 func crossValidationOverridesPin(crossValidationEnabled bool, selectedProvider, stickiness string) bool {
 	return crossValidationEnabled && (selectedProvider != "" || stickiness != "")
 }
