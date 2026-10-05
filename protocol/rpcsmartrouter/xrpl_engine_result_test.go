@@ -129,7 +129,7 @@ func startXRPLRouter(t *testing.T, ctx context.Context, upstreams map[string]str
 	server := &RPCSmartRouterServer{
 		chainParser: chainParser, sessionManager: sessionManager, listenEndpoint: rpcEndpoint,
 		rpcSmartRouterLogs: logs,
-		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
+		consistencyConfig:  relaycore.DefaultConsistencyValidationConfig(),
 	}
 	listener := chainlib.NewJrpcChainListener(ctx, rpcEndpoint, server, nil, logs, nil, nil)
 	listenerDone := make(chan struct{})
