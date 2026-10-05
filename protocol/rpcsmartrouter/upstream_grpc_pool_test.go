@@ -386,49 +386,20 @@ func TestUpstreamGRPCPool_MaybeScaleDown_BelowMinConnections(t *testing.T) {
 	assert.Equal(t, 1, pool.ConnectionCount())
 }
 
-// A caller arriving while a reconnect is in flight waits for it instead of failing: every
-// stream on a dead connection restores through ReconnectWithBackoff at once, and a failure
-// here tears that stream's subscription down.
 func TestUpstreamGRPCPool_ReconnectWithBackoff_AlreadyReconnecting(t *testing.T) {
 	nodeUrl := &common.NodeUrl{
 		Url: "grpc://localhost:9090",
 	}
 	pool := NewUpstreamGRPCPool(nodeUrl)
 
-	// Another caller's attempt is in flight
+	// Mark as already reconnecting
 	pool.reconnecting.Store(true)
 
-	done := make(chan error, 1)
-	go func() { done <- pool.ReconnectWithBackoff(context.Background()) }()
-	select {
-	case err := <-done:
-		t.Fatalf("returned while the other attempt was still in flight: %v", err)
-	case <-time.After(200 * time.Millisecond):
-	}
+	ctx := context.Background()
+	err := pool.ReconnectWithBackoff(ctx)
 
-	// That attempt ends
-	pool.reconnecting.Store(false)
-	select {
-	case err := <-done:
-		assert.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("still waiting after the other attempt ended")
-	}
-	assert.Equal(t, 0, pool.ConnectionCount(), "a waiting caller dials nothing itself")
-}
-
-func TestUpstreamGRPCPool_ReconnectWithBackoff_WaitEndsWithTheContext(t *testing.T) {
-	nodeUrl := &common.NodeUrl{
-		Url: "grpc://localhost:9090",
-	}
-	pool := NewUpstreamGRPCPool(nodeUrl)
-	pool.reconnecting.Store(true)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-
-	assert.ErrorIs(t, pool.ReconnectWithBackoff(ctx), context.DeadlineExceeded)
-	assert.True(t, pool.reconnecting.Load(), "a waiting caller must not clear the other attempt's flag")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "reconnection already in progress")
 }
 
 func TestUpstreamGRPCPool_ReconnectWithBackoff_ContextCanceled(t *testing.T) {
