@@ -507,6 +507,9 @@ func (d *DirectRPCRelaySender) sendForInterface(
 	case "rest":
 		return d.sendRESTRelay(ctx, chainMessage, attemptBudget)
 
+	case "graphql":
+		return d.sendGraphQLRelay(ctx, chainMessage, attemptBudget)
+
 	case "grpc":
 		return d.sendGRPCRelay(ctx, chainMessage, attemptBudget)
 
@@ -876,6 +879,115 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 
 	utils.LavaFormatTrace("REST request completed",
 		utils.LogAttr("method", httpMethod),
+		utils.LogAttr("status", response.StatusCode),
+		utils.LogAttr("response_size", len(response.Body)),
+		utils.LogAttr("latency", latency),
+		utils.LogAttr("is_node_error", isNodeError),
+	)
+
+	return result, nil
+}
+
+// sendGraphQLRelay posts a GraphQL document to the endpoint's base URL.
+//
+// Every operation shares that one URL, so the body is the request: it is sent exactly as the
+// caller wrote it. Errors are classified on the REST transport, which GraphQL-over-HTTP shares
+// (see common.ApiInterfaceToTransport); what counts as a node error is decided by
+// GraphQLMessage.CheckResponseError, since GraphQL reports most failures inside a 200.
+func (d *DirectRPCRelaySender) sendGraphQLRelay(
+	ctx context.Context,
+	chainMessage chainlib.ChainMessage,
+	attemptBudget time.Duration,
+) (*common.RelayResult, error) {
+	nodeUrl := d.directConnection.GetNodeUrl()
+	requestCtx, cancel := nodeUrl.LowerContextTimeoutWithDuration(ctx, attemptBudget)
+	defer cancel()
+
+	rpcMessage := chainMessage.GetRPCMessage()
+	graphqlMessage, ok := rpcMessage.(*rpcInterfaceMessages.GraphQLMessage)
+	if !ok {
+		return nil, fmt.Errorf("expected GraphQLMessage for GraphQL API, got %T", rpcMessage)
+	}
+
+	httpDoer, ok := d.directConnection.(lavasession.HTTPDirectRPCDoer)
+	if !ok {
+		return nil, fmt.Errorf("connection doesn't support GraphQL (HTTP)")
+	}
+
+	httpParams := lavasession.HTTPRequestParams{
+		Method:      "POST",
+		URL:         nodeUrl.Url,
+		Body:        graphqlMessage.Msg,
+		Headers:     graphqlMessage.GetHeaders(), // Preserves duplicates, empty value = delete
+		ContentType: "application/json",
+	}
+
+	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendGraphQLRelay)
+	defer span.End()
+	tracing.RecordHTTPRequest(span, httpParams.Method, httpParams.URL)
+	httpParams.Headers = tracing.InjectHTTP(requestCtx, httpParams.Headers)
+
+	startTime := time.Now()
+	response, err := httpDoer.DoHTTPRequest(requestCtx, httpParams)
+	latency := time.Since(startTime)
+	tracing.RecordHTTPResponse(span, response)
+
+	if err != nil {
+		tracing.RecordError(span, err)
+		return nil, classifyAndWrap(err, d.chainFamily, common.TransportREST)
+	}
+
+	// Every GraphQL reply is a JSON document, errors included, so a 2xx body that does not
+	// parse is a truncated or corrupted reply: a transport failure, as on JSON-RPC.
+	if response.StatusCode >= 200 && response.StatusCode < 300 && len(response.Body) > 0 && !json.Valid(response.Body) {
+		utils.LavaFormatDebug("direct GraphQL response is not valid JSON",
+			utils.LogAttr("endpoint", d.endpointName),
+			utils.LogAttr("status_code", response.StatusCode),
+			utils.LogAttr("response_size", len(response.Body)),
+		)
+		return nil, classifyAndWrap(
+			fmt.Errorf("malformed GraphQL response: body is not valid JSON"),
+			d.chainFamily, common.TransportREST,
+		)
+	}
+
+	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
+	if hasError && errorMessage != "" {
+		utils.LavaFormatDebug("GraphQL response contains error",
+			utils.LogAttr("endpoint", d.endpointName),
+			utils.LogAttr("error", errorMessage),
+		)
+	}
+
+	// As on REST, a 429 is capacity rather than a node error at the transport level: the
+	// registry's rate-limit row and the hold-off own it.
+	isNodeError := hasError && response.StatusCode != 429
+
+	providerAddress := d.endpointName
+	if providerAddress == "" {
+		providerAddress = sanitizeEndpointURL(d.directConnection.GetURL())
+	}
+
+	result := &common.RelayResult{
+		Reply: &pairingtypes.RelayReply{
+			Data:        response.Body,
+			LatestBlock: extractBlockHeightFromJSONResponse(response.Body, chainMessage),
+			Metadata:    convertHTTPHeadersToMetadata(response.Headers),
+		},
+		Finalized:  true,
+		StatusCode: response.StatusCode,
+		ProviderInfo: common.ProviderInfo{
+			ProviderAddress: providerAddress,
+			ProviderGroup:   d.groupLabel,
+		},
+		IsNodeError: isNodeError,
+	}
+	if hasError {
+		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, response.StatusCode, errorMessage)
+	}
+
+	utils.LavaFormatTrace("GraphQL request completed",
+		utils.LogAttr("method", chainMessage.GetApi().Name),
 		utils.LogAttr("status", response.StatusCode),
 		utils.LogAttr("response_size", len(response.Body)),
 		utils.LogAttr("latency", latency),
