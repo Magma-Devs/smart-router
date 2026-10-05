@@ -199,6 +199,9 @@ func TestGetParsingByTagForCollection_InternalPathBaseCollection(t *testing.T) {
 	})
 
 	t.Run("a disabled path collection is not a source of directives", func(t *testing.T) {
+		// getServiceApis never inserts a disabled collection, so this exercises the
+		// lookup's defensive guard through the hand-built map, as the MAG-3296
+		// fixture does for add-ons.
 		disabledParser, _, disabledV3 := tonShapedParser(t)
 		disabledV3.Enabled = false
 		parsing, collection, ok := disabledParser.GetParsingByTagForCollection(

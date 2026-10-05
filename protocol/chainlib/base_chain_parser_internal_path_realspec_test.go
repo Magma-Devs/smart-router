@@ -1,6 +1,7 @@
 package chainlib
 
 import (
+	"strings"
 	"testing"
 
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -47,7 +48,8 @@ func TestRealSpecInternalPathHeadDirective(t *testing.T) {
 		{"/v3", spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM, "/blocks", "/blocks?workchain=-1&seqno=%d", []string{"0", "blocks", "0", "root_hash"}},
 		{"/v2", spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM, "/lookupBlock", "/lookupBlock?workchain=-1&shard=-9223372036854775808&seqno=%d", []string{"0", "result", "root_hash"}},
 	} {
-		t.Run(tc.internalPath+" "+tc.tag.String(), func(t *testing.T) {
+		// No leading slash: `go test -run 'TestRealSpecInternalPathHeadDirective/v3'` must select it.
+		t.Run(strings.TrimPrefix(tc.internalPath, "/")+" "+tc.tag.String(), func(t *testing.T) {
 			// nil addons, base allowed: exactly what EndpointPoller passes for a
 			// node-url configured with `internal-path` and no `addons`.
 			parsing, collection, ok := parser.GetParsingByTagForCollection(tc.tag, nil, tc.internalPath, true)
