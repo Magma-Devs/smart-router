@@ -236,10 +236,12 @@ type RestChainListener struct {
 }
 
 // restMethodCarriesBody reports whether the REST listener relays the request body for
-// an HTTP method. POST, PUT and PATCH carry one and the node receives it byte for byte;
-// every other method is relayed without a body. The same set decides which requests
-// forward the client's Content-Type (forwardsClientBodyHeader), so the router never
-// forwards a Content-Type for bytes it did not send.
+// an HTTP method. POST, PUT and PATCH carry one, and the node receives the body as
+// Fiber's Body() returns it: the client's bytes, decoded first when the client set a
+// Content-Encoding (that header is not forwarded). Every other method is relayed
+// without a body. The same set decides which requests forward the client's
+// Content-Type (forwardsClientBodyHeader), so the router never forwards a Content-Type
+// for bytes it did not send.
 func restMethodCarriesBody(method string) bool {
 	switch method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch:
