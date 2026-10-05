@@ -480,6 +480,9 @@ func GetListenerWithRetryGrpc(protocol, addr string) net.Listener {
 // sink (MAG-3881). Every consumer of the map below this point gets owned strings. It builds the map
 // the way GetReqHeaders does, copying each string as it goes, rather than copying GetReqHeaders'
 // map, which would build it twice.
+//
+// That covers the tracing ids utils.ExtractWantedHeadersFromCachedMap stamps from this map on the
+// request's context, which outlives the handler.
 func detachedReqHeaders(c *fiber.Ctx) map[string][]string {
 	headers := make(map[string][]string)
 	c.Request().Header.VisitAll(func(name, value []byte) {
