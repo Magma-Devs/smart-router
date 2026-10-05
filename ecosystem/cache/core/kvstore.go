@@ -18,9 +18,9 @@ import (
 //
 // The chain-tip pair is separate from the plain int64 pair because its
 // freshness model differs: a chain tip has a fixed freshness horizon decided at
-// write time and reads report staleness, while the monotonic write guard keeps
-// comparing against the raw stored value even after it goes stale — a stale tip
-// is unreadable but still fences lower writes.
+// write time and reads report staleness, and the write guard honours the same
+// horizon: a stale tip is unreadable and fences nothing, so a lower write
+// replaces it (MAG-3755).
 // StickyPin is one fleet-wide sticky-session claim: the upstream bound to a sticky id, and the
 // router epoch the binding was made in. Provider is the upstream's NAME (its routing identity,
 // unique per chain + api interface), never a URL — URLs carry credentials. Epoch lets a reader
