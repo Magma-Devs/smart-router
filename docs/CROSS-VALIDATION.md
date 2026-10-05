@@ -148,16 +148,16 @@ recording path) for test suites that cannot scrape the metrics port — see
   node can accept cannot reach any agreement threshold, so the router used to answer HTTP 500
   after the transaction had already been submitted. `forbid-caller-cv: true` is for a
   **stateless** method an operator wants protected from caller-driven cross-validation.
-  Caveats: the four cosmos `tx` **REST** endpoints that carry the stateful category without
-  broadcasting (`/cosmos/tx/v1beta1/encode`, `encode/amino`, `decode`, `simulate`) are covered by
-  the same rule, and the split is per interface — the spec marks the gRPC
-  `cosmos.tx.v1beta1.Service/Simulate` `stateful: 0`, so a caller keeps cross-validating simulate
-  on gRPC and loses it on REST. A malformed header pair on a stateful method (a value that does
-  not parse, one header without its companion, a threshold above `max-participants`) used to
-  refuse the request before anything was dispatched; it is now ignored like a well-formed pair,
-  and the request goes out as a write. A `forbid-caller-cv: true` policy written on a stateful
-  method under the earlier advice is now redundant; it still loads and is harmless. And a submit
-  endpoint the spec does not mark stateful — Aptos `POST /transactions` today — is not covered.
+  Caveats: the rule keys on the spec's stateful category, so it is only as right as the spec — a
+  read the spec marks stateful loses caller cross-validation, and a submit it does not mark
+  stateful is not covered. The shipped lava-specs mark the cosmos `tx` REST encode, encode/amino,
+  decode and simulate endpoints `stateful: 0` (MAG-4034) and Aptos `POST /transactions` and
+  `/transactions/batch` `stateful: 1` (MAG-4035); the in-repo `specs/` mirror predates both fixes.
+  A malformed header pair on a stateful method (a value that does not parse, one header without
+  its companion, a threshold above `max-participants`) used to refuse the request before anything
+  was dispatched; it is now ignored like a well-formed pair, and the request goes out as a write.
+  A `forbid-caller-cv: true` policy written on a stateful method under the earlier advice is now
+  redundant; it still loads and is harmless.
 - **The readiness health check is not cross-validated.** The router's own health check crafts a
   latest-block request (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`, whatever
   the spec tags) and takes one provider's answer. A policy on that method does **not** apply to it,

@@ -93,18 +93,16 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
 > is needed for this; `forbid-caller-cv: true` is what an operator reaches for on a **stateless**
 > method they want protected from caller-driven cross-validation.
 >
-> Four consequences worth knowing. The four cosmos `tx` **REST** endpoints that carry the
-> stateful category without broadcasting anything (`/cosmos/tx/v1beta1/encode`, `encode/amino`,
-> `decode`, `simulate`) are covered by the same rule and so cannot be cross-validated by a caller
-> either — and the split is per interface, not per operation: the spec marks the gRPC
-> `cosmos.tx.v1beta1.Service/Simulate` `stateful: 0`, so a caller keeps cross-validating
-> simulate on gRPC and loses it on REST. A malformed header pair on a stateful method (a value
-> that does not parse, one header without its companion, a threshold above `max-participants`)
-> used to refuse the request before anything was dispatched; it is now ignored like a well-formed
-> pair, and the request goes out as a write. A `forbid-caller-cv: true` policy written on a
-> stateful method under the earlier advice is now redundant; it still loads and is harmless. And
-> the rule is only as complete as the spec: a submit endpoint the spec does not mark stateful —
-> Aptos `POST /transactions` today — is not covered.
+> Three consequences worth knowing. The rule keys on the spec's stateful category, so it is only
+> as right as the spec: a read the spec marks stateful loses caller cross-validation, and a submit
+> it does not mark stateful is not covered. The shipped lava-specs mark the cosmos `tx` REST
+> encode, encode/amino, decode and simulate endpoints `stateful: 0` (MAG-4034) and Aptos
+> `POST /transactions` and `/transactions/batch` `stateful: 1` (MAG-4035); the in-repo `specs/`
+> mirror predates both fixes. A malformed header pair on a stateful method (a value that does not
+> parse, one header without its companion, a threshold above `max-participants`) used to refuse
+> the request before anything was dispatched; it is now ignored like a well-formed pair, and the
+> request goes out as a write. A `forbid-caller-cv: true` policy written on a stateful method
+> under the earlier advice is now redundant; it still loads and is harmless.
 
 ### Provider group labels
 

@@ -196,26 +196,17 @@ func NewUnifiedRelayStateMachine(
 		// resubmitting is the obvious next step and the one thing the write path exists to
 		// prevent.
 		//
-		// That reasoning does NOT hold for every method in the category, and the category is
-		// what this branch keys on. Four of the fifteen methods carrying it broadcast nothing —
-		// the cosmos tx encode, encode/amino, decode and simulate endpoints — and a
-		// cross-validation across three nodes would have agreed for the three deterministic
-		// ones. They lose caller-driven cross-validation here. That is deliberate: the router
-		// already refuses an operator's cross-validation policy on every stateful method, those
-		// four included (ValidateNoStatefulPolicies, which fails closed), so keying on the
-		// category keeps one definition of the boundary instead of two that can drift. A
-		// narrower rule would need a signal the spec does not carry. That one definition is
-		// only as consistent as the spec that carries it: specs/cosmossdk.json marks the REST
-		// /cosmos/tx/v1beta1/simulate stateful:1 and the gRPC cosmos.tx.v1beta1.Service/Simulate
-		// stateful:0, so a caller keeps cross-validating simulate on gRPC and loses it on REST.
-		// Keying on the category inherits that mismark rather than avoiding it, and the repair
-		// is the spec's, not this branch's.
-		//
-		// This is also exactly as complete as the spec data: a submit endpoint the spec does not
-		// mark stateful is not covered. specs/aptos.json marks POST /transactions and
-		// /transactions/batch stateful:0, so an Aptos submit still takes the caller's headers.
-		// That marking is its own bug and its own change — it would alter fan-out, not just this
-		// label — but the limit belongs written down here rather than discovered later.
+		// The branch keys on the spec's stateful category, not on whether the method actually
+		// broadcasts, so it is exactly as right as the spec. A read the spec marks stateful loses
+		// caller-driven cross-validation here, and a submit the spec does not mark stateful still
+		// takes the caller's headers. That is deliberate: the router already refuses an operator's
+		// cross-validation policy on every stateful method (ValidateNoStatefulPolicies, which fails
+		// closed), so keying on the category keeps one definition of the boundary instead of two
+		// that can drift, and a narrower rule would need a signal the spec does not carry. A
+		// mismark is the spec's to repair: the shipped lava-specs fixed the two known ones — the
+		// cosmos REST tx encode, encode/amino, decode and simulate endpoints are stateful:0
+		// (MAG-4034) and Aptos POST /transactions and /transactions/batch are stateful:1
+		// (MAG-4035). The in-repo specs/ mirror predates both fixes.
 		//
 		// The operator-forced branch above stays ahead of this one: Finding A ordered it that
 		// way. What keeps a policy override off a write is not that branch's own guard but the
