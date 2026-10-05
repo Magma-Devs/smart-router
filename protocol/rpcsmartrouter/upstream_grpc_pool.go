@@ -543,10 +543,17 @@ func (p *UpstreamGRPCPool) maybeScaleDown() {
 	}
 }
 
-// ReconnectWithBackoff attempts to reconnect the pool with exponential backoff
+// ReconnectWithBackoff attempts to reconnect the pool with exponential backoff.
+//
+// A connection that dies fails every stream on it at once, and each of their subscriptions
+// restores through here. One caller dials; the others wait for that attempt to end and then
+// open their streams on whatever the pool holds. Failing them instead tore each of those
+// subscriptions down. UpstreamWSPool's callers wait too, but its wait also reports whether a
+// healthy connection came back; this one leaves that to the stream the caller opens next, so
+// when the upstream is gone every waiter fails right after the dialing caller does.
 func (p *UpstreamGRPCPool) ReconnectWithBackoff(ctx context.Context) error {
 	if !p.reconnecting.CompareAndSwap(false, true) {
-		return fmt.Errorf("reconnection already in progress")
+		return p.waitForReconnect(ctx)
 	}
 	defer p.reconnecting.Store(false)
 
@@ -589,6 +596,22 @@ func (p *UpstreamGRPCPool) ReconnectWithBackoff(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// waitForReconnect returns once the reconnect in flight has ended, or with ctx's error. It
+// does not report how that attempt went: the caller opens its stream next, and that fails on
+// its own if the upstream is still unreachable.
+func (p *UpstreamGRPCPool) waitForReconnect(ctx context.Context) error {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for p.reconnecting.Load() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+	return ctx.Err()
 }
 
 // Close closes all connections in the pool

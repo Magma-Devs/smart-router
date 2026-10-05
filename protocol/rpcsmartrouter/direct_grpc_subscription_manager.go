@@ -828,6 +828,13 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 		return
 	}
 
+	// Count the stream on its new connection before opening it, and so before the old one is
+	// released below. Releasing runs maybeScaleDown, which closes every pooled connection past
+	// minConnections that carries no counted stream. Counted afterwards, the new connection was
+	// one of those: closing it failed the stream just restored and sent the subscription round
+	// again, dialing another connection each time, for as long as the old one held others.
+	newConn.IncrementStreams()
+
 	// Create new stream
 	newStream, err := dgm.createUpstreamStream(
 		ctx,
@@ -837,6 +844,7 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 		activeSub.methodDescriptor,
 	)
 	if err != nil {
+		activeSub.upstreamPool.NotifyStreamRemoved(newConn)
 		utils.LavaFormatWarning("DirectGRPC: failed to create new stream", err)
 		return
 	}
@@ -852,7 +860,6 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	if oldConn != nil {
 		activeSub.upstreamPool.NotifyStreamRemoved(oldConn)
 	}
-	newConn.IncrementStreams()
 
 	utils.LavaFormatInfo("DirectGRPC: subscription restored",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
