@@ -1067,10 +1067,12 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 	// Set parsing data on grpcMessage for block height extraction (QoS sync tracking)
 	// This is required because FormatResponseForParsing needs the method descriptor and formatter
 	// to properly parse the binary protobuf response into JSON for block extraction.
-	// The descriptor comes from the connection's cache. A binary request does not fill it, since
-	// it reaches the node without a descriptor; the warm-up sweep or a JSON request for the same
-	// method does (the endpoint poller sends its GET_BLOCKNUM poll as JSON). Until then this
-	// reply's block is not extracted, and the endpoint poller still tracks the tip.
+	// The descriptor comes from the connection's cache, and on this path it is normally there:
+	// relayInnerDirect's streaming check resolves it (ResolveMethodDescriptor, bounded by the
+	// attempt window) before it calls SendDirectRelay. It is missing only when that lookup failed
+	// or ran out of time, on a node without working reflection or a cold one slower than the
+	// window. A binary request goes out without a descriptor (invokeRaw), so in that case this
+	// reply's block is not extracted.
 	if descriptorProvider, ok := d.directConnection.(lavasession.GRPCDescriptorProvider); ok {
 		if methodDesc := descriptorProvider.GetCachedMethodDescriptor(methodPath); methodDesc != nil {
 			formatter := createGRPCFormatter(methodDesc)
