@@ -368,3 +368,58 @@ func TestPinnedProvider_CollapsesTheRequestedProviderCount(t *testing.T) {
 	require.NoError(t, err, "the shortfall is silent: this layer reports no error for it")
 	require.Len(t, css, 1, "a pin collapses the count to one, whatever the caller asked for")
 }
+
+// newCaseTwinCSM pairs two providers whose names differ only in case and blocks both. Boot
+// validation compares provider names exactly, so this is a configuration the router accepts.
+func newCaseTwinCSM(t *testing.T) *ConsumerSessionManager {
+	t.Helper()
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{
+		0: mkProviderForBenchTest("lava@Node-A"),
+		1: mkProviderForBenchTest("lava@node-a"),
+	}, nil))
+	blockEveryPrimary(csm)
+	return csm
+}
+
+// A pin spelled a third way folds onto both case-twins and matches neither exactly. A release
+// cannot create an exact spelling, so after any release selection rejects the pin as ambiguous all
+// over again. Releasing for it would only wipe the blocked list for every other relay.
+func TestPinnedProvider_AmbiguousCaseTwinsWithEmptyPoolDoNotRelease(t *testing.T) {
+	csm := newCaseTwinCSM(t)
+
+	_, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "LAVA@NODE-A")
+	require.ErrorIs(t, err, SelectedProviderUnavailableError, "an ambiguous pin must still fail")
+
+	require.Equal(t, uint64(0), csm.numberOfResets, "no release can make an ambiguous pin resolve")
+	require.ElementsMatch(t, []string{"lava@Node-A", "lava@node-a"}, csm.currentlyBlockedProviderAddresses,
+		"the standing blocked list must survive an ambiguous pin")
+}
+
+// The ambiguity a release CAN fix: the pin is spelled exactly like one of the twins. Once the
+// release puts it back, the exact spelling wins and the request reaches the provider it named.
+func TestPinnedProvider_ExactSpellingAmongCaseTwinsStillReleases(t *testing.T) {
+	csm := newCaseTwinCSM(t)
+
+	css, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "lava@Node-A")
+	require.NoError(t, err, "the exact spelling is a pin a release can satisfy")
+	require.Len(t, css, 1)
+	for providerAddress := range css {
+		require.Equal(t, "lava@Node-A", providerAddress, "the exact spelling must win over its case-twin")
+	}
+	require.Equal(t, uint64(1), csm.numberOfResets)
+}
+
+// A pin this request already tried cannot be served after a release: selection looks it up by its
+// exact address and fails it as already-failed. Its untried case-twin does not change that, so it
+// must not justify a release either.
+func TestPinnedProvider_TriedPinIsNotAnsweredForByItsCaseTwin(t *testing.T) {
+	csm := newCaseTwinCSM(t)
+	ctx := context.Background()
+
+	tried := map[string]struct{}{"lava@Node-A": {}}
+	require.False(t, csm.releaseCouldServeThisRequest(tried, "", nil, "lava@Node-A", ctx),
+		"a release for a pin that already failed in this request only destroys state")
+	require.True(t, csm.releaseCouldServeThisRequest(map[string]struct{}{}, "", nil, "lava@Node-A", ctx),
+		"control: the same pin, not yet tried, is a release that can help")
+}
