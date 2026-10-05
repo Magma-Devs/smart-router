@@ -48,8 +48,7 @@ func TestStateMachine_NonPositiveAttemptWindowDoesNotEndTheProcess(t *testing.T)
 				&SmartRouterRelaySenderMock{retValue: nil, tickerValue: window}, protocolMessage, nil, false)
 			require.NoError(t, err)
 			relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams,
-				relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics,
-				relaycoretest.RelayRetriesManagerInstance, stateMachine)
+				relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine)
 
 			relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 			require.NoError(t, err)
@@ -323,8 +322,7 @@ func TestRelayTimeoutHeader_QuietNodeGivesUpAtTheRouterBudgetNotTheHeader(t *tes
 		&relayTimeoutBudgetSender{srv: srv}, protocolMessage, nil, false)
 	require.NoError(t, err)
 	relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams,
-		relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics,
-		relaycoretest.RelayRetriesManagerInstance, stateMachine)
+		relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine)
 	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 	require.NoError(t, err)
 
