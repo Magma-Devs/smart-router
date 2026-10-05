@@ -63,6 +63,8 @@ func TestGraphQLDirectRelay(t *testing.T) {
 		wantNodeError   bool
 		wantNonRetrying bool
 		wantRateLimited bool
+		wantAtFault     bool
+		wantCapability  bool
 	}{
 		{
 			name:   "a success is passed through",
@@ -79,6 +81,7 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			status:        http.StatusOK,
 			reply:         `{"data":null,"errors":[{"message":"boom","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}`,
 			wantNodeError: true,
+			wantAtFault:   true,
 		},
 		{
 			name:            "a 400 is a node error the registry files as the caller's",
@@ -94,6 +97,22 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			reply:           `{"data":null,"errors":[{"message":"slow down","extensions":{"code":"RESOURCE_EXHAUSTED"}}]}`,
 			wantNodeError:   true,
 			wantRateLimited: true,
+		},
+		{
+			// Sui answers a query timeout inside an ordinary response: retried, and the endpoint's.
+			name:          "REQUEST_TIMEOUT inside a 200 is the node's",
+			status:        http.StatusOK,
+			reply:         `{"data":null,"errors":[{"message":"Request timed out","extensions":{"code":"REQUEST_TIMEOUT"}}]}`,
+			wantNodeError: true,
+			wantAtFault:   true,
+		},
+		{
+			// This operator lacks the store the query needs: retried elsewhere, not scored.
+			name:           "FEATURE_UNAVAILABLE inside a 200 is a node capability",
+			status:         http.StatusOK,
+			reply:          `{"data":null,"errors":[{"message":"not available","extensions":{"code":"FEATURE_UNAVAILABLE"}}]}`,
+			wantNodeError:  true,
+			wantCapability: true,
 		},
 		{
 			// A rejected write must not end the broadcast as a success, and is the caller's.
@@ -140,6 +159,8 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			require.Equal(t, test.wantNodeError, result.IsNodeError)
 			require.Equal(t, test.wantNonRetrying, result.IsNonRetryable)
 			require.Equal(t, test.wantRateLimited, result.IsRateLimited)
+			require.Equal(t, test.wantAtFault, result.IsNodeAtFault)
+			require.Equal(t, test.wantCapability, result.IsNodeCapability)
 		})
 	}
 }

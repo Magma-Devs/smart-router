@@ -329,14 +329,52 @@ func TestGraphQLMessageMutationErrors(t *testing.T) {
 	require.False(t, hasError)
 
 	// The registry gets a status that says what the error is: the caller's mutation error is a
-	// 400 (not retried, not scored), RESOURCE_EXHAUSTED is a 429 on either operation type, and a
-	// server fault keeps the reply's status.
+	// 400 (not retried, not scored), and each of Sui's node-fault codes maps to its HTTP analogue
+	// on either operation type.
 	require.Equal(t, 400, mutation.ClassificationStatus(codeless, 200))
 	require.Equal(t, 429, mutation.ClassificationStatus(rateLimited, 200))
 	require.Equal(t, 429, query.ClassificationStatus(rateLimited, 200))
-	require.Equal(t, 200, mutation.ClassificationStatus(internal, 200))
+	require.Equal(t, 500, mutation.ClassificationStatus(internal, 200))
 	require.Equal(t, 200, query.ClassificationStatus(codeless, 200))
 	require.Equal(t, 503, mutation.ClassificationStatus(codeless, 503), "a non-2xx status is its own answer")
+}
+
+// TestGraphQLMessageSuiNodeFaultCodes pins every code Sui's GraphQL server defines
+// (sui-indexer-alt-graphql, src/error.rs `mod code`). REQUEST_TIMEOUT arrives inside an ordinary
+// response; read as the caller's answer it ended the relay unretried and could be cached as a
+// pinned checkpoint's answer.
+func TestGraphQLMessageSuiNodeFaultCodes(t *testing.T) {
+	query, err := ParseGraphQLMsg([]byte(`{"query":"{ checkpoint(sequenceNumber: 1) { digest } }"}`))
+	require.NoError(t, err)
+
+	tests := []struct {
+		code       string
+		nodeError  bool
+		statusWant int
+	}{
+		{code: "BAD_USER_INPUT", nodeError: false, statusWant: 200},
+		{code: "GRAPHQL_PARSE_FAILED", nodeError: false, statusWant: 200},
+		{code: "GRAPHQL_VALIDATION_FAILED", nodeError: false, statusWant: 200},
+		{code: "RESOURCE_EXHAUSTED", nodeError: true, statusWant: 429},
+		{code: "INTERNAL_SERVER_ERROR", nodeError: true, statusWant: 500},
+		{code: "REQUEST_TIMEOUT", nodeError: true, statusWant: 504},
+		{code: "FEATURE_UNAVAILABLE", nodeError: true, statusWant: 403},
+	}
+	for _, test := range tests {
+		t.Run(test.code, func(t *testing.T) {
+			body := []byte(`{"data":null,"errors":[{"message":"m","extensions":{"code":"` + test.code + `"}}]}`)
+			hasError, _ := query.CheckResponseError(body, 200)
+			require.Equal(t, test.nodeError, hasError)
+			require.Equal(t, test.statusWant, query.ClassificationStatus(body, 200))
+		})
+	}
+}
+
+func TestParseGraphQLMsgRejectsSubscriptions(t *testing.T) {
+	// Sui's Subscription root shares field names with Query; accepted, this would be filed under
+	// the read named checkpoints.
+	_, err := ParseGraphQLMsg([]byte(`{"query":"subscription { checkpoints { sequenceNumber } }"}`))
+	require.ErrorContains(t, err, "subscriptions are not served")
 }
 
 func TestGraphQLMessageRawRequestHash(t *testing.T) {

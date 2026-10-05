@@ -25,21 +25,36 @@ import (
 // subsystem downstream is keyed on one string.
 const GraphQLMethodSeparator = "&"
 
-// GraphQL error codes that mean the NODE failed, not the caller. Everything else — including an
+// GraphQL error codes that mean the NODE failed, not the caller, each with the HTTP status the
+// error registry classifies it under (see ClassificationStatus). Everything else — including an
 // error carrying no code at all — is the caller's answer.
 //
 // The direction of that default is load-bearing. A malformed query fails identically on every
 // provider, so counting one as a node error burns the retry budget and demotes the whole fleet on
-// a single bad customer request. Only RESOURCE_EXHAUSTED is documented by Sui (returned for rich-
-// query limits and rate limits, the HTTP 429 analogue); the other three are the standard
-// GraphQL-over-HTTP server-fault codes and are listed so a node that emits one is not read as a
-// successful reply. Observed live on mainnet: GRAPHQL_VALIDATION_FAILED (client) and errors with
-// no extensions block at all (client, see graphQLErrorIsNodeFault).
-var graphQLNodeErrorCodes = map[string]struct{}{
-	graphQLRateLimitCode:    {},
-	"INTERNAL_SERVER_ERROR": {},
-	"UNAVAILABLE":           {},
-	"DEADLINE_EXCEEDED":     {},
+// a single bad customer request.
+//
+// Sui's GraphQL server defines seven codes (sui-indexer-alt-graphql, src/error.rs `mod code`).
+// BAD_USER_INPUT, GRAPHQL_PARSE_FAILED and GRAPHQL_VALIDATION_FAILED are the caller's. The other
+// four are listed here:
+//   - RESOURCE_EXHAUSTED: a rate or query-cost limit, so a 429. The rate-limit hold-off engages
+//     and the busy endpoint is not scored.
+//   - INTERNAL_SERVER_ERROR: a 500. Retried, and scored against the endpoint.
+//   - REQUEST_TIMEOUT: the query ran out of the server's time budget (src/extensions/timeout.rs
+//     answers it as an ordinary response, not a 5xx), so a 504. Retried and scored. Read as the
+//     caller's answer it would end the relay, and a pinned read could cache the timeout as that
+//     checkpoint's answer.
+//   - FEATURE_UNAVAILABLE: this operator's deployment lacks the store the query needs, so a 403.
+//     The registry files that as a node capability: retried on another endpoint, not scored.
+//
+// UNAVAILABLE and DEADLINE_EXCEEDED are not Sui codes; they are kept so a GraphQL server that
+// uses gRPC-style names for the same faults is not read as answering successfully.
+var graphQLNodeErrorCodes = map[string]int{
+	graphQLRateLimitCode:    http.StatusTooManyRequests,
+	"INTERNAL_SERVER_ERROR": http.StatusInternalServerError,
+	"REQUEST_TIMEOUT":       http.StatusGatewayTimeout,
+	"FEATURE_UNAVAILABLE":   http.StatusForbidden,
+	"UNAVAILABLE":           http.StatusServiceUnavailable,
+	"DEADLINE_EXCEEDED":     http.StatusGatewayTimeout,
 }
 
 // graphQLRateLimitCode is the code Sui answers a rate or query-cost limit with inside a 200.
@@ -116,6 +131,12 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 	operation, err := selectGraphQLOperation(doc, envelope.OperationName)
 	if err != nil {
 		return nil, err
+	}
+	// GraphQL-over-HTTP POST cannot carry a subscription, and Sui's Subscription root shares field
+	// names with Query (checkpoints, transactions, events). Accepted, a subscription would resolve to
+	// the read of the same name and be cached and cross-validated as that read.
+	if operation.Operation == ast.Subscription {
+		return nil, errors.New("graphql subscriptions are not served over HTTP POST")
 	}
 
 	rootFields, err := graphQLRootFields(doc, operation, envelope.Variables)
@@ -352,10 +373,9 @@ func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (h
 
 // ClassificationStatus returns the HTTP status the error registry should classify a GraphQL
 // node error under. A status outside 2xx is its own answer. Inside a 2xx the status says nothing,
-// so the error's code stands in for it: RESOURCE_EXHAUSTED is Sui's 429 and classifies as one,
-// which is what engages the rate-limit hold-off and keeps a busy endpoint's score intact, and a
-// mutation error that is not a node fault (CheckResponseError's mutation rule) is the caller's
-// and classifies as a 400, not retried and not scored. Anything else keeps the reply's status.
+// so the error's code stands in for it, through graphQLNodeErrorCodes. A mutation error that is
+// not a node fault (CheckResponseError's mutation rule) is the caller's and classifies as a 400,
+// not retried and not scored. Anything else keeps the reply's status.
 func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) int {
 	if httpStatusCode != 0 && (httpStatusCode < 200 || httpStatusCode >= 300) {
 		return httpStatusCode
@@ -366,10 +386,7 @@ func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) 
 	}
 	for _, entry := range envelope.Errors {
 		if graphQLErrorIsNodeFault(entry) {
-			if entry.Extensions.Code == graphQLRateLimitCode {
-				return http.StatusTooManyRequests
-			}
-			return httpStatusCode
+			return graphQLNodeErrorCodes[entry.Extensions.Code]
 		}
 	}
 	if gm.IsMutation() && len(envelope.Errors) > 0 {
