@@ -580,7 +580,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				// (success or failure). The pre-existing flow `continue`d
 				// before reaching AddMetricForWebSocket below, so normal WS
 				// relays were silently dropped from the analytics pipeline.
-				go logger.AddMetricForWebSocket(metricsData, err, websocketConn)
+				go logger.AddMetricForWebSocket(metricsData, err)
 				continue
 			}
 		}
@@ -619,7 +619,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		// Snapshot the populated RelayMetrics fields for per-delivery
 		// emits. The start-of-subscription emit below races with the
 		// per-message emits on the same pointer (AddMetricForWebSocket
-		// mutates Success and Origin) — copy by value so each per-message
+		// mutates Success) — copy by value so each per-message
 		// goroutine works on its own struct.
 		subscriptionFields := *metricsData
 
@@ -644,7 +644,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					perMessage.Timestamp = time.Now()
 					perMessage.ApiMethod = SubscriptionDeliveryMethod
 					perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
-					go logger.AddMetricForWebSocket(&perMessage, nil, websocketConn)
+					go logger.AddMetricForWebSocket(&perMessage, nil)
 				}
 
 				utils.LavaFormatTrace("subscriptionMsgsChan was closed",
@@ -656,7 +656,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			}()
 		}
 
-		go logger.AddMetricForWebSocket(metricsData, err, websocketConn)
+		go logger.AddMetricForWebSocket(metricsData, err)
 
 		if reply != nil {
 			reply.Data = outputFormatter(reply.Data) // use that id for the reply
