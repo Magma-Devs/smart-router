@@ -459,45 +459,53 @@ func (bcp *BaseChainParser) GetParsingByTagForCollection(tag spectypes.FUNCTION_
 	if !taggedExisted {
 		return nil, nil, false
 	}
-	connectionType := tagged.ApiCollection.CollectionData.Type
+	key := CollectionKey{ConnectionType: tagged.ApiCollection.CollectionData.Type, InternalPath: internalPath}
 
 	for _, addon := range addons {
 		if addon == "" {
 			continue // the base collection, resolved below
 		}
-		collection, ok := bcp.apiCollections[CollectionKey{
-			ConnectionType: connectionType,
-			InternalPath:   internalPath,
-			Addon:          addon,
-		}]
-		if !ok || !collection.Enabled {
-			continue
-		}
-		if directive := findParseDirectiveByTag(collection, tag); directive != nil {
+		key.Addon = addon
+		if directive, collection, ok := bcp.directiveFromCollectionLocked(key, tag); ok {
 			return directive, collection, true
 		}
 	}
 
-	if len(addons) > 0 && !allowBaseFallback {
+	if !allowBaseFallback {
 		// The url serves only its add-on collections, and none of them declares
 		// this tag. Every base collection — the one at its own path included — is
 		// the very probe standalone-addons opted out of, so fail loudly rather than
-		// reinstate it quietly. A url with no add-ons always falls through:
-		// ServesBaseCollection is true for it by definition.
+		// reinstate it quietly. A url with no add-ons never arrives here with
+		// false: both ServesBaseCollection implementations answer true for it, and
+		// the router downgrades standalone-addons on a url that declares no add-on
+		// collection.
 		return nil, nil, false
 	}
 
-	if collection, ok := bcp.apiCollections[CollectionKey{
-		ConnectionType: connectionType,
-		InternalPath:   internalPath,
-		Addon:          "",
-	}]; ok && collection.Enabled {
-		if directive := findParseDirectiveByTag(collection, tag); directive != nil {
-			return directive, collection, true
-		}
+	key.Addon = ""
+	if directive, collection, ok := bcp.directiveFromCollectionLocked(key, tag); ok {
+		return directive, collection, true
 	}
 
 	return tagged.Parsing, tagged.ApiCollection, true
+}
+
+// directiveFromCollectionLocked is the keyed read steps 2 and 4 of
+// GetParsingByTagForCollection share: the directive one exact collection declares
+// for a tag, or false when the collection is absent or declares none. The caller
+// holds rwLock. The Enabled check is defensive — getServiceApis never inserts a
+// disabled collection, so only a hand-built map can reach it — and is kept so the
+// lookup can never hand out a directive the spec switched off.
+func (bcp *BaseChainParser) directiveFromCollectionLocked(key CollectionKey, tag spectypes.FUNCTION_TAG) (*spectypes.ParseDirective, *spectypes.ApiCollection, bool) {
+	collection, ok := bcp.apiCollections[key]
+	if !ok || !collection.Enabled {
+		return nil, nil, false
+	}
+	directive := findParseDirectiveByTag(collection, tag)
+	if directive == nil {
+		return nil, nil, false
+	}
+	return directive, collection, true
 }
 
 func (bcp *BaseChainParser) IsTagInCollection(tag spectypes.FUNCTION_TAG, collectionKey CollectionKey) bool {
