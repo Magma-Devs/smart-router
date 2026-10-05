@@ -278,15 +278,23 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 
 			usedProviders := lavasession.NewUsedProviders(nil)
 			sessionsMap := lavasession.ConsumerSessionsMap{}
-			for node, upstream := range map[string]struct{ url, group string }{
-				"node-1": {answering.URL, "group-1"},
-				"node-2": {answering.URL, "group-1"},
-				"node-3": {hanging.URL, "group-2"},
+			// Each session gets its own id, as GetSessions gives every real session a random one. The
+			// session manager keys QoS reports by (epoch, session id), so with every id left at zero
+			// node-1 and node-2, answering together, would share one report, and -race flags the
+			// unlocked read in OnSessionDone's metrics update against the other's write.
+			for node, upstream := range map[string]struct {
+				url, group string
+				sessionID  int64
+			}{
+				"node-1": {answering.URL, "group-1", 1},
+				"node-2": {answering.URL, "group-1", 2},
+				"node-3": {hanging.URL, "group-2", 3},
 			} {
 				endpoint := &lavasession.Endpoint{NetworkAddress: upstream.url}
 				directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.url}, 5, "")
 				require.NoError(t, err)
 				session := &lavasession.SingleConsumerSession{
+					SessionId: upstream.sessionID,
 					Parent: &lavasession.ConsumerSessionsWithProvider{
 						PublicLavaAddress: node,
 						Endpoints:         []*lavasession.Endpoint{endpoint},
