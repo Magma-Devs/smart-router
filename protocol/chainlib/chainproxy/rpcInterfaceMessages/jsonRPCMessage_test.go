@@ -2,9 +2,11 @@ package rpcInterfaceMessages
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -424,16 +426,6 @@ func TestJsonrpcMessage_CheckResponseError_MalformedShapes(t *testing.T) {
 		require.Equal(t, "method not found", msg)
 	})
 
-	t.Run("error_with_empty_message_is_not_flagged", func(t *testing.T) {
-		// Preserves the previous behavior: an error object with an empty
-		// message is not surfaced as an error.
-		hasError, _ := jm.CheckResponseError(
-			[]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":0,"message":""}}`),
-			200,
-		)
-		require.False(t, hasError)
-	})
-
 	t.Run("top_level_scalar_body", func(t *testing.T) {
 		hasError, msg := jm.CheckResponseError([]byte(`"just a string"`), 200)
 		require.True(t, hasError)
@@ -462,6 +454,138 @@ func TestJsonrpcMessage_CheckResponseError_MalformedShapes(t *testing.T) {
 			200,
 		)
 		require.False(t, hasError, "error:null alongside a result must not be flagged")
+	})
+}
+
+// TestJsonrpcMessage_CheckResponseError_EmptyErrorMessage pins MAG-3991: an error
+// object is an error whether or not it carries message text. Read as a success,
+// {"error":{"code":-32000,"message":""}} ended the relay on the node that sent
+// it — no failover, no lava-identified-node-error header, no score against the
+// node, and the error eligible for the cache as the answer. The one reply that
+// still reads as a success is a zero-value error object beside a result, which
+// states no failure.
+func TestJsonrpcMessage_CheckResponseError_EmptyErrorMessage(t *testing.T) {
+	jm := JsonrpcMessage{}
+
+	flagged := []struct {
+		name string
+		body string
+	}{
+		{"server_error_code", `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":""}}`},
+		{"message_key_absent", `{"jsonrpc":"2.0","id":1,"error":{"code":-32603}}`},
+		// Pinned as a success before MAG-3991. With no result there is nothing to serve.
+		{"zero_value_error_without_result", `{"jsonrpc":"2.0","id":1,"error":{"code":0,"message":""}}`},
+		{"empty_error_object_without_result", `{"jsonrpc":"2.0","id":1,"error":{}}`},
+		// Some nodes write both members on every reply, result:null on an error.
+		{"coded_error_beside_null_result", `{"result":null,"error":{"code":-1,"message":""},"id":1}`},
+		// A code states a failure the way a message does, and a message already
+		// wins over a result beside it.
+		{"coded_error_beside_result", `{"jsonrpc":"2.0","id":1,"result":"0x1","error":{"code":-32000,"message":""}}`},
+		{"string_code", `{"jsonrpc":"2.0","id":1,"error":{"code":"-32000","message":""}}`},
+	}
+	for _, tc := range flagged {
+		t.Run(tc.name, func(t *testing.T) {
+			hasError, msg := jm.CheckResponseError([]byte(tc.body), 200)
+			require.True(t, hasError, "an error object without message text must be flagged")
+			require.Equal(t, "JSON-RPC error with an empty message", msg)
+		})
+	}
+
+	// The "no error" of an encoder whose error field is a struct, not a pointer.
+	succeeded := []struct {
+		name string
+		body string
+	}{
+		{"zero_value_error_beside_result", `{"jsonrpc":"2.0","id":1,"result":"0x12a7b5c","error":{"code":0,"message":""}}`},
+		{"empty_error_object_beside_result", `{"jsonrpc":"2.0","id":1,"result":"0x12a7b5c","error":{}}`},
+		{"zero_value_error_beside_null_result", `{"jsonrpc":"2.0","id":1,"result":null,"error":{"code":0,"message":""}}`},
+		{"null_code_beside_result", `{"jsonrpc":"2.0","id":1,"result":"0x1","error":{"code":null,"message":""}}`},
+		{"spaced_zero_code_beside_result", `{"jsonrpc":"2.0","id":1,"result":"0x1","error":{ "code" : 0 , "message" : "" }}`},
+	}
+	for _, tc := range succeeded {
+		t.Run(tc.name, func(t *testing.T) {
+			hasError, msg := jm.CheckResponseError([]byte(tc.body), 200)
+			require.False(t, hasError, "a zero-value error object beside a result must not be flagged")
+			require.Empty(t, msg)
+		})
+	}
+
+	t.Run("message_decides_class_by_code_alone", func(t *testing.T) {
+		// The synthetic text must not steer classification: both classification
+		// sites — the direct-RPC sender and the relay processor, which also runs
+		// the connection-error string fallback — must read the error exactly as
+		// they would with no message at all. A digit in the text would let the
+		// HTTP-status matchers read a JSON-RPC code as an HTTP status.
+		for _, msg := range []string{
+			"JSON-RPC error with an empty message",
+			"Tendermint RPC error with an empty message",
+			"JSON-RPC batch element error with an empty message",
+		} {
+			require.Nil(t, common.DetectConnectionError(errors.New(msg)), msg)
+			for family := common.ChainFamilyUnknown; family <= common.ChainFamilySui; family++ {
+				for _, code := range []int{-32000, -32603, -32601, -32005, -1, 0, 3, 404, 429, 500} {
+					require.Equal(t,
+						common.ClassifyError(nil, family, common.TransportJsonRPC, code, "").Name,
+						common.ClassifyError(nil, family, common.TransportJsonRPC, code, msg).Name,
+						"%q changed the class of code %d on %s", msg, code, family)
+				}
+			}
+		}
+	})
+}
+
+// TestCheckResponseErrorForJsonRpcBatch_EmptyErrorMessage covers MAG-3991 at the
+// batch level. An element whose error has no message text used to count as a
+// success, so it both hid itself and, in default mode, masked every sibling fault.
+func TestCheckResponseErrorForJsonRpcBatch_EmptyErrorMessage(t *testing.T) {
+	withBatchMode := func(t *testing.T, strict bool) {
+		t.Helper()
+		originalValue := BatchNodeErrorOnAny
+		t.Cleanup(func() { BatchNodeErrorOnAny = originalValue })
+		BatchNodeErrorOnAny = strict
+	}
+
+	t.Run("all_elements_empty_message_errors", func(t *testing.T) {
+		withBatchMode(t, false)
+		data := []byte(`[
+			{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":""}},
+			{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":""}}
+		]`)
+		hasError, errorMsg := CheckResponseErrorForJsonRpcBatch(data, 200)
+		require.True(t, hasError, "a batch of failed elements must be flagged for retry")
+		require.Contains(t, errorMsg, "error with an empty message")
+	})
+
+	t.Run("empty_message_error_does_not_mask_a_sibling_fault", func(t *testing.T) {
+		withBatchMode(t, false)
+		data := []byte(`[
+			{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":""}},
+			{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"header not found"}}
+		]`)
+		hasError, errorMsg := CheckResponseErrorForJsonRpcBatch(data, 200)
+		require.True(t, hasError, "no element succeeded, so the batch failed")
+		require.Contains(t, errorMsg, "header not found")
+	})
+
+	t.Run("strict_mode_flags_empty_message_error_beside_success", func(t *testing.T) {
+		withBatchMode(t, true)
+		data := []byte(`[
+			{"jsonrpc":"2.0","id":1,"result":"0x1"},
+			{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":""}}
+		]`)
+		hasError, errorMsg := CheckResponseErrorForJsonRpcBatch(data, 200)
+		require.True(t, hasError, "strict mode flags any failed element")
+		require.Contains(t, errorMsg, "error with an empty message")
+	})
+
+	t.Run("default_mode_success_still_masks_empty_message_sibling", func(t *testing.T) {
+		withBatchMode(t, false)
+		data := []byte(`[
+			{"jsonrpc":"2.0","id":1,"result":"0x1"},
+			{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":""}}
+		]`)
+		hasError, _ := CheckResponseErrorForJsonRpcBatch(data, 200)
+		require.False(t, hasError, "default mode is unchanged: one success masks sibling faults")
 	})
 }
 
