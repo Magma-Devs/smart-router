@@ -379,6 +379,10 @@ A value at or above the request's own budget turns hedging off for that request.
 the hedge interval, and the budget is never shorter than the window, so such a value makes the two
 equal and a hedge could only fire as the budget runs out. Retrying after a failed attempt works as
 it does without the header, but an endpoint that goes quiet holds the request for the whole budget.
+Such a request also gets no backup-reserve hedge (MAG-3923). That hedge goes out one window before
+the budget ends, but never before the first window has passed, so when the window equals the budget
+there is no point inside the budget for it and it is not armed: if the primaries go quiet, the
+backup tier is never tried.
 
 `--max-caller-relay-timeout` lets callers extend the budget, up to its value:
 
@@ -387,7 +391,8 @@ it does without the header, but an endpoint that goes quiet holds the request fo
 ```
 
 A request extended this way is one of those: its window is its whole budget, so one quiet endpoint
-can hold it for as long as the caller asked, up to the flag's value.
+can hold it for as long as the caller asked, up to the flag's value, and it gets no backup-reserve
+hedge either.
 
 A reply to a request that carried the header includes `Lava-Relay-Timeout-Applied`: the window the
 router actually used, as a Go duration. Like the router's other reply headers, it is absent when the
