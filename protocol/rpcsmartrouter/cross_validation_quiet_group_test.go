@@ -75,8 +75,7 @@ func startQuietGroupRequest(t *testing.T, budget, window time.Duration, nodeGrou
 	require.NoError(t, err)
 	require.Equal(t, relaycore.CrossValidation, stateMachine.GetSelection())
 	relayProcessor := relaycore.NewRelayProcessor(ctx, stateMachine.GetCrossValidationParams(),
-		relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics,
-		relaycoretest.RelayRetriesManagerInstance, stateMachine)
+		relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine)
 	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 	require.NoError(t, err)
 
@@ -322,8 +321,7 @@ func TestSendRelayToDirectEndpoints_RecordsTheCrossValidationGroupLayout(t *test
 				cvParams:                   cvParams,
 			}
 			metricsStub := cvGuardMetrics{}
-			relayProcessor := relaycore.NewRelayProcessor(
-				ctx, cvParams, metricsStub, metricsStub, lavaprotocol.NewRelayRetriesManager(), sm)
+			relayProcessor := relaycore.NewRelayProcessor(ctx, cvParams, metricsStub, metricsStub, sm)
 
 			rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 			optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
