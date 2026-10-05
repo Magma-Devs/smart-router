@@ -198,10 +198,11 @@ func (bcnc *baseChainMessageContainer) addExtensions(extensionNames []string, ex
 				utils.LavaFormatTrace("[Archive Debug] Extension added", utils.LogAttr("extensionName", extensionName), utils.LogAttr("totalExtensions", len(bcnc.extensions)))
 			} else {
 				if callerRequested {
-					// The name is the caller's lava-extension header value, which on the HTTP
-					// listeners aliases fasthttp's per-connection header buffer: the next request on
-					// the same keep-alive connection rewrites it in place. Readers of this list keep
-					// it past the request (the warn-once register's keys, metric labels), so own it.
+					// Readers of this list keep the name past the request (the warn-once register's
+					// keys, metric labels, which Prometheus does not copy). Today's listeners already
+					// hand over owned header strings (detachedReqHeaders, MAG-3881), so this clone is a
+					// guard, not the fix: a listener that passed fasthttp's per-connection buffer
+					// through would have the next keep-alive request rewrite the name in place.
 					bcnc.unavailableExtensions = append(bcnc.unavailableExtensions, strings.Clone(extensionName))
 				}
 				utils.LavaFormatTrace("[Archive Debug] Extension not found", utils.LogAttr("extensionName", extensionName), utils.LogAttr("extensionKey", extensionKey))

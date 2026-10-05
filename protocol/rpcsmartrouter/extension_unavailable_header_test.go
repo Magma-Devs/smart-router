@@ -144,14 +144,15 @@ func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T)
 	}
 }
 
-// The extension name arrives in a fiber request header, whose string aliases fasthttp's
-// per-connection header buffer: the next request on the same keep-alive connection rewrites those
-// bytes in place. The warn-once register outlives the request, so a key that still aliased the
+// A fiber request header string aliases fasthttp's per-connection header buffer: the next request
+// on the same keep-alive connection rewrites those bytes in place. The production listeners copy
+// their headers first (detachedReqHeaders, MAG-3881); this handler deliberately does not, so the
+// test pins the record's own copy rather than relying on every listener to detach. The warn-once register outlives the request, so a key that still aliased the
 // buffer would silently change text — "archive" becoming "invalid" — and the register would
 // re-warn for archive and claim to have warned for a name nobody asked about.
 //
 // Literal strings cannot reproduce this; it takes a real listener and ONE connection. The handler
-// does what the JSON-RPC listener does (GetReqHeaders, then strings.Join per header, which returns
+// does what the JSON-RPC listener did before MAG-3881 (GetReqHeaders, then strings.Join per header, which returns
 // a lone value itself rather than a copy), on an app configured like the router's (not Immutable).
 // Both values are seven bytes and lava-extension is the only non-special header, so the second
 // request's value lands in the very slot the first one's did.

@@ -95,10 +95,11 @@ func TestParseMsg_DeepEthCallStillGetsArchiveWhenANodeOffersIt(t *testing.T) {
 	require.Empty(t, getBalance.GetExtensions(), "the archive rule does not reach this block")
 }
 
-// The name comes from the caller's lava-extension header, which on the HTTP listeners aliases
-// fasthttp's per-connection buffer, and the router keeps it past the request (the warn-once
-// register, metric labels). Recording must copy it: here the "header buffer" is rewritten after
-// the call, as the next request on a keep-alive connection would, and the record must not follow.
+// The router keeps a recorded name past the request (the warn-once register, metric labels), so
+// recording must own it whatever the caller passed in. The HTTP listeners detach their headers
+// today (MAG-3881); this pins the guard for an input that still aliases a reused buffer: the
+// "header buffer" is rewritten after the call, as the next keep-alive request would, and the
+// record must not follow.
 // The end-to-end version over a real listener is in rpcsmartrouter.
 func TestOverrideExtensions_RecordOwnsTheCallersString(t *testing.T) {
 	msg := newJSONRPCMessageContainer()
