@@ -28,7 +28,7 @@ func TestNewUpstreamGRPCPool(t *testing.T) {
 	assert.Equal(t, 30*time.Second, pool.connectTimeout)
 	assert.Equal(t, grpcChannelLiveness{
 		idleTimeout:      2 * time.Minute,
-		keepaliveTime:    time.Minute,
+		keepaliveTime:    5 * time.Minute,
 		keepaliveTimeout: 20 * time.Second,
 	}, pool.liveness)
 	assert.NotNil(t, pool.backoff)

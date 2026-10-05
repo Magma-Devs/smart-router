@@ -41,7 +41,7 @@ func TestDefaultGRPCStreamingConfig(t *testing.T) {
 
 	// Verify upstream channel liveness
 	assert.Equal(t, 2*time.Minute, config.PoolIdleTimeout)
-	assert.Equal(t, 1*time.Minute, config.PoolKeepaliveTime)
+	assert.Equal(t, 5*time.Minute, config.PoolKeepaliveTime)
 	assert.Equal(t, 20*time.Second, config.PoolKeepaliveTimeout)
 }
 

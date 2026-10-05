@@ -43,8 +43,10 @@ func newGRPCChannelLiveness(config *GRPCStreamingConfig) grpcChannelLiveness {
 
 // keepaliveParams returns the client keepalive, or false when either value is 0.
 // PermitWithoutStream stays false because gRPC servers penalise pings on connections without
-// streams. A grpc-go server by default also GOAWAYs (too_many_pings) a client pinging more
-// often than every 5m while it writes nothing; grpc-go then doubles the channel's interval.
+// streams. A grpc-go server by default also GOAWAYs (too_many_pings) a client that pings more
+// often than every 5m while the server writes nothing, and closes the connection with every
+// stream on it, so the default interval is 5m. grpc-go doubles a channel's interval after such
+// a GOAWAY, but only once its streams have already failed.
 func (l grpcChannelLiveness) keepaliveParams() (keepalive.ClientParameters, bool) {
 	if l.keepaliveTime <= 0 || l.keepaliveTimeout <= 0 {
 		return keepalive.ClientParameters{}, false

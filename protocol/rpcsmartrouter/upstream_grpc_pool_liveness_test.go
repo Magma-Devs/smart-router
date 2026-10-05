@@ -297,6 +297,16 @@ func TestUpstreamGRPCPool_KeepaliveEndsAStreamOnADroppedFlow(t *testing.T) {
 	require.Equal(t, codes.Unavailable, status.Code(err), "want keepalive to close the transport, got %v", err)
 }
 
+// TestDefaultPoolKeepaliveRespectsGRPCServerMinTime pins the default ping interval at or
+// above a grpc-go server's default keepalive MinTime (5m). The Cosmos SDK's gRPC server, which
+// serves dYdX's order book stream, keeps that default. A client that pings more often on a
+// connection whose streams are quiet gets GOAWAY too_many_pings after its third such ping, and
+// the server closes the connection with every stream on it.
+func TestDefaultPoolKeepaliveRespectsGRPCServerMinTime(t *testing.T) {
+	const grpcServerDefaultMinTime = 5 * time.Minute
+	require.GreaterOrEqual(t, DefaultGRPCStreamingConfig().PoolKeepaliveTime, grpcServerDefaultMinTime)
+}
+
 // TestGRPCChannelLiveness_Keepalive pins the keepalive a pooled channel dials with, and
 // that 0 in either keepalive value leaves the option out altogether: grpc-go would raise
 // a zero ping interval to its 10s minimum and ping anyway.
@@ -305,7 +315,7 @@ func TestGRPCChannelLiveness_Keepalive(t *testing.T) {
 	params, ok := liveness.keepaliveParams()
 	require.True(t, ok)
 	require.Equal(t, keepalive.ClientParameters{
-		Time:                time.Minute,
+		Time:                5 * time.Minute,
 		Timeout:             20 * time.Second,
 		PermitWithoutStream: false,
 	}, params)
