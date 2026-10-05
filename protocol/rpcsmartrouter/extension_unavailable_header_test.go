@@ -1,13 +1,17 @@
 package rpcsmartrouter
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -136,4 +140,89 @@ func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T)
 			require.Equal(t, []string{strings.Join(tc.reported, ",")}, header)
 		})
 	}
+}
+
+// The extension name arrives in a fiber request header, whose string aliases fasthttp's
+// per-connection header buffer: the next request on the same keep-alive connection rewrites those
+// bytes in place. The warn-once register outlives the request, so a key that still aliased the
+// buffer would silently change text — "archive" becoming "invalid" — and the register would
+// re-warn for archive and claim to have warned for a name nobody asked about.
+//
+// Literal strings cannot reproduce this; it takes a real listener and ONE connection. The handler
+// does what the JSON-RPC listener does (GetReqHeaders, then strings.Join per header, which returns
+// a lone value itself rather than a copy), on an app configured like the router's (not Immutable).
+// Both values are seven bytes and lava-extension is the only non-special header, so the second
+// request's value lands in the very slot the first one's did.
+func TestExtensionUnavailableHeader_WarnRegisterSurvivesKeepAliveBufferReuse(t *testing.T) {
+	const tip = 1_000_000
+	chainState := chainstate.New("ETH1", chainstate.DefaultConfig(12*time.Second))
+	chainState.SetLatestBlock(tip)
+	srv := &RPCSmartRouterServer{
+		chainParser:    ethJsonRPCParser(t),
+		chainState:     chainState,
+		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
+	}
+
+	app := fiber.New(fiber.Config{ReadBufferSize: 128 * 1024, WriteBufferSize: 128 * 1024})
+	app.Post("/", func(c *fiber.Ctx) error {
+		var headers []pairingtypes.Metadata
+		for name, values := range c.GetReqHeaders() {
+			headers = append(headers, pairingtypes.Metadata{Name: name, Value: strings.Join(values, ", ")})
+		}
+		ctx := context.Background()
+		protocolMessage, err := srv.ParseRelay(ctx, "", string(c.Body()), http.MethodPost, "test-dapp", "127.0.0.1", headers)
+		if err != nil {
+			return err
+		}
+		relayResult := &common.RelayResult{
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+			Reply:        &pairingtypes.RelayReply{},
+		}
+		srv.appendHeadersToRelayResult(ctx, relayResult, 0, &MockRelayProcessorForHeaders{}, protocolMessage,
+			protocolMessage.GetApi().GetName(), nil, true)
+		for _, md := range relayResult.Reply.Metadata {
+			c.Set(md.Name, md.Value)
+		}
+		return c.SendString(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)
+	})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	go func() { _ = app.Listener(listener) }()
+	t.Cleanup(func() { _ = app.Shutdown() })
+
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	require.NoError(t, err)
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	send := func(extension string) *http.Response {
+		t.Helper()
+		body := `{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}`
+		request := fmt.Sprintf("POST / HTTP/1.1\r\nHost: router\r\nContent-Type: application/json\r\nLava-Extension: %s\r\nContent-Length: %d\r\n\r\n%s",
+			extension, len(body), body)
+		_, err := conn.Write([]byte(request))
+		require.NoError(t, err)
+		response, err := http.ReadResponse(reader, nil)
+		require.NoError(t, err)
+		_, err = io.Copy(io.Discard, response.Body)
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		return response
+	}
+
+	first := send(extensionslib.ArchiveExtension)
+	require.Equal(t, extensionslib.ArchiveExtension, first.Header.Get(common.EXTENSION_UNAVAILABLE_HEADER_NAME),
+		"no node offers archive, so the first reply reports it")
+	// Not an extension the spec knows, so it is dropped before it can be reported; its only effect
+	// is to overwrite the header slot the first request's value lived in.
+	second := send("invalid")
+	require.Empty(t, second.Header.Get(common.EXTENSION_UNAVAILABLE_HEADER_NAME))
+
+	var warned []string
+	srv.warnedUnavailableExtensions.Range(func(key, _ any) bool {
+		warned = append(warned, key.(string))
+		return true
+	})
+	require.Equal(t, []string{extensionslib.ArchiveExtension}, warned,
+		"the register must own its keys; one aliasing the connection's header buffer reads back as the next request's value")
 }

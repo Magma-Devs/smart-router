@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"unsafe"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -92,4 +93,20 @@ func TestParseMsg_DeepEthCallStillGetsArchiveWhenANodeOffersIt(t *testing.T) {
 
 	getBalance := parse(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x1111111111111111111111111111111111111111","0x%x"]}`, block))
 	require.Empty(t, getBalance.GetExtensions(), "the archive rule does not reach this block")
+}
+
+// The name comes from the caller's lava-extension header, which on the HTTP listeners aliases
+// fasthttp's per-connection buffer, and the router keeps it past the request (the warn-once
+// register, metric labels). Recording must copy it: here the "header buffer" is rewritten after
+// the call, as the next request on a keep-alive connection would, and the record must not follow.
+// The end-to-end version over a real listener is in rpcsmartrouter.
+func TestOverrideExtensions_RecordOwnsTheCallersString(t *testing.T) {
+	msg := newJSONRPCMessageContainer()
+	parser := extensionslib.NewExtensionParser(map[extensionslib.ExtensionKey]*spectypes.Extension{})
+	headerBuffer := []byte(extensionslib.ArchiveExtension)
+
+	msg.OverrideExtensions([]string{unsafe.String(&headerBuffer[0], len(headerBuffer))}, &parser)
+	copy(headerBuffer, "invalid")
+
+	require.Equal(t, []string{extensionslib.ArchiveExtension}, msg.GetUnavailableExtensions())
 }

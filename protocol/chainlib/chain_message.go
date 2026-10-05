@@ -2,6 +2,7 @@ package chainlib
 
 import (
 	"math"
+	"strings"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
@@ -197,7 +198,11 @@ func (bcnc *baseChainMessageContainer) addExtensions(extensionNames []string, ex
 				utils.LavaFormatTrace("[Archive Debug] Extension added", utils.LogAttr("extensionName", extensionName), utils.LogAttr("totalExtensions", len(bcnc.extensions)))
 			} else {
 				if callerRequested {
-					bcnc.unavailableExtensions = append(bcnc.unavailableExtensions, extensionName)
+					// The name is the caller's lava-extension header value, which on the HTTP
+					// listeners aliases fasthttp's per-connection header buffer: the next request on
+					// the same keep-alive connection rewrites it in place. Readers of this list keep
+					// it past the request (the warn-once register's keys, metric labels), so own it.
+					bcnc.unavailableExtensions = append(bcnc.unavailableExtensions, strings.Clone(extensionName))
 				}
 				utils.LavaFormatTrace("[Archive Debug] Extension not found", utils.LogAttr("extensionName", extensionName), utils.LogAttr("extensionKey", extensionKey))
 			}
