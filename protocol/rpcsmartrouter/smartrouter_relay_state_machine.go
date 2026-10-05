@@ -2,13 +2,16 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -88,14 +91,31 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		// headers do not even error) and signal the state machine to ignore caller headers. This must be
 		// checked before Resolve, since Resolve returns applies=false for a forbid policy — which on its own
 		// would just let the machine fall back to the caller's headers.
-		forbidCallerCV = resolver.ForbidsCallerCV(chainID, apiInterface, method)
+		//
+		// A GraphQL request that selects several root fields is named after all of them, and that
+		// combined name matches no policy. Each root's policy is consulted instead: a forbid on any
+		// root forbids the request, and otherwise the strictest policy that applies wins, so bundling
+		// a governed operation with another can neither escape its policy nor weaken it.
+		policyMethods := crossValidationPolicyMethods(apiInterface, method)
+		for _, policyMethod := range policyMethods {
+			if resolver.ForbidsCallerCV(chainID, apiInterface, policyMethod) {
+				forbidCallerCV = true
+			}
+		}
 		if !forbidCallerCV {
 			caller, callerPresent, err := protocolMessage.GetCrossValidationParameters()
 			if callerPresent && err != nil {
 				return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
 			}
-			if eff, applies := resolver.Resolve(chainID, apiInterface, method, caller, callerPresent); applies {
-				cvOverride = &eff
+			for _, policyMethod := range policyMethods {
+				if eff, applies := resolver.Resolve(chainID, apiInterface, policyMethod, caller, callerPresent); applies {
+					if cvOverride == nil || stricterCrossValidation(eff, *cvOverride) {
+						cvOverride = &eff
+					}
+				}
+			}
+			if cvOverride != nil {
+				eff := *cvOverride
 				if debugRelays {
 					utils.LavaFormatDebug("[CrossValidation] per-method policy resolved",
 						utils.LogAttr("chainID", chainID),
@@ -130,4 +150,29 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		cvOverride,
 		forbidCallerCV,
 	)
+}
+
+// crossValidationPolicyMethods returns the method names a request's cross-validation policy is
+// looked up under: the request's own name, or for a GraphQL request selecting several root fields,
+// each root field's name. JSON-RPC batches keep their combined name.
+func crossValidationPolicyMethods(apiInterface, method string) []string {
+	if strings.EqualFold(apiInterface, spectypes.APIInterfaceGraphQL) && strings.Contains(method, rpcInterfaceMessages.GraphQLMethodSeparator) {
+		return strings.Split(method, rpcInterfaceMessages.GraphQLMethodSeparator)
+	}
+	return []string{method}
+}
+
+// stricterCrossValidation reports whether a demands more agreement than b: a higher agreement
+// threshold first, then more groups, then per-group quorum, then more participants.
+func stricterCrossValidation(a, b common.CrossValidationParams) bool {
+	if a.AgreementThreshold != b.AgreementThreshold {
+		return a.AgreementThreshold > b.AgreementThreshold
+	}
+	if a.MinGroups != b.MinGroups {
+		return a.MinGroups > b.MinGroups
+	}
+	if a.PerGroupQuorum != b.PerGroupQuorum {
+		return a.PerGroupQuorum
+	}
+	return a.MaxParticipants > b.MaxParticipants
 }

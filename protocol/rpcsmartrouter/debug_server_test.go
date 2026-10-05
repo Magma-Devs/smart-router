@@ -317,10 +317,11 @@ func postResetEndpointHealthRouter(mux http.Handler) *httptest.ResponseRecorder 
 	return rr
 }
 
-// stateEndpointPaths are the read-only state endpoints added for MAG-2202.
-var stateEndpointPaths = []string{"/debug/endpoint-state", "/debug/chain-state", "/debug/provider-routing", "/debug/probe-loop"}
+// stateEndpointPaths are the read-only state endpoints: the four added for MAG-2202, and
+// /debug/sticky-claims (MAG-3860).
+var stateEndpointPaths = []string{"/debug/endpoint-state", "/debug/chain-state", "/debug/provider-routing", "/debug/probe-loop", "/debug/sticky-claims"}
 
-// TestDebugStateEndpoints_MethodNotAllowed: all three are GET-only (the acceptance criterion that any
+// TestDebugStateEndpoints_MethodNotAllowed: each is GET-only (the acceptance criterion that any
 // non-GET method returns 405).
 func TestDebugStateEndpoints_MethodNotAllowed(t *testing.T) {
 	var offsetNano atomic.Int64

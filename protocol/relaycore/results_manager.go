@@ -15,14 +15,9 @@ import (
 // transportFromProtocolMessage derives the TransportType from the protocol message's API collection.
 func transportFromProtocolMessage(pm chainlib.ProtocolMessage) common.TransportType {
 	if collection := pm.GetApiCollection(); collection != nil {
-		switch collection.CollectionData.ApiInterface {
-		case "rest":
-			return common.TransportREST
-		case "grpc":
-			return common.TransportGRPC
-		}
+		return common.ApiInterfaceToTransport(collection.CollectionData.ApiInterface)
 	}
-	return common.TransportJsonRPC // default for jsonrpc and tendermintrpc
+	return common.TransportJsonRPC
 }
 
 type ResultsManager interface {

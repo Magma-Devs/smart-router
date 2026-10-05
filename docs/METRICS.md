@@ -12,7 +12,7 @@ metrics manager.
 
 | Path | Format | Description |
 | --- | --- | --- |
-| `/metrics` | Prometheus | All registered metrics ([`promhttp.Handler()`](../protocol/metrics/smartrouter_metrics_manager.go#L623)) |
+| `/metrics` | Prometheus | All registered metrics ([`newMetricsPageHandler`](../protocol/metrics/metrics_page.go)). A metric that cannot be gathered is left out, logged, and counted as `promhttp_metric_handler_errors_total{cause="gathering"}`, and the rest of the page is still served. The library default answers `500` with no metrics at all and logs nothing. |
 | `/metrics/overall-health` | text | `200 Health status OK` if ≥1 endpoint is healthy, else `503 Unhealthy` |
 | `/metrics/health-overall` | text | Alias of the above (backward-compat path) |
 
@@ -297,6 +297,11 @@ Once it is non-zero they are lossy — some batch types are being merged into `b
 | `smartrouter_retries_failed_total` | Counter | `spec`, `apiInterface`, `method` | Retried requests that failed. |
 | `smartrouter_retry_attempts` | Histogram | `spec`, `apiInterface`, `method` | Attempts per retried request (buckets 1…10). |
 
+A hedged request is counted here as well. A hedge is an extra attempt, and these series are
+recorded from the same count as the `Lava-Retries` header, which includes every attempt the
+router sent (MAG-1818), a hedge's losing attempt among them. The retry and hedging families
+therefore overlap, so do not add them together.
+
 #### Rate-limit hold-off
 
 Emitted by the [hold-off registry](RATE-LIMIT-HOLDOFF.md) itself, so every consumer path
@@ -441,7 +446,7 @@ went out, and which" — so read the alerting note under the table before buildi
 | `smartrouter_csm_blocked_providers_by_reason` | Gauge | `spec`, `apiInterface`, `reason` | How many providers are blocked, split by **why**: `all-endpoints-disabled`, `explicit-block-signal`, `blocked-in-previous-epoch`, `unspecified`. (`too-many-dead-sessions` and `never-served-successfully` were removed with FAILOVER-TASKS section 2 — both block triggers are gone, so the series no longer exist.) Every reason is republished on every tick including the zeros, so a reason that stops applying returns to 0 rather than sticking. It counts **both pools**, so the identity is `sum()` == `smartrouter_csm_blocked_providers` + `smartrouter_csm_blocked_backup_providers` — not the first alone. One caveat: those two gauges count **memberships** while this one counts **providers**, so a provider configured in both pools and blocked in both is counted twice by the sum of the other two and once here. That is deliberate — the question this gauge answers is *how many providers are out, and why*. Deliberately carries **no provider label** — with one, a provider re-blocked under a different reason would leave the old reason's series stuck at 1. Use `smartrouter_csm_provider_blocked` or `/debug/provider-routing` for *which* provider. |
 | `smartrouter_csm_blocked_backup_providers` | Gauge | `spec`, `apiInterface` | Size of the blocked-backup-providers store. Backups are tracked here only — they never appear in `smartrouter_csm_provider_blocked`. |
 | `smartrouter_csm_sticky_sessions` | Gauge | `spec`, `apiInterface` | Live sticky-session affinities held by THIS pod. With `--shared-state` this is a read-through cache of the fleet's claims, not the fleet total. |
-| `smartrouter_csm_sticky_claims_total` | Counter | `spec`, `apiInterface`, `outcome` | Cross-pod sticky-session claim resolutions. `outcome`: `local_hit` (answered from this pod, no round trip), `adopted` (took a claim a peer had already made), `claimed` (this pod made the claim), `lost_race` (claimed simultaneously with a peer and adopted its winner), `error` (the registry could not be reached, so the request failed rather than being served off an unverified pin), `no_candidate` (this pod had no upstream to offer at all — a pairing problem, not a registry one), `invalidated` (a local claim was dropped because its upstream could not serve here). **`adopted` staying at zero on a multi-replica fleet means the feature is wired but never firing** — and note that `no_candidate` and `invalidated` are the two series that climb during an incident, so an alert built only on `error` will read healthy while every sticky request for those sessions is failing. |
+| `smartrouter_csm_sticky_claims_total` | Counter | `spec`, `apiInterface`, `outcome` | Cross-pod sticky-session claim resolutions. `outcome`: `local_hit` (answered from this pod, no round trip), `adopted` (routed by a live claim read from the registry rather than one held in memory: a peer's claim, or this pod's own read back after it dropped its local copy — see `invalidated`), `claimed` (this pod made the claim), `lost_race` (claimed simultaneously with a peer and adopted its winner), `error` (the registry could not be reached, so the request failed rather than being served off an unverified pin), `no_candidate` (this pod had no upstream to offer at all — a pairing problem, not a registry one), `invalidated` (a local claim was dropped because its upstream could not serve here). **`adopted` staying at zero on a multi-replica fleet means the feature is wired but never firing** — and note that `no_candidate` and `invalidated` are the two series that climb during an incident, so an alert built only on `error` will read healthy while every sticky request for those sessions is failing. The same counts, per endpoint, are readable at `GET /debug/sticky-claims` on the debug server (`--debug-address`; nothing passes that flag by default, so the deployment or the harness has to). There `SharedSticky` tells a router without the claim registry from one where it never fired, `SharedStickyReason` says whether the registry was never requested (`--shared-state` off) or was requested and refused by the cache backend, and `PodID` names the process that answered. The counts are per process and cumulative for its lifetime: the debug Service balances across a router's pods, so pin one pod (a port-forward) or compare two readings only when their `PodID` matches. A rise in `adopted` on a pod whose `invalidated` did not move is a peer's claim; the registry does not say whose claim it holds, so the route cannot split the two further. `/debug/reset-all` does not produce `adopted`: it clears the receiving pod's local pins and flushes the shared claims with them (one cache backs both), so that pod's next request re-claims (`claimed`), while the other pods keep their confirmed local pins and keep serving the old upstream from `local_hit` until those pins age out — the fleet is split until then. The reset drops the pins without counting `invalidated`; the one reset that leaves a claim to read back is a skipped flush (a cache pod predating the `FlushCache` RPC), which the reset's response shows by omitting `cache-be` from its cleared list. |
 | `smartrouter_csm_reported_providers` | Gauge | `spec`, `apiInterface` | Size of the reported-providers register. |
 
 **Alert on the maximum over a window, not the instant value.** When every provider is blocked
@@ -463,6 +468,21 @@ max_over_time(smartrouter_csm_blocked_providers_by_reason[5m]) > 0
 
 For "is this chain serving at all", prefer `smartrouter_endpoint_serving_tier` (below): it is not
 drained by the release path, and `0` means dark unambiguously.
+
+**Alert on the metrics page's own error counter.** `/metrics` leaves out a family the registry
+cannot gather and serves the rest with `200` (see the endpoints table), so scrape-success and `up`
+read healthy while that family is missing from every scrape until the process restarts. The page
+counts each such scrape itself:
+
+```promql
+# some family is missing from the page, and stays missing until the pod restarts
+increase(promhttp_metric_handler_errors_total{cause="gathering"}[5m]) > 0
+```
+
+While that fires, read this counter and the router log (`metrics page: a metric could not be
+served`), not the affected family: a family that gathers inconsistently keeps whichever of its
+colliding children the registry met first, which can differ from one scrape to the next, so its
+remaining values are not to be trusted.
 
 #### Serving tier (availability)
 
