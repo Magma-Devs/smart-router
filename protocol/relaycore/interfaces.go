@@ -30,8 +30,9 @@ type ResultsCheckerInf interface {
 	HasRequiredNodeResults(tries int) (bool, int)
 	GetCrossValidationParams() *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
 	GetResultsSummary() ResultsSummary
-	// CrossValidationMissingOnlyGroups reports whether a cross-validation quorum lacks only group
-	// coverage: some response hash has reached the agreement threshold, but not across enough groups.
+	// CrossValidationMissingOnlyGroups reports whether a cross-validation request should stop at its attempt
+	// window: some response hash has reached the agreement threshold without satisfying the quorum rule, and
+	// only providers of under-staffed groups, still silent, could complete a quorum on any hash.
 	CrossValidationMissingOnlyGroups() bool
 }
 

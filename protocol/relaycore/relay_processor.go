@@ -54,6 +54,14 @@ type RelayProcessor struct {
 	// lava-cross-validation-failure-reason header from it — the error returns are left byte-for-byte
 	// unchanged so the state machine's PairingListEmptyError stop logic is unaffected. Guarded by rp.lock.
 	crossValidationFailFastReason string
+	// crossValidationProviderGroups maps each provider the request was sent to onto its group, folded like
+	// quorumGroupOf, and crossValidationUnderstaffedGroups holds the groups smaller than the agreement
+	// threshold. The dispatcher records both (SetCrossValidationGroupLayout). crossValidationAnswered
+	// holds the providers whose response has been filed, success or error. The attempt-window check
+	// reads all three to find who could still complete the quorum (MAG-3993). Guarded by rp.lock.
+	crossValidationProviderGroups     map[string]string
+	crossValidationUnderstaffedGroups map[string]struct{}
+	crossValidationAnswered           map[string]struct{}
 
 	// stopReason is why the state machine stopped this request ("Stateful", "MaxRetriesReached",
 	// "ProcessingTimeout", "Success", …), so the request's final log line can say why there was
@@ -255,14 +263,28 @@ func (rp *RelayProcessor) crossValidationQuorumReached() bool {
 	return false
 }
 
-// CrossValidationMissingOnlyGroups reports whether the answers so far agree often enough, but across too
-// few groups: some real response hash reached the agreement threshold without satisfying the quorum
-// rule. The count is not what is missing, only group coverage, so only a provider from a group that has
-// not answered yet can complete the quorum. The state machine uses this at the attempt window to stop
-// waiting on such providers rather than holding the request for its whole budget (MAG-3993).
+// CrossValidationMissingOnlyGroups reports whether a cross-validation request should stop at its attempt
+// window rather than hold out for its whole budget (MAG-3993). Two conditions, both required:
 //
-// The zero hash is skipped for the same reason crossValidationQuorumReached skips it: a nil reply is a
-// fallback resolved at final evaluation, not a value to stop early on.
+//   - Some real response hash has reached the agreement count without satisfying the quorum rule. In
+//     default mode its answers span too few groups; in per-group mode too few groups corroborate it on
+//     their own.
+//   - No response bucket could still satisfy the rule if every provider still in flight answered it,
+//     leaving out the providers of under-staffed groups: groups smaller than the agreement threshold,
+//     the shape the startup SPOF warning names.
+//
+// The first condition alone does not mean that only a group with no answers yet can complete the quorum.
+// In default mode a quorum can still form on another hash, from groups that have already answered. In
+// per-group mode a group that has answered once completes the quorum with its second answer. While any
+// provider outside an under-staffed group could still complete a quorum, the request keeps waiting as
+// before. In per-group mode an under-staffed group cannot corroborate a hash at all, so the stop there
+// only ends a request that could no longer succeed. In default mode it changes the outcome only when a
+// member of an under-staffed group, still silent at the window, was the last way to complete the quorum.
+//
+// Without a recorded group layout, or with a provider in flight whose group is unknown, it cannot tell,
+// so it does not stop. The zero hash is skipped for the first condition for the same reason
+// crossValidationQuorumReached skips it: a nil reply is a fallback resolved at final evaluation, not a
+// value to stop early on. A nil quorum that could still form keeps the request waiting all the same.
 func (rp *RelayProcessor) CrossValidationMissingOnlyGroups() bool {
 	if rp == nil || rp.selection != CrossValidation {
 		return false
@@ -276,6 +298,50 @@ func (rp *RelayProcessor) CrossValidationMissingOnlyGroups() bool {
 			continue
 		}
 		if stat.count >= threshold && !rp.hashQuorumReached(stat.count, stat.groupCounts, threshold, minGroups) {
+			return !rp.crossValidationQuorumStillCompletable(threshold, minGroups)
+		}
+	}
+	return false
+}
+
+// crossValidationQuorumStillCompletable reports whether some response bucket, the zero hash included, would
+// satisfy the quorum rule if every provider still in flight answered it, except the providers of
+// under-staffed groups. It reuses hashQuorumReached, so both quorum modes are judged by the rule the
+// request is held to. A new hash needs no check of its own: the caller has already found a bucket with
+// answers, and adding the same providers to that bucket can only do better. It reports true when it cannot
+// tell: no layout was recorded, or a provider in flight has no recorded group. Assumes rp.lock is held.
+func (rp *RelayProcessor) crossValidationQuorumStillCompletable(threshold, minGroups int) bool {
+	if rp.crossValidationProviderGroups == nil {
+		return true
+	}
+	inFlight := 0
+	inFlightByGroup := make(map[string]int)
+	for _, provider := range rp.crossValidationQueriedProviders {
+		if _, answered := rp.crossValidationAnswered[provider]; answered {
+			continue
+		}
+		group, known := rp.crossValidationProviderGroups[provider]
+		if !known {
+			return true
+		}
+		if _, understaffed := rp.crossValidationUnderstaffedGroups[group]; understaffed {
+			continue
+		}
+		inFlight++
+		inFlightByGroup[group]++
+	}
+	if inFlight == 0 {
+		return false
+	}
+	for _, stat := range rp.quorumMap {
+		groupCounts := make(map[string]int, len(stat.groupCounts)+len(inFlightByGroup))
+		for group, count := range stat.groupCounts {
+			groupCounts[group] = count
+		}
+		for group, count := range inFlightByGroup {
+			groupCounts[group] += count
+		}
+		if rp.hashQuorumReached(stat.count+inFlight, groupCounts, threshold, minGroups) {
 			return true
 		}
 	}
@@ -328,6 +394,33 @@ func (rp *RelayProcessor) GetCrossValidationQueriedProviders() []string {
 	rp.lock.RLock()
 	defer rp.lock.RUnlock()
 	return rp.crossValidationQueriedProviders
+}
+
+// SetCrossValidationGroupLayout records the group of each provider a cross-validation request was sent to
+// (providerGroups, address to group label) and which groups are under-staffed: smaller than the request's
+// agreement threshold, which at a policy's own threshold are the groups the startup SPOF warning names.
+// An empty label folds into common.DefaultProviderGroup, as quorumGroupOf folds it for answers. Only the
+// attempt-window check reads it (CrossValidationMissingOnlyGroups); without it that check never stops a
+// request early.
+func (rp *RelayProcessor) SetCrossValidationGroupLayout(providerGroups map[string]string, understaffedGroups []string) {
+	fold := func(group string) string {
+		if group == "" {
+			return common.DefaultProviderGroup
+		}
+		return group
+	}
+	groups := make(map[string]string, len(providerGroups))
+	for provider, group := range providerGroups {
+		groups[provider] = fold(group)
+	}
+	understaffed := make(map[string]struct{}, len(understaffedGroups))
+	for _, group := range understaffedGroups {
+		understaffed[fold(group)] = struct{}{}
+	}
+	rp.lock.Lock()
+	defer rp.lock.Unlock()
+	rp.crossValidationProviderGroups = groups
+	rp.crossValidationUnderstaffedGroups = understaffed
 }
 
 // SetCrossValidationRelayDeadline stamps the latest batch's relay upper bound at launch time
@@ -718,27 +811,13 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 		utils.LavaFormatInfo("Relay received a node error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("Error", nodeError), utils.LogAttr("provider", response.RelayResult.ProviderInfo), utils.LogAttr("Request", rp.RelayStateMachine.GetProtocolMessage().GetApi().Name))
 	}
 
-	// Only successful responses (not errors) count toward cross-validation quorum.
-	// Gate on CrossValidation mode: the quorumMap and per-group tally are only
-	// consumed in CV mode (checkEndProcessing / HasRequiredNodeResults), so
+	// Only successful responses (not errors) count toward cross-validation quorum, though every
+	// response marks its provider as answered. Gate on CrossValidation mode: the quorumMap and per-group
+	// tally are only consumed in CV mode (checkEndProcessing / HasRequiredNodeResults), so
 	// Stateless/Stateful traffic skips the bookkeeping entirely — the hash was
 	// already canonicalized above (before SetResponse) only when in CV mode.
-	if rp.selection == CrossValidation && response != nil && nodeError == nil && response.Err == nil {
-		// Written under the lock because the state machine's ticker reads the tally from its own
-		// goroutine (CrossValidationMissingOnlyGroups); every other reader shares this one's goroutine.
-		rp.lock.Lock()
-		defer rp.lock.Unlock()
-		hash := response.RelayResult.ResponseHash // already cached above (before SetResponse), canonicalized
-		stat := rp.quorumMap[hash]
-		if stat == nil {
-			stat = &quorumStat{groupCounts: make(map[string]int)}
-			rp.quorumMap[hash] = stat
-		}
-		stat.count++
-		stat.groupCounts[quorumGroupOf(response.RelayResult)]++ // total count and per-group count recorded together
-		if stat.count > rp.currentQuorumEqualResults {
-			rp.currentQuorumEqualResults = stat.count
-		}
+	if rp.selection == CrossValidation && response != nil {
+		rp.recordCrossValidationResponse(response, nodeError == nil && response.Err == nil)
 	}
 
 	// The per-user consistency seenBlock feed used to live here (Topic C F15): it wrote the served
@@ -749,6 +828,34 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	// descended (monotonic-max, TTL kept alive by ongoing traffic) so the pod stayed broken until a
 	// manual reset. Consistency now measures each endpoint against the anti-lie-guarded chain tip
 	// (C-G), so this write has no reader and is deliberately gone rather than left live-but-unread.
+}
+
+// recordCrossValidationResponse marks the response's provider as answered and, when the response counts
+// toward the quorum, adds it to the per-hash tally. Both are written in one critical section: the state
+// machine's ticker reads them together from its own goroutine (CrossValidationMissingOnlyGroups), and must
+// never see a provider as answered whose answer is not yet in the tally. The lock covers this
+// bookkeeping only, not the rest of handleResponse.
+func (rp *RelayProcessor) recordCrossValidationResponse(response *RelayResponse, countsTowardQuorum bool) {
+	rp.lock.Lock()
+	defer rp.lock.Unlock()
+	if rp.crossValidationAnswered == nil {
+		rp.crossValidationAnswered = make(map[string]struct{})
+	}
+	rp.crossValidationAnswered[response.RelayResult.ProviderInfo.ProviderAddress] = struct{}{}
+	if !countsTowardQuorum {
+		return
+	}
+	hash := response.RelayResult.ResponseHash // already cached in handleResponse (before SetResponse), canonicalized
+	stat := rp.quorumMap[hash]
+	if stat == nil {
+		stat = &quorumStat{groupCounts: make(map[string]int)}
+		rp.quorumMap[hash] = stat
+	}
+	stat.count++
+	stat.groupCounts[quorumGroupOf(response.RelayResult)]++ // total count and per-group count recorded together
+	if stat.count > rp.currentQuorumEqualResults {
+		rp.currentQuorumEqualResults = stat.count
+	}
 }
 
 func (rp *RelayProcessor) readExistingResponses() {

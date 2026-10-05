@@ -584,9 +584,10 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 
 				// Cross-validation never hedges, so for it the window means only this: the providers that
 				// have not answered have had their turn. When the agreement count is met but not the
-				// groups, the missing answers can only come from those providers. Waiting on them for the
-				// rest of the budget turned one quiet group into a fixed 30s stall on every request, so
-				// stop here and let the final evaluation report the unmet quorum (MAG-3993).
+				// quorum, and only providers of under-staffed groups could still complete one, waiting on
+				// them for the rest of the budget turned one quiet group into a fixed 30s stall on every
+				// request. So stop here and let the final evaluation report the unmet quorum (MAG-3993).
+				// While a provider from any other group could still complete a quorum, keep waiting.
 				if sm.selection == CrossValidation && sm.resultsChecker != nil && sm.resultsChecker.CrossValidationMissingOnlyGroups() {
 					utils.LavaFormatInfo("[StateMachine] cross-validation stopped at the attempt window: agreement reached, but the providers from the missing groups have not answered",
 						utils.LogAttr("GUID", sm.ctx),

@@ -113,6 +113,13 @@ type RPCSmartRouterServer struct {
 
 	// Per-method cross-validation policy resolver (nil/empty => header-driven CV only).
 	crossValidationResolver *CrossValidationPolicyResolver
+	// crossValidationGroupSizes is each provider group's size at startup, the layout the SPOF warning in
+	// validateCrossValidationStartup reads. The dispatcher derives a request's under-staffed groups from
+	// it with the warning's own groupsBelowThreshold and the request's threshold. At a policy's own
+	// threshold those are the groups the warning names; a caller that raises the threshold can make
+	// more groups under-staffed for its request (MAG-3993). Nil without cross-validation policies.
+	// Read-only after startup.
+	crossValidationGroupSizes map[string]int
 
 	// probeStats holds the most-recent runProbeLoop cycle telemetry for /debug/probe-loop
 	// (MAG-2202 endpoint 4). Written off the data plane by runProbeCycle; read by the debug handler.
@@ -186,6 +193,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		if cvStartupErr := validateCrossValidationStartup(cvResolver, chainParser, listenEndpoint.ChainID, listenEndpoint.ApiInterface, sessionManager.NumberOfValidProviderGroups(), groupSizes); cvStartupErr != nil {
 			return cvStartupErr
 		}
+		rpcss.crossValidationGroupSizes = groupSizes
 		// Log the resolved provider->group layout once at startup so operators can confirm the diversity
 		// their config yields (a min-groups policy is only as good as the group spread of the fleet).
 		utils.LavaFormatInfo("cross-validation per-method policies loaded",
@@ -2098,11 +2106,24 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		// misreported to the client as pending in-flight stragglers — and the watcher would burn a
 		// goroutine waiting for, then falsely counting not-received, a provider that was never
 		// queried. This set is exactly the goroutines launched below.
+		//
+		// The same survivors' groups, with the groups of the startup layout that are smaller than
+		// this request's threshold, are what the attempt-window stop needs to tell who could still
+		// complete the quorum (MAG-3993). A survivor with no parent session has no known group, and
+		// the stop stays off while it is in flight.
 		queriedProviders := make([]string, 0, len(sessions))
-		for providerPublicAddress := range sessions {
+		providerGroups := make(map[string]string, len(sessions))
+		for providerPublicAddress, sessionInfo := range sessions {
 			queriedProviders = append(queriedProviders, providerPublicAddress)
+			if sessionInfo != nil && sessionInfo.Session != nil && sessionInfo.Session.Parent != nil {
+				providerGroups[providerPublicAddress] = sessionInfo.Session.Parent.GroupLabel
+			}
 		}
 		relayProcessor.SetCrossValidationQueriedProviders(queriedProviders)
+		if crossValidationParams != nil {
+			relayProcessor.SetCrossValidationGroupLayout(providerGroups,
+				groupsBelowThreshold(rpcss.crossValidationGroupSizes, crossValidationParams.AgreementThreshold))
+		}
 
 		// Stamp a deliberately GENEROUS upper bound for the straggler watcher, anchored at launch.
 		// A detached goroutine's lifetime is the sum of individually-bounded phases — the gRPC
