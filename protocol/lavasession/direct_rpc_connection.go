@@ -1789,7 +1789,9 @@ func (g *GRPCDirectRPCConnection) lookupService(service string) (*desc.ServiceDe
 // GetCachedMethodDescriptor returns a cached method descriptor for the given method path.
 // This implements the GRPCDescriptorProvider interface.
 // The methodPath should be in format "service/method" (e.g., "cosmos.bank.v1beta1.Query/TotalSupply")
-// Returns nil if no descriptor is cached (call SendRequest first to populate cache).
+// Returns nil if no descriptor is cached. The warm-up sweep, a JSON request and
+// ResolveMethodDescriptor fill the cache; a binary request does not, because it goes to
+// the node without a descriptor (see invokeRaw).
 func (g *GRPCDirectRPCConnection) GetCachedMethodDescriptor(methodPath string) *desc.MethodDescriptor {
 	// Parse the method path to get the full name used in cache
 	svc, methodName := rpcInterfaceMessages.ParseSymbol(methodPath)
