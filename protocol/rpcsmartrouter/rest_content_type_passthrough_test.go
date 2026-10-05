@@ -138,6 +138,11 @@ func TestRESTRelay_DeclaredPassSendNormalizesGenericContentType(t *testing.T) {
 	got := relay(t, cosmosSimulatePath, `{"tx_bytes":"AAAA"}`, []pairingtypes.Metadata{{Name: "Content-Type", Value: contentTypeFormURLEncoded}})
 	require.Equal(t, "application/json", got)
 
+	// TEZOS declares content-type pass_send too, and /injection/operation takes the signed
+	// operation as a JSON string; Octez answers 415 to it under a form or text type.
+	got = relay(t, cosmosSimulatePath, `"6c0a1f"`, []pairingtypes.Metadata{{Name: "Content-Type", Value: contentTypeFormURLEncoded}})
+	require.Equal(t, "application/json", got)
+
 	const bcs = "application/x.aptos.signed_transaction+bcs"
 	got = relay(t, cosmosSimulatePath, "\x00\x01bcs", []pairingtypes.Metadata{{Name: "Content-Type", Value: bcs}})
 	require.Equal(t, bcs, got)
