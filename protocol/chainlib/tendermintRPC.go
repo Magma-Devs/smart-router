@@ -487,7 +487,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			logFormattedMsg = utils.FormatLongString(logFormattedMsg, relayMsgLogMaxChars)
 		}
 
-		utils.LavaFormatDebug("in <<<",
+		utils.LavaFormatInfo("in <<<",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
 			utils.LogAttr(utils.KEY_TASK_ID, ctx),
@@ -561,7 +561,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		headers := convertToMetadataMap(metadataValues)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
-		utils.LavaFormatDebug("urirpc in <<<",
+		utils.LavaFormatInfo("urirpc in <<<",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
 			utils.LogAttr(utils.KEY_TASK_ID, ctx),

@@ -416,7 +416,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		dappID := extractDappIDFromGrpcHeader(metadataValues)
 
 		grpcHeaders := convertToMetadataMapOfSlices(metadataValues)
-		utils.LavaFormatDebug("in <<< GRPC Relay ",
+		utils.LavaFormatInfo("in <<< GRPC Relay ",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
 			utils.LogAttr(utils.KEY_TASK_ID, ctx),
@@ -564,7 +564,7 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		metricsData := metrics.NewRelayAnalytics(dappID, apil.endpoint.ChainID, apil.endpoint.ApiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
 
-		utils.LavaFormatDebug("in <<< GRPC stream subscribe",
+		utils.LavaFormatInfo("in <<< GRPC stream subscribe",
 			utils.LogAttr("GUID", ctx),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
 			utils.LogAttr(utils.KEY_TASK_ID, ctx),
