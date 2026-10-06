@@ -71,12 +71,14 @@ whatever the caller sends.
 ```
 
 So the shorthand "a caller may make cross-validation stricter, never weaker" holds only **up
-to the configured cap**. The cap is the one mechanism by which the router validates less
-strictly than a caller asked, and it is an explicit operator decision — an operator who wants
-a method's fan-out pinned regardless of caller headers sets `floor == cap`, and one who wants
-the headers ignored outright sets `forbid-caller-cv: true`.
+to the configured cap**. The cap is the one *configured* mechanism by which the router validates
+less strictly than a caller asked, and it is an explicit operator decision — an operator who
+wants a method's fan-out pinned regardless of caller headers sets `floor == cap`, and one who
+wants the headers ignored outright sets `forbid-caller-cv: true`. One unconfigured mechanism
+also does: a method in the stateful category ignores the caller's headers outright, whatever
+they contain (see [Caveats](#caveats)).
 
-With no policy for a method the caller's headers are the only authority, and any
+With no policy for a **stateless** method the caller's headers are the only authority, and any
 self-consistent shape is honored — including the degenerate `max-participants: 1` with
 `agreement-threshold: 1`, which returns `lava-cross-validation-status: success` after a
 single response because the requested quorum of one was met. Nothing is compared in that
@@ -139,10 +141,23 @@ recording path) for test suites that cannot scrape the metrics port — see
 
 ## Caveats
 
-- **Writes.** An *operator policy* on a stateful (write) method is rejected at startup.
-  Cross-validating a write response verifies nothing — leave writes to the stateful fan-out.
-  To also block the legacy *caller-header* path on a specific write, set
-  `forbid-caller-cv: true` on its policy.
+- **Writes.** Cross-validation does not apply to a method in the stateful category, by either
+  route. An *operator policy* on one is rejected at startup, and the *caller-header* path is
+  ignored on one — the request routes by its category and the headers have no effect, whatever
+  they contain. No policy is needed for that (MAG-3603): cross-validating a broadcast only one
+  node can accept cannot reach any agreement threshold, so the router used to answer HTTP 500
+  after the transaction had already been submitted. `forbid-caller-cv: true` is for a
+  **stateless** method an operator wants protected from caller-driven cross-validation.
+  Caveats: the rule keys on the spec's stateful category, so it is only as right as the spec — a
+  read the spec marks stateful loses caller cross-validation, and a submit it does not mark
+  stateful is not covered. The shipped lava-specs mark the cosmos `tx` REST encode, encode/amino,
+  decode and simulate endpoints `stateful: 0` (MAG-4034) and Aptos `POST /transactions` and
+  `/transactions/batch` `stateful: 1` (MAG-4035); the in-repo `specs/` mirror predates both fixes.
+  A malformed header pair on a stateful method (a value that does not parse, one header without
+  its companion, a threshold above `max-participants`) used to refuse the request before anything
+  was dispatched; it is now ignored like a well-formed pair, and the request goes out as a write.
+  A `forbid-caller-cv: true` policy written on a stateful method under the earlier advice is now
+  redundant; it still loads and is harmless.
 - **The readiness health check is not cross-validated.** The router's own health check crafts a
   latest-block request (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`, whatever
   the spec tags) and takes one provider's answer. A policy on that method does **not** apply to it,
