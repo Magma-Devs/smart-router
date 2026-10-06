@@ -94,7 +94,14 @@ func TestEngineEndpointObservation_StoreErrorIsSurfaced(t *testing.T) {
 
 	_, err := engine.PublishEndpointObservation(ctx, "ETH1", "jsonrpc", "ep1", "pod-a", 1, time.Second)
 	require.ErrorIs(t, err, store.observationErr)
+	require.ErrorIs(t, err, StoreError, "the RESP backend's write breaker counts it like a sticky claim")
 	_, _, found, err := engine.GetEndpointObservation(ctx, "ETH1", "jsonrpc", "ep1")
 	require.ErrorIs(t, err, store.observationErr)
+	require.ErrorIs(t, err, StoreError, "the RESP backend's read breaker counts it like a sticky read")
 	require.False(t, found)
+
+	// A rejected publish never reached the store, so it is not the store failing.
+	_, err = engine.PublishEndpointObservation(ctx, "ETH1", "jsonrpc", "ep1", "pod-a", 0, time.Second)
+	require.ErrorIs(t, err, ErrInvalidEndpointObservation)
+	require.NotErrorIs(t, err, StoreError)
 }

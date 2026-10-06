@@ -675,6 +675,147 @@ func TestRespCacheBreakerGuardsStickySessionCalls(t *testing.T) {
 	require.Equal(t, float64(1), skippedSets())
 }
 
+// The fleet tracker gate's endpoint-observation calls sit behind the breaker like the sticky
+// calls (MAG-3732 after MAG-3676): fetch on the read side, publish on the write side. While a
+// breaker is open they return its error at once and reach no wire, so a dead backend stops
+// costing every poll tick its fetch budget and every publish a pool slot; their own store
+// failures count toward opening it.
+func TestRespCacheBreakerGuardsEndpointObservationCalls(t *testing.T) {
+	get := &pairingtypes.EndpointObservationGet{ChainId: "ETH1", ApiInterface: "jsonrpc", EndpointId: "ep1"}
+	set := &pairingtypes.EndpointObservationSet{ChainId: "ETH1", ApiInterface: "jsonrpc", EndpointId: "ep1", PodId: "pod-a", Block: 100, TtlMs: 24000}
+	blackholed := func(t *testing.T) (*RespCache, *blackholeListener) {
+		blackhole := newBlackholeListener(t)
+		store, err := redisstore.New(redisstore.Config{Addresses: []string{blackhole.addr()}})
+		require.NoError(t, err)
+		cache := newRespCacheWithHealthInterval(store, core.DefaultPolicy(), time.Hour)
+		t.Cleanup(func() { _ = cache.Close() })
+		return cache, blackhole
+	}
+
+	t.Run("fetch failures open the read breaker, then both calls are skipped", func(t *testing.T) {
+		cache, blackhole := blackholed(t)
+		failedGets := failedDelta(respCacheOpObservationGet, respCacheFailureKindTimeout)
+		skippedGets, skippedSets := skippedDelta(respCacheOpObservationGet), skippedDelta(respCacheOpObservationSet)
+		for i := 0; i < respCacheBreakerThreshold; i++ {
+			ctx, cancel := context.WithTimeout(context.Background(), common.DefaultCacheTimeout)
+			reply, err := cache.GetEndpointObservation(ctx, get)
+			cancel()
+			require.ErrorIs(t, err, core.StoreError, "a fetch the backend never answered is a store failure, not a miss")
+			require.Nil(t, reply)
+		}
+		require.True(t, cache.readBreaker.open.Load(), "consecutive fetch failures open the breaker")
+		require.Equal(t, float64(respCacheBreakerThreshold), failedGets())
+
+		dialsAtOpen := blackhole.accepted.Load()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		start := time.Now()
+		reply, err := cache.GetEndpointObservation(ctx, get)
+		require.ErrorIs(t, err, ErrCacheBreakerOpen)
+		require.ErrorIs(t, err, core.StoreError)
+		require.Nil(t, reply, "an unavailable store is an error, never a miss")
+		// Unsplit store: one breaker stands behind both roles, so the publish is skipped too.
+		err = cache.SetEndpointObservation(ctx, set)
+		require.ErrorIs(t, err, ErrCacheBreakerOpen)
+		require.Less(t, time.Since(start), 50*time.Millisecond, "both skipped at once, not at the caller's budget")
+		require.Equal(t, dialsAtOpen, blackhole.accepted.Load(), "no skipped observation call opened a connection")
+		require.Equal(t, float64(1), skippedGets())
+		require.Equal(t, float64(1), skippedSets())
+	})
+
+	t.Run("publish failures open the write breaker", func(t *testing.T) {
+		cache, blackhole := blackholed(t)
+		failedSets := failedDelta(respCacheOpObservationSet, respCacheFailureKindTimeout)
+		for i := 0; i < respCacheBreakerThreshold; i++ {
+			ctx, cancel := context.WithTimeout(context.Background(), common.DefaultCacheTimeout)
+			err := cache.SetEndpointObservation(ctx, set)
+			cancel()
+			require.ErrorIs(t, err, core.StoreError)
+		}
+		require.True(t, cache.writeBreaker.open.Load(), "consecutive publish failures open the breaker")
+		require.Equal(t, float64(respCacheBreakerThreshold), failedSets())
+
+		dialsAtOpen := blackhole.accepted.Load()
+		start := time.Now()
+		require.ErrorIs(t, cache.SetEndpointObservation(context.Background(), set), ErrCacheBreakerOpen)
+		require.Less(t, time.Since(start), 50*time.Millisecond, "a skipped publish holds no pool slot for its budget")
+		require.Equal(t, dialsAtOpen, blackhole.accepted.Load())
+	})
+}
+
+// Observation calls share the breaker's failure streak with every other op on their side, with
+// the sticky calls' semantics: a store failure extends the streak, a success resets it, and a
+// call the engine rejects before reaching the store resets it too — it says nothing about the
+// backend.
+func TestRespCacheEndpointObservationCallsShareTheFailureStreak(t *testing.T) {
+	get := &pairingtypes.EndpointObservationGet{ChainId: "ETH1", ApiInterface: "jsonrpc", EndpointId: "ep1"}
+	set := &pairingtypes.EndpointObservationSet{ChainId: "ETH1", ApiInterface: "jsonrpc", EndpointId: "ep1", PodId: "pod-a", Block: 100, TtlMs: 24000}
+	// Each case gets its own store: once a breaker opens it probes every second, and a probe
+	// against a store failing on purpose would reopen it under the next case.
+	healthyCache := func(t *testing.T) (*RespCache, *miniredis.Miniredis) {
+		mr := miniredis.RunT(t)
+		cache := respCacheOverAddr(t, mr.Addr())
+		require.Eventually(t, func() bool {
+			state := cache.DebugCacheState()
+			return state.Reachable != nil && *state.Reachable
+		}, 5*time.Second, 10*time.Millisecond, "the startup probe must land before the store starts failing")
+		return cache, mr
+	}
+	const failing = "LOADING the backend is not answering"
+	stickyFails := func(t *testing.T, cache *RespCache, n int) {
+		for i := 0; i < n; i++ {
+			_, _, err := cache.GetStickySession(context.Background(), "ETH1", "jsonrpc", "base", "digest")
+			require.ErrorIs(t, err, core.StoreError)
+		}
+	}
+
+	t.Run("a failed fetch extends and completes a streak other reads started", func(t *testing.T) {
+		cache, mr := healthyCache(t)
+		mr.SetError(failing)
+		stickyFails(t, cache, respCacheBreakerThreshold-1)
+		require.False(t, cache.readBreaker.open.Load())
+		_, err := cache.GetEndpointObservation(context.Background(), get)
+		require.ErrorIs(t, err, core.StoreError)
+		require.True(t, cache.readBreaker.open.Load(), "an observation failure counts in the same streak as a sticky one")
+	})
+
+	t.Run("a failed publish extends and completes a streak", func(t *testing.T) {
+		cache, mr := healthyCache(t)
+		mr.SetError(failing)
+		stickyFails(t, cache, respCacheBreakerThreshold-1)
+		require.ErrorIs(t, cache.SetEndpointObservation(context.Background(), set), core.StoreError)
+		require.True(t, cache.writeBreaker.open.Load(), "an unsplit store: one streak behind both sides")
+	})
+
+	t.Run("successful observation calls reset the streak like a successful sticky call", func(t *testing.T) {
+		cache, mr := healthyCache(t)
+		mr.SetError(failing)
+		stickyFails(t, cache, respCacheBreakerThreshold-1)
+		mr.SetError("")
+		_, err := cache.GetEndpointObservation(context.Background(), get)
+		require.NoError(t, err)
+		require.Equal(t, int64(0), cache.readBreaker.consecutiveFailures.Load(), "a successful fetch reset the streak")
+
+		mr.SetError(failing)
+		stickyFails(t, cache, respCacheBreakerThreshold-1)
+		mr.SetError("")
+		require.NoError(t, cache.SetEndpointObservation(context.Background(), set))
+		require.Equal(t, int64(0), cache.writeBreaker.consecutiveFailures.Load(), "a successful publish reset the streak")
+
+		// A publish the engine rejects never reached the store: like any non-store outcome
+		// (noteOperation's rule), it resets rather than extends.
+		mr.SetError(failing)
+		stickyFails(t, cache, respCacheBreakerThreshold-1)
+		invalid := *set
+		invalid.Block = 0
+		err = cache.SetEndpointObservation(context.Background(), &invalid)
+		require.ErrorIs(t, err, core.ErrInvalidEndpointObservation)
+		require.NotErrorIs(t, err, core.StoreError)
+		require.Equal(t, int64(0), cache.writeBreaker.consecutiveFailures.Load())
+		require.False(t, cache.writeBreaker.open.Load())
+	})
+}
+
 // breakerTransitions samples one breaker and records every change of state
 // with its time, so a test can count openings and closings without reading
 // the log lines each transition writes.

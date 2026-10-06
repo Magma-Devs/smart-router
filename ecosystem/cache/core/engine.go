@@ -456,11 +456,17 @@ func (e *Engine) PublishEndpointObservation(ctx context.Context, chainId, apiInt
 	if block <= 0 {
 		return false, fmt.Errorf("%w: block %d is not positive", ErrInvalidEndpointObservation, block)
 	}
-	return e.Store.PublishEndpointObservation(ctx,
+	applied, err := e.Store.PublishEndpointObservation(ctx,
 		EndpointObservationKey(chainId, apiInterface, endpointId),
 		EndpointObservation{Block: block, PodID: podId},
 		ClampEndpointObservationTTL(ttl),
 	)
+	if err != nil {
+		// StoreError, like the sticky calls: the RESP backend's write breaker counts it.
+		// Validation failures above stay plain — the store was never asked.
+		return false, errors.Join(StoreError, err)
+	}
+	return applied, nil
 }
 
 // GetEndpointObservation returns the fleet's live observation of an upstream endpoint with its
@@ -470,5 +476,10 @@ func (e *Engine) GetEndpointObservation(ctx context.Context, chainId, apiInterfa
 	if chainId == "" || endpointId == "" {
 		return EndpointObservation{}, 0, false, nil
 	}
-	return e.Store.GetEndpointObservation(ctx, EndpointObservationKey(chainId, apiInterface, endpointId))
+	obs, age, found, err := e.Store.GetEndpointObservation(ctx, EndpointObservationKey(chainId, apiInterface, endpointId))
+	if err != nil {
+		// StoreError, so the RESP backend's read breaker counts it; never a miss.
+		return EndpointObservation{}, 0, false, errors.Join(StoreError, err)
+	}
+	return obs, age, found, nil
 }
