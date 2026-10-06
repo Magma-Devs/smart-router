@@ -2,6 +2,8 @@ package chainlib
 
 import (
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
 
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -62,4 +64,65 @@ func TestHashCacheRequest_OnlyTheDefaultContentTypeLeavesTheKey(t *testing.T) {
 	require.NotEqual(t, bare, hashWith(other), "a forwarded header other than content-type must keep moving the key")
 	require.Equal(t, hashWith(other), hashWith(other, contentType("application/json")),
 		"the default content-type must drop out of the key while the other headers stay in it")
+}
+
+// TestHashCacheRequest_HeaderOrderDoesNotMoveTheKey guards the key against the order the
+// listeners hand headers over in. They build the forwarded metadata by ranging over a map of the
+// request's headers, so two identical requests can list the same headers in different orders. A
+// non-default Content-Type stays in the key, so on a route that forwards it next to another
+// header (CARDANO declares content-type and project_id pass_send) the key depended on that order,
+// and repeats of one request split into lanes that missed each other's entries.
+func TestHashCacheRequest_HeaderOrderDoesNotMoveTheKey(t *testing.T) {
+	const chainId = "CARDANO"
+
+	hashWith := func(metadata []pairingtypes.Metadata) []byte {
+		relayData := &pairingtypes.RelayPrivateData{
+			ConnectionType: http.MethodPost,
+			ApiUrl:         "/utils/txs/evaluate",
+			Data:           []byte{0x84, 0xa4, 0x00, 0x81},
+			ApiInterface:   spectypes.APIInterfaceRest,
+			Metadata:       metadata,
+		}
+		sent := slices.Clone(metadata)
+		hash, _, err := HashCacheRequest(relayData, chainId)
+		require.NoError(t, err)
+		// Spec overrides come last and the transport applies the headers in order, so the
+		// order the caller sends must survive hashing; only the hashed copy is sorted.
+		require.Equal(t, sent, relayData.Metadata, "hashing must hand the metadata back in the caller's order")
+		return hash
+	}
+
+	// The REST listener's own conversion, fed the same request's headers every time.
+	headers := map[string][]string{
+		"Content-Type": {"application/cbor"},
+		"Project_id":   {"mainnet-key"},
+		"X-Trace":      {"abc"},
+	}
+	orders := map[string]struct{}{}
+	keys := map[string]struct{}{}
+	for range 200 {
+		metadata := convertToMetadataMap(headers)
+		names := make([]string, 0, len(metadata))
+		for _, entry := range metadata {
+			names = append(names, entry.Name)
+		}
+		orders[strings.Join(names, ",")] = struct{}{}
+		keys[string(hashWith(metadata))] = struct{}{}
+	}
+	require.Greater(t, len(orders), 1, "setup: the conversion must vary the header order, or this measures nothing")
+	require.Len(t, keys, 1, "one request must have one key, whatever order its headers arrive in")
+
+	contentType := pairingtypes.Metadata{Name: "Content-Type", Value: "application/cbor"}
+	projectID := pairingtypes.Metadata{Name: "Project_id", Value: "mainnet-key"}
+	require.Equal(t,
+		hashWith([]pairingtypes.Metadata{contentType, projectID}),
+		hashWith([]pairingtypes.Metadata{projectID, contentType}),
+		"the same two headers in either order must share a key")
+
+	// Sensitivity control: sorting must not blur the values, or the equalities above could pass
+	// because the key stopped reading the headers.
+	require.NotEqual(t,
+		hashWith([]pairingtypes.Metadata{contentType, projectID}),
+		hashWith([]pairingtypes.Metadata{contentType, {Name: "Project_id", Value: "testnet-key"}}),
+		"a different header value must keep its own key")
 }

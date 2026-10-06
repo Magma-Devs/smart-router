@@ -929,6 +929,28 @@ func metadataWithoutDefaultContentType(metadata []pairingtypes.Metadata) []pairi
 	return kept
 }
 
+// metadataForCacheKey returns the metadata hashCacheRequest puts in the key: metadata without an
+// application/json Content-Type, in a fixed order. The listeners build the forwarded metadata by
+// ranging over a map of the request's headers, so two identical requests can list the same headers
+// in different orders, and json.Marshal keeps whatever order it is handed. Sorting by name, then
+// value, makes the key a function of the headers alone. It sorts a copy: the caller's slice is what
+// the transport sends next, and spec overrides rely on its order (they come last and are applied
+// in order).
+func metadataForCacheKey(metadata []pairingtypes.Metadata) []pairingtypes.Metadata {
+	kept := metadataWithoutDefaultContentType(metadata)
+	if len(kept) < 2 {
+		return kept
+	}
+	sorted := slices.Clone(kept)
+	slices.SortStableFunc(sorted, func(a, b pairingtypes.Metadata) int {
+		if byName := strings.Compare(a.Name, b.Name); byName != 0 {
+			return byName
+		}
+		return strings.Compare(a.Value, b.Value)
+	})
+	return sorted
+}
+
 // hashCacheRequest derives the cache key for a relay. explicitExtensionDirective carries the
 // normalized value of the client's lava-extension directive header (empty when absent). When
 // present it is folded into the hash so an explicitly requested extension (e.g. "archive") lands
@@ -970,8 +992,9 @@ func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explici
 	// the same request and share a lane: drop it from the key. Every other value stays in the key.
 	// It tells the node to read the same bytes differently, and some nodes answer a misread body
 	// with a 200 (an error envelope or a default result) that is cache-eligible, so a reply to one
-	// reading must never be served for another.
-	relayData.Metadata = metadataWithoutDefaultContentType(relayData.Metadata)
+	// reading must never be served for another. The entries left are hashed in a fixed order,
+	// because the listeners hand a request's headers over in map order (metadataForCacheKey).
+	relayData.Metadata = metadataForCacheKey(relayData.Metadata)
 	// we remove the discrepancy of requested block from the hash, and add it on the cache side instead
 	// this is due to the fact that we don't know the latest seen block at this moment, as on shared state
 	// only the cache has this information. we make sure the hashing at this stage does not include the requested block.
