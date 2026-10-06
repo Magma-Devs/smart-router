@@ -779,6 +779,7 @@ func (m *mockChainMessage) UpdateLatestBlockInMessage(latestBlock int64, modifyC
 }
 func (m *mockChainMessage) AppendHeader(metadata []pairingtypes.Metadata) {}
 func (m *mockChainMessage) GetExtensions() []*spectypes.Extension         { return nil }
+func (m *mockChainMessage) GetUnavailableExtensions() []string            { return nil }
 func (m *mockChainMessage) OverrideExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser) {
 }
 func (m *mockChainMessage) DisableErrorHandling()                               {}

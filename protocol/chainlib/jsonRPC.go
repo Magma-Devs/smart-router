@@ -199,8 +199,9 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			extensionInfo.LatestBlock > ethCallArchiveBlockDepth &&
 			uint64(parsedBlock) < extensionInfo.LatestBlock-ethCallArchiveBlockDepth {
 			utils.LavaFormatInfo("adding extension requirement to archive since block is 127 before lastest block")
-			// change to archive
-			extensionInfo.AdditionalExtensions = append(extensionInfo.AdditionalExtensions, extensionslib.ArchiveExtension)
+			// change to archive. The router asks for it, not the caller, so a fleet without an
+			// archive node serves the call without it and does not report it back (MAG-3935).
+			extensionInfo.RouterExtensions = append(extensionInfo.RouterExtensions, extensionslib.ArchiveExtension)
 		}
 
 		if idx == 0 {
@@ -474,7 +475,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		}
 
 		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := fiberCtx.GetReqHeaders()
+		metadataValues := detachedReqHeaders(fiberCtx)
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		headers := convertToMetadataMap(metadataValues)

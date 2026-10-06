@@ -72,13 +72,15 @@ request ──► primary cache ──hit──► served ("Cached")
   block that `latest`, `safe`, `finalized` and `pending` resolve to — chain-wide,
   and unlowerable until it expires.
 - **No foreign hash→height mappings.** For the same reason, the secondary is
-  never asked for the block-hash→height mappings the primary tier supplies. Those
-  heights raise the effective requested block (gating endpoint sync and optimizer
-  selection) and decide archive routing, and the two tiers' values were folded
-  max-for-latest / min-for-earliest — so the more extreme value always won and a
-  foreign tier would beat your own primary by construction. Hash-keyed archive
-  detection therefore uses your primary's mappings alone, or none in a
-  secondary-only topology, exactly as on a router with no cache configured.
+  never asked for block-hash→height mappings. Heights from a cache would raise the
+  effective requested block (gating endpoint sync and optimizer selection) and
+  steer archive routing. The two tiers' values were folded max-for-latest /
+  min-for-earliest, so the more extreme value always won and a foreign tier would
+  beat your own primary by construction. The router writes no mappings today, so
+  your primary has none to supply either (see
+  [RESP-CACHE.md](RESP-CACHE.md#block-hash-to-height-mappings)). Hash-keyed archive
+  detection has no mappings in any topology, exactly as on a router with no cache
+  configured.
 
 Any backend that speaks the Smart Router cache protocol works as either tier —
 the secondary is simply a second `smartrouter cache` address. Run the same cache
