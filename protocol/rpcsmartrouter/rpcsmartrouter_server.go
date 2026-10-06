@@ -2800,7 +2800,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				// OnSessionDone would reward a lagging or pruned node with availability and latency
 				// for data it did not serve. The request still fails over; only the endpoint's tip is scored.
 				relayHoldoff.RecordAnswer(holdoffProvider, holdoffURL)
-				releaseErr := fmt.Errorf("upstream does not hold the requested data (HTTP %d)", statusCode)
+				releaseErr := fmt.Errorf("upstream does not hold the requested data (status %d)", statusCode)
 				if errSession := rpcss.sessionManager.OnSessionDataNotHeld(singleConsumerSession, releaseErr); errSession != nil {
 					utils.LavaFormatWarning("OnSessionDataNotHeld failed for direct RPC", errSession,
 						utils.LogAttr("GUID", goroutineCtx),

@@ -163,8 +163,7 @@ func TestDataScopeAnswerScoresSyncOnly(t *testing.T) {
 			}
 
 			sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}
-			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{},
-				lavaprotocol.NewRelayRetriesManager(), sm)
+			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{}, sm)
 			require.NoError(t, rpcss.sendRelayToDirectEndpoints(ctx, sessions, protocolMsg, relayProcessor, nil, nil, common.CacheLookupReport{}))
 
 			waitCtx, cancelWait := context.WithTimeout(ctx, 5*time.Second)
@@ -204,6 +203,13 @@ func TestIsDataScopeRelayOutcome(t *testing.T) {
 		result.ApplyNodeErrorClassification(common.ChainFamilyEVM, common.TransportJsonRPC, code, message)
 		return result
 	}
+	// A REST or gRPC answer is classified by its transport status, as the direct senders do
+	// (sendRESTRelay / sendGRPCRelay call ApplyNodeErrorClassification with the response code).
+	classifiedStatus := func(family common.ChainFamily, transport common.TransportType, status int, message string) *common.RelayResult {
+		result := &common.RelayResult{StatusCode: status, IsNodeError: true}
+		result.ApplyNodeErrorClassification(family, transport, status, message)
+		return result
+	}
 
 	for _, tc := range []struct {
 		name   string
@@ -217,6 +223,14 @@ func TestIsDataScopeRelayOutcome(t *testing.T) {
 		{name: "internal error", result: classified(-32603, "internal error"), want: false},
 		{name: "rate limited", result: classified(-32000, "rate limit exceeded, please slow down"), want: false},
 		{name: "a result", result: &common.RelayResult{StatusCode: http.StatusOK}, want: false},
+		// Since REST non-2xx became node errors, a REST "not found" takes this path too,
+		// including a 404 for a route the node does not serve.
+		{name: "REST 404", result: classifiedStatus(common.ChainFamilyEVM, common.TransportREST, http.StatusNotFound, "not found"), want: true},
+		{name: "REST 404 on a Cosmos chain", result: classifiedStatus(common.ChainFamilyCosmosSDK, common.TransportREST, http.StatusNotFound, "not found"), want: true},
+		{name: "REST 410", result: classifiedStatus(common.ChainFamilyEVM, common.TransportREST, http.StatusGone, "gone"), want: true},
+		{name: "REST 403 stays out", result: classifiedStatus(common.ChainFamilyEVM, common.TransportREST, http.StatusForbidden, "forbidden"), want: false},
+		{name: "REST 400 stays out", result: classifiedStatus(common.ChainFamilyEVM, common.TransportREST, http.StatusBadRequest, "bad request"), want: false},
+		{name: "gRPC NOT_FOUND", result: classifiedStatus(common.ChainFamilyCosmosSDK, common.TransportGRPC, 5, "block not found"), want: true},
 		{name: "no result", result: nil, want: false},
 		{
 			name:   "data scope behind a 5xx stays a failure",
