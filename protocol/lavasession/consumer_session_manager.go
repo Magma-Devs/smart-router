@@ -42,13 +42,11 @@ func SetDebugProbes(enabled bool) { debugProbes.Store(enabled) }
 // DebugProbesEnabled reports whether verbose probe logging is on.
 func DebugProbesEnabled() bool { return debugProbes.Load() }
 
-var (
-	// ProbeLoopInterval is the configurable cadence (MAG-2161 D5) of the proactive health prober
-	// (rpcsmartrouter.runProbeLoop) — the single source of truth for direct-RPC endpoint health and
-	// probe-fed QoS. Default 5s; validated at startup (a non-positive value is rejected back to the
-	// default).
-	ProbeLoopInterval = 5 * time.Second
-)
+// ProbeLoopInterval is the configurable cadence (MAG-2161 D5) of the proactive health prober
+// (rpcsmartrouter.runProbeLoop) — the single source of truth for direct-RPC endpoint health and
+// probe-fed QoS. Default 5s; validated at startup (a non-positive value is rejected back to the
+// default).
+var ProbeLoopInterval = 5 * time.Second
 
 // created with NewConsumerSessionManager
 type ConsumerSessionManager struct {
@@ -56,12 +54,18 @@ type ConsumerSessionManager struct {
 	lock           sync.RWMutex
 	pairing        map[string]*ConsumerSessionsWithProvider // key == provider address
 	stickySessions *StickySessionStore
+	// stickyClaimCounts mirrors smartrouter_csm_sticky_claims_total in process, indexed by outcome,
+	// so GET /debug/sticky-claims can report it without the metrics port (MAG-3860).
+	stickyClaimCounts [numStickyOutcomes]atomic.Uint64
 	// sharedSticky is the fleet-wide claim registry. Nil leaves stickiness pod-local, which is
 	// the pre-existing behaviour. stickyEpochDuration sizes a claim's backstop lifetime.
-	sharedSticky        SharedStickyStore
-	stickyEpochDuration time.Duration
-	currentEpoch        uint64
-	numberOfResets      uint64
+	// sharedStickyRequested records that a registry was asked for at all (SetSharedStickyStore ran),
+	// so a nil registry can be told apart from one never requested (MAG-3860).
+	sharedSticky          SharedStickyStore
+	sharedStickyRequested bool
+	stickyEpochDuration   time.Duration
+	currentEpoch          uint64
+	numberOfResets        uint64
 
 	// original pairingAddresses for current epoch
 	// contains all addresses from the initial pairing. and the keys are the indexes of the pairing query (these indexes are used for data reliability)
@@ -372,19 +376,11 @@ func (csm *ConsumerSessionManager) countByGroup(addresses []string) map[string]i
 	return counts
 }
 
-// NumberOfValidProviderGroups returns the count of distinct cross-validation group labels across ALL
-// currently valid providers (ignoring addon/extension filtering). Used by the startup capacity check as
-// the upper bound on how many distinct groups a request could ever draw from.
-func (csm *ConsumerSessionManager) NumberOfValidProviderGroups() int {
-	csm.lock.RLock()
-	defer csm.lock.RUnlock()
-	return csm.countDistinctGroups(csm.validAddresses)
-}
-
 // ProviderGroupAssignments returns a snapshot of how the currently valid providers map onto
 // cross-validation group labels (label -> sorted provider addresses), folding an empty label into
-// common.DefaultProviderGroup. It is meant for one-shot startup/diagnostic logging so operators can see the diversity
-// their config actually yields; it is not on any hot path.
+// common.DefaultProviderGroup. It is meant for one-shot startup/diagnostic logging; it is not on any hot
+// path. It holds only the providers that passed verification, so it describes the fleet serving now, not
+// the configured one: a provider that failed its boot verification is absent until it is re-admitted.
 func (csm *ConsumerSessionManager) ProviderGroupAssignments() map[string][]string {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
@@ -1624,7 +1620,7 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 			if len(csm.backupProviders) > 0 {
 				utils.LavaFormatDebug("No regular providers available, trying backup providers", utils.LogAttr("GUID", ctx))
 				// try to get a session from the backup providers
-				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
+				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
 				if err == nil {
 					// backup providers succeeded, return the session
 					utils.LavaFormatDebug("Successfully got session from backup providers", utils.LogAttr("GUID", ctx))
@@ -1712,6 +1708,17 @@ type GetSessionsOptions struct {
 	// enables a root collection alongside versioned ones (STRK) must keep its
 	// root traffic on the root url.
 	InternalPath *string
+	// PreferBackup routes this selection to the backup tier ahead of any primary still unused on
+	// the request — the backup-reserve hedge (MAG-3923). With no eligible backup it falls back to
+	// ordinary selection. A pinned provider (header or fleet claim) always wins over it.
+	PreferBackup bool
+}
+
+// HasBackupProviders reports whether this endpoint has a backup tier configured.
+func (csm *ConsumerSessionManager) HasBackupProviders() bool {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	return len(csm.backupProviders) > 0
 }
 
 func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProviderNumber int, cuNeededForSession uint64, usedProviders UsedProvidersInf, requestedBlock int64, addon string, extensions []*spectypes.Extension, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, opts ...GetSessionsOptions) (
@@ -1722,7 +1729,9 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	minGroups := groupBlindMinGroups
 	perGroupTarget := groupBlindPerGroupTarget
 	var internalPath *string
+	preferBackup := false
 	if len(opts) > 0 {
+		preferBackup = opts[0].PreferBackup
 		if opts[0].MinGroups > 1 {
 			minGroups = opts[0].MinGroups
 		}
@@ -1849,8 +1858,20 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	}
 	utils.LavaFormatTrace("GetSessions tempIgnoredProviders", utils.LogAttr("tempIgnoredProviders", tempIgnoredProviders), utils.LogAttr("GUID", ctx))
 
-	// Get a valid consumerSessionsWithProvider
-	sessionWithProviderMap, err := csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+	// Get a valid consumerSessionsWithProvider. The backup-reserve hedge asks for the backup tier
+	// first; a pin still wins, so it only applies to an unpinned selection.
+	var sessionWithProviderMap SessionWithProviderMap
+	var err error
+	if preferBackup && selectedProvider == "" {
+		sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierReserveHedge, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
+		if err != nil {
+			utils.LavaFormatDebug("backup-reserve hedge found no eligible backup, using ordinary selection", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
+			sessionWithProviderMap = nil
+		}
+	}
+	if sessionWithProviderMap == nil {
+		sessionWithProviderMap, err = csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+	}
 	if err != nil {
 		utils.LavaFormatTrace("GetSessions error", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 		return nil, err
@@ -2186,8 +2207,13 @@ func convertSelectionStatsToMetrics(stats *provideroptimizer.SelectionStats) (al
 // the opposite of what pinning is for. The caller reports the collision so the operator
 // can rename a provider.
 func resolveSelectedProviderAddress(selectedProvider string, addresses []string) (address string, ambiguous []string) {
-	if slices.Contains(addresses, selectedProvider) {
-		return selectedProvider, nil
+	// The router's own string, never the caller's, even on an exact match. selectedProvider comes
+	// from a request header, which a listener may hand over still pointing into a buffer the next
+	// request reuses; the resolved address outlives the request as the session-map key and the
+	// endpoint_id / provider_address metric labels. A label whose text changed under Prometheus
+	// took down the whole /metrics page (MAG-3881).
+	if i := slices.Index(addresses, selectedProvider); i >= 0 {
+		return addresses[i], nil
 	}
 	var folded []string
 	for _, candidate := range addresses {
@@ -2574,16 +2600,51 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	return nil, utils.LavaFormatError(csm.rpcEndpoint.ChainID+" could not get a provider address from blocked provider list", PairingListEmptyError, utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("addons", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("ignoredProviders", ignoredProviders.providers), utils.LogAttr("GUID", ctx))
 }
 
-// getValidConsumerSessionsWithProviderFromBackupProviderList retrieves valid backup provider sessions for emergency fallback when no regular providers are available.
-func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) {
+// backupTierAsk is why a selection reads the backup tier, which decides how it reports itself.
+type backupTierAsk int
+
+const (
+	// backupTierFallback is the emergency fallback: no regular provider can serve the request.
+	backupTierFallback backupTierAsk = iota
+	// backupTierReserveHedge is the backup-reserve hedge (MAG-3923). Primaries are still in the
+	// pool, so finding no eligible backup is routine: the caller falls back to ordinary selection.
+	backupTierReserveHedge
+)
+
+// errNoEligibleBackupProvider is returned when the backup tier has nothing this request can use.
+// It is a sentinel rather than a logged error so each caller reports it at the level its own ask
+// warrants.
+var errNoEligibleBackupProvider = errors.New("no eligible backup provider")
+
+// noEligibleBackup returns errNoEligibleBackupProvider for reason. The emergency fallback keeps
+// its ERROR line; the reserve hedge leaves the reporting to its caller.
+func noEligibleBackup(ctx context.Context, ask backupTierAsk, reason string) error {
+	if ask == backupTierFallback {
+		utils.LavaFormatError(reason, nil, utils.LogAttr("GUID", ctx))
+	}
+	return fmt.Errorf("%s: %w", reason, errNoEligibleBackupProvider)
+}
+
+// getValidConsumerSessionsWithProviderFromBackupProviderList retrieves valid backup provider
+// sessions, for the emergency fallback when no regular providers are available and for the
+// backup-reserve hedge; ask says which.
+func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ask backupTierAsk, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
-	utils.LavaFormatInfo("[BackupProviders] Static providers exhausted — entering backup fallback",
-		utils.LogAttr("ignored_providers", ignoredProviders.providers),
-		utils.LogAttr("backup_pool_size", len(csm.backupProviders)),
-		utils.LogAttr("GUID", ctx),
-	)
+	if ask == backupTierReserveHedge {
+		utils.LavaFormatDebug("[BackupProviders] reserve hedge selecting from the backup tier",
+			utils.LogAttr("ignored_providers", ignoredProviders.providers),
+			utils.LogAttr("backup_pool_size", len(csm.backupProviders)),
+			utils.LogAttr("GUID", ctx),
+		)
+	} else {
+		utils.LavaFormatInfo("[BackupProviders] Static providers exhausted — entering backup fallback",
+			utils.LogAttr("ignored_providers", ignoredProviders.providers),
+			utils.LogAttr("backup_pool_size", len(csm.backupProviders)),
+			utils.LogAttr("GUID", ctx),
+		)
+	}
 
 	currentEpoch := csm.atomicReadCurrentEpoch() // reading the epoch here while locked, to get the epoch of the pairing.
 	if ignoredProviders.currentEpoch < currentEpoch {
@@ -2595,7 +2656,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	// Check if backup providers exist
 	if len(csm.backupProviders) == 0 {
 		utils.LavaFormatDebug("No backup providers configured", utils.LogAttr("GUID", ctx))
-		return nil, utils.LavaFormatError("no backup providers configured", nil, utils.LogAttr("GUID", ctx))
+		return nil, noEligibleBackup(ctx, ask, "no backup providers configured")
 	}
 
 	// Get valid backup provider addresses that support the required addon and extensions
@@ -2624,7 +2685,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 			utils.LogAttr("ignored_providers", ignoredProviders.providers),
 			utils.LogAttr("GUID", ctx),
 		)
-		return nil, utils.LavaFormatError("no valid backup providers available", nil, utils.LogAttr("GUID", ctx))
+		return nil, noEligibleBackup(ctx, ask, "no valid backup providers available")
 	}
 
 	utils.LavaFormatInfo("[BackupProviders] Asking optimizer to select from backup candidates",
@@ -2643,7 +2704,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 			utils.LogAttr("candidates", backupProviderAddresses),
 			utils.LogAttr("GUID", ctx),
 		)
-		return nil, utils.LavaFormatError("optimizer returned no backup provider", nil, utils.LogAttr("GUID", ctx))
+		return nil, noEligibleBackup(ctx, ask, "optimizer returned no backup provider")
 	}
 	selectedAddress := selectedAddresses[0]
 
@@ -4096,25 +4157,45 @@ const (
 	// drop claims that readers still honour — reopening the split this feature closes. Exported
 	// so the wiring site can warn when the configured epoch pushes the TTL past the ceiling.
 	StickyClaimEpochSpan = 2
+)
 
-	// Outcomes for smartrouter_csm_sticky_claims_total. A closed set, so the series stays bounded.
-	stickyOutcomeLocalHit = "local_hit"
-	stickyOutcomeAdopted  = "adopted"
-	stickyOutcomeClaimed  = "claimed"
-	stickyOutcomeLostRace = "lost_race"
-	stickyOutcomeError    = "error"
+// stickyOutcome is one way a sticky id resolves, counted by smartrouter_csm_sticky_claims_total and
+// by GET /debug/sticky-claims. A closed set, so the series stays bounded. Declaring an outcome here
+// is what gives it a count slot, so the route cannot miss one the metric counts.
+type stickyOutcome uint8
+
+const (
+	stickyOutcomeLocalHit stickyOutcome = iota
+	stickyOutcomeAdopted
+	stickyOutcomeClaimed
+	stickyOutcomeLostRace
+	stickyOutcomeError
 	// stickyOutcomeNoCandidate is this pod having no upstream to offer (an empty pairing), which
 	// is not a registry failure and must not share a series with one.
-	stickyOutcomeNoCandidate = "no_candidate"
+	stickyOutcomeNoCandidate
 	// stickyOutcomeInvalidated is a local claim dropped because its upstream could not serve
 	// here. A climbing series means claims are outliving the upstreams they name.
-	stickyOutcomeInvalidated = "invalidated"
+	stickyOutcomeInvalidated
+	numStickyOutcomes
 )
+
+// stickyOutcomes is each outcome's value for the metric's outcome label, which is also its key in
+// StickyClaimCounts.
+var stickyOutcomes = [numStickyOutcomes]string{
+	stickyOutcomeLocalHit:    "local_hit",
+	stickyOutcomeAdopted:     "adopted",
+	stickyOutcomeClaimed:     "claimed",
+	stickyOutcomeLostRace:    "lost_race",
+	stickyOutcomeError:       "error",
+	stickyOutcomeNoCandidate: "no_candidate",
+	stickyOutcomeInvalidated: "invalidated",
+}
 
 // SetSharedStickyStore wires the fleet-wide claim registry and the epoch length used to size a
 // claim's lifetime. Called once at construction; nil leaves stickiness pod-local.
 func (csm *ConsumerSessionManager) SetSharedStickyStore(store SharedStickyStore, epochDuration time.Duration) {
 	csm.sharedSticky = store
+	csm.sharedStickyRequested = true
 	csm.stickyEpochDuration = epochDuration
 }
 
@@ -4236,6 +4317,28 @@ func (csm *ConsumerSessionManager) invalidateStickyPin(localKey string) {
 
 // recordStickyOutcome publishes one claim resolution. The metrics manager is nil-safe, and
 // SafeMetrics guarantees a non-nil consumer, so this needs no guard of its own.
-func (csm *ConsumerSessionManager) recordStickyOutcome(outcome string) {
-	csm.consumerMetricsManager.RecordStickyClaim(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, outcome)
+func (csm *ConsumerSessionManager) recordStickyOutcome(outcome stickyOutcome) {
+	csm.stickyClaimCounts[outcome].Add(1)
+	csm.consumerMetricsManager.RecordStickyClaim(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, stickyOutcomes[outcome])
+}
+
+// StickyClaimCounts reports whether the fleet-wide claim registry is wired (shared) and how many times
+// each outcome has resolved on this pod since it started: the resolutions smartrouter_csm_sticky_claims_total
+// counts, readable without the metrics port (MAG-3860). Every outcome is present, zero included, and without
+// the registry every count stays zero, so shared is what tells "off" from "never fired". The counts are
+// this process's alone: a reset does not touch them, and no pod sees another's.
+func (csm *ConsumerSessionManager) StickyClaimCounts() (shared bool, outcomes map[string]uint64) {
+	outcomes = make(map[string]uint64, numStickyOutcomes)
+	for outcome, label := range stickyOutcomes {
+		outcomes[label] = csm.stickyClaimCounts[outcome].Load()
+	}
+	return csm.sharedSticky != nil, outcomes
+}
+
+// SharedStickyRequested reports whether a claim registry was asked for, whether or not one could be
+// wired. With StickyClaimCounts' shared flag it tells apart the three states a reader of
+// GET /debug/sticky-claims needs: never requested (--shared-state off), requested and wired, and
+// requested but left pod-local because the configured cache backend cannot hold claims (MAG-3860).
+func (csm *ConsumerSessionManager) SharedStickyRequested() bool {
+	return csm.sharedStickyRequested
 }
