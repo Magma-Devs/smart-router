@@ -437,14 +437,6 @@ func (s *Store) key(k string) string {
 	return s.prefix + ":" + k
 }
 
-// sharedKey is the key a fleet-shared fact is written under: core's key as it is, NOT scoped to
-// this store's prefix. Endpoint observations are the one such fact (see core.EndpointObservationKey):
-// routers on different key prefixes that poll the same upstream share them, as they do on the
-// gRPC cache server, whose observation store has never been prefix-scoped.
-func sharedKey(k string) string {
-	return k
-}
-
 // PoolStats is a client-neutral snapshot of the connection pool(s); when
 // reads are split the write and read pools are summed.
 type PoolStats struct {
@@ -984,7 +976,7 @@ func (s *Store) PublishEndpointObservation(ctx context.Context, key string, obs 
 	if ttl < time.Millisecond {
 		ttl = time.Millisecond
 	}
-	applied, err := publishEndpointObservationScript.Run(ctx, s.write, []string{sharedKey(key)}, obs.Block, obs.PodID, ttl.Milliseconds()).Int()
+	applied, err := publishEndpointObservationScript.Run(ctx, s.write, []string{s.key(key)}, obs.Block, obs.PodID, ttl.Milliseconds()).Int()
 	if err != nil {
 		return false, err
 	}
@@ -999,7 +991,7 @@ func (s *Store) PublishEndpointObservation(ctx context.Context, key string, obs 
 // between servers, when they differ, is the larger term; the TTL bounds it).
 func (s *Store) GetEndpointObservation(ctx context.Context, key string) (core.EndpointObservation, time.Duration, bool, error) {
 	pipe := s.read.Pipeline()
-	getCmd := pipe.Get(ctx, sharedKey(key))
+	getCmd := pipe.Get(ctx, s.key(key))
 	timeCmd := pipe.Time(ctx)
 	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
 		return core.EndpointObservation{}, 0, false, err
@@ -1019,7 +1011,7 @@ func (s *Store) GetEndpointObservation(ctx context.Context, key string) (core.En
 		// Same policy as the int64 tip: a router-embedded backend on a SHARED store must not
 		// be derailed by a foreign writer, so corruption reads as a miss (and the next publish
 		// overwrites it — see the script's fall-through).
-		utils.LavaFormatError("corrupt endpoint observation in RESP backend, treating as miss", nil, utils.LogAttr("key", sharedKey(key)), utils.LogAttr("value", getCmd.Val()))
+		utils.LavaFormatError("corrupt endpoint observation in RESP backend, treating as miss", nil, utils.LogAttr("key", s.key(key)), utils.LogAttr("value", getCmd.Val()))
 		return core.EndpointObservation{}, 0, false, nil
 	}
 	age := time.Duration(now.UnixMilli()-storedAtMs) * time.Millisecond
@@ -1062,11 +1054,9 @@ func decodeEndpointObservation(raw string) (obs core.EndpointObservation, stored
 // says so, naming the read side, because a reset that silently did half the
 // job is the defect this exists to close.
 func (s *Store) Purge(ctx context.Context) error {
-	matches := s.purgeMatches()
-	for _, match := range matches {
-		if err := purgeClient(ctx, s.write, match); err != nil {
-			return err
-		}
+	match := s.prefix + ":*"
+	if err := purgeClient(ctx, s.write, match); err != nil {
+		return err
 	}
 	if s.read == s.write {
 		return nil
@@ -1078,11 +1068,7 @@ func (s *Store) Purge(ctx context.Context) error {
 			utils.LogAttr("replica-of-write-endpoint", addressListed(master, s.configuredEndpoints.Addresses)))
 		return nil
 	}
-	for _, match := range matches {
-		err := purgeClient(ctx, s.read, match)
-		if err == nil {
-			continue
-		}
+	if err := purgeClient(ctx, s.read, match); err != nil {
 		if redis.HasErrorPrefix(err, "READONLY") {
 			utils.LavaFormatDebug("resp-cache purge: the read endpoint is a read-only replica, so the write-side purge reaches it through replication",
 				utils.LogAttr("read-endpoint", s.readEndpoint.current()))
@@ -1091,14 +1077,6 @@ func (s *Store) Purge(ctx context.Context) error {
 		return fmt.Errorf("resp-cache: purging the read endpoint: %w", err)
 	}
 	return nil
-}
-
-// purgeMatches is what Purge clears: this store's own keyspace, and the shared endpoint
-// observations (sharedKey), which a reset clears for every router on the backend, the way the
-// gRPC cache server's FlushCache clears its observation store. Observations are short-lived
-// polls (their TTL is twice a freshness window), so clearing a peer's costs it one poll.
-func (s *Store) purgeMatches() []string {
-	return []string{s.prefix + ":*", core.EndpointObservationPrefix + "*"}
 }
 
 // readEndpointReplicaOf asks the read endpoint what it is before Purge scans
