@@ -121,6 +121,19 @@ type RPCSmartRouterServer struct {
 
 	// Per-method cross-validation policy resolver (nil/empty => header-driven CV only).
 	crossValidationResolver *CrossValidationPolicyResolver
+	// crossValidationGroupSizes is each provider group's size at startup, the layout the SPOF warning in
+	// validateCrossValidationStartup reads. The dispatcher derives a request's under-staffed groups from
+	// it with the warning's own groupsBelowThreshold and the request's threshold. At a policy's own
+	// threshold those are the groups the warning names; a caller that raises the threshold can make
+	// more groups under-staffed for its request (MAG-3993).
+	//
+	// Nil without cross-validation policies, deliberately: the early stop covers only fleets the
+	// SPOF warning has been able to name. Header-driven cross-validation on a router with no
+	// policies sees no under-staffed group, so a quiet provider still counts as able to complete
+	// the quorum and the request keeps the full-budget wait; it stops at the window only when no
+	// provider in flight could complete a quorum at all, which cannot change the outcome.
+	// Written once in ServeRPCRequests before the listener starts; read-only after that.
+	crossValidationGroupSizes map[string]int
 
 	// probeStats holds the most-recent runProbeLoop cycle telemetry for /debug/probe-loop
 	// (MAG-2202 endpoint 4). Written off the data plane by runProbeCycle; read by the debug handler.
@@ -197,6 +210,11 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 			return cvStartupErr
 		}
 		advisory.log()
+		// Recorded only here, beside the SPOF warning, so the attempt-window stop (MAG-3993) is
+		// scoped to policy-driven cross-validation; see the field comment for the header-only case.
+		// The configured layout, as the SPOF warning reads it: a group is under-staffed by its
+		// configuration, not because one of its primaries was down at boot.
+		rpcss.crossValidationGroupSizes = groupSizesOf(configuredProviderGroups)
 	}
 
 	// Initialize consistency validation config from chain spec values. The finalization distance
@@ -524,13 +542,17 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 	// block boundary, outvote a larger honest group). This is still a SATISFIABLE config (default mode counts
 	// agreement across groups, not within them), so it is a WARNING, not a startup error. Skipped when
 	// groupSizes is empty (no configured primary, see above).
+	//
+	// The same shape costs availability too (MAG-3993): cross-validation neither retries nor draws on
+	// backups, so when every member of a required group goes quiet no request can reach the quorum, and
+	// each one fails diversity-unmet at the attempt window. The warning names both halves.
 	if len(groupSizes) > 0 {
 		for _, req := range resolver.MinGroupsRequirements(chainID, apiInterface) {
 			if req.MinGroups <= 1 {
 				continue // no diversity requirement, so nothing rests on under-staffed groups
 			}
 			if below := groupsBelowThreshold(groupSizes, req.Threshold); len(below) > 0 {
-				utils.LavaFormatWarning("cross-validation group-diversity may rest on single points of failure: some provider groups are smaller than the agreement threshold and cannot corroborate a response on their own, yet can still carry the required group diversity", nil,
+				utils.LavaFormatWarning("cross-validation group-diversity may rest on single points of failure: some provider groups are smaller than the agreement threshold and cannot corroborate a response on their own, yet can still carry the required group diversity. Each such group is also an availability single point of failure: cross-validation does not retry or use backups, so while its members are quiet every request fails diversity-unmet at the attempt window", nil,
 					utils.LogAttr("groupsBelowThreshold", below),
 					utils.LogAttr("agreementThreshold", req.Threshold),
 					utils.LogAttr("minGroups", req.MinGroups),
@@ -2470,11 +2492,24 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		// misreported to the client as pending in-flight stragglers — and the watcher would burn a
 		// goroutine waiting for, then falsely counting not-received, a provider that was never
 		// queried. This set is exactly the goroutines launched below.
+		//
+		// The same survivors' groups, with the groups of the startup layout that are smaller than
+		// this request's threshold, are what the attempt-window stop needs to tell who could still
+		// complete the quorum (MAG-3993). A survivor with no parent session has no known group, and
+		// the stop stays off while it is in flight.
 		queriedProviders := make([]string, 0, len(sessions))
-		for providerPublicAddress := range sessions {
+		providerGroups := make(map[string]string, len(sessions))
+		for providerPublicAddress, sessionInfo := range sessions {
 			queriedProviders = append(queriedProviders, providerPublicAddress)
+			if sessionInfo != nil && sessionInfo.Session != nil && sessionInfo.Session.Parent != nil {
+				providerGroups[providerPublicAddress] = sessionInfo.Session.Parent.GroupLabel
+			}
 		}
 		relayProcessor.SetCrossValidationQueriedProviders(queriedProviders)
+		if crossValidationParams != nil {
+			relayProcessor.SetCrossValidationGroupLayout(providerGroups,
+				groupsBelowThreshold(rpcss.crossValidationGroupSizes, crossValidationParams.AgreementThreshold))
+		}
 
 		// Stamp a deliberately GENEROUS upper bound for the straggler watcher, anchored at launch.
 		// A detached goroutine's lifetime is the sum of individually-bounded phases — the gRPC

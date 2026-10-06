@@ -167,6 +167,29 @@ recording path) for test suites that cannot scrape the metrics port — see
   That is deliberate: gating a whole chain and interface on one method's quorum is the over-coupling
   MAG-3746 was. Alert on the cross-validation failure series for policy capacity, not on readiness.
 - **Cost & latency.** N relays per request. Scope policies to the methods that warrant it.
+- **A group smaller than the agreement threshold is an availability risk.** Cross-validation
+  does not retry, hedge or use backups. With `min-groups: 2` and a group of one provider,
+  that provider going quiet can leave the quorum only group diversity short. When the
+  attempt window expires with the agreement count met, and only providers from groups
+  smaller than the threshold could still complete a quorum, the request fails
+  `diversity-unmet` (or `group-quorum-unmet` in per-group mode) at once, rather than waiting
+  out the processing budget. This is the same window that paces hedging: usually
+  `--min-relay-timeout`, but longer for a heavy or hanging method. The spec's `timeout_ms` or
+  the caller's `lava-relay-timeout` replaces it where set. A provider in such a group that is
+  slower than the window fails the request when the quorum cannot be completed without it,
+  even if it would have answered within the budget. While a provider from a group at least
+  as large as the threshold could still complete a quorum, on any response, the request
+  keeps waiting as before. In per-group mode a group smaller than the threshold cannot
+  corroborate a response on its own, so there the early stop only ends a request that could
+  no longer succeed. The router warns at startup when a group is smaller than the
+  threshold; give every required group at least as many providers as the threshold.
+  This early stop applies only when cross-validation policies are loaded (a
+  `cross-validation:` block): the group sizes it reads are recorded at startup together
+  with that warning. Cross-validation turned on by caller headers alone, with no policies
+  loaded, does not treat any group as smaller than the threshold, so a quiet provider still
+  counts as able to complete the quorum and the request waits out the processing budget
+  as before. It stops at the window only when no provider still in flight could complete
+  a quorum at all, which cannot change the outcome.
 - **Public endpoints are best-effort.** The example fleets use rate-limited community
   endpoints; for production, point at your own nodes or keyed gateways.
 - **No value-threshold escalation.** There is no knob that raises a method's policy for an
