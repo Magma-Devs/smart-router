@@ -10,7 +10,6 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -85,7 +84,9 @@ func TestRESTListener_ProtocolErrorsTotal(t *testing.T) {
 		{"a gateway 502 fails the attempt but is an answer, not a protocol error", status(http.StatusBadGateway, `{"message":"bad gateway"}`), [4]bool{false, false, false, true}, true},
 		{"unimplemented is a node error, not a protocol error", status(http.StatusNotImplemented, `{"code":12,"message":"Not Implemented"}`), [4]bool{false, true, false, false}, false},
 		{"a rate limit is held off, not a protocol error", status(http.StatusTooManyRequests, `{"message":"rate limited"}`), [4]bool{false, false, true, true}, true},
-		{"client rejection is a reply, not a protocol error", status(http.StatusBadRequest, `{"code":3,"message":"invalid height"}`), [4]bool{false, false, false, false}, false},
+		// Every REST status outside 2xx is a node error since 3be46ec, a 400 included, but it is still
+		// the caller's answer: not a protocol error, not a failed attempt.
+		{"client rejection is a reply, not a protocol error", status(http.StatusBadRequest, `{"code":3,"message":"invalid height"}`), [4]bool{false, true, false, false}, false},
 		{"success is not a protocol error", status(http.StatusOK, `{"block":{}}`), [4]bool{false, false, false, false}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,8 +125,7 @@ func TestRESTListener_ProtocolErrorsTotal(t *testing.T) {
 			server := &RPCSmartRouterServer{
 				chainParser: parser, sessionManager: sessionManager, listenEndpoint: rpcEndpoint,
 				rpcSmartRouterLogs: logs, smartRouterEndpointMetrics: mm,
-				relayRetriesManager: lavaprotocol.NewRelayRetriesManager(),
-				consistencyConfig:   relaycore.DefaultConsistencyValidationConfig(),
+				consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
 			}
 			listener := chainlib.NewRestChainListener(ctx, rpcEndpoint, server, nil, logs)
 			listenerDone := make(chan struct{})
