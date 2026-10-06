@@ -121,6 +121,7 @@ type ChainMessage interface {
 	AppendHeader(metadata []pairingtypes.Metadata)
 	GetExtensions() []*spectypes.Extension
 	OverrideExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser)
+	GetUnavailableExtensions() []string
 	DisableErrorHandling()
 	TimeoutOverride(...time.Duration) time.Duration
 	GetForceCacheRefresh() bool

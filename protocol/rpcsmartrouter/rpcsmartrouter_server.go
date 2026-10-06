@@ -75,6 +75,10 @@ const (
 
 // implements Relay Sender interfaced and uses an ChainListener to get it called
 type RPCSmartRouterServer struct {
+	// warnedUnavailableExtensions holds the extension names already logged as "requested but no
+	// node offers it", so the WARN fires once per extension per endpoint rather than per request.
+	warnedUnavailableExtensions sync.Map
+
 	chainParser          chainlib.ChainParser
 	chainState           *chainstate.ChainState // MAG-2160 (Topic C): per-chain consensus tip — replaces the global ChainTracker, the estimator, and the atomic
 	sessionManager       *lavasession.ConsumerSessionManager
@@ -5353,6 +5357,40 @@ func (rpcss *RPCSmartRouterServer) getMetadataFromRelayTrailer(metadataHeaders [
 	}
 }
 
+// warnUnavailableExtensions logs, once per extension for the life of this endpoint, that callers
+// are requesting an extension no node offers. It is an operator configuration gap, not a caller
+// error, so once is enough to surface it; the per-request signal is the response header.
+func (rpcss *RPCSmartRouterServer) warnUnavailableExtensions(ctx context.Context, unavailable []string) {
+	for _, extension := range unavailable {
+		if _, alreadyWarned := rpcss.warnedUnavailableExtensions.LoadOrStore(extension, struct{}{}); alreadyWarned {
+			continue
+		}
+		chainID, apiInterface := "", ""
+		if rpcss.listenEndpoint != nil {
+			chainID, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
+		}
+		utils.LavaFormatWarning("a caller's lava-extension names an extension no node offers, serving without it", nil,
+			utils.LogAttr("extension", extension),
+			utils.LogAttr("chainID", chainID),
+			utils.LogAttr("apiInterface", apiInterface),
+			utils.LogAttr("responseHeader", common.EXTENSION_UNAVAILABLE_HEADER_NAME),
+			utils.LogAttr("GUID", ctx),
+		)
+	}
+}
+
+// countUnavailableExtensions counts this request against each extension it asked for that no node
+// offers. Unlike the WARN it fires on every request, so operators can see how much traffic
+// depends on an extension the deployment lacks, not just that some did once.
+func (rpcss *RPCSmartRouterServer) countUnavailableExtensions(unavailable []string) {
+	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	for _, extension := range unavailable {
+		rpcss.smartRouterEndpointMetrics.RecordExtensionUnavailable(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, extension)
+	}
+}
+
 // requestRanOutOfRoad reports whether the request ended because its budget expired, rather than
 // because an attempt answered or the policy stopped it.
 //
@@ -5868,6 +5906,17 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	// The cross-validation info is included in the error message and metrics have been emitted.
 	if relayResult == nil {
 		return pendingProviders
+	}
+
+	// The caller asked for an extension no node here offers, so the request was served without it
+	// (MAG-3935). Say so, or a non-archive answer to an archive request reads as a real one.
+	if unavailable := protocolMessage.GetUnavailableExtensions(); len(unavailable) > 0 {
+		metadataReply = append(metadataReply, pairingtypes.Metadata{
+			Name:  common.EXTENSION_UNAVAILABLE_HEADER_NAME,
+			Value: strings.Join(unavailable, ","),
+		})
+		rpcss.warnUnavailableExtensions(ctx, unavailable)
+		rpcss.countUnavailableExtensions(unavailable)
 	}
 
 	// Add selection stats header if feature is enabled

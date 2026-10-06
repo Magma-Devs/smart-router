@@ -399,6 +399,30 @@ inlinable no-op call and nothing else.
 --usage-otel-service-instance-id "$HOSTNAME-eth"  # default: hostname-pid
 ```
 
+### Extensions no node offers
+
+A caller asks for an extension, such as `archive`, with the `lava-extension` request header
+(comma-separated for several). When no node on the router offers one it asked for, the request is
+still served, from a node without it, and the reply says so:
+
+| Header | Value |
+| --- | --- |
+| `Lava-Extension-Unavailable` | The extensions the caller asked for with `lava-extension` that no node on this router offers, comma-separated. The answer came from a node without them, so a caller that needs one of them should not trust it. |
+
+The header is absent when every requested extension was applied, so its presence alone means the
+request was served without something the caller asked for. It only ever names extensions the
+caller requested: one the router adds on its own, such as `archive` for an `eth_call` deep behind
+the head, is never listed, and `lava-extension: none` never produces it. The header arrives as an
+HTTP response header on JSON-RPC, REST and Tendermint RPC, and as response metadata on gRPC;
+messages over a WebSocket carry no headers.
+
+On the operator side the router logs a WARN once per extension per endpoint, the first time a
+reply reports it, naming the extension, chain and interface, and counts every such request in
+`smartrouter_extension_unavailable_total{spec, apiInterface, extension}`
+([METRICS.md](../../docs/METRICS.md#extensions-no-node-offers)). The WARN says a gap exists; the
+counter says how much traffic depends on it. Its `extension` label only takes names the spec
+defines, so a caller sending made-up values cannot grow it.
+
 ## Upstream response headers
 
 The router does not pass an upstream's response headers through to the client. Before its

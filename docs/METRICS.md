@@ -281,6 +281,16 @@ either lands in `method="batch:other"`. Both are declared in
 Once it is non-zero they are lossy — some batch types are being merged into `batch:other`
 — which is a signal to raise the cap, not to distrust the other series.
 
+#### Extensions no node offers
+
+A caller can ask for an extension (`archive`, …) with the `lava-extension` request header. When no
+node on the router offers it, the request is still served without it and the reply carries the
+`Lava-Extension-Unavailable` response header ([README](../protocol/rpcsmartrouter/README.md#extensions-no-node-offers)).
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_extension_unavailable_total` | Counter | `spec`, `apiInterface`, `extension` | Requests served without an extension the caller asked for, once per request per such extension — the same replies that carry `Lava-Extension-Unavailable`. Never counts an extension the router adds on its own (`archive` for a deep `eth_call`). `extension` is bounded by the spec: only names the spec defines as extensions (plus `websocket`) can be recorded, so arbitrary caller values do not create series. Non-zero means callers depend on an extension this deployment has no node for. |
+
 #### Errors
 
 | Metric | Type | Labels | Description |
