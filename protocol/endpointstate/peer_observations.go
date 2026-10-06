@@ -53,7 +53,8 @@ type PeerObservationStore interface {
 	// store keeps it. Errors are advisory — a lost publish costs a peer one real poll.
 	Publish(ctx context.Context, chainID, apiInterface, endpointID, podID string, block int64, ttl time.Duration) error
 	// Fetch returns the freshest live observation of an endpoint: the block, who published
-	// it, and its age on the STORE's clock. found=false is a normal miss.
+	// it, and its age as the STORE measures it (not this pod's clock). found=false is a
+	// normal miss.
 	Fetch(ctx context.Context, chainID, apiInterface, endpointID string) (block int64, podID string, age time.Duration, found bool, err error)
 }
 

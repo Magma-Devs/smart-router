@@ -60,8 +60,9 @@ func TestEndpointObservation_BlockMonotonicWhileLive(t *testing.T) {
 	require.True(t, applied, "a higher block always wins")
 }
 
-// Age is measured on the BACKEND's clock: the stamp is taken by TIME inside the script and
-// compared against TIME on read. miniredis owns that clock (SetTime moves what TIME answers,
+// Age is measured by the backend, not the pod: the stamp is taken by TIME inside the script and
+// compared against TIME on read (one server here; with read-addresses or Cluster the two TIMEs
+// can come from different servers — see the store's comment). miniredis owns that clock (SetTime moves what TIME answers,
 // FastForward ages the TTLs), so both the age and the expiry are exercised without a sleep.
 func TestEndpointObservation_AgeIsOnTheStoreClockAndExpires(t *testing.T) {
 	store, mr := newTestStore(t)

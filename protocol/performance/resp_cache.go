@@ -726,7 +726,7 @@ func (cache *RespCache) SetStickySessionIfAbsent(ctx context.Context, chainId, a
 // SetEndpointObservation publishes this pod's successful poll of an upstream endpoint for the
 // fleet tracker gate (MAG-2981), straight into the RESP store. The engine validates and clamps
 // exactly as the cache server does for the gRPC backend, and the store stamps the entry with
-// the key primary's clock.
+// the key primary's TIME.
 //
 // Behind the write breaker like a sticky claim: while it is open the publish is skipped with
 // an error at once — the caller counts it and polls on — instead of holding a pool slot for
