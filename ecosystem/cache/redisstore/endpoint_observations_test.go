@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -156,4 +157,39 @@ func TestEndpointObservation_PurgeDropsIt(t *testing.T) {
 	_, _, found, err := store.GetEndpointObservation(ctx, obsKey)
 	require.NoError(t, err)
 	require.False(t, found)
+}
+
+// Observations are shared across key prefixes (core.EndpointObservationKey, MAG-3521): two
+// routers on different keyspaces polling the same upstream borrow each other's poll, as on the
+// gRPC cache server. A purge clears them for every router, as that server's FlushCache does.
+func TestEndpointObservation_SharedAcrossKeyPrefixes(t *testing.T) {
+	storeA, mr := newTestStore(t)
+	clientB := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	storeB, err := NewWithClient(clientB, "other-router")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = storeB.Close() })
+	ctx := context.Background()
+
+	_, err = storeA.PublishEndpointObservation(ctx, obsKey, core.EndpointObservation{Block: 42, PodID: "pod-a"}, time.Minute)
+	require.NoError(t, err)
+	require.True(t, mr.Exists(obsKey), "the observation is written under the unscoped key")
+	require.False(t, mr.Exists("sr:"+obsKey), "the observation must not be scoped to the writer's prefix")
+
+	obs, _, found, err := storeB.GetEndpointObservation(ctx, obsKey)
+	require.NoError(t, err)
+	require.True(t, found, "a router on another key prefix reads the same observation")
+	require.Equal(t, int64(42), obs.Block)
+
+	// A lower block from the other router is fenced, so the shared value stays monotonic.
+	applied, err := storeB.PublishEndpointObservation(ctx, obsKey, core.EndpointObservation{Block: 41, PodID: "pod-b"}, time.Minute)
+	require.NoError(t, err)
+	require.False(t, applied)
+
+	// Either router's purge clears the shared observations, and only its own prefixed keys.
+	require.NoError(t, mr.Set("sr:own", "x"))
+	require.NoError(t, storeB.Purge(ctx))
+	_, _, found, err = storeA.GetEndpointObservation(ctx, obsKey)
+	require.NoError(t, err)
+	require.False(t, found)
+	require.True(t, mr.Exists("sr:own"), "a purge leaves another router's prefixed keys alone")
 }

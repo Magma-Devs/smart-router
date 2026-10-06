@@ -113,6 +113,12 @@ func StickyKey(chainId, apiInterface, service, stickyId string) string {
 // endpoint (the fleet tracker gate). endpointId is the router's digest of the endpoint URL,
 // never the URL itself — URLs carry credentials. The api interface is part of the key because
 // one endpoint may serve several interfaces and the tracker polls each separately.
+//
+// It is deliberately NOT scoped to a router's key prefix, unlike every other key the engine
+// derives (MAG-3521). An observation is a fact about one upstream endpoint ("this URL answered at
+// block N"), and two routers polling the same upstream are entitled to share it; a router on a
+// different node set has different endpoint ids and never matches. Scoping it would only cost
+// the fleet the polls the gate exists to save. Both backends write it under this key as it is.
 func EndpointObservationKey(chainId, apiInterface, endpointId string) string {
 	return EndpointObservationPrefix + chainId + ":" + apiInterface + ":" + endpointId
 }

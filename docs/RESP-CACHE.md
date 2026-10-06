@@ -506,8 +506,11 @@ node that was ahead of that router's tip, the header reads the tip.
 
 The router's `/debug/reset-all` flushes the RESP backend **prefix-scoped**: `SCAN` over
 `key-prefix:*` with single-key `UNLINK`s. `FLUSHDB` is never issued, so a shared backend's
-other tenants (and other prefixes) are untouched. If two deployments must be flush-isolated,
-give them distinct prefixes.
+other tenants (and other prefixes) are untouched. The one exception is the shared
+fleet-tracker observations (`obs:*`, see the caveat below): a reset clears them for every
+router on the backend, as `cache-be`'s flush does. They are short-lived polls, so a peer pays
+at most one poll to refill. If two deployments must be flush-isolated, give them distinct
+prefixes.
 
 The gRPC sidecar is the exception: its in-memory store cannot enumerate keys by prefix, so a
 `/debug/reset-all` on any router empties **every** keyspace on that sidecar — the prefix
@@ -535,7 +538,9 @@ Switching backends is a configuration change; the RESP cache starts cold (no dat
   identically on `cache-be` and here. A router older than that logs
   `fleet tracker gate: the configured cache backend does not implement endpoint observations;
   polling locally` once per listen endpoint and polls locally — nothing fails, every replica
-  just polls its upstreams itself.
+  just polls its upstreams itself. Observations are **not** scoped to `key-prefix`, the same as
+  on `cache-be`: they are facts about one upstream URL (keyed `obs:<chain>:<interface>:<endpoint
+  digest>`), so routers on different prefixes that poll the same upstream share them.
 - **Sentinel credential rotation** applies per connection attempt, not in place — see
   [Credential rotation](#credential-rotation).
 - **`read-addresses` selects an endpoint, not a replica role** — see
