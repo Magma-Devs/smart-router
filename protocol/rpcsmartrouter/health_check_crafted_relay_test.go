@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -94,7 +93,6 @@ func newHealthRelayFleet(t *testing.T, policy CrossValidationPolicy) *healthRela
 			sessionManager:          sessionManager,
 			listenEndpoint:          rpcEndpoint,
 			rpcSmartRouterLogs:      logs,
-			relayRetriesManager:     lavaprotocol.NewRelayRetriesManager(),
 			crossValidationResolver: resolver,
 		},
 	}
@@ -193,9 +191,9 @@ func TestHealthRelayUnderThePreFixWiring(t *testing.T) {
 				"premise: the pre-fix wiring is what put a health check into cross-validation at all")
 
 			relayProcessor := relaycore.NewRelayProcessor(ctx, stateMachine.GetCrossValidationParams(),
-				fleet.server.rpcSmartRouterLogs, fleet.server, fleet.server.relayRetriesManager, stateMachine)
+				fleet.server.rpcSmartRouterLogs, fleet.server, stateMachine)
 			// numOfEndpoints 1 is the health path's own fan-out: a health check asks one provider.
-			err = fleet.server.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(ctx, message), relayProcessor, nil, nil)
+			err = fleet.server.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(message), relayProcessor, nil, nil, false)
 
 			if tc.refusal == "" {
 				require.NoError(t, err, "one session is not fewer than one, so threshold 1 alone was never the bug")
