@@ -5058,16 +5058,10 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		}
 
 		// Second line of defence for methods the spec does not declare as
-		// subscriptions, from the descriptor this call needs anyway: cached on its
-		// connection, and resolved in the background when cold. Without one the call
-		// proceeds as unary, which is right for the overwhelming majority of methods.
+		// subscriptions, from the method's descriptor. Without one the call proceeds as
+		// unary, which is right for the overwhelming majority of methods.
 		if resolver, ok := directConnection.(lavasession.GRPCMethodResolver); ok {
-			// Bounded by the WINDOW, not the budget: detached CV relay contexts carry no
-			// deadline, and a capability check must not consume the whole request.
-			streamCheckCtx, streamCheckCancel := context.WithTimeout(ctx, relayTimeout)
-			methodDesc, streamErr := resolver.ResolveMethodDescriptor(streamCheckCtx, methodPath)
-			streamCheckCancel()
-			if streamErr == nil && methodDesc.IsServerStreaming() {
+			if grpcMethodIsServerStreaming(ctx, resolver, directConnection, chainMessage, methodPath, relayTimeout) {
 				utils.LavaFormatWarning("gRPC method is server-streaming upstream but carries no SUBSCRIBE directive in the spec", nil,
 					utils.LogAttr("method", methodPath),
 					utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
