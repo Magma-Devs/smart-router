@@ -444,6 +444,38 @@ func TestUpstreamGRPCPool_ReconnectWithBackoff_WaiterGetsTheFailure(t *testing.T
 	}
 }
 
+// An attempt that ended because its own caller left says nothing about the upstream. A waiter
+// whose context is still live dials itself instead of failing with the other caller's
+// cancellation.
+func TestUpstreamGRPCPool_ReconnectWithBackoff_WaiterRetriesAnAbandonedAttempt(t *testing.T) {
+	upstream := startRestoreUpstream(t)
+	pool := NewUpstreamGRPCPool(&common.NodeUrl{
+		Url:        "grpc://" + upstream.addr,
+		GrpcConfig: common.GrpcConfig{AllowInsecure: true},
+	})
+	defer pool.Close()
+	pool.reconnecting.Store(true)
+
+	done := make(chan error, 1)
+	go func() { done <- pool.ReconnectWithBackoff(context.Background()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("returned while the other attempt was still in flight: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// The other caller's context ended mid-attempt
+	pool.reconnectOutcome.Store(reconnectResult{err: context.Canceled, abandoned: true})
+	pool.reconnecting.Store(false)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("still waiting after the other attempt was abandoned")
+	}
+	assert.Equal(t, 1, pool.ConnectionCount(), "the waiter dials the connection itself")
+}
+
 func TestUpstreamGRPCPool_ReconnectWithBackoff_WaitEndsWithTheContext(t *testing.T) {
 	nodeUrl := &common.NodeUrl{
 		Url: "grpc://localhost:9090",

@@ -38,6 +38,7 @@ type restoreUpstream struct {
 	rejected     map[string]codes.Code    // answers every stream of that host with this code
 	quietReopens bool                     // a reopened stream sends nothing
 	failReopens  bool                     // a reopened stream fails at once with Internal
+	flapReopens  bool                     // a reopened stream sends its message, then fails with Internal
 
 	refuse   chan struct{} // closed by refuseAll
 	refusing atomic.Bool
@@ -76,6 +77,7 @@ func startRestoreUpstream(t *testing.T) *restoreUpstream {
 		code, rejected := upstream.rejected[host]
 		quiet := upstream.quietReopens && opened > 1
 		failNow := upstream.failReopens && opened > 1
+		flap := upstream.flapReopens && opened > 1
 		upstream.mu.Unlock()
 
 		switch {
@@ -93,6 +95,9 @@ func startRestoreUpstream(t *testing.T) *restoreUpstream {
 			}
 			if err := stream.SendMsg(payload); err != nil {
 				return err
+			}
+			if flap {
+				return status.Error(codes.Internal, "stream reset")
 			}
 		}
 		select {
@@ -134,6 +139,13 @@ func (u *restoreUpstream) setReopens(quiet, fail bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.quietReopens, u.failReopens = quiet, fail
+}
+
+// setFlappingReopens makes every reopened stream deliver its message and then fail.
+func (u *restoreUpstream) setFlappingReopens() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.flapReopens = true
 }
 
 // refuseAll ends every open stream, and answers every new one, with PermissionDenied: an
@@ -326,6 +338,56 @@ func TestGRPCSubscriptionRestore_GivesUpAfterRepeatedFailures(t *testing.T) {
 	require.Equal(t, 1+defaultMaxRestoresWithoutProgress, upstream.streamsOpened("z"),
 		"the first stream plus one per allowed restore")
 	require.Equal(t, int64(0), manager.GetActiveSubscriptionCount())
+}
+
+// TestGRPCSubscriptionRestore_GivesUpWhenRestoredStreamsDeliverThenFail: a delivered message is
+// not progress on its own. A restored stream that delivers and then fails before
+// restoreStableAfter counts toward the bound like one that delivers nothing, so a subscription
+// that keeps failing that way is given up instead of restored without end.
+func TestGRPCSubscriptionRestore_GivesUpWhenRestoredStreamsDeliverThenFail(t *testing.T) {
+	upstream := startRestoreUpstream(t)
+	endFirst := upstream.endFirstStreamOf("f")
+	upstream.setFlappingReopens()
+	manager := newManagerAgainstUpstream(t, upstream.addr)
+	defer manager.Stop()
+
+	replies := subscribeHost(t, manager, "f")
+	require.Equal(t, "f", awaitStreamPayload(t, replies))
+
+	endFirst()
+	awaitClosed(t, replies, 10*time.Second)
+
+	endErr := manager.SubscriptionEndError(clientKeyOf(manager, "f"))
+	require.Equal(t, codes.Unavailable, status.Code(endErr), "got %v", endErr)
+	require.Equal(t, 1+defaultMaxRestoresWithoutProgress, upstream.streamsOpened("f"),
+		"the first stream plus one per allowed restore")
+	require.Equal(t, int64(0), manager.GetActiveSubscriptionCount())
+}
+
+// TestGRPCSubscriptionRestore_ALeavingClientRunsNoRestore: the last client leaving cancels the
+// subscription, and its stream then fails with that cancellation. That is the subscription
+// closing, not the upstream failing: nothing is reopened, and the pool records no reconnect
+// attempt, whose cancelled outcome another subscription's restore waiting on it would read.
+func TestGRPCSubscriptionRestore_ALeavingClientRunsNoRestore(t *testing.T) {
+	upstream := startRestoreUpstream(t)
+	manager := newManagerAgainstUpstream(t, upstream.addr)
+	defer manager.Stop()
+
+	replies := subscribeHost(t, manager, "l")
+	require.Equal(t, "l", awaitStreamPayload(t, replies))
+
+	require.NoError(t, manager.UnsubscribeAll(context.Background(), clientKeyOf(manager, "l")))
+	require.Eventually(t, func() bool { return manager.GetActiveSubscriptionCount() == 0 },
+		5*time.Second, 10*time.Millisecond)
+
+	// A restore, had one started, would have reopened the stream well within this.
+	time.Sleep(300 * time.Millisecond)
+	require.Equal(t, 1, upstream.streamsOpened("l"), "a leaving client must not reopen the stream")
+	manager.lock.RLock()
+	defer manager.lock.RUnlock()
+	for _, pool := range manager.upstreamPools {
+		require.Nil(t, pool.reconnectOutcome.Load(), "a leaving client must not run a reconnect")
+	}
 }
 
 // TestGRPCSubscriptionRestore_AQuietStreamSurvivesSpacedReconnects: a quiet subscription can go

@@ -26,14 +26,15 @@ import (
 
 const (
 	// defaultMaxRestoresWithoutProgress bounds how many times one subscription is restored
-	// without progress before it is given up. Progress is a delivered message, or a restored
-	// stream that stayed up for defaultRestoreStableAfter.
+	// without progress before it is given up. Progress is a restored stream that stayed up
+	// for defaultRestoreStableAfter.
 	defaultMaxRestoresWithoutProgress = 5
 
 	// defaultRestoreStableAfter is how long a restored stream must stay up to count as
-	// progress. A quiet subscription can go minutes without a message, and the reconnects a
-	// load balancer's connection age limit or keepalive cause now and then must not use up
-	// its restores.
+	// progress. Uptime rather than a delivered message: a quiet subscription can go minutes
+	// without one, so the reconnects a load balancer's connection age limit or keepalive
+	// cause now and then must not use up its restores; and a stream that delivers and then
+	// fails each time it is reopened has made no progress, however much it delivered.
 	defaultRestoreStableAfter = 30 * time.Second
 )
 
@@ -73,9 +74,9 @@ type grpcActiveSubscription struct {
 	// Restoration state
 	restoring atomic.Bool
 
-	// restoresWithoutProgress counts restores since the last progress: a delivered message,
-	// or a restored stream that stayed up for the manager's restoreStableAfter. Past the
-	// manager's maxRestoresWithoutProgress the subscription is given up.
+	// restoresWithoutProgress counts restores since the last progress: a restored stream
+	// that stayed up for the manager's restoreStableAfter. Past the manager's
+	// maxRestoresWithoutProgress the subscription is given up.
 	restoresWithoutProgress atomic.Int32
 	// lastRestoredAt is when the last restore completed, in unix nanoseconds; 0 for none.
 	lastRestoredAt atomic.Int64
@@ -786,6 +787,12 @@ func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 				return
 			}
 			if err != nil {
+				// The subscription's own context ended (its last client left, or the router
+				// is stopping) and took the stream with it: that is the subscription closing,
+				// not the upstream failing, so there is nothing to restore.
+				if ctx.Err() != nil {
+					return
+				}
 				// A refusal is the upstream's answer to this request or to the router's
 				// credentials, and a restore would only send the same request again: end
 				// the subscription with it instead (the deferred cleanup).
@@ -807,10 +814,6 @@ func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 				go dgm.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
 				return
 			}
-
-			// A delivered message is progress: the restores this stream has used so far
-			// no longer count toward giving it up.
-			activeSub.restoresWithoutProgress.Store(0)
 
 			// Marshal to bytes
 			msgBytes, err := proto.Marshal(outputMsg)
@@ -919,8 +922,8 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	}()
 
 	// Bound the restores. A restored stream that stayed up for restoreStableAfter was
-	// progress, even on a quiet subscription that delivered nothing since; only restores
-	// that keep failing add up.
+	// progress, even on a quiet subscription that delivered nothing since; only restored
+	// streams that keep failing sooner add up, whether or not they delivered first.
 	if last := activeSub.lastRestoredAt.Load(); last != 0 && time.Since(time.Unix(0, last)) >= dgm.restoreStableAfter {
 		activeSub.restoresWithoutProgress.Store(0)
 	}
@@ -965,8 +968,16 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 		return
 	}
 
-	// Update subscription
+	// Update subscription, unless cleanup got there first. cleanupSubscription latches
+	// cleanedUp before it reads upstreamConnection under this lock, so either it releases
+	// the connection installed here, or it already released the old one and this restore
+	// releases only the slot it reserved.
 	activeSub.lock.Lock()
+	if activeSub.cleanedUp.Load() {
+		activeSub.lock.Unlock()
+		activeSub.upstreamPool.NotifyStreamRemoved(newConn)
+		return
+	}
 	oldConn := activeSub.upstreamConnection
 	activeSub.upstreamConnection = newConn
 	activeSub.upstreamStream = newStream
