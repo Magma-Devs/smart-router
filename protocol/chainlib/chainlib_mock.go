@@ -252,6 +252,20 @@ func (mr *MockChainParserMockRecorder) IsInternalPathEnabled(internalPath, apiIn
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsInternalPathEnabled", reflect.TypeOf((*MockChainParser)(nil).IsInternalPathEnabled), internalPath, apiInterface, addon)
 }
 
+// ServesRootCollection mocks base method.
+func (m *MockChainParser) ServesRootCollection(internalPath string) bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ServesRootCollection", internalPath)
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// ServesRootCollection indicates an expected call of ServesRootCollection.
+func (mr *MockChainParserMockRecorder) ServesRootCollection(internalPath interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ServesRootCollection", reflect.TypeOf((*MockChainParser)(nil).ServesRootCollection), internalPath)
+}
+
 // IsTagInCollection mocks base method.
 func (m *MockChainParser) IsTagInCollection(tag spec.FUNCTION_TAG, collectionKey CollectionKey) bool {
 	m.ctrl.T.Helper()
