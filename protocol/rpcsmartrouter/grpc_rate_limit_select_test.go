@@ -13,7 +13,8 @@ import (
 // skipped while something ready remains, and the full tier stays when nothing is.
 func TestGRPCSelectFromTier_SkipsHeldOffEndpoints(t *testing.T) {
 	reg := withFreshRelayHoldoff(t)
-	dgm := &DirectGRPCSubscriptionManager{} // no optimizer: first-non-ignored selection
+	dgm := NewDirectGRPCSubscriptionManager(nil, "SUI", "grpc", nil, nil, nil, nil) // no optimizer: first-non-ignored selection
+	require.Same(t, reg, dgm.rateLimitHoldoff, "the manager reads the registry the ws and relay paths record into")
 	tier := []*common.NodeUrl{{Url: "grpc-a.example:443"}, {Url: "grpc-b.example:443"}}
 
 	reg.RecordRateLimit("grpc-a.example:443", "grpc-a.example:443", time.Minute)

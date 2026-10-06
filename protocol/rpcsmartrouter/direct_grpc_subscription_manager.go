@@ -15,12 +15,14 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -52,6 +54,9 @@ type grpcActiveSubscription struct {
 	upstreamConnection *UpstreamGRPCStreamConnection
 	upstreamStream     grpc.ClientStream
 	methodDescriptor   *desc.MethodDescriptor
+	// endpointURL is the node URL upstreamPool dials. It keys the endpoint's rate-limit
+	// hold-off, as selection reads it.
+	endpointURL string
 
 	// Router-generated unique subscription ID
 	routerSubscriptionID string
@@ -184,6 +189,10 @@ type DirectGRPCSubscriptionManager struct {
 	maxRestoresWithoutProgress int32
 	restoreStableAfter         time.Duration
 
+	// rateLimitHoldoff is the hold-off registry selection reads and a stream's rate limit is
+	// recorded into: relayHoldoff, unless a test sets its own.
+	rateLimitHoldoff *holdoff.Registry
+
 	// Per-client subscription tracking
 	clientSubscriptions map[string]map[string]struct{} // clientKey -> set of hashedParams
 
@@ -244,6 +253,7 @@ func NewDirectGRPCSubscriptionManager(
 
 		maxRestoresWithoutProgress: defaultMaxRestoresWithoutProgress,
 		restoreStableAfter:         defaultRestoreStableAfter,
+		rateLimitHoldoff:           relayHoldoff,
 	}
 
 	// Build endpoint lookup map across both tiers
@@ -647,6 +657,7 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 		upstreamConnection:   conn,
 		upstreamStream:       stream,
 		methodDescriptor:     methodDesc,
+		endpointURL:          endpoint.Url,
 		routerSubscriptionID: routerSubID,
 		hashedParams:         hashedParams,
 		clientRouterIDs:      map[string]string{clientKey: clientRouterID},
@@ -767,6 +778,7 @@ func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 	}()
 
 	msgFactory := dynamic.NewMessageFactoryWithDefaults()
+	answered := false
 
 	for {
 		select {
@@ -793,6 +805,10 @@ func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 				if ctx.Err() != nil {
 					return
 				}
+				// A rate limit holds the endpoint off, whether the subscription then ends or
+				// is restored. Selection only reads hold-offs, so without one a client that
+				// resubscribes on the Unavailable it gets goes straight back to this endpoint.
+				dgm.noteStreamRateLimit(activeSub.endpointURL, err, activeSub.upstreamStream.Trailer())
 				// A refusal is the upstream's answer to this request or to the router's
 				// credentials, and a restore would only send the same request again: end
 				// the subscription with it instead (the deferred cleanup).
@@ -813,6 +829,13 @@ func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 				reconnectInFlight = true
 				go dgm.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
 				return
+			}
+
+			// The endpoint answered this stream, so a rate-limit hold-off standing for it is
+			// stale. Once per stream: a restore starts a new listener.
+			if !answered {
+				answered = true
+				dgm.rateLimitHoldoff.RecordAnswer(activeSub.endpointURL, activeSub.endpointURL)
 			}
 
 			// Marshal to bytes
@@ -851,6 +874,28 @@ func upstreamRefusal(err error) (error, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// noteStreamRateLimit holds endpointURL off when a stream error is the upstream refusing the
+// router for rate. It is recognised as on every gRPC path (common.RateLimitFromGRPC): a known
+// rate-limit text in the message, or RESOURCE_EXHAUSTED with a retry delay in the stream's
+// trailer. A bare RESOURCE_EXHAUSTED still ends the subscription (upstreamRefusal) but holds
+// nothing off, because grpc-go mints the same code for an oversized message. Keyed by the URL
+// alone, as on the WS path: no provider name exists here.
+func (dgm *DirectGRPCSubscriptionManager) noteStreamRateLimit(endpointURL string, err error, trailer metadata.MD) {
+	st, ok := status.FromError(err)
+	if !ok {
+		return
+	}
+	retryAfter, limited := common.RateLimitFromGRPC(uint32(st.Code()), st.Message(), trailer)
+	if !limited {
+		return
+	}
+	heldFor := dgm.rateLimitHoldoff.RecordRateLimit(endpointURL, endpointURL, retryAfter)
+	utils.LavaFormatDebug("DirectGRPC: stream rate-limited by upstream, holding endpoint off",
+		utils.LogAttr("endpoint", sanitizeEndpointURL(endpointURL)),
+		utils.LogAttr("holdoff", heldFor.String()),
+	)
 }
 
 // routeMessageToClients routes upstream message to all connected clients
@@ -1006,8 +1051,8 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	go dgm.listenForUpstreamMessages(activeSub.ctx, hashedParams, activeSub)
 }
 
-// cleanupSubscription releases a subscription: deregisters it, cancels it, closes every
-// client channel, returns the stream slot to the pool and drops the per-client tracking
+// cleanupSubscription releases a subscription: cancels it, closes every client channel,
+// deregisters it, returns the stream slot to the pool and drops the per-client tracking
 // and ID mappings.
 //
 // Two guards, answering two different questions (MAG-2540):
@@ -1027,17 +1072,6 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupSubscription(hashedParams strin
 	if !activeSub.cleanedUp.CompareAndSwap(false, true) {
 		return
 	}
-
-	dgm.lock.Lock()
-	if current, found := dgm.activeSubscriptions[hashedParams]; found && current == activeSub {
-		delete(dgm.activeSubscriptions, hashedParams)
-	}
-	// Decremented per subscription object, not per map entry: createNewSubscription
-	// increments once when it registers, and the cleanedUp latch above makes this the
-	// matching decrement. Gating it on the identity check instead would strand the slot
-	// of any subscription that left the map by another route.
-	dgm.totalSubscriptions.Add(-1)
-	dgm.lock.Unlock()
 
 	activeSub.cancel()
 
@@ -1062,6 +1096,23 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupSubscription(hashedParams strin
 	}
 	upstreamConnection := activeSub.upstreamConnection
 	activeSub.lock.Unlock()
+
+	// Deregistered only once the clients are released above. UnsubscribeAll finds a
+	// client's subscriptions through activeSubscriptions, so while this one is registered a
+	// leaving client either leaves it first and gets no status above, or leaves after the
+	// statuses were recorded and drops its own. Deregistered first, a client leaving in
+	// between found nothing to leave and dropped its status before this recorded one, which
+	// nothing would then read or drop.
+	dgm.lock.Lock()
+	if current, found := dgm.activeSubscriptions[hashedParams]; found && current == activeSub {
+		delete(dgm.activeSubscriptions, hashedParams)
+	}
+	// Decremented per subscription object, not per map entry: createNewSubscription
+	// increments once when it registers, and the cleanedUp latch above makes this the
+	// matching decrement. Gating it on the identity check instead would strand the slot
+	// of any subscription that left the map by another route.
+	dgm.totalSubscriptions.Add(-1)
+	dgm.lock.Unlock()
 
 	// Untrack per client, or checkClientSubscriptionLimit keeps counting a dead
 	// subscription and ratchets the client toward its cap. Outside activeSub.lock —
@@ -1326,7 +1377,7 @@ func (dgm *DirectGRPCSubscriptionManager) selectFromTier(ctx context.Context, ti
 	// Rate-limit hold-off: prefer endpoints that are not currently held off after a 429.
 	// Only narrows the tier when something ready remains — a subscription must still be
 	// served when every endpoint is held off, so the full tier stays in that case.
-	if ready := notHeldOff(tier); len(ready) > 0 && len(ready) < len(tier) {
+	if ready := notHeldOff(dgm.rateLimitHoldoff, tier); len(ready) > 0 && len(ready) < len(tier) {
 		tier = ready
 	}
 

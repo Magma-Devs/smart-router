@@ -60,7 +60,7 @@ off" means on its path. This table is the catalog; add a row when wiring a new c
 | Chain tracker / endpoint poller | The poll backoff takes the upstream's Retry-After as a floor instead of guessing with the fail-count doubling | 429 poll responses | live |
 | WS subscriptions (`direct_ws_subscription_manager.go`) | A rate-limited connect/subscribe is held off instead of scored (no availability sample), selection skips held endpoints while something ready remains, and the pool's reconnect ladder is floored by the dial's Retry-After. Keyed per WS URL — no provider name exists on this path, so vendor-tier escalation does not apply | 429 handshakes and subscribe failures | live |
 | WS / gRPC transports | Recognition first: a 429 on the WS upgrade or a corroborated gRPC rate limit produces the typed sentinel these consumers key on | handshake / metadata 429s | live |
-| gRPC streaming subscriptions (`direct_grpc_subscription_manager.go`) | Selection skips held-off endpoints while something ready remains; the full tier stays when nothing is | (reads only — the relay path records) | live |
+| gRPC streaming subscriptions (`direct_grpc_subscription_manager.go`) | Selection skips held-off endpoints while something ready remains; the full tier stays when nothing is. A stream the upstream ends for rate holds its endpoint off, so the client's resubscribe goes elsewhere; a stream's first message clears it. Keyed per URL, as on the WS path | Corroborated rate limits that end a stream (`common.RateLimitFromGRPC`, retry delay read from the stream's trailer) | live |
 
 ## Metrics
 
