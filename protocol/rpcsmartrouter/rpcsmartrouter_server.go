@@ -186,7 +186,9 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		return cvErr
 	}
 	rpcss.crossValidationResolver = cvResolver
-	if cvResolver.HasPolicies() {
+	// Scoped to this endpoint: a policy for another chain or interface is not this endpoint's to check or
+	// to report (MAG-3604).
+	if len(cvResolver.PolicyRefs(listenEndpoint.ChainID, listenEndpoint.ApiInterface)) > 0 {
 		// The session manager holds only the primaries that passed boot verification, so the configured
 		// layout comes from the caller: judging the policy by the verified ones turned one node that was
 		// down at boot into an exit (MAG-3751).
@@ -461,9 +463,11 @@ func (rpcss *RPCSmartRouterServer) craftRelay(ctx context.Context) (ok bool, rel
 
 // validateCrossValidationStartup enforces, at startup, the cross-validation policy guards that need
 // spec/provider context:
-//   - The stateful-write guard: an enabled CV policy on a CONSISTENCY_SELECT_ALL_PROVIDERS method is a
-//     no-op and must be rejected. It FAILS CLOSED — if the parser cannot classify stateful methods we
-//     refuse to start rather than silently allow a write-method policy through.
+//   - The spec-only guards (the stateful-write guard and the method guard, see
+//     validateCrossValidationSpecGuards). On the boot path they already ran in CreateSmartRouterEndpoint
+//     as soon as the spec was loaded, before any provider was dialed and behind the boot configuration
+//     barrier, so a failure here is unreachable there; the re-check is cheap and keeps this function a
+//     complete guard for a caller that reaches it directly.
 //   - The min-groups capacity bound: an enabled min-groups policy that requires more distinct groups than
 //     the endpoint has configured can never be satisfied.
 //
@@ -476,19 +480,7 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 	if !resolver.HasPolicies() {
 		return nil
 	}
-	statefulChecker, ok := chainParser.(interface{ ApiHasStatefulCategory(string) bool })
-	if !ok {
-		return utils.LavaFormatError("cross-validation policies are configured but the chain parser cannot classify stateful methods; cannot enforce the write-method guard", nil,
-			utils.LogAttr("chainID", chainID),
-			utils.LogAttr("apiInterface", apiInterface))
-	}
-	isStateful := func(c, a, method string) bool {
-		if !strings.EqualFold(c, chainID) || !strings.EqualFold(a, apiInterface) {
-			return false // only this endpoint's parser can classify its own chain/api
-		}
-		return statefulChecker.ApiHasStatefulCategory(method)
-	}
-	if guardErr := resolver.ValidateNoStatefulPolicies(isStateful); guardErr != nil {
+	if guardErr := validateCrossValidationSpecGuards(resolver, chainParser, chainID, apiInterface); guardErr != nil {
 		return guardErr
 	}
 	// Every capacity check below is skipped when no primary is configured: the endpoint serves from backup
@@ -599,8 +591,15 @@ func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chain
 	// groupSizes and groupAssignments describe the primaries that passed verification and are serving, as
 	// they did before MAG-3751 (scripts/pre_setups/init_smartrouter_cv_demo.sh reads distinctGroups to prove
 	// its fleet verified); the configured* fields describe the layout the startup guards judged.
+	//
+	// policies and methods count only this endpoint's own policies (PolicyRefs). Each method is named with its
+	// position in cross-validation.policies: the log redactor mistakes a gRPC method name for a url and prints
+	// "cosmos.bank.v1beta1.Query/[redacted]", and the position is what still tells two policies on one
+	// service apart (MAG-3604).
+	endpointPolicies := resolver.PolicyRefs(chainID, apiInterface)
 	utils.LavaFormatInfo("cross-validation per-method policies loaded",
-		utils.LogAttr("policies", resolver.NumPolicies()),
+		utils.LogAttr("policies", len(endpointPolicies)),
+		utils.LogAttr("methods", policyRefStrings(endpointPolicies)),
 		utils.LogAttr("chainID", chainID),
 		utils.LogAttr("apiInterface", apiInterface),
 		utils.LogAttr("distinctGroups", len(verified)),

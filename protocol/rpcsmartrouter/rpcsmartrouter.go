@@ -246,6 +246,11 @@ type rpcSmartRouterStartOptions struct {
 	staticProvidersList      []*lavasession.RPCStaticProviderEndpoint // define static providers as primary providers
 	backupProvidersList      []*lavasession.RPCStaticProviderEndpoint // define backup providers as emergency fallback when no providers available
 	upstreamSelectorConfig   provideroptimizer.UpstreamSelectorConfig
+	// bootBarrier holds every endpoint at its configuration check until all have passed theirs, so one
+	// refused configuration stops the router before any endpoint binds (MAG-3604; see
+	// cross_validation_boot.go). Set by Start; nil when an endpoint is created on its own, in which case
+	// the check still runs and the endpoint waits for nobody.
+	bootBarrier *bootConfigBarrier
 }
 
 // Start sets up the RPCSmartRouter and all its processes, then returns once
@@ -339,6 +344,9 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	wg.Add(parallelJobs)
 
 	errCh := make(chan error, parallelJobs)
+	// Every endpoint boots in its own goroutine below with no concurrency limit, which is what lets them
+	// all meet at the configuration barrier (see cross_validation_boot.go).
+	options.bootBarrier = newBootConfigBarrier(parallelJobs)
 
 	utils.LavaFormatInfo("RPCSmartRouter identifier: " + smartRouterIdentifier)
 	utils.LavaFormatInfo("RPCSmartRouter setting up endpoints", utils.Attribute{Key: "length", Value: strconv.Itoa(parallelJobs)})
@@ -2496,7 +2504,30 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	smartRouterOptimizerQoSClient *metrics.ConsumerOptimizerQoSClient,
 	smartRouterMetricsManager *metrics.SmartRouterMetricsManager,
 	relaysMonitorAggregator *metrics.RelaysMonitorAggregator,
-) error {
+) (err error) {
+	// Configuration barrier (MAG-3604): the endpoint arrives once its spec-backed policy checks have a
+	// verdict, and holds until every sibling has arrived. Arrival is idempotent and also deferred, so no
+	// return before that point — nor a panic — can leave a sibling waiting; such a return counts as a
+	// failure, which every return before the checks is. err is the named result so the deferred arrival
+	// carries the error the early return carried.
+	arrived := false
+	arriveAtBarrier := func(verdict error) {
+		if arrived {
+			return
+		}
+		arrived = true
+		if options.bootBarrier != nil {
+			options.bootBarrier.arrive(verdict)
+		}
+	}
+	defer func() {
+		verdict := err
+		if verdict == nil {
+			verdict = errBootAbortedBeforeConfigCheck
+		}
+		arriveAtBarrier(verdict)
+	}()
+
 	chainParser, err := chainlib.NewChainParser(rpcEndpoint.ApiInterface)
 	if err != nil {
 		err = utils.LavaFormatError("failed creating chain parser", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
@@ -2519,6 +2550,24 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		err = utils.LavaFormatError("no static spec paths configured; smart router requires --static-spec-paths to load chain specs", nil, utils.Attribute{Key: "chainID", Value: chainID})
 		errCh <- err
 		return err
+	}
+
+	// The spec is loaded: check the cross-validation policies this endpoint is held to against it, then
+	// hold here until every endpoint has done the same (MAG-3604; see cross_validation_boot.go). A refusal
+	// returns before a provider is dialed or a listener bound — on this endpoint, and through the barrier
+	// on every other — instead of after the siblings have started serving.
+	if err = crossValidationBootCheck(rpcEndpoint, chainParser); err != nil {
+		err = utils.LavaFormatError("invalid cross-validation configuration", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		errCh <- err
+		return err
+	}
+	arriveAtBarrier(nil)
+	if options.bootBarrier != nil {
+		if abort := options.bootBarrier.wait(); abort != nil {
+			// The endpoint that failed reported its own error; this one is not repeated into errCh, so the
+			// first error Start reads is the cause.
+			return utils.LavaFormatWarning("startup aborted before this endpoint bound a listener: another endpoint refused its configuration", abort, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		}
 	}
 
 	// Filter the relevant static providers.
@@ -3338,7 +3387,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			// before the metrics port binds, before any provider is dialed, and before the router logs
 			// that it is listening — so a bad config is a clean startup error instead of a crash loop
 			// from a router that has already announced itself.
-			if err := PreflightValidateCrossValidationConfig(viper.GetViper()); err != nil {
+			if err := PreflightValidateCrossValidationConfig(viper.GetViper(), rpcEndpoints); err != nil {
 				return utils.LavaFormatError("invalid cross-validation configuration", err)
 			}
 

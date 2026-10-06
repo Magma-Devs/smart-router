@@ -67,7 +67,10 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
 - **Per-method operator policy** (config-driven, below). An operator policy can *mandate*
   cross-validation even with no caller headers (`enabled: true`), set a **floor** the caller
   may exceed, a **cap** that overrides a stricter caller, or *forbid* caller-driven
-  cross-validation entirely for a method (`forbid-caller-cv: true`).
+  cross-validation entirely for a method (`forbid-caller-cv: true`). A floor or cap takes
+  effect only under `enabled: true` today: a policy that sets a bound without enabling
+  cross-validation clamps nothing (a caller with no headers still gets pure caller-driven
+  behavior), though such a policy is still checked at startup for naming a served target.
 
 > **The router's own health check is exempt.** A mandate applies to client requests. The readiness
 > health check crafts a latest-block request (`eth_blockNumber`,
@@ -118,7 +121,11 @@ direct-rpc:
 
 An optional top-level `cross-validation:` block sets policy per `(chain-id, api-interface,
 method)`. Omitting it entirely keeps the header-driven behavior above, fully backwards
-compatible. `chain-id`/`api-interface` match case-insensitively; `method` matches exactly.
+compatible. `chain-id`/`api-interface` match case-insensitively; `method` matches exactly, as the
+spec names it: the JSON-RPC method, the REST path template (`/cosmos/bank/v1beta1/balances/{address}`),
+or the gRPC service/method. A policy that could never apply is a startup error: an `enabled` or
+`forbid-caller-cv` policy whose `chain-id`/`api-interface` no configured endpoint serves, or whose
+method that endpoint's spec does not serve. A policy with neither intent is a no-op and is not checked.
 Each numeric knob is either a bare number `N` (meaning `{floor: N}`) or an object
 `{floor: F, cap: C}`.
 

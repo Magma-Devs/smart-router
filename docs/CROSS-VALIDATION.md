@@ -103,12 +103,21 @@ smartrouter config/smartrouter_examples/smartrouter_multichain_cross_validation.
 
 At startup the router logs the resolved provider→group layout and **rejects** a policy the
 configured fleet can never satisfy (e.g. `min-groups: 3` with only two groups), so a
-misconfiguration fails fast rather than silently degrading. Three cases are warnings instead,
-and none of them stops the router: a provider that is down when the router starts, a
-`max-participants` larger than the configured primaries (never a startup error), and an
-endpoint with no configured primary at all (cross-validation never draws on backup providers,
-so a policy there can never be met). See the `ATTENTION` rows under
-[Troubleshooting](#troubleshooting).
+misconfiguration fails fast rather than silently degrading. It also rejects a policy that could never
+apply at all: one whose `chain-id`/`api-interface` no endpoint serves, or whose `method` the spec does
+not serve. A REST policy names the spec's path template, not the gRPC method name. These two refusals
+happen before any endpoint binds its listener — the spec-backed checks run as each endpoint loads its
+spec and wait on a boot barrier, so one refused policy stops the whole router before it announces itself,
+rather than after some endpoints are already serving.
+
+Three cases are warnings instead, and none of them stops the router: a provider that is down when the
+router starts, a `max-participants` larger than the configured primaries (never a startup error), and an
+endpoint with no configured primary at all (cross-validation never draws on backup providers, so a policy
+there can never be met). See the `ATTENTION` rows under [Troubleshooting](#troubleshooting).
+
+A `floor` or `cap` only clamps a caller's headers under `enabled: true` today; a bound written on a
+policy that does not also enable cross-validation changes nothing at request time, but is still checked
+here for naming a chain/api and method the router serves.
 
 ## What the caller sees
 
@@ -249,7 +258,9 @@ yields rather than the diversity it looks like it asks for. `distinctGroups`, `g
 `groupAssignments` describe the primaries that passed verification and are serving;
 `configuredGroups`, `configuredGroupSizes` and `configuredGroupAssignments` on the same line
 describe the configured fleet the startup checks judged. The two differ only while a primary
-that failed verification is out.
+that failed verification is out. `policies` and `methods` count only the policies of that
+line's own endpoint; `methods` names each as `policy #N <method>`, its position in
+`cross-validation.policies`.
 
 Knobs, all optional: `SIM_DIR` for the simulator checkout, `ROUTER_PORT` / `METRICS_PORT` /
 `DEBUG_PORT` / `NEG_PORT` to move ports, `SKIP_SMOKE=1`.
@@ -519,7 +530,7 @@ policy floor instead.
 | `finality="unknown"` on the mismatch metric | The request did not carry a resolvable block number, or the chain tracker had not learned the head yet. Query a concrete finalized block, not `latest`. |
 | A cross-validated method answers without fanning out | Something served it from cache. These lanes configure no cache for that reason; if you add one, vary the request parameters. |
 | The pod never becomes Ready / `/readyz` answers 503 while client requests succeed | Fixed in MAG-3746. On a build before it, a policy on the **latest-block** method (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`) made the router's own health check impossible to pass, because the check takes one session and one session cannot meet a threshold above 1. Tell-tale: repeated `insufficient sessions for cross-validation consensus` with `sessionsAcquired 1`, and no `[+] init relay succeeded`. Workarounds on such a build: drop the policy from that method, set its `agreement-threshold` to 1 (only if the policy has no `min-groups` floor above 1 — that floor refuses a one-session check on its own), or probe readiness elsewhere. |
-| Router exits at startup with a cross-validation error | Working as intended for an unsatisfiable policy. The error itself carries the numbers: `requiredGroups` / `configuredGroups` on the `min-groups` refusal, `groupSizes` on the per-group one. Don't look for the `distinctGroups` startup line — the validation runs *before* it, so a router that exits this way never logs it. |
+| Router exits at startup with a cross-validation error | Working as intended for an unsatisfiable policy. The error itself carries the numbers: `requiredGroups` / `configuredGroups` on the `min-groups` refusal, `groupSizes` on the per-group one. Don't look for the `distinctGroups` startup line — the validation runs *before* it, so a router that exits this way never logs it. A policy that could never apply is refused the same way. `no endpoint serves` lists the endpoints that do exist, and `does not serve` flags a method the spec lacks. Both name each policy by its position in `cross-validation.policies`, counting from 0. The position matters for a gRPC method name: the log redactor mistakes it for a url and prints its method part as `[redacted]`. |
 | Startup logs `ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy` | A primary failed its startup verification (it is named in `unavailableProviders`), and the primaries left cannot meet a policy: fewer groups than its `min-groups` (`requiredGroups`), or fewer providers than its `max-participants` (`requiredProviders`). The router is serving: requests without cross-validation are answered, and requests under that policy fail fast with `insufficient-groups` or `insufficient-capacity` until the background retry re-admits the provider, which happens at most 3 minutes after it recovers. `configuredGroupSizes` is the configured layout and `verifiedGroupSizes` the one serving now. |
 | Startup logs `ATTENTION: the configured primaries cannot meet a cross-validation policy` | The configured primaries themselves are too few for a policy's `max-participants` (`requiredProviders`), so no recovery closes the gap: lower the bound or add primaries. A `max-participants` above the fleet is reported here rather than refused at startup. `unavailableProviders` may name a primary that is out as well; re-admitting it still leaves the policy unmet. |
 | Startup logs `ATTENTION: this endpoint has no configured primary, and cross-validation never draws on backup providers` | The endpoint is configured with backup providers only. Its plain requests are served from them, but cross-validation selects among primaries, so every request one of its policies governs is refused. Add primaries or remove the policies. |
