@@ -1067,12 +1067,12 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 	// Set parsing data on grpcMessage for block height extraction (QoS sync tracking)
 	// This is required because FormatResponseForParsing needs the method descriptor and formatter
 	// to properly parse the binary protobuf response into JSON for block extraction.
-	// The descriptor comes from the connection's cache, and on this path it is normally there:
-	// relayInnerDirect's streaming check resolves it (ResolveMethodDescriptor, bounded by the
-	// attempt window) before it calls SendDirectRelay. It is missing only when that lookup failed
-	// or ran out of time, on a node without working reflection or a cold one slower than the
-	// window. A binary request goes out without a descriptor (invokeRaw), so in that case this
-	// reply's block is not extracted.
+	// The descriptor comes from the connection's cache. For a JSON request it is there, because
+	// the send resolved it. A binary request goes out without one (invokeRaw), and
+	// relayInnerDirect's streaming check does not wait for it either: it is cached once the
+	// warm-up sweep, a JSON request on the same service (the endpoint poller) or the background
+	// lookup an earlier relay started has resolved it. Until then, and on a node without working
+	// reflection, a binary reply's block is not extracted.
 	if descriptorProvider, ok := d.directConnection.(lavasession.GRPCDescriptorProvider); ok {
 		if methodDesc := descriptorProvider.GetCachedMethodDescriptor(methodPath); methodDesc != nil {
 			formatter := createGRPCFormatter(methodDesc)
@@ -1108,6 +1108,60 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 	}
 
 	return result, nil
+}
+
+// grpcMethodIsServerStreaming reports whether methodPath is server-streaming upstream,
+// as far as the connection's descriptor can tell; false when it has none.
+//
+// Only a JSON body waits for the descriptor: the send converts it through that same
+// descriptor, so waiting here costs nothing extra. The wait is bounded by the WINDOW, not
+// the budget: detached CV relay contexts carry no deadline, and a capability check must
+// not consume the whole request.
+//
+// A binary body goes to the node without a descriptor (MAG-3886), so a stalled or missing
+// reflection service must not hold it here either. It uses the cached descriptor and, when
+// that is cold, resolves it in the background for the next call. The lookup is shared per
+// service and bounded by the node's reflection-timeout, so it always ends.
+func grpcMethodIsServerStreaming(
+	ctx context.Context,
+	resolver lavasession.GRPCMethodResolver,
+	conn lavasession.DirectRPCConnection,
+	chainMessage chainlib.ChainMessage,
+	methodPath string,
+	window time.Duration,
+) bool {
+	if grpcRelayNeedsDescriptor(chainMessage) {
+		checkCtx, cancel := context.WithTimeout(ctx, window)
+		defer cancel()
+		methodDesc, err := resolver.ResolveMethodDescriptor(checkCtx, methodPath)
+		return err == nil && methodDesc.IsServerStreaming()
+	}
+	if methodDesc := cachedGRPCMethodDescriptor(conn, methodPath); methodDesc != nil {
+		return methodDesc.IsServerStreaming()
+	}
+	go func() { _, _ = resolver.ResolveMethodDescriptor(context.Background(), methodPath) }()
+	return false
+}
+
+// grpcRelayNeedsDescriptor reports whether a gRPC relay's body is JSON, which the
+// connection has to convert through the method's descriptor before it can send it.
+// A binary body goes to the node as it is and needs none (MAG-3886).
+func grpcRelayNeedsDescriptor(chainMessage chainlib.ChainMessage) bool {
+	grpcMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
+	if !ok {
+		return true
+	}
+	return lavasession.GRPCRequestNeedsDescriptor(grpcMessage.Msg)
+}
+
+// cachedGRPCMethodDescriptor returns the connection's cached descriptor for methodPath,
+// or nil when it has none, without waiting on a lookup.
+func cachedGRPCMethodDescriptor(conn lavasession.DirectRPCConnection, methodPath string) *desc.MethodDescriptor {
+	provider, ok := conn.(lavasession.GRPCDescriptorProvider)
+	if !ok {
+		return nil
+	}
+	return provider.GetCachedMethodDescriptor(methodPath)
 }
 
 // looksLikeJSONOpening returns true when the first non-whitespace byte of

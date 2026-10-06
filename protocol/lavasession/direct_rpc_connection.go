@@ -2154,6 +2154,13 @@ func isJSONRequest(data []byte) bool {
 	return len(data) > 0 && (data[0] == '{' || data[0] == '[')
 }
 
+// GRPCRequestNeedsDescriptor reports whether SendRequest has to resolve the method's
+// descriptor to send this body: true for a JSON body, false for a binary one, which
+// goes to the node unchanged (see invokeRaw).
+func GRPCRequestNeedsDescriptor(data []byte) bool {
+	return isJSONRequest(data)
+}
+
 // invokeRaw sends a binary request to the node unchanged and returns the node's
 // reply unchanged, with the response headers. It needs no descriptor, so it works
 // whether or not the node serves reflection.
