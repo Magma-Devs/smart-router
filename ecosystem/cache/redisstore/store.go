@@ -941,7 +941,10 @@ func decodeStickyPin(raw string) (core.StickyPin, error) {
 // The compare-and-set stays a script for the same reason the sticky claim does: a GET-then-SET
 // pair from the adapter reopens the race between two pods the monotonic rule exists to close.
 // The corrupt-value handling mirrors setInt64GEScript — a stored value that does not parse
-// falls THROUGH to the write rather than fencing it forever.
+// falls THROUGH to the write rather than fencing it forever. "Parse" means the same shape the
+// read decodes (block AND stamp): a value the read treats as a miss must not fence the write
+// either, or a foreign value with a numeric head and no TTL would read as a miss and refuse
+// every lower publish for good.
 //
 // TIME inside a writing script needs effects replication, which every Redis from 5.0 and every
 // Valkey uses by default; on the 3.x/4.x line it would need redis.replicate_commands(), which
@@ -949,7 +952,7 @@ func decodeStickyPin(raw string) (core.StickyPin, error) {
 var publishEndpointObservationScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 if cur then
-	local curBlock = string.match(cur, '^(%d+)|')
+	local curBlock = string.match(cur, '^(%d+)|%d+|')
 	local curn = curBlock and tonumber(curBlock)
 	if curn and tonumber(ARGV[1]) < curn then
 		return 0

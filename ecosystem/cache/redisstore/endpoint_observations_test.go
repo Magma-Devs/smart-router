@@ -109,6 +109,27 @@ func TestEndpointObservation_CorruptValueReadsAsMissAndIsOverwritten(t *testing.
 	require.EqualValues(t, 7, obs.Block)
 }
 
+// The script's fence and the read's decoder must agree on what a valid value is. A foreign value
+// with a numeric head but no valid stamp reads as a miss, so it must not fence the next publish
+// either — written without a TTL, it would otherwise refuse every lower block for good.
+func TestEndpointObservation_ValueTheReadRejectsDoesNotFence(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, mr.Set("sr:"+obsKey, "999999|not-a-stamp|pod-x"))
+
+	_, _, found, err := store.GetEndpointObservation(ctx, obsKey)
+	require.NoError(t, err)
+	require.False(t, found, "the read decodes no stamp, so it is a miss")
+
+	applied, err := store.PublishEndpointObservation(ctx, obsKey, core.EndpointObservation{Block: 7, PodID: "pod-a"}, time.Second)
+	require.NoError(t, err)
+	require.True(t, applied, "a value the read treats as a miss must not fence the write")
+	obs, _, found, err := store.GetEndpointObservation(ctx, obsKey)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.EqualValues(t, 7, obs.Block)
+}
+
 // The pod id is the one free-form field and goes last, so any character in it survives.
 func TestEndpointObservation_PodIDWithSeparators(t *testing.T) {
 	store, _ := newTestStore(t)
