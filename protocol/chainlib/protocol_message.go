@@ -112,18 +112,30 @@ func (bpm *BaseProtocolMessage) UpdateEarliestAndValidateExtensionRules(extensio
 	return false
 }
 
+// GetBlockedProviders returns every provider the caller excluded with lava-providers-block.
+//
+// There is no cap on the count (MAG-3080). One used to silently drop the WHOLE list at three or
+// more names, so the request could land on exactly the providers the caller excluded. Nothing
+// needs the cap: the operator owns the provider set, and a list that excludes every provider
+// fails that caller's request — the exclusion holds through the backup tier and the blocked-list
+// fallback — rather than serving one of them.
+//
+// Entries are trimmed, so "a, b" excludes b rather than a " b" that matches nothing.
 func (bpm *BaseProtocolMessage) GetBlockedProviders() []string {
 	if bpm.directiveHeaders == nil {
 		return nil
 	}
 	blockedProviders, ok := bpm.directiveHeaders[common.BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME]
-	if ok {
-		blockProviders := strings.Split(blockedProviders, ",")
-		if len(blockProviders) <= 2 {
-			return blockProviders
+	if !ok {
+		return nil
+	}
+	var blockProviders []string
+	for _, provider := range strings.Split(blockedProviders, ",") {
+		if provider = strings.TrimSpace(provider); provider != "" {
+			blockProviders = append(blockProviders, provider)
 		}
 	}
-	return nil
+	return blockProviders
 }
 
 func NewProtocolMessage(chainMessage ChainMessage, directiveHeaders map[string]string, relayRequestData *pairingtypes.RelayPrivateData, dappId, consumerIp string) ProtocolMessage {

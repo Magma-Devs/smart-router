@@ -619,6 +619,20 @@ func (mr *MockChainMessageMockRecorder) OverrideExtensions(extensionNames, exten
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OverrideExtensions", reflect.TypeOf((*MockChainMessage)(nil).OverrideExtensions), extensionNames, extensionParser)
 }
 
+// GetUnavailableExtensions mocks base method.
+func (m *MockChainMessage) GetUnavailableExtensions() []string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUnavailableExtensions")
+	ret0, _ := ret[0].([]string)
+	return ret0
+}
+
+// GetUnavailableExtensions indicates an expected call of GetUnavailableExtensions.
+func (mr *MockChainMessageMockRecorder) GetUnavailableExtensions() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUnavailableExtensions", reflect.TypeOf((*MockChainMessage)(nil).GetUnavailableExtensions))
+}
+
 // RequestedBlock mocks base method.
 func (m *MockChainMessage) RequestedBlock() (int64, int64) {
 	m.ctrl.T.Helper()

@@ -43,6 +43,11 @@ x-router: &router
     # outcomes, which are how an operator tells a wired feature from a firing one.
     - "--metrics-listen-address"
     - "0.0.0.0:7779"
+    # The debug server. GET /debug/sticky-claims reports the same claim outcomes per endpoint
+    # without the metrics port, naming the replica that answered (MAG-3860). Off unless asked
+    # for: nothing else (the Helm chart included) passes this flag.
+    - "--debug-address"
+    - "0.0.0.0:9999"
     - "--log-level"
     - "${SR_LOG_LEVEL:-info}"
     - "--skip-websocket-verification"
@@ -86,13 +91,13 @@ services:
 
   router-a:
     <<: *router
-    ports: ["7801:7779"]
+    ports: ["7801:7779", "9801:9999"]
   router-b:
     <<: *router
-    ports: ["7802:7779"]
+    ports: ["7802:7779", "9802:9999"]
   router-c:
     <<: *router
-    ports: ["7803:7779"]
+    ports: ["7803:7779", "9803:9999"]
 
   ingress:
     image: nginx:1.27-alpine

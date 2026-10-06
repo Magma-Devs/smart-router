@@ -75,6 +75,10 @@ const (
 
 // implements Relay Sender interfaced and uses an ChainListener to get it called
 type RPCSmartRouterServer struct {
+	// warnedUnavailableExtensions holds the extension names already logged as "requested but no
+	// node offers it", so the WARN fires once per extension per endpoint rather than per request.
+	warnedUnavailableExtensions sync.Map
+
 	chainParser          chainlib.ChainParser
 	chainState           *chainstate.ChainState // MAG-2160 (Topic C): per-chain consensus tip — replaces the global ChainTracker, the estimator, and the atomic
 	sessionManager       *lavasession.ConsumerSessionManager
@@ -117,6 +121,19 @@ type RPCSmartRouterServer struct {
 
 	// Per-method cross-validation policy resolver (nil/empty => header-driven CV only).
 	crossValidationResolver *CrossValidationPolicyResolver
+	// crossValidationGroupSizes is each provider group's size at startup, the layout the SPOF warning in
+	// validateCrossValidationStartup reads. The dispatcher derives a request's under-staffed groups from
+	// it with the warning's own groupsBelowThreshold and the request's threshold. At a policy's own
+	// threshold those are the groups the warning names; a caller that raises the threshold can make
+	// more groups under-staffed for its request (MAG-3993).
+	//
+	// Nil without cross-validation policies, deliberately: the early stop covers only fleets the
+	// SPOF warning has been able to name. Header-driven cross-validation on a router with no
+	// policies sees no under-staffed group, so a quiet provider still counts as able to complete
+	// the quorum and the request keeps the full-budget wait; it stops at the window only when no
+	// provider in flight could complete a quorum at all, which cannot change the outcome.
+	// Written once in ServeRPCRequests before the listener starts; read-only after that.
+	crossValidationGroupSizes map[string]int
 
 	// probeStats holds the most-recent runProbeLoop cycle telemetry for /debug/probe-loop
 	// (MAG-2202 endpoint 4). Written off the data plane by runProbeCycle; read by the debug handler.
@@ -143,6 +160,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	listenEndpoint *lavasession.RPCEndpoint,
 	chainParser chainlib.ChainParser,
 	sessionManager *lavasession.ConsumerSessionManager,
+	configuredProviderGroups map[string][]string,
 	cache performance.CacheBackend,
 	secondaryCache performance.CacheReader,
 	secondaryCacheTimeout time.Duration,
@@ -181,26 +199,22 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		return cvErr
 	}
 	rpcss.crossValidationResolver = cvResolver
-	if cvResolver.HasPolicies() {
-		// Providers are already registered (UpdateAllProviders runs before ServeRPCRequests), so the
-		// configured group layout is the upper bound for the startup capacity checks.
-		groupAssignments := sessionManager.ProviderGroupAssignments()
-		groupSizes := make(map[string]int, len(groupAssignments))
-		for label, addrs := range groupAssignments {
-			groupSizes[label] = len(addrs)
-		}
-		if cvStartupErr := validateCrossValidationStartup(cvResolver, chainParser, listenEndpoint.ChainID, listenEndpoint.ApiInterface, sessionManager.NumberOfValidProviderGroups(), groupSizes); cvStartupErr != nil {
+	// Scoped to this endpoint: a policy for another chain or interface is not this endpoint's to check or
+	// to report (MAG-3604).
+	if len(cvResolver.PolicyRefs(listenEndpoint.ChainID, listenEndpoint.ApiInterface)) > 0 {
+		// The session manager holds only the primaries that passed boot verification, so the configured
+		// layout comes from the caller: judging the policy by the verified ones turned one node that was
+		// down at boot into an exit (MAG-3751).
+		advisory, cvStartupErr := validateCrossValidationFleet(cvResolver, chainParser, listenEndpoint.ChainID, listenEndpoint.ApiInterface, configuredProviderGroups, sessionManager.ProviderGroupAssignments())
+		if cvStartupErr != nil {
 			return cvStartupErr
 		}
-		// Log the resolved provider->group layout once at startup so operators can confirm the diversity
-		// their config yields (a min-groups policy is only as good as the group spread of the fleet).
-		utils.LavaFormatInfo("cross-validation per-method policies loaded",
-			utils.LogAttr("policies", cvResolver.NumPolicies()),
-			utils.LogAttr("chainID", listenEndpoint.ChainID),
-			utils.LogAttr("apiInterface", listenEndpoint.ApiInterface),
-			utils.LogAttr("distinctGroups", len(groupAssignments)),
-			utils.LogAttr("groupSizes", groupSizes),
-			utils.LogAttr("groupAssignments", groupAssignments))
+		advisory.log()
+		// Recorded only here, beside the SPOF warning, so the attempt-window stop (MAG-3993) is
+		// scoped to policy-driven cross-validation; see the field comment for the header-only case.
+		// The configured layout, as the SPOF warning reads it: a group is under-staffed by its
+		// configuration, not because one of its primaries was down at boot.
+		rpcss.crossValidationGroupSizes = groupSizesOf(configuredProviderGroups)
 	}
 
 	// Initialize consistency validation config from chain spec values. The finalization distance
@@ -467,35 +481,30 @@ func (rpcss *RPCSmartRouterServer) craftRelay(ctx context.Context) (ok bool, rel
 
 // validateCrossValidationStartup enforces, at startup, the cross-validation policy guards that need
 // spec/provider context:
-//   - The stateful-write guard: an enabled CV policy on a CONSISTENCY_SELECT_ALL_PROVIDERS method is a
-//     no-op and must be rejected. It FAILS CLOSED — if the parser cannot classify stateful methods we
-//     refuse to start rather than silently allow a write-method policy through.
+//   - The spec-only guards (the stateful-write guard and the method guard, see
+//     validateCrossValidationSpecGuards). On the boot path they already ran in CreateSmartRouterEndpoint
+//     as soon as the spec was loaded, before any provider was dialed and behind the boot configuration
+//     barrier, so a failure here is unreachable there; the re-check is cheap and keeps this function a
+//     complete guard for a caller that reaches it directly.
 //   - The min-groups capacity bound: an enabled min-groups policy that requires more distinct groups than
 //     the endpoint has configured can never be satisfied.
 //
 // configuredGroups is the total distinct provider-group count for the endpoint (the per-request check
 // tightens it to the addon/extension candidate set). groupSizes maps each group label to its provider
 // count, used by the per-group-quorum capacity check (a per-group policy needs MinGroups groups that EACH
-// have >= Threshold providers). Both are passed in to keep this function testable.
+// have >= Threshold providers). Both are passed in to keep this function testable. Both describe the
+// CONFIGURED primaries, not the verified ones — validateCrossValidationFleet explains why.
 func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, chainParser chainlib.ChainParser, chainID, apiInterface string, configuredGroups int, groupSizes map[string]int) error {
 	if !resolver.HasPolicies() {
 		return nil
 	}
-	statefulChecker, ok := chainParser.(interface{ ApiHasStatefulCategory(string) bool })
-	if !ok {
-		return utils.LavaFormatError("cross-validation policies are configured but the chain parser cannot classify stateful methods; cannot enforce the write-method guard", nil,
-			utils.LogAttr("chainID", chainID),
-			utils.LogAttr("apiInterface", apiInterface))
-	}
-	isStateful := func(c, a, method string) bool {
-		if !strings.EqualFold(c, chainID) || !strings.EqualFold(a, apiInterface) {
-			return false // only this endpoint's parser can classify its own chain/api
-		}
-		return statefulChecker.ApiHasStatefulCategory(method)
-	}
-	if guardErr := resolver.ValidateNoStatefulPolicies(isStateful); guardErr != nil {
+	if guardErr := validateCrossValidationSpecGuards(resolver, chainParser, chainID, apiInterface); guardErr != nil {
 		return guardErr
 	}
+	// Every capacity check below is skipped when no primary is configured: the endpoint serves from backup
+	// providers only, cross-validation never draws on backups, and validateCrossValidationFleet warns about
+	// the endpoint as a whole (MAG-3751). The input is the static config, so an empty layout is that shape,
+	// not missing data.
 	if requiredGroups := resolver.MaxResolvedMinGroups(chainID, apiInterface); requiredGroups > 1 && configuredGroups > 0 && configuredGroups < requiredGroups {
 		return utils.LavaFormatError("cross-validation min-groups policy cannot be satisfied: configured provider groups are fewer than required", nil,
 			utils.LogAttr("requiredGroups", requiredGroups),
@@ -506,7 +515,7 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 	// Per-group-quorum capacity: each per-group policy needs MinGroups groups that EACH have >= Threshold
 	// providers. Without enough adequately-staffed groups the policy can never succeed (every request would
 	// fail group-quorum-unmet), so reject it at startup rather than at runtime. Skipped when groupSizes is
-	// empty (provider data unavailable) to avoid a false negative.
+	// empty (no configured primary, see above).
 	if len(groupSizes) > 0 {
 		for _, req := range resolver.PerGroupRequirements(chainID, apiInterface) {
 			adequateGroups := 0
@@ -532,14 +541,18 @@ func validateCrossValidationStartup(resolver *CrossValidationPolicyResolver, cha
 	// the diversity guarantee rests on single points of failure (two such groups colluding, or both wrong at a
 	// block boundary, outvote a larger honest group). This is still a SATISFIABLE config (default mode counts
 	// agreement across groups, not within them), so it is a WARNING, not a startup error. Skipped when
-	// groupSizes is empty (provider data unavailable) to avoid a false warning.
+	// groupSizes is empty (no configured primary, see above).
+	//
+	// The same shape costs availability too (MAG-3993): cross-validation neither retries nor draws on
+	// backups, so when every member of a required group goes quiet no request can reach the quorum, and
+	// each one fails diversity-unmet at the attempt window. The warning names both halves.
 	if len(groupSizes) > 0 {
 		for _, req := range resolver.MinGroupsRequirements(chainID, apiInterface) {
 			if req.MinGroups <= 1 {
 				continue // no diversity requirement, so nothing rests on under-staffed groups
 			}
 			if below := groupsBelowThreshold(groupSizes, req.Threshold); len(below) > 0 {
-				utils.LavaFormatWarning("cross-validation group-diversity may rest on single points of failure: some provider groups are smaller than the agreement threshold and cannot corroborate a response on their own, yet can still carry the required group diversity", nil,
+				utils.LavaFormatWarning("cross-validation group-diversity may rest on single points of failure: some provider groups are smaller than the agreement threshold and cannot corroborate a response on their own, yet can still carry the required group diversity. Each such group is also an availability single point of failure: cross-validation does not retry or use backups, so while its members are quiet every request fails diversity-unmet at the attempt window", nil,
 					utils.LogAttr("groupsBelowThreshold", below),
 					utils.LogAttr("agreementThreshold", req.Threshold),
 					utils.LogAttr("minGroups", req.MinGroups),
@@ -569,6 +582,198 @@ func groupsBelowThreshold(groupSizes map[string]int, threshold int) []string {
 	}
 	sort.Strings(below)
 	return below
+}
+
+// validateCrossValidationFleet runs the startup cross-validation checks for an endpoint that has per-method
+// policies. configured maps each group label to the primaries the operator configured for the endpoint;
+// verified is the same map for the primaries that passed boot verification. Both fold an empty label into
+// common.DefaultProviderGroup.
+//
+// Whether a policy can EVER be met is a question about the configuration, so the guards in
+// validateCrossValidationStartup run against the configured layout, and an error from them stops the
+// endpoint from starting. A primary that failed boot verification is a runtime condition: it is retried in
+// the background and re-admitted when it recovers (MAG-2525). A shortfall among the verified primaries is
+// therefore reported, not returned: the endpoint starts and serves what it can, and
+// validateCrossValidationCapacity refuses only the cross-validated requests the verified primaries cannot
+// meet. Judging the policy by the verified primaries turned one node that was down at boot into a crash
+// loop (MAG-3751).
+//
+// The report is the returned advisory, nil when every enabled policy is met; the caller logs it. It also
+// covers the two shortfalls the guards do not refuse: a max-participants above the configured primaries,
+// which has never been a startup error, and an endpoint with no configured primary at all, which serves from
+// backups that cross-validation never draws on.
+func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chainParser chainlib.ChainParser, chainID, apiInterface string, configured, verified map[string][]string) (*crossValidationFleetAdvisory, error) {
+	configuredSizes := groupSizesOf(configured)
+	if err := validateCrossValidationStartup(resolver, chainParser, chainID, apiInterface, len(configured), configuredSizes); err != nil {
+		return nil, err
+	}
+	verifiedSizes := groupSizesOf(verified)
+	// Log the provider->group layout once at startup so operators can confirm the diversity their config
+	// yields (a min-groups policy is only as good as the group spread of the fleet). distinctGroups,
+	// groupSizes and groupAssignments describe the primaries that passed verification and are serving, as
+	// they did before MAG-3751 (scripts/pre_setups/init_smartrouter_cv_demo.sh reads distinctGroups to prove
+	// its fleet verified); the configured* fields describe the layout the startup guards judged.
+	//
+	// policies and methods count only this endpoint's own policies (PolicyRefs). Each method is named with its
+	// position in cross-validation.policies: the log redactor mistakes a gRPC method name for a url and prints
+	// "cosmos.bank.v1beta1.Query/[redacted]", and the position is what still tells two policies on one
+	// service apart (MAG-3604).
+	endpointPolicies := resolver.PolicyRefs(chainID, apiInterface)
+	utils.LavaFormatInfo("cross-validation per-method policies loaded",
+		utils.LogAttr("policies", len(endpointPolicies)),
+		utils.LogAttr("methods", policyRefStrings(endpointPolicies)),
+		utils.LogAttr("chainID", chainID),
+		utils.LogAttr("apiInterface", apiInterface),
+		utils.LogAttr("distinctGroups", len(verified)),
+		utils.LogAttr("groupSizes", verifiedSizes),
+		utils.LogAttr("groupAssignments", verified),
+		utils.LogAttr("configuredGroups", len(configured)),
+		utils.LogAttr("configuredGroupSizes", configuredSizes),
+		utils.LogAttr("configuredGroupAssignments", configured))
+	requiredProviders, requiredGroups := crossValidationShortfall(resolver, chainID, apiInterface, verifiedSizes)
+	backupOnly := len(configured) == 0 && len(resolver.headerlessParams(chainID, apiInterface)) > 0
+	if requiredProviders == 0 && requiredGroups == 0 && !backupOnly {
+		return nil, nil
+	}
+	configuredProviders, configuredGroups := crossValidationShortfall(resolver, chainID, apiInterface, configuredSizes)
+	return &crossValidationFleetAdvisory{
+		chainID:           chainID,
+		apiInterface:      apiInterface,
+		requiredProviders: requiredProviders,
+		requiredGroups:    requiredGroups,
+		configuredShort:   backupOnly || configuredProviders > 0 || configuredGroups > 0,
+		unavailable:       providersMissingFrom(configured, verified),
+		configuredSizes:   configuredSizes,
+		verifiedSizes:     verifiedSizes,
+	}, nil
+}
+
+// crossValidationFleetAdvisory is what validateCrossValidationFleet found worth an ATTENTION line: an
+// enabled policy of the endpoint that the primaries serving now cannot meet. It is a value, logged by log,
+// so the boot path can be tested without capturing the log.
+type crossValidationFleetAdvisory struct {
+	chainID, apiInterface string
+	// requiredProviders and requiredGroups are the largest max-participants and min-groups the VERIFIED
+	// primaries cannot reach, each 0 when met: the shortfall the request-time guard refuses on now.
+	requiredProviders, requiredGroups int
+	// configuredShort is true when the CONFIGURED primaries fall short as well, so re-admitting the
+	// unavailable ones cannot close the gap: the policy or the fleet has to change.
+	configuredShort bool
+	// unavailable names the configured primaries that failed boot verification, sorted; empty when every
+	// primary verified.
+	unavailable                    []string
+	configuredSizes, verifiedSizes map[string]int
+}
+
+// log writes the ATTENTION line for the advisory, worded by what closes the gap: a provider recovering, a
+// change to the policy or the fleet, or primaries for an endpoint that has none. A nil advisory logs nothing.
+func (a *crossValidationFleetAdvisory) log() {
+	if a == nil {
+		return
+	}
+	attrs := []utils.Attribute{
+		utils.LogAttr("chainID", a.chainID),
+		utils.LogAttr("apiInterface", a.apiInterface),
+	}
+	if a.requiredProviders > 0 {
+		attrs = append(attrs, utils.LogAttr("requiredProviders", a.requiredProviders))
+	}
+	if a.requiredGroups > 0 {
+		attrs = append(attrs, utils.LogAttr("requiredGroups", a.requiredGroups))
+	}
+	attrs = append(attrs,
+		utils.LogAttr("verifiedGroupSizes", a.verifiedSizes),
+		utils.LogAttr("configuredGroupSizes", a.configuredSizes))
+	if len(a.unavailable) > 0 {
+		attrs = append(attrs, utils.LogAttr("unavailableProviders", a.unavailable))
+	}
+	// crossValidationShortfall counts every verified primary; the request-time guard counts only the
+	// candidates that serve the request's addon and extensions, so it can refuse with fewer.
+	const scope = "the count covers every verified primary; a request that needs an addon or extension draws only on the primaries serving it and can be refused with fewer"
+	switch {
+	case len(a.configuredSizes) == 0:
+		utils.LavaFormatWarning("ATTENTION: this endpoint has no configured primary, and cross-validation never draws on backup providers — the requests its cross-validation policies govern can never be met", nil,
+			append(attrs, utils.LogAttr("hint", "add primaries to the endpoint or remove its policies; requests without cross-validation are served from the backups"))...)
+	case a.configuredShort:
+		utils.LavaFormatWarning("ATTENTION: the configured primaries cannot meet a cross-validation policy — the requests it governs are refused until the policy or the fleet changes", nil,
+			append(attrs, utils.LogAttr("hint", "a max-participants above the configured primaries is not a startup error: lower it or add primaries; "+scope))...)
+	default:
+		utils.LavaFormatWarning("ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy — the requests it governs are refused until the failed providers recover", nil,
+			append(attrs, utils.LogAttr("hint", "providers that failed verification are retried in the background; requests without cross-validation are served meanwhile; "+scope))...)
+	}
+}
+
+// crossValidationShortfall predicts what the request-time guard (validateCrossValidationCapacity) will do
+// with a request that sends no cross-validation headers when the candidates are the given primaries. It
+// returns the largest max-participants and the largest min-groups among the enabled policies it would refuse
+// for that reason, each 0 when none. Groups are judged by crossValidationGroupShortfall, the guards' own test.
+//
+// The prediction is for a request of the base collection. groupSizes counts every primary, while the guard
+// counts only the candidates that support the request's addon and extensions
+// (ProviderAndGroupCountsForRequest), a subset. A request scoped to an addon or extension can therefore be
+// refused when this predicts nothing; never the other way round.
+func crossValidationShortfall(resolver *CrossValidationPolicyResolver, chainID, apiInterface string, groupSizes map[string]int) (requiredProviders, requiredGroups int) {
+	providers := 0
+	for _, size := range groupSizes {
+		providers += size
+	}
+	for _, params := range resolver.headerlessParams(chainID, apiInterface) {
+		if params.MaxParticipants > providers {
+			requiredProviders = max(requiredProviders, params.MaxParticipants)
+		}
+		if _, reason := crossValidationGroupShortfall(groupSizes, &params); reason != "" {
+			requiredGroups = max(requiredGroups, params.MinGroups)
+		}
+	}
+	return requiredProviders, requiredGroups
+}
+
+// staticProviderGroupAssignments maps configured providers onto their cross-validation groups (label ->
+// sorted provider names). It folds an empty label into common.DefaultProviderGroup the way the session
+// manager's ProviderGroupAssignments does, so the configured and verified layouts compare label for label.
+func staticProviderGroupAssignments(providers []*lavasession.RPCStaticProviderEndpoint) map[string][]string {
+	assignments := make(map[string][]string)
+	for _, provider := range providers {
+		label := common.DefaultProviderGroup
+		if provider.GroupLabel != "" {
+			label = provider.GroupLabel
+		}
+		assignments[label] = append(assignments[label], provider.Name)
+	}
+	for label := range assignments {
+		sort.Strings(assignments[label])
+	}
+	return assignments
+}
+
+// groupSizesOf returns the provider count of each group in a provider->group layout.
+func groupSizesOf(assignments map[string][]string) map[string]int {
+	sizes := make(map[string]int, len(assignments))
+	for label, providers := range assignments {
+		sizes[label] = len(providers)
+	}
+	return sizes
+}
+
+// providersMissingFrom returns, sorted, the providers of the configured layout that the verified layout
+// does not hold.
+func providersMissingFrom(configured, verified map[string][]string) []string {
+	held := make(map[string]struct{})
+	for _, providers := range verified {
+		for _, provider := range providers {
+			held[provider] = struct{}{}
+		}
+	}
+	var missing []string
+	for _, providers := range configured {
+		for _, provider := range providers {
+			if _, ok := held[provider]; !ok {
+				missing = append(missing, provider)
+			}
+		}
+	}
+	sort.Strings(missing)
+	return missing
 }
 
 // crossValidationSuccessOutliers returns the successful responses whose content diverged from the reached
@@ -626,6 +831,39 @@ func crossValidationPendingProviders(allProviders []string, successResults, node
 		}
 	}
 	return pending
+}
+
+// attemptsWithoutResult returns the dispatched attempts that have no recorded result, in dispatch
+// order: dispatched minus one entry for each result that carries the same provider. It is the
+// non-cross-validation counterpart of crossValidationPendingProviders, which works on a set. This
+// one subtracts per attempt, because a retry path may ask the same provider twice, and a provider
+// asked twice but answered once still has an attempt out.
+//
+// A cache hit is recorded without being dispatched and carries no provider, so it never settles
+// a dispatched attempt.
+func attemptsWithoutResult(dispatched []string, successResults, nodeErrorResults []common.RelayResult, protocolErrorResults []relaycore.RelayError) []string {
+	if len(dispatched) == 0 {
+		return nil
+	}
+	recorded := make(map[string]int, len(successResults)+len(nodeErrorResults)+len(protocolErrorResults))
+	for _, result := range successResults {
+		recorded[result.ProviderInfo.ProviderAddress]++
+	}
+	for _, result := range nodeErrorResults {
+		recorded[result.ProviderInfo.ProviderAddress]++
+	}
+	for _, result := range protocolErrorResults {
+		recorded[result.ProviderInfo.ProviderAddress]++
+	}
+	var withoutResult []string
+	for _, addr := range dispatched {
+		if recorded[addr] > 0 {
+			recorded[addr]--
+			continue
+		}
+		withoutResult = append(withoutResult, addr)
+	}
+	return withoutResult
 }
 
 // preferStructuralFailureReason overwrites a cross-validation FAILURE result's reason with a structural
@@ -912,11 +1150,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		// endpoint from consuming a client-sized budget. Cancelled on both exits below rather than
 		// deferred, so a hung attempt from this try does not outlive it.
 		tryCtx, cancelTry := context.WithTimeout(ctx, internalRelayTryTimeout)
-		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil)
+		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil, false)
 		if errors.Is(err, lavasession.PairingListEmptyError) {
 			// we don't have pairings anymore, could be related to unwanted endpoints
 			relayProcessor.GetUsedProviders().ClearUnwanted()
-			err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil)
+			err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil, false)
 		}
 		if err != nil {
 			utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
@@ -1512,7 +1750,7 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 			consistencyFallback,
 			relayProcessor.GetUsedProviders(),
 			func() error {
-				return rpcss.sendRelayToEndpoint(ctx, task.NumOfProviders, task.RelayState, relayProcessor, consistencyFallback, task.Analytics)
+				return rpcss.sendRelayToEndpoint(ctx, task.NumOfProviders, task.RelayState, relayProcessor, consistencyFallback, task.Analytics, task.BackupReserve)
 			},
 		)
 
@@ -1535,6 +1773,11 @@ func (rpcss *RPCSmartRouterServer) CancelSubscriptionContext(subscriptionKey str
 	// Direct RPC subscription managers handle their own lifecycle.
 }
 
+// getEarliestBlockHashRequestedFromCacheReply folds the reply's BlocksHashesToHeights into
+// (latest, earliest). Every reply carries an empty list today: the router writes no
+// block-hash→height mappings (MAG-3807), so the lookup's question is always answered empty and
+// this returns (NOT_APPLICABLE, NOT_APPLICABLE) on every request. Kept, with its callers, for
+// MAG-3892 — the day something writes them, the read side is already in place.
 func (rpcss *RPCSmartRouterServer) getEarliestBlockHashRequestedFromCacheReply(cacheReply *pairingtypes.CacheRelayReply) (int64, int64) {
 	blocksHashesToHeights := cacheReply.GetBlocksHashesToHeights()
 	earliestRequestedBlock := spectypes.NOT_APPLICABLE
@@ -1636,7 +1879,10 @@ func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlo
 	}
 
 	// Following logic to set the requested block as a new value fetched from the cache reply.
-	// 1. We managed to get a value from the cache reply. (latestBlockHashRequested >= 0)
+	// It cannot act today: latestBlockHashRequested is folded from the reply's
+	// BlocksHashesToHeights, and the router writes no block-hash→height mappings (MAG-3807), so
+	// it is NOT_APPLICABLE on every request. Kept for MAG-3892.
+	// 1. The cache reply carried a height for a requested hash. (latestBlockHashRequested >= 0)
 	// 2. We didn't manage to parse the block and used the default value meaning we didnt have knowledge of the requested block (reqBlock == spectypes.LATEST_BLOCK && protocolMessage.GetUsedDefaultValue())
 	// 3. The requested block is smaller than the latest block hash requested from the cache reply (reqBlock >= 0 && reqBlock < latestBlockHashRequested)
 	// 4. The requested block is not applicable meaning block parsing failed completely (reqBlock == spectypes.NOT_APPLICABLE)
@@ -1648,6 +1894,11 @@ func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlo
 	return reqBlock
 }
 
+// newBlocksHashesToHeightsSliceFromRequestedBlockHashes builds the lookup's block-hash→height
+// question, one entry per hash the spec's BLOCK_HASH parser found. It is always answered empty
+// today: nothing writes the mappings (both cache writes pass BlocksHashesToHeights nil —
+// MAG-3807), so the engine finds no h2h: key for any hash. Kept so MAG-3892 has the question in
+// place once a writer exists.
 func (rpcss *RPCSmartRouterServer) newBlocksHashesToHeightsSliceFromRequestedBlockHashes(requestedBlockHashes []string) []*pairingtypes.BlockHashToHeight {
 	var blocksHashesToHeights []*pairingtypes.BlockHashToHeight
 	for _, blockHash := range requestedBlockHashes {
@@ -2001,6 +2252,32 @@ func lostBroadcastRejection(selection relaycore.Selection, answeredWithNodeError
 	return selection == relaycore.Stateful && answeredWithNodeError && acceptedElsewhere > 0
 }
 
+// releaseUndispatchedSessions hands back sessions GetSessions gave us that no relay will be sent
+// on. Every return between GetSessions and dispatch owes this (MAG-3286): GetSessions' deferred
+// AddUsed already registered them in UsedProviders, no relay goroutine will ever remove them, and
+// the state machine's validateReturnCondition only delivers an error once CurrentlyUsed() == 0, so
+// a skipped release holds the caller for the full processingTimeout (~30s).
+//
+// OnSessionDiscarded rather than a bare Session.Free: the relay was never sent, so the endpoint
+// takes no QoS hit, and the compute units GetSessions reserved go back to the provider. A nil
+// reason keeps the providers out of the errored set.
+func (rpcss *RPCSmartRouterServer) releaseUndispatchedSessions(ctx context.Context, usedProviders *lavasession.UsedProviders, sessions lavasession.ConsumerSessionsMap, reason error) {
+	// Before the discard below: it frees the sessions, which resets the router key this releases under.
+	usedProviders.ReleaseSessionsFromLatestBatch(sessions, reason)
+	for endpointAddress, sessionInfo := range sessions {
+		if sessionInfo == nil || sessionInfo.Session == nil {
+			continue
+		}
+		if err := rpcss.sessionManager.OnSessionDiscarded(sessionInfo.Session, reason); err != nil {
+			utils.LavaFormatError("failed releasing an undispatched session", err,
+				utils.LogAttr("endpoint", endpointAddress),
+				utils.LogAttr("reason", reason),
+				utils.LogAttr("GUID", ctx),
+			)
+		}
+	}
+}
+
 // sendRelayToDirectEndpoints handles relay for direct RPC sessions (smart router direct mode)
 func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	ctx context.Context,
@@ -2058,32 +2335,23 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		consistencyFallback.recordRejected(failedSessions)
 	}
 
-	// Release failed sessions:
-	// - ReleaseFromLatestBatch decrements UsedProviders.sessionsLatestBatch so
-	//   RelayProcessor.checkEndProcessing matches the goroutines we will
-	//   actually launch. Without this the CV path can wait the full
-	//   processingTimeout (~30s) for responses that never arrive.
-	// - OnSessionDiscarded returns reserved CU and unlocks the session without
-	//   QoS punishment. No request reached the upstream, so this is a routing
-	//   exclusion rather than an availability failure.
+	// Release the consistency-rejected sessions: no relay goes to them. This is a routing exclusion
+	// rather than an availability failure, so the release carries no QoS punishment; the reason marks
+	// them errored so a retry batch skips them.
+	//
+	// The helper releases each session under the key it was taken with, not one derived from the
+	// request's extensions: a request that degrades to a regular provider takes its sessions under
+	// the plain key, and a release under the request's key would leave the provider in the dispatch
+	// history that Lava-Retries (MAG-3762) and writeOutcomeIsUnknown read.
 	usedProviders := relayProcessor.GetUsedProviders()
-	releaseRouterKey := lavasession.NewRouterKeyFromExtensions(protocolMessage.GetExtensions())
-	for endpointAddress, sessionInfo := range failedSessions {
-		if sessionInfo != nil && sessionInfo.Session != nil {
-			utils.LavaFormatDebug("discarding stale session before relay dispatch",
-				utils.LogAttr("endpoint", endpointAddress),
-				utils.LogAttr("error", lavasession.ConsistencyPreValidationError),
-				utils.LogAttr("GUID", ctx),
-			)
-			usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, lavasession.ConsistencyPreValidationError)
-			if err := rpcss.sessionManager.OnSessionDiscarded(sessionInfo.Session, lavasession.ConsistencyPreValidationError); err != nil {
-				utils.LavaFormatError("failed discarding consistency-rejected session", err,
-					utils.LogAttr("endpoint", endpointAddress),
-					utils.LogAttr("GUID", ctx),
-				)
-			}
-		}
+	if len(failedSessions) > 0 {
+		utils.LavaFormatDebug("discarding stale sessions before relay dispatch",
+			utils.LogAttr("endpoints", len(failedSessions)),
+			utils.LogAttr("error", lavasession.ConsistencyPreValidationError),
+			utils.LogAttr("GUID", ctx),
+		)
 	}
+	rpcss.releaseUndispatchedSessions(ctx, usedProviders, failedSessions, lavasession.ConsistencyPreValidationError)
 
 	// If ALL sessions failed consistency validation, return error to trigger retry with different providers
 	if filterErr != nil {
@@ -2107,18 +2375,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	crossValidationParams := relayProcessor.GetCrossValidationParams()
 	if selection == relaycore.CrossValidation && crossValidationParams != nil &&
 		len(validSessions) < crossValidationParams.AgreementThreshold {
-		// Release the surviving valid sessions before returning. No goroutines
-		// will be launched for them, so without this they stay in
-		// UsedProviders.providers (CurrentlyUsed > 0). The state machine's
-		// validateReturnCondition only delivers the err to returnCondition when
-		// CurrentlyUsed == 0, so the request would otherwise stall for the
-		// full processingTimeout (~30s) instead of failing fast.
-		for endpointAddress, sessionInfo := range validSessions {
-			if sessionInfo != nil && sessionInfo.Session != nil {
-				usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, nil)
-				sessionInfo.Session.Free(nil)
-			}
-		}
+		rpcss.releaseUndispatchedSessions(ctx, usedProviders, validSessions, nil)
 		// Carry the structured reason on the shared processor so SendParsedRelay can surface the
 		// failure-reason header; the error itself is left unchanged so the state machine's
 		// PairingListEmptyError stop logic is unaffected.
@@ -2152,12 +2409,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			survivingGroupCounts[label]++
 		}
 		if qualifyingGroups, failReason := crossValidationGroupShortfall(survivingGroupCounts, crossValidationParams); failReason != "" {
-			for endpointAddress, sessionInfo := range validSessions {
-				if sessionInfo != nil && sessionInfo.Session != nil {
-					usedProviders.ReleaseFromLatestBatch(endpointAddress, releaseRouterKey, nil)
-					sessionInfo.Session.Free(nil)
-				}
-			}
+			rpcss.releaseUndispatchedSessions(ctx, usedProviders, validSessions, nil)
 			relayProcessor.SetCrossValidationFailFastReason(failReason)
 			return utils.LavaFormatError("insufficient provider groups for cross-validation after consistency filter ("+failReason+")",
 				lavasession.PairingListEmptyError,
@@ -2240,11 +2492,24 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 		// misreported to the client as pending in-flight stragglers — and the watcher would burn a
 		// goroutine waiting for, then falsely counting not-received, a provider that was never
 		// queried. This set is exactly the goroutines launched below.
+		//
+		// The same survivors' groups, with the groups of the startup layout that are smaller than
+		// this request's threshold, are what the attempt-window stop needs to tell who could still
+		// complete the quorum (MAG-3993). A survivor with no parent session has no known group, and
+		// the stop stays off while it is in flight.
 		queriedProviders := make([]string, 0, len(sessions))
-		for providerPublicAddress := range sessions {
+		providerGroups := make(map[string]string, len(sessions))
+		for providerPublicAddress, sessionInfo := range sessions {
 			queriedProviders = append(queriedProviders, providerPublicAddress)
+			if sessionInfo != nil && sessionInfo.Session != nil && sessionInfo.Session.Parent != nil {
+				providerGroups[providerPublicAddress] = sessionInfo.Session.Parent.GroupLabel
+			}
 		}
 		relayProcessor.SetCrossValidationQueriedProviders(queriedProviders)
+		if crossValidationParams != nil {
+			relayProcessor.SetCrossValidationGroupLayout(providerGroups,
+				groupsBelowThreshold(rpcss.crossValidationGroupSizes, crossValidationParams.AgreementThreshold))
+		}
 
 		// Stamp a deliberately GENEROUS upper bound for the straggler watcher, anchored at launch.
 		// A detached goroutine's lifetime is the sum of individually-bounded phases — the gRPC
@@ -2527,6 +2792,17 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				)
 				if errSession := rpcss.sessionManager.OnSessionRateLimited(singleConsumerSession, releaseErr); errSession != nil {
 					utils.LavaFormatWarning("OnSessionRateLimited failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
+			} else if isDataScopeRelayOutcome(err, localRelayResult) {
+				// "I do not hold this data" is neither failure nor success. It comes back fast, so
+				// OnSessionDone would reward a lagging or pruned node with availability and latency
+				// for data it did not serve. The request still fails over; only the endpoint's tip is scored.
+				relayHoldoff.RecordAnswer(holdoffProvider, holdoffURL)
+				releaseErr := fmt.Errorf("upstream does not hold the requested data (status %d)", statusCode)
+				if errSession := rpcss.sessionManager.OnSessionDataNotHeld(singleConsumerSession, releaseErr); errSession != nil {
+					utils.LavaFormatWarning("OnSessionDataNotHeld failed for direct RPC", errSession,
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
@@ -3858,8 +4134,8 @@ func (rpcss *RPCSmartRouterServer) tryCacheWrite(
 }
 
 // tryCacheWriteResolved is tryCacheWrite with an optional pre-resolved cache-key
-// block. resolvedBlock == nil preserves the
-// legacy resolution (Reply.LatestBlock → SeenBlock → skip). A non-nil resolvedBlock
+// block. resolvedBlock == nil preserves the normal resolution (latestCacheBlock: the
+// parse-time seen block, else the gated tip, else skip). A non-nil resolvedBlock
 // carries the exact block that produced a secondary-cache hit, so the backfill SET
 // lands on the identical server-side key (hash ‖ block) — re-deriving it here could
 // land on a different key (tip advance between parse and lookup) or skip the write
@@ -3977,7 +4253,13 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	// value is the requested block itself (extractBlockHeightFromEVMResponse
 	// reads result.number), so the naive check never marks any historical
 	// block finalized and every entry takes the ~625 ms non-finalized TTL.
-	latestBlock := relayResult.Reply.LatestBlock
+	//
+	// The reply's claim is bounded by what this router vouches for before it is
+	// used anywhere here — finalization, the older-than-tip guard below, and the
+	// copy SetRelay reads — so an upstream cannot publish a head the router did
+	// not believe as the cache's chain-level tip or the entry's floor (MAG-3755;
+	// see replyLatestBlockForCacheWrite).
+	latestBlock := replyLatestBlockForCacheWrite(relayResult.Reply.LatestBlock, int64(rpcss.getLatestBlock()), relayData.SeenBlock)
 	// Finalization uses the GATED getLatestBlock (fresh tip or 0), never getLatestBlockAllowStale:
 	// a stale or too-high head here would falsely finalize a mutable block into the long-TTL store.
 	finalized := isFinalizedForCacheWrite(requestedBlock, latestBlock, int64(rpcss.getLatestBlock()), int64(blockDistanceForFinalizedData))
@@ -4067,9 +4349,10 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 		// request it is the RAW user-requested height — vouched for by nothing but
 		// the foreign tier's willingness to answer that key — and SetRelay publishes
 		// max(Response.LatestBlock, SeenBlock) as the cache server's chain-level tip
-		// through a monotonic-max write that resolves LATEST/SAFE/FINALIZED/PENDING
-		// for the whole chain. Lifted past the local tip, one request at a far-future
-		// key would retarget negative-tag resolution on this router's own primary
+		// through a write that only ever moves up while the tip is fresh (MAG-3755)
+		// and resolves LATEST/SAFE/FINALIZED/PENDING for the whole chain. Lifted past
+		// the local tip, one request at a far-future key would retarget negative-tag
+		// resolution on this router's own primary
 		// until expiry (TestSecondaryFutureKeyBackfillNeverRaisesPrimaryChainTip).
 		// Clamping costs the legitimate cases nothing: the entry still lands on its
 		// exact key, and it stays visible to its own follow-up GET because a
@@ -4092,6 +4375,9 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 
 	// Snapshot the reply for the async write; see cacheWriteReplySnapshot for what it shares.
 	copyReply := cacheWriteReplySnapshot(relayResult.Reply)
+	// The snapshot is what the cache server reads: it carries the bounded claim, not the
+	// upstream's, while the live reply keeps the block the node answered with (MAG-3755).
+	copyReply.LatestBlock = latestBlock
 	rpcss.smartRouterEndpointMetrics.RecordCacheEntryWritten(chainId, apiInterface, apiName, bodyBytes)
 
 	// Write to cache in a non-blocking goroutine
@@ -4111,7 +4397,7 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 			SharedStateId:         sharedStateId,
 			AverageBlockTime:      int64(averageBlockTime),
 			IsNodeError:           false, // node errors are rejected by the eligibility checks above
-			BlocksHashesToHeights: nil,   // Not available in direct RPC mode
+			BlocksHashesToHeights: nil,   // the router learns no heights (MAG-3807, MAG-3892)
 			// The local captured above, not relayResult.StatusCode: this goroutine outlives
 			// the call and the response path keeps mutating relayResult, so reading a field
 			// off it here would be a cross-goroutine read of live state.
@@ -4241,6 +4527,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	relayProcessor *relaycore.RelayProcessor,
 	consistencyFallback *consistencyFallbackState,
 	analytics *metrics.RelayMetrics,
+	backupReserve bool,
 ) (errRet error) {
 	// Send relay to direct RPC endpoints:
 	// - Get sessions from ConsumerSessionManager for the requested endpoints
@@ -4387,6 +4674,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							_, cacheSpan := tracing.StartInternalSpan(ctx, tracing.SpanCacheLookup)
 							defer cacheSpan.End()
 							cacheStart := time.Now()
+							// The BlocksHashesToHeights question below is always answered empty today: the
+							// router writes no mappings (MAG-3807). See
+							// newBlocksHashesToHeightsSliceFromRequestedBlockHashes.
 							cacheReply, cacheError = rpcss.cache.GetEntry(cacheCtx, &pairingtypes.RelayCacheGet{
 								RequestHash:           hashKey,
 								RequestedBlock:        requestedBlockForCache,
@@ -4504,8 +4794,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 					// produced no hit — including primary inactive or unconfigured. A hit is
 					// sanitized, served, and backfilled through the populator. A miss leaves
 					// latestBlockHashRequested/earliestBlockHashRequested exactly as the primary
-					// left them: those scalars steer local block resolution and archive routing,
-					// and the secondary is a trust boundary, not a second source of chain state.
+					// left them — NOT_APPLICABLE today, since the router writes none of the
+					// mappings they are folded from (MAG-3807). Were they ever set they would
+					// steer local block resolution and archive routing, and the secondary is a
+					// trust boundary, not a second source of chain state.
 					if secondaryCacheActive {
 						if rpcss.trySecondaryCacheLookup(ctx, protocolMessage, localRelayData, relayProcessor, analytics, hashKey, outputFormatter, requestedBlockForCache, &cacheReport) {
 							return nil
@@ -4562,7 +4854,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// least MinGroups distinct provider groups (1.2a). Default 1 leaves selection group-blind. For
 	// per-group quorum (2.3), also front-load AgreementThreshold providers per group so each group can
 	// independently reach its internal quorum — otherwise QoS-skewed selection starves the smaller groups.
-	sessionOpts := lavasession.GetSessionsOptions{MinGroups: 1, PerGroupTarget: 1}
+	sessionOpts := lavasession.GetSessionsOptions{MinGroups: 1, PerGroupTarget: 1, PreferBackup: backupReserve}
 	// Which internal path this api is served under, so selection can pick the
 	// endpoint whose URL is that path's root. In direct mode the path lives in
 	// the upstream url — one node-url per API version — and dialing the wrong
@@ -4644,6 +4936,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		// Verify we have enough sessions to meet the agreement threshold
 		// If not, fail early with a clear error rather than proceeding knowing consensus is impossible
 		if crossValidationParams != nil && len(sessions) < crossValidationParams.AgreementThreshold {
+			rpcss.releaseUndispatchedSessions(ctx, usedProviders, sessions, nil)
 			relayProcessor.SetCrossValidationFailFastReason(common.CrossValidationReasonInsufficientCapacity)
 			return utils.LavaFormatError("insufficient sessions for cross-validation consensus",
 				lavasession.PairingListEmptyError,
@@ -4677,6 +4970,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	}
 	for endpointAddress, sessionInfo := range sessions {
 		if sessionInfo == nil || sessionInfo.Session == nil || !sessionInfo.Session.IsDirectRPC() {
+			rpcss.releaseUndispatchedSessions(ctx, usedProviders, sessions, nil)
 			return utils.LavaFormatError("rpcsmartrouter only supports direct RPC sessions", nil,
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("GUID", ctx),
@@ -5026,6 +5320,12 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	return relayLatency, nil, false
 }
 
+// HasBackupTier implements relaycore.BackupTierReporter: the state machine arms its backup-reserve
+// hedge only for an endpoint that has a backup tier to send it to.
+func (rpcss *RPCSmartRouterServer) HasBackupTier() bool {
+	return rpcss.sessionManager != nil && rpcss.sessionManager.HasBackupProviders()
+}
+
 func (rpcss *RPCSmartRouterServer) GetProcessingTimeout(chainMessage chainlib.ChainMessage) (processingTimeout time.Duration, relayTimeout time.Duration) {
 	_, averageBlockTime, _, _ := rpcss.chainParser.ChainBlockStats()
 	relayTimeout = chainlib.GetRelayTimeout(chainMessage, averageBlockTime)
@@ -5068,17 +5368,27 @@ func (rpcss *RPCSmartRouterServer) getExtensionsFromDirectiveHeaders(directiveHe
 }
 
 func (rpcss *RPCSmartRouterServer) HandleDirectiveHeadersForMessage(chainMessage chainlib.ChainMessage, directiveHeaders map[string]string) {
-	timeoutStr, ok := directiveHeaders[common.RELAY_TIMEOUT_HEADER_NAME]
-	if ok {
+	if timeoutStr, ok := directiveHeaders[common.RELAY_TIMEOUT_HEADER_NAME]; ok {
+		// Any caller can send this, unauthenticated. A value that is not a positive duration is
+		// dropped here rather than stored: a negative one used to reach time.NewTicker and end the
+		// process (MAG-3600). A positive one is stored as sent and bounded where it is used
+		// (chainlib.GetRelayTimeout), so a message rebuilt from this one (preserveRelayTimeout) is
+		// bounded against its own budget. The caller learns what applied from the
+		// Lava-Relay-Timeout-Applied reply header. Debug level on purpose: the value is the
+		// caller's, and anything louder would let any caller write to the log at will.
 		timeout, err := time.ParseDuration(timeoutStr)
-		if err == nil {
-			// set an override timeout
-			utils.LavaFormatDebug("User indicated to set the timeout using flag", utils.LogAttr("timeout", timeoutStr))
+		switch {
+		case err != nil:
+			utils.LavaFormatDebug("lava-relay-timeout ignored: not a duration", utils.LogAttr("timeout", timeoutStr))
+		case timeout <= 0:
+			utils.LavaFormatDebug("lava-relay-timeout ignored: not positive", utils.LogAttr("timeout", timeoutStr))
+		default:
+			utils.LavaFormatDebug("lava-relay-timeout set by the caller", utils.LogAttr("timeout", timeoutStr))
 			chainMessage.TimeoutOverride(timeout)
 		}
 	}
 
-	_, ok = directiveHeaders[common.FORCE_CACHE_REFRESH_HEADER_NAME]
+	_, ok := directiveHeaders[common.FORCE_CACHE_REFRESH_HEADER_NAME]
 	chainMessage.SetForceCacheRefresh(ok)
 }
 
@@ -5093,6 +5403,40 @@ func (rpcss *RPCSmartRouterServer) getMetadataFromRelayTrailer(metadataHeaders [
 			}
 			relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, extensionMD)
 		}
+	}
+}
+
+// warnUnavailableExtensions logs, once per extension for the life of this endpoint, that callers
+// are requesting an extension no node offers. It is an operator configuration gap, not a caller
+// error, so once is enough to surface it; the per-request signal is the response header.
+func (rpcss *RPCSmartRouterServer) warnUnavailableExtensions(ctx context.Context, unavailable []string) {
+	for _, extension := range unavailable {
+		if _, alreadyWarned := rpcss.warnedUnavailableExtensions.LoadOrStore(extension, struct{}{}); alreadyWarned {
+			continue
+		}
+		chainID, apiInterface := "", ""
+		if rpcss.listenEndpoint != nil {
+			chainID, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
+		}
+		utils.LavaFormatWarning("a caller's lava-extension names an extension no node offers, serving without it", nil,
+			utils.LogAttr("extension", extension),
+			utils.LogAttr("chainID", chainID),
+			utils.LogAttr("apiInterface", apiInterface),
+			utils.LogAttr("responseHeader", common.EXTENSION_UNAVAILABLE_HEADER_NAME),
+			utils.LogAttr("GUID", ctx),
+		)
+	}
+}
+
+// countUnavailableExtensions counts this request against each extension it asked for that no node
+// offers. Unlike the WARN it fires on every request, so operators can see how much traffic
+// depends on an extension the deployment lacks, not just that some did once.
+func (rpcss *RPCSmartRouterServer) countUnavailableExtensions(unavailable []string) {
+	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	for _, extension := range unavailable {
+		rpcss.smartRouterEndpointMetrics.RecordExtensionUnavailable(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, extension)
 	}
 }
 
@@ -5488,7 +5832,23 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 
 		// add the relay retried count: total attempts minus 1 (the initial attempt is not a retry)
 		successResults, nodeErrorResults, protocolErrorResults := relayProcessor.GetResultsData()
-		totalAttempts := uint64(len(successResults)) + uint64(len(nodeErrorResults)) + protocolErrors
+
+		// The three lists hold only the attempts whose result was recorded before this reply was
+		// built, and a hedge's loser is not among them (MAG-3762). An attempt outlives the window
+		// that dispatches the hedge, so the loser is still running when the hedge wins. The router
+		// then cancels it, and the loser posts its result to a channel that nothing reads again.
+		// Counting results alone reported a two-attempt hedge race as zero retries. Lava-Retries
+		// counts every attempt the router sent (MAG-1818), so the attempts still out count too.
+		dispatched := relayProcessor.GetUsedProviders().DispatchedProviders()
+		unfinished := attemptsWithoutResult(dispatched, successResults, nodeErrorResults, protocolErrorResults)
+
+		// The caller read its protocol-error count before this snapshot. On a failure path a
+		// reader still draining the responses can record one more in between. That attempt is in
+		// protocolErrorResults, so attemptsWithoutResult no longer counts it, and the caller's
+		// count does not either. Counting from the same snapshot keeps it counted once. The list
+		// only grows, so the larger of the two is the snapshot's own count.
+		protocolErrorCount := max(protocolErrors, uint64(len(protocolErrorResults)))
+		totalAttempts := uint64(len(successResults)) + uint64(len(nodeErrorResults)) + protocolErrorCount + uint64(len(unfinished))
 
 		// Stateful selection fans out to all top providers in a single batch and
 		// never retries (relaypolicy.Decide returns Stop for Stateful). Failures
@@ -5513,28 +5873,35 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				go rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
 			}
 
-			// When there are retries, show all attempted providers in
-			// chronological-ish order (failures before the resolver, the resolver
-			// last). "Cached" stays in the list so the entry count matches
-			// Lava-Retries — without it, retries=N and a single provider name
-			// disagree on how many actors participated (MAG-1653 Bug #2).
+			// When there are retries, show every attempted provider in the order
+			// the router asked them, the resolver last. "Cached" stays in the
+			// list so the entry count matches Lava-Retries — without it,
+			// retries=N and a single provider name disagree on how many actors
+			// participated (MAG-1653 Bug #2).
 			//
-			// Ordering rule: walk protocol errors → node errors → successes,
-			// skipping any entry whose address matches the resolver, then
-			// append the resolver (`providerAddress`, which is "Cached" when
-			// relayResult.GetProvider() was empty). The skip-then-append is
-			// load-bearing: dedup alone preserves first-seen position, so if
-			// the resolver happened to be in successResults[0] (e.g. it
-			// completed before the loser was even recorded), the final
-			// addProvider(providerAddress) would be a no-op and the chain
-			// tail would be a *loser*, violating "last entry == response
-			// source" (MAG-1871). Walking slices makes the value
-			// deterministic across runs; the explicit final append makes
-			// the contract structurally true.
+			// Ordering rule: walk the dispatch history, then protocol errors →
+			// node errors → successes, skipping the resolver, then append the
+			// resolver (`providerAddress`, which is "Cached" when
+			// relayResult.GetProvider() was empty). The history lists the
+			// batches in the order they went out, and a batch that reaches this
+			// list holds one session (a stateful fan-out never reports retries,
+			// and cross-validation has its own headers), so the list is
+			// chronological whether an attempt errored, answered or is still out.
+			// Walking the results by kind instead named every protocol error
+			// before every node error, whatever order they were asked in, and
+			// left an attempt still out with no true place (MAG-3762). On a live
+			// request every result's provider is in the history, so the result
+			// lists only add a provider the history does not hold. The
+			// skip-then-append is load-bearing: dedup alone preserves first-seen
+			// position, so if the resolver went out first (a hedge overtook it
+			// and it answered anyway), the chain tail would be a *loser*,
+			// violating "last entry == response source" (MAG-1871). Walking
+			// slices makes the value deterministic across runs; the explicit
+			// final append makes the contract structurally true.
 			seen := make(map[string]struct{})
 			allProvidersList := make([]string, 0)
-			addProvider := func(addr string) {
-				if addr == "" {
+			addEarlierAttempt := func(addr string) {
+				if addr == "" || addr == providerAddress {
 					return
 				}
 				if _, ok := seen[addr]; ok {
@@ -5543,25 +5910,19 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				seen[addr] = struct{}{}
 				allProvidersList = append(allProvidersList, addr)
 			}
+			for _, addr := range dispatched {
+				addEarlierAttempt(addr)
+			}
 			for _, r := range protocolErrorResults {
-				if r.ProviderInfo.ProviderAddress == providerAddress {
-					continue
-				}
-				addProvider(r.ProviderInfo.ProviderAddress)
+				addEarlierAttempt(r.ProviderInfo.ProviderAddress)
 			}
 			for _, r := range nodeErrorResults {
-				if r.ProviderInfo.ProviderAddress == providerAddress {
-					continue
-				}
-				addProvider(r.ProviderInfo.ProviderAddress)
+				addEarlierAttempt(r.ProviderInfo.ProviderAddress)
 			}
 			for _, r := range successResults {
-				if r.ProviderInfo.ProviderAddress == providerAddress {
-					continue
-				}
-				addProvider(r.ProviderInfo.ProviderAddress)
+				addEarlierAttempt(r.ProviderInfo.ProviderAddress)
 			}
-			addProvider(providerAddress) // resolver — "Cached" or the winning real provider, always last
+			allProvidersList = append(allProvidersList, providerAddress) // resolver — "Cached" or the winning real provider, always last
 
 			if len(allProvidersList) > 0 {
 				allProvidersString := strings.Join(allProvidersList, ",")
@@ -5594,6 +5955,17 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	// The cross-validation info is included in the error message and metrics have been emitted.
 	if relayResult == nil {
 		return pendingProviders
+	}
+
+	// The caller asked for an extension no node here offers, so the request was served without it
+	// (MAG-3935). Say so, or a non-archive answer to an archive request reads as a real one.
+	if unavailable := protocolMessage.GetUnavailableExtensions(); len(unavailable) > 0 {
+		metadataReply = append(metadataReply, pairingtypes.Metadata{
+			Name:  common.EXTENSION_UNAVAILABLE_HEADER_NAME,
+			Value: strings.Join(unavailable, ","),
+		})
+		rpcss.warnUnavailableExtensions(ctx, unavailable)
+		rpcss.countUnavailableExtensions(unavailable)
 	}
 
 	// Add selection stats header if feature is enabled
@@ -5675,6 +6047,23 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			pairingtypes.Metadata{
 				Name:  common.LAVA_HEDGE_TRIGGERED_HEADER,
 				Value: "true",
+			})
+	}
+
+	// MAG-3600: a caller who sent lava-relay-timeout is told the window the router actually used —
+	// the value as sent, the bound it was held to, or the router's own window when the value was
+	// ignored (not a duration, or not positive). Read through GetRelayTimeout, the function the
+	// relay itself used, so the two cannot disagree. Emitted whenever the directive was sent, so an
+	// absent header means only "not sent" or "router predates this header".
+	if _, sent := protocolMessage.GetDirectiveHeaders()[common.RELAY_TIMEOUT_HEADER_NAME]; sent {
+		var averageBlockTime time.Duration
+		if rpcss.chainParser != nil {
+			_, averageBlockTime, _, _ = rpcss.chainParser.ChainBlockStats()
+		}
+		metadataReply = append(metadataReply,
+			pairingtypes.Metadata{
+				Name:  common.RELAY_TIMEOUT_APPLIED_HEADER_NAME,
+				Value: chainlib.GetRelayTimeout(protocolMessage, averageBlockTime).String(),
 			})
 	}
 
@@ -5823,6 +6212,12 @@ func dedupSortedStrings(s []string) []string {
 	return out
 }
 
+// updateProtocolMessageIfNeededWithNewEarliestData rebuilds the protocol message once a cache
+// reply has named the height of a requested hash, so the archive rule can be applied to it. The
+// branch cannot open today: earliestBlockHashRequested is folded from the reply's
+// BlocksHashesToHeights, and the router writes no block-hash→height mappings (MAG-3807), so it
+// is NOT_APPLICABLE on every request. Kept for MAG-3892, which needs the rebuild once a writer
+// exists.
 func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestData(
 	ctx context.Context,
 	relayState *relaycore.RelayState,
@@ -5831,8 +6226,8 @@ func (rpcss *RPCSmartRouterServer) updateProtocolMessageIfNeededWithNewEarliestD
 	addon string,
 ) chainlib.ProtocolMessage {
 	if !relayState.GetIsEarliestUsed() && earliestBlockHashRequested != spectypes.NOT_APPLICABLE {
-		// We got a earliest block data from cache, we need to create a new protocol message with the new earliest block hash parsed
-		// and update the extension rules with the new earliest block data as it might be archive.
+		// A cache reply carried a height for a requested hash: rebuild the protocol message with
+		// the earliest block parsed, and update the extension rules with it as it might be archive.
 		// Setting earliest used to attempt this only once.
 		relayState.SetIsEarliestUsed()
 		relayRequestData := protocolMessage.RelayPrivateData()
@@ -5880,8 +6275,8 @@ func (rpcss *RPCSmartRouterServer) directRelayTransport(directConnection lavases
 	case lavasession.DirectRPCProtocolGRPC:
 		return common.TransportGRPC
 	case lavasession.DirectRPCProtocolHTTP, lavasession.DirectRPCProtocolHTTPS:
-		// HTTP could be JSON-RPC or REST — use the endpoint's API interface
-		if rpcss.listenEndpoint.ApiInterface == "rest" {
+		// HTTP could be JSON-RPC, REST or GraphQL — use the endpoint's API interface
+		if common.ApiInterfaceToTransport(rpcss.listenEndpoint.ApiInterface) == common.TransportREST {
 			return common.TransportREST
 		}
 	}
@@ -5922,6 +6317,14 @@ func isRateLimitedRelayOutcome(err error, relayResult *common.RelayResult) bool 
 		return true
 	}
 	return err != nil && errors.Is(err, common.StatusCodeError429)
+}
+
+// isDataScopeRelayOutcome reports an answer that the endpoint does not hold the requested data
+// (SubCategoryDataScope: block not found, pruned state, unknown transaction). Only answers the
+// availability gate already keeps off the failure path qualify, so a 5xx stays a failure.
+func isDataScopeRelayOutcome(err error, relayResult *common.RelayResult) bool {
+	return relayResult != nil && relayResult.IsNodeError && relayResult.IsDataScope &&
+		!shouldFailSessionForResult(err, relayResult)
 }
 
 // httpStatusRelayError is the error relayInnerDirect fails a relay with when the upstream

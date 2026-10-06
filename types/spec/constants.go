@@ -14,6 +14,7 @@ const (
 	APIInterfaceTendermintRPC = "tendermintrpc"
 	APIInterfaceRest          = "rest"
 	APIInterfaceGrpc          = "grpc"
+	APIInterfaceGraphQL       = "graphql"
 
 	ParserArgLatest = "latest"
 

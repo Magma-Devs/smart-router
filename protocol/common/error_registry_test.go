@@ -1203,3 +1203,15 @@ func checkShadow(t *testing.T, i, j int, a, b errorMapping) {
 			i, aCode.code, a.LavaError.Name, j, bCode.code, b.LavaError.Name)
 	}
 }
+
+// TestSuiNetworksAllMapToSuiFamily guards the gap this test was added for: sui.json declares
+// SUI (mainnet), SUIT (testnet) and SUID (devnet), but only the testnet was registered, so
+// mainnet and devnet traffic fell through to ChainFamilyUnknown and skipped every family-scoped
+// matcher — on the network customers actually run.
+func TestSuiNetworksAllMapToSuiFamily(t *testing.T) {
+	for _, chainID := range []string{"SUI", "SUIT", "SUID"} {
+		family, registered := GetChainFamily(chainID)
+		require.True(t, registered, "chain %s is not registered in chainFamilyMap", chainID)
+		require.Equal(t, ChainFamilySui, family, "chain %s should map to the Sui family", chainID)
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -151,9 +152,7 @@ func forwardsClientBodyHeader(apiCollection *spectypes.ApiCollection, headerName
 	if apiCollection.CollectionData.ApiInterface != spectypes.APIInterfaceRest {
 		return false
 	}
-	switch apiCollection.CollectionData.Type {
-	case http.MethodPost, http.MethodPut, http.MethodPatch:
-	default:
+	if !restMethodCarriesBody(apiCollection.CollectionData.Type) {
 		return false
 	}
 	_, ok := clientBodyHeaders[headerName]
@@ -533,6 +532,9 @@ func (bcp *BaseChainParser) ExtensionParsing(addon string, parsedMessageArg *bas
 		}
 		parsedMessageArg.OverrideExtensions(extensionInfo.AdditionalExtensions, &bcp.extensionParser)
 	}
+	if extensionInfo.RouterExtensions != nil {
+		parsedMessageArg.addRouterExtensions(extensionInfo.RouterExtensions, &bcp.extensionParser)
+	}
 }
 
 func (bcp *BaseChainParser) extensionParsingInner(addon string, parsedMessageArg *baseChainMessageContainer, latestBlock uint64) {
@@ -615,6 +617,62 @@ func (apip *BaseChainParser) ApiHasStatefulCategory(name string) bool {
 		}
 	}
 	return false
+}
+
+// ApiNameDefined reports whether the spec serves an enabled API with exactly this name on this parser's
+// interface, in any collection (add-ons included). It compares the API's own name, which is what a
+// request resolves to (GetApi().GetName()); a REST key is a regex built from the path template, so the key
+// would not match the name an operator writes. Used by the cross-validation startup guard to reject a
+// per-method policy that no request can ever select by that name.
+//
+// It answers by name alone: ConnectionType and InternalPath, which a request's lookup also keys on, are
+// not consulted, so a defined name is necessary for a policy to apply and not proof that it will. Two
+// REST templates that differ only in a placeholder's name compile to one regex and share one slot in
+// serverApis, so only the last one loaded is defined; ApiNamesLike names the survivor.
+func (apip *BaseChainParser) ApiNameDefined(name string) bool {
+	if apip == nil {
+		return false
+	}
+	apip.rwLock.RLock()
+	defer apip.rwLock.RUnlock()
+	for _, apiCont := range apip.serverApis {
+		if apiCont.api != nil && apiCont.api.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ApiNamesLike returns, sorted, the names of the enabled APIs on this parser's interface that differ from
+// name only by letter case or by the spelling of a REST placeholder ({address_bytes} against
+// {address_string}), and are not name itself. It is the hint the cross-validation method guard gives an
+// operator whose policy names a method the spec serves under no such name: the operator copied the
+// name out of the spec, and this is the name a request actually resolves to. Like ApiNameDefined it
+// ignores ConnectionType and InternalPath.
+func (apip *BaseChainParser) ApiNamesLike(name string) []string {
+	if apip == nil {
+		return nil
+	}
+	shapeOf := func(apiName string) string {
+		return strings.ToLower(restPlaceholderRegex.ReplaceAllString(apiName, "{}"))
+	}
+	wanted := shapeOf(name)
+	apip.rwLock.RLock()
+	defer apip.rwLock.RUnlock()
+	seen := map[string]struct{}{}
+	var like []string
+	for _, apiCont := range apip.serverApis {
+		if apiCont.api == nil || apiCont.api.Name == name || shapeOf(apiCont.api.Name) != wanted {
+			continue
+		}
+		if _, dup := seen[apiCont.api.Name]; dup {
+			continue
+		}
+		seen[apiCont.api.Name] = struct{}{}
+		like = append(like, apiCont.api.Name)
+	}
+	sort.Strings(like)
+	return like
 }
 
 func (apip *BaseChainParser) isValidInternalPath(path string) bool {

@@ -1,6 +1,7 @@
 package chainlib
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -551,6 +552,10 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 						// only constructed by jsonRPC.go and tendermintRPC.go, both
 						// JSON-RPC-shaped. Mirrors lavanet/lava#2296.
 						responseData = buildUnsubscribeSuccessReply(msg)
+						if responseData == nil {
+							// A notification gets no reply (JSON-RPC 2.0 §4.1).
+							continue
+						}
 						utils.LavaFormatTrace("synthesized unsubscribe ack",
 							utils.LogAttr("GUID", webSocketCtx),
 							utils.LogAttr("dappID", dappID),
@@ -562,8 +567,17 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				continue
 			} else if IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_UNSUBSCRIBE_ALL) {
 				err := cwm.wsSubscriptionManager.UnsubscribeAll(webSocketCtx, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+				// The manager tears this client's subscriptions down itself and hands back no
+				// node frame, so the router answers, as the node would have (MAG-4064). A
+				// failed teardown is answered too, under the same id, so the client waiting
+				// on it unblocks. A notification gets no reply.
+				reply := buildUnsubscribeAllSuccessReply(msg)
 				if err != nil {
 					utils.LavaFormatWarning("error unsubscribing from all subscription", err, utils.LogAttr("GUID", webSocketCtx))
+					reply = buildUnsubscribeAllErrorReply(msg)
+				}
+				if reply != nil {
+					sendWS(webSocketMsgWithType{messageType: messageType, msg: reply})
 				}
 				continue
 			} else {
@@ -682,9 +696,73 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 // upstreams typically return `{}` here; we optimize for "client unblocks"
 // rather than exact upstream parity.
 func buildUnsubscribeSuccessReply(requestBytes []byte) []byte {
-	idRaw := "null"
-	if r := gjson.GetBytes(requestBytes, "id"); r.Exists() {
-		idRaw = r.Raw
+	return buildLocalSuccessReply(requestBytes, "true")
+}
+
+// buildUnsubscribeAllSuccessReply synthesizes the reply to an unsubscribe_all the
+// router satisfied locally. Only the Tendermint spec tags a method UNSUBSCRIBE_ALL,
+// and a Tendermint node answers it with an empty object, so result is `{}`.
+func buildUnsubscribeAllSuccessReply(requestBytes []byte) []byte {
+	return buildLocalSuccessReply(requestBytes, "{}")
+}
+
+// jsonRpcUnsubscribeAllFailedError answers an unsubscribe_all whose local teardown
+// failed. Its id is a placeholder: buildUnsubscribeAllErrorReply sets the caller's.
+var jsonRpcUnsubscribeAllFailedError = common.JsonRPCErrorMessage{
+	JsonRPC: "2.0",
+	Id:      1,
+	Error: common.JsonRPCError{
+		Code:    -32603,
+		Message: "Internal error",
+		Data:    "unsubscribe_all failed",
+	},
+}
+
+// buildUnsubscribeAllErrorReply builds the JSON-RPC error for an unsubscribe_all whose
+// teardown failed, carrying the caller's id so a client waiting on it unblocks.
+func buildUnsubscribeAllErrorReply(requestBytes []byte) []byte {
+	return buildLocalReply(requestBytes, func(request []byte) []byte {
+		reply, err := common.MarshalJsonRPCErrorWithRequestID(jsonRpcUnsubscribeAllFailedError, request)
+		if err != nil {
+			return nil
+		}
+		return reply
+	})
+}
+
+// buildLocalSuccessReply builds a JSON-RPC 2.0 success response carrying resultRaw,
+// with the request's id substituted as raw JSON to keep its exact type (§4.2).
+func buildLocalSuccessReply(requestBytes []byte, resultRaw string) []byte {
+	return buildLocalReply(requestBytes, func(request []byte) []byte {
+		return []byte(`{"jsonrpc":"2.0","id":` + gjson.GetBytes(request, "id").Raw + `,"result":` + resultRaw + `}`)
+	})
+}
+
+// buildLocalReply answers a request the router handled itself, calling reply for each
+// request object that has an id. One without an id is a notification and gets no reply
+// (JSON-RPC 2.0 §4.1), so for it this returns nil and the caller must send nothing. A
+// batch is answered with an array (§6), or nil when none of its members has an id. The
+// parser tags only a one-element batch as an unsubscribe: a longer one matches no
+// single method.
+func buildLocalReply(requestBytes []byte, reply func(request []byte) []byte) []byte {
+	request := gjson.ParseBytes(requestBytes)
+	if !request.IsArray() {
+		if !request.Get("id").Exists() {
+			return nil
+		}
+		return reply(requestBytes)
 	}
-	return []byte(`{"jsonrpc":"2.0","id":` + idRaw + `,"result":true}`)
+	var replies [][]byte
+	request.ForEach(func(_, member gjson.Result) bool {
+		if member.Get("id").Exists() {
+			if memberReply := reply([]byte(member.Raw)); memberReply != nil {
+				replies = append(replies, memberReply)
+			}
+		}
+		return true
+	})
+	if len(replies) == 0 {
+		return nil
+	}
+	return append(append([]byte{'['}, bytes.Join(replies, []byte{','})...), ']')
 }
