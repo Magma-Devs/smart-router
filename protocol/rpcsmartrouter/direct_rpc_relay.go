@@ -34,6 +34,12 @@ type DirectRPCRelaySender struct {
 	originalRequestData []byte             // Original request bytes (for batch support)
 	chainFamily         common.ChainFamily // Chain family for Tier 2 classification (-1 if unknown)
 	groupLabel          string             // Cross-validation group label of this provider (may be empty)
+	// replyHeaderDirectives is the reply-direction header directives of the relay's API
+	// interface, resolved by the server from the chain parser across every collection of
+	// the interface (ChainParser.ReplyHeaderDirectives). SendDirectRelay keeps these
+	// upstream headers, and the matched collection's own, in the reply; a sender built
+	// without them (tests) runs on the matched collection alone. MAG-3104.
+	replyHeaderDirectives []*spectypes.Header
 }
 
 // maxGRPCResponseSizeForBlockExtraction is the threshold above which gRPC block-height
@@ -476,15 +482,33 @@ func (d *DirectRPCRelaySender) SendDirectRelay(
 	chainMessage chainlib.ChainMessage,
 	attemptBudget time.Duration,
 ) (*common.RelayResult, error) {
-	// Branch based on API interface
 	apiCollection := chainMessage.GetApiCollection()
+	result, err := d.sendForInterface(ctx, chainMessage, apiCollection, attemptBudget)
+	if result != nil && result.Reply != nil {
+		// An upstream's headers reach the client only through this filter (MAG-3104). It
+		// runs here, once, for every transport and every arm of the senders, a gRPC error
+		// body returned as a result included; the senders hand it the raw set.
+		result.Reply.Metadata = filterUpstreamReplyMetadata(result.Reply.Metadata, d.replyHeaderDirectives, apiCollection.Headers)
+	}
+	return result, err
+}
 
+// sendForInterface dispatches to the sender for the API interface of the matched collection.
+func (d *DirectRPCRelaySender) sendForInterface(
+	ctx context.Context,
+	chainMessage chainlib.ChainMessage,
+	apiCollection *spectypes.ApiCollection,
+	attemptBudget time.Duration,
+) (*common.RelayResult, error) {
 	switch apiCollection.CollectionData.ApiInterface {
 	case "jsonrpc", "tendermintrpc":
 		return d.sendJSONRPCRelay(ctx, chainMessage, attemptBudget)
 
 	case "rest":
 		return d.sendRESTRelay(ctx, chainMessage, attemptBudget)
+
+	case "graphql":
+		return d.sendGraphQLRelay(ctx, chainMessage, attemptBudget)
 
 	case "grpc":
 		return d.sendGRPCRelay(ctx, chainMessage, attemptBudget)
@@ -801,8 +825,8 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		)
 	}
 
-	// Let the chain message parse domain-specific REST errors (e.g. Cosmos tx errors on HTTP 200),
-	// and say which 4xx are the caller's answer and which are a refused route.
+	// Let the chain message parse domain-specific REST errors (e.g. Cosmos tx errors on HTTP 200)
+	// and say whether the status is a success at all.
 	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
 	if hasError && errorMessage != "" {
 		utils.LavaFormatDebug("REST response contains error",
@@ -811,24 +835,20 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		)
 	}
 
-	// Proper error classification (don't treat all 4xx as node errors)
+	// The transport-level flag follows CheckResponseError, so this and the relay processor's
+	// node-error list cannot disagree: any status outside 2xx is a node error. Two carve-outs
+	// keep their old meaning: a 429 is capacity (the registry's rate-limit row and the hold-off
+	// own it, and the flag stays false so the availability gate reads the carve-out), and a 2xx
+	// carrying an application error in its body (a Cosmos tx_response.code) is a
+	// request/application error, not a node error at the transport level.
 	var isNodeError bool
 	switch {
-	case response.StatusCode >= 500:
-		isNodeError = true // Server error
 	case response.StatusCode == 429:
-		isNodeError = false // Rate limit (not node issue)
-	case response.StatusCode >= 400:
-		// A 4xx is the caller's answer, passed through — unless the message's classifier says the
-		// route was refused (any 405, or a 404 without a JSON body), in which case the endpoint
-		// never served the request. One rule, owned by CheckResponseError, so this flag and the
-		// relay processor's verdict cannot disagree: this flag is what gates the
-		// lava-identified-node-error header and the cache write.
-		isNodeError = hasError
-	default:
-		// A 2xx carrying an application error in its body (a Cosmos tx_response.code) is NOT a
-		// node error at the transport level; it is a request/application error.
 		isNodeError = false
+	case response.StatusCode == 0 || (response.StatusCode >= 200 && response.StatusCode < 300):
+		isNodeError = false
+	default:
+		isNodeError = hasError
 	}
 
 	// Convert response headers to metadata
@@ -859,6 +879,121 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 
 	utils.LavaFormatTrace("REST request completed",
 		utils.LogAttr("method", httpMethod),
+		utils.LogAttr("status", response.StatusCode),
+		utils.LogAttr("response_size", len(response.Body)),
+		utils.LogAttr("latency", latency),
+		utils.LogAttr("is_node_error", isNodeError),
+	)
+
+	return result, nil
+}
+
+// sendGraphQLRelay posts a GraphQL document to the endpoint's base URL.
+//
+// Every operation shares that one URL, so the body is the request: it is sent exactly as the
+// caller wrote it. Errors are classified on the REST transport, which GraphQL-over-HTTP shares
+// (see common.ApiInterfaceToTransport); what counts as a node error is decided by
+// GraphQLMessage.CheckResponseError, since GraphQL reports most failures inside a 200.
+func (d *DirectRPCRelaySender) sendGraphQLRelay(
+	ctx context.Context,
+	chainMessage chainlib.ChainMessage,
+	attemptBudget time.Duration,
+) (*common.RelayResult, error) {
+	nodeUrl := d.directConnection.GetNodeUrl()
+	requestCtx, cancel := nodeUrl.LowerContextTimeoutWithDuration(ctx, attemptBudget)
+	defer cancel()
+
+	rpcMessage := chainMessage.GetRPCMessage()
+	graphqlMessage, ok := rpcMessage.(*rpcInterfaceMessages.GraphQLMessage)
+	if !ok {
+		return nil, fmt.Errorf("expected GraphQLMessage for GraphQL API, got %T", rpcMessage)
+	}
+
+	httpDoer, ok := d.directConnection.(lavasession.HTTPDirectRPCDoer)
+	if !ok {
+		return nil, fmt.Errorf("connection doesn't support GraphQL (HTTP)")
+	}
+
+	httpParams := lavasession.HTTPRequestParams{
+		Method:      "POST",
+		URL:         nodeUrl.Url,
+		Body:        graphqlMessage.Msg,
+		Headers:     graphqlMessage.GetHeaders(), // Preserves duplicates, empty value = delete
+		ContentType: "application/json",
+	}
+
+	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendGraphQLRelay)
+	defer span.End()
+	tracing.RecordHTTPRequest(span, httpParams.Method, httpParams.URL)
+	httpParams.Headers = tracing.InjectHTTP(requestCtx, httpParams.Headers)
+
+	startTime := time.Now()
+	response, err := httpDoer.DoHTTPRequest(requestCtx, httpParams)
+	latency := time.Since(startTime)
+	tracing.RecordHTTPResponse(span, response)
+
+	if err != nil {
+		tracing.RecordError(span, err)
+		return nil, classifyAndWrap(err, d.chainFamily, common.TransportREST)
+	}
+
+	// Every GraphQL reply is a JSON document, errors included, so a 2xx body that does not
+	// parse is a truncated or corrupted reply: a transport failure, as on JSON-RPC.
+	if response.StatusCode >= 200 && response.StatusCode < 300 && len(response.Body) > 0 && !json.Valid(response.Body) {
+		utils.LavaFormatDebug("direct GraphQL response is not valid JSON",
+			utils.LogAttr("endpoint", d.endpointName),
+			utils.LogAttr("status_code", response.StatusCode),
+			utils.LogAttr("response_size", len(response.Body)),
+		)
+		return nil, classifyAndWrap(
+			fmt.Errorf("malformed GraphQL response: body is not valid JSON"),
+			d.chainFamily, common.TransportREST,
+		)
+	}
+
+	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
+	if hasError && errorMessage != "" {
+		utils.LavaFormatDebug("GraphQL response contains error",
+			utils.LogAttr("endpoint", d.endpointName),
+			utils.LogAttr("error", errorMessage),
+		)
+	}
+
+	// As on REST, a 429 is capacity rather than a node error at the transport level: the
+	// registry's rate-limit row and the hold-off own it. An in-body RESOURCE_EXHAUSTED stays a
+	// node error and reaches the same handling through IsRateLimited, as a JSON-RPC body's
+	// rate limit does.
+	isNodeError := hasError && response.StatusCode != 429
+
+	providerAddress := d.endpointName
+	if providerAddress == "" {
+		providerAddress = sanitizeEndpointURL(d.directConnection.GetURL())
+	}
+
+	result := &common.RelayResult{
+		Reply: &pairingtypes.RelayReply{
+			Data:        response.Body,
+			LatestBlock: extractBlockHeightFromJSONResponse(response.Body, chainMessage),
+			Metadata:    convertHTTPHeadersToMetadata(response.Headers),
+		},
+		Finalized:  true,
+		StatusCode: response.StatusCode,
+		ProviderInfo: common.ProviderInfo{
+			ProviderAddress: providerAddress,
+			ProviderGroup:   d.groupLabel,
+		},
+		IsNodeError: isNodeError,
+	}
+	if hasError {
+		// A GraphQL node error usually arrives inside a 200, so the status alone would leave
+		// the registry with nothing to go on: the message stands in for it (RESOURCE_EXHAUSTED
+		// classifies as a 429, a caller's error on a mutation as a 400).
+		classificationStatus := graphqlMessage.ClassificationStatus(response.Body, response.StatusCode)
+		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, classificationStatus, errorMessage)
+	}
+
+	utils.LavaFormatTrace("GraphQL request completed",
+		utils.LogAttr("method", chainMessage.GetApi().Name),
 		utils.LogAttr("status", response.StatusCode),
 		utils.LogAttr("response_size", len(response.Body)),
 		utils.LogAttr("latency", latency),
@@ -1106,7 +1241,10 @@ func looksLikeJSONOpening(data []byte) bool {
 	return false
 }
 
-// convertHTTPHeadersToMetadata converts http.Header to pairingtypes.Metadata
+// convertHTTPHeadersToMetadata turns an upstream's response headers (http.Header or gRPC
+// metadata, both map[string][]string) into reply metadata, one entry per name with the
+// first value. The set is raw: SendDirectRelay passes it through
+// filterUpstreamReplyMetadata before it leaves the sender (MAG-3104).
 func convertHTTPHeadersToMetadata(headers map[string][]string) []pairingtypes.Metadata {
 	metadata := make([]pairingtypes.Metadata, 0, len(headers))
 	for name, values := range headers {

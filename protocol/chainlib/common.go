@@ -18,7 +18,6 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	common "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -141,9 +140,12 @@ func extractDappIDFromFiberContext(c *fiber.Ctx) (dappID string) {
 func extractDappIDFromGrpcHeader(metadataValues metadata.MD) string {
 	dappId := generateNewDappID()
 	if values, ok := metadataValues[ProjectIDHeader]; ok && len(values) > 0 {
-		// Same hazard as the HTTP path: gRPC metadata strings can alias
-		// the receive buffer depending on the transport implementation.
-		// Clone before retaining past the handler return.
+		// Not the HTTP path's hazard: grpc-go decodes every metadata value into
+		// its own string (x/net's hpack decoder allocates, and a -bin value is
+		// base64-decoded into a fresh one), so incoming metadata never points
+		// into the transport's receive buffer. The clone is kept as a cheap
+		// guard against a transport that does not make that promise; nothing
+		// depends on it (MAG-3881).
 		dappId = strings.Clone(values[0])
 	}
 	return dappId
@@ -155,23 +157,13 @@ func generateNewDappID() string {
 	return "DefaultDappID"
 }
 
-func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled fiber.Handler, isMetricEnabled bool) fiber.Handler {
+func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled fiber.Handler) fiber.Handler {
 	webSocketCallback := callbackToBeCalled
 	handler := func(c *fiber.Ctx) error {
 		// Extract project id from headers and stash it in the request-scoped
 		// fiber context for the websocket handler to read after the upgrade.
 		dappID := extractDappIDFromFiberContext(c)
 		c.Locals(ProjectIDHeader, dappID)
-
-		if isMetricEnabled {
-			c.Locals(metrics.RefererHeaderKey, c.Get(metrics.RefererHeaderKey, ""))
-			c.Locals(metrics.UserAgentHeaderKey, c.Get(metrics.UserAgentHeaderKey, ""))
-			// Clone Origin: it crosses the request boundary into the
-			// websocket handler and from there into RelayMetrics, which the
-			// OTel sink serializes asynchronously after fasthttp has
-			// recycled the request buffer.
-			c.Locals(metrics.OriginHeaderKey, strings.Clone(c.Get(metrics.OriginHeaderKey, "")))
-		}
 		return webSocketCallback(c) // uses external dappID
 	}
 	return handler
@@ -480,9 +472,31 @@ func GetListenerWithRetryGrpc(protocol, addr string) net.Listener {
 	}
 }
 
+// detachedReqHeaders returns the request's headers with every name and value copied out of
+// fasthttp's per-request buffers. fiber's GetReqHeaders hands them back zero-copy (no Immutable
+// config), and fasthttp reuses a header slot's buffer for the next request on the connection, so a
+// header string kept past the handler changes under whoever kept it: a pinned provider name held as
+// a metric label, a request id read by a goroutine after the reply, an Origin serialized by the usage
+// sink (MAG-3881). Every consumer of the map below this point gets owned strings. It builds the map
+// the way GetReqHeaders does, copying each string as it goes, rather than copying GetReqHeaders'
+// map, which would build it twice.
+//
+// That covers the tracing ids utils.ExtractWantedHeadersFromCachedMap stamps from this map on the
+// request's context, which outlives the handler.
+func detachedReqHeaders(c *fiber.Ctx) map[string][]string {
+	headers := make(map[string][]string)
+	c.Request().Header.VisitAll(func(name, value []byte) {
+		key := string(name)
+		headers[key] = append(headers[key], string(value))
+	})
+	return headers
+}
+
 // GetHeaderFromCachedMap extracts a header value from a cached headers map.
 // Returns the first value if present, or the defaultValue if not found.
 // This avoids repeated calls to fiberCtx.Get() which has overhead.
+// The value is returned as stored, so a caller that keeps it needs a map of owned strings,
+// which is what the listeners pass (detachedReqHeaders).
 func GetHeaderFromCachedMap(headers map[string][]string, key string, defaultValue string) string {
 	if values, ok := headers[key]; ok && len(values) > 0 {
 		return values[0]
@@ -578,11 +592,25 @@ func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRe
 //
 // It is NOT how long an attempt may live — that is the processing budget, see
 // GetTimeoutForProcessing and sendRelayToDirectEndpoints.
+//
+// A caller's lava-relay-timeout replaces the computed window only once it has been bounded
+// (common.BoundCallerRelayTimeout), and a bounded value is always positive. The window feeds
+// time.NewTicker, and the processing budget is never shorter than it, so this is the one place both
+// hazards of an unchecked header are closed for every consumer of the window (MAG-3600).
 func GetRelayTimeout(chainMessage ChainMessageForSend, averageBlockTime time.Duration) time.Duration {
-	if chainMessage.TimeoutOverride() != 0 {
-		return chainMessage.TimeoutOverride()
+	ownWindow := routerRelayTimeout(chainMessage, averageBlockTime)
+	if override := chainMessage.TimeoutOverride(); override != 0 {
+		if window, ok := common.BoundCallerRelayTimeout(override, ownWindow, GetTimeoutInfo(chainMessage)); ok {
+			return window
+		}
 	}
-	// Calculate extra RelayTimeout
+	return ownWindow
+}
+
+// routerRelayTimeout is the window the router computes for a message by itself: the spec's
+// timeout_ms, or its compute units at --min-relay-timeout at least, plus twice the block time for a
+// hanging call.
+func routerRelayTimeout(chainMessage ChainMessageForSend, averageBlockTime time.Duration) time.Duration {
 	extraRelayTimeout := time.Duration(0)
 	if IsHangingApi(chainMessage) {
 		extraRelayTimeout = averageBlockTime * 2

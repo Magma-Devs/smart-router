@@ -3,6 +3,7 @@
 package rpcclient
 
 import (
+	"errors"
 	"reflect"
 	"sync"
 	"testing"
@@ -240,4 +241,67 @@ func TestClientSubscription_NilReceiverIsSafe(t *testing.T) {
 		sub.Unsubscribe()
 		sub.Unsubscribe() // idempotent, as on a real subscription
 	}, "Unsubscribe() must tolerate a nil receiver")
+}
+
+// MAG-4063: on shutdown the upstream connection goes down while the subscription manager
+// unsubscribes. The dispatcher's close fills quit with the connection error, so Unsubscribe
+// skips its own signal and closes err, and the forwarding loop then ends on the connection
+// error. It used to send that error on the closed channel and panic the router.
+func TestClientSubscription_UnsubscribeAfterConnectionClose(t *testing.T) {
+	client := &Client{idgen: func() ID { return ID("test-id") }}
+	sub := newClientSubscription(client, "test", reflect.ValueOf(make(chan interface{}, 1)))
+
+	sub.close(errors.New("connection closed")) // the dispatcher, as the socket goes down
+	sub.Unsubscribe()                          // the subscription manager, at shutdown
+
+	require.NotPanics(t, sub.run, "the forwarding loop must not send on the error channel Unsubscribe closed")
+
+	_, ok := <-sub.Err()
+	require.False(t, ok, "Err must stay closed after Unsubscribe")
+}
+
+// A connection error still reaches the reader of Err when nobody unsubscribed.
+func TestClientSubscription_ConnectionCloseDeliversError(t *testing.T) {
+	client := &Client{idgen: func() ID { return ID("test-id") }}
+	sub := newClientSubscription(client, "test", reflect.ValueOf(make(chan interface{}, 1)))
+	connErr := errors.New("connection closed")
+
+	sub.close(connErr)
+	sub.run()
+
+	select {
+	case err, ok := <-sub.Err():
+		require.True(t, ok, "Err must not be closed before Unsubscribe")
+		require.Equal(t, connErr, err)
+	case <-time.After(time.Second):
+		t.Fatal("the connection error never reached Err")
+	}
+}
+
+// The three shutdown calls in every order the scheduler picks. Run with -race.
+func TestClientSubscription_ConcurrentCloseUnsubscribeRun(t *testing.T) {
+	client := &Client{idgen: func() ID { return ID("test-id") }}
+	for i := 0; i < 500; i++ {
+		sub := newClientSubscription(client, "test", reflect.ValueOf(make(chan interface{}, 1)))
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() { defer wg.Done(); sub.run() }()
+		go func() { defer wg.Done(); sub.close(errors.New("connection closed")) }()
+		go func() { defer wg.Done(); sub.Unsubscribe() }()
+
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: run, close and Unsubscribe did not all return", i)
+		}
+		// run may have handed over the connection error before Unsubscribe closed the
+		// channel; a reader then gets that one value and then the close.
+		values := 0
+		for range sub.Err() {
+			values++
+		}
+		require.LessOrEqual(t, values, 1, "iteration %d: at most the one connection error before the close", i)
+	}
 }

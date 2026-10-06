@@ -18,7 +18,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
@@ -41,6 +40,11 @@ type MockRelayProcessorForHeaders struct {
 	protocolErrors                  []relaycore.RelayError
 	statefulRelayTargets            []string
 	crossValidationQueriedProviders []string
+	// usedProviders is what the request dispatched. The header counts and names the attempts in
+	// it (MAG-3762), and a real request's history holds the provider of every result it recorded,
+	// so a test that records results must say what went out. dispatchedTo and dispatchedTogether
+	// build it; a cache hit that dispatched nothing sets an empty one.
+	usedProviders *lavasession.UsedProviders
 }
 
 func (m *MockRelayProcessorForHeaders) GetCrossValidationParams() *common.CrossValidationParams {
@@ -64,6 +68,14 @@ func (m *MockRelayProcessorForHeaders) GetCrossValidationQueriedProviders() []st
 }
 
 func (m *MockRelayProcessorForHeaders) GetUsedProviders() *lavasession.UsedProviders {
+	if m.usedProviders != nil {
+		return m.usedProviders
+	}
+	// Answering with an empty history here is what let every header test pass with the attempt
+	// count's new term removed: results with nothing dispatched leave that term nothing to count.
+	if len(m.successResults)+len(m.nodeErrors)+len(m.protocolErrors) > 0 {
+		panic("MockRelayProcessorForHeaders: results recorded but usedProviders unset; set the dispatch history the request would have")
+	}
 	return lavasession.NewUsedProviders(nil)
 }
 
@@ -460,7 +472,8 @@ func TestAppendHeadersToRelayResult_PendingProvidersOnEarlyExit(t *testing.T) {
 func TestAppendHeadersToRelayResult_ExhaustedTransportErrors(t *testing.T) {
 	ctx := context.Background()
 	relayProcessor := &MockRelayProcessorForHeaders{
-		selection: relaycore.Stateless,
+		selection:     relaycore.Stateless,
+		usedProviders: dispatchedTo("lava@provider1", "lava@provider2", "lava@provider3"),
 		protocolErrors: []relaycore.RelayError{
 			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
 			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
@@ -737,7 +750,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
 		require.NoError(t, smErr)
 		require.Equal(t, relaycore.CrossValidation, sm.GetSelection(), "caller CV headers must enable cross-validation")
-		rp := relaycore.NewRelayProcessor(ctx, sm.GetCrossValidationParams(), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, sm)
+		rp := relaycore.NewRelayProcessor(ctx, sm.GetCrossValidationParams(), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, sm)
 		rp.SetCrossValidationQueriedProviders([]string{"p1", "p2", "p3"})
 		pushSuccess(rp, "p1", "g1", consensusBody)
 		pushSuccess(rp, "p2", "g2", consensusBody)
@@ -1012,6 +1025,7 @@ func TestRetryCountHeader(t *testing.T) {
 	t.Run("single node error no success - no retry header", func(t *testing.T) {
 		// Scenario: unsupported method like "seth_blockNumber" — 1 attempt, 0 retries
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders:  dispatchedTo("lava@provider1"),
 			successResults: []common.RelayResult{},
 			nodeErrors: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
@@ -1035,6 +1049,7 @@ func TestRetryCountHeader(t *testing.T) {
 	t.Run("one node error then success - retry header is 1", func(t *testing.T) {
 		// Scenario: first provider returned node error, second succeeded — 1 retry
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders: dispatchedTo("lava@provider1", "lava@provider2"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
 			},
@@ -1060,6 +1075,7 @@ func TestRetryCountHeader(t *testing.T) {
 
 	t.Run("two node errors then success - retry header is 2", func(t *testing.T) {
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders: dispatchedTo("lava@provider1", "lava@provider2", "lava@provider3"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider3"}},
 			},
@@ -1086,8 +1102,12 @@ func TestRetryCountHeader(t *testing.T) {
 
 	t.Run("single protocol error no success - no retry header", func(t *testing.T) {
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders:  dispatchedTo("lava@provider1"),
 			successResults: []common.RelayResult{},
 			nodeErrors:     []common.RelayResult{},
+			protocolErrors: []relaycore.RelayError{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+			},
 		}
 
 		relayResult := &common.RelayResult{
@@ -1106,10 +1126,14 @@ func TestRetryCountHeader(t *testing.T) {
 
 	t.Run("protocol error then success - retry header is 1", func(t *testing.T) {
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders: dispatchedTo("lava@provider1", "lava@provider2"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
 			},
 			nodeErrors: []common.RelayResult{},
+			protocolErrors: []relaycore.RelayError{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+			},
 		}
 
 		relayResult := &common.RelayResult{
@@ -1130,12 +1154,16 @@ func TestRetryCountHeader(t *testing.T) {
 	t.Run("mixed errors then success - retry header counts all retries", func(t *testing.T) {
 		// 1 protocol error + 2 node errors + 1 success = 4 attempts, 3 retries
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders: dispatchedTo("lava@provider1", "lava@provider2", "lava@provider3", "lava@provider4"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider4"}},
 			},
 			nodeErrors: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider3"}},
+			},
+			protocolErrors: []relaycore.RelayError{
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
 			},
 		}
 
@@ -1156,6 +1184,7 @@ func TestRetryCountHeader(t *testing.T) {
 
 	t.Run("no errors no retries - no retry header", func(t *testing.T) {
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders: dispatchedTo("lava@provider1"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
 			},
@@ -1179,6 +1208,7 @@ func TestRetryCountHeader(t *testing.T) {
 	t.Run("two node errors no success - retry header is 1", func(t *testing.T) {
 		// 2 node errors, 0 success — 2 attempts, 1 retry
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders:  dispatchedTo("lava@provider1", "lava@provider2"),
 			successResults: []common.RelayResult{},
 			nodeErrors: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
@@ -1224,9 +1254,12 @@ func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
 	}
 
 	t.Run("stateful fan-out with one provider 503 - absorbs failure, retries=0", func(t *testing.T) {
-		// Mirrors the production repro: P1 503 + P2 success in the same fan-out.
+		// Mirrors the production repro: P1 503 + P2 success in the same fan-out. P3 had not
+		// answered when the reply was built, so it is an attempt without a result, which the
+		// absorption must swallow too (MAG-3762).
 		relayProcessor := &MockRelayProcessorForHeaders{
-			selection: relaycore.Stateful,
+			selection:     relaycore.Stateful,
+			usedProviders: dispatchedTogether("lava@simprovider1", "lava@simprovider2", "lava@simprovider3"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider2"}},
 			},
@@ -1264,7 +1297,8 @@ func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
 		// Acceptance criterion 2: no regression for the all-healthy fan-out case.
 		// Three successes in one batch must not produce any retry header.
 		relayProcessor := &MockRelayProcessorForHeaders{
-			selection: relaycore.Stateful,
+			selection:     relaycore.Stateful,
+			usedProviders: dispatchedTogether("lava@simprovider1", "lava@simprovider2", "lava@simprovider3"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider1"}},
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider2"}},
@@ -1295,7 +1329,8 @@ func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
 		// guard a future change collapsing the Stateless branch into Stateful's
 		// would silently zero out the counter for the most common path.
 		relayProcessor := &MockRelayProcessorForHeaders{
-			selection: relaycore.Stateless,
+			selection:     relaycore.Stateless,
+			usedProviders: dispatchedTo("lava@provider1", "lava@provider2"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
 			},
@@ -1344,8 +1379,9 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 		}
 	}
 
-	newProcessor := func() *MockRelayProcessorForHeaders {
+	newProcessor := func(usedProviders *lavasession.UsedProviders) *MockRelayProcessorForHeaders {
 		return &MockRelayProcessorForHeaders{
+			usedProviders: usedProviders,
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
 			},
@@ -1357,13 +1393,20 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 		rpcSmartRouterServer := &RPCSmartRouterServer{}
 		analytics := &metrics.RelayMetrics{HedgeCount: 1}
 
-		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(), &MockProtocolMessage{
+		// The ticker hedged to provider2, and provider1 answered while the hedge was still out.
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(dispatchedTo("lava@provider1", "lava@provider2")), &MockProtocolMessage{
 			api: &spectypes.Api{Name: "eth_blockNumber"},
 		}, "eth_blockNumber", analytics, true)
 
 		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.LAVA_HEDGE_TRIGGERED_HEADER)
 		require.NotNil(t, hedgeHeader, "hedge header must be set when HedgeCount > 0")
 		require.Equal(t, "true", hedgeHeader.Value)
+		// Independent, not exclusive: the hedge was an attempt the router sent, so the same reply
+		// reports it as a retry (MAG-1818). A reply saying a hedge fired and nothing was retried
+		// is MAG-3723.
+		retryHeader := findHeader(relayResult.Reply.Metadata, common.RETRY_COUNT_HEADER_NAME)
+		require.NotNil(t, retryHeader, "a hedge that went out is a retry")
+		require.Equal(t, "1", retryHeader.Value)
 	})
 
 	t.Run("hedge count zero - header absent", func(t *testing.T) {
@@ -1371,7 +1414,7 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 		rpcSmartRouterServer := &RPCSmartRouterServer{}
 		analytics := &metrics.RelayMetrics{HedgeCount: 0}
 
-		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(), &MockProtocolMessage{
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(dispatchedTo("lava@provider1")), &MockProtocolMessage{
 			api: &spectypes.Api{Name: "eth_blockNumber"},
 		}, "eth_blockNumber", analytics, true)
 
@@ -1383,7 +1426,7 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 		relayResult := newRelayResult()
 		rpcSmartRouterServer := &RPCSmartRouterServer{}
 
-		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(), &MockProtocolMessage{
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(dispatchedTo("lava@provider1")), &MockProtocolMessage{
 			api: &spectypes.Api{Name: "eth_blockNumber"},
 		}, "eth_blockNumber", nil, true)
 
@@ -1411,6 +1454,7 @@ func TestCacheServedResponseHeaders(t *testing.T) {
 
 	t.Run("cache hit with no retries - single Cached address, no retry header", func(t *testing.T) {
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders: dispatchedTo(), // the cache answered before anything went out
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: ""}}, // cache result has no provider
 			},
@@ -1438,6 +1482,7 @@ func TestCacheServedResponseHeaders(t *testing.T) {
 	t.Run("cache hit after two protocol errors - matches MAG-1653 reproduction", func(t *testing.T) {
 		// 2 P1 503s + 1 cache hit = 3 attempts, 2 retries.
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders: dispatchedTo("lava@simprovider1", "lava@simprovider1"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: ""}}, // cache result
 			},
@@ -1507,8 +1552,10 @@ func TestResolverAlwaysLastInProviderHeader(t *testing.T) {
 		// and the trailing addProvider(resolver) was a no-op, yielding
 		// "simprovider2,simprovider3" — winner not last, contract broken.
 		// After the fix, the resolver is skipped during iteration and
-		// appended explicitly at the end.
+		// appended explicitly at the end. simprovider2 also went out first, so the
+		// dispatch history puts the resolver first as well.
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders: dispatchedTo("simprovider2", "simprovider3"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider2"}},
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider3"}},
@@ -1539,6 +1586,7 @@ func TestResolverAlwaysLastInProviderHeader(t *testing.T) {
 		// Without the fix the dedup keeps the resolver in the nodeErrors
 		// position; the final addProvider is a no-op.
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders: dispatchedTo("simprovider1", "simprovider2", "simprovider1"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider1"}},
 			},
@@ -1572,6 +1620,7 @@ func TestResolverAlwaysLastInProviderHeader(t *testing.T) {
 		// "stickiness fails over to peer" scenario per the simulator's
 		// down-mode semantics (down → HTTP 503 → protocolErrors).
 		relayProcessor := &MockRelayProcessorForHeaders{
+			usedProviders: dispatchedTo("simprovider3", "simprovider2"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: "simprovider2"}},
 			},
@@ -1608,6 +1657,8 @@ func TestStatefulRelayTargetsHeader(t *testing.T) {
 		// Create a mock relay processor with stateful relay targets
 		relayProcessor := &MockRelayProcessorForHeaders{
 			crossValidationParams: nil,
+			selection:             relaycore.Stateful,
+			usedProviders:         dispatchedTogether(providerAddress1, providerAddress2, providerAddress3),
 			statefulRelayTargets:  []string{providerAddress1, providerAddress2, providerAddress3},
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: providerAddress1}},
@@ -1678,6 +1729,8 @@ func TestStatefulRelayTargetsHeader(t *testing.T) {
 		// Create a mock relay processor with only one stateful relay target
 		relayProcessor := &MockRelayProcessorForHeaders{
 			crossValidationParams: nil,
+			selection:             relaycore.Stateful,
+			usedProviders:         dispatchedTogether(providerAddress1),
 			statefulRelayTargets:  []string{providerAddress1},
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: providerAddress1}},
@@ -1728,6 +1781,8 @@ func TestStatefulRelayTargetsHeader(t *testing.T) {
 		// Create a mock relay processor with empty stateful relay targets
 		relayProcessor := &MockRelayProcessorForHeaders{
 			crossValidationParams: nil,
+			selection:             relaycore.Stateful,
+			usedProviders:         dispatchedTogether(providerAddress1),
 			statefulRelayTargets:  []string{},
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: providerAddress1}},
@@ -1784,6 +1839,7 @@ func TestStatefulRelayTargetsHeader(t *testing.T) {
 		// Create a mock relay processor without stateful relay targets
 		relayProcessor := &MockRelayProcessorForHeaders{
 			crossValidationParams: nil,
+			usedProviders:         dispatchedTo(providerAddress1),
 			statefulRelayTargets:  nil, // No stateful targets
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: providerAddress1}},
@@ -1929,6 +1985,13 @@ type MockProtocolMessage struct {
 	// express a node error at ALL, which is why "one endpoint answered with an error while a sibling
 	// was still silent" — the write case that reached a customer as a success — had no test.
 	repliesAreNodeErrors bool
+	// unavailableExtensions is what GetUnavailableExtensions reports: extensions the caller asked
+	// for that no node offers (MAG-3935). Nil for an ordinary request.
+	unavailableExtensions []string
+}
+
+func (m *MockProtocolMessage) GetUnavailableExtensions() []string {
+	return m.unavailableExtensions
 }
 
 func (m *MockProtocolMessage) GetApi() *spectypes.Api {
@@ -3121,9 +3184,13 @@ func TestConsistencyPreValidationError_NotRetryable(t *testing.T) {
 type cvGuardStateMachine struct {
 	usedProviders *lavasession.UsedProviders
 	cvParams      *common.CrossValidationParams
+	// protocolMessage is what sendRelayToEndpoint reads off the processor before it gets sessions.
+	// The post-filter test below drives sendRelayToDirectEndpoints, which takes the message as an
+	// argument, so it leaves this nil.
+	protocolMessage chainlib.ProtocolMessage
 }
 
-func (m *cvGuardStateMachine) GetProtocolMessage() chainlib.ProtocolMessage { return nil }
+func (m *cvGuardStateMachine) GetProtocolMessage() chainlib.ProtocolMessage { return m.protocolMessage }
 func (m *cvGuardStateMachine) GetDebugState() bool                          { return false }
 func (m *cvGuardStateMachine) GetRelayTaskChannel() (chan relaycore.RelayStateSendInstructions, error) {
 	return make(chan relaycore.RelayStateSendInstructions), nil
@@ -3135,9 +3202,8 @@ func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidation
 	return m.cvParams
 }
 
-func (m *cvGuardStateMachine) GetUsedProviders() *lavasession.UsedProviders                { return m.usedProviders }
-func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf)            {}
-func (m *cvGuardStateMachine) SetRelayRetriesManager(rm *lavaprotocol.RelayRetriesManager) {}
+func (m *cvGuardStateMachine) GetUsedProviders() *lavasession.UsedProviders     { return m.usedProviders }
+func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf) {}
 
 // cvGuardMetrics is a no-op MetricsInterface + ChainIdAndApiInterfaceGetter
 // for the CV-guard test. The early-exit path does not hit metrics callbacks.
@@ -3235,7 +3301,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	metricsStub := cvGuardMetrics{}
 	relayProcessor := relaycore.NewRelayProcessor(
 		ctx, cvParams, metricsStub, metricsStub,
-		lavaprotocol.NewRelayRetriesManager(), sm)
+		sm)
 
 	// Real session manager — OnSessionFailure runs against it for the 2 dropped sessions.
 	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
@@ -3500,6 +3566,7 @@ func appendHeadersForCacheHit(t *testing.T, server *RPCSmartRouterServer, report
 		CacheLookup:  report,
 	}
 	server.appendHeadersToRelayResult(context.Background(), relayResult, 0, &MockRelayProcessorForHeaders{
+		usedProviders:  dispatchedTo(), // the cache answered before anything went out
 		successResults: []common.RelayResult{{ProviderInfo: common.ProviderInfo{ProviderAddress: ""}}},
 	}, &MockProtocolMessage{api: &spectypes.Api{Name: "eth_blockNumber"}, directiveHeaders: directives}, "eth_blockNumber", nil, true)
 	return relayResult.Reply.Metadata

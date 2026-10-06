@@ -31,6 +31,8 @@ func NewChainParser(apiInterface string) (chainParser ChainParser, err error) {
 		return NewRestChainParser()
 	case spectypes.APIInterfaceGrpc:
 		return NewGrpcChainParser()
+	case spectypes.APIInterfaceGraphQL:
+		return NewGraphQLChainParser()
 	}
 	return nil, fmt.Errorf("chainParser for apiInterface (%s) not found", apiInterface)
 }
@@ -58,6 +60,8 @@ func NewChainListener(
 		return NewRestChainListener(ctx, listenEndpoint, relaySender, healthReporter, rpcConsumerLogs), nil
 	case spectypes.APIInterfaceGrpc:
 		return NewGrpcChainListener(ctx, listenEndpoint, relaySender, healthReporter, rpcConsumerLogs, chainParser), nil
+	case spectypes.APIInterfaceGraphQL:
+		return NewGraphQLChainListener(ctx, listenEndpoint, relaySender, healthReporter, rpcConsumerLogs), nil
 	}
 	return nil, fmt.Errorf("chainListener for apiInterface (%s) not found", listenEndpoint.ApiInterface)
 }
@@ -73,6 +77,7 @@ type ChainParser interface {
 	IsInternalPathEnabled(internalPath string, apiInterface string, addon string) bool
 	CraftMessage(parser *spectypes.ParseDirective, connectionType string, craftData *CraftData, metadata []pairingtypes.Metadata) (ChainMessageForSend, error)
 	HandleHeaders(metadata []pairingtypes.Metadata, apiCollection *spectypes.ApiCollection, headersDirection spectypes.Header_HeaderType) (filtered []pairingtypes.Metadata, overwriteReqBlock string, ignoredMetadata []pairingtypes.Metadata)
+	ReplyHeaderDirectives() []*spectypes.Header
 	GetVerifications(supported []string, internalPath string, apiInterface string) ([]VerificationContainer, error)
 	SeparateAddonsExtensions(ctx context.Context, supported []string) (addons, extensions []string, err error)
 	SetPolicy(policy PolicyInf, chainId string, apiInterface string) error
@@ -116,6 +121,7 @@ type ChainMessage interface {
 	AppendHeader(metadata []pairingtypes.Metadata)
 	GetExtensions() []*spectypes.Extension
 	OverrideExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser)
+	GetUnavailableExtensions() []string
 	DisableErrorHandling()
 	TimeoutOverride(...time.Duration) time.Duration
 	GetForceCacheRefresh() bool
@@ -248,6 +254,8 @@ func GetChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint *lavas
 		proxyConstructor = NewRestChainProxy
 	case spectypes.APIInterfaceGrpc:
 		proxyConstructor = NewGrpcChainProxy
+	case spectypes.APIInterfaceGraphQL:
+		proxyConstructor = NewGraphQLChainProxy
 	default:
 		return nil, fmt.Errorf("chain proxy for apiInterface (%s) not found", rpcProviderEndpoint.ApiInterface)
 	}

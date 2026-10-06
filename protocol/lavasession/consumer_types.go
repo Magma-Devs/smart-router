@@ -121,6 +121,10 @@ type ProviderOptimizer interface {
 type ignoredProviders struct {
 	providers    map[string]struct{}
 	currentEpoch uint64
+	// preferredProvider is this request's GetSessionsOptions.PreferredProvider, carried here
+	// because this is the one piece of per-request state every level of selection receives. It
+	// survives the epoch reset that clears providers: it names a choice, not a failure.
+	preferredProvider string
 }
 
 type EndpointConnection struct {

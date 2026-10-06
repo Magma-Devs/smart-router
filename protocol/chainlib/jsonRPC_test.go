@@ -20,6 +20,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	plantypes "github.com/magma-Devs/smart-router/types/plans"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -711,6 +712,16 @@ func startTestJsonRPCListener(t *testing.T, ctx context.Context, slowHandler boo
 // healthPath, so a test can put it where an operator might: on "/".
 func startTestJsonRPCListenerWithHealthPath(t *testing.T, ctx context.Context, healthPath string) (*JsonRPCChainListener, string) {
 	t.Helper()
+	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	return startTestJsonRPCListenerWithOptions(t, ctx, healthPath, nil, logger)
+}
+
+// startTestJsonRPCListenerWithOptions serves a listener with its health route on
+// healthPath, relaySender behind its relay paths (nil when a test never sends a
+// relay: the handlers dereference it) and logger as its metrics and usage sink.
+func startTestJsonRPCListenerWithOptions(t *testing.T, ctx context.Context, healthPath string, relaySender RelaySender, logger *metrics.RPCConsumerLogs) (*JsonRPCChainListener, string) {
+	t.Helper()
 	// ListenToMessages uses the custom rand package which requires initialization.
 	// The package-level TestMain (chain_router_test.go) does not call InitRandomSeed,
 	// so we do it here. InitRandomSeed is idempotent.
@@ -723,9 +734,7 @@ func startTestJsonRPCListenerWithHealthPath(t *testing.T, ctx context.Context, h
 		ApiInterface:    "jsonrpc",
 		HealthCheckPath: healthPath,
 	}
-	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
-	require.NoError(t, err)
-	listener := NewJrpcChainListener(ctx, endpoint, nil, alwaysHealthyReporter{}, logger, nil, nil)
+	listener := NewJrpcChainListener(ctx, endpoint, relaySender, alwaysHealthyReporter{}, logger, nil, nil)
 
 	cmdFlags := common.ConsumerCmdFlags{}
 	go listener.Serve(ctx, cmdFlags)
@@ -948,5 +957,89 @@ func TestJsonRPCChainListener_IdleConnectionIsReleasedWhenClientIgnoresClose(t *
 	case <-handlerReturned:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the idle connection's handler never returned: the router is holding it for the life of the process")
+	}
+}
+
+// usageCaptureSink hands every relay_usage event the router emits to the test.
+type usageCaptureSink struct {
+	events chan metrics.RelayUsageEvent
+}
+
+func (s *usageCaptureSink) Emit(event metrics.RelayUsageEvent)                { s.events <- event }
+func (s *usageCaptureSink) EmitOptimizerQoS(metrics.OptimizerQoSReportToSend) {}
+func (s *usageCaptureSink) Stats() metrics.SinkStats                          { return metrics.SinkStats{} }
+func (s *usageCaptureSink) Close()                                            {}
+
+// plainRelayMessage is a parsed relay with no parse directive, so the websocket
+// manager takes the normal-relay branch. It only answers GetParseDirective: any
+// other call reaches the nil ProtocolMessage and fails the test loudly.
+type plainRelayMessage struct {
+	ProtocolMessage
+}
+
+func (plainRelayMessage) GetParseDirective() *spectypes.ParseDirective { return nil }
+
+const wsRelayStubReply = `{"jsonrpc":"2.0","id":1,"result":"0x1"}`
+
+// wsRelayStub is the slice of RelaySender a normal websocket relay uses.
+type wsRelayStub struct{}
+
+func (wsRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
+	return nil, errors.New("not used")
+}
+
+func (wsRelayStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
+	return plainRelayMessage{}, nil
+}
+
+func (wsRelayStub) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
+	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(wsRelayStubReply)}, StatusCode: http.StatusOK}, nil
+}
+
+func (wsRelayStub) CancelSubscriptionContext(subscriptionKey string) {}
+
+// MAG-4055: a websocket relay's relay_usage event carries the Origin the client
+// sent on the handshake, the same as an HTTP or gRPC relay's event does.
+func TestJsonRPCChainListener_WebsocketRelayUsageCarriesOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header http.Header
+		want   string
+	}{
+		{name: "origin sent", header: http.Header{"Origin": {"https://app.example"}}, want: "https://app.example"},
+		{name: "no origin", header: nil, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveCtx, cancelServe := context.WithCancel(context.Background())
+			defer cancelServe()
+			sink := &usageCaptureSink{events: make(chan metrics.RelayUsageEvent, 8)}
+			logger, err := metrics.NewRPCConsumerLogs(nil, sink, nil)
+			require.NoError(t, err)
+			listener, addr := startTestJsonRPCListenerWithOptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, wsRelayStub{}, logger)
+			t.Cleanup(func() {
+				shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancelShutdown()
+				_ = listener.Shutdown(shutdownCtx)
+			})
+
+			client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws", tc.header)
+			require.NoError(t, err)
+			defer client.Close()
+
+			require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`)))
+			_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+			_, reply, err := client.ReadMessage()
+			require.NoError(t, err)
+			require.JSONEq(t, wsRelayStubReply, string(reply))
+
+			select {
+			case event := <-sink.events:
+				assert.Equal(t, tc.want, event.Origin)
+				assert.Equal(t, "ETH1", event.ChainID)
+				assert.True(t, event.Success)
+			case <-time.After(3 * time.Second):
+				t.Fatal("the websocket relay emitted no relay_usage event")
+			}
+		})
 	}
 }

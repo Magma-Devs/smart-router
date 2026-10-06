@@ -710,6 +710,9 @@ type mockChainMessage struct {
 	// httpMethod is surfaced as ApiCollection.CollectionData.Type, which the
 	// REST path consults; only meaningful when apiInterface == "rest".
 	httpMethod string
+	// headers are surfaced as ApiCollection.Headers, the spec's header directives;
+	// the reply path keeps the pass_reply / pass_both ones (MAG-3104).
+	headers []*spectypes.Header
 	// rpcMessage, when non-nil, replaces the default mockGenericMessage —
 	// REST tests need a real *RestMessage so the path/body extraction works.
 	rpcMessage rpcInterfaceMessages.GenericMessage
@@ -760,6 +763,7 @@ func (m *mockChainMessage) GetApiCollection() *spectypes.ApiCollection {
 			ApiInterface: iface,
 			Type:         m.httpMethod,
 		},
+		Headers: m.headers,
 	}
 }
 
@@ -775,6 +779,7 @@ func (m *mockChainMessage) UpdateLatestBlockInMessage(latestBlock int64, modifyC
 }
 func (m *mockChainMessage) AppendHeader(metadata []pairingtypes.Metadata) {}
 func (m *mockChainMessage) GetExtensions() []*spectypes.Extension         { return nil }
+func (m *mockChainMessage) GetUnavailableExtensions() []string            { return nil }
 func (m *mockChainMessage) OverrideExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser) {
 }
 func (m *mockChainMessage) DisableErrorHandling()                               {}

@@ -224,6 +224,20 @@ func (mr *MockChainParserMockRecorder) HandleHeaders(metadata, apiCollection, he
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HandleHeaders", reflect.TypeOf((*MockChainParser)(nil).HandleHeaders), metadata, apiCollection, headersDirection)
 }
 
+// ReplyHeaderDirectives mocks base method.
+func (m *MockChainParser) ReplyHeaderDirectives() []*spec.Header {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ReplyHeaderDirectives")
+	ret0, _ := ret[0].([]*spec.Header)
+	return ret0
+}
+
+// ReplyHeaderDirectives indicates an expected call of ReplyHeaderDirectives.
+func (mr *MockChainParserMockRecorder) ReplyHeaderDirectives() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReplyHeaderDirectives", reflect.TypeOf((*MockChainParser)(nil).ReplyHeaderDirectives))
+}
+
 // IsInternalPathEnabled mocks base method.
 func (m *MockChainParser) IsInternalPathEnabled(internalPath, apiInterface, addon string) bool {
 	m.ctrl.T.Helper()
@@ -603,6 +617,20 @@ func (m *MockChainMessage) OverrideExtensions(extensionNames []string, extension
 func (mr *MockChainMessageMockRecorder) OverrideExtensions(extensionNames, extensionParser interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OverrideExtensions", reflect.TypeOf((*MockChainMessage)(nil).OverrideExtensions), extensionNames, extensionParser)
+}
+
+// GetUnavailableExtensions mocks base method.
+func (m *MockChainMessage) GetUnavailableExtensions() []string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUnavailableExtensions")
+	ret0, _ := ret[0].([]string)
+	return ret0
+}
+
+// GetUnavailableExtensions indicates an expected call of GetUnavailableExtensions.
+func (mr *MockChainMessageMockRecorder) GetUnavailableExtensions() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUnavailableExtensions", reflect.TypeOf((*MockChainMessage)(nil).GetUnavailableExtensions))
 }
 
 // RequestedBlock mocks base method.
