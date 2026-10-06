@@ -248,3 +248,18 @@ func ValidateDurationConfigValues(v *viper.Viper, flagNames ...string) error {
 	}
 	return nil
 }
+
+// ValidateEpochDuration refuses a negative --epoch-duration. Zero is fine: it means unset,
+// and the caller substitutes StandaloneEpochDuration. A negative value is never one a
+// router runs on today: CalculateCurrentEpoch divides by it into a uint64, which wraps to a
+// huge epoch number, and the next boundary lands in the past, so the epoch timer fires
+// again as soon as it is set.
+func ValidateEpochDuration(epochDuration time.Duration) error {
+	if epochDuration < 0 {
+		return utils.LavaFormatError("--"+EpochDurationFlag+" must not be negative", nil,
+			utils.LogAttr("value", epochDuration),
+			utils.LogAttr("write_it_as", "a positive duration such as 30m, or leave it unset for the 15m default"),
+		)
+	}
+	return nil
+}
