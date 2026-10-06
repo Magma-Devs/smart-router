@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"slices"
 	"sort"
@@ -34,6 +35,16 @@ const (
 	LAVA_IDENTIFIED_NODE_ERROR_HEADER               = "lava-identified-node-error"
 	LAVA_HEDGE_TRIGGERED_HEADER                     = "lava-hedge-triggered"
 	SMART_ROUTER_VERSION_HEADER_NAME                = "Smart-Router-Version"
+	// EXTENSION_UNAVAILABLE_HEADER_NAME lists, comma-separated, the extensions the caller asked for
+	// with lava-extension that no node on this router offers. The request was served WITHOUT them
+	// — e.g. from a non-archive node — so a caller that needs the extension must not trust the
+	// answer (MAG-3935). An extension the router adds on its own, such as archive for an eth_call
+	// deep behind the head, is never listed: the caller did not ask for it.
+	EXTENSION_UNAVAILABLE_HEADER_NAME = "Lava-Extension-Unavailable"
+	// RELAY_TIMEOUT_APPLIED_HEADER_NAME answers a request that carried lava-relay-timeout with the
+	// attempt window the router actually used, as a Go duration (MAG-3600). See
+	// appendHeadersToRelayResult.
+	RELAY_TIMEOUT_APPLIED_HEADER_NAME = "Lava-Relay-Timeout-Applied"
 	// CACHE_BACKEND_HEADER_NAME names the cache backend that served a hit — the
 	// cache-be address, or the RESP node actually dialled (the current master
 	// under sentinel, the touched shard under cluster). Debug-only: it exposes
@@ -171,6 +182,51 @@ type NodeUrl struct {
 	StandaloneAddons bool `yaml:"standalone-addons,omitempty" json:"standalone-addons,omitempty" mapstructure:"standalone-addons"`
 	// GrpcConfig holds gRPC-specific configuration for direct gRPC connections (smart router)
 	GrpcConfig GrpcConfig `yaml:"grpc-config,omitempty" json:"grpc-config,omitempty" mapstructure:"grpc-config"`
+	// AcceptEncoding is the Accept-Encoding the router sends this url's upstream:
+	// AcceptEncodingIdentity (the default, also when empty) or AcceptEncodingGzip.
+	// Only http(s) urls read it.
+	//
+	// Off by default because inflating is CPU the router pays for. On the eth
+	// router, production pprof put 30-39% of CPU in the decode path, and asking for
+	// identity halved its cores (MAG-1589). Gzip pays where replies are large and
+	// reading them is what saturates: a Solana block is megabytes of JSON that gzip
+	// shrinks several times over, and every byte saved is one that TLS, the HTTP/2
+	// read loop and the socket buffers never carry (MAG-3844). Only a measurement
+	// says which of the two an upstream is, so it is set per url.
+	//
+	// Setting the header by hand turns off net/http's transparent decoding, so the
+	// router inflates gzip replies itself.
+	AcceptEncoding string `yaml:"accept-encoding,omitempty" json:"accept-encoding,omitempty" mapstructure:"accept-encoding"`
+}
+
+// The values NodeUrl.AcceptEncoding takes.
+const (
+	AcceptEncodingIdentity = "identity"
+	AcceptEncodingGzip     = "gzip"
+)
+
+// UpstreamAcceptEncoding returns the Accept-Encoding to send this url's upstream:
+// AcceptEncodingGzip when the url opted in, AcceptEncodingIdentity otherwise. Never
+// empty, because an empty Accept-Encoding hands the choice back to net/http, which
+// asks for gzip and decodes it on the path MAG-1589 took out.
+func (nurl *NodeUrl) UpstreamAcceptEncoding() string {
+	if strings.EqualFold(strings.TrimSpace(nurl.AcceptEncoding), AcceptEncodingGzip) {
+		return AcceptEncodingGzip
+	}
+	return AcceptEncodingIdentity
+}
+
+// ValidateAcceptEncoding refuses an accept-encoding the router does not implement.
+// An unknown value is an error rather than identity: whoever set it expects the
+// upstream to compress, and a silent identity would make any measurement of it
+// read as "no difference".
+func (nurl *NodeUrl) ValidateAcceptEncoding() error {
+	switch strings.ToLower(strings.TrimSpace(nurl.AcceptEncoding)) {
+	case "", AcceptEncodingIdentity, AcceptEncodingGzip:
+		return nil
+	}
+	return fmt.Errorf("node url %s: unsupported accept-encoding %q, use %q or %q",
+		nurl.UrlStr(), nurl.AcceptEncoding, AcceptEncodingIdentity, AcceptEncodingGzip)
 }
 
 // SkipVerificationsWildcard is the sentinel a node-url's skip-verifications list can carry
@@ -445,7 +501,7 @@ func (gc *GrpcConfig) ValidateReflectionTimeout() error {
 
 func ValidateEndpoint(endpoint, apiInterface string) error {
 	switch apiInterface {
-	case spectypes.APIInterfaceRest:
+	case spectypes.APIInterfaceRest, spectypes.APIInterfaceGraphQL:
 		parsedUrl, err := url.Parse(endpoint)
 		if err != nil {
 			return utils.LavaFormatError("could not parse node url", err,
@@ -667,3 +723,10 @@ func RedactMetadata(md []pairingtypes.Metadata) string {
 	b.WriteByte('}')
 	return b.String()
 }
+
+// TransportReplyHeaders are the upstream response headers a client needs to decode the
+// body, and so the only ones every reply path keeps regardless of chain: the live relay
+// (rpcsmartrouter's filterUpstreamReplyMetadata) and a reply that crossed in from the
+// secondary cache (performance.SanitizeForeignCacheReply). Content-Length is not here:
+// the body is re-stamped before it is served.
+var TransportReplyHeaders = []string{"Content-Type", "Content-Encoding"}

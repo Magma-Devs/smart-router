@@ -240,24 +240,6 @@ func createGRPCServer(changeListener string, probeDelay time.Duration) (string, 
 
 const providerStr = "provider"
 
-type DirectiveHeaders struct {
-	directiveHeaders map[string]string
-}
-
-func (bpm DirectiveHeaders) GetBlockedProviders() []string {
-	if bpm.directiveHeaders == nil {
-		return nil
-	}
-	blockedProviders, ok := bpm.directiveHeaders[common.BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME]
-	if ok {
-		blockProviders := strings.Split(blockedProviders, ",")
-		if len(blockProviders) <= 2 {
-			return blockProviders
-		}
-	}
-	return nil
-}
-
 func createPairingList(providerPrefixAddress string, enabled bool) map[uint64]*ConsumerSessionsWithProvider {
 	cswpList := make(map[uint64]*ConsumerSessionsWithProvider, 0)
 	pairingEndpoints := make([]*Endpoint, 1)
@@ -306,9 +288,9 @@ func createNamedPairingList(names ...string) map[uint64]*ConsumerSessionsWithPro
 	return cswpList
 }
 
-// TestNumberOfValidProviderGroups covers the Fix 3 group-capacity helper: distinct cross-validation
-// group labels across valid providers, with empty GroupLabel folded into the implicit "default" group.
-func TestNumberOfValidProviderGroups(t *testing.T) {
+// TestProviderGroupAssignments covers the group accounting over valid providers: providers sharing a
+// cross-validation label form one group, and an empty GroupLabel folds into the implicit "default" group.
+func TestProviderGroupAssignments(t *testing.T) {
 	csm := CreateConsumerSessionManager()
 	mk := func(addr, group string) *ConsumerSessionsWithProvider {
 		return &ConsumerSessionsWithProvider{
@@ -329,7 +311,11 @@ func TestNumberOfValidProviderGroups(t *testing.T) {
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairingList, nil))
 
 	require.Equal(t, 4, csm.GetNumberOfValidProviders())
-	require.Equal(t, 3, csm.NumberOfValidProviderGroups(), "tier-1, external, default are the 3 distinct groups")
+	require.Equal(t, map[string][]string{
+		"tier-1":                    {"lava@p0", "lava@p1"},
+		"external":                  {"lava@p2"},
+		common.DefaultProviderGroup: {"lava@p3"},
+	}, csm.ProviderGroupAssignments(), "tier-1, external, default are the 3 distinct groups")
 
 	// With no addon/extension filtering the request-scoped counts match the totals.
 	providers, groups := csm.ProviderAndGroupCountsForRequest("", nil, context.Background())
@@ -340,8 +326,8 @@ func TestNumberOfValidProviderGroups(t *testing.T) {
 // TestBackupProvidersExcludedFromValidationSet is the Phase 1.5 validation-set scope guard: backup
 // providers are failover-only and must never enter the cross-validation candidate set. Concretely they
 // must not (a) be returned by GetSessions — the path CV fans out over — while healthy primaries exist,
-// nor (b) appear in the group accounting (NumberOfValidProviderGroups / ProviderGroupAssignments) that
-// the CV capacity check trusts, or a backup could inflate a quorum it was never meant to validate.
+// nor (b) appear in the group accounting (ProviderGroupAssignments / ProviderAndGroupCountsForRequest)
+// that the CV capacity checks trust, or a backup could inflate a quorum it was never meant to validate.
 func TestBackupProvidersExcludedFromValidationSet(t *testing.T) {
 	ctx := context.Background()
 	csm := CreateConsumerSessionManager()
@@ -366,7 +352,7 @@ func TestBackupProvidersExcludedFromValidationSet(t *testing.T) {
 
 	// (b) Group accounting only sees primaries — the backup's distinct "backup-group" must not count.
 	require.Equal(t, 2, csm.GetNumberOfValidProviders(), "only primaries are valid providers")
-	require.Equal(t, 2, csm.NumberOfValidProviderGroups(), "backup-group must not inflate the group count")
+	require.Len(t, csm.ProviderGroupAssignments(), 2, "backup-group must not inflate the group count")
 	// ProviderAndGroupCountsForRequest is the exact input the CV capacity gate trusts to fail-fast; a
 	// backup leaking in here would let an unsatisfiable min-groups/max-participants policy pass.
 	reqProviders, reqGroups := csm.ProviderAndGroupCountsForRequest("", nil, context.Background())
@@ -1848,7 +1834,7 @@ func TestBackupProviderOptimizerSelection(t *testing.T) {
 	}
 
 	// First call: optimizer picks one backup.
-	result1, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, 0, NewUsedProviders(nil))
+	result1, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, 0, NewUsedProviders(nil))
 	require.NoError(t, err)
 	require.Len(t, result1, 1, "expected exactly one backup provider returned per call")
 	var first string
@@ -1861,7 +1847,7 @@ func TestBackupProviderOptimizerSelection(t *testing.T) {
 	require.True(t, firstIgnored, "selected backup should be in ignoredProviders after call")
 
 	// Second call: optimizer picks the other backup (first is now ignored).
-	result2, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, 0, NewUsedProviders(nil))
+	result2, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, 0, NewUsedProviders(nil))
 	require.NoError(t, err)
 	require.Len(t, result2, 1, "expected exactly one backup provider returned per call")
 	var second string
@@ -1871,7 +1857,7 @@ func TestBackupProviderOptimizerSelection(t *testing.T) {
 	require.NotEqual(t, first, second, "second call should return the other backup provider")
 
 	// Third call: both backups are now ignored — expect an error.
-	_, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, 0, NewUsedProviders(nil))
+	_, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, 0, NewUsedProviders(nil))
 	require.Error(t, err, "expected error when all backup providers are exhausted")
 }
 
@@ -1915,7 +1901,7 @@ func TestBackupProviderOptimizerSelection_EndpointCountBoundaries(t *testing.T) 
 			seen := make(map[string]struct{})
 			for call := 0; call < tc.backupCount; call++ {
 				result, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
-					ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
+					ctx, backupTierFallback, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
 					[]string{}, 0, 0, NewUsedProviders(nil))
 				require.NoError(t, err, "call #%d of %d must succeed", call+1, tc.backupCount)
 				require.Len(t, result, 1, "exactly one backup per call (got %d)", len(result))
@@ -1930,7 +1916,7 @@ func TestBackupProviderOptimizerSelection_EndpointCountBoundaries(t *testing.T) 
 
 			// One more call exhausts the pool.
 			_, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
-				ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
+				ctx, backupTierFallback, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
 				[]string{}, 0, 0, NewUsedProviders(nil))
 			require.Error(t, err, "expected exhaustion error after %d backups served", tc.backupCount)
 		})
@@ -2220,7 +2206,7 @@ func TestBlockProvider_BackupProviderFilteredFromSelection(t *testing.T) {
 	// Attempting to get backup sessions should fail — no eligible backup providers
 	ignored := &ignoredProviders{providers: make(map[string]struct{}), currentEpoch: firstEpochHeight}
 	_, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
-		context.Background(), ignored, 1, servicedBlockNumber, "", nil, 0, 0, NewUsedProviders(nil),
+		context.Background(), backupTierFallback, ignored, 1, servicedBlockNumber, "", nil, 0, 0, NewUsedProviders(nil),
 	)
 	require.Error(t, err, "blocked backup provider should not be selectable")
 }

@@ -54,12 +54,18 @@ type ConsumerSessionManager struct {
 	lock           sync.RWMutex
 	pairing        map[string]*ConsumerSessionsWithProvider // key == provider address
 	stickySessions *StickySessionStore
+	// stickyClaimCounts mirrors smartrouter_csm_sticky_claims_total in process, indexed by outcome,
+	// so GET /debug/sticky-claims can report it without the metrics port (MAG-3860).
+	stickyClaimCounts [numStickyOutcomes]atomic.Uint64
 	// sharedSticky is the fleet-wide claim registry. Nil leaves stickiness pod-local, which is
 	// the pre-existing behaviour. stickyEpochDuration sizes a claim's backstop lifetime.
-	sharedSticky        SharedStickyStore
-	stickyEpochDuration time.Duration
-	currentEpoch        uint64
-	numberOfResets      uint64
+	// sharedStickyRequested records that a registry was asked for at all (SetSharedStickyStore ran),
+	// so a nil registry can be told apart from one never requested (MAG-3860).
+	sharedSticky          SharedStickyStore
+	sharedStickyRequested bool
+	stickyEpochDuration   time.Duration
+	currentEpoch          uint64
+	numberOfResets        uint64
 
 	// original pairingAddresses for current epoch
 	// contains all addresses from the initial pairing. and the keys are the indexes of the pairing query (these indexes are used for data reliability)
@@ -370,19 +376,11 @@ func (csm *ConsumerSessionManager) countByGroup(addresses []string) map[string]i
 	return counts
 }
 
-// NumberOfValidProviderGroups returns the count of distinct cross-validation group labels across ALL
-// currently valid providers (ignoring addon/extension filtering). Used by the startup capacity check as
-// the upper bound on how many distinct groups a request could ever draw from.
-func (csm *ConsumerSessionManager) NumberOfValidProviderGroups() int {
-	csm.lock.RLock()
-	defer csm.lock.RUnlock()
-	return csm.countDistinctGroups(csm.validAddresses)
-}
-
 // ProviderGroupAssignments returns a snapshot of how the currently valid providers map onto
 // cross-validation group labels (label -> sorted provider addresses), folding an empty label into
-// common.DefaultProviderGroup. It is meant for one-shot startup/diagnostic logging so operators can see the diversity
-// their config actually yields; it is not on any hot path.
+// common.DefaultProviderGroup. It is meant for one-shot startup/diagnostic logging; it is not on any hot
+// path. It holds only the providers that passed verification, so it describes the fleet serving now, not
+// the configured one: a provider that failed its boot verification is absent until it is re-admitted.
 func (csm *ConsumerSessionManager) ProviderGroupAssignments() map[string][]string {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
@@ -472,6 +470,50 @@ func (csm *ConsumerSessionManager) IsStaticProvider(providerAddr string) bool {
 	}
 
 	return false
+}
+
+// usablePreferredProvider returns the request's preferred provider when selection may hand it this
+// request right now, or "" and the reason it may not, in which case the request is selected as
+// usual. The reason is "" too when there is no preference to judge, or it has already been tried.
+//
+// Usable means: not already tried by this request, which also keeps a refill after it fails from
+// handing it back; not held off after a rate limit; and either a valid primary serving the
+// collection, or an unblocked backup serving it. Backups count because a write can be accepted by
+// one — under --stateful-to-backup, or when every primary is blocked — and the follow-up read
+// belongs where the write landed.
+//
+// Decided under the same lock as the selection it feeds, so the answer cannot go stale before it
+// is used, and never through the selectedProvider path: a preference that fails falls back, it does
+// not fail the request or release the blocked list.
+//
+// csm must be rlocked here.
+func (csm *ConsumerSessionManager) usablePreferredProvider(ctx context.Context, request *ignoredProviders, addon string, extensions []string) (provider string, reason string) {
+	preferred := request.preferredProvider
+	if preferred == "" {
+		return "", ""
+	}
+	if _, tried := request.providers[preferred]; tried {
+		return "", ""
+	}
+	if csm.rateLimitHoldoff != nil {
+		if _, held := csm.rateLimitHoldoff.ProviderReadyAt(preferred); held {
+			return "", "held off after a rate limit"
+		}
+	}
+	if slices.Contains(csm.getValidAddresses(addon, extensions, ctx), preferred) {
+		return preferred, ""
+	}
+	backup, isBackup := csm.backupProviders[preferred]
+	if !isBackup || backup == nil {
+		return "", "not a valid primary for this request, and not a backup"
+	}
+	if _, blocked := csm.blockedBackupProviders[preferred]; blocked {
+		return "", "blocked backup"
+	}
+	if !backup.IsSupportingAddon(addon) || !backup.IsSupportingExtensions(extensions, ctx) {
+		return "", "backup does not serve this collection"
+	}
+	return preferred, ""
 }
 
 // this is being read in multiple locations and but never changes so no need to lock.
@@ -1404,19 +1446,55 @@ func (csm *ConsumerSessionManager) cacheAddonAddresses(addon string, extensions 
 // every other relay depends on. That happens whenever the pool empties *during* a request rather
 // than before it: each provider is blocked as it fails, and by the time the last one goes the
 // request has already tried them all.
-func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[string]struct{}, addon string, extensions []string, ctx context.Context) bool {
+//
+// selectedProvider narrows "any of those providers" to the one the request pinned, and is the
+// difference between a release that rescues the request and one that only destroys state. A pinned
+// request can only ever be handed the provider its pin resolves to, so the question becomes whether
+// a release would let the pin resolve to a provider this request has not tried. The pinned path
+// reaches this guard when the name is not in the pairing at all, when it is in the pairing but
+// blocked, when it is in the pairing but cannot serve this addon, or when it folds onto more than
+// one address. A release fixes the blocked case, and an ambiguous pin whose exact spelling is among
+// the addresses it restores. It fixes nothing else. Without the narrowing the guard answered on the
+// strength of some OTHER provider being available, which is a fact a pinned request can never use:
+// it released every blocked provider for every other relay and then failed anyway.
+func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[string]struct{}, addon string, extensions []string, selectedProvider string, ctx context.Context) bool {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
+
+	// The same predicates CalculateAddonValidAddresses filters on, so "capable" means exactly
+	// "selectable for this request once a release has put it back".
+	capable := func(address string) bool {
+		provider, ok := csm.pairing[address]
+		return ok && provider != nil && provider.IsSupportingAddon(addon) && provider.IsSupportingExtensions(extensions, ctx)
+	}
+
+	if selectedProvider != "" {
+		// A release refills the pool with the capable pairing addresses, so resolve the pin against
+		// those, the way getValidProviderAddresses will resolve it once the pool is back. An exact
+		// spelling wins and a single case-insensitive match is accepted. A name that is not there,
+		// or one that folds onto several addresses with no exact spelling among them, resolves to
+		// nothing after any release too, so releasing could not serve this request.
+		var candidates []string
+		for _, address := range csm.pairingAddresses {
+			if capable(address) {
+				candidates = append(candidates, address)
+			}
+		}
+		resolved, _ := resolveSelectedProviderAddress(selectedProvider, candidates)
+		if resolved == "" {
+			return false
+		}
+		// Looked up by the resolved address exactly, as selection does: a pin this request has
+		// already tried fails as already-failed after a release, whatever its case-twin looks like.
+		_, alreadyTried := ignored[resolved]
+		return !alreadyTried
+	}
 
 	for _, address := range csm.pairingAddresses {
 		if _, alreadyTried := ignored[address]; alreadyTried {
 			continue
 		}
-		provider, ok := csm.pairing[address]
-		if !ok || provider == nil {
-			continue
-		}
-		if provider.IsSupportingAddon(addon) && provider.IsSupportingExtensions(extensions, ctx) {
+		if capable(address) {
 			return true
 		}
 	}
@@ -1446,7 +1524,7 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 	// snapshot after the guard put the diagnosis on the far side of the branch that swallows it.
 	inventory := csm.snapshotPoolInventory(addon, extensionNames, ctx)
 
-	if !csm.releaseCouldServeThisRequest(tempIgnoredProviders.providers, addon, extensionNames, ctx) {
+	if !csm.releaseCouldServeThisRequest(tempIgnoredProviders.providers, addon, extensionNames, selectedProvider, ctx) {
 		// A declined release is usually ordinary retry exhaustion: this request has already tried
 		// every provider, releasing rescues nothing, and that stays at DEBUG.
 		//
@@ -1458,6 +1536,24 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 		// default collection). In all three nothing was tried, and "every provider has already been
 		// tried" is not merely unhelpful, it is false — the request tried nothing. Keying on
 		// pairingSize rescued only the first of the three and left the other two on the false line.
+		//
+		// A pinned request is none of that, so it is answered first. Both lines below describe the
+		// pool, and for a pin the pool is not the finding — the named provider is. It stays at DEBUG
+		// because the loud signal already exists: getValidProviderAddresses logged the pin itself at
+		// ERROR before this chain was ever entered.
+		if selectedProvider != "" {
+			utils.LavaFormatDebug("no release can serve this pinned provider, leaving the blocked list standing",
+				utils.LogAttr("selectedProvider", selectedProvider),
+				// The pin is the finding, but the pool state is why we were called at all, and this
+				// is the branch that would otherwise swallow it: an all-pinned deployment would
+				// never report an all-blocked pool. It rides along here rather than on a second
+				// line, which is also what stops the snapshot above being taken for nothing.
+				utils.LogAttr("reason", inventory.reason(addon, extensionNames)),
+				utils.LogAttr("addon", addon),
+				utils.LogAttr("extensions", extensionNames),
+				utils.LogAttr("GUID", ctx))
+			return nil, false
+		}
 		if len(tempIgnoredProviders.providers) == 0 {
 			csm.logPoolEmpty(ctx, inventory, addon, extensionNames)
 			return nil, false
@@ -1537,7 +1633,7 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 			if len(csm.backupProviders) > 0 {
 				utils.LavaFormatDebug("No regular providers available, trying backup providers", utils.LogAttr("GUID", ctx))
 				// try to get a session from the backup providers
-				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
+				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
 				if err == nil {
 					// backup providers succeeded, return the session
 					utils.LavaFormatDebug("Successfully got session from backup providers", utils.LogAttr("GUID", ctx))
@@ -1598,6 +1694,13 @@ const (
 )
 
 type GetSessionsOptions struct {
+	// PreferredProvider routes the request to this provider when selection could hand it the
+	// request right now (usablePreferredProvider), and leaves the request to ordinary selection
+	// when it could not. Unlike a header pin it is the router's preference rather than the caller's
+	// demand: it never fails a request, never releases the blocked list, never outranks the caller's
+	// lava-select-provider or lava-stickiness, and is ignored under a group-diversity policy. It may
+	// name a backup, which a header pin cannot reach. Read-your-writes pins use it (MAG-4032).
+	PreferredProvider string
 	// MinGroups > 1 makes selection fan out across at least this many distinct provider groups so a
 	// group-diversity cross-validation policy can be satisfied. Default 0/1 means group-blind selection.
 	MinGroups int
@@ -1618,6 +1721,17 @@ type GetSessionsOptions struct {
 	// enables a root collection alongside versioned ones (STRK) must keep its
 	// root traffic on the root url.
 	InternalPath *string
+	// PreferBackup routes this selection to the backup tier ahead of any primary still unused on
+	// the request — the backup-reserve hedge (MAG-3923). With no eligible backup it falls back to
+	// ordinary selection. A pinned provider (header or fleet claim) always wins over it.
+	PreferBackup bool
+}
+
+// HasBackupProviders reports whether this endpoint has a backup tier configured.
+func (csm *ConsumerSessionManager) HasBackupProviders() bool {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	return len(csm.backupProviders) > 0
 }
 
 func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProviderNumber int, cuNeededForSession uint64, usedProviders UsedProvidersInf, requestedBlock int64, addon string, extensions []*spectypes.Extension, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, opts ...GetSessionsOptions) (
@@ -1628,7 +1742,9 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	minGroups := groupBlindMinGroups
 	perGroupTarget := groupBlindPerGroupTarget
 	var internalPath *string
+	preferBackup := false
 	if len(opts) > 0 {
+		preferBackup = opts[0].PreferBackup
 		if opts[0].MinGroups > 1 {
 			minGroups = opts[0].MinGroups
 		}
@@ -1637,6 +1753,34 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		}
 		internalPath = opts[0].InternalPath
 	}
+
+	// A group-diversity mandate outranks any caller directive, and the drop happens HERE, before
+	// anything else in this call reads either value.
+	//
+	// It used to happen deep inside getValidConsumerSessionsWithProvider, at the one call that
+	// needed it. That left this frame and the failover cascade below holding a pin that selection
+	// had already discarded — and the cascade reads selectedProvider to decide whether releasing
+	// the blocked provider list could serve this request. Answering that for an address nobody
+	// will be routed to declines a release the request genuinely needs, so a cross-validation
+	// relay that the pool could still have satisfied comes back short of its required providers.
+	//
+	// Doing it before the cross-pod resolution below also saves a fleet round trip for a claim
+	// that would be discarded the moment it came back.
+	//
+	// The rpcsmartrouter caller drops these earlier still, for cross-validation at ANY minGroups.
+	// This one is the library's own invariant: GetSessions must not carry a directive that its own
+	// selection will ignore, whoever called it.
+	if minGroups > 1 && (selectedProvider != "" || stickiness != "") {
+		utils.LavaFormatWarning("group-diversity selection overrides caller provider selection / stickiness", nil,
+			utils.LogAttr("selectedProvider", selectedProvider),
+			utils.LogAttr("stickiness", stickiness),
+			utils.LogAttr("minGroups", minGroups),
+			utils.LogAttr("chainID", csm.rpcEndpoint.ChainID),
+			utils.LogAttr("GUID", ctx))
+		selectedProvider = ""
+		stickiness = ""
+	}
+
 	// Cross-pod stickiness resolves BEFORE any lock is taken, because it may call the fleet
 	// store and no network round trip may happen while csm.lock is held.
 	//
@@ -1720,10 +1864,27 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		providers:    initUnwantedProviders,
 		currentEpoch: csm.atomicReadCurrentEpoch(),
 	}
+	// Read here, after the fleet sticky claim has been resolved into selectedProvider above: any
+	// directive of the caller's outranks the router's own preference.
+	if selectedProvider == "" && stickiness == "" && len(opts) > 0 {
+		tempIgnoredProviders.preferredProvider = opts[0].PreferredProvider
+	}
 	utils.LavaFormatTrace("GetSessions tempIgnoredProviders", utils.LogAttr("tempIgnoredProviders", tempIgnoredProviders), utils.LogAttr("GUID", ctx))
 
-	// Get a valid consumerSessionsWithProvider
-	sessionWithProviderMap, err := csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+	// Get a valid consumerSessionsWithProvider. The backup-reserve hedge asks for the backup tier
+	// first; a pin still wins, so it only applies to an unpinned selection.
+	var sessionWithProviderMap SessionWithProviderMap
+	var err error
+	if preferBackup && selectedProvider == "" {
+		sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierReserveHedge, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
+		if err != nil {
+			utils.LavaFormatDebug("backup-reserve hedge found no eligible backup, using ordinary selection", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
+			sessionWithProviderMap = nil
+		}
+	}
+	if sessionWithProviderMap == nil {
+		sessionWithProviderMap, err = csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+	}
 	if err != nil {
 		utils.LavaFormatTrace("GetSessions error", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 		return nil, err
@@ -2059,8 +2220,13 @@ func convertSelectionStatsToMetrics(stats *provideroptimizer.SelectionStats) (al
 // the opposite of what pinning is for. The caller reports the collision so the operator
 // can rename a provider.
 func resolveSelectedProviderAddress(selectedProvider string, addresses []string) (address string, ambiguous []string) {
-	if slices.Contains(addresses, selectedProvider) {
-		return selectedProvider, nil
+	// The router's own string, never the caller's, even on an exact match. selectedProvider comes
+	// from a request header, which a listener may hand over still pointing into a buffer the next
+	// request reuses; the resolved address outlives the request as the session-map key and the
+	// endpoint_id / provider_address metric labels. A label whose text changed under Prometheus
+	// took down the whole /metrics page (MAG-3881).
+	if i := slices.Index(addresses, selectedProvider); i >= 0 {
+		return addresses[i], nil
 	}
 	var folded []string
 	for _, candidate := range addresses {
@@ -2447,16 +2613,51 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	return nil, utils.LavaFormatError(csm.rpcEndpoint.ChainID+" could not get a provider address from blocked provider list", PairingListEmptyError, utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("addons", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("ignoredProviders", ignoredProviders.providers), utils.LogAttr("GUID", ctx))
 }
 
-// getValidConsumerSessionsWithProviderFromBackupProviderList retrieves valid backup provider sessions for emergency fallback when no regular providers are available.
-func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) {
+// backupTierAsk is why a selection reads the backup tier, which decides how it reports itself.
+type backupTierAsk int
+
+const (
+	// backupTierFallback is the emergency fallback: no regular provider can serve the request.
+	backupTierFallback backupTierAsk = iota
+	// backupTierReserveHedge is the backup-reserve hedge (MAG-3923). Primaries are still in the
+	// pool, so finding no eligible backup is routine: the caller falls back to ordinary selection.
+	backupTierReserveHedge
+)
+
+// errNoEligibleBackupProvider is returned when the backup tier has nothing this request can use.
+// It is a sentinel rather than a logged error so each caller reports it at the level its own ask
+// warrants.
+var errNoEligibleBackupProvider = errors.New("no eligible backup provider")
+
+// noEligibleBackup returns errNoEligibleBackupProvider for reason. The emergency fallback keeps
+// its ERROR line; the reserve hedge leaves the reporting to its caller.
+func noEligibleBackup(ctx context.Context, ask backupTierAsk, reason string) error {
+	if ask == backupTierFallback {
+		utils.LavaFormatError(reason, nil, utils.LogAttr("GUID", ctx))
+	}
+	return fmt.Errorf("%s: %w", reason, errNoEligibleBackupProvider)
+}
+
+// getValidConsumerSessionsWithProviderFromBackupProviderList retrieves valid backup provider
+// sessions, for the emergency fallback when no regular providers are available and for the
+// backup-reserve hedge; ask says which.
+func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ask backupTierAsk, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
-	utils.LavaFormatInfo("[BackupProviders] Static providers exhausted — entering backup fallback",
-		utils.LogAttr("ignored_providers", ignoredProviders.providers),
-		utils.LogAttr("backup_pool_size", len(csm.backupProviders)),
-		utils.LogAttr("GUID", ctx),
-	)
+	if ask == backupTierReserveHedge {
+		utils.LavaFormatDebug("[BackupProviders] reserve hedge selecting from the backup tier",
+			utils.LogAttr("ignored_providers", ignoredProviders.providers),
+			utils.LogAttr("backup_pool_size", len(csm.backupProviders)),
+			utils.LogAttr("GUID", ctx),
+		)
+	} else {
+		utils.LavaFormatInfo("[BackupProviders] Static providers exhausted — entering backup fallback",
+			utils.LogAttr("ignored_providers", ignoredProviders.providers),
+			utils.LogAttr("backup_pool_size", len(csm.backupProviders)),
+			utils.LogAttr("GUID", ctx),
+		)
+	}
 
 	currentEpoch := csm.atomicReadCurrentEpoch() // reading the epoch here while locked, to get the epoch of the pairing.
 	if ignoredProviders.currentEpoch < currentEpoch {
@@ -2468,7 +2669,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	// Check if backup providers exist
 	if len(csm.backupProviders) == 0 {
 		utils.LavaFormatDebug("No backup providers configured", utils.LogAttr("GUID", ctx))
-		return nil, utils.LavaFormatError("no backup providers configured", nil, utils.LogAttr("GUID", ctx))
+		return nil, noEligibleBackup(ctx, ask, "no backup providers configured")
 	}
 
 	// Get valid backup provider addresses that support the required addon and extensions
@@ -2497,7 +2698,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 			utils.LogAttr("ignored_providers", ignoredProviders.providers),
 			utils.LogAttr("GUID", ctx),
 		)
-		return nil, utils.LavaFormatError("no valid backup providers available", nil, utils.LogAttr("GUID", ctx))
+		return nil, noEligibleBackup(ctx, ask, "no valid backup providers available")
 	}
 
 	utils.LavaFormatInfo("[BackupProviders] Asking optimizer to select from backup candidates",
@@ -2516,7 +2717,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 			utils.LogAttr("candidates", backupProviderAddresses),
 			utils.LogAttr("GUID", ctx),
 		)
-		return nil, utils.LavaFormatError("optimizer returned no backup provider", nil, utils.LogAttr("GUID", ctx))
+		return nil, noEligibleBackup(ctx, ask, "optimizer returned no backup provider")
 	}
 	selectedAddress := selectedAddresses[0]
 
@@ -2571,27 +2772,35 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 	// diverse set exists. minGroups <= 1 keeps the original group-blind selection byte-identical.
 	var providerAddresses []string
 	if minGroups > 1 {
-		// A group-diversity policy (an operator mandate) needs >= minGroups distinct provider groups, which
-		// is fundamentally incompatible with a single-provider directive: lava-select-provider and a sticky
-		// session each pin selection to exactly ONE provider (getValidProviderAddresses returns just that
-		// address). The operator policy wins (UC-1: stricter validation regardless of what the caller asked),
-		// so we intentionally pass empty stickiness/selectedProvider into the diverse fetch below — but make
-		// the override OBSERVABLE instead of silently discarding the caller's directive.
-		if selectedProvider != "" || stickiness != "" {
-			utils.LavaFormatWarning("cross-validation group-diversity policy overrides caller provider selection / stickiness", nil,
-				utils.LogAttr("selectedProvider", selectedProvider),
-				utils.LogAttr("stickiness", stickiness),
-				utils.LogAttr("minGroups", minGroups),
-				utils.LogAttr("chainID", csm.rpcEndpoint.ChainID),
-				utils.LogAttr("GUID", ctx))
-		}
+		// A group-diversity policy (an operator mandate) needs >= minGroups distinct provider groups,
+		// which is fundamentally incompatible with a single-provider directive: lava-select-provider
+		// and a sticky session each pin selection to exactly ONE provider (getValidProviderAddresses
+		// returns just that address). The operator policy wins (UC-1: stricter validation regardless
+		// of what the caller asked).
+		//
+		// Both are still passed empty explicitly, so this fetch says what it selects on rather than
+		// inheriting it. GetSessions has already cleared them for minGroups > 1 and reported the
+		// override, so by the time we get here there is nothing left to discard or to warn about.
 		ranked, rankErr := csm.getValidProviderAddresses(ctx, len(csm.validAddresses), ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "")
 		if rankErr != nil {
 			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get group-diverse provider addresses", utils.LogAttr("error", rankErr), utils.LogAttr("GUID", ctx))
 			return nil, rankErr
 		}
 		providerAddresses = csm.orderForGroupDiversity(ranked, wantedProviderNumber, minGroups, perGroupTarget)
+	} else if preferred, reason := csm.usablePreferredProvider(ctx, ignoredProviders, addon, extensions); preferred != "" {
+		utils.LavaFormatDebug("routing to the preferred provider",
+			utils.LogAttr("provider", preferred),
+			utils.LogAttr("GUID", ctx),
+		)
+		providerAddresses = []string{preferred}
 	} else {
+		if reason != "" {
+			utils.LavaFormatDebug("preferred provider cannot take this request, selecting normally",
+				utils.LogAttr("provider", ignoredProviders.preferredProvider),
+				utils.LogAttr("reason", reason),
+				utils.LogAttr("GUID", ctx),
+			)
+		}
 		providerAddresses, err = csm.getValidProviderAddresses(ctx, wantedProviderNumber, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider)
 		if err != nil {
 			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get a provider addresses", utils.LogAttr("error", err), utils.LogAttr("GUID", ctx))
@@ -2948,7 +3157,7 @@ func blockScope(backup bool) string {
 	return "primary"
 }
 
-// releaseWithoutPenalty is the shared body of the two "this told us nothing about the
+// releaseWithoutPenalty is the shared body of the "this told us nothing about the
 // provider" release paths. It returns the reserved compute units and unlocks the session,
 // deliberately recording NO QoS failure, NO consecutive provider error, and NO optimizer
 // availability sample. caller names the entry point so a lock-order violation still
@@ -3000,6 +3209,31 @@ func (csm *ConsumerSessionManager) OnSessionCancelled(consumerSession *SingleCon
 // not session scoring, is what keeps traffic away from it (docs/RATE-LIMIT-HOLDOFF.md).
 func (csm *ConsumerSessionManager) OnSessionRateLimited(consumerSession *SingleConsumerSession, reason error) error {
 	return csm.releaseWithoutPenalty(consumerSession, reason, "OnSessionRateLimited")
+}
+
+// OnSessionDataNotHeld releases a session whose endpoint answered that it does not hold the
+// requested data (SubCategoryDataScope). The fast error says nothing about availability or latency,
+// so neither is sampled; the endpoint's tip still is evidence, so a lagging node keeps losing sync.
+func (csm *ConsumerSessionManager) OnSessionDataNotHeld(consumerSession *SingleConsumerSession, reason error) error {
+	if err := consumerSession.VerifyLock(); err != nil {
+		return fmt.Errorf("OnSessionDataNotHeld, consumerSession.lock must be locked before accessing this method: %w", err)
+	}
+	if endpointBlock := csm.endpointTipBlock(consumerSession); endpointBlock > 0 {
+		go csm.providerOptimizer.AppendSyncData(consumerSession.Parent.PublicLavaAddress, uint64(endpointBlock), csm.resolveSyncReference())
+	}
+	return csm.releaseWithoutPenalty(consumerSession, reason, "OnSessionDataNotHeld")
+}
+
+// endpointTipBlock reads the session endpoint's tip from the shared endpointtip store, 0 when unknown.
+// It can be a PEER pod's observation (the fleet tracker gate): block height belongs to the endpoint,
+// not to the path, so a provider lagging only on this pod's path may not be demoted.
+func (csm *ConsumerSessionManager) endpointTipBlock(consumerSession *SingleConsumerSession) int64 {
+	drsc, ok := consumerSession.Connection.(*DirectRPCSessionConnection)
+	if !ok || drsc.Endpoint == nil {
+		return 0
+	}
+	info := csm.RPCEndpoint()
+	return endpointtip.Default().Block(endpointtip.Key(info.ChainID, info.ApiInterface, drsc.Endpoint.NetworkAddress))
 }
 
 // Report session failure, mark it as blocked from future usages, report if timeout happened.
@@ -3345,21 +3579,8 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		// Prefer the per-endpoint ChainTracker block (Endpoint.LatestBlock, kept current regardless of
 		// method) so a lagging provider is actually demoted.
 		syncBlock := uint64(latestServicedBlock)
-		if drsc, ok := consumerSession.Connection.(*DirectRPCSessionConnection); ok && drsc.Endpoint != nil {
-			// Read the per-endpoint tip from the shared single-source-of-truth store (keyed
-			// by chain+apiInterface+url). This used to read drsc.Endpoint.LatestBlock, a
-			// second copy written ungated; the store is fed through the gated poll/relay
-			// observers, so a lagging provider is demoted against a consistent tip.
-			//
-			// It can also carry a PEER pod's observation (the fleet tracker gate), i.e. a height
-			// this pod did not itself serve. Accepted deliberately — block height is a property
-			// of the endpoint, not of the path to it — but it means a provider lagging only on
-			// THIS pod's path may not be demoted.
-			info := csm.RPCEndpoint()
-			tipKey := endpointtip.Key(info.ChainID, info.ApiInterface, drsc.Endpoint.NetworkAddress)
-			if endpointBlock := endpointtip.Default().Block(tipKey); endpointBlock > 0 {
-				syncBlock = uint64(endpointBlock)
-			}
+		if endpointBlock := csm.endpointTipBlock(consumerSession); endpointBlock > 0 {
+			syncBlock = uint64(endpointBlock)
 		}
 		// F4/F5: resolve THIS interface's consensus baseline so the optimizer measures sync lag
 		// against the agreed tip — or omits sync when there is no fresh majority — instead of the
@@ -3961,25 +4182,45 @@ const (
 	// drop claims that readers still honour — reopening the split this feature closes. Exported
 	// so the wiring site can warn when the configured epoch pushes the TTL past the ceiling.
 	StickyClaimEpochSpan = 2
+)
 
-	// Outcomes for smartrouter_csm_sticky_claims_total. A closed set, so the series stays bounded.
-	stickyOutcomeLocalHit = "local_hit"
-	stickyOutcomeAdopted  = "adopted"
-	stickyOutcomeClaimed  = "claimed"
-	stickyOutcomeLostRace = "lost_race"
-	stickyOutcomeError    = "error"
+// stickyOutcome is one way a sticky id resolves, counted by smartrouter_csm_sticky_claims_total and
+// by GET /debug/sticky-claims. A closed set, so the series stays bounded. Declaring an outcome here
+// is what gives it a count slot, so the route cannot miss one the metric counts.
+type stickyOutcome uint8
+
+const (
+	stickyOutcomeLocalHit stickyOutcome = iota
+	stickyOutcomeAdopted
+	stickyOutcomeClaimed
+	stickyOutcomeLostRace
+	stickyOutcomeError
 	// stickyOutcomeNoCandidate is this pod having no upstream to offer (an empty pairing), which
 	// is not a registry failure and must not share a series with one.
-	stickyOutcomeNoCandidate = "no_candidate"
+	stickyOutcomeNoCandidate
 	// stickyOutcomeInvalidated is a local claim dropped because its upstream could not serve
 	// here. A climbing series means claims are outliving the upstreams they name.
-	stickyOutcomeInvalidated = "invalidated"
+	stickyOutcomeInvalidated
+	numStickyOutcomes
 )
+
+// stickyOutcomes is each outcome's value for the metric's outcome label, which is also its key in
+// StickyClaimCounts.
+var stickyOutcomes = [numStickyOutcomes]string{
+	stickyOutcomeLocalHit:    "local_hit",
+	stickyOutcomeAdopted:     "adopted",
+	stickyOutcomeClaimed:     "claimed",
+	stickyOutcomeLostRace:    "lost_race",
+	stickyOutcomeError:       "error",
+	stickyOutcomeNoCandidate: "no_candidate",
+	stickyOutcomeInvalidated: "invalidated",
+}
 
 // SetSharedStickyStore wires the fleet-wide claim registry and the epoch length used to size a
 // claim's lifetime. Called once at construction; nil leaves stickiness pod-local.
 func (csm *ConsumerSessionManager) SetSharedStickyStore(store SharedStickyStore, epochDuration time.Duration) {
 	csm.sharedSticky = store
+	csm.sharedStickyRequested = true
 	csm.stickyEpochDuration = epochDuration
 }
 
@@ -4101,6 +4342,28 @@ func (csm *ConsumerSessionManager) invalidateStickyPin(localKey string) {
 
 // recordStickyOutcome publishes one claim resolution. The metrics manager is nil-safe, and
 // SafeMetrics guarantees a non-nil consumer, so this needs no guard of its own.
-func (csm *ConsumerSessionManager) recordStickyOutcome(outcome string) {
-	csm.consumerMetricsManager.RecordStickyClaim(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, outcome)
+func (csm *ConsumerSessionManager) recordStickyOutcome(outcome stickyOutcome) {
+	csm.stickyClaimCounts[outcome].Add(1)
+	csm.consumerMetricsManager.RecordStickyClaim(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, stickyOutcomes[outcome])
+}
+
+// StickyClaimCounts reports whether the fleet-wide claim registry is wired (shared) and how many times
+// each outcome has resolved on this pod since it started: the resolutions smartrouter_csm_sticky_claims_total
+// counts, readable without the metrics port (MAG-3860). Every outcome is present, zero included, and without
+// the registry every count stays zero, so shared is what tells "off" from "never fired". The counts are
+// this process's alone: a reset does not touch them, and no pod sees another's.
+func (csm *ConsumerSessionManager) StickyClaimCounts() (shared bool, outcomes map[string]uint64) {
+	outcomes = make(map[string]uint64, numStickyOutcomes)
+	for outcome, label := range stickyOutcomes {
+		outcomes[label] = csm.stickyClaimCounts[outcome].Load()
+	}
+	return csm.sharedSticky != nil, outcomes
+}
+
+// SharedStickyRequested reports whether a claim registry was asked for, whether or not one could be
+// wired. With StickyClaimCounts' shared flag it tells apart the three states a reader of
+// GET /debug/sticky-claims needs: never requested (--shared-state off), requested and wired, and
+// requested but left pod-local because the configured cache backend cannot hold claims (MAG-3860).
+func (csm *ConsumerSessionManager) SharedStickyRequested() bool {
+	return csm.sharedStickyRequested
 }

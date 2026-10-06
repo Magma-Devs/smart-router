@@ -110,6 +110,7 @@ type ProviderOptimizer interface {
 	AppendRelayFailure(providerAddress string)
 	AppendRelayData(providerAddress string, latency time.Duration, cu, syncBlock uint64)
 	AppendRelayDataConsensus(providerAddress string, latency time.Duration, cu, syncBlock uint64, syncRef provideroptimizer.SyncReference)
+	AppendSyncData(providerAddress string, syncBlock uint64, syncRef provideroptimizer.SyncReference)
 	ChooseUpstream(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
 	ChooseUpstreamWithStats(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string, stats *provideroptimizer.SelectionStats)
 	GetReputationReportForProvider(string) (*pairingtypes.QualityOfServiceReport, time.Time)
@@ -120,6 +121,10 @@ type ProviderOptimizer interface {
 type ignoredProviders struct {
 	providers    map[string]struct{}
 	currentEpoch uint64
+	// preferredProvider is this request's GetSessionsOptions.PreferredProvider, carried here
+	// because this is the one piece of per-request state every level of selection receives. It
+	// survives the epoch reset that clears providers: it names a choice, not a failure.
+	preferredProvider string
 }
 
 type EndpointConnection struct {

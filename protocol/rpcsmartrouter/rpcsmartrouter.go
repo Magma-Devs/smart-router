@@ -238,6 +238,7 @@ type rpcSmartRouterStartOptions struct {
 	cache                    performance.CacheBackend
 	secondaryCache           performance.CacheReader // optional read-only fallback tier (docs/SECONDARY-CACHE.md); nil when unconfigured
 	secondaryCacheTimeout    time.Duration
+	cacheMaxEntryBytes       int64 // largest reply body written to the cache; 0 = no cap
 	strategy                 provideroptimizer.Strategy
 	analyticsServerAddresses AnalyticsServerAddresses
 	cmdFlags                 common.ConsumerCmdFlags
@@ -245,6 +246,11 @@ type rpcSmartRouterStartOptions struct {
 	staticProvidersList      []*lavasession.RPCStaticProviderEndpoint // define static providers as primary providers
 	backupProvidersList      []*lavasession.RPCStaticProviderEndpoint // define backup providers as emergency fallback when no providers available
 	upstreamSelectorConfig   provideroptimizer.UpstreamSelectorConfig
+	// bootBarrier holds every endpoint at its configuration check until all have passed theirs, so one
+	// refused configuration stops the router before any endpoint binds (MAG-3604; see
+	// cross_validation_boot.go). Set by Start; nil when an endpoint is created on its own, in which case
+	// the check still runs and the endpoint waits for nobody.
+	bootBarrier *bootConfigBarrier
 }
 
 // Start sets up the RPCSmartRouter and all its processes, then returns once
@@ -338,6 +344,9 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	wg.Add(parallelJobs)
 
 	errCh := make(chan error, parallelJobs)
+	// Every endpoint boots in its own goroutine below with no concurrency limit, which is what lets them
+	// all meet at the configuration barrier (see cross_validation_boot.go).
+	options.bootBarrier = newBootConfigBarrier(parallelJobs)
 
 	utils.LavaFormatInfo("RPCSmartRouter identifier: " + smartRouterIdentifier)
 	utils.LavaFormatInfo("RPCSmartRouter setting up endpoints", utils.Attribute{Key: "length", Value: strconv.Itoa(parallelJobs)})
@@ -499,14 +508,14 @@ func (rpsr *RPCSmartRouter) Stop(shutdownGracePeriod time.Duration) {
 }
 
 // debugMuxDeps bundles the state the debug HTTP handlers reach into. Bundling
-// rather than positional args lets us add stores (router-wide retry caches,
+// rather than positional args lets us add stores (router-wide caches,
 // session managers, etc.) without breaking the existing test fixtures, which
 // can leave router=nil and exercise just the optimizer+offset surface.
 type debugMuxDeps struct {
 	optimizers *common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]
 	offsetNano *atomic.Int64
 	// router is optional. When provided, /debug/reset-all also flushes
-	// per-server RelayRetriesManagers and per-CSM transient failure state.
+	// per-CSM transient failure state and the blocked-providers list.
 	router *RPCSmartRouter
 	// qosClient is the optional optimizer-QoS sampler. When provided,
 	// GET /debug/provider-scores reads the live per-provider quality scores
@@ -1170,6 +1179,21 @@ type routerConfigResponse struct {
 // — this is the rpcsmartrouter copy, extended with /debug/reset-all (a single endpoint
 // that flushes every router-internal state store so black-box tests can return to a
 // known-clean state without restarting the pod).
+// sharedStickyReason spells out why SharedSticky reads as it does on GET /debug/sticky-claims. False on
+// its own conflates a router that never asked for the claim registry with one that asked and could not
+// get it, and the two call for different fixes: the first is a values change, the second a cache backend
+// that cannot hold claims (NewCacheStickyStore warned once at boot and left stickiness pod-local).
+func sharedStickyReason(wired, requested bool) string {
+	switch {
+	case wired:
+		return "registry wired"
+	case requested:
+		return "--shared-state set, but the cache backend cannot hold claims"
+	default:
+		return "--shared-state not set"
+	}
+}
+
 func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	optimizers := deps.optimizers
 	currentOffsetNano := deps.offsetNano
@@ -1349,8 +1373,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/reset-all — flush every state store the test framework
 	// cares about in a single call: in-process Ristretto, optimizer scores,
-	// relay retry bans, sticky
-	// sessions, reported providers, cross-epoch blocked-provider memory,
+	// sticky sessions, reported providers, cross-epoch blocked-provider memory,
 	// and — when --cache-be is configured — the external cache-be pod
 	// (MAG-1764). Equivalent to the legacy time-warp(+3600) → time-warp(0)
 	// → reset-scores dance plus the surviving state above.
@@ -1392,9 +1415,8 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    Surfaced in the response body as the "chain-state" capability below.
 		resetAllChainStates(deps)
 		//
-		// 3. Per-server RelayRetriesManagers (6h hash ban cache), 4. per-CSM
-		//    transient failure state, and 4b. per-CSM blocked-providers list.
-		//    All require the router to be present; test fixtures without a
+		// 3. Per-CSM transient failure state, and 3b. per-CSM blocked-providers
+		//    list. Both require the router to be present; test fixtures without a
 		//    router still get a useful partial reset above and we report which
 		//    stores actually moved.
 		//
@@ -1409,11 +1431,6 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    for /debug/* paths; production relay paths never reach it.
 		if deps.router != nil {
 			deps.router.mu.Lock()
-			for _, server := range deps.router.rpcServers {
-				if server != nil && server.relayRetriesManager != nil {
-					server.relayRetriesManager.Reset()
-				}
-			}
 			for _, csm := range deps.router.sessionManagers {
 				if csm != nil {
 					csm.ResetTransientFailureState()
@@ -1479,6 +1496,13 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// signals MAG-1764 end-to-end coverage, "blocked-providers" signals
 		// MAG-1810, and "endpoint-health" + "pairing" signal the MAG-2186
 		// endpoint-health reset and cold pairing rebuild added above.
+		//
+		// "retries-manager" is retained on the same grounds as "seen-block": the
+		// store it named is gone (the relay-retries hash cache went with the
+		// speculative archive retry, which was its only writer), and the key is
+		// part of the contract an out-of-repo prober reads. Its postcondition —
+		// "no retry hash bans survive this call" — still holds, vacuously. Drop
+		// the key only together with the prober that requires it.
 		w.Header().Set("Content-Type", "application/json")
 		if cacheBeFlushed {
 			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","cache-be"]}`)
@@ -1717,6 +1741,53 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					// MAG-2202 suite reads them by name.
 					"Blocked": s.Blocked,
 					"HeldOff": s.HeldOff,
+				})
+			}
+			deps.router.mu.Unlock()
+		}
+		writeDebugRows(w, rows)
+	})
+
+	// GET /debug/sticky-claims — per-endpoint cross-pod sticky-session claim outcomes (MAG-3860). Flat
+	// array of self-describing records (ChainID + ApiInterface). SharedSticky says whether the fleet-wide
+	// claim registry is wired (--shared-state with a cache backend that holds claims), and
+	// SharedStickyReason says why when it is not: never requested, or requested and refused by the backend.
+	// Outcomes holds the seven counts smartrouter_csm_sticky_claims_total carries, cumulative since the
+	// process started, every outcome present. The counts are this process's alone: PodID names the process
+	// that answered (endpointstate.LocalPodID: the host name and a per-process suffix), and the debug
+	// Service balances across a router's pods, so a reader pins one pod (a port-forward) or compares two
+	// readings only when their PodID matches. "adopted" is how a peer's claim shows up, which
+	// Lava-Provider-Address cannot show, because it reads the same whether a pod used its own claim or a
+	// peer's; a pod that dropped its local copy of its own claim (invalidated) reads it back as adopted
+	// too, and the registry does not say whose claim it holds, so the two cannot be split here.
+	// /debug/reset-all is not such a case: it clears this pod's local pins and flushes the shared claims
+	// with them (one cache backs both), so the next request re-claims (claimed), while peers keep their
+	// confirmed local pins and keep serving the old upstream from local_hit until those pins age out.
+	// That reset drops the pins through Clear(), so invalidated does not move on it. Without the registry
+	// every count stays 0, so SharedSticky is what tells "off" from "never fired". Read-only; nil-router
+	// safe.
+	mux.HandleFunc("/debug/sticky-claims", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			podID := endpointstate.LocalPodID()
+			deps.router.mu.Lock()
+			for _, csm := range deps.router.sessionManagers {
+				if csm == nil {
+					continue
+				}
+				ep := csm.RPCEndpoint()
+				shared, outcomes := csm.StickyClaimCounts()
+				rows = append(rows, map[string]any{
+					"ChainID":            ep.ChainID,
+					"ApiInterface":       ep.ApiInterface,
+					"PodID":              podID,
+					"SharedSticky":       shared,
+					"SharedStickyReason": sharedStickyReason(shared, csm.SharedStickyRequested()),
+					"Outcomes":           outcomes,
 				})
 			}
 			deps.router.mu.Unlock()
@@ -2433,7 +2504,30 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	smartRouterOptimizerQoSClient *metrics.ConsumerOptimizerQoSClient,
 	smartRouterMetricsManager *metrics.SmartRouterMetricsManager,
 	relaysMonitorAggregator *metrics.RelaysMonitorAggregator,
-) error {
+) (err error) {
+	// Configuration barrier (MAG-3604): the endpoint arrives once its spec-backed policy checks have a
+	// verdict, and holds until every sibling has arrived. Arrival is idempotent and also deferred, so no
+	// return before that point — nor a panic — can leave a sibling waiting; such a return counts as a
+	// failure, which every return before the checks is. err is the named result so the deferred arrival
+	// carries the error the early return carried.
+	arrived := false
+	arriveAtBarrier := func(verdict error) {
+		if arrived {
+			return
+		}
+		arrived = true
+		if options.bootBarrier != nil {
+			options.bootBarrier.arrive(verdict)
+		}
+	}
+	defer func() {
+		verdict := err
+		if verdict == nil {
+			verdict = errBootAbortedBeforeConfigCheck
+		}
+		arriveAtBarrier(verdict)
+	}()
+
 	chainParser, err := chainlib.NewChainParser(rpcEndpoint.ApiInterface)
 	if err != nil {
 		err = utils.LavaFormatError("failed creating chain parser", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
@@ -2456,6 +2550,24 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		err = utils.LavaFormatError("no static spec paths configured; smart router requires --static-spec-paths to load chain specs", nil, utils.Attribute{Key: "chainID", Value: chainID})
 		errCh <- err
 		return err
+	}
+
+	// The spec is loaded: check the cross-validation policies this endpoint is held to against it, then
+	// hold here until every endpoint has done the same (MAG-3604; see cross_validation_boot.go). A refusal
+	// returns before a provider is dialed or a listener bound — on this endpoint, and through the barrier
+	// on every other — instead of after the siblings have started serving.
+	if err = crossValidationBootCheck(rpcEndpoint, chainParser); err != nil {
+		err = utils.LavaFormatError("invalid cross-validation configuration", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		errCh <- err
+		return err
+	}
+	arriveAtBarrier(nil)
+	if options.bootBarrier != nil {
+		if abort := options.bootBarrier.wait(); abort != nil {
+			// The endpoint that failed reported its own error; this one is not repeated into errCh, so the
+			// first error Start reads is the cause.
+			return utils.LavaFormatWarning("startup aborted before this endpoint bound a listener: another endpoint refused its configuration", abort, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
+		}
 	}
 
 	// Filter the relevant static providers.
@@ -3104,7 +3216,9 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// ServeRPCRequests. No single-node tip, no fire-and-forget poller per pod.
 
 	// Convert smartRouterIdentifier string to empty sdk.AccAddress for smart router
-	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, options.cache, options.secondaryCache, options.secondaryCacheTimeout, rpcSmartRouterMetrics, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
+	// The group layout goes from the CONFIGURED primaries: the session manager holds only the ones that
+	// passed verification above, and the cross-validation startup check must not judge the config by them.
+	err = rpcSmartRouterServer.ServeRPCRequests(ctx, rpcEndpoint, chainParser, sessionManager, staticProviderGroupAssignments(relevantStaticProviderList), options.cache, options.secondaryCache, options.secondaryCacheTimeout, options.cacheMaxEntryBytes, rpcSmartRouterMetrics, relaysMonitor, options.cmdFlags, options.stateShare, wsSubscriptionManager, smartRouterMetricsManager)
 	if err != nil {
 		err = utils.LavaFormatError("failed serving rpc requests", err, utils.Attribute{Key: "endpoint", Value: rpcEndpoint})
 		errCh <- err
@@ -3273,7 +3387,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			// before the metrics port binds, before any provider is dialed, and before the router logs
 			// that it is listening — so a bad config is a clean startup error instead of a crash loop
 			// from a router that has already announced itself.
-			if err := PreflightValidateCrossValidationConfig(viper.GetViper()); err != nil {
+			if err := PreflightValidateCrossValidationConfig(viper.GetViper(), rpcEndpoints); err != nil {
 				return utils.LavaFormatError("invalid cross-validation configuration", err)
 			}
 
@@ -3426,6 +3540,10 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			if err != nil {
 				return utils.LavaFormatError("invalid cache backend configuration", err)
 			}
+			cacheMaxEntryBytes, err := cacheMaxEntryBytesFrom(viper.GetViper())
+			if err != nil {
+				return utils.LavaFormatError("invalid cache configuration", err)
+			}
 
 			// Optional read-only secondary cache tier (docs/SECONDARY-CACHE.md).
 			// Deliberately independent of the primary: valid with cache-be unset.
@@ -3564,6 +3682,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				DebugAddress:                      viper.GetString("debug-address"),
 				ResponseCompression:               viper.GetString(common.ResponseCompressionFlag),
 				ShutdownGracePeriod:               viper.GetDuration(common.ShutdownGracePeriodFlag),
+				ReadYourWritesWindow:              viper.GetDuration(common.ReadYourWritesWindowFlag),
 			}
 
 			rpcSmartRouterSharedState := viper.GetBool(common.SharedStateFlag)
@@ -3588,6 +3707,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				cache:                    cache,
 				secondaryCache:           secondaryCacheReader,
 				secondaryCacheTimeout:    secondaryCacheConfig.Timeout,
+				cacheMaxEntryBytes:       cacheMaxEntryBytes,
 				strategy:                 strategyFlag.Strategy,
 				analyticsServerAddresses: analyticsServerAddresses,
 				cmdFlags:                 consumerPropagatedFlags,
@@ -3712,7 +3832,8 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().Duration(common.EpochDurationFlag, 0, "duration of each epoch for time-based epoch system (e.g., 30m, 1h). If not set, epochs are disabled")
 	cmdRPCSmartRouter.Flags().Duration(common.ShutdownGracePeriodFlag, common.DefaultShutdownGracePeriod, "graceful shutdown deadline for in-flight requests and WebSocket clients")
 	cmdRPCSmartRouter.Flags().IntVar(&relaycore.RelayRetryLimit, common.SetRelayRetryLimitFlag, 2, "max total relay retry attempts across all error types (node and protocol errors combined; 0 disables retries)")
-	cmdRPCSmartRouter.Flags().Bool(common.StatefulToBackupFlag, false, "also broadcast stateful relays (transaction submission) to the backup tier. OFF by default: a stateful relay reaches every provider it selects, so this sends EVERY stateful request to the backup — including the ones the primaries serve fine — and a fast backup can win the race and cancel the primaries. Turn it on to maximise the chance a transaction lands, accepting the backup spend")
+	cmdRPCSmartRouter.Flags().Bool(common.StatefulToBackupFlag, false, "also broadcast stateful relays (transaction submission) to the backup tier. OFF by default: a stateful relay reaches every provider it selects, so this sends EVERY stateful request to the backup — including the ones the primaries serve fine — and a fast backup can answer the caller first. Turn it on to maximise the chance a transaction lands, accepting the backup spend")
+	cmdRPCSmartRouter.Flags().Duration(common.ReadYourWritesWindowFlag, common.DefaultReadYourWritesWindow, "how long an eth_sendRawTransaction's sender and hash stay pinned to the upstream that accepted it: the sender's pending-nonce reads and lookups of the hash go there, so a wallet reads back its own write instead of an upstream the write has not reached yet. Pod-local, and a preference — an upstream that cannot take the read gives way to ordinary selection. 0 turns it off")
 	if err := viper.BindPFlag(common.StatefulToBackupFlag, cmdRPCSmartRouter.Flags().Lookup(common.StatefulToBackupFlag)); err != nil {
 		utils.LavaFormatFatal("failed to bind stateful-to-backup flag", err)
 	}
@@ -3739,7 +3860,9 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 
 	cmdRPCSmartRouter.Flags().DurationVar(&common.DefaultTimeout, common.DefaultProcessingTimeoutFlagName, common.DefaultTimeout, "default timeout for relay processing (e.g., 30s, 1m)")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.MinimumTimePerRelayDelay, common.MinRelayTimeoutFlagName, common.MinimumTimePerRelayDelay, "minimum relay timeout floor applied to all methods when CU-based timeout is lower (e.g., 1s, 5s)")
+	cmdRPCSmartRouter.Flags().DurationVar(&common.MaxCallerRelayTimeout, common.MaxCallerRelayTimeoutFlagName, common.MaxCallerRelayTimeout, "longest a caller's lava-relay-timeout header may make the router hold one request (e.g., 2m). It only lets the header extend a request past the budget the router gives it with no header, and never shortens a budget; the default 0 allows no extension. An extended request does not hedge, not even to the backup tier: its attempt window is its whole budget")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.CacheTimeout, common.CacheTimeoutFlagName, common.CacheTimeout, "per-relay cache lookup budget; must exceed the network round trip to the cache backend, so raise it for a remote (e.g. cross-region RESP) backend (e.g., 400ms)")
+	cmdRPCSmartRouter.Flags().Int64(common.CacheMaxEntryBytesFlagName, common.DefaultCacheMaxEntryBytes, "largest reply body, in bytes, written to the cache (gRPC or RESP backend); a larger reply is served but not written, since encoding a multi-MB entry costs more than its rare hits save. Off by default (0); set a value to turn it on")
 	cmdRPCSmartRouter.Flags().Uint64(common.BenchAfterFlagName, lavasession.DefaultBenchAfter,
 		"consecutive failed requests to one endpoint address before it is taken out of rotation; a successful relay resets the count. Must be > 0")
 	// Bound to viper so the value is readable from config.yml, not just the command line. Without

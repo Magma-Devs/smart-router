@@ -25,7 +25,7 @@ func newTwoProviderProcessor(t *testing.T) (*RelayProcessor, *lavasession.UsedPr
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "123.11")
 	usedProviders := lavasession.NewUsedProviders(nil)
-	rp := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachine(protocolMessage, usedProviders))
+	rp := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachine(protocolMessage, usedProviders))
 
 	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 	defer cancel()

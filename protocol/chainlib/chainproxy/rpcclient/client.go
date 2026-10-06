@@ -303,6 +303,15 @@ func (c *Client) CallContext(ctx context.Context, id json.RawMessage, method str
 		return nil, err
 	}
 
+	// A socket matches a reply to its request by id alone, so the call travels
+	// under an id the client owns and the caller's id comes back on the reply.
+	// The caller's may be null, which not every server echoes (XRPL's Clio omits
+	// it), or the same as another call's in flight. HTTP sends the id as given.
+	callerID := msg.ID
+	if !c.isHTTP && id != nil {
+		msg.ID = c.nextID()
+	}
+
 	op := &requestOp{ids: []json.RawMessage{msg.ID}, resp: make(chan *JsonrpcMessage, 1)}
 
 	if c.isHTTP {
@@ -320,8 +329,15 @@ func (c *Client) CallContext(ctx context.Context, id json.RawMessage, method str
 	if err != nil {
 		return nil, err
 	}
+	if c.isHTTP {
+		return resp, nil
+	}
 
-	return resp, nil
+	// The caller gets a copy carrying its id: dispatch still reads the reply it
+	// handed over.
+	out := *resp
+	out.ID = callerID
+	return &out, nil
 }
 
 // BatchCall sends all given requests as a single batch and waits for the server
@@ -355,15 +371,21 @@ func (c *Client) BatchCallContext(ctx context.Context, b []BatchElemWithId, stri
 		resp: make(chan *JsonrpcMessage, len(b)),
 	}
 	for i, elem := range b {
+		// As in CallContext: over HTTP the element goes out under the id its
+		// caller gave it, on a socket under one the client draws.
+		id := elem.ID
+		if !c.isHTTP {
+			id = nil
+		}
 		var msg *JsonrpcMessage
 		var err error
 		switch args := elem.args.(type) {
 		case []interface{}:
 			msg, err = c.newMessageArray(elem.Method, args...)
 		case map[string]interface{}:
-			msg, err = c.newMessageMapWithID(elem.Method, elem.ID, args)
+			msg, err = c.newMessageMapWithID(elem.Method, id, args)
 		case nil:
-			msg, err = c.newMessageArrayWithID(elem.Method, elem.ID, nil)
+			msg, err = c.newMessageArrayWithID(elem.Method, id, nil)
 		default:
 			return fmt.Errorf("invalid args type in message %t", args)
 		}
@@ -371,8 +393,8 @@ func (c *Client) BatchCallContext(ctx context.Context, b []BatchElemWithId, stri
 		if err != nil {
 			return err
 		}
-		if elem.ID != nil {
-			msg.ID = elem.ID
+		if id != nil {
+			msg.ID = id
 		}
 		_, exists := byID[string(msg.ID)]
 		if exists {

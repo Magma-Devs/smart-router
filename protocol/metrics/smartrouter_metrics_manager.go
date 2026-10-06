@@ -12,7 +12,6 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // registerOrReuse registers a Prometheus collector, returning the existing
@@ -110,6 +109,9 @@ type SmartRouterMetricsManager struct {
 	cacheSuccessTotalMetric  *prometheus.CounterVec   // smartrouter_cache_success_total
 	cacheFailedTotalMetric   *prometheus.CounterVec   // smartrouter_cache_failed_total {…, outcome=miss|error|timeout}
 	cacheLatencyHistogram    *prometheus.HistogramVec // smartrouter_cache_latency_milliseconds — observed on EVERY attempted lookup
+	// Cache writes (labels: spec, apiInterface, method; skipped adds reason)
+	cacheWriteSkippedTotalMetric *prometheus.CounterVec   // smartrouter_cache_write_skipped_total {…, reason=size}
+	cacheEntryBytesHistogram     *prometheus.HistogramVec // smartrouter_cache_entry_bytes — body size of every entry handed to the backend
 
 	// CSM state-store size gauges (labels: spec, apiInterface). Expose otherwise
 	// black-box internal state so integration tests can verify /debug/reset-all
@@ -134,6 +136,11 @@ type SmartRouterMetricsManager struct {
 	routerRequestsDebugTrace *prometheus.CounterVec
 	routerRequestsArchive    *prometheus.CounterVec
 	routerRequestsBatch      *prometheus.CounterVec
+
+	// extensionUnavailableTotal counts replies served without an extension the caller asked for
+	// (MAG-3935). Labels: spec, apiInterface, extension — the extension label is bounded by the
+	// spec's extension names, see RecordExtensionUnavailable.
+	extensionUnavailableTotal *prometheus.CounterVec // smartrouter_extension_unavailable_total
 
 	// Batch-request shape metrics. The `method` label on every family above is collapsed
 	// for batches (see batch_method_label.go) — batchSize carries the element count the
@@ -533,7 +540,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_csm_sticky_claims_total",
 		Help: "Cross-pod sticky-session claim resolutions by outcome. " +
 			"local_hit: answered from this pod's confirmed table, no round trip. " +
-			"adopted: took a claim another pod had already made — the signal that cross-pod stickiness is doing its job, and zero here on a multi-replica fleet means it is wired but never firing. " +
+			"adopted: routed by a live claim read from the registry rather than one held in memory — normally another pod's, the signal that cross-pod stickiness is doing its job, and zero here on a multi-replica fleet means it is wired but never firing; a pod also reads back its own claim after dropping its local copy (see invalidated). " +
 			"claimed: this pod's write created the claim. " +
 			"lost_race: a peer's claim was already live and named a DIFFERENT upstream, so this pod adopted it. " +
 			"(A peer claim naming the same upstream this pod would have picked is indistinguishable from winning, and counts as claimed.) " +
@@ -594,6 +601,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_requests_batch_total",
 		Help: "Total number of batch requests on the smart router.",
 	}, routerRequestLabels)
+	extensionUnavailableTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_extension_unavailable_total",
+		Help: "Requests served without an extension the caller asked for with lava-extension, because no node on this router offers it, per extension. Counted once per request per such extension, on the same replies that carry the Lava-Extension-Unavailable response header. An extension the router adds on its own (archive for a deep eth_call) is never counted. Non-zero means callers depend on an extension this deployment has no node for.",
+	}, []string{"spec", "apiInterface", "extension"})
 
 	batchSize := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "smartrouter_batch_size",
@@ -629,6 +640,16 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Help:    "Distribution of cache lookup latency in milliseconds, per cache tier, observed on every attempted lookup (hits and non-hits).",
 		Buckets: latencyBuckets,
 	}, cacheLabels)
+	cacheWriteLabels := []string{"spec", "apiInterface", "method"}
+	cacheWriteSkippedTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_cache_write_skipped_total",
+		Help: "Replies the router served but did not write to its cache, by reason. reason=size: the reply body exceeded --cache-max-entry-bytes.",
+	}, append(append([]string{}, cacheWriteLabels...), "reason"))
+	cacheEntryBytesHistogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "smartrouter_cache_entry_bytes",
+		Help:    "Body size in bytes of every reply the router hands to its cache backend for writing, before the backend encodes it.",
+		Buckets: cacheEntryBytesBuckets,
+	}, cacheWriteLabels)
 
 	// Register router-scoped and histogram metrics.
 	// On duplicate registration, reuse the already-registered collector so the
@@ -671,6 +692,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerRequestsDebugTrace = registerOrReuse(routerRequestsDebugTrace)
 	routerRequestsArchive = registerOrReuse(routerRequestsArchive)
 	routerRequestsBatch = registerOrReuse(routerRequestsBatch)
+	extensionUnavailableTotal = registerOrReuse(extensionUnavailableTotal)
 	batchSize = registerOrReuse(batchSize)
 	batchSignatureOverflow = registerOrReuse(batchSignatureOverflow)
 	defaultMethodOverflow = registerOrReuse(defaultMethodOverflow)
@@ -678,6 +700,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	cacheSuccessTotalMetric = registerOrReuse(cacheSuccessTotalMetric)
 	cacheFailedTotalMetric = registerOrReuse(cacheFailedTotalMetric)
 	cacheLatencyHistogram = registerOrReuse(cacheLatencyHistogram)
+	cacheWriteSkippedTotalMetric = registerOrReuse(cacheWriteSkippedTotalMetric)
+	cacheEntryBytesHistogram = registerOrReuse(cacheEntryBytesHistogram)
 	csmBlockedProvidersCount = registerOrReuse(csmBlockedProvidersCount)
 	csmPrevEpochBlockedProviders = registerOrReuse(csmPrevEpochBlockedProviders)
 	csmProviderBlocked = registerOrReuse(csmProviderBlocked)
@@ -762,6 +786,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		routerRequestsArchive:    routerRequestsArchive,
 		routerRequestsBatch:      routerRequestsBatch,
 
+		extensionUnavailableTotal: extensionUnavailableTotal,
+
 		// Batch shape group
 		batchSize:              batchSize,
 		batchSignatureOverflow: batchSignatureOverflow,
@@ -776,6 +802,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		cacheSuccessTotalMetric:  cacheSuccessTotalMetric,
 		cacheFailedTotalMetric:   cacheFailedTotalMetric,
 		cacheLatencyHistogram:    cacheLatencyHistogram,
+
+		// Cache writes
+		cacheWriteSkippedTotalMetric: cacheWriteSkippedTotalMetric,
+		cacheEntryBytesHistogram:     cacheEntryBytesHistogram,
 
 		// CSM state-store gauges
 		csmBlockedProvidersCount:       csmBlockedProvidersCount,
@@ -804,9 +834,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// address leaves the manager in register-only mode (collectors registered, no
 	// socket) — see SmartRouterMetricsManagerOptions.
 	if options.NetworkAddress != "" {
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", promhttp.Handler())
-		manager.registerHTTPHandlers(mux)
+		mux := manager.metricsMux(prometheus.DefaultRegisterer, prometheus.DefaultGatherer)
 
 		go func() {
 			utils.LavaFormatInfo("prometheus endpoint listening", utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})
@@ -817,6 +845,15 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}
 
 	return manager
+}
+
+// metricsMux is every route the metrics server answers: the page, gathered from the given registry,
+// and the health routes.
+func (m *SmartRouterMetricsManager) metricsMux(registerer prometheus.Registerer, gatherer prometheus.Gatherer) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", newMetricsPageHandler(registerer, gatherer))
+	m.registerHTTPHandlers(mux)
+	return mux
 }
 
 // registerHTTPHandlers wires the health/readiness routes onto the given mux.
@@ -1414,6 +1451,37 @@ func (m *SmartRouterMetricsManager) RecordCacheResult(chainId, apiInterface, met
 	// Every attempted lookup is observed — hit-only latency hid exactly the tail
 	// that matters for a network-hop tier.
 	m.cacheLatencyHistogram.WithLabelValues(chainId, apiInterface, method, cacheTier).Observe(latencyMs)
+}
+
+// RecordExtensionUnavailable counts one request served without extension, a caller-requested
+// extension no node on this router offers (MAG-3935). The extension label is bounded without a
+// registry of its own: only names the spec defines as extensions (plus "websocket") survive
+// SeparateAddonsExtensions before they can be recorded as unavailable, so a caller cannot mint
+// series by sending arbitrary lava-extension values.
+func (m *SmartRouterMetricsManager) RecordExtensionUnavailable(chainId, apiInterface, extension string) {
+	if m == nil {
+		return
+	}
+	m.extensionUnavailableTotal.WithLabelValues(chainId, apiInterface, extension).Inc()
+}
+
+// RecordCacheWriteSkipped counts a reply the router served but chose not to write to its
+// cache; reason is the closed CacheWriteSkipReason* enum.
+func (m *SmartRouterMetricsManager) RecordCacheWriteSkipped(chainId, apiInterface, method, reason string) {
+	if m == nil {
+		return
+	}
+	method = m.normalizeMethodLabel(chainId, method)
+	m.cacheWriteSkippedTotalMetric.WithLabelValues(chainId, apiInterface, method, reason).Inc()
+}
+
+// RecordCacheEntryWritten observes the body size of a reply handed to the cache backend.
+func (m *SmartRouterMetricsManager) RecordCacheEntryWritten(chainId, apiInterface, method string, bodyBytes int) {
+	if m == nil {
+		return
+	}
+	method = m.normalizeMethodLabel(chainId, method)
+	m.cacheEntryBytesHistogram.WithLabelValues(chainId, apiInterface, method).Observe(float64(bodyBytes))
 }
 
 func (m *SmartRouterMetricsManager) SetProtocolError(chainId string, apiInterface string, providerAddress string, method string) {

@@ -310,11 +310,10 @@ type WebSocketDirectRPCConnection struct {
 	client *rpcclient.Client // lazily dialed on first SendRequest, then cached
 	closed bool              // set by Close(); prevents re-dialing a closed connection
 
-	// wireID issues a connection-unique JSON-RPC id per request. rpcclient.Client
-	// multiplexes concurrent requests on one socket and routes replies by id
-	// (handler.respWait is a plain id→op map), so reusing a caller-supplied id
-	// across concurrent calls would misroute responses. We send a unique wire id
-	// and restore the caller's original id on the reply before returning.
+	// wireID issues a connection-unique JSON-RPC id per request, and the caller's
+	// original id is restored on the reply before returning. rpcclient.Client
+	// draws an id of its own for every call on a socket too; this connection keeps
+	// one so that matching a reply to its request does not rest on the client alone.
 	wireID atomic.Uint64
 }
 
@@ -597,10 +596,13 @@ func NewDirectRPCConnection(
 	case DirectRPCProtocolHTTP, DirectRPCProtocolHTTPS:
 		// Use the shared optimized client so every smart-router HTTP connection
 		// benefits from:
-		//   - DisableCompression=true        (skips ~30% CPU on auto-gunzip inflate)
 		//   - MaxIdleConnsPerHost pooling    (reuses TCP conns under load)
 		//   - TLS session cache              (faster reconnects, less handshake CPU)
 		//   - ForceAttemptHTTP2              (multiplexes streams on one conn)
+		//
+		// Compression is not a transport setting: the transport leaves it on for
+		// the chainlib proxies, and every request from this connection sets its own
+		// Accept-Encoding (see SendRequest).
 		//
 		// The backing transport is a singleton from common.SharedHttpTransport(),
 		// so all HTTPDirectRPCConnection instances share one connection pool.
@@ -696,14 +698,16 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 		req.Header.Set(k, v)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// Advertise Accept-Encoding: identity so Go's http client neither auto-adds
-	// `gzip` nor auto-decodes the response. This scoping is smart-router-only:
-	// the shared transport still lets provider chain proxies keep their
-	// standard auto-gzip behavior. Production pprof attributed ~30-39% of CPU
-	// to the auto-decode path (http2gzipReader → compress/flate.decompressor);
-	// removing it dropped the eth router from 2.47 cores to 1.23 cores.
+	// Accept-Encoding is the url's own (NodeUrl.AcceptEncoding): identity unless
+	// the operator opted it in to gzip. Setting any value keeps Go's http client
+	// from adding `gzip` and decoding it on its own. That path cost the eth router
+	// ~30-39% of its CPU (http2gzipReader → compress/flate.decompressor), and
+	// asking for identity took it from 2.47 cores to 1.23 (MAG-1589). This
+	// scoping is smart-router-only: the shared transport still lets provider
+	// chain proxies keep their standard auto-gzip behavior. A gzip reply is
+	// inflated by readHTTPResponseBody instead.
 	// Set *after* caller headers so it cannot be accidentally overridden.
-	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Accept-Encoding", h.nodeUrl.UpstreamAcceptEncoding())
 
 	resp, err := h.client.Do(req)
 	if err != nil {
@@ -711,7 +715,7 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readHTTPResponseBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed reading response body: %w", err)
 	}
@@ -738,6 +742,47 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	}
 
 	return response, nil
+}
+
+// maxPresizedResponseBytes is the largest Content-Length readResponseBody trusts for its one
+// up-front allocation. It sits above the block replies these routers serve today: a Solana block
+// reply is 5–7 MB, and Tendermint's default block.max_bytes is 21 MB. A chain can raise
+// block.max_bytes past it (CometBFT allows 100 MB), and a reply is larger than the block it
+// carries. It exists because the length is the upstream's claim: without a bound, a wrong one
+// would allocate memory before the transport finds out the body is shorter. A longer
+// announcement is read as it arrives, as it was before.
+const maxPresizedResponseBytes = 32 << 20
+
+// readResponseBody reads an upstream response body. When the upstream announced a length, the
+// body is read into one buffer of exactly that size (MAG-3845). io.ReadAll cannot know the
+// size, so it reads into a chain of growing buffers and then copies them all into a final one:
+// for a 5.9 MB Solana block that is 14.6 MB allocated and a full extra copy, against 5.9 MB and
+// none. A body with no announced length, or one above maxPresizedResponseBytes, still goes
+// through io.ReadAll. Read errors, including a body shorter than announced, come back as they
+// did before.
+func readResponseBody(resp *http.Response) ([]byte, error) {
+	size := resp.ContentLength
+	if size <= 0 || size > maxPresizedResponseBytes {
+		return io.ReadAll(resp.Body)
+	}
+	// One spare byte, so a body of exactly the announced length reaches EOF without growing
+	// the buffer (the same approach as os.ReadFile).
+	body := make([]byte, 0, size+1)
+	for {
+		n, err := resp.Body.Read(body[len(body):cap(body)])
+		body = body[:len(body)+n]
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return body, nil
+			}
+			return body, err
+		}
+		if len(body) == cap(body) {
+			// Longer than announced. The transport enforces Content-Length, so this should not
+			// happen; grow rather than cut the body short if it ever does.
+			body = append(body, 0)[:len(body)]
+		}
+	}
 }
 
 // HTTPStatusError represents an HTTP error response (4xx/5xx)
@@ -832,10 +877,10 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 		}
 	}
 
-	// Scoped smart-router override: skip upstream gzip auto-negotiation. See
+	// The url's own Accept-Encoding, identity unless it opted in to gzip. See
 	// SendRequest above for the full rationale. Set last so it cannot be
 	// overridden by per-request headers.
-	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Accept-Encoding", h.nodeUrl.UpstreamAcceptEncoding())
 
 	// Send request
 	resp, err := h.client.Do(req)
@@ -844,8 +889,8 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
+	// Read response body, inflated if the upstream gzipped it
+	body, err := readHTTPResponseBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed reading response: %w", err)
 	}
@@ -885,8 +930,8 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 		return nil, fmt.Errorf("failed to parse JSON-RPC request for WebSocket %s: %w", w.nodeUrl.UrlStr(), err)
 	}
 
-	// Send a connection-unique wire id so concurrent requests can't collide in
-	// the client's id→response map, then restore the caller's id on the reply.
+	// Call under a connection-unique id rather than the caller's, so concurrent
+	// requests cannot collide, then restore the caller's id on the reply.
 	wireID := json.RawMessage(strconv.FormatUint(w.wireID.Add(1), 10))
 
 	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
@@ -894,10 +939,8 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 		return nil, err
 	}
 
-	// Restore the caller's id on a COPY of the reply. The rpcclient dispatch
-	// goroutine may still read the returned reply concurrently, so mutating it
-	// in place is a data race — we only read it (to copy) and write the id on
-	// our own value.
+	// Restore the caller's id on a copy of the reply, so that this does not
+	// depend on the client handing back a message of its own.
 	out := *reply
 	out.ID = reqMsg.ID // caller's id (omitted/empty for notifications)
 
@@ -1033,6 +1076,13 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	if len(metadataMap) > 0 {
 		md := metadata.New(metadataMap)
 		ctx = metadata.NewOutgoingContext(ctx, md)
+	}
+
+	// A binary request goes to the node as the caller's bytes, and the reply comes
+	// back as the node's bytes. Nothing here reads either, so no descriptor is
+	// needed; only a JSON body has to be converted through the method's descriptor.
+	if !isJSONRequest(data) {
+		return g.invokeRaw(ctx, conn, methodPath, data)
 	}
 
 	// Parse service and method name
@@ -1744,7 +1794,9 @@ func (g *GRPCDirectRPCConnection) lookupService(service string) (*desc.ServiceDe
 // GetCachedMethodDescriptor returns a cached method descriptor for the given method path.
 // This implements the GRPCDescriptorProvider interface.
 // The methodPath should be in format "service/method" (e.g., "cosmos.bank.v1beta1.Query/TotalSupply")
-// Returns nil if no descriptor is cached (call SendRequest first to populate cache).
+// Returns nil if no descriptor is cached. The warm-up sweep, a JSON request and
+// ResolveMethodDescriptor fill the cache; a binary request does not, because it goes to
+// the node without a descriptor (see invokeRaw).
 func (g *GRPCDirectRPCConnection) GetCachedMethodDescriptor(methodPath string) *desc.MethodDescriptor {
 	// Parse the method path to get the full name used in cache
 	svc, methodName := rpcInterfaceMessages.ParseSymbol(methodPath)
@@ -2062,7 +2114,7 @@ func (g *GRPCDirectRPCConnection) parseInputMessage(
 	conn *grpc.ClientConn,
 ) error {
 	// Detect if input is JSON or binary proto
-	if len(data) > 0 && (data[0] == '{' || data[0] == '[') {
+	if isJSONRequest(data) {
 		// JSON input - use grpcurl parser. The parser resolves any message types the
 		// request references, so it needs the same descriptor source as the method
 		// lookup did — reflection-only here would defeat "file" mode (MAG-2350).
@@ -2099,6 +2151,62 @@ func (g *GRPCDirectRPCConnection) parseInputMessage(
 
 	return nil
 }
+
+// isJSONRequest reports whether a gRPC request body is JSON rather than binary
+// protobuf. A protobuf message never starts with '{' or '[': both are start-group
+// tags, which proto3 encoders do not emit.
+func isJSONRequest(data []byte) bool {
+	return len(data) > 0 && (data[0] == '{' || data[0] == '[')
+}
+
+// GRPCRequestNeedsDescriptor reports whether SendRequest has to resolve the method's
+// descriptor to send this body: true for a JSON body, false for a binary one, which
+// goes to the node unchanged (see invokeRaw).
+func GRPCRequestNeedsDescriptor(data []byte) bool {
+	return isJSONRequest(data)
+}
+
+// invokeRaw sends a binary request to the node unchanged and returns the node's
+// reply unchanged, with the response headers. It needs no descriptor, so it works
+// whether or not the node serves reflection.
+func (g *GRPCDirectRPCConnection) invokeRaw(ctx context.Context, conn *grpc.ClientConn, methodPath string, data []byte) (*DirectRPCResponse, error) {
+	var reply []byte
+	var respHeaders metadata.MD
+	err := conn.Invoke(ctx, "/"+methodPath, data, &reply, grpc.ForceCodec(rawProtoCodec{}), grpc.Header(&respHeaders))
+	if err != nil {
+		return g.handleGRPCError(ctx, err, respHeaders)
+	}
+	return &DirectRPCResponse{
+		Data:       reply,
+		Metadata:   respHeaders,
+		StatusCode: http.StatusOK,
+	}, nil
+}
+
+// rawProtoCodec carries protobuf messages as their wire bytes. It is named "proto"
+// so calls go out as application/grpc+proto, which every gRPC server reads.
+type rawProtoCodec struct{}
+
+func (rawProtoCodec) Marshal(v any) ([]byte, error) {
+	b, ok := v.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("raw proto codec: cannot marshal %T", v)
+	}
+	return b, nil
+}
+
+// Unmarshal keeps data as the reply: grpc-go hands a codec of this kind its own
+// copy of the message, so nothing else reuses the slice.
+func (rawProtoCodec) Unmarshal(data []byte, v any) error {
+	b, ok := v.(*[]byte)
+	if !ok {
+		return fmt.Errorf("raw proto codec: cannot unmarshal into %T", v)
+	}
+	*b = data
+	return nil
+}
+
+func (rawProtoCodec) Name() string { return "proto" }
 
 // handleGRPCError handles gRPC errors and returns an appropriate response
 func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error, respHeaders metadata.MD) (*DirectRPCResponse, error) {

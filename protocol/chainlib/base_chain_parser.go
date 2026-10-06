@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
@@ -58,13 +60,20 @@ type InternalPath struct {
 }
 
 type BaseChainParser struct {
-	internalPaths     map[string]InternalPath
-	taggedApis        map[spectypes.FUNCTION_TAG]TaggedContainer
-	spec              spectypes.Spec
-	rwLock            sync.RWMutex
-	serverApis        map[ApiKey]ApiContainer
-	apiCollections    map[CollectionKey]*spectypes.ApiCollection
-	headers           map[ApiKey]*spectypes.Header
+	internalPaths  map[string]InternalPath
+	taggedApis     map[spectypes.FUNCTION_TAG]TaggedContainer
+	spec           spectypes.Spec
+	rwLock         sync.RWMutex
+	serverApis     map[ApiKey]ApiContainer
+	apiCollections map[CollectionKey]*spectypes.ApiCollection
+	headers        map[ApiKey]*spectypes.Header
+	// replyHeaders is every header directive of this parser's API interface that passes in
+	// the reply direction (HeaderPassesOnReply), across all of the interface's enabled
+	// collections, deduplicated by name in spec order. Built by Construct, read by
+	// ReplyHeaderDirectives. Per interface rather than per collection because a chain's
+	// reply headers describe the node, not the route: Aptos declares its ledger-state
+	// headers on the GET collection and its nodes send them on POST too (MAG-3104).
+	replyHeaders      []*spectypes.Header
 	verifications     map[VerificationKey]map[string][]VerificationContainer // map[VerificationKey]map[InternalPath][]VerificationContainer
 	allowedAddons     map[string]bool
 	allowedExtensions map[string]struct{}
@@ -77,6 +86,10 @@ type BaseChainParser struct {
 	// that probe several endpoints concurrently. Guarded by rwLock like every other
 	// mutable field here.
 	skipWebsocketVerification bool
+
+	// family is the error-registry family of spec, resolved by Construct so that classifying each
+	// parsed message reads it without taking rwLock. nil until a spec is set.
+	family atomic.Pointer[common.ChainFamily]
 }
 
 // SkipWebsocketVerification reports whether this parser's endpoint opts out of
@@ -85,6 +98,15 @@ func (bcp *BaseChainParser) SkipWebsocketVerification() bool {
 	bcp.rwLock.RLock()
 	defer bcp.rwLock.RUnlock()
 	return bcp.skipWebsocketVerification
+}
+
+// chainFamily is the error-registry family of the spec this parser serves, ChainFamilyUnknown before
+// a spec is set (the zero ChainFamily is EVM, so an unset parser must not read as zero).
+func (bcp *BaseChainParser) chainFamily() common.ChainFamily {
+	if family := bcp.family.Load(); family != nil {
+		return *family
+	}
+	return common.ChainFamilyUnknown
 }
 
 // SetSkipWebsocketVerification overrides the process default for this parser only.
@@ -111,6 +133,32 @@ func (bcp *BaseChainParser) UpdateBlockTime(newBlockTime time.Duration) {
 	bcp.spec.AverageBlockTime = newBlockTime.Milliseconds()
 }
 
+// clientBodyHeaders are the request headers that describe the body the client authored.
+// The REST interface forwards that body to the node byte-for-byte, so the client's own
+// description of it is the correct one and is forwarded without a spec directive
+// (MAG-2745). Before this, an undeclared content-type was dropped here and the hardcoded
+// application/json default reached the node instead, so every REST chain whose node
+// takes a non-JSON body needed a per-spec pass_send/pass_override to work at all.
+//
+// JSON-RPC and tendermint re-marshal the body the router sends, so application/json
+// stays theirs; gRPC's content-type is transport-owned (see grpc.go). And only the
+// methods that carry a body qualify: on a GET there is nothing to describe, and the
+// header would only fragment the cache key, which hashes the forwarded metadata.
+var clientBodyHeaders = map[string]struct{}{"content-type": {}}
+
+// forwardsClientBodyHeader reports whether lowercase headerName is a client body header
+// that is forwarded for this collection without a spec directive.
+func forwardsClientBodyHeader(apiCollection *spectypes.ApiCollection, headerName string) bool {
+	if apiCollection.CollectionData.ApiInterface != spectypes.APIInterfaceRest {
+		return false
+	}
+	if !restMethodCarriesBody(apiCollection.CollectionData.Type) {
+		return false
+	}
+	_, ok := clientBodyHeaders[headerName]
+	return ok
+}
+
 func (bcp *BaseChainParser) HandleHeaders(metadata []pairingtypes.Metadata, apiCollection *spectypes.ApiCollection, headersDirection spectypes.Header_HeaderType) (filteredHeaders []pairingtypes.Metadata, overwriteRequestedBlock string, ignoredMetadata []pairingtypes.Metadata) {
 	bcp.rwLock.RLock()
 	defer bcp.rwLock.RUnlock()
@@ -123,7 +171,12 @@ func (bcp *BaseChainParser) HandleHeaders(metadata []pairingtypes.Metadata, apiC
 		apiKey := ApiKey{Name: headerName, ConnectionType: apiCollection.CollectionData.Type}
 		headerDirective, ok := bcp.headers[apiKey]
 		if !ok {
-			// this header is not handled
+			// Undeclared. A client body header on a REST body is forwarded anyway; a spec
+			// that declares the name keeps its exact say, and a pass_override or
+			// pass_nullify is appended below and so wins when the request reaches the wire.
+			if headersDirection == spectypes.Header_pass_send && header.Value != "" && forwardsClientBodyHeader(apiCollection, headerName) {
+				retMetadata = append(retMetadata, header)
+			}
 			continue
 		}
 		if headerDirective.Kind == headersDirection || headerDirective.Kind == spectypes.Header_pass_both {
@@ -309,10 +362,13 @@ func (bcp *BaseChainParser) Construct(spec spectypes.Spec, internalPaths map[str
 	verifications map[VerificationKey]map[string][]VerificationContainer,
 ) {
 	bcp.spec = spec
+	family := common.GetChainFamilyOrDefault(spec.Index)
+	bcp.family.Store(&family)
 	bcp.internalPaths = internalPaths
 	bcp.serverApis = serverApis
 	bcp.taggedApis = taggedApis
 	bcp.headers = headers
+	bcp.replyHeaders = replyHeaderDirectives(spec, apiCollections)
 	bcp.apiCollections = apiCollections
 	bcp.verifications = verifications
 	allowedAddons := map[string]bool{}
@@ -476,6 +532,9 @@ func (bcp *BaseChainParser) ExtensionParsing(addon string, parsedMessageArg *bas
 		}
 		parsedMessageArg.OverrideExtensions(extensionInfo.AdditionalExtensions, &bcp.extensionParser)
 	}
+	if extensionInfo.RouterExtensions != nil {
+		parsedMessageArg.addRouterExtensions(extensionInfo.RouterExtensions, &bcp.extensionParser)
+	}
 }
 
 func (bcp *BaseChainParser) extensionParsingInner(addon string, parsedMessageArg *baseChainMessageContainer, latestBlock uint64) {
@@ -558,6 +617,62 @@ func (apip *BaseChainParser) ApiHasStatefulCategory(name string) bool {
 		}
 	}
 	return false
+}
+
+// ApiNameDefined reports whether the spec serves an enabled API with exactly this name on this parser's
+// interface, in any collection (add-ons included). It compares the API's own name, which is what a
+// request resolves to (GetApi().GetName()); a REST key is a regex built from the path template, so the key
+// would not match the name an operator writes. Used by the cross-validation startup guard to reject a
+// per-method policy that no request can ever select by that name.
+//
+// It answers by name alone: ConnectionType and InternalPath, which a request's lookup also keys on, are
+// not consulted, so a defined name is necessary for a policy to apply and not proof that it will. Two
+// REST templates that differ only in a placeholder's name compile to one regex and share one slot in
+// serverApis, so only the last one loaded is defined; ApiNamesLike names the survivor.
+func (apip *BaseChainParser) ApiNameDefined(name string) bool {
+	if apip == nil {
+		return false
+	}
+	apip.rwLock.RLock()
+	defer apip.rwLock.RUnlock()
+	for _, apiCont := range apip.serverApis {
+		if apiCont.api != nil && apiCont.api.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ApiNamesLike returns, sorted, the names of the enabled APIs on this parser's interface that differ from
+// name only by letter case or by the spelling of a REST placeholder ({address_bytes} against
+// {address_string}), and are not name itself. It is the hint the cross-validation method guard gives an
+// operator whose policy names a method the spec serves under no such name: the operator copied the
+// name out of the spec, and this is the name a request actually resolves to. Like ApiNameDefined it
+// ignores ConnectionType and InternalPath.
+func (apip *BaseChainParser) ApiNamesLike(name string) []string {
+	if apip == nil {
+		return nil
+	}
+	shapeOf := func(apiName string) string {
+		return strings.ToLower(restPlaceholderRegex.ReplaceAllString(apiName, "{}"))
+	}
+	wanted := shapeOf(name)
+	apip.rwLock.RLock()
+	defer apip.rwLock.RUnlock()
+	seen := map[string]struct{}{}
+	var like []string
+	for _, apiCont := range apip.serverApis {
+		if apiCont.api == nil || apiCont.api.Name == name || shapeOf(apiCont.api.Name) != wanted {
+			continue
+		}
+		if _, dup := seen[apiCont.api.Name]; dup {
+			continue
+		}
+		seen[apiCont.api.Name] = struct{}{}
+		like = append(like, apiCont.api.Name)
+	}
+	sort.Strings(like)
+	return like
 }
 
 func (apip *BaseChainParser) isValidInternalPath(path string) bool {
@@ -662,6 +777,61 @@ func findParseDirectiveByTag(apiCollection *spectypes.ApiCollection, tag spectyp
 		}
 	}
 	return nil
+}
+
+// HeaderPassesOnReply reports whether a spec header directive of this kind lets the node's
+// header through to the client. pass_reply and pass_both say so by name. pass_ignore does
+// too: the spec type defines it as a header that "allows it to pass around but is not
+// signed", that is, passed, but kept out of the signed and compared payload because its
+// value differs per node (Aptos's x-aptos-ledger-timestampusec). The router signs nothing,
+// so "pass" is all that is left of it.
+func HeaderPassesOnReply(kind spectypes.Header_HeaderType) bool {
+	switch kind {
+	case spectypes.Header_pass_reply, spectypes.Header_pass_both, spectypes.Header_pass_ignore:
+		return true
+	}
+	return false
+}
+
+// replyHeaderDirectives collects the reply-direction header directives of the collections
+// in apiCollections (this interface's enabled ones), walking spec.ApiCollections so the
+// order is the spec's and not a map's. The first directive for a name wins; names compare
+// case-insensitively because HTTP canonicalises and gRPC lowercases.
+func replyHeaderDirectives(spec spectypes.Spec, apiCollections map[CollectionKey]*spectypes.ApiCollection) []*spectypes.Header {
+	if len(apiCollections) == 0 {
+		return nil
+	}
+	indexed := make(map[*spectypes.ApiCollection]struct{}, len(apiCollections))
+	for _, apiCollection := range apiCollections {
+		indexed[apiCollection] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	var directives []*spectypes.Header
+	for _, apiCollection := range spec.ApiCollections {
+		if _, ok := indexed[apiCollection]; !ok {
+			continue
+		}
+		for _, header := range apiCollection.Headers {
+			if header == nil || !HeaderPassesOnReply(header.Kind) {
+				continue
+			}
+			key := strings.ToLower(header.Name)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			directives = append(directives, header)
+		}
+	}
+	return directives
+}
+
+// ReplyHeaderDirectives returns the reply-direction header directives of this parser's
+// API interface, as built by Construct. The slice is shared: read it, do not modify it.
+func (bcp *BaseChainParser) ReplyHeaderDirectives() []*spectypes.Header {
+	bcp.rwLock.RLock()
+	defer bcp.rwLock.RUnlock()
+	return bcp.replyHeaders
 }
 
 func getServiceApis(

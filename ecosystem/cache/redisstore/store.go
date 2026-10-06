@@ -29,11 +29,11 @@ const (
 
 	// chainTipRetention is how long the chain-tip KEY persists. Reader
 	// freshness is the embedded deadline (core.DefaultExpirationForNonFinalized,
-	// much shorter); the key outliving it keeps the monotonic write guard
-	// fencing lower writes long after the tip goes stale for readers —
-	// mirroring the in-memory adapter, where the stored block fences forever.
-	// Bounded (instead of no TTL) so every key stays volatile and
-	// maxmemory-policy volatile-* strategies see the whole keyspace.
+	// much shorter), and the write guard honours that same deadline: a stale
+	// tip fences nothing (MAG-3755), so retention only bounds the key's
+	// lifetime and never how long a lower write is refused. Bounded (instead
+	// of no TTL) so every key stays volatile and maxmemory-policy volatile-*
+	// strategies see the whole keyspace.
 	chainTipRetention = 24 * time.Hour
 
 	scanBatchSize = 512
@@ -57,7 +57,11 @@ type Store struct {
 	// each client, so the store can name the node actually serving it. Static
 	// configuration cannot answer this: under sentinel the serving node changes
 	// on every failover, and under cluster it depends on the key's slot.
-	// Observability only — nothing in the cache path reads these.
+	//
+	// The address half is observability only. The reachability half these also
+	// carry IS read on the relay path, through OpWindow, to tell an endpoint that
+	// is gone from one that is merely slow — recorded for standalone alone, which
+	// is the only topology where one endpoint stands behind one tracker.
 	readEndpoint  *endpointTracker
 	writeEndpoint *endpointTracker
 
@@ -87,12 +91,18 @@ type Store struct {
 	credentials *StreamingProvider
 }
 
-// endpointTracker holds the last successfully dialled address. Written from
-// dial callbacks on arbitrary goroutines, read from the relay path, so it is
-// atomic; a slightly stale value is fine for its purpose (naming a node in a
-// debug header) and never affects routing.
+// endpointTracker holds the last successfully dialled address, and the last
+// observation that the endpoint could not be reached at all. Written from dial
+// callbacks on arbitrary goroutines, read from the relay path, so both are
+// atomic; neither affects routing.
+//
+// The address is an answer about identity — which node served this — and a
+// slightly stale one is fine for its purpose, naming a node in a debug header.
+// The fault is an answer about reachability, read through OpWindow, and there
+// staleness is the whole difficulty: see OpWindow for why it is timestamped.
 type endpointTracker struct {
-	addr atomic.Value // string
+	addr  atomic.Value // string
+	fault atomic.Pointer[endpointFault]
 }
 
 func (t *endpointTracker) note(addr string) {
@@ -690,22 +700,36 @@ func (s *Store) SetInt64IfGreaterOrEqual(ctx context.Context, key string, value 
 // ---------------------------------------------------------------------------
 
 // The chain tip stores "block:freshnessDeadlineUnixMs". Readers honour the
-// embedded deadline; the monotonic guard compares against the raw stored
-// block for as long as the key is retained (chainTipRetention), stale or not.
+// embedded deadline, and so does the write guard: a lower block is refused
+// only while the stored tip is still fresh by that deadline. ARGV[4] is the
+// writer's clock: the deadline was stamped by whichever replica wrote last and
+// readers judge it by their own clock (GetChainTip), so the guard assumes the
+// same clock alignment across replicas that readers already do, and the script
+// never needs redis TIME. Leaving TIME out is a choice, not a limit: a script
+// may read it and still write (after redis.replicate_commands() on a server
+// that replicates scripts verbatim), but TIME against a deadline a router
+// stamped still compares two clocks. Taking skew out of the guard would mean
+// stamping the deadline from TIME in the script as well, and readers would
+// still judge it by their own clocks. Once the deadline has passed the stored
+// block fences nothing and any write replaces it: the downward path a false
+// high tip needs in order to age out once nobody refreshes it (MAG-3755). An
+// equal or higher block always writes, which moves the deadline.
 //
-// The match result is bound before tonumber rather than nested inside it, which
-// is a TEST-INFRASTRUCTURE requirement, not a correctness one: on a corrupt
-// value string.match returns nil, and real Redis (PUC Lua 5.1) returns nil from
-// tonumber(nil) while miniredis (gopher-lua) raises "bad argument #1 to
-// tonumber (value expected)". Nesting it makes the corrupt-value path
+// The match results are bound before tonumber rather than nested inside it,
+// which is a TEST-INFRASTRUCTURE requirement, not a correctness one: on a
+// corrupt value string.match returns nil, and real Redis (PUC Lua 5.1) returns
+// nil from tonumber(nil) while miniredis (gopher-lua) raises "bad argument #1
+// to tonumber (value expected)". Nesting it makes the corrupt-value path
 // untestable under miniredis and invites someone to "fix" a script that is
-// already correct against a real backend.
-var setChainTipGEScript = redis.NewScript(`
+// already correct against a real backend. A value that is not
+// "block:deadline" fences nothing.
+var setChainTipGuardedScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 if cur then
-	local match = string.match(cur, '^(-?%d+)')
-	local curb = match and tonumber(match)
-	if curb and tonumber(ARGV[1]) < curb then
+	local b, d = string.match(cur, '^(-?%d+):(-?%d+)$')
+	local curb = b and tonumber(b)
+	local curd = d and tonumber(d)
+	if curb and curd and tonumber(ARGV[1]) < curb and tonumber(ARGV[4]) < curd then
 		return 0
 	end
 end
@@ -752,10 +776,11 @@ func (s *Store) GetChainTip(ctx context.Context, key string) (int64, bool, error
 	return spectypes.NOT_APPLICABLE, false, nil
 }
 
-func (s *Store) SetChainTipIfGreaterOrEqual(ctx context.Context, key string, block int64) error {
-	deadline := time.Now().Add(core.DefaultExpirationForNonFinalized).UnixMilli()
+func (s *Store) SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error {
+	now := time.Now()
+	deadline := now.Add(core.DefaultExpirationForNonFinalized).UnixMilli()
 	encoded := encodeChainTip(block, deadline)
-	return setChainTipGEScript.Run(ctx, s.write, []string{s.key(key)}, block, encoded, chainTipRetention.Milliseconds()).Err()
+	return setChainTipGuardedScript.Run(ctx, s.write, []string{s.key(key)}, block, encoded, chainTipRetention.Milliseconds(), now.UnixMilli()).Err()
 }
 
 // ---------------------------------------------------------------------------
@@ -901,6 +926,115 @@ func decodeStickyPin(raw string) (core.StickyPin, error) {
 		return core.StickyPin{}, err
 	}
 	return core.StickyPin{Provider: value.Provider, Epoch: value.Epoch}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint observations (the fleet tracker gate)
+// ---------------------------------------------------------------------------
+
+// An observation is stored as "block|storedAtUnixMs|podID". The stamp is the TIME of the
+// server that owns the key — the primary the write client reaches (under Cluster, the key's
+// shard) — taken inside the script, so no writing pod's wall clock reaches a peer's freshness
+// decision. The read's TIME, though, comes from the server the READ client reaches: the same
+// primary only without read-addresses and outside Cluster. With read-addresses it is a different
+// server (a replica, or a separate store); under Cluster the TIME in the read pipeline goes to
+// an arbitrary shard, not necessarily the key's. So age is "reader server's TIME minus key
+// primary's TIME" and carries the skew between them; nothing cancels it, but the entry's TTL
+// (2× the freshness window) bounds how stale a served observation can be. The cache server's
+// in-memory store, by contrast, stamps and measures on one clock. The pod id goes last because
+// it is the one field with no character restriction; the first two are digits.
+//
+// The compare-and-set stays a script for the same reason the sticky claim does: a GET-then-SET
+// pair from the adapter reopens the race between two pods the monotonic rule exists to close.
+// The corrupt-value handling mirrors setInt64GEScript — a stored value that does not parse
+// falls THROUGH to the write rather than fencing it forever. "Parse" means the same shape the
+// read decodes (block AND stamp): a value the read treats as a miss must not fence the write
+// either, or a foreign value with a numeric head and no TTL would read as a miss and refuse
+// every lower publish for good.
+//
+// TIME inside a writing script needs effects replication, which every Redis from 5.0 and every
+// Valkey uses by default; on the 3.x/4.x line it would need redis.replicate_commands(), which
+// this adapter does not target.
+var publishEndpointObservationScript = redis.NewScript(`
+local cur = redis.call('GET', KEYS[1])
+if cur then
+	local curBlock = string.match(cur, '^(%d+)|%d+|')
+	local curn = curBlock and tonumber(curBlock)
+	if curn and tonumber(ARGV[1]) < curn then
+		return 0
+	end
+end
+local t = redis.call('TIME')
+local atMs = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+redis.call('SET', KEYS[1], ARGV[1] .. '|' .. string.format('%.0f', atMs) .. '|' .. ARGV[2], 'PX', ARGV[3])
+return 1
+`)
+
+func (s *Store) PublishEndpointObservation(ctx context.Context, key string, obs core.EndpointObservation, ttl time.Duration) (bool, error) {
+	// The engine clamps to a sub-second floor; this guard only keeps a direct caller from
+	// issuing SET PX 0, which the backend rejects.
+	if ttl < time.Millisecond {
+		ttl = time.Millisecond
+	}
+	applied, err := publishEndpointObservationScript.Run(ctx, s.write, []string{s.key(key)}, obs.Block, obs.PodID, ttl.Milliseconds()).Int()
+	if err != nil {
+		return false, err
+	}
+	return applied == 1, nil
+}
+
+// GetEndpointObservation reads the entry and the read client's server TIME in ONE pipelined
+// round trip (that server need not be the one whose TIME stamped the entry — see above),
+// no script: the read may be served by a reader endpoint (read-addresses), and plain commands
+// run there without question. The two commands are not atomic, and need not be — the time
+// between them is microseconds against a freshness window of a block time (the clock skew
+// between servers, when they differ, is the larger term; the TTL bounds it).
+func (s *Store) GetEndpointObservation(ctx context.Context, key string) (core.EndpointObservation, time.Duration, bool, error) {
+	pipe := s.read.Pipeline()
+	getCmd := pipe.Get(ctx, s.key(key))
+	timeCmd := pipe.Time(ctx)
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return core.EndpointObservation{}, 0, false, err
+	}
+	if getCmd.Err() == redis.Nil {
+		return core.EndpointObservation{}, 0, false, nil
+	}
+	if err := getCmd.Err(); err != nil {
+		return core.EndpointObservation{}, 0, false, err
+	}
+	now, err := timeCmd.Result()
+	if err != nil {
+		return core.EndpointObservation{}, 0, false, err
+	}
+	obs, storedAtMs, ok := decodeEndpointObservation(getCmd.Val())
+	if !ok {
+		// Same policy as the int64 tip: a router-embedded backend on a SHARED store must not
+		// be derailed by a foreign writer, so corruption reads as a miss (and the next publish
+		// overwrites it — see the script's fall-through).
+		utils.LavaFormatError("corrupt endpoint observation in RESP backend, treating as miss", nil, utils.LogAttr("key", s.key(key)), utils.LogAttr("value", getCmd.Val()))
+		return core.EndpointObservation{}, 0, false, nil
+	}
+	age := time.Duration(now.UnixMilli()-storedAtMs) * time.Millisecond
+	if age < 0 {
+		age = 0
+	}
+	return obs, age, true, nil
+}
+
+func decodeEndpointObservation(raw string) (obs core.EndpointObservation, storedAtMs int64, ok bool) {
+	parts := strings.SplitN(raw, "|", 3)
+	if len(parts) != 3 {
+		return core.EndpointObservation{}, 0, false
+	}
+	block, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return core.EndpointObservation{}, 0, false
+	}
+	storedAtMs, err = strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return core.EndpointObservation{}, 0, false
+	}
+	return core.EndpointObservation{Block: block, PodID: parts[2]}, storedAtMs, true
 }
 
 // Purge drops every key under this store's prefix from every endpoint the

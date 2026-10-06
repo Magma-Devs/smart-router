@@ -335,8 +335,11 @@ var chainFamilyMap = map[string]ChainFamily{
 	"APT1": ChainFamilyAptos,
 
 	// Sui — shares Move heritage with Aptos but has a distinct JSON-RPC surface
-	// and error taxonomy, so it gets its own family.
-	"SUIT": ChainFamilySui,
+	// and error taxonomy, so it gets its own family. SUI is mainnet, SUIT testnet,
+	// SUID devnet; sui.json declares all three. Listing only the testnet left
+	// mainnet traffic falling through to ChainFamilyUnknown, which skips every
+	// family-scoped matcher — on the network customers actually run.
+	"SUI": ChainFamilySui, "SUIT": ChainFamilySui, "SUID": ChainFamilySui,
 
 	// NEAR
 	"NEAR": ChainFamilyNEAR, "NEART": ChainFamilyNEAR,
@@ -465,6 +468,31 @@ func (m messageRegexMatcher) Matches(_ int, errorMessage string) bool {
 
 func MessageRegex(pattern string) ErrorMatcher {
 	return messageRegexMatcher{re: regexp.MustCompile(pattern)}
+}
+
+// CodeAndMessage matches only when BOTH the error code and a case-insensitive
+// message substring match. It exists for rows whose message alone is too broad to
+// stand on its own: nodeos says "unknown block" in a 400, but the same words in a
+// 500 body are not evidence of a block-not-found, and on REST the raw response body
+// is what reaches the matcher as the message (extractErrorMessage's fallback), so a
+// bare substring row is matched against whatever the upstream happened to print.
+type codeAndMessageMatcher struct {
+	code      int
+	substring string // pre-lowercased at construction time
+}
+
+func (m codeAndMessageMatcher) Matches(errorCode int, errorMessage string) bool {
+	return errorCode == m.code && strings.Contains(strings.ToLower(errorMessage), m.substring)
+}
+
+// matchesLowered keeps this matcher on ClassifyError's fast path, so adding rows of
+// this kind costs no extra strings.ToLower per classification.
+func (m codeAndMessageMatcher) matchesLowered(errorCode int, loweredMessage string) bool {
+	return errorCode == m.code && strings.Contains(loweredMessage, m.substring)
+}
+
+func CodeAndMessage(code int, substring string) ErrorMatcher {
+	return codeAndMessageMatcher{code: code, substring: strings.ToLower(substring)}
 }
 
 // HTTPStatusContains matches an HTTP status code in the error message with non-digit

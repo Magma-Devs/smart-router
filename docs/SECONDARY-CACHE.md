@@ -72,13 +72,15 @@ request ──► primary cache ──hit──► served ("Cached")
   block that `latest`, `safe`, `finalized` and `pending` resolve to — chain-wide,
   and unlowerable until it expires.
 - **No foreign hash→height mappings.** For the same reason, the secondary is
-  never asked for the block-hash→height mappings the primary tier supplies. Those
-  heights raise the effective requested block (gating endpoint sync and optimizer
-  selection) and decide archive routing, and the two tiers' values were folded
-  max-for-latest / min-for-earliest — so the more extreme value always won and a
-  foreign tier would beat your own primary by construction. Hash-keyed archive
-  detection therefore uses your primary's mappings alone, or none in a
-  secondary-only topology, exactly as on a router with no cache configured.
+  never asked for block-hash→height mappings. Heights from a cache would raise the
+  effective requested block (gating endpoint sync and optimizer selection) and
+  steer archive routing. The two tiers' values were folded max-for-latest /
+  min-for-earliest, so the more extreme value always won and a foreign tier would
+  beat your own primary by construction. The router writes no mappings today, so
+  your primary has none to supply either (see
+  [RESP-CACHE.md](RESP-CACHE.md#block-hash-to-height-mappings)). Hash-keyed archive
+  detection has no mappings in any topology, exactly as on a router with no cache
+  configured.
 
 Any backend that speaks the Smart Router cache protocol works as either tier —
 the secondary is simply a second `smartrouter cache` address. Run the same cache
@@ -112,7 +114,8 @@ merely implemented:
   carrying the entry's true state. A cached node error or an error status is
   served to the caller but rejected for backfill by that component's own
   rules — so the two tiers can never drift apart in what they consider
-  cacheable.
+  cacheable. The same holds for size: with
+  `--cache-max-entry-bytes` set, a hit larger than it is served but not backfilled.
 
 ## Configuration
 
@@ -566,7 +569,12 @@ secondary hit both report `Cached`, both carry the same locally minted header
 set, and the body is the same bytes. (The one difference is invisible here and
 by design: an entry that came from the secondary replays only its
 `Content-Type` / `Content-Encoding`, not whatever other upstream headers the
-writer's node happened to send.)
+writer's node happened to send. Since MAG-3104 the live path is nearly as
+strict — `filterUpstreamReplyMetadata` keeps those two, `Retry-After`, `Date`
+and the spec's own reply headers, and drops the rest before the reply leaves
+the sender — and a primary hit is passed through the same filter when it is
+served, so the primary replays that reduced set whichever router wrote the
+entry.)
 
 `Lava-Cache-Tier` names the tier that answered, and `Lava-Cache-Outcome` says
 what each tier did on the way. Both are part of the reply, so there is nothing
