@@ -41,6 +41,10 @@ const (
 	// answer (MAG-3935). An extension the router adds on its own, such as archive for an eth_call
 	// deep behind the head, is never listed: the caller did not ask for it.
 	EXTENSION_UNAVAILABLE_HEADER_NAME = "Lava-Extension-Unavailable"
+	// RELAY_TIMEOUT_APPLIED_HEADER_NAME answers a request that carried lava-relay-timeout with the
+	// attempt window the router actually used, as a Go duration (MAG-3600). See
+	// appendHeadersToRelayResult.
+	RELAY_TIMEOUT_APPLIED_HEADER_NAME = "Lava-Relay-Timeout-Applied"
 	// CACHE_BACKEND_HEADER_NAME names the cache backend that served a hit — the
 	// cache-be address, or the RESP node actually dialled (the current master
 	// under sentinel, the touched shard under cluster). Debug-only: it exposes

@@ -371,6 +371,50 @@ the cache more than its rare hits save. 1 MiB fits Solana `getBlock` replies (1.
 16% of the time). On ETH and Base, `eth_getBlockReceipts` replies run up to and past 1 MiB, so a
 cap that low there cuts those entries; size the cap per chain from `smartrouter_cache_entry_bytes`.
 
+### Per-request time budget (`lava-relay-timeout`)
+
+A caller can send `lava-relay-timeout: <Go duration>` (for example `300ms` or `5s`) to set the
+request's attempt window: how long the router waits on one endpoint before it also tries the next.
+The router bounds the value (MAG-3600):
+
+- A value that is not a positive duration (`-45s`, `0s`, `abc`) is ignored, and the router's own
+  window applies.
+- A value under 300ms is raised to 300ms, about one round trip. A much shorter window hedges before
+  any endpoint could answer, fanning one request out to every endpoint the retry limits allow.
+- A value above the request's own budget is held to that budget. The own budget is what the
+  router gives the request with no header: `--default-processing-timeout`, doubled for calls of
+  50 CU or more, and six times it for hanging, stateful or 100+ CU calls. A call whose own window is
+  longer still keeps it: a hanging call waits twice the chain's block time, so Bitcoin's
+  `sendrawtransaction` gets about 20 minutes. By default the header reshapes hedging but cannot
+  make the router hold a request longer than that.
+
+A value below the router's own window replaces it. On most calls that only makes hedging sooner.
+On a call whose budget comes from its own window, such as that Bitcoin write, it also shortens the
+budget, as it did before these bounds.
+
+A value at or above the request's own budget turns hedging off for that request. The window is also
+the hedge interval, and the budget is never shorter than the window, so such a value makes the two
+equal and a hedge could only fire as the budget runs out. Retrying after a failed attempt works as
+it does without the header, but an endpoint that goes quiet holds the request for the whole budget.
+Such a request also gets no backup-reserve hedge (MAG-3923). That hedge goes out one window before
+the budget ends, but never before the first window has passed, so when the window equals the budget
+there is no point inside the budget for it and it is not armed: if the primaries go quiet, the
+backup tier is never tried.
+
+`--max-caller-relay-timeout` lets callers extend the budget, up to its value:
+
+```bash
+--max-caller-relay-timeout 2m        # default 0: callers cannot extend a request's budget
+```
+
+A request extended this way is one of those: its window is its whole budget, so one quiet endpoint
+can hold it for as long as the caller asked, up to the flag's value, and it gets no backup-reserve
+hedge either.
+
+A reply to a request that carried the header includes `Lava-Relay-Timeout-Applied`: the window the
+router actually used, as a Go duration. Like the router's other reply headers, it is absent when the
+request failed without any reply.
+
 ### Request tracing headers
 
 A caller can label a request so it can be found again in the router's logs and matched to
