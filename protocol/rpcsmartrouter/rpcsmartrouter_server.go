@@ -2795,6 +2795,17 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 						utils.LogAttr("GUID", goroutineCtx),
 					)
 				}
+			} else if isDataScopeRelayOutcome(err, localRelayResult) {
+				// "I do not hold this data" is neither failure nor success. It comes back fast, so
+				// OnSessionDone would reward a lagging or pruned node with availability and latency
+				// for data it did not serve. The request still fails over; only the endpoint's tip is scored.
+				relayHoldoff.RecordAnswer(holdoffProvider, holdoffURL)
+				releaseErr := fmt.Errorf("upstream does not hold the requested data (status %d)", statusCode)
+				if errSession := rpcss.sessionManager.OnSessionDataNotHeld(singleConsumerSession, releaseErr); errSession != nil {
+					utils.LavaFormatWarning("OnSessionDataNotHeld failed for direct RPC", errSession,
+						utils.LogAttr("GUID", goroutineCtx),
+					)
+				}
 			} else if !shouldFailSession {
 				// The endpoint answered for real — success or a plain client error — so any
 				// standing rate-limit hold-off for it is stale.
@@ -6312,6 +6323,14 @@ func isRateLimitedRelayOutcome(err error, relayResult *common.RelayResult) bool 
 		return true
 	}
 	return err != nil && errors.Is(err, common.StatusCodeError429)
+}
+
+// isDataScopeRelayOutcome reports an answer that the endpoint does not hold the requested data
+// (SubCategoryDataScope: block not found, pruned state, unknown transaction). Only answers the
+// availability gate already keeps off the failure path qualify, so a 5xx stays a failure.
+func isDataScopeRelayOutcome(err error, relayResult *common.RelayResult) bool {
+	return relayResult != nil && relayResult.IsNodeError && relayResult.IsDataScope &&
+		!shouldFailSessionForResult(err, relayResult)
 }
 
 // httpStatusRelayError is the error relayInnerDirect fails a relay with when the upstream
