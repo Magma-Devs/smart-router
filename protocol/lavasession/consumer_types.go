@@ -265,6 +265,20 @@ func (e *Endpoint) IsDirectRPC() bool {
 	return len(e.DirectConnections) > 0
 }
 
+// isDirectWebSocket reports whether this endpoint is a direct ws(s) connection. The
+// router serves subscriptions through its subscription managers; a unary relay sent
+// over one of these fails, so session selection never hands one out.
+func (e *Endpoint) isDirectWebSocket() bool {
+	if len(e.DirectConnections) == 0 || e.DirectConnections[0] == nil {
+		return false
+	}
+	switch e.DirectConnections[0].GetProtocol() {
+	case DirectRPCProtocolWS, DirectRPCProtocolWSS:
+		return true
+	}
+	return false
+}
+
 // ServesInternalPath reports whether this endpoint's url is the one to dial for
 // an api served under `internalPath`.
 func (e *Endpoint) ServesInternalPath(internalPath string) bool {
@@ -1225,6 +1239,9 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			if restrictToPath && !endpoint.ServesInternalPath(*internalPath) {
 				continue
 			}
+			if endpoint.isDirectWebSocket() {
+				continue
+			}
 			// retryDisabledEndpoints will attempt to reconnect to the provider even though we have disabled the endpoint
 			// this is used on a routine that tries to reconnect to a provider that has been disabled due to being unable to connect to it.
 			endpoint.mu.RLock()
@@ -1448,6 +1465,10 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 		// before verifying all are Disabled.
 		allDisabled = true
 		for _, endpoint := range cswp.Endpoints {
+			// A websocket endpoint serves no relay, so it cannot keep the provider alive.
+			if endpoint.isDirectWebSocket() {
+				continue
+			}
 			endpoint.mu.RLock()
 			enabled := endpoint.Enabled
 			endpoint.mu.RUnlock()
