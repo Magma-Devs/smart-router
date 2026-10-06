@@ -11,8 +11,9 @@ import (
 
 // MAG-3988: GetRelayTimeout's result becomes the relay state machine's time.NewTicker interval,
 // which panics on a non-positive value — in a goroutine with no recover, so the process exits. A
-// non-positive override must fall back to the computed window; a positive one is used verbatim,
-// even below the --min-relay-timeout floor, as the directives docs promise.
+// non-positive override must fall back to the computed window. A positive one is used as sent when
+// it lies within the caller bound (MAG-3600): even below the --min-relay-timeout floor, but never
+// below common.MinCallerRelayTimeout.
 func TestGetRelayTimeout_Override(t *testing.T) {
 	floor := common.MinimumTimePerRelayDelay
 	t.Cleanup(func() { common.MinimumTimePerRelayDelay = floor })
@@ -29,6 +30,8 @@ func TestGetRelayTimeout_Override(t *testing.T) {
 		{"unset uses the computed window", 0, computed},
 		{"positive above the floor is verbatim", 12 * time.Second, 12 * time.Second},
 		{"positive below the floor is verbatim", 500 * time.Millisecond, 500 * time.Millisecond},
+		// MAG-3600 changes PR 452's rule: below the caller floor is raised to it, not used verbatim.
+		{"positive below the caller floor is raised to it", 250 * time.Millisecond, common.MinCallerRelayTimeout},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
