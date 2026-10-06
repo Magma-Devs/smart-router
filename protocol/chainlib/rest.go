@@ -105,6 +105,7 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 	if err != nil {
 		return nil, err
 	}
+	metadata = normalizeGenericContentType(metadata, data)
 	metadata, overwriteReqBlock, _ := apip.HandleHeaders(metadata, apiCollection, spectypes.Header_pass_send)
 
 	settingHeaderDirective, _, _ := apip.GetParsingByTag(spectypes.FUNCTION_TAG_SET_LATEST_IN_METADATA)
