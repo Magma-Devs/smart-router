@@ -335,8 +335,11 @@ var chainFamilyMap = map[string]ChainFamily{
 	"APT1": ChainFamilyAptos,
 
 	// Sui — shares Move heritage with Aptos but has a distinct JSON-RPC surface
-	// and error taxonomy, so it gets its own family.
-	"SUIT": ChainFamilySui,
+	// and error taxonomy, so it gets its own family. SUI is mainnet, SUIT testnet,
+	// SUID devnet; sui.json declares all three. Listing only the testnet left
+	// mainnet traffic falling through to ChainFamilyUnknown, which skips every
+	// family-scoped matcher — on the network customers actually run.
+	"SUI": ChainFamilySui, "SUIT": ChainFamilySui, "SUID": ChainFamilySui,
 
 	// NEAR
 	"NEAR": ChainFamilyNEAR, "NEART": ChainFamilyNEAR,

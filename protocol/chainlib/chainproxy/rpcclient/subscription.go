@@ -208,6 +208,11 @@ type ClientSubscription struct {
 	// It is closed by Unsubscribe.
 	err     chan error
 	errOnce sync.Once
+	// errMu orders the forwarding loop's send on err against Unsubscribe's close of it, and
+	// errClosed records the close. Unsubscribe does not wait for run (see Unsubscribe), so
+	// without them run can send on the closed channel and panic.
+	errMu     sync.Mutex
+	errClosed bool
 
 	// Closing of the subscription is requested by sending on 'quit'. This is handled by
 	// the forwarding loop, which closes 'forwardDone' when it has stopped sending to
@@ -273,7 +278,10 @@ func (sub *ClientSubscription) Unsubscribe() {
 		default:
 			// Unsubscribe already requested (or subscription already closed).
 		}
+		sub.errMu.Lock()
+		sub.errClosed = true
 		close(sub.err)
+		sub.errMu.Unlock()
 		sub.client.forgetSubscription(sub)
 	})
 }
@@ -314,10 +322,25 @@ func (sub *ClientSubscription) run() {
 			// nil error because it's not an error, but we can't close sub.err here.
 			err = nil
 		}
-		select {
-		case sub.err <- err:
-		default:
-		}
+		sub.sendErr(err)
+	}
+}
+
+// sendErr hands err to the reader of Err, unless Unsubscribe has already closed the channel.
+//
+// Unsubscribe closes err without waiting for the forwarding loop. So whenever the loop ends on
+// anything but errUnsubscribed (connection loss, Client.Close, queue overflow), this send can
+// come after that close, whether or not Unsubscribe's own signal reached quit. Sending on the
+// closed channel would panic, so the error is dropped: nobody can receive it once err is closed.
+func (sub *ClientSubscription) sendErr(err error) {
+	sub.errMu.Lock()
+	defer sub.errMu.Unlock()
+	if sub.errClosed {
+		return
+	}
+	select {
+	case sub.err <- err:
+	default:
 	}
 }
 

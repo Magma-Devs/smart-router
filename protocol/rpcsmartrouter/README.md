@@ -67,7 +67,10 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
 - **Per-method operator policy** (config-driven, below). An operator policy can *mandate*
   cross-validation even with no caller headers (`enabled: true`), set a **floor** the caller
   may exceed, a **cap** that overrides a stricter caller, or *forbid* caller-driven
-  cross-validation entirely for a method (`forbid-caller-cv: true`).
+  cross-validation entirely for a method (`forbid-caller-cv: true`). A floor or cap takes
+  effect only under `enabled: true` today: a policy that sets a bound without enabling
+  cross-validation clamps nothing (a caller with no headers still gets pure caller-driven
+  behavior), though such a policy is still checked at startup for naming a served target.
 
 > **The router's own health check is exempt.** A mandate applies to client requests. The readiness
 > health check crafts a latest-block request (`eth_blockNumber`,
@@ -81,15 +84,25 @@ Cross-validation can be turned on two ways, which compose via `clamp(caller, flo
 > does **not** attest that a policied method currently has quorum capacity; it answers whether the
 > chain can serve relays at all.
 
-> **Write / stateful methods.** An **operator policy** that enables cross-validation on a
-> stateful (write) method is **rejected at startup** — that path is guarded. By default the
-> legacy **caller-header** path is *not* guarded: a request that sends the headers above still
-> selects cross-validation on any method, *including writes*, ahead of the normal stateful
-> fan-out (backwards compatibility). To close that off for a specific method, set
-> `forbid-caller-cv: true` on its policy (see below) — the router then ignores the CV headers
-> and routes the method normally. Cross-validating a write *response* (e.g. a transaction hash
-> echoed back) does not independently verify anything, so prefer policy-driven cross-validation
-> on read methods and leave writes to the stateful path.
+> **Write / stateful methods.** Both paths are guarded. An **operator policy** that enables
+> cross-validation on a stateful (write) method is **rejected at startup**. The
+> **caller-header** path is ignored on such a method: the request routes by its stateful
+> category and the `lava-cross-validation-*` headers have no effect, whatever they contain
+> (MAG-3603 — cross-validating a broadcast only one node can accept cannot reach any agreement
+> threshold, so the router used to answer HTTP 500 after submitting the transaction). No policy
+> is needed for this; `forbid-caller-cv: true` is what an operator reaches for on a **stateless**
+> method they want protected from caller-driven cross-validation.
+>
+> Three consequences worth knowing. The rule keys on the spec's stateful category, so it is only
+> as right as the spec: a read the spec marks stateful loses caller cross-validation, and a submit
+> it does not mark stateful is not covered. The shipped lava-specs mark the cosmos `tx` REST
+> encode, encode/amino, decode and simulate endpoints `stateful: 0` (MAG-4034) and Aptos
+> `POST /transactions` and `/transactions/batch` `stateful: 1` (MAG-4035); the in-repo `specs/`
+> mirror predates both fixes. A malformed header pair on a stateful method (a value that does not
+> parse, one header without its companion, a threshold above `max-participants`) used to refuse
+> the request before anything was dispatched; it is now ignored like a well-formed pair, and the
+> request goes out as a write. A `forbid-caller-cv: true` policy written on a stateful method
+> under the earlier advice is now redundant; it still loads and is harmless.
 
 ### Provider group labels
 
@@ -118,7 +131,11 @@ direct-rpc:
 
 An optional top-level `cross-validation:` block sets policy per `(chain-id, api-interface,
 method)`. Omitting it entirely keeps the header-driven behavior above, fully backwards
-compatible. `chain-id`/`api-interface` match case-insensitively; `method` matches exactly.
+compatible. `chain-id`/`api-interface` match case-insensitively; `method` matches exactly, as the
+spec names it: the JSON-RPC method, the REST path template (`/cosmos/bank/v1beta1/balances/{address}`),
+or the gRPC service/method. A policy that could never apply is a startup error: an `enabled` or
+`forbid-caller-cv` policy whose `chain-id`/`api-interface` no configured endpoint serves, or whose
+method that endpoint's spec does not serve. A policy with neither intent is a no-op and is not checked.
 Each numeric knob is either a bare number `N` (meaning `{floor: N}`) or an object
 `{floor: F, cap: C}`.
 
@@ -151,7 +168,7 @@ cross-validation:
 | Knob | Meaning |
 | --- | --- |
 | `enabled` | `true` mandates CV for this method even with no caller headers. |
-| `forbid-caller-cv` | `true` disables CV for this method: the caller's CV headers are ignored and the method routes by its normal category. Mutually exclusive with `enabled` (rejected at startup if both set); the other knobs are ignored when set. |
+| `forbid-caller-cv` | `true` disables CV for this method: the caller's CV headers are ignored and the method routes by its normal category. Mutually exclusive with `enabled` (rejected at startup if both set); the other knobs are ignored when set. Redundant on a stateful method, which ignores the headers on its own (MAG-3603); such an entry still loads and is harmless. |
 | `max-participants` | How many providers to fan out to. |
 | `agreement-threshold` | How many identical responses form a quorum (in per-group mode, *within each group*). |
 | `min-groups` | Distinct provider groups the quorum must span (`1` = no diversity requirement). |
@@ -173,7 +190,15 @@ selection so a QoS-dominant group cannot starve the others.
 
 A policy that cannot be satisfied by the configured fleet (too few groups, or too few providers
 per group for per-group quorum) is **rejected at startup**, and the resolved
-provider→group layout is logged.
+provider→group layout is logged. A provider that fails its startup verification does not count
+against that check, and the endpoint starts. If the providers left cannot meet a policy (fewer
+groups than its `min-groups`, or fewer providers than its `max-participants`), it logs an
+`ATTENTION` line naming the missing providers and refuses only the requests that policy governs
+until the background retry re-admits them. Two shortfalls are warned about rather than refused:
+a `max-participants` larger than the configured primaries, and an endpoint configured with
+backup providers only, which cross-validation never draws on. The startup line counts every
+verified primary; a request that needs an addon or extension draws only on the primaries serving
+it and can be refused with fewer.
 
 ### Response headers
 
@@ -346,6 +371,78 @@ the cache more than its rare hits save. 1 MiB fits Solana `getBlock` replies (1.
 16% of the time). On ETH and Base, `eth_getBlockReceipts` replies run up to and past 1 MiB, so a
 cap that low there cuts those entries; size the cap per chain from `smartrouter_cache_entry_bytes`.
 
+### Per-request time budget (`lava-relay-timeout`)
+
+A caller can send `lava-relay-timeout: <Go duration>` (for example `300ms` or `5s`) to set the
+request's attempt window: how long the router waits on one endpoint before it also tries the next.
+The router bounds the value (MAG-3600):
+
+- A value that is not a positive duration (`-45s`, `0s`, `abc`) is ignored, and the router's own
+  window applies.
+- A value under 300ms is raised to 300ms, about one round trip. A much shorter window hedges before
+  any endpoint could answer, fanning one request out to every endpoint the retry limits allow.
+- A value above the request's own budget is held to that budget. The own budget is what the
+  router gives the request with no header: `--default-processing-timeout`, doubled for calls of
+  50 CU or more, and six times it for hanging, stateful or 100+ CU calls. A call whose own window is
+  longer still keeps it: a hanging call waits twice the chain's block time, so Bitcoin's
+  `sendrawtransaction` gets about 20 minutes. By default the header reshapes hedging but cannot
+  make the router hold a request longer than that.
+
+A value below the router's own window replaces it. On most calls that only makes hedging sooner.
+On a call whose budget comes from its own window, such as that Bitcoin write, it also shortens the
+budget, as it did before these bounds.
+
+A value at or above the request's own budget turns hedging off for that request. The window is also
+the hedge interval, and the budget is never shorter than the window, so such a value makes the two
+equal and a hedge could only fire as the budget runs out. Retrying after a failed attempt works as
+it does without the header, but an endpoint that goes quiet holds the request for the whole budget.
+Such a request also gets no backup-reserve hedge (MAG-3923). That hedge goes out one window before
+the budget ends, but never before the first window has passed, so when the window equals the budget
+there is no point inside the budget for it and it is not armed: if the primaries go quiet, the
+backup tier is never tried.
+
+`--max-caller-relay-timeout` lets callers extend the budget, up to its value:
+
+```bash
+--max-caller-relay-timeout 2m        # default 0: callers cannot extend a request's budget
+```
+
+A request extended this way is one of those: its window is its whole budget, so one quiet endpoint
+can hold it for as long as the caller asked, up to the flag's value, and it gets no backup-reserve
+hedge either.
+
+A reply to a request that carried the header includes `Lava-Relay-Timeout-Applied`: the window the
+router actually used, as a Go duration. Like the router's other reply headers, it is absent when the
+request failed without any reply.
+
+### Request tracing headers
+
+A caller can label a request so it can be found again in the router's logs and matched to
+their own records. Three headers are read, on every interface:
+
+| Header | Log field |
+| --- | --- |
+| `X-Request-Id` | `request_id` |
+| `X-Task-Id` | `task_id` |
+| `X-Tx-Id` | `tx_id` |
+
+On JSON-RPC, REST and Tendermint RPC they travel as HTTP request headers; on gRPC they travel
+as request metadata (`x-request-id` and so on: gRPC lower-cases metadata keys in transit, and
+the router accepts either casing). The values are stamped on the request's context as it enters
+the listener. Each listener logs them on the info-level line it writes when a request arrives,
+and the errors logged when that request's relay fails carry them too; in debug mode
+(`--debug-address`), `/debug/logs?request_id=<id>` returns those lines. They are not forwarded
+to the upstream node, which is sent only the request headers its chain's spec declares, and
+they are stripped before the cache key is built, so two callers asking the same question under
+different ids still share one cache entry.
+
+The headers are read per HTTP request or gRPC call. A gRPC streaming call is one subscribe
+request on its own stream, so its ids stay per request: they label the subscribe, not the
+notifications the stream delivers afterwards. A WebSocket connection's upgrade request is not
+read, so messages sent over a WebSocket carry no caller ids today. Reading the upgrade's ids
+would not be the same fix: one socket multiplexes many subscriptions and requests, so those ids
+would label every request on the connection rather than the one the caller tagged.
+
 ### Usage telemetry (OTel)
 
 Off by default. When enabled, the smart router emits two event types as
@@ -362,6 +459,30 @@ inlinable no-op call and nothing else.
 --usage-otel-service-name "smartrouter"
 --usage-otel-service-instance-id "$HOSTNAME-eth"  # default: hostname-pid
 ```
+
+### Extensions no node offers
+
+A caller asks for an extension, such as `archive`, with the `lava-extension` request header
+(comma-separated for several). When no node on the router offers one it asked for, the request is
+still served, from a node without it, and the reply says so:
+
+| Header | Value |
+| --- | --- |
+| `Lava-Extension-Unavailable` | The extensions the caller asked for with `lava-extension` that no node on this router offers, comma-separated. The answer came from a node without them, so a caller that needs one of them should not trust it. |
+
+The header is absent when every requested extension was applied, so its presence alone means the
+request was served without something the caller asked for. It only ever names extensions the
+caller requested: one the router adds on its own, such as `archive` for an `eth_call` deep behind
+the head, is never listed, and `lava-extension: none` never produces it. The header arrives as an
+HTTP response header on JSON-RPC, REST and Tendermint RPC, and as response metadata on gRPC;
+messages over a WebSocket carry no headers.
+
+On the operator side the router logs a WARN once per extension per endpoint, the first time a
+reply reports it, naming the extension, chain and interface, and counts every such request in
+`smartrouter_extension_unavailable_total{spec, apiInterface, extension}`
+([METRICS.md](../../docs/METRICS.md#extensions-no-node-offers)). The WARN says a gap exists; the
+counter says how much traffic depends on it. Its `extension` label only takes names the spec
+defines, so a caller sending made-up values cannot grow it.
 
 ## Upstream response headers
 
@@ -402,7 +523,10 @@ User Request --> Smart Router --> Provider Selection (QoS-based)
 
 1. **Primary Attempt**: Tries direct-rpc providers first (best QoS selected)
 2. **Failure Detection**: Detects errors, timeouts, or unavailability
-3. **Automatic Failover**: Switches to backup providers transparently
+3. **Automatic Failover**: Switches to backup providers transparently. A primary that stops answering
+   (rather than refusing) is still "busy" until the budget ends, so a read with no answer yet is also
+   hedged to a backup one attempt window (`--min-relay-timeout` floor) before the processing budget
+   runs out, so the backup still has a full window to answer. Writes are never hedged.
 4. **Recovery**: Monitors primary providers and switches back when healthy
 
 ## Monitoring

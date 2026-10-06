@@ -18,9 +18,9 @@ import (
 //
 // The chain-tip pair is separate from the plain int64 pair because its
 // freshness model differs: a chain tip has a fixed freshness horizon decided at
-// write time and reads report staleness, while the monotonic write guard keeps
-// comparing against the raw stored value even after it goes stale — a stale tip
-// is unreadable but still fences lower writes.
+// write time and reads report staleness, and the write guard honours the same
+// horizon: a stale tip is unreadable and fences nothing, so a lower write
+// replaces it (MAG-3755).
 // StickyPin is one fleet-wide sticky-session claim: the upstream bound to a sticky id, and the
 // router epoch the binding was made in. Provider is the upstream's NAME (its routing identity,
 // unique per chain + api interface), never a URL — URLs carry credentials. Epoch lets a reader
@@ -44,9 +44,26 @@ type KVStore interface {
 	SetInt64IfGreaterOrEqual(ctx context.Context, key string, value int64, ttl time.Duration) error
 
 	// Chain tip with a write-time freshness horizon. fresh=false means unknown
-	// (missing or stale); the write guard still fences against the raw value.
+	// (missing or stale).
 	GetChainTip(ctx context.Context, key string) (block int64, fresh bool, err error)
-	SetChainTipIfGreaterOrEqual(ctx context.Context, key string, block int64) error
+	// SetChainTipIfGreaterOrEqualOrStale adopts block unless the stored tip is
+	// both higher and still fresh. While fresh the tip is a monotonic maximum,
+	// so a lagging writer cannot drag it backward; once its freshness horizon
+	// has passed a lower write replaces it, so a false high value that no
+	// writer keeps refreshing stops fencing honest writers the moment readers
+	// stop trusting it. Same rule the router's own ChainState applies to its
+	// tip (MAG-3755). An equal or higher block always writes and refreshes the
+	// horizon. In a keyspace written less often than the horizon the tip is
+	// simply the last writer's value, which is also all a reader could use.
+	// Fresh is judged on the incoming writer's clock against a deadline the
+	// previous writer stamped on its own, so on a store that routers write with
+	// their own clocks (the RESP backend; the in-memory store has just one) a
+	// writer whose clock runs ahead sees the fence shortened by its lead, and
+	// gone once the lead reaches DefaultExpirationForNonFinalized (500ms): the
+	// guard fails open and adopts that writer's lower write, which costs tip
+	// lag rather than trust, because a router only ever publishes a head it
+	// believed itself (replyLatestBlockForCacheWrite).
+	SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error
 
 	// Block-hash → height scalars. Missing key reads as (0, false).
 	GetHeight(ctx context.Context, key string) (int64, bool, error)

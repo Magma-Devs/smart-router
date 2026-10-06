@@ -28,6 +28,10 @@ type ResultsCheckerInf interface {
 	HasRequiredNodeResults(tries int) (bool, int)
 	GetCrossValidationParams() *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
 	GetResultsSummary() ResultsSummary
+	// CrossValidationMissingOnlyGroups reports whether a cross-validation request should stop at its attempt
+	// window: some response hash has reached the agreement threshold without satisfying the quorum rule, and
+	// only providers of under-staffed groups, still silent, could complete a quorum on any hash.
+	CrossValidationMissingOnlyGroups() bool
 }
 
 // MetricsInterface for relay processor metrics
@@ -51,6 +55,10 @@ type RelayStateSendInstructions struct {
 	// on the Done instruction so the request's final log line can say why there was no further
 	// attempt. Empty on a non-Done instruction.
 	StopReason string
+	// BackupReserve marks the hedge the state machine holds back for the backup tier: the sender
+	// should route it to a backup endpoint ahead of any primary still unused on this request, and
+	// fall back to ordinary selection when no backup is eligible. See backupReserveDelay.
+	BackupReserve bool
 }
 
 func (rssi *RelayStateSendInstructions) IsDone() bool {
@@ -63,6 +71,13 @@ type RelaySenderInf interface {
 	RelayParserInf
 	GetProcessingTimeout(chainMessage chainlib.ChainMessage) (processingTimeout time.Duration, relayTimeout time.Duration)
 	GetChainIdAndApiInterface() (string, string)
+}
+
+// BackupTierReporter is implemented by a relay sender that can route to a backup tier. It is
+// optional — the state machine type-asserts for it — so senders without a backup tier, and the
+// many test mocks, need not implement it and never get a backup-reserve hedge.
+type BackupTierReporter interface {
+	HasBackupTier() bool
 }
 
 // ResultsSummary is pure data reported by the RelayProcessor for the policy engine.
