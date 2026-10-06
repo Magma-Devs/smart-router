@@ -612,7 +612,7 @@ func (apip *BaseChainParser) ApiHasStatefulCategory(name string) bool {
 	apip.rwLock.RLock()
 	defer apip.rwLock.RUnlock()
 	for apiKey, apiCont := range apip.serverApis {
-		if apiKey.Name == name && apiCont.api != nil && apiCont.api.Category.Stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+		if apiKey.Name == name && apiCont.api != nil && apiCont.api.Enabled && apiCont.api.Category.Stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 			return true
 		}
 	}
@@ -636,7 +636,7 @@ func (apip *BaseChainParser) ApiNameDefined(name string) bool {
 	apip.rwLock.RLock()
 	defer apip.rwLock.RUnlock()
 	for _, apiCont := range apip.serverApis {
-		if apiCont.api != nil && apiCont.api.Name == name {
+		if apiCont.api != nil && apiCont.api.Enabled && apiCont.api.Name == name {
 			return true
 		}
 	}
@@ -662,7 +662,7 @@ func (apip *BaseChainParser) ApiNamesLike(name string) []string {
 	seen := map[string]struct{}{}
 	var like []string
 	for _, apiCont := range apip.serverApis {
-		if apiCont.api == nil || apiCont.api.Name == name || shapeOf(apiCont.api.Name) != wanted {
+		if apiCont.api == nil || !apiCont.api.Enabled || apiCont.api.Name == name || shapeOf(apiCont.api.Name) != wanted {
 			continue
 		}
 		if _, dup := seen[apiCont.api.Name]; dup {
@@ -834,6 +834,23 @@ func (bcp *BaseChainParser) ReplyHeaderDirectives() []*spectypes.Header {
 	return bcp.replyHeaders
 }
 
+// addServerApi stores apiContainer under key. An enabled api always replaces a disabled one
+// and a disabled one never replaces an enabled one, so a method that one collection disables
+// and another serves stays served whatever order the collections load in. Between two
+// entries of the same kind, overwrite decides.
+func addServerApi(serverApis map[ApiKey]ApiContainer, key ApiKey, apiContainer ApiContainer, overwrite bool) {
+	if existing, ok := serverApis[key]; ok {
+		if existing.api.Enabled != apiContainer.api.Enabled {
+			if !apiContainer.api.Enabled {
+				return
+			}
+		} else if !overwrite {
+			return
+		}
+	}
+	serverApis[key] = apiContainer
+}
+
 func getServiceApis(
 	spec spectypes.Spec,
 	rpcInterface string,
@@ -893,49 +910,40 @@ func getServiceApis(
 				}
 			}
 
+			// Disabled apis are stored too, so a request for one finds it and getSupportedApi
+			// refuses it. Skipping them made the lookup miss and fall through to
+			// defaultApiContainer, which relays the method as a cacheable single-provider read
+			// (MAG-4185). addServerApi keeps an enabled entry over a disabled one for the same key.
 			for _, api := range apiCollection.Apis {
-				if !api.Enabled {
-					continue
-				}
-
 				if rpcInterface == spectypes.APIInterfaceRest {
 					apiKey, apiContainer, err := newRestApiContainer(api, collectionKey)
 					if err != nil {
 						utils.LavaFormatError("regex Compile api", err, utils.Attribute{Key: "apiName", Value: api.Name})
 						continue
 					}
-					serverApis[apiKey] = apiContainer
-				} else {
-					// add another internal path entry so it can specifically be referenced
-					if apiCollection.CollectionData.InternalPath != "" {
-						serverApis[ApiKey{
-							Name:           api.Name,
-							ConnectionType: collectionKey.ConnectionType,
-							InternalPath:   apiCollection.CollectionData.InternalPath,
-						}] = ApiContainer{
-							api:           api,
-							collectionKey: collectionKey,
-						}
-						// if it does not exist set it
-						if _, ok := serverApis[ApiKey{Name: api.Name, ConnectionType: collectionKey.ConnectionType}]; !ok {
-							serverApis[ApiKey{
-								Name:           api.Name,
-								ConnectionType: collectionKey.ConnectionType,
-							}] = ApiContainer{
-								api:           api,
-								collectionKey: collectionKey,
-							}
-						}
-					} else {
-						serverApis[ApiKey{
-							Name:           api.Name,
-							ConnectionType: collectionKey.ConnectionType,
-						}] = ApiContainer{
-							api:           api,
-							collectionKey: collectionKey,
-						}
-					}
+					addServerApi(serverApis, apiKey, apiContainer, true)
+					continue
 				}
+				apiContainer := ApiContainer{
+					api:           api,
+					collectionKey: collectionKey,
+				}
+				bareKey := ApiKey{
+					Name:           api.Name,
+					ConnectionType: collectionKey.ConnectionType,
+				}
+				if apiCollection.CollectionData.InternalPath == "" {
+					addServerApi(serverApis, bareKey, apiContainer, true)
+					continue
+				}
+				// add another internal path entry so it can specifically be referenced
+				addServerApi(serverApis, ApiKey{
+					Name:           api.Name,
+					ConnectionType: collectionKey.ConnectionType,
+					InternalPath:   apiCollection.CollectionData.InternalPath,
+				}, apiContainer, true)
+				// the bare key keeps whichever collection set it first
+				addServerApi(serverApis, bareKey, apiContainer, false)
 			}
 			for _, header := range apiCollection.Headers {
 				headers[ApiKey{
