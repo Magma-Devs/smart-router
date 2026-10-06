@@ -470,7 +470,7 @@ func (e *Engine) PublishEndpointObservation(ctx context.Context, chainId, apiInt
 }
 
 // GetEndpointObservation returns the fleet's live observation of an upstream endpoint with its
-// age on the store's clock. found=false is a normal miss; an error means the store could not
+// age as the store measures it (see KVStore). found=false is a normal miss; an error means the store could not
 // answer, which the caller treats the same way — poll locally — but counts separately.
 func (e *Engine) GetEndpointObservation(ctx context.Context, chainId, apiInterface, endpointId string) (EndpointObservation, time.Duration, bool, error) {
 	if chainId == "" || endpointId == "" {

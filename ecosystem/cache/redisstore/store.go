@@ -932,11 +932,17 @@ func decodeStickyPin(raw string) (core.StickyPin, error) {
 // Endpoint observations (the fleet tracker gate)
 // ---------------------------------------------------------------------------
 
-// An observation is stored as "block|storedAtUnixMs|podID". The stamp is the BACKEND's clock,
-// taken inside the script with TIME, so age is measured on the same clock on read and no
-// writer's wall clock reaches a peer's freshness decision — the property the cache server's
-// in-memory store gets for free by stamping receipt time. The pod id goes last because it is
-// the one field with no character restriction; the first two are digits.
+// An observation is stored as "block|storedAtUnixMs|podID". The stamp is the TIME of the
+// server that owns the key — the primary the write client reaches (under Cluster, the key's
+// shard) — taken inside the script, so no writing pod's wall clock reaches a peer's freshness
+// decision. The read's TIME, though, comes from the server the READ client reaches: the same
+// primary only without read-addresses and outside Cluster. With read-addresses it is a different
+// server (a replica, or a separate store); under Cluster the TIME in the read pipeline goes to
+// an arbitrary shard, not necessarily the key's. So age is "reader server's TIME minus key
+// primary's TIME" and carries the skew between them; nothing cancels it, but the entry's TTL
+// (2× the freshness window) bounds how stale a served observation can be. The cache server's
+// in-memory store, by contrast, stamps and measures on one clock. The pod id goes last because
+// it is the one field with no character restriction; the first two are digits.
 //
 // The compare-and-set stays a script for the same reason the sticky claim does: a GET-then-SET
 // pair from the adapter reopens the race between two pods the monotonic rule exists to close.
@@ -977,10 +983,12 @@ func (s *Store) PublishEndpointObservation(ctx context.Context, key string, obs 
 	return applied == 1, nil
 }
 
-// GetEndpointObservation reads the entry and the backend's clock in ONE pipelined round trip,
+// GetEndpointObservation reads the entry and the read client's server TIME in ONE pipelined
+// round trip (that server need not be the one whose TIME stamped the entry — see above),
 // no script: the read may be served by a reader endpoint (read-addresses), and plain commands
-// run there without question. The two commands are not atomic, and need not be — the skew
-// between them is microseconds against a freshness window of a block time.
+// run there without question. The two commands are not atomic, and need not be — the time
+// between them is microseconds against a freshness window of a block time (the clock skew
+// between servers, when they differ, is the larger term; the TTL bounds it).
 func (s *Store) GetEndpointObservation(ctx context.Context, key string) (core.EndpointObservation, time.Duration, bool, error) {
 	pipe := s.read.Pipeline()
 	getCmd := pipe.Get(ctx, s.key(key))
