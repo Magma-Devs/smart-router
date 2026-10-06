@@ -31,6 +31,19 @@ type StickyPin struct {
 	Epoch    uint64
 }
 
+// EndpointObservation is one pod's published poll result for one upstream endpoint: the block
+// it saw and which pod saw it (the fleet tracker gate, MAG-2981). The store stamps it on write
+// and reports an age on read, so no writing POD's wall clock enters a peer's freshness decision.
+// Whether one clock does both depends on the store: the cache server's in-memory store stamps
+// and measures on its own clock; the RESP store stamps with the key primary's TIME and measures
+// with the read client's TIME, which is a different server under read-addresses (and an
+// arbitrary shard under Cluster). Skew between those servers is bounded only by the entry's TTL
+// (2× the freshness window), not cancelled — see redisstore's PublishEndpointObservation.
+type EndpointObservation struct {
+	Block int64
+	PodID string
+}
+
 type KVStore interface {
 	// GetEntries fetches relay envelopes for the given keys, index-aligned with
 	// the input; a nil element is a miss. Adapters should batch where the
@@ -96,6 +109,23 @@ type KVStore interface {
 	// the whole point is to resolve a race between two pods.
 	GetSticky(ctx context.Context, key string) (StickyPin, bool, error)
 	SetStickyIfAbsent(ctx context.Context, key string, pin StickyPin, ttl time.Duration) (StickyPin, error)
+
+	// Endpoint observations, BLOCK-MONOTONIC WHILE LIVE.
+	//
+	// PublishEndpointObservation stores an observation unless a live entry already holds a
+	// higher block: a lower block from a slower peer must not regress what the fleet has seen.
+	// An equal-or-higher block replaces the entry and refreshes its stamp; an expired entry is
+	// always replaced (a reorg or a fresh restart may legitimately publish a lower block once the
+	// old one aged out). Returns whether the write applied.
+	//
+	// GetEndpointObservation returns the live entry with its age measured by the STORE, or
+	// found=false for a miss or an expired entry. Age is a store-side measurement on purpose:
+	// the reader compares it against a freshness window, and two pods' wall clocks are not a
+	// thing the gate should have to trust. A store spread over several servers may stamp and
+	// measure on different servers' clocks (see EndpointObservation); the TTL still bounds how
+	// stale an entry can be served.
+	PublishEndpointObservation(ctx context.Context, key string, obs EndpointObservation, ttl time.Duration) (applied bool, err error)
+	GetEndpointObservation(ctx context.Context, key string) (obs EndpointObservation, age time.Duration, found bool, err error)
 
 	// Purge drops every entry this store holds (the FlushCache RPC).
 	Purge(ctx context.Context) error

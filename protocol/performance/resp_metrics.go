@@ -15,6 +15,10 @@ const (
 	respCacheOpSet       = "set"
 	respCacheOpStickyGet = "sticky_get"
 	respCacheOpStickySet = "sticky_set"
+	// The fleet tracker gate's endpoint observations (MAG-2981): fetch rides the read
+	// breaker, publish the write breaker, like sticky_get / sticky_set.
+	respCacheOpObservationGet = "observation_get"
+	respCacheOpObservationSet = "observation_set"
 
 	respCacheFailureKindError   = "error"
 	respCacheFailureKindTimeout = "timeout"
@@ -78,7 +82,7 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 			}, []string{"role"}),
 			skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
 				Name: "smartrouter_resp_cache_skipped_total",
-				Help: "RESP cache operations skipped without I/O while the breaker on their side was open (endpoint unreachable or slower than its budget), by op (get|set|sticky_get|sticky_set). Never counted as failed: the backend never saw them.",
+				Help: "RESP cache operations skipped without I/O while the breaker on their side was open (endpoint unreachable or slower than its budget), by op (get|set|sticky_get|sticky_set|observation_get|observation_set). Never counted as failed: the backend never saw them.",
 			}, []string{"op"}),
 			breakerOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 				Name: "smartrouter_resp_cache_breaker_open",

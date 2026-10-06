@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -20,6 +21,9 @@ var (
 	HashMismatchError = errors.New("cache entry for specific block and request had a mismatching hash stored")
 	EntryTypeError    = errors.New("cache entry for specific block and request had a mismatching object stored")
 	ErrEmptyStickyId  = errors.New("sticky session id is empty")
+	// ErrInvalidEndpointObservation rejects a publish that names no endpoint or no positive
+	// block — a writer bug, refused before it reaches any store.
+	ErrInvalidEndpointObservation = errors.New("invalid endpoint observation")
 	// StoreError marks a failure of the underlying KVStore itself (backend
 	// unreachable, timeout), as opposed to the semantic miss reasons above.
 	// Joined with the raw cause so errors.Is sees both this sentinel and the
@@ -418,4 +422,64 @@ func (e *Engine) SetStickyIfAbsent(ctx context.Context, chainId, apiInterface, s
 		return StickyPin{}, errors.Join(StoreError, err)
 	}
 	return effective, nil
+}
+
+const (
+	// MinEndpointObservationTTL / MaxEndpointObservationTTL clamp the TTL a router asks for on a
+	// published endpoint observation (the fleet tracker gate). The floor guards against a writer
+	// that computes a zero or negative TTL, which would publish nothing useful; the ceiling
+	// guards against a dead pod's observation outliving every peer's freshness window by hours.
+	MinEndpointObservationTTL = 500 * time.Millisecond
+	MaxEndpointObservationTTL = 5 * time.Minute
+)
+
+// ClampEndpointObservationTTL bounds a requested TTL to
+// [MinEndpointObservationTTL, MaxEndpointObservationTTL].
+func ClampEndpointObservationTTL(requested time.Duration) time.Duration {
+	if requested < MinEndpointObservationTTL {
+		return MinEndpointObservationTTL
+	}
+	if requested > MaxEndpointObservationTTL {
+		return MaxEndpointObservationTTL
+	}
+	return requested
+}
+
+// PublishEndpointObservation records one pod's successful poll of an upstream endpoint so peer
+// pods can borrow it instead of polling. Validation and the TTL clamp live here so both
+// backends apply them identically; the store contributes the block-monotonic write and its own
+// clock. Returns whether the write applied (false when a live entry holds a higher block).
+func (e *Engine) PublishEndpointObservation(ctx context.Context, chainId, apiInterface, endpointId, podId string, block int64, ttl time.Duration) (bool, error) {
+	if chainId == "" || endpointId == "" {
+		return false, fmt.Errorf("%w: missing chain id or endpoint id", ErrInvalidEndpointObservation)
+	}
+	if block <= 0 {
+		return false, fmt.Errorf("%w: block %d is not positive", ErrInvalidEndpointObservation, block)
+	}
+	applied, err := e.Store.PublishEndpointObservation(ctx,
+		EndpointObservationKey(chainId, apiInterface, endpointId),
+		EndpointObservation{Block: block, PodID: podId},
+		ClampEndpointObservationTTL(ttl),
+	)
+	if err != nil {
+		// StoreError, like the sticky calls: the RESP backend's write breaker counts it.
+		// Validation failures above stay plain — the store was never asked.
+		return false, errors.Join(StoreError, err)
+	}
+	return applied, nil
+}
+
+// GetEndpointObservation returns the fleet's live observation of an upstream endpoint with its
+// age as the store measures it (see KVStore). found=false is a normal miss; an error means the store could not
+// answer, which the caller treats the same way — poll locally — but counts separately.
+func (e *Engine) GetEndpointObservation(ctx context.Context, chainId, apiInterface, endpointId string) (EndpointObservation, time.Duration, bool, error) {
+	if chainId == "" || endpointId == "" {
+		return EndpointObservation{}, 0, false, nil
+	}
+	obs, age, found, err := e.Store.GetEndpointObservation(ctx, EndpointObservationKey(chainId, apiInterface, endpointId))
+	if err != nil {
+		// StoreError, so the RESP backend's read breaker counts it; never a miss.
+		return EndpointObservation{}, 0, false, errors.Join(StoreError, err)
+	}
+	return obs, age, found, nil
 }

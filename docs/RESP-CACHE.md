@@ -452,7 +452,8 @@ such a replay to archive. Routing it there by a known height is MAG-3892.
 
 A keyspace is one cache. Every router in it reads and writes the same entries, resolves
 `latest` / `safe` / `finalized` / `pending` through the same chain tip, and — under
-`--shared-state` — shares the same seen-block and sticky-session claims. That is exactly right
+`--shared-state` — shares the same seen-block, sticky-session claims and fleet tracker gate
+observations (see [Caveats](#caveats) for how the gate's reach differs from the sidecar's). That is exactly right
 for **replicas of one deployment**: they read the same nodes, so an answer one of them cached is
 the answer any of them would have fetched.
 
@@ -529,14 +530,18 @@ Switching backends is a configuration change; the RESP cache starts cold (no dat
 
 ## Caveats
 
-- **Fleet tracker gate is not carried over.** The per-endpoint chain-tracker gate (MAG-2981)
-  lets pods borrow each other's successful upstream polls. It is a `cache-be` *RPC* backed by a
-  dedicated in-memory store on the cache server, not a cache-engine behaviour, so it does not
-  travel through the key/value seam this backend implements. A router on the RESP backend logs
-  a warning once per listen endpoint and **polls locally** — the same degradation already
-  applied to a `cache-be` that predates the RPC. Everything else the sidecar caches (relay
-  entries, chain tip, shared-state seen-block) works identically. If you
-  need the peer gate, stay on `cache-be`.
+- **Fleet tracker gate needs v1.6.0 or later.** The per-endpoint chain-tracker gate (MAG-2981)
+  lets pods borrow each other's successful upstream polls. Since v1.6.0 the observations travel
+  through the same key/value seam as everything else this backend stores, so the gate works
+  here as it does on `cache-be`, with one difference in reach: here the observations sit under
+  `key-prefix` like every other key, so only routers on the same prefix borrow each other's
+  polls. The sidecar keeps them outside any keyspace, so routers on different
+  `cache-be-key-prefix` values share them there. Routers on different RESP prefixes each poll
+  for themselves — more upstream polls, never a different answer — and the keys stay inside
+  an ACL user restricted to `~<prefix>:*` and inside the prefix-scoped flush. A router older
+  than v1.6.0 logs `fleet tracker gate: the configured cache backend does not implement
+  endpoint observations; polling locally` once per listen endpoint and polls locally —
+  nothing fails, every replica just polls its upstreams itself.
 - **Sentinel credential rotation** applies per connection attempt, not in place — see
   [Credential rotation](#credential-rotation).
 - **`read-addresses` selects an endpoint, not a replica role** — see

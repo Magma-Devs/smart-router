@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"slices"
 	"strconv"
 	"strings"
@@ -908,25 +909,51 @@ func HashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId string) 
 	return hashCacheRequest(relayData, chainId, "")
 }
 
-// isClientBodyHeader reports whether a metadata entry is one of clientBodyHeaders.
-func isClientBodyHeader(entry pairingtypes.Metadata) bool {
-	_, ok := clientBodyHeaders[strings.ToLower(entry.Name)]
-	return ok
+// isDefaultContentType reports whether a metadata entry is a Content-Type whose media type is
+// application/json, the type the router sends for a REST body when the client names none.
+func isDefaultContentType(entry pairingtypes.Metadata) bool {
+	if !strings.EqualFold(entry.Name, "content-type") {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(entry.Value)
+	return err == nil && mediaType == "application/json"
 }
 
-// metadataWithoutClientBodyHeaders returns metadata with the clientBodyHeaders entries removed,
-// or metadata itself when it carries none, so the common case allocates nothing.
-func metadataWithoutClientBodyHeaders(metadata []pairingtypes.Metadata) []pairingtypes.Metadata {
-	if !slices.ContainsFunc(metadata, isClientBodyHeader) {
+// metadataWithoutDefaultContentType returns metadata with an application/json Content-Type
+// removed, or metadata itself when it carries none, so the common case allocates nothing.
+func metadataWithoutDefaultContentType(metadata []pairingtypes.Metadata) []pairingtypes.Metadata {
+	if !slices.ContainsFunc(metadata, isDefaultContentType) {
 		return metadata
 	}
 	kept := make([]pairingtypes.Metadata, 0, len(metadata)-1)
 	for _, entry := range metadata {
-		if !isClientBodyHeader(entry) {
+		if !isDefaultContentType(entry) {
 			kept = append(kept, entry)
 		}
 	}
 	return kept
+}
+
+// metadataForCacheKey returns the metadata hashCacheRequest puts in the key: metadata without an
+// application/json Content-Type, in a fixed order. The listeners build the forwarded metadata by
+// ranging over a map of the request's headers, so two identical requests can list the same headers
+// in different orders, and json.Marshal keeps whatever order it is handed. Sorting by name, then
+// value, makes the key a function of the headers alone. It sorts a copy: the caller's slice is what
+// the transport sends next, and spec overrides rely on its order (they come last and are applied
+// in order).
+func metadataForCacheKey(metadata []pairingtypes.Metadata) []pairingtypes.Metadata {
+	kept := metadataWithoutDefaultContentType(metadata)
+	if len(kept) < 2 {
+		return kept
+	}
+	sorted := slices.Clone(kept)
+	slices.SortStableFunc(sorted, func(a, b pairingtypes.Metadata) int {
+		if byName := strings.Compare(a.Name, b.Name); byName != 0 {
+			return byName
+		}
+		return strings.Compare(a.Value, b.Value)
+	})
+	return sorted
 }
 
 // hashCacheRequest derives the cache key for a relay. explicitExtensionDirective carries the
@@ -965,11 +992,14 @@ func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explici
 	relayData.RequestId = ""                        // remove request id (unique per request)
 	relayData.XTaskId = nil                         // remove task id (unique per request)
 	relayData.XTxId = nil                           // remove tx id (unique per request)
-	// A client body header (content-type, forwarded on REST bodies since MAG-2745) says how the
-	// node should read the bytes in Data, which are already in the key. Two clients sending the
-	// same body with and without it are the same request; a value the node cannot read is a
-	// non-2xx answer that is never written. Keep it out so it cannot split the lane.
-	relayData.Metadata = metadataWithoutClientBodyHeaders(relayData.Metadata)
+	// A forwarded Content-Type says how the node reads the bytes in Data. application/json is the
+	// router's own default for a REST body, so a client that names it and one that sends none make
+	// the same request and share a lane: drop it from the key. Every other value stays in the key.
+	// It tells the node to read the same bytes differently, and some nodes answer a misread body
+	// with a 200 (an error envelope or a default result) that is cache-eligible, so a reply to one
+	// reading must never be served for another. The entries left are hashed in a fixed order,
+	// because the listeners hand a request's headers over in map order (metadataForCacheKey).
+	relayData.Metadata = metadataForCacheKey(relayData.Metadata)
 	// we remove the discrepancy of requested block from the hash, and add it on the cache side instead
 	// this is due to the fact that we don't know the latest seen block at this moment, as on shared state
 	// only the cache has this information. we make sure the hashing at this stage does not include the requested block.
