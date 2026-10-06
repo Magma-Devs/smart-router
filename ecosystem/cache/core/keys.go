@@ -114,11 +114,15 @@ func StickyKey(chainId, apiInterface, service, stickyId string) string {
 // never the URL itself — URLs carry credentials. The api interface is part of the key because
 // one endpoint may serve several interfaces and the tracker polls each separately.
 //
-// It is deliberately NOT scoped to a router's key prefix, unlike every other key the engine
-// derives (MAG-3521). An observation is a fact about one upstream endpoint ("this URL answered at
-// block N"), and two routers polling the same upstream are entitled to share it; a router on a
-// different node set has different endpoint ids and never matches. Scoping it would only cost
-// the fleet the polls the gate exists to save. Both backends write it under this key as it is.
+// The engine does not fold the router's key prefix into this key, unlike every relay key it
+// derives (MAG-3521). An observation is a fact about one upstream endpoint — "this URL answered
+// at block N" — and two routers polling the same upstream are entitled to share it; a router on
+// a different node set has different endpoint ids and never matches. On the cache-be sidecar
+// that makes observations shared across `cache-be-key-prefix` values. The RESP store heads every
+// key with its own `key-prefix`, this one included, so there sharing follows
+// `resp-cache.key-prefix`: a key outside the prefix would fall outside an ACL user restricted to
+// `~<prefix>:*` and outside the prefix-scoped flush. Routers on different RESP prefixes each
+// poll for themselves, which costs polls but never a wrong answer.
 func EndpointObservationKey(chainId, apiInterface, endpointId string) string {
 	return EndpointObservationPrefix + chainId + ":" + apiInterface + ":" + endpointId
 }
