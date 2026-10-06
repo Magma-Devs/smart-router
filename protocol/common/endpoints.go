@@ -83,6 +83,13 @@ const (
 	// consensus asynchronously (straggler watcher) and recorded via log + metric.
 	CROSS_VALIDATION_PENDING_PROVIDERS_HEADER = "lava-cross-validation-pending-providers"
 	CROSS_VALIDATION_FAILURE_REASON_HEADER    = "lava-cross-validation-failure-reason"
+	// On a failed quorum, the largest set of providers that returned the same response, and its size
+	// (MAG-2192). Additive to disagreeing-providers, which keeps listing every successful provider: a
+	// plurality below the client's agreement threshold is NOT a consensus, so it must not turn the
+	// minority into the accused. These say who formed the plurality without claiming it is right.
+	// plurality-providers is empty on a tie, which has no plurality.
+	CROSS_VALIDATION_PLURALITY_SIZE_HEADER      = "lava-cross-validation-plurality-size"
+	CROSS_VALIDATION_PLURALITY_PROVIDERS_HEADER = "lava-cross-validation-plurality-providers"
 	// send http request to /lava/health to see if the process is up - (ret code 200)
 	DEFAULT_HEALTH_PATH                                       = "/lava/health"
 	MAXIMUM_ALLOWED_TIMEOUT_EXTEND_MULTIPLIER_BY_THE_CONSUMER = 4

@@ -125,7 +125,8 @@ here for naming a chain/api and method the router serves.
 
 A cross-validated response carries headers describing the quorum
 (`lava-cross-validation-status`, `…-agreeing-providers`, `…-disagreeing-providers`,
-`…-pending-providers`, and on failure `…-failure-reason`). The quorum early-exits once the
+`…-pending-providers`, and on failure `…-failure-reason`, `…-plurality-size` and
+`…-plurality-providers`). The quorum early-exits once the
 threshold is met, so a provider that answers too late is reported as **pending** rather than
 silently dropped — `disagreeing-providers` only ever lists dissent the router actually received,
 and the straggler's late answer is still compared against the consensus asynchronously (log +

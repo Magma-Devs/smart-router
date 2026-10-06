@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1153,6 +1155,45 @@ func selectQuorumWinner(guid uint64, countMap map[[32]byte]*resultCount, results
 		)
 	}
 	return w
+}
+
+// CrossValidationPlurality reports the largest set of successful results that returned the same response
+// (MAG-2192): its size, and its providers sorted — or nil when two or more sets tie for largest, because a
+// tie names no plurality. Only real responses count; nil/empty replies are not agreement on a value, which
+// is why this matches quorumWinner.maxRealCount rather than maxCount. It is a pure function of the results
+// so the header path can describe a failed quorum without the relay processor carrying winner state out.
+func CrossValidationPlurality(results []common.RelayResult) (size int, providers []string) {
+	members := make(map[[32]byte][]string)
+	counts := make(map[[32]byte]int)
+	for _, result := range results {
+		hash := result.ResponseHash
+		if hash == [32]byte{} && result.Reply != nil {
+			hash = responseContentHash(result.Reply.Data) // same rule as responsesCrossValidation
+		}
+		if hash == [32]byte{} {
+			continue
+		}
+		counts[hash]++
+		if address := result.ProviderInfo.ProviderAddress; address != "" {
+			members[hash] = append(members[hash], address)
+		}
+	}
+	tied := false
+	var pluralityHash [32]byte
+	for hash, count := range counts {
+		switch {
+		case count > size:
+			size, pluralityHash, tied = count, hash, false
+		case count == size:
+			tied = true
+		}
+	}
+	if size == 0 || tied {
+		return size, nil
+	}
+	providers = members[pluralityHash]
+	sort.Strings(providers)
+	return size, slices.Compact(providers)
 }
 
 func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult, crossValidationSize int) (returnedResult *common.RelayResult, failureReason string, processingError error) {
