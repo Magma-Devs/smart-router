@@ -182,6 +182,17 @@ type GRPCSubscriptionManager interface {
 	ClientKey(dappID, consumerIp, connectionUniqueId string) string
 }
 
+// GRPCSubscriptionEndReporter is an optional interface on GRPCSubscriptionManager. A
+// manager that gives up on a subscription, rather than seeing its upstream end, reports
+// why, so the listener ends the client's stream with that status instead of OK and the
+// client knows to resubscribe or to fix its request.
+type GRPCSubscriptionEndReporter interface {
+	// SubscriptionEndError returns the status clientKey's stream should end with, or
+	// nil for a normal end. The listener reads it after the client's reply channel has
+	// closed, once per stream.
+	SubscriptionEndError(clientKey string) error
+}
+
 // GRPCSubscriptionProvider is an optional interface on RelaySender, like
 // grpcproxy.ReflectionSource. When it is implemented and returns a non-nil manager, the
 // gRPC listener serves server-streaming methods through it; otherwise streaming

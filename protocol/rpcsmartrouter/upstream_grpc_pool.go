@@ -354,7 +354,10 @@ type UpstreamGRPCPool struct {
 	lock         sync.RWMutex
 	closed       atomic.Bool
 	reconnecting atomic.Bool
-	onReconnect  func() // Callback when reconnected (for stream restoration)
+	// reconnectOutcome holds the result of the last ReconnectWithBackoff attempt that dialed,
+	// as a reconnectResult, so a caller that waited for it learns how it went.
+	reconnectOutcome atomic.Value
+	onReconnect      func() // Callback when reconnected (for stream restoration)
 
 	// Pool configuration
 	minConnections int                 // Minimum connections to maintain (default: 1)
@@ -404,6 +407,19 @@ func (p *UpstreamGRPCPool) SetReconnectCallback(callback func()) {
 // It prefers connections with lower stream counts and will create new connections
 // if all existing ones are near capacity (and we haven't hit maxConnections).
 func (p *UpstreamGRPCPool) GetConnectionForStream(ctx context.Context) (*UpstreamGRPCStreamConnection, error) {
+	return p.connectionForStream(ctx, false)
+}
+
+// ReserveConnectionForStream is GetConnectionForStream that also counts the caller's stream on
+// the connection it returns, under the pool lock. Counted any later, the connection can look
+// unused in the meantime, and maybeScaleDown closes a connection past minConnections that
+// carries no counted stream: the stream opened on it then fails at once. The caller releases
+// the slot with NotifyStreamRemoved, including when opening the stream fails.
+func (p *UpstreamGRPCPool) ReserveConnectionForStream(ctx context.Context) (*UpstreamGRPCStreamConnection, error) {
+	return p.connectionForStream(ctx, true)
+}
+
+func (p *UpstreamGRPCPool) connectionForStream(ctx context.Context, reserve bool) (*UpstreamGRPCStreamConnection, error) {
 	if p.closed.Load() {
 		return nil, fmt.Errorf("pool is closed")
 	}
@@ -411,6 +427,15 @@ func (p *UpstreamGRPCPool) GetConnectionForStream(ctx context.Context) (*Upstrea
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
+	conn, err := p.pickConnectionLocked(ctx)
+	if err == nil && reserve {
+		conn.IncrementStreams()
+	}
+	return conn, err
+}
+
+// pickConnectionLocked chooses or creates the connection for a new stream (caller must hold lock).
+func (p *UpstreamGRPCPool) pickConnectionLocked(ctx context.Context) (*UpstreamGRPCStreamConnection, error) {
 	// Find the best connection (healthy with lowest stream count)
 	var bestConn *UpstreamGRPCStreamConnection
 	var lowestStreams int32 = int32(p.streamsPerConn + 1)
@@ -543,12 +568,27 @@ func (p *UpstreamGRPCPool) maybeScaleDown() {
 	}
 }
 
-// ReconnectWithBackoff attempts to reconnect the pool with exponential backoff
-func (p *UpstreamGRPCPool) ReconnectWithBackoff(ctx context.Context) error {
+// reconnectResult is the outcome of one ReconnectWithBackoff attempt.
+type reconnectResult struct {
+	err error
+}
+
+// ReconnectWithBackoff attempts to reconnect the pool with exponential backoff.
+//
+// A connection that dies fails every stream on it at once, and each of their subscriptions
+// restores through here. One caller dials; the others wait for that attempt and get its
+// outcome, as UpstreamWSPool's callers do, then open their streams on what the pool holds.
+// Refusing them instead tore each of those subscriptions down.
+func (p *UpstreamGRPCPool) ReconnectWithBackoff(ctx context.Context) (err error) {
 	if !p.reconnecting.CompareAndSwap(false, true) {
-		return fmt.Errorf("reconnection already in progress")
+		return p.waitForReconnect(ctx)
 	}
-	defer p.reconnecting.Store(false)
+	defer func() {
+		// Record the outcome before clearing the flag, so a waiter that sees the flag
+		// drop reads this attempt's result.
+		p.reconnectOutcome.Store(reconnectResult{err: err})
+		p.reconnecting.Store(false)
+	}()
 
 	p.reconnectMu.Lock()
 	defer p.reconnectMu.Unlock()
@@ -588,6 +628,24 @@ func (p *UpstreamGRPCPool) ReconnectWithBackoff(ctx context.Context) error {
 		callback()
 	}
 
+	return nil
+}
+
+// waitForReconnect returns once the reconnect in flight has ended, with that attempt's
+// error, or with ctx's error if ctx ends first.
+func (p *UpstreamGRPCPool) waitForReconnect(ctx context.Context) error {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for p.reconnecting.Load() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+	if outcome, ok := p.reconnectOutcome.Load().(reconnectResult); ok && outcome.err != nil {
+		return fmt.Errorf("the reconnect this caller waited for failed: %w", outcome.err)
+	}
 	return nil
 }
 

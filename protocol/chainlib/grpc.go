@@ -590,8 +590,16 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 			)
 		}
 
+		// The manager closes the reply channel both when the upstream ends and when it
+		// gives the subscription up; only the second must reach the client as an error.
+		var endError func() error
+		if reporter, ok := subscriptionManager.(GRPCSubscriptionEndReporter); ok {
+			endError = func() error { return reporter.SubscriptionEndError(clientKey) }
+		}
+
 		return &grpcproxy.StreamResponse{
 			Replies: apil.forwardSubscriptionReplies(ctx, repliesChan, subscriptionFields, snapshotMetricsHeaders(metadataValues)),
+			Err:     endError,
 			// firstReply's payload is a JSON acknowledgement, which would not decode as
 			// the method's output type — only its subscription id is carried, as headers.
 			Metadata: streamResponseHeaders(firstReply.GetMetadata()),
@@ -621,7 +629,8 @@ func (apil *GrpcChainListener) forwardSubscriptionReplies(ctx context.Context, r
 	payloads := make(chan []byte)
 	go func() {
 		// Closing tells grpcproxy the upstream ended, which closes the client stream
-		// with OK.
+		// with OK, or with the error StreamResponse.Err reports when the manager gave
+		// the subscription up.
 		defer close(payloads)
 		for reply := range repliesChan {
 			select {

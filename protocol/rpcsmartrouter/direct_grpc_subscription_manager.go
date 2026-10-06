@@ -20,6 +20,28 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+const (
+	// defaultMaxRestoresWithoutProgress bounds how many times one subscription is restored
+	// without progress before it is given up. Progress is a delivered message, or a restored
+	// stream that stayed up for defaultRestoreStableAfter.
+	defaultMaxRestoresWithoutProgress = 5
+
+	// defaultRestoreStableAfter is how long a restored stream must stay up to count as
+	// progress. A quiet subscription can go minutes without a message, and the reconnects a
+	// load balancer's connection age limit or keepalive cause now and then must not use up
+	// its restores.
+	defaultRestoreStableAfter = 30 * time.Second
+)
+
+// The statuses a client's stream ends with when the router gives its subscription up.
+var (
+	errSubscriptionLost = status.Error(codes.Unavailable, "upstream subscription lost")
+	errUpstreamRefused  = status.Error(codes.Unavailable, "upstream refused the subscription")
+	errRouterStopping   = status.Error(codes.Unavailable, "router is shutting down")
 )
 
 // grpcActiveSubscription holds state for an active upstream gRPC stream
@@ -51,6 +73,18 @@ type grpcActiveSubscription struct {
 	// Restoration state
 	restoring atomic.Bool
 
+	// restoresWithoutProgress counts restores since the last progress: a delivered message,
+	// or a restored stream that stayed up for the manager's restoreStableAfter. Past the
+	// manager's maxRestoresWithoutProgress the subscription is given up.
+	restoresWithoutProgress atomic.Int32
+	// lastRestoredAt is when the last restore completed, in unix nanoseconds; 0 for none.
+	lastRestoredAt atomic.Int64
+
+	// endErr is the status every client of this subscription is ended with when the router
+	// gives the subscription up, rather than seeing its upstream end or its last client
+	// leave. Set before cleanup; the first reason recorded wins.
+	endErr atomic.Pointer[error]
+
 	// Set once cleanupSubscription has released this subscription's resources. Keyed on
 	// the subscription object rather than on its presence in activeSubscriptions, so
 	// release runs exactly once no matter who reaches cleanup first.
@@ -60,6 +94,20 @@ type grpcActiveSubscription struct {
 	messageSeq atomic.Uint64
 
 	lock sync.RWMutex
+}
+
+// giveUp records why the router is giving this subscription up, unless a reason was
+// recorded already. cleanupSubscription hands it to every client still connected.
+func (sub *grpcActiveSubscription) giveUp(reason error) {
+	sub.endErr.CompareAndSwap(nil, &reason)
+}
+
+// endError is the reason giveUp recorded, or nil when the subscription ended normally.
+func (sub *grpcActiveSubscription) endError() error {
+	if reason := sub.endErr.Load(); reason != nil {
+		return *reason
+	}
+	return nil
 }
 
 // signalClose closes closeSubChan exactly once.
@@ -125,6 +173,16 @@ type DirectGRPCSubscriptionManager struct {
 	// Total subscription counter
 	totalSubscriptions atomic.Int64
 
+	// endErrors holds, per client key, the status a given-up subscription's client stream
+	// ends with, until the listener reads it (SubscriptionEndError) or the client is
+	// released (UnsubscribeAll). A sync.Map, because cleanupSubscription records into it
+	// while holding a subscription's lock, and dgm.lock may not be taken there.
+	endErrors sync.Map
+
+	// Restore bounds; see defaultMaxRestoresWithoutProgress and defaultRestoreStableAfter.
+	maxRestoresWithoutProgress int32
+	restoreStableAfter         time.Duration
+
 	// Per-client subscription tracking
 	clientSubscriptions map[string]map[string]struct{} // clientKey -> set of hashedParams
 
@@ -182,6 +240,9 @@ func NewDirectGRPCSubscriptionManager(
 		clientSubscriptions:  make(map[string]map[string]struct{}),
 		ctx:                  ctx,
 		cancel:               cancel,
+
+		maxRestoresWithoutProgress: defaultMaxRestoresWithoutProgress,
+		restoreStableAfter:         defaultRestoreStableAfter,
 	}
 
 	// Build endpoint lookup map across both tiers
@@ -261,8 +322,10 @@ func (dgm *DirectGRPCSubscriptionManager) Stop() {
 	dgm.lock.Lock()
 	defer dgm.lock.Unlock()
 
-	// Close all active subscriptions
+	// Close all active subscriptions. Their clients end with Unavailable rather than OK,
+	// so they reconnect elsewhere instead of taking the shutdown for a finished stream.
 	for _, sub := range dgm.activeSubscriptions {
+		sub.giveUp(errRouterStopping)
 		sub.cancel()
 		sub.signalClose()
 	}
@@ -521,8 +584,9 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 		return nil, nil, fmt.Errorf("failed to get pool: %w", err)
 	}
 
-	// Get connection
-	conn, err := pool.GetConnectionForStream(ctx)
+	// Get a connection, with this stream's slot counted on it already (see
+	// ReserveConnectionForStream); every failure below releases the slot.
+	conn, err := pool.ReserveConnectionForStream(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get connection: %w", err)
 	}
@@ -541,11 +605,13 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 	// Get method descriptor
 	methodDesc, err := conn.GetMethodDescriptor(ctx, svc, methodName)
 	if err != nil {
+		pool.NotifyStreamRemoved(conn)
 		return nil, nil, fmt.Errorf("failed to get method descriptor: %w", err)
 	}
 
 	// Verify it's a server-streaming method
 	if !methodDesc.IsServerStreaming() {
+		pool.NotifyStreamRemoved(conn)
 		return nil, nil, fmt.Errorf("method %s is not a server-streaming method", methodPath)
 	}
 
@@ -561,11 +627,9 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 	stream, err := dgm.createUpstreamStream(subCtx, conn.GetConn(), methodPath, requestData, methodDesc)
 	if err != nil {
 		subCancel()
+		pool.NotifyStreamRemoved(conn)
 		return nil, nil, fmt.Errorf("failed to create stream: %w", err)
 	}
-
-	// Increment stream count
-	conn.IncrementStreams()
 
 	// Generate IDs
 	routerSubID := dgm.idMapper.GenerateRouterID(clientKey)
@@ -722,6 +786,17 @@ func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 				return
 			}
 			if err != nil {
+				// A refusal is the upstream's answer to this request or to the router's
+				// credentials, and a restore would only send the same request again: end
+				// the subscription with it instead (the deferred cleanup).
+				if reason, refused := upstreamRefusal(err); refused {
+					utils.LavaFormatWarning("DirectGRPC: upstream refused the subscription, ending it",
+						err,
+						utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+					)
+					activeSub.giveUp(reason)
+					return
+				}
 				utils.LavaFormatWarning("DirectGRPC: stream error",
 					err,
 					utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
@@ -733,6 +808,10 @@ func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 				return
 			}
 
+			// A delivered message is progress: the restores this stream has used so far
+			// no longer count toward giving it up.
+			activeSub.restoresWithoutProgress.Store(0)
+
 			// Marshal to bytes
 			msgBytes, err := proto.Marshal(outputMsg)
 			if err != nil {
@@ -743,6 +822,31 @@ func (dgm *DirectGRPCSubscriptionManager) listenForUpstreamMessages(
 			// Route to all clients
 			dgm.routeMessageToClients(activeSub, msgBytes)
 		}
+	}
+}
+
+// upstreamRefusal reports whether a stream error is the upstream refusing the subscription,
+// which a restore would only repeat, and the status its clients' streams end with.
+//
+// An error about the request itself (InvalidArgument, NotFound, OutOfRange, AlreadyExists,
+// FailedPrecondition, Unimplemented) passes through with the upstream's code and message:
+// the client sent that request and can fix it. An error about the router's own credentials
+// or quota (PermissionDenied, Unauthenticated, ResourceExhausted) ends the client's stream
+// with Unavailable instead: the client can do nothing about it, and the upstream's text can
+// describe the router's key. Any other error is not a refusal and goes to a restore.
+func upstreamRefusal(err error) (error, bool) {
+	st, ok := status.FromError(err)
+	if !ok {
+		return nil, false
+	}
+	switch st.Code() {
+	case codes.InvalidArgument, codes.NotFound, codes.OutOfRange, codes.AlreadyExists,
+		codes.FailedPrecondition, codes.Unimplemented:
+		return status.Error(st.Code(), st.Message()), true
+	case codes.PermissionDenied, codes.Unauthenticated, codes.ResourceExhausted:
+		return errUpstreamRefused, true
+	default:
+		return nil, false
 	}
 }
 
@@ -804,25 +908,44 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	// function short of a completed restoration must release the subscription — and a
 	// failure path added later gets that for free instead of having to remember it.
 	// cleanupSubscription cancels, so the failure paths below do not.
+	// A failure on any path below gives the subscription up, so its clients' streams end
+	// with Unavailable rather than OK. A reason recorded earlier wins.
 	restored := false
 	defer func() {
 		if !restored {
+			activeSub.giveUp(errSubscriptionLost)
 			dgm.cleanupSubscription(hashedParams, activeSub)
 		}
 	}()
+
+	// Bound the restores. A restored stream that stayed up for restoreStableAfter was
+	// progress, even on a quiet subscription that delivered nothing since; only restores
+	// that keep failing add up.
+	if last := activeSub.lastRestoredAt.Load(); last != 0 && time.Since(time.Unix(0, last)) >= dgm.restoreStableAfter {
+		activeSub.restoresWithoutProgress.Store(0)
+	}
+	if attempt := activeSub.restoresWithoutProgress.Add(1); attempt > dgm.maxRestoresWithoutProgress {
+		utils.LavaFormatWarning("DirectGRPC: subscription keeps failing, giving it up", nil,
+			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+			utils.LogAttr("restoresWithoutProgress", attempt-1),
+		)
+		return
+	}
 
 	utils.LavaFormatInfo("DirectGRPC: attempting to restore subscription",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 	)
 
-	// Reconnect pool
+	// Reconnect pool. A caller that finds another subscription's reconnect in flight
+	// waits for it and gets its outcome.
 	if err := activeSub.upstreamPool.ReconnectWithBackoff(ctx); err != nil {
 		utils.LavaFormatWarning("DirectGRPC: failed to reconnect", err)
 		return
 	}
 
-	// Get new connection
-	newConn, err := activeSub.upstreamPool.GetConnectionForStream(ctx)
+	// Get a connection with this stream's slot counted on it already, so releasing the
+	// old connection below cannot scale the new one down as unused.
+	newConn, err := activeSub.upstreamPool.ReserveConnectionForStream(ctx)
 	if err != nil {
 		utils.LavaFormatWarning("DirectGRPC: failed to get new connection", err)
 		return
@@ -837,6 +960,7 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 		activeSub.methodDescriptor,
 	)
 	if err != nil {
+		activeSub.upstreamPool.NotifyStreamRemoved(newConn)
 		utils.LavaFormatWarning("DirectGRPC: failed to create new stream", err)
 		return
 	}
@@ -848,11 +972,11 @@ func (dgm *DirectGRPCSubscriptionManager) handleUpstreamDisconnect(
 	activeSub.upstreamStream = newStream
 	activeSub.lock.Unlock()
 
-	// Decrement old connection stream count
+	// Release the old connection's slot. The new one is counted already.
 	if oldConn != nil {
 		activeSub.upstreamPool.NotifyStreamRemoved(oldConn)
 	}
-	newConn.IncrementStreams()
+	activeSub.lastRestoredAt.Store(time.Now().UnixNano())
 
 	utils.LavaFormatInfo("DirectGRPC: subscription restored",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
@@ -907,10 +1031,16 @@ func (dgm *DirectGRPCSubscriptionManager) cleanupSubscription(hashedParams strin
 	activeSub.cancel()
 
 	// Close client channels, and snapshot what the release below needs — upstreamConnection
-	// is written under this lock by handleUpstreamDisconnect.
+	// is written under this lock by handleUpstreamDisconnect. A given-up subscription's
+	// status is recorded for each client before its channel closes: the listener reads it
+	// once it sees the close, and would otherwise end the client's stream with OK.
+	endErr := activeSub.endError()
 	activeSub.lock.Lock()
 	clientKeys := make([]string, 0, len(activeSub.connectedClients))
 	for clientKey, sender := range activeSub.connectedClients {
+		if endErr != nil {
+			dgm.endErrors.Store(clientKey, endErr)
+		}
 		sender.Close()
 		clientKeys = append(clientKeys, clientKey)
 	}
@@ -992,6 +1122,11 @@ func (dgm *DirectGRPCSubscriptionManager) UnsubscribeAll(
 	ctx context.Context,
 	clientKey string,
 ) error {
+	// The listener releases every stream through here, read or not, so this is where an
+	// end status nobody read is dropped. Deferred, to run after the client has left every
+	// subscription: cleanup records statuses only for clients still connected.
+	defer dgm.endErrors.Delete(clientKey)
+
 	dgm.lock.RLock()
 	clientSubs, exists := dgm.clientSubscriptions[clientKey]
 	if !exists {
@@ -1022,6 +1157,20 @@ func (dgm *DirectGRPCSubscriptionManager) UnsubscribeAll(
 
 	dgm.rateLimiter.CleanupClient(clientKey)
 
+	return nil
+}
+
+var _ chainlib.GRPCSubscriptionEndReporter = (*DirectGRPCSubscriptionManager)(nil)
+
+// SubscriptionEndError implements chainlib.GRPCSubscriptionEndReporter: the status
+// clientKey's stream ends with when its subscription was given up, or nil for a normal end.
+// Read once: the entry is removed.
+func (dgm *DirectGRPCSubscriptionManager) SubscriptionEndError(clientKey string) error {
+	if endErr, found := dgm.endErrors.LoadAndDelete(clientKey); found {
+		if err, ok := endErr.(error); ok {
+			return err
+		}
+	}
 	return nil
 }
 
