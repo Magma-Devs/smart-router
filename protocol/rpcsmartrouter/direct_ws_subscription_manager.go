@@ -16,6 +16,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -521,11 +522,12 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 //
 // tier and byURL come from one endpointsSnapshot so the optimizer's chosen URL is
 // resolved against the same generation of the index it was offered from.
-// notHeldOff returns the endpoints of tier that are not currently rate-limit held off.
-func notHeldOff(tier []*common.NodeUrl) []*common.NodeUrl {
+// notHeldOff returns the endpoints of tier that registry is not currently holding off for a
+// rate limit.
+func notHeldOff(registry *holdoff.Registry, tier []*common.NodeUrl) []*common.NodeUrl {
 	ready := make([]*common.NodeUrl, 0, len(tier))
 	for _, ep := range tier {
-		if !relayHoldoff.HeldOff(ep.Url, ep.Url) {
+		if !registry.HeldOff(ep.Url, ep.Url) {
 			ready = append(ready, ep)
 		}
 	}
@@ -561,7 +563,7 @@ func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tie
 	// Rate-limit hold-off: prefer endpoints that are not currently held off after a 429.
 	// Only narrows the tier when something ready remains — a subscription must still be
 	// served when every endpoint is held off, so the full tier stays in that case.
-	if ready := notHeldOff(tier); len(ready) > 0 && len(ready) < len(tier) {
+	if ready := notHeldOff(relayHoldoff, tier); len(ready) > 0 && len(ready) < len(tier) {
 		tier = ready
 	}
 

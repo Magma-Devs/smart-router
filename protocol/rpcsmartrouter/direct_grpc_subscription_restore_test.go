@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -22,6 +24,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1"
 	"google.golang.org/grpc/status"
 )
@@ -36,6 +39,7 @@ type restoreUpstream struct {
 	opened       map[string]int
 	failFirst    map[string]chan struct{} // ends that host's first stream with Internal
 	rejected     map[string]codes.Code    // answers every stream of that host with this code
+	pushback     map[string]string        // grpc-retry-pushback-ms trailer sent with that host's rejection
 	quietReopens bool                     // a reopened stream sends nothing
 	failReopens  bool                     // a reopened stream fails at once with Internal
 	flapReopens  bool                     // a reopened stream sends its message, then fails with Internal
@@ -53,6 +57,7 @@ func startRestoreUpstream(t *testing.T) *restoreUpstream {
 		opened:    map[string]int{},
 		failFirst: map[string]chan struct{}{},
 		rejected:  map[string]codes.Code{},
+		pushback:  map[string]string{},
 		refuse:    make(chan struct{}),
 	}
 
@@ -75,6 +80,7 @@ func startRestoreUpstream(t *testing.T) *restoreUpstream {
 			fail = upstream.failFirst[host]
 		}
 		code, rejected := upstream.rejected[host]
+		pushback := upstream.pushback[host]
 		quiet := upstream.quietReopens && opened > 1
 		failNow := upstream.failReopens && opened > 1
 		flap := upstream.flapReopens && opened > 1
@@ -82,6 +88,9 @@ func startRestoreUpstream(t *testing.T) *restoreUpstream {
 
 		switch {
 		case rejected:
+			if pushback != "" {
+				stream.SetTrailer(metadata.Pairs("grpc-retry-pushback-ms", pushback))
+			}
 			return status.Error(code, "the upstream rejected "+host)
 		case upstream.refusing.Load():
 			return status.Error(codes.PermissionDenied, restoreKeyText)
@@ -135,6 +144,17 @@ func (u *restoreUpstream) reject(host string, code codes.Code) {
 	u.rejected[host] = code
 }
 
+// rateLimit answers every stream of host with RESOURCE_EXHAUSTED and, unless pushback is 0, the
+// grpc-retry-pushback-ms trailer a rate-limiting server sends with it.
+func (u *restoreUpstream) rateLimit(host string, pushback time.Duration) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.rejected[host] = codes.ResourceExhausted
+	if pushback > 0 {
+		u.pushback[host] = strconv.FormatInt(pushback.Milliseconds(), 10)
+	}
+}
+
 func (u *restoreUpstream) setReopens(quiet, fail bool) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -174,8 +194,14 @@ func (u *restoreUpstream) totalOpened() int {
 // subscribeHost opens a subscription whose request names host.
 func subscribeHost(t *testing.T, manager *DirectGRPCSubscriptionManager, host string) <-chan *pairingtypes.RelayReply {
 	t.Helper()
+	return subscribeHostFrom(t, manager, host, "conn-"+host)
+}
+
+// subscribeHostFrom is subscribeHost from the client stream connectionID.
+func subscribeHostFrom(t *testing.T, manager *DirectGRPCSubscriptionManager, host, connectionID string) <-chan *pairingtypes.RelayReply {
+	t.Helper()
 	message := newGrpcSubscriptionMessageWithRequest(t, []byte(`{"host":"`+host+`"}`))
-	_, replies, err := manager.StartSubscription(context.Background(), message, "dapp", "1.1.1.1", "conn-"+host, nil)
+	_, replies, err := manager.StartSubscription(context.Background(), message, "dapp", "1.1.1.1", connectionID, nil)
 	require.NoError(t, err)
 	return replies
 }
@@ -316,6 +342,93 @@ func TestGRPCSubscriptionRestore_ACredentialRefusalEndsEveryClientWithoutItsText
 	require.Equal(t, int64(0), manager.GetActiveSubscriptionCount())
 }
 
+// newManagerAgainstUpstreams is newManagerAgainstUpstream over a primary tier of several
+// upstreams. With no optimizer, selection takes the first one not held off.
+func newManagerAgainstUpstreams(t *testing.T, addrs ...string) *DirectGRPCSubscriptionManager {
+	t.Helper()
+	endpoints := make([]*common.NodeUrl, 0, len(addrs))
+	for _, addr := range addrs {
+		endpoints = append(endpoints, &common.NodeUrl{
+			Url:        "grpc://" + addr,
+			GrpcConfig: common.GrpcConfig{AllowInsecure: true},
+		})
+	}
+	manager := NewDirectGRPCSubscriptionManager(nil, "SUI", spectypes.APIInterfaceGrpc, endpoints, nil, nil, nil)
+
+	ctx := context.Background()
+	for _, endpoint := range endpoints {
+		pool, err := manager.getOrCreatePool(ctx, endpoint)
+		require.NoError(t, err)
+		conn, err := pool.GetConnectionForStream(ctx)
+		require.NoError(t, err)
+		conn.descriptorsCache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", streamingMethodDescriptor(t))
+	}
+	return manager
+}
+
+// TestGRPCSubscriptionRestore_ARateLimitedEndpointIsHeldOff: an upstream that refuses a stream
+// for rate ends the subscription with Unavailable, and the client resubscribes at once.
+// Selection only reads hold-offs, so the refusal must record one, or the retry goes straight
+// back to the endpoint that refused it. A bare RESOURCE_EXHAUSTED is not a recognised rate
+// limit, since grpc-go mints the same code for an oversized message, so it holds nothing off.
+func TestGRPCSubscriptionRestore_ARateLimitedEndpointIsHeldOff(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		pushback    time.Duration
+		wantHeldOff bool
+	}{
+		{name: "with a retry delay", pushback: time.Minute, wantHeldOff: true},
+		{name: "bare", wantHeldOff: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			limited := startRestoreUpstream(t)
+			limited.rateLimit("r", tc.pushback)
+			other := startRestoreUpstream(t)
+			manager := newManagerAgainstUpstreams(t, limited.addr, other.addr)
+			manager.rateLimitHoldoff = holdoff.NewRegistry()
+			defer manager.Stop()
+			limitedURL := "grpc://" + limited.addr
+
+			// The first endpoint in the tier refuses the subscription.
+			first := subscribeHostFrom(t, manager, "r", "first")
+			awaitClosed(t, first, 3*time.Second)
+			firstKey := manager.ClientKey("dapp", "1.1.1.1", "first")
+			endErr := manager.SubscriptionEndError(firstKey)
+			require.Equal(t, codes.Unavailable, status.Code(endErr), "got %v", endErr)
+			require.Equal(t, tc.wantHeldOff, manager.rateLimitHoldoff.HeldOff(limitedURL, limitedURL))
+			// The listener releases a stream once it has ended.
+			require.NoError(t, manager.UnsubscribeAll(context.Background(), firstKey))
+
+			// The client resubscribes on a new stream.
+			retry := subscribeHostFrom(t, manager, "r", "retry")
+			if tc.wantHeldOff {
+				require.Equal(t, "r", awaitStreamPayload(t, retry), "the retry must go to the endpoint not held off")
+				require.Equal(t, 1, limited.streamsOpened("r"), "the held-off endpoint must not be asked again")
+			} else {
+				awaitClosed(t, retry, 3*time.Second)
+				require.Equal(t, 2, limited.streamsOpened("r"))
+				require.Zero(t, other.streamsOpened("r"))
+			}
+		})
+	}
+}
+
+// TestGRPCSubscriptionRestore_AStreamThatAnswersClearsTheHoldoff: any answer clears a rate-limit
+// hold-off (docs/RATE-LIMIT-HOLDOFF.md). A held-off endpoint still serves when nothing else is
+// ready, and once its stream delivers, the hold-off and the strikes behind it are stale.
+func TestGRPCSubscriptionRestore_AStreamThatAnswersClearsTheHoldoff(t *testing.T) {
+	upstream := startRestoreUpstream(t)
+	manager := newManagerAgainstUpstream(t, upstream.addr)
+	manager.rateLimitHoldoff = holdoff.NewRegistry()
+	defer manager.Stop()
+	url := "grpc://" + upstream.addr
+	manager.rateLimitHoldoff.RecordRateLimit(url, url, time.Minute)
+
+	replies := subscribeHost(t, manager, "a")
+	require.Equal(t, "a", awaitStreamPayload(t, replies))
+	require.False(t, manager.rateLimitHoldoff.HeldOff(url, url), "the endpoint answered, so its hold-off is stale")
+}
+
 // TestGRPCSubscriptionRestore_GivesUpAfterRepeatedFailures: a stream that fails with an error
 // that is not a refusal is restored, but a restored stream that keeps failing before it
 // delivers anything is given up after defaultMaxRestoresWithoutProgress restores, and its
@@ -364,10 +477,20 @@ func TestGRPCSubscriptionRestore_GivesUpWhenRestoredStreamsDeliverThenFail(t *te
 	require.Equal(t, int64(0), manager.GetActiveSubscriptionCount())
 }
 
+// onlyRegisteredSubscription returns the one subscription manager holds.
+func onlyRegisteredSubscription(t *testing.T, manager *DirectGRPCSubscriptionManager) *grpcActiveSubscription {
+	t.Helper()
+	hashedParams := onlyRegisteredSubscriptionKey(t, manager)
+	manager.lock.RLock()
+	defer manager.lock.RUnlock()
+	return manager.activeSubscriptions[hashedParams]
+}
+
 // TestGRPCSubscriptionRestore_ALeavingClientRunsNoRestore: the last client leaving cancels the
 // subscription, and its stream then fails with that cancellation. That is the subscription
-// closing, not the upstream failing: nothing is reopened, and the pool records no reconnect
-// attempt, whose cancelled outcome another subscription's restore waiting on it would read.
+// closing, not the upstream failing: no restore starts, so nothing is reopened and no
+// reconnect runs on the cancelled context, where it would be abandoned and a restore waiting
+// on it would have to dial again.
 func TestGRPCSubscriptionRestore_ALeavingClientRunsNoRestore(t *testing.T) {
 	upstream := startRestoreUpstream(t)
 	manager := newManagerAgainstUpstream(t, upstream.addr)
@@ -375,19 +498,58 @@ func TestGRPCSubscriptionRestore_ALeavingClientRunsNoRestore(t *testing.T) {
 
 	replies := subscribeHost(t, manager, "l")
 	require.Equal(t, "l", awaitStreamPayload(t, replies))
+	sub := onlyRegisteredSubscription(t, manager)
 
 	require.NoError(t, manager.UnsubscribeAll(context.Background(), clientKeyOf(manager, "l")))
 	require.Eventually(t, func() bool { return manager.GetActiveSubscriptionCount() == 0 },
 		5*time.Second, 10*time.Millisecond)
 
-	// A restore, had one started, would have reopened the stream well within this.
+	// A restore, had one started, would have counted itself well within this.
 	time.Sleep(300 * time.Millisecond)
 	require.Equal(t, 1, upstream.streamsOpened("l"), "a leaving client must not reopen the stream")
-	manager.lock.RLock()
-	defer manager.lock.RUnlock()
-	for _, pool := range manager.upstreamPools {
-		require.Nil(t, pool.reconnectOutcome.Load(), "a leaving client must not run a reconnect")
+	require.Zero(t, sub.restoresWithoutProgress.Load(), "a leaving client must not start a restore")
+}
+
+// TestGRPCSubscriptionRestore_AClientLeavingDuringCleanupStrandsNoEndStatus: a client can leave
+// while the router gives its subscription up. UnsubscribeAll is the last call the listener makes
+// for a stream and drops any end status it left unread, so a status recorded after it would stay
+// in the manager for good. Cleanup is held where it releases the clients, and the client leaves
+// in that window.
+func TestGRPCSubscriptionRestore_AClientLeavingDuringCleanupStrandsNoEndStatus(t *testing.T) {
+	upstream := startRestoreUpstream(t)
+	manager := newManagerAgainstUpstream(t, upstream.addr)
+	defer manager.Stop()
+
+	replies := subscribeHost(t, manager, "s")
+	require.Equal(t, "s", awaitStreamPayload(t, replies))
+	sub := onlyRegisteredSubscription(t, manager)
+
+	// Cleanup cancels the subscription and then waits here for its lock.
+	sub.lock.Lock()
+	sub.giveUp(errSubscriptionLost)
+	cleaned := make(chan struct{})
+	go func() {
+		defer close(cleaned)
+		manager.cleanupSubscription(sub.hashedParams, sub)
+	}()
+	require.Eventually(t, func() bool { return sub.ctx.Err() != nil }, 5*time.Second, time.Millisecond)
+
+	left := make(chan struct{})
+	go func() {
+		defer close(left)
+		_ = manager.UnsubscribeAll(context.Background(), clientKeyOf(manager, "s"))
+	}()
+	select {
+	case <-left:
+	case <-time.After(200 * time.Millisecond):
+		// Still registered, so the client waits for the subscription's lock too
 	}
+	sub.lock.Unlock()
+	<-cleaned
+	<-left
+
+	_, stranded := manager.endErrors.Load(clientKeyOf(manager, "s"))
+	require.False(t, stranded, "an end status recorded after its client left is never read or dropped")
 }
 
 // TestGRPCSubscriptionRestore_AQuietStreamSurvivesSpacedReconnects: a quiet subscription can go
@@ -550,7 +712,7 @@ func dialRestoreListener(t *testing.T, manager *DirectGRPCSubscriptionManager) *
 // naming host.
 func openClientStream(t *testing.T, conn *grpc.ClientConn, host string) grpc.ClientStream {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancel)
 	stream, err := conn.NewStream(ctx, &grpc.StreamDesc{ServerStreams: true}, "/"+restoreFeedMethod, grpc.ForceCodec(restoreRawCodec{}))
 	require.NoError(t, err)
@@ -592,5 +754,67 @@ func TestGRPCSubscriptionRestore_TheClientSeesTheRefusalStatus(t *testing.T) {
 		require.Equal(t, "the upstream rejected bad", status.Convert(err).Message())
 	case <-time.After(time.Second):
 		t.Fatal("the client's stream did not end within 1s")
+	}
+}
+
+// TestGRPCSubscriptionRestore_TheClientSeesWhyItWasGivenUp drives each way the router gives a
+// subscription up through the real listener, as TestGRPCSubscriptionRestore_TheClientSeesTheRefusalStatus
+// does for a refused request. The client's stream must end with the router's own Unavailable
+// status, not OK, so the client resubscribes instead of taking the end for a finished stream;
+// and with that exact text, so none of the upstream's text about the router's key reaches it.
+func TestGRPCSubscriptionRestore_TheClientSeesWhyItWasGivenUp(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// arm sets the upstream up before the client subscribes, and returns what gives the
+		// subscription up once the client has had its first message.
+		arm  func(*restoreUpstream, *DirectGRPCSubscriptionManager) func()
+		want error
+	}{
+		{
+			name: "the upstream refuses the router's credentials",
+			arm:  func(u *restoreUpstream, _ *DirectGRPCSubscriptionManager) func() { return u.refuseAll },
+			want: errUpstreamRefused,
+		},
+		{
+			name: "restores make no progress",
+			arm: func(u *restoreUpstream, _ *DirectGRPCSubscriptionManager) func() {
+				endFirst := u.endFirstStreamOf("g")
+				u.setReopens(false, true)
+				return endFirst
+			},
+			want: errSubscriptionLost,
+		},
+		{
+			name: "the router stops",
+			arm:  func(_ *restoreUpstream, m *DirectGRPCSubscriptionManager) func() { return m.Stop },
+			want: errRouterStopping,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := startRestoreUpstream(t)
+			manager := newManagerAgainstUpstream(t, upstream.addr)
+			defer manager.Stop()
+			giveUp := tc.arm(upstream, manager)
+			conn := dialRestoreListener(t, manager)
+
+			stream := openClientStream(t, conn, "g")
+			var payload []byte
+			require.NoError(t, stream.RecvMsg(&payload), "the subscription must stream before it is given up")
+
+			giveUp()
+
+			received := make(chan error, 1)
+			go func() {
+				var reply []byte
+				received <- stream.RecvMsg(&reply)
+			}()
+			select {
+			case err := <-received:
+				require.Equal(t, codes.Unavailable, status.Code(err), "the client must see why, not a normal end: %v", err)
+				require.Equal(t, status.Convert(tc.want).Message(), status.Convert(err).Message())
+			case <-time.After(10 * time.Second):
+				t.Fatal("the client's stream did not end within 10s")
+			}
+		})
 	}
 }

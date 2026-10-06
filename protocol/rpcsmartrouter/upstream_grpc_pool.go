@@ -350,13 +350,11 @@ type UpstreamGRPCPool struct {
 	sanitizedURL string
 	connections  []*UpstreamGRPCStreamConnection
 	backoff      *ExponentialBackoff
-	reconnectMu  sync.Mutex // Prevents concurrent reconnection attempts
 	lock         sync.RWMutex
 	closed       atomic.Bool
-	reconnecting atomic.Bool
-	// reconnectOutcome holds the result of the last ReconnectWithBackoff attempt that dialed,
-	// as a reconnectResult, so a caller that waited for it learns how it went.
-	reconnectOutcome atomic.Value
+	// reconnectAttempt is the ReconnectWithBackoff attempt in flight, nil when none. The
+	// caller that installs it dials; every other caller waits on it.
+	reconnectAttempt atomic.Pointer[reconnectAttempt]
 	onReconnect      func() // Callback when reconnected (for stream restoration)
 
 	// Pool configuration
@@ -568,9 +566,11 @@ func (p *UpstreamGRPCPool) maybeScaleDown() {
 	}
 }
 
-// reconnectResult is the outcome of one ReconnectWithBackoff attempt.
-type reconnectResult struct {
-	err error
+// reconnectAttempt is one ReconnectWithBackoff attempt. done closes once err and abandoned
+// hold its outcome, so every caller waiting on the attempt wakes as it ends.
+type reconnectAttempt struct {
+	done chan struct{}
+	err  error
 	// abandoned is set when the attempt ended because its own caller's context ended, not
 	// because the dial failed. That says nothing about the upstream, so a waiter whose
 	// context is still live tries again rather than giving up on it.
@@ -589,35 +589,43 @@ type reconnectResult struct {
 // waiter that still wants the connection dials itself.
 func (p *UpstreamGRPCPool) ReconnectWithBackoff(ctx context.Context) error {
 	for {
-		if p.reconnecting.CompareAndSwap(false, true) {
-			return p.reconnect(ctx)
+		if inFlight := p.reconnectAttempt.Load(); inFlight != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-inFlight.done:
+			}
+			if inFlight.abandoned {
+				continue
+			}
+			if inFlight.err != nil {
+				return fmt.Errorf("the reconnect this caller waited for failed: %w", inFlight.err)
+			}
+			return nil
 		}
-		outcome, err := p.waitForReconnect(ctx)
-		if err != nil {
-			return err
+
+		attempt := &reconnectAttempt{done: make(chan struct{})}
+		if !p.reconnectAttempt.CompareAndSwap(nil, attempt) {
+			continue // another caller installed its attempt first: wait for that one
 		}
-		if outcome.abandoned {
-			continue
-		}
-		if outcome.err != nil {
-			return fmt.Errorf("the reconnect this caller waited for failed: %w", outcome.err)
-		}
-		return nil
+		err := p.reconnect(ctx)
+		p.endReconnect(attempt, err, err != nil && ctx.Err() != nil)
+		return err
 	}
 }
 
-// reconnect is one ReconnectWithBackoff attempt, run by the caller that set p.reconnecting.
-func (p *UpstreamGRPCPool) reconnect(ctx context.Context) (err error) {
-	defer func() {
-		// Record the outcome before clearing the flag, so a waiter that sees the flag
-		// drop reads this attempt's result.
-		p.reconnectOutcome.Store(reconnectResult{err: err, abandoned: err != nil && ctx.Err() != nil})
-		p.reconnecting.Store(false)
-	}()
+// endReconnect records attempt's outcome and wakes every caller waiting on it. The attempt
+// is uninstalled before the wake, so a waiter that retries an abandoned attempt finds none
+// in flight and dials itself.
+func (p *UpstreamGRPCPool) endReconnect(attempt *reconnectAttempt, err error, abandoned bool) {
+	attempt.err, attempt.abandoned = err, abandoned
+	p.reconnectAttempt.CompareAndSwap(attempt, nil)
+	close(attempt.done)
+}
 
-	p.reconnectMu.Lock()
-	defer p.reconnectMu.Unlock()
-
+// reconnect dials one new connection after the backoff, for the caller whose attempt is
+// installed.
+func (p *UpstreamGRPCPool) reconnect(ctx context.Context) error {
 	// Get backoff duration
 	backoffDuration, _ := p.backoff.NextBackoff()
 	utils.LavaFormatDebug("gRPC pool: waiting before reconnect",
@@ -631,14 +639,21 @@ func (p *UpstreamGRPCPool) reconnect(ctx context.Context) (err error) {
 	case <-time.After(backoffDuration):
 	}
 
-	// Try to create a new connection
-	p.lock.Lock()
+	// Dial outside the pool lock: a dial can take up to connectTimeout, and every stream
+	// opened or released on this pool needs that lock meanwhile.
 	newConn, err := NewUpstreamGRPCStreamConnection(ctx, p.nodeUrl, p.connectTimeout, p.liveness)
 	if err != nil {
-		p.lock.Unlock()
 		return fmt.Errorf("failed to reconnect: %w", err)
 	}
 
+	// Close marks the pool closed before it takes this lock, so checked under the lock the
+	// new connection is either closed here or among those Close releases.
+	p.lock.Lock()
+	if p.closed.Load() {
+		p.lock.Unlock()
+		newConn.Close()
+		return fmt.Errorf("pool closed while reconnecting")
+	}
 	p.connections = append(p.connections, newConn)
 	p.backoff.Reset()
 	callback := p.onReconnect
@@ -654,22 +669,6 @@ func (p *UpstreamGRPCPool) reconnect(ctx context.Context) (err error) {
 	}
 
 	return nil
-}
-
-// waitForReconnect returns once the reconnect in flight has ended, with that attempt's
-// outcome, or with ctx's error if ctx ends first.
-func (p *UpstreamGRPCPool) waitForReconnect(ctx context.Context) (reconnectResult, error) {
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	for p.reconnecting.Load() {
-		select {
-		case <-ctx.Done():
-			return reconnectResult{}, ctx.Err()
-		case <-ticker.C:
-		}
-	}
-	outcome, _ := p.reconnectOutcome.Load().(reconnectResult)
-	return outcome, nil
 }
 
 // Close closes all connections in the pool
