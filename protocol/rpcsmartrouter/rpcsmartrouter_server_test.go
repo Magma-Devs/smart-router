@@ -164,8 +164,9 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 		// Call the function
 		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, true)
 
-		// Verify the result - should have status, all-providers, agreeing-providers, disagreeing-providers, pending-providers, and user request type headers
-		require.Len(t, relayResult.Reply.Metadata, 6)
+		// Verify the result - should have status, all-providers, agreeing-providers, disagreeing-providers, pending-providers,
+		// the two failure-only plurality headers (MAG-2192), and user request type headers
+		require.Len(t, relayResult.Reply.Metadata, 8)
 
 		// Find and verify headers
 		var statusHeader, allProvidersHeader, agreeingProvidersHeader, pendingProvidersHeader *pairingtypes.Metadata
@@ -308,8 +309,9 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 		// Call the function
 		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, true)
 
-		// Verify the result - should have 6 headers (status, all-providers, agreeing-providers, disagreeing-providers, pending-providers, user-request-type)
-		require.Len(t, relayResult.Reply.Metadata, 6)
+		// Verify the result - should have 8 headers (status, all-providers, agreeing-providers, disagreeing-providers, pending-providers,
+		// plurality-size, plurality-providers, user-request-type)
+		require.Len(t, relayResult.Reply.Metadata, 8)
 
 		// Find and verify headers
 		var statusHeader, allProvidersHeader, agreeingProvidersHeader *pairingtypes.Metadata
@@ -406,6 +408,100 @@ func TestAppendHeadersToRelayResult_DisagreeingOnQuorumFailure(t *testing.T) {
 	require.Contains(t, disagreeingHeader.Value, "lava@provider1")
 	require.Contains(t, disagreeingHeader.Value, "lava@provider2")
 	require.Contains(t, disagreeingHeader.Value, "lava@provider3")
+}
+
+// TestAppendHeadersToRelayResult_PluralityOnQuorumFailure pins the MAG-2192 contract: on a failed quorum
+// the plurality headers say who formed the largest agreeing set, while disagreeing-providers keeps listing
+// every successful provider — a 2-of-3 plurality below a threshold of 3 is not a consensus.
+func TestAppendHeadersToRelayResult_PluralityOnQuorumFailure(t *testing.T) {
+	hashA := [32]byte{0xAA}
+	hashB := [32]byte{0xBB}
+	responded := func(provider string, hash [32]byte) common.RelayResult {
+		return common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: provider}, ResponseHash: hash}
+	}
+
+	tests := []struct {
+		name            string
+		queried         []string
+		successResults  []common.RelayResult
+		relayResult     *common.RelayResult
+		wantStatus      string
+		wantDisagreeing string
+		wantPlurality   bool
+		wantSize        string
+		wantProviders   string
+	}{
+		{
+			// The ticket's repro, plus a provider still in flight that must not be counted.
+			name:            "two of three agree below threshold",
+			queried:         []string{"lava@provider1", "lava@provider2", "lava@provider3", "lava@provider4"},
+			successResults:  []common.RelayResult{responded("lava@provider1", hashA), responded("lava@provider2", hashA), responded("lava@provider3", hashB)},
+			relayResult:     &common.RelayResult{StatusCode: 500, CrossValidationFailureReason: common.CrossValidationReasonNoAgreement},
+			wantStatus:      "failed",
+			wantDisagreeing: "lava@provider1,lava@provider2,lava@provider3",
+			wantPlurality:   true,
+			wantSize:        "2",
+			wantProviders:   "lava@provider1,lava@provider2",
+		},
+		{
+			name:            "tie reports the size but no providers",
+			queried:         []string{"lava@provider1", "lava@provider2", "lava@provider3", "lava@provider4"},
+			successResults:  []common.RelayResult{responded("lava@provider1", hashA), responded("lava@provider2", hashA), responded("lava@provider3", hashB), responded("lava@provider4", hashB)},
+			relayResult:     &common.RelayResult{StatusCode: 500, CrossValidationFailureReason: common.CrossValidationReasonNoAgreement},
+			wantStatus:      "failed",
+			wantDisagreeing: "lava@provider1,lava@provider2,lava@provider3,lava@provider4",
+			wantPlurality:   true,
+			wantSize:        "2",
+			wantProviders:   "",
+		},
+		{
+			name:            "nobody answered",
+			queried:         []string{"lava@provider1", "lava@provider2", "lava@provider3"},
+			relayResult:     &common.RelayResult{StatusCode: 500, CrossValidationFailureReason: common.CrossValidationReasonInsufficientResponses},
+			wantStatus:      "failed",
+			wantDisagreeing: "",
+			wantPlurality:   true,
+			wantSize:        "0",
+			wantProviders:   "",
+		},
+		{
+			// On success the agreeing-providers header already names the consensus; no plurality headers.
+			name:            "quorum reached",
+			queried:         []string{"lava@provider1", "lava@provider2", "lava@provider3"},
+			successResults:  []common.RelayResult{responded("lava@provider1", hashA), responded("lava@provider2", hashA), responded("lava@provider3", hashA)},
+			relayResult:     &common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}, CrossValidation: 3, ResponseHash: hashA},
+			wantStatus:      "success",
+			wantDisagreeing: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			relayProcessor := &MockRelayProcessorForHeaders{
+				crossValidationParams:           &common.CrossValidationParams{AgreementThreshold: 3, MaxParticipants: len(tt.queried)},
+				selection:                       relaycore.CrossValidation,
+				crossValidationQueriedProviders: tt.queried,
+				successResults:                  tt.successResults,
+				nodeErrors:                      []common.RelayResult{},
+			}
+			tt.relayResult.Reply = &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}}
+			mockProtocolMessage := &MockProtocolMessage{api: &spectypes.Api{Name: "test-api"}}
+
+			(&RPCSmartRouterServer{}).appendHeadersToRelayResult(context.Background(), tt.relayResult, 0, relayProcessor, mockProtocolMessage, "test-api", nil, tt.wantStatus == "success")
+
+			headers := map[string]string{}
+			for _, md := range tt.relayResult.Reply.Metadata {
+				headers[md.Name] = md.Value
+			}
+			require.Equal(t, tt.wantStatus, headers[common.CROSS_VALIDATION_STATUS_HEADER_NAME])
+			require.Equal(t, tt.wantDisagreeing, headers[common.CROSS_VALIDATION_DISAGREEING_PROVIDERS_HEADER])
+			size, hasSize := headers[common.CROSS_VALIDATION_PLURALITY_SIZE_HEADER]
+			providers, hasProviders := headers[common.CROSS_VALIDATION_PLURALITY_PROVIDERS_HEADER]
+			require.Equal(t, tt.wantPlurality, hasSize)
+			require.Equal(t, tt.wantPlurality, hasProviders)
+			require.Equal(t, tt.wantSize, size)
+			require.Equal(t, tt.wantProviders, providers)
+		})
+	}
 }
 
 // TestAppendHeadersToRelayResult_PendingProvidersOnEarlyExit pins the MAG-2187 header contract at reply

@@ -5788,6 +5788,24 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				Value: relayResult.CrossValidationFailureReason,
 			})
 		}
+
+		// On failure, also surface the plurality composition (MAG-2192): disagreeing-providers above
+		// names every successful provider, because nothing reached the threshold, so these two headers
+		// are where a client finds who the odd one out was. Computed from the received results, never
+		// the queried set, so a pending provider can never appear in the plurality.
+		if !cvSuccess {
+			pluralitySize, pluralityProviders := relaycore.CrossValidationPlurality(successResults)
+			metadataReply = append(metadataReply,
+				pairingtypes.Metadata{
+					Name:  common.CROSS_VALIDATION_PLURALITY_SIZE_HEADER,
+					Value: strconv.Itoa(pluralitySize),
+				},
+				pairingtypes.Metadata{
+					Name:  common.CROSS_VALIDATION_PLURALITY_PROVIDERS_HEADER,
+					Value: strings.Join(pluralityProviders, ","),
+				},
+			)
+		}
 	} else if relayResult != nil {
 		// For non-cross-validation mode: keep existing single provider behavior
 		providerAddress := relayResult.GetProvider()

@@ -214,6 +214,8 @@ without debug mode:
 | `lava-cross-validation-disagreeing-providers` | Providers whose **received** response dissented (node/protocol errors and hash-divergent responses; on a quorum failure, every successful provider, since there is no consensus to agree with). Empty means "everyone we heard from agreed" — a provider the router did not hear from is listed as *pending*, never silently dropped (MAG-2187). |
 | `lava-cross-validation-pending-providers` | Providers queried but whose response had not arrived when the reply was built (the quorum early-exit does not wait for stragglers). Their late responses are still compared against the consensus asynchronously — see [Straggler behavior](#straggler-behavior). |
 | `lava-cross-validation-failure-reason` | On failure only — a stable enum (below). |
+| `lava-cross-validation-plurality-size` | On failure only — how many providers returned the most common response (`0` when no non-empty response arrived). Nil/empty replies never count. Says who came closest, not who was right: a plurality below the agreement threshold is not a consensus, which is why `disagreeing-providers` still lists every successful provider (MAG-2192). |
+| `lava-cross-validation-plurality-providers` | On failure only — those providers (comma-separated, sorted). Empty on a tie, since a tie has no plurality. Drawn only from received responses, so a pending provider never appears. |
 
 A **request-time structural fail-fast** (a capacity/diversity check that aborts *before any
 upstream relay runs* — the `insufficient-capacity` / `insufficient-groups` reasons below) carries
