@@ -302,6 +302,8 @@ func (m *mockWSProtocolMessage) GetApi() *spectypes.Api {
 	return &spectypes.Api{Name: m.method}
 }
 
+func (m *mockWSProtocolMessage) GetUnavailableExtensions() []string { return nil }
+
 func (m *mockWSProtocolMessage) GetApiCollection() *spectypes.ApiCollection {
 	return &spectypes.ApiCollection{
 		CollectionData: spectypes.CollectionData{

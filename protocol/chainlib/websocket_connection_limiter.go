@@ -28,9 +28,12 @@ type WebsocketConnectionLimiter struct {
 }
 
 func (wcl *WebsocketConnectionLimiter) HandleFiberRateLimitFlags(c *fiber.Ctx) {
-	userAgent := c.Get(fiber.HeaderUserAgent)
-	// Store the User-Agent in locals for later use
-	c.Locals(fiber.HeaderUserAgent, userAgent)
+	// c.Get returns a view into fasthttp's reusable request buffer, and this Local is read
+	// later, in the websocket handler (CanOpenConnection). With metrics on it is overwritten by
+	// constructFiberCallbackWithHeaderAndParameterExtraction's own clone, which runs after this
+	// middleware; the copy here keeps the stored value owned whatever the route order and
+	// whether metrics are on (MAG-3881).
+	c.Locals(fiber.HeaderUserAgent, strings.Clone(c.Get(fiber.HeaderUserAgent)))
 
 	forwardedFor := c.Get(common.IP_FORWARDING_HEADER_NAME)
 	if forwardedFor == "" {

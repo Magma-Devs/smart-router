@@ -12,7 +12,7 @@ metrics manager.
 
 | Path | Format | Description |
 | --- | --- | --- |
-| `/metrics` | Prometheus | All registered metrics ([`promhttp.Handler()`](../protocol/metrics/smartrouter_metrics_manager.go#L623)) |
+| `/metrics` | Prometheus | All registered metrics ([`newMetricsPageHandler`](../protocol/metrics/metrics_page.go)). A metric that cannot be gathered is left out, logged, and counted as `promhttp_metric_handler_errors_total{cause="gathering"}`, and the rest of the page is still served. The library default answers `500` with no metrics at all and logs nothing. |
 | `/metrics/overall-health` | text | `200 Health status OK` if ≥1 endpoint is healthy, else `503 Unhealthy` |
 | `/metrics/health-overall` | text | Alias of the above (backward-compat path) |
 
@@ -147,7 +147,9 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 >   `code = Unavailable`, followed by a reconnect loop that recovers on its own.
 > - **out of date**: `fleet tracker gate: the cache backend does not implement endpoint observations`,
 >   logged **once per listen endpoint** (one adapter is built per chain+interface), and it will not
->   clear until the backend is upgraded.
+>   clear until the backend is upgraded. The same line with `polling locally` from a router below
+>   v1.6.0 on the RESP backend (`resp-cache:`) means the same thing: that release carries the
+>   gate on both backends, earlier ones only on `cache-be`.
 >
 > A URL mismatch between pods presents as `peer` at zero with errors **also** at zero, exactly like a
 > healthy single replica: observations are keyed by `chain | apiInterface | sha256(url)`, so pods that
@@ -281,6 +283,16 @@ either lands in `method="batch:other"`. Both are declared in
 Once it is non-zero they are lossy — some batch types are being merged into `batch:other`
 — which is a signal to raise the cap, not to distrust the other series.
 
+#### Extensions no node offers
+
+A caller can ask for an extension (`archive`, …) with the `lava-extension` request header. When no
+node on the router offers it, the request is still served without it and the reply carries the
+`Lava-Extension-Unavailable` response header ([README](../protocol/rpcsmartrouter/README.md#extensions-no-node-offers)).
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_extension_unavailable_total` | Counter | `spec`, `apiInterface`, `extension` | Requests served without an extension the caller asked for, once per request per such extension — the same replies that carry `Lava-Extension-Unavailable`. Never counts an extension the router adds on its own (`archive` for a deep `eth_call`). `extension` is bounded by the spec: only names the spec defines as extensions (plus `websocket`) can be recorded, so arbitrary caller values do not create series. Non-zero means callers depend on an extension this deployment has no node for. |
+
 #### Errors
 
 | Metric | Type | Labels | Description |
@@ -411,13 +423,13 @@ are the alerting surface for cache degradation.
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_resp_cache_failed_total` | Counter | `op`, `kind` | Backend-level operation failures (never clean misses): `op` = `get` \| `set` \| `sticky_get` \| `sticky_set`; `kind` = `error` (unreachable / protocol error) \| `timeout` (budget exceeded — saturation reads differently from outage). Under `topology: standalone`, `error` is also the reading when the store could not connect to the endpoint at all (refused, no route, no such host), **including when the operation's own budget expired first** — a read's budget is shorter than the backend's first dial retry, so it always does. Until MAG-3653 that made every `op="get"` outage arrive as `kind="timeout"` while `op="set"` on the same incident read `error` correctly. A dial that merely timed out stays `timeout`: a black-holed endpoint and a healthy backend too far away fail identically. **Under `sentinel` and `cluster` an unreachable endpoint still reads `kind="timeout"` on reads** — a dial there cannot be attributed to the one endpoint an operation used — so for outage detection on those topologies alert on `smartrouter_resp_cache_endpoint_connected{role}` / `smartrouter_resp_cache_connected` (the 10s PING probe, which reaches each endpoint under every topology), not on this series' `kind`. |
+| `smartrouter_resp_cache_failed_total` | Counter | `op`, `kind` | Backend-level operation failures (never clean misses): `op` = `get` \| `set` \| `sticky_get` \| `sticky_set` \| `observation_get` \| `observation_set` (the fleet tracker gate's fetch and publish); `kind` = `error` (unreachable / protocol error) \| `timeout` (budget exceeded — saturation reads differently from outage). Under `topology: standalone`, `error` is also the reading when the store could not connect to the endpoint at all (refused, no route, no such host), **including when the operation's own budget expired first** — a read's budget is shorter than the backend's first dial retry, so it always does. Until MAG-3653 that made every `op="get"` outage arrive as `kind="timeout"` while `op="set"` on the same incident read `error` correctly. A dial that merely timed out stays `timeout`: a black-holed endpoint and a healthy backend too far away fail identically. **Under `sentinel` and `cluster` an unreachable endpoint still reads `kind="timeout"` on reads** — a dial there cannot be attributed to the one endpoint an operation used — so for outage detection on those topologies alert on `smartrouter_resp_cache_endpoint_connected{role}` / `smartrouter_resp_cache_connected` (the 10s PING probe, which reaches each endpoint under every topology), not on this series' `kind`. |
 | `smartrouter_resp_cache_connection_errors_total` | Counter | — | Failed background health probes (PING, every 10s), whole cache: one per probe in which any endpoint failed. |
 | `smartrouter_resp_cache_connected` | Gauge | — | Whole cache: 1 while the last health probe succeeded against every endpoint, 0 after any endpoint failed. Reachability *transitions* are also logged, naming the failing endpoint; steady state stays quiet. |
 | `smartrouter_resp_cache_endpoint_connected` | Gauge | `role` | Per endpoint: 1 while its last probe succeeded, 0 after a failure. `role` = `write` \| `read` (`read` exists only with the read/write split configured). This is the series that says **which half** of a split cache is down; the unlabelled gauge cannot. |
 | `smartrouter_resp_cache_endpoint_connection_errors_total` | Counter | `role` | Per endpoint: failed health probes, by `role`. A read outage never counts against the write endpoint, and vice versa. |
 | `smartrouter_resp_cache_breaker_open` | Gauge | `role` | Per side of the relay path: 1 while that side's breaker is open. `role` = `write` (writes are being skipped: three consecutive write failures or a failed probe of the write endpoint opened it) \| `read` (lookups are being skipped: the same for the read endpoint). While open, the probe runs every second, and the breaker closes on the first probe that answers within the side's budget, once at least one interval has passed. Without a read/write split one breaker stands behind both roles and the two series move together; both exist as 0 from startup. |
-| `smartrouter_resp_cache_skipped_total` | Counter | `op` | Operations an open breaker answered without I/O, `op` = `get` \| `set` \| `sticky_get` \| `sticky_set` (a skipped sticky call is an error to its caller, never a missing claim). Never counted in `smartrouter_resp_cache_failed_total`: the backend never saw them. A rising rate is what an outage costs the relay path — nothing per relay beyond this. |
+| `smartrouter_resp_cache_skipped_total` | Counter | `op` | Operations an open breaker answered without I/O, `op` = `get` \| `set` \| `sticky_get` \| `sticky_set` \| `observation_get` \| `observation_set` (a skipped sticky call is an error to its caller, never a missing claim; a skipped observation call is a fetch or publish error to the fleet tracker gate, which polls locally and counts it on `rpc_endpoint_tracker_gate_errors_total`). Never counted in `smartrouter_resp_cache_failed_total`: the backend never saw them. A rising rate is what an outage costs the relay path — nothing per relay beyond this. |
 | `smartrouter_resp_cache_pool_total_conns` | Gauge | — | Connections currently held by the client pool(s) (write + read summed when the read/write split is configured). |
 | `smartrouter_resp_cache_pool_idle_conns` | Gauge | — | Idle pool connections. |
 | `smartrouter_resp_cache_pool_stale_conns` | Gauge | — | Stale connections removed from the pool. |
@@ -468,6 +480,21 @@ max_over_time(smartrouter_csm_blocked_providers_by_reason[5m]) > 0
 
 For "is this chain serving at all", prefer `smartrouter_endpoint_serving_tier` (below): it is not
 drained by the release path, and `0` means dark unambiguously.
+
+**Alert on the metrics page's own error counter.** `/metrics` leaves out a family the registry
+cannot gather and serves the rest with `200` (see the endpoints table), so scrape-success and `up`
+read healthy while that family is missing from every scrape until the process restarts. The page
+counts each such scrape itself:
+
+```promql
+# some family is missing from the page, and stays missing until the pod restarts
+increase(promhttp_metric_handler_errors_total{cause="gathering"}[5m]) > 0
+```
+
+While that fires, read this counter and the router log (`metrics page: a metric could not be
+served`), not the affected family: a family that gathers inconsistently keeps whichever of its
+colliding children the registry met first, which can differ from one scrape to the next, so its
+remaining values are not to be trusted.
 
 #### Serving tier (availability)
 
