@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"strings"
 )
 
 type request_id_ctx_key struct{}
@@ -37,29 +38,48 @@ func GetTxId(ctx context.Context) (txId string, found bool) {
 	return txId, found
 }
 
-// ExtractWantedHeadersFromCachedMap extracts specific headers from a pre-cached headers map
-// and adds them to the Go context. This avoids repeated header lookups when headers
-// are already cached via GetReqHeaders().
+// ExtractWantedHeadersFromCachedMap reads the caller's tracing headers (X-Request-Id,
+// X-Task-Id, X-Tx-Id) out of a request's header map and stamps them on the context, so
+// they reach the log lines and the relay.
+//
+// The context can outlive the request's handler: log lines written after the reply and
+// asynchronous work read the ids later. So a stored id must not alias a listener's reusable
+// per-connection buffers, such as the fasthttp request buffers behind fiber's zero-copy
+// header strings, which the next request on the same keep-alive connection overwrites in
+// place.
 func ExtractWantedHeadersFromCachedMap(headers map[string][]string, ctx context.Context) context.Context {
-	if reqId := getHeaderValue(headers, "X-Request-Id"); reqId != "" {
+	if reqId := getHeaderValue(headers, "X-Request-Id", "x-request-id"); reqId != "" {
 		ctx = WithRequestId(ctx, reqId)
 	}
 
-	if taskId := getHeaderValue(headers, "X-Task-Id"); taskId != "" {
+	if taskId := getHeaderValue(headers, "X-Task-Id", "x-task-id"); taskId != "" {
 		ctx = WithTaskId(ctx, taskId)
 	}
 
-	if txId := getHeaderValue(headers, "X-Tx-Id"); txId != "" {
+	if txId := getHeaderValue(headers, "X-Tx-Id", "x-tx-id"); txId != "" {
 		ctx = WithTxId(ctx, txId)
 	}
 
 	return ctx
 }
 
-// getHeaderValue extracts the first value for a header key from a cached headers map.
-func getHeaderValue(headers map[string][]string, key string) string {
+// getHeaderValue returns the first value stored under key, the header's canonical
+// spelling, or failing that under lowerKey, the same name in lower case. The HTTP listeners
+// hand over canonical keys (X-Request-Id: fasthttp normalises them), while gRPC metadata
+// keys are always lower case (x-request-id: HTTP/2 field names are, and grpc-go lowers them
+// on the way in), so a single lookup shape would honour the headers on one transport and
+// drop them on the other. The caller spells out both rather than this lowering key: this
+// runs on every request, lowering allocates, and a request that sends no tracing header
+// would pay for it three times over.
+//
+// The value is copied, so the id is owned whatever map a caller hands over, including one
+// whose strings alias a listener's buffers (see ExtractWantedHeadersFromCachedMap).
+func getHeaderValue(headers map[string][]string, key, lowerKey string) string {
 	if values, ok := headers[key]; ok && len(values) > 0 {
-		return values[0]
+		return strings.Clone(values[0])
+	}
+	if values, ok := headers[lowerKey]; ok && len(values) > 0 {
+		return strings.Clone(values[0])
 	}
 	return ""
 }

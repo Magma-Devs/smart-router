@@ -147,6 +147,7 @@ const (
 	MaxSessionsPerProviderFlagName   = "max-sessions-per-provider"  // Max number of sessions allowed per provider
 	DefaultProcessingTimeoutFlagName = "default-processing-timeout" // default timeout for relay processing
 	MinRelayTimeoutFlagName          = "min-relay-timeout"          // minimum relay timeout floor (default 1s)
+	MaxCallerRelayTimeoutFlagName    = "max-caller-relay-timeout"   // how far a caller's lava-relay-timeout may stretch a request's budget (default 0: not at all)
 	CacheTimeoutFlagName             = "cache-timeout"              // per-relay cache lookup budget (default 50ms)
 	// CacheMaxEntryBytesFlagName caps the reply body the router writes to its cache: a larger
 	// reply is served but not written. Off by default (0): the cap applies only when the flag

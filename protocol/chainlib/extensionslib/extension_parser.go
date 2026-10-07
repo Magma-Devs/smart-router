@@ -7,9 +7,16 @@ import (
 const ArchiveExtension = "archive"
 
 type ExtensionInfo struct {
-	ExtensionOverride    []string
-	LatestBlock          uint64
+	ExtensionOverride []string
+	LatestBlock       uint64
+	// AdditionalExtensions are the extensions named by the request's lava-extension directive.
+	// One that no node offers is recorded, so the reply can tell the caller it was dropped
+	// (MAG-3935).
 	AdditionalExtensions []string
+	// RouterExtensions are extensions the router adds on its own while parsing, such as archive
+	// for an eth_call deep behind the head. They are applied like AdditionalExtensions, but the
+	// caller did not ask for them, so one that no node offers is not reported back.
+	RouterExtensions []string
 }
 
 type ExtensionsChainMessage interface {

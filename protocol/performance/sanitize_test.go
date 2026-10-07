@@ -89,7 +89,7 @@ func TestSanitizeForeignCacheReplyKeepsNonJSONContentType(t *testing.T) {
 // LatestBlock is dropped, not preserved. It looks like an inert payload field because
 // on the serving path it is one, but the same sanitized clone is what backfills the
 // primary — and SetRelay publishes Response.LatestBlock as the cache server's
-// chain-level tip through a monotonic-max write that cannot be lowered until expiry.
+// chain-level tip through a write that only moves up while the tip is fresh (MAG-3755).
 // That key resolves LATEST/SAFE/FINALIZED/PENDING, so a single over-high value from a
 // foreign zone would shift negative-tag resolution for the entire chain on this
 // router's own primary. Zeroing here is what keeps the trust boundary the secondary

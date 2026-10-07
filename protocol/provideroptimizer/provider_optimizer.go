@@ -356,6 +356,33 @@ func (po *ProviderOptimizer) AppendRelayDataConsensus(provider string, latency t
 	po.appendRelayData(provider, latency, true, cu, syncBlock, syncRef, po.now())
 }
 
+// AppendSyncData records where a provider's tip stands, at relay weight, and nothing else. It is for
+// a relay whose answer says nothing about availability or latency (the endpoint does not hold the
+// data) but whose tip is still evidence of lag. Omitted when syncBlock is 0 or no reference resolves.
+func (po *ProviderOptimizer) AppendSyncData(provider string, syncBlock uint64, syncRef SyncReference) {
+	if syncBlock == 0 {
+		return
+	}
+	stripe := po.providerStripe(provider)
+	stripe.mu.Lock()
+	defer stripe.mu.Unlock()
+
+	providerData, _ := po.getProviderData(provider)
+	stripe.applyLocked(provider, syncBlock, &providerData)
+	sampleTime := po.now()
+	latestSync, timeSync, ok := po.resolveSyncReference(syncRef, syncBlock, sampleTime)
+	if !ok {
+		return
+	}
+	syncLag := po.calculateSyncLag(latestSync, timeSync, providerData.SyncBlock, sampleTime)
+	providerData, err := po.updateDecayingWeightedAverage(providerData, score.SyncScoreType, syncLag.Seconds(),
+		score.RelayUpdateWeight, po.calculateHalfTime(provider, sampleTime), 0, sampleTime)
+	if err != nil {
+		return
+	}
+	po.providersStorage.Set(provider, providerData, 1)
+}
+
 // resolveSyncReference turns a per-sample SyncReference into the concrete (referenceBlock,
 // referenceTime, ok) the sync-lag is measured against. ok=false means "no usable reference this
 // sample" — the caller must then OMIT the sync update rather than invent one (F5: never fall back

@@ -53,7 +53,8 @@ type PeerObservationStore interface {
 	// store keeps it. Errors are advisory — a lost publish costs a peer one real poll.
 	Publish(ctx context.Context, chainID, apiInterface, endpointID, podID string, block int64, ttl time.Duration) error
 	// Fetch returns the freshest live observation of an endpoint: the block, who published
-	// it, and its age on the STORE's clock. found=false is a normal miss.
+	// it, and its age as the STORE measures it (not this pod's clock). found=false is a
+	// normal miss.
 	Fetch(ctx context.Context, chainID, apiInterface, endpointID string) (block int64, podID string, age time.Duration, found bool, err error)
 }
 
@@ -123,9 +124,11 @@ func LocalPodID() string {
 	return localPodID
 }
 
-// cachePeerObservations adapts the cache backend client to PeerObservationStore.
+// cachePeerObservations adapts a cache backend to PeerObservationStore. One implementation for
+// both shipped backends: the gRPC client reaches the cache server's RPC pair, the RESP backend
+// runs the same engine in-process, and both speak the RPC pair's own request and reply types.
 type cachePeerObservations struct {
-	cache *performance.Cache
+	cache performance.EndpointObservationBackend
 	// unimplementedOnce rate-limits the warning for a cache backend that predates the
 	// observation RPCs (a rolling upgrade window): every call would otherwise log, on every
 	// poll tick, for every endpoint. One adapter is built per chain+interface, so the warning
@@ -151,13 +154,14 @@ func (c *cachePeerObservations) warnIfUnimplemented(err error) {
 	})
 }
 
-// NewCachePeerObservations wraps the cache backend client as the fleet observation store.
-// Returns nil when no cache is configured, which disables the peer gate.
-func NewCachePeerObservations(cache *performance.Cache) PeerObservationStore {
-	if cache == nil {
+// NewCachePeerObservations wraps a cache backend as the fleet observation store. Returns nil for
+// a nil backend, which disables the peer gate. The caller decides what "no cache configured"
+// looks like for its backend (the gRPC client travels as a typed-nil *Cache) and passes nil.
+func NewCachePeerObservations(backend performance.EndpointObservationBackend) PeerObservationStore {
+	if backend == nil {
 		return nil
 	}
-	return &cachePeerObservations{cache: cache}
+	return &cachePeerObservations{cache: backend}
 }
 
 func (c *cachePeerObservations) Publish(ctx context.Context, chainID, apiInterface, endpointID, podID string, block int64, ttl time.Duration) error {

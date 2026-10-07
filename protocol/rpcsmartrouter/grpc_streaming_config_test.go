@@ -38,6 +38,11 @@ func TestDefaultGRPCStreamingConfig(t *testing.T) {
 	assert.Equal(t, 1, config.PoolMinConnections)
 	assert.Equal(t, 5, config.PoolMaxConnections)
 	assert.Equal(t, 100, config.StreamsPerConnection)
+
+	// Verify upstream channel liveness
+	assert.Equal(t, 2*time.Minute, config.PoolIdleTimeout)
+	assert.Equal(t, 5*time.Minute, config.PoolKeepaliveTime)
+	assert.Equal(t, 20*time.Second, config.PoolKeepaliveTimeout)
 }
 
 func TestGRPCStreamingConfig_ShouldRejectOnClientLimit(t *testing.T) {
