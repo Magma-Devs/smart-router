@@ -252,6 +252,16 @@ func restMethodCarriesBody(method string) bool {
 	}
 }
 
+// restRequestPath is the client's path as the parser and the sender must both read it.
+// The parser matches it against the spec with url.Parse; the sender appends it to the
+// configured node URL. url.Parse reads "//cosmos/tx/v1beta1/txs" (a client whose base
+// URL ends in "/") as host "cosmos" and path "/tx/v1beta1/txs", so a write fell to the
+// Default read API while the node received the whole path (MAG-3970, MAG-3973). Collapsing
+// the leading slashes before either side sees the path keeps the two in agreement.
+func restRequestPath(fiberCtx *fiber.Ctx) string {
+	return "/" + strings.TrimLeft(fiberCtx.Params("*"), "/")
+}
+
 // NewRestChainListener creates a new instance of RestChainListener
 func NewRestChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEndpoint,
 	relaySender RelaySender, healthReporter HealthReporter,
@@ -292,7 +302,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 		msgSeed := apil.logger.GetMessageSeed()
 		query := "?" + string(fiberCtx.Request().URI().QueryString())
-		path := "/" + fiberCtx.Params("*")
+		path := restRequestPath(fiberCtx)
 
 		// Cache headers once at the start to avoid repeated lookups
 		metadataValues := detachedReqHeaders(fiberCtx)
@@ -363,7 +373,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		msgSeed := apil.logger.GetMessageSeed()
 
 		query := "?" + string(fiberCtx.Request().URI().QueryString())
-		path := "/" + fiberCtx.Params("*")
+		path := restRequestPath(fiberCtx)
 		dappID := extractDappIDFromFiberContext(fiberCtx)
 		analytics := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		analytics.SetProcessingTimestampBeforeRelay(startTime)

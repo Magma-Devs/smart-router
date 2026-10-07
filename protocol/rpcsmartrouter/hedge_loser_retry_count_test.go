@@ -12,7 +12,6 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -411,8 +410,8 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 	require.NoError(t, err)
 	server := &RPCSmartRouterServer{
 		chainParser: parser, sessionManager: sessionManager, listenEndpoint: rpcEndpoint,
-		rpcSmartRouterLogs: logs, relayRetriesManager: lavaprotocol.NewRelayRetriesManager(),
-		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
+		rpcSmartRouterLogs: logs,
+		consistencyConfig:  relaycore.DefaultConsistencyValidationConfig(),
 	}
 	listener := chainlib.NewRestChainListener(ctx, rpcEndpoint, server, nil, logs)
 	listenerDone := make(chan struct{})

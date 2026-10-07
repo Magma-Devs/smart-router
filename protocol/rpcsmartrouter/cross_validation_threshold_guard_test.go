@@ -109,7 +109,7 @@ func TestSendRelayToEndpoint_ThresholdGuardReleasesGatheredSessions(t *testing.T
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	sendErr := rpcss.sendRelayToEndpoint(callCtx, cvParams.MaxParticipants,
-		relaycore.GetEmptyRelayState(protocolMsg), relayProcessor, nil, nil)
+		relaycore.GetEmptyRelayState(protocolMsg), relayProcessor, nil, nil, false)
 
 	require.Error(t, sendErr)
 	require.Truef(t, errors.Is(sendErr, lavasession.PairingListEmptyError),
