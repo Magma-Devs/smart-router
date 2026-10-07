@@ -1498,13 +1498,15 @@ func TestGetResultsSummary_UnsupportedMethodFlag(t *testing.T) {
 	})
 
 	t.Run("registry-based classification", func(t *testing.T) {
-		unsupportedMessages := []string{
+		// MAG-2771: a node's own refusal is node-capability and retried on another provider, so it
+		// must neither set the unsupported flag nor stop the retry.
+		nodeRefusalMessages := []string{
 			"method not found",
 			"endpoint not found",
 		}
-		for _, msg := range unsupportedMessages {
-			isUnsupported := common.IsUnsupportedMethodError("", 0, msg)
-			require.True(t, isUnsupported, "Message '%s' should be detected as unsupported", msg)
+		for _, msg := range nodeRefusalMessages {
+			require.False(t, common.IsUnsupportedMethodError("", 0, msg), "Message '%s' is the node's refusal, not an unsupported method", msg)
+			require.False(t, common.IsNonRetryableNodeError("", 0, msg), "Message '%s' must be retried on another provider", msg)
 		}
 
 		smartContractMessages := []string{
@@ -1585,7 +1587,8 @@ func TestIsNonRetryableNodeError_Classification(t *testing.T) {
 	}{
 		{name: "execution reverted is non-retryable", chainID: "ETH1", status: 200, message: "execution reverted", want: true},
 		{name: "execution reverted with data is non-retryable", chainID: "ETH1", status: 200, message: "execution reverted: NFT not found", want: true},
-		{name: "unsupported method is non-retryable (Retryable=false)", chainID: "ETH1", status: 404, message: "method not found", want: true},
+		// MAG-2771: a claim about this node; another provider may serve the method.
+		{name: "a node's method not found is retryable", chainID: "ETH1", status: 404, message: "method not found", want: false},
 		{name: "user parse error is non-retryable", chainID: "ETH1", status: -32700, message: "parse error", want: true},
 		{name: "generic transient error is retryable", chainID: "ETH1", status: 502, message: "bad gateway", want: false},
 		{name: "unknown message is retryable (returns false)", chainID: "ETH1", status: 0, message: "totally unfamiliar garbage", want: false},

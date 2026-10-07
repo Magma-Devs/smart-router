@@ -2091,16 +2091,19 @@ func promoteConsistencyFallback(
 // The three carve-outs are load-bearing, not defensive, and they exclude on DIFFERENT axes:
 //
 //   - IsNonRetryable — "retrying elsewhere would not help". Deterministic caller-fault errors
-//     (unsupported method, invalid params, execution reverted) come back from EVERY endpoint for
-//     the same request, so scoring them would drive the whole pairing below
-//     score.MinAcceptableAvailability on a burst of malformed client requests and collapse every
-//     endpoint to the selection floor — punishing healthy nodes for a bad request instead of
-//     identifying a bad node. All four SubCategoryUnsupportedMethod codes are Retryable=false, so
-//     this also preserves that subcategory's "no provider scoring" contract.
+//     (invalid params, execution reverted) come back from EVERY endpoint for the same request,
+//     so scoring them would drive the whole pairing below score.MinAcceptableAvailability on a
+//     burst of malformed client requests and collapse every endpoint to the selection floor —
+//     punishing healthy nodes for a bad request instead of identifying a bad node. Every
+//     SubCategoryUnsupportedMethod code is Retryable=false, so this also preserves that
+//     subcategory's "no provider scoring" contract. Since MAG-2771 no code carries it: a node's
+//     own refusal (method not found, unimplemented, route, verb, credentials) is retryable and
+//     reaches the IsNodeCapability carve-out below instead.
 //   - IsRateLimited — "the endpoint is healthy but busy". SubCategoryRateLimit is contractually
 //     backoff-without-marking-unhealthy (common/error_registry.go), and it does NOT follow from
-//     retryability: NODE_RATE_LIMITED (2005) is Retryable=true, NODE_LIMIT_EXCEEDED (2011) is
-//     Retryable=false, and both must stay out of the availability signal.
+//     retryability: NODE_RATE_LIMITED (2005) and NODE_LIMIT_EXCEEDED (2011) are both
+//     Retryable=true, so IsNonRetryable excuses neither, and both must stay out of the
+//     availability signal.
 //   - IsDataScope — "the endpoint does not hold this data, and said so". SubCategoryDataScope
 //     (gRPC NOT_FOUND / OUT_OF_RANGE) is the case neither axis above can express: retrying IS
 //     worthwhile because a pruned node and an archive node genuinely disagree, yet the endpoint
@@ -5186,8 +5189,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// would convert it into a synthetic transport error (triggering retry +
 	// backoff) and discard the node's response. Excluding it lets the result
 	// flow through as the NodeError the REST sender already produced
-	// (IsNodeError=true), where it classifies as NODE_UNIMPLEMENTED
-	// (non-retryable) and is returned to the client.
+	// (IsNodeError=true), where it classifies as NODE_UNIMPLEMENTED: retried on
+	// another provider (MAG-2771), and returned to the client when none serves it.
 	//
 	// A 5xx that is the node's own JSON reply (rpcInterfaceMessages.ServerErrorIsNodeReply) is
 	// excluded for the same reason: when every node answers Horizon's

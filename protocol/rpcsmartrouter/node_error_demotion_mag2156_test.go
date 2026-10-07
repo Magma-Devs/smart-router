@@ -28,15 +28,13 @@ type nodeErrorFixture struct {
 // relayResult mirrors direct_rpc_relay.go's JSON-RPC branch: HTTP 200 (the whole point of the bug —
 // a node error is a 200 with {"error":...} in the body), IsNodeError from the body check, policy
 // flags from the registry.
+// relayResult sets the flags through ApplyNodeErrorClassification, the method direct_rpc_relay.go
+// calls, so the fixture carries every fault-axis flag production does. It used to copy three by
+// hand and dropped IsDataScope and IsNodeCapability, which were added after it was written.
 func (f nodeErrorFixture) relayResult() *common.RelayResult {
-	classification := common.ClassifyNodeErrorForRetry(common.ChainFamilyEVM, common.TransportJsonRPC, f.code, f.message)
-	return &common.RelayResult{
-		StatusCode:          200,
-		IsNodeError:         true,
-		IsNonRetryable:      classification.IsNonRetryable,
-		IsUnsupportedMethod: classification.IsUnsupportedMethod,
-		IsRateLimited:       classification.IsRateLimited,
-	}
+	result := &common.RelayResult{StatusCode: 200, IsNodeError: true}
+	result.ApplyNodeErrorClassification(common.ChainFamilyEVM, common.TransportJsonRPC, f.code, f.message)
+	return result
 }
 
 // TestNodeErrorProviderIsDemoted_MAG2156 is the ticket's acceptance criterion driven through the
@@ -142,8 +140,8 @@ func TestNodeErrorProviderIsDemoted_MAG2156(t *testing.T) {
 		why     string
 	}{
 		{
-			fixture: nodeErrorFixture{name: "unsupported method", code: -32601, message: "the method eth_foo does not exist/is not available"},
-			why:     "NODE_METHOD_NOT_FOUND is non-retryable and SubCategoryUnsupportedMethod: every endpoint returns it for the same request, and the subcategory is contractually 'no provider scoring'",
+			fixture: nodeErrorFixture{name: "method not found", code: -32601, message: "the method eth_foo does not exist/is not available"},
+			why:     "NODE_METHOD_NOT_FOUND is node-capability (MAG-2771): the endpoint answered truthfully about what it serves, so the request goes to another provider and nobody is scored",
 		},
 		{
 			fixture: nodeErrorFixture{name: "rate limited", code: -32000, message: "rate limit exceeded, please slow down"},
@@ -174,22 +172,27 @@ func TestNodeErrorProviderIsDemoted_MAG2156(t *testing.T) {
 // elsewhere help", not "is this the endpoint's fault", and SubCategoryRateLimit straddles both
 // answers. If these two ever collapse onto the same axis, the gate silently starts scoring
 // rate limits against availability again.
+//
+// NODE_LIMIT_EXCEEDED (2011) used to be the non-retryable half. MAG-2771 made it retryable, so both
+// registered rate-limit codes are retryable and the carve-out is the only thing keeping either out
+// of the availability score. The non-retryable half is fed by hand: the gate reads flags, so the
+// verdict must not move with IsNonRetryable whichever code produced it.
 func TestRateLimitCarveOutIsIndependentOfRetryability_MAG2156(t *testing.T) {
 	retryable := common.ClassifyNodeErrorForRetry(common.ChainFamilyEVM, common.TransportJsonRPC, -32000, "rate limit exceeded, please slow down")
 	require.True(t, retryable.IsRateLimited, "NODE_RATE_LIMITED must carry SubCategoryRateLimit")
 	require.False(t, retryable.IsNonRetryable, "NODE_RATE_LIMITED is Retryable=true — the whole reason IsNonRetryable cannot carve it out")
 
-	nonRetryable := common.ClassifyNodeErrorForRetry(common.ChainFamilyEVM, common.TransportJsonRPC, -32005, "rate limit exceeded")
-	require.True(t, nonRetryable.IsRateLimited, "NODE_LIMIT_EXCEEDED must carry SubCategoryRateLimit")
-	require.True(t, nonRetryable.IsNonRetryable, "NODE_LIMIT_EXCEEDED is Retryable=false")
+	limitExceeded := common.ClassifyNodeErrorForRetry(common.ChainFamilyEVM, common.TransportJsonRPC, -32005, "rate limit exceeded")
+	require.True(t, limitExceeded.IsRateLimited, "NODE_LIMIT_EXCEEDED must carry SubCategoryRateLimit")
+	require.False(t, limitExceeded.IsNonRetryable, "NODE_LIMIT_EXCEEDED is Retryable=true since MAG-2771")
 
-	// Same subcategory, opposite retryability, same verdict from the gate.
-	for _, c := range []common.NodeErrorClassification{retryable, nonRetryable} {
+	// Same subcategory, either retryability, same verdict from the gate.
+	for _, nonRetryable := range []bool{false, true} {
 		require.False(t, shouldFailSessionForResult(nil, &common.RelayResult{
 			StatusCode:     200,
 			IsNodeError:    true,
-			IsNonRetryable: c.IsNonRetryable,
-			IsRateLimited:  c.IsRateLimited,
+			IsNonRetryable: nonRetryable,
+			IsRateLimited:  true,
 		}), "a rate-limit signal must never reach the availability score, whatever its retryability")
 	}
 }

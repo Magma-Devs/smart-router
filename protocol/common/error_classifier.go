@@ -132,10 +132,11 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// --- Message-based matchers (for -32000 catch-all and codeless errors) ---
 
 		// Unsupported methods (message-based fallback for nodes that use -32000).
-		// Matchers here must be tightly scoped: NodeMethodNotFound carries
-		// SubCategoryUnsupportedMethod (zero CU, no retry), so a false positive
-		// silently stops retries and bills nothing. When in doubt, require the
-		// literal word "method" to appear alongside the trigger phrase.
+		// Matchers here must be tightly scoped: NodeMethodNotFound is a node
+		// refusal, retried on another provider and kept off the endpoint's score
+		// (MAG-2771), so a false positive sends a caller's mistake or a revert to a
+		// peer instead of returning it. When in doubt, require the literal word
+		// "method" to appear alongside the trigger phrase.
 		{MessageContains("method not found"), LavaErrorNodeMethodNotFound},
 		{MessageContains("method not supported"), LavaErrorNodeMethodNotSupported},
 		{MessageContains("unknown method"), LavaErrorNodeMethodNotFound},
@@ -149,7 +150,7 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// "invalid method" — match only when the phrase is terminal, quoted, or
 		// followed by "name"/colon. This rejects "invalid method argument",
 		// "invalid method parameters", "invalid method signature", etc., which
-		// would otherwise trip the zero-CU path on a user-input error.
+		// would otherwise send a user-input error to another provider.
 		{MessageRegex(`(?i)invalid method(?:\s*$|\s*[:'"]|\s+name\b)`), LavaErrorNodeMethodNotFound},
 		// Provider-disabled methods (e.g. QuickNode paid tier). Require "method"
 		// or "rpc" near the "blocked" token so unrelated firewall/proxy messages
@@ -273,8 +274,8 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// specific-to-general: what the node SAID, then what status it used. A status code is
 		// the fallback, never the specialisation — the reverse order silently reclassified
 		// anything whose body carried a specific message under a generic status (a 400 saying
-		// "method not allowed" or "route not found" lost its unsupported-method verdict, which
-		// chainlib.IsUnsupportedMethodError reads on the protocol-error path).
+		// "method not allowed" or "route not found" lost its route-refusal verdict and was
+		// returned as the caller's bad request instead of going to another provider).
 		//
 		// Evidence for every row: agent_docs/.../rest-stateful-bug/rest-status-code-map.md and
 		// rest-blockchain-errors-research.md (twelve families probed live 2026-09-27).
@@ -439,7 +440,8 @@ func httpStatusCodeMappings() []errorMapping {
 		{CodeEquals(429), LavaErrorNodeRateLimited},
 		{CodeEquals(500), LavaErrorNodeInternalError},
 		// 501 Not Implemented: node lacks this method/endpoint (e.g. Cosmos REST
-		// gRPC-gateway). Non-retryable node error, not a transient server failure.
+		// gRPC-gateway). A node refusal, not a transient server failure: retried on
+		// another provider, the endpoint unblamed (MAG-2771).
 		{CodeEquals(501), LavaErrorNodeUnimplemented},
 		{CodeEquals(502), LavaErrorNodeBadGateway},
 		{CodeEquals(503), LavaErrorNodeServiceUnavailable},
@@ -467,7 +469,7 @@ func httpStatusMessageMappings() []errorMapping {
 		{HTTPStatusContains(413), LavaErrorUserRequestTooLarge},
 		{HTTPStatusContains(429), LavaErrorNodeRateLimited},
 		{HTTPStatusContains(500), LavaErrorNodeInternalError},
-		// 501 Not Implemented: node lacks this method/endpoint. Non-retryable.
+		// 501 Not Implemented: node lacks this method/endpoint. Retried on another provider (MAG-2771).
 		{HTTPStatusContains(501), LavaErrorNodeUnimplemented},
 		{HTTPStatusContains(502), LavaErrorNodeBadGateway},
 		{HTTPStatusContains(503), LavaErrorNodeServiceUnavailable},
@@ -586,7 +588,7 @@ func IsNonRetryableNodeErrorWithContext(family ChainFamily, transport TransportT
 // The three are orthogonal axes, not a hierarchy. IsNonRetryable answers
 // "would retrying elsewhere help", the SubCategory flags answer "whose fault
 // is this". NODE_RATE_LIMITED (2005) is retryable AND rate-limited;
-// NODE_LIMIT_EXCEEDED (2011) is non-retryable AND rate-limited. A caller that
+// NODE_LIMIT_EXCEEDED (2011) was non-retryable AND rate-limited until MAG-2771. A caller that
 // needs "is this the node's fault" must read the fault axis, not infer it from
 // retryability.
 type NodeErrorClassification struct {

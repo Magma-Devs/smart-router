@@ -343,12 +343,17 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixReachesClassifier_MAG1666(t *testi
 		"bare message must classify to UNKNOWN without the HTTP <status>: prefix — "+
 			"otherwise this test cannot prove the prefix is what flipped the verdict")
 
+	// What the prefix lets the classifier see. Without it the bare message is UNKNOWN and every flag
+	// is false, so either expectation below proves the prefix arrived.
 	tests := []struct {
-		name       string
-		statusCode int
+		name             string
+		statusCode       int
+		wantNonRetryable bool
+		wantCapability   bool
 	}{
-		{name: "HTTP 404 → NODE_ENDPOINT_NOT_FOUND (non-retryable)", statusCode: 404},
-		{name: "HTTP 413 → USER_REQUEST_TOO_LARGE (non-retryable)", statusCode: 413},
+		// MAG-2771: the node's refusal of the route, retried on another provider.
+		{name: "HTTP 404 → NODE_ENDPOINT_NOT_FOUND (retryable node capability)", statusCode: 404, wantCapability: true},
+		{name: "HTTP 413 → USER_REQUEST_TOO_LARGE (non-retryable)", statusCode: 413, wantNonRetryable: true},
 	}
 
 	for _, tt := range tests {
@@ -390,10 +395,12 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixReachesClassifier_MAG1666(t *testi
 			require.NotNil(t, result)
 			assert.Equal(t, tt.statusCode, result.StatusCode)
 			assert.True(t, result.IsNodeError, "hasError branch must have fired")
-			assert.True(t, result.IsNonRetryable,
-				"HTTP %d with generic body code should classify as non-retryable; "+
-					"removing the HTTP <status>: prefix at direct_rpc_relay.go::sendJSONRPCRelay would regress this",
-				tt.statusCode)
+			assert.Equal(t, tt.wantNonRetryable, result.IsNonRetryable,
+				"HTTP %d with generic body code: removing the HTTP <status>: prefix at "+
+					"direct_rpc_relay.go::sendJSONRPCRelay would regress this", tt.statusCode)
+			assert.Equal(t, tt.wantCapability, result.IsNodeCapability,
+				"HTTP %d with generic body code: removing the HTTP <status>: prefix at "+
+					"direct_rpc_relay.go::sendJSONRPCRelay would regress this", tt.statusCode)
 		})
 	}
 }
@@ -456,31 +463,37 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixSkippedOn2xx(t *testing.T) {
 // "code-based first, message-based second" — so when the body's error.code is
 // a registered code, CodeEquals matches first and HTTPStatusContains never
 // runs. The router sees IsNonRetryable=false and retries, even though the
-// HTTP layer said 404/405/413 (non-retryable).
+// HTTP layer said 413 (non-retryable).
+//
+// The fix escalates only when the HTTP status is non-retryable in the
+// registry. MAG-2771 made 401, 404 and 405 retryable — a node's claim about its
+// own credentials, routes and verbs, which another provider may not share — so
+// for those the second pass now agrees with the body code and the request goes
+// to another provider. 413 still escalates and is what keeps the override
+// covered.
 //
 // The MAG-1666 test (TestDirectRPCRelaySender_HTTPStatusPrefixReachesClassifier_MAG1666)
 // uses error.code=-1 specifically to dodge code matchers, which is why it
 // passes but doesn't catch the production case.
 func TestDirectRPCRelaySender_HTTPStatusOverridesRetryableBodyCode_MAG1870(t *testing.T) {
 	tests := []struct {
-		name       string
-		statusCode int
-		bodyCode   int // a REGISTERED retryable code in genericErrorMappings[JsonRPC]
+		name             string
+		statusCode       int
+		bodyCode         int // a REGISTERED retryable code in genericErrorMappings[JsonRPC]
+		wantNonRetryable bool
 	}{
-		// HTTP 401 was named in the duplicate MAG-1858 but had no registry
-		// entry at all prior to this patch; covered here because the same
-		// simulator test cluster fails on it.
-		{name: "HTTP 401 + body -32603 (new NODE_UNAUTHORIZED mapping)", statusCode: 401, bodyCode: -32603},
+		// The override: a terminal HTTP status beats a retryable body code.
+		{name: "HTTP 413 + body -32603", statusCode: 413, bodyCode: -32603, wantNonRetryable: true},
+		// MAG-2771: 401, 404 and 405 are the node's refusal and retryable, so nothing escalates
+		// and the request goes to another provider. HTTP 401 was named in the duplicate MAG-1858
+		// and is covered because the same simulator test cluster hits it.
+		{name: "HTTP 401 + body -32603 (NODE_UNAUTHORIZED, retryable)", statusCode: 401, bodyCode: -32603},
 		{name: "HTTP 404 + body -32603 (NODE_INTERNAL_ERROR)", statusCode: 404, bodyCode: -32603},
 		{name: "HTTP 405 + body -32603", statusCode: 405, bodyCode: -32603},
-		{name: "HTTP 413 + body -32603", statusCode: 413, bodyCode: -32603},
 		{name: "HTTP 404 + body -32000 (NODE_SERVER_ERROR, server-defined)", statusCode: 404, bodyCode: -32000},
-		// Pin the already-non-retryable body-code path: the first pass
-		// classifies via CodeEquals(-32601) → NODE_METHOD_NOT_FOUND
-		// (Retryable: false) and the second pass is skipped on the
-		// !IsNonRetryable guard. Surface a future regression that would
-		// flip this verdict before adding any second-pass logic.
-		{name: "HTTP 404 + body -32601 (already non-retryable, no second pass needed)", statusCode: 404, bodyCode: -32601},
+		// -32601 is NODE_METHOD_NOT_FOUND, retryable since MAG-2771, so the second pass runs and
+		// the 404 agrees with it.
+		{name: "HTTP 404 + body -32601 (NODE_METHOD_NOT_FOUND, retryable)", statusCode: 404, bodyCode: -32601},
 	}
 
 	// Sanity-pin the discriminator: each body code must classify as RETRYABLE
@@ -537,9 +550,9 @@ func TestDirectRPCRelaySender_HTTPStatusOverridesRetryableBodyCode_MAG1870(t *te
 			require.NotNil(t, result)
 			assert.Equal(t, tt.statusCode, result.StatusCode)
 			assert.True(t, result.IsNodeError, "hasError branch must have fired")
-			assert.True(t, result.IsNonRetryable,
-				"HTTP %d is non-retryable per the registry; a retryable body code (%d) "+
-					"must not mask the HTTP-status verdict",
+			assert.Equal(t, tt.wantNonRetryable, result.IsNonRetryable,
+				"HTTP %d with body code %d: a terminal HTTP status must not be masked by a "+
+					"retryable body code, and a retryable one must not be made terminal",
 				tt.statusCode, tt.bodyCode)
 		})
 	}
