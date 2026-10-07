@@ -1,5 +1,7 @@
 package relaycore
 
+import "errors"
+
 type Selection int
 
 const (
@@ -36,3 +38,19 @@ const StopReasonProcessingTimeout = "ProcessingTimeout"
 // its connection says nothing about the endpoint still working on the answer. The HTTP listeners
 // build their request context from Background, so only the streaming transports reach this.
 const StopReasonCallerGone = "CallerGone"
+
+// StopReasonCrossValidationGroupsQuiet marks a cross-validation request that stopped at its attempt
+// window because enough providers agreed without meeting the quorum rule, and the only providers that
+// could still complete a quorum belong to under-staffed groups (smaller than the agreement threshold)
+// and had not answered (MAG-3993). Cross-validation has no retry and nothing to hedge to, so nothing
+// else could complete it. Waiting out the whole budget for them turned one quiet group into a fixed
+// 30s stall on every request.
+//
+// It is not the budget running out, so availability scoring does not blame an endpoint for it. The
+// quiet provider's relay is detached and still ends on its own deadline, and that is what marks it.
+const StopReasonCrossValidationGroupsQuiet = "CrossValidationGroupsQuiet"
+
+// ErrCrossValidationGroupsQuiet is the state machine's error for a StopReasonCrossValidationGroupsQuiet
+// stop. The caller does not see it: the responses already collected go through final evaluation, which
+// reports the unmet quorum (diversity-unmet or group-quorum-unmet) as it would at the end of the budget.
+var ErrCrossValidationGroupsQuiet = errors.New("cross-validation quorum can only be completed by under-staffed provider groups whose providers did not answer within the attempt window")

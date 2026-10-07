@@ -71,12 +71,14 @@ whatever the caller sends.
 ```
 
 So the shorthand "a caller may make cross-validation stricter, never weaker" holds only **up
-to the configured cap**. The cap is the one mechanism by which the router validates less
-strictly than a caller asked, and it is an explicit operator decision — an operator who wants
-a method's fan-out pinned regardless of caller headers sets `floor == cap`, and one who wants
-the headers ignored outright sets `forbid-caller-cv: true`.
+to the configured cap**. The cap is the one *configured* mechanism by which the router validates
+less strictly than a caller asked, and it is an explicit operator decision — an operator who
+wants a method's fan-out pinned regardless of caller headers sets `floor == cap`, and one who
+wants the headers ignored outright sets `forbid-caller-cv: true`. One unconfigured mechanism
+also does: a method in the stateful category ignores the caller's headers outright, whatever
+they contain (see [Caveats](#caveats)).
 
-With no policy for a method the caller's headers are the only authority, and any
+With no policy for a **stateless** method the caller's headers are the only authority, and any
 self-consistent shape is honored — including the degenerate `max-participants: 1` with
 `agreement-threshold: 1`, which returns `lava-cross-validation-status: success` after a
 single response because the requested quorum of one was met. Nothing is compared in that
@@ -103,12 +105,21 @@ smartrouter config/smartrouter_examples/smartrouter_multichain_cross_validation.
 
 At startup the router logs the resolved provider→group layout and **rejects** a policy the
 configured fleet can never satisfy (e.g. `min-groups: 3` with only two groups), so a
-misconfiguration fails fast rather than silently degrading. Three cases are warnings instead,
-and none of them stops the router: a provider that is down when the router starts, a
-`max-participants` larger than the configured primaries (never a startup error), and an
-endpoint with no configured primary at all (cross-validation never draws on backup providers,
-so a policy there can never be met). See the `ATTENTION` rows under
-[Troubleshooting](#troubleshooting).
+misconfiguration fails fast rather than silently degrading. It also rejects a policy that could never
+apply at all: one whose `chain-id`/`api-interface` no endpoint serves, or whose `method` the spec does
+not serve. A REST policy names the spec's path template, not the gRPC method name. These two refusals
+happen before any endpoint binds its listener — the spec-backed checks run as each endpoint loads its
+spec and wait on a boot barrier, so one refused policy stops the whole router before it announces itself,
+rather than after some endpoints are already serving.
+
+Three cases are warnings instead, and none of them stops the router: a provider that is down when the
+router starts, a `max-participants` larger than the configured primaries (never a startup error), and an
+endpoint with no configured primary at all (cross-validation never draws on backup providers, so a policy
+there can never be met). See the `ATTENTION` rows under [Troubleshooting](#troubleshooting).
+
+A `floor` or `cap` only clamps a caller's headers under `enabled: true` today; a bound written on a
+policy that does not also enable cross-validation changes nothing at request time, but is still checked
+here for naming a chain/api and method the router serves.
 
 ## What the caller sees
 
@@ -130,10 +141,23 @@ recording path) for test suites that cannot scrape the metrics port — see
 
 ## Caveats
 
-- **Writes.** An *operator policy* on a stateful (write) method is rejected at startup.
-  Cross-validating a write response verifies nothing — leave writes to the stateful fan-out.
-  To also block the legacy *caller-header* path on a specific write, set
-  `forbid-caller-cv: true` on its policy.
+- **Writes.** Cross-validation does not apply to a method in the stateful category, by either
+  route. An *operator policy* on one is rejected at startup, and the *caller-header* path is
+  ignored on one — the request routes by its category and the headers have no effect, whatever
+  they contain. No policy is needed for that (MAG-3603): cross-validating a broadcast only one
+  node can accept cannot reach any agreement threshold, so the router used to answer HTTP 500
+  after the transaction had already been submitted. `forbid-caller-cv: true` is for a
+  **stateless** method an operator wants protected from caller-driven cross-validation.
+  Caveats: the rule keys on the spec's stateful category, so it is only as right as the spec — a
+  read the spec marks stateful loses caller cross-validation, and a submit it does not mark
+  stateful is not covered. The shipped lava-specs mark the cosmos `tx` REST encode, encode/amino,
+  decode and simulate endpoints `stateful: 0` (MAG-4034) and Aptos `POST /transactions` and
+  `/transactions/batch` `stateful: 1` (MAG-4035); the in-repo `specs/` mirror predates both fixes.
+  A malformed header pair on a stateful method (a value that does not parse, one header without
+  its companion, a threshold above `max-participants`) used to refuse the request before anything
+  was dispatched; it is now ignored like a well-formed pair, and the request goes out as a write.
+  A `forbid-caller-cv: true` policy written on a stateful method under the earlier advice is now
+  redundant; it still loads and is harmless.
 - **The readiness health check is not cross-validated.** The router's own health check crafts a
   latest-block request (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`, whatever
   the spec tags) and takes one provider's answer. A policy on that method does **not** apply to it,
@@ -158,6 +182,29 @@ recording path) for test suites that cannot scrape the metrics port — see
   That is deliberate: gating a whole chain and interface on one method's quorum is the over-coupling
   MAG-3746 was. Alert on the cross-validation failure series for policy capacity, not on readiness.
 - **Cost & latency.** N relays per request. Scope policies to the methods that warrant it.
+- **A group smaller than the agreement threshold is an availability risk.** Cross-validation
+  does not retry, hedge or use backups. With `min-groups: 2` and a group of one provider,
+  that provider going quiet can leave the quorum only group diversity short. When the
+  attempt window expires with the agreement count met, and only providers from groups
+  smaller than the threshold could still complete a quorum, the request fails
+  `diversity-unmet` (or `group-quorum-unmet` in per-group mode) at once, rather than waiting
+  out the processing budget. This is the same window that paces hedging: usually
+  `--min-relay-timeout`, but longer for a heavy or hanging method. The spec's `timeout_ms` or
+  the caller's `lava-relay-timeout` replaces it where set. A provider in such a group that is
+  slower than the window fails the request when the quorum cannot be completed without it,
+  even if it would have answered within the budget. While a provider from a group at least
+  as large as the threshold could still complete a quorum, on any response, the request
+  keeps waiting as before. In per-group mode a group smaller than the threshold cannot
+  corroborate a response on its own, so there the early stop only ends a request that could
+  no longer succeed. The router warns at startup when a group is smaller than the
+  threshold; give every required group at least as many providers as the threshold.
+  This early stop applies only when cross-validation policies are loaded (a
+  `cross-validation:` block): the group sizes it reads are recorded at startup together
+  with that warning. Cross-validation turned on by caller headers alone, with no policies
+  loaded, does not treat any group as smaller than the threshold, so a quiet provider still
+  counts as able to complete the quorum and the request waits out the processing budget
+  as before. It stops at the window only when no provider still in flight could complete
+  a quorum at all, which cannot change the outcome.
 - **Public endpoints are best-effort.** The example fleets use rate-limited community
   endpoints; for production, point at your own nodes or keyed gateways.
 - **No value-threshold escalation.** There is no knob that raises a method's policy for an
@@ -249,7 +296,9 @@ yields rather than the diversity it looks like it asks for. `distinctGroups`, `g
 `groupAssignments` describe the primaries that passed verification and are serving;
 `configuredGroups`, `configuredGroupSizes` and `configuredGroupAssignments` on the same line
 describe the configured fleet the startup checks judged. The two differ only while a primary
-that failed verification is out.
+that failed verification is out. `policies` and `methods` count only the policies of that
+line's own endpoint; `methods` names each as `policy #N <method>`, its position in
+`cross-validation.policies`.
 
 Knobs, all optional: `SIM_DIR` for the simulator checkout, `ROUTER_PORT` / `METRICS_PORT` /
 `DEBUG_PORT` / `NEG_PORT` to move ports, `SKIP_SMOKE=1`.
@@ -519,7 +568,7 @@ policy floor instead.
 | `finality="unknown"` on the mismatch metric | The request did not carry a resolvable block number, or the chain tracker had not learned the head yet. Query a concrete finalized block, not `latest`. |
 | A cross-validated method answers without fanning out | Something served it from cache. These lanes configure no cache for that reason; if you add one, vary the request parameters. |
 | The pod never becomes Ready / `/readyz` answers 503 while client requests succeed | Fixed in MAG-3746. On a build before it, a policy on the **latest-block** method (`eth_blockNumber`, `/cosmos/base/tendermint/v1beta1/blocks/latest`) made the router's own health check impossible to pass, because the check takes one session and one session cannot meet a threshold above 1. Tell-tale: repeated `insufficient sessions for cross-validation consensus` with `sessionsAcquired 1`, and no `[+] init relay succeeded`. Workarounds on such a build: drop the policy from that method, set its `agreement-threshold` to 1 (only if the policy has no `min-groups` floor above 1 — that floor refuses a one-session check on its own), or probe readiness elsewhere. |
-| Router exits at startup with a cross-validation error | Working as intended for an unsatisfiable policy. The error itself carries the numbers: `requiredGroups` / `configuredGroups` on the `min-groups` refusal, `groupSizes` on the per-group one. Don't look for the `distinctGroups` startup line — the validation runs *before* it, so a router that exits this way never logs it. |
+| Router exits at startup with a cross-validation error | Working as intended for an unsatisfiable policy. The error itself carries the numbers: `requiredGroups` / `configuredGroups` on the `min-groups` refusal, `groupSizes` on the per-group one. Don't look for the `distinctGroups` startup line — the validation runs *before* it, so a router that exits this way never logs it. A policy that could never apply is refused the same way. `no endpoint serves` lists the endpoints that do exist, and `does not serve` flags a method the spec lacks. Both name each policy by its position in `cross-validation.policies`, counting from 0. The position matters for a gRPC method name: the log redactor mistakes it for a url and prints its method part as `[redacted]`. |
 | Startup logs `ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy` | A primary failed its startup verification (it is named in `unavailableProviders`), and the primaries left cannot meet a policy: fewer groups than its `min-groups` (`requiredGroups`), or fewer providers than its `max-participants` (`requiredProviders`). The router is serving: requests without cross-validation are answered, and requests under that policy fail fast with `insufficient-groups` or `insufficient-capacity` until the background retry re-admits the provider, which happens at most 3 minutes after it recovers. `configuredGroupSizes` is the configured layout and `verifiedGroupSizes` the one serving now. |
 | Startup logs `ATTENTION: the configured primaries cannot meet a cross-validation policy` | The configured primaries themselves are too few for a policy's `max-participants` (`requiredProviders`), so no recovery closes the gap: lower the bound or add primaries. A `max-participants` above the fleet is reported here rather than refused at startup. `unavailableProviders` may name a primary that is out as well; re-admitting it still leaves the policy unmet. |
 | Startup logs `ATTENTION: this endpoint has no configured primary, and cross-validation never draws on backup providers` | The endpoint is configured with backup providers only. Its plain requests are served from them, but cross-validation selects among primaries, so every request one of its policies governs is refused. Add primaries or remove the policies. |
