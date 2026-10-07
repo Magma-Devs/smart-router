@@ -10,29 +10,30 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// TestSpecificErrorFromUser classifies a provider answering "Not Implemented" for a Default path, a
+// shape reported by a user. It is the node saying it does not implement the method, which since
+// MAG-2771 is a claim about that node: NODE_UNIMPLEMENTED, retried on another provider, and not a
+// router-terminal unsupported method.
 func TestSpecificErrorFromUser(t *testing.T) {
-	// Test the specific error pattern from the user
 	errorMsg := "rpc error: code = Unknown desc = unsupported method 'Default-/cosmos/base/tendermint/v1beta1/blocks1/2': Not Implemented"
 
-	// Test with actual error
-	t.Run("Error object detection", func(t *testing.T) {
+	t.Run("Error object is the node's NODE_UNIMPLEMENTED, not a router-terminal unsupported method", func(t *testing.T) {
 		err := errors.New(errorMsg)
-		result := IsUnsupportedMethodError(err)
-		require.True(t, result, "Should detect unsupported method error from error object")
+		require.Equal(t, common.LavaErrorNodeUnimplemented, ClassifyNodeError(err, -1, common.TransportGRPC))
+		require.False(t, IsUnsupportedMethodError(err))
 	})
 
-	// Test with gRPC Unknown status
-	t.Run("gRPC Unknown status", func(t *testing.T) {
+	t.Run("gRPC Unknown status is the node's NODE_UNIMPLEMENTED too", func(t *testing.T) {
 		grpcErr := status.Error(codes.Unknown, "unsupported method 'Default-/cosmos/base/tendermint/v1beta1/blocks1/2': Not Implemented")
-		result := IsUnsupportedMethodError(grpcErr)
-		require.True(t, result, "Should detect unsupported method from gRPC Unknown status")
+		require.Equal(t, common.LavaErrorNodeUnimplemented, ClassifyNodeError(grpcErr, -1, common.TransportGRPC))
+		require.False(t, IsUnsupportedMethodError(grpcErr))
 	})
 
-	// Test ShouldRetryErrorWithContext — this is a gRPC error ("rpc error: code = Unknown desc = ..."),
-	// so the gRPC transport must be specified for the registry to detect "Not Implemented".
-	t.Run("ShouldRetryError with user error", func(t *testing.T) {
+	// This is a gRPC error ("rpc error: code = Unknown desc = ..."), so the gRPC transport must be
+	// specified for the registry to detect "Not Implemented".
+	t.Run("ShouldRetryError retries it on another provider", func(t *testing.T) {
 		err := errors.New(errorMsg)
-		result := ShouldRetryErrorWithContext(err, -1, common.TransportGRPC)
-		require.False(t, result, "Should NOT retry with unsupported method error")
+		require.True(t, ShouldRetryErrorWithContext(err, -1, common.TransportGRPC),
+			"another provider may implement the method (MAG-2771)")
 	})
 }

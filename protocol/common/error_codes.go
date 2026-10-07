@@ -193,20 +193,38 @@ var (
 
 var (
 	// Generic node errors (2000-2099)
+	//
+	// MAG-2771: a refusal ends the request only if it is a fact about the chain. A NODE_* refusal
+	// is a claim the node makes about itself — the methods it serves, the routes its front end
+	// knows, its plan's limits, the credentials it was given — so it is provider-local until a peer
+	// confirms it, and the request goes to another provider before the caller is failed. Being
+	// wrong in that direction costs one extra call on a request that was already failing; being
+	// wrong in the other is a customer-visible failure on a method another provider serves.
+	// CHAIN_* (3xxx) codes are the same answer from every honest node and stay non-retryable.
+	//
+	// 2001, 2008, 2009, 2010 and 2016 are SubCategoryNodeCapability, as NODE_METHOD_NOT_SUPPORTED
+	// and NODE_ACCESS_DENIED already were: the endpoint answered truthfully about what it serves,
+	// so it is neither blamed (EndpointAtFault) nor scored (the availability gate's capability
+	// carve-out). Retryable alone, without the subcategory, would make each of them count against
+	// the endpoint that said no. 2011 keeps SubCategoryRateLimit; see its entry.
+
+	// NODE_METHOD_NOT_FOUND: the node says the method is not on its surface (-32601). On the wire
+	// that cannot be told apart from a method its plan switches off: on MAG-2735's fleet one
+	// provider answered -32601 for net_listening while the other served it, and the router handed
+	// the refusal to the caller without asking. The Name field is a Prometheus label; keep it.
 	LavaErrorNodeMethodNotFound = registerError(&LavaError{
 		Code: 2001, Name: "NODE_METHOD_NOT_FOUND", Category: CategoryExternal,
-		SubCategory: SubCategoryUnsupportedMethod,
-		Description: "Method does not exist on this node (unknown to the API surface); non-retryable", Retryable: false,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "Node reports the method is not on its surface; another provider may serve it", Retryable: true,
 	})
-	// NODE_METHOD_NOT_SUPPORTED: the method exists but this node has disabled
-	// it (e.g. provider tier, admin config). Distinct from NODE_METHOD_NOT_FOUND
-	// in that it IS retryable on another provider. The Name field is a
-	// Prometheus label so keep it stable — the distinction lives in the
-	// description and the Retryable flag.
+	// NODE_METHOD_NOT_SUPPORTED: the node says the method exists but is disabled on it (provider
+	// tier, policy, admin config). Retryable on another provider, as NODE_METHOD_NOT_FOUND now is
+	// too: the two differ in what the node said, not in what the router does with it. The Name
+	// field is a Prometheus label so keep it stable.
 	LavaErrorNodeMethodNotSupported = registerError(&LavaError{
 		Code: 2002, Name: "NODE_METHOD_NOT_SUPPORTED", Category: CategoryExternal,
 		SubCategory: SubCategoryNodeCapability,
-		Description: "Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider. Distinct from NODE_METHOD_NOT_FOUND (2001) which means the method does not exist at all.", Retryable: true,
+		Description: "Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider.", Retryable: true,
 	})
 	LavaErrorNodeInternalError = registerError(&LavaError{
 		Code: 2003, Name: "NODE_INTERNAL_ERROR", Category: CategoryExternal,
@@ -229,25 +247,36 @@ var (
 		Code: 2007, Name: "NODE_SYNCING", Category: CategoryExternal,
 		Description: "Node is syncing/catching up", Retryable: true,
 	})
+	// NODE_UNIMPLEMENTED: gRPC Unimplemented or HTTP 501. One gateway implements a method or route
+	// that another does not.
 	LavaErrorNodeUnimplemented = registerError(&LavaError{
 		Code: 2008, Name: "NODE_UNIMPLEMENTED", Category: CategoryExternal,
-		SubCategory: SubCategoryUnsupportedMethod,
-		Description: "gRPC method unimplemented", Retryable: false,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "Method not implemented on this node (gRPC Unimplemented, HTTP 501); another provider may serve it", Retryable: true,
 	})
+	// NODE_ENDPOINT_NOT_FOUND: this node's front end does not route the path. Route sets differ
+	// per provider. A REST HTTP 404 is NODE_DATA_NOT_HELD instead.
 	LavaErrorNodeEndpointNotFound = registerError(&LavaError{
 		Code: 2009, Name: "NODE_ENDPOINT_NOT_FOUND", Category: CategoryExternal,
-		SubCategory: SubCategoryUnsupportedMethod,
-		Description: "REST endpoint not found", Retryable: false,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "Endpoint not found on this node; another provider may serve it", Retryable: true,
 	})
+	// NODE_METHOD_NOT_ALLOWED: HTTP 405 from this node's front end. Another provider's gateway
+	// may allow the same request.
 	LavaErrorNodeMethodNotAllowed = registerError(&LavaError{
 		Code: 2010, Name: "NODE_METHOD_NOT_ALLOWED", Category: CategoryExternal,
-		SubCategory: SubCategoryUnsupportedMethod,
-		Description: "REST method not allowed", Retryable: false,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "HTTP method not allowed by this node (HTTP 405); another provider may serve it", Retryable: true,
 	})
+	// NODE_LIMIT_EXCEEDED: the request exceeds this node's limit (-32005) — its plan cap or its
+	// eth_getLogs range — and another provider's limit may be higher. Stays SubCategoryRateLimit:
+	// the endpoint is held off rather than blamed (rpcsmartrouter_server.go, the rate-limited
+	// release), so the retry and the requests after it go to a peer rather than back into the
+	// same limit. That is the backoff MAG-2771 asks for alongside the failover.
 	LavaErrorNodeLimitExceeded = registerError(&LavaError{
 		Code: 2011, Name: "NODE_LIMIT_EXCEEDED", Category: CategoryExternal,
 		SubCategory: SubCategoryRateLimit,
-		Description: "Request exceeds node limit (e.g., eth_getLogs range)", Retryable: false,
+		Description: "Request exceeds this node's limit (e.g., eth_getLogs range, plan cap); another provider may serve it", Retryable: true,
 	})
 	LavaErrorNodeResourceNotFound = registerError(&LavaError{
 		Code: 2012, Name: "NODE_RESOURCE_NOT_FOUND", Category: CategoryExternal,
@@ -273,13 +302,16 @@ var (
 		Description: "Bad gateway (HTTP 502 from provider)", Retryable: true,
 		MayHaveReachedNode: true,
 	})
-	// NODE_UNAUTHORIZED: upstream rejected the smart-router's credentials
-	// (HTTP 401). Non-retryable because the same credentials are reused on
-	// every attempt — retrying just multiplies the same auth failure across
-	// providers. Operator must fix the auth-config for the affected endpoint.
+	// NODE_UNAUTHORIZED: the node rejected the credentials the router sent it (HTTP 401 on
+	// JSON-RPC and gRPC; a REST 401 is NODE_ACCESS_DENIED). Credentials are configured per node
+	// url, so this is a claim about the key this provider was given, and another provider's key
+	// may be fine. It used to be non-retryable on the assumption that one credential fronts every
+	// provider. When that is so, the retry costs one more 401 on a request that was already
+	// failing. The operator still has to fix the auth-config for the endpoint.
 	LavaErrorNodeUnauthorized = registerError(&LavaError{
 		Code: 2016, Name: "NODE_UNAUTHORIZED", Category: CategoryExternal,
-		Description: "Upstream rejected router credentials (HTTP 401)", Retryable: false,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "Upstream rejected router credentials (HTTP 401); another provider may serve it", Retryable: true,
 	})
 	// NODE_ACCESS_DENIED: the endpoint refused the router itself — its credentials (401), its
 	// plan or quota (402), a WAF or IP rule (403), a proxy wanting credentials (407), a protocol

@@ -15,9 +15,9 @@ import (
 //
 // This table is the contract. It exists to be a tripwire in two directions:
 //
-//   - Every Retryable value here is what it was BEFORE the fault axis was introduced. The
-//     subcategory re-labelling must not have moved routing, and a diff in this column is how you
-//     find out that it did.
+//   - Every Retryable value here is what it was BEFORE the fault axis was introduced, except the
+//     MAG-2771 rows, which moved routing on purpose. The subcategory re-labelling must not have
+//     moved routing, and a diff in this column is how you find out that it did.
 //   - A new code added without a deliberate fault-axis decision fails
 //     TestFaultAxis_EveryRegisteredCodeIsAccountedFor below, rather than silently defaulting to
 //     "the endpoint's fault".
@@ -30,19 +30,23 @@ type faultAxisCase struct {
 }
 
 var faultAxisTable = []faultAxisCase{
-	// Not the endpoint's fault — the method does not exist anywhere. Retrying is pointless.
-	{2001, "NODE_METHOD_NOT_FOUND", SubCategoryUnsupportedMethod, false, "absent from every API surface"},
-	{2008, "NODE_UNIMPLEMENTED", SubCategoryUnsupportedMethod, false, "gRPC unimplemented"},
-	{2009, "NODE_ENDPOINT_NOT_FOUND", SubCategoryUnsupportedMethod, false, "REST path does not exist"},
-	{2010, "NODE_METHOD_NOT_ALLOWED", SubCategoryUnsupportedMethod, false, "REST verb not allowed"},
-
-	// Not the endpoint's fault, but retrying DOES help — the capability exists elsewhere.
-	// The whole reason SubCategoryNodeCapability is not SubCategoryUnsupportedMethod.
+	// Not the endpoint's fault, and retrying DOES help — the capability may exist elsewhere.
+	// MAG-2771 moved 2001, 2008, 2009 and 2010 here from SubCategoryUnsupportedMethod +
+	// non-retryable, deliberately changing routing: each is a claim the node makes about itself
+	// (its method set, its implementation, its routes, its front end's verbs), which on the wire
+	// cannot be told apart from a provider-local gap, so the request goes to a peer before the
+	// caller is failed. Retryable alone would have made them at fault; the subcategory keeps them
+	// as unblamed as they were.
+	{2001, "NODE_METHOD_NOT_FOUND", SubCategoryNodeCapability, true, "not on THIS node's surface; a peer may serve it (MAG-2771)"},
 	{2002, "NODE_METHOD_NOT_SUPPORTED", SubCategoryNodeCapability, true, "disabled on THIS node; another tier serves it"},
+	{2008, "NODE_UNIMPLEMENTED", SubCategoryNodeCapability, true, "not implemented by THIS gateway (MAG-2771)"},
+	{2009, "NODE_ENDPOINT_NOT_FOUND", SubCategoryNodeCapability, true, "route sets differ per provider (MAG-2771)"},
+	{2010, "NODE_METHOD_NOT_ALLOWED", SubCategoryNodeCapability, true, "THIS front end's 405 (MAG-2771)"},
 
 	// Not the endpoint's fault — healthy, just busy. Layer 6 owns these.
 	{2005, "NODE_RATE_LIMITED", SubCategoryRateLimit, true, "retryable AND rate limited"},
-	{2011, "NODE_LIMIT_EXCEEDED", SubCategoryRateLimit, false, "non-retryable AND rate limited"},
+	// MAG-2771: this node's limit, which a peer's may exceed. Routing moved on purpose; the axis did not.
+	{2011, "NODE_LIMIT_EXCEEDED", SubCategoryRateLimit, true, "retryable AND rate limited (MAG-2771)"},
 
 	// Not the endpoint's fault — it answered truthfully about what it holds.
 	{2012, "NODE_RESOURCE_NOT_FOUND", SubCategoryDataScope, true, ""},
@@ -77,9 +81,11 @@ var faultAxisTable = []faultAxisCase{
 	{3335, "CHAIN_STARKNET_UNEXPECTED_ERROR", SubCategoryNone, true, "unexpected server error — the node broke"},
 	{3363, "CHAIN_NEAR_NOT_SYNCED_YET", SubCategoryNone, true, "same shape as NODE_SYNCING (2007)"},
 
-	// The caller's fault. Non-retryable, and no fault-axis label needed — the default arm of
-	// classifyEndpointHealth already excuses CategoryExternal + !Retryable.
-	{2016, "NODE_UNAUTHORIZED", SubCategoryNone, false, "credentials rejected; see the note below"},
+	// The endpoint refused the router's credentials (JSON-RPC and gRPC 401). MAG-2771 moved it from
+	// non-retryable + no label, deliberately changing routing: credentials are configured per node
+	// url, so another provider's may be fine. Node-capability keeps it as unblamed as it was —
+	// retryable with no label would have made it at fault.
+	{2016, "NODE_UNAUTHORIZED", SubCategoryNodeCapability, true, "credentials for THIS node rejected (MAG-2771)"},
 	// The endpoint refused the router (REST 401/402/403/407/426/451). Each provider has its own
 	// credentials and rules, so another provider can serve the request: retryable. NOT at fault —
 	// node-capability, the same axis as NODE_METHOD_NOT_SUPPORTED: the endpoint answered truthfully

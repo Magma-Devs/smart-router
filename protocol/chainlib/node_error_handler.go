@@ -21,16 +21,6 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-// NewUnsupportedMethodError creates an error wrapping a LavaError with unsupported method classification.
-// The methodName is included in the context for logging.
-func NewUnsupportedMethodError(_ error, methodName string) error {
-	context := "unsupported method"
-	if methodName != "" {
-		context = fmt.Sprintf("unsupported method %q", methodName)
-	}
-	return common.NewLavaError(common.LavaErrorNodeMethodNotFound, context)
-}
-
 // NewSolanaNonRetryableError creates an error wrapping a LavaError with non-retryable classification.
 func NewSolanaNonRetryableError(err error) error {
 	return common.NewLavaError(common.LavaErrorChainSolanaMissingLongTerm, err.Error())

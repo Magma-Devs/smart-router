@@ -127,15 +127,18 @@ func TestClassifyError_MatchOrdering(t *testing.T) {
 	assert.Equal(t, common.LavaErrorNodeRateLimited, result)
 }
 
-func TestClassifyDirectRPCError_UnsupportedMethod(t *testing.T) {
-	// "method not found" has SubCategoryUnsupportedMethod (zero retries, cached response)
+func TestClassifyDirectRPCError_MethodNotFoundAndNotSupported(t *testing.T) {
+	// "method not found" is the node's claim about its own surface (MAG-2771): node-capability,
+	// retried on another provider, never the router-terminal unsupported-method subcategory
 	err := errors.New("method not found")
 	lavaErr, _ := classifyDirectRPCError(err, -1, common.TransportJsonRPC)
 	require.NotNil(t, lavaErr)
 	assert.Equal(t, common.LavaErrorNodeMethodNotFound, lavaErr)
-	assert.True(t, lavaErr.SubCategory.IsUnsupportedMethod())
+	assert.True(t, lavaErr.SubCategory.IsNodeCapability())
+	assert.False(t, lavaErr.SubCategory.IsUnsupportedMethod())
+	assert.True(t, lavaErr.Retryable)
 
-	// "method not supported" is retryable — another provider may support it — no SubCategory
+	// "method not supported" is retryable — another provider may support it — node-capability
 	err = errors.New("the method is method not supported on this node")
 	lavaErr, _ = classifyDirectRPCError(err, -1, common.TransportJsonRPC)
 	require.NotNil(t, lavaErr)
@@ -156,11 +159,12 @@ func TestClassifyDirectRPCError_JSONRPCBodyExtraction(t *testing.T) {
 	assert.Equal(t, common.LavaErrorChainSolanaMissingLongTerm, lavaErr, "Solana -32009 should be extracted from HTTP body and classified via Tier 2")
 }
 
-func TestClassifyError_UnsupportedMethodByCode(t *testing.T) {
-	// JSON-RPC -32601 should classify as unsupported method
+func TestClassifyError_MethodNotFoundByCode(t *testing.T) {
+	// JSON-RPC -32601 is NODE_METHOD_NOT_FOUND: retryable node-capability since MAG-2771
 	result := common.ClassifyError(nil, common.ChainFamilyEVM, common.TransportJsonRPC, -32601, "some error")
 	assert.Equal(t, common.LavaErrorNodeMethodNotFound, result)
-	assert.True(t, result.SubCategory.IsUnsupportedMethod())
+	assert.True(t, result.SubCategory.IsNodeCapability())
+	assert.True(t, result.Retryable)
 }
 
 func TestDetectConnectionError_NotRefused(t *testing.T) {
