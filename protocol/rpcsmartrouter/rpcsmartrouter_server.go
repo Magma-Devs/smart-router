@@ -143,6 +143,9 @@ type RPCSmartRouterServer struct {
 	// replay, at most one outstanding per endpoint). Initialized once in runProbeLoop; nil until
 	// then, which runProbeCycleCore treats as "no replay wiring" (poll-only fallback).
 	probeReplayer *relayProbeRunner
+	// headStall is the head-stalled step's state (MAG-3986): which urls hold head-stalled, read by
+	// onTipObservation on every tip vote, and which stuck endpoints never-empty is keeping.
+	headStall headStallState
 
 	// Cached API names of the two tip-defining spec methods (GET_BLOCKNUM / GET_BLOCK_BY_NUM), resolved
 	// once on the first relay via tipApiNamesOnce. tipBlockFromRelay runs on every successful relay;
@@ -3238,14 +3241,23 @@ func (rpcss *RPCSmartRouterServer) recomputeChainStateConsensus() {
 	// otherwise a pod that has lost all its endpoints keeps anti-lie-guarding against a baseline
 	// no live endpoint still supports. Recompute(empty) is the explicit "no consensus" signal.
 	snap := rpcss.endpointChainTrackerManager.SnapshotObservations()
+	rpcss.chainState.Recompute(consensusObservations(snap, rpcss.headStall.isStalled))
+}
+
+// consensusObservations turns the monitor's snapshot into consensus votes. A url held as
+// head-stalled does not vote (MAG-3986): its repeated block keeps its own tip fresh, so with two
+// frozen urls out of three the frozen pair would form the majority baseline and the healthy url's
+// real head would be rejected as an outlier — the tip lock the onTipObservation filter alone only
+// prevents when there is no majority.
+func consensusObservations(snap map[string]endpointstate.EndpointObservation, isStalled func(url string) bool) []chainstate.BlockObservation {
 	obs := make([]chainstate.BlockObservation, 0, len(snap))
 	for url, o := range snap {
-		if o.LatestBlock <= 0 {
+		if o.LatestBlock <= 0 || (isStalled != nil && isStalled(url)) {
 			continue
 		}
 		obs = append(obs, chainstate.BlockObservation{URL: url, Block: o.LatestBlock, ObservedAt: o.ObservedAt})
 	}
-	rpcss.chainState.Recompute(obs)
+	return obs
 }
 
 // probeQoSAppender is the narrow optimizer capability the prober uses to feed QoS (Topic E's
@@ -3304,6 +3316,21 @@ type probeLoopStats struct {
 	replaysRecovered    uint64
 	replaysStillFailing uint64
 	replaysInconclusive uint64
+	// Cumulative MAG-3986 head-stall transitions.
+	stalledAdded    uint64
+	stalledRemoved  uint64
+	stalledKept     uint64
+	stalledReleased uint64
+}
+
+// recordHeadStall adds one cycle's head-stall transitions to the cumulative counters.
+func (s *probeLoopStats) recordHeadStall(r headStallResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stalledAdded += uint64(r.added)
+	s.stalledRemoved += uint64(r.removed)
+	s.stalledKept += uint64(r.kept)
+	s.stalledReleased += uint64(r.released)
 }
 
 // setInterval publishes the effective probe cadence. Called once at loop start.
@@ -3356,6 +3383,10 @@ type probeLoopSnapshot struct {
 	ReplaysRecovered    uint64
 	ReplaysStillFailing uint64
 	ReplaysInconclusive uint64
+	StalledAdded        uint64
+	StalledRemoved      uint64
+	StalledKept         uint64
+	StalledReleased     uint64
 }
 
 // snapshot returns a consistent copy of the stats under the lock (no mutex in the returned value).
@@ -3375,6 +3406,10 @@ func (s *probeLoopStats) snapshot() probeLoopSnapshot {
 		ReplaysRecovered:    s.replaysRecovered,
 		ReplaysStillFailing: s.replaysStillFailing,
 		ReplaysInconclusive: s.replaysInconclusive,
+		StalledAdded:        s.stalledAdded,
+		StalledRemoved:      s.stalledRemoved,
+		StalledKept:         s.stalledKept,
+		StalledReleased:     s.stalledReleased,
 	}
 }
 
@@ -3463,13 +3498,17 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 		}
 	}
 	startedAt := time.Now()
+	endpoints := rpcss.sessionManager.GetAllDirectRPCEndpoints()
 	scored, reEnabled, syncOmitted, evidenceGated := runProbeCycleCore(
-		rpcss.sessionManager.GetAllDirectRPCEndpoints(),
+		endpoints,
 		rpcss.endpointChainTrackerManager.GetObservation,
 		baseline, hasBaseline, syncRef, startedAt, cfg, appender,
 		rpcss.sessionManager.RestoreRecoveredProvider,
 		rpcss.probeReplayer,
 	)
+	// MAG-3986: after the re-enable pass, so an endpoint the probe just returned to rotation is
+	// counted as usable by never-empty.
+	rpcss.runHeadStall(endpoints, startedAt)
 	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, evidenceGated)
 }
 
@@ -3592,8 +3631,14 @@ func runProbeCycleCore(
 // cannot inflate it through this path either.
 //
 // Nil-guards cover test fixtures that construct the server without metrics or ChainState wired.
-func (rpcss *RPCSmartRouterServer) onTipObservation(block int64) {
+func (rpcss *RPCSmartRouterServer) onTipObservation(endpointURL string, block int64, repeat bool) {
 	if rpcss.chainState == nil {
+		return
+	}
+	// A head-stalled endpoint repeating its block must not keep the tip fresh (MAG-3986): that
+	// repeat vote is what pinned the Plasma tip for 70 minutes. A HIGHER block still counts — it
+	// is real news, and the next probe cycle takes head-stalled off because of it.
+	if repeat && rpcss.headStall.isStalled(endpointURL) {
 		return
 	}
 	rpcss.chainState.SetLatestBlock(block)

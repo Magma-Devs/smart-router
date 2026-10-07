@@ -838,6 +838,21 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 		}
 		total += csm.ResetEndpointHealth()
 
+		// The operator reset is the one route allowed to clear STATE reasons too (MAG-3986, D8).
+		// The stall counters go with them, or the next probe cycle would re-add head-stalled from
+		// the evidence the operator just discarded (H11).
+		for _, ep := range csm.GetAllDirectRPCEndpoints() {
+			if ep != nil && ep.Endpoint != nil {
+				ep.Endpoint.ClearStateReasons()
+			}
+		}
+		if server := deps.router.rpcServers[chainKey]; server != nil {
+			server.headStall.reset()
+			if server.endpointChainTrackerManager != nil {
+				server.endpointChainTrackerManager.ResetStallCounters()
+			}
+		}
+
 		// Mirror the struct reset onto the Prometheus health gauge so operators see
 		// providers recover immediately rather than at the next epoch tick — without it
 		// the gauge stays stuck at 0 until a successful relay, one a rarely-used backup
@@ -1657,6 +1672,18 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 						"RelayProbeMethod":   health.RelayProbeMethod,
 						"RelayProbeAttempts": health.RelayProbeAttempts,
 						"ReenableProbeFlaps": health.ReenableProbeFlaps,
+						// MAG-3986: Enabled is the event slot only. Usable is what selection
+						// sees — Enabled AND no state reason. StateReasons lists head-stalled
+						// with when it was added and the block it was stuck on; SameBlockCycles
+						// is the evidence that adds it, and a LastAnsweredBlock above the stuck
+						// block removes it.
+						"Usable":            health.Usable,
+						"StateReasons":      debugStateReasons(health.StateReasons),
+						"SameBlockCycles":   obs.SameBlockCycles,
+						"LastAnsweredBlock": obs.LastAnsweredBlock,
+						"HighestBlockSeen":  obs.HighestBlockSeen,
+						"Provider":          ep.ProviderAddress,
+						"Backup":            ep.Backup,
 						// PollIntervalMs is the live dedicated-poll cadence: base when healthy,
 						// exponentialBackoff-stretched when the endpoint has been failing. This is the
 						// observable /debug/reset-probe-backoff returns to base (MAG-2395).
@@ -1831,6 +1858,11 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					"ReplaysRecovered":    s.ReplaysRecovered,
 					"ReplaysStillFailing": s.ReplaysStillFailing,
 					"ReplaysInconclusive": s.ReplaysInconclusive,
+					// MAG-3986 head-stall transitions, cumulative since process start.
+					"StalledAdded":    s.StalledAdded,
+					"StalledRemoved":  s.StalledRemoved,
+					"StalledKept":     s.StalledKept,
+					"StalledReleased": s.StalledReleased,
 				})
 			}
 			deps.router.mu.Unlock()
@@ -4726,4 +4758,17 @@ func collectGRPCEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, ti
 		}
 	}
 	return endpoints
+}
+
+// debugStateReasons renders an endpoint's state reasons for /debug/endpoint-state.
+func debugStateReasons(entries []lavasession.StateReasonRecord) []map[string]any {
+	out := make([]map[string]any, 0, len(entries))
+	for _, r := range entries {
+		out = append(out, map[string]any{
+			"Reason": string(r.Reason),
+			"Since":  debugTimeRFC3339(r.Since),
+			"Block":  r.Block,
+		})
+	}
+	return out
 }

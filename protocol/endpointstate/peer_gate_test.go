@@ -118,7 +118,7 @@ func TestFreshPeerTip_PeerObservationSuppressesAndIsAdopted(t *testing.T) {
 	require.False(t, before.LastSuccessfulPoll.IsZero(), "the seed poll is the pod's own reachability evidence")
 
 	var fedTip atomic.Int64
-	m.onTipObservation = func(block int64) { fedTip.Store(block) }
+	m.onTipObservation = func(_ string, block int64, _ bool) { fedTip.Store(block) }
 
 	store.set(5000, "other-pod/abcd", 100*time.Millisecond)
 

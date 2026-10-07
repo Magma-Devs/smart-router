@@ -386,7 +386,7 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 		BlocksToSave:     1,
 		// Production wiring (rpcsmartrouter_server.go OnTipObservation): every accepted
 		// poll/relay observation drives the per-chain ChainState tip.
-		OnTipObservation: func(block int64) { cs.SetLatestBlock(block) },
+		OnTipObservation: func(_ string, block int64, _ bool) { cs.SetLatestBlock(block) },
 	})
 	t.Cleanup(m.Stop)
 
@@ -546,7 +546,7 @@ func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 200 * time.Millisecond,
 		BlocksToSave:     1,
-		OnTipObservation: func(block int64) { cs.SetLatestBlock(block) },
+		OnTipObservation: func(_ string, block int64, _ bool) { cs.SetLatestBlock(block) },
 	})
 	t.Cleanup(m.Stop)
 
@@ -685,10 +685,10 @@ func TestOnTipObservation_GaugeAdvancesUnderPollOnlyTraffic(t *testing.T) {
 	}
 
 	// Two consecutive poll observations — no relay anywhere in this test — must move the gauge.
-	rpcss.onTipObservation(25_638_537)
+	rpcss.onTipObservation("https://poll.example", 25_638_537, false)
 	require.Equal(t, float64(25_638_537), readRouterLatestBlockGauge(t),
 		"first poll observation must seed the gauge — pre-fix, only a relay could")
-	rpcss.onTipObservation(25_638_545)
+	rpcss.onTipObservation("https://poll.example", 25_638_545, false)
 	require.Equal(t, float64(25_638_545), readRouterLatestBlockGauge(t),
 		"the gauge must track the tip under poll-only traffic — the frozen-gauge case from MAG-2629")
 
@@ -698,13 +698,13 @@ func TestOnTipObservation_GaugeAdvancesUnderPollOnlyTraffic(t *testing.T) {
 	// that state must leave the gauge UNTOUCHED: a stale tip must not advance it, and zeroing it
 	// would turn routine TTL expiry into a false "chain reset" on the graph.
 	cs.SetDebugClockOffset(200 * time.Second)
-	rpcss.onTipObservation(25_638_600)
+	rpcss.onTipObservation("https://poll.example", 25_638_600, false)
 	require.Equal(t, float64(25_638_545), readRouterLatestBlockGauge(t),
 		"a stale gated read must leave the gauge at its last fresh value")
 	cs.SetDebugClockOffset(0)
 
 	// Nil-guards: fixtures build servers without metrics or ChainState wired — the hook fires
 	// from tracker callbacks and must never panic on such a server.
-	(&RPCSmartRouterServer{}).onTipObservation(1)
-	(&RPCSmartRouterServer{chainState: cs}).onTipObservation(1)
+	(&RPCSmartRouterServer{}).onTipObservation("https://poll.example", 1, false)
+	(&RPCSmartRouterServer{chainState: cs}).onTipObservation("https://poll.example", 1, false)
 }

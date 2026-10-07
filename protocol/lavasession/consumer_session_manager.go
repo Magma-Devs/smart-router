@@ -1007,8 +1007,11 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 		// under e.mu (RecordProbeVerdict), and an unsynchronized read here raced with it (F3). This
 		// path no longer emits liveness metrics or QoS — it is only a race-free routability gate for
 		// the epoch-transition unblock/reconnect callers; the prober owns direct-RPC liveness.
-		if !endpoint.IsEnabled() {
-			utils.LavaFormatDebug("Direct RPC endpoint is disabled, skipping probe",
+		// IsUsable, not IsEnabled: an endpoint held by a state reason (head-stalled, MAG-3986) is
+		// as unroutable as a backed-off one, and treating it as routable here would let the
+		// epoch-transition unblock release a provider whose every endpoint is stalled.
+		if !endpoint.IsUsable() {
+			utils.LavaFormatDebug("Direct RPC endpoint is not usable, skipping probe",
 				utils.LogAttr("provider", providerAddress),
 				utils.LogAttr("endpoint", endpoint.NetworkAddress),
 			)
