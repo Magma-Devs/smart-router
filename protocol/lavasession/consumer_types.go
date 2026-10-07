@@ -3,6 +3,7 @@ package lavasession
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1076,15 +1077,26 @@ func (cswp *ConsumerSessionsWithProvider) ConnectRawClientWithTimeout(ctx contex
 	return c, conn, nil
 }
 
-func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint(endpointConnection *EndpointConnection, qosManager *qos.QoSManager, networkAddress string) (singleConsumerSession *SingleConsumerSession, pairingEpoch uint64, err error) {
-	// TODO: validate that the endpoint even belongs to the ConsumerSessionsWithProvider and is enabled.
+// GetConsumerSessionInstanceFromEndpoint returns a locked session on the endpoint selection chose.
+//
+// A provider-relay session (endpointConnection != nil) is matched on that connection. A direct RPC
+// session (endpointConnection == nil) is matched on directEndpoint itself, never on its url: the
+// chart lists an `archive` node-url twice (once with the extension, once without), so one url can
+// back two endpoints. Matching on the url tied every session to the first of them, so once that
+// one was disabled every later failure still landed on it, the second never reached the disable
+// threshold, and a silent url kept every request (MAG-4025).
+func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint(endpointConnection *EndpointConnection, qosManager *qos.QoSManager, networkAddress string, directEndpoint *Endpoint) (singleConsumerSession *SingleConsumerSession, pairingEpoch uint64, err error) {
+	// TODO: validate that a provider-relay endpoint belongs to the ConsumerSessionsWithProvider and is enabled.
 
 	cswp.Lock.Lock()
 	defer cswp.Lock.Unlock()
 
-	// Check if this is a provider-relay session (endpointConnection != nil)
-	// or direct RPC session (endpointConnection == nil, need to find endpoint by networkAddress)
 	isProviderRelay := (endpointConnection != nil)
+	if !isProviderRelay {
+		if directEndpoint == nil || !directEndpoint.IsDirectRPC() || !slices.Contains(cswp.Endpoints, directEndpoint) {
+			return nil, 0, fmt.Errorf("direct RPC connection not found for endpoint: %s", networkAddress)
+		}
+	}
 
 	// try to lock an existing session, if can't create a new one
 	for _, session := range cswp.Sessions {
@@ -1093,8 +1105,8 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 		if isProviderRelay {
 			matchesConnection = (session.EndpointConnection == endpointConnection)
 		} else {
-			// Direct RPC: match by network address
-			matchesConnection = (session.Connection != nil && session.Connection.GetEndpointAddress() == networkAddress)
+			drsc, ok := session.Connection.(*DirectRPCSessionConnection)
+			matchesConnection = ok && drsc.Endpoint == directEndpoint
 		}
 
 		if !matchesConnection {
@@ -1137,28 +1149,11 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 			EndpointAddress:    networkAddress,
 		}
 	} else {
-		// Direct RPC mode: find the endpoint and use its DirectConnection
-		var directConn DirectRPCConnection
-		var selectedEndpoint *Endpoint
-		for _, endpoint := range cswp.Endpoints {
-			if endpoint.NetworkAddress == networkAddress && endpoint.IsDirectRPC() {
-				if len(endpoint.DirectConnections) > 0 {
-					directConn = endpoint.DirectConnections[0]
-					selectedEndpoint = endpoint // ✅ Store endpoint reference
-					break
-				}
-			}
-		}
-
-		if directConn == nil {
-			return nil, 0, fmt.Errorf("direct RPC connection not found for endpoint: %s", networkAddress)
-		}
-
 		sessionConnection = &DirectRPCSessionConnection{
-			DirectConnection: directConn,
+			DirectConnection: directEndpoint.DirectConnections[0],
 			QoSManager:       qosManager,
-			EndpointAddress:  networkAddress,
-			Endpoint:         selectedEndpoint, // ✅ Store for per-endpoint tracking
+			EndpointAddress:  directEndpoint.NetworkAddress,
+			Endpoint:         directEndpoint, // failures are recorded on this endpoint
 		}
 	}
 	consumerSession := &SingleConsumerSession{

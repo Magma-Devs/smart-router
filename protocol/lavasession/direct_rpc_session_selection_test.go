@@ -48,6 +48,7 @@ func TestGetConsumerSessionInstanceFromEndpoint_DirectRPC(t *testing.T) {
 		nil,         // endpointConnection = nil triggers direct RPC mode
 		qosManager,  // qosManager
 		nodeUrl.Url, // networkAddress
+		endpoint,    // directEndpoint
 	)
 
 	// Verify session creation succeeded
@@ -109,6 +110,7 @@ func TestGetConsumerSessionInstanceFromEndpoint_ProviderRelay(t *testing.T) {
 		endpointConn,   // endpointConnection != nil triggers provider-relay mode
 		qosManager,     // qosManager
 		networkAddress, // networkAddress
+		nil,            // directEndpoint (provider-relay)
 	)
 
 	// Verify session creation succeeded
@@ -409,4 +411,90 @@ func TestFetchEndpointConnection_DirectRPC_SkipsWebsocketEndpoints(t *testing.T)
 		assert.False(t, newEndpoint("ws://monad.example.com", true).ServesDirectRelays())
 		assert.True(t, (&Endpoint{NetworkAddress: "provider-relay"}).ServesDirectRelays())
 	})
+}
+
+// TestGetConsumerSessionInstanceFromEndpoint_DuplicateNodeUrl is the regression guard for
+// MAG-4025. The chart writes an `archive` node-url twice — once with the extension, once
+// without — so one url backs two endpoints. Sessions used to be tied to the first endpoint
+// with the chosen url, so after that one was disabled every failure still landed on it, the
+// second never reached the threshold, and the provider's healthy url never got a request.
+func TestGetConsumerSessionInstanceFromEndpoint_DuplicateNodeUrl(t *testing.T) {
+	rand.InitRandomSeed()
+	ctx := context.Background()
+
+	newEndpoint := func(url string, extensions ...string) *Endpoint {
+		conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
+		require.NoError(t, err)
+		ext := map[string]struct{}{}
+		for _, e := range extensions {
+			ext[e] = struct{}{}
+		}
+		return &Endpoint{NetworkAddress: url, Enabled: true, Extensions: ext, DirectConnections: []DirectRPCConnection{conn}}
+	}
+	silentArchive := newEndpoint("http://127.0.0.1:18638", "archive")
+	silentPlain := newEndpoint("http://127.0.0.1:18638")
+	healthyArchive := newEndpoint("http://127.0.0.1:18639", "archive")
+	healthyPlain := newEndpoint("http://127.0.0.1:18639")
+	cswp := &ConsumerSessionsWithProvider{
+		Sessions:          make(map[int64]*SingleConsumerSession),
+		PairingEpoch:      100,
+		StaticProvider:    true,
+		PublicLavaAddress: "EthFailoverTwoaddrSoloProvider1",
+		Endpoints:         []*Endpoint{silentArchive, silentPlain, healthyArchive, healthyPlain},
+	}
+	qosManager := &qos.QoSManager{}
+
+	// Every request fails while it lands on the silent url, the way the relay path records it:
+	// on the endpoint stored in the session.
+	failures := uint64(0)
+	var chosen *Endpoint
+	for failures <= 2*MaxConsecutiveConnectionAttempts {
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, false, false, "", nil, nil)
+		require.NoError(t, err)
+		require.True(t, connected)
+		chosen = endpoints[0].endpoint
+
+		session, _, err := cswp.GetConsumerSessionInstanceFromEndpoint(nil, qosManager, chosen.NetworkAddress, chosen)
+		require.NoError(t, err)
+		drsc, ok := session.Connection.(*DirectRPCSessionConnection)
+		require.True(t, ok)
+		require.Same(t, chosen, drsc.Endpoint, "the session must be tied to the endpoint selection chose, not the first with its url")
+
+		if chosen.NetworkAddress == healthyArchive.NetworkAddress {
+			session.Free(nil)
+			break
+		}
+		drsc.Endpoint.MarkUnhealthy(EndpointDisableUnreachable)
+		failures++
+		session.Free(nil)
+	}
+
+	assert.False(t, silentArchive.IsEnabled(), "the archive entry for the silent url must be disabled")
+	assert.False(t, silentPlain.IsEnabled(), "the plain entry for the silent url must be disabled")
+	assert.Equal(t, 2*MaxConsecutiveConnectionAttempts, failures, "each entry for the silent url is disabled after the threshold, no more")
+	assert.Same(t, healthyArchive, chosen, "traffic must move to the provider's other url")
+	assert.True(t, healthyArchive.IsEnabled())
+	assert.True(t, healthyPlain.IsEnabled())
+}
+
+// TestGetConsumerSessionInstanceFromEndpoint_RejectsForeignEndpoint: a direct RPC session is
+// only handed out for an endpoint the provider actually holds.
+func TestGetConsumerSessionInstanceFromEndpoint_RejectsForeignEndpoint(t *testing.T) {
+	rand.InitRandomSeed()
+	ctx := context.Background()
+	conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: "http://127.0.0.1:18638"}, 5, "")
+	require.NoError(t, err)
+	own := &Endpoint{NetworkAddress: "http://127.0.0.1:18638", Enabled: true, DirectConnections: []DirectRPCConnection{conn}}
+	foreign := &Endpoint{NetworkAddress: "http://127.0.0.1:18638", Enabled: true, DirectConnections: []DirectRPCConnection{conn}}
+	cswp := &ConsumerSessionsWithProvider{
+		Sessions:  make(map[int64]*SingleConsumerSession),
+		Endpoints: []*Endpoint{own},
+	}
+
+	_, _, err = cswp.GetConsumerSessionInstanceFromEndpoint(nil, &qos.QoSManager{}, foreign.NetworkAddress, foreign)
+	require.Error(t, err)
+	_, _, err = cswp.GetConsumerSessionInstanceFromEndpoint(nil, &qos.QoSManager{}, own.NetworkAddress, nil)
+	require.Error(t, err)
+	_, _, err = cswp.GetConsumerSessionInstanceFromEndpoint(nil, &qos.QoSManager{}, own.NetworkAddress, own)
+	require.NoError(t, err)
 }
