@@ -356,3 +356,57 @@ func TestFetchEndpointConnection_InternalPath(t *testing.T) {
 		assert.Equal(t, "https://avax.example/ext/bc/P", got[0].endpoint.NetworkAddress)
 	})
 }
+
+// TestFetchEndpointConnection_DirectRPC_SkipsWebsocketEndpoints is the regression guard for
+// the hypernative monad incident: a vendor listed as [https, wss] under jsonrpc. With the
+// https url backed off for timing out, selection used to fall through to the wss endpoint,
+// and every relay then failed instantly with "connection does not support HTTP requests
+// (protocol: wss)". A websocket endpoint must never be offered for a relay.
+func TestFetchEndpointConnection_DirectRPC_SkipsWebsocketEndpoints(t *testing.T) {
+	ctx := context.Background()
+
+	newEndpoint := func(url string, enabled bool) *Endpoint {
+		conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
+		require.NoError(t, err)
+		return &Endpoint{NetworkAddress: url, Enabled: enabled, DirectConnections: []DirectRPCConnection{conn}}
+	}
+	fetch := func(cswp *ConsumerSessionsWithProvider) (bool, []*EndpointAndChosenConnection) {
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, false, false, "", nil, nil)
+		require.NoError(t, err)
+		return connected, endpoints
+	}
+
+	t.Run("https enabled is chosen even when wss is listed first", func(t *testing.T) {
+		https := newEndpoint("https://monad.example.com", true)
+		cswp := &ConsumerSessionsWithProvider{
+			Sessions:          make(map[int64]*SingleConsumerSession),
+			StaticProvider:    true,
+			PublicLavaAddress: "dwellir",
+			Endpoints:         []*Endpoint{newEndpoint("wss://monad.example.com", true), https},
+		}
+		connected, endpoints := fetch(cswp)
+		require.True(t, connected)
+		require.Len(t, endpoints, 1)
+		assert.Same(t, https, endpoints[0].endpoint)
+	})
+
+	t.Run("https backed off leaves the provider unselectable, not on wss", func(t *testing.T) {
+		cswp := &ConsumerSessionsWithProvider{
+			Sessions:          make(map[int64]*SingleConsumerSession),
+			StaticProvider:    true,
+			PublicLavaAddress: "dwellir",
+			Endpoints:         []*Endpoint{newEndpoint("https://monad.example.com", false), newEndpoint("wss://monad.example.com", true)},
+		}
+		connected, endpoints := fetch(cswp)
+		assert.False(t, connected, "a provider whose only enabled endpoint is wss must not be handed out for a relay")
+		assert.Empty(t, endpoints)
+	})
+
+	t.Run("ServesDirectRelays", func(t *testing.T) {
+		assert.True(t, newEndpoint("https://monad.example.com", true).ServesDirectRelays())
+		assert.True(t, newEndpoint("http://monad.example.com", true).ServesDirectRelays())
+		assert.False(t, newEndpoint("wss://monad.example.com", true).ServesDirectRelays())
+		assert.False(t, newEndpoint("ws://monad.example.com", true).ServesDirectRelays())
+		assert.True(t, (&Endpoint{NetworkAddress: "provider-relay"}).ServesDirectRelays())
+	})
+}
