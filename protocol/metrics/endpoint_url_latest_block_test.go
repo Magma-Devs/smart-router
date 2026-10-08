@@ -109,24 +109,25 @@ func TestURLLatestBlock_SharedURLIsASeriesPerProvider(t *testing.T) {
 	require.Equal(t, map[string]float64{"/v2": 1000}, byInternalPath(t, urlSeriesOf(t, m, "TON", "chainstack-backup")))
 }
 
-// The url label is exported and retained: no part of a node url's path, query or userinfo, where
-// an api key lives, may reach it. The hash still tells two urls on one host apart, and the same
-// url always gets the same label.
-func TestURLSeriesLabel_CarriesNoSecret(t *testing.T) {
+// The url label is exported and retained, and a node url can hold an api key in any part of it:
+// the path, the query, the userinfo, or a host label. So no part of the url reaches the label,
+// only a fingerprint, which still tells two urls apart and gives one url the same label every time.
+func TestURLSeriesLabel_CarriesNothingOfTheURL(t *testing.T) {
 	const secret = "s3cr3tK3y0123456789"
 	raws := []string{
 		"https://ton.vendor.example/" + secret + "/api/v2",
 		"https://ton.vendor.example/" + secret + "/api/v3",
 		"https://eth.vendor.example/rpc?apikey=" + secret,
 		"https://user:" + secret + "@eth.vendor.example/rpc",
-		"wss://eth.vendor.example/ws/" + secret,
+		"https://" + secret + "-1.rpc.vendor.example:443",
+		secret + "-1.grpc.vendor.example:443",
 	}
 	seen := map[string]string{}
 	for _, raw := range raws {
 		label := urlSeriesLabel(raw)
+		require.Regexp(t, `^[0-9a-f]{8}$`, label, raw)
 		require.NotContains(t, label, secret, raw)
-		require.NotContains(t, label, "/api/", raw)
-		require.True(t, strings.Contains(label, "vendor.example"), "the host stays readable: %s", label)
+		require.False(t, strings.Contains(raw, label), "the label must not be a piece of the url: %s", raw)
 		require.Equal(t, label, urlSeriesLabel(raw), "the label is stable")
 		other, dup := seen[label]
 		require.False(t, dup, "%s and %s share label %s", raw, other, label)
