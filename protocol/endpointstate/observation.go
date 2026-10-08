@@ -90,6 +90,9 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 	// the tip store ACCEPTED it — a block behind our own fresh tip is a straggler the fleet store
 	// would reject too, and publishing it would burn a throttle window for nothing.
 	var tipBlock, publishBlock int64
+	// A failed poll is reported off obsMu too, with how long the endpoint has given no answer.
+	var reportFailure bool
+	var silentFor time.Duration
 	defer func() {
 		if tipBlock > 0 && m.onTipObservation != nil {
 			m.onTipObservation(tipBlock)
@@ -100,6 +103,9 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		// The same accepted block, with its url, for rpc_endpoint_latest_block's per-url heads.
 		if tipBlock > 0 && m.onPollBlock != nil {
 			m.onPollBlock(endpointURL, tipBlock)
+		}
+		if reportFailure && m.onPollFailure != nil {
+			m.onPollFailure(endpointURL, silentFor)
 		}
 	}()
 
@@ -152,6 +158,16 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 			o.LastPollError = "poll did not parse a block"
 		}
 		o.ConsecutivePollFailures++
+		// Silent since the last answer of any kind: a successful poll, or an accepted relay
+		// observation, which lands in the tip store without touching the poll fields.
+		lastAnswer := o.LastSuccessfulPoll
+		if tip, ok := endpointtip.Default().Get(m.tipKey(endpointURL)); ok && tip.ObservedAt.After(lastAnswer) {
+			lastAnswer = tip.ObservedAt
+		}
+		if !lastAnswer.IsZero() && at.After(lastAnswer) {
+			silentFor = at.Sub(lastAnswer)
+		}
+		reportFailure = true
 	}
 
 	m.observations[endpointURL] = o

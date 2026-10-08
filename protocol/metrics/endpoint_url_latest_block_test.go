@@ -134,3 +134,22 @@ func TestURLSeriesLabel_CarriesNothingOfTheURL(t *testing.T) {
 		seen[label] = raw
 	}
 }
+
+// A url that stopped answering is down, not stuck: its own series goes, so the stuck alerts do not
+// read it, while the provider series keeps its last head for the dashboards. The series comes back
+// at the url's next head.
+func TestURLLatestBlock_DropKeepsTheProviderSeries(t *testing.T) {
+	m := newTONProviderWithPaths(t)
+	m.SetEndpointLatestBlock("TON", "rest", tonV2URL, 1000)
+	m.SetEndpointLatestBlock("TON", "rest", tonV3URL, 1200)
+
+	m.DropEndpointURLLatestBlock("TON", "rest", tonV2URL)
+	require.Equal(t, map[string]float64{"/v3": 1200}, byInternalPath(t, urlSeriesOf(t, m, "TON", "chainstack")))
+	require.Equal(t, float64(1000), providerLatestBlock(t, m, "TON", "chainstack"), "the provider series keeps /v2's head")
+
+	m.SetEndpointLatestBlock("TON", "rest", tonV2URL, 1000) // answers again
+	require.Equal(t, map[string]float64{"/v2": 1000, "/v3": 1200}, byInternalPath(t, urlSeriesOf(t, m, "TON", "chainstack")))
+
+	var nilManager *SmartRouterMetricsManager
+	nilManager.DropEndpointURLLatestBlock("TON", "rest", tonV2URL)
+}
