@@ -327,6 +327,9 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		},
 		OnFetchError: func(endpointURL string) {
 			rpcss.smartRouterEndpointMetrics.RecordBlockFetch(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, true, false)
+			// A url that cannot answer leaves its provider's lowest-head series until its
+			// next head, so it does not read as a stuck one (MAG-4204).
+			rpcss.smartRouterEndpointMetrics.ForgetEndpointLatestBlock(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL)
 		},
 	})
 
@@ -3668,12 +3671,14 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 		}
 	}
 	if rpcss.smartRouterEndpointMetrics != nil {
-		// endpointAddress is the provider name (session map key), so resolveProviderName
-		// returns it unchanged — endpoint_id = provider name in the metric.
-		rpcss.smartRouterEndpointMetrics.SetEndpointLatestBlock(
+		// endpointAddress is the provider name (session map key) — endpoint_id in the
+		// metric. The head is recorded as targetEndpoint's url's, so it joins the
+		// provider's lowest-head-across-urls series rather than overwriting it (MAG-4204).
+		rpcss.smartRouterEndpointMetrics.SetProviderURLLatestBlock(
 			rpcss.listenEndpoint.ChainID,
 			rpcss.listenEndpoint.ApiInterface,
 			endpointAddress,
+			targetEndpoint.NetworkAddress,
 			tip,
 		)
 	}
