@@ -302,9 +302,10 @@ func (m *EndpointMonitor) recordPeerObservation(endpointURL string, gen uint64, 
 		return false
 	}
 	var tipBlock int64
+	var tipRepeat bool
 	defer func() {
 		if tipBlock > 0 && m.onTipObservation != nil {
-			m.onTipObservation(tipBlock)
+			m.onTipObservation(endpointURL, tipBlock, tipRepeat)
 		}
 	}()
 
@@ -320,12 +321,16 @@ func (m *EndpointMonitor) recordPeerObservation(endpointURL string, gen uint64, 
 	if _, exists := m.observations[endpointURL]; !exists {
 		m.observations[endpointURL] = EndpointObservation{}
 	}
+	// A peer pod's view never touches this pod's stall evidence (MAG-3986, D14), but its vote on
+	// the tip carries the same repeat flag so the router can drop it for a stalled endpoint.
+	repeat := m.tipRepeats(endpointURL, block)
 	if endpointtip.Default().Set(m.tipKey(endpointURL), endpointtip.Tip{
 		Block:      block,
 		ObservedAt: at,
 		Source:     endpointtip.SourcePeer,
 	}, m.tipStaleAfter) {
 		tipBlock = block
+		tipRepeat = repeat
 		return true
 	}
 	return false

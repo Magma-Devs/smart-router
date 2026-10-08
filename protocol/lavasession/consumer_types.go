@@ -233,8 +233,18 @@ type Endpoint struct {
 	// path — the bounded escape hatch for evidence whose replay can never pass. Reset when fresh
 	// evidence is recorded.
 	relayProbeAttempts uint64
-	Addons             map[string]struct{}
-	Extensions         map[string]struct{}
+	// stateReasons are the STATE-type reasons this endpoint is out of rotation for (MAG-3986),
+	// kept apart from the event slot above (Enabled / disabledAt / disableReason). An event reason
+	// records that something happened (50 failures in a row) and is cleared by its own proof of
+	// recovery: the probe re-enable, a successful relay, the epoch reset. A state reason is a
+	// condition the probe loop re-evaluates from stored telemetry every cycle (head-stalled today),
+	// and only the probe loop and the operator reset may remove it. None of the event-slot
+	// transitions read or write this map, so no re-enable path can clear a state reason by
+	// accident. The endpoint is usable only when Enabled AND this map is empty (usableLocked).
+	// Nil until the first state reason is added.
+	stateReasons map[EndpointDisableReason]StateReasonRecord
+	Addons       map[string]struct{}
+	Extensions   map[string]struct{}
 	// StandaloneAddons mirrors common.NodeUrl.StandaloneAddons: this endpoint
 	// serves ONLY the collections its Addons name, not those plus the base one.
 	// Set for a url whose add-on REPLACES the base api surface rather than
@@ -252,7 +262,7 @@ type Endpoint struct {
 	// it does not serve, and the vendor's 404 then reads as a verdict on the
 	// request.
 	InternalPath string
-	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, relayProbeMethod, relayProbePayload, relayProbeTimeout, relayProbeAttempts
+	mu           sync.RWMutex // Protects Connections, ConnectionRefusals, Enabled, consecutiveHealthyProbes, disabledAt, disableReason, lastRecoveryPoll, probeReenabled, reenableProbeFlaps, relayProbeMethod, relayProbePayload, relayProbeTimeout, relayProbeAttempts, stateReasons
 
 	// Per-endpoint observed tip lives in the shared endpointtip store (single source of
 	// truth), keyed by chain+apiInterface+NetworkAddress — not on the Endpoint — so the
@@ -335,6 +345,12 @@ type EndpointHealthSnapshot struct {
 	// reEnableAfterK << ReenableProbeFlaps) — on-call's answer to "why is this endpoint earning
 	// such a long streak".
 	ReenableProbeFlaps uint64
+	// Usable is whether selection may route to this endpoint right now: Enabled AND no state reason
+	// (MAG-3986). Enabled alone describes only the event slot.
+	Usable bool
+	// StateReasons lists the state-type reasons (head-stalled) this endpoint is out for, in a stable
+	// order, each with when it was added and the block it was recorded at. Empty when none.
+	StateReasons []StateReasonRecord
 }
 
 // HealthSnapshot returns the endpoint's enable/recovery state under e.mu. Read-only companion to
@@ -353,6 +369,8 @@ func (e *Endpoint) HealthSnapshot() EndpointHealthSnapshot {
 		RelayProbeMethod:         e.relayProbeMethod,
 		RelayProbeAttempts:       e.relayProbeAttempts,
 		ReenableProbeFlaps:       e.reenableProbeFlaps,
+		Usable:                   e.usableLocked(),
+		StateReasons:             e.stateReasonsLocked(),
 	}
 }
 
@@ -1258,8 +1276,12 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			// this is used on a routine that tries to reconnect to a provider that has been disabled due to being unable to connect to it.
 			endpoint.mu.RLock()
 			enabled := endpoint.Enabled
+			// A state reason (head-stalled, MAG-3986) keeps the endpoint out even on the
+			// retry-disabled path: that path retries an endpoint the EVENT slot backed off, and
+			// reconnecting proves nothing about a node that answers but does not follow the chain.
+			heldByState := endpoint.heldByStateLocked()
 			endpoint.mu.RUnlock()
-			if !retryDisabledEndpoints && !enabled {
+			if heldByState || (!retryDisabledEndpoints && !enabled) {
 				continue
 			}
 			// A websocket-only endpoint can never answer a relay — see ServesDirectRelays.
@@ -1484,10 +1506,11 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 		// before verifying all are Disabled.
 		allDisabled = true
 		for _, endpoint := range cswp.Endpoints {
-			endpoint.mu.RLock()
-			enabled := endpoint.Enabled
-			endpoint.mu.RUnlock()
-			if !enabled {
+			// Usable, not merely Enabled: a provider whose every endpoint is held by a state
+			// reason (head-stalled) has nothing to dial, and must be blocked like one whose
+			// endpoints all failed — that block is what moves its traffic to the next primary or
+			// the backup tier (MAG-3986).
+			if !endpoint.IsUsable() {
 				continue
 			}
 			// even one endpoint is enough for us to not purge.
