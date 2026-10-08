@@ -504,10 +504,18 @@ func TestGetServiceApis(t *testing.T) {
 	rpcInterface := spectypes.APIInterfaceRest
 	_, serverApis, _, _, _, _ := getServiceApis(spec, rpcInterface)
 
-	// Test serverApis
-	if len(serverApis) != 3 {
-		t.Errorf("Expected serverApis length to be 3, but got %d", len(serverApis))
+	// The disabled api is kept, as a disabled entry, so a lookup refuses it rather than missing
+	// it and relaying it as a Default- api (MAG-4185).
+	require.Len(t, serverApis, 4)
+	enabled := 0
+	for _, apiCont := range serverApis {
+		if apiCont.api.Enabled {
+			enabled++
+			continue
+		}
+		require.Equal(t, "test-api-disabled", apiCont.api.Name)
 	}
+	require.Equal(t, 3, enabled)
 }
 
 // utxoFamilyChainIDsForTest lists every chain id isUTXOFamily accepts. Derived from the
