@@ -1918,7 +1918,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 			reportedProviders := csm.GetReportedProviders(sessionEpoch)
 
 			// Get session from endpoint or create new or continue. if more than 10 connections are open.
-			consumerSession, pairingEpoch, err := consumerSessionsWithProvider.GetConsumerSessionInstanceFromEndpoint(endpoint.chosenEndpointConnection, csm.qosManager, endpoint.endpoint.NetworkAddress)
+			consumerSession, pairingEpoch, err := consumerSessionsWithProvider.GetConsumerSessionInstanceFromEndpoint(endpoint.chosenEndpointConnection, csm.qosManager, endpoint.endpoint.NetworkAddress, endpoint.endpoint)
 			if err != nil {
 				// Capacity is not an error. The provider has no free session and is already at
 				// the total-session ceiling, so skip it for THIS request and pick another —
