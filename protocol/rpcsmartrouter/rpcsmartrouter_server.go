@@ -118,6 +118,9 @@ type RPCSmartRouterServer struct {
 
 	// Endpoint-scoped metrics manager (new spec)
 	smartRouterEndpointMetrics *metrics.SmartRouterMetricsManager
+	// urlSeriesDropAfter overrides latestBlockURLSeriesDropAfter when positive, so a test can
+	// watch a url drop out without waiting two minutes.
+	urlSeriesDropAfter time.Duration
 
 	// Per-method cross-validation policy resolver (nil/empty => header-driven CV only).
 	crossValidationResolver *CrossValidationPolicyResolver
@@ -292,7 +295,8 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
 		// Each url's head in its provider's lowest-head rpc_endpoint_latest_block (MAG-4204).
-		OnPollBlock: rpcss.onEndpointPollBlock,
+		OnPollBlock:   rpcss.onEndpointPollBlock,
+		OnPollFailure: rpcss.onEndpointPollFailure,
 		// Fleet tracker gate (MAG-2981): with --shared-state AND a cache backend, pods share
 		// their poll observations so an endpoint is polled about once per interval fleet-wide.
 		// Gated on the same flag as the chain-level shared tip — it is the operator's "this
@@ -3617,11 +3621,13 @@ func (rpcss *RPCSmartRouterServer) onTipObservation(block int64) {
 // includes the tracker's first poll and every repeat of the same block, which OnNewBlock never
 // reports, so a url that was already stuck when its tracker started still counts.
 //
-// A url whose polls fail keeps its last head, as every url does on main: a url that stops
-// answering freezes its provider's series once the other urls pass it, and the stuck-provider
-// alerts fire for it. Dropping it instead let the series follow the other urls up, and a burst
-// of errors on a stuck url swung the series away and back. Only a url whose tracker is removed
-// leaves the series (cleanupStaleTrackers).
+// A url whose polls fail keeps its last head in the provider series, so the dashboards show the
+// provider held back once its other urls pass it; dropping it there let the series follow the
+// other urls up, and an error burst on a stuck url swung it away and back. Only a url whose
+// tracker is removed leaves the provider series (cleanupStaleTrackers). The url's own
+// rpc_endpoint_url_latest_block series, which the stuck alerts read, is dropped once the url has
+// given no answer for latestBlockURLSeriesDropAfter (onEndpointPollFailure): a url that stopped
+// answering is down, not stuck.
 //
 // A ws/wss url is left out. It never serves a relay (Endpoint.ServesDirectRelays), so its head
 // says nothing about the answers customers get, and keeping it would let a websocket door that
@@ -3639,6 +3645,32 @@ func (rpcss *RPCSmartRouterServer) onEndpointPollBlock(endpointURL string, block
 	}
 	rpcss.smartRouterEndpointMetrics.SetEndpointLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL, block)
 	rpcss.forgetLatestBlockIfUntracked(endpointURL)
+}
+
+// latestBlockURLSeriesDropAfter is how long a url may give no answer, poll or relay, before its
+// rpc_endpoint_url_latest_block series is dropped (MAG-4204). A url that stopped answering is
+// down, not stuck: it serves no stale block, and a series standing at its last head would let
+// the provider's other urls' relays page "stuck and still serving customers". Two minutes keeps
+// an error burst on a url that is stuck, and answering in between, from dropping it. It is also
+// short enough that a down url's last head stands for less than any stuck alert's `for` (5m),
+// even with the poll backoff (at most a minute) on top.
+const latestBlockURLSeriesDropAfter = 2 * time.Minute
+
+// onEndpointPollFailure is the EndpointMonitor's OnPollFailure hook. Once a url has given no
+// answer for latestBlockURLSeriesDropAfter, it drops the url's own rpc_endpoint_url_latest_block
+// series. The provider's lowest head keeps the url's last head, as on main, so the dashboards
+// still show the provider held back. The series comes back at the url's next answered poll.
+func (rpcss *RPCSmartRouterServer) onEndpointPollFailure(endpointURL string, silentFor time.Duration) {
+	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	dropAfter := latestBlockURLSeriesDropAfter
+	if rpcss.urlSeriesDropAfter > 0 {
+		dropAfter = rpcss.urlSeriesDropAfter
+	}
+	if silentFor >= dropAfter {
+		rpcss.smartRouterEndpointMetrics.DropEndpointURLLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL)
+	}
 }
 
 // forgetLatestBlockIfUntracked undoes a latest-block write that raced its url's removal.

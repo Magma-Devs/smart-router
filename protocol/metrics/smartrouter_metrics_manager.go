@@ -274,7 +274,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// One series per url of a provider, for the stuck-provider alerts (MAG-4204). The
 	// provider series above is the lowest of these heads, which serves the dashboards,
 	// but no single series per provider can show a url that froze while another url of
-	// the provider still trails it.
+	// the provider still trails it. A url that stopped answering loses its series
+	// (DropEndpointURLLatestBlock): it is down, not stuck.
 	endpointURLLatestBlock := NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
 		Name:       "rpc_endpoint_url_latest_block",
 		Help:       "Latest block one node url of a provider reported. url is a fingerprint of the node url: the first 8 hex digits of its sha256.",
@@ -1071,6 +1072,23 @@ func (m *SmartRouterMetricsManager) ForgetEndpointLatestBlock(spec, apiInterface
 			continue
 		}
 		m.setProviderLatestBlockLocked(key, 0)
+	}
+}
+
+// DropEndpointURLLatestBlock deletes a url's own rpc_endpoint_url_latest_block series for every
+// provider configured with it. The provider series, and the url's head in it, stay. The caller
+// is a url that has stopped answering: it is down, not stuck, and a series standing at its last
+// head would read as stuck to the alerts. The series comes back at the url's next head.
+func (m *SmartRouterMetricsManager) DropEndpointURLLatestBlock(spec, apiInterface, endpointID string) {
+	if m == nil || m.endpointURLLatestBlock == nil {
+		return
+	}
+	providerNames := m.resolveProviderNames(endpointID)
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	for _, providerName := range providerNames {
+		key := providerSeriesKey{spec: spec, apiInterface: apiInterface, provider: providerName}
+		m.endpointURLLatestBlock.GaugeVec.Delete(prometheus.Labels(m.urlSeriesLabelsLocked(key, endpointID)))
 	}
 }
 
