@@ -419,6 +419,19 @@ func (csm *ConsumerSessionManager) GroupCountsForRequest(addon string, extension
 	return csm.countByGroup(csm.CalculateAddonValidAddresses(addon, extensions, ctx))
 }
 
+// IsBackupProvider reports whether providerAddr belongs to the backup tier. The relay server asks it
+// once per completed request, to count a request a backup answered on
+// smartrouter_backup_tier_served_total (MAG-3536).
+func (csm *ConsumerSessionManager) IsBackupProvider(providerAddr string) bool {
+	if csm == nil || providerAddr == "" {
+		return false
+	}
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	_, ok := csm.backupProviders[providerAddr]
+	return ok
+}
+
 // IsStaticProvider returns true when the given provider address belongs to a
 // static provider in the current pairing (including backup providers and
 // purged providers that may still be serving active subscriptions across an
