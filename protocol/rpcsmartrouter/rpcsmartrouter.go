@@ -2878,6 +2878,8 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 						url.Url,       // raw URL — stored in endpoint_url label; used for URL->name resolution in ChainTracker callbacks
 						provider.Name, // provider name — used as endpoint_id in all Prometheus metrics
 					)
+					// The internal_path label of rpc_endpoint_url_latest_block (MAG-4204).
+					smartRouterMetricsManager.RegisterEndpointInternalPath(url.Url, url.InternalPath)
 				}
 			}
 

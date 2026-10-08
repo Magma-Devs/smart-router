@@ -18,6 +18,10 @@ func newSmartRouterForURLFanoutTest() *SmartRouterMetricsManager {
 			Name:   "t_sr_endpoint_latest_block",
 			Labels: endpointLabels,
 		}),
+		endpointURLLatestBlock: NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
+			Name:   "t_sr_endpoint_url_latest_block",
+			Labels: []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"},
+		}),
 		endpointFetchLatestSuccess: NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
 			Name:   "t_sr_endpoint_fetch_latest_success",
 			Labels: endpointLabels,
