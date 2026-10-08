@@ -154,10 +154,11 @@ type EndpointMonitor struct {
 	// per-chain ChainState tip (SetLatestBlock). Fired AFTER obsMu is released so the tip lock
 	// is never taken while holding the observation lock. Set once at construction; immutable.
 	onTipObservation func(block int64)
-	// onPollResult, if set, is invoked once per latest-block poll recordPollObservation records
-	// for a live tracker, fired AFTER obsMu is released like onTipObservation. See
-	// EndpointChainTrackerConfig.OnPollResult. Set once at construction; immutable.
-	onPollResult func(endpointURL string, acceptedBlock int64, consecutiveFailures int)
+	// onPollBlock, if set, is invoked with the url and block of every poll recordPollObservation
+	// records for a live tracker and the tip store accepts, fired AFTER obsMu is released like
+	// onTipObservation. See EndpointChainTrackerConfig.OnPollBlock. Set once at construction;
+	// immutable.
+	onPollBlock func(endpointURL string, block int64)
 	// onGateSkip, if set, is invoked once per poll cycle the traffic gate suppressed, with the
 	// source that made the poll redundant (metrics.TrackerGateSkipSource*).
 	onGateSkip func(endpointURL, source string)
@@ -203,14 +204,14 @@ type EndpointChainTrackerConfig struct {
 	// OnTipObservation, if set, feeds every positive poll/relay block into the per-chain
 	// ChainState tip (MAG-2160). See EndpointMonitor.onTipObservation.
 	OnTipObservation func(block int64)
-	// OnPollResult, if set, is invoked once per latest-block poll a live tracker records —
-	// including the tracker's first poll and a poll that returns the same block again, neither
-	// of which OnNewBlock reports. acceptedBlock is the polled block when the endpoint's tip
-	// store accepted it (a repeat of the stored block is accepted), else 0: the poll failed, or
-	// answered below a still-fresh tip. consecutiveFailures is the endpoint's failure streak
-	// after this poll, 0 after a successful one. A poll from a removed or replaced tracker is
-	// not reported (the same generation gate as the observation itself).
-	OnPollResult func(endpointURL string, acceptedBlock int64, consecutiveFailures int)
+	// OnPollBlock, if set, is invoked with the url and block of every latest-block poll a live
+	// tracker records — including the tracker's first poll and a poll that returns the same
+	// block again, neither of which OnNewBlock reports. Only a block the endpoint's tip store
+	// accepted is reported: a repeat of the stored block is, a straggler below a still-fresh
+	// tip is not, and a failed poll reports nothing. A poll from a removed or replaced tracker
+	// is not reported (the observation's own generation gate), but the call runs after that
+	// gate's lock is released, so it can land just after the tracker is removed.
+	OnPollBlock func(endpointURL string, block int64)
 
 	// PeerObservations, when set, enables the fleet half of the traffic gate (MAG-2981): this
 	// pod publishes its successful polls to the store and borrows fresh observations from
@@ -293,7 +294,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		onConsistency:      config.OnConsistency,
 		onFetchError:       config.OnFetchError,
 		onTipObservation:   config.OnTipObservation,
-		onPollResult:       config.OnPollResult,
+		onPollBlock:        config.OnPollBlock,
 		onGateSkip:         config.OnGateSkip,
 		onGateError:        config.OnGateError,
 		onTrackerRequest:   config.OnTrackerRequest,

@@ -20,11 +20,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-4204: rpc_endpoint_latest_block is the lowest head across a provider's urls, and the
-// per-url heads come from onEndpointPollResult — every answered poll, not OnNewBlock. OnNewBlock
-// fires only for a strictly higher block, so a url that was already stuck when its tracker
-// started, or that left the series after a failed poll, would never be counted again and the
-// stuck-provider alerts would stay blind.
+// MAG-4204: rpc_endpoint_latest_block is the lowest head across a provider's urls, and the per-url
+// heads come from onEndpointPollBlock — every answered poll, not OnNewBlock. OnNewBlock fires only
+// for a strictly higher block, so a url that was already stuck when its tracker started would never
+// be counted and the stuck-provider alerts would stay blind. A url whose polls fail keeps its last
+// head, as on main, so errors neither hide a stuck url nor move the series.
 
 // latestBlockSeries reads rpc_endpoint_latest_block{spec, apiInterface, endpoint_id=provider}
 // from the process-global registry the metrics manager registers on, or -1 when absent.
@@ -76,8 +76,8 @@ func newHeadUpstream(t *testing.T, head func() int64, fail func() bool) *headUps
 }
 
 // trackProviderURLs starts real per-url trackers for provider's upstreams, with the monitor's
-// OnPollResult wired to the server's onEndpointPollResult as ServeRPCRequests wires it.
-func trackProviderURLs(t *testing.T, provider string, upstreams ...*headUpstream) {
+// OnPollBlock wired to the server's onEndpointPollBlock as ServeRPCRequests wires it.
+func trackProviderURLs(t *testing.T, provider string, upstreams ...*headUpstream) (*RPCSmartRouterServer, *metrics.SmartRouterMetricsManager) {
 	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -96,9 +96,10 @@ func trackProviderURLs(t *testing.T, provider string, upstreams ...*headUpstream
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 100 * time.Millisecond,
 		BlocksToSave:     1,
-		OnPollResult:     rpcss.onEndpointPollResult,
+		OnPollBlock:      rpcss.onEndpointPollBlock,
 	})
 	t.Cleanup(m.Stop)
+	rpcss.endpointChainTrackerManager = m // before any tracker polls
 	for _, u := range upstreams {
 		mm.RegisterEndpoint("ETH1", "jsonrpc", u.srv.URL, provider)
 		conn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: u.srv.URL}, 5, "jsonrpc")
@@ -107,6 +108,7 @@ func trackProviderURLs(t *testing.T, provider string, upstreams ...*headUpstream
 		_, err = m.GetOrCreateTracker(ep, conn)
 		require.NoError(t, err)
 	}
+	return rpcss, mm
 }
 
 // A pod that starts (rollout, restart, scale-up) while a url is stuck: the tracker's first
@@ -126,75 +128,102 @@ func TestEndpointLatestBlock_URLStuckWhenItsTrackerStartsHoldsTheSeries(t *testi
 		"the stuck url answers 1000 on every poll, so it holds the provider's series there")
 }
 
-// One failed poll (a 503, a rate limit, a timeout) on a stuck url must not drop it from the
-// series, not even for a moment: the series would swing to the other url's head and back, and
-// changes() over the alert window would no longer be 0.
-func TestEndpointLatestBlock_OneFailedPollDoesNotDropAStuckURL(t *testing.T) {
-	const provider = "lava@mag4204OneFailedPoll"
+// A burst of failed polls (503s, rate limits, timeouts) on a stuck url must not move the
+// provider's series, not even for a moment: a swing to the other url's head and back would make
+// changes() over the alert window non-zero, and the max across pods lets one pod clear the alert.
+func TestEndpointLatestBlock_ErrorBurstDoesNotMoveAStuckURLsSeries(t *testing.T) {
+	const provider = "lava@mag4204ErrorBurst"
+	const burst = 5 // failed polls in a row, more than the 3 that used to drop a url
 	var head atomic.Int64
 	head.Store(990)
-	var failOnce atomic.Bool
-	stuck := newHeadUpstream(t, func() int64 { return 1000 }, func() bool { return failOnce.CompareAndSwap(true, false) })
+	var failLeft atomic.Int64
+	stuck := newHeadUpstream(t, func() int64 { return 1000 }, func() bool {
+		for {
+			left := failLeft.Load()
+			if left <= 0 {
+				return false
+			}
+			if failLeft.CompareAndSwap(left, left-1) {
+				return true
+			}
+		}
+	})
 	advancing := newHeadUpstream(t, func() int64 { return head.Add(1) }, nil)
 	trackProviderURLs(t, provider, stuck, advancing)
 
 	require.Eventually(t, func() bool { return head.Load() > 1010 }, 15*time.Second, 10*time.Millisecond)
 	require.Equal(t, float64(1000), latestBlockSeries(t, "ETH1", "jsonrpc", provider))
 
-	failOnce.Store(true)
 	polled := stuck.polls.Load()
-	for stuck.polls.Load() < polled+10 {
+	failLeft.Store(burst)
+	for stuck.polls.Load() < polled+burst+3 {
 		require.Equal(t, float64(1000), latestBlockSeries(t, "ETH1", "jsonrpc", provider),
-			"the provider series must not leave the stuck url's head around its failed poll")
+			"the provider series must not leave the stuck url's head during or after its failed polls")
 		time.Sleep(time.Millisecond)
 	}
-	require.False(t, failOnce.Load(), "the stuck url did fail a poll")
+	require.Zero(t, failLeft.Load(), "the stuck url did fail the whole burst")
 }
 
-// The decision onEndpointPollResult makes, poll by poll, without the timing of real trackers.
-func TestOnEndpointPollResult_DownURLLeavesAndAFlappingStuckURLStays(t *testing.T) {
-	const provider = "lava@mag4204ScriptedPollResults"
-	const stuckURL, otherURL = "http://stuck.mag4204-scripted:8545", "http://other.mag4204-scripted:8545"
+// A url that stops answering altogether keeps its last head: once the provider's other url
+// passes it, the series freezes and the stuck-provider alerts fire for it — what main does, where
+// a url that fails every poll writes nothing.
+func TestEndpointLatestBlock_URLThatStopsAnsweringFreezesTheSeries(t *testing.T) {
+	const provider = "lava@mag4204StopsAnswering"
+	var head atomic.Int64
+	head.Store(990)
+	var down atomic.Bool
+	dying := newHeadUpstream(t, func() int64 { return 1000 }, down.Load)
+	advancing := newHeadUpstream(t, func() int64 { return head.Add(1) }, nil)
+	trackProviderURLs(t, provider, dying, advancing)
+
+	require.Eventually(t, func() bool { return head.Load() > 1005 }, 15*time.Second, 10*time.Millisecond)
+	down.Store(true)
+	polled := dying.polls.Load()
+	require.Eventually(t, func() bool { return dying.polls.Load() >= polled+4 }, 15*time.Second, 10*time.Millisecond,
+		"the url fails several polls in a row")
+	require.Eventually(t, func() bool { return head.Load() > 1030 }, 15*time.Second, 10*time.Millisecond)
+	require.Equal(t, float64(1000), latestBlockSeries(t, "ETH1", "jsonrpc", provider),
+		"a url that stopped answering holds the provider's series at its last head")
+}
+
+// A poll or harvest write lands after the observation gate releases its lock, so it can arrive
+// just after cleanupStaleTrackers removed the url's tracker and forgot its head. That write must
+// not pin the removed url's head in the provider's lowest head for the life of the pod.
+func TestEndpointLatestBlock_LateWriteForARemovedURLIsUndone(t *testing.T) {
+	const provider = "lava@mag4204LateWrite"
+	const removed = "http://removed.mag4204-late-write:8545"
+	var head atomic.Int64
+	head.Store(1100)
+	kept := newHeadUpstream(t, func() int64 { return head.Add(1) }, nil)
+	rpcss, mm := trackProviderURLs(t, provider, kept)
+	mm.RegisterEndpoint("ETH1", "jsonrpc", removed, provider) // a url of the provider with no tracker (left)
+
+	require.Eventually(t, func() bool { return head.Load() > 1110 }, 15*time.Second, 10*time.Millisecond)
+	rpcss.onEndpointPollBlock(removed, 1000) // the late write
+
+	require.Eventually(t, func() bool { return head.Load() > 1115 }, 15*time.Second, 10*time.Millisecond)
+	require.Greater(t, latestBlockSeries(t, "ETH1", "jsonrpc", provider), float64(1110),
+		"the removed url's late head must not hold the provider's series at 1000")
+}
+
+// A provider's websocket door never serves a relay, so its head stays out of the series: a wss url
+// that answered once and then stopped must not freeze the provider while its https url serves
+// fresh blocks.
+func TestOnEndpointPollBlock_WebsocketURLIsLeftOut(t *testing.T) {
+	const provider = "lava@mag4204Websocket"
+	const httpsURL, wssURL = "https://rpc.mag4204-ws.example", "wss://ws.mag4204-ws.example"
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	require.NotNil(t, mm)
-	mm.RegisterEndpoint("ETH1", "jsonrpc", stuckURL, provider)
-	mm.RegisterEndpoint("ETH1", "jsonrpc", otherURL, provider)
+	mm.RegisterEndpoint("ETH1", "jsonrpc", httpsURL, provider)
+	mm.RegisterEndpoint("ETH1", "jsonrpc", wssURL, provider)
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		smartRouterEndpointMetrics: mm,
 	}
-	series := func() float64 { return latestBlockSeries(t, "ETH1", "jsonrpc", provider) }
 
-	rpcss.onEndpointPollResult(stuckURL, 1000, 0)
-	rpcss.onEndpointPollResult(otherURL, 1001, 0)
-	require.Equal(t, float64(1000), series())
-
-	// A stuck url that errors on every other poll is still stuck: whenever it answers, it
-	// answers 1000. It stays in the series through every failure.
-	for other := int64(1002); other < 1010; other++ {
-		rpcss.onEndpointPollResult(stuckURL, 0, 1)
-		require.Equal(t, float64(1000), series(), "one failed poll keeps the url")
-		rpcss.onEndpointPollResult(otherURL, other, 0)
-		rpcss.onEndpointPollResult(stuckURL, 1000, 0)
-		require.Equal(t, float64(1000), series())
+	rpcss.onEndpointPollBlock(wssURL, 1000) // answered once, then stopped
+	for block := int64(1001); block <= 1005; block++ {
+		rpcss.onEndpointPollBlock(httpsURL, block)
+		require.Equal(t, float64(block), latestBlockSeries(t, "ETH1", "jsonrpc", provider))
 	}
-
-	// A url whose polls keep failing is down, not stuck: it leaves after the threshold, and
-	// the provider reads as its other url ...
-	for failures := 1; failures < latestBlockForgetAfterPollFailures; failures++ {
-		rpcss.onEndpointPollResult(stuckURL, 0, failures)
-		require.Equal(t, float64(1000), series())
-	}
-	rpcss.onEndpointPollResult(stuckURL, 0, latestBlockForgetAfterPollFailures)
-	require.Equal(t, float64(1009), series(), "a url that is down leaves the series")
-	rpcss.onEndpointPollResult(otherURL, 1010, 0)
-	require.Equal(t, float64(1010), series())
-
-	// ... until it answers again, at its next answered poll.
-	rpcss.onEndpointPollResult(stuckURL, 1000, 0)
-	require.Equal(t, float64(1000), series())
-
-	// A poll answered below a still-fresh tip (accepted block 0, no failure streak) changes nothing.
-	rpcss.onEndpointPollResult(stuckURL, 0, 0)
-	require.Equal(t, float64(1000), series())
 }

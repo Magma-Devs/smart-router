@@ -292,7 +292,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
 		// Each url's head in its provider's lowest-head rpc_endpoint_latest_block (MAG-4204).
-		OnPollResult: rpcss.onEndpointPollResult,
+		OnPollBlock: rpcss.onEndpointPollBlock,
 		// Fleet tracker gate (MAG-2981): with --shared-state AND a cache backend, pods share
 		// their poll observations so an endpoint is polled about once per interval fleet-wide.
 		// Gated on the same flag as the chain-level shared tip — it is the operator's "this
@@ -319,7 +319,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 				utils.LogAttr("toBlock", toBlock),
 			)
 			rpcss.smartRouterEndpointMetrics.RecordBlockFetch(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, true, true)
-			// rpc_endpoint_latest_block is written by onEndpointPollResult, on every answered
+			// rpc_endpoint_latest_block is written by onEndpointPollBlock, on every answered
 			// poll: this callback fires only for a strictly higher block (MAG-4204).
 		},
 		OnFork: func(endpointURL string, blockNum int64) {
@@ -3612,31 +3612,47 @@ func (rpcss *RPCSmartRouterServer) onTipObservation(block int64) {
 	}
 }
 
-// latestBlockForgetAfterPollFailures is how many latest-block polls of a url must fail in a
-// row before the url leaves its provider's rpc_endpoint_latest_block (MAG-4204). One failed
-// poll does not make a url down: a stuck node that also times out or rate-limits now and then
-// is still stuck, and dropping it on every blip would swing the series to the provider's other
-// url and back, which is the saw-tooth the lowest head exists to remove.
-const latestBlockForgetAfterPollFailures = 3
-
-// onEndpointPollResult is the EndpointMonitor's OnPollResult hook. It keeps each url's head in
-// its provider's lowest-head rpc_endpoint_latest_block series (MAG-4204):
-//   - every answered poll records the url's head. That includes the tracker's first poll and a
-//     poll that returns the same block again, which OnNewBlock never reports, so a url that was
-//     already stuck when its tracker started, or that left the series once, still counts;
-//   - a url whose polls keep failing leaves the series after latestBlockForgetAfterPollFailures
-//     failures in a row, so a url that is down does not read as stuck while the provider's other
-//     urls answer. It rejoins at its next answered poll.
+// onEndpointPollBlock is the EndpointMonitor's OnPollBlock hook. It records the url's head in its
+// provider's lowest-head rpc_endpoint_latest_block series (MAG-4204) on every answered poll. That
+// includes the tracker's first poll and every repeat of the same block, which OnNewBlock never
+// reports, so a url that was already stuck when its tracker started still counts.
+//
+// A url whose polls fail keeps its last head, as every url does on main: a url that stops
+// answering freezes its provider's series once the other urls pass it, and the stuck-provider
+// alerts fire for it. Dropping it instead let the series follow the other urls up, and a burst
+// of errors on a stuck url swung the series away and back. Only a url whose tracker is removed
+// leaves the series (cleanupStaleTrackers).
+//
+// A ws/wss url is left out. It never serves a relay (Endpoint.ServesDirectRelays), so its head
+// says nothing about the answers customers get, and keeping it would let a websocket door that
+// stopped answering freeze the provider's series and page "stuck and still serving customers"
+// while the provider's https url serves fresh blocks.
 //
 // Nil-guards cover test fixtures that construct the server without metrics wired.
-func (rpcss *RPCSmartRouterServer) onEndpointPollResult(endpointURL string, acceptedBlock int64, consecutiveFailures int) {
+func (rpcss *RPCSmartRouterServer) onEndpointPollBlock(endpointURL string, block int64) {
 	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
 		return
 	}
-	switch {
-	case acceptedBlock > 0:
-		rpcss.smartRouterEndpointMetrics.SetEndpointLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL, acceptedBlock)
-	case consecutiveFailures >= latestBlockForgetAfterPollFailures:
+	if protocol, err := lavasession.DetectProtocol(endpointURL, rpcss.listenEndpoint.ApiInterface); err == nil &&
+		(protocol == lavasession.DirectRPCProtocolWS || protocol == lavasession.DirectRPCProtocolWSS) {
+		return
+	}
+	rpcss.smartRouterEndpointMetrics.SetEndpointLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL, block)
+	rpcss.forgetLatestBlockIfUntracked(endpointURL)
+}
+
+// forgetLatestBlockIfUntracked undoes a latest-block write that raced its url's removal.
+// cleanupStaleTrackers removes the url's tracker and then forgets its head. The poll and harvest
+// writes are generation-gated, but they land after the gate's lock is released, so one can
+// arrive just after that forget. It would then hold a url the router no longer uses in its
+// provider's lowest head for the life of the pod, since nothing writes or forgets that url again.
+// Checking for the tracker after the write closes every interleaving, because the removal always
+// comes before the forget.
+func (rpcss *RPCSmartRouterServer) forgetLatestBlockIfUntracked(endpointURL string) {
+	if rpcss.endpointChainTrackerManager == nil || rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	if _, tracked := rpcss.endpointChainTrackerManager.ObservationGeneration(endpointURL); !tracked {
 		rpcss.smartRouterEndpointMetrics.ForgetEndpointLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL)
 	}
 }
@@ -3710,6 +3726,7 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 			targetEndpoint.NetworkAddress,
 			tip,
 		)
+		rpcss.forgetLatestBlockIfUntracked(targetEndpoint.NetworkAddress)
 	}
 }
 

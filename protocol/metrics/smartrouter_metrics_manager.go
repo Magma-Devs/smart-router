@@ -941,11 +941,12 @@ func (m *SmartRouterMetricsManager) SetEndpointOverallHealthBreakdown(spec, apiI
 //   - a provider with one url is unchanged.
 //
 // A url counts once it has reported a positive block, so a tracker that never started
-// does not hold the series at zero. ForgetEndpointLatestBlock drops a url whose
-// tracker is removed or whose latest-block polls keep failing, and the url rejoins at
-// its next answer. The server reports every answered poll here, not only a new head,
-// so a url that keeps answering with the same block keeps counting, which is what a
-// stuck url looks like.
+// does not hold the series at zero. The server reports every answered poll here, not
+// only a new head, so a url that keeps answering with the same block keeps counting,
+// which is what a stuck url looks like. A url whose polls fail keeps its last head too,
+// so a url that stops answering freezes the series once the others pass it, as a
+// single-url provider's does. Only ForgetEndpointLatestBlock, for a removed tracker,
+// takes a url out.
 //
 // endpointID is normally a registered url. An unregistered value (a provider name, or
 // a url that never reached RegisterEndpoint) is its own single-url provider, as before.
@@ -994,16 +995,11 @@ func (m *SmartRouterMetricsManager) recordURLLatestBlockLocked(key providerSerie
 }
 
 // ForgetEndpointLatestBlock drops a url's head from its providers' series until the url
-// reports a head again. Two callers:
-//   - a removed tracker: the url's last head would otherwise hold the series down for
-//     good, and the stuck-provider alert would fire for a url the router no longer uses;
-//   - latest-block polls that keep failing (several in a row; one blip is not enough):
-//     a url that is down is not a url serving a stale block, and holding its last head
-//     would page "stuck and still serving customers" while the provider's other urls
-//     serve fresh answers.
+// reports a head again. The caller is a removed tracker: the url's last head would
+// otherwise hold the series down for good, and the stuck-provider alert would fire for
+// a url the router no longer uses.
 //
-// The series keeps its value when no url is left, so a provider with one url reads as
-// it always did: a dead url freezes it.
+// The series keeps its value when no url is left.
 func (m *SmartRouterMetricsManager) ForgetEndpointLatestBlock(spec, apiInterface, endpointID string) {
 	if m == nil {
 		return
