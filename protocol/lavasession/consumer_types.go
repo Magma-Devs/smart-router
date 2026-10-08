@@ -1086,7 +1086,10 @@ func (cswp *ConsumerSessionsWithProvider) ConnectRawClientWithTimeout(ctx contex
 // one was disabled every later failure still landed on it, the second never reached the disable
 // threshold, and a silent url kept every request (MAG-4025).
 func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint(endpointConnection *EndpointConnection, qosManager *qos.QoSManager, networkAddress string, directEndpoint *Endpoint) (singleConsumerSession *SingleConsumerSession, pairingEpoch uint64, err error) {
-	// TODO: validate that a provider-relay endpoint belongs to the ConsumerSessionsWithProvider and is enabled.
+	// TODO: validate that a provider-relay endpoint belongs to the ConsumerSessionsWithProvider and is
+	// enabled. A direct RPC endpoint is checked below for belonging, not for being enabled: selection
+	// has just skipped the disabled ones, so only a MarkUnhealthy landing in between gets through,
+	// and GetSessions treats any error from here other than the session ceiling as fatal.
 
 	cswp.Lock.Lock()
 	defer cswp.Lock.Unlock()

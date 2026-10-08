@@ -498,3 +498,44 @@ func TestGetConsumerSessionInstanceFromEndpoint_RejectsForeignEndpoint(t *testin
 	_, _, err = cswp.GetConsumerSessionInstanceFromEndpoint(nil, &qos.QoSManager{}, own.NetworkAddress, own)
 	require.NoError(t, err)
 }
+
+// TestGetSessions_DuplicateNodeUrlBindsTheChosenEntry guards the call site the MAG-4025 fix rests
+// on: GetSessions must hand GetConsumerSessionInstanceFromEndpoint the endpoint selection chose.
+// The tests above call that function directly, so a GetSessions that passed the first endpoint with
+// the chosen url would bring the bug back without failing any of them.
+func TestGetSessions_DuplicateNodeUrlBindsTheChosenEntry(t *testing.T) {
+	ctx := context.Background()
+	const url = "http://127.0.0.1:18638"
+	conn, err := NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
+	require.NoError(t, err)
+	archive := &Endpoint{NetworkAddress: url, Enabled: true, Extensions: map[string]struct{}{"archive": {}}, DirectConnections: []DirectRPCConnection{conn}}
+	plain := &Endpoint{NetworkAddress: url, Enabled: true, Extensions: map[string]struct{}{}, DirectConnections: []DirectRPCConnection{conn}}
+
+	csm := CreateConsumerSessionManager()
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{
+		0: {
+			PublicLavaAddress: "lava@mag4025",
+			Endpoints:         []*Endpoint{archive, plain}, // the chart's order: archive entry first
+			Sessions:          map[int64]*SingleConsumerSession{},
+			MaxComputeUnits:   200,
+			PairingEpoch:      firstEpochHeight,
+			StaticProvider:    true,
+		},
+	}, nil))
+
+	// The archive entry has been taken out by its own failures, so selection lands on the plain
+	// entry for the same url.
+	for i := uint64(0); i < MaxConsecutiveConnectionAttempts; i++ {
+		archive.MarkUnhealthy(EndpointDisableUnreachable)
+	}
+	require.False(t, archive.IsEnabled())
+
+	css, err := csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+	require.NoError(t, err)
+	require.Len(t, css, 1)
+	for _, info := range css {
+		drsc, ok := info.Session.Connection.(*DirectRPCSessionConnection)
+		require.True(t, ok)
+		require.Same(t, plain, drsc.Endpoint, "the session must be bound to the entry selection chose, not the first entry with its url")
+	}
+}
