@@ -89,3 +89,64 @@ func TestOnPollBlock_RelayObservationIsNotReported(t *testing.T) {
 	require.True(t, m.RecordRelayObservation(url, gen, 500, time.Now()))
 	require.Empty(t, sink.snapshot())
 }
+
+// OnPollFailure tells the router how long an endpoint has given no answer, so a url that stopped
+// answering can leave rpc_endpoint_url_latest_block: it is down, not stuck. An answer is a
+// successful poll or an accepted relay observation; a url that never answered reports 0.
+
+type pollFailure struct {
+	url       string
+	silentFor time.Duration
+}
+
+type pollFailureSink struct {
+	mu       sync.Mutex
+	failures []pollFailure
+}
+
+func (s *pollFailureSink) record(url string, silentFor time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failures = append(s.failures, pollFailure{url, silentFor})
+}
+
+func (s *pollFailureSink) snapshot() []pollFailure {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]pollFailure(nil), s.failures...)
+}
+
+func TestOnPollFailure_ReportsHowLongTheEndpointHasGivenNoAnswer(t *testing.T) {
+	const url = "http://poll-failure-hook:8545"
+	sink := &pollFailureSink{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
+		ChainID:          "ETH1",
+		ApiInterface:     spectypes.APIInterfaceJsonRPC,
+		AverageBlockTime: 200 * time.Millisecond,
+		BlocksToSave:     1,
+		OnPollFailure:    sink.record,
+	})
+	require.NotNil(t, m)
+	t.Cleanup(m.Stop)
+	gen := m.registerGenForTest(url)
+	t0 := time.Now()
+	at := t0.Add
+
+	m.recordPollObservation(url, gen, 0, 0, errors.New("dial"), at(0))                        // never answered yet
+	m.recordPollObservation(url, gen, 100, time.Millisecond, nil, at(time.Second))            // answers: no failure
+	m.recordPollObservation(url, gen, 0, 0, errors.New("503"), at(31*time.Second))            // 30s after the answer
+	m.recordPollObservation(url, gen, 0, 0, nil, at(3*time.Minute+time.Second))               // answered without a block
+	require.True(t, m.RecordRelayObservation(url, gen, 100, at(4*time.Minute)))               // a relay answers
+	m.recordPollObservation(url, gen, 0, 0, errors.New("503"), at(5*time.Minute))             // 1m after the relay
+	m.recordPollObservation(url, gen+1, 0, 0, errors.New("503"), at(6*time.Minute))           // a replaced tracker
+	m.recordPollObservation(url, gen, 0, 0, errors.New("503"), at(4*time.Minute+time.Second)) // an older attempt
+
+	require.Equal(t, []pollFailure{
+		{url, 0},
+		{url, 30 * time.Second},
+		{url, 3 * time.Minute},
+		{url, time.Minute},
+	}, sink.snapshot())
+}
