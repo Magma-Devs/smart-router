@@ -90,12 +90,19 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 	// the tip store ACCEPTED it — a block behind our own fresh tip is a straggler the fleet store
 	// would reject too, and publishing it would burn a throttle window for nothing.
 	var tipBlock, publishBlock int64
+	// The poll-result hook is reported off obsMu too, and only for a poll this record kept:
+	// tipBlock doubles as its accepted block, and failureStreak is the streak after this poll.
+	var reportPollResult bool
+	var failureStreak int
 	defer func() {
 		if tipBlock > 0 && m.onTipObservation != nil {
 			m.onTipObservation(tipBlock)
 		}
 		if publishBlock > 0 {
 			m.publishLocalObservation(endpointURL, publishBlock)
+		}
+		if reportPollResult && m.onPollResult != nil {
+			m.onPollResult(endpointURL, tipBlock, failureStreak)
 		}
 	}()
 
@@ -151,6 +158,7 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 	}
 
 	m.observations[endpointURL] = o
+	reportPollResult, failureStreak = true, o.ConsecutivePollFailures
 }
 
 // RecordRelayObservation records a block harvested from a served relay response. It
