@@ -4657,6 +4657,11 @@ func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 				utils.LogAttr("chainKey", chainKey),
 			)
 			server.endpointChainTrackerManager.RemoveTracker(trackedURL)
+			// The url's last head would otherwise hold its provider's
+			// rpc_endpoint_latest_block down for good (MAG-4204).
+			if server.smartRouterEndpointMetrics != nil && server.listenEndpoint != nil {
+				server.smartRouterEndpointMetrics.ForgetEndpointLatestBlock(server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, trackedURL)
+			}
 			removedCount++
 		}
 	}
