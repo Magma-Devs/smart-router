@@ -36,8 +36,14 @@ type StreamProxyCallBack = func(ctx context.Context, method string, reqBody []by
 type StreamResponse struct {
 	// Replies carries already-encoded response messages, each one a marshalled
 	// instance of the method's output type. The producer closes the channel when
-	// the upstream stream ends; the proxy then closes the client stream with OK.
+	// the upstream stream ends; the proxy then closes the client stream with OK,
+	// or with the status Err reports.
 	Replies <-chan []byte
+
+	// Err, when set, is called once after Replies has closed. A non-nil error ends
+	// the client stream with that status instead of OK: the router gave the stream
+	// up rather than seeing it end, and the client should not take it for a normal end.
+	Err func() error
 
 	// Metadata is sent as response headers ahead of the first message. This is
 	// where the router-assigned subscription id belongs: a gRPC stream has no room
@@ -188,7 +194,8 @@ func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) g
 // upstream stream and fan it out to per-client channels, but nothing on the serving
 // side kept a client connection alive to read one (MAG-2643).
 //
-// Returns nil on upstream end-of-stream, which closes the client stream with OK.
+// Returns nil on upstream end-of-stream, which closes the client stream with OK, unless
+// response.Err reports why the stream was given up instead.
 func serveServerStream(stream grpc.ServerStream, response *StreamResponse) error {
 	// Runs on every exit path, so a client that disconnects mid-stream is dropped
 	// from the upstream subscription rather than leaving it running unread.
@@ -211,6 +218,9 @@ func serveServerStream(stream grpc.ServerStream, response *StreamResponse) error
 			return status.FromContextError(ctx.Err()).Err()
 		case msg, open := <-response.Replies:
 			if !open {
+				if response.Err != nil {
+					return response.Err()
+				}
 				return nil
 			}
 			if err := stream.SendMsg(msg); err != nil {
