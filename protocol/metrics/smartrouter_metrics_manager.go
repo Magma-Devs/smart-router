@@ -942,9 +942,10 @@ func (m *SmartRouterMetricsManager) SetEndpointOverallHealthBreakdown(spec, apiI
 //
 // A url counts once it has reported a positive block, so a tracker that never started
 // does not hold the series at zero. ForgetEndpointLatestBlock drops a url whose
-// tracker is removed or whose latest-block fetch failed, and the url rejoins at its
-// next head. A url that keeps answering with the same block keeps counting, which is
-// what a stuck url looks like.
+// tracker is removed or whose latest-block polls keep failing, and the url rejoins at
+// its next answer. The server reports every answered poll here, not only a new head,
+// so a url that keeps answering with the same block keeps counting, which is what a
+// stuck url looks like.
 //
 // endpointID is normally a registered url. An unregistered value (a provider name, or
 // a url that never reached RegisterEndpoint) is its own single-url provider, as before.
@@ -996,9 +997,10 @@ func (m *SmartRouterMetricsManager) recordURLLatestBlockLocked(key providerSerie
 // reports a head again. Two callers:
 //   - a removed tracker: the url's last head would otherwise hold the series down for
 //     good, and the stuck-provider alert would fire for a url the router no longer uses;
-//   - a failed latest-block fetch: a url that is down is not a url serving a stale
-//     block, and holding its last head would page "stuck and still serving customers"
-//     while the provider's other urls serve fresh answers.
+//   - latest-block polls that keep failing (several in a row; one blip is not enough):
+//     a url that is down is not a url serving a stale block, and holding its last head
+//     would page "stuck and still serving customers" while the provider's other urls
+//     serve fresh answers.
 //
 // The series keeps its value when no url is left, so a provider with one url reads as
 // it always did: a dead url freezes it.
