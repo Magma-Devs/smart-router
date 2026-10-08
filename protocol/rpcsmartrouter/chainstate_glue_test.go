@@ -247,7 +247,7 @@ func TestRecomputeChainStateConsensus_PopulatedSnapshotSetsBaseline(t *testing.T
 	// Two endpoints report the same tip via relay harvest → a strict majority.
 	for _, url := range []string{"http://a:8545", "http://b:8545"} {
 		ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-		_, err := m.GetOrCreateTracker(ep, nil)
+		_, err := m.GetOrCreateTracker("", ep, nil)
 		require.NoError(t, err)
 		gen, ok := m.ObservationGeneration(url)
 		require.True(t, ok)
@@ -284,7 +284,7 @@ func TestSiteB_ObservationFresherThanTrackerAtomic(t *testing.T) {
 
 	url := "http://ep:8545"
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-	_, err := m.GetOrCreateTracker(ep, nil) // tracker exists, but its poll atomic stays 0 (nil conn)
+	_, err := m.GetOrCreateTracker("", ep, nil) // tracker exists, but its poll atomic stays 0 (nil conn)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
@@ -400,7 +400,7 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 
 	url := "http://ep:8545"
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-	_, err := m.GetOrCreateTracker(ep, nil)
+	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
@@ -561,7 +561,7 @@ func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
 	cm := &mockChainMessage{api: &spectypes.Api{Name: "eth_blockNumber"}, requestedBlock: spectypes.LATEST_BLOCK}
 	for _, url := range []string{leaderURL, laggardURL} {
 		ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-		_, err := m.GetOrCreateTracker(ep, nil)
+		_, err := m.GetOrCreateTracker("", ep, nil)
 		require.NoError(t, err)
 		gen, ok := m.ObservationGeneration(url)
 		require.True(t, ok)

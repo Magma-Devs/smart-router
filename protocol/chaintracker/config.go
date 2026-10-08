@@ -2,6 +2,8 @@ package chaintracker
 
 import (
 	"time"
+
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 )
 
 const (
@@ -74,6 +76,18 @@ type ChainTrackerConfig struct {
 	// forever — and every pod keeps proving its OWN path to the upstream. 0 selects
 	// DefaultMaxRelaySkipsBeforePoll. Only meaningful when RelayTipFresh is set.
 	MaxRelaySkipsBeforePoll int
+
+	// RateLimitHoldoff is the registry a rate-limited fetch records into and the first fetch
+	// consults before each attempt (docs/RATE-LIMIT-HOLDOFF.md). nil selects the process-wide
+	// holdoff.Shared; tests inject their own. RateLimitProvider and RateLimitURL are the
+	// registry keys: the provider name the relay path records under, and the node URL. Sharing
+	// the relay path's keys is what lets a 429 the tracker meets and a 429 a relay meets land on
+	// one entry, and two held-off URLs of one provider escalate to the provider as designed. An
+	// empty provider falls back to the URL (no escalation); an empty URL falls back to the
+	// fetcher's endpoint URL (MAG-4165).
+	RateLimitHoldoff  *holdoff.Registry
+	RateLimitProvider string
+	RateLimitURL      string
 }
 
 func (cnf *ChainTrackerConfig) validate() error {

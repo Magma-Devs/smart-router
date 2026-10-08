@@ -144,7 +144,7 @@ func TestTrackerRequestCounter_ByKind_EndToEnd(t *testing.T) {
 		defer m.Stop()
 
 		url := "http://eth-ep:8545"
-		_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, &mockDirectRPCConnection{url: url})
+		_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, &mockDirectRPCConnection{url: url})
 		require.NoError(t, err)
 
 		// Let the poll loop run a few cycles at the 50ms flat cadence (avgBlockTime/2).

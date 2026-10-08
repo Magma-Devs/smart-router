@@ -23,7 +23,10 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   failure — is no longer refusing us for load: the URL's strikes and the provider
   escalation are dropped, and later failures reach their normal handling at the normal
   cadence. Strike memory becomes eligible for reclamation after 1h of quiet and is
-  reclaimed lazily on the next recorded 429 anywhere in the registry.
+  reclaimed lazily on the next recorded 429 anywhere in the registry. The one consumer
+  that does not clear on every answer is the chain tracker: a poll clears only a hold-off
+  the tracker's own 429 set, because a poll that fits under a vendor's cap does not prove
+  relay traffic will (see its row in the consumer map).
 - **Internal only.** The registry and the Retry-After values drive internal retry and
   scheduling decisions. Nothing here is surfaced to the customer.
 - **A rate limit is safe to retry once the attempt has completed.** The upstream refused
@@ -36,6 +39,12 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
 - **A fully capped chain answers 503.** When every attempt was refused for rate, the
   client gets 503 Service Unavailable — temporarily unservable, not broken — with no
   Retry-After (that stays internal). Any other failure mix keeps its usual shape.
+- **What counts as a 429.** An HTTP 429 status on any transport, a WebSocket upgrade the
+  upstream rejected with 429, a gRPC status whose text names a rate limit (or
+  RESOURCE_EXHAUSTED with a retry delay), and a JSON-RPC error body with code 429 or a
+  "too many requests" / "rate limit" message — the shape a gateway answers with on an open
+  WebSocket connection or inside a 200, where no status reaches the transport layer
+  (`common/error_classifier.go`, JSON-RPC table).
 
 ## Query APIs
 
@@ -57,7 +66,7 @@ off" means on its path. This table is the catalog; add a row when wiring a new c
 | Spec re-verification (`spec_reverifier.go`) | Skip the probe, return the rate-limit error so reconciliation stays inconclusive — membership unchanged, streak untouched — without spending a request | 429 from `Validate` | live |
 | Hot relay path (endpoint selection) | A rate-limited relay releases its session with no QoS sample in either direction, and selection prefers providers that are not held off; when every candidate is held off, the soonest-to-expire one stays in — the customer is never answered with a synthesized 429 | 429 relay results, both shapes (typed HTTP error, 2xx-body/gRPC classification) | live |
 | Recovery probe (`recovery_probe.go`) | Skip the replay while held off (verdict stays inconclusive), instead of burning replay-attempt budget on a vendor that said stop | 429 probe responses (Retry-After floor honoured) | live |
-| Chain tracker / endpoint poller | The poll backoff takes the upstream's Retry-After as a floor instead of guessing with the fail-count doubling | 429 poll responses | live |
+| Chain tracker / endpoint poller (`chaintracker/chain_tracker.go`) | The first fetch waits out an existing hold-off before each attempt, and a rate-limited attempt ends the init burst instead of retrying into the limit; the dedicated poll is floored with the applied hold-off (Retry-After when sent, else the strike schedule) and with whatever the registry holds for the endpoint — a relay's or a probe's hold-off, or the provider escalation. Clears the entry only after its own 429 was answered: a poll that fits under a vendor's cap does not prove relay traffic will | The typed 429 from the head or block-hash fetch — an HTTP 429, a refused ws handshake, or a JSON-RPC error body with code 429 / "too many requests", which `chainlib.ChainFetcher` types for the body form (MAG-4165) | live |
 | WS subscriptions (`direct_ws_subscription_manager.go`) | A rate-limited connect/subscribe is held off instead of scored (no availability sample), selection skips held endpoints while something ready remains, and the pool's reconnect ladder is floored by the dial's Retry-After. Keyed per WS URL — no provider name exists on this path, so vendor-tier escalation does not apply | 429 handshakes and subscribe failures | live |
 | WS / gRPC transports | Recognition first: a 429 on the WS upgrade or a corroborated gRPC rate limit produces the typed sentinel these consumers key on | handshake / metadata 429s | live |
 | gRPC streaming subscriptions (`direct_grpc_subscription_manager.go`) | Selection skips held-off endpoints while something ready remains; the full tier stays when nothing is. A stream the upstream ends for rate holds its endpoint off, so the client's resubscribe goes elsewhere; a stream's first message clears it. Keyed per URL, as on the WS path | Corroborated rate limits that end a stream (`common.RateLimitFromGRPC`, retry delay read from the stream's trailer) | live |

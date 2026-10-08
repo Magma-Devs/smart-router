@@ -745,6 +745,13 @@ func (cf *ChainFetcher) FetchLatestBlockNumForCollection(ctx context.Context, ad
 			{Key: "error", Value: err},
 		}...)
 	}
+	if rateLimited := cf.rateLimitedReplyError(parserInput); rateLimited != nil {
+		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited, []utils.Attribute{
+			{Key: "chainId", Value: chainId},
+			{Key: "nodeUrl", Value: proxyUrl.Url},
+			{Key: "Method", Value: parsing.ApiName},
+		}...)
+	}
 	parsedInput := parser.ParseBlockFromReply(parserInput, parsing.ResultParsing, parsing.Parsers)
 	blockNum := parsedInput.GetBlock()
 	if blockNum == spectypes.NOT_APPLICABLE {
@@ -847,6 +854,13 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 		}...)
 	}
 
+	if rateLimited := cf.rateLimitedReplyError(parserInput); rateLimited != nil {
+		return "", responseData, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited, []utils.Attribute{
+			{Key: "chainId", Value: chainId},
+			{Key: "nodeUrl", Value: proxyUrl.Url},
+			{Key: "Method", Value: parsing.ApiName},
+		}...)
+	}
 	res, err := parser.ParseBlockHashFromReplyAndDecode(parserInput, parsing.ResultParsing, parsing.Parsers)
 	if err != nil {
 		return "", responseData, utils.LavaFormatDebug(tagName+" Failed ParseMessageResponse", []utils.Attribute{
@@ -883,6 +897,27 @@ func NewChainFetcher(ctx context.Context, options *ChainFetcherOptions) *ChainFe
 		endpoint:    options.Endpoint,
 		cache:       options.Cache,
 	}
+}
+
+// rateLimitedReplyError reads a reply whose JSON-RPC error body is the upstream refusing the
+// request for rate — a 429 a gateway mirrors into the body of a 200, or into a reply on an open
+// WebSocket connection, where no HTTP status reaches the transport layer and nothing types the
+// error on the way up. It returns the typed rate-limit error (no Retry-After: a body carries
+// none) so the ChainTracker's hold-off and every errors.Is(err, common.StatusCodeError429)
+// consumer read it as they read an HTTP 429, and nil for a reply with no error or with any other
+// error. "Rate-limited" here is the registry's retryable-and-rate-limited verdict: the upstream is
+// healthy but busy. A non-retryable limit (NODE_LIMIT_EXCEEDED, a request shape the node refuses)
+// is not a reason to hold the endpoint off (MAG-4165).
+func (cf *ChainFetcher) rateLimitedReplyError(input parser.RPCInput) error {
+	jsonErr := input.GetError()
+	if jsonErr == nil {
+		return nil
+	}
+	classified := common.ClassifyError(nil, common.GetChainFamilyOrDefault(cf.endpoint.ChainID), common.TransportJsonRPC, jsonErr.Code, jsonErr.Message)
+	if classified == nil || !classified.Retryable || !classified.SubCategory.IsRateLimit() {
+		return nil
+	}
+	return common.RateLimited(fmt.Errorf("json-rpc error %d: %s", jsonErr.Code, jsonErr.Message), 0)
 }
 
 func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage ChainMessageForSend) (parsable parser.RPCInput, err error) {
