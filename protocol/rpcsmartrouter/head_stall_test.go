@@ -208,6 +208,52 @@ func TestHeadStall_DuplicatePointerCountedOnce(t *testing.T) {
 	require.False(t, stalled(t, both))
 }
 
+// The chart writes an `archive` node-url twice (archive entry + plain entry): two *Endpoints, one
+// url, one node. Never-empty counts urls, so a single-node archive router keeps BOTH entries; counting
+// endpoints took the archive entry out and left archive/trace requests with nowhere to go.
+func TestHeadStall_ArchiveURLListedTwiceIsOneNode(t *testing.T) {
+	h := newStallHarness()
+	archive := ep("https://node", "solo", true)
+	plain := ep("https://node", "solo", true)
+	h.obs["https://node"] = stuckAt(1000, stallN)
+
+	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow, archive, plain))
+	require.False(t, stalled(t, archive), "the archive entry of the only node must stay in rotation")
+	require.False(t, stalled(t, plain))
+	require.Equal(t, headStallResult{}, h.step(t, stallNow.Add(5*time.Second), archive, plain), "kept is logged once per episode")
+}
+
+// With a second node, the stuck url goes out whole — both of its entries — and comes back whole.
+func TestHeadStall_ArchiveURLListedTwiceGoesOutAndBackTogether(t *testing.T) {
+	h := newStallHarness()
+	stuckArchive := ep("https://a", "vendor", true)
+	stuckPlain := ep("https://a", "vendor", true)
+	freshArchive := ep("https://b", "vendor", true)
+	freshPlain := ep("https://b", "vendor", true)
+	h.obs["https://a"] = stuckAt(1000, stallN)
+	h.obs["https://b"] = stuckAt(5000, 0)
+	all := []*lavasession.EndpointWithDirectConnection{stuckArchive, stuckPlain, freshArchive, freshPlain}
+
+	require.Equal(t, headStallResult{added: 1}, h.step(t, stallNow, all...))
+	require.True(t, stalled(t, stuckArchive))
+	require.True(t, stalled(t, stuckPlain))
+	require.False(t, stalled(t, freshArchive))
+	require.False(t, stalled(t, freshPlain))
+
+	// Both urls frozen: the second is the last usable url, so both of its entries are kept.
+	h.obs["https://b"] = stuckAt(5000, stallN)
+	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow.Add(5*time.Second), all...))
+	require.False(t, stalled(t, freshArchive), "the archive entry of the last usable url must stay")
+	require.False(t, stalled(t, freshPlain))
+
+	h.obs["https://a"] = stuckAt(1001, 0)
+	require.Equal(t, headStallResult{removed: 1, added: 1}, h.step(t, stallNow.Add(10*time.Second), all...))
+	require.False(t, stalled(t, stuckArchive))
+	require.False(t, stalled(t, stuckPlain))
+	require.True(t, stalled(t, freshArchive), "once a moves again, the frozen b goes out whole")
+	require.True(t, stalled(t, freshPlain))
+}
+
 // When a stalled url comes back, the provider's gauge returns to 1 only if every one of its urls is
 // usable: here a sibling url is still disabled for node errors, so the gauge stays at 0.
 func TestHeadStall_GaugeStaysDownWhileASiblingIsOut(t *testing.T) {

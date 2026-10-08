@@ -135,6 +135,44 @@ func runHeadStallStep(
 		}
 	}
 
+	// The decision is per url, not per endpoint. The chart writes an `archive` node-url twice (once
+	// with the extension, once without), so one url can back several endpoints. They share one
+	// observation, and they are one node: counting them apart let never-empty take out the archive
+	// entry of a single-node router and keep only the plain one, leaving archive/trace requests with
+	// nothing to go to (MAG-4025 shape).
+	type urlGroup struct {
+		url string
+		eps []*lavasession.EndpointWithDirectConnection
+	}
+	var groups []*urlGroup
+	groupOf := make(map[string]*urlGroup)
+	for _, ep := range unique {
+		g := groupOf[ep.Endpoint.NetworkAddress]
+		if g == nil {
+			g = &urlGroup{url: ep.Endpoint.NetworkAddress}
+			groupOf[g.url] = g
+			groups = append(groups, g)
+		}
+		g.eps = append(g.eps, ep)
+	}
+	groupUsable := func(g *urlGroup) bool {
+		for _, ep := range g.eps {
+			if ep.Endpoint.IsUsable() {
+				return true
+			}
+		}
+		return false
+	}
+	countUsableURLs := func() int {
+		n := 0
+		for _, g := range groups {
+			if groupUsable(g) {
+				n++
+			}
+		}
+		return n
+	}
+
 	// providerAllUsable: every url of the provider can be routed to — the only state in which this
 	// step sets the provider's gauge back to 1.
 	providerAllUsable := func(provider string) bool {
@@ -146,21 +184,35 @@ func runHeadStallStep(
 		return true
 	}
 
-	// release takes head-stalled off and, if that makes the endpoint usable, returns its provider to
-	// the valid list (H1) and its gauge to 1 when every url of the provider is usable (D24).
-	release := func(ep *lavasession.EndpointWithDirectConnection, rec lavasession.StateReasonRecord, why string) {
-		if !ep.Endpoint.RemoveStateReason(lavasession.EndpointDisableHeadStalled) {
-			return
+	// release takes head-stalled off every endpoint of the url and, for each that becomes usable,
+	// returns its provider to the valid list (H1) and its gauge to 1 when every url of the provider
+	// is usable (D24). It reports whether anything was released.
+	release := func(g *urlGroup, why string) bool {
+		var released []*lavasession.EndpointWithDirectConnection
+		var rec lavasession.StateReasonRecord
+		for _, ep := range g.eps {
+			if r, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled); held && ep.Endpoint.RemoveStateReason(lavasession.EndpointDisableHeadStalled) {
+				rec = r
+				released = append(released, ep)
+				state.clearKept(ep.Endpoint)
+			}
 		}
-		state.clearKept(ep.Endpoint)
+		if len(released) == 0 {
+			return false
+		}
+		first := released[0]
 		utils.LavaFormatInfo("head-stalled "+why, append([]utils.Attribute{
-			utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
-			utils.LogAttr("provider", ep.ProviderAddress),
-			utils.LogAttr("backup", ep.Backup),
+			utils.LogAttr("endpoint", g.url),
+			utils.LogAttr("provider", first.ProviderAddress),
+			utils.LogAttr("backup", first.Backup),
+			utils.LogAttr("entries", len(released)),
 			utils.LogAttr("stuck_block", rec.Block),
 			utils.LogAttr("stuck_for", now.Sub(rec.Since).String()),
 		}, logAttrs...)...)
-		if ep.Endpoint.IsUsable() {
+		for _, ep := range released {
+			if !ep.Endpoint.IsUsable() {
+				continue
+			}
 			if onRecover != nil {
 				onRecover(ep.ProviderAddress)
 			}
@@ -168,58 +220,90 @@ func runHeadStallStep(
 				setProviderHealth(ep.ProviderAddress, true)
 			}
 		}
+		return true
 	}
 
-	// 1. Remove: the endpoint answered above the block it was stuck on.
-	for _, ep := range unique {
-		rec, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled)
+	// stuckRecord returns the head-stalled record of the url, if any of its endpoints holds one.
+	stuckRecord := func(g *urlGroup) (lavasession.StateReasonRecord, bool) {
+		for _, ep := range g.eps {
+			if rec, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled); held {
+				return rec, true
+			}
+		}
+		return lavasession.StateReasonRecord{}, false
+	}
+
+	// 1. Remove: the url answered above the block it was stuck on.
+	for _, g := range groups {
+		rec, held := stuckRecord(g)
 		if !held {
 			continue
 		}
-		if obs, _ := getObservation(ep.Endpoint.NetworkAddress); obs.LastAnsweredBlock > rec.Block {
-			release(ep, rec, "removed")
+		if obs, _ := getObservation(g.url); obs.LastAnsweredBlock > rec.Block && release(g, "removed") {
 			res.removed++
 		}
 	}
 
-	usable := countUsable(unique)
+	usable := countUsableURLs()
 
-	// 2. Add: N same-block cycles in a row, unless it is the last usable endpoint.
-	for _, ep := range unique {
-		if _, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled); held {
+	// 2. Add: N same-block cycles in a row, unless it is the last usable url. Every endpoint of the
+	// url goes out together, or none does.
+	for _, g := range groups {
+		var pending []*lavasession.EndpointWithDirectConnection
+		for _, ep := range g.eps {
+			if _, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled); !held {
+				pending = append(pending, ep)
+			}
+		}
+		if len(pending) == 0 {
 			continue
 		}
-		obs, _ := getObservation(ep.Endpoint.NetworkAddress)
+		obs, _ := getObservation(g.url)
 		if obs.SameBlockCycles < n || obs.LastAnsweredBlock <= 0 {
-			state.clearKept(ep.Endpoint)
+			for _, ep := range pending {
+				state.clearKept(ep.Endpoint)
+			}
 			continue
 		}
-		wasUsable := ep.Endpoint.IsUsable()
+		wasUsable := groupUsable(g)
 		if wasUsable && usable <= 1 {
-			if state.markKept(ep.Endpoint) {
+			firstKept := false
+			for _, ep := range pending {
+				if state.markKept(ep.Endpoint) {
+					firstKept = true
+				}
+			}
+			if firstKept {
 				res.kept++
 				utils.LavaFormatInfo("head-stalled kept by never-empty", append([]utils.Attribute{
-					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
-					utils.LogAttr("provider", ep.ProviderAddress),
-					utils.LogAttr("backup", ep.Backup),
+					utils.LogAttr("endpoint", g.url),
+					utils.LogAttr("provider", pending[0].ProviderAddress),
+					utils.LogAttr("backup", pending[0].Backup),
 					utils.LogAttr("block", obs.LastAnsweredBlock),
 					utils.LogAttr("same_block_cycles", obs.SameBlockCycles),
 				}, logAttrs...)...)
 			}
 			continue
 		}
-		if !ep.Endpoint.AddStateReason(lavasession.EndpointDisableHeadStalled, now, obs.LastAnsweredBlock) {
+		added := false
+		for _, ep := range pending {
+			if ep.Endpoint.AddStateReason(lavasession.EndpointDisableHeadStalled, now, obs.LastAnsweredBlock) {
+				added = true
+				state.clearKept(ep.Endpoint)
+			}
+		}
+		if !added {
 			continue
 		}
-		state.clearKept(ep.Endpoint)
 		if wasUsable {
 			usable--
 		}
 		res.added++
 		utils.LavaFormatInfo("head-stalled added", append([]utils.Attribute{
-			utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
-			utils.LogAttr("provider", ep.ProviderAddress),
-			utils.LogAttr("backup", ep.Backup),
+			utils.LogAttr("endpoint", g.url),
+			utils.LogAttr("provider", pending[0].ProviderAddress),
+			utils.LogAttr("backup", pending[0].Backup),
+			utils.LogAttr("entries", len(pending)),
 			utils.LogAttr("block", obs.LastAnsweredBlock),
 			utils.LogAttr("same_block_cycles", obs.SameBlockCycles),
 			utils.LogAttr("threshold", n),
@@ -227,24 +311,35 @@ func runHeadStallStep(
 	}
 
 	// 3. Never-empty after the fact: something else (50 node errors on the backup) may have emptied
-	// the pool since this endpoint was taken out. Stale answers beat no answers: bring back the stuck
-	// endpoint on the highest block, the most recently stuck on a tie. Only one whose event slot is
-	// on can actually serve, so only those are candidates.
-	if countUsable(unique) == 0 {
-		var pick *lavasession.EndpointWithDirectConnection
+	// the pool since this url was taken out. Stale answers beat no answers: bring back the stuck url
+	// on the highest block, the most recently stuck on a tie. Only a url with an endpoint whose event
+	// slot is on can actually serve, so only those are candidates.
+	if countUsableURLs() == 0 {
+		var pick *urlGroup
 		var pickRec lavasession.StateReasonRecord
-		for _, ep := range unique {
-			rec, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled)
-			if !held || !ep.Endpoint.IsEnabled() {
+		for _, g := range groups {
+			rec, held := stuckRecord(g)
+			if !held {
+				continue
+			}
+			canServe := false
+			for _, ep := range g.eps {
+				if ep.Endpoint.IsEnabled() {
+					canServe = true
+					break
+				}
+			}
+			if !canServe {
 				continue
 			}
 			if pick == nil || rec.Block > pickRec.Block || (rec.Block == pickRec.Block && rec.Since.After(pickRec.Since)) {
-				pick, pickRec = ep, rec
+				pick, pickRec = g, rec
 			}
 		}
-		if pick != nil {
-			release(pick, pickRec, "released by never-empty")
-			state.markKept(pick.Endpoint) // it is still stuck: step 2 must keep it, not re-add it
+		if pick != nil && release(pick, "released by never-empty") {
+			for _, ep := range pick.eps {
+				state.markKept(ep.Endpoint) // it is still stuck: step 2 must keep it, not re-add it
+			}
 			res.released++
 		}
 	}
@@ -265,17 +360,6 @@ func runHeadStallStep(
 		}
 	}
 	return res
-}
-
-// countUsable counts the endpoints selection may route to right now.
-func countUsable(endpoints []*lavasession.EndpointWithDirectConnection) int {
-	n := 0
-	for _, ep := range endpoints {
-		if ep.Endpoint.IsUsable() {
-			n++
-		}
-	}
-	return n
 }
 
 // runHeadStall wires runHeadStallStep to this server's live dependencies.
