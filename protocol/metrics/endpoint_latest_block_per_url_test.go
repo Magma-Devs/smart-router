@@ -131,20 +131,20 @@ func TestEndpointLatestBlock_ForgetReleasesTheSeries(t *testing.T) {
 	nilManager.SetProviderURLLatestBlock("TON", "rest", "chainstack", tonV2URL, 1)
 }
 
-// A url that is down (its latest-block fetch fails, so the server forgets it) does not
-// hold the provider at its last head: the provider's other url is serving fresh
-// answers. It rejoins at its next head, and a provider with one url still freezes.
-func TestEndpointLatestBlock_DownURLDoesNotReadAsStuck(t *testing.T) {
+// A url forgotten because its tracker was removed (cleanupStaleTrackers) leaves the
+// provider's lowest head, and rejoins at its next head if the router tracks it again. A
+// url whose polls merely fail is never forgotten: it keeps its last head, as on main.
+func TestEndpointLatestBlock_ForgottenURLRejoinsAtItsNextHead(t *testing.T) {
 	m := newTONProvider(t)
 	m.SetEndpointLatestBlock("TON", "rest", tonV2URL, 1000)
 	m.SetEndpointLatestBlock("TON", "rest", tonV3URL, 1000)
 
-	m.ForgetEndpointLatestBlock("TON", "rest", tonV2URL) // fetch failed
+	m.ForgetEndpointLatestBlock("TON", "rest", tonV2URL) // its tracker was removed
 	for _, v3 := range []int64{1001, 1002, 1003} {
 		m.SetEndpointLatestBlock("TON", "rest", tonV3URL, v3)
 		require.Equal(t, float64(v3), providerLatestBlock(t, m, "TON", "chainstack"))
 	}
-	m.SetEndpointLatestBlock("TON", "rest", tonV2URL, 1002) // back, a block behind
+	m.SetEndpointLatestBlock("TON", "rest", tonV2URL, 1002) // tracked again, a block behind
 	require.Equal(t, float64(1002), providerLatestBlock(t, m, "TON", "chainstack"))
 
 	solo := newSmartRouterForURLFanoutTest()
@@ -153,7 +153,7 @@ func TestEndpointLatestBlock_DownURLDoesNotReadAsStuck(t *testing.T) {
 	solo.SetEndpointLatestBlock("ETH1", "rest", url, 500)
 	solo.ForgetEndpointLatestBlock("ETH1", "rest", url)
 	require.Equal(t, float64(500), providerLatestBlock(t, solo, "ETH1", "solo"),
-		"a single-url provider whose url is down freezes, as it always did")
+		"a provider whose last url is forgotten keeps its value")
 }
 
 // One url serving two chain servers: each chain's heads are compared only with that
