@@ -30,7 +30,7 @@ require (
 	github.com/jhump/protoreflect v1.18.1
 	github.com/redis/go-redis/v9 v9.22.0
 	github.com/spf13/pflag v1.0.10
-	github.com/tidwall/gjson v1.19.0
+	github.com/tidwall/gjson v1.20.0
 	github.com/tidwall/sjson v1.2.5
 	github.com/vektah/gqlparser/v2 v2.5.58
 	go.opentelemetry.io/contrib/exporters/autoexport v0.71.0
