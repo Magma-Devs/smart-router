@@ -63,12 +63,15 @@ type EndpointObservation struct {
 	// from THIS pod's own polls and relays only — never a peer pod's:
 	//   - LastAnsweredBlock is the block the endpoint answered with most recently.
 	//   - HighestBlockSeen is the highest block it has ever answered with.
-	//   - SameBlockCycles counts consecutive tracker cycles in which the endpoint answered with
-	//     the same block as its previous answer: a successful poll, or a cycle the traffic gate
-	//     skipped because a fresh relay answer already carried that block. Any change of block
-	//     resets it to 0 — up (it moved) or down (a load balancer failing over to another
-	//     backend, which then freezes there). A failed poll, a peer-gate skip or an idle skip
-	//     leave it unchanged.
+	//   - SameBlockCycles counts consecutive tracker cycles in which the endpoint answered without
+	//     going above HighestBlockSeen: a successful poll, or a cycle the traffic gate skipped
+	//     because a fresh relay answer already covered it. Only a NEW highest block resets it to 0.
+	//     A lower answer counts like a repeat: a load balancer failing over to a backend frozen
+	//     below what the url already reported is not moving either. Comparing against the previous
+	//     answer instead would reset on every alternation between two frozen values — which is
+	//     what a frozen Solana node does, because relays report context.slot at the client's
+	//     commitment (confirmed/processed) while the poll reports the finalized slot. A failed
+	//     poll, a peer-gate skip or an idle skip leave it unchanged.
 	LastAnsweredBlock int64
 	// It counts evidence, not time, so a router that stops polling (idle mode) never judges a
 	// URL on the silence. The probe loop reads it and decides head-stalled.
@@ -84,17 +87,15 @@ type EndpointObservation struct {
 // it) rather than advancing or re-adopting it.
 type TipObservationFunc func(endpointURL string, block int64, repeat bool)
 
-// noteAnsweredBlockLocked folds one answered block into the stall evidence. A block different
-// from the previous answer resets the same-block counter; the same block adds one cycle only when
+// noteAnsweredBlockLocked folds one answered block into the stall evidence. A block above the
+// highest one seen resets the same-block counter; any other block adds one cycle only when
 // countRepeat is set (a poll is one tracker cycle; a relay is not — relay-covered cycles are
 // counted once per cycle by countRelayCoveredCycle). The first answer only records the block:
 // nothing is counted before an endpoint has answered once.
 func (o *EndpointObservation) noteAnsweredBlockLocked(block int64, countRepeat bool) {
+	o.LastAnsweredBlock = block
 	if block > o.HighestBlockSeen {
 		o.HighestBlockSeen = block
-	}
-	if block != o.LastAnsweredBlock {
-		o.LastAnsweredBlock = block
 		o.SameBlockCycles = 0
 		return
 	}
@@ -178,8 +179,8 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		o.LastPollLatency = latency
 		o.LastPollError = ""
 		o.ConsecutivePollFailures = 0
-		// Stall evidence: the same block as the previous answer is one more cycle answered
-		// without moving; any other block resets the count.
+		// Stall evidence: an answer that does not go above the highest block seen is one more
+		// cycle without moving; a new highest block resets the count.
 		o.noteAnsweredBlockLocked(block, true)
 		repeat := m.tipRepeats(endpointURL, block)
 		// The block triple lives in the single-source-of-truth endpointtip store, not on
@@ -270,9 +271,9 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 	// endpoint in the per-chain consensus. The block triple itself lives in the endpointtip
 	// store; the map entry carries only poll-health, which a relay never touches.
 	o := m.observations[endpointURL] // zero value if absent
-	// Stall evidence: a relay with a different block resets the counter. A relay repeating the
-	// block is counted once per tracker cycle by the traffic gate (countRelayCoveredCycle), not
-	// per relay, so a busy endpoint's request rate never inflates it.
+	// Stall evidence: a relay with a new highest block resets the counter. Any other relay is
+	// counted once per tracker cycle by the traffic gate (countRelayCoveredCycle), not per relay,
+	// so a busy endpoint's request rate never inflates it.
 	o.noteAnsweredBlockLocked(block, false)
 	m.observations[endpointURL] = o
 	repeat := m.tipRepeats(endpointURL, block)
@@ -373,7 +374,7 @@ func (m *EndpointMonitor) freshRelayTip(endpointURL string, now time.Time) (endp
 
 // countRelayCoveredCycle records stall evidence for a tracker cycle the traffic gate skipped
 // because a fresh relay answer from THIS pod already covered it (MAG-3986). It counts the cycle
-// only when the relay carried the endpoint's last answered block and is a NEWER answer than the
+// only when the relay did not go above the endpoint's highest block and is a NEWER answer than the
 // last one counted — one relay answer that spans two poll cycles is one piece of evidence, not two.
 func (m *EndpointMonitor) countRelayCoveredCycle(endpointURL string, gen uint64, tip endpointtip.Tip) {
 	m.obsMu.Lock()
@@ -385,7 +386,7 @@ func (m *EndpointMonitor) countRelayCoveredCycle(endpointURL string, gen uint64,
 		return
 	}
 	o, exists := m.observations[endpointURL]
-	if !exists || o.LastAnsweredBlock <= 0 || tip.Block != o.LastAnsweredBlock || !tip.ObservedAt.After(o.lastCountedRelayAt) {
+	if !exists || o.HighestBlockSeen <= 0 || tip.Block > o.HighestBlockSeen || !tip.ObservedAt.After(o.lastCountedRelayAt) {
 		return
 	}
 	o.SameBlockCycles++

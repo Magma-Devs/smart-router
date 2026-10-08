@@ -23,8 +23,9 @@ import (
 // tip alive in the Plasma incident.
 //
 // Rules, from agent_docs/bug-reports/stuck-provider-not-detected/plan.md:
-//   - add at the first cycle that sees SameBlockCycles >= N (D11), N = StallCycleThreshold (D20);
-//   - remove only when the endpoint answers ABOVE the block it was stuck on (D9, H2) — never because
+//   - add at the first cycle that sees SameBlockCycles >= N (D11), N = StallCycleThreshold (D20), and
+//     only while another url of the chain has shown a higher block — a quiet chain marks nothing;
+//   - remove only when the endpoint's highest block goes ABOVE the one it was stuck on (D9, H2) — never because
 //     the counter restarted, which also happens when a tracker is recreated;
 //   - never take out the last usable endpoint of this chain and interface, across both tiers (D13);
 //     re-checked every cycle, releasing the stuck endpoint on the highest block when nothing else is
@@ -233,21 +234,36 @@ func runHeadStallStep(
 		return lavasession.StateReasonRecord{}, false
 	}
 
-	// 1. Remove: the url answered above the block it was stuck on.
+	// 1. Remove: the url answered above the block it was stuck on. Its highest block, not its last
+	// answer: a frozen Solana node alternates between its confirmed and finalized slot, and the
+	// higher of the two is what it was stuck on.
 	for _, g := range groups {
 		rec, held := stuckRecord(g)
 		if !held {
 			continue
 		}
-		if obs, _ := getObservation(g.url); obs.LastAnsweredBlock > rec.Block && release(g, "removed") {
+		if obs, _ := getObservation(g.url); obs.HighestBlockSeen > rec.Block && release(g, "removed") {
 			res.removed++
 		}
 	}
 
 	usable := countUsableURLs()
 
-	// 2. Add: N same-block cycles in a row, unless it is the last usable url. Every endpoint of the
-	// url goes out together, or none does.
+	// chainHigh is the highest block any url of this chain and interface has shown. A url is only
+	// stalled when another one has gone above it: if nothing is ahead, the chain itself is quiet
+	// (a testnet with no traffic, a halt), every url answers the same block, and none of them is
+	// at fault. Marking them would hold every provider's health gauge at 0, and the production
+	// EndpointHealthDegraded alert pages critical after 15 minutes of that.
+	// Every url counts as evidence the chain moved, including ws/wss urls that never serve a relay.
+	var chainHigh int64
+	for e := range seen {
+		if obs, _ := getObservation(e.NetworkAddress); obs.HighestBlockSeen > chainHigh {
+			chainHigh = obs.HighestBlockSeen
+		}
+	}
+
+	// 2. Add: N cycles in a row without moving while another url is ahead, unless it is the last
+	// usable url. Every endpoint of the url goes out together, or none does.
 	for _, g := range groups {
 		var pending []*lavasession.EndpointWithDirectConnection
 		for _, ep := range g.eps {
@@ -259,7 +275,7 @@ func runHeadStallStep(
 			continue
 		}
 		obs, _ := getObservation(g.url)
-		if obs.SameBlockCycles < n || obs.LastAnsweredBlock <= 0 {
+		if obs.SameBlockCycles < n || obs.HighestBlockSeen <= 0 || obs.HighestBlockSeen >= chainHigh {
 			for _, ep := range pending {
 				state.clearKept(ep.Endpoint)
 			}
@@ -279,7 +295,7 @@ func runHeadStallStep(
 					utils.LogAttr("endpoint", g.url),
 					utils.LogAttr("provider", pending[0].ProviderAddress),
 					utils.LogAttr("backup", pending[0].Backup),
-					utils.LogAttr("block", obs.LastAnsweredBlock),
+					utils.LogAttr("block", obs.HighestBlockSeen),
 					utils.LogAttr("same_block_cycles", obs.SameBlockCycles),
 				}, logAttrs...)...)
 			}
@@ -287,7 +303,7 @@ func runHeadStallStep(
 		}
 		added := false
 		for _, ep := range pending {
-			if ep.Endpoint.AddStateReason(lavasession.EndpointDisableHeadStalled, now, obs.LastAnsweredBlock) {
+			if ep.Endpoint.AddStateReason(lavasession.EndpointDisableHeadStalled, now, obs.HighestBlockSeen) {
 				added = true
 				state.clearKept(ep.Endpoint)
 			}
@@ -304,7 +320,8 @@ func runHeadStallStep(
 			utils.LogAttr("provider", pending[0].ProviderAddress),
 			utils.LogAttr("backup", pending[0].Backup),
 			utils.LogAttr("entries", len(pending)),
-			utils.LogAttr("block", obs.LastAnsweredBlock),
+			utils.LogAttr("block", obs.HighestBlockSeen),
+			utils.LogAttr("chain_high", chainHigh),
 			utils.LogAttr("same_block_cycles", obs.SameBlockCycles),
 			utils.LogAttr("threshold", n),
 		}, logAttrs...)...)

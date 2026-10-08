@@ -2,6 +2,10 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -113,26 +117,52 @@ func TestHeadStall_RemovedOnlyAboveStuckBlock(t *testing.T) {
 	require.False(t, h.state.isStalled("https://primary"))
 }
 
-// Never-empty counts usable endpoints across BOTH tiers (D13): with a single endpoint, or with every
-// other endpoint already out, the stuck one is kept and logged once, not every cycle.
+// Never-empty counts usable endpoints across BOTH tiers (D13): with every other endpoint already out,
+// the stuck one is kept and logged once, not every cycle. A single endpoint with nothing ahead of it
+// is not judged at all — see TestHeadStall_QuietChainMarksNothing.
 func TestHeadStall_NeverEmptyKeepsTheLastUsable(t *testing.T) {
 	h := newStallHarness()
 	only := ep("https://only", "solo", true)
 	h.obs["https://only"] = stuckAt(1000, stallN)
-
-	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow, only))
+	require.Equal(t, headStallResult{}, h.step(t, stallNow, only), "nothing is ahead, so there is no stall to keep")
 	require.False(t, stalled(t, only))
-	require.Equal(t, headStallResult{}, h.step(t, stallNow.Add(5*time.Second), only), "kept is logged once per episode")
 
-	// Primary stuck, and the backup already disabled for node errors: the primary is the last
-	// usable endpoint, so it stays.
+	// Primary stuck, and the backup — which shows the chain moved — already disabled for node errors:
+	// the primary is the last usable endpoint, so it stays.
 	h2 := newStallHarness()
 	primary := ep("https://primary", "p", true)
 	deadBackup := backupEp("https://backup", "b")
 	deadBackup.Endpoint.Enabled = false
 	h2.obs["https://primary"] = stuckAt(1000, stallN)
+	h2.obs["https://backup"] = stuckAt(5000, 0)
 	require.Equal(t, headStallResult{kept: 1}, h2.step(t, stallNow, primary, deadBackup))
 	require.False(t, stalled(t, primary))
+	require.Equal(t, headStallResult{}, h2.step(t, stallNow.Add(5*time.Second), primary, deadBackup), "kept is logged once per episode")
+}
+
+// A quiet chain (a testnet with no traffic, a halt) makes no block for N cycles, so every url answers
+// the same block. None of them is behind, so none is marked and no health gauge is touched: holding
+// them at 0 would page on-call through EndpointHealthDegraded (critical after 15 minutes).
+func TestHeadStall_QuietChainMarksNothing(t *testing.T) {
+	h := newStallHarness()
+	a := ep("https://a", "vendor-a", true)
+	b := ep("https://b", "vendor-b", true)
+	c := backupEp("https://c", "vendor-c")
+	for _, u := range []string{"https://a", "https://b", "https://c"} {
+		h.obs[u] = stuckAt(1000, stallN*3)
+	}
+	require.Equal(t, headStallResult{}, h.step(t, stallNow, a, b, c))
+	require.False(t, stalled(t, a))
+	require.False(t, stalled(t, b))
+	require.False(t, stalled(t, c))
+	require.Empty(t, h.health, "no gauge is written for a quiet chain")
+
+	// The chain moves again and only b follows: a and c are now behind and go out.
+	h.obs["https://b"] = stuckAt(1001, 0)
+	require.Equal(t, headStallResult{added: 2}, h.step(t, stallNow.Add(5*time.Second), a, b, c))
+	require.True(t, stalled(t, a))
+	require.False(t, stalled(t, b))
+	require.True(t, stalled(t, c))
 }
 
 // An endpoint already out for an event reason does not count as usable, so marking it stuck never
@@ -142,6 +172,7 @@ func TestHeadStall_EventDisabledEndpointCanAlsoStall(t *testing.T) {
 	primary := ep("https://primary", "p", false) // disabled for node-error
 	backup := backupEp("https://backup", "b")
 	h.obs["https://primary"] = stuckAt(1000, stallN)
+	h.obs["https://backup"] = stuckAt(5000, 0)
 	require.Equal(t, headStallResult{added: 1}, h.step(t, stallNow, primary, backup))
 
 	primary.Endpoint.ResetHealth() // the event reason clears (relay success / epoch)
@@ -203,8 +234,10 @@ func TestHeadStall_DuplicatePointerCountedOnce(t *testing.T) {
 	h := newStallHarness()
 	both := ep("https://both", "dual", true)
 	dupe := &lavasession.EndpointWithDirectConnection{Endpoint: both.Endpoint, ProviderAddress: "dual", Backup: true}
+	dead := ep("https://ahead", "other", false) // shows the chain moved, but cannot serve
 	h.obs["https://both"] = stuckAt(1000, stallN)
-	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow, both, dupe))
+	h.obs["https://ahead"] = stuckAt(5000, 0)
+	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow, both, dupe, dead))
 	require.False(t, stalled(t, both))
 }
 
@@ -215,12 +248,15 @@ func TestHeadStall_ArchiveURLListedTwiceIsOneNode(t *testing.T) {
 	h := newStallHarness()
 	archive := ep("https://node", "solo", true)
 	plain := ep("https://node", "solo", true)
+	dead := backupEp("https://backup", "backup") // shows the chain moved, but is disabled
+	dead.Endpoint.Enabled = false
 	h.obs["https://node"] = stuckAt(1000, stallN)
+	h.obs["https://backup"] = stuckAt(5000, 0)
 
-	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow, archive, plain))
-	require.False(t, stalled(t, archive), "the archive entry of the only node must stay in rotation")
+	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow, archive, plain, dead))
+	require.False(t, stalled(t, archive), "the archive entry of the only usable node must stay in rotation")
 	require.False(t, stalled(t, plain))
-	require.Equal(t, headStallResult{}, h.step(t, stallNow.Add(5*time.Second), archive, plain), "kept is logged once per episode")
+	require.Equal(t, headStallResult{}, h.step(t, stallNow.Add(5*time.Second), archive, plain, dead), "kept is logged once per episode")
 }
 
 // With a second node, the stuck url goes out whole — both of its entries — and comes back whole.
@@ -240,13 +276,13 @@ func TestHeadStall_ArchiveURLListedTwiceGoesOutAndBackTogether(t *testing.T) {
 	require.False(t, stalled(t, freshArchive))
 	require.False(t, stalled(t, freshPlain))
 
-	// Both urls frozen: the second is the last usable url, so both of its entries are kept.
+	// b freezes too, but nothing is ahead of it, so it is not judged: both of its entries stay.
 	h.obs["https://b"] = stuckAt(5000, stallN)
-	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow.Add(5*time.Second), all...))
+	require.Equal(t, headStallResult{}, h.step(t, stallNow.Add(5*time.Second), all...))
 	require.False(t, stalled(t, freshArchive), "the archive entry of the last usable url must stay")
 	require.False(t, stalled(t, freshPlain))
 
-	h.obs["https://a"] = stuckAt(1001, 0)
+	h.obs["https://a"] = stuckAt(5001, 0)
 	require.Equal(t, headStallResult{removed: 1, added: 1}, h.step(t, stallNow.Add(10*time.Second), all...))
 	require.False(t, stalled(t, stuckArchive))
 	require.False(t, stalled(t, stuckPlain))
@@ -329,7 +365,7 @@ func TestHeadStall_WebsocketURLDoesNotSatisfyNeverEmpty(t *testing.T) {
 
 	h := newStallHarness()
 	h.obs["https://node"] = stuckAt(1000, stallN)
-	h.obs["wss://node"] = stuckAt(1000, stallN)
+	h.obs["wss://node"] = stuckAt(1005, 0) // a moving wss url still shows the chain moved
 	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow, https, wss))
 	require.True(t, https.Endpoint.IsUsable(), "the only relay-capable url stays in")
 	require.False(t, stalled(t, wss), "a wss url takes no part in the head-stall step")
@@ -402,8 +438,33 @@ func TestOnTipObservation_StalledRepeatsNoLongerPinTheTip(t *testing.T) {
 func TestResetEndpointHealthAndGauge_ClearsHeadStalled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// A node frozen at block 1000, so real polls build real stall evidence.
+	frozen := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		result := `"0x3e8"`
+		if req.Method != "eth_blockNumber" {
+			result = `{"number":"0x3e8","hash":"0x00000000000000000000000000000000000000000000000000000000000003e8"}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":%s}`, req.ID, result)
+	}))
+	defer frozen.Close()
+
 	f := newReconcileFixture(t, ctx)
-	f.admit(t, ctx, "http://127.0.0.1:1")
+	f.admit(t, ctx, frozen.URL)
+	go f.server.initializeChainTrackers(ctx)
+	require.Eventually(t, func() bool { return f.hasTracker(frozen.URL) }, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool {
+		_, _, _ = f.monitor.PollNow(ctx, frozen.URL)
+		obs, _ := f.monitor.GetObservation(frozen.URL)
+		return obs.SameBlockCycles >= 2
+	}, 10*time.Second, 50*time.Millisecond, "polls of the frozen node must build stall evidence")
+
 	eps := f.csm.GetAllDirectRPCEndpoints()
 	require.Len(t, eps, 1)
 	stuck := eps[0].Endpoint
@@ -418,6 +479,11 @@ func TestResetEndpointHealthAndGauge_ClearsHeadStalled(t *testing.T) {
 
 	require.True(t, stuck.IsUsable())
 	require.False(t, f.server.headStall.isStalled(stuck.NetworkAddress))
+	// The evidence goes with the reason (H11), or the next probe cycle re-adds head-stalled from
+	// the very cycles the operator just discarded.
+	obs, _ := f.monitor.GetObservation(frozen.URL)
+	require.Zero(t, obs.SameBlockCycles, "the operator reset must zero the stall counter")
+	require.Equal(t, int64(1000), obs.HighestBlockSeen, "the blocks seen are kept")
 }
 
 // The probe step is the only writer of the head-stall gauge: an outside write back to 1 (the epoch

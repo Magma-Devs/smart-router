@@ -10,7 +10,7 @@ import (
 )
 
 // MAG-3986 — stall evidence. Each endpoint counts consecutive tracker cycles in which it answered
-// with the same block. These tests pin every row of the counting table in the plan, the relay
+// without going above the highest block it has shown. These tests pin every row of the counting table in the plan, the relay
 // de-duplication (H9), the threshold rounding (D20, H10), and the repeat flag on the tip hook.
 
 var stallBase = time.Unix(1_800_000_000, 0)
@@ -45,9 +45,9 @@ func TestStallEvidence_PollRows(t *testing.T) {
 	poll(0, nil)                   // no block parsed: unchanged
 	require.Equal(t, 2, obsOf(t, m, url).SameBlockCycles)
 
-	poll(99, nil) // a different (lower) block is a change: reset, highest kept
+	poll(99, nil) // a lower block is not movement: +1, highest kept
 	o = obsOf(t, m, url)
-	require.Equal(t, 0, o.SameBlockCycles)
+	require.Equal(t, 3, o.SameBlockCycles)
 	require.Equal(t, int64(99), o.LastAnsweredBlock)
 	require.Equal(t, int64(100), o.HighestBlockSeen)
 
@@ -58,8 +58,8 @@ func TestStallEvidence_PollRows(t *testing.T) {
 }
 
 // A load balancer that fails over to a backend frozen BELOW what the url already reported (the
-// Chainstack half of the Plasma incident) must still count: stuck means the same block as the
-// previous answer, not the same block as the highest ever seen.
+// Chainstack half of the Plasma incident) must still count: stuck means no answer above the
+// highest block the url has shown.
 func TestStallEvidence_FrozenBelowHighestStillCounts(t *testing.T) {
 	m := newObsMonitor(t)
 	const url = "https://stall-below.example"
@@ -71,7 +71,36 @@ func TestStallEvidence_FrozenBelowHighestStillCounts(t *testing.T) {
 	o := obsOf(t, m, url)
 	require.Equal(t, int64(1003), o.HighestBlockSeen)
 	require.Equal(t, int64(1000), o.LastAnsweredBlock)
-	require.Equal(t, 24, o.SameBlockCycles, "the first 1000 is a change; the next 24 are repeats")
+	require.Equal(t, 25, o.SameBlockCycles, "every answer below the highest is a cycle without movement")
+}
+
+// A frozen Solana node answers two frozen slots: relays report context.slot at the client's
+// commitment (confirmed), the poll the finalized one. Alternating between them is not movement.
+// Comparing each answer with the previous one reset the counter on every switch, so a busy frozen
+// node peaked at 4 cycles and was never marked.
+func TestStallEvidence_FrozenAlternatingSlotsStillCount(t *testing.T) {
+	freshness := time.Hour
+	m := newGatedMonitor(t, freshness)
+	const url = "https://stall-solana.example"
+	gen := m.registerGenForTest(url)
+	const confirmed, finalized = int64(5032), int64(5000)
+
+	at := stallBase
+	m.recordPollObservation(url, gen, finalized, time.Millisecond, nil, at)
+	for cycle := 1; cycle <= 25; cycle++ {
+		at = at.Add(time.Second)
+		if cycle%5 == 0 { // the traffic gate forces a real poll every 5th cycle
+			m.recordPollObservation(url, gen, finalized, time.Millisecond, nil, at)
+			continue
+		}
+		require.True(t, m.RecordRelayObservation(url, gen, confirmed, at))
+		tip, ok := m.freshRelayTip(url, at)
+		require.True(t, ok)
+		m.countRelayCoveredCycle(url, gen, tip)
+	}
+	o := obsOf(t, m, url)
+	require.Equal(t, confirmed, o.HighestBlockSeen)
+	require.Equal(t, 25, o.SameBlockCycles, "every cycle counts: polls below the highest slot and relay-covered cycles alike")
 }
 
 func TestStallEvidence_RelayOnlyAdvances(t *testing.T) {

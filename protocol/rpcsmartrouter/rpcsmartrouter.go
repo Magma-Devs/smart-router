@@ -1675,7 +1675,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 						// MAG-3986: Enabled is the event slot only. Usable is what selection
 						// sees — Enabled AND no state reason. StateReasons lists head-stalled
 						// with when it was added and the block it was stuck on; SameBlockCycles
-						// is the evidence that adds it, and a LastAnsweredBlock above the stuck
+						// is the evidence that adds it, and a HighestBlockSeen above the stuck
 						// block removes it.
 						"Usable":            health.Usable,
 						"StateReasons":      debugStateReasons(health.StateReasons),
