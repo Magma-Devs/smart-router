@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,6 +48,39 @@ func latestBlockSeries(t *testing.T, spec, apiInterface, provider string) float6
 		}
 	}
 	return -1
+}
+
+// urlLatestBlockSeries reads provider's rpc_endpoint_url_latest_block series as {url label: value}.
+func urlLatestBlockSeries(t *testing.T, spec, apiInterface, provider string) map[string]float64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	out := map[string]float64{}
+	for _, mf := range mfs {
+		if mf.GetName() != "rpc_endpoint_url_latest_block" {
+			continue
+		}
+		for _, mtr := range mf.GetMetric() {
+			lm := map[string]string{}
+			for _, lp := range mtr.GetLabel() {
+				lm[lp.GetName()] = lp.GetValue()
+			}
+			if lm["spec"] == spec && lm["apiInterface"] == apiInterface && lm["endpoint_id"] == provider {
+				out[lm["url"]] = mtr.GetGauge().GetValue()
+			}
+		}
+	}
+	return out
+}
+
+// seriesValues returns the values of a {label: value} map, sorted.
+func seriesValues(series map[string]float64) []float64 {
+	values := make([]float64, 0, len(series))
+	for _, v := range series {
+		values = append(values, v)
+	}
+	sort.Float64s(values)
+	return values
 }
 
 // headUpstream answers eth_blockNumber with head(), or a 503 when fail() says so.
@@ -126,6 +160,10 @@ func TestEndpointLatestBlock_URLStuckWhenItsTrackerStartsHoldsTheSeries(t *testi
 	require.Eventually(t, func() bool { return stuck.polls.Load() >= polled+5 }, 15*time.Second, 10*time.Millisecond)
 	require.Equal(t, float64(1000), latestBlockSeries(t, "ETH1", "jsonrpc", provider),
 		"the stuck url answers 1000 on every poll, so it holds the provider's series there")
+	perURL := seriesValues(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider))
+	require.Len(t, perURL, 2, "one series per url")
+	require.Equal(t, float64(1000), perURL[0], "the stuck url's own series stands at 1000")
+	require.Greater(t, perURL[1], float64(1010), "the advancing url's own series moves")
 }
 
 // A burst of failed polls (503s, rate limits, timeouts) on a stuck url must not move the
@@ -204,6 +242,8 @@ func TestEndpointLatestBlock_LateWriteForARemovedURLIsUndone(t *testing.T) {
 	require.Eventually(t, func() bool { return head.Load() > 1115 }, 15*time.Second, 10*time.Millisecond)
 	require.Greater(t, latestBlockSeries(t, "ETH1", "jsonrpc", provider), float64(1110),
 		"the removed url's late head must not hold the provider's series at 1000")
+	require.Len(t, urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider), 1,
+		"nor leave a series of its own standing still")
 }
 
 // A provider's websocket door never serves a relay, so its head stays out of the series: a wss url
@@ -226,4 +266,6 @@ func TestOnEndpointPollBlock_WebsocketURLIsLeftOut(t *testing.T) {
 		rpcss.onEndpointPollBlock(httpsURL, block)
 		require.Equal(t, float64(block), latestBlockSeries(t, "ETH1", "jsonrpc", provider))
 	}
+	require.Equal(t, []float64{1005}, seriesValues(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider)),
+		"the wss url gets no series of its own")
 }

@@ -84,4 +84,6 @@ func TestCleanupStaleTrackers_ForgetsTheRemovedURLsHead(t *testing.T) {
 
 	require.ElementsMatch(t, []string{kept}, m.GetAllEndpoints(), "the dropped url's tracker is gone")
 	require.Equal(t, float64(1200), providerLatestBlock(t), "and so is its head")
+	require.Equal(t, []float64{1200}, seriesValues(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider)),
+		"and its own rpc_endpoint_url_latest_block series, which would otherwise stand still forever")
 }
