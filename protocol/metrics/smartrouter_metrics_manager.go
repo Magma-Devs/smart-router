@@ -277,7 +277,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// the provider still trails it.
 	endpointURLLatestBlock := NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
 		Name:       "rpc_endpoint_url_latest_block",
-		Help:       "Latest block one node url of a provider reported. url is the node url redacted to its scheme and host, plus a hash of the full url.",
+		Help:       "Latest block one node url of a provider reported. url is a fingerprint of the node url: the first 8 hex digits of its sha256.",
 		Labels:     []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"},
 		Registerer: prometheus.DefaultRegisterer,
 	})
@@ -1029,14 +1029,14 @@ func (m *SmartRouterMetricsManager) urlSeriesLabelsLocked(key providerSeriesKey,
 	}
 }
 
-// urlSeriesLabel is the url label of rpc_endpoint_url_latest_block. A node url carries
-// its api key in its path or query, so the label keeps only the scheme and host
-// (utils.RedactURL). That alone would give TON's /v2 and /v3 urls one label, since they
-// differ only in the redacted path, and two writers on one series is the saw-tooth this
-// metric exists to avoid; the first 8 hex digits of the full url's sha256 tell them apart.
+// urlSeriesLabel is the url label of rpc_endpoint_url_latest_block: the first 8 hex digits
+// of the node url's sha256, and nothing of the url itself. A node url can hold an api key in
+// any part of it, so no part of it is exported. The fingerprint still tells a provider's urls
+// apart (TON's /v2 and /v3 share everything but the path), and internal_path says which
+// path a url serves.
 func urlSeriesLabel(rawURL string) string {
 	sum := sha256.Sum256([]byte(rawURL))
-	return utils.RedactURL(rawURL) + "#" + hex.EncodeToString(sum[:4])
+	return hex.EncodeToString(sum[:4])
 }
 
 // ForgetEndpointLatestBlock drops a url's head from its providers' series until the url
