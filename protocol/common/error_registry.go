@@ -37,7 +37,7 @@ type ErrorSubCategory int
 
 const (
 	SubCategoryNone              ErrorSubCategory = iota
-	SubCategoryUnsupportedMethod                  // zero retries, zero CU, cached response, no provider scoring
+	SubCategoryUnsupportedMethod                  // zero retries, zero CU, cached response, no provider scoring; no registered code carries it since MAG-2771
 	SubCategoryRateLimit                          // rate-limit signal: endpoint is healthy but busy, apply backoff, do not mark unhealthy
 	SubCategoryDataScope                          // endpoint does not hold the data: retry elsewhere may help, but it is not unhealthy
 	SubCategoryNodeCapability                     // endpoint does not offer this capability: retry elsewhere may help, but it is not unhealthy
@@ -91,9 +91,11 @@ func (sc ErrorSubCategory) IsDataScope() bool {
 }
 
 // IsNodeCapability reports whether this subcategory represents "the endpoint answered
-// authoritatively that it does not offer this capability" — a method that exists on the
-// API surface but is switched off on this particular node (provider tier, policy, admin
-// config). NODE_METHOD_NOT_SUPPORTED (2002) is the case.
+// authoritatively that it does not offer this capability" — a method, route, verb or credential
+// this particular node will not serve (provider tier, policy, admin config, gateway). The codes
+// are NODE_METHOD_NOT_SUPPORTED (2002), NODE_ACCESS_DENIED (2018) and, since MAG-2771,
+// NODE_METHOD_NOT_FOUND (2001), NODE_UNIMPLEMENTED (2008), NODE_ENDPOINT_NOT_FOUND (2009),
+// NODE_METHOD_NOT_ALLOWED (2010) and NODE_UNAUTHORIZED (2016).
 //
 // It is the same fault axis as IsDataScope, one level up: data scope is "I do not hold
 // that", capability is "I do not serve that". Both mean the endpoint did its job and told
@@ -102,9 +104,10 @@ func (sc ErrorSubCategory) IsDataScope() bool {
 //
 // Deliberately NOT SubCategoryUnsupportedMethod, even though the wording is close.
 // ShouldRetryErrorWithContext hard-stops on that subcategory REGARDLESS of the Retryable
-// flag, so reusing it would kill the retry this classification exists to allow. The
-// distinction is real: NODE_METHOD_NOT_FOUND (2001) means the method exists nowhere, so
-// retrying is pointless; 2002 means it exists but not here, so retrying is the whole point.
+// flag, so reusing it would kill the retry this classification exists to allow. 2001 used to
+// sit there on the reading that "method not found" means the method exists nowhere. On the
+// wire it cannot be told apart from "not here" — one provider's plan switches off what its
+// peer serves — so MAG-2771 moved it, and the other node refusals, to this axis.
 //
 // Health-tracking callers should therefore keep retrying elsewhere but leave the
 // endpoint's availability score untouched.

@@ -608,17 +608,19 @@ type RelayResult struct {
 	CrossValidationFailureReason string
 	// IsNonRetryable is the umbrella flag the retry state machine consults:
 	// it's true whenever the matched registry LavaError has Retryable=false,
-	// which covers unsupported method, execution reverted, out of gas,
-	// invalid signature, double spend, etc. Retrying on another provider
-	// would just reproduce the same deterministic failure.
+	// which covers execution reverted, out of gas, invalid signature, double
+	// spend, caller mistakes, etc. Retrying on another provider would just
+	// reproduce the same deterministic failure. A node's refusal of its own
+	// (method, route, credentials, limits) is retryable since MAG-2771.
 	// IsUnsupportedMethod is an independent subset flag derived from the
 	// SubCategory and used to gate the zero-CU carve-out and caching policy.
 	IsNonRetryable bool
 	// IsRateLimited is true when the node error carries SubCategoryRateLimit:
 	// the endpoint is healthy but busy. Callers back off but must not mark it
 	// unhealthy, which is why the direct-RPC availability gate excludes it.
-	// Orthogonal to IsNonRetryable — NODE_RATE_LIMITED (2005) is retryable,
-	// NODE_LIMIT_EXCEEDED (2011) is not, and both set this flag.
+	// Orthogonal to IsNonRetryable — NODE_RATE_LIMITED (2005) and, since
+	// MAG-2771, NODE_LIMIT_EXCEEDED (2011) are retryable; the flag is set
+	// either way.
 	IsRateLimited bool
 	// IsDataScope is true when the node error carries SubCategoryDataScope: the
 	// endpoint answered truthfully that it does not hold the requested data

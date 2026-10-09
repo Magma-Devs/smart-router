@@ -235,14 +235,18 @@ func TestErrorSubCategory_String(t *testing.T) {
 	assert.Equal(t, "unsupported_method", SubCategoryUnsupportedMethod.String())
 }
 
-func TestErrorSubCategory_UnsupportedMethodTagging(t *testing.T) {
-	// 2002 (NODE_METHOD_NOT_SUPPORTED) is intentionally excluded: it's retryable on another provider
-	unsupportedCodes := []uint32{2001, 2008, 2009, 2010}
-	for _, code := range unsupportedCodes {
+func TestErrorSubCategory_NodeRefusalTagging(t *testing.T) {
+	// MAG-2771: a node's own "I do not serve that" is node-capability, retried on another provider,
+	// never the router-terminal unsupported-method subcategory.
+	nodeRefusalCodes := []uint32{2001, 2002, 2008, 2009, 2010, 2016, 2018}
+	for _, code := range nodeRefusalCodes {
 		le := getLavaError(code)
 		require.NotEqual(t, LavaErrorUnknown, le, "code %d not registered", code)
-		assert.True(t, le.SubCategory.IsUnsupportedMethod(),
-			"code %d (%s) should be SubCategoryUnsupportedMethod", code, le.Name)
+		assert.True(t, le.SubCategory.IsNodeCapability(),
+			"code %d (%s) should be SubCategoryNodeCapability", code, le.Name)
+		assert.True(t, le.Retryable, "code %d (%s) should be retryable on another provider", code, le.Name)
+		assert.False(t, le.SubCategory.IsUnsupportedMethod(),
+			"code %d (%s) should NOT be SubCategoryUnsupportedMethod", code, le.Name)
 	}
 
 	// Non-unsupported codes should not be
@@ -545,13 +549,14 @@ func TestClassifyNodeErrorForRetry_DerivesAllFlagsFromSingleLookup(t *testing.T)
 			wantNonRetryable: true,
 		},
 		{
-			name:             "EVM method not found → terminal + unsupported",
+			// MAG-2771: a claim about this node, so another provider is asked.
+			name:             "EVM method not found → retryable node capability, not unsupported",
 			family:           ChainFamilyEVM,
 			transport:        TransportJsonRPC,
 			errorCode:        -32601,
 			message:          "method not found",
-			wantNonRetryable: true,
-			wantUnsupported:  true,
+			wantNonRetryable: false,
+			wantUnsupported:  false,
 		},
 		{
 			name:             "JSON-RPC body code -32700 parse error → terminal, not unsupported",
@@ -1067,19 +1072,24 @@ func TestClassifyError_GenericRESTMappings(t *testing.T) {
 // TestClassifyError_REST501NotImplemented pins the classifier half of the MAG-1576
 // "REST not implemented" fix. The REST relay path classifies on the HTTP status code
 // itself (errorCode = StatusCode), so a Cosmos node's 501 must map to
-// NODE_UNIMPLEMENTED and be non-retryable — otherwise the router would retry an
-// unsupported method as if it were a transient server error.
+// NODE_UNIMPLEMENTED — the node saying it does not implement the method — and never
+// to a transient server error, which would blame the endpoint.
+//
+// MAG-1576 also made it non-retryable. MAG-2771 reversed that half: one gateway
+// implements a route another does not, so the request goes to another provider,
+// while the endpoint that answered 501 stays unblamed.
 func TestClassifyError_REST501NotImplemented(t *testing.T) {
 	// Code-based path: the REST relay forwards errorCode = HTTP status (501).
 	result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportREST, 501, "Not Implemented")
 	assert.Equal(t, LavaErrorNodeUnimplemented, result,
 		"REST 501 must classify as NODE_UNIMPLEMENTED, got %s", result.Name)
-	assert.False(t, result.Retryable, "NODE_UNIMPLEMENTED must be non-retryable")
+	assert.True(t, result.Retryable, "NODE_UNIMPLEMENTED is retryable on another provider")
+	assert.False(t, result.EndpointAtFault(), "NODE_UNIMPLEMENTED must not blame the endpoint")
 
 	// The umbrella retry verdict the relay path actually consults.
-	assert.True(t,
+	assert.False(t,
 		IsNonRetryableNodeErrorWithContext(ChainFamilyCosmosSDK, TransportREST, 501, "Not Implemented"),
-		"REST 501 must be non-retryable")
+		"REST 501 must be retryable on another provider")
 }
 
 // TestClassifyError_GenericJsonRPCHTTPStatusMappings is the JSON-RPC analogue

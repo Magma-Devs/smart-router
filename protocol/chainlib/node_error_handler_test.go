@@ -12,52 +12,11 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestUnsupportedMethodError(t *testing.T) {
-	t.Run("Error formatting with method name", func(t *testing.T) {
-		originalErr := errors.New("original error")
-		err := NewUnsupportedMethodError(originalErr, "eth_someMethod")
-
-		require.Contains(t, err.Error(), "eth_someMethod")
-		require.Contains(t, err.Error(), "unsupported method")
-	})
-
-	t.Run("Error formatting without method name", func(t *testing.T) {
-		originalErr := errors.New("original error")
-		err := NewUnsupportedMethodError(originalErr, "")
-
-		require.Contains(t, err.Error(), "unsupported method")
-	})
-
-	t.Run("IsUnsupportedMethodErrorType detects the error", func(t *testing.T) {
-		originalErr := errors.New("original error")
-		err := NewUnsupportedMethodError(originalErr, "eth_call")
-
-		require.True(t, IsUnsupportedMethodErrorType(err))
-		require.Contains(t, err.Error(), "eth_call")
-	})
-
-	t.Run("Unwrap returns LavaError", func(t *testing.T) {
-		originalErr := errors.New("original error")
-		err := NewUnsupportedMethodError(originalErr, "method")
-
-		unwrapped := errors.Unwrap(err)
-		require.NotNil(t, unwrapped)
-		require.True(t, errors.Is(err, common.LavaErrorNodeMethodNotFound))
-	})
-
-	t.Run("Error message contains method name when provided", func(t *testing.T) {
-		originalErr := errors.New("original error")
-		err := NewUnsupportedMethodError(originalErr, "test-method")
-		require.Contains(t, err.Error(), "test-method")
-	})
-
-	t.Run("Error message has no method name when empty", func(t *testing.T) {
-		originalErr := errors.New("original error")
-		err := NewUnsupportedMethodError(originalErr, "")
-		require.Contains(t, err.Error(), "unsupported method")
-	})
-}
-
+// TestIsUnsupportedMethodError pins that no node refusal reads as a router-terminal unsupported
+// method. Since MAG-2771 a node saying it does not serve a method, route or verb — 404, 405, gRPC
+// Unimplemented, -32601, "method not found" — is node-capability and retried on another provider,
+// so every one of those shapes below must come back false. A code re-tagged
+// SubCategoryUnsupportedMethod would turn them true and stop the retry.
 func TestIsUnsupportedMethodError(t *testing.T) {
 	t.Run("Nil error returns false", func(t *testing.T) {
 		require.False(t, IsUnsupportedMethodError(nil))
@@ -70,9 +29,9 @@ func TestIsUnsupportedMethodError(t *testing.T) {
 			expected bool
 		}{
 			{
-				name:     "Method not found error",
+				name:     "Method not found is the node's refusal, not an unsupported method",
 				err:      errors.New("method not found"),
-				expected: true,
+				expected: false,
 			},
 			{
 				name:     "Generic error",
@@ -80,9 +39,9 @@ func TestIsUnsupportedMethodError(t *testing.T) {
 				expected: false,
 			},
 			{
-				name:     "Wrapped method not found",
+				name:     "Wrapped method not found is the node's refusal too",
 				err:      fmt.Errorf("request failed: %w", errors.New("method not found")),
-				expected: true,
+				expected: false,
 			},
 		}
 
@@ -101,14 +60,14 @@ func TestIsUnsupportedMethodError(t *testing.T) {
 			expected bool
 		}{
 			{
-				name:     "404 Not Found",
+				name:     "404 Not Found is the node's refusal",
 				err:      rpcclient.HTTPError{StatusCode: 404, Status: "404 Not Found"},
-				expected: true,
+				expected: false,
 			},
 			{
-				name:     "405 Method Not Allowed",
+				name:     "405 Method Not Allowed is the node's refusal",
 				err:      rpcclient.HTTPError{StatusCode: 405, Status: "405 Method Not Allowed"},
-				expected: true,
+				expected: false,
 			},
 			{
 				name:     "500 Internal Server Error",
@@ -137,9 +96,9 @@ func TestIsUnsupportedMethodError(t *testing.T) {
 			expected bool
 		}{
 			{
-				name:     "Unimplemented status",
+				name:     "Unimplemented status is the node's refusal",
 				err:      status.Error(codes.Unimplemented, "method not implemented"),
-				expected: true,
+				expected: false,
 			},
 			{
 				name:     "NotFound status",
@@ -172,13 +131,13 @@ func TestIsUnsupportedMethodError(t *testing.T) {
 		}
 
 		result := IsUnsupportedMethodError(httpErr)
-		require.True(t, result, "Should detect JSON-RPC method not found error code")
+		require.False(t, result, "a JSON-RPC -32601 is the node's refusal, retried on another provider")
 	})
 
 	t.Run("Combined error scenarios", func(t *testing.T) {
 		// Test a gRPC error with method not found message
 		err := status.Error(codes.Internal, "method not found")
-		require.True(t, IsUnsupportedMethodError(err), "Should detect by message even with different status code")
+		require.False(t, IsUnsupportedMethodError(err), "a method-not-found message is the node's refusal whatever the status code")
 
 		// Test HTTP error with method not found only in body (not in error message)
 		httpErr := rpcclient.HTTPError{
@@ -186,9 +145,9 @@ func TestIsUnsupportedMethodError(t *testing.T) {
 			Status:     "200 OK",
 			Body:       []byte("Method not found: eth_newMethod"),
 		}
-		// This returns true because the HTTPError.Error() includes the body content
-		// and the body contains "method not found" as a substring
-		require.True(t, IsUnsupportedMethodError(httpErr))
+		// HTTPError.Error() includes the body, so this classifies by the "method not found" in
+		// it: the node's refusal, not an unsupported method
+		require.False(t, IsUnsupportedMethodError(httpErr))
 	})
 }
 
@@ -208,34 +167,61 @@ func BenchmarkIsUnsupportedMethodError(b *testing.B) {
 	}
 }
 
-// TestIsUnsupportedMethodError_SmartContractErrors verifies that smart contract errors
-// are NOT classified as unsupported methods (prevents false positives on reverts).
+// TestIsUnsupportedMethodError_SmartContractErrors verifies that smart contract errors are not read
+// as the node refusing the method (prevents false positives on reverts). Since MAG-2771 such a false
+// positive would send a revert to another provider instead of returning it, so the matchers must
+// stay as tight as they were: a revert classifies as no node-refusal code, and a real refusal
+// classifies as the code its wording names. Neither reads as a router-terminal unsupported method.
 func TestIsUnsupportedMethodError_SmartContractErrors(t *testing.T) {
+	refusalCodes := map[uint32]bool{
+		common.LavaErrorNodeMethodNotFound.Code:   true,
+		common.LavaErrorNodeUnimplemented.Code:    true,
+		common.LavaErrorNodeEndpointNotFound.Code: true,
+		common.LavaErrorNodeMethodNotAllowed.Code: true,
+	}
+	// The transports IsUnsupportedMethodError consults, in its order.
+	classifyAll := func(err error) []*common.LavaError {
+		var out []*common.LavaError
+		for _, transport := range []common.TransportType{common.TransportJsonRPC, common.TransportREST, common.TransportGRPC} {
+			if classified := ClassifyNodeError(err, -1, transport); classified != nil {
+				out = append(out, classified)
+			}
+		}
+		return out
+	}
+
 	tests := []struct {
-		name     string
-		message  string
-		expected bool
+		name    string
+		message string
+		refusal *common.LavaError // the node refusal the message names, nil for a revert
 	}{
-		// CRITICAL: Smart contract errors should NOT match
-		{"Smart contract NFT not found", "execution reverted: NFT not found", false},
-		{"Smart contract User not found", "execution reverted: User not found", false},
-		{"Smart contract Token not found", "execution reverted: Token not found", false},
-		{"Smart contract identity not found", "execution reverted: identity not found", false},
-		{"Smart contract IdentityRegistry specific", "execution reverted: IdentityRegistry: identity not found", false},
-		{"Smart contract Record not found", "execution reverted: Record not found in database", false},
-		{"Generic not found without execution reverted", "user not found", false},
-		{"Item not found", "item not found", false},
-		// Verify actual unsupported methods still work correctly
-		{"Actual method not found", "method not found", true},
-		{"Actual endpoint not found", "endpoint not found", true},
-		{"Actual route not found", "route not found", true},
-		// Note: "method not supported" (-32004) is retryable (another provider may support it), not SubCategoryUnsupportedMethod
+		// CRITICAL: Smart contract errors must not read as a node refusal
+		{"Smart contract NFT not found", "execution reverted: NFT not found", nil},
+		{"Smart contract User not found", "execution reverted: User not found", nil},
+		{"Smart contract Token not found", "execution reverted: Token not found", nil},
+		{"Smart contract identity not found", "execution reverted: identity not found", nil},
+		{"Smart contract IdentityRegistry specific", "execution reverted: IdentityRegistry: identity not found", nil},
+		{"Smart contract Record not found", "execution reverted: Record not found in database", nil},
+		{"Generic not found without execution reverted", "user not found", nil},
+		{"Item not found", "item not found", nil},
+		// Real refusals still classify as the code their wording names
+		{"Actual method not found", "method not found", common.LavaErrorNodeMethodNotFound},
+		{"Actual endpoint not found", "endpoint not found", common.LavaErrorNodeEndpointNotFound},
+		{"Actual route not found", "route not found", common.LavaErrorNodeEndpointNotFound},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := IsUnsupportedMethodError(errors.New(tt.message))
-			require.Equal(t, tt.expected, got, "Message: %s", tt.message)
+			err := errors.New(tt.message)
+			require.False(t, IsUnsupportedMethodError(err), "Message: %s", tt.message)
+			classified := classifyAll(err)
+			if tt.refusal == nil {
+				for _, c := range classified {
+					require.False(t, refusalCodes[c.Code], "Message: %s classified as %s", tt.message, c.Name)
+				}
+				return
+			}
+			require.Contains(t, classified, tt.refusal, "Message: %s", tt.message)
 		})
 	}
 }

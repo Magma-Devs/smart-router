@@ -267,13 +267,15 @@ func TestRESTRelay_404_EmptyBody_IsANodeError(t *testing.T) {
 }
 
 // TestRESTRelay_405_IsANodeError: whatever its body, a 405 is a node error, classified by the
-// registry's 405 row.
+// registry's 405 row: this front end's refusal, retried on another provider since MAG-2771, and
+// not the endpoint's fault.
 func TestRESTRelay_405_IsANodeError(t *testing.T) {
 	result := sendRESTThroughMockUpstream(t, http.StatusMethodNotAllowed, `{"message":"method not allowed"}`)
 
 	assert.Equal(t, http.StatusMethodNotAllowed, result.StatusCode)
 	assert.True(t, result.IsNodeError)
-	assert.True(t, result.IsNonRetryable)
+	assert.False(t, result.IsNonRetryable)
+	assert.True(t, result.IsNodeCapability)
 	assert.False(t, result.IsNodeAtFault)
 }
 
@@ -633,10 +635,12 @@ func TestRESTRelay_501_NotImplemented_relayInnerDirect(t *testing.T) {
 	assert.Equal(t, http.StatusNotImplemented, relayResult.StatusCode)
 	assert.True(t, relayResult.IsNodeError, "REST 501 should be classified as a node error")
 	// End-to-end: with the classifier mapping 501→NODE_UNIMPLEMENTED, the node
-	// error must be non-retryable so the policy stops instead of retrying an
-	// unsupported method. This ties the routing fix (Part 1) to the classifier
-	// fix (Part 2).
-	assert.True(t, relayResult.IsNonRetryable, "REST 501 should be a non-retryable node error")
+	// error is the node saying it does not implement the method. MAG-2771 sends
+	// that to another provider rather than stopping, and node-capability keeps
+	// the endpoint unblamed. This ties the routing fix (Part 1) to the
+	// classifier fix (Part 2).
+	assert.False(t, relayResult.IsNonRetryable, "REST 501 is retried on another provider")
+	assert.True(t, relayResult.IsNodeCapability, "REST 501 is the node's capability gap, not its fault")
 }
 
 // relayInnerDirectREST drives relayInnerDirect — the arm that turns a REST 5xx into a transport

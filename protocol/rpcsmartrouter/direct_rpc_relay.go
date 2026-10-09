@@ -708,10 +708,12 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		// declaration order: code-based matchers first, message-based after.
 		// When the body carries a registered RETRYABLE code (e.g. -32603
 		// NODE_INTERNAL_ERROR, -32000 NODE_SERVER_ERROR) AND the upstream
-		// returned a non-retryable HTTP status (404/405/413), the body-code
-		// matcher fires first and HTTPStatusContains never runs — so the
-		// retryable body code masks the non-retryable HTTP verdict and the
-		// router retries pointlessly.
+		// returned a non-retryable HTTP status (413), the body-code matcher
+		// fires first and HTTPStatusContains never runs — so the retryable
+		// body code masks the non-retryable HTTP verdict and the router retries
+		// pointlessly. 401, 404 and 405 were in that list until MAG-2771 made
+		// them retryable: each is this node's own refusal, which another
+		// provider may not share, so this pass leaves them alone.
 		//
 		// A second classification pass with the raw HTTP statusCode as the
 		// errorCode resolves the conflict: when the HTTP layer says the
