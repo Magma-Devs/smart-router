@@ -13,6 +13,13 @@ exists in Jira. -->
 
 Jira ticket:
 
+<!-- Two checks gate the merge (docs/PR-GATES.md):
+unit-coverage: unit tests must run at least 80% of the Go statements this pull
+request adds or edits. `make patch-coverage` runs the same check locally.
+e2e-test/linked: a test on smart-router-automation's main must name the
+ticket above. When no e2e test can see the change, a reviewer adds the
+no-e2e-test label. -->
+
 ---
 
 ## Author Checklist
