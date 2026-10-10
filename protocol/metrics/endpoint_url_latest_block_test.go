@@ -3,28 +3,35 @@ package metrics
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-4204 option B: rpc_endpoint_url_latest_block is one series per url of a provider, for the
-// stuck-provider alerts. The provider series is the lowest of these heads, and no single series
-// per provider can show a url that froze while another url of the provider still trails it.
+// MAG-4204 option B: one series per node url of a provider, for the stuck-provider alerts.
+// rpc_endpoint_latest_block, the provider series, is written by every url of the provider and is
+// left as it was.
 
-type urlSeriesPoint struct {
-	url, internalPath string
-	block             float64
+const (
+	tonV2URL = "https://vendor.example/api/v2"
+	tonV3URL = "https://vendor.example/api/v3"
+)
+
+type urlPoint struct {
+	internalPath string
+	url          string
+	value        float64
 }
 
-// urlSeriesOf returns provider's rpc_endpoint_url_latest_block series for spec.
-func urlSeriesOf(t *testing.T, m *SmartRouterMetricsManager, spec, provider string) []urlSeriesPoint {
+// urlPoints collects one per-url vec's series for spec and provider.
+func urlPoints(t *testing.T, c prometheus.Collector, spec, provider string) []urlPoint {
 	t.Helper()
 	ch := make(chan prometheus.Metric, 64)
-	m.endpointURLLatestBlock.GaugeVec.Collect(ch)
+	c.Collect(ch)
 	close(ch)
-	var out []urlSeriesPoint
+	var out []urlPoint
 	for metric := range ch {
 		var pb dto.Metric
 		require.NoError(t, metric.Write(&pb))
@@ -32,87 +39,138 @@ func urlSeriesOf(t *testing.T, m *SmartRouterMetricsManager, spec, provider stri
 		for _, lp := range pb.GetLabel() {
 			labels[lp.GetName()] = lp.GetValue()
 		}
-		if labels["spec"] == spec && labels["endpoint_id"] == provider {
-			out = append(out, urlSeriesPoint{labels["url"], labels["internal_path"], pb.GetGauge().GetValue()})
+		if labels["spec"] != spec || labels["endpoint_id"] != provider {
+			continue
 		}
+		value := pb.GetGauge().GetValue()
+		if pb.GetCounter() != nil {
+			value = pb.GetCounter().GetValue()
+		}
+		out = append(out, urlPoint{labels["internal_path"], labels["url"], value})
 	}
 	return out
 }
 
-// byInternalPath maps the series by internal_path, failing if two series share one.
-func byInternalPath(t *testing.T, points []urlSeriesPoint) map[string]float64 {
+// byPath maps the points by internal_path, failing if two share one.
+func byPath(t *testing.T, points []urlPoint) map[string]float64 {
 	t.Helper()
 	out := map[string]float64{}
 	for _, p := range points {
 		_, dup := out[p.internalPath]
 		require.False(t, dup, "two series for internal_path %q", p.internalPath)
-		out[p.internalPath] = p.block
+		out[p.internalPath] = p.value
 	}
 	return out
 }
 
-func newTONProviderWithPaths(t *testing.T) *SmartRouterMetricsManager {
+func newTONProvider(t *testing.T) *SmartRouterMetricsManager {
 	t.Helper()
-	m := newTONProvider(t)
+	m := newSmartRouterForURLFanoutTest()
+	m.RegisterEndpoint("TON", "rest", tonV2URL, "chainstack")
+	m.RegisterEndpoint("TON", "rest", tonV3URL, "chainstack")
 	m.RegisterEndpointInternalPath(tonV2URL, "/v2")
 	m.RegisterEndpointInternalPath(tonV3URL, "/v3")
 	return m
 }
 
+// The case one series per provider cannot show: /v2 frozen while /v3, which trails it, moves on.
+// Each url has its own series, and the provider series is not touched.
 func TestURLLatestBlock_OneSeriesPerURL(t *testing.T) {
-	m := newTONProviderWithPaths(t)
-	m.SetEndpointLatestBlock("TON", "rest", tonV2URL, 1000)
-	m.SetEndpointLatestBlock("TON", "rest", tonV3URL, 990)
-
-	points := urlSeriesOf(t, m, "TON", "chainstack")
-	require.Equal(t, map[string]float64{"/v2": 1000, "/v3": 990}, byInternalPath(t, points))
-	require.NotEqual(t, points[0].url, points[1].url, "the two urls share a host, so the url label must still tell them apart")
+	m := newTONProvider(t)
+	for v3 := int64(500); v3 < 505; v3++ {
+		m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000) // frozen, still answering
+		m.SetEndpointURLLatestBlock("TON", "rest", tonV3URL, v3)
+		require.Equal(t, map[string]float64{"/v2": 1000, "/v3": float64(v3)},
+			byPath(t, urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack")))
+	}
+	points := urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack")
+	require.NotEqual(t, points[0].url, points[1].url, "/v2 and /v3 share a host; the url label still tells them apart")
+	require.Empty(t, urlPoints(t, m.endpointLatestBlock.GaugeVec, "TON", "chainstack"), "the provider series is written elsewhere")
 }
 
-// The case the provider series cannot show: /v2 freezes while /v3 still trails it (an indexer
-// 28,000 blocks behind). The provider series follows /v3 for as long as /v3 is lower, but /v2's
-// own series stands still, which is what the stuck-provider alerts read.
-func TestURLLatestBlock_AFrozenURLStandsStillWhileItsSiblingLags(t *testing.T) {
-	m := newTONProviderWithPaths(t)
-	for v3 := int64(500); v3 < 510; v3++ {
-		m.SetEndpointLatestBlock("TON", "rest", tonV2URL, 1000) // frozen, still answering
-		m.SetEndpointLatestBlock("TON", "rest", tonV3URL, v3)
-		require.Equal(t, float64(v3), providerLatestBlock(t, m, "TON", "chainstack"), "the provider series moves with /v3")
-		require.Equal(t, map[string]float64{"/v2": 1000, "/v3": float64(v3)}, byInternalPath(t, urlSeriesOf(t, m, "TON", "chainstack")))
+// Every write moves the url's answered-until time to now plus its chain server's answer timeout,
+// 2 minutes unless the server set one.
+func TestURLLatestBlock_AnsweredUntilIsTheLastAnswerPlusTheTimeout(t *testing.T) {
+	m := newTONProvider(t)
+	m.RegisterEndpoint("ETH1", "jsonrpc", "https://eth.vendor.example", "solo")
+	m.SetURLAnswerTimeout("TON", "rest", 10*time.Minute)
+
+	before := time.Now()
+	m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000)
+	m.SetEndpointURLLatestBlock("ETH1", "jsonrpc", "https://eth.vendor.example", 20)
+	after := time.Now()
+
+	within := func(got float64, timeout time.Duration) {
+		t.Helper()
+		require.GreaterOrEqual(t, got, float64(before.Add(timeout).Unix()))
+		require.LessOrEqual(t, got, float64(after.Add(timeout).Unix()))
+	}
+	within(byPath(t, urlPoints(t, m.endpointURLAnsweredUntil.GaugeVec, "TON", "chainstack"))["/v2"], 10*time.Minute)
+	within(byPath(t, urlPoints(t, m.endpointURLAnsweredUntil.GaugeVec, "ETH1", "solo"))[""], DefaultURLAnswerTimeout)
+}
+
+// A shared url is one series per provider configured with it; the relay harvest moves only the
+// provider it relayed to.
+func TestURLLatestBlock_SharedURLIsASeriesPerProvider(t *testing.T) {
+	m := newTONProvider(t)
+	m.RegisterEndpoint("TON", "rest", tonV2URL, "chainstack-backup")
+	m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000)
+	m.SetProviderURLLatestBlock("TON", "rest", "chainstack", tonV2URL, 1001)
+
+	require.Equal(t, map[string]float64{"/v2": 1001}, byPath(t, urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack")))
+	require.Equal(t, map[string]float64{"/v2": 1000}, byPath(t, urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack-backup")))
+}
+
+// An unregistered url would name itself as its provider, and no part of a url is safe to export.
+func TestURLLatestBlock_UnregisteredURLGetsNoSeries(t *testing.T) {
+	m := newSmartRouterForURLFanoutTest()
+	const url = "https://unregistered.vendor.example/key"
+	m.SetEndpointURLLatestBlock("ETH1", "jsonrpc", url, 10)
+	m.SetProviderURLLatestBlock("ETH1", "jsonrpc", "p", url, 10)
+	m.AddEndpointURLRelayServiced("ETH1", "jsonrpc", "p", url)
+	for _, c := range []prometheus.Collector{m.endpointURLLatestBlock.GaugeVec, m.endpointURLAnsweredUntil.GaugeVec, m.endpointURLRelaysServiced.CounterVec} {
+		ch := make(chan prometheus.Metric, 4)
+		c.Collect(ch)
+		close(ch)
+		require.Empty(t, ch)
 	}
 }
 
-// A removed url's own series must go, not stand still: a series that keeps its last value
-// forever is exactly what the stuck-provider alerts fire on.
-func TestURLLatestBlock_ForgetDeletesTheURLSeries(t *testing.T) {
-	m := newTONProviderWithPaths(t)
-	m.SetEndpointLatestBlock("TON", "rest", tonV2URL, 1000)
-	m.SetEndpointLatestBlock("TON", "rest", tonV3URL, 1200)
-
-	m.ForgetEndpointLatestBlock("TON", "rest", tonV2URL)
-	require.Equal(t, map[string]float64{"/v3": 1200}, byInternalPath(t, urlSeriesOf(t, m, "TON", "chainstack")))
-
-	m.ForgetEndpointLatestBlock("TON", "rest", tonV3URL)
-	m.ForgetEndpointLatestBlock("TON", "rest", "https://never.registered")
-	require.Empty(t, urlSeriesOf(t, m, "TON", "chainstack"))
+// Relays are counted per url, so a page about a url can ask whether customers' requests reach it.
+func TestURLRelaysServiced_CountsPerURL(t *testing.T) {
+	m := newTONProvider(t)
+	for i := 0; i < 3; i++ {
+		m.AddEndpointURLRelayServiced("TON", "rest", "chainstack", tonV2URL)
+	}
+	m.AddEndpointURLRelayServiced("TON", "rest", "chainstack", tonV3URL)
+	require.Equal(t, map[string]float64{"/v2": 3, "/v3": 1}, byPath(t, urlPoints(t, m.endpointURLRelaysServiced.CounterVec, "TON", "chainstack")))
 }
 
-// A shared url is one series per provider configured with it, and the harvest path moves only
-// the provider it relayed to.
-func TestURLLatestBlock_SharedURLIsASeriesPerProvider(t *testing.T) {
-	m := newTONProviderWithPaths(t)
-	m.RegisterEndpoint("TON", "rest", tonV2URL, "chainstack-backup")
-	m.SetEndpointLatestBlock("TON", "rest", tonV2URL, 1000)
-	m.SetProviderURLLatestBlock("TON", "rest", "chainstack", tonV2URL, 1001)
+// A removed url loses every per-url series, and nothing else: a series left behind stands still
+// forever, which is what the stuck alerts fire on.
+func TestURLLatestBlock_ForgetDeletesTheURLsSeries(t *testing.T) {
+	m := newTONProvider(t)
+	m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000)
+	m.SetEndpointURLLatestBlock("TON", "rest", tonV3URL, 1200)
+	m.AddEndpointURLRelayServiced("TON", "rest", "chainstack", tonV2URL)
+	m.AddEndpointURLRelayServiced("TON", "rest", "chainstack", tonV3URL)
 
-	require.Equal(t, map[string]float64{"/v2": 1001}, byInternalPath(t, urlSeriesOf(t, m, "TON", "chainstack")))
-	require.Equal(t, map[string]float64{"/v2": 1000}, byInternalPath(t, urlSeriesOf(t, m, "TON", "chainstack-backup")))
+	m.ForgetEndpointURLLatestBlock("TON", "rest", tonV2URL)
+	require.Equal(t, map[string]float64{"/v3": 1200}, byPath(t, urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack")))
+	require.Len(t, urlPoints(t, m.endpointURLAnsweredUntil.GaugeVec, "TON", "chainstack"), 1)
+	require.Equal(t, map[string]float64{"/v3": 1}, byPath(t, urlPoints(t, m.endpointURLRelaysServiced.CounterVec, "TON", "chainstack")))
+
+	m.ForgetEndpointURLLatestBlock("TON", "rest", "https://never.registered.example")
+	var nilManager *SmartRouterMetricsManager
+	nilManager.ForgetEndpointURLLatestBlock("TON", "rest", tonV2URL)
+	nilManager.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1)
+	nilManager.AddEndpointURLRelayServiced("TON", "rest", "chainstack", tonV2URL)
 }
 
 // The url label is exported and retained, and a node url can hold an api key in any part of it:
 // the path, the query, the userinfo, or a host label. So no part of the url reaches the label,
 // only a fingerprint, which still tells two urls apart and gives one url the same label every time.
-func TestURLSeriesLabel_CarriesNothingOfTheURL(t *testing.T) {
+func TestURLFingerprint_CarriesNothingOfTheURL(t *testing.T) {
 	const secret = "s3cr3tK3y0123456789"
 	raws := []string{
 		"https://ton.vendor.example/" + secret + "/api/v2",
@@ -124,32 +182,13 @@ func TestURLSeriesLabel_CarriesNothingOfTheURL(t *testing.T) {
 	}
 	seen := map[string]string{}
 	for _, raw := range raws {
-		label := urlSeriesLabel(raw)
+		label := URLFingerprint(raw)
 		require.Regexp(t, `^[0-9a-f]{8}$`, label, raw)
 		require.NotContains(t, label, secret, raw)
 		require.False(t, strings.Contains(raw, label), "the label must not be a piece of the url: %s", raw)
-		require.Equal(t, label, urlSeriesLabel(raw), "the label is stable")
+		require.Equal(t, label, URLFingerprint(raw), "the label is stable")
 		other, dup := seen[label]
 		require.False(t, dup, "%s and %s share label %s", raw, other, label)
 		seen[label] = raw
 	}
-}
-
-// A url that stopped answering is down, not stuck: its own series goes, so the stuck alerts do not
-// read it, while the provider series keeps its last head for the dashboards. The series comes back
-// at the url's next head.
-func TestURLLatestBlock_DropKeepsTheProviderSeries(t *testing.T) {
-	m := newTONProviderWithPaths(t)
-	m.SetEndpointLatestBlock("TON", "rest", tonV2URL, 1000)
-	m.SetEndpointLatestBlock("TON", "rest", tonV3URL, 1200)
-
-	m.DropEndpointURLLatestBlock("TON", "rest", tonV2URL)
-	require.Equal(t, map[string]float64{"/v3": 1200}, byInternalPath(t, urlSeriesOf(t, m, "TON", "chainstack")))
-	require.Equal(t, float64(1000), providerLatestBlock(t, m, "TON", "chainstack"), "the provider series keeps /v2's head")
-
-	m.SetEndpointLatestBlock("TON", "rest", tonV2URL, 1000) // answers again
-	require.Equal(t, map[string]float64{"/v2": 1000, "/v3": 1200}, byInternalPath(t, urlSeriesOf(t, m, "TON", "chainstack")))
-
-	var nilManager *SmartRouterMetricsManager
-	nilManager.DropEndpointURLLatestBlock("TON", "rest", tonV2URL)
 }
