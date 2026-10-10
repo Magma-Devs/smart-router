@@ -58,6 +58,8 @@ type SmartRouterMetricsManager struct {
 	optimizerSelectionScore        *prometheus.GaugeVec    // rpc_optimizer_selection_score {spec, endpoint_id, score_type}
 	endpointLatestBlock            *MappedLabelsGaugeVec   // rpc_endpoint_latest_block
 	endpointURLLatestBlock         *MappedLabelsGaugeVec   // rpc_endpoint_url_latest_block
+	endpointURLAnsweredUntil       *MappedLabelsGaugeVec   // rpc_endpoint_url_answered_until_seconds
+	endpointURLRelaysServiced      *MappedLabelsCounterVec // rpc_endpoint_url_relays_serviced_total
 	endpointFetchLatestFails       *MappedLabelsCounterVec // rpc_endpoint_fetch_latest_fails
 	endpointFetchBlockFails        *MappedLabelsCounterVec // rpc_endpoint_fetch_block_fails
 	endpointFetchLatestSuccess     *MappedLabelsCounterVec // rpc_endpoint_fetch_latest_success
@@ -166,24 +168,24 @@ type SmartRouterMetricsManager struct {
 	// ALL provider names sharing the URL — otherwise only the last-registered provider gets
 	// the metric label, leaving its peers stuck at the zero value on dashboards.
 	urlToProviderNames map[string][]string
-	// urlLatestBlocks holds the last head each url reported, per provider, so
-	// rpc_endpoint_latest_block can carry the LOWEST head across a provider's urls
-	// rather than whichever url wrote last (MAG-4204). Guarded by lock; created on
-	// first write.
-	urlLatestBlocks map[providerSeriesKey]map[string]int64
-	// urlInternalPaths maps a registered url to the spec path it serves ("/v2", or ""
-	// for the root), for rpc_endpoint_url_latest_block's internal_path label. Guarded
-	// by lock; created on first write.
-	urlInternalPaths   map[string]string
+	// urlInternalPaths maps a registered url to the spec path it serves ("/v2", or "" for the
+	// root), for the internal_path label of the per-url series. Guarded by lock.
+	urlInternalPaths map[string]string
+	// urlAnswerTimeouts is, per chain server, how long a url counts as answering after its last
+	// answer (SetURLAnswerTimeout). Guarded by lock.
+	urlAnswerTimeouts  map[chainServerKey]time.Duration
 	optimizerQoSClient *ConsumerOptimizerQoSClient
 }
 
-// providerSeriesKey names one rpc_endpoint_latest_block series. spec and
-// apiInterface are part of it because urlToProviderNames is process-wide: one
-// url can serve two chain servers, and their heads must not be compared.
-type providerSeriesKey struct {
-	spec, apiInterface, provider string
+// chainServerKey names one chain server (spec and api interface) of the router.
+type chainServerKey struct {
+	spec, apiInterface string
 }
+
+// DefaultURLAnswerTimeout is the shortest time a url counts as answering after its last
+// answer. A chain server whose trackers poll less often than once a minute sets twice its poll
+// interval instead (SetURLAnswerTimeout).
+const DefaultURLAnswerTimeout = 2 * time.Minute
 
 // SmartRouterMetricsManagerOptions contains configuration for the metrics manager.
 //
@@ -266,20 +268,31 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 
 	endpointLatestBlock := NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
 		Name:       "rpc_endpoint_latest_block",
-		Help:       "Latest block known by this RPC endpoint; for a provider with several node urls, the lowest head among them.",
+		Help:       "Latest block known by this RPC endpoint.",
 		Labels:     endpointLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
-	// One series per url of a provider, for the stuck-provider alerts (MAG-4204). The
-	// provider series above is the lowest of these heads, which serves the dashboards,
-	// but no single series per provider can show a url that froze while another url of
-	// the provider still trails it. A url that stopped answering loses its series
-	// (DropEndpointURLLatestBlock): it is down, not stuck.
+	// One series per node url of a provider, for the stuck-provider alerts (MAG-4204). Every url
+	// of a provider writes the provider series above, so that series cannot show a url that
+	// froze while another url of the provider moves on.
+	urlLabels := []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"}
 	endpointURLLatestBlock := NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
 		Name:       "rpc_endpoint_url_latest_block",
-		Help:       "Latest block one node url of a provider reported. url is a fingerprint of the node url: the first 8 hex digits of its sha256.",
-		Labels:     []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"},
+		Help:       "Latest block one node url of a provider answered with. url is a fingerprint of the node url: the first 8 hex digits of its sha256.",
+		Labels:     urlLabels,
+		Registerer: prometheus.DefaultRegisterer,
+	})
+	endpointURLAnsweredUntil := NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_url_answered_until_seconds",
+		Help:       "Unix time until which a node url counts as answering: its last answer, a poll or a relay, plus max(2m, 2 x the chain's poll interval). A url past it has stopped answering: it is down, not stuck.",
+		Labels:     urlLabels,
+		Registerer: prometheus.DefaultRegisterer,
+	})
+	endpointURLRelaysServiced := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_url_relays_serviced_total",
+		Help:       "Relays one node url of a provider served successfully.",
+		Labels:     urlLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
@@ -749,6 +762,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		optimizerSelectionScore:        optimizerSelectionScore,
 		endpointLatestBlock:            endpointLatestBlock,
 		endpointURLLatestBlock:         endpointURLLatestBlock,
+		endpointURLAnsweredUntil:       endpointURLAnsweredUntil,
+		endpointURLRelaysServiced:      endpointURLRelaysServiced,
 		endpointFetchLatestFails:       endpointFetchLatestFails,
 		endpointFetchBlockFails:        endpointFetchBlockFails,
 		endpointFetchLatestSuccess:     endpointFetchLatestSuccess,
@@ -944,166 +959,153 @@ func (m *SmartRouterMetricsManager) SetEndpointOverallHealthBreakdown(spec, apiI
 	m.endpointOverallHealthBreakdown.WithLabelValues(spec, apiInterface).Set(value)
 }
 
-// SetEndpointLatestBlock records the latest block one url reported and sets
-// rpc_endpoint_latest_block for every provider configured with that url (backup and
-// primary pairs often share a node-url, and each dashboard row must see the update).
-//
-// The series is one per provider, but a provider can have several urls — TON's /v2
-// node and /v3 indexer are separate services that stall independently. MAG-4204: when
-// every url wrote the shared series directly, a stuck /v2 and an advancing /v3
-// alternated in it ([1000 990 1000 993 …]), so `changes(...) == 0` never held and the
-// stuck-provider alerts could not fire. The series is now the LOWEST head among the
-// provider's urls:
-//   - a url that stops advancing freezes the series once the others pass it, so the
-//     stuck-provider alerts fire for it as they do for a single-url provider;
-//   - a url that trails (a lagging indexer) shows as the provider being behind, not
-//     as a saw-tooth;
-//   - a provider with one url is unchanged.
-//
-// A url counts once it has reported a positive block, so a tracker that never started
-// does not hold the series at zero. The server reports every answered poll here, not
-// only a new head, so a url that keeps answering with the same block keeps counting,
-// which is what a stuck url looks like. A url whose polls fail keeps its last head too,
-// so a url that stops answering freezes the series once the others pass it, as a
-// single-url provider's does. Only ForgetEndpointLatestBlock, for a removed tracker,
-// takes a url out.
-//
-// endpointID is normally a registered url. An unregistered value (a provider name, or
-// a url that never reached RegisterEndpoint) is its own single-url provider, as before.
+// SetEndpointLatestBlock sets the latest block known by an RPC endpoint.
+// When endpointID is a URL shared by multiple providers (typical for backup-primary pairs
+// with identical node-urls), emits the metric once per provider so every dashboard row
+// sees the update — not just the last-registered one.
 func (m *SmartRouterMetricsManager) SetEndpointLatestBlock(spec, apiInterface, endpointID string, block int64) {
 	if m == nil {
 		return
 	}
-	providerNames := m.resolveProviderNames(endpointID)
-	m.lock.Lock()
-	defer m.lock.Unlock()
-	for _, providerName := range providerNames {
-		m.recordURLLatestBlockLocked(providerSeriesKey{spec: spec, apiInterface: apiInterface, provider: providerName}, endpointID, block)
+	for _, providerName := range m.resolveProviderNames(endpointID) {
+		labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": providerName}
+		m.endpointLatestBlock.WithLabelValues(labels).Set(float64(block))
 	}
 }
 
-// SetProviderURLLatestBlock is SetEndpointLatestBlock for a caller that already knows
-// which provider the url belongs to — the relay-harvest path, which reports the
-// provider it relayed to. Only that provider's series moves; its head counts as the
-// url's, so it joins the same lowest-head-across-urls value the trackers feed instead
-// of writing the series directly and bringing the saw-tooth back.
-func (m *SmartRouterMetricsManager) SetProviderURLLatestBlock(spec, apiInterface, providerName, url string, block int64) {
-	if m == nil {
-		return
-	}
-	m.lock.Lock()
-	defer m.lock.Unlock()
-	m.recordURLLatestBlockLocked(providerSeriesKey{spec: spec, apiInterface: apiInterface, provider: providerName}, url, block)
-}
-
-// recordURLLatestBlockLocked stores url's head for key, writes url's own series and
-// rewrites key's provider series. A non-positive block is not stored: it is written to
-// the provider series only when the provider has no url with a head yet, as that series
-// always was, and it never reaches a url's own series. The caller holds lock.
-func (m *SmartRouterMetricsManager) recordURLLatestBlockLocked(key providerSeriesKey, url string, block int64) {
-	if block > 0 {
-		if m.urlLatestBlocks == nil {
-			m.urlLatestBlocks = make(map[providerSeriesKey]map[string]int64)
-		}
-		urls := m.urlLatestBlocks[key]
-		if urls == nil {
-			urls = make(map[string]int64)
-			m.urlLatestBlocks[key] = urls
-		}
-		urls[url] = block
-		if m.endpointURLLatestBlock != nil {
-			m.endpointURLLatestBlock.WithLabelValues(m.urlSeriesLabelsLocked(key, url)).Set(float64(block))
-		}
-	}
-	m.setProviderLatestBlockLocked(key, block)
-}
-
-// urlSeriesLabelsLocked names url's rpc_endpoint_url_latest_block series under key. The
-// caller holds lock.
-func (m *SmartRouterMetricsManager) urlSeriesLabelsLocked(key providerSeriesKey, url string) map[string]string {
-	return map[string]string{
-		"spec":          key.spec,
-		"apiInterface":  key.apiInterface,
-		"endpoint_id":   key.provider,
-		"url":           urlSeriesLabel(url),
-		"internal_path": m.urlInternalPaths[url],
-	}
-}
-
-// urlSeriesLabel is the url label of rpc_endpoint_url_latest_block: the first 8 hex digits
-// of the node url's sha256, and nothing of the url itself. A node url can hold an api key in
-// any part of it, so no part of it is exported. The fingerprint still tells a provider's urls
-// apart (TON's /v2 and /v3 share everything but the path), and internal_path says which
-// path a url serves.
-func urlSeriesLabel(rawURL string) string {
+// URLFingerprint is the url label of the per-url series: the first 8 hex digits of the node url's
+// sha256, and nothing of the url itself. A node url can hold an api key in any part of it, so no
+// part of it is exported. /debug/endpoint-state shows it beside each endpoint, which is how an
+// operator maps an alert's url back to a node url.
+func URLFingerprint(rawURL string) string {
 	sum := sha256.Sum256([]byte(rawURL))
 	return hex.EncodeToString(sum[:4])
 }
 
-// ForgetEndpointLatestBlock drops a url's head from its providers' series until the url
-// reports a head again, and deletes the url's own rpc_endpoint_url_latest_block series.
-// The caller is a removed tracker: the url's last head would otherwise hold the provider
-// series down for good, and its own series would stand still forever. Either way the
-// stuck-provider alert would fire for a url the router no longer uses.
-//
-// The provider series keeps its value when no url is left.
-func (m *SmartRouterMetricsManager) ForgetEndpointLatestBlock(spec, apiInterface, endpointID string) {
+// RegisterEndpointInternalPath records the spec path a registered url serves ("/v2", or "" for
+// the root), for the internal_path label of the per-url series. TON's /v2 and /v3 urls share a
+// host, so the fingerprint alone does not tell an operator which of them an alert is about.
+func (m *SmartRouterMetricsManager) RegisterEndpointInternalPath(endpointID, internalPath string) {
 	if m == nil {
 		return
 	}
-	providerNames := m.resolveProviderNames(endpointID)
 	m.lock.Lock()
 	defer m.lock.Unlock()
-	for _, providerName := range providerNames {
-		key := providerSeriesKey{spec: spec, apiInterface: apiInterface, provider: providerName}
-		if m.endpointURLLatestBlock != nil {
-			m.endpointURLLatestBlock.GaugeVec.Delete(prometheus.Labels(m.urlSeriesLabelsLocked(key, endpointID)))
-		}
-		urls, ok := m.urlLatestBlocks[key]
-		if !ok {
-			continue
-		}
-		if _, ok := urls[endpointID]; !ok {
-			continue
-		}
-		delete(urls, endpointID)
-		if len(urls) == 0 {
-			delete(m.urlLatestBlocks, key)
-			continue
-		}
-		m.setProviderLatestBlockLocked(key, 0)
+	if m.urlInternalPaths == nil {
+		m.urlInternalPaths = make(map[string]string)
+	}
+	m.urlInternalPaths[endpointID] = internalPath
+}
+
+// SetURLAnswerTimeout sets how long a url of one chain server counts as answering after its last
+// answer. The server passes max(DefaultURLAnswerTimeout, 2 x its trackers' poll interval), so a
+// url on a slow chain that answers every poll never reads as down between two polls.
+func (m *SmartRouterMetricsManager) SetURLAnswerTimeout(spec, apiInterface string, timeout time.Duration) {
+	if m == nil {
+		return
+	}
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	if m.urlAnswerTimeouts == nil {
+		m.urlAnswerTimeouts = make(map[chainServerKey]time.Duration)
+	}
+	m.urlAnswerTimeouts[chainServerKey{spec, apiInterface}] = timeout
+}
+
+// SetEndpointURLLatestBlock records the head one url answered with on rpc_endpoint_url_latest_block,
+// for every provider configured with the url, and moves the url's answered-until time on. Every
+// answered poll calls it, a repeat of the same block included, so a url that keeps answering with
+// one block stands still on its series while its answered-until time keeps moving: that is stuck.
+// A url that stops answering stands still on both: that is down.
+//
+// Only a registered url gets a series: an unregistered one would name itself as its provider, and
+// a url, even redacted, is not safe to export.
+func (m *SmartRouterMetricsManager) SetEndpointURLLatestBlock(spec, apiInterface, endpointURL string, block int64) {
+	if m == nil || m.endpointURLLatestBlock == nil || block <= 0 {
+		return
+	}
+	now := time.Now()
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	for _, providerName := range m.urlToProviderNames[endpointURL] {
+		m.setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL, block, now)
 	}
 }
 
-// DropEndpointURLLatestBlock deletes a url's own rpc_endpoint_url_latest_block series for every
-// provider configured with it. The provider series, and the url's head in it, stay. The caller
-// is a url that has stopped answering: it is down, not stuck, and a series standing at its last
-// head would read as stuck to the alerts. The series comes back at the url's next head.
-func (m *SmartRouterMetricsManager) DropEndpointURLLatestBlock(spec, apiInterface, endpointID string) {
+// SetProviderURLLatestBlock is SetEndpointURLLatestBlock for a caller that knows which provider the
+// url belongs to: the relay-harvest path, which reports the provider it relayed to. Only that
+// provider's series moves.
+func (m *SmartRouterMetricsManager) SetProviderURLLatestBlock(spec, apiInterface, providerName, endpointURL string, block int64) {
+	if m == nil || m.endpointURLLatestBlock == nil || block <= 0 {
+		return
+	}
+	now := time.Now()
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	if _, registered := m.urlToProviderNames[endpointURL]; !registered {
+		return
+	}
+	m.setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL, block, now)
+}
+
+// setURLLatestBlockLocked writes one url series and its answered-until time. The caller holds lock,
+// for reading.
+func (m *SmartRouterMetricsManager) setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL string, block int64, now time.Time) {
+	labels := m.urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL)
+	m.endpointURLLatestBlock.WithLabelValues(labels).Set(float64(block))
+	if m.endpointURLAnsweredUntil != nil {
+		timeout, ok := m.urlAnswerTimeouts[chainServerKey{spec, apiInterface}]
+		if !ok {
+			timeout = DefaultURLAnswerTimeout
+		}
+		m.endpointURLAnsweredUntil.WithLabelValues(labels).Set(float64(now.Add(timeout).Unix()))
+	}
+}
+
+// AddEndpointURLRelayServiced counts a relay one url of a provider served successfully, so a page
+// about that url can ask whether customers' requests reach it, not just its provider.
+func (m *SmartRouterMetricsManager) AddEndpointURLRelayServiced(spec, apiInterface, providerName, endpointURL string) {
+	if m == nil || m.endpointURLRelaysServiced == nil {
+		return
+	}
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	if _, registered := m.urlToProviderNames[endpointURL]; !registered {
+		return
+	}
+	m.endpointURLRelaysServiced.WithLabelValues(m.urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL)).Inc()
+}
+
+// ForgetEndpointURLLatestBlock deletes a url's per-url series for every provider configured with
+// it. The caller is a removed tracker: a series left behind would stand still forever, which is
+// what the stuck-provider alerts fire on.
+func (m *SmartRouterMetricsManager) ForgetEndpointURLLatestBlock(spec, apiInterface, endpointURL string) {
 	if m == nil || m.endpointURLLatestBlock == nil {
 		return
 	}
-	providerNames := m.resolveProviderNames(endpointID)
 	m.lock.Lock()
 	defer m.lock.Unlock()
-	for _, providerName := range providerNames {
-		key := providerSeriesKey{spec: spec, apiInterface: apiInterface, provider: providerName}
-		m.endpointURLLatestBlock.GaugeVec.Delete(prometheus.Labels(m.urlSeriesLabelsLocked(key, endpointID)))
+	for _, providerName := range m.urlToProviderNames[endpointURL] {
+		labels := prometheus.Labels(m.urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL))
+		m.endpointURLLatestBlock.GaugeVec.Delete(labels)
+		if m.endpointURLAnsweredUntil != nil {
+			m.endpointURLAnsweredUntil.GaugeVec.Delete(labels)
+		}
+		if m.endpointURLRelaysServiced != nil {
+			m.endpointURLRelaysServiced.CounterVec.Delete(labels)
+		}
 	}
 }
 
-// setProviderLatestBlockLocked writes the lowest head among key's urls, or fallback
-// when none has reported a positive block. The caller holds lock.
-func (m *SmartRouterMetricsManager) setProviderLatestBlockLocked(key providerSeriesKey, fallback int64) {
-	lowest := fallback
-	first := true
-	for _, block := range m.urlLatestBlocks[key] {
-		if first || block < lowest {
-			lowest, first = block, false
-		}
+// urlSeriesLabelsLocked names one url's per-url series. The caller holds lock.
+func (m *SmartRouterMetricsManager) urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL string) map[string]string {
+	return map[string]string{
+		"spec":          spec,
+		"apiInterface":  apiInterface,
+		"endpoint_id":   providerName,
+		"url":           URLFingerprint(endpointURL),
+		"internal_path": m.urlInternalPaths[endpointURL],
 	}
-	labels := map[string]string{"spec": key.spec, "apiInterface": key.apiInterface, "endpoint_id": key.provider}
-	m.endpointLatestBlock.WithLabelValues(labels).Set(float64(lowest))
 }
 
 // AddEndpointRelayServiced increments the relay counter for an endpoint and function
@@ -1274,22 +1276,6 @@ func (m *SmartRouterMetricsManager) RegisterEndpoint(spec, apiInterface, endpoin
 	// The relay code only calls SetEndpointOverallHealth on state transitions (unhealthy→healthy),
 	// so without this initialization, endpoints that never fail would have no health metric at all.
 	m.SetEndpointOverallHealth(spec, apiInterface, providerName, true)
-}
-
-// RegisterEndpointInternalPath records the spec path a registered url serves ("/v2", or ""
-// for the root), for the internal_path label of rpc_endpoint_url_latest_block. TON's /v2
-// and /v3 urls share a host, so the redacted url label alone does not tell an operator
-// which of them an alert is about.
-func (m *SmartRouterMetricsManager) RegisterEndpointInternalPath(endpointID, internalPath string) {
-	if m == nil {
-		return
-	}
-	m.lock.Lock()
-	defer m.lock.Unlock()
-	if m.urlInternalPaths == nil {
-		m.urlInternalPaths = make(map[string]string)
-	}
-	m.urlInternalPaths[endpointID] = internalPath
 }
 
 // resolveProviderNames returns every provider name configured for a given endpoint URL.

@@ -1639,9 +1639,12 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					health := ep.Endpoint.HealthSnapshot()
 					obs := observations[url] // zero value when no observation recorded yet
 					rows = append(rows, map[string]any{
-						"ChainID":                  server.listenEndpoint.ChainID,
-						"ApiInterface":             server.listenEndpoint.ApiInterface,
-						"NetworkAddress":           url,
+						"ChainID":        server.listenEndpoint.ChainID,
+						"ApiInterface":   server.listenEndpoint.ApiInterface,
+						"NetworkAddress": url,
+						// The url label of rpc_endpoint_url_latest_block and its siblings, which
+						// carry no part of the url: how an alert's url maps back to this row.
+						"URLFingerprint":           metrics.URLFingerprint(url),
 						"Enabled":                  health.Enabled,
 						"DisabledAt":               debugTimeRFC3339(health.DisabledAt),
 						"DisableReason":            string(health.DisableReason),
@@ -2878,7 +2881,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 						url.Url,       // raw URL — stored in endpoint_url label; used for URL->name resolution in ChainTracker callbacks
 						provider.Name, // provider name — used as endpoint_id in all Prometheus metrics
 					)
-					// The internal_path label of rpc_endpoint_url_latest_block (MAG-4204).
+					// The internal_path label of the per-url series (MAG-4204).
 					smartRouterMetricsManager.RegisterEndpointInternalPath(url.Url, url.InternalPath)
 				}
 			}
@@ -4659,10 +4662,10 @@ func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 				utils.LogAttr("chainKey", chainKey),
 			)
 			server.endpointChainTrackerManager.RemoveTracker(trackedURL)
-			// The url's last head would otherwise hold its provider's
-			// rpc_endpoint_latest_block down for good (MAG-4204).
+			// Its per-url series would otherwise stand still for the life of the pod, which the
+			// stuck-provider alerts read as stuck (MAG-4204).
 			if server.smartRouterEndpointMetrics != nil && server.listenEndpoint != nil {
-				server.smartRouterEndpointMetrics.ForgetEndpointLatestBlock(server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, trackedURL)
+				server.smartRouterEndpointMetrics.ForgetEndpointURLLatestBlock(server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, trackedURL)
 			}
 			removedCount++
 		}

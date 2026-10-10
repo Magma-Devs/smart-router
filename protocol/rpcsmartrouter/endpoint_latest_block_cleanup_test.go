@@ -9,15 +9,13 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-4204: rpc_endpoint_latest_block carries the lowest head across a provider's urls.
-// A url dropped on an epoch update must leave that set, or its last head holds the
-// provider's series down for good and the stuck-provider alert fires for a url the
-// router no longer uses.
-func TestCleanupStaleTrackers_ForgetsTheRemovedURLsHead(t *testing.T) {
+// MAG-4204: a url dropped on an epoch update must lose its rpc_endpoint_url_latest_block series,
+// or the series stands still for the life of the pod and the stuck-provider alert fires for a url
+// the router no longer uses.
+func TestCleanupStaleTrackers_DeletesTheRemovedURLsSeries(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
@@ -46,31 +44,9 @@ func TestCleanupStaleTrackers_ForgetsTheRemovedURLsHead(t *testing.T) {
 		_, err := m.GetOrCreateTracker(ep, nil)
 		require.NoError(t, err)
 	}
-	mm.SetEndpointLatestBlock("ETH1", "jsonrpc", dropped, 1000)
-	mm.SetEndpointLatestBlock("ETH1", "jsonrpc", kept, 1200)
-
-	providerLatestBlock := func(t *testing.T) float64 {
-		t.Helper()
-		mfs, err := prometheus.DefaultGatherer.Gather()
-		require.NoError(t, err)
-		for _, mf := range mfs {
-			if mf.GetName() != "rpc_endpoint_latest_block" {
-				continue
-			}
-			for _, mtr := range mf.GetMetric() {
-				lm := map[string]string{}
-				for _, lp := range mtr.GetLabel() {
-					lm[lp.GetName()] = lp.GetValue()
-				}
-				if lm["spec"] == "ETH1" && lm["apiInterface"] == "jsonrpc" && lm["endpoint_id"] == provider {
-					return mtr.GetGauge().GetValue()
-				}
-			}
-		}
-		t.Fatalf("no rpc_endpoint_latest_block series for %s", provider)
-		return 0
-	}
-	require.Equal(t, float64(1000), providerLatestBlock(t), "both urls count: the lower head is the provider's")
+	mm.SetEndpointURLLatestBlock("ETH1", "jsonrpc", dropped, 1000)
+	mm.SetEndpointURLLatestBlock("ETH1", "jsonrpc", kept, 1200)
+	require.Len(t, urlBlocks(t, provider), 2)
 
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
@@ -83,7 +59,6 @@ func TestCleanupStaleTrackers_ForgetsTheRemovedURLsHead(t *testing.T) {
 	(&RPCSmartRouter{}).cleanupStaleTrackers("ETH1-jsonrpc", rpcss, sessions, nil)
 
 	require.ElementsMatch(t, []string{kept}, m.GetAllEndpoints(), "the dropped url's tracker is gone")
-	require.Equal(t, float64(1200), providerLatestBlock(t), "and so is its head")
-	require.Equal(t, []float64{1200}, seriesValues(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider)),
-		"and its own rpc_endpoint_url_latest_block series, which would otherwise stand still forever")
+	require.Equal(t, map[string]float64{metrics.URLFingerprint(kept): 1200}, urlBlocks(t, provider), "and so is its series")
+	require.NotContains(t, answeredUntil(t, provider), metrics.URLFingerprint(dropped))
 }

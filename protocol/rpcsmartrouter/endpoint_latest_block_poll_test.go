@@ -7,57 +7,36 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-4204: rpc_endpoint_latest_block is the lowest head across a provider's urls, and the per-url
-// heads come from onEndpointPollBlock — every answered poll, not OnNewBlock. OnNewBlock fires only
-// for a strictly higher block, so a url that was already stuck when its tracker started would never
-// be counted and the stuck-provider alerts would stay blind. A url whose polls fail keeps its last
-// head, as on main, so errors neither hide a stuck url nor move the series.
+// MAG-4204 option B: rpc_endpoint_url_latest_block carries each node url's own head, written on
+// every answered poll by onEndpointPollBlock and by the relay harvest, and
+// rpc_endpoint_url_answered_until_seconds says until when the url counts as answering. A stuck url
+// stands still on the first while the second keeps moving; a url that stopped answering stands
+// still on both.
 
-// latestBlockSeries reads rpc_endpoint_latest_block{spec, apiInterface, endpoint_id=provider}
-// from the process-global registry the metrics manager registers on, or -1 when absent.
-func latestBlockSeries(t *testing.T, spec, apiInterface, provider string) float64 {
-	t.Helper()
-	mfs, err := prometheus.DefaultGatherer.Gather()
-	require.NoError(t, err)
-	for _, mf := range mfs {
-		if mf.GetName() != "rpc_endpoint_latest_block" {
-			continue
-		}
-		for _, mtr := range mf.GetMetric() {
-			lm := map[string]string{}
-			for _, lp := range mtr.GetLabel() {
-				lm[lp.GetName()] = lp.GetValue()
-			}
-			if lm["spec"] == spec && lm["apiInterface"] == apiInterface && lm["endpoint_id"] == provider {
-				return mtr.GetGauge().GetValue()
-			}
-		}
-	}
-	return -1
-}
-
-// urlLatestBlockSeries reads provider's rpc_endpoint_url_latest_block series as {url label: value}.
-func urlLatestBlockSeries(t *testing.T, spec, apiInterface, provider string) map[string]float64 {
+// gatherSeries reads one metric's series for provider as {url label: value}.
+func gatherSeries(t *testing.T, name, provider string) map[string]float64 {
 	t.Helper()
 	mfs, err := prometheus.DefaultGatherer.Gather()
 	require.NoError(t, err)
 	out := map[string]float64{}
 	for _, mf := range mfs {
-		if mf.GetName() != "rpc_endpoint_url_latest_block" {
+		if mf.GetName() != name {
 			continue
 		}
 		for _, mtr := range mf.GetMetric() {
@@ -65,22 +44,27 @@ func urlLatestBlockSeries(t *testing.T, spec, apiInterface, provider string) map
 			for _, lp := range mtr.GetLabel() {
 				lm[lp.GetName()] = lp.GetValue()
 			}
-			if lm["spec"] == spec && lm["apiInterface"] == apiInterface && lm["endpoint_id"] == provider {
-				out[lm["url"]] = mtr.GetGauge().GetValue()
+			if lm["endpoint_id"] != provider {
+				continue
 			}
+			value := mtr.GetGauge().GetValue()
+			if mtr.GetCounter() != nil {
+				value = mtr.GetCounter().GetValue()
+			}
+			out[lm["url"]] = value
 		}
 	}
 	return out
 }
 
-// seriesValues returns the values of a {label: value} map, sorted.
-func seriesValues(series map[string]float64) []float64 {
-	values := make([]float64, 0, len(series))
-	for _, v := range series {
-		values = append(values, v)
-	}
-	sort.Float64s(values)
-	return values
+func urlBlocks(t *testing.T, provider string) map[string]float64 {
+	t.Helper()
+	return gatherSeries(t, "rpc_endpoint_url_latest_block", provider)
+}
+
+func answeredUntil(t *testing.T, provider string) map[string]float64 {
+	t.Helper()
+	return gatherSeries(t, "rpc_endpoint_url_answered_until_seconds", provider)
 }
 
 // headUpstream answers eth_blockNumber with head(), or a 503 when fail() says so.
@@ -131,7 +115,6 @@ func trackProviderURLs(t *testing.T, provider string, upstreams ...*headUpstream
 		AverageBlockTime: 100 * time.Millisecond,
 		BlocksToSave:     1,
 		OnPollBlock:      rpcss.onEndpointPollBlock,
-		OnPollFailure:    rpcss.onEndpointPollFailure,
 	})
 	t.Cleanup(m.Stop)
 	rpcss.endpointChainTrackerManager = m // before any tracker polls
@@ -146,35 +129,62 @@ func trackProviderURLs(t *testing.T, provider string, upstreams ...*headUpstream
 	return rpcss, mm
 }
 
-// A pod that starts (rollout, restart, scale-up) while a url is stuck: the tracker's first
-// poll seeds its head without OnNewBlock, and every later poll returns the same block.
-func TestEndpointLatestBlock_URLStuckWhenItsTrackerStartsHoldsTheSeries(t *testing.T) {
-	const provider = "lava@mag4204StuckAtTrackerStart"
+// A pod that starts while a url is stuck: the tracker's first poll seeds its head without
+// OnNewBlock, and every later poll answers the same block. The url's series stands at it from the
+// first poll, and its answered-until time keeps moving: answering, and stuck.
+func TestURLLatestBlock_StuckURLStandsStillWhileItKeepsAnswering(t *testing.T) {
+	const provider = "lava@mag4204Stuck"
 	var head atomic.Int64
 	head.Store(990)
 	stuck := newHeadUpstream(t, func() int64 { return 1000 }, nil)
 	advancing := newHeadUpstream(t, func() int64 { return head.Add(1) }, nil)
 	trackProviderURLs(t, provider, stuck, advancing)
+	stuckLabel := metrics.URLFingerprint(stuck.srv.URL)
 
 	require.Eventually(t, func() bool { return head.Load() > 1010 }, 15*time.Second, 10*time.Millisecond)
-	polled := stuck.polls.Load()
-	require.Eventually(t, func() bool { return stuck.polls.Load() >= polled+5 }, 15*time.Second, 10*time.Millisecond)
-	require.Equal(t, float64(1000), latestBlockSeries(t, "ETH1", "jsonrpc", provider),
-		"the stuck url answers 1000 on every poll, so it holds the provider's series there")
-	perURL := seriesValues(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider))
-	require.Len(t, perURL, 2, "one series per url")
-	require.Equal(t, float64(1000), perURL[0], "the stuck url's own series stands at 1000")
-	require.Greater(t, perURL[1], float64(1010), "the advancing url's own series moves")
+	require.Equal(t, float64(1000), urlBlocks(t, provider)[stuckLabel], "the stuck url's own series stands at 1000")
+	require.Greater(t, urlBlocks(t, provider)[metrics.URLFingerprint(advancing.srv.URL)], float64(1010))
+
+	first := answeredUntil(t, provider)[stuckLabel]
+	require.Eventually(t, func() bool { return answeredUntil(t, provider)[stuckLabel] > first },
+		5*time.Second, 50*time.Millisecond, "a url that keeps answering keeps moving its answered-until time")
+	require.Equal(t, float64(1000), urlBlocks(t, provider)[stuckLabel])
 }
 
-// A burst of failed polls (503s, rate limits, timeouts) on a stuck url must not move the
-// provider's series, not even for a moment: a swing to the other url's head and back would make
-// changes() over the alert window non-zero, and the max across pods lets one pod clear the alert.
-func TestEndpointLatestBlock_ErrorBurstDoesNotMoveAStuckURLsSeries(t *testing.T) {
-	const provider = "lava@mag4204ErrorBurst"
-	const burst = 5 // failed polls in a row, more than the 3 that used to drop a url
+// A url that stops answering keeps its last head on its series, and its answered-until time stops
+// and falls behind the clock: down, not stuck. Nothing is deleted, so nothing depends on when the
+// next poll comes, however far a Retry-After or a slow chain pushes it.
+func TestURLLatestBlock_URLThatStopsAnsweringFallsBehindItsAnsweredUntil(t *testing.T) {
+	const provider = "lava@mag4204StopsAnswering"
 	var head atomic.Int64
 	head.Store(990)
+	var down atomic.Bool
+	dying := newHeadUpstream(t, func() int64 { return 1000 }, down.Load)
+	advancing := newHeadUpstream(t, func() int64 { return head.Add(1) }, nil)
+	_, mm := trackProviderURLs(t, provider, dying, advancing)
+	mm.SetURLAnswerTimeout("ETH1", "jsonrpc", time.Second)
+	dyingLabel := metrics.URLFingerprint(dying.srv.URL)
+
+	require.Eventually(t, func() bool { return head.Load() > 1005 }, 15*time.Second, 10*time.Millisecond)
+	down.Store(true)
+	polled := dying.polls.Load()
+	require.Eventually(t, func() bool { return dying.polls.Load() >= polled+2 }, 15*time.Second, 10*time.Millisecond)
+	lastAnswered := answeredUntil(t, provider)[dyingLabel]
+	require.Eventually(t, func() bool { return float64(time.Now().Unix()) > lastAnswered+1 },
+		10*time.Second, 50*time.Millisecond)
+
+	require.Equal(t, lastAnswered, answeredUntil(t, provider)[dyingLabel], "no answer, so its answered-until time stands")
+	require.Equal(t, float64(1000), urlBlocks(t, provider)[dyingLabel], "and its series keeps its last head")
+
+	down.Store(false)
+	require.Eventually(t, func() bool { return answeredUntil(t, provider)[dyingLabel] > lastAnswered },
+		15*time.Second, 50*time.Millisecond, "its next answer moves it on again")
+}
+
+// A burst of failed polls on a stuck url changes nothing on its series: there is nothing to
+// delete, so there is no gap and no swing for the alerts to read.
+func TestURLLatestBlock_ErrorBurstLeavesAStuckURLsSeries(t *testing.T) {
+	const provider = "lava@mag4204ErrorBurst"
 	var failLeft atomic.Int64
 	stuck := newHeadUpstream(t, func() int64 { return 1000 }, func() bool {
 		for {
@@ -187,87 +197,23 @@ func TestEndpointLatestBlock_ErrorBurstDoesNotMoveAStuckURLsSeries(t *testing.T)
 			}
 		}
 	})
-	advancing := newHeadUpstream(t, func() int64 { return head.Add(1) }, nil)
-	trackProviderURLs(t, provider, stuck, advancing)
-
-	require.Eventually(t, func() bool { return head.Load() > 1010 }, 15*time.Second, 10*time.Millisecond)
-	require.Equal(t, float64(1000), latestBlockSeries(t, "ETH1", "jsonrpc", provider))
+	trackProviderURLs(t, provider, stuck)
+	label := metrics.URLFingerprint(stuck.srv.URL)
+	require.Eventually(t, func() bool { return urlBlocks(t, provider)[label] == 1000 }, 15*time.Second, 10*time.Millisecond)
 
 	polled := stuck.polls.Load()
-	failLeft.Store(burst)
-	for stuck.polls.Load() < polled+burst+3 {
-		require.Equal(t, float64(1000), latestBlockSeries(t, "ETH1", "jsonrpc", provider),
-			"the provider series must not leave the stuck url's head during or after its failed polls")
-		require.Contains(t, seriesValues(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider)), float64(1000),
-			"a burst far shorter than latestBlockURLSeriesDropAfter keeps the stuck url's own series")
+	failLeft.Store(5)
+	for stuck.polls.Load() < polled+8 {
+		require.Equal(t, float64(1000), urlBlocks(t, provider)[label])
 		time.Sleep(time.Millisecond)
 	}
-	require.Zero(t, failLeft.Load(), "the stuck url did fail the whole burst")
-}
-
-// A url that stops answering altogether keeps its last head in the provider series, which freezes
-// once the provider's other url passes it, as main's does when a url writes nothing. Its own per-url
-// series, which the stuck alerts read, is dropped once it has given no answer for
-// latestBlockURLSeriesDropAfter (shortened here): it is down, not stuck.
-func TestEndpointLatestBlock_URLThatStopsAnsweringFreezesTheSeries(t *testing.T) {
-	const provider = "lava@mag4204StopsAnswering"
-	var head atomic.Int64
-	head.Store(990)
-	var down atomic.Bool
-	dying := newHeadUpstream(t, func() int64 { return 1000 }, down.Load)
-	advancing := newHeadUpstream(t, func() int64 { return head.Add(1) }, nil)
-	rpcss, _ := trackProviderURLs(t, provider, dying, advancing)
-
-	require.Eventually(t, func() bool { return head.Load() > 1005 }, 15*time.Second, 10*time.Millisecond)
-	// Written before any poll can fail: the failure hook reads it only after the atomic store below.
-	rpcss.urlSeriesDropAfter = 300 * time.Millisecond
-	down.Store(true)
-	polled := dying.polls.Load()
-	require.Eventually(t, func() bool { return dying.polls.Load() >= polled+4 }, 15*time.Second, 10*time.Millisecond,
-		"the url fails several polls in a row")
-	require.Eventually(t, func() bool { return head.Load() > 1030 }, 15*time.Second, 10*time.Millisecond)
-	require.Equal(t, float64(1000), latestBlockSeries(t, "ETH1", "jsonrpc", provider),
-		"a url that stopped answering holds the provider's series at its last head")
-	perURL := seriesValues(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider))
-	require.Len(t, perURL, 1, "the url that stopped answering has no series of its own")
-	require.Greater(t, perURL[0], float64(1030), "the answering url's series moves")
-
-	down.Store(false) // it answers again, at the same block
-	require.Eventually(t, func() bool {
-		return len(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider)) == 2
-	}, 15*time.Second, 10*time.Millisecond, "its series comes back at its next answer")
-}
-
-// The decision onEndpointPollFailure makes, without the timing of real trackers.
-func TestOnEndpointPollFailure_DropsAURLSilentForTwoMinutes(t *testing.T) {
-	const provider = "lava@mag4204PollFailure"
-	const url, other = "https://down.mag4204-failure.example", "https://up.mag4204-failure.example"
-	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
-	require.NotNil(t, mm)
-	mm.RegisterEndpoint("ETH1", "jsonrpc", url, provider)
-	mm.RegisterEndpoint("ETH1", "jsonrpc", other, provider)
-	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
-		smartRouterEndpointMetrics: mm,
-	}
-
-	rpcss.onEndpointPollBlock(url, 1000)
-	rpcss.onEndpointPollBlock(other, 1001)
-	rpcss.onEndpointPollFailure(url, 2*time.Minute-time.Second)
-	require.Equal(t, []float64{1000, 1001}, seriesValues(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider)))
-
-	rpcss.onEndpointPollFailure(url, 2*time.Minute)
-	require.Equal(t, []float64{1001}, seriesValues(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider)))
-	require.Equal(t, float64(1000), latestBlockSeries(t, "ETH1", "jsonrpc", provider), "the provider series keeps its head")
-
-	rpcss.onEndpointPollBlock(url, 1000)
-	require.Equal(t, []float64{1000, 1001}, seriesValues(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider)))
+	require.Zero(t, failLeft.Load(), "the url did fail the whole burst")
 }
 
 // A poll or harvest write lands after the observation gate releases its lock, so it can arrive
-// just after cleanupStaleTrackers removed the url's tracker and forgot its head. That write must
-// not pin the removed url's head in the provider's lowest head for the life of the pod.
-func TestEndpointLatestBlock_LateWriteForARemovedURLIsUndone(t *testing.T) {
+// just after cleanupStaleTrackers removed the url's tracker and deleted its series. That write
+// must not leave a series standing still for the life of the pod.
+func TestURLLatestBlock_LateWriteForARemovedURLIsUndone(t *testing.T) {
 	const provider = "lava@mag4204LateWrite"
 	const removed = "http://removed.mag4204-late-write:8545"
 	var head atomic.Int64
@@ -276,19 +222,16 @@ func TestEndpointLatestBlock_LateWriteForARemovedURLIsUndone(t *testing.T) {
 	rpcss, mm := trackProviderURLs(t, provider, kept)
 	mm.RegisterEndpoint("ETH1", "jsonrpc", removed, provider) // a url of the provider with no tracker (left)
 
-	require.Eventually(t, func() bool { return head.Load() > 1110 }, 15*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return head.Load() > 1105 }, 15*time.Second, 10*time.Millisecond)
 	rpcss.onEndpointPollBlock(removed, 1000) // the late write
 
-	require.Eventually(t, func() bool { return head.Load() > 1115 }, 15*time.Second, 10*time.Millisecond)
-	require.Greater(t, latestBlockSeries(t, "ETH1", "jsonrpc", provider), float64(1110),
-		"the removed url's late head must not hold the provider's series at 1000")
-	require.Len(t, urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider), 1,
-		"nor leave a series of its own standing still")
+	series := urlBlocks(t, provider)
+	require.NotContains(t, series, metrics.URLFingerprint(removed), "the removed url's late write is undone")
+	require.Contains(t, series, metrics.URLFingerprint(kept.srv.URL))
+	require.NotContains(t, answeredUntil(t, provider), metrics.URLFingerprint(removed))
 }
 
-// A provider's websocket door never serves a relay, so its head stays out of the series: a wss url
-// that answered once and then stopped must not freeze the provider while its https url serves
-// fresh blocks.
+// A provider's websocket door never serves a relay, so it gets no series of its own.
 func TestOnEndpointPollBlock_WebsocketURLIsLeftOut(t *testing.T) {
 	const provider = "lava@mag4204Websocket"
 	const httpsURL, wssURL = "https://rpc.mag4204-ws.example", "wss://ws.mag4204-ws.example"
@@ -301,11 +244,68 @@ func TestOnEndpointPollBlock_WebsocketURLIsLeftOut(t *testing.T) {
 		smartRouterEndpointMetrics: mm,
 	}
 
-	rpcss.onEndpointPollBlock(wssURL, 1000) // answered once, then stopped
-	for block := int64(1001); block <= 1005; block++ {
-		rpcss.onEndpointPollBlock(httpsURL, block)
-		require.Equal(t, float64(block), latestBlockSeries(t, "ETH1", "jsonrpc", provider))
+	rpcss.onEndpointPollBlock(wssURL, 1000)
+	rpcss.onEndpointPollBlock(httpsURL, 1001)
+	require.Equal(t, map[string]float64{metrics.URLFingerprint(httpsURL): 1001}, urlBlocks(t, provider))
+}
+
+// A harvested current-tip relay moves the relayed-to url's own series, for that provider, besides
+// the provider series it always moved.
+func TestHarvest_MovesTheRelayedToURLsSeries(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
 	}
-	require.Equal(t, []float64{1005}, seriesValues(urlLatestBlockSeries(t, "ETH1", "jsonrpc", provider)),
-		"the wss url gets no series of its own")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainParser:      newRealChainParserForHarvest(t, "ETH1"),
+		ChainID:          "ETH1",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 200 * time.Millisecond,
+		BlocksToSave:     1,
+	})
+	t.Cleanup(m.Stop)
+
+	const url = "http://harvest.mag4204:8545"
+	const provider = "lava@mag4204Harvest"
+	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	_, err := m.GetOrCreateTracker(ep, nil)
+	require.NoError(t, err)
+	gen, ok := m.ObservationGeneration(url)
+	require.True(t, ok)
+
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, mm)
+	mm.RegisterEndpoint("ETH1", "jsonrpc", url, provider)
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		endpointChainTrackerManager: m,
+		smartRouterEndpointMetrics:  mm,
+		chainParser:                 newRealChainParserForHarvest(t, "ETH1"),
+	}
+	chainParser := newRealChainParserForHarvest(t, "ETH1")
+	tipMsg, perr := chainParser.ParseMsg("", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, perr)
+	var cm chainlib.ChainMessage = tipMsg
+
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, gen, provider)
+
+	require.Equal(t, map[string]float64{metrics.URLFingerprint(url): 20_000_000}, urlBlocks(t, provider))
+	require.Contains(t, answeredUntil(t, provider), metrics.URLFingerprint(url))
+	require.Equal(t, float64(20_000_000), gatherSeries(t, "rpc_endpoint_latest_block", provider)[""], "the provider series, as before")
+}
+
+// Two poll intervals, never under two minutes: a healthy url on a slow chain answers at least once
+// per poll interval, so it never reads as down between two polls.
+func TestURLAnswerTimeout_IsTwoPollIntervalsAndAtLeastTwoMinutes(t *testing.T) {
+	for poll, want := range map[time.Duration]time.Duration{
+		200 * time.Millisecond: 2 * time.Minute,  // TON
+		6 * time.Second:        2 * time.Minute,  // ETH1
+		5 * time.Minute:        10 * time.Minute, // BTC
+		20 * time.Minute:       40 * time.Minute, // BTC at a 0.5 divisor
+	} {
+		require.Equal(t, want, urlAnswerTimeout(poll), "poll interval %v", poll)
+	}
+	require.Equal(t, 2*time.Minute, urlAnswerTimeout(0))
+	require.Equal(t, 2*time.Minute, urlAnswerTimeout(time.Minute))
 }
