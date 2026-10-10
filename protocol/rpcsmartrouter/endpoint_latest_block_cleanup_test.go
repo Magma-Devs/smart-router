@@ -44,8 +44,8 @@ func TestCleanupStaleTrackers_DeletesTheRemovedURLsSeries(t *testing.T) {
 		_, err := m.GetOrCreateTracker(ep, nil)
 		require.NoError(t, err)
 	}
-	mm.SetEndpointURLLatestBlock("ETH1", "jsonrpc", dropped, 1000)
-	mm.SetEndpointURLLatestBlock("ETH1", "jsonrpc", kept, 1200)
+	mm.SetEndpointURLLatestBlock("ETH1", "jsonrpc", dropped, 1000, metrics.DefaultURLAnswerTimeout)
+	mm.SetEndpointURLLatestBlock("ETH1", "jsonrpc", kept, 1200, metrics.DefaultURLAnswerTimeout)
 	require.Len(t, urlBlocks(t, provider), 2)
 
 	rpcss := &RPCSmartRouterServer{

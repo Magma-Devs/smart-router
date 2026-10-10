@@ -331,8 +331,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 			rpcss.smartRouterEndpointMetrics.RecordBlockFetch(listenEndpoint.ChainID, listenEndpoint.ApiInterface, endpointURL, true, false)
 		},
 	})
-	rpcss.smartRouterEndpointMetrics.SetURLAnswerTimeout(listenEndpoint.ChainID, listenEndpoint.ApiInterface,
-		urlAnswerTimeout(rpcss.endpointChainTrackerManager.PollInterval()))
 
 	// Consensus recompute tick (MAG-2160 / Topic C): periodically pull all per-endpoint
 	// observation snapshots and let ChainState recompute its strict-majority baseline +
@@ -3631,6 +3629,11 @@ func urlAnswerTimeout(pollInterval time.Duration) time.Duration {
 	return max(metrics.DefaultURLAnswerTimeout, 2*pollInterval)
 }
 
+// answerTimeout is urlAnswerTimeout for this server's trackers, passed with every per-url write.
+func (rpcss *RPCSmartRouterServer) answerTimeout() time.Duration {
+	return urlAnswerTimeout(rpcss.endpointChainTrackerManager.PollInterval())
+}
+
 // onEndpointPollBlock is the EndpointMonitor's OnPollBlock hook. It records the head a url
 // answered with on rpc_endpoint_url_latest_block (MAG-4204), on every answered poll: the tracker's
 // first poll and every repeat of the same block included, which OnNewBlock never reports. So a url
@@ -3651,7 +3654,7 @@ func (rpcss *RPCSmartRouterServer) onEndpointPollBlock(endpointURL string, block
 		(protocol == lavasession.DirectRPCProtocolWS || protocol == lavasession.DirectRPCProtocolWSS) {
 		return
 	}
-	rpcss.smartRouterEndpointMetrics.SetEndpointURLLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL, block)
+	rpcss.smartRouterEndpointMetrics.SetEndpointURLLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL, block, rpcss.answerTimeout())
 	rpcss.forgetURLLatestBlockIfUntracked(endpointURL)
 }
 
@@ -3744,6 +3747,7 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 			endpointAddress,
 			targetEndpoint.NetworkAddress,
 			tip,
+			rpcss.answerTimeout(),
 		)
 		rpcss.forgetURLLatestBlockIfUntracked(targetEndpoint.NetworkAddress)
 	}

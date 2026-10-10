@@ -171,20 +171,15 @@ type SmartRouterMetricsManager struct {
 	// urlInternalPaths maps a registered url to the spec path it serves ("/v2", or "" for the
 	// root), for the internal_path label of the per-url series. Guarded by lock.
 	urlInternalPaths map[string]string
-	// urlAnswerTimeouts is, per chain server, how long a url counts as answering after its last
-	// answer (SetURLAnswerTimeout). Guarded by lock.
-	urlAnswerTimeouts  map[chainServerKey]time.Duration
+	// urlFingerprints maps a registered url to its URLFingerprint, computed once at registration
+	// rather than on every relay. Guarded by lock.
+	urlFingerprints    map[string]string
 	optimizerQoSClient *ConsumerOptimizerQoSClient
 }
 
-// chainServerKey names one chain server (spec and api interface) of the router.
-type chainServerKey struct {
-	spec, apiInterface string
-}
-
-// DefaultURLAnswerTimeout is the shortest time a url counts as answering after its last
-// answer. A chain server whose trackers poll less often than once a minute sets twice its poll
-// interval instead (SetURLAnswerTimeout).
+// DefaultURLAnswerTimeout is the shortest time a url counts as answering after an answer. A
+// chain server whose trackers poll less often than once a minute passes twice its poll interval
+// instead.
 const DefaultURLAnswerTimeout = 2 * time.Minute
 
 // SmartRouterMetricsManagerOptions contains configuration for the metrics manager.
@@ -975,8 +970,8 @@ func (m *SmartRouterMetricsManager) SetEndpointLatestBlock(spec, apiInterface, e
 
 // URLFingerprint is the url label of the per-url series: the first 8 hex digits of the node url's
 // sha256, and nothing of the url itself. A node url can hold an api key in any part of it, so no
-// part of it is exported. /debug/endpoint-state shows it beside each endpoint, which is how an
-// operator maps an alert's url back to a node url.
+// part of it is exported. /debug/endpoint-state shows it beside each endpoint, on a router run
+// with its debug server.
 func URLFingerprint(rawURL string) string {
 	sum := sha256.Sum256([]byte(rawURL))
 	return hex.EncodeToString(sum[:4])
@@ -997,68 +992,60 @@ func (m *SmartRouterMetricsManager) RegisterEndpointInternalPath(endpointID, int
 	m.urlInternalPaths[endpointID] = internalPath
 }
 
-// SetURLAnswerTimeout sets how long a url of one chain server counts as answering after its last
-// answer. The server passes max(DefaultURLAnswerTimeout, 2 x its trackers' poll interval), so a
-// url on a slow chain that answers every poll never reads as down between two polls.
-func (m *SmartRouterMetricsManager) SetURLAnswerTimeout(spec, apiInterface string, timeout time.Duration) {
-	if m == nil {
-		return
-	}
-	m.lock.Lock()
-	defer m.lock.Unlock()
-	if m.urlAnswerTimeouts == nil {
-		m.urlAnswerTimeouts = make(map[chainServerKey]time.Duration)
-	}
-	m.urlAnswerTimeouts[chainServerKey{spec, apiInterface}] = timeout
-}
-
 // SetEndpointURLLatestBlock records the head one url answered with on rpc_endpoint_url_latest_block,
-// for every provider configured with the url, and moves the url's answered-until time on. Every
-// answered poll calls it, a repeat of the same block included, so a url that keeps answering with
-// one block stands still on its series while its answered-until time keeps moving: that is stuck.
-// A url that stops answering stands still on both: that is down.
+// for every provider configured with the url, and moves the url's answered-until time to
+// answerTimeout from now (DefaultURLAnswerTimeout if answerTimeout is not positive). The server
+// passes max(DefaultURLAnswerTimeout, 2 x its trackers' poll interval), so a url on a slow chain
+// that answers every poll never reads as down between two polls. Every answered poll calls it, a
+// repeat of the same block included, so a url that keeps answering with one block stands still on
+// its series while its answered-until time keeps moving: that is stuck. A url that stops answering
+// stands still on both: that is down.
 //
 // Only a registered url gets a series: an unregistered one would name itself as its provider, and
 // a url, even redacted, is not safe to export.
-func (m *SmartRouterMetricsManager) SetEndpointURLLatestBlock(spec, apiInterface, endpointURL string, block int64) {
+func (m *SmartRouterMetricsManager) SetEndpointURLLatestBlock(spec, apiInterface, endpointURL string, block int64, answerTimeout time.Duration) {
 	if m == nil || m.endpointURLLatestBlock == nil || block <= 0 {
 		return
 	}
-	now := time.Now()
+	answeredUntil := answeredUntilFrom(time.Now(), answerTimeout)
 	m.lock.RLock()
 	defer m.lock.RUnlock()
 	for _, providerName := range m.urlToProviderNames[endpointURL] {
-		m.setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL, block, now)
+		m.setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL, block, answeredUntil)
 	}
 }
 
 // SetProviderURLLatestBlock is SetEndpointURLLatestBlock for a caller that knows which provider the
 // url belongs to: the relay-harvest path, which reports the provider it relayed to. Only that
 // provider's series moves.
-func (m *SmartRouterMetricsManager) SetProviderURLLatestBlock(spec, apiInterface, providerName, endpointURL string, block int64) {
+func (m *SmartRouterMetricsManager) SetProviderURLLatestBlock(spec, apiInterface, providerName, endpointURL string, block int64, answerTimeout time.Duration) {
 	if m == nil || m.endpointURLLatestBlock == nil || block <= 0 {
 		return
 	}
-	now := time.Now()
+	answeredUntil := answeredUntilFrom(time.Now(), answerTimeout)
 	m.lock.RLock()
 	defer m.lock.RUnlock()
 	if _, registered := m.urlToProviderNames[endpointURL]; !registered {
 		return
 	}
-	m.setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL, block, now)
+	m.setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL, block, answeredUntil)
+}
+
+// answeredUntilFrom is the answered-until time of an answer at now.
+func answeredUntilFrom(now time.Time, answerTimeout time.Duration) time.Time {
+	if answerTimeout <= 0 {
+		answerTimeout = DefaultURLAnswerTimeout
+	}
+	return now.Add(answerTimeout)
 }
 
 // setURLLatestBlockLocked writes one url series and its answered-until time. The caller holds lock,
 // for reading.
-func (m *SmartRouterMetricsManager) setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL string, block int64, now time.Time) {
+func (m *SmartRouterMetricsManager) setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL string, block int64, answeredUntil time.Time) {
 	labels := m.urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL)
 	m.endpointURLLatestBlock.WithLabelValues(labels).Set(float64(block))
 	if m.endpointURLAnsweredUntil != nil {
-		timeout, ok := m.urlAnswerTimeouts[chainServerKey{spec, apiInterface}]
-		if !ok {
-			timeout = DefaultURLAnswerTimeout
-		}
-		m.endpointURLAnsweredUntil.WithLabelValues(labels).Set(float64(now.Add(timeout).Unix()))
+		m.endpointURLAnsweredUntil.WithLabelValues(labels).Set(float64(answeredUntil.Unix()))
 	}
 }
 
@@ -1099,11 +1086,15 @@ func (m *SmartRouterMetricsManager) ForgetEndpointURLLatestBlock(spec, apiInterf
 
 // urlSeriesLabelsLocked names one url's per-url series. The caller holds lock.
 func (m *SmartRouterMetricsManager) urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL string) map[string]string {
+	fingerprint, ok := m.urlFingerprints[endpointURL]
+	if !ok {
+		fingerprint = URLFingerprint(endpointURL)
+	}
 	return map[string]string{
 		"spec":          spec,
 		"apiInterface":  apiInterface,
 		"endpoint_id":   providerName,
-		"url":           URLFingerprint(endpointURL),
+		"url":           fingerprint,
 		"internal_path": m.urlInternalPaths[endpointURL],
 	}
 }
@@ -1269,6 +1260,12 @@ func (m *SmartRouterMetricsManager) RegisterEndpoint(spec, apiInterface, endpoin
 	}
 	if !alreadyRegistered {
 		m.urlToProviderNames[endpointID] = append(existing, providerName)
+	}
+	if _, ok := m.urlFingerprints[endpointID]; !ok {
+		if m.urlFingerprints == nil {
+			m.urlFingerprints = make(map[string]string)
+		}
+		m.urlFingerprints[endpointID] = URLFingerprint(endpointID)
 	}
 	m.lock.Unlock()
 

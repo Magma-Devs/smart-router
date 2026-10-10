@@ -2495,6 +2495,18 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 	return expanded
 }
 
+// registerEndpointMetrics registers one node url of a provider with the metrics manager: the raw
+// url, stored in the endpoint_url label and used for URL->name resolution in the ChainTracker
+// callbacks; the provider name, the endpoint_id of every Prometheus metric; and the spec path the url
+// serves, the internal_path label of its per-url series (MAG-4204).
+func registerEndpointMetrics(mm *metrics.SmartRouterMetricsManager, rpcEndpoint *lavasession.RPCEndpoint, url common.NodeUrl, providerName string) {
+	if mm == nil {
+		return
+	}
+	mm.RegisterEndpoint(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface, url.Url, providerName)
+	mm.RegisterEndpointInternalPath(url.Url, url.InternalPath)
+}
+
 func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	ctx context.Context,
 	rpcEndpoint *lavasession.RPCEndpoint,
@@ -2874,16 +2886,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				endpoints = append(endpoints, endpoint)
 
 				// Register endpoint with metrics manager for info metric visibility
-				if smartRouterMetricsManager != nil {
-					smartRouterMetricsManager.RegisterEndpoint(
-						rpcEndpoint.ChainID,
-						rpcEndpoint.ApiInterface,
-						url.Url,       // raw URL — stored in endpoint_url label; used for URL->name resolution in ChainTracker callbacks
-						provider.Name, // provider name — used as endpoint_id in all Prometheus metrics
-					)
-					// The internal_path label of the per-url series (MAG-4204).
-					smartRouterMetricsManager.RegisterEndpointInternalPath(url.Url, url.InternalPath)
-				}
+				registerEndpointMetrics(smartRouterMetricsManager, rpcEndpoint, url, provider.Name)
 			}
 
 			// Skip provider entirely if every URL failed direct-connection creation.

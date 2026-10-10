@@ -914,6 +914,9 @@ func (m *EndpointMonitor) ObservationGeneration(endpointURL string) (uint64, boo
 // succeeds: the chain's block time over the poll divisor. Failures back off from it, and the
 // traffic gate may skip polls an answered relay already covers.
 func (m *EndpointMonitor) PollInterval() time.Duration {
+	if m == nil {
+		return 0
+	}
 	return m.flatPollInterval
 }
 
