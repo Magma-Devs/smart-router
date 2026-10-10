@@ -159,10 +159,6 @@ type EndpointMonitor struct {
 	// onTipObservation. See EndpointChainTrackerConfig.OnPollBlock. Set once at construction;
 	// immutable.
 	onPollBlock func(endpointURL string, block int64)
-	// onPollFailure, if set, is invoked after every failed latest-block poll recordPollObservation
-	// records for a live tracker, fired AFTER obsMu is released. See
-	// EndpointChainTrackerConfig.OnPollFailure. Set once at construction; immutable.
-	onPollFailure func(endpointURL string, silentFor time.Duration)
 	// onGateSkip, if set, is invoked once per poll cycle the traffic gate suppressed, with the
 	// source that made the poll redundant (metrics.TrackerGateSkipSource*).
 	onGateSkip func(endpointURL, source string)
@@ -216,11 +212,6 @@ type EndpointChainTrackerConfig struct {
 	// is not reported (the observation's own generation gate), but the call runs after that
 	// gate's lock is released, so it can land just after the tracker is removed.
 	OnPollBlock func(endpointURL string, block int64)
-	// OnPollFailure, if set, is invoked after every failed latest-block poll a live tracker
-	// records, with how long the endpoint has given no answer: the time since its last accepted
-	// observation, poll or relay, or 0 if it has never answered. Like OnPollBlock it runs after
-	// the observation gate's lock is released.
-	OnPollFailure func(endpointURL string, silentFor time.Duration)
 
 	// PeerObservations, when set, enables the fleet half of the traffic gate (MAG-2981): this
 	// pod publishes its successful polls to the store and borrows fresh observations from
@@ -304,7 +295,6 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		onFetchError:       config.OnFetchError,
 		onTipObservation:   config.OnTipObservation,
 		onPollBlock:        config.OnPollBlock,
-		onPollFailure:      config.OnPollFailure,
 		onGateSkip:         config.OnGateSkip,
 		onGateError:        config.OnGateError,
 		onTrackerRequest:   config.OnTrackerRequest,
@@ -918,6 +908,13 @@ func (m *EndpointMonitor) ObservationGeneration(endpointURL string) (uint64, boo
 	defer m.obsMu.RUnlock()
 	gen, ok := m.generations[endpointURL]
 	return gen, ok
+}
+
+// PollInterval is the cadence each tracker of this monitor polls its endpoint at when the poll
+// succeeds: the chain's block time over the poll divisor. Failures back off from it, and the
+// traffic gate may skip polls an answered relay already covers.
+func (m *EndpointMonitor) PollInterval() time.Duration {
+	return m.flatPollInterval
 }
 
 // GetAllEndpoints returns all endpoint URLs with active ChainTrackers.
