@@ -97,6 +97,10 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		if publishBlock > 0 {
 			m.publishLocalObservation(endpointURL, publishBlock)
 		}
+		// The same accepted block, with its url, for rpc_endpoint_url_latest_block.
+		if tipBlock > 0 && m.onPollBlock != nil {
+			m.onPollBlock(endpointURL, tipBlock)
+		}
 	}()
 
 	m.obsMu.Lock()

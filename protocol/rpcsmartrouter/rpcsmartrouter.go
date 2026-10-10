@@ -1639,9 +1639,12 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					health := ep.Endpoint.HealthSnapshot()
 					obs := observations[url] // zero value when no observation recorded yet
 					rows = append(rows, map[string]any{
-						"ChainID":                  server.listenEndpoint.ChainID,
-						"ApiInterface":             server.listenEndpoint.ApiInterface,
-						"NetworkAddress":           url,
+						"ChainID":        server.listenEndpoint.ChainID,
+						"ApiInterface":   server.listenEndpoint.ApiInterface,
+						"NetworkAddress": url,
+						// The url label of rpc_endpoint_url_latest_block and its siblings, which
+						// carry no part of the url: how an alert's url maps back to this row.
+						"URLFingerprint":           metrics.URLFingerprint(url),
 						"Enabled":                  health.Enabled,
 						"DisabledAt":               debugTimeRFC3339(health.DisabledAt),
 						"DisableReason":            string(health.DisableReason),
@@ -2492,6 +2495,18 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 	return expanded
 }
 
+// registerEndpointMetrics registers one node url of a provider with the metrics manager: the raw
+// url, stored in the endpoint_url label and used for URL->name resolution in the ChainTracker
+// callbacks; the provider name, the endpoint_id of every Prometheus metric; and the spec path the url
+// serves, the internal_path label of its per-url series (MAG-4204).
+func registerEndpointMetrics(mm *metrics.SmartRouterMetricsManager, rpcEndpoint *lavasession.RPCEndpoint, url common.NodeUrl, providerName string) {
+	if mm == nil {
+		return
+	}
+	mm.RegisterEndpoint(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface, url.Url, providerName)
+	mm.RegisterEndpointInternalPath(url.Url, url.InternalPath)
+}
+
 func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	ctx context.Context,
 	rpcEndpoint *lavasession.RPCEndpoint,
@@ -2871,14 +2886,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 				endpoints = append(endpoints, endpoint)
 
 				// Register endpoint with metrics manager for info metric visibility
-				if smartRouterMetricsManager != nil {
-					smartRouterMetricsManager.RegisterEndpoint(
-						rpcEndpoint.ChainID,
-						rpcEndpoint.ApiInterface,
-						url.Url,       // raw URL — stored in endpoint_url label; used for URL->name resolution in ChainTracker callbacks
-						provider.Name, // provider name — used as endpoint_id in all Prometheus metrics
-					)
-				}
+				registerEndpointMetrics(smartRouterMetricsManager, rpcEndpoint, url, provider.Name)
 			}
 
 			// Skip provider entirely if every URL failed direct-connection creation.
@@ -4657,6 +4665,11 @@ func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 				utils.LogAttr("chainKey", chainKey),
 			)
 			server.endpointChainTrackerManager.RemoveTracker(trackedURL)
+			// Its per-url series would otherwise stand still for the life of the pod, which the
+			// stuck-provider alerts read as stuck (MAG-4204).
+			if server.smartRouterEndpointMetrics != nil && server.listenEndpoint != nil {
+				server.smartRouterEndpointMetrics.ForgetEndpointURLLatestBlock(server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, trackedURL)
+			}
 			removedCount++
 		}
 	}

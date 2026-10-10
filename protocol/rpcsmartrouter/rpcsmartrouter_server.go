@@ -291,6 +291,8 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
+		// Each url's head on rpc_endpoint_url_latest_block, on every answered poll (MAG-4204).
+		OnPollBlock: rpcss.onEndpointPollBlock,
 		// Fleet tracker gate (MAG-2981): with --shared-state AND a cache backend, pods share
 		// their poll observations so an endpoint is polled about once per interval fleet-wide.
 		// Gated on the same flag as the chain-level shared tip — it is the operator's "this
@@ -2675,6 +2677,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					outcome,
 					analytics,
 				)
+				// Per url too: a provider can have several urls, and the stuck-and-serving page
+				// asks whether customers' requests reach the stuck one (MAG-4204).
+				if outcome == metrics.RelayOutcomeSuccess && targetEndpoint != nil {
+					rpcss.smartRouterEndpointMetrics.AddEndpointURLRelayServiced(
+						rpcss.listenEndpoint.ChainID,
+						rpcss.listenEndpoint.ApiInterface,
+						endpointAddress,
+						targetEndpoint.NetworkAddress,
+					)
+				}
 			}
 
 			// Handle response
@@ -3609,6 +3621,58 @@ func (rpcss *RPCSmartRouterServer) onTipObservation(block int64) {
 	}
 }
 
+// urlAnswerTimeout is how long a url counts as answering after its last answer, for a chain whose
+// trackers poll every pollInterval: two poll intervals, so a healthy url on a slow chain (BTC polls
+// every 5 minutes, every 20 at a 0.5 divisor) never reads as down between two polls, and never
+// less than metrics.DefaultURLAnswerTimeout.
+func urlAnswerTimeout(pollInterval time.Duration) time.Duration {
+	return max(metrics.DefaultURLAnswerTimeout, 2*pollInterval)
+}
+
+// answerTimeout is urlAnswerTimeout for this server's trackers, passed with every per-url write.
+func (rpcss *RPCSmartRouterServer) answerTimeout() time.Duration {
+	return urlAnswerTimeout(rpcss.endpointChainTrackerManager.PollInterval())
+}
+
+// onEndpointPollBlock is the EndpointMonitor's OnPollBlock hook. It records the head a url
+// answered with on rpc_endpoint_url_latest_block (MAG-4204), on every answered poll: the tracker's
+// first poll and every repeat of the same block included, which OnNewBlock never reports. So a url
+// that keeps answering with one block stands still on its own series while its answered-until time
+// keeps moving, which is what the stuck alerts look for; a url that stops answering stops both,
+// which they leave alone. rpc_endpoint_latest_block, the provider series, is still written by
+// OnNewBlock and the relay harvest, as before.
+//
+// A ws/wss url is left out. It never serves a relay (Endpoint.ServesDirectRelays), so its head
+// says nothing about the answers customers' relays get.
+//
+// Nil-guards cover test fixtures that construct the server without metrics wired.
+func (rpcss *RPCSmartRouterServer) onEndpointPollBlock(endpointURL string, block int64) {
+	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	if protocol, err := lavasession.DetectProtocol(endpointURL, rpcss.listenEndpoint.ApiInterface); err == nil &&
+		(protocol == lavasession.DirectRPCProtocolWS || protocol == lavasession.DirectRPCProtocolWSS) {
+		return
+	}
+	rpcss.smartRouterEndpointMetrics.SetEndpointURLLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL, block, rpcss.answerTimeout())
+	rpcss.forgetURLLatestBlockIfUntracked(endpointURL)
+}
+
+// forgetURLLatestBlockIfUntracked undoes a per-url write that raced its url's removal.
+// cleanupStaleTrackers removes the url's tracker and then deletes its per-url series. The poll and
+// harvest writes are generation-gated, but they land after the gate's lock is released, so one can
+// arrive just after that delete and leave a series that stands still for the life of the pod, which
+// the stuck alerts would read as stuck. Checking for the tracker after the write closes every
+// interleaving, because the removal always comes before the delete.
+func (rpcss *RPCSmartRouterServer) forgetURLLatestBlockIfUntracked(endpointURL string) {
+	if rpcss.endpointChainTrackerManager == nil || rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	if _, tracked := rpcss.endpointChainTrackerManager.ObservationGeneration(endpointURL); !tracked {
+		rpcss.smartRouterEndpointMetrics.ForgetEndpointURLLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL)
+	}
+}
+
 // harvestAndUpdateTipFromRelay applies a served relay's block to TIP state — but only when the
 // response is tip-eligible (MAG-2159 finding 4). tipBlockFromRelay distinguishes a "block
 // associated with a response" (historical: eth_getBlockByNumber(N), getBlockByHash,
@@ -3676,6 +3740,16 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 			endpointAddress,
 			tip,
 		)
+		// And the url's own series, for the provider relayed to (MAG-4204).
+		rpcss.smartRouterEndpointMetrics.SetProviderURLLatestBlock(
+			rpcss.listenEndpoint.ChainID,
+			rpcss.listenEndpoint.ApiInterface,
+			endpointAddress,
+			targetEndpoint.NetworkAddress,
+			tip,
+			rpcss.answerTimeout(),
+		)
+		rpcss.forgetURLLatestBlockIfUntracked(targetEndpoint.NetworkAddress)
 	}
 }
 
