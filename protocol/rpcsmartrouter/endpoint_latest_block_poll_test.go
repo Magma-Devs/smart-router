@@ -97,6 +97,12 @@ func newHeadUpstream(t *testing.T, head func() int64, fail func() bool) *headUps
 // OnPollBlock wired to the server's onEndpointPollBlock as ServeRPCRequests wires it.
 func trackProviderURLs(t *testing.T, provider string, upstreams ...*headUpstream) (*RPCSmartRouterServer, *metrics.SmartRouterMetricsManager) {
 	t.Helper()
+	return trackProviderURLsEvery(t, 100*time.Millisecond, provider, upstreams...)
+}
+
+// trackProviderURLsEvery is trackProviderURLs for a chain with the given average block time.
+func trackProviderURLsEvery(t *testing.T, blockTime time.Duration, provider string, upstreams ...*headUpstream) (*RPCSmartRouterServer, *metrics.SmartRouterMetricsManager) {
+	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
@@ -112,7 +118,7 @@ func trackProviderURLs(t *testing.T, provider string, upstreams ...*headUpstream
 		ChainParser:      newRealChainParserForHarvest(t, "ETH1"),
 		ChainID:          "ETH1",
 		ApiInterface:     "jsonrpc",
-		AverageBlockTime: 100 * time.Millisecond,
+		AverageBlockTime: blockTime,
 		BlocksToSave:     1,
 		OnPollBlock:      rpcss.onEndpointPollBlock,
 	})
@@ -152,17 +158,16 @@ func TestURLLatestBlock_StuckURLStandsStillWhileItKeepsAnswering(t *testing.T) {
 }
 
 // A url that stops answering keeps its last head on its series, and its answered-until time stops
-// and falls behind the clock: down, not stuck. Nothing is deleted, so nothing depends on when the
-// next poll comes, however far a Retry-After or a slow chain pushes it.
-func TestURLLatestBlock_URLThatStopsAnsweringFallsBehindItsAnsweredUntil(t *testing.T) {
+// while the clock moves on, until the clock passes it: down, not stuck. Nothing is deleted, so
+// nothing depends on when the next poll comes, however far a Retry-After or a slow chain pushes it.
+func TestURLLatestBlock_URLThatStopsAnsweringStopsItsAnsweredUntil(t *testing.T) {
 	const provider = "lava@mag4204StopsAnswering"
 	var head atomic.Int64
 	head.Store(990)
 	var down atomic.Bool
 	dying := newHeadUpstream(t, func() int64 { return 1000 }, down.Load)
 	advancing := newHeadUpstream(t, func() int64 { return head.Add(1) }, nil)
-	_, mm := trackProviderURLs(t, provider, dying, advancing)
-	mm.SetURLAnswerTimeout("ETH1", "jsonrpc", time.Second)
+	trackProviderURLs(t, provider, dying, advancing)
 	dyingLabel := metrics.URLFingerprint(dying.srv.URL)
 
 	require.Eventually(t, func() bool { return head.Load() > 1005 }, 15*time.Second, 10*time.Millisecond)
@@ -170,8 +175,11 @@ func TestURLLatestBlock_URLThatStopsAnsweringFallsBehindItsAnsweredUntil(t *test
 	polled := dying.polls.Load()
 	require.Eventually(t, func() bool { return dying.polls.Load() >= polled+2 }, 15*time.Second, 10*time.Millisecond)
 	lastAnswered := answeredUntil(t, provider)[dyingLabel]
-	require.Eventually(t, func() bool { return float64(time.Now().Unix()) > lastAnswered+1 },
-		10*time.Second, 50*time.Millisecond)
+	// The gauge holds whole seconds, so a write from a failed poll more than a second later would
+	// have moved it.
+	stoppedAt, polledAtStop := time.Now(), dying.polls.Load()
+	require.Eventually(t, func() bool { return time.Since(stoppedAt) > 1100*time.Millisecond && dying.polls.Load() > polledAtStop },
+		15*time.Second, 50*time.Millisecond)
 
 	require.Equal(t, lastAnswered, answeredUntil(t, provider)[dyingLabel], "no answer, so its answered-until time stands")
 	require.Equal(t, float64(1000), urlBlocks(t, provider)[dyingLabel], "and its series keeps its last head")

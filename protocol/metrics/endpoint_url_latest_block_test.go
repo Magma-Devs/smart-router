@@ -78,26 +78,29 @@ func newTONProvider(t *testing.T) *SmartRouterMetricsManager {
 func TestURLLatestBlock_OneSeriesPerURL(t *testing.T) {
 	m := newTONProvider(t)
 	for v3 := int64(500); v3 < 505; v3++ {
-		m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000) // frozen, still answering
-		m.SetEndpointURLLatestBlock("TON", "rest", tonV3URL, v3)
+		m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000, DefaultURLAnswerTimeout) // frozen, still answering
+		m.SetEndpointURLLatestBlock("TON", "rest", tonV3URL, v3, DefaultURLAnswerTimeout)
 		require.Equal(t, map[string]float64{"/v2": 1000, "/v3": float64(v3)},
 			byPath(t, urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack")))
 	}
 	points := urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack")
 	require.NotEqual(t, points[0].url, points[1].url, "/v2 and /v3 share a host; the url label still tells them apart")
+	for _, p := range points {
+		require.Equal(t, map[string]string{"/v2": URLFingerprint(tonV2URL), "/v3": URLFingerprint(tonV3URL)}[p.internalPath], p.url)
+	}
 	require.Empty(t, urlPoints(t, m.endpointLatestBlock.GaugeVec, "TON", "chainstack"), "the provider series is written elsewhere")
 }
 
-// Every write moves the url's answered-until time to now plus its chain server's answer timeout,
-// 2 minutes unless the server set one.
+// Every write moves the url's answered-until time to now plus the answer timeout its caller
+// passes, DefaultURLAnswerTimeout when the caller passes none.
 func TestURLLatestBlock_AnsweredUntilIsTheLastAnswerPlusTheTimeout(t *testing.T) {
 	m := newTONProvider(t)
 	m.RegisterEndpoint("ETH1", "jsonrpc", "https://eth.vendor.example", "solo")
-	m.SetURLAnswerTimeout("TON", "rest", 10*time.Minute)
 
 	before := time.Now()
-	m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000)
-	m.SetEndpointURLLatestBlock("ETH1", "jsonrpc", "https://eth.vendor.example", 20)
+	m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000, 10*time.Minute)
+	m.SetProviderURLLatestBlock("TON", "rest", "chainstack", tonV3URL, 1000, 20*time.Minute)
+	m.SetEndpointURLLatestBlock("ETH1", "jsonrpc", "https://eth.vendor.example", 20, 0)
 	after := time.Now()
 
 	within := func(got float64, timeout time.Duration) {
@@ -105,7 +108,9 @@ func TestURLLatestBlock_AnsweredUntilIsTheLastAnswerPlusTheTimeout(t *testing.T)
 		require.GreaterOrEqual(t, got, float64(before.Add(timeout).Unix()))
 		require.LessOrEqual(t, got, float64(after.Add(timeout).Unix()))
 	}
-	within(byPath(t, urlPoints(t, m.endpointURLAnsweredUntil.GaugeVec, "TON", "chainstack"))["/v2"], 10*time.Minute)
+	ton := byPath(t, urlPoints(t, m.endpointURLAnsweredUntil.GaugeVec, "TON", "chainstack"))
+	within(ton["/v2"], 10*time.Minute)
+	within(ton["/v3"], 20*time.Minute)
 	within(byPath(t, urlPoints(t, m.endpointURLAnsweredUntil.GaugeVec, "ETH1", "solo"))[""], DefaultURLAnswerTimeout)
 }
 
@@ -114,8 +119,8 @@ func TestURLLatestBlock_AnsweredUntilIsTheLastAnswerPlusTheTimeout(t *testing.T)
 func TestURLLatestBlock_SharedURLIsASeriesPerProvider(t *testing.T) {
 	m := newTONProvider(t)
 	m.RegisterEndpoint("TON", "rest", tonV2URL, "chainstack-backup")
-	m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000)
-	m.SetProviderURLLatestBlock("TON", "rest", "chainstack", tonV2URL, 1001)
+	m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000, DefaultURLAnswerTimeout)
+	m.SetProviderURLLatestBlock("TON", "rest", "chainstack", tonV2URL, 1001, DefaultURLAnswerTimeout)
 
 	require.Equal(t, map[string]float64{"/v2": 1001}, byPath(t, urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack")))
 	require.Equal(t, map[string]float64{"/v2": 1000}, byPath(t, urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack-backup")))
@@ -125,8 +130,8 @@ func TestURLLatestBlock_SharedURLIsASeriesPerProvider(t *testing.T) {
 func TestURLLatestBlock_UnregisteredURLGetsNoSeries(t *testing.T) {
 	m := newSmartRouterForURLFanoutTest()
 	const url = "https://unregistered.vendor.example/key"
-	m.SetEndpointURLLatestBlock("ETH1", "jsonrpc", url, 10)
-	m.SetProviderURLLatestBlock("ETH1", "jsonrpc", "p", url, 10)
+	m.SetEndpointURLLatestBlock("ETH1", "jsonrpc", url, 10, DefaultURLAnswerTimeout)
+	m.SetProviderURLLatestBlock("ETH1", "jsonrpc", "p", url, 10, DefaultURLAnswerTimeout)
 	m.AddEndpointURLRelayServiced("ETH1", "jsonrpc", "p", url)
 	for _, c := range []prometheus.Collector{m.endpointURLLatestBlock.GaugeVec, m.endpointURLAnsweredUntil.GaugeVec, m.endpointURLRelaysServiced.CounterVec} {
 		ch := make(chan prometheus.Metric, 4)
@@ -150,8 +155,8 @@ func TestURLRelaysServiced_CountsPerURL(t *testing.T) {
 // forever, which is what the stuck alerts fire on.
 func TestURLLatestBlock_ForgetDeletesTheURLsSeries(t *testing.T) {
 	m := newTONProvider(t)
-	m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000)
-	m.SetEndpointURLLatestBlock("TON", "rest", tonV3URL, 1200)
+	m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000, DefaultURLAnswerTimeout)
+	m.SetEndpointURLLatestBlock("TON", "rest", tonV3URL, 1200, DefaultURLAnswerTimeout)
 	m.AddEndpointURLRelayServiced("TON", "rest", "chainstack", tonV2URL)
 	m.AddEndpointURLRelayServiced("TON", "rest", "chainstack", tonV3URL)
 
@@ -163,7 +168,7 @@ func TestURLLatestBlock_ForgetDeletesTheURLsSeries(t *testing.T) {
 	m.ForgetEndpointURLLatestBlock("TON", "rest", "https://never.registered.example")
 	var nilManager *SmartRouterMetricsManager
 	nilManager.ForgetEndpointURLLatestBlock("TON", "rest", tonV2URL)
-	nilManager.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1)
+	nilManager.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1, DefaultURLAnswerTimeout)
 	nilManager.AddEndpointURLRelayServiced("TON", "rest", "chainstack", tonV2URL)
 }
 
