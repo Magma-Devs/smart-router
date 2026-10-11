@@ -163,8 +163,10 @@ func TestDirectRelay_CountsTheRelayOnTheURLItWentTo(t *testing.T) {
 		response.Body.Close()
 		require.Equal(t, http.StatusOK, response.StatusCode)
 	}
-	require.Equal(t, map[string]float64{metrics.URLFingerprint(nodeURL.Url): 2},
-		gatherSeries(t, "rpc_endpoint_url_relays_serviced_total", provider))
+	// Only this run's url: the registry is process-wide, and each run's upstream gets a new port,
+	// so a second run in one process (-count=2) also sees the first run's series.
+	series := gatherSeries(t, "rpc_endpoint_url_relays_serviced_total", provider)
+	require.Equal(t, float64(2), series[metrics.URLFingerprint(nodeURL.Url)])
 }
 
 // A relay in flight when cleanupStaleTrackers removes its url's tracker completes after the url's
@@ -181,8 +183,11 @@ func TestDirectRelay_LateCountForARemovedURLIsUndone(t *testing.T) {
 	rpcss.countURLRelayServiced(provider, removed) // the late count
 	rpcss.countURLRelayServiced(provider, kept.srv.URL)
 
-	require.Equal(t, map[string]float64{metrics.URLFingerprint(kept.srv.URL): 1},
-		gatherSeries(t, "rpc_endpoint_url_relays_serviced_total", provider))
+	// Only this run's urls: the registry is process-wide, so a second run in one process sees the
+	// first run's kept url too.
+	series := gatherSeries(t, "rpc_endpoint_url_relays_serviced_total", provider)
+	require.Equal(t, float64(1), series[metrics.URLFingerprint(kept.srv.URL)])
+	require.NotContains(t, series, metrics.URLFingerprint(removed))
 }
 
 // The tests above wire the poll hook and register the urls themselves, so they pass with either

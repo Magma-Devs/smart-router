@@ -303,6 +303,62 @@ func TestHarvest_MovesTheRelayedToURLsSeries(t *testing.T) {
 	require.Equal(t, float64(20_000_000), gatherSeries(t, "rpc_endpoint_latest_block", provider)[""], "the provider series, as before")
 }
 
+// The harvest's per-url write lands after the generation gate has accepted the relay, so
+// cleanupStaleTrackers can remove the url between the two. The monitor's OnTipObservation hook runs
+// in exactly that gap, after the gate and before the write, so the test runs the cleanup from it:
+// the harvest's write must then be undone, not leaked for the life of the pod.
+func TestHarvest_LateWriteForARemovedURLIsUndone(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const url = "http://harvest-late.mag4204:8545"
+	const provider = "lava@mag4204HarvestLate"
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, mm)
+	mm.RegisterEndpoint("ETH1", "jsonrpc", url, provider)
+
+	var m *endpointstate.EndpointMonitor
+	m = endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainParser:      newRealChainParserForHarvest(t, "ETH1"),
+		ChainID:          "ETH1",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: 200 * time.Millisecond,
+		BlocksToSave:     1,
+		// cleanupStaleTrackers, between the gate and the harvest's metric write.
+		OnTipObservation: func(int64) {
+			m.RemoveTracker(url)
+			mm.ForgetEndpointURLLatestBlock("ETH1", "jsonrpc", url)
+		},
+	})
+	t.Cleanup(m.Stop)
+
+	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	_, err := m.GetOrCreateTracker(ep, nil)
+	require.NoError(t, err)
+	gen, ok := m.ObservationGeneration(url)
+	require.True(t, ok)
+
+	rpcss := &RPCSmartRouterServer{
+		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		endpointChainTrackerManager: m,
+		smartRouterEndpointMetrics:  mm,
+		chainParser:                 newRealChainParserForHarvest(t, "ETH1"),
+	}
+	tipMsg, perr := rpcss.chainParser.ParseMsg("", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, perr)
+	var cm chainlib.ChainMessage = tipMsg
+
+	rpcss.harvestAndUpdateTipFromRelay(ep, cm, &pairingtypes.RelayReply{LatestBlock: 20_000_000}, gen, provider)
+
+	_, tracked := m.ObservationGeneration(url)
+	require.False(t, tracked, "the cleanup ran inside the harvest")
+	require.NotContains(t, urlBlocks(t, provider), metrics.URLFingerprint(url), "the harvest's late write is undone")
+	require.NotContains(t, answeredUntil(t, provider), metrics.URLFingerprint(url))
+}
+
 // Two poll intervals, never under two minutes: a healthy url on a slow chain answers at least once
 // per poll interval, so it never reads as down between two polls.
 func TestURLAnswerTimeout_IsTwoPollIntervalsAndAtLeastTwoMinutes(t *testing.T) {

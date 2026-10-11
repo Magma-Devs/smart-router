@@ -2496,8 +2496,8 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 }
 
 // registerEndpointMetrics registers one node url of a provider with the metrics manager: the raw
-// url, stored in the endpoint_url label and used for URL->name resolution in the ChainTracker
-// callbacks; the provider name, the endpoint_id of every Prometheus metric; and the spec path the url
+// url, used for URL->name resolution in the ChainTracker callbacks and never exported (the per-url
+// series carry its fingerprint); the provider name, the endpoint_id of every Prometheus metric; and the spec path the url
 // serves, the internal_path label of its per-url series (MAG-4204).
 func registerEndpointMetrics(mm *metrics.SmartRouterMetricsManager, rpcEndpoint *lavasession.RPCEndpoint, url common.NodeUrl, providerName string) {
 	if mm == nil {
@@ -4665,8 +4665,9 @@ func (rpsr *RPCSmartRouter) cleanupStaleTrackers(
 				utils.LogAttr("chainKey", chainKey),
 			)
 			server.endpointChainTrackerManager.RemoveTracker(trackedURL)
-			// Its per-url series would otherwise stand still for the life of the pod, which the
-			// stuck-provider alerts read as stuck (MAG-4204).
+			// Its per-url series would otherwise be left behind for the life of the pod (MAG-4204).
+			// The stuck-provider alerts read such a series as down once its answered-until time
+			// passes, so this prevents a leaked series, not a false alert.
 			if server.smartRouterEndpointMetrics != nil && server.listenEndpoint != nil {
 				server.smartRouterEndpointMetrics.ForgetEndpointURLLatestBlock(server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, trackedURL)
 			}
