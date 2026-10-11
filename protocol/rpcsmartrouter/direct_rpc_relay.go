@@ -726,12 +726,26 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		// bare-body fallback case where ExtractJSONRPCErrorCode returned 0
 		// and the first pass already ran with errorCode = statusCode.
 		//
-		// Only IsNonRetryable escalates here. The fault-axis flags
-		// (IsUnsupportedMethod, IsRateLimited) keep the first pass's verdict:
-		// the body code is the authoritative statement of *what* went wrong,
-		// and this pass exists solely to override *retryability*.
+		// Only IsNonRetryable escalates here, plus IsNodeCapability when the
+		// status is the node's own refusal. The other fault-axis flags
+		// (IsUnsupportedMethod, IsRateLimited, IsNodeAtFault) keep the first
+		// pass's verdict: the body code is the authoritative statement of
+		// *what* went wrong, and this pass exists to override *retryability*.
+		//
+		// IsNodeCapability is the exception because of what escalating used to
+		// do on the side. A 401, 404 or 405 escalated to non-retryable, and
+		// shouldFailSessionForResult excuses a non-retryable reply, so such a
+		// reply stayed out of the availability score even when its body code
+		// was a retryable one that blames the endpoint. MAG-2771 made those
+		// statuses retryable and so removed that excuse; the capability
+		// carve-out is what keeps the reply out of the score now, so the
+		// endpoint is scored exactly as it was before.
 		if !result.IsNonRetryable && (statusCode < 200 || statusCode >= 300) && statusCode != errorCode {
-			result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, statusCode, classifierMessage)
+			statusVerdict := common.ClassifyNodeErrorForRetry(d.chainFamily, common.TransportJsonRPC, statusCode, classifierMessage)
+			result.IsNonRetryable = statusVerdict.IsNonRetryable
+			if statusVerdict.IsNodeCapability {
+				result.IsNodeCapability = true
+			}
 		}
 	}
 

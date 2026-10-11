@@ -470,7 +470,9 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixSkippedOn2xx(t *testing.T) {
 // own credentials, routes and verbs, which another provider may not share — so
 // for those the second pass now agrees with the body code and the request goes
 // to another provider. 413 still escalates and is what keeps the override
-// covered.
+// covered. The second pass still marks a 401, 404 or 405 as the node's refusal
+// (IsNodeCapability), which keeps the reply out of the availability score as
+// the escalation used to.
 //
 // The MAG-1666 test (TestDirectRPCRelaySender_HTTPStatusPrefixReachesClassifier_MAG1666)
 // uses error.code=-1 specifically to dodge code matchers, which is why it
@@ -553,6 +555,13 @@ func TestDirectRPCRelaySender_HTTPStatusOverridesRetryableBodyCode_MAG1870(t *te
 			assert.Equal(t, tt.wantNonRetryable, result.IsNonRetryable,
 				"HTTP %d with body code %d: a terminal HTTP status must not be masked by a "+
 					"retryable body code, and a retryable one must not be made terminal",
+				tt.statusCode, tt.bodyCode)
+			// No row is scored, before MAG-2771 or after: a 413 is excused as non-retryable, and a
+			// 401, 404 or 405 as the node's refusal. Those three used to be excused by escalating
+			// to non-retryable, so without the capability flag the retryable body code would start
+			// counting them against the endpoint's availability.
+			assert.False(t, shouldFailSessionForResult(nil, result),
+				"HTTP %d with body code %d must stay out of the availability score, as before MAG-2771",
 				tt.statusCode, tt.bodyCode)
 		})
 	}
