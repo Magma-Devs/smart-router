@@ -2682,12 +2682,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				// Per url too: a provider can have several urls, and the stuck-and-serving page
 				// asks whether customers' requests reach the stuck one (MAG-4204).
 				if outcome == metrics.RelayOutcomeSuccess && targetEndpoint != nil {
-					rpcss.smartRouterEndpointMetrics.AddEndpointURLRelayServiced(
-						rpcss.listenEndpoint.ChainID,
-						rpcss.listenEndpoint.ApiInterface,
-						endpointAddress,
-						targetEndpoint.NetworkAddress,
-					)
+					rpcss.countURLRelayServiced(endpointAddress, targetEndpoint.NetworkAddress)
 				}
 			}
 
@@ -3687,12 +3682,26 @@ func (rpcss *RPCSmartRouterServer) onEndpointPollBlock(endpointURL string, block
 	rpcss.forgetURLLatestBlockIfUntracked(endpointURL)
 }
 
+// countURLRelayServiced counts a successful relay on rpc_endpoint_url_relays_serviced_total for the
+// url it went to. A relay in flight when cleanupStaleTrackers removes the url's tracker completes
+// after the url's series were deleted, and its harvest is dropped by the generation gate, so nothing
+// else would undo the count: without the check after it, the counter would stay for the life of the
+// pod, though a removed url loses its series.
+func (rpcss *RPCSmartRouterServer) countURLRelayServiced(providerName, endpointURL string) {
+	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	rpcss.smartRouterEndpointMetrics.AddEndpointURLRelayServiced(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, providerName, endpointURL)
+	rpcss.forgetURLLatestBlockIfUntracked(endpointURL)
+}
+
 // forgetURLLatestBlockIfUntracked undoes a per-url write that raced its url's removal.
-// cleanupStaleTrackers removes the url's tracker and then deletes its per-url series. The poll and
-// harvest writes are generation-gated, but they land after the gate's lock is released, so one can
-// arrive just after that delete and leave a series that stands still for the life of the pod, which
-// the stuck alerts would read as stuck. Checking for the tracker after the write closes every
-// interleaving, because the removal always comes before the delete.
+// cleanupStaleTrackers removes the url's tracker and then deletes its per-url series. The poll,
+// harvest and relay-count writes land after that removal can happen (the poll and harvest writes
+// are generation-gated, but run after the gate's lock is released), so one can arrive just after
+// that delete and leave a series that stands still for the life of the pod, which the stuck alerts
+// would read as stuck. Checking for the tracker after the write closes every interleaving, because
+// the removal always comes before the delete.
 func (rpcss *RPCSmartRouterServer) forgetURLLatestBlockIfUntracked(endpointURL string) {
 	if rpcss.endpointChainTrackerManager == nil || rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
 		return
