@@ -2,19 +2,26 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -158,4 +165,75 @@ func TestDirectRelay_CountsTheRelayOnTheURLItWentTo(t *testing.T) {
 	}
 	require.Equal(t, map[string]float64{metrics.URLFingerprint(nodeURL.Url): 2},
 		gatherSeries(t, "rpc_endpoint_url_relays_serviced_total", provider))
+}
+
+// A relay in flight when cleanupStaleTrackers removes its url's tracker completes after the url's
+// series were deleted. Its count must not bring the url's relay counter back for the life of the
+// pod: the harvest that would undo a late block write is dropped by the generation gate, so the
+// count has to undo itself.
+func TestDirectRelay_LateCountForARemovedURLIsUndone(t *testing.T) {
+	const provider = "lava@mag4204LateCount"
+	const removed = "http://removed.mag4204-late-count:8545"
+	kept := newHeadUpstream(t, func() int64 { return 1000 }, nil)
+	rpcss, mm := trackProviderURLs(t, provider, kept)
+	mm.RegisterEndpoint("ETH1", "jsonrpc", removed, provider) // a url of the provider with no tracker (left)
+
+	rpcss.countURLRelayServiced(provider, removed) // the late count
+	rpcss.countURLRelayServiced(provider, kept.srv.URL)
+
+	require.Equal(t, map[string]float64{metrics.URLFingerprint(kept.srv.URL): 1},
+		gatherSeries(t, "rpc_endpoint_url_relays_serviced_total", provider))
+}
+
+// The tests above wire the poll hook and register the urls themselves, so they pass with either
+// production call gone. This boots the endpoint the way the router does — CreateSmartRouterEndpoint,
+// which registers each node url (registerEndpointMetrics) and starts ServeRPCRequests, which hands
+// the monitor its OnPollBlock — and moves each upstream's head after the boot. No relay is sent
+// after the boot, so only the trackers' polls can carry the new head onto a url's series (the boot's
+// own relays can write the old one through the harvest). Without either call no url gets the new
+// head, and the stuck alerts fall back to the provider series this ticket exists to get past.
+func TestCreateSmartRouterEndpoint_PollsWriteEachURLsSeries(t *testing.T) {
+	const bootHead, movedHead = 20_000_000, 20_000_007
+	var head atomic.Int64
+	head.Store(bootHead)
+	upstream := func() *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			hexHead := fmt.Sprintf("0x%x", head.Load())
+			var result any = "0x0"
+			switch req.Method {
+			case "eth_blockNumber":
+				result = hexHead
+			case "eth_getBlockByNumber":
+				result = map[string]any{"number": hexHead, "hash": "0x" + strings.Repeat("ab", 32)}
+			case "eth_getCode":
+				result = "0x"
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result})
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	// ETH1 polls every 6s by default; 8 polls per block time (1.5s) keeps the wait short.
+	prevDivisor := viper.Get(endpointstate.PollDivisorFlagName)
+	viper.Set(endpointstate.PollDivisorFlagName, endpointstate.MaxPollDivisor)
+	t.Cleanup(func() { viper.Set(endpointstate.PollDivisorFlagName, prevDivisor) })
+	up1, up2 := upstream(), upstream()
+	_, err := bootFleetTestEndpoint(t,
+		fleetTestPrimary("sim-1", "group-a", up1.URL),
+		fleetTestPrimary("sim-2", "group-b", up2.URL))
+	require.NoError(t, err)
+	head.Store(movedHead)
+
+	for provider, url := range map[string]string{"sim-1": up1.URL, "sim-2": up2.URL} {
+		label := metrics.URLFingerprint(url)
+		require.Eventually(t, func() bool { return urlBlocks(t, provider)[label] == movedHead }, 45*time.Second, 50*time.Millisecond,
+			"%s's url gets the head its tracker polled after the boot", provider)
+		require.Greater(t, answeredUntil(t, provider)[label], float64(time.Now().Unix()), "%s's url counts as answering", provider)
+	}
 }
