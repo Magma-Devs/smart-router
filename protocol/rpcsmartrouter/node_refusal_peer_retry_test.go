@@ -195,6 +195,62 @@ func TestNodeRefusal_EveryProviderRefuses_TheCallerGetsTheRefusal_MAG2771(t *tes
 	require.Equal(t, "1", refusalReplyHeader(result, common.RETRY_COUNT_HEADER_NAME))
 }
 
+// TestNodeRefusal_ThePeersTerminalAnswerReachesTheCaller_MAG2771: the refusal sends the request to
+// the peer, and the peer answers with a fact about the chain or the request — a revert, invalid
+// params. That answer ends the request, so it is what the caller gets. The refusal was the node's
+// claim about itself, and the peer did not share it; returning it anyway pays the extra hop and
+// throws the real answer away, revert data included.
+func TestNodeRefusal_ThePeersTerminalAnswerReachesTheCaller_MAG2771(t *testing.T) {
+	rand.InitRandomSeed()
+	ctx := context.Background()
+	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	refusal := refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found: eth_getBalance"}}`}
+	cases := []struct {
+		name string
+		peer refusalReply
+		code uint32
+	}{
+		{
+			name: "CHAIN_EXECUTION_REVERTED",
+			peer: refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted","data":"0x08c379a0"}}`},
+			code: common.LavaErrorChainExecutionReverted.Code,
+		},
+		{
+			name: "USER_INVALID_PARAMS",
+			peer: refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid argument 0: hex string has length 2, want 40 for common.Address"}}`},
+			code: common.LavaErrorUserInvalidParams.Code,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.code, classifyLikeTheJSONRPCSender(t, chainParser, tc.peer).Code,
+				"the peer's answer must classify as the code this case is about")
+			hits, server := newRefusalTestServer(t, chainParser, logs, refusal, tc.peer)
+
+			for i := 0; i < 4; i++ {
+				before := loadRefusalHits(hits)
+				result, sendErr := sendRefusalTestRequest(t, ctx, chainParser, server)
+				after := loadRefusalHits(hits)
+				require.Equal(t, [2]int64{1, 1}, [2]int64{after[0] - before[0], after[1] - before[1]},
+					"the refuser is asked first and the peer once")
+				require.NoError(t, sendErr, "a node's answer is relayed to the caller")
+				require.NotNil(t, result.Reply)
+				require.JSONEq(t, tc.peer.body, string(result.Reply.Data), "the caller gets the peer's answer, not the refusal")
+				require.Equal(t, "1", refusalReplyHeader(result, common.RETRY_COUNT_HEADER_NAME))
+			}
+		})
+	}
+}
+
 // classifyLikeTheJSONRPCSender classifies a reply from the same inputs sendJSONRPCRelay builds: the
 // body's JSON-RPC code when it has one, otherwise the HTTP status, and the status prefixed to the
 // message when it is not 2xx.
