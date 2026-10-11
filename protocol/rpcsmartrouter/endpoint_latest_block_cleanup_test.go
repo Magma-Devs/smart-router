@@ -13,8 +13,7 @@ import (
 )
 
 // MAG-4204: a url dropped on an epoch update must lose its rpc_endpoint_url_latest_block series,
-// or the series stands still for the life of the pod and the stuck-provider alert fires for a url
-// the router no longer uses.
+// or the series is leaked for the life of the pod, naming a url the router no longer uses.
 func TestCleanupStaleTrackers_DeletesTheRemovedURLsSeries(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
