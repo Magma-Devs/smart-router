@@ -285,6 +285,66 @@ type HTTPDirectRPCConnection struct {
 	nodeUrl  common.NodeUrl
 	protocol DirectRPCProtocol
 	client   *http.Client
+
+	// consecutive5xx counts 5xx replies since this url last answered anything
+	// else, and retireConn asks the next request to retire the connection it
+	// rides (MAG-4211). See markRetireIfDue.
+	consecutive5xx atomic.Uint32
+	retireConn     atomic.Bool
+}
+
+// consecutive5xxBeforeConnRetire is how many 5xx replies in a row, with nothing
+// else in between, retire the upstream connection. It is the smallest count that
+// is a streak rather than a single failure: one 5xx is something a healthy
+// vendor sends now and then, and recycling its connection each time would only
+// add handshakes. Erring low is cheap the other way round: a wrongly retired
+// connection costs one TLS-resumed dial, and a stuck one kept the dfns
+// optimism-sepolia router down for 50 minutes.
+const consecutive5xxBeforeConnRetire = 2
+
+// markRetireIfDue sets req.Close when a 5xx streak has asked for the connection
+// to be retired, so that the stuck connection is dropped and the request after
+// this one dials a new one.
+//
+// Why this is needed: the shared transport keeps one HTTP/2 connection per host
+// (or a keep-alive HTTP/1.1 pool) and only drops it on a transport error, a
+// GOAWAY, or IdleConnTimeout. Under steady traffic none of those happen, and a
+// 5xx is a well-formed reply that does not touch the connection. A vendor load
+// balancer that pins our connection to a dead backend and answers 503 on it,
+// while new connections reach healthy ones, therefore held the router on 503s
+// until the pod restarted (MAG-4211).
+//
+// req.Close retires only the connection this request is sent on, which is why it
+// works on the process-wide shared transport without affecting other hosts. On
+// HTTP/2 it marks the connection not-reusable: in-flight streams finish and the
+// next request dials. On HTTP/1.1 the connection closes after this response. The
+// request itself still goes out on the old connection, so it probably gets
+// another 5xx, and recovery takes effect from the request after it.
+func (h *HTTPDirectRPCConnection) markRetireIfDue(req *http.Request) {
+	if h.retireConn.CompareAndSwap(true, false) {
+		req.Close = true
+	}
+}
+
+// observeStatus counts the reply toward a 5xx streak, or ends the streak. A full
+// streak arms one retirement and starts the count over, so that a vendor that is
+// really down gets a fresh connection every consecutive5xxBeforeConnRetire
+// failures and not one per request.
+func (h *HTTPDirectRPCConnection) observeStatus(statusCode int) {
+	if statusCode < http.StatusInternalServerError {
+		h.consecutive5xx.Store(0)
+		return
+	}
+	n := h.consecutive5xx.Add(1)
+	if n < consecutive5xxBeforeConnRetire || !h.consecutive5xx.CompareAndSwap(n, 0) {
+		return
+	}
+	h.retireConn.Store(true)
+	utils.LavaFormatWarning("upstream answered only 5xx; retiring its connection so the next request dials a new one", nil,
+		utils.LogAttr("url", h.nodeUrl.UrlStr()),
+		utils.LogAttr("status", statusCode),
+		utils.LogAttr("consecutive5xx", n),
+	)
 }
 
 // WebSocketDirectRPCConnection implements DirectRPCConnection for WebSocket/WSS.
@@ -708,12 +768,14 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	// inflated by readHTTPResponseBody instead.
 	// Set *after* caller headers so it cannot be accidentally overridden.
 	req.Header.Set("Accept-Encoding", h.nodeUrl.UpstreamAcceptEncoding())
+	h.markRetireIfDue(req)
 
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	h.observeStatus(resp.StatusCode)
 
 	body, err := readHTTPResponseBody(resp)
 	if err != nil {
@@ -876,6 +938,7 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	// SendRequest above for the full rationale. Set last so it cannot be
 	// overridden by per-request headers.
 	req.Header.Set("Accept-Encoding", h.nodeUrl.UpstreamAcceptEncoding())
+	h.markRetireIfDue(req)
 
 	// Send request
 	resp, err := h.client.Do(req)
@@ -883,6 +946,7 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 		return nil, fmt.Errorf("http request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	h.observeStatus(resp.StatusCode)
 
 	// Read response body, inflated if the upstream gzipped it
 	body, err := readHTTPResponseBody(resp)
