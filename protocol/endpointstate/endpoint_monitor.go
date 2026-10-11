@@ -112,10 +112,10 @@ type EndpointMonitor struct {
 	// averageBlockTime/divisor, resolved ONCE at construction from the operator's
 	// PollIntervalDivisor. See poll_cadence.go for the knob and the bounds on it.
 	flatPollInterval time.Duration
-	// pollDivisor is the validated operator divisor flatPollInterval was derived from. Kept so
-	// StallCycleThreshold can express "about 10 block times" in tracker cycles without
-	// re-deriving it lossily from the rounded interval (MAG-3986).
-	pollDivisor float64
+	// stallCycles is how many tracker cycles without a new highest block mark an endpoint
+	// head-stalled (MAG-3986). Computed once at construction from the same validated divisor that
+	// produced flatPollInterval (stallCyclesFor), so it is never re-derived from the rounded interval.
+	stallCycles int
 	// tipStaleAfter is the per-endpoint tip staleness horizon (T4/C-D): the shared
 	// chainstate.StalenessWindow, derived once and passed to every endpointtip.Store.Set to
 	// gate downward (reorg) moves.
@@ -277,7 +277,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		apiInterface:      config.ApiInterface,
 		averageBlockTime:  avgBlockTime,
 		flatPollInterval:  flatPollInterval,
-		pollDivisor:       pollDivisor,
+		stallCycles:       stallCyclesFor(pollDivisor),
 		tipStaleAfter:     chainstate.StalenessWindow(avgBlockTime),
 		blocksToSave:      blocksToSave,
 		retryMinDelay:     defaultTrackerStartRetryMin,

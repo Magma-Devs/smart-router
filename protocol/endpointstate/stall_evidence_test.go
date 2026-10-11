@@ -1,6 +1,7 @@
 package endpointstate
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -185,11 +186,28 @@ func TestStallEvidence_ResetStallCountersKeepsHighest(t *testing.T) {
 }
 
 func TestStallCycleThreshold(t *testing.T) {
-	require.Equal(t, 20, StallCycleThresholdFor(0), "0 means the default divisor of 2")
-	require.Equal(t, 20, StallCycleThresholdFor(2))
-	require.Equal(t, 3, StallCycleThresholdFor(0.25), "2.5 rounds up to 3, and the floor is 3")
-	require.Equal(t, 5, StallCycleThresholdFor(0.5))
-	require.Equal(t, 80, StallCycleThresholdFor(8))
+	for _, c := range []struct {
+		divisor float64
+		want    int
+		why     string
+	}{
+		{0, 20, "0 means the default divisor of 2"},
+		{2, 20, "the default"},
+		{0.25, 3, "2.5 rounds up to 3, and the floor is 3"},
+		{0.5, 5, ""},
+		{3, 30, "an interval that does not divide evenly must not round up to 31"},
+		{8, 80, "the maximum divisor"},
+		{20, 20, "an out-of-range divisor reverts to the default, and so does the threshold"},
+	} {
+		ctx, cancel := context.WithCancel(context.Background())
+		m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
+			ChainID: "ETH", ApiInterface: "jsonrpc", AverageBlockTime: 2 * time.Second, BlocksToSave: 10,
+			PollIntervalDivisor: c.divisor,
+		})
+		require.Equal(t, c.want, m.StallCycleThreshold(), "divisor %v: %s", c.divisor, c.why)
+		m.Stop()
+		cancel()
+	}
 
 	require.Equal(t, 20, newObsMonitor(t).StallCycleThreshold(), "a monitor with no divisor uses the default")
 }

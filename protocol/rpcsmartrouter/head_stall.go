@@ -40,8 +40,8 @@ import (
 // loop, but shares the lock for simplicity.
 type headStallState struct {
 	mu      sync.RWMutex
-	stalled map[string]struct{}            // urls holding head-stalled, for the tip-vote filter
-	kept    map[*lavasession.Endpoint]bool // stuck endpoints never-empty is holding in rotation (log once)
+	stalled map[string]struct{} // urls holding head-stalled, for the tip-vote filter
+	kept    map[string]struct{} // stuck urls never-empty is holding in rotation (logged once)
 }
 
 func (s *headStallState) isStalled(url string) bool {
@@ -51,39 +51,39 @@ func (s *headStallState) isStalled(url string) bool {
 	return held
 }
 
-// markKept reports whether this is the first cycle never-empty holds the endpoint (so the caller logs
-// once per episode, not every 5 s).
-func (s *headStallState) markKept(e *lavasession.Endpoint) (first bool) {
+// markKept reports whether this is the first cycle never-empty holds the url (so the caller logs once
+// per episode, not every 5 s).
+func (s *headStallState) markKept(url string) (first bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.kept[e] {
+	if _, kept := s.kept[url]; kept {
 		return false
 	}
 	if s.kept == nil {
-		s.kept = make(map[*lavasession.Endpoint]bool)
+		s.kept = make(map[string]struct{})
 	}
-	s.kept[e] = true
+	s.kept[url] = struct{}{}
 	return true
 }
 
-func (s *headStallState) clearKept(e *lavasession.Endpoint) {
+func (s *headStallState) clearKept(url string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.kept, e)
+	delete(s.kept, url)
 }
 
-// sync makes the stalled url set and the kept set describe exactly the endpoints of this cycle. It is
-// the only writer of the stalled set: the endpoints themselves are the source of truth, rebuilt from
-// once per probe cycle. That also covers a pairing rebuild, which replaces Endpoint objects (the new
-// ones hold no state reason) — the old url drops out instead of having its repeat tip votes refused
-// for ever.
-func (s *headStallState) sync(stalledURLs map[string]struct{}, live map[*lavasession.Endpoint]struct{}) {
+// sync makes the stalled url set and the kept set describe exactly the urls of this cycle. It is the
+// only writer of the stalled set: the endpoints themselves are the source of truth, rebuilt from once
+// per probe cycle. That also covers a pairing rebuild, which replaces Endpoint objects (the new ones
+// hold no state reason) — the old url drops out instead of having its repeat tip votes refused for
+// ever. A kept url no longer in this cycle's endpoints is forgotten too.
+func (s *headStallState) sync(stalledURLs map[string]struct{}, liveURLs map[string]struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stalled = stalledURLs
-	for e := range s.kept {
-		if _, ok := live[e]; !ok {
-			delete(s.kept, e)
+	for url := range s.kept {
+		if _, ok := liveURLs[url]; !ok {
+			delete(s.kept, url)
 		}
 	}
 }
@@ -156,14 +156,18 @@ func runHeadStallStep(
 		}
 		g.eps = append(g.eps, ep)
 	}
-	groupUsable := func(g *urlGroup) bool {
+	// groupAny reports whether any endpoint of the url satisfies pred.
+	groupAny := func(g *urlGroup, pred func(*lavasession.Endpoint) bool) bool {
 		for _, ep := range g.eps {
-			if ep.Endpoint.IsUsable() {
+			if pred(ep.Endpoint) {
 				return true
 			}
 		}
 		return false
 	}
+	isUsable := func(e *lavasession.Endpoint) bool { return e.IsUsable() }
+	isEnabled := func(e *lavasession.Endpoint) bool { return e.IsEnabled() }
+	groupUsable := func(g *urlGroup) bool { return groupAny(g, isUsable) }
 	countUsableURLs := func() int {
 		n := 0
 		for _, g := range groups {
@@ -185,22 +189,40 @@ func runHeadStallStep(
 		return true
 	}
 
+	// stuckRecord returns the head-stalled record of the url, if any of its endpoints holds one.
+	stuckRecord := func(g *urlGroup) (lavasession.StateReasonRecord, bool) {
+		for _, ep := range g.eps {
+			if rec, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled); held {
+				return rec, true
+			}
+		}
+		return lavasession.StateReasonRecord{}, false
+	}
+
+	// holdsStall reports whether one endpoint holds head-stalled.
+	holdsStall := func(e *lavasession.Endpoint) bool {
+		_, held := e.StateReason(lavasession.EndpointDisableHeadStalled)
+		return held
+	}
+
 	// release takes head-stalled off every endpoint of the url and, for each that becomes usable,
 	// returns its provider to the valid list (H1) and its gauge to 1 when every url of the provider
 	// is usable (D24). It reports whether anything was released.
 	release := func(g *urlGroup, why string) bool {
+		rec, held := stuckRecord(g)
+		if !held {
+			return false
+		}
 		var released []*lavasession.EndpointWithDirectConnection
-		var rec lavasession.StateReasonRecord
 		for _, ep := range g.eps {
-			if r, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled); held && ep.Endpoint.RemoveStateReason(lavasession.EndpointDisableHeadStalled) {
-				rec = r
+			if ep.Endpoint.RemoveStateReason(lavasession.EndpointDisableHeadStalled) {
 				released = append(released, ep)
-				state.clearKept(ep.Endpoint)
 			}
 		}
 		if len(released) == 0 {
 			return false
 		}
+		state.clearKept(g.url)
 		first := released[0]
 		utils.LavaFormatInfo("head-stalled "+why, append([]utils.Attribute{
 			utils.LogAttr("endpoint", g.url),
@@ -222,16 +244,6 @@ func runHeadStallStep(
 			}
 		}
 		return true
-	}
-
-	// stuckRecord returns the head-stalled record of the url, if any of its endpoints holds one.
-	stuckRecord := func(g *urlGroup) (lavasession.StateReasonRecord, bool) {
-		for _, ep := range g.eps {
-			if rec, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled); held {
-				return rec, true
-			}
-		}
-		return lavasession.StateReasonRecord{}, false
 	}
 
 	// 1. Remove: the url answered above the block it was stuck on. Its highest block, not its last
@@ -267,7 +279,7 @@ func runHeadStallStep(
 	for _, g := range groups {
 		var pending []*lavasession.EndpointWithDirectConnection
 		for _, ep := range g.eps {
-			if _, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled); !held {
+			if !holdsStall(ep.Endpoint) {
 				pending = append(pending, ep)
 			}
 		}
@@ -276,20 +288,12 @@ func runHeadStallStep(
 		}
 		obs, _ := getObservation(g.url)
 		if obs.SameBlockCycles < n || obs.HighestBlockSeen <= 0 || obs.HighestBlockSeen >= chainHigh {
-			for _, ep := range pending {
-				state.clearKept(ep.Endpoint)
-			}
+			state.clearKept(g.url)
 			continue
 		}
 		wasUsable := groupUsable(g)
 		if wasUsable && usable <= 1 {
-			firstKept := false
-			for _, ep := range pending {
-				if state.markKept(ep.Endpoint) {
-					firstKept = true
-				}
-			}
-			if firstKept {
+			if state.markKept(g.url) {
 				res.kept++
 				utils.LavaFormatInfo("head-stalled kept by never-empty", append([]utils.Attribute{
 					utils.LogAttr("endpoint", g.url),
@@ -305,12 +309,12 @@ func runHeadStallStep(
 		for _, ep := range pending {
 			if ep.Endpoint.AddStateReason(lavasession.EndpointDisableHeadStalled, now, obs.HighestBlockSeen) {
 				added = true
-				state.clearKept(ep.Endpoint)
 			}
 		}
 		if !added {
 			continue
 		}
+		state.clearKept(g.url)
 		if wasUsable {
 			usable--
 		}
@@ -339,14 +343,7 @@ func runHeadStallStep(
 			if !held {
 				continue
 			}
-			canServe := false
-			for _, ep := range g.eps {
-				if ep.Endpoint.IsEnabled() {
-					canServe = true
-					break
-				}
-			}
-			if !canServe {
+			if !groupAny(g, isEnabled) {
 				continue
 			}
 			if pick == nil || rec.Block > pickRec.Block || (rec.Block == pickRec.Block && rec.Since.After(pickRec.Since)) {
@@ -354,9 +351,7 @@ func runHeadStallStep(
 			}
 		}
 		if pick != nil && release(pick, "released by never-empty") {
-			for _, ep := range pick.eps {
-				state.markKept(ep.Endpoint) // it is still stuck: step 2 must keep it, not re-add it
-			}
+			state.markKept(pick.url) // it is still stuck: step 2 must keep it, not re-add it
 			res.released++
 		}
 	}
@@ -364,13 +359,17 @@ func runHeadStallStep(
 	// Publish this cycle's stalled set, and hold the gauge of every provider with a stalled url at 0.
 	stalledURLs := make(map[string]struct{})
 	stalledProviders := make(map[string]struct{})
-	for _, ep := range unique {
-		if _, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled); held {
-			stalledURLs[ep.Endpoint.NetworkAddress] = struct{}{}
-			stalledProviders[ep.ProviderAddress] = struct{}{}
+	liveURLs := make(map[string]struct{}, len(groups))
+	for _, g := range groups {
+		liveURLs[g.url] = struct{}{}
+		for _, ep := range g.eps {
+			if holdsStall(ep.Endpoint) {
+				stalledURLs[g.url] = struct{}{}
+				stalledProviders[ep.ProviderAddress] = struct{}{}
+			}
 		}
 	}
-	state.sync(stalledURLs, seen)
+	state.sync(stalledURLs, liveURLs)
 	if setProviderHealth != nil {
 		for provider := range stalledProviders {
 			setProviderHealth(provider, false)

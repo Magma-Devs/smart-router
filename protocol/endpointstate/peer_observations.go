@@ -312,10 +312,7 @@ func (m *EndpointMonitor) recordPeerObservation(endpointURL string, gen uint64, 
 	m.obsMu.Lock()
 	defer m.obsMu.Unlock()
 
-	if m.stopped {
-		return false
-	}
-	if liveGen, ok := m.generations[endpointURL]; !ok || liveGen != gen {
+	if !m.acceptsLocked(endpointURL, gen) {
 		return false
 	}
 	if _, exists := m.observations[endpointURL]; !exists {

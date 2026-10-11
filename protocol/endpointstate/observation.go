@@ -155,13 +155,7 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 	m.obsMu.Lock()
 	defer m.obsMu.Unlock()
 
-	if m.stopped {
-		return
-	}
-	// Generation gate: ignore callbacks from a removed/replaced tracker instance. The
-	// generation must still EXIST (a removed URL has no entry) and match — requiring
-	// existence also rejects a stray gen==0 rather than matching the absent-map default.
-	if liveGen, ok := m.generations[endpointURL]; !ok || liveGen != gen {
+	if !m.acceptsLocked(endpointURL, gen) {
 		return
 	}
 
@@ -255,14 +249,7 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 	m.obsMu.Lock()
 	defer m.obsMu.Unlock()
 
-	if m.stopped {
-		return false
-	}
-	// Generation gate: reject relays whose captured generation no longer matches the live
-	// one (removed/replaced tracker), mirroring recordPollObservation. Requiring existence
-	// rejects an unknown endpoint (and a stray gen==0) instead of matching the absent
-	// map default of 0.
-	if liveGen, ok := m.generations[endpointURL]; !ok || liveGen != gen {
+	if !m.acceptsLocked(endpointURL, gen) {
 		return false
 	}
 
@@ -379,19 +366,30 @@ func (m *EndpointMonitor) freshRelayTip(endpointURL string, now time.Time) (endp
 func (m *EndpointMonitor) countRelayCoveredCycle(endpointURL string, gen uint64, tip endpointtip.Tip) {
 	m.obsMu.Lock()
 	defer m.obsMu.Unlock()
-	if m.stopped {
-		return
-	}
-	if liveGen, ok := m.generations[endpointURL]; !ok || liveGen != gen {
+	if !m.acceptsLocked(endpointURL, gen) {
 		return
 	}
 	o, exists := m.observations[endpointURL]
-	if !exists || o.HighestBlockSeen <= 0 || tip.Block > o.HighestBlockSeen || !tip.ObservedAt.After(o.lastCountedRelayAt) {
+	if !exists || o.HighestBlockSeen <= 0 || !tip.ObservedAt.After(o.lastCountedRelayAt) {
 		return
 	}
-	o.SameBlockCycles++
+	o.noteAnsweredBlockLocked(tip.Block, true) // the same counting rule as a poll
 	o.lastCountedRelayAt = tip.ObservedAt
 	m.observations[endpointURL] = o
+}
+
+// acceptsLocked is the write gate every observation path shares: the monitor is not stopped, and
+// the caller's generation is the url's live one. A callback from a removed or replaced tracker
+// carries a stale generation and is dropped, so a late in-flight poll or relay can neither recreate
+// a deleted record nor overwrite a fresh tracker's record for the same url. The generation must
+// EXIST as well as match: a removed url has no entry, and requiring it rejects a stray gen==0
+// instead of matching the absent-map default. Caller must hold obsMu.
+func (m *EndpointMonitor) acceptsLocked(endpointURL string, gen uint64) bool {
+	if m.stopped {
+		return false
+	}
+	liveGen, ok := m.generations[endpointURL]
+	return ok && liveGen == gen
 }
 
 // ResetStallCounters zeroes every endpoint's same-block counter, keeping the blocks seen.
@@ -415,14 +413,12 @@ const minStallCycles = 3
 // averageBlockTime / divisor, so while the router is active this is about 10 block times whatever
 // divisor the operator chose (MAG-3986, D20).
 func (m *EndpointMonitor) StallCycleThreshold() int {
-	return StallCycleThresholdFor(m.pollDivisor)
+	return m.stallCycles
 }
 
-// StallCycleThresholdFor is StallCycleThreshold for a given divisor (0 = the default divisor).
-func StallCycleThresholdFor(divisor float64) int {
-	if divisor <= 0 {
-		divisor = DefaultPollDivisor
-	}
+// stallCyclesFor turns an already validated poll divisor (resolvePollDivisor) into the stall
+// threshold: 10 × divisor cycles, rounded up, floored at minStallCycles.
+func stallCyclesFor(divisor float64) int {
 	n := int(math.Ceil(10 * divisor))
 	if n < minStallCycles {
 		return minStallCycles
