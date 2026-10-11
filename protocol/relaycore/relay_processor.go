@@ -608,9 +608,13 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 	// IsUnsupportedMethod is a subset kept for zero-CU and caching only.
 	hasNonRetryableNodeError := false
 	hasUnsupportedMethod := false
+	hasNodeCapabilityRefusal := false
 	for _, result := range nodeErrorResults {
 		if result.IsNonRetryable {
 			hasNonRetryableNodeError = true
+		}
+		if result.IsNodeCapability {
+			hasNodeCapabilityRefusal = true
 		}
 		if result.IsUnsupportedMethod {
 			hasUnsupportedMethod = true
@@ -640,6 +644,7 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		SpecialNodeErrors:         specialNodeErrors,
 		ProtocolErrors:            protocolErrors,
 		HasNonRetryableNodeError:  hasNonRetryableNodeError,
+		HasNodeCapabilityRefusal:  hasNodeCapabilityRefusal,
 		HasUnsupportedMethod:      hasUnsupportedMethod,
 		HasPermanentProtocolError: hasPermanentProtocolError,
 		HasEpochMismatch:          hasEpochMismatch,

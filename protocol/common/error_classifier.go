@@ -588,7 +588,7 @@ func IsNonRetryableNodeErrorWithContext(family ChainFamily, transport TransportT
 // The three are orthogonal axes, not a hierarchy. IsNonRetryable answers
 // "would retrying elsewhere help", the SubCategory flags answer "whose fault
 // is this". NODE_RATE_LIMITED (2005) is retryable AND rate-limited;
-// NODE_LIMIT_EXCEEDED (2011) was non-retryable AND rate-limited until MAG-2771. A caller that
+// NODE_LIMIT_EXCEEDED (2011) is non-retryable AND rate-limited. A caller that
 // needs "is this the node's fault" must read the fault axis, not infer it from
 // retryability.
 type NodeErrorClassification struct {

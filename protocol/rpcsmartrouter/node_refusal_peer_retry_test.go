@@ -36,10 +36,10 @@ type refusalReply struct {
 // SendParsedRelay to two local upstreams. One refuses, the other serves.
 //
 // MAG-2771: a refusal is terminal only if it is a fact about the chain. A NODE_* refusal is a
-// claim the node makes about itself — its method set, its routes, its plan's limits, the
-// credentials it was given — so it is provider-local until a peer confirms it, and the request
-// must reach the peer before the caller is failed. CHAIN_* and USER_* answers are the same from
-// every node, so the controls must still end on the first provider.
+// claim the node makes about itself — its method set, its routes, the credentials it was given —
+// so it is provider-local until a peer confirms it, and the request must reach the peer before
+// the caller is failed. CHAIN_* and USER_* answers are the same from every node, so the controls
+// must still end on the first provider.
 //
 // The refusing upstream is the only primary and the serving one the backup, so every request is
 // asked of the refuser first. Each case sends several requests, so a refusal that changed how the
@@ -89,12 +89,6 @@ func TestNodeRefusal_AskedOfAPeerBeforeFailingTheCaller_MAG2771(t *testing.T) {
 			name:      "2010 NODE_METHOD_NOT_ALLOWED, HTTP 405",
 			refusal:   refusalReply{http.StatusMethodNotAllowed, `{}`},
 			code:      common.LavaErrorNodeMethodNotAllowed.Code,
-			peerAsked: true,
-		},
-		{
-			name:      "2011 NODE_LIMIT_EXCEEDED, -32005",
-			refusal:   refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"limit exceeded"}}`},
-			code:      common.LavaErrorNodeLimitExceeded.Code,
 			peerAsked: true,
 		},
 		{
@@ -193,6 +187,44 @@ func TestNodeRefusal_EveryProviderRefuses_TheCallerGetsTheRefusal_MAG2771(t *tes
 	require.NotNil(t, result.Reply)
 	require.Contains(t, string(result.Reply.Data), "-32601", "the caller gets the node's own refusal")
 	require.Equal(t, "1", refusalReplyHeader(result, common.RETRY_COUNT_HEADER_NAME))
+}
+
+// TestNodeRefusal_UnlistedMethodRefusalIsFinal_MAG2771: a method the spec does not list is
+// forwarded only because the spec cannot rule it out (the parser makes it a Default- API), and
+// every provider is expected to refuse it. So the first refusal is the answer: asking a peer would
+// cost a call per provider for typo and scanner traffic and serve nobody. A listed method keeps the
+// retry, which the cases above cover.
+func TestNodeRefusal_UnlistedMethodRefusalIsFinal_MAG2771(t *testing.T) {
+	rand.InitRandomSeed()
+	ctx := context.Background()
+	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "ETH1", spectypes.APIInterfaceJsonRPC, noop, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+
+	unlisted := []byte(`{"jsonrpc":"2.0","method":"eth_getBalanse","params":["0x0000000000000000000000000000000000000001","latest"],"id":1}`)
+	require.True(t, chainlib.NewProtocolMessage(parseRefusalTestRequestBody(t, chainParser, unlisted), nil, nil, "", "").IsDefaultApi(),
+		"the typo must parse as a method the spec does not list")
+
+	refusal := refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"the method eth_getBalanse does not exist/is not available"}}`}
+	hits, server := newRefusalTestServer(t, chainParser, logs, refusal, refusalReply{http.StatusOK, refusalPeerAnswer})
+
+	for i := 0; i < 4; i++ {
+		before := loadRefusalHits(hits)
+		result, sendErr := sendRefusalTestRequestBody(t, ctx, chainParser, server, unlisted)
+		after := loadRefusalHits(hits)
+		require.Equal(t, [2]int64{1, 0}, [2]int64{after[0] - before[0], after[1] - before[1]},
+			"the refusal of an unlisted method ends the request on the first provider")
+		require.NoError(t, sendErr)
+		require.NotNil(t, result.Reply)
+		require.Contains(t, string(result.Reply.Data), "-32601", "the caller gets the node's refusal")
+		require.Empty(t, refusalReplyHeader(result, common.RETRY_COUNT_HEADER_NAME), "no retry")
+	}
 }
 
 // TestNodeRefusal_ThePeersTerminalAnswerReachesTheCaller_MAG2771: the refusal sends the request to
@@ -313,9 +345,16 @@ func newRefusalTestServer(t *testing.T, chainParser chainlib.ChainParser, logs *
 	}
 }
 
+// refusalTestRequest is the request every case sends unless it says otherwise: a method the spec lists.
+const refusalTestRequest = `{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x0000000000000000000000000000000000000001","latest"],"id":1}`
+
 func parseRefusalTestRequest(t *testing.T, chainParser chainlib.ChainParser) chainlib.ChainMessage {
 	t.Helper()
-	body := []byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x0000000000000000000000000000000000000001","latest"],"id":1}`)
+	return parseRefusalTestRequestBody(t, chainParser, []byte(refusalTestRequest))
+}
+
+func parseRefusalTestRequestBody(t *testing.T, chainParser chainlib.ChainParser, body []byte) chainlib.ChainMessage {
+	t.Helper()
 	chainMessage, err := chainParser.ParseMsg("", body, http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	return chainMessage
@@ -323,8 +362,12 @@ func parseRefusalTestRequest(t *testing.T, chainParser chainlib.ChainParser) cha
 
 func sendRefusalTestRequest(t *testing.T, ctx context.Context, chainParser chainlib.ChainParser, server *RPCSmartRouterServer) (*common.RelayResult, error) {
 	t.Helper()
-	chainMessage := parseRefusalTestRequest(t, chainParser)
-	body := []byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x0000000000000000000000000000000000000001","latest"],"id":1}`)
+	return sendRefusalTestRequestBody(t, ctx, chainParser, server, []byte(refusalTestRequest))
+}
+
+func sendRefusalTestRequestBody(t *testing.T, ctx context.Context, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, body []byte) (*common.RelayResult, error) {
+	t.Helper()
+	chainMessage := parseRefusalTestRequestBody(t, chainParser, body)
 	relayData := lavaprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceJsonRPC,
 		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
 	protocolMessage := chainlib.NewProtocolMessage(chainMessage, nil, relayData, "dapp", "1.2.3.4")

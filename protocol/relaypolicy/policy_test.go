@@ -41,6 +41,41 @@ func TestDecide_PermanentFailures(t *testing.T) {
 		require.Equal(t, "NonRetryableNodeError", output.Reason)
 	})
 
+	t.Run("a refusal of a method the spec does not list stops", func(t *testing.T) {
+		output := policy.Decide(DecisionInput{
+			Selection:    relaycore.Stateless,
+			Summary:      ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
+			IsDefaultApi: true,
+		})
+		require.Equal(t, Stop, output.Action)
+		require.Equal(t, "UnlistedMethodRefused", output.Reason)
+
+		hedge := policy.Decide(DecisionInput{
+			Selection:     relaycore.Stateless,
+			Summary:       ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
+			IsDefaultApi:  true,
+			IsTickerHedge: true,
+		})
+		require.Equal(t, Stop, hedge.Action, "a hedge must not ask another provider either")
+	})
+
+	t.Run("a refusal of a listed method is retried on a peer (MAG-2771)", func(t *testing.T) {
+		output := policy.Decide(DecisionInput{
+			Selection: relaycore.Stateless,
+			Summary:   ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
+		})
+		require.Equal(t, Retry, output.Action)
+	})
+
+	t.Run("an unlisted method is still retried when nobody refused it", func(t *testing.T) {
+		output := policy.Decide(DecisionInput{
+			Selection:    relaycore.Stateless,
+			Summary:      ResultsSummary{ProtocolErrors: 1},
+			IsDefaultApi: true,
+		})
+		require.Equal(t, Retry, output.Action, "a timeout or a broken node is no answer about the method")
+	})
+
 	t.Run("PermanentProtocolError stops", func(t *testing.T) {
 		output := policy.Decide(DecisionInput{
 			Selection: relaycore.Stateless,

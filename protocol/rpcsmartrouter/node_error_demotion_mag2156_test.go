@@ -172,27 +172,22 @@ func TestNodeErrorProviderIsDemoted_MAG2156(t *testing.T) {
 // elsewhere help", not "is this the endpoint's fault", and SubCategoryRateLimit straddles both
 // answers. If these two ever collapse onto the same axis, the gate silently starts scoring
 // rate limits against availability again.
-//
-// NODE_LIMIT_EXCEEDED (2011) used to be the non-retryable half. MAG-2771 made it retryable, so both
-// registered rate-limit codes are retryable and the carve-out is the only thing keeping either out
-// of the availability score. The non-retryable half is fed by hand: the gate reads flags, so the
-// verdict must not move with IsNonRetryable whichever code produced it.
 func TestRateLimitCarveOutIsIndependentOfRetryability_MAG2156(t *testing.T) {
 	retryable := common.ClassifyNodeErrorForRetry(common.ChainFamilyEVM, common.TransportJsonRPC, -32000, "rate limit exceeded, please slow down")
 	require.True(t, retryable.IsRateLimited, "NODE_RATE_LIMITED must carry SubCategoryRateLimit")
 	require.False(t, retryable.IsNonRetryable, "NODE_RATE_LIMITED is Retryable=true — the whole reason IsNonRetryable cannot carve it out")
 
-	limitExceeded := common.ClassifyNodeErrorForRetry(common.ChainFamilyEVM, common.TransportJsonRPC, -32005, "rate limit exceeded")
-	require.True(t, limitExceeded.IsRateLimited, "NODE_LIMIT_EXCEEDED must carry SubCategoryRateLimit")
-	require.False(t, limitExceeded.IsNonRetryable, "NODE_LIMIT_EXCEEDED is Retryable=true since MAG-2771")
+	nonRetryable := common.ClassifyNodeErrorForRetry(common.ChainFamilyEVM, common.TransportJsonRPC, -32005, "rate limit exceeded")
+	require.True(t, nonRetryable.IsRateLimited, "NODE_LIMIT_EXCEEDED must carry SubCategoryRateLimit")
+	require.True(t, nonRetryable.IsNonRetryable, "NODE_LIMIT_EXCEEDED is Retryable=false")
 
-	// Same subcategory, either retryability, same verdict from the gate.
-	for _, nonRetryable := range []bool{false, true} {
+	// Same subcategory, opposite retryability, same verdict from the gate.
+	for _, c := range []common.NodeErrorClassification{retryable, nonRetryable} {
 		require.False(t, shouldFailSessionForResult(nil, &common.RelayResult{
 			StatusCode:     200,
 			IsNodeError:    true,
-			IsNonRetryable: nonRetryable,
-			IsRateLimited:  true,
+			IsNonRetryable: c.IsNonRetryable,
+			IsRateLimited:  c.IsRateLimited,
 		}), "a rate-limit signal must never reach the availability score, whatever its retryability")
 	}
 }

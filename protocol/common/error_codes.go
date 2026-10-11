@@ -196,7 +196,7 @@ var (
 	//
 	// MAG-2771: a refusal ends the request only if it is a fact about the chain. A NODE_* refusal
 	// is a claim the node makes about itself — the methods it serves, the routes its front end
-	// knows, its plan's limits, the credentials it was given — so it is provider-local until a peer
+	// knows, the credentials it was given — so it is provider-local until a peer
 	// confirms it, and the request goes to another provider before the caller is failed. Being
 	// wrong in that direction costs one extra call on a request that was already failing; being
 	// wrong in the other is a customer-visible failure on a method another provider serves.
@@ -206,7 +206,7 @@ var (
 	// and NODE_ACCESS_DENIED already were: the endpoint answered truthfully about what it serves,
 	// so it is neither blamed (EndpointAtFault) nor scored (the availability gate's capability
 	// carve-out). Retryable alone, without the subcategory, would make each of them count against
-	// the endpoint that said no. 2011 keeps SubCategoryRateLimit; see its entry.
+	// the endpoint that said no. NODE_LIMIT_EXCEEDED (2011) is left out; see its entry.
 
 	// NODE_METHOD_NOT_FOUND: the node says the method is not on its surface (-32601). On the wire
 	// that cannot be told apart from a method its plan switches off: on MAG-2735's fleet one
@@ -268,15 +268,15 @@ var (
 		SubCategory: SubCategoryNodeCapability,
 		Description: "HTTP method not allowed by this node (HTTP 405); another provider may serve it", Retryable: true,
 	})
-	// NODE_LIMIT_EXCEEDED: the request exceeds this node's limit (-32005) — its plan cap or its
-	// eth_getLogs range — and another provider's limit may be higher. Stays SubCategoryRateLimit:
-	// the endpoint is held off rather than blamed (rpcsmartrouter_server.go, the rate-limited
-	// release), so the retry and the requests after it go to a peer rather than back into the
-	// same limit. That is the backoff MAG-2771 asks for alongside the failover.
+	// NODE_LIMIT_EXCEEDED stays non-retryable, outside MAG-2771's rule for now. A -32005 is usually
+	// a cap on the request that every provider shares ("query returned more than 10000 results"),
+	// and it carries SubCategoryRateLimit, so a retry would hold off every provider it reached, and
+	// a client repeating the request would take the whole pool out of rotation. Retrying it needs
+	// its own hold-off design.
 	LavaErrorNodeLimitExceeded = registerError(&LavaError{
 		Code: 2011, Name: "NODE_LIMIT_EXCEEDED", Category: CategoryExternal,
 		SubCategory: SubCategoryRateLimit,
-		Description: "Request exceeds this node's limit (e.g., eth_getLogs range, plan cap); another provider may serve it", Retryable: true,
+		Description: "Request exceeds node limit (e.g., eth_getLogs range)", Retryable: false,
 	})
 	LavaErrorNodeResourceNotFound = registerError(&LavaError{
 		Code: 2012, Name: "NODE_RESOURCE_NOT_FOUND", Category: CategoryExternal,

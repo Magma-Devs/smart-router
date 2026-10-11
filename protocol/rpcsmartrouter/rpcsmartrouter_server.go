@@ -2101,9 +2101,8 @@ func promoteConsistencyFallback(
 //     reaches the IsNodeCapability carve-out below instead.
 //   - IsRateLimited — "the endpoint is healthy but busy". SubCategoryRateLimit is contractually
 //     backoff-without-marking-unhealthy (common/error_registry.go), and it does NOT follow from
-//     retryability: NODE_RATE_LIMITED (2005) and NODE_LIMIT_EXCEEDED (2011) are both
-//     Retryable=true, so IsNonRetryable excuses neither, and both must stay out of the
-//     availability signal.
+//     retryability: NODE_RATE_LIMITED (2005) is Retryable=true, NODE_LIMIT_EXCEEDED (2011) is
+//     Retryable=false, and both must stay out of the availability signal.
 //   - IsDataScope — "the endpoint does not hold this data, and said so". SubCategoryDataScope
 //     (gRPC NOT_FOUND / OUT_OF_RANGE) is the case neither axis above can express: retrying IS
 //     worthwhile because a pruned node and an archive node genuinely disagree, yet the endpoint

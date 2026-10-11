@@ -20,6 +20,9 @@ import (
 // Since MAG-2771 no registered code carries the subcategory: a node's own "I do not serve that"
 // (2001, 2008, 2009, 2010) is SubCategoryNodeCapability and retried on another provider. So this
 // guards the next code someone tags unsupported-method, and checks nothing today by design.
+//
+// Same shape for SubCategoryRateLimit, which does NOT hold — 2005 is retryable, 2011 is not — which
+// is exactly why the gate carries a separate rate-limit carve-out rather than inferring it.
 func TestUnsupportedMethodCodesAreAllNonRetryable_MAG2156(t *testing.T) {
 	var checked int
 	for code, le := range errorRegistry {
@@ -57,20 +60,19 @@ func TestNodeCapabilityCodesAreAllRetryable_MAG2771(t *testing.T) {
 	require.NotZero(t, checked, "expected at least one SubCategoryNodeCapability code in the registry")
 }
 
-// TestRateLimitCarveOutIsNotRedundant_MAG2156 pins the fact that made a second carve-out necessary:
-// rate-limit codes are retryable, so IsNonRetryable cannot keep them out of availability scoring and
-// the gate's IsRateLimited condition has to. It used to also pin NODE_LIMIT_EXCEEDED (2011) as the
-// non-retryable half of the subcategory; MAG-2771 made 2011 retryable, which leaves the carve-out
-// load-bearing for every rate-limit code rather than some. If this ever fails because every
-// rate-limit code became non-retryable, the IsRateLimited condition becomes redundant — but it
-// should still not be removed without re-reading this test, since the subcategory is the contract
-// and retryability is only incidentally aligned with it.
-func TestRateLimitCarveOutIsNotRedundant_MAG2156(t *testing.T) {
-	for _, le := range []*LavaError{LavaErrorNodeRateLimited, LavaErrorNodeLimitExceeded} {
-		require.True(t, le.SubCategory.IsRateLimit(), le.Name)
-		require.True(t, le.Retryable,
-			"%s (%d) is retryable — IsNonRetryable cannot carve it out of availability scoring", le.Name, le.Code)
-	}
+// TestRateLimitSubCategorySpansBothRetryabilities_MAG2156 is the negative twin of the above: it
+// pins the fact that made a second carve-out necessary. If this ever fails because every rate-limit
+// code became non-retryable, the gate's IsRateLimited condition becomes redundant — but it should
+// still not be removed without re-reading this test, since the subcategory is the contract and
+// retryability is only incidentally aligned with it.
+func TestRateLimitSubCategorySpansBothRetryabilities_MAG2156(t *testing.T) {
+	require.True(t, LavaErrorNodeRateLimited.SubCategory.IsRateLimit())
+	require.True(t, LavaErrorNodeRateLimited.Retryable,
+		"NODE_RATE_LIMITED (2005) is retryable — IsNonRetryable cannot carve it out of availability scoring")
+
+	require.True(t, LavaErrorNodeLimitExceeded.SubCategory.IsRateLimit())
+	require.False(t, LavaErrorNodeLimitExceeded.Retryable,
+		"NODE_LIMIT_EXCEEDED (2011) is not retryable — same subcategory, opposite axis")
 }
 
 // TestDataScopeCodesAreAllRetryable_MAG2549 is the same invariant one axis over, and it exists

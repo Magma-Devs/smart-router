@@ -45,8 +45,7 @@ var faultAxisTable = []faultAxisCase{
 
 	// Not the endpoint's fault — healthy, just busy. Layer 6 owns these.
 	{2005, "NODE_RATE_LIMITED", SubCategoryRateLimit, true, "retryable AND rate limited"},
-	// MAG-2771: this node's limit, which a peer's may exceed. Routing moved on purpose; the axis did not.
-	{2011, "NODE_LIMIT_EXCEEDED", SubCategoryRateLimit, true, "retryable AND rate limited (MAG-2771)"},
+	{2011, "NODE_LIMIT_EXCEEDED", SubCategoryRateLimit, false, "non-retryable AND rate limited"},
 
 	// Not the endpoint's fault — it answered truthfully about what it holds.
 	{2012, "NODE_RESOURCE_NOT_FOUND", SubCategoryDataScope, true, ""},
