@@ -11,7 +11,14 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-const MaximumNumberOfSelectionLockAttempts = 500
+// A caller that finds another selection in flight for the same request polls for it to finish.
+// selectionLockMaxWait is the bound the caller used to impose with a context.WithTimeout created
+// per GetSessions — a timer and a cancel func per relay for a wait that almost never happens.
+// The bound now lives here and the common path allocates nothing (MAG-4244).
+const (
+	selectionLockPollInterval = 5 * time.Millisecond
+	selectionLockMaxWait      = time.Second
+)
 
 type BlockedProvidersInf interface {
 	GetBlockedProviders() []string
@@ -419,22 +426,25 @@ func (up *UsedProviders) TryLockSelection(ctx context.Context) error {
 	if up == nil {
 		return nil
 	}
-	for counter := 0; counter < MaximumNumberOfSelectionLockAttempts; counter++ {
+	if up.tryLockSelection() {
+		return nil // the common case: no other selection is running for this request
+	}
+	deadline := time.Now().Add(selectionLockMaxWait)
+	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
 			utils.LavaFormatTrace("Failed locking selection, context is done")
 			return ContextDoneNoNeedToLockSelectionError
 		default:
-			canSelect := up.tryLockSelection()
-			if canSelect {
+			time.Sleep(selectionLockPollInterval)
+			if up.tryLockSelection() {
 				return nil
 			}
-			time.Sleep(5 * time.Millisecond)
 		}
 	}
 
 	// if we got here we failed locking the selection.
-	return utils.LavaFormatError("Failed locking selection after MaximumNumberOfSelectionLockAttempts", nil, utils.LogAttr("GUID", ctx))
+	return utils.LavaFormatError("Failed locking selection within selectionLockMaxWait", nil, utils.LogAttr("GUID", ctx), utils.LogAttr("maxWait", selectionLockMaxWait))
 }
 
 func (up *UsedProviders) tryLockSelection() bool {

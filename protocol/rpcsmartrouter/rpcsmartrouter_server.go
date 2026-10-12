@@ -1197,7 +1197,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 			}
 		}
 		cancelTry()
-		time.Sleep(RelayRetryBackoffDuration)
+		select {
+		case <-ctx.Done():
+			// The caller is gone; another attempt would only fail on the dead context.
+			return success, ctx.Err()
+		case <-time.After(RelayRetryBackoffDuration):
+		}
 	}
 
 	return success, err

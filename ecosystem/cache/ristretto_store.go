@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
@@ -23,8 +24,42 @@ type LastestCacheStore struct {
 	latestExpirationTime time.Time
 }
 
-func (cv *LastestCacheStore) Cost() int64 {
-	return 8 + 16
+// chainTipStore holds the per-chain tips the engine compares requests against. They lived in
+// finalizedCache, whose Set is asynchronous and may be dropped, so every write ran a goroutine
+// that slept 1 ms up to DbValueConfirmationAttempts times to confirm it. A tip is one value per
+// chain, bounded by the number of chains served: a map under a mutex needs no confirmation and
+// no goroutine per write (MAG-4244). The zero value is ready to use.
+type chainTipStore struct {
+	mu   sync.Mutex
+	tips map[string]LastestCacheStore
+}
+
+func (s *chainTipStore) get(key string) (LastestCacheStore, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tip, ok := s.tips[key]
+	return tip, ok
+}
+
+// setIfGreaterOrEqualOrStale keeps the newer tip. A stored tip fences lower writes only while
+// readers still trust it: past its deadline the next write, lower included, replaces it
+// (MAG-3755). An equal or higher write always lands.
+func (s *chainTipStore) setIfGreaterOrEqualOrStale(key string, tip LastestCacheStore, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, ok := s.tips[key]; ok && existing.latestBlock > tip.latestBlock && existing.latestExpirationTime.After(now) {
+		return
+	}
+	if s.tips == nil {
+		s.tips = make(map[string]LastestCacheStore)
+	}
+	s.tips[key] = tip
+}
+
+func (s *chainTipStore) clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tips = nil
 }
 
 // ristrettoStore adapts the CacheServer's three ristretto caches onto
@@ -110,15 +145,11 @@ func (r ristrettoStore) SetInt64IfGreaterOrEqual(ctx context.Context, key string
 }
 
 func (r ristrettoStore) chainTipRaw(key string) (block int64, expiration time.Time) {
-	value, found := getNonExpiredFromCache(r.cs.finalizedCache, key)
+	tip, found := r.cs.chainTips.get(key)
 	if !found {
 		return spectypes.NOT_APPLICABLE, time.Time{}
 	}
-	if cacheValue, ok := value.(LastestCacheStore); ok {
-		return cacheValue.latestBlock, cacheValue.latestExpirationTime
-	}
-	utils.LavaFormatError("latestBlock value is not a LastestCacheStore", EntryTypeError, utils.Attribute{Key: "value", Value: fmt.Sprintf("%+v", value)})
-	return spectypes.NOT_APPLICABLE, time.Time{}
+	return tip.latestBlock, tip.latestExpirationTime
 }
 
 func (r ristrettoStore) GetChainTip(ctx context.Context, key string) (int64, bool, error) {
@@ -130,22 +161,9 @@ func (r ristrettoStore) GetChainTip(ctx context.Context, key string) (int64, boo
 }
 
 func (r ristrettoStore) SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error {
-	cacheStore := LastestCacheStore{latestBlock: block, latestExpirationTime: time.Now().Add(core.DefaultExpirationForNonFinalized)}
+	now := time.Now()
 	utils.LavaFormatDebug("setting latest block", utils.Attribute{Key: "key", Value: key}, utils.Attribute{Key: "latestBlock", Value: block})
-	set := func() {
-		r.cs.finalizedCache.Set(key, cacheStore, cacheStore.Cost())
-	}
-	get := func() int64 {
-		// A stored tip fences lower writes only while readers still trust it.
-		// Past its deadline it reads as absent here, so the next write — lower
-		// included — replaces it (MAG-3755). It used to fence forever.
-		existingLatest, expiration := r.chainTipRaw(key)
-		if existingLatest == spectypes.NOT_APPLICABLE || !expiration.After(time.Now()) {
-			return spectypes.NOT_APPLICABLE
-		}
-		return existingLatest
-	}
-	performInt64WriteWithValidationAndRetry(get, set, block)
+	r.cs.chainTips.setIfGreaterOrEqualOrStale(key, LastestCacheStore{latestBlock: block, latestExpirationTime: now.Add(core.DefaultExpirationForNonFinalized)}, now)
 	return nil
 }
 
@@ -236,6 +254,7 @@ func (r ristrettoStore) Purge(ctx context.Context) error {
 		c.Clear()
 		c.Wait()
 	}
+	r.cs.chainTips.clear()
 	if r.cs.stickyPins != nil {
 		r.cs.stickyPins.clear()
 	}

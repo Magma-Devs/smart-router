@@ -1814,10 +1814,8 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		}()
 	}
 
-	// set usedProviders if they were chosen for this relay
-	timeoutCtx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	cantSelectError := usedProviders.TryLockSelection(timeoutCtx)
+	// set usedProviders if they were chosen for this relay; TryLockSelection bounds its own wait
+	cantSelectError := usedProviders.TryLockSelection(ctx)
 	if cantSelectError != nil {
 		if errors.Is(cantSelectError, ContextDoneNoNeedToLockSelectionError) {
 			return nil, utils.LavaFormatDebug("Context deadline exceeded when trying to lock selection", utils.LogAttr("GUID", ctx))
