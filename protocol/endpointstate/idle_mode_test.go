@@ -2,9 +2,8 @@ package endpointstate
 
 // Tests for idle mode (idle.go): the monitor-side decision (IsIdle), the relay-path stamp and
 // wake (NoteClientRelay), the per-cycle gate the trackers ask (idleGate, including the
-// heartbeat), the staleness-gated tip reader the consistency path uses (FreshTipBlock), and the
-// knob validation. The wake burst is driven through a REAL tracker (the poll_now_test harness)
-// so the production PollNow path — not a stub — is what records the fresh tip.
+// heartbeat), and the knob validation. The wake burst is driven through a REAL tracker (the
+// poll_now_test harness) so the production PollNow path — not a stub — is what records the fresh tip.
 
 import (
 	"context"
@@ -13,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -259,9 +259,7 @@ func TestIdleMode_WakeBurstPollsEveryEndpoint(t *testing.T) {
 	require.Equal(t, ObservationSourcePoll, after.Source)
 	require.True(t, after.LastSuccessfulPoll.After(before.LastSuccessfulPoll))
 
-	block, known := m.FreshTipBlock(url, time.Now())
-	require.True(t, known)
-	require.Equal(t, int64(1042), block, "the consistency reader sees the fresh tip right away")
+	require.Equal(t, int64(1042), endpointtip.Default().Block(m.tipKey(url)), "the consistency reader sees the fresh tip right away")
 
 	require.False(t, m.IsIdle(time.Now()))
 	require.Eventually(t, func() bool { return !m.IdleSnapshot(time.Now()).WakeInProgress }, 10*time.Second, 10*time.Millisecond)
@@ -338,27 +336,4 @@ func TestIdleMode_WakeChannelStaysOpenWhileTrackerIsStarting(t *testing.T) {
 	elapsed := time.Since(started)
 	require.GreaterOrEqual(t, elapsed, pollNowUnstartedGrace, "the channel stays open until delivery is given up")
 	require.Less(t, elapsed, pollNowUnstartedGrace+5*time.Second)
-}
-
-// TestFreshTipBlock pins the monitor-level reader: fresh → block, older than the chain's
-// staleness window → (0, known), never observed → (0, unknown).
-func TestFreshTipBlock(t *testing.T) {
-	const url = "http://ep:8545"
-	m := newGatedMonitor(t, 400*time.Millisecond) // tipStaleAfter = StalenessWindow(400ms) = 4s
-	require.Equal(t, 4*time.Second, m.tipStaleAfter)
-	gen := m.registerGenForTest(url)
-	observedAt := time.Now()
-	require.True(t, m.RecordRelayObservation(url, gen, 1000, observedAt))
-
-	block, known := m.FreshTipBlock(url, observedAt.Add(time.Second))
-	require.True(t, known)
-	require.Equal(t, int64(1000), block)
-
-	block, known = m.FreshTipBlock(url, observedAt.Add(4*time.Second+time.Millisecond))
-	require.True(t, known, "a stale tip is still a known endpoint")
-	require.Equal(t, int64(0), block, "but its block is unknown, so consistency must not gate on it")
-
-	block, known = m.FreshTipBlock("http://never:8545", observedAt)
-	require.False(t, known)
-	require.Equal(t, int64(0), block)
 }

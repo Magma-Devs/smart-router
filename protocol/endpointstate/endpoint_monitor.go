@@ -788,17 +788,6 @@ func (m *EndpointMonitor) GetLatestBlockData(endpointURL string) (latestBlock in
 	return latestBlock, changeTime, true
 }
 
-// FreshTipBlock reads an endpoint's observed tip from the shared store, gated by this chain's
-// staleness window (chainstate.StalenessWindow, the same horizon the store's reorg backstop and
-// the probe's alive check use). It reports (block, true) for a fresh tip, (0, true) for a tip
-// that exists but is older than the window — "unknown, do not gate" — and (0, false) when the
-// endpoint has never been observed. The consistency and sync-gap readers in rpcsmartrouter use
-// it so a tip left behind by a paused tracker (idle mode) or a long backoff cannot read as a lag
-// against a fresh chain tip.
-func (m *EndpointMonitor) FreshTipBlock(endpointURL string, now time.Time) (block int64, known bool) {
-	return endpointtip.Default().FreshBlock(m.tipKey(endpointURL), now, m.tipStaleAfter)
-}
-
 // ResetAllLatestBlocks clears BOTH per-endpoint tip sources so the next consistency
 // pre-validation skips the lag check until the poll loop repopulates them. Used by
 // /debug/reset-scores to clear per-endpoint chain-tracker pollution without restarting

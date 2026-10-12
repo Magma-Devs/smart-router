@@ -190,34 +190,3 @@ func TestSource_String_Peer(t *testing.T) {
 		t.Fatalf("unknown source = %q", got)
 	}
 }
-
-// TestStore_FreshBlock pins the staleness-gated reader the consistency and sync-gap paths use:
-// a fresh tip reads as its block, a stale one as (0, known=true) — "observed, but too long ago to
-// say" — and a never-observed key as (0, known=false). The two zero results are distinct on
-// purpose: only the never-observed case may fall back to the tracker's own atomic.
-func TestStore_FreshBlock(t *testing.T) {
-	s := NewStore()
-	const key = "ETH1|jsonrpc|http://ep:8545"
-	observedAt := time.Now()
-	require.True(t, s.Set(key, Tip{Block: 1000, ObservedAt: observedAt, Source: SourcePoll}, time.Minute))
-
-	block, known := s.FreshBlock(key, observedAt.Add(30*time.Second), time.Minute)
-	require.True(t, known)
-	require.Equal(t, int64(1000), block, "inside the window the block is reported")
-
-	block, known = s.FreshBlock(key, observedAt.Add(time.Minute), time.Minute)
-	require.True(t, known)
-	require.Equal(t, int64(1000), block, "exactly at the window is still fresh (the gate rejects only age > window)")
-
-	block, known = s.FreshBlock(key, observedAt.Add(time.Minute+time.Nanosecond), time.Minute)
-	require.True(t, known, "a stale entry is still KNOWN — it is not the never-observed case")
-	require.Equal(t, int64(0), block, "past the window the block reads as unknown")
-
-	block, known = s.FreshBlock("ETH1|jsonrpc|http://never:8545", observedAt, time.Minute)
-	require.False(t, known)
-	require.Equal(t, int64(0), block)
-
-	block, known = s.FreshBlock(key, observedAt.Add(time.Hour), 0)
-	require.True(t, known)
-	require.Equal(t, int64(1000), block, "staleAfter <= 0 disables the gate")
-}

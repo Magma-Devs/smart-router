@@ -150,28 +150,6 @@ func (s *Store) Block(key string) int64 {
 	return s.tips[key].Block
 }
 
-// FreshBlock is Block with a staleness gate: the stored block only while its observation is
-// younger than staleAfter, plus whether ANY tip is stored under the key. The two zero results
-// mean different things and the consistency reader needs both: (0, false) is "never observed"
-// (it may fall back to the tracker's own atomic), (0, true) is "observed, but too long ago to say
-// where this endpoint is now" — unknown, do not gate, and do NOT fall back to an atomic that is
-// at least as old (every poll writes both; a relay writes only the store). Without the gate a
-// tip left behind by a paused tracker (idle mode) or a long Retry-After backoff reads as a real
-// lag against a fresh chain tip and rejects an endpoint nothing has looked at. staleAfter <= 0
-// disables the gate.
-func (s *Store) FreshBlock(key string, now time.Time, staleAfter time.Duration) (block int64, known bool) {
-	s.mu.RLock()
-	t, ok := s.tips[key]
-	s.mu.RUnlock()
-	if !ok || t.Block <= 0 {
-		return 0, false
-	}
-	if staleAfter > 0 && now.Sub(t.ObservedAt) > staleAfter {
-		return 0, true
-	}
-	return t.Block, true
-}
-
 // Remove drops an endpoint's tip. The monitor calls this when a tracker is removed or
 // the monitor stops, so a removed endpoint's stale tip cannot linger in the global map.
 func (s *Store) Remove(key string) {

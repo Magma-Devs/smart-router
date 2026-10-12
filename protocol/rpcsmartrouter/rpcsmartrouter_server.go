@@ -3013,9 +3013,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		return sessions, nil, nil
 	}
 
-	// Validate each endpoint. One clock read for the pass: every per-endpoint tip's freshness
-	// below is judged against it.
-	now := time.Now()
+	// Validate each endpoint
 	validSessions = make(lavasession.ConsumerSessionsMap, len(sessions))
 	failedSessions = make(lavasession.ConsumerSessionsMap)
 
@@ -3034,21 +3032,16 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		}
 
 		// Prefer the endpointtip store (the single source of truth), falling back to the poll
-		// atomic only when the store has NEVER been written for this endpoint (MAG-2160 Finding 6
-		// + follow-up): see endpointTipPreferStore. The old atomic-then-store-if-0 logic rejected a
-		// current relay-fed endpoint whose poll atomic was frozen by the traffic gate; a naive
-		// max() would instead keep a STALE-HIGH atomic winning over a newer lower store tip after
-		// a reorg. The store read is staleness-gated: a tip older than the chain's staleness
-		// window reads as unknown (0) and does NOT fall back to the atomic, which is at least as
-		// old — otherwise an endpoint nothing has looked at since the trackers paused (idle mode)
-		// or backed off would be rejected for "lagging" a fresh chain tip it never had a chance
-		// to report against.
+		// atomic only when the store is empty (MAG-2160 Finding 6 + follow-up): see
+		// endpointTipPreferStore. The old atomic-then-store-if-0 logic rejected a current relay-fed
+		// endpoint whose poll atomic was frozen by the traffic gate; a naive max() would instead
+		// keep a STALE-HIGH atomic winning over a newer lower store tip after a reorg.
 		pollAtomic := int64(0)
 		if rpcss.endpointChainTrackerManager != nil && endpointURL != "" {
 			pollAtomic = rpcss.endpointChainTrackerManager.GetLatestBlockNum(endpointURL)
 		}
-		storeTip, storeKnown := rpcss.endpointTipBlockFresh(endpointURL, now)
-		endpointLatest = endpointTipPreferStore(pollAtomic, storeTip, storeKnown)
+		storeTip := rpcss.endpointTipBlock(endpointURL)
+		endpointLatest = endpointTipPreferStore(pollAtomic, storeTip)
 
 		// If we still have no block data, skip validation for this endpoint (allow first relay)
 		if endpointLatest == 0 {
@@ -3062,9 +3055,6 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 				utils.LogAttr("endpointURL", endpointURL),
 				utils.LogAttr("chainTip", chainTip),
 				utils.LogAttr("requestedBlock", reqBlock),
-				// true: a tip exists but is older than the staleness window (paused tracker,
-				// long backoff); false: this endpoint has never been observed.
-				utils.LogAttr("staleTip", storeKnown),
 				utils.LogAttr("trackerState", trackerState),
 				utils.LogAttr("trackerLastError", trackerLastError),
 				utils.LogAttr("GUID", ctx),
@@ -3097,10 +3087,10 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 				utils.LogAttr("chainTip", chainTip),
 				utils.LogAttr("lag", lag),
 				utils.LogAttr("threshold", threshold),
-				// Report which source produced the value: the store wins whenever it holds an
-				// entry (prefer-store), else the poll atomic is the bootstrap fallback.
+				// Report which source produced the value: the store wins whenever it holds a
+				// positive tip (prefer-store), else the poll atomic is the bootstrap fallback.
 				utils.LogAttr("source", func() string {
-					if storeKnown {
+					if storeTip > 0 {
 						return "endpointtip_store"
 					}
 					return "poll_tracker"
@@ -3198,16 +3188,8 @@ func (rpcss *RPCSmartRouterServer) recordRelayBlockObservation(endpoint *lavases
 // tracker gate), which can read higher than this pod has seen. Accepted deliberately: the
 // reference it is compared against is the guarded chain tip, so a too-high endpoint value can
 // only mask that ONE endpoint's lag — it can never reject an honest one.
-//
-// storeKnown is whether the store holds ANY entry for the endpoint. The store value arrives
-// staleness-gated (endpointTipBlockFresh): an entry older than the chain's staleness window
-// comes in as 0. That 0 is returned as-is — "unknown, do not gate" — rather than falling back to
-// the atomic: every poll writes both stores and a relay writes only this one, so the atomic can
-// never be fresher than a stale store entry, only equally old or older. Falling back would hand
-// consistency the exact stale-low value the gate exists to withhold. The atomic is consulted only
-// for an endpoint the store has never seen (the bootstrap window before its first observation).
-func endpointTipPreferStore(pollAtomic, storeTip int64, storeKnown bool) int64 {
-	if storeKnown {
+func endpointTipPreferStore(pollAtomic, storeTip int64) int64 {
+	if storeTip > 0 {
 		return storeTip
 	}
 	return pollAtomic
@@ -3240,23 +3222,16 @@ func (rpcss *RPCSmartRouterServer) onChainBlockRegression(from, to int64, reason
 	rpcss.smartRouterEndpointMetrics.SetRouterLatestBlock(chainID, apiInterface, to)
 }
 
-// endpointTipBlockFresh reads an endpoint's observed tip from the shared single-source-of-truth
-// endpointtip store through the monitor's staleness gate (EndpointMonitor.FreshTipBlock): the
-// block while the observation is inside the chain's staleness window, (0, true) once it is older
-// than that, and (0, false) for an endpoint never observed. Without a monitor there is no
-// staleness horizon (and no poller feeding the store), so the read is ungated — the store's
-// value as written, keyed by this server's chain + apiInterface. Returns (0, false) when the
-// listen endpoint is unset or the URL is empty, so callers never need to nil-check.
-func (rpcss *RPCSmartRouterServer) endpointTipBlockFresh(endpointURL string, now time.Time) (block int64, known bool) {
+// endpointTipBlock reads an endpoint's observed tip from the shared single-source-of-truth
+// endpointtip store, keyed by this server's chain + apiInterface + the endpoint URL. It
+// returns 0 (the "unknown tip" sentinel) when the listen endpoint is unset or the URL is
+// empty, so callers never need to nil-check listenEndpoint.
+func (rpcss *RPCSmartRouterServer) endpointTipBlock(endpointURL string) int64 {
 	if rpcss.listenEndpoint == nil || endpointURL == "" {
-		return 0, false
+		return 0
 	}
-	if rpcss.endpointChainTrackerManager != nil {
-		return rpcss.endpointChainTrackerManager.FreshTipBlock(endpointURL, now)
-	}
-	return endpointtip.Default().FreshBlock(
+	return endpointtip.Default().Block(
 		endpointtip.Key(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL),
-		now, 0,
 	)
 }
 
@@ -3286,9 +3261,7 @@ func (rpcss *RPCSmartRouterServer) endpointSyncGap(endpointURL, endpointAddress 
 	if tip, ok := rpcss.chainState.GetLatestBlock(); ok {
 		reference = tip
 	}
-	// Staleness-gated like the consistency read: a tip nothing has refreshed inside the window
-	// (paused tracker, long backoff) is unknown, and unknown clamps the gap to 0 below.
-	endpointLatest, _ := rpcss.endpointTipBlockFresh(endpointURL, time.Now())
+	endpointLatest := rpcss.endpointTipBlock(endpointURL)
 	syncGap := syncGapAgainstReference(reference, endpointLatest, rpcss.chainState.ConsensusBucketWidth())
 	if reference > 0 && endpointLatest > 0 {
 		utils.LavaFormatDebug("calculated sync gap",
