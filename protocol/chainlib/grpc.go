@@ -574,6 +574,9 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		)
 
 		firstReply, repliesChan, err := subscriptionManager.StartSubscription(ctx, protocolMessage, dappID, consumerIp, connectionUniqueId, metricsData)
+		// A subscribe never passes SendParsedRelay, which stamps these for a normal request.
+		metricsData.ApiMethod = protocolMessage.GetApi().GetName()
+		metricsData.Latency = time.Since(startTime).Milliseconds()
 
 		// Snapshot before the emit goroutine starts. AddMetricForGrpc writes Success and
 		// Origin on the struct it is handed, and the per-delivery emits work from these
@@ -645,8 +648,8 @@ func (apil *GrpcChainListener) forwardSubscriptionReplies(ctx context.Context, r
 
 			perMessage := subscriptionFields
 			perMessage.Timestamp = time.Now()
-			perMessage.ApiMethod = SubscriptionDeliveryMethod
-			perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
+			perMessage.ApiMethod = metrics.SubscriptionDeliveryMethod
+			perMessage.ComputeUnits = metrics.DefaultSubscriptionDeliveryCU
 			go apil.logger.AddMetricForGrpc(&perMessage, nil, &metricsHeaders)
 		}
 	}()
