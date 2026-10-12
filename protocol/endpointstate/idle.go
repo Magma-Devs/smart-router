@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -241,7 +240,7 @@ func (m *EndpointMonitor) runWake(done chan struct{}, urls []string, startedAt t
 
 	// One budget for the whole burst: the tracker's own fetch timeout (what bounds a poll that
 	// reaches upstream) plus the delivery grace for a tracker that is still starting.
-	budget := max(10*time.Second, common.MinimumTimePerRelayDelay) + pollNowUnstartedGrace + time.Second
+	budget := chaintracker.FetchTimeout() + pollNowUnstartedGrace + time.Second
 	ctx, cancel := context.WithTimeout(m.ctx, budget)
 	defer cancel()
 

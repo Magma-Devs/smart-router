@@ -39,7 +39,7 @@ const (
 	// whose state merely lagged.
 	//
 	// Delivery only. It deliberately does NOT bound the poll cycle that follows: that is bounded by
-	// the tracker's own fetch timeout, max(10s, MinimumTimePerRelayDelay), which is several times
+	// the tracker's own fetch timeout, chaintracker.FetchTimeout(), which is several times
 	// this grace. Capping both with this value would abandon healthy polls mid-flight and leave the
 	// caller reading a pre-poll record.
 	pollNowUnstartedGrace = 2 * time.Second

@@ -200,6 +200,12 @@ type pollNowRequest struct {
 	resp chan error
 }
 
+// FetchTimeout bounds one poll cycle that reaches upstream, on the timer and on PollNow alike.
+// Callers that budget for a poll (the idle wake burst) use it rather than restating the value.
+func FetchTimeout() time.Duration {
+	return max(10*time.Second, common.MinimumTimePerRelayDelay)
+}
+
 func (cs *ChainTracker) IsDummy() bool {
 	return false
 }
@@ -680,7 +686,7 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 		for {
 			select {
 			case <-cs.timer.C:
-				fetchTimeout := max(10*time.Second, common.MinimumTimePerRelayDelay)
+				fetchTimeout := FetchTimeout()
 				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout) // protect this flow from hanging code
 				skipped, err := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx, false)
 				cancel()
@@ -733,7 +739,7 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 				// same bound as the timer case (fidelity), and a shutdown still cancels the fetch
 				// promptly. The requester's context governs only how long IT waits — a caller that
 				// gives up leaves the poll to finish and record, which is honest: it did happen.
-				fetchTimeout := max(10*time.Second, common.MinimumTimePerRelayDelay)
+				fetchTimeout := FetchTimeout()
 				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 				_, pollErr := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx, true)
 				cancel()
@@ -815,7 +821,7 @@ func (cs *ChainTracker) PollNow(ctx context.Context) error {
 // The split exists because those two waits have unrelated natural lengths. Delivery either happens
 // in microseconds (the goroutine is at its select) or never (there is no goroutine yet), so a
 // caller that suspects the latter wants a short deadline. The cycle itself is bounded by the
-// tracker's own fetch timeout — max(10s, MinimumTimePerRelayDelay) — so applying that same short
+// tracker's own fetch timeout (FetchTimeout) — so applying that same short
 // deadline to the result would routinely abandon a poll that was proceeding normally, and the
 // caller would then read a pre-poll record. See EndpointMonitor.PollNow, the one caller.
 func (cs *ChainTracker) PollNowWithDeliveryDeadline(deliveryCtx, resultCtx context.Context) error {
