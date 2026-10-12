@@ -28,15 +28,13 @@ type nodeErrorFixture struct {
 // relayResult mirrors direct_rpc_relay.go's JSON-RPC branch: HTTP 200 (the whole point of the bug —
 // a node error is a 200 with {"error":...} in the body), IsNodeError from the body check, policy
 // flags from the registry.
+// relayResult sets the flags through ApplyNodeErrorClassification, the method direct_rpc_relay.go
+// calls, so the fixture carries every fault-axis flag production does. It used to copy three by
+// hand and dropped IsDataScope and IsNodeCapability, which were added after it was written.
 func (f nodeErrorFixture) relayResult() *common.RelayResult {
-	classification := common.ClassifyNodeErrorForRetry(common.ChainFamilyEVM, common.TransportJsonRPC, f.code, f.message)
-	return &common.RelayResult{
-		StatusCode:          200,
-		IsNodeError:         true,
-		IsNonRetryable:      classification.IsNonRetryable,
-		IsUnsupportedMethod: classification.IsUnsupportedMethod,
-		IsRateLimited:       classification.IsRateLimited,
-	}
+	result := &common.RelayResult{StatusCode: 200, IsNodeError: true}
+	result.ApplyNodeErrorClassification(common.ChainFamilyEVM, common.TransportJsonRPC, f.code, f.message)
+	return result
 }
 
 // TestNodeErrorProviderIsDemoted_MAG2156 is the ticket's acceptance criterion driven through the
@@ -142,8 +140,8 @@ func TestNodeErrorProviderIsDemoted_MAG2156(t *testing.T) {
 		why     string
 	}{
 		{
-			fixture: nodeErrorFixture{name: "unsupported method", code: -32601, message: "the method eth_foo does not exist/is not available"},
-			why:     "NODE_METHOD_NOT_FOUND is non-retryable and SubCategoryUnsupportedMethod: every endpoint returns it for the same request, and the subcategory is contractually 'no provider scoring'",
+			fixture: nodeErrorFixture{name: "method not found", code: -32601, message: "the method eth_foo does not exist/is not available"},
+			why:     "NODE_METHOD_NOT_FOUND is node-capability (MAG-2771): the endpoint answered truthfully about what it serves, so the request goes to another provider and nobody is scored",
 		},
 		{
 			fixture: nodeErrorFixture{name: "rate limited", code: -32000, message: "rate limit exceeded, please slow down"},

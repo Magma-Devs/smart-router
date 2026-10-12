@@ -87,6 +87,7 @@ type ResultsSummary struct {
 	SpecialNodeErrors         int
 	ProtocolErrors            int
 	HasNonRetryableNodeError  bool // any node error with IsNonRetryable flag (umbrella — THE RETRY GATE)
+	HasNodeCapabilityRefusal  bool // any node error with IsNodeCapability: the node said it does not serve this request
 	HasUnsupportedMethod      bool // subset of non-retryable, for caching decisions and zero-CU
 	HasPermanentProtocolError bool // any non-retryable protocol error (excluding epoch mismatch)
 	HasEpochMismatch          bool // any protocol error is epoch mismatch
@@ -143,6 +144,9 @@ type DecisionInput struct {
 	IsBatch       bool
 	Summary       ResultsSummary
 	IsTickerHedge bool // true when called from ticker.C (hedge), false from gotResults (retry)
+	// IsDefaultApi is true when the request names a method the spec does not list: the parser
+	// forwarded it as a Default- API only because the spec cannot rule it out.
+	IsDefaultApi bool
 }
 
 // RelayPolicyInf is the interface that the policy engine must implement.
