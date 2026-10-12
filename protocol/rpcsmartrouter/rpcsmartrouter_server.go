@@ -245,7 +245,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	// monitor's OnTipObservation hook can feed it. Phase 2 wires the writes (relay+poll
 	// observations → SetLatestBlock) and the internal consensus recompute tick; the read sites
 	// still use the legacy sources until phase 3.
-	rpcss.chainState = chainstate.New(listenEndpoint.ChainID, chainstate.DefaultConfig(effectiveBlockTime))
+	rpcss.chainState = rpcss.newChainState(effectiveBlockTime)
 
 	// Topic E (MAG-2160 Finding 2 / F4): point the relay sync dimension at THIS chain+interface's
 	// tip, so relay sync lag is measured against the agreed head rather than
@@ -3133,6 +3133,33 @@ func endpointTipPreferStore(pollAtomic, storeTip int64) int64 {
 		return storeTip
 	}
 	return pollAtomic
+}
+
+// newChainState builds this server's per-chain tip with production config and the MAG-4153
+// regression hook wired. One constructor so the tests exercise the exact wiring ServeRPCRequests uses.
+func (rpcss *RPCSmartRouterServer) newChainState(effectiveBlockTime time.Duration) *chainstate.ChainState {
+	cfg := chainstate.DefaultConfig(effectiveBlockTime)
+	cfg.OnRegression = rpcss.onChainBlockRegression
+	return chainstate.New(rpcss.listenEndpoint.ChainID, cfg)
+}
+
+// onChainBlockRegression is ChainState's OnRegression hook: this chain's latest block moved
+// backwards (MAG-4153). Logged at ERROR and counted on smartrouter_latest_block_regressions_total,
+// which is what the fleet alert reads. The gauge is refreshed here too: after a consensus snap-down
+// nothing else rewrites it until the next accepted observation, so it would keep showing the
+// higher block that was just rejected.
+func (rpcss *RPCSmartRouterServer) onChainBlockRegression(from, to int64, reason string) {
+	chainID, apiInterface := rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
+	utils.LavaFormatError("chain latest block went backwards", nil,
+		utils.LogAttr("chainID", chainID),
+		utils.LogAttr("apiInterface", apiInterface),
+		utils.LogAttr("fromBlock", from),
+		utils.LogAttr("toBlock", to),
+		utils.LogAttr("blocksBack", from-to),
+		utils.LogAttr("reason", reason),
+	)
+	rpcss.smartRouterEndpointMetrics.RecordRouterLatestBlockRegression(chainID, apiInterface, reason)
+	rpcss.smartRouterEndpointMetrics.SetRouterLatestBlock(chainID, apiInterface, to)
 }
 
 // endpointTipBlock reads an endpoint's observed tip from the shared single-source-of-truth

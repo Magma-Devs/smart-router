@@ -73,11 +73,12 @@ type SmartRouterMetricsManager struct {
 	routerOverallHealthBreakdown *prometheus.GaugeVec // smartrouter_overall_health_breakdown {spec, apiInterface}
 
 	// Router-scoped metrics (labels: spec, apiInterface)
-	routerLatestBlock          *prometheus.GaugeVec
-	routerProtocolVersion      *prometheus.GaugeVec
-	routerWsConnectionsActive  *prometheus.GaugeVec
-	routerWsSubscriptionsTotal *prometheus.CounterVec
-	routerWsSubscriptionErrors *prometheus.CounterVec
+	routerLatestBlock            *prometheus.GaugeVec
+	routerLatestBlockRegressions *prometheus.CounterVec // smartrouter_latest_block_regressions_total {spec, apiInterface, reason}
+	routerProtocolVersion        *prometheus.GaugeVec
+	routerWsConnectionsActive    *prometheus.GaugeVec
+	routerWsSubscriptionsTotal   *prometheus.CounterVec
+	routerWsSubscriptionErrors   *prometheus.CounterVec
 
 	// Cross-validation group metrics
 	crossValidationRequestsTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_requests_total        {spec, apiInterface, method}
@@ -374,6 +375,14 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Help: "Latest block known by the RPC smart router for this chain/interface.",
 	}, []string{"spec", "apiInterface"})
 
+	// Counts the chain tip moving DOWN (MAG-4153). smartrouter_latest_block is a per-pod gauge that
+	// is also written on every relay, so a drop in it cannot be told apart from a pod restart; this
+	// counter is the alertable signal. reason is chainstate.RegressionReason* — a closed set of two.
+	routerLatestBlockRegressions := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_latest_block_regressions_total",
+		Help: "Times the router's latest block for this chain/interface moved backwards, by reason (consensus, stale_tip).",
+	}, []string{"spec", "apiInterface", "reason"})
+
 	routerProtocolVersion := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_protocol_version",
 		Help: "Protocol version of the RPC smart router encoded as major*1e6+minor*1e3+patch.",
@@ -649,6 +658,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerTotalErrored = registerOrReuse(routerTotalErrored)
 	routerEndToEndLatency = registerOrReuse(routerEndToEndLatency)
 	routerLatestBlock = registerOrReuse(routerLatestBlock)
+	routerLatestBlockRegressions = registerOrReuse(routerLatestBlockRegressions)
 	routerProtocolVersion = registerOrReuse(routerProtocolVersion)
 	routerWsConnectionsActive = registerOrReuse(routerWsConnectionsActive)
 	routerWsSubscriptionsTotal = registerOrReuse(routerWsSubscriptionsTotal)
@@ -735,11 +745,12 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		routerOverallHealthBreakdown: routerOverallHealthBreakdown,
 
 		// Router-scoped (without function)
-		routerLatestBlock:          routerLatestBlock,
-		routerProtocolVersion:      routerProtocolVersion,
-		routerWsConnectionsActive:  routerWsConnectionsActive,
-		routerWsSubscriptionsTotal: routerWsSubscriptionsTotal,
-		routerWsSubscriptionErrors: routerWsSubscriptionErrors,
+		routerLatestBlock:            routerLatestBlock,
+		routerLatestBlockRegressions: routerLatestBlockRegressions,
+		routerProtocolVersion:        routerProtocolVersion,
+		routerWsConnectionsActive:    routerWsConnectionsActive,
+		routerWsSubscriptionsTotal:   routerWsSubscriptionsTotal,
+		routerWsSubscriptionErrors:   routerWsSubscriptionErrors,
 
 		// Cross-validation group
 		crossValidationRequestsTotalMetric:              crossValidationRequestsTotalMetric,
@@ -1033,6 +1044,15 @@ func (m *SmartRouterMetricsManager) SetRouterLatestBlock(spec, apiInterface stri
 		return
 	}
 	m.routerLatestBlock.WithLabelValues(spec, apiInterface).Set(float64(block))
+}
+
+// RecordRouterLatestBlockRegression counts ONE downward move of the router's latest block for a
+// chain/interface (MAG-4153). reason is a chainstate.RegressionReason* value.
+func (m *SmartRouterMetricsManager) RecordRouterLatestBlockRegression(spec, apiInterface, reason string) {
+	if m == nil || m.routerLatestBlockRegressions == nil {
+		return
+	}
+	m.routerLatestBlockRegressions.WithLabelValues(spec, apiInterface, reason).Inc()
 }
 
 // =============================================================================

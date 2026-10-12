@@ -708,3 +708,59 @@ func TestOnTipObservation_GaugeAdvancesUnderPollOnlyTraffic(t *testing.T) {
 	(&RPCSmartRouterServer{}).onTipObservation(1)
 	(&RPCSmartRouterServer{chainState: cs}).onTipObservation(1)
 }
+
+// readBlockRegressions reads smartrouter_latest_block_regressions_total for ETH1/jsonrpc and one
+// reason off the default registry; 0 when the series does not exist yet. Shared registry, so
+// callers assert on a before/after delta.
+func readBlockRegressions(t *testing.T, reason string) float64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "smartrouter_latest_block_regressions_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			lm := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				lm[lp.GetName()] = lp.GetValue()
+			}
+			if lm["spec"] == "ETH1" && lm["apiInterface"] == "jsonrpc" && lm["reason"] == reason {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// MAG-4153: the chain's latest block moving backwards is counted (the fleet alert's signal) and
+// pulls smartrouter_latest_block down with it. Built through newChainState, the constructor
+// ServeRPCRequests uses, so dropping the hook from production wiring fails this test.
+func TestChainBlockRegression_CountedAndGaugeFollows(t *testing.T) {
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	rpcss := &RPCSmartRouterServer{
+		smartRouterEndpointMetrics: mm,
+		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+	}
+	rpcss.chainState = rpcss.newChainState(12 * time.Second)
+
+	consensusBefore := readBlockRegressions(t, chainstate.RegressionReasonConsensus)
+	staleBefore := readBlockRegressions(t, chainstate.RegressionReasonStaleTip)
+
+	// A tip far ahead of a fresh majority: Recompute snaps it down to the baseline.
+	rpcss.onTipObservation(25_000_000)
+	now := time.Now()
+	rpcss.chainState.Recompute([]chainstate.BlockObservation{
+		{URL: "a", Block: 20_000_000, ObservedAt: now},
+		{URL: "b", Block: 20_000_000, ObservedAt: now},
+	})
+	require.Equal(t, consensusBefore+1, readBlockRegressions(t, chainstate.RegressionReasonConsensus))
+	require.Equal(t, float64(20_000_000), readRouterLatestBlockGauge(t),
+		"the gauge follows the tip down instead of holding the rejected higher block")
+
+	// Tip goes stale, then a lower observation is re-adopted.
+	rpcss.chainState.SetDebugClockOffset(10 * time.Minute)
+	rpcss.chainState.SetLatestBlock(19_999_990)
+	require.Equal(t, staleBefore+1, readBlockRegressions(t, chainstate.RegressionReasonStaleTip))
+	require.Equal(t, float64(19_999_990), readRouterLatestBlockGauge(t))
+}
