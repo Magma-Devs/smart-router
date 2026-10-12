@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -4744,10 +4745,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				hashKey, outputFormatter, err := protocolMessage.HashCacheRequest(chainId)
 				if err != nil {
 					utils.LavaFormatError("sendRelayToEndpoint failed getting hash for cache request", err, utils.LogAttr("GUID", ctx))
-				} else {
+				} else if utils.IsDebugEnabled() {
 					utils.LavaFormatDebug("Cache lookup hash generated",
 						utils.LogAttr("GUID", ctx),
-						utils.LogAttr("hashKey", fmt.Sprintf("%x", hashKey)),
+						utils.LogAttr("hashKey", hex.EncodeToString(hashKey)),
 						utils.LogAttr("apiUrl", localRelayData.ApiUrl),
 					)
 
@@ -4811,21 +4812,23 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 						}()
 						cacheReport.PrimaryOutcome = primaryOutcome
 
-						// Generate the actual cache key that will be used for lookup
-						actualLookupCacheKey := make([]byte, len(hashKey))
-						copy(actualLookupCacheKey, hashKey)
-						actualLookupCacheKey = binary.LittleEndian.AppendUint64(actualLookupCacheKey, uint64(requestedBlockForCache))
-
-						utils.LavaFormatDebug("Cache lookup result",
-							utils.LogAttr("GUID", ctx),
-							utils.LogAttr("hashKeyHex", fmt.Sprintf("%x", hashKey)),
-							utils.LogAttr("actualLookupCacheKeyHex", fmt.Sprintf("%x", actualLookupCacheKey)),
-							utils.LogAttr("reqBlock", reqBlock),
-							utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
-							utils.LogAttr("seenBlock", localRelayData.SeenBlock),
-							utils.LogAttr("cacheError", cacheError),
-							utils.LogAttr("replyFound", cacheReply != nil && cacheReply.GetReply() != nil),
-						)
+						if utils.IsDebugEnabled() {
+							// The key the engine actually looked up: the hash plus the block it was
+							// resolved to. Built only for this line, so only when it can be emitted.
+							actualLookupCacheKey := make([]byte, len(hashKey), len(hashKey)+8)
+							copy(actualLookupCacheKey, hashKey)
+							actualLookupCacheKey = binary.LittleEndian.AppendUint64(actualLookupCacheKey, uint64(requestedBlockForCache))
+							utils.LavaFormatDebug("Cache lookup result",
+								utils.LogAttr("GUID", ctx),
+								utils.LogAttr("hashKeyHex", hex.EncodeToString(hashKey)),
+								utils.LogAttr("actualLookupCacheKeyHex", hex.EncodeToString(actualLookupCacheKey)),
+								utils.LogAttr("reqBlock", reqBlock),
+								utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
+								utils.LogAttr("seenBlock", localRelayData.SeenBlock),
+								utils.LogAttr("cacheError", cacheError),
+								utils.LogAttr("replyFound", cacheReply != nil && cacheReply.GetReply() != nil),
+							)
+						}
 						reply := cacheReply.GetReply()
 
 						// Cross-pod consistency (T10): peer pods publish their guarded chain tip under
@@ -5641,7 +5644,7 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			utils.LogAttr("outcome", straggler.Outcome),
 			utils.LogAttr("delayAfterReply", straggler.Delay),
 			utils.LogAttr("method", apiName),
-			utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", consensusHash[:8])),
+			utils.LogAttr("consensusHashHex", hex.EncodeToString(consensusHash[:8])),
 		)
 		group := straggler.ProviderGroup
 		if group == "" {
@@ -5823,8 +5826,8 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 					utils.LogAttr("group", group),
 					utils.LogAttr("method", apiName),
 					utils.LogAttr("finality", finality),
-					utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", consensusHash[:8])),
-					utils.LogAttr("outlierHashHex", fmt.Sprintf("%x", outlier.ResponseHash[:8])),
+					utils.LogAttr("consensusHashHex", hex.EncodeToString(consensusHash[:8])),
+					utils.LogAttr("outlierHashHex", hex.EncodeToString(outlier.ResponseHash[:8])),
 				)
 				// The debug read surface for the same dissent the log and the counter describe, keyed
 				// by request so the automation can assert per-request facts a counter cannot carry
@@ -6256,14 +6259,19 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 
 		nodeErrors := relayProcessor.NodeErrors()
 		if len(nodeErrors) > 0 {
-			nodeErrorHeaderString := ""
+			// One buffer for the header: the string concatenation it replaces copied every node
+			// error's body once per provider, and the bodies can be whole error replies.
+			var nodeErrorHeader strings.Builder
 			for _, nodeError := range nodeErrors {
-				nodeErrorHeaderString += fmt.Sprintf("%s: %s,", nodeError.GetProvider(), string(nodeError.Reply.Data))
+				nodeErrorHeader.WriteString(nodeError.GetProvider())
+				nodeErrorHeader.WriteString(": ")
+				nodeErrorHeader.Write(nodeError.Reply.Data)
+				nodeErrorHeader.WriteByte(',')
 			}
 			relayResult.Reply.Metadata = append(relayResult.Reply.Metadata,
 				pairingtypes.Metadata{
 					Name:  common.NODE_ERRORS_PROVIDERS_HEADER_NAME,
-					Value: nodeErrorHeaderString,
+					Value: nodeErrorHeader.String(),
 				})
 		}
 
