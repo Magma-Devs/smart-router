@@ -20,14 +20,15 @@ func TestShouldRetryError(t *testing.T) {
 			shouldRetry: false,
 		},
 		{
-			name:        "Unsupported method error should not retry",
-			err:         NewUnsupportedMethodError(errors.New("method not found"), "eth_test"),
-			shouldRetry: false,
+			// MAG-2771: a node's method-not-found is a claim about that node.
+			name:        "Wrapped NODE_METHOD_NOT_FOUND retries on another provider",
+			err:         common.NewLavaError(common.LavaErrorNodeMethodNotFound, "unsupported method \"eth_test\""),
+			shouldRetry: true,
 		},
 		{
-			name:        "Method not found message should not retry",
+			name:        "Method not found message retries on another provider",
 			err:         errors.New("method not found"),
-			shouldRetry: false,
+			shouldRetry: true,
 		},
 		{
 			name:        "Generic error should allow retry",
@@ -86,9 +87,11 @@ func TestIsUnsupportedMethodErrorType(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "UnsupportedMethodError type",
-			err:      NewUnsupportedMethodError(errors.New("method not found"), "eth_test"),
-			expected: true,
+			// MAG-2771: NODE_METHOD_NOT_FOUND is node-capability, so no node refusal reads as a
+			// router-terminal unsupported method any more.
+			name:     "Wrapped NODE_METHOD_NOT_FOUND is not an unsupported method",
+			err:      common.NewLavaError(common.LavaErrorNodeMethodNotFound, "unsupported method \"eth_test\""),
+			expected: false,
 		},
 		{
 			name:     "Generic error",
@@ -96,9 +99,9 @@ func TestIsUnsupportedMethodErrorType(t *testing.T) {
 			expected: false,
 		},
 		{
-			name:     "Wrapped UnsupportedMethodError",
-			err:      NewUnsupportedMethodError(errors.New("method not found"), ""),
-			expected: true,
+			name:     "Wrapped NODE_UNIMPLEMENTED is not an unsupported method",
+			err:      common.NewLavaError(common.LavaErrorNodeUnimplemented, "unsupported method"),
+			expected: false,
 		},
 	}
 
@@ -137,9 +140,10 @@ func TestIsSolanaNonRetryableErrorType(t *testing.T) {
 			expected: true,
 		},
 		{
-			name:     "UnsupportedMethodError is also non-retryable",
-			err:      NewUnsupportedMethodError(errors.New("method not found"), "eth_test"),
-			expected: true, // unsupported methods are non-retryable
+			// MAG-2771: another provider may serve a method this node does not.
+			name:     "Wrapped NODE_METHOD_NOT_FOUND is retryable",
+			err:      common.NewLavaError(common.LavaErrorNodeMethodNotFound, "unsupported method \"eth_test\""),
+			expected: false,
 		},
 	}
 

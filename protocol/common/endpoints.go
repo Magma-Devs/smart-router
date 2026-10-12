@@ -608,9 +608,10 @@ type RelayResult struct {
 	CrossValidationFailureReason string
 	// IsNonRetryable is the umbrella flag the retry state machine consults:
 	// it's true whenever the matched registry LavaError has Retryable=false,
-	// which covers unsupported method, execution reverted, out of gas,
-	// invalid signature, double spend, etc. Retrying on another provider
-	// would just reproduce the same deterministic failure.
+	// which covers execution reverted, out of gas, invalid signature, double
+	// spend, caller mistakes, etc. Retrying on another provider would just
+	// reproduce the same deterministic failure. A node's refusal of its own
+	// (method, route, credentials) is retryable since MAG-2771.
 	// IsUnsupportedMethod is an independent subset flag derived from the
 	// SubCategory and used to gate the zero-CU carve-out and caching policy.
 	IsNonRetryable bool
