@@ -3595,10 +3595,10 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 	// Idle mode (endpointstate/idle.go): with the trackers paused and no relays, every observation
 	// ages past the staleness window and each verdict reads "not alive" — the QoS feed would then
 	// hand the optimizer Availability=0 for EVERY provider every cycle and decay the whole pod's
-	// scores over nothing but silence. Withhold the feed while idle; the cycle still runs for the
-	// re-enable evidence and the telemetry. Relays re-score providers at 4x the probe weight the
-	// moment traffic returns.
-	idle := rpcss.endpointChainTrackerManager.IsIdle(startedAt)
+	// scores over nothing but silence. Withhold the feed while idle and while the wake burst is
+	// still re-polling (QoSFeedPaused); the cycle still runs for the telemetry. Relays re-score
+	// providers at 4x the probe weight the moment traffic returns.
+	idle := rpcss.endpointChainTrackerManager.QoSFeedPaused(startedAt)
 	scored, reEnabled, syncOmitted, evidenceGated := runProbeCycleCore(
 		endpoints,
 		rpcss.endpointChainTrackerManager.GetObservation,

@@ -337,3 +337,41 @@ func TestIdleMode_WakeChannelStaysOpenWhileTrackerIsStarting(t *testing.T) {
 	require.GreaterOrEqual(t, elapsed, pollNowUnstartedGrace, "the channel stays open until delivery is given up")
 	require.Less(t, elapsed, pollNowUnstartedGrace+5*time.Second)
 }
+
+// TestIdleMode_QoSFeedStaysPausedUntilTheBurstEnds: the relay that ends an idle period clears
+// IsIdle at once, but the probe's QoS feed stays paused until the wake burst finishes, so a probe
+// cycle that lands mid-burst cannot score the endpoints not yet re-polled as not alive.
+func TestIdleMode_QoSFeedStaysPausedUntilTheBurstEnds(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ensureRandSeeded()
+
+	const url = "http://eth-idle-feed:8545"
+	m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
+		ChainParser:      newRealChainParser(t, "ETH1", spectypes.APIInterfaceJsonRPC),
+		ChainID:          "ETH1",
+		ApiInterface:     spectypes.APIInterfaceJsonRPC,
+		AverageBlockTime: time.Minute,
+		BlocksToSave:     1,
+		IdleAfter:        MinIdleAfter,
+	})
+	defer m.Stop()
+
+	require.False(t, m.QoSFeedPaused(time.Now()), "an active chain feeds QoS")
+
+	conn := &pollNowConn{url: url}
+	conn.fail.Store(true) // an unstarted tracker holds the burst open for pollNowUnstartedGrace
+	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	require.NoError(t, err)
+
+	m.forceIdleForTest(2 * MinIdleAfter)
+	require.True(t, m.QoSFeedPaused(time.Now()), "an idle chain withholds the feed")
+
+	wait := m.NoteClientRelay(time.Now())
+	require.NotNil(t, wait)
+	require.False(t, m.IsIdle(time.Now()), "the relay ends the idle period at once")
+	require.True(t, m.QoSFeedPaused(time.Now()), "but the feed stays paused while the burst polls")
+
+	require.Eventually(t, func() bool { return !m.QoSFeedPaused(time.Now()) },
+		pollNowUnstartedGrace+10*time.Second, 20*time.Millisecond, "the pause ends with the burst")
+}

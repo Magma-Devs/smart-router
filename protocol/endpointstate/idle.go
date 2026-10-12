@@ -151,10 +151,24 @@ func (m *EndpointMonitor) IdleSnapshot(now time.Time) IdleSnapshot {
 	if snap.Idle {
 		snap.IdleSince = snap.LastClientRelay.Add(m.idleAfter)
 	}
-	m.wakeMu.Lock()
-	snap.WakeInProgress = m.wakeDone != nil
-	m.wakeMu.Unlock()
+	snap.WakeInProgress = m.wakeInProgress()
 	return snap
+}
+
+// wakeInProgress reports whether a wake burst is still polling endpoints.
+func (m *EndpointMonitor) wakeInProgress() bool {
+	m.wakeMu.Lock()
+	defer m.wakeMu.Unlock()
+	return m.wakeDone != nil
+}
+
+// QoSFeedPaused reports whether the probe loop must withhold its QoS feed at now: while the chain
+// is idle, and while a wake burst is still polling. A relay ends the idle period the instant it is
+// stamped, before the burst's polls land; a probe cycle in that window would still read every
+// endpoint not yet re-polled as not alive and feed it Availability=0. The pause ends with the
+// burst, so an endpoint whose wake poll failed is scored normally on the next cycle.
+func (m *EndpointMonitor) QoSFeedPaused(now time.Time) bool {
+	return m.IsIdle(now) || m.wakeInProgress()
 }
 
 // NoteClientRelay stamps one client relay as activity on this chain+interface. It is the relay
