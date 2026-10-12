@@ -910,14 +910,32 @@ func (m *EndpointMonitor) ObservationGeneration(endpointURL string) (uint64, boo
 	return gen, ok
 }
 
-// PollInterval is the cadence each tracker of this monitor polls its endpoint at when the poll
-// succeeds: the chain's block time over the poll divisor. Failures back off from it, and the
-// traffic gate may skip polls an answered relay already covers.
+// PollInterval is how long each tracker of this monitor waits between two polls of its endpoint
+// while they succeed: the chain's block time over the poll divisor, capped at
+// chaintracker.BACKOFF_MAX_TIME the way the tracker's scheduler caps it
+// (chaintracker.HealthyPollInterval). So a 10-minute chain polls every minute, not every 5.
+// Failures back off from it, and the traffic gate may skip polls (WorstCaseGapBetweenPolls).
 func (m *EndpointMonitor) PollInterval() time.Duration {
 	if m == nil {
 		return 0
 	}
-	return m.flatPollInterval
+	return chaintracker.HealthyPollInterval(m.flatPollInterval)
+}
+
+// WorstCaseGapBetweenPolls is the longest a tracker of this monitor can go between two real polls
+// while they succeed. The traffic gate skips a poll while a relay or another pod's poll keeps the
+// endpoint's tip fresh, up to chaintracker.DefaultMaxRelaySkipsBeforePoll in a row, so the next
+// real poll can come that many PollIntervals plus one after the last.
+//
+// It does not shrink to one block time after the last relay, where the relay half of the gate
+// stops skipping. A skip on another pod's poll (MAG-2981) writes nothing on this pod, and a relay
+// writes the url's series only for the provider it went through, so for a url two providers share,
+// only the skip budget bounds the gap between this pod's writes.
+func (m *EndpointMonitor) WorstCaseGapBetweenPolls() time.Duration {
+	if m == nil {
+		return 0
+	}
+	return worstCaseGapBetweenPolls(m.PollInterval())
 }
 
 // GetAllEndpoints returns all endpoint URLs with active ChainTrackers.

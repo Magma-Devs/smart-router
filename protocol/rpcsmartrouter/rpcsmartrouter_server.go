@@ -3645,17 +3645,22 @@ func (rpcss *RPCSmartRouterServer) onTipObservation(block int64) {
 	}
 }
 
-// urlAnswerTimeout is how long a url counts as answering after its last answer, for a chain whose
-// trackers poll every pollInterval: two poll intervals, so a healthy url on a slow chain (BTC polls
-// every 5 minutes, every 20 at a 0.5 divisor) never reads as down between two polls, and never
-// less than metrics.DefaultURLAnswerTimeout.
-func urlAnswerTimeout(pollInterval time.Duration) time.Duration {
-	return max(metrics.DefaultURLAnswerTimeout, 2*pollInterval)
+// urlAnswerTimeout is how long a url counts as answering after its last answer (MAG-4249). A url
+// that answers every poll answers again within worstCaseGapBetweenPolls of its last answer, which
+// covers the polls the traffic gate skips, and one pollInterval more covers the round trip of the
+// poll that ends the gap. Never less than metrics.DefaultURLAnswerTimeout.
+//
+// Both come from the interval the trackers actually wait (EndpointMonitor.PollInterval), which the
+// tracker caps at one minute: BTC polls every minute and a dead BTC url reads as down 6 minutes
+// after its last answer, while ETH and TON keep the 2-minute floor.
+func urlAnswerTimeout(worstCaseGapBetweenPolls, pollInterval time.Duration) time.Duration {
+	return max(metrics.DefaultURLAnswerTimeout, worstCaseGapBetweenPolls+pollInterval)
 }
 
 // answerTimeout is urlAnswerTimeout for this server's trackers, passed with every per-url write.
 func (rpcss *RPCSmartRouterServer) answerTimeout() time.Duration {
-	return urlAnswerTimeout(rpcss.endpointChainTrackerManager.PollInterval())
+	m := rpcss.endpointChainTrackerManager
+	return urlAnswerTimeout(m.WorstCaseGapBetweenPolls(), m.PollInterval())
 }
 
 // onEndpointPollBlock is the EndpointMonitor's OnPollBlock hook. It records the head a url

@@ -117,6 +117,13 @@ func resolveFlatPollInterval(averageBlockTime time.Duration, divisor float64) ti
 	return interval
 }
 
+// worstCaseGapBetweenPolls is the longest the traffic gate can hold off a real poll at this poll
+// interval: it may skip chaintracker.DefaultMaxRelaySkipsBeforePoll cycles in a row, and the cycle
+// after them polls.
+func worstCaseGapBetweenPolls(interval time.Duration) time.Duration {
+	return time.Duration(chaintracker.DefaultMaxRelaySkipsBeforePoll+1) * interval
+}
+
 // warnIfCadenceOutrunsStaleness reports, once per chain at startup, a cadence whose worst-case
 // gap between real polls exceeds chainstate.StalenessWindow — the horizon past which an
 // observation stops counting for consensus, the tip reads "unknown", and the probe's alive check
@@ -133,7 +140,7 @@ func resolveFlatPollInterval(averageBlockTime time.Duration, divisor float64) ti
 // configuration that is safe for both of the common cases would cost more than it protects.
 func warnIfCadenceOutrunsStaleness(interval, averageBlockTime time.Duration, chainID, apiInterface string) {
 	window := chainstate.StalenessWindow(averageBlockTime)
-	worstCaseGap := time.Duration(chaintracker.DefaultMaxRelaySkipsBeforePoll+1) * interval
+	worstCaseGap := worstCaseGapBetweenPolls(interval)
 	if worstCaseGap <= window {
 		return
 	}
