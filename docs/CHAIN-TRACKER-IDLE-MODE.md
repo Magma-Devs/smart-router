@@ -29,13 +29,13 @@ Idle mode is **off by default**.
   that arrive while the burst runs — waits until the first poll has recorded a fresh block, at most
   **1 second**, then is routed as usual. Past 1 s it routes as a freshly started router would,
   while the burst finishes in the background. Normal polling resumes after the wake.
-- **Safe resume.** A per-endpoint block older than the staleness window (10 block times) is
-  treated as *unknown* by the consistency check and the sync-gap score, not as lag. Without that,
-  the first request after a long pause would reject every endpoint not yet re-polled.
-- **Scores do not decay over silence.** While a chain is idle the prober withholds its QoS feed:
-  with no polls every endpoint would read "not alive" and every provider would be scored
-  unavailable for being unpolled. Proactive re-enable of a disabled endpoint needs a poll, so it
-  happens after the wake.
+- **Resume.** Routing at the wake works as it always does: the consistency check compares each
+  endpoint's last polled block with the chain tip. An endpoint the burst has already re-polled is
+  current; one whose wake poll has not landed yet, or failed, still holds its pre-idle block and
+  is treated as lagging, exactly as with idle mode off.
+- **Scores do not decay over silence.** While a chain is idle, and until its wake burst finishes,
+  the prober withholds its QoS feed: with no polls every endpoint would read "not alive" and every
+  provider would be scored unavailable for being unpolled.
 
 ## Settings
 
@@ -73,8 +73,12 @@ also fetches block hashes, so it costs more per endpoint.
   the chain awake nor wakes it. The next unary request pays one wake.
 - An external monitor that sends a real RPC request more often than the idle window keeps the
   chain awake permanently.
-- The first request after a long pause is routed before every endpoint has been re-polled; its
-  consistency check sees only the endpoints already polled as known.
+- The first request after a long pause is routed once the first endpoint is re-polled (or after
+  1 s); endpoints whose wake poll has not landed yet are treated as lagging for that request.
+- A **disabled endpoint does not recover while idle.** Re-enabling it needs fresh polls, and idle
+  mode skips them. It recovers at the next epoch boundary (every endpoint is re-enabled each
+  epoch, 15 min by default), when a request it is lent as the last chance succeeds (MAG-4232), or
+  through the normal probe re-enable after the wake.
 
 ## Observing it
 
