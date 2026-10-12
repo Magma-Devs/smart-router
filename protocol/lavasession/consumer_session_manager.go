@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -896,7 +897,11 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 
 	// A probe measures reachability of the provider, not of one api collection —
 	// no internal path to match on, so every endpoint stays eligible.
-	connected, endpoints, providerAddress, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, tryReconnectToDisabledEndpoints, true, "", nil, nil)
+	pickMode := endpointPickSkipDisabled
+	if tryReconnectToDisabledEndpoints {
+		pickMode = endpointPickReconnectDisabled
+	}
+	connected, endpoints, providerAddress, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, pickMode, true, "", nil, nil)
 	if err != nil || !connected {
 		if errors.Is(err, AllProviderEndpointsDisabledError) {
 			csm.blockProvider(ctx, providerAddress, BlockReasonAllEndpointsDisabled, true, epoch, MaxConsecutiveConnectionAttempts, 0, csm.GenerateReconnectCallback(consumerSessionsWithProvider)) // reporting and blocking provider this epoch
@@ -1835,13 +1840,6 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	defer func() { usedProviders.AddUsed(consumerSessionMap, errRet) }()
 	routerKey := NewRouterKeyFromExtensions(extensions)
 	initUnwantedProviders := usedProviders.GetUnwantedProvidersToSend(routerKey)
-	// triedBefore is the providers earlier attempts of THIS request already used. Copied, because
-	// tempIgnoredProviders below takes initUnwantedProviders as its live map and grows it. The last
-	// chance must never lend to one of these: it already had its try in this request.
-	triedBefore := make(map[string]struct{}, len(initUnwantedProviders))
-	for provider := range initUnwantedProviders {
-		triedBefore[provider] = struct{}{}
-	}
 
 	extensionNames := common.GetExtensionNames(extensions)
 	utils.LavaFormatTrace("[Archive Debug] GetSessions extension conversion",
@@ -1858,8 +1856,9 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 
 	// providers that we don't try to connect this iteration.
 	tempIgnoredProviders := &ignoredProviders{
-		providers:    initUnwantedProviders,
-		currentEpoch: csm.atomicReadCurrentEpoch(),
+		providers:          initUnwantedProviders,
+		triedByThisRequest: maps.Clone(initUnwantedProviders),
+		currentEpoch:       csm.atomicReadCurrentEpoch(),
 	}
 	// Read here, after the fleet sticky claim has been resolved into selectedProvider above: any
 	// directive of the caller's outranks the router's own preference.
@@ -1882,16 +1881,9 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	if sessionWithProviderMap == nil {
 		sessionWithProviderMap, err = csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
 	}
-	// lastChanceTried makes sure this call looks for a last-chance provider at most once.
-	lastChanceTried := false
 	if err != nil {
-		lastChanceTried = true
-		lastChance, ok := csm.lastChanceProvider(ctx, err, triedBefore, cuNeededForSession, addon, extensionNames, virtualEpoch, selectedProvider, internalPath)
-		if !ok {
-			utils.LavaFormatTrace("GetSessions error", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
-			return nil, err
-		}
-		sessionWithProviderMap, err = lastChance, nil
+		utils.LavaFormatTrace("GetSessions error", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
+		return nil, err
 	}
 
 	// Save how many sessions we are aiming to have
@@ -1904,16 +1896,13 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 			consumerSessionsWithProvider := sessionWithProvider.SessionsWithProvider
 			sessionEpoch := sessionWithProvider.CurrentEpoch
 
-			// Get a valid Endpoint from the provider chosen. A provider handed out as the last chance
-			// lends one of its disabled endpoints for this request — once per request.
+			// Get a valid Endpoint from the provider chosen. A provider the blocked-list fallback handed
+			// out as this request's last chance is lent a disabled endpoint instead of skipping it.
 			pickMode := endpointPickSkipDisabled
-			if sessionWithProvider.lastChance && usedProviders.TakeLastChance() {
+			if sessionWithProvider.lastChance {
 				pickMode = endpointPickLendDisabled
-				// A success on the lent endpoint lifts the provider's block (OnSessionDone →
-				// ReleaseSuccessfulRelay), exactly like the blocked-list fallback.
-				consumerSessionsWithProvider.atomicWriteBlockedStatus(BlockedProviderSessionUsedStatus)
 			}
-			connected, endpoints, _, err := consumerSessionsWithProvider.fetchEndpointConnectionWithMode(ctx, pickMode, false, addon, extensionNames, internalPath)
+			connected, endpoints, _, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, pickMode, false, addon, extensionNames, internalPath)
 			if err != nil {
 				// verify err is AllProviderEndpointsDisabled and report.
 				if errors.Is(err, AllProviderEndpointsDisabledError) {
@@ -1936,10 +1925,15 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 				continue
 			}
 
-			// get the endpoint we got, as its the only one returned when asking fetchEndpointConnectionFromConsumerSessionWithProvider with false value
+			// get the endpoint we got: the only one returned, since we asked with getAllEndpoints=false
 			endpoint := endpoints[0]
 			if pickMode == endpointPickLendDisabled {
 				if snap := endpoint.endpoint.HealthSnapshot(); !snap.Enabled {
+					if !usedProviders.TakeLastChance() {
+						// This request was already lent a disabled endpoint once; never a second.
+						tempIgnoredProviders.providers[providerAddress] = struct{}{}
+						continue
+					}
 					utils.LavaFormatInfo("last chance: nothing else can serve, lending an out-of-rotation endpoint for this request",
 						utils.LogAttr("provider", providerAddress),
 						utils.LogAttr("endpoint", endpoint.endpoint.NetworkAddress),
@@ -2039,87 +2033,12 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		if err != nil && len(sessions) != 0 {
 			return sessions, nil
 		}
-		// Every fallback is spent and nothing could serve: try the last chance once, rather than
-		// answering "No pairings available".
-		if err != nil && !lastChanceTried {
-			lastChanceTried = true
-			if lastChance, ok := csm.lastChanceProvider(ctx, err, triedBefore, cuNeededForSession, addon, extensionNames, virtualEpoch, selectedProvider, internalPath); ok {
-				sessionWithProviderMap, err = lastChance, nil
-				continue
-			}
-		}
 		// If error happens, and we do not have any sessions return an error
 		if err != nil {
 			return nil, err
 		}
 		// if we got here we managed to get more sessions so we will try to connect and return a session to the user.
 	}
-}
-
-// lastChanceProvider picks the provider to lend an out-of-rotation endpoint to, when every normal
-// path and every fallback came back with "No pairings available". A slow or flaky answer from a
-// backed-off endpoint is better than no answer at all.
-//
-// It looks at primaries first, then backups, and picks the provider whose disabled, relay-capable
-// endpoint has been out the LONGEST: it has had the most time to recover. It skips:
-//   - any error other than an empty pool, and a request pinned to one provider (selectedProvider);
-//   - providers an earlier attempt of this request already used (triedBefore): one try each;
-//   - providers that cannot take the request: no compute units, or no endpoint serving the addon,
-//     extensions and internal path.
-//
-// The endpoint itself is lent by GetSessions (endpointPickLendDisabled), at most once per request
-// (UsedProvidersInf.TakeLastChance); that is also where the provider is marked as a blocked-provider
-// session in use, so a success lifts its block (ReleaseSuccessfulRelay).
-func (csm *ConsumerSessionManager) lastChanceProvider(ctx context.Context, selectErr error, triedBefore map[string]struct{}, cuNeeded uint64, addon string, extensions []string, virtualEpoch uint64, selectedProvider string, internalPath *string) (SessionWithProviderMap, bool) {
-	if !errors.Is(selectErr, PairingListEmptyError) || selectedProvider != "" {
-		return nil, false
-	}
-	csm.lock.RLock()
-	defer csm.lock.RUnlock()
-	epoch := csm.atomicReadCurrentEpoch()
-
-	var best *ConsumerSessionsWithProvider
-	var bestAddress string
-	var bestSince time.Time
-	consider := func(pool map[string]*ConsumerSessionsWithProvider) {
-		addresses := make([]string, 0, len(pool))
-		for address := range pool {
-			addresses = append(addresses, address)
-		}
-		sort.Strings(addresses) // deterministic among equals
-		for _, address := range addresses {
-			cswp := pool[address]
-			if cswp == nil {
-				continue
-			}
-			if _, tried := triedBefore[address]; tried {
-				continue
-			}
-			if cswp.validateComputeUnits(cuNeeded, virtualEpoch) != nil {
-				continue
-			}
-			since, ok := cswp.longestDisabledLendableEndpoint(addon, extensions, internalPath)
-			if !ok {
-				continue
-			}
-			if best == nil || since.Before(bestSince) {
-				best, bestAddress, bestSince = cswp, address, since
-			}
-		}
-	}
-	consider(csm.pairing)
-	if best == nil {
-		consider(csm.backupProviders)
-	}
-	if best == nil {
-		return nil, false
-	}
-	utils.LavaFormatDebug("last chance: picked a provider to lend an out-of-rotation endpoint",
-		utils.LogAttr("provider", bestAddress),
-		utils.LogAttr("disabled_since", bestSince),
-		utils.LogAttr("GUID", ctx),
-	)
-	return SessionWithProviderMap{bestAddress: {SessionsWithProvider: best, CurrentEpoch: epoch, lastChance: true}}, true
 }
 
 // statefulFanoutPerTier caps how many providers a stateful relay broadcasts to within one tier.
@@ -2645,6 +2564,16 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 // On cases where the valid provider list is empty, by being already used in this attempt, and we got to a point
 // where we need another session (for retry or a timeout happened) we want to try fetching a blocked provider for the list.
 // the list will be sorted by most cu served giving the best provider that was blocked a second chance to get back to valid addresses.
+//
+// This is the request's last chance before "No pairings available" (MAG-4232). A provider is
+// blocked because all of its endpoints are disabled, so the provider handed out here is marked
+// lastChance: GetSessions lends it one of those disabled endpoints for this request instead of
+// skipping them. It skips only the providers this request already tried (triedByThisRequest), not
+// the ones this attempt just passed over — those are the blocked providers this fallback exists
+// for. GetSessions lends a disabled endpoint at most once per request
+// (UsedProvidersInf.TakeLastChance), so a retrying request is not lent one disabled endpoint after
+// another. A blocked provider whose endpoint already works again (a stale block) is served as
+// before, with no such limit.
 func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedProviderList(ctx context.Context, wantedProviderNumber int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) {
 	csm.lock.RLock()
 	// we do not defer yet as we might need to unlock due to an epoch change
@@ -2674,13 +2603,14 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	// meaning if we fetch the first successful index this is probably the highest success ratio to get a response.
 	for _, providerAddress := range csm.currentlyBlockedProviderAddresses {
 		// check if we have this provider already.
-		if _, providerExistInIgnoredProviders := ignoredProviders.providers[providerAddress]; providerExistInIgnoredProviders {
-			utils.LavaFormatTrace("[continue] provider already in ignored providers", utils.LogAttr("providerAddress", providerAddress), utils.LogAttr("GUID", ctx))
+		if _, tried := ignoredProviders.triedByThisRequest[providerAddress]; tried {
+			utils.LavaFormatTrace("[continue] provider already tried by this request", utils.LogAttr("providerAddress", providerAddress), utils.LogAttr("GUID", ctx))
 			continue
 		}
 		consumerSessionsWithProvider := csm.pairing[providerAddress]
-		// Add to ignored (no matter what)
+		// Add to ignored and tried (no matter what)
 		ignoredProviders.providers[providerAddress] = struct{}{}
+		ignoredProviders.markTried(providerAddress)
 		usedProviders.AddUnwantedAddresses(providerAddress, routerKey) // add the address to our unwanted providers to avoid infinite recursion
 
 		// validate this provider has enough cu to be used

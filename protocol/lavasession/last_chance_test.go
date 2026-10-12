@@ -12,9 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The last chance: when every normal path and every fallback says "No pairings available", the
-// router lends one out-of-rotation (error-disabled) endpoint for this request instead of failing.
-// Rules agreed for it:
+// The last chance (MAG-4232): when every primary and every backup is out, the blocked-list fallback
+// hands this request one blocked provider, and its disabled endpoint is lent for the request instead
+// of skipped — no new step in the selection flow. Rules agreed for it:
 //  1. one try per request, never a loop over every disabled endpoint;
 //  2. lending does not mark the endpoint enabled; only a successful answer brings it back;
 //  3. a failure keeps it disabled;
@@ -96,9 +96,7 @@ func TestLastChance_OncePerRequest(t *testing.T) {
 	_, err = lcGet(csm, used)
 	require.Error(t, err, "the retry of the same request must not lend a second endpoint")
 	for _, p := range []*ConsumerSessionsWithProvider{a, b} {
-		if p.PublicLavaAddress != lcServedBy(t, sessions) {
-			require.Equal(t, BlockedProviderSessionUnusedStatus, p.atomicReadBlockedStatus(), "a provider that was not lent to is not marked in use")
-		}
+		require.False(t, p.Endpoints[0].IsEnabled(), "the failed lend and the one never lent both stay disabled")
 	}
 }
 
@@ -128,27 +126,53 @@ func TestLastChance_NotUsedWhileABackupCanServe(t *testing.T) {
 	require.True(t, used.TakeLastChance(), "no lending happened")
 }
 
-// Primaries before backups, and among several the one disabled the longest (most time to recover).
-func TestLastChance_PrefersPrimariesThenTheLongestDisabled(t *testing.T) {
-	recent := lcProvider(t, "recent", "http://127.0.0.1:1")
-	oldest := lcProvider(t, "oldest", "http://127.0.0.1:2")
-	backup := lcProvider(t, "backup", "http://127.0.0.1:3")
-	disableAt(t, recent.Endpoints[0], probeBase.Add(time.Minute))
-	disableAt(t, oldest.Endpoints[0], probeBase)
-	disableAt(t, backup.Endpoints[0], probeBase.Add(-time.Hour)) // oldest of all, but a backup
-	csm := lcCSM(t, []*ConsumerSessionsWithProvider{recent, oldest}, []*ConsumerSessionsWithProvider{backup})
+// A provider already blocked when the request arrives is not picked by normal selection at all. The
+// pool-empty release re-picks it, its endpoint is still disabled, and the blocked-list fallback then
+// lends it — this request must not end in "No pairings available" either.
+func TestLastChance_LendsAProviderBlockedBeforeTheRequestArrived(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+
+	sessions, err := lcGet(csm, NewUsedProviders(nil)) // first request: blocks it, then lends it
+	require.NoError(t, err)
+	for _, s := range sessions {
+		require.NoError(t, csm.OnSessionFailure(s.Session, errLastChanceRelay))
+	}
+	require.True(t, slices.Contains(csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "primary"))
+
+	sessions, err = lcGet(csm, NewUsedProviders(nil)) // a new request, the provider already blocked
+	require.NoError(t, err)
+	require.Equal(t, "primary", lcServedBy(t, sessions))
+	require.False(t, p.Endpoints[0].IsEnabled())
+}
+
+// With every primary and every backup disabled, the blocked-list fallback walks the primaries'
+// blocked list, so a primary is the one lent.
+func TestLastChance_LendsAPrimaryWhenBothTiersAreDisabled(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	b := lcProvider(t, "backup", "http://127.0.0.1:2")
+	disableAt(t, p.Endpoints[0], probeBase)
+	disableAt(t, b.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, []*ConsumerSessionsWithProvider{b})
 
 	sessions, err := lcGet(csm, NewUsedProviders(nil))
 	require.NoError(t, err)
-	require.Equal(t, "oldest", lcServedBy(t, sessions))
+	require.Equal(t, "primary", lcServedBy(t, sessions))
+}
 
-	// With no primary left to try, a disabled backup gets it.
+// A stale block — the provider is still blocked but its endpoint already works again (the epoch's
+// re-enable runs before the block is lifted) — is served through that working endpoint, as on main.
+func TestLastChance_StaleBlockIsServedByTheWorkingEndpoint(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+	csm.removeAddressFromValidAddresses("primary", BlockRecord{Reason: BlockReasonAllEndpointsDisabled})
+
 	used := NewUsedProviders(nil)
-	used.AddUnwantedAddresses("recent", NewRouterKey(nil))
-	used.AddUnwantedAddresses("oldest", NewRouterKey(nil))
-	sessions, err = lcGet(csm, used)
+	sessions, err := lcGet(csm, used)
 	require.NoError(t, err)
-	require.Equal(t, "backup", lcServedBy(t, sessions))
+	require.Equal(t, "primary", lcServedBy(t, sessions))
+	require.True(t, p.Endpoints[0].IsEnabled())
 }
 
 // A websocket url can never answer a relay, so it is never lent.

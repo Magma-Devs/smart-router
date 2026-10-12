@@ -117,14 +117,14 @@ func TestFetchEndpointConnection_SkipsStalledEndpoint(t *testing.T) {
 		Endpoints:         []*Endpoint{stuck, healthy},
 	}
 
-	for _, retryDisabled := range []bool{false, true} {
-		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), retryDisabled, true, "", nil, nil)
+	for _, mode := range []endpointPickMode{endpointPickSkipDisabled, endpointPickReconnectDisabled, endpointPickLendDisabled} {
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), mode, true, "", nil, nil)
 		require.NoError(t, err)
 		require.True(t, connected)
-		require.Len(t, endpoints, 1, "retryDisabled=%v", retryDisabled)
+		require.Len(t, endpoints, 1, "mode=%v", mode)
 		require.Equal(t, "https://healthy.example", endpoints[0].endpoint.NetworkAddress)
 	}
-	require.False(t, stuck.IsUsable(), "the reconnect line must not have cleared the stall")
+	require.False(t, stuck.IsUsable(), "no pick mode may clear the stall")
 }
 
 // A provider whose every endpoint is stalled has nothing to dial. It reports the same error a fully
@@ -138,7 +138,7 @@ func TestFetchEndpointConnection_AllStalledIsAllDisabled(t *testing.T) {
 		PublicLavaAddress: "vendor",
 		Endpoints:         []*Endpoint{stuck},
 	}
-	connected, _, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), false, false, "", nil, nil)
+	connected, _, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickSkipDisabled, false, "", nil, nil)
 	require.False(t, connected)
 	require.ErrorIs(t, err, AllProviderEndpointsDisabledError)
 }

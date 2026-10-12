@@ -121,12 +121,26 @@ type ProviderOptimizer interface {
 }
 
 type ignoredProviders struct {
-	providers    map[string]struct{}
-	currentEpoch uint64
+	providers map[string]struct{}
+	// triedByThisRequest is the providers this request already tried: the ones its earlier
+	// attempts used, plus every blocked provider the blocked-list fallback has handed out during
+	// this attempt. providers grows during the attempt too, but it also gains every provider this
+	// attempt passed over because all of its endpoints are disabled — and that provider is exactly
+	// the one the fallback is meant to give its last chance, so the fallback reads this set instead.
+	triedByThisRequest map[string]struct{}
+	currentEpoch       uint64
 	// preferredProvider is this request's GetSessionsOptions.PreferredProvider, carried here
 	// because this is the one piece of per-request state every level of selection receives. It
 	// survives the epoch reset that clears providers: it names a choice, not a failure.
 	preferredProvider string
+}
+
+// markTried adds a provider to triedByThisRequest.
+func (ip *ignoredProviders) markTried(providerAddress string) {
+	if ip.triedByThisRequest == nil {
+		ip.triedByThisRequest = map[string]struct{}{}
+	}
+	ip.triedByThisRequest[providerAddress] = struct{}{}
 }
 
 type EndpointConnection struct {
@@ -857,15 +871,14 @@ func (e *Endpoint) ResetHealth() bool {
 type SessionWithProvider struct {
 	SessionsWithProvider *ConsumerSessionsWithProvider
 	CurrentEpoch         uint64
-	// lastChance marks a provider handed out because nothing else can serve this request (the
-	// blocked-list fallback, or the last-chance pick). GetSessions then lends it one of its
-	// disabled endpoints for this request instead of skipping them (endpointPickLendDisabled),
-	// once per request (UsedProvidersInf.TakeLastChance).
+	// lastChance marks a provider handed out by the blocked-list fallback because nothing else can
+	// serve this request. GetSessions then picks its endpoint with endpointPickLendDisabled, so a
+	// disabled endpoint is lent for this request instead of skipped.
 	lastChance bool
 }
 
-// endpointPickMode says what fetchEndpointConnectionWithMode does with an endpoint whose Enabled
-// flag is off (backed off after consecutive failures).
+// endpointPickMode says what fetchEndpointConnectionFromConsumerSessionWithProvider does with an
+// endpoint whose Enabled flag is off (backed off after consecutive failures).
 type endpointPickMode int
 
 const (
@@ -874,10 +887,10 @@ const (
 	// endpointPickReconnectDisabled picks it and marks it enabled again once it connects. Used by
 	// the provider-relay reconnect probe.
 	endpointPickReconnectDisabled
-	// endpointPickLendDisabled picks it for this one request WITHOUT marking it enabled: the last
-	// chance when nothing else can serve. A success re-enables it through the normal relay-success
-	// path (ResetHealth); a failure leaves it disabled, its failure count already past the
-	// threshold, so normal traffic keeps skipping it.
+	// endpointPickLendDisabled picks it for this one request WITHOUT marking it enabled, when it is
+	// a direct-RPC endpoint: the last chance when nothing else can serve. A success re-enables it
+	// through the normal relay-success path (ResetHealth); a failure leaves it disabled, its failure
+	// count already past the threshold, so normal traffic keeps skipping it.
 	endpointPickLendDisabled
 )
 
@@ -1259,56 +1272,9 @@ func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos [
 // collection — and matches only the endpoint serving the root, so a chain that
 // enables both a root and versioned collections (STRK) keeps its root traffic
 // on the root url.
-func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, retryDisabledEndpoints bool, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
-	mode := endpointPickSkipDisabled
-	if retryDisabledEndpoints {
-		mode = endpointPickReconnectDisabled
-	}
-	return cswp.fetchEndpointConnectionWithMode(ctx, mode, getAllEndpoints, addon, extensionNames, internalPath)
-}
-
-// longestDisabledLendableEndpoint reports when this provider's longest-disabled endpoint that the
-// last chance could lend went out (its DisabledAt), and whether there is one. An endpoint is
-// lendable when it is direct RPC, can answer a relay (not ws/wss), supports the addon and
-// extensions, and serves the request's internal path under the same rule normal selection uses.
-func (cswp *ConsumerSessionsWithProvider) longestDisabledLendableEndpoint(addon string, extensions []string, internalPath *string) (time.Time, bool) {
-	cswp.Lock.RLock()
-	defer cswp.Lock.RUnlock()
-	restrictToPath := false
-	if internalPath != nil {
-		for _, endpoint := range cswp.Endpoints {
-			if endpoint.ServesInternalPath(*internalPath) {
-				restrictToPath = true
-				break
-			}
-		}
-	}
-	var since time.Time
-	found := false
-	for _, endpoint := range cswp.Endpoints {
-		if endpoint == nil || !endpoint.IsDirectRPC() || len(endpoint.DirectConnections) == 0 || endpoint.DirectConnections[0] == nil {
-			continue
-		}
-		if restrictToPath && !endpoint.ServesInternalPath(*internalPath) {
-			continue
-		}
-		if !endpoint.ServesDirectRelays() || !endpoint.CheckSupportForServices(addon, extensions) {
-			continue
-		}
-		snap := endpoint.HealthSnapshot()
-		if snap.Enabled {
-			continue
-		}
-		if !found || snap.DisabledAt.Before(since) {
-			since, found = snap.DisabledAt, true
-		}
-	}
-	return since, found
-}
-
-// fetchEndpointConnectionWithMode is fetchEndpointConnectionFromConsumerSessionWithProvider with the
-// treatment of disabled endpoints spelled out (endpointPickMode).
-func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionWithMode(ctx context.Context, mode endpointPickMode, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
+//
+// mode says what happens to an endpoint whose Enabled flag is off (endpointPickMode).
+func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, mode endpointPickMode, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
 	getConnectionFromConsumerSessionsWithProvider := func(ctx context.Context) (connected bool, endpointPtr []*EndpointAndChosenConnection, allDisabled bool) {
 		endpoints := make([]*EndpointAndChosenConnection, 0)
 		cswp.Lock.Lock()
@@ -1342,7 +1308,9 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionWithMode(ctx co
 				continue
 			}
 			// A disabled endpoint is skipped in normal selection. The reconnect probe retries it
-			// (endpointPickReconnectDisabled); the last chance lends it (endpointPickLendDisabled).
+			// (endpointPickReconnectDisabled); the last chance lends it (endpointPickLendDisabled),
+			// but only a direct-RPC endpoint: its connection already exists, so lending sends the
+			// request without a dial. A provider-relay endpoint stays skipped, as before.
 			endpoint.mu.RLock()
 			enabled := endpoint.Enabled
 			// A state reason (head-stalled, MAG-3986) keeps the endpoint out in every pick mode:
@@ -1350,7 +1318,8 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionWithMode(ctx co
 			// proves anything about a node that answers but does not follow the chain.
 			heldByState := endpoint.heldByStateLocked()
 			endpoint.mu.RUnlock()
-			if heldByState || (mode == endpointPickSkipDisabled && !enabled) {
+			lendable := mode == endpointPickLendDisabled && endpoint.IsDirectRPC()
+			if heldByState || (!enabled && mode != endpointPickReconnectDisabled && !lendable) {
 				continue
 			}
 			// A websocket-only endpoint can never answer a relay — see ServesDirectRelays.

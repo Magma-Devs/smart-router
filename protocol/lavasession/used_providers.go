@@ -56,10 +56,7 @@ type UsedProviders struct {
 	uniqueUsedProviders       map[string]*UniqueUsedProviders
 	originalUnwantedProviders map[string]struct{}
 	selecting                 bool
-	// lastChanceTaken records that this request already lent one out-of-rotation endpoint
-	// (TakeLastChance), so a retrying request lends at most one in total.
-	lastChanceTaken     bool
-	sessionsLatestBatch int
+	sessionsLatestBatch       int
 	// dispatched is sessionsLatestBatch without the per-batch reset: the provider of every session
 	// this request has dispatched in total, one entry per session. Callers comparing against a
 	// CUMULATIVE tally — "did everyone we asked come back?" — need this one; sessionsLatestBatch
@@ -80,6 +77,9 @@ type UsedProviders struct {
 	// Defaults to common.DecideEligibility; overridden via SetEligibilityFunc
 	// to use relaypolicy.DecideEligibility (breaking the circular import).
 	eligibilityFunc EligibilityFunc
+	// lastChanceTaken records that this request was already lent a disabled endpoint
+	// (TakeLastChance), so a retrying request is lent at most one.
+	lastChanceTaken bool
 }
 
 // SetChainID attaches a chain ID to this UsedProviders instance so that
@@ -107,10 +107,10 @@ func (up *UsedProviders) SetEligibilityFunc(fn EligibilityFunc) {
 	up.eligibilityFunc = fn
 }
 
-// TakeLastChance claims this request's single last chance: lending an out-of-rotation endpoint
-// when nothing else can serve. It returns true the first time and false after that, so a request
-// whose lent endpoint fails, and which then retries, does not go on lending one disabled endpoint
-// after another.
+// TakeLastChance claims this request's single last chance: lending a disabled endpoint of a
+// provider the blocked-list fallback handed out. It returns true the first time and false after
+// that, so a request whose lent endpoint fails, and which then retries, is not lent one disabled
+// endpoint after another.
 func (up *UsedProviders) TakeLastChance() bool {
 	if up == nil {
 		return true
