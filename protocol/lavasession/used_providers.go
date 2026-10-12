@@ -11,13 +11,16 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-// A caller that finds another selection in flight for the same request polls for it to finish.
-// selectionLockMaxWait is the bound the caller used to impose with a context.WithTimeout created
-// per GetSessions — a timer and a cancel func per relay for a wait that almost never happens.
-// The bound now lives here and the common path allocates nothing (MAG-4244).
+// A caller that finds another selection in flight for the same request polls for it to finish,
+// every selectionLockPollInterval, for at most MaximumNumberOfSelectionLockAttempts polls. The
+// caller's context bounds the wait first; a deadline on it is honoured as a deadline, not only
+// once its timer fires. GetSessions used to add a context.WithTimeout of its own per call — a
+// timer and a cancel func per relay for a wait that almost never happens — so the bound lives
+// here now, and the common path allocates nothing (MAG-4244).
 const (
-	selectionLockPollInterval = 5 * time.Millisecond
-	selectionLockMaxWait      = time.Second
+	MaximumNumberOfSelectionLockAttempts = 500
+	selectionLockPollInterval            = 5 * time.Millisecond
+	selectionLockMaxWait                 = MaximumNumberOfSelectionLockAttempts * selectionLockPollInterval
 )
 
 type BlockedProvidersInf interface {
@@ -430,21 +433,32 @@ func (up *UsedProviders) TryLockSelection(ctx context.Context) error {
 		return nil // the common case: no other selection is running for this request
 	}
 	deadline := time.Now().Add(selectionLockMaxWait)
-	for time.Now().Before(deadline) {
+	ctxBounds := false
+	if ctxDeadline, ok := ctx.Deadline(); ok && !ctxDeadline.After(deadline) {
+		deadline, ctxBounds = ctxDeadline, true
+	}
+	for {
 		select {
 		case <-ctx.Done():
 			utils.LavaFormatTrace("Failed locking selection, context is done")
 			return ContextDoneNoNeedToLockSelectionError
 		default:
-			time.Sleep(selectionLockPollInterval)
-			if up.tryLockSelection() {
-				return nil
-			}
 		}
+		if up.tryLockSelection() {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(selectionLockPollInterval)
+	}
+	if ctxBounds || ctx.Err() != nil {
+		utils.LavaFormatTrace("Failed locking selection, context deadline reached")
+		return ContextDoneNoNeedToLockSelectionError
 	}
 
 	// if we got here we failed locking the selection.
-	return utils.LavaFormatError("Failed locking selection within selectionLockMaxWait", nil, utils.LogAttr("GUID", ctx), utils.LogAttr("maxWait", selectionLockMaxWait))
+	return utils.LavaFormatError("Failed locking selection after MaximumNumberOfSelectionLockAttempts", nil, utils.LogAttr("GUID", ctx), utils.LogAttr("maxWait", selectionLockMaxWait))
 }
 
 func (up *UsedProviders) tryLockSelection() bool {
