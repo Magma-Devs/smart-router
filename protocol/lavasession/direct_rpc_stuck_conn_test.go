@@ -2,10 +2,13 @@ package lavasession
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -39,15 +42,30 @@ func (u *stuckConnUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`))
 }
 
-// newStuckConnServer starts the upstream over TLS, with HTTP/2 when http2 is set,
-// and returns a connection to it whose client trusts the test certificate. The
-// client gets its own transport, configured as the shared one is, so the test
-// neither depends on nor leaves connections in the process-wide pool.
+// newStuckConnServer starts a stuckConnUpstream (see newTLSUpstream) and returns
+// it with a connection to it.
 func newStuckConnServer(t *testing.T, http2 bool) (*stuckConnUpstream, *HTTPDirectRPCConnection) {
 	t.Helper()
 	upstream := &stuckConnUpstream{}
-	srv := httptest.NewUnstartedServer(upstream)
+	conn, _ := newTLSUpstream(t, upstream, http2)
+	return upstream, conn
+}
+
+// newTLSUpstream serves handler over TLS, with HTTP/2 when http2 is set, and
+// returns a connection to it whose client trusts the test certificate, plus the
+// number of connections the server has accepted so far. The client gets its own
+// transport, configured as the shared one is, so the test neither depends on nor
+// leaves connections in the process-wide pool.
+func newTLSUpstream(t *testing.T, handler http.Handler, http2 bool) (*HTTPDirectRPCConnection, *atomic.Int64) {
+	t.Helper()
+	accepted := &atomic.Int64{}
+	srv := httptest.NewUnstartedServer(handler)
 	srv.EnableHTTP2 = http2
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			accepted.Add(1)
+		}
+	}
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 
@@ -59,7 +77,7 @@ func newStuckConnServer(t *testing.T, http2 bool) (*stuckConnUpstream, *HTTPDire
 
 	conn := newHTTPConnection(t, common.NodeUrl{Url: srv.URL})
 	conn.client = &http.Client{Transport: transport}
-	return upstream, conn
+	return conn, accepted
 }
 
 // A connection that only ever answers 5xx is retired, so the requests after it
@@ -142,4 +160,80 @@ func TestHTTPDirectRPCConnection_Interleaved5xxKeepsConnection(t *testing.T) {
 	require.NoError(t, err)
 	h.markRetireIfDue(again)
 	require.False(t, again.Close, "one streak retires one connection, not every request after it")
+}
+
+// After a retirement, another full streak within minConnRetireInterval retires
+// nothing: it is the just-retired connection's in-flight tail, or a vendor that
+// is down on every connection. Once the interval has passed, a streak retires
+// again.
+func TestHTTPDirectRPCConnection_RetiresAtMostOncePerInterval(t *testing.T) {
+	h := &HTTPDirectRPCConnection{}
+	streak := func() {
+		for j := uint32(0); j < consecutive5xxBeforeConnRetire; j++ {
+			h.observeStatus(http.StatusServiceUnavailable)
+		}
+	}
+	retires := func() bool {
+		req, err := http.NewRequest(http.MethodGet, "http://example.invalid", nil)
+		require.NoError(t, err)
+		h.markRetireIfDue(req)
+		return req.Close
+	}
+
+	streak()
+	require.True(t, retires(), "the first streak retires at once")
+
+	streak()
+	require.False(t, retires(), "a streak inside the interval after a retirement retires nothing")
+
+	h.lastConnRetire.Store(time.Now().Add(-minConnRetireInterval).UnixNano())
+	streak()
+	require.True(t, retires(), "once the interval has passed, a streak retires again")
+}
+
+// downUpstream is a vendor that is down on every connection: each request takes
+// a moment, as a real upstream's does, and is answered 503.
+func downUpstream(w http.ResponseWriter, _ *http.Request) {
+	time.Sleep(2 * time.Millisecond)
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte("Node temporarily unavailable"))
+}
+
+// Under concurrent load, an upstream that answers 5xx on every connection is not
+// re-dialed after every streak. A retirement makes each request that needs a
+// connection before the new one is up dial its own, so without
+// minConnRetireInterval 32 workers sending 20 requests each opened more
+// connections than they sent requests over HTTP/2, and one per two requests over
+// HTTP/1.1. The run is far shorter than the interval, so it may cost the first
+// dials plus one retirement's.
+func TestHTTPDirectRPCConnection_DownUpstreamUnderLoadIsNotRedialedPerStreak(t *testing.T) {
+	const workers, perWorker = 32, 20
+	for _, proto := range []struct {
+		name  string
+		http2 bool
+	}{{"HTTP/2", true}, {"HTTP/1.1", false}} {
+		t.Run(proto.name, func(t *testing.T) {
+			conn, accepted := newTLSUpstream(t, http.HandlerFunc(downUpstream), proto.http2)
+
+			var not503 atomic.Int64
+			var wg sync.WaitGroup
+			for w := 0; w < workers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := 0; i < perWorker; i++ {
+						resp, _ := conn.SendRequest(context.Background(), []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), nil)
+						if resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+							not503.Add(1)
+						}
+					}
+				}()
+			}
+			wg.Wait()
+
+			require.Zero(t, not503.Load(), "every request must reach the down upstream and get its 503")
+			require.Less(t, accepted.Load(), int64(4*workers),
+				"%d requests to a down upstream opened %d connections", workers*perWorker, accepted.Load())
+		})
+	}
 }

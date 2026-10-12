@@ -291,6 +291,9 @@ type HTTPDirectRPCConnection struct {
 	// rides (MAG-4211). See markRetireIfDue.
 	consecutive5xx atomic.Uint32
 	retireConn     atomic.Bool
+	// lastConnRetire is when a streak last armed retireConn, in Unix
+	// nanoseconds (0: never). See minConnRetireInterval.
+	lastConnRetire atomic.Int64
 }
 
 // consecutive5xxBeforeConnRetire is how many 5xx replies in a row, with nothing
@@ -298,9 +301,21 @@ type HTTPDirectRPCConnection struct {
 // is a streak rather than a single failure: one 5xx is something a healthy
 // vendor sends now and then, and recycling its connection each time would only
 // add handshakes. Erring low is cheap the other way round: a wrongly retired
-// connection costs one TLS-resumed dial, and a stuck one kept the dfns
-// optimism-sepolia router down for 50 minutes.
+// connection costs TLS-resumed dials (see minConnRetireInterval), and a stuck one
+// kept the dfns optimism-sepolia router down for 50 minutes.
 const consecutive5xxBeforeConnRetire = 2
+
+// minConnRetireInterval is the least time between two retirements of this url's
+// connection. A retirement under concurrent traffic is not one dial: once the
+// HTTP/2 connection is marked not-reusable, every request that needs a
+// connection before a new one is up dials its own, and all but one of those are
+// closed again. Without this floor, an upstream answering 5xx on every
+// connection was re-dialed after every streak, which came to more than one TLS
+// dial per request with 64 requests in flight, and the 5xx still arriving on a
+// just-retired connection retired its replacement too. The first retirement is
+// never delayed, so a connection pinned to a dead backend is still dropped on its
+// first streak; the floor only spaces out the ones after it.
+const minConnRetireInterval = 5 * time.Second
 
 // markRetireIfDue sets req.Close when a 5xx streak has asked for the connection
 // to be retired, so that the stuck connection is dropped and the request after
@@ -320,6 +335,12 @@ const consecutive5xxBeforeConnRetire = 2
 // next request dials. On HTTP/1.1 the connection closes after this response. The
 // request itself still goes out on the old connection, so it probably gets
 // another 5xx, and recovery takes effect from the request after it.
+//
+// The streak is counted per url, not per connection. That singles out the stuck
+// connection on HTTP/2, where all of a host's requests share one. It does not
+// when several HTTP/1.1 connections are pooled to the host: successes on the
+// healthy ones end the streak, and the request carrying req.Close may ride a
+// healthy one, so a single stuck connection among them can stay in the pool.
 func (h *HTTPDirectRPCConnection) markRetireIfDue(req *http.Request) {
 	if h.retireConn.CompareAndSwap(true, false) {
 		req.Close = true
@@ -327,9 +348,9 @@ func (h *HTTPDirectRPCConnection) markRetireIfDue(req *http.Request) {
 }
 
 // observeStatus counts the reply toward a 5xx streak, or ends the streak. A full
-// streak arms one retirement and starts the count over, so that a vendor that is
-// really down gets a fresh connection every consecutive5xxBeforeConnRetire
-// failures and not one per request.
+// streak starts the count over and arms one retirement, unless one was armed less
+// than minConnRetireInterval ago, so that a vendor that is really down gets at
+// most one fresh connection per interval and not one per streak.
 func (h *HTTPDirectRPCConnection) observeStatus(statusCode int) {
 	if statusCode < http.StatusInternalServerError {
 		h.consecutive5xx.Store(0)
@@ -337,6 +358,14 @@ func (h *HTTPDirectRPCConnection) observeStatus(statusCode int) {
 	}
 	n := h.consecutive5xx.Add(1)
 	if n < consecutive5xxBeforeConnRetire || !h.consecutive5xx.CompareAndSwap(n, 0) {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := h.lastConnRetire.Load()
+	if last != 0 && now-last < int64(minConnRetireInterval) {
+		return
+	}
+	if !h.lastConnRetire.CompareAndSwap(last, now) {
 		return
 	}
 	h.retireConn.Store(true)
