@@ -409,7 +409,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// operation on one path, and the operation is named in the body.
 		relayResult, err := apil.relaySender.SendRelay(ctx, "", requestBody, http.MethodPost, dappID, userIp, analytics, graphqlHeaders)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(analytics, err, metadataValues)
+		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody, errMasking, msgSeed, time.Since(startTime), err)

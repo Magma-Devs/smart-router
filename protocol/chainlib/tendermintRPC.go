@@ -499,7 +499,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, "", msg, "", dappID, userIp, metricsData, headers)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
+		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 
 		if err != nil {
 			// Check if batch size limit exceeded - return 429 rate limit error
@@ -573,7 +573,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, "", "", dappID, userIp, metricsData, headers)
 		msgSeed := strconv.FormatUint(guid, 10)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
+		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 		if err != nil {
 			// Get unique GUID response
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)

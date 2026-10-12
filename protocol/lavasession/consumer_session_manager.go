@@ -3569,6 +3569,11 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		// shared-getter/max-across-providers behavior. The per-endpoint block above is the provider's
 		// observed position; syncRef is the reference it is compared against.
 		syncRef := csm.resolveSyncReference()
+		// Still a goroutine, unlike the metric increments: OnSessionDone runs before the relay
+		// goroutine hands its result to the processor, and AppendRelayDataConsensus rebuilds the
+		// chain's adaptive T-Digest under a chain-global lock on every sample. Inline, that
+		// rebuild would sit on every response's latency. Inline it once the rebuild is off the
+		// per-sample path (audit §4.6 F1).
 		go csm.providerOptimizer.AppendRelayDataConsensus(consumerSession.Parent.PublicLavaAddress, currentLatency, specComputeUnits, syncBlock, syncRef)
 	}
 
@@ -3608,9 +3613,7 @@ func (csm *ConsumerSessionManager) updateMetricsManager(consumerSession *SingleC
 	latestBlock := consumerSession.LatestBlock
 	relayNum := consumerSession.RelayNum
 
-	go func() {
-		csm.consumerMetricsManager.SetQOSMetrics(chainId, apiInterface, publicProviderAddress, publicProviderEndpoint, lastQos, lastReputation, latestBlock, relayNum, relayLatency, sessionSuccessful)
-	}()
+	csm.consumerMetricsManager.SetQOSMetrics(chainId, apiInterface, publicProviderAddress, publicProviderEndpoint, lastQos, lastReputation, latestBlock, relayNum, relayLatency, sessionSuccessful)
 }
 
 // setSelectionStats stores the latest selection stats (thread-safe)

@@ -4898,11 +4898,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							analytics.IsArchive = chainqueries.IsArchiveRequest(protocolMessage)
 							analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(protocolMessage)
 							analytics.IsBatch = chainqueries.IsBatchRequest(protocolMessage)
-							go rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
-							go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.CacheOutcomeHit, cacheLatencyMs)
+							rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
+							rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.CacheOutcomeHit, cacheLatencyMs)
 							return nil
 						}
-						go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
+						rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
 						// Cache miss - will relay to endpoint
 						latestBlockHashRequested, earliestBlockHashRequested = rpcss.getEarliestBlockHashRequestedFromCacheReply(cacheReply)
 						utils.LavaFormatTrace("[Archive Debug] Reading block hashes from cache", utils.LogAttr("latestBlockHashRequested", latestBlockHashRequested), utils.LogAttr("earliestBlockHashRequested", earliestBlockHashRequested), utils.LogAttr("GUID", ctx))
@@ -5775,7 +5775,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// Emit cross-validation metric (even on failure)
 		if cvParams != nil && rpcss.listenEndpoint != nil && rpcss.rpcSmartRouterLogs != nil {
 			chainId, apiInterface := rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
-			go rpcss.rpcSmartRouterLogs.SetCrossValidationMetric(
+			rpcss.rpcSmartRouterLogs.SetCrossValidationMetric(
 				chainId, apiInterface, apiName, cvSuccess,
 				agreeingProvidersList, disagreeingProvidersList,
 			)
@@ -5785,7 +5785,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			// structural fail-fast emits its own reason via crossValidationFailFast (the two paths are
 			// mutually exclusive).
 			if !cvSuccess && relayResult != nil && relayResult.CrossValidationFailureReason != "" {
-				go rpcss.rpcSmartRouterLogs.SetCrossValidationFailureMetric(
+				rpcss.rpcSmartRouterLogs.SetCrossValidationFailureMetric(
 					chainId, apiInterface, apiName, relayResult.CrossValidationFailureReason,
 				)
 			}
@@ -6003,7 +6003,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			if rpcss.listenEndpoint != nil && rpcss.rpcSmartRouterLogs != nil {
 				chainId := rpcss.listenEndpoint.ChainID
 				apiInterface := rpcss.listenEndpoint.ApiInterface
-				go rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
+				rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
 			}
 
 			// When there are retries, show every attempted provider in the order
@@ -6075,11 +6075,11 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		apiInterface := rpcss.listenEndpoint.ApiInterface
 		// Consistency: triggered when the consumer enforces a minimum seen block height
 		if protocolMessage.RelayPrivateData().SeenBlock > 0 {
-			go rpcss.rpcSmartRouterLogs.RecordIncidentConsistency(chainId, apiInterface, apiName, success)
+			rpcss.rpcSmartRouterLogs.RecordIncidentConsistency(chainId, apiInterface, apiName, success)
 		}
 		// Hedge: triggered when the batch ticker fired during this relay
 		if analytics != nil && analytics.HedgeCount > 0 {
-			go rpcss.rpcSmartRouterLogs.RecordIncidentHedgeResult(chainId, apiInterface, apiName, analytics.HedgeCount, success)
+			rpcss.rpcSmartRouterLogs.RecordIncidentHedgeResult(chainId, apiInterface, apiName, analytics.HedgeCount, success)
 		}
 	}
 

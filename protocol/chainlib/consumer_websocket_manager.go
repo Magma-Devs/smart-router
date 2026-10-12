@@ -598,7 +598,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				// (success or failure). The pre-existing flow `continue`d
 				// before reaching AddMetricForWebSocket below, so normal WS
 				// relays were silently dropped from the analytics pipeline.
-				go logger.AddMetricForWebSocket(metricsData, err)
+				logger.AddMetricForWebSocket(metricsData, err)
 				continue
 			}
 		}
@@ -662,7 +662,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					perMessage.Timestamp = time.Now()
 					perMessage.ApiMethod = SubscriptionDeliveryMethod
 					perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
-					go logger.AddMetricForWebSocket(&perMessage, nil)
+					logger.AddMetricForWebSocket(&perMessage, nil)
 				}
 
 				utils.LavaFormatTrace("subscriptionMsgsChan was closed",
@@ -674,7 +674,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			}()
 		}
 
-		go logger.AddMetricForWebSocket(metricsData, err)
+		logger.AddMetricForWebSocket(metricsData, err)
 
 		if reply != nil {
 			reply.Data = outputFormatter(reply.Data) // use that id for the reply
