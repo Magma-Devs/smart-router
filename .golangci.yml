@@ -8,6 +8,11 @@ linters:
   default: none
   # For list of linters and what they do: https://golangci-lint.run/usage/linters/
   enable:
+    # bodyclose, nilerr, prealloc, unparam, unused and wastedassign were added by MAG-4244: the
+    # 2026-10-12 audit found the dead returns, swallowed errors, per-call allocations and dead
+    # stores they report had accumulated because nothing ran them. golangci-lint v2's
+    # staticcheck does NOT include the U1000 unused check; that is the separate `unused` linter.
+    - bodyclose
     - copyloopvar
     - dogsled
     - forcetypeassert
@@ -17,12 +22,17 @@ linters:
     - ineffassign
     - misspell
     - nakedret
+    - nilerr
     - nilnil
     - nolintlint
+    - prealloc
     # staticcheck now also runs the former `stylecheck` (ST*) checks — golangci-lint v2.4+ merged
     # stylecheck into staticcheck, so listing `stylecheck` separately is an "unknown linter" error.
     - staticcheck
     - unconvert
+    - unparam
+    - unused
+    - wastedassign
     - whitespace
   settings:
     dogsled:
@@ -42,6 +52,14 @@ linters:
       - protocol/chainlib/grpcproxy/dyncodec/remote_relayer.go
       - protocol/chainlib/grpcproxy/dyncodec/remotes_test.go
     rules:
+      # Tests may leak a response body, pass a constant argument, or grow a slice by append:
+      # none of that is on a request path, and annotating every test site would bury the
+      # production hits these three linters exist for.
+      - path: _test\.go
+        linters:
+          - bodyclose
+          - unparam
+          - prealloc
       - linters:
           - gocritic
         text: "singleCaseSwitch"
@@ -78,6 +96,22 @@ linters:
         linters:
           - staticcheck
         text: "SA1019:"
+      # The jhump/protoreflect v1 API (desc, dynamic, grpcreflect) is load-bearing across the gRPC
+      # relay, pool and subscription paths, and grpc_reflection_v1alpha is what upstream nodes still
+      # serve; moving to google.golang.org/protobuf's protoreflect/dynamicpb and reflection v1 is a
+      # cross-package migration tracked under MAG-4243, not a lint fix.
+      - linters:
+          - staticcheck
+        text: 'SA1019:.*github.com/jhump/protoreflect.*'
+      - linters:
+          - staticcheck
+        text: 'SA1019:.*grpc_reflection_v1alpha.*'
+      # h2c.NewHandler and the http2.Server it takes are replaced by http.Server.Protocols (Go 1.24+);
+      # that touches the cache server, the gRPC proxy and the connection probe together, and is
+      # tracked under MAG-4243.
+      - linters:
+          - staticcheck
+        text: 'SA1019:.*(h2c\.NewHandler|http2\.Server) is deprecated.*'
       # jhump/protoreflect desc + dynamic are the v1 protobuf reflection API. Moving to
       # google.golang.org/protobuf/reflect is a dependency migration, not a lint fix.
       - linters:

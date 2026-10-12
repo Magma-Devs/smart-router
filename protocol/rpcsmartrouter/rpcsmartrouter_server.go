@@ -635,7 +635,7 @@ func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chain
 	requiredProviders, requiredGroups := crossValidationShortfall(resolver, chainID, apiInterface, verifiedSizes)
 	backupOnly := len(configured) == 0 && len(resolver.headerlessParams(chainID, apiInterface)) > 0
 	if requiredProviders == 0 && requiredGroups == 0 && !backupOnly {
-		return nil, nil
+		return nil, nil //nolint:nilnil // nil means there is no shortfall to report for this endpoint; the error is for a malformed layout
 	}
 	configuredProviders, configuredGroups := crossValidationShortfall(resolver, chainID, apiInterface, configuredSizes)
 	return &crossValidationFleetAdvisory{
@@ -1902,7 +1902,7 @@ func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlo
 // MAG-3807), so the engine finds no h2h: key for any hash. Kept so MAG-3892 has the question in
 // place once a writer exists.
 func (rpcss *RPCSmartRouterServer) newBlocksHashesToHeightsSliceFromRequestedBlockHashes(requestedBlockHashes []string) []*pairingtypes.BlockHashToHeight {
-	var blocksHashesToHeights []*pairingtypes.BlockHashToHeight
+	blocksHashesToHeights := make([]*pairingtypes.BlockHashToHeight, 0, len(requestedBlockHashes))
 	for _, blockHash := range requestedBlockHashes {
 		blocksHashesToHeights = append(blocksHashesToHeights, &pairingtypes.BlockHashToHeight{Hash: blockHash, Height: spectypes.NOT_APPLICABLE})
 	}
@@ -2613,7 +2613,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			}
 			var harvestGen uint64
 			if targetEndpoint != nil && directConn != nil {
-				rpcss.ensureEndpointChainTracker(goroutineCtx, targetEndpoint, directConn)
+				rpcss.ensureEndpointChainTracker(targetEndpoint, directConn)
 				harvestGen = rpcss.endpointObservationGeneration(targetEndpoint.NetworkAddress)
 			}
 
@@ -2627,7 +2627,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				return lostBroadcastRejection(selection, answeredWithNodeError, accepted)
 			}
 
-			relayLatency, err, _ := rpcss.relayInnerDirect(
+			relayLatency, err := rpcss.relayInnerDirect(
 				spanCtx,
 				singleConsumerSession,
 				localRelayResult,
@@ -2635,7 +2635,6 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				attemptBudget,
 				chainMessage,
 				originalRequestData,
-				analytics,
 				func() bool { return requestRanOutOfRoad(relayProcessor.GetStopReason()) },
 				lostBroadcast,
 			)
@@ -2970,7 +2969,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		}
 
 		// Get endpoint's latest block from ChainTracker (if available), fallback to reactive value
-		endpointLatest := int64(0)
+		var endpointLatest int64
 		endpointURL := ""
 
 		// Extract the actual endpoint URL (ChainTrackers are stored by URL, not provider name)
@@ -3460,7 +3459,7 @@ func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence tim
 	rpcss.probeReplayer = &relayProbeRunner{
 		async: true,
 		probe: func(ep *lavasession.EndpointWithDirectConnection, method string, payload []byte, relayTimeout time.Duration) relayProbeVerdict {
-			verdict := rpcss.replayFailingRelay(ep, method, payload, relayTimeout)
+			verdict := rpcss.replayFailingRelay(ep, payload, relayTimeout)
 			rpcss.probeStats.countReplay(verdict)
 			return verdict
 		},
@@ -3895,7 +3894,6 @@ func (rpcss *RPCSmartRouterServer) isGetBlockByNumMethod(chainMessage chainlib.C
 }
 
 func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
-	ctx context.Context,
 	endpoint *lavasession.Endpoint,
 	directConnection lavasession.DirectRPCConnection,
 ) {
@@ -5123,14 +5121,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	attemptBudget time.Duration,
 	chainMessage chainlib.ChainMessage,
 	originalRequestData []byte,
-	analytics *metrics.RelayMetrics,
 	budgetExpired func() bool,
 	lostBroadcast func(answeredWithNodeError bool) bool,
-) (relayLatency time.Duration, err error, needsBackoff bool) {
+) (relayLatency time.Duration, err error) {
 	// Get direct connection from session
 	directConnection, ok := singleConsumerSession.GetDirectConnection()
 	if !ok {
-		return 0, fmt.Errorf("session does not have direct RPC connection"), false
+		return 0, fmt.Errorf("session does not have direct RPC connection")
 	}
 
 	if rpcss.debugRelays {
@@ -5170,7 +5167,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
 				utils.LogAttr("GUID", ctx),
 			)
-			return 0, fmt.Errorf("gRPC streaming method %q must be served through the streaming listener, not as a unary relay", methodPath), false
+			return 0, fmt.Errorf("gRPC streaming method %q must be served through the streaming listener, not as a unary relay", methodPath)
 		}
 
 		// Second line of defence for methods the spec does not declare as
@@ -5184,7 +5181,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 					utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
 					utils.LogAttr("GUID", ctx),
 				)
-				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID), false
+				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID)
 			}
 		}
 	}
@@ -5277,7 +5274,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// behind a provider with several was never disabled, never probed for recovery, and never moved
 		// the health metric — while the provider's own QoS availability did drop.
 		var shouldMarkUnhealthy bool
-		shouldMarkUnhealthy, needsBackoff = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
+		shouldMarkUnhealthy, _ = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
 
 		// Apply health tracking based on error classification. The failing request is recorded
 		// FIRST (read-only methods only) so that if this failure crosses the disable threshold,
@@ -5288,7 +5285,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 		}
 
-		return relayLatency, err, needsBackoff
+		return relayLatency, err
 	}
 
 	// Check status code even when err == nil (for REST 5xx/429).
@@ -5312,8 +5309,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	statusCode := result.StatusCode
 	carriesNodeReply := result.IsNodeError && rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData())
 	if (statusCode >= 500 && statusCode != http.StatusNotImplemented && !carriesNodeReply) || statusCode == 429 {
-		shouldMarkUnhealthy, needsBackoffHTTP := classifyHTTPStatus(statusCode)
-		needsBackoff = needsBackoffHTTP
+		shouldMarkUnhealthy, _ := classifyHTTPStatus(statusCode)
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
@@ -5353,7 +5349,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		relayResult.IsNodeAtFault = result.IsNodeAtFault
 		relayResult.ProviderInfo = result.ProviderInfo
 
-		return relayLatency, httpStatusRelayError(statusCode, result.Reply), needsBackoff
+		return relayLatency, httpStatusRelayError(statusCode, result.Reply)
 	}
 
 	// A node error delivered inside a 2xx body reaches here with err == nil and a 200 status, so it
@@ -5433,7 +5429,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		utils.LogAttr("GUID", ctx),
 	)
 
-	return relayLatency, nil, false
+	return relayLatency, nil
 }
 
 // HasBackupTier implements relaycore.BackupTierReporter: the state machine arms its backup-reserve

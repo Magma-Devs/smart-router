@@ -167,7 +167,7 @@ func TestBackupTierSelection_NoEligibleBackupIsASentinel(t *testing.T) {
 		"no backup tier":      setupBenchTestCSM(t, false),
 	} {
 		ignored := &ignoredProviders{providers: map[string]struct{}{"lava@backup0": {}}, currentEpoch: csm.atomicReadCurrentEpoch()}
-		_, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(context.Background(), backupTierReserveHedge, ignored, cuForFirstRequest, servicedBlockNumber, "", nil, common.NO_STATE, 0, NewUsedProviders(nil))
+		_, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(context.Background(), backupTierReserveHedge, ignored, cuForFirstRequest, servicedBlockNumber, "", nil, 0, NewUsedProviders(nil))
 		require.ErrorIs(t, err, errNoEligibleBackupProvider, name)
 	}
 }

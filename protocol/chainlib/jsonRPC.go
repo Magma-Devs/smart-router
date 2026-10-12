@@ -829,9 +829,8 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		)
 	}
 
-	// Release rpcMessage after all references to it are complete
+	// Release rpcMessage's Result after all references to it are complete
 	rpcMessage.Result = nil
-	rpcMessage = nil
 
 	retData, err := json.Marshal(replyMsg)
 	if err != nil {
@@ -846,9 +845,8 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		},
 	}
 
-	// Clear replyMsg after all references to it are complete
+	// Clear replyMsg's Result after all references to it are complete
 	replyMsg.Result = nil
-	replyMsg = nil
 
 	return reply, err
 }

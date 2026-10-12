@@ -1514,7 +1514,7 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 			if msg == nil {
 				continue
 			}
-			dwsm.routeMessageToClients(hashedParams, activeSub, msg)
+			dwsm.routeMessageToClients(activeSub, msg)
 		}
 	}
 }
@@ -1524,7 +1524,6 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 // rewritten in the notification params. This enables proper deduplication where
 // clients can unsubscribe individually without affecting other clients.
 func (dwsm *DirectWSSubscriptionManager) routeMessageToClients(
-	hashedParams string,
 	activeSub *directActiveSubscription,
 	msg *rpcclient.JsonrpcMessage,
 ) {

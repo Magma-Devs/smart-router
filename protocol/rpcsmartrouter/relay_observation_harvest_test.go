@@ -672,7 +672,7 @@ func TestEnsureEndpointChainTracker_GenerationAvailableSynchronously(t *testing.
 	// SYNCHRONOUS contract: immediately after ensureEndpointChainTracker returns — with NO sleep,
 	// poll, or Eventually — the generation must already exist and be nonzero. This is exactly the
 	// capture order the relay path uses (ensure → endpointObservationGeneration → dispatch).
-	rpcss.ensureEndpointChainTracker(ctx, ep, directConn)
+	rpcss.ensureEndpointChainTracker(ep, directConn)
 	gen := rpcss.endpointObservationGeneration(url)
 	require.NotZero(t, gen, "the generation must be allocated synchronously, before the relay captures it")
 

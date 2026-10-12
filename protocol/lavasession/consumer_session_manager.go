@@ -884,14 +884,14 @@ func (csm *ConsumerSessionManager) closePurgedUnusedPairingsConnections(pairingP
 }
 
 // this code needs to be thread safe
-func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSessionsWithProvider *ConsumerSessionsWithProvider, epoch uint64, tryReconnectToDisabledEndpoints bool) (latency time.Duration, providerAddress string, err error) {
+func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSessionsWithProvider *ConsumerSessionsWithProvider, epoch uint64, tryReconnectToDisabledEndpoints bool) (providerAddress string, err error) {
 	// Static providers (direct RPC in smart router mode) use HTTP/WebSocket connections,
 	// not gRPC. Skip fetchEndpointConnectionFromConsumerSessionWithProvider entirely —
 	// it returns endpoints with nil chosenEndpointConnection for direct RPC, which causes
 	// the gRPC probe loop below to fail with "returned nil client in endpoint", resulting
 	// in success=false, latency=0s for every probe.
 	if consumerSessionsWithProvider.StaticProvider {
-		return csm.probeDirectRPCEndpoints(ctx, consumerSessionsWithProvider, consumerSessionsWithProvider.PublicLavaAddress)
+		return csm.probeDirectRPCEndpoints(consumerSessionsWithProvider, consumerSessionsWithProvider.PublicLavaAddress)
 	}
 
 	// A probe measures reachability of the provider, not of one api collection —
@@ -901,7 +901,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 		if errors.Is(err, AllProviderEndpointsDisabledError) {
 			csm.blockProvider(ctx, providerAddress, BlockReasonAllEndpointsDisabled, true, epoch, MaxConsecutiveConnectionAttempts, 0, csm.GenerateReconnectCallback(consumerSessionsWithProvider)) // reporting and blocking provider this epoch
 		}
-		return 0, providerAddress, err
+		return providerAddress, err
 	}
 
 	var endpointInfos []EndpointInfo
@@ -965,11 +965,11 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 
 	if len(endpointInfos) == 0 {
 		// no endpoints.
-		return 0, providerAddress, lastError
+		return providerAddress, lastError
 	}
 	sort.Sort(EndpointInfoList(endpointInfos))
 	consumerSessionsWithProvider.sortEndpointsByLatency(endpointInfos)
-	return endpointInfos[0].Latency, providerAddress, nil
+	return providerAddress, nil
 }
 
 // probeDirectRPCEndpoints handles health checking for direct RPC endpoints (smart router mode).
@@ -978,10 +978,9 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 // This avoids the "nil client" errors that occur when trying to use provider gRPC clients
 // for endpoints that don't have them.
 func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
-	ctx context.Context,
 	consumerSessionsWithProvider *ConsumerSessionsWithProvider,
 	providerAddress string,
-) (latency time.Duration, address string, err error) {
+) (address string, err error) {
 	consumerSessionsWithProvider.Lock.RLock()
 	defer consumerSessionsWithProvider.Lock.RUnlock()
 
@@ -1033,26 +1032,23 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 	}
 
 	if totalEndpoints == 0 {
-		return 0, providerAddress, fmt.Errorf("no direct RPC endpoints found for provider %s", providerAddress)
+		return providerAddress, fmt.Errorf("no direct RPC endpoints found for provider %s", providerAddress)
 	}
 
 	if usableEndpoints == 0 {
-		return 0, providerAddress, fmt.Errorf("no enabled direct RPC endpoints for provider %s", providerAddress)
+		return providerAddress, fmt.Errorf("no enabled direct RPC endpoints for provider %s", providerAddress)
 	}
 
 	// No per-connection latency is measured anymore (the old "latency" was just the
 	// time to read an atomic bool). Report a nominal minimal latency for parity with
 	// the provider-relay probe API.
-	minLatency := time.Millisecond
-
 	utils.LavaFormatTrace("Direct RPC endpoints probe completed",
 		utils.LogAttr("provider", providerAddress),
 		utils.LogAttr("usableEndpoints", usableEndpoints),
 		utils.LogAttr("totalEndpoints", totalEndpoints),
-		utils.LogAttr("latency", minLatency),
 	)
 
-	return minLatency, providerAddress, nil
+	return providerAddress, nil
 }
 
 // csm needs to be locked here
@@ -1374,7 +1370,7 @@ func (csm *ConsumerSessionManager) atomicReadNumberOfResets() (resets uint64) {
 // The outcome is reported by the single caller, releaseBlockedProvidersIfPoolEmpty, not here: that
 // frame holds the pool inventory and the request GUID, so it can name the cause and attribute it to
 // a chain and a relay.
-func (csm *ConsumerSessionManager) resetValidAddresses(addon string, extensions []string) (numberOfResets uint64, didReset bool) {
+func (csm *ConsumerSessionManager) resetValidAddresses(addon string, extensions []string) (didReset bool) {
 	csm.lock.Lock() // lock write
 	defer csm.lock.Unlock()
 	if len(csm.getValidAddresses(addon, extensions, context.Background())) == 0 { // re verify it didn't change while waiting for lock.
@@ -1382,8 +1378,7 @@ func (csm *ConsumerSessionManager) resetValidAddresses(addon string, extensions 
 		csm.numberOfResets += 1
 		didReset = true
 	}
-	// if len(csm.validAddresses) != 0 meaning we had a reset (or an epoch change), so we need to return the numberOfResets which is currently in csm
-	return csm.numberOfResets, didReset
+	return didReset
 }
 
 func (csm *ConsumerSessionManager) cacheAddonAddresses(addon string, extensions []string, ctx context.Context) []string {
@@ -1552,7 +1547,7 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 
 	csm.logPoolEmpty(ctx, inventory, addon, extensionNames)
 
-	_, didReset := csm.resetValidAddresses(addon, extensionNames)
+	didReset := csm.resetValidAddresses(addon, extensionNames)
 
 	// The reset refills validAddresses straight from the pairing, so it can only restore what the
 	// pairing holds. With an empty pairing it is a no-op — and the line that used to report this
@@ -1620,7 +1615,7 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 			if len(csm.backupProviders) > 0 {
 				utils.LavaFormatDebug("No regular providers available, trying backup providers", utils.LogAttr("GUID", ctx))
 				// try to get a session from the backup providers
-				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
+				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, virtualEpoch, usedProviders)
 				if err == nil {
 					// backup providers succeeded, return the session
 					utils.LavaFormatDebug("Successfully got session from backup providers", utils.LogAttr("GUID", ctx))
@@ -1863,7 +1858,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	var sessionWithProviderMap SessionWithProviderMap
 	var err error
 	if preferBackup && selectedProvider == "" {
-		sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierReserveHedge, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
+		sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierReserveHedge, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, virtualEpoch, usedProviders)
 		if err != nil {
 			utils.LavaFormatDebug("backup-reserve hedge found no eligible backup, using ordinary selection", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 			sessionWithProviderMap = nil
@@ -2628,7 +2623,7 @@ func noEligibleBackup(ctx context.Context, ask backupTierAsk, reason string) err
 // getValidConsumerSessionsWithProviderFromBackupProviderList retrieves valid backup provider
 // sessions, for the emergency fallback when no regular providers are available and for the
 // backup-reserve hedge; ask says which.
-func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ask backupTierAsk, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) {
+func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ask backupTierAsk, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) { //nolint:unparam // virtualEpoch is a constant 0 in this fork (CU accounting never trips, MAG-4243); kept so the backup path mirrors the primary one
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
@@ -3682,7 +3677,7 @@ func (csm *ConsumerSessionManager) OnSessionDoneIncreaseCUOnly(consumerSession *
 func (csm *ConsumerSessionManager) GenerateReconnectCallback(consumerSessionsWithProvider *ConsumerSessionsWithProvider) func() error {
 	return func() error {
 		ctx := utils.WithUniqueIdentifier(context.Background(), utils.GenerateUniqueIdentifier()) // unique identifier for retries
-		_, providerAddress, err := csm.probeProvider(ctx, consumerSessionsWithProvider, csm.atomicReadCurrentEpoch(), true)
+		providerAddress, err := csm.probeProvider(ctx, consumerSessionsWithProvider, csm.atomicReadCurrentEpoch(), true)
 		if err == nil {
 			utils.LavaFormatInfo("Reconnecting provider succeeded returning provider to valid addresses list", utils.LogAttr("provider", providerAddress))
 			// csm.pairing and csm.backupProviders are built from separate inputs by
@@ -3815,7 +3810,7 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 			utils.LogAttr("GUID", ctx),
 		)
 
-		_, providerAddress, err := csm.probeProvider(ctx, info.cswp, epoch, true)
+		providerAddress, err := csm.probeProvider(ctx, info.cswp, epoch, true)
 
 		if err == nil {
 			utils.LavaFormatInfo("Re-blocked provider's comprehensive probe succeeded, immediately unblocking",

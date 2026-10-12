@@ -223,7 +223,9 @@ func TestExtensionUnavailableHeader_WarnRegisterSurvivesKeepAliveBufferReuse(t *
 
 	var warned []string
 	srv.warnedUnavailableExtensions.Range(func(key, _ any) bool {
-		warned = append(warned, key.(string))
+		name, ok := key.(string)
+		require.True(t, ok)
+		warned = append(warned, name)
 		return true
 	})
 	require.Equal(t, []string{extensionslib.ArchiveExtension}, warned,

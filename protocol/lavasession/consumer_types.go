@@ -1104,7 +1104,7 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 	// try to lock an existing session, if can't create a new one
 	for _, session := range cswp.Sessions {
 		// Match session to connection (different logic for provider-relay vs direct RPC)
-		matchesConnection := false
+		var matchesConnection bool
 		if isProviderRelay {
 			matchesConnection = (session.EndpointConnection == endpointConnection)
 		} else {

@@ -34,11 +34,11 @@ func GetSpecFromLocalDirs(specPaths []string, index string) (types.Spec, error) 
 	for _, specPath := range specPaths {
 		_ = filepath.WalkDir(specPath, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
-				return nil
+				return nil //nolint:nilerr // an unreadable entry is skipped, not fatal: this loader pools whatever it can read
 			}
 			proposal, err := decodeProposal(path)
 			if err != nil {
-				return nil // skip unparseable files
+				return nil //nolint:nilerr // skip unparseable files; GetAllSpecsFromLocalDir is the loader that reports them
 			}
 			for _, spec := range proposal.Proposal.Specs {
 				allSpecs[spec.Index] = spec

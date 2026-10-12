@@ -38,6 +38,7 @@ func (m *budgetCallSiteStateMachine) GetSelection() relaycore.Selection { return
 func (m *budgetCallSiteStateMachine) GetCrossValidationParams() *common.CrossValidationParams {
 	return nil
 }
+
 func (m *budgetCallSiteStateMachine) GetUsedProviders() *lavasession.UsedProviders {
 	return m.usedProviders
 }

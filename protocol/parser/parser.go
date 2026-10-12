@@ -503,9 +503,7 @@ func parseGenericParserBlockHash(value interface{}) (*ParsedInput, error) {
 }
 
 func parseDefault(input []string) []interface{} {
-	retArr := make([]interface{}, 0)
-	retArr = append(retArr, input[0])
-	return retArr
+	return []interface{}{input[0]}
 }
 
 // align hash encoding to base64 string, to save up on space and allow comparisons
@@ -597,9 +595,7 @@ func parseByArg(rpcInput RPCInput, input []string, dataSource int) ([]interface{
 		block := unmarshaledDataTyped[param_index]
 		// TODO: turn this into type assertion instead
 
-		retArr := make([]interface{}, 0)
-		retArr = append(retArr, blockInterfaceToString(block))
-		return retArr, nil
+		return []interface{}{blockInterfaceToString(block)}, nil
 	case nil:
 		// Handle nil params as "no parameters set"
 		return nil, ValueNotSetError
@@ -666,9 +662,7 @@ func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]interf
 					rpcInput.GetParams(), rpcInput.GetMethod(), blockContainer, key, unmarshalledDataTyped, ValueNotSetError)
 			}
 		}
-		retArr := make([]interface{}, 0)
-		retArr = append(retArr, blockInterfaceToString(blockContainer))
-		return retArr, nil
+		return []interface{}{blockInterfaceToString(blockContainer)}, nil
 	case map[string]interface{}:
 		inp := input[0]
 		_, err := strconv.ParseUint(inp, 10, 32)
@@ -682,9 +676,7 @@ func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]interf
 			key := relevantInput[idx]
 			if val, ok := unmarshalledDataTyped[key]; ok {
 				if idx == (len(relevantInput) - 1) {
-					retArr := make([]interface{}, 0)
-					retArr = append(retArr, blockInterfaceToString(val))
-					return retArr, nil
+					return []interface{}{blockInterfaceToString(val)}, nil
 				}
 				// if we didn't get to the last element continue deeper by changing unmarshaledDataTyped
 				switch v := val.(type) {
@@ -706,9 +698,7 @@ func parseCanonical(rpcInput RPCInput, input []string, dataSource int) ([]interf
 					// Get the element from array and check if it's the last element
 					arrayElement := v[arrayIndex]
 					if idx+1 == (len(relevantInput) - 1) {
-						retArr := make([]interface{}, 0)
-						retArr = append(retArr, blockInterfaceToString(arrayElement))
-						return retArr, nil
+						return []interface{}{blockInterfaceToString(arrayElement)}, nil
 					}
 					// Continue with the array element as a map
 					if mapElement, ok := arrayElement.(map[string]interface{}); ok {
@@ -890,9 +880,7 @@ func parseArrayOfInterfaces(data []interface{}, propName, innerSeparator string)
 
 // appendInterfaceToInterfaceArray appends interface to interface array
 func appendInterfaceToInterfaceArray(value interface{}) []interface{} {
-	retArr := make([]interface{}, 0)
-	retArr = append(retArr, value)
-	return retArr
+	return []interface{}{value}
 }
 
 // appendInterfaceToInterfaceArrayWithError appends interface to interface array
