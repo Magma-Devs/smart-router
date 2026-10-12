@@ -323,6 +323,7 @@ func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) Decis
 		IsBatch:       sm.protocolMessage.IsBatch(),
 		Summary:       sm.getResultsSummary(),
 		IsTickerHedge: isTickerHedge,
+		IsDefaultApi:  sm.protocolMessage.IsDefaultApi(),
 	}
 }
 

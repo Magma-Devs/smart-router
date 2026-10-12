@@ -608,9 +608,13 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 	// IsUnsupportedMethod is a subset kept for zero-CU and caching only.
 	hasNonRetryableNodeError := false
 	hasUnsupportedMethod := false
+	hasNodeCapabilityRefusal := false
 	for _, result := range nodeErrorResults {
 		if result.IsNonRetryable {
 			hasNonRetryableNodeError = true
+		}
+		if result.IsNodeCapability {
+			hasNodeCapabilityRefusal = true
 		}
 		if result.IsUnsupportedMethod {
 			hasUnsupportedMethod = true
@@ -640,6 +644,7 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		SpecialNodeErrors:         specialNodeErrors,
 		ProtocolErrors:            protocolErrors,
 		HasNonRetryableNodeError:  hasNonRetryableNodeError,
+		HasNodeCapabilityRefusal:  hasNodeCapabilityRefusal,
 		HasUnsupportedMethod:      hasUnsupportedMethod,
 		HasPermanentProtocolError: hasPermanentProtocolError,
 		HasEpochMismatch:          hasEpochMismatch,
@@ -1443,9 +1448,9 @@ func (rp *RelayProcessor) processCrossValidationResult(
 }
 
 // processNonCrossValidationResult handles Stateful and Stateless modes, which share the same result
-// selection: first success, else first node error, else a failure result built from the best
-// node/protocol error. (Stateful fans out without retries and Stateless retries sequentially, but that
-// difference lives in the state machine, not here.)
+// selection: first success, else the first non-retryable node error, else the first node error, else a
+// failure result built from the best node/protocol error. (Stateful fans out without retries and
+// Stateless retries sequentially, but that difference lives in the state machine, not here.)
 func (rp *RelayProcessor) processNonCrossValidationResult(
 	successResults, nodeErrors []common.RelayResult,
 	protocolErrors []RelayError,
@@ -1456,8 +1461,18 @@ func (rp *RelayProcessor) processNonCrossValidationResult(
 		return &result, nil
 	}
 
-	// No successes, return first node error if available
+	// No successes: return a node error, a non-retryable one first. A non-retryable error is a fact
+	// about the chain or the request, the same from every node, and it is the answer that ended the
+	// request. A retryable one is the node's claim about itself (MAG-2771): a refusal, a limit, data
+	// it does not hold. Taking the first error to arrive handed the caller the refusing provider's
+	// "method not found" even after the provider it was retried on had answered with the revert.
 	if len(nodeErrors) > 0 {
+		for i := range nodeErrors {
+			if nodeErrors[i].IsNonRetryable {
+				result := nodeErrors[i]
+				return &result, nil
+			}
+		}
 		result := nodeErrors[0]
 		return &result, nil
 	}

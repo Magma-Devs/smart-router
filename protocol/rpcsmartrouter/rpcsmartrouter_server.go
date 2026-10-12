@@ -245,7 +245,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	// monitor's OnTipObservation hook can feed it. Phase 2 wires the writes (relay+poll
 	// observations → SetLatestBlock) and the internal consensus recompute tick; the read sites
 	// still use the legacy sources until phase 3.
-	rpcss.chainState = chainstate.New(listenEndpoint.ChainID, chainstate.DefaultConfig(effectiveBlockTime))
+	rpcss.chainState = rpcss.newChainState(effectiveBlockTime)
 
 	// Topic E (MAG-2160 Finding 2 / F4): point the relay sync dimension at THIS chain+interface's
 	// tip, so relay sync lag is measured against the agreed head rather than
@@ -291,6 +291,8 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
+		// Each url's head on rpc_endpoint_url_latest_block, on every answered poll (MAG-4204).
+		OnPollBlock: rpcss.onEndpointPollBlock,
 		// Fleet tracker gate (MAG-2981): with --shared-state AND a cache backend, pods share
 		// their poll observations so an endpoint is polled about once per interval fleet-wide.
 		// Gated on the same flag as the chain-level shared tip — it is the operator's "this
@@ -2091,12 +2093,14 @@ func promoteConsistencyFallback(
 // The three carve-outs are load-bearing, not defensive, and they exclude on DIFFERENT axes:
 //
 //   - IsNonRetryable — "retrying elsewhere would not help". Deterministic caller-fault errors
-//     (unsupported method, invalid params, execution reverted) come back from EVERY endpoint for
-//     the same request, so scoring them would drive the whole pairing below
-//     score.MinAcceptableAvailability on a burst of malformed client requests and collapse every
-//     endpoint to the selection floor — punishing healthy nodes for a bad request instead of
-//     identifying a bad node. All four SubCategoryUnsupportedMethod codes are Retryable=false, so
-//     this also preserves that subcategory's "no provider scoring" contract.
+//     (invalid params, execution reverted) come back from EVERY endpoint for the same request,
+//     so scoring them would drive the whole pairing below score.MinAcceptableAvailability on a
+//     burst of malformed client requests and collapse every endpoint to the selection floor —
+//     punishing healthy nodes for a bad request instead of identifying a bad node. Every
+//     SubCategoryUnsupportedMethod code is Retryable=false, so this also preserves that
+//     subcategory's "no provider scoring" contract. Since MAG-2771 no code carries it: a node's
+//     own refusal (method not found, unimplemented, route, verb, credentials) is retryable and
+//     reaches the IsNodeCapability carve-out below instead.
 //   - IsRateLimited — "the endpoint is healthy but busy". SubCategoryRateLimit is contractually
 //     backoff-without-marking-unhealthy (common/error_registry.go), and it does NOT follow from
 //     retryability: NODE_RATE_LIMITED (2005) is Retryable=true, NODE_LIMIT_EXCEEDED (2011) is
@@ -2675,6 +2679,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					outcome,
 					analytics,
 				)
+				// Per url too: a provider can have several urls, and the stuck-and-serving page
+				// asks whether customers' requests reach the stuck one (MAG-4204).
+				if outcome == metrics.RelayOutcomeSuccess && targetEndpoint != nil {
+					rpcss.countURLRelayServiced(endpointAddress, targetEndpoint.NetworkAddress)
+				}
 			}
 
 			// Handle response
@@ -3131,6 +3140,33 @@ func endpointTipPreferStore(pollAtomic, storeTip int64) int64 {
 		return storeTip
 	}
 	return pollAtomic
+}
+
+// newChainState builds this server's per-chain tip with production config and the MAG-4153
+// regression hook wired. One constructor so the tests exercise the exact wiring ServeRPCRequests uses.
+func (rpcss *RPCSmartRouterServer) newChainState(effectiveBlockTime time.Duration) *chainstate.ChainState {
+	cfg := chainstate.DefaultConfig(effectiveBlockTime)
+	cfg.OnRegression = rpcss.onChainBlockRegression
+	return chainstate.New(rpcss.listenEndpoint.ChainID, cfg)
+}
+
+// onChainBlockRegression is ChainState's OnRegression hook: this chain's latest block moved
+// backwards (MAG-4153). Logged at ERROR and counted on smartrouter_latest_block_regressions_total,
+// which is what the fleet alert reads. The gauge is refreshed here too: after a consensus snap-down
+// nothing else rewrites it until the next accepted observation, so it would keep showing the
+// higher block that was just rejected.
+func (rpcss *RPCSmartRouterServer) onChainBlockRegression(from, to int64, reason string) {
+	chainID, apiInterface := rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
+	utils.LavaFormatError("chain latest block went backwards", nil,
+		utils.LogAttr("chainID", chainID),
+		utils.LogAttr("apiInterface", apiInterface),
+		utils.LogAttr("fromBlock", from),
+		utils.LogAttr("toBlock", to),
+		utils.LogAttr("blocksBack", from-to),
+		utils.LogAttr("reason", reason),
+	)
+	rpcss.smartRouterEndpointMetrics.RecordRouterLatestBlockRegression(chainID, apiInterface, reason)
+	rpcss.smartRouterEndpointMetrics.SetRouterLatestBlock(chainID, apiInterface, to)
 }
 
 // endpointTipBlock reads an endpoint's observed tip from the shared single-source-of-truth
@@ -3609,6 +3645,73 @@ func (rpcss *RPCSmartRouterServer) onTipObservation(block int64) {
 	}
 }
 
+// urlAnswerTimeout is how long a url counts as answering after its last answer, for a chain whose
+// trackers poll every pollInterval: two poll intervals, so a healthy url on a slow chain (BTC polls
+// every 5 minutes, every 20 at a 0.5 divisor) never reads as down between two polls, and never
+// less than metrics.DefaultURLAnswerTimeout.
+func urlAnswerTimeout(pollInterval time.Duration) time.Duration {
+	return max(metrics.DefaultURLAnswerTimeout, 2*pollInterval)
+}
+
+// answerTimeout is urlAnswerTimeout for this server's trackers, passed with every per-url write.
+func (rpcss *RPCSmartRouterServer) answerTimeout() time.Duration {
+	return urlAnswerTimeout(rpcss.endpointChainTrackerManager.PollInterval())
+}
+
+// onEndpointPollBlock is the EndpointMonitor's OnPollBlock hook. It records the head a url
+// answered with on rpc_endpoint_url_latest_block (MAG-4204), on every answered poll: the tracker's
+// first poll and every repeat of the same block included, which OnNewBlock never reports. So a url
+// that keeps answering with one block stands still on its own series while its answered-until time
+// keeps moving, which is what the stuck alerts look for; a url that stops answering stops both,
+// which they leave alone. rpc_endpoint_latest_block, the provider series, is still written by
+// OnNewBlock and the relay harvest, as before.
+//
+// A ws/wss url is left out. It never serves a relay (Endpoint.ServesDirectRelays), so its head
+// says nothing about the answers customers' relays get.
+//
+// Nil-guards cover test fixtures that construct the server without metrics wired.
+func (rpcss *RPCSmartRouterServer) onEndpointPollBlock(endpointURL string, block int64) {
+	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	if protocol, err := lavasession.DetectProtocol(endpointURL, rpcss.listenEndpoint.ApiInterface); err == nil &&
+		(protocol == lavasession.DirectRPCProtocolWS || protocol == lavasession.DirectRPCProtocolWSS) {
+		return
+	}
+	rpcss.smartRouterEndpointMetrics.SetEndpointURLLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL, block, rpcss.answerTimeout())
+	rpcss.forgetURLLatestBlockIfUntracked(endpointURL)
+}
+
+// countURLRelayServiced counts a successful relay on rpc_endpoint_url_relays_serviced_total for the
+// url it went to. A relay in flight when cleanupStaleTrackers removes the url's tracker completes
+// after the url's series were deleted, and its harvest is dropped by the generation gate, so nothing
+// else would undo the count: without the check after it, the counter would stay for the life of the
+// pod, though a removed url loses its series.
+func (rpcss *RPCSmartRouterServer) countURLRelayServiced(providerName, endpointURL string) {
+	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	rpcss.smartRouterEndpointMetrics.AddEndpointURLRelayServiced(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, providerName, endpointURL)
+	rpcss.forgetURLLatestBlockIfUntracked(endpointURL)
+}
+
+// forgetURLLatestBlockIfUntracked undoes a per-url write that raced its url's removal.
+// cleanupStaleTrackers removes the url's tracker and then deletes its per-url series. The poll,
+// harvest and relay-count writes land after that removal can happen (the poll and harvest writes
+// are generation-gated, but run after the gate's lock is released), so one can arrive just after
+// that delete and leave a series behind for the life of the pod. The stuck alerts read such a
+// series as down once its answered-until time passes, so this prevents a leaked series, not a
+// false alert. Checking for the tracker after the write closes every interleaving, because
+// the removal always comes before the delete.
+func (rpcss *RPCSmartRouterServer) forgetURLLatestBlockIfUntracked(endpointURL string) {
+	if rpcss.endpointChainTrackerManager == nil || rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	if _, tracked := rpcss.endpointChainTrackerManager.ObservationGeneration(endpointURL); !tracked {
+		rpcss.smartRouterEndpointMetrics.ForgetEndpointURLLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL)
+	}
+}
+
 // harvestAndUpdateTipFromRelay applies a served relay's block to TIP state — but only when the
 // response is tip-eligible (MAG-2159 finding 4). tipBlockFromRelay distinguishes a "block
 // associated with a response" (historical: eth_getBlockByNumber(N), getBlockByHash,
@@ -3676,6 +3779,16 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 			endpointAddress,
 			tip,
 		)
+		// And the url's own series, for the provider relayed to (MAG-4204).
+		rpcss.smartRouterEndpointMetrics.SetProviderURLLatestBlock(
+			rpcss.listenEndpoint.ChainID,
+			rpcss.listenEndpoint.ApiInterface,
+			endpointAddress,
+			targetEndpoint.NetworkAddress,
+			tip,
+			rpcss.answerTimeout(),
+		)
+		rpcss.forgetURLLatestBlockIfUntracked(targetEndpoint.NetworkAddress)
 	}
 }
 
@@ -5186,8 +5299,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// would convert it into a synthetic transport error (triggering retry +
 	// backoff) and discard the node's response. Excluding it lets the result
 	// flow through as the NodeError the REST sender already produced
-	// (IsNodeError=true), where it classifies as NODE_UNIMPLEMENTED
-	// (non-retryable) and is returned to the client.
+	// (IsNodeError=true), where it classifies as NODE_UNIMPLEMENTED: retried on
+	// another provider (MAG-2771), and returned to the client when none serves it.
 	//
 	// A 5xx that is the node's own JSON reply (rpcInterfaceMessages.ServerErrorIsNodeReply) is
 	// excluded for the same reason: when every node answers Horizon's
