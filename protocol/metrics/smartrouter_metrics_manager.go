@@ -1243,7 +1243,7 @@ func (m *SmartRouterMetricsManager) RecordRouterLatestBlockRegression(spec, apiI
 
 // SetChainIdle publishes a chain/interface's idle-mode state: 1 while it has served no client
 // relay for the idle window and its tracker polls are paused, 0 once a client relay wakes it.
-// Written on transitions only (the monitor's OnIdleChange hook), never on the relay hot path.
+// Written by the probe loop every cycle (current state, not transitions), never on the relay hot path.
 func (m *SmartRouterMetricsManager) SetChainIdle(spec, apiInterface string, idle bool) {
 	if m == nil || m.routerChainIdle == nil {
 		return

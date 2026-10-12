@@ -19,17 +19,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// idleEvents records the two telemetry hooks idle mode drives.
+// idleEvents records the gate-skip telemetry idle mode drives.
 type idleEvents struct {
-	mu          sync.Mutex
-	transitions []bool
-	skips       []string
-}
-
-func (e *idleEvents) onIdle(idle bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.transitions = append(e.transitions, idle)
+	mu    sync.Mutex
+	skips []string
 }
 
 func (e *idleEvents) onSkip(_ string, source string) {
@@ -38,10 +31,10 @@ func (e *idleEvents) onSkip(_ string, source string) {
 	e.skips = append(e.skips, source)
 }
 
-func (e *idleEvents) snapshot() (transitions []bool, skips []string) {
+func (e *idleEvents) snapshot() (skips []string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return append([]bool(nil), e.transitions...), append([]string(nil), e.skips...)
+	return append([]string(nil), e.skips...)
 }
 
 // newIdleMonitor builds a monitor with idle mode on and no trackers: enough for every decision
@@ -59,7 +52,6 @@ func newIdleMonitor(t *testing.T, idleAfter, idlePollInterval time.Duration, eve
 		IdlePollInterval: idlePollInterval,
 	}
 	if events != nil {
-		cfg.OnIdleChange = events.onIdle
 		cfg.OnGateSkip = events.onSkip
 	}
 	m := NewEndpointMonitor(ctx, cfg)
@@ -143,7 +135,7 @@ func TestIdleMode_ClientRelayKeepsAwake(t *testing.T) {
 }
 
 // TestIdleGate_HeartbeatAndTelemetry pins the per-cycle decision the trackers ask, the idle
-// heartbeat, and the transition telemetry (one log/gauge event per direction, one skip metric
+// heartbeat, and the transition telemetry (one log line per direction, one skip metric
 // per skipped cycle).
 func TestIdleGate_HeartbeatAndTelemetry(t *testing.T) {
 	const url = "http://ep:8545"
@@ -156,8 +148,8 @@ func TestIdleGate_HeartbeatAndTelemetry(t *testing.T) {
 		for i := 0; i < 3; i++ {
 			require.True(t, m.idleGate(url, now, time.Duration(i)*time.Hour))
 		}
-		transitions, skips := events.snapshot()
-		require.Equal(t, []bool{false, true}, transitions, "active at boot, then the idle transition announced once, on the first skip")
+		skips := events.snapshot()
+		require.True(t, m.idleAnnounced.Load(), "the idle transition is announced on the first skip")
 		require.Equal(t, []string{metrics.TrackerGateSkipSourceIdle, metrics.TrackerGateSkipSourceIdle, metrics.TrackerGateSkipSourceIdle}, skips)
 	})
 
@@ -170,7 +162,7 @@ func TestIdleGate_HeartbeatAndTelemetry(t *testing.T) {
 		require.True(t, m.idleGate(url, now, time.Minute), "one minute since the last real poll: skip")
 		require.True(t, m.idleGate(url, now, 2*time.Minute-time.Nanosecond), "just under the interval: skip")
 		require.False(t, m.idleGate(url, now, 2*time.Minute), "heartbeat due: this cycle polls")
-		_, skips := events.snapshot()
+		skips := events.snapshot()
 		require.Len(t, skips, 2, "only skipped cycles count as skips")
 	})
 
@@ -178,14 +170,13 @@ func TestIdleGate_HeartbeatAndTelemetry(t *testing.T) {
 		events := &idleEvents{}
 		m := newIdleMonitor(t, MinIdleAfter, 0, events)
 		require.False(t, m.idleGate(url, time.Now(), time.Hour))
-		transitions, skips := events.snapshot()
-		require.Equal(t, []bool{false}, transitions, "only the boot-time 'active' event")
-		require.Empty(t, skips)
+		require.False(t, m.idleAnnounced.Load(), "nothing announced")
+		require.Empty(t, events.snapshot())
 	})
 }
 
 // TestIdleMode_WakeWithNoTrackers: the relay that ends an idle period gets a channel that is
-// closed as soon as the burst has nothing to poll, and the gauge flips back to active.
+// closed as soon as the burst has nothing to poll, and the idle announcement is re-armed.
 func TestIdleMode_WakeWithNoTrackers(t *testing.T) {
 	events := &idleEvents{}
 	m := newIdleMonitor(t, MinIdleAfter, 0, events)
@@ -201,8 +192,7 @@ func TestIdleMode_WakeWithNoTrackers(t *testing.T) {
 	}
 	require.False(t, m.IsIdle(time.Now()), "the waking relay's stamp makes the chain active")
 	require.Eventually(t, func() bool { return !m.IdleSnapshot(time.Now()).WakeInProgress }, 5*time.Second, 10*time.Millisecond)
-	transitions, _ := events.snapshot()
-	require.Equal(t, []bool{false, true, false}, transitions, "active at boot, idle, then active — one event each")
+	require.False(t, m.idleAnnounced.Load(), "the wake re-arms the next idle period's announcement")
 }
 
 // TestIdleMode_WakeBurstPollsEveryEndpoint is the end-to-end proof through a REAL tracker: the
@@ -295,8 +285,7 @@ func TestIdleMode_ConcurrentWakersShareOneBurst(t *testing.T) {
 	close(start)
 	wg.Wait()
 	require.GreaterOrEqual(t, wakers.Load(), int32(1), "the waker itself always gets a channel")
-	transitions, _ := events.snapshot()
-	require.Equal(t, []bool{false, true, false}, transitions, "boot, one idle period, one wake — never a second burst")
+	require.Equal(t, uint64(1), m.wakeBursts.Load(), "one idle period, one wake — never a second burst")
 }
 
 // TestIdleMode_WakeChannelStaysOpenWhileTrackerIsStarting: a tracker still retrying its init has

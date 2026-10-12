@@ -125,6 +125,11 @@ func (m *EndpointMonitor) lastClientRelay() time.Time {
 	return time.Unix(0, m.lastClientRelayNanos.Load())
 }
 
+// IdleModeEnabled reports whether idle mode is on for this chain+interface.
+func (m *EndpointMonitor) IdleModeEnabled() bool {
+	return m.idleAfter > 0
+}
+
 // IsIdle reports whether this chain+interface is idle at now: idle mode is on and no client
 // relay has been stamped within the idle window. It is the ONE decision function — the tracker
 // gate, the probe loop and the debug view all read it — and it reads only the stamp, so it can
@@ -215,11 +220,10 @@ func (m *EndpointMonitor) startWake(now time.Time, idleFor time.Duration) <-chan
 	done := make(chan struct{})
 	m.wakeDone = done
 	m.wakeMu.Unlock()
+	m.wakeBursts.Add(1)
 
-	// Telemetry: the gauge flips back to active on the wake, not on the first resumed poll.
-	if m.idleAnnounced.CompareAndSwap(true, false) && m.onIdleChange != nil {
-		m.onIdleChange(false)
-	}
+	// The next idle period announces itself again ("chain idle" log line).
+	m.idleAnnounced.Store(false)
 	go m.runWake(done, m.GetAllEndpoints(), now, idleFor)
 	return done
 }
@@ -333,7 +337,9 @@ func (m *EndpointMonitor) triggerPoll(ctx context.Context, endpointURL string) (
 // idleGate is the per-cycle decision wired into every tracker this monitor creates when idle
 // mode is on (chaintracker.ChainTrackerConfig.IdleGate): skip the cycle while the chain is idle,
 // except when the idle heartbeat is due for this endpoint. The first skip of an idle period
-// announces the transition (one log line, gauge to 1); the wake announces the other direction.
+// logs the transition once; the wake logs the other direction. The smartrouter_chain_idle gauge is
+// not written here: the probe loop publishes the current state every cycle (IdleModeEnabled/IsIdle),
+// so a tracker that read "idle" just before a relay woke the chain cannot leave it stuck at 1.
 func (m *EndpointMonitor) idleGate(endpointURL string, now time.Time, sinceLastRealPoll time.Duration) bool {
 	if !m.IsIdle(now) {
 		return false
@@ -349,9 +355,6 @@ func (m *EndpointMonitor) idleGate(endpointURL string, now time.Time, sinceLastR
 			utils.LogAttr("idleAfter", m.idleAfter),
 			utils.LogAttr("idlePollInterval", m.idlePollInterval),
 		)
-		if m.onIdleChange != nil {
-			m.onIdleChange(true)
-		}
 	}
 	m.noteGateSkip(endpointURL, metrics.TrackerGateSkipSourceIdle)
 	return true

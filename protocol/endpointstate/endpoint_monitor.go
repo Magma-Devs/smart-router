@@ -158,15 +158,15 @@ type EndpointMonitor struct {
 	// before it can go idle. Written by NoteClientRelay on the relay hot path (one atomic swap),
 	// read by every tracker's idle gate, the probe loop and the debug view.
 	lastClientRelayNanos atomic.Int64
-	// idleAnnounced is telemetry state only (the transition log line and the gauge); decisions
+	// idleAnnounced is log state only (the "chain idle" line, once per idle period); decisions
 	// read the stamp. The first idle skip sets it, the wake clears it.
 	idleAnnounced atomic.Bool
 	// wakeDone is non-nil while a wake burst is in flight and is closed once the first endpoint
 	// poll of the burst has recorded a fresh tip (or every poll has finished). Guarded by wakeMu.
 	wakeMu   sync.Mutex
 	wakeDone chan struct{}
-	// onIdleChange, if set, is invoked on every idle<->active transition (metrics gauge).
-	onIdleChange func(idle bool)
+	// wakeBursts counts the wake bursts started, one per idle period a relay ended.
+	wakeBursts atomic.Uint64
 
 	// Callbacks for events (optional)
 	onFork        func(endpointURL string, blockNum int64)
@@ -266,10 +266,6 @@ type EndpointChainTrackerConfig struct {
 	// with the endpoint URL and the request kind (metrics.TrackerRequestKind*). It backs the
 	// only metric that measures tracker REQUEST VOLUME — see RecordTrackerRequest.
 	OnTrackerRequest func(endpointURL, kind string)
-
-	// OnIdleChange, if set, is invoked with true when the chain goes idle (first skipped poll
-	// cycle) and false when a client relay wakes it. Backs smartrouter_chain_idle.
-	OnIdleChange func(idle bool)
 }
 
 // NewEndpointMonitor creates a new manager for per-endpoint ChainTrackers.
@@ -345,7 +341,6 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		podID:              LocalPodID(),
 		idleAfter:          idleAfter,
 		idlePollInterval:   idlePollInterval,
-		onIdleChange:       config.OnIdleChange,
 		ctx:                ctxWithCancel,
 		cancel:             cancel,
 	}
@@ -359,11 +354,6 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 			utils.LogAttr("idleAfter", idleAfter),
 			utils.LogAttr("idlePollInterval", idlePollInterval),
 		)
-		// Publish "active" from boot so the gauge series exists at 0 whenever the feature is on,
-		// rather than appearing only at the first idle transition.
-		if manager.onIdleChange != nil {
-			manager.onIdleChange(false)
-		}
 	}
 
 	// Resolved after the struct exists because it reads manager.chainParser. Both inputs are

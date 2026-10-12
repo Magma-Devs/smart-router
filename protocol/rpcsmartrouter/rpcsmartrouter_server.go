@@ -296,9 +296,6 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// from viper for the same reason as the flags above; 0 (absent) is off, the default.
 		IdleAfter:        viper.GetDuration(endpointstate.IdleAfterFlagName),
 		IdlePollInterval: viper.GetDuration(endpointstate.IdlePollIntervalFlagName),
-		OnIdleChange: func(idle bool) {
-			rpcss.smartRouterEndpointMetrics.SetChainIdle(listenEndpoint.ChainID, listenEndpoint.ApiInterface, idle)
-		},
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
@@ -3561,6 +3558,7 @@ func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence tim
 	// re-enable-only if a future optimizer lacks it, rather than failing to start.
 	appender, _ := rpcss.sessionManager.GetProviderOptimizer().(probeQoSAppender)
 
+	rpcss.publishChainIdle(time.Now()) // the series exists from boot whenever idle mode is on
 	ticker := time.NewTicker(cadence)
 	defer ticker.Stop()
 	for {
@@ -3599,6 +3597,7 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 	// still re-polling (QoSFeedPaused); the cycle still runs for the telemetry. Relays re-score
 	// providers at 4x the probe weight the moment traffic returns.
 	idle := rpcss.endpointChainTrackerManager.QoSFeedPaused(startedAt)
+	rpcss.publishChainIdle(startedAt)
 	scored, reEnabled, syncOmitted, evidenceGated := runProbeCycleCore(
 		endpoints,
 		rpcss.endpointChainTrackerManager.GetObservation,
@@ -3610,6 +3609,18 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 	// counted as usable by never-empty.
 	rpcss.runHeadStall(endpoints, startedAt)
 	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, evidenceGated, idle)
+}
+
+// publishChainIdle sets smartrouter_chain_idle to this chain+interface's idle state at now. The
+// probe loop is its only writer and publishes every cycle, so the gauge is never more than one
+// cycle behind and cannot stick at a stale value (alerts mute the frozen-tip page on it). Nothing
+// is published while idle mode is off, so the series exists only where the feature is on.
+func (rpcss *RPCSmartRouterServer) publishChainIdle(now time.Time) {
+	monitor := rpcss.endpointChainTrackerManager
+	if monitor == nil || !monitor.IdleModeEnabled() || rpcss.listenEndpoint == nil {
+		return
+	}
+	rpcss.smartRouterEndpointMetrics.SetChainIdle(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, monitor.IsIdle(now))
 }
 
 // probeAppenderUnlessIdle is the one place the idle verdict reaches the QoS feed: nil (no feed)

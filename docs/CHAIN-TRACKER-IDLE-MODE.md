@@ -12,6 +12,13 @@ an endpoint with no traffic polls every cycle. Idle mode covers that case.
 
 Idle mode is **off by default**.
 
+**Before turning it on for a tenant:** an idle chain's `smartrouter_latest_block` stands still on
+purpose, and the `sr-tip-frozen` alert (critical, pages the phone) fires when that gauge has not
+moved for its window (15 min on most chains). Do not enable idle mode on a tenant until
+[smart-router-infrastructure#844](https://github.com/Magma-Devs/smart-router-infrastructure/pull/844)
+is merged; it skips routers whose every pod is idle (`smartrouter_chain_idle`) and adds a
+"Chain Idle" panel to the fleet war room.
+
 ## How it works
 
 - **The signal.** Each chain + API interface keeps the time of its last *client* request: HTTP,
@@ -19,8 +26,8 @@ Idle mode is **off by default**.
   A freshly started process counts as active for one full idle window.
 - **Going idle.** When no client request has arrived for `--chain-tracker-idle-after`, every
   tracker of that chain + interface skips its cycles: no upstream request, no poll-health change,
-  failure backoff preserved. The first skipped cycle logs `chain idle` and sets
-  `smartrouter_chain_idle` to 1.
+  failure backoff preserved. The first skipped cycle logs `chain idle`;
+  `smartrouter_chain_idle` reads 1 from the next 5 s probe cycle.
 - **Heartbeat (optional).** With `--chain-tracker-idle-poll-interval`, an idle tracker still
   polls once per that interval, so a node that dies while idle is noticed and the stored block at
   wake is never older than one interval.
@@ -69,6 +76,12 @@ also fetches block hashes, so it costs more per endpoint.
 
 ## Limits
 
+- While a chain is idle, `smartrouter_latest_block` does not move (no polls), and a provider that
+  dies is not noticed until the next heartbeat or wake. The frozen-tip alert is skipped for idle
+  routers (see the note at the top), so a dead pool on a quiet chain pages only once traffic
+  returns. A heartbeat (`--chain-tracker-idle-poll-interval`, e.g. `5m`) keeps the tip moving
+  and notices a dead provider, at one poll per endpoint per interval.
+
 - A websocket **subscription** (`eth_subscribe` and its pushes) is not activity: it neither keeps
   the chain awake nor wakes it. The next unary request pays one wake.
 - An external monitor that sends a real RPC request more often than the idle window keeps the
@@ -84,7 +97,7 @@ also fetches block hashes, so it costs more per endpoint.
 
 | Where | Reading |
 | --- | --- |
-| `smartrouter_chain_idle{spec,apiInterface}` | 1 idle, 0 active, absent when idle mode is off |
+| `smartrouter_chain_idle{spec,apiInterface}` | 1 idle, 0 active, absent when idle mode is off. Published every 5 s (probe cycle), so it is at most one cycle behind. `sr-tip-frozen` skips a router whose every pod reads 1; the fleet war room's "Chain Idle" panel shows it |
 | `rpc_endpoint_tracker_gate_skips_total{source="idle"}` | one per skipped cycle |
 | `rpc_endpoint_tracker_requests_total` | flat while idle, one per endpoint at each wake |
 | `/debug/endpoint-state` | `IdleMode` (`off` / `active` / `idle`), `LastClientRelay`, `IdleSince`, `WakeInProgress` |

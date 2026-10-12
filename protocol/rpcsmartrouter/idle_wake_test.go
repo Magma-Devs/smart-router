@@ -1,7 +1,7 @@
 package rpcsmartrouter
 
 // Tests for the router-side half of idle mode (endpointstate/idle.go): the relay-path wait
-// (awaitWakeIfIdle) and the probe loop's QoS-feed gate.
+// (awaitWakeIfIdle), the probe loop's QoS-feed gate and its smartrouter_chain_idle publishing.
 
 import (
 	"context"
@@ -11,8 +11,10 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -118,4 +120,83 @@ func TestAwaitWakeIfIdle_RespectsRequestContext(t *testing.T) {
 	started := time.Now()
 	rpcss.awaitWakeIfIdle(reqCtx, time.Now().Add(2*endpointstate.MinIdleAfter))
 	require.Less(t, time.Since(started), 100*time.Millisecond)
+}
+
+// TestPublishChainIdle_ReportsTheCurrentState: the probe loop is the gauge's only writer and
+// publishes the CURRENT idle state every cycle, so a value written by a stale read is overwritten
+// on the next cycle instead of sticking until the next transition.
+func TestPublishChainIdle_ReportsTheCurrentState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	require.NotNil(t, mm)
+	monitor := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainID:          "IDLEPUB",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: time.Minute,
+		BlocksToSave:     1,
+		IdleAfter:        endpointstate.MinIdleAfter,
+	})
+	defer monitor.Stop()
+	rpcss := &RPCSmartRouterServer{
+		smartRouterEndpointMetrics:  mm,
+		endpointChainTrackerManager: monitor,
+		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "IDLEPUB", ApiInterface: "jsonrpc"},
+	}
+
+	now := time.Now()
+	rpcss.publishChainIdle(now)
+	require.Equal(t, 0.0, readChainIdleGauge(t, "IDLEPUB"), "a freshly started chain is active")
+
+	rpcss.publishChainIdle(now.Add(3 * endpointstate.MinIdleAfter))
+	require.Equal(t, 1.0, readChainIdleGauge(t, "IDLEPUB"), "no client relay within the window: idle")
+
+	monitor.NoteClientRelay(now.Add(3 * endpointstate.MinIdleAfter))
+	rpcss.publishChainIdle(now.Add(3*endpointstate.MinIdleAfter + time.Second))
+	require.Equal(t, 0.0, readChainIdleGauge(t, "IDLEPUB"), "the next cycle after a wake reports active")
+}
+
+// TestPublishChainIdle_NothingWhileIdleModeIsOff: the series exists only where the feature is on.
+func TestPublishChainIdle_NothingWhileIdleModeIsOff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	monitor := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainID: "IDLEOFF", ApiInterface: "jsonrpc", AverageBlockTime: time.Minute, BlocksToSave: 1,
+	})
+	defer monitor.Stop()
+	rpcss := &RPCSmartRouterServer{
+		smartRouterEndpointMetrics:  mm,
+		endpointChainTrackerManager: monitor,
+		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "IDLEOFF", ApiInterface: "jsonrpc"},
+	}
+	rpcss.publishChainIdle(time.Now().Add(time.Hour))
+	_, found := findChainIdleGauge(t, "IDLEOFF")
+	require.False(t, found)
+}
+
+func findChainIdleGauge(t *testing.T, spec string) (float64, bool) {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "smartrouter_chain_idle" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == "spec" && lp.GetValue() == spec {
+					return m.GetGauge().GetValue(), true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+func readChainIdleGauge(t *testing.T, spec string) float64 {
+	t.Helper()
+	v, found := findChainIdleGauge(t, spec)
+	require.True(t, found, "smartrouter_chain_idle not reported for %s", spec)
+	return v
 }
