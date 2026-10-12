@@ -2561,12 +2561,39 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 	return providers, nil
 }
 
+// blockedProvidersByCuServedLocked lists every blocked provider: the blocked primaries first, then
+// the blocked backups, each group ordered by compute units served this epoch, highest first (the
+// primaries' list is kept in that order by sortBlockedProviderListByCuServed). csm.lock must be held.
+func (csm *ConsumerSessionManager) blockedProvidersByCuServedLocked() []*ConsumerSessionsWithProvider {
+	providers := make([]*ConsumerSessionsWithProvider, 0, csm.blockedTotalLocked())
+	for _, address := range csm.currentlyBlockedProviderAddresses {
+		if provider := csm.pairing[address]; provider != nil {
+			providers = append(providers, provider)
+		}
+	}
+	backups := make([]*ConsumerSessionsWithProvider, 0, len(csm.blockedBackupProviders))
+	for address := range csm.blockedBackupProviders {
+		if backup := csm.backupProviders[address]; backup != nil {
+			backups = append(backups, backup)
+		}
+	}
+	sort.Slice(backups, func(i, j int) bool {
+		cuI, cuJ := backups[i].atomicReadUsedComputeUnits(), backups[j].atomicReadUsedComputeUnits()
+		if cuI != cuJ {
+			return cuI > cuJ
+		}
+		return backups[i].PublicLavaAddress < backups[j].PublicLavaAddress
+	})
+	return append(providers, backups...)
+}
+
 // On cases where the valid provider list is empty, by being already used in this attempt, and we got to a point
 // where we need another session (for retry or a timeout happened) we want to try fetching a blocked provider for the list.
 // the list will be sorted by most cu served giving the best provider that was blocked a second chance to get back to valid addresses.
 //
-// This is the request's last chance before "No pairings available" (MAG-4232). A provider is
-// blocked because all of its endpoints are disabled, so the provider handed out here is marked
+// This is the request's last chance before "No pairings available" (MAG-4232). It walks the
+// blocked primaries, then the blocked backups. A provider is blocked because all of its endpoints
+// are disabled, so the provider handed out here is marked
 // lastChance: GetSessions lends it one of those disabled endpoints for this request instead of
 // skipping them. It skips only the providers this request already tried (triedByThisRequest), not
 // the ones this attempt just passed over — those are the blocked providers this fallback exists
@@ -2584,7 +2611,7 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	// if len(csm.currentlyBlockedProviderAddresses) == 0 we probably reset the state so we can fetch it normally OR ||
 	// on a very rare case epoch change can happen. in this case we should just fetch a provider from the new pairing list.
 	// we also enter this case if all validAddresses are inside ignoredProviders
-	if len(csm.currentlyBlockedProviderAddresses) == 0 || ignoredProviders.currentEpoch < currentEpoch {
+	if csm.blockedTotalLocked() == 0 || ignoredProviders.currentEpoch < currentEpoch {
 		// epoch changed just now (between the getValidConsumerSessionsWithProvider to tryGetConsumerSessionWithProviderFromBlockedProviderList)
 		if ignoredProviders.currentEpoch < currentEpoch {
 			utils.LavaFormatDebug("Epoch changed between getValidConsumerSessionsWithProvider to tryGetConsumerSessionWithProviderFromBlockedProviderList getting pairing from new epoch list", utils.LogAttr("GUID", ctx))
@@ -2599,15 +2626,14 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	defer csm.lock.RUnlock()
 
 	routerKey := NewRouterKey(extensions)
-	// csm.currentlyBlockedProviderAddresses is sorted by the provider with the highest cu used this epoch to the lowest
-	// meaning if we fetch the first successful index this is probably the highest success ratio to get a response.
-	for _, providerAddress := range csm.currentlyBlockedProviderAddresses {
+	// Highest cu used this epoch first: that provider probably has the highest success ratio.
+	for _, consumerSessionsWithProvider := range csm.blockedProvidersByCuServedLocked() {
+		providerAddress := consumerSessionsWithProvider.PublicLavaAddress
 		// check if we have this provider already.
 		if _, tried := ignoredProviders.triedByThisRequest[providerAddress]; tried {
 			utils.LavaFormatTrace("[continue] provider already tried by this request", utils.LogAttr("providerAddress", providerAddress), utils.LogAttr("GUID", ctx))
 			continue
 		}
-		consumerSessionsWithProvider := csm.pairing[providerAddress]
 		// Add to ignored and tried (no matter what)
 		ignoredProviders.providers[providerAddress] = struct{}{}
 		ignoredProviders.markTried(providerAddress)
@@ -3451,6 +3477,27 @@ func (csm *ConsumerSessionManager) blockRecordOrUnknownLocked(providerAddress st
 	return BlockRecord{Reason: BlockReasonPreviousEpoch, Since: time.Now(), Reported: true}
 }
 
+// releaseBlockedProvider returns a provider to routing in both pools: off the primaries' blocked
+// list and off the blocked backups. A pool it is not blocked in is left as it is.
+func (csm *ConsumerSessionManager) releaseBlockedProvider(providerAddress string, route ReleaseRoute) {
+	csm.lock.Lock()
+	defer csm.lock.Unlock()
+	csm.validateAndReturnBlockedProviderToValidAddressesListLocked(providerAddress, route)
+	csm.releaseBlockedBackupLocked(providerAddress, route)
+}
+
+// releaseBlockedBackupLocked lifts a backup's block and logs the release. A no-op when the backup is
+// not blocked. csm.lock must be held.
+func (csm *ConsumerSessionManager) releaseBlockedBackupLocked(providerAddress string, route ReleaseRoute) {
+	if _, blocked := csm.blockedBackupProviders[providerAddress]; !blocked {
+		return
+	}
+	delete(csm.blockedBackupProviders, providerAddress)
+	if record, released := csm.releaseBlockRecordLocked(providerAddress, true); released {
+		csm.logProviderReleased(providerAddress, record, route, csm.blockedTotalLocked())
+	}
+}
+
 // blockedTotalLocked is how many providers are out across both pools — the number an operator wants
 // beside a block or release line. csm.lock must be held.
 func (csm *ConsumerSessionManager) blockedTotalLocked() int {
@@ -3542,19 +3589,8 @@ func (csm *ConsumerSessionManager) logProviderReleased(providerAddress string, r
 // calls this AFTER Endpoint.RecordProbeVerdict has returned (the endpoint mutex is already released),
 // so taking csm.lock here introduces no endpoint.mu→csm.lock nesting.
 func (csm *ConsumerSessionManager) RestoreRecoveredProvider(providerAddress string) {
-	csm.lock.Lock()
-	// Regular provider: move it back from the blocked list to validAddresses (also clears redemption
-	// status + blocked metric). A no-op if it isn't in the blocked list.
-	csm.validateAndReturnBlockedProviderToValidAddressesListLocked(providerAddress, ReleaseHealthProbe)
-	// Backup provider: drop it from the blocked-backup set (a no-op if absent). Independent of the
-	// regular pool — a provider overlapping both is restored in both.
-	if _, blocked := csm.blockedBackupProviders[providerAddress]; blocked {
-		delete(csm.blockedBackupProviders, providerAddress)
-		if record, released := csm.releaseBlockRecordLocked(providerAddress, true); released {
-			csm.logProviderReleased(providerAddress, record, ReleaseHealthProbe, csm.blockedTotalLocked())
-		}
-	}
-	csm.lock.Unlock()
+	// A provider overlapping both pools is restored in both.
+	csm.releaseBlockedProvider(providerAddress, ReleaseHealthProbe)
 
 	// Clear any standing report so a re-blocked provider isn't immediately re-blocked at epoch flip.
 	// RemoveReport takes its own lock; call it outside csm.lock to avoid any lock-order coupling.
@@ -3587,7 +3623,7 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		// we want this method to run last after we unlock the consumer session
 		// golang defer operates in a Last-In-First-Out (LIFO) order, meaning this defer will run last.
 		defer func() {
-			go csm.validateAndReturnBlockedProviderToValidAddressesList(providerAddress, ReleaseSuccessfulRelay)
+			go csm.releaseBlockedProvider(providerAddress, ReleaseSuccessfulRelay)
 		}()
 	}
 
@@ -3728,27 +3764,8 @@ func (csm *ConsumerSessionManager) GenerateReconnectCallback(consumerSessionsWit
 			utils.LavaFormatInfo("Reconnecting provider succeeded returning provider to valid addresses list", utils.LogAttr("provider", providerAddress))
 			// csm.pairing and csm.backupProviders are built from separate inputs by
 			// UpdateAllProviders with no dedup, so a provider address can legitimately
-			// appear in both. The old "if backup else primary" branching silently dropped
-			// the primary-side unblock for overlap cases — a provider blocked as primary
-			// via currentlyBlockedProviderAddresses would never return to validAddresses
-			// just because it happened to also exist in backupProviders.
-			//
-			// Handle both sides independently:
-			//   - backup side: delete from blockedBackupProviders when present
-			//   - primary side: validateAndReturnBlockedProviderToValidAddressesList —
-			//     idempotent for addresses not in currentlyBlockedProviderAddresses
-			//     (see line ~1739 comment), so calling unconditionally is safe.
-			csm.lock.Lock()
-			if _, inBackup := csm.backupProviders[providerAddress]; inBackup {
-				if _, blocked := csm.blockedBackupProviders[providerAddress]; blocked {
-					delete(csm.blockedBackupProviders, providerAddress)
-					if record, released := csm.releaseBlockRecordLocked(providerAddress, true); released {
-						csm.logProviderReleased(providerAddress, record, ReleaseReconnectLoop, csm.blockedTotalLocked())
-					}
-				}
-			}
-			csm.lock.Unlock()
-			csm.validateAndReturnBlockedProviderToValidAddressesList(providerAddress, ReleaseReconnectLoop)
+			// appear in both. Release both sides independently.
+			csm.releaseBlockedProvider(providerAddress, ReleaseReconnectLoop)
 		}
 		return err
 	}
@@ -3867,13 +3884,8 @@ func (csm *ConsumerSessionManager) checkAndUnblockHealthyReBlockedProviders(ctx 
 			)
 			if info.isBackup {
 				csm.lock.Lock()
-				delete(csm.blockedBackupProviders, providerAddress)
-				record, released := csm.releaseBlockRecordLocked(providerAddress, true)
-				blockedCount := csm.blockedTotalLocked()
+				csm.releaseBlockedBackupLocked(providerAddress, ReleaseEpochProbe)
 				csm.lock.Unlock()
-				if released {
-					csm.logProviderReleased(providerAddress, record, ReleaseEpochProbe, blockedCount)
-				}
 			} else {
 				csm.validateAndReturnBlockedProviderToValidAddressesList(providerAddress, ReleaseEpochProbe)
 			}

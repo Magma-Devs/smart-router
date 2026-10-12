@@ -13,7 +13,7 @@ import (
 )
 
 // The last chance (MAG-4232): when every primary and every backup is out, the blocked-list fallback
-// hands this request one blocked provider, and its disabled endpoint is lent for the request instead
+// hands this request one blocked provider — a primary first, else a backup — and its disabled endpoint is lent for the request instead
 // of skipped — no new step in the selection flow. Rules agreed for it:
 //  1. one try per request, never a loop over every disabled endpoint;
 //  2. lending does not mark the endpoint enabled; only a successful answer brings it back;
@@ -53,6 +53,18 @@ func lcCSM(t *testing.T, primaries []*ConsumerSessionsWithProvider, backups []*C
 
 func lcGet(csm *ConsumerSessionManager, used *UsedProviders) (ConsumerSessionsMap, error) {
 	return csm.GetSessions(context.Background(), 1, 10, used, spectypes.LATEST_BLOCK, "", nil, common.NO_STATE, 0, "", "")
+}
+
+// lcBackupWithDebug is a backup named "backup" whose only URL also serves the debug add-on.
+func lcBackupWithDebug(t *testing.T) *ConsumerSessionsWithProvider {
+	t.Helper()
+	b := lcProvider(t, "backup", "http://127.0.0.1:2")
+	b.Endpoints[0].Addons = map[string]struct{}{"debug": {}}
+	return b
+}
+
+func lcGetDebug(csm *ConsumerSessionManager, used *UsedProviders) (ConsumerSessionsMap, error) {
+	return csm.GetSessions(context.Background(), 1, 10, used, spectypes.LATEST_BLOCK, "debug", nil, common.NO_STATE, 0, "", "")
 }
 
 func lcServedBy(t *testing.T, sessions ConsumerSessionsMap) string {
@@ -147,8 +159,8 @@ func TestLastChance_LendsAProviderBlockedBeforeTheRequestArrived(t *testing.T) {
 	require.False(t, p.Endpoints[0].IsEnabled())
 }
 
-// With every primary and every backup disabled, the blocked-list fallback walks the primaries'
-// blocked list, so a primary is the one lent.
+// With every primary and every backup disabled, the blocked-list fallback walks the blocked
+// primaries before the blocked backups, so a primary is the one lent.
 func TestLastChance_LendsAPrimaryWhenBothTiersAreDisabled(t *testing.T) {
 	p := lcProvider(t, "primary", "http://127.0.0.1:1")
 	b := lcProvider(t, "backup", "http://127.0.0.1:2")
@@ -173,6 +185,57 @@ func TestLastChance_StaleBlockIsServedByTheWorkingEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "primary", lcServedBy(t, sessions))
 	require.True(t, p.Endpoints[0].IsEnabled())
+}
+
+// Only the backup has the debug add-on, and both URLs are disabled. The blocked primaries cannot
+// serve the request, so the blocked backup is lent. Before backups were walked: "No pairings
+// available".
+func TestLastChance_LendsABackupWhenOnlyItHasTheAddon(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	b := lcBackupWithDebug(t)
+	disableAt(t, p.Endpoints[0], probeBase)
+	disableAt(t, b.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, []*ConsumerSessionsWithProvider{b})
+
+	sessions, err := lcGetDebug(csm, NewUsedProviders(nil))
+	require.NoError(t, err)
+	require.Equal(t, "backup", lcServedBy(t, sessions))
+	require.False(t, b.Endpoints[0].IsEnabled(), "rule 2: lending must not mark the endpoint enabled")
+}
+
+// An earlier attempt of this request already used the primary. The backup is disabled, so it is
+// the one lent.
+func TestLastChance_LendsABackupWhenThePrimaryWasAlreadyTried(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	b := lcProvider(t, "backup", "http://127.0.0.1:2")
+	disableAt(t, b.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, []*ConsumerSessionsWithProvider{b})
+
+	used := NewUsedProviders(nil)
+	used.AddUnwantedAddresses("primary", NewRouterKey(nil))
+	sessions, err := lcGet(csm, used)
+	require.NoError(t, err)
+	require.Equal(t, "backup", lcServedBy(t, sessions))
+}
+
+// A lent backup that answers leaves the blocked backups at once, as a lent primary leaves the
+// blocked primaries.
+func TestLastChance_BackupSuccessLiftsItsBlock(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	b := lcBackupWithDebug(t)
+	disableAt(t, b.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, []*ConsumerSessionsWithProvider{b})
+
+	sessions, err := lcGetDebug(csm, NewUsedProviders(nil))
+	require.NoError(t, err)
+	require.Equal(t, "backup", lcServedBy(t, sessions))
+	require.True(t, slices.Contains(csm.ProviderRoutingSnapshot().BlockedBackupProviders, "backup"))
+	for _, s := range sessions {
+		require.NoError(t, csm.OnSessionDone(s.Session, spectypes.LATEST_BLOCK, 10, time.Millisecond, time.Millisecond, 1, 1, 1, false, nil))
+	}
+	require.Eventually(t, func() bool {
+		return !slices.Contains(csm.ProviderRoutingSnapshot().BlockedBackupProviders, "backup")
+	}, 2*time.Second, 10*time.Millisecond, "a successful last-chance relay lifts the backup's block")
 }
 
 // A websocket url can never answer a relay, so it is never lent.
