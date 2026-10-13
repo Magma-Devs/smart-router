@@ -464,6 +464,10 @@ func (dgm *DirectGRPCSubscriptionManager) StartSubscription(
 	existingSub, exists := dgm.activeSubscriptions[hashedParams]
 	dgm.lock.RUnlock()
 
+	// refused is a subscription the join turned away: dead, but still registered under the
+	// key until its listener gets round to releasing it. The dedup below must not read it as
+	// the live subscription to wait for or join, or this client would spin on it.
+	var refused *grpcActiveSubscription
 	if exists && dgm.config.SubscriptionSharingEnabled {
 		ack, replies, joinErr := dgm.joinExistingSubscription(ctx, existingSub, clientKey, hashedParams)
 		if !errors.Is(joinErr, errSubscriptionUnavailable) {
@@ -472,10 +476,45 @@ func (dgm *DirectGRPCSubscriptionManager) StartSubscription(
 		// The subscription died between the lookup above and the join — its last client
 		// left, or its upstream ended. Fall through and open a new one rather than hand
 		// this client a stream that is already being torn down.
+		refused = existingSub
 		utils.LavaFormatDebug("DirectGRPC: shared subscription vanished before join, creating a new one",
 			utils.LogAttr("clientKey", clientKey),
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
+	}
+
+	// Another client may be opening the same subscription right now. Wait for its outcome
+	// and join, rather than opening a second upstream stream that the map would then
+	// overwrite — stranding the first stream on the upstream with a client that could never
+	// unsubscribe it (MAG-4242). The first client through becomes the creator and settles the
+	// entry for the others on its way out, success or failure.
+	if dgm.config.SubscriptionSharingEnabled {
+		for {
+			pendingChan, foundPending := dgm.checkAndAddPendingSubscription(hashedParams, refused)
+			if !foundPending {
+				defer func() { dgm.settlePendingSubscription(hashedParams, err == nil) }()
+				break
+			}
+			var created bool
+			select {
+			case created = <-pendingChan:
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
+			if created {
+				dgm.lock.RLock()
+				existingSub, exists = dgm.activeSubscriptions[hashedParams]
+				dgm.lock.RUnlock()
+				if exists && existingSub != refused {
+					ack, replies, joinErr := dgm.joinExistingSubscription(ctx, existingSub, clientKey, hashedParams)
+					if !errors.Is(joinErr, errSubscriptionUnavailable) {
+						return ack, replies, joinErr
+					}
+					refused = existingSub
+				}
+			}
+			// The creator failed, or its subscription is already gone: try to become the creator.
+		}
 	}
 
 	// Check client subscription limit
@@ -492,6 +531,44 @@ func (dgm *DirectGRPCSubscriptionManager) StartSubscription(
 	return dgm.createNewSubscription(ctx, chainMessage, methodPath, requestData, hashedParams, clientKey)
 }
 
+// checkAndAddPendingSubscription mirrors the WebSocket manager's: a creator registers under
+// hashedParams before it opens the upstream stream, and every client arriving with the same
+// params while that is in flight gets a channel that reports the outcome. The active map is
+// re-checked under the same lock, so a subscription that became active between the caller's
+// lookup and this call is reported as created, and joined — unless it is the one the join
+// already refused, which is dead and gets replaced. Returns (nil, false) to the creator.
+func (dgm *DirectGRPCSubscriptionManager) checkAndAddPendingSubscription(hashedParams string, refused *grpcActiveSubscription) (chan bool, bool) {
+	dgm.lock.Lock()
+	defer dgm.lock.Unlock()
+
+	if active, found := dgm.activeSubscriptions[hashedParams]; found && active != refused {
+		settled := make(chan bool, 1)
+		settled <- true
+		return settled, true
+	}
+	pending, found := dgm.pendingSubscriptions[hashedParams]
+	if !found {
+		dgm.pendingSubscriptions[hashedParams] = &pendingSubscriptionsBroadcastManager{}
+		return nil, false
+	}
+	listenChan := make(chan bool, 1)
+	pending.broadcastChannelList = append(pending.broadcastChannelList, listenChan)
+	return listenChan, true
+}
+
+// settlePendingSubscription reports the creator's outcome to every client waiting on it and
+// retires the entry.
+func (dgm *DirectGRPCSubscriptionManager) settlePendingSubscription(hashedParams string, created bool) {
+	dgm.lock.Lock()
+	defer dgm.lock.Unlock()
+
+	pending, found := dgm.pendingSubscriptions[hashedParams]
+	if !found {
+		return
+	}
+	pending.broadcastToChannelList(created)
+	delete(dgm.pendingSubscriptions, hashedParams)
+}
 
 // releaseClientStateIfIdle drops the per-client bookkeeping a failed subscribe would
 // otherwise strand — but only while the client holds no subscription at all, so a client
