@@ -82,7 +82,7 @@ linters:
       # google.golang.org/protobuf/reflect is a dependency migration, not a lint fix.
       - linters:
           - staticcheck
-        text: 'SA1019:.*github.com/jhump/protoreflect/(desc|dynamic) is deprecated.*'
+        text: 'SA1019:.*"?github.com/jhump/protoreflect/(desc|dynamic)"? is deprecated.*'
       # h2c is superseded by http.Server.Protocols (Go 1.24). The cleartext HTTP/2 path
       # carries the cache and gRPC proxy listeners, so it moves in its own change.
       - linters:
