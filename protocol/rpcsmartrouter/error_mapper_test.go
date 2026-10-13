@@ -112,12 +112,12 @@ func TestClassifyDirectRPCError_InternalVsExternal(t *testing.T) {
 	// Connection errors are internal (Lava protocol layer)
 	timeoutErr := &mockNetError{timeout: true}
 	lavaErr, _ := classifyDirectRPCError(timeoutErr, -1, common.TransportJsonRPC)
-	assert.True(t, common.IsInternal(lavaErr.Code))
+	assert.Equal(t, common.CategoryInternal, lavaErr.Category)
 
 	// HTTP status errors are external (node/chain layer)
 	httpErr := errors.New("HTTP status 503: Service Unavailable")
 	lavaErr, _ = classifyDirectRPCError(httpErr, -1, common.TransportJsonRPC)
-	assert.True(t, common.IsExternal(lavaErr.Code))
+	assert.Equal(t, common.CategoryExternal, lavaErr.Category)
 }
 
 func TestClassifyError_MatchOrdering(t *testing.T) {

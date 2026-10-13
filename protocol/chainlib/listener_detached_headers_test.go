@@ -42,8 +42,6 @@ func (r *headerKeepingRelay) SendParsedRelay(ctx context.Context, analytics *met
 	return nil, errors.New("not used")
 }
 
-func (r *headerKeepingRelay) CancelSubscriptionContext(subscriptionKey string) {}
-
 // keptValues reads, now, the value each relay was handed for header name.
 func (r *headerKeepingRelay) keptValues(name string) []string {
 	r.mu.Lock()

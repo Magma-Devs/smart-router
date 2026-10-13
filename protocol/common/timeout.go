@@ -14,11 +14,6 @@ const (
 	AverageWorldLatency   = 300 * time.Millisecond
 	DefaultTimeoutSeconds = 30 // default timeout in seconds, can be overridden by flag
 	DefaultCacheTimeout   = 50 * time.Millisecond
-	// On subscriptions we must use context.Background(),
-	// we cant have a context.WithTimeout() context, meaning we can hang for ever.
-	// to avoid that we introduced a first reply timeout using a routine.
-	// if the first reply doesn't return after the specified timeout a timeout error will occur
-	SubscriptionFirstReplyTimeout = 10 * time.Second
 )
 
 // DefaultTimeout is the configurable default timeout for relay processing.

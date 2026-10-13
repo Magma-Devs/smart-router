@@ -37,10 +37,6 @@ type GrpcMessage struct {
 	chainproxy.BaseMessage
 }
 
-func (gm *GrpcMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	return ""
-}
-
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
 func (gm *GrpcMessage) GetRawRequestHash() ([]byte, error) {
 	headers := gm.GetHeaders()

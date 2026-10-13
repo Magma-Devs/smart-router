@@ -158,10 +158,6 @@ type ConsumerSessionManager struct {
 
 	qosManager *qos.QoSManager
 
-	// getLavaBlockHeight returns the current Lava blockchain block height
-	// This is NOT used for RelaySession.Epoch (which must be the pairing epoch start block)
-	getLavaBlockHeight func() int64
-
 	// consensusBaselineGetter resolves THIS interface's consensus baseline (block, the time it was
 	// computed, and whether a fresh majority exists) for the relay sync dimension (Topic E / F4). It
 	// is per-CSM (one CSM per chain+interface) so the relay path measures sync lag against its own
@@ -3864,7 +3860,6 @@ func NewConsumerSessionManager(
 		consumerMetricsManager: metrics.SafeMetrics(consumerMetricsManager),
 		consumerPublicAddress:  consumerPublicAddress,
 		qosManager:             qos.NewQoSManager(),
-		getLavaBlockHeight:     func() int64 { return 0 }, // default to 0, should be set by caller
 		blockedBackupProviders: make(map[string]struct{}),
 		blockedProviderRecords: make(map[string]BlockRecord),
 		rateLimitHoldoff:       holdoff.Shared,
@@ -3875,12 +3870,6 @@ func NewConsumerSessionManager(
 	csm.stickySessions = NewStickySessionStore()
 	csm.startStateSizesPublisher()
 	return csm
-}
-
-// SetLavaBlockHeightCallback sets the callback function to get current Lava blockchain block height
-// This must be called after creating the ConsumerSessionManager
-func (csm *ConsumerSessionManager) SetLavaBlockHeightCallback(getLavaBlockHeight func() int64) {
-	csm.getLavaBlockHeight = getLavaBlockHeight
 }
 
 // SetStatefulToBackup widens this chain's stateful broadcast to the backup tier

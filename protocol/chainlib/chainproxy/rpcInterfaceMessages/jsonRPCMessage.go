@@ -32,10 +32,6 @@ type JsonrpcMessage struct {
 	chainproxy.BaseMessage `json:"-"`
 }
 
-func (jm *JsonrpcMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	return string(reply.Result)
-}
-
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
 func (jm *JsonrpcMessage) GetRawRequestHash() ([]byte, error) {
 	headers := jm.GetHeaders()
@@ -243,11 +239,6 @@ func (jm JsonrpcMessage) ParseBlock(inp string) (int64, error) {
 	return parser.ParseDefaultBlockParameter(inp)
 }
 
-func ParseJsonRPCMsg(data []byte) (msgRet []JsonrpcMessage, err error) {
-	msgs, _, err := ParseJsonRPCMsgWithBatchFlag(data)
-	return msgs, err
-}
-
 // ParseJsonRPCMsgWithBatchFlag parses JSON-RPC message(s) and returns whether the input
 // was a batch request (JSON array). This distinction matters for single-element batches
 // like [{"id":1,"method":"getblockhash","params":[100]}] which must be treated as batch
@@ -307,10 +298,6 @@ func firstNonWhitespaceByte(data []byte) byte {
 type JsonrpcBatchMessage struct {
 	batch []rpcclient.BatchElemWithId
 	chainproxy.BaseMessage
-}
-
-func (jbm *JsonrpcBatchMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	return ""
 }
 
 // on batches we don't want to calculate the batch hash as its impossible to get the args

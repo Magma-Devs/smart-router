@@ -24,7 +24,6 @@ type IChainTracker interface {
 	GetLatestBlockData(fromBlock, toBlock, specificBlock int64) (latestBlock int64, requestedHashes []*BlockStore, changeTime time.Time, err error)
 
 	// RegisterForBlockTimeUpdates registers an updatable to receive block time updates
-	RegisterForBlockTimeUpdates(updatable blockTimeUpdatable)
 
 	// GetLatestBlockNum returns the current latest block number and the time it was last changed
 	GetLatestBlockNum() (int64, time.Time)
@@ -64,7 +63,6 @@ type IChainTracker interface {
 	AddBlockGap(newData time.Duration, blocks uint64)
 
 	// IsDummy gets the chain tracker weight - a way to differntiate between trackers (dummy tracker with weight 0)
-	IsDummy() bool
 }
 
 const (
@@ -98,10 +96,6 @@ type ChainFetcher interface {
 	FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error)
 	FetchEndpoint() lavasession.RPCProviderEndpoint
 	CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error)
-}
-
-type blockTimeUpdatable interface {
-	UpdateBlockTime(time.Duration)
 }
 
 type DefaultChainTrackerFetcher struct {
@@ -140,7 +134,6 @@ type ChainTracker struct {
 	latestChangeTime        time.Time
 	startupTime             time.Time
 	blockEventsGap          []time.Duration
-	blockTimeUpdatables     map[blockTimeUpdatable]struct{}
 
 	// initial config
 	averageBlockTime time.Duration
@@ -194,10 +187,6 @@ type pollNowRequest struct {
 	resp chan error
 }
 
-func (cs *ChainTracker) IsDummy() bool {
-	return false
-}
-
 // this function returns block hashes of the blocks: [from block - to block] inclusive. an additional specific block hash can be provided. order is sorted ascending
 // it supports requests for [spectypes.LATEST_BLOCK-distance1, spectypes.LATEST_BLOCK-distance2)
 // spectypes.NOT_APPLICABLE in fromBlock or toBlock results in only returning specific block.
@@ -241,20 +230,6 @@ func (cs *ChainTracker) GetLatestBlockData(fromBlock, toBlock, specificBlock int
 	}
 
 	return latestBlock, requestedHashes, cs.latestChangeTime, nil
-}
-
-func (cs *ChainTracker) RegisterForBlockTimeUpdates(updatable blockTimeUpdatable) {
-	cs.blockQueueMu.Lock()
-	defer cs.blockQueueMu.Unlock()
-	cs.blockTimeUpdatables[updatable] = struct{}{}
-}
-
-func (cs *ChainTracker) updateAverageBlockTimeForRegistrations(averageBlockTime time.Duration) {
-	cs.blockQueueMu.RLock()
-	defer cs.blockQueueMu.RUnlock()
-	for updatable := range cs.blockTimeUpdatables {
-		updatable.UpdateBlockTime(averageBlockTime)
-	}
 }
 
 // blockQueueMu must be locked
@@ -974,7 +949,6 @@ func (ct *ChainTracker) updatePollingTimeBasedOnBlockGap(pollingTime time.Durati
 				if percentileTime > pollingTime*2 {
 					utils.LavaFormatWarning("[-] substantial polling time increase for chain detected", nil, utils.Attribute{Key: "median new polling time", Value: percentileTime}, utils.Attribute{Key: "original polling time", Value: pollingTime}, utils.Attribute{Key: "chainID", Value: ct.endpoint.ChainID}, utils.Attribute{Key: "stability", Value: stability})
 				}
-				go ct.updateAverageBlockTimeForRegistrations(percentileTime)
 				return percentileTime, true
 			}
 			return pollingTime, true
@@ -1051,7 +1025,6 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		serverBlockMemory:       config.ServerBlockMemory,
 		blockCheckpointDistance: config.BlocksCheckpointDistance,
 		blockEventsGap:          []time.Duration{},
-		blockTimeUpdatables:     map[blockTimeUpdatable]struct{}{},
 		startupTime:             time.Now(),
 		pollingTimeMultiplier:   time.Duration(pollingTime),
 		averageBlockTime:        config.AverageBlockTime,

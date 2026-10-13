@@ -43,10 +43,6 @@ func NewTendermintRpcChainParser() (chainParser *TendermintChainParser, err erro
 	return parser, nil
 }
 
-func (bcp *TendermintChainParser) GetUniqueName() string {
-	return "tendermint_chain_parser"
-}
-
 func (apip *TendermintChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {
 	if apip == nil {
 		return nil, errors.New("ChainParser not defined")
@@ -292,12 +288,6 @@ func (*TendermintChainParser) newBatchChainMessage(serviceApi *spectypes.Api, re
 		usedDefaultValue:         usedDefaultValue,
 	}
 	return nodeMsg, err
-}
-
-// overwritten because tendermintrpc doesnt use POST but an empty connecionType
-func (apip *TendermintChainParser) ExtractDataFromRequest(request *http.Request) (url string, data string, connectionType string, metadata []pairingtypes.Metadata, err error) {
-	url, data, _, metadata, err = apip.BaseChainParser.ExtractDataFromRequest(request)
-	return url, data, "", metadata, err
 }
 
 func (*TendermintChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedHashes []string, msg *rpcInterfaceMessages.TendermintrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
@@ -827,14 +817,6 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 		return nil, utils.LavaFormatError("tendermintRPC error", err)
 	}
 
-	// if we didn't get a node error.
-	if replyMsg.Error == nil {
-		// validate result is valid
-		responseIsNilValidationError := ValidateNilResponse(string(replyMsg.Result))
-		if responseIsNilValidationError != nil {
-			return nil, responseIsNilValidationError
-		}
-	}
 	err = cp.ValidateRequestAndResponseIds(nodeMessage.ID, rpcMessage.ID)
 	if err != nil {
 		// When there's a response error, the node may return an empty/invalid ID,

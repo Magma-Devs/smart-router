@@ -2771,16 +2771,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	sessionManager.SetStatefulToBackup(viper.GetBool(common.StatefulToBackupFlag))
 
 	// Set callback to get Lava blockchain block height for RelaySession.Epoch
-	// Smart router doesn't connect to blockchain, so calculate approximate block height from epoch
-	// Epoch duration is 15 minutes (900 seconds), and Lava block time is ~15 seconds
-	// So each epoch is approximately 60 blocks (900 / 15)
-	sessionManager.SetLavaBlockHeightCallback(func() int64 {
-		currentEpoch := rpsr.epochTimer.GetCurrentEpoch()
-		// Approximate blocks per epoch: epochDuration / averageBlockTime
-		blocksPerEpoch := int64(rpsr.epochTimer.GetEpochDuration().Seconds() / 15) // 15 second Lava block time
-		return int64(currentEpoch) * blocksPerEpoch
-	})
-
 	// Store session manager in router for epoch timer callbacks
 	sessionManagerKey := rpcEndpoint.Key() // chainID-apiInterface
 	rpsr.mu.Lock()

@@ -994,8 +994,3 @@ func (m *EndpointMonitor) Stop() {
 		utils.LogAttr("trackersStopped", trackerCount),
 	)
 }
-
-// IsDummy returns false - this is a real manager.
-func (m *EndpointMonitor) IsDummy() bool {
-	return false
-}

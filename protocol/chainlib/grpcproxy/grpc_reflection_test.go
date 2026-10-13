@@ -371,7 +371,7 @@ func TestReflection_WithoutASourceNothingReachesTheRelayCallback(t *testing.T) {
 		relayed.Add(1)
 		return nil, nil, status.Error(codes.Internal, "reflection reached the relay callback")
 	}
-	_, httpServer, err := NewGRPCProxy(relay, "", testCmdFlags(), nil)
+	_, httpServer, err := newGRPCProxy(relay, "", testCmdFlags(), nil)
 	require.NoError(t, err)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)

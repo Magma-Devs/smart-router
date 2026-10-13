@@ -121,7 +121,6 @@ func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 			allowedAddons:     apip.allowedAddons,
 			allowedExtensions: apip.allowedExtensions,
 			extensionParser:   apip.extensionParser,
-			active:            apip.active,
 
 			// Carried, not re-seeded from the package default: the clone must verify
 			// under the same ws policy as the parser it stands in for.
@@ -130,10 +129,6 @@ func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 		registry: apip.registry,
 		codec:    apip.codec,
 	}
-}
-
-func (bcp *GrpcChainParser) GetUniqueName() string {
-	return "grpc_chain_parser"
 }
 
 func (apip *GrpcChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {

@@ -51,10 +51,6 @@ func NewJrpcChainParser() (chainParser *JsonRPCChainParser, err error) {
 	return parser, nil
 }
 
-func (bcp *JsonRPCChainParser) GetUniqueName() string {
-	return "jsonrpc_chain_parser"
-}
-
 func (apip *JsonRPCChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {
 	if apip == nil {
 		return nil, errors.New("ChainParser not defined")
@@ -313,14 +309,6 @@ func (apip *JsonRPCChainParser) SetSpec(spec spectypes.Spec) {
 	// extract server and tagged apis from spec
 	internalPaths, serverApis, taggedApis, apiCollections, headers, verifications := getServiceApis(spec, spectypes.APIInterfaceJsonRPC)
 	apip.BaseChainParser.Construct(spec, internalPaths, taggedApis, serverApis, apiCollections, headers, verifications)
-}
-
-func (apip *JsonRPCChainParser) GetInternalPaths() map[string]struct{} {
-	internalPaths := map[string]struct{}{}
-	for _, apiCollection := range apip.apiCollections {
-		internalPaths[apiCollection.CollectionData.InternalPath] = struct{}{}
-	}
-	return internalPaths
 }
 
 // ChainBlockStats returns block stats from spec
@@ -801,14 +789,6 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 	replyMsg, err = rpcInterfaceMessages.ConvertJsonRPCMsg(rpcMessage)
 	if err != nil {
 		return nil, utils.LavaFormatError("jsonRPC error", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
-	}
-
-	// validate result is valid
-	if replyMsg.Error == nil {
-		responseIsNilValidationError := ValidateNilResponse(string(replyMsg.Result))
-		if responseIsNilValidationError != nil {
-			return nil, responseIsNilValidationError
-		}
 	}
 
 	err = cp.ValidateRequestAndResponseIds(nodeMessage.ID, replyMsg.ID)

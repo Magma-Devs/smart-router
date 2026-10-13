@@ -20,15 +20,6 @@ type TendermintrpcMessage struct {
 	Path string
 }
 
-func (tm TendermintrpcMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	params, err := json.Marshal(tm.GetParams())
-	if err != nil {
-		utils.LavaFormatWarning("failed marshaling params", err, utils.LogAttr("request", tm))
-		return ""
-	}
-	return string(params)
-}
-
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
 func (tm *TendermintrpcMessage) GetRawRequestHash() ([]byte, error) {
 	headers := tm.GetHeaders()

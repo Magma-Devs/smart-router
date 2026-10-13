@@ -996,8 +996,6 @@ func (wsRelayStub) SendParsedRelay(ctx context.Context, analytics *metrics.Relay
 	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(wsRelayStubReply)}, StatusCode: http.StatusOK}, nil
 }
 
-func (wsRelayStub) CancelSubscriptionContext(subscriptionKey string) {}
-
 // MAG-4055: a websocket relay's relay_usage event carries the Origin the client
 // sent on the handshake, the same as an HTTP or gRPC relay's event does.
 func TestJsonRPCChainListener_WebsocketRelayUsageCarriesOrigin(t *testing.T) {

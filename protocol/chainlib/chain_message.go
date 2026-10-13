@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -17,7 +16,6 @@ type updatableRPCInput interface {
 	rpcInterfaceMessages.GenericMessage
 	UpdateLatestBlockInMessage(latestBlock uint64, modifyContent bool) (success bool)
 	AppendHeader(metadata []pairingtypes.Metadata)
-	SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string
 	GetRawRequestHash() ([]byte, error)
 }
 
@@ -59,10 +57,6 @@ func (bcnc *baseChainMessageContainer) GetRequestedBlocksHashes() []string {
 	return bcnc.requestedBlockHashes
 }
 
-func (bcnc *baseChainMessageContainer) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	return bcnc.msg.SubscriptionIdExtractor(reply)
-}
-
 // returning parse directive for the api. can be nil.
 func (bcnc *baseChainMessageContainer) GetParseDirective() *spectypes.ParseDirective {
 	return bcnc.parseDirective
@@ -101,10 +95,6 @@ func (bcnc *baseChainMessageContainer) SetForceCacheRefresh(force bool) bool {
 
 func (bcnc *baseChainMessageContainer) GetForceCacheRefresh() bool {
 	return bcnc.forceCacheRefresh
-}
-
-func (bcnc *baseChainMessageContainer) DisableErrorHandling() {
-	bcnc.msg.DisableErrorHandling()
 }
 
 func (bcnc baseChainMessageContainer) AppendHeader(metadata []pairingtypes.Metadata) {

@@ -103,7 +103,7 @@ func TestJsonrpcMessage_ParseBlock(t *testing.T) {
 func TestParseJsonRPCMsg(t *testing.T) {
 	// Test Case 1: Valid JSON input
 	data := []byte(`{"jsonrpc": "2.0", "id": 1, "method": "getblock", "params": [], "result": {"block": "block data"}}`)
-	msgs, err := ParseJsonRPCMsg(data)
+	msgs, err := parseJsonRPCMsg(data)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestParseJsonRPCMsg(t *testing.T) {
 
 	// Test Case 2: Invalid JSON input
 	data = []byte(`{"jsonrpc": "2.0", "id": 1, "method": "getblock", "params": []`)
-	_, err = ParseJsonRPCMsg(data)
+	_, err = parseJsonRPCMsg(data)
 	if err == nil {
 		t.Errorf("Expected error, but got nil")
 	}
@@ -127,11 +127,11 @@ func TestParseJsonRPCMsg(t *testing.T) {
 func TestParseJsonRPCMissingId(t *testing.T) {
 	// Test Case 1: Valid JSON input
 	data := []byte(`{"jsonrpc": "2.0", "id": nil, "method": "getblock", "params": []}`)
-	_, err := ParseJsonRPCMsg(data)
+	_, err := parseJsonRPCMsg(data)
 	require.Error(t, err, err)
 
 	data = []byte(`{"jsonrpc": "2.0", "method": "getblock", "params": []}`)
-	msg, err := ParseJsonRPCMsg(data)
+	msg, err := parseJsonRPCMsg(data)
 	require.NoError(t, err)
 	require.Equal(t, json.RawMessage([]byte("null")), msg[0].ID)
 }
@@ -139,7 +139,7 @@ func TestParseJsonRPCMissingId(t *testing.T) {
 func TestParseJsonRPCBatch(t *testing.T) {
 	// Test Case 1: Valid JSON input
 	data := []byte(`[{"method":"eth_chainId","params":[],"id":1,"jsonrpc":"2.0"},{"method":"eth_accounts","params":[],"id":2,"jsonrpc":"2.0"},{"method":"eth_blockNumber","params":[],"id":3,"jsonrpc":"2.0"}]`)
-	msgs, err := ParseJsonRPCMsg(data)
+	msgs, err := parseJsonRPCMsg(data)
 	if err != nil {
 		t.Errorf("Unexpected error: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestParseJsonRPCBatch(t *testing.T) {
 
 		// Test Case 2: Invalid JSON input
 		data = []byte(`{"jsonrpc": "2.0", "id": 1, "method": "getblock", "params": []`)
-		_, err = ParseJsonRPCMsg(data)
+		_, err = parseJsonRPCMsg(data)
 		if err == nil {
 			t.Errorf("Expected error, but got nil")
 		}
@@ -620,4 +620,9 @@ func TestCheckResponseErrorForJsonRpcBatch_MalformedElements(t *testing.T) {
 		require.True(t, hasError, "strict mode flags any fault, including malformed elements")
 		require.Contains(t, errorMsg, "missing both 'result' and 'error'")
 	})
+}
+
+func parseJsonRPCMsg(data []byte) (msgRet []JsonrpcMessage, err error) {
+	msgs, _, err := ParseJsonRPCMsgWithBatchFlag(data)
+	return msgs, err
 }
