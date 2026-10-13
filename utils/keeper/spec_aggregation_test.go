@@ -1108,3 +1108,24 @@ func expandCommaSeparatedLocalPaths(path string) []string {
 	}
 	return expanded
 }
+
+// A corrupt spec file beside a good one used to vanish silently: the walk recorded the error and
+// the loader dropped it as long as one spec loaded. The remote loaders warn; now so does this one,
+// and the walk exposes what it recorded (MAG-4278).
+func TestGetAllSpecsFromLocalDir_ReportsACorruptSibling(t *testing.T) {
+	tmpDir := t.TempDir()
+	good := `{"proposal":{"specs":[{"index":"GOOD1","name":"good chain","enabled":true}]}}`
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "good.json"), []byte(good), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "broken.json"), []byte(`{"proposal":`), 0o644))
+
+	specs, errs, err := walkLocalSpecDir(tmpDir)
+	require.NoError(t, err)
+	require.Len(t, specs, 1)
+	require.Contains(t, specs, "GOOD1")
+	require.Len(t, errs, 1, "the corrupt sibling must be recorded")
+	require.Contains(t, errs[0].Error(), "broken.json")
+
+	loaded, err := GetAllSpecsFromLocalDir(tmpDir)
+	require.NoError(t, err, "one good spec is still a successful load")
+	require.Contains(t, loaded, "GOOD1")
+}
