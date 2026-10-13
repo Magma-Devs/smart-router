@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"syscall"
@@ -730,6 +731,17 @@ func DetectConnectionError(err error) *LavaError {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return LavaErrorConnectionTimeout
 	}
+	// A DNS failure that is not a timeout (no such host, server misbehaving) is a connect-phase
+	// fault of the endpoint's name, and an EOF is the socket closing under the request. Both used
+	// to fall through to the generic matchers, land on UNKNOWN_ERROR and count as nobody's fault,
+	// while the sibling connection reset was internal and at fault (MAG-4242).
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return LavaErrorDNSFailure
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return LavaErrorConnectionClosed
+	}
 
 	// Layer 2: string fallback for errors wrapped without %w.
 	if le := detectConnectionErrorFromString(strings.ToLower(err.Error())); le != nil {
@@ -854,6 +866,16 @@ var stringConnectionFallbacks = []stringConnectionFallback{
 	// upstream stream (distinct from "connection refused" which is a connect
 	// failure before any stream was established).
 	{mustContain: []string{"connection termination"}, result: LavaErrorConnectionReset},
+	// DNS, EOF and the http-served-as-https shapes, as the resolver, io and net/http word them and
+	// as the node error handler rewords them ("Reason: ..."), so the typed checks above have a
+	// string sibling for an error wrapped without %w (MAG-4242).
+	{mustContain: []string{"no such host"}, result: LavaErrorDNSFailure},
+	{mustContain: []string{"server misbehaving"}, result: LavaErrorDNSFailure},
+	{mustContain: []string{"dns resolution failed"}, result: LavaErrorDNSFailure},
+	{mustContain: []string{"server gave http response to https client"}, result: LavaErrorTLSMismatch},
+	{mustContain: []string{"misconfigured http endpoint as https"}, result: LavaErrorTLSMismatch},
+	{mustContain: []string{"unexpected eof"}, result: LavaErrorConnectionClosed},
+	{mustContain: []string{"end of input stream reached"}, result: LavaErrorConnectionClosed},
 }
 
 // detectConnectionErrorFromString walks stringConnectionFallbacks in order and
