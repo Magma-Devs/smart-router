@@ -5,7 +5,12 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -199,4 +204,104 @@ func readChainIdleGauge(t *testing.T, spec string) float64 {
 	v, found := findChainIdleGauge(t, spec)
 	require.True(t, found, "smartrouter_chain_idle not reported for %s", spec)
 	return v
+}
+
+// TestProbeCycle_HeadStallWaitsForTheWakeBurst: a chain that was quiet before it went idle has
+// every url on the same block with SameBlockCycles >= N, and nothing marked (nothing was ahead).
+// The relay that ends the idle period re-polls both urls; A answers at once with a higher block,
+// B is slow. A probe cycle in that window sees B behind A's block with N same-block cycles, which is
+// exactly the head-stall shape, but B has simply not answered yet. The step must wait for the
+// burst; once B's wake poll lands above its old block there is nothing to mark.
+func TestProbeCycle_HeadStallWaitsForTheWakeBurst(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var headA, headB atomic.Int64
+	headA.Store(1000)
+	headB.Store(1000)
+	var delayB atomic.Int64 // milliseconds
+	node := func(head *atomic.Int64, delay *atomic.Int64) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if delay != nil {
+				time.Sleep(time.Duration(delay.Load()) * time.Millisecond)
+			}
+			var req struct {
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			b := head.Load()
+			result := fmt.Sprintf(`"0x%x"`, b)
+			if req.Method != "eth_blockNumber" {
+				result = fmt.Sprintf(`{"number":"0x%x","hash":"0x%064x"}`, b, b)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%s,"result":%s}`, req.ID, result)
+		}))
+	}
+	nodeA, nodeB := node(&headA, nil), node(&headB, &delayB)
+	defer nodeA.Close()
+	defer nodeB.Close()
+
+	f := newReconcileFixtureWith(t, ctx, func(cfg *endpointstate.EndpointChainTrackerConfig) {
+		cfg.IdleAfter = endpointstate.MinIdleAfter
+		cfg.PollIntervalDivisor = 0.25 // N = 3, and the trackers' own timer stays minutes away
+	})
+	n := f.monitor.StallCycleThreshold()
+	require.Equal(t, 3, n)
+	f.admit(t, ctx, nodeA.URL, nodeB.URL)
+	go f.server.initializeChainTrackers(ctx)
+	for _, url := range []string{nodeA.URL, nodeB.URL} {
+		require.Eventually(t, func() bool {
+			state, _, _ := f.monitor.GetTrackerState(url)
+			return state == endpointstate.EndpointChainTrackerPolling
+		}, 10*time.Second, 20*time.Millisecond)
+	}
+	// The quiet chain: both urls answer 1000 for N cycles and more.
+	for _, url := range []string{nodeA.URL, nodeB.URL} {
+		require.Eventually(t, func() bool {
+			_, _, _ = f.monitor.PollNow(ctx, url)
+			obs, _ := f.monitor.GetObservation(url)
+			return obs.SameBlockCycles >= n
+		}, 10*time.Second, 20*time.Millisecond)
+	}
+	cfg := probeVerdictConfigFor(30*time.Second, nil)
+	f.server.runProbeCycle(nil, cfg)
+	stalledURL := func(url string) bool {
+		for _, e := range f.csm.GetAllDirectRPCEndpoints() {
+			if e.Endpoint.NetworkAddress == url {
+				_, held := e.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled)
+				return held
+			}
+		}
+		t.Fatalf("no endpoint for %s", url)
+		return false
+	}
+	require.False(t, stalledURL(nodeB.URL), "a quiet chain marks nothing")
+
+	// The chain moved while idle. A relay an hour after the last one ends the idle period.
+	headA.Store(1100)
+	headB.Store(1100)
+	delayB.Store(3000)
+	wait := f.monitor.NoteClientRelay(time.Now().Add(time.Hour))
+	require.NotNil(t, wait)
+	select {
+	case <-wait: // A's wake poll landed
+	case <-time.After(5 * time.Second):
+		t.Fatal("node A's wake poll did not land")
+	}
+	obsA, _ := f.monitor.GetObservation(nodeA.URL)
+	require.Equal(t, int64(1100), obsA.HighestBlockSeen)
+	obsB, _ := f.monitor.GetObservation(nodeB.URL)
+	require.Equal(t, int64(1000), obsB.HighestBlockSeen, "B's wake poll is still in flight")
+	require.GreaterOrEqual(t, obsB.SameBlockCycles, n)
+
+	f.server.runProbeCycle(nil, cfg)
+	require.False(t, stalledURL(nodeB.URL), "a url still being re-polled by the wake is not head-stalled")
+
+	require.Eventually(t, func() bool { return !f.monitor.QoSFeedPaused(time.Now()) }, 15*time.Second, 50*time.Millisecond)
+	obsB, _ = f.monitor.GetObservation(nodeB.URL)
+	require.Equal(t, int64(1100), obsB.HighestBlockSeen, "B's wake poll landed")
+	f.server.runProbeCycle(nil, cfg)
+	require.False(t, stalledURL(nodeB.URL))
 }

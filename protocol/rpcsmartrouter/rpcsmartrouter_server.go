@@ -3606,8 +3606,14 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 		rpcss.probeReplayer,
 	)
 	// MAG-3986: after the re-enable pass, so an endpoint the probe just returned to rotation is
-	// counted as usable by never-empty.
-	rpcss.runHeadStall(endpoints, startedAt)
+	// counted as usable by never-empty. Skipped while the QoS feed is paused, for the same reason:
+	// no fresh evidence. During a wake burst (or idle heartbeats, which poll one url at a time) the
+	// first url to answer raises the chain's highest block while the others still hold their
+	// pre-idle block, and a url that carried SameBlockCycles >= N into the idle period (every url
+	// of a chain that was quiet before it went idle) would be marked head-stalled for nothing.
+	if !idle {
+		rpcss.runHeadStall(endpoints, startedAt)
+	}
 	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, evidenceGated, idle)
 }
 
