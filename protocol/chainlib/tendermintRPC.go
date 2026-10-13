@@ -287,7 +287,7 @@ func (*TendermintChainParser) newBatchChainMessage(serviceApi *spectypes.Api, re
 		requestedBlockHashes:     requestedHashes,
 		msg:                      &batchMessage,
 		earliestRequestedBlock:   earliestRequestedBlock,
-		resultErrorParsingMethod: rpcInterfaceMessages.CheckResponseErrorForJsonRpcBatch,
+		resultErrorParsingMethod: rpcInterfaceMessages.CheckResponseErrorForTendermintBatch,
 		parseDirective:           GetParseDirective(serviceApi, apiCollection),
 		usedDefaultValue:         usedDefaultValue,
 	}
