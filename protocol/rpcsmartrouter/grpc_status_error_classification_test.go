@@ -178,11 +178,12 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 			name:                  "Unimplemented is a capability gap, not a failure",
 			code:                  codes.Unimplemented,
 			nodeMessage:           "unknown service cosmos.bank.v1beta1.Query",
-			wantNonRetryable:      true,
-			wantUnsupportedMethod: true,
+			wantNonRetryable:      false,
+			wantUnsupportedMethod: false,
 			wantScored:            false,
-			why: "IsUnsupportedMethod gates the zero-CU carve-out and caching policy; it is reachable " +
-				"only because ApplyNodeErrorClassification assigns the whole flag set, not IsNonRetryable alone",
+			why: "MAG-2771: another gateway may implement the service, so the request goes on, and " +
+				"node-capability keeps the endpoint out of the availability signal — reachable only " +
+				"because ApplyNodeErrorClassification assigns the whole flag set, not IsNonRetryable alone",
 		},
 		{
 			name:             "Aborted is the validators' verdict on a write, not the endpoint's fault",

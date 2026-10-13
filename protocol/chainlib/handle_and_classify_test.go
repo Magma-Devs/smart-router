@@ -15,14 +15,17 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestHandleAndClassify_UnsupportedMethod(t *testing.T) {
+func TestHandleAndClassify_MethodNotFoundIsRetryable(t *testing.T) {
 	// GIVEN a "method not found" error
 	// WHEN handleAndClassify processes it
-	// THEN it returns an UnsupportedMethodError wrapper
+	// THEN it is wrapped as NODE_METHOD_NOT_FOUND, which since MAG-2771 is a claim about this node:
+	// retryable on another provider, not a router-terminal unsupported method
 	err := errors.New("method not found")
 	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
 	require.NotNil(t, result)
-	assert.True(t, IsUnsupportedMethodErrorType(result))
+	assert.True(t, errors.Is(result, common.LavaErrorNodeMethodNotFound))
+	assert.False(t, IsUnsupportedMethodErrorType(result))
+	assert.True(t, ShouldRetryError(result), "another provider may serve the method")
 }
 
 func TestHandleAndClassify_NonRetryableError(t *testing.T) {
@@ -69,11 +72,14 @@ func TestClassifyNodeError_PlainError(t *testing.T) {
 }
 
 func TestClassifyNodeError_GRPCStatusError(t *testing.T) {
-	// gRPC Unimplemented should classify as unsupported method
+	// gRPC Unimplemented is the node saying it does not implement the method: NODE_UNIMPLEMENTED,
+	// node-capability and retryable since MAG-2771, because another gateway may implement it.
 	grpcErr := status.Error(codes.Unimplemented, "method not implemented")
 	result := ClassifyNodeError(grpcErr, -1, common.TransportGRPC)
 	require.NotNil(t, result)
-	assert.True(t, result.SubCategory.IsUnsupportedMethod())
+	assert.Equal(t, common.LavaErrorNodeUnimplemented, result)
+	assert.True(t, result.SubCategory.IsNodeCapability())
+	assert.True(t, result.Retryable)
 }
 
 func TestClassifyNodeError_HTTPError(t *testing.T) {
@@ -157,11 +163,14 @@ func TestUnwrapLavaError_Nil(t *testing.T) {
 func TestHandleAndClassify_JsonRPCMethodNotFound(t *testing.T) {
 	// GIVEN a "method not found" error (message-based match)
 	// WHEN classified with TransportJsonRPC
-	// THEN it's detected as unsupported method via SubCategory
+	// THEN its SubCategory is node-capability: the node answered about itself (MAG-2771)
 	err := errors.New("method not found")
 	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
 	require.NotNil(t, result)
-	assert.True(t, IsUnsupportedMethodErrorType(result))
+	lavaErr := unwrapLavaError(result)
+	require.NotNil(t, lavaErr)
+	assert.True(t, lavaErr.SubCategory.IsNodeCapability())
+	assert.False(t, IsUnsupportedMethodErrorType(result))
 }
 
 func TestHandleAndClassify_MethodNotSupported(t *testing.T) {

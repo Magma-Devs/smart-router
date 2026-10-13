@@ -719,6 +719,65 @@ func TestStatelessReturnsFirstNodeError(t *testing.T) {
 	})
 }
 
+// TestStatelessReturnsTheNonRetryableNodeError_MAG2771: a retryable node error is the node's claim
+// about itself (MAG-2771). When a later attempt ends the request with a non-retryable one — a fact
+// about the chain or the request — that is the error the caller gets, not the first to arrive.
+func TestStatelessReturnsTheNonRetryableNodeError_MAG2771(t *testing.T) {
+	ctx := context.Background()
+	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, "LAVA", spectypes.APIInterfaceRest, serverHandler, nil, "../../", nil)
+	if closeServer != nil {
+		defer closeServer()
+	}
+	require.NoError(t, err)
+	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
+
+	for _, tc := range []struct {
+		name        string
+		terminalIdx int // which of the three replies is non-retryable; -1 for none
+		want        int // which reply the caller gets
+	}{
+		{name: "a refusal, then the peer's terminal answer", terminalIdx: 1, want: 1},
+		{name: "two refusals, then a terminal answer", terminalIdx: 2, want: 2},
+		{name: "a terminal answer first", terminalIdx: 0, want: 0},
+		{name: "no terminal answer: the first to arrive", terminalIdx: -1, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			usedProviders := lavasession.NewUsedProviders(nil)
+			relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics,
+				newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateless))
+			lockCtx, cancel := context.WithTimeout(context.Background(), time.Millisecond*10)
+			defer cancel()
+			require.Nil(t, usedProviders.TryLockSelection(lockCtx))
+
+			providers := []string{"lava@first", "lava@second", "lava@third"}
+			sessions := lavasession.ConsumerSessionsMap{}
+			for _, provider := range providers {
+				sessions[provider] = &lavasession.SessionInfo{}
+			}
+			usedProviders.AddUsed(sessions, nil)
+			replies := make([][]byte, len(providers))
+			for i, provider := range providers {
+				replies[i] = []byte(fmt.Sprintf(`{"message":"reply %d","code":%d}`, i, 400+i))
+				go sendNodeErrorWithDataAndRetryability(relayProcessor, provider, time.Duration(5*(i+1))*time.Millisecond, replies[i], i == tc.terminalIdx)
+			}
+
+			waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Millisecond*200)
+			defer waitCancel()
+			require.NoError(t, relayProcessor.WaitForResults(waitCtx))
+
+			returnedResult, err := relayProcessor.ProcessingResult()
+			require.NoError(t, err)
+			require.NotNil(t, returnedResult)
+			require.Equal(t, string(replies[tc.want]), string(returnedResult.Reply.Data))
+		})
+	}
+}
+
 // Test 1.2: CrossValidation mode fails when only node errors are received (no successful responses)
 func TestNodeErrorCrossValidationNotMet(t *testing.T) {
 	t.Run("cross_validation_mode_fails_with_only_node_errors", func(t *testing.T) {
@@ -1273,6 +1332,25 @@ func TestSuccessCrossValidationFailsWhenCrossValidationDisabled(t *testing.T) {
 // Helper functions for new tests
 // ============================================================================
 
+// Helper to send a node error with custom data and an explicit retry verdict
+func sendNodeErrorWithDataAndRetryability(relayProcessor *RelayProcessor, provider string, delay time.Duration, data []byte, nonRetryable bool) {
+	time.Sleep(delay)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.SetResponse(&RelayResponse{
+		RelayResult: common.RelayResult{
+			Request: &pairingtypes.RelayRequest{
+				RelaySession: &pairingtypes.RelaySession{},
+				RelayData:    &pairingtypes.RelayPrivateData{},
+			},
+			Reply:          &pairingtypes.RelayReply{Data: data},
+			ProviderInfo:   common.ProviderInfo{ProviderAddress: provider},
+			StatusCode:     500,
+			IsNodeError:    true,
+			IsNonRetryable: nonRetryable,
+		},
+	})
+}
+
 // Helper to send a node error with custom data
 func sendNodeErrorWithData(relayProcessor *RelayProcessor, provider string, delay time.Duration, data []byte) {
 	time.Sleep(delay)
@@ -1498,13 +1576,15 @@ func TestGetResultsSummary_UnsupportedMethodFlag(t *testing.T) {
 	})
 
 	t.Run("registry-based classification", func(t *testing.T) {
-		unsupportedMessages := []string{
+		// MAG-2771: a node's own refusal is node-capability and retried on another provider, so it
+		// must neither set the unsupported flag nor stop the retry.
+		nodeRefusalMessages := []string{
 			"method not found",
 			"endpoint not found",
 		}
-		for _, msg := range unsupportedMessages {
-			isUnsupported := common.IsUnsupportedMethodError("", 0, msg)
-			require.True(t, isUnsupported, "Message '%s' should be detected as unsupported", msg)
+		for _, msg := range nodeRefusalMessages {
+			require.False(t, common.IsUnsupportedMethodError("", 0, msg), "Message '%s' is the node's refusal, not an unsupported method", msg)
+			require.False(t, common.IsNonRetryableNodeError("", 0, msg), "Message '%s' must be retried on another provider", msg)
 		}
 
 		smartContractMessages := []string{
@@ -1585,7 +1665,8 @@ func TestIsNonRetryableNodeError_Classification(t *testing.T) {
 	}{
 		{name: "execution reverted is non-retryable", chainID: "ETH1", status: 200, message: "execution reverted", want: true},
 		{name: "execution reverted with data is non-retryable", chainID: "ETH1", status: 200, message: "execution reverted: NFT not found", want: true},
-		{name: "unsupported method is non-retryable (Retryable=false)", chainID: "ETH1", status: 404, message: "method not found", want: true},
+		// MAG-2771: a claim about this node; another provider may serve the method.
+		{name: "a node's method not found is retryable", chainID: "ETH1", status: 404, message: "method not found", want: false},
 		{name: "user parse error is non-retryable", chainID: "ETH1", status: -32700, message: "parse error", want: true},
 		{name: "generic transient error is retryable", chainID: "ETH1", status: 502, message: "bad gateway", want: false},
 		{name: "unknown message is retryable (returns false)", chainID: "ETH1", status: 0, message: "totally unfamiliar garbage", want: false},

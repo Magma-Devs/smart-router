@@ -5,19 +5,20 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 )
 
 func TestRelayProcessorRetryPrevention(t *testing.T) {
-	// Create a mock relay processor to test hasUnsupportedMethodErrors
-	// This test verifies that unsupported method errors prevent retries
+	// The retry verdict the relay processor applies to protocol errors (ShouldRetryError).
 
-	t.Run("shouldRetryWithUnsupportedMethodError", func(t *testing.T) {
-		// Test the basic retry logic with unsupported method error
-		unsupportedErr := chainlib.NewUnsupportedMethodError(errors.New("method not found"), "eth_test")
+	t.Run("shouldRetryWithNodeMethodNotFound", func(t *testing.T) {
+		// MAG-2771: a node saying the method is not on its surface is a claim about that node, so
+		// another provider is asked rather than the request failing.
+		methodNotFound := common.NewLavaError(common.LavaErrorNodeMethodNotFound, `unsupported method "eth_test"`)
 
-		result := chainlib.ShouldRetryError(unsupportedErr)
-		require.False(t, result, "Should not retry unsupported method errors")
+		result := chainlib.ShouldRetryError(methodNotFound)
+		require.True(t, result, "a node's method-not-found must be retried on another provider")
 	})
 
 	t.Run("shouldRetryWithNormalError", func(t *testing.T) {

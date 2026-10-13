@@ -47,6 +47,14 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	if input.Summary.HasPermanentProtocolError {
 		return DecisionOutput{Action: Stop, Reason: "PermanentProtocolError"}
 	}
+	// A node's refusal is retried on a peer because providers really do differ in what they serve
+	// (MAG-2771). That holds for a method the spec lists, not for one it does not: the parser
+	// forwards an unlisted method (a typo, a scanner, another chain's method) only because the spec
+	// cannot rule it out, and every provider is expected to refuse it. Retrying there costs a call
+	// per provider and serves nobody, so the first refusal is the answer.
+	if input.IsDefaultApi && input.Summary.HasNodeCapabilityRefusal {
+		return DecisionOutput{Action: Stop, Reason: "UnlistedMethodRefused"}
+	}
 
 	// 3. LIMIT CHECKS
 	if input.AttemptNumber >= p.config.MaxRetries {
