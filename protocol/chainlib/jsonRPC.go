@@ -212,7 +212,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
 			latestRequestedBlock = parsedBlock
-			earliestRequestedBlock = parsedBlock
+			earliestRequestedBlock = foldParsedEarliest(parsedBlock, parsedInput)
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
@@ -248,12 +248,18 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			}
 
 			latestRequestedBlock, earliestRequestedBlock = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
+			earliestRequestedBlock = foldParsedEarliest(earliestRequestedBlock, parsedInput)
 		}
 	}
 
 	var nodeMsg *baseChainMessageContainer
 	if len(msgs) == 1 && !isBatch {
 		nodeMsg = apip.newChainMessage(api, latestRequestedBlock, blockHashes, &msgs[0], apiCollection, parsedDefault)
+		// A single request has no earliest of its own unless its parsers read a range lower bound
+		// (trace_filter's fromBlock); then the archive rule must judge the range on it.
+		if earliestRequestedBlock != latestRequestedBlock {
+			nodeMsg.earliestRequestedBlock = earliestRequestedBlock
+		}
 	} else {
 		nodeMsg, err = apip.newBatchChainMessage(api, latestRequestedBlock, earliestRequestedBlock, blockHashes, msgs, apiCollection, parsedDefault)
 		if err != nil {
