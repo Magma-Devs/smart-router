@@ -11,7 +11,6 @@
 # The fix tracks context.slot on both sides. With a fixed binary, the requests
 # below should succeed with NO 3368 / "block too new" / "No pairings" errors.
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-source "$__dir"/../useful_commands.sh
 # Optional vars file (not present in all checkouts) — source only if it exists.
 [ -f "${__dir}/../vars/variables.sh" ] && . "${__dir}/../vars/variables.sh"
 

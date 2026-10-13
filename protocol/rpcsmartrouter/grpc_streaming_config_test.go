@@ -232,5 +232,4 @@ func TestGRPCStreamingConfig_VsWebSocketConfig(t *testing.T) {
 	// gRPC should have higher rate limits
 	assert.Greater(t, grpcConfig.SubscriptionsPerMinutePerClient, wsConfig.SubscriptionsPerMinutePerClient,
 		"gRPC should allow more subscriptions per minute")
-
 }

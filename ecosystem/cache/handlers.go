@@ -36,8 +36,6 @@ var (
 	EntryTypeError = core.EntryTypeError
 )
 
-const ()
-
 type RelayerCacheServer struct {
 	relaytypes.UnimplementedRelayerCacheServer
 	CacheServer *CacheServer

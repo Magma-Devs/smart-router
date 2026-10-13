@@ -303,7 +303,6 @@ func (cf *ChainFetcher) validate(ctx context.Context, perCollection bool) (Provi
 					}
 					return admission, utils.LavaFormatError("invalid Verification on provider startup", err, utils.Attribute{Key: "Addons", Value: addons}, utils.Attribute{Key: "verification", Value: verification.Name})
 				}
-			} else {
 			}
 		}
 	}
