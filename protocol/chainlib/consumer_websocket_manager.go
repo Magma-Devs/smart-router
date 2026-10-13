@@ -336,6 +336,12 @@ func enqueueWebsocketFrame(ctx, webSocketCtx context.Context, writerDone <-chan 
 }
 
 func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
+	// CLI flags are startup configuration. Snapshot them before spawning the
+	// connection's workers so a later command cannot race an idle/rate checker.
+	connectionRateLimit := WebSocketRateLimit
+	connectionBanDuration := WebSocketBanDuration
+	connectionMaxIdle := GetMaxIdleTimeInSeconds()
+
 	// adding metrics for how many active connections we have.
 	cwm.rpcConsumerLogs.SetWebSocketConnectionActive(cwm.chainId, cwm.apiInterface, true)
 	defer cwm.rpcConsumerLogs.SetWebSocketConnectionActive(cwm.chainId, cwm.apiInterface, false)
@@ -392,7 +398,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	idleFor.Store(time.Now().Unix())
 	requestsPerSecond := &atomic.Uint64{}
 	go func() {
-		if WebSocketRateLimit <= 0 && cwm.headerRateLimit <= 0 && GetMaxIdleTimeInSeconds() <= 0 {
+		if connectionRateLimit <= 0 && cwm.headerRateLimit <= 0 && connectionMaxIdle <= 0 {
 			return
 		}
 		ticker := time.NewTicker(time.Second) // rate limit per second.
@@ -403,7 +409,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				utils.LavaFormatDebug("ctx done in time checker")
 				return
 			case <-ticker.C:
-				if maxIdleTime := GetMaxIdleTimeInSeconds(); maxIdleTime > 0 {
+				if maxIdleTime := connectionMaxIdle; maxIdleTime > 0 {
 					utils.LavaFormatDebug("checking idle time", utils.LogAttr("idleFor", idleFor.Load()), utils.LogAttr("maxIdleTime", maxIdleTime), utils.LogAttr("now", time.Now().Unix()))
 					idleDuration := idleFor.Load() + maxIdleTime
 					if time.Now().Unix() > idleDuration {
@@ -426,15 +432,15 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 						return
 					}
 				}
-				if cwm.headerRateLimit > 0 || WebSocketRateLimit > 0 {
+				if cwm.headerRateLimit > 0 || connectionRateLimit > 0 {
 					// check if rate limit reached, and ban is required
 					currentRequestsPerSecondLoad := requestsPerSecond.Load()
-					if WebSocketBanDuration > 0 && (currentRequestsPerSecondLoad > cwm.headerRateLimit || currentRequestsPerSecondLoad > uint64(WebSocketRateLimit)) {
+					if connectionBanDuration > 0 && (currentRequestsPerSecondLoad > cwm.headerRateLimit || currentRequestsPerSecondLoad > uint64(connectionRateLimit)) {
 						// wait the ban duration before resetting the store.
 						select {
 						case <-webSocketCtx.Done():
 							return
-						case <-time.After(WebSocketBanDuration): // just continue
+						case <-time.After(connectionBanDuration): // just continue
 						}
 					}
 					requestsPerSecond.Store(0)
@@ -475,7 +481,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		// Check rate limit is met
 		currentRequestsPerSecond := requestsPerSecond.Add(1)
 		if (cwm.headerRateLimit > 0 && currentRequestsPerSecond > cwm.headerRateLimit) ||
-			(WebSocketRateLimit > 0 && currentRequestsPerSecond > uint64(WebSocketRateLimit)) {
+			(connectionRateLimit > 0 && currentRequestsPerSecond > uint64(connectionRateLimit)) {
 			rateLimitResponse, err := cwm.handleRateLimitReached(msg)
 			if err == nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: rateLimitResponse})
