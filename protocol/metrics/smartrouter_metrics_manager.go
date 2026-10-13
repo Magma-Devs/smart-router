@@ -80,6 +80,7 @@ type SmartRouterMetricsManager struct {
 	// Router-scoped metrics (labels: spec, apiInterface)
 	routerLatestBlock            *prometheus.GaugeVec
 	routerLatestBlockRegressions *prometheus.CounterVec // smartrouter_latest_block_regressions_total {spec, apiInterface, reason}
+	routerChainIdle              *prometheus.GaugeVec   // smartrouter_chain_idle {spec, apiInterface}
 	routerProtocolVersion        *prometheus.GaugeVec
 	routerWsConnectionsActive    *prometheus.GaugeVec
 	routerWsSubscriptionsTotal   *prometheus.CounterVec
@@ -345,13 +346,15 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	})
 
 	// Counts the poll cycles the tracker's traffic gate suppressed, split by what made the
-	// poll redundant: source="relay" (served traffic kept the tip fresh) or source="peer"
-	// (another pod's poll, borrowed through the cache backend — the fleet gate, MAG-2981).
+	// poll redundant: source="relay" (served traffic kept the tip fresh), source="peer"
+	// (another pod's poll, borrowed through the cache backend — the fleet gate, MAG-2981), or
+	// source="idle" (the chain served no client relay for the idle window, so nobody needs
+	// the poll's answer — idle mode).
 	// Together with rpc_endpoint_tracker_requests_total this shows both halves of the
 	// tracker's cadence: requests sent, and ticks that sent nothing and why.
 	endpointTrackerGateSkips := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
 		Name:       "rpc_endpoint_tracker_gate_skips_total",
-		Help:       "Total per-endpoint tracker poll cycles suppressed by the traffic gate, by source (relay, peer).",
+		Help:       "Total per-endpoint tracker poll cycles suppressed by the traffic gate, by source (relay, peer, idle).",
 		Labels:     []string{"spec", "apiInterface", "endpoint_id", "source"},
 		Registerer: prometheus.DefaultRegisterer,
 	})
@@ -430,6 +433,14 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_latest_block_regressions_total",
 		Help: "Times the router's latest block for this chain/interface moved backwards, by reason (consensus, stale_tip).",
 	}, []string{"spec", "apiInterface", "reason"})
+
+	// Idle mode per chain/interface: 1 while the chain has served no client relay for the idle
+	// window and its dedicated polls are paused (or on the idle heartbeat), 0 while active. Left
+	// unset when idle mode is off, so a missing series means "not configured", not "active".
+	routerChainIdle := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_chain_idle",
+		Help: "Idle mode state for this chain/interface (1=idle: no client relay within --chain-tracker-idle-after, tracker polls paused; 0=active).",
+	}, []string{"spec", "apiInterface"})
 
 	routerProtocolVersion := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_protocol_version",
@@ -730,6 +741,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerEndToEndLatency = registerOrReuse(routerEndToEndLatency)
 	routerLatestBlock = registerOrReuse(routerLatestBlock)
 	routerLatestBlockRegressions = registerOrReuse(routerLatestBlockRegressions)
+	routerChainIdle = registerOrReuse(routerChainIdle)
 	routerProtocolVersion = registerOrReuse(routerProtocolVersion)
 	routerWsConnectionsActive = registerOrReuse(routerWsConnectionsActive)
 	routerWsSubscriptionsTotal = registerOrReuse(routerWsSubscriptionsTotal)
@@ -825,6 +837,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		// Router-scoped (without function)
 		routerLatestBlock:            routerLatestBlock,
 		routerLatestBlockRegressions: routerLatestBlockRegressions,
+		routerChainIdle:              routerChainIdle,
 		routerProtocolVersion:        routerProtocolVersion,
 		routerWsConnectionsActive:    routerWsConnectionsActive,
 		routerWsSubscriptionsTotal:   routerWsSubscriptionsTotal,
@@ -1271,6 +1284,20 @@ func (m *SmartRouterMetricsManager) RecordRouterLatestBlockRegression(spec, apiI
 	m.routerLatestBlockRegressions.WithLabelValues(spec, apiInterface, reason).Inc()
 }
 
+// SetChainIdle publishes a chain/interface's idle-mode state: 1 while it has served no client
+// relay for the idle window and its tracker polls are paused, 0 once a client relay wakes it.
+// Written by the probe loop every cycle (current state, not transitions), never on the relay hot path.
+func (m *SmartRouterMetricsManager) SetChainIdle(spec, apiInterface string, idle bool) {
+	if m == nil || m.routerChainIdle == nil {
+		return
+	}
+	value := 0.0
+	if idle {
+		value = 1
+	}
+	m.routerChainIdle.WithLabelValues(spec, apiInterface).Set(value)
+}
+
 // =============================================================================
 // Health check methods
 // =============================================================================
@@ -1587,14 +1614,17 @@ func (m *SmartRouterMetricsManager) AddEndpointTrackerRequest(spec, apiInterface
 	m.endpointTrackerRequests.WithLabelValues(labels).Inc()
 }
 
-// TrackerGateSkipSource values for RecordTrackerGateSkip. A closed set of two, mirroring the
-// two signals that can make a dedicated poll redundant.
+// TrackerGateSkipSource values for RecordTrackerGateSkip. A closed set of three, mirroring the
+// three reasons a dedicated poll can be skipped without contacting upstream.
 const (
 	// TrackerGateSkipSourceRelay — served relay traffic kept this endpoint's tip fresh.
 	TrackerGateSkipSourceRelay = "relay"
 	// TrackerGateSkipSourcePeer — another pod polled this endpoint and published the result
 	// to the cache backend (MAG-2981).
 	TrackerGateSkipSourcePeer = "peer"
+	// TrackerGateSkipSourceIdle — the chain served no client relay for the idle window, so
+	// nobody would read the poll's answer (idle mode, --chain-tracker-idle-after).
+	TrackerGateSkipSourceIdle = "idle"
 )
 
 // TrackerGateOp values for RecordTrackerGateError: the two calls the gate makes to the fleet

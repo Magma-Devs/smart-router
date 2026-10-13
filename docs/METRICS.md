@@ -30,6 +30,8 @@ metrics manager.
 | `--metrics-listen-address` | `disabled` | Address to expose Prometheus metrics on, e.g. `:7779` or `localhost:7779`. The literal `disabled` turns the metrics server off entirely. |
 | `--optimizer-qos-sampling-interval` | `1s` | How often the optimizer-QoS sampler refreshes the `rpc_optimizer_selection_score` gauge and — when `--usage-otel-enabled` is set — emits `optimizer_qos` events to the OTel usage pipeline. |
 | `--enable-fork-detection` | `false` | Turns per-endpoint block-hash polling on. Off by default, which pins `rpc_endpoint_tracker_requests_total{kind="block_hash"}` at zero and is the single largest term in tracker request volume. Process-wide: it applies to every chain the process serves, and cannot be scoped to one of them. |
+| `--chain-tracker-idle-after` | `0` (off) | Idle mode ([CHAIN-TRACKER-IDLE-MODE.md](CHAIN-TRACKER-IDLE-MODE.md)). Once a chain+interface has served no client request for this long, its per-endpoint tracker polls pause until the next client request, which polls every endpoint once and is held up to 1s for the first poll to land before it is routed. Minimum `10s`. `rpc_endpoint_tracker_requests_total` flattens and `rpc_endpoint_tracker_gate_skips_total{source="idle"}` climbs while idle; `smartrouter_chain_idle` reads `1`. The router's own health relay does not count as a request and keeps running. Process-wide flag, per chain+interface state. |
+| `--chain-tracker-idle-poll-interval` | `0` (poll nothing while idle) | Idle heartbeat: while a chain is idle, still poll each endpoint once per this interval, so a dead upstream is noticed and the tip at wake is at most this old. Needs `--chain-tracker-idle-after`; a value below the normal poll cadence is raised to it. |
 
 ```bash
 # enable, then scrape
@@ -106,7 +108,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `rpc_endpoint_fetch_block_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | Successful specific-block fetches. |
 | `rpc_endpoint_tracker_requests_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `kind` | Upstream requests the per-endpoint chain tracker actually sent, by `kind` (`latest_block`, `block_hash`). The only metric that measures tracker **request volume** — see the note below. |
 | `rpc_endpoint_tracker_gate_errors_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `op` | Failed calls to the shared fleet observation store, by `op`: `fetch` (reading a peer's observation before polling — the pod polled instead) or `publish` (sharing this pod's own observation). Non-zero means the cache backend is unreachable, slow, or older than the observation RPCs. |
-| `rpc_endpoint_tracker_gate_skips_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `source` | Poll cycles the tracker's traffic gate suppressed (no upstream request sent), by `source`: `relay` (served traffic kept the tip fresh) or `peer` (another pod's poll, borrowed through the cache backend — needs `--shared-state` + `--cache-be`). The other half of the tracker's cadence next to `rpc_endpoint_tracker_requests_total`. |
+| `rpc_endpoint_tracker_gate_skips_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `source` | Poll cycles the tracker's traffic gate suppressed (no upstream request sent), by `source`: `relay` (served traffic kept the tip fresh), `peer` (another pod's poll, borrowed through the cache backend — needs `--shared-state` + `--cache-be`), or `idle` (the chain served no client request within `--chain-tracker-idle-after`). The other half of the tracker's cadence next to `rpc_endpoint_tracker_requests_total`. |
 
 > **Tracker requests vs. fetch events.** `rpc_endpoint_fetch_latest_success` counts NEW BLOCK
 > detections and `rpc_endpoint_fetch_latest_fails` counts latest-block fetch failures. Neither
@@ -132,6 +134,17 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 > and the gate's skip budget still forces a local poll every few ticks, so `requests_total` never
 > drops to zero on a live endpoint. On a multi-replica deployment, `peer` skips climbing while
 > `requests_total{kind="latest_block"}` flattens is the feature working.
+>
+> `source="idle"` is idle mode (`--chain-tracker-idle-after`): the chain served no client request
+> for the idle window, so nobody would read the poll's answer and every tick is skipped — this one
+> IS unbounded, so `requests_total` does drop to zero on an idle chain (or to the heartbeat rate
+> with `--chain-tracker-idle-poll-interval`). `smartrouter_chain_idle` reads `1` meanwhile, and
+> `/debug/endpoint-state` reports `IdleMode` (`off` / `active` / `idle`), `LastClientRelay`,
+> `IdleSince` and `WakeInProgress` per row. The next client request ends it: every endpoint is
+> polled once (a burst of `requests_total`), and `/debug/probe-loop` shows `QoSFeedPausedIdle`
+> and `HeadStallPausedIdle` flipping back to `false` once the burst is done — while idle the prober
+> withholds its QoS feed rather than score every provider unavailable for being unpolled, and skips
+> the head-stall step rather than mark a url stuck for not having been polled yet.
 >
 > `peer` stuck at zero has several unrelated causes. `rpc_endpoint_tracker_gate_errors_total`
 > narrows it to two groups, and the log separates the pair that share a metric shape:
@@ -217,6 +230,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `smartrouter_overall_health_breakdown` | Gauge | `spec`, `apiInterface` | Per-chain/interface health. |
 | `smartrouter_latest_block` | Gauge | `spec`, `apiInterface` | Latest block known to the router. |
 | `smartrouter_latest_block_regressions_total` | Counter | `spec`, `apiInterface`, `reason` | Times the router's latest block moved backwards; each one also logs `chain latest block went backwards` at ERROR. `reason="consensus"`: the tip led the endpoint majority by more than the outlier threshold and was snapped down to it. `reason="stale_tip"`: nothing re-confirmed the tip for a TTL and a lower observation was adopted. Alert on `increase(...) > 0`. |
+| `smartrouter_chain_idle` | Gauge | `spec`, `apiInterface` | Idle mode state: `1` while the chain has served no client request within `--chain-tracker-idle-after` and its tracker polls are paused, `0` while active. Absent when idle mode is off. Published by the probe loop every cycle (5 s), not on transitions. The infra `sr-tip-frozen` alert skips a router whose every pod reads `1`. |
 | `smartrouter_protocol_version` | Gauge | `version` | Encoded protocol version. |
 
 #### WebSocket
