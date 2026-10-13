@@ -258,6 +258,48 @@ with read/write.
 | `smartrouter_requests_archive_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Archive requests. |
 | `smartrouter_requests_batch_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Batch requests. |
 
+These count **relays**, not client requests: a request retried, hedged or
+cross-validated increments them once per attempt, and the router's own tracker
+traffic is in them too. For what the client experienced, use the per-customer
+family below, summed over `customer`.
+
+#### Per customer — the `project-id` header
+
+A caller may label each request with its own customer id in the `project-id`
+header (HTTP header or gRPC metadata; on a WebSocket, on the upgrade request).
+The router counts the request under that label and does nothing else with it:
+the header is never sent to an upstream, and it is not part of the cache key or
+of any routing decision. Requests without it are counted under
+`customer="DefaultDappID"`.
+
+Each client request is counted once, after the reply, with its final outcome.
+A subscribe is counted once, whether it succeeds or fails; the pushes on an
+open subscription are not. A
+request the router could not parse is not counted.
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_customer_requests_total` | Counter | `spec`, `apiInterface`, `customer`, `method` | Client requests. |
+| `smartrouter_customer_requests_failed_total` | Counter | `spec`, `apiInterface`, `customer`, `method` | Client requests that ended in an error to the client. |
+| `smartrouter_customer_end_to_end_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `customer` | Latency of successful client requests. No `method`: it is the family whose series multiply. |
+| `smartrouter_customer_overflow_total` | Counter | `spec` | Values collapsed to `customer="other"`. |
+
+`customer` is bounded: the first 512 distinct values per spec keep their own
+series for the life of the process, and later ones — or any value longer than
+128 characters — become `customer="other"`. Non-zero
+`smartrouter_customer_overflow_total` means that spec's per-customer numbers
+are lossy. `method` is normalized as on `smartrouter_requests_total`.
+
+```promql
+# requests per customer per chain
+sum by (customer, spec) (increase(smartrouter_customer_requests_total[1h]))
+# success rate per customer and method
+1 - sum by (customer, method) (rate(smartrouter_customer_requests_failed_total[5m]))
+  / sum by (customer, method) (rate(smartrouter_customer_requests_total[5m]))
+# p95 per customer per chain
+histogram_quantile(0.95, sum by (customer, spec, le) (rate(smartrouter_customer_end_to_end_latency_milliseconds_bucket[5m])))
+```
+
 #### Batch requests and the `method` label
 
 For a batch request there is no single method, so the `method` label carries a

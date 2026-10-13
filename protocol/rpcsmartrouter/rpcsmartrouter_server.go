@@ -1512,6 +1512,12 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	ctx, span := tracing.StartInternalSpan(ctx, tracing.SpanParsedRelay)
 	defer span.End()
 
+	// The method is known once the request is parsed, so it is set before relaying: a failed
+	// request is counted under its method too (SetRelayMetrics, MAG-4081).
+	if analytics != nil {
+		analytics.ApiMethod = protocolMessage.GetApi().GetName()
+	}
+
 	relaySentTime := time.Now()
 	// Idle mode: this is a client relay. Stamp it, and if it ends an idle period hold it (capped)
 	// until the first endpoint poll has landed so it is routed on fresh tips. The wait counts
@@ -1674,7 +1680,6 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		analytics.Latency = currentLatency.Milliseconds()
 		api := protocolMessage.GetApi()
 		analytics.ComputeUnits = api.ComputeUnits
-		analytics.ApiMethod = api.Name
 		if rpcss.smartRouterEndpointMetrics != nil {
 			rpcss.smartRouterEndpointMetrics.RecordRouterEndToEndLatency(
 				rpcss.listenEndpoint.ChainID,
