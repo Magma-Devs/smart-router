@@ -71,6 +71,14 @@ The existing `smartrouter_requests_*`, `rpc_endpoint_*`, cache lookup and incide
 metrics retain their original behavior. They describe provider attempts,
 lookups or incidents and must not be added to the new request counters.
 
+The per-customer `smartrouter_customer_requests_total`,
+`smartrouter_customer_requests_failed_total` and latency histogram (MAG-4081)
+also remain available. They count parsed method requests under a bounded
+`customer` label and omit parse failures. Their completion now reads the same
+API-level final Success verdict as the terminal snapshot, so an HTTP 200 node
+error is correctly unsuccessful. Each parsed request updates each family once;
+never add the parsed-request total to the all-request received/outcome totals.
+
 | Metric | Native labels |
 | --- | --- |
 | `smartrouter_customer_requests_received_total` | `spec`, `apiInterface` |
@@ -80,8 +88,9 @@ lookups or incidents and must not be added to the new request counters.
 `outcome` and `recovery` use the bounded values above. `cache_hit` is `true` or
 `false`; `error_name` is an existing registry identity, or `none` on success.
 Request IDs, provider names/lists, methods and raw messages are not metric labels.
-The collector may attach `cluster`, customer, pod and chain labels; the router
-has no customer identifier metric label. In shared deployments, tenant-specific
+The collector may attach `cluster`, customer, pod and chain labels; the new
+all-request counters have no customer identifier metric label. The existing
+parsed-request family has its own bounded `customer` label. In shared deployments, tenant-specific
 reports require filtering `relay_usage.project` or an ingress/collector tenant
 partition. A deployment-wide Prometheus series cannot separate those tenants.
 

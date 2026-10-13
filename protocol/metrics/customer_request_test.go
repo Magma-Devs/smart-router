@@ -336,3 +336,40 @@ func TestCustomerTypedParseFailureUsesExistingRegistry(t *testing.T) {
 	require.Equal(t, common.LavaErrorUserParseError.Name, recorder.outcomes[0].ErrorName)
 	require.False(t, recorder.outcomes[0].Retryable)
 }
+
+// MAG-4081 landed while MAG-4276 was being implemented. Its parsed-request
+// counters and the new all-request outcomes share one completion without doubling.
+func TestCustomerExistingParsedCountersShareFinalVerdict(t *testing.T) {
+	manager := NewSmartRouterMetricsManager(SmartRouterMetricsManagerOptions{})
+	logger, err := NewRPCConsumerLogs(manager, nil, nil)
+	require.NoError(t, err)
+	chain, customer, method := "MAG4276-COMPAT", "tenant-4276", "eth_blockNumber"
+	oldTotal := manager.customerRequestsTotal.WithLabelValues(chain, "jsonrpc", customer, method)
+	oldFailure := manager.customerRequestsFailed.WithLabelValues(chain, "jsonrpc", customer, method)
+	beforeTotal, beforeFailure := testutil.ToFloat64(oldTotal), testutil.ToFloat64(oldFailure)
+	for _, failure := range []bool{false, true} {
+		data := NewRelayAnalytics(customer, chain, "jsonrpc")
+		data.ApiMethod = method
+		logger.BeginCustomerRequest(context.Background(), data)
+		result := providerResult("provider")
+		if failure {
+			result.IsNodeError = true
+			result.CustomerError = common.LavaErrorNodeServerError
+		}
+		logger.ObserveCustomerReply(data, result)
+		logger.AddMetricForHttp(data, nil, nil)
+		logger.AddMetricForHttp(data, nil, nil)
+	}
+	// A parse failure is new report coverage, not a second parsed method request.
+	unparsed := NewRelayAnalytics(customer, chain, "jsonrpc")
+	logger.BeginCustomerRequest(context.Background(), unparsed)
+	logger.AddMetricForHttp(unparsed, errors.New("unparsed"), nil)
+	require.Equal(t, beforeTotal+2, testutil.ToFloat64(oldTotal))
+	require.Equal(t, beforeFailure+1, testutil.ToFloat64(oldFailure))
+	require.Equal(t, float64(3), testutil.ToFloat64(manager.customerRequestsReceived.WithLabelValues(chain, "jsonrpc")))
+	notification := NewRelayAnalytics(customer, chain, "jsonrpc")
+	notification.RequestKind = "notification"
+	notification.ApiMethod = SubscriptionDeliveryMethod
+	logger.AddMetricForWebSocket(notification, nil)
+	require.Equal(t, beforeTotal+2, testutil.ToFloat64(oldTotal))
+}
