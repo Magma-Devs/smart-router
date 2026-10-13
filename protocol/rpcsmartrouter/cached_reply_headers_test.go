@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -51,4 +52,29 @@ func TestPrimaryCacheHitReplaysOnlyTheFilteredUpstreamHeaders(t *testing.T) {
 	empty := &pairingtypes.RelayReply{}
 	bare.filterCachedReplyMetadata(empty, nil)
 	require.Nil(t, empty.Metadata)
+}
+
+// A primary hit replays the spec's pass_reply headers (above). A secondary hit of the same entry
+// kept only the transport pair, because the foreign-reply sanitiser carried its own, narrower
+// allow-list (MAG-4278).
+func TestSecondaryCacheHitReplaysTheSameFilteredHeadersAsAPrimaryHit(t *testing.T) {
+	ctx := context.Background()
+	chainParser, protocolMessage := buildRestProtocolMessage(t, ctx, 100)
+
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	h.Set("Server", "cloudflare")
+	h.Set("CF-Ray", "a3f90a00d8924476-TLV")
+	h.Set(common.PROVIDER_ADDRESS_HEADER_NAME, "somebody-else")
+	h.Set("X-Cosmos-Block-Height", "12345")
+	fake := &fakeCacheReader{active: true, reply: &pairingtypes.CacheRelayReply{
+		Reply:      &pairingtypes.RelayReply{Data: []byte(`{"block":{}}`), Metadata: convertHTTPHeadersToMetadata(h), LatestBlock: 100},
+		StatusCode: http.StatusOK,
+	}}
+	rpcss := newSecondaryTestServer(chainParser, nil, fake, time.Second)
+
+	served, result, _ := runSecondaryLookupWithReport(t, rpcss, protocolMessage, 100)
+	require.True(t, served)
+	require.Equal(t, []string{"Content-Type", "X-Cosmos-Block-Height"}, metadataNames(result.Reply.Metadata),
+		"the secondary tier must pass the spec's reply directives, and only those, like the primary tier")
 }

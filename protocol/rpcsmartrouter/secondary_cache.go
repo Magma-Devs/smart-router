@@ -182,7 +182,14 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 		return false
 	}
 
+	// The sanitiser keeps only the transport pair, which is less than a primary hit replays:
+	// the live filter also passes the spec's pass_reply headers (the Aptos ledger-state set,
+	// for one). Run that same filter over the foreign entry's headers so a secondary hit of an
+	// entry answers with the headers a primary hit of the same entry does (MAG-4278).
+	foreignMetadata := copyReply.Metadata
 	performance.SanitizeForeignCacheReply(copyReply)
+	copyReply.Metadata = foreignMetadata
+	rpcss.filterCachedReplyMetadata(copyReply, protocolMessage)
 	// Re-stamp the zeroed LatestBlock from this router's own GATED tip, so the two tiers
 	// serve the same header set. LatestBlock's only serving-side reader is
 	// appendHeadersToRelayResult, which emits Provider-Latest-Block when the value is
