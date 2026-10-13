@@ -17,6 +17,7 @@ import (
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/magma-Devs/smart-router/version"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
@@ -27,7 +28,7 @@ import (
 // blockchain, so specs must be loaded from files/URLs (--use-static-spec).
 // Any goroutine that fails during setup sends its error to errCh, which causes
 // the command to cancel and return the error immediately.
-func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEndpoint, parallelConnections uint, staticSpecPaths []string) error {
+func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEndpoint, parallelConnections uint, staticSpecPaths []string, githubToken, gitlabToken string) error {
 	ctx, stopSignal := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignal()
 
@@ -58,8 +59,8 @@ func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEn
 			}
 			if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(
 				ctx, chainParser, staticSpecPaths, rpcEndpoint,
-				"", // github token — not needed for local files
-				"", // gitlab token — not needed for local files
+				githubToken,
+				gitlabToken,
 			); err != nil {
 				errCh <- utils.LavaFormatError("failed loading spec for endpoint", err,
 					utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID},
@@ -148,6 +149,7 @@ func CreateTestRPCSmartRouterCobraCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			githubToken, gitlabToken := specTokensFromFlags(cmd.Flags())
 			logLevel, err := cmd.Flags().GetString("log-level")
 			if err != nil {
 				utils.LavaFormatFatal("failed to read log level flag", err)
@@ -182,11 +184,8 @@ func CreateTestRPCSmartRouterCobraCommand() *cobra.Command {
 					ChainID:        endpoint.ChainID,
 					ApiInterface:   endpoint.ApiInterface,
 					NodeUrls: []commonlib.NodeUrl{{
-						Url: endpoint.NetworkAddress,
-						AuthConfig: commonlib.AuthConfig{
-							UseTLS:        viper.GetBool(chainproxy.GRPCUseTls),
-							AllowInsecure: viper.GetBool(chainproxy.GRPCAllowInsecureConnection),
-						},
+						Url:        endpoint.NetworkAddress,
+						AuthConfig: grpcAuthConfigFromFlags(cmd.Flags()),
 					}},
 				}
 			}
@@ -197,7 +196,7 @@ func CreateTestRPCSmartRouterCobraCommand() *cobra.Command {
 			if err != nil {
 				utils.LavaFormatFatal("error fetching chainproxy.ParallelConnectionsFlag", err)
 			}
-			return startTesting(ctx, modifiedProviderEndpoints, numberOfNodeParallelConnections, staticSpecPaths)
+			return startTesting(ctx, modifiedProviderEndpoints, numberOfNodeParallelConnections, staticSpecPaths, githubToken, gitlabToken)
 		},
 	}
 
@@ -208,5 +207,28 @@ func CreateTestRPCSmartRouterCobraCommand() *cobra.Command {
 	cmdTestRPCSmartRouter.Flags().Bool(chainproxy.GRPCAllowInsecureConnection, false, "used to test grpc, to allow insecure (self signed cert).")
 	cmdTestRPCSmartRouter.Flags().Bool(chainproxy.GRPCUseTls, true, "use tls configuration for grpc connections to your consumer")
 	cmdTestRPCSmartRouter.Flags().StringArray(commonlib.UseStaticSpecFlag, nil, "load specs from file, directory, or remote URL — required in smart-router mode (same paths as rpcsmartrouter --use-static-spec)")
+	addSpecTokenFlags(cmdTestRPCSmartRouter.Flags())
 	return cmdTestRPCSmartRouter
+}
+
+// grpcAuthConfigFromFlags reads the gRPC TLS flags from the command's own flag set. The test command
+// used to read them through viper, which only the root command binds to its flag set, so --use-tls
+// (default true) and --allow-insecure-connection were always false there.
+func grpcAuthConfigFromFlags(flags *pflag.FlagSet) commonlib.AuthConfig {
+	useTLS, _ := flags.GetBool(chainproxy.GRPCUseTls)
+	allowInsecure, _ := flags.GetBool(chainproxy.GRPCAllowInsecureConnection)
+	return commonlib.AuthConfig{UseTLS: useTLS, AllowInsecure: allowInsecure}
+}
+
+// addSpecTokenFlags registers the same private-repository token flags the root command has, so a
+// spec source that needs a token loads for the test and health commands too.
+func addSpecTokenFlags(flags *pflag.FlagSet) {
+	flags.String(commonlib.GitHubTokenFlag, "", "GitHub personal access token for a private spec repository (same as rpcsmartrouter --github-token)")
+	flags.String(commonlib.GitLabTokenFlag, "", "GitLab personal access token for a private spec repository (same as rpcsmartrouter --gitlab-token)")
+}
+
+func specTokensFromFlags(flags *pflag.FlagSet) (githubToken, gitlabToken string) {
+	githubToken, _ = flags.GetString(commonlib.GitHubTokenFlag)
+	gitlabToken, _ = flags.GetString(commonlib.GitLabTokenFlag)
+	return githubToken, gitlabToken
 }
