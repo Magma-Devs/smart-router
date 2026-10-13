@@ -1528,6 +1528,7 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 					err,
 					utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 				)
+				dwsm.retireConnectionOnUpstreamError(activeSub, err)
 				reconnectInFlight = true
 				go dwsm.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
 			}
@@ -1624,6 +1625,33 @@ func (dwsm *DirectWSSubscriptionManager) dropSlowClient(hashedParams string, act
 	}
 }
 
+// retireConnectionOnUpstreamError tells the pool that the connection a subscription just failed
+// on is dead, so the restore's ReconnectWithBackoff reconnects — with its backoff ladder — instead
+// of finding the pool "healthy" and handing the dead socket straight back to the re-subscribe,
+// which then had one dial inside rpcclient and no retry (MAG-4242). A subscription's own end
+// leaves the socket alone: the forward queue overflowing, or the node answering this one
+// subscription with an error, says nothing about the connection, and the restore re-subscribes
+// on it.
+func (dwsm *DirectWSSubscriptionManager) retireConnectionOnUpstreamError(activeSub *directActiveSubscription, err error) {
+	if errors.Is(err, rpcclient.ErrSubscriptionQueueOverflow) {
+		return
+	}
+	var nodeErr *rpcclient.JsonError
+	if errors.As(err, &nodeErr) {
+		return
+	}
+	dwsm.lock.RLock()
+	conn := activeSub.upstreamConnection
+	dwsm.lock.RUnlock()
+	if conn == nil {
+		return
+	}
+	conn.MarkUnhealthy(err)
+	utils.LavaFormatInfo("DirectWS: upstream connection marked dead, the pool will reconnect with backoff",
+		utils.LogAttr("endpoint", conn.sanitizedURL),
+		utils.LogAttr("error", err.Error()),
+	)
+}
 
 // handleUpstreamDisconnect handles upstream connection loss and attempts to restore subscriptions
 func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
@@ -1895,6 +1923,14 @@ const upstreamUnsubscribeTimeout = 10 * time.Second
 // (MAG-2547): the caller snapshots them while it still holds the lock.
 func (dwsm *DirectWSSubscriptionManager) teardownUpstreamSubscription(upstreamConn *UpstreamWSConnection, upstreamID, subscribeMethod string) {
 	if upstreamConn == nil {
+		return
+	}
+	if !upstreamConn.IsHealthy() {
+		// The socket this subscription lived on is gone, and the node lost the subscription
+		// with it. A call here would only make rpcclient dial again to say goodbye.
+		utils.LavaFormatTrace("DirectWS: no upstream unsubscribe for a subscription that died with its connection",
+			utils.LogAttr("upstreamID", upstreamID),
+		)
 		return
 	}
 	client := upstreamConn.GetClient()
