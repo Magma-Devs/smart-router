@@ -3,17 +3,18 @@ package chainlib
 import (
 	"context"
 	"errors"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	"github.com/stretchr/testify/require"
 )
 
 type listenerCustomerRecorder struct {
@@ -28,11 +29,13 @@ func (r *listenerCustomerRecorder) RecordCustomerReceived(string, string) {
 	defer r.mu.Unlock()
 	r.received++
 }
+
 func (r *listenerCustomerRecorder) RecordCustomerOutcome(t metrics.CustomerTerminal) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.terminal = append(r.terminal, t)
 }
+
 func (r *listenerCustomerRecorder) snapshot() (int, []metrics.CustomerTerminal) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

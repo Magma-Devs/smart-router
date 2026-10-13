@@ -2166,6 +2166,7 @@ func (m *SmartRouterMetricsManager) RecordCustomerReceived(chain, apiInterface s
 	}
 	m.customerRequestsReceived.WithLabelValues(chain, apiInterface).Inc()
 }
+
 func (m *SmartRouterMetricsManager) RecordCustomerOutcome(t CustomerTerminal) {
 	if m == nil || m.customerRequestOutcomes == nil {
 		return

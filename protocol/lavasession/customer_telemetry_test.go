@@ -2,11 +2,12 @@ package lavasession
 
 import (
 	"context"
+	"testing"
+
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func onlyProvider(t *testing.T, css ConsumerSessionsMap) string {

@@ -4432,6 +4432,7 @@ func (csm *ConsumerSessionManager) SetCustomerPrimaryBaseConfigured(configured b
 	defer csm.lock.Unlock()
 	csm.customerPrimaryBaseConfigured = configured
 }
+
 func (csm *ConsumerSessionManager) customerPrimaryBaseConfiguredForReporting() bool {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
