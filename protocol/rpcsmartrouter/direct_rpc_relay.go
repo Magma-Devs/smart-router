@@ -488,7 +488,7 @@ func (d *DirectRPCRelaySender) SendDirectRelay(
 		// An upstream's headers reach the client only through this filter (MAG-3104). It
 		// runs here, once, for every transport and every arm of the senders, a gRPC error
 		// body returned as a result included; the senders hand it the raw set.
-		result.Reply.Metadata = filterUpstreamReplyMetadata(result.Reply.Metadata, d.replyHeaderDirectives, apiCollection.Headers)
+		result.Reply.Metadata = common.FilterUpstreamReplyMetadata(result.Reply.Metadata, d.replyHeaderDirectives, apiCollection.Headers)
 	}
 	return result, err
 }
@@ -1319,7 +1319,7 @@ func looksLikeJSONOpening(data []byte) bool {
 // convertHTTPHeadersToMetadata turns an upstream's response headers (http.Header or gRPC
 // metadata, both map[string][]string) into reply metadata, one entry per name with the
 // first value. The set is raw: SendDirectRelay passes it through
-// filterUpstreamReplyMetadata before it leaves the sender (MAG-3104).
+// common.FilterUpstreamReplyMetadata before it leaves the sender (MAG-3104).
 func convertHTTPHeadersToMetadata(headers map[string][]string) []pairingtypes.Metadata {
 	metadata := make([]pairingtypes.Metadata, 0, len(headers))
 	for name, values := range headers {
