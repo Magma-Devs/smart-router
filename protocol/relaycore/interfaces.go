@@ -95,7 +95,6 @@ type ResultsSummary struct {
 	// an upstream rate limit — the one failure that is safe to retry even for a stateful
 	// relay or a batch, because the upstream refused before executing anything.
 	OnlyRateLimited bool
-	HashErr         error // hash computation error (nil = hash OK)
 }
 
 // Action represents the post-relay decision action.
