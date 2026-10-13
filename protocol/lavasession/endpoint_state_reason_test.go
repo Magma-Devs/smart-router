@@ -105,8 +105,8 @@ func TestStateReason_SurvivesConfirmRelayRecovery(t *testing.T) {
 	require.False(t, e.IsUsable())
 }
 
-// Selection must skip a stalled endpoint even on the retry-disabled path, which otherwise re-enables
-// whatever it reconnects to.
+// Selection must skip a stalled endpoint in every pick mode: the reconnect path otherwise re-enables
+// whatever it reconnects to, and the last chance otherwise lends a disabled endpoint.
 func TestFetchEndpointConnection_SkipsStalledEndpoint(t *testing.T) {
 	stuck := directRPCEndpoint(t, "https://stuck.example")
 	require.True(t, stuck.AddStateReason(EndpointDisableHeadStalled, probeBase, stalledBlock))

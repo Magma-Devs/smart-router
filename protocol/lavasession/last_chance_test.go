@@ -18,7 +18,8 @@ import (
 //  1. one try per request, never a loop over every disabled endpoint;
 //  2. lending does not mark the endpoint enabled; only a successful answer brings it back;
 //  3. a failure keeps it disabled;
-//  4. (head-stalled, not on this branch) a success never clears a stall.
+//  4. a head-stalled URL (MAG-3986) is never lent: a stalled node answers, so it is not what the
+//     last chance is for, and a success could only clear the event slot, never the stall.
 
 var errLastChanceRelay = errors.New("upstream refused the relay")
 
@@ -251,6 +252,22 @@ func TestLastChance_NeverLendsAWebsocketURL(t *testing.T) {
 
 	_, err = lcGet(csm, NewUsedProviders(nil))
 	require.Error(t, err)
+}
+
+// Rule 4: a URL that is both disabled and head-stalled is never lent. The request gets No pairings
+// available, the claim stays free, and the stall is still in place.
+func TestLastChance_NeverLendsAHeadStalledURL(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	require.True(t, p.Endpoints[0].AddStateReason(EndpointDisableHeadStalled, probeBase, stalledBlock))
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+
+	used := NewUsedProviders(nil)
+	_, err := lcGet(csm, used)
+	require.Error(t, err, "a stalled URL must not be lent")
+	require.True(t, used.TakeLastChance(), "the claim must still be free: nothing was lent")
+	_, stalled := p.Endpoints[0].StateReason(EndpointDisableHeadStalled)
+	require.True(t, stalled, "the last chance must not clear the stall")
 }
 
 // Rule 2 and 3 end to end at this layer: a success lifts the provider's block (the relay path's
