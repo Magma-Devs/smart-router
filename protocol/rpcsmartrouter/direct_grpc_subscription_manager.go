@@ -492,6 +492,7 @@ func (dgm *DirectGRPCSubscriptionManager) StartSubscription(
 	return dgm.createNewSubscription(ctx, chainMessage, methodPath, requestData, hashedParams, clientKey)
 }
 
+
 // releaseClientStateIfIdle drops the per-client bookkeeping a failed subscribe would
 // otherwise strand — but only while the client holds no subscription at all, so a client
 // with a live stream keeps its endpoint affinity and its limiter.
@@ -548,7 +549,7 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 	dgm.idMapper.RegisterMapping(routerID, sub.routerSubscriptionID)
 
 	// Create channel for this client
-	replyChan := make(chan *pairingtypes.RelayReply, 100)
+	replyChan := make(chan *pairingtypes.RelayReply, subscriptionClientReplyBuffer)
 	sender := common.NewSafeChannelSender(ctx, replyChan)
 
 	sub.clientRouterIDs[clientKey] = routerID
@@ -648,7 +649,7 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 	dgm.idMapper.RegisterMapping(clientRouterID, routerSubID)
 
 	// Create reply channel for this client
-	replyChan := make(chan *pairingtypes.RelayReply, 100)
+	replyChan := make(chan *pairingtypes.RelayReply, subscriptionClientReplyBuffer)
 	sender := common.NewSafeChannelSender(subCtx, replyChan)
 
 	// Create active subscription
@@ -919,7 +920,7 @@ func (dgm *DirectGRPCSubscriptionManager) routeMessageToClients(
 
 	seqNum := activeSub.messageSeq.Add(1)
 
-	for _, info := range clients {
+	for clientKey, info := range clients {
 		reply := &pairingtypes.RelayReply{
 			Data: msgData,
 			Metadata: []pairingtypes.Metadata{
@@ -927,8 +928,34 @@ func (dgm *DirectGRPCSubscriptionManager) routeMessageToClients(
 				{Name: MetadataGRPCStreamSeq, Value: fmt.Sprintf("%d", seqNum)},
 			},
 		}
-		info.sender.Send(reply)
+		if !info.sender.TrySend(reply) {
+			dgm.dropSlowClient(activeSub, clientKey)
+		}
 	}
+}
+
+// dropSlowClient ends the stream of a client whose reply channel is full: it has fallen
+// subscriptionClientReplyBuffer pushes behind and is not catching up. The client's stream ends
+// with errSlowConsumer rather than losing the push silently, and the fan-out never waited for
+// it, so the other clients of the shared subscription were not stalled. The drop is counted,
+// and the subscription is torn down when this was its last client.
+func (dgm *DirectGRPCSubscriptionManager) dropSlowClient(activeSub *grpcActiveSubscription, clientKey string) {
+	activeSub.lock.RLock()
+	_, attached := activeSub.connectedClients[clientKey]
+	activeSub.lock.RUnlock()
+	if !attached {
+		return
+	}
+	dgm.endErrors.Store(clientKey, errSlowConsumer)
+	if dgm.metricsManager != nil {
+		dgm.metricsManager.SetSubscriptionClientDroppedMetric(dgm.chainID, dgm.apiInterface)
+	}
+	utils.LavaFormatWarning("DirectGRPC: client is not keeping up with its subscription, ending its stream", nil,
+		utils.LogAttr("clientKey", clientKey),
+		utils.LogAttr("hashedParams", utils.ToHexString(activeSub.hashedParams)),
+		utils.LogAttr("pushesBehind", subscriptionClientReplyBuffer),
+	)
+	_ = dgm.removeClientFromSubscription(activeSub, activeSub.hashedParams, clientKey)
 }
 
 // handleUpstreamDisconnect handles upstream stream disconnection

@@ -62,6 +62,24 @@ func (scs *SafeChannelSender[T]) LockAndSendAsynchronously(msg T) {
 	}()
 }
 
+// TrySend delivers msg if the receiver has room for it and reports whether it did. It never
+// waits and never retries: a receiver that is not keeping up is reported, not waited for, so
+// one slow client cannot stall the fan-out to every other client of a shared subscription
+// (MAG-4242). A closed sender, or one whose context has ended, reports false as well.
+func (scs *SafeChannelSender[T]) TrySend(msg T) bool {
+	scs.lock.Lock()
+	defer scs.lock.Unlock()
+	if scs.closed || scs.ctx.Err() != nil {
+		return false
+	}
+	select {
+	case scs.ch <- msg:
+		return true
+	default:
+		return false
+	}
+}
+
 // Used when you need to wait for the other side to receive the message.
 func (scs *SafeChannelSender[T]) Send(msg T) {
 	scs.lock.Lock()

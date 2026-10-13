@@ -1,0 +1,60 @@
+package rpcsmartrouter
+
+import (
+	"context"
+	"fmt"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// TestGRPCSlowClientStreamEndsWithStatus is MAG-4242 item 8 on the gRPC manager. A joiner that
+// never reads falls a buffer behind; its stream must end with a status that says so, the drop
+// must be counted, and the creator, which keeps up, must keep receiving.
+func TestGRPCSlowClientStreamEndsWithStatus(t *testing.T) {
+	upstream := startFakeStreamingUpstream(t)
+	manager := newManagerAgainstUpstream(t, upstream.addr)
+	counter := &droppedClientsCounter{}
+	manager.metricsManager = counter
+	defer manager.Stop()
+
+	message := newGrpcSubscriptionMessage(t)
+	_, creatorReplies, err := manager.StartSubscription(context.Background(), message, "dapp", "1.1.1.1", "creator-conn", nil)
+	require.NoError(t, err)
+	requireUpstreamStreamOpened(t, upstream)
+	_, laggardReplies, err := manager.StartSubscription(context.Background(), message, "dapp", "1.1.1.1", "laggard-conn", nil)
+	require.NoError(t, err)
+	laggardKey := manager.ClientKey("dapp", "1.1.1.1", "laggard-conn")
+
+	var creatorReceived atomic.Int64
+	go func() {
+		for range creatorReplies {
+			creatorReceived.Add(1)
+		}
+	}()
+
+	// One push more than the laggard's buffer holds.
+	for i := 0; i <= subscriptionClientReplyBuffer; i++ {
+		upstream.messages <- marshalStreamPayload(t, fmt.Sprintf("checkpoint-%d", i))
+	}
+
+	// Only once the drop is counted may the test read the laggard's channel: reading earlier
+	// would make it a client that keeps up.
+	require.Eventually(t, func() bool { return counter.dropped.Load() == 1 },
+		10*time.Second, 10*time.Millisecond, "the client that never reads must be dropped")
+	require.True(t, drainedUntilClosed(laggardReplies, 10*time.Second), "the laggard's channel must close")
+	endErr := manager.SubscriptionEndError(laggardKey)
+	require.Error(t, endErr, "the laggard's stream must end with a status, not OK")
+	require.Equal(t, codes.Unavailable, status.Code(endErr))
+	require.Contains(t, status.Convert(endErr).Message(), "keep up")
+
+	require.Equal(t, int64(1), manager.totalSubscriptions.Load(), "the creator's subscription lives on")
+	before := creatorReceived.Load()
+	upstream.messages <- marshalStreamPayload(t, "after-the-drop")
+	require.Eventually(t, func() bool { return creatorReceived.Load() > before },
+		5*time.Second, 10*time.Millisecond, "the creator keeps receiving after the laggard is dropped")
+}

@@ -729,8 +729,9 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		)
 	}
 
-	// Create reply channel for this client
-	repliesChannel := make(chan *pairingtypes.RelayReply)
+	// Create reply channel for this client. Buffered for a burst; a client that lets it fill
+	// is dropped as a slow consumer (dropSlowClient), never waited for.
+	repliesChannel := make(chan *pairingtypes.RelayReply, subscriptionClientReplyBuffer)
 	safeChannelSender := common.NewSafeChannelSender(ctx, repliesChannel)
 
 	// Track metrics
@@ -1578,13 +1579,51 @@ func (dwsm *DirectWSSubscriptionManager) routeMessageToClients(
 			Data: rewrittenMsg,
 		}
 
-		info.sender.Send(reply)
+		if !info.sender.TrySend(reply) {
+			dwsm.dropSlowClient(hashedParams, activeSub, clientKey)
+			continue
+		}
 		utils.LavaFormatTrace("DirectWS: sent message to client with unique router ID",
 			utils.LogAttr("clientKey", clientKey),
 			utils.LogAttr("routerID", info.routerID),
 		)
 	}
 }
+
+// dropSlowClient releases a client whose reply channel is full: it has fallen
+// subscriptionClientReplyBuffer pushes behind and is not catching up. Its channel closes, which
+// ends its subscription at the ingress, rather than losing the push silently (a gap in a
+// subscription stream is worse than a stream that visibly ends) or waiting for it (which stalled
+// every other client of the shared subscription). The drop is counted, and the subscription is
+// torn down when this was its last client. A client already gone by another path is left alone.
+func (dwsm *DirectWSSubscriptionManager) dropSlowClient(hashedParams string, activeSub *directActiveSubscription, clientKey string) {
+	dwsm.lock.Lock()
+	defer dwsm.lock.Unlock()
+
+	if dwsm.activeSubscriptions[hashedParams] != activeSub {
+		return
+	}
+	clientRouterID, wasAttached := activeSub.releaseClientLocked(clientKey)
+	if !wasAttached {
+		return
+	}
+	if clientRouterID != "" {
+		dwsm.idMapper.RemoveMapping(clientRouterID)
+	}
+	dwsm.forgetSubscriptionForClientLocked(clientKey, hashedParams, false)
+	if dwsm.metricsManager != nil {
+		dwsm.metricsManager.SetSubscriptionClientDroppedMetric(dwsm.chainID, dwsm.apiInterface)
+	}
+	utils.LavaFormatWarning("DirectWS: client is not keeping up with its subscription, dropping it", nil,
+		utils.LogAttr("clientKey", clientKey),
+		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+		utils.LogAttr("pushesBehind", subscriptionClientReplyBuffer),
+	)
+	if len(activeSub.connectedClients) == 0 {
+		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, true)
+	}
+}
+
 
 // handleUpstreamDisconnect handles upstream connection loss and attempts to restore subscriptions
 func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(

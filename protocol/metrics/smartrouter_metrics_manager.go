@@ -84,6 +84,7 @@ type SmartRouterMetricsManager struct {
 	routerWsConnectionsActive    *prometheus.GaugeVec
 	routerWsSubscriptionsTotal   *prometheus.CounterVec
 	routerWsSubscriptionErrors   *prometheus.CounterVec
+	subscriptionClientsDropped   *prometheus.CounterVec
 
 	// Cross-validation group metrics
 	crossValidationRequestsTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_requests_total        {spec, apiInterface, method}
@@ -442,6 +443,11 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Help: "Total failed WebSocket subscription requests on the smart router.",
 	}, []string{"spec", "apiInterface"})
 
+	subscriptionClientsDropped := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_subscription_clients_dropped_total",
+		Help: "Clients dropped from a shared subscription (WebSocket or gRPC) because they did not keep up with its pushes.",
+	}, []string{"spec", "apiInterface"})
+
 	crossValidationLabels := []string{"spec", "apiInterface", "method"}
 	crossValidationProviderLabels := []string{"spec", "apiInterface", "method", "provider_address"}
 	crossValidationRequestsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -702,6 +708,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerWsConnectionsActive = registerOrReuse(routerWsConnectionsActive)
 	routerWsSubscriptionsTotal = registerOrReuse(routerWsSubscriptionsTotal)
 	routerWsSubscriptionErrors = registerOrReuse(routerWsSubscriptionErrors)
+	subscriptionClientsDropped = registerOrReuse(subscriptionClientsDropped)
 	endpointEndToEndLatency = registerOrReuse(endpointEndToEndLatency)
 	crossValidationRequestsTotalMetric = registerOrReuse(crossValidationRequestsTotalMetric)
 	crossValidationSuccessTotalMetric = registerOrReuse(crossValidationSuccessTotalMetric)
@@ -793,6 +800,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		routerWsConnectionsActive:    routerWsConnectionsActive,
 		routerWsSubscriptionsTotal:   routerWsSubscriptionsTotal,
 		routerWsSubscriptionErrors:   routerWsSubscriptionErrors,
+		subscriptionClientsDropped:   subscriptionClientsDropped,
 
 		// Cross-validation group
 		crossValidationRequestsTotalMetric:              crossValidationRequestsTotalMetric,
@@ -1994,6 +2002,13 @@ func (m *SmartRouterMetricsManager) SetFailedWsSubscriptionRequestMetric(chainId
 		return
 	}
 	m.routerWsSubscriptionErrors.WithLabelValues(chainId, apiInterface).Inc()
+}
+
+func (m *SmartRouterMetricsManager) SetSubscriptionClientDroppedMetric(chainId, apiInterface string) {
+	if m == nil {
+		return
+	}
+	m.subscriptionClientsDropped.WithLabelValues(chainId, apiInterface).Inc()
 }
 
 func (m *SmartRouterMetricsManager) SetWebSocketConnectionActive(chainId, apiInterface string, add bool) {
