@@ -422,6 +422,18 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 					break
 				}
 			}
+			if err != nil {
+				// Same verdict as validate: a head the node cannot answer fails the url. Verifying
+				// against NOT_APPLICABLE instead made every latest-distance check pass vacuously
+				// against 2^64-1 and reported the url green.
+				nodeResult.Verifications = append(nodeResult.Verifications, VerificationResult{
+					Name:  "fetch-latest-block",
+					Ok:    false,
+					Error: err.Error(),
+				})
+				results = append(results, nodeResult)
+				continue
+			}
 		}
 		nodeResult.LatestBlock = latestBlock
 

@@ -88,3 +88,23 @@ func TestChainFetcher_FetchLatestBlockNum_PlainErrorIsNotRateLimit(t *testing.T)
 	_, ok := common.RetryAfterFrom(err)
 	require.False(t, ok)
 }
+
+// validate aborts a url whose head probe fails; ValidateCollect used to carry on and verify every
+// latest-distance check against NOT_APPLICABLE (2^64-1 once cast), reporting the url green to
+// `smartrouter health` (MAG-4278).
+func TestValidateCollect_FailedHeadProbeFailsTheURL(t *testing.T) {
+	cf := newEthChainFetcherWithRouterErr(t, errors.New("node down"))
+	cf.endpoint.NodeUrls = []common.NodeUrl{{Url: "http://127.0.0.1:1"}}
+
+	results := cf.ValidateCollect(context.Background())
+	require.Len(t, results, 1)
+	row := results[0]
+	require.Equal(t, spectypes.NOT_APPLICABLE, row.LatestBlock)
+	require.NotEmpty(t, row.Verifications, "a failed head probe must be reported, not skipped")
+	require.Equal(t, "fetch-latest-block", row.Verifications[0].Name)
+	require.False(t, row.Verifications[0].Ok)
+	require.Contains(t, row.Verifications[0].Error, "node down")
+	for _, v := range row.Verifications[1:] {
+		require.False(t, v.Ok, "no verification may pass against an unknown head: %s", v.Name)
+	}
+}
