@@ -205,10 +205,14 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 		}
 
 		if idx == 0 {
-			// on the first entry store them
+			// on the first entry store them. The earliest block starts at this element's block, not
+			// at the "unset" 0: CompareRequestedBlockInBatch only lowers it, and 0 made every later
+			// combination come out 0, so RequestedBlock reported the newest block as the earliest
+			// and the archive rule never saw a batch's deep element (MAG-4242).
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
 			latestRequestedBlock = parsedBlock
+			earliestRequestedBlock = parsedBlock
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
@@ -251,12 +255,6 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 	if len(msgs) == 1 && !isBatch {
 		nodeMsg = apip.newChainMessage(api, latestRequestedBlock, blockHashes, &msgs[0], apiCollection, parsedDefault)
 	} else {
-		// For single-element batches, earliestRequestedBlock was never updated by
-		// CompareRequestedBlockInBatch (which only runs for idx > 0). With one message,
-		// earliest == latest.
-		if len(msgs) == 1 {
-			earliestRequestedBlock = latestRequestedBlock
-		}
 		nodeMsg, err = apip.newBatchChainMessage(api, latestRequestedBlock, earliestRequestedBlock, blockHashes, msgs, apiCollection, parsedDefault)
 		if err != nil {
 			return nil, err
