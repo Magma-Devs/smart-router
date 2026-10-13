@@ -717,10 +717,8 @@ func TestUnsubscribeRateLimiting(t *testing.T) {
 		PerClientLimitEnforcement:       "warn",
 		MaxTotalSubscriptions:           5000,
 		TotalLimitEnforcement:           "warn",
-		SubscriptionSharingEnabled:      true,
 		SubscriptionsPerMinutePerClient: 10,
 		UnsubscribesPerMinutePerClient:  2, // Very low limit for testing
-		MaxMessageSize:                  1048576,
 		CleanupInterval:                 time.Minute,
 	}
 
@@ -775,10 +773,8 @@ func TestUnsubscribeAllNotRateLimited(t *testing.T) {
 		PerClientLimitEnforcement:       "warn",
 		MaxTotalSubscriptions:           5000,
 		TotalLimitEnforcement:           "warn",
-		SubscriptionSharingEnabled:      true,
 		SubscriptionsPerMinutePerClient: 10,
 		UnsubscribesPerMinutePerClient:  1, // Extremely low limit
-		MaxMessageSize:                  1048576,
 		CleanupInterval:                 time.Minute,
 	}
 
@@ -1274,10 +1270,8 @@ func TestUnsubscribeRouterIDOwnershipValidation(t *testing.T) {
 		PerClientLimitEnforcement:       "warn",
 		MaxTotalSubscriptions:           5000,
 		TotalLimitEnforcement:           "warn",
-		SubscriptionSharingEnabled:      true,
 		SubscriptionsPerMinutePerClient: 60, // High limit to avoid rate limiting
 		UnsubscribesPerMinutePerClient:  60,
-		MaxMessageSize:                  1048576,
 		CleanupInterval:                 time.Minute,
 	}
 
@@ -2285,10 +2279,8 @@ func TestUnsubscribe_AcceptsUpstreamIDFallback(t *testing.T) {
 		PerClientLimitEnforcement:       "warn",
 		MaxTotalSubscriptions:           5000,
 		TotalLimitEnforcement:           "warn",
-		SubscriptionSharingEnabled:      true,
 		SubscriptionsPerMinutePerClient: 60,
 		UnsubscribesPerMinutePerClient:  60,
-		MaxMessageSize:                  1048576,
 		CleanupInterval:                 time.Minute,
 	}
 
@@ -2677,10 +2669,8 @@ func TestUnsubscribe_StillRejectsForeignSubscription(t *testing.T) {
 		PerClientLimitEnforcement:       "warn",
 		MaxTotalSubscriptions:           5000,
 		TotalLimitEnforcement:           "warn",
-		SubscriptionSharingEnabled:      true,
 		SubscriptionsPerMinutePerClient: 60,
 		UnsubscribesPerMinutePerClient:  60,
-		MaxMessageSize:                  1048576,
 		CleanupInterval:                 time.Minute,
 	}
 

@@ -1111,7 +1111,6 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	var err error
 	usedProviders := lavasession.NewUsedProviders(nil)
 	usedProviders.SetChainID(rpcss.listenEndpoint.ChainID)
-	usedProviders.SetEligibilityFunc(relaypolicy.DecideEligibility)
 
 	// Selection comes from the method's own category only — see internalRelayStateMachine for why
 	// an operator cross-validation policy must not reach a health check.
@@ -1654,7 +1653,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	defer cancel()
 	usedProviders := lavasession.NewUsedProviders(protocolMessage)
 	usedProviders.SetChainID(rpcss.listenEndpoint.ChainID)
-	usedProviders.SetEligibilityFunc(relaypolicy.DecideEligibility)
 
 	// Record retry count when this span ends. BatchNumber is incremented once per
 	// GetSessions success (one batch may contain N parallel sessions for cross-validation,

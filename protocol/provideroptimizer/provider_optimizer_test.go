@@ -3,7 +3,6 @@ package provideroptimizer
 import (
 	"context"
 	"fmt"
-	stdmath "math"
 	"strconv"
 	"sync"
 	"testing"
@@ -966,108 +965,6 @@ func TestProviderOptimizerLatencySyncScore(t *testing.T) {
 	iterations := 1000
 	res := runChooseManyTimesAndReturnResults(t, providerOptimizer, providersGen.providersAddresses, nil, iterations, cu, requestBlock)
 	require.InDelta(t, res[providersGen.providersAddresses[0]], res[providersGen.providersAddresses[1]], float64(iterations)*0.1)
-}
-
-// TestCalculateBlockAvailability tests the block availability calculation logic
-func TestCalculateBlockAvailability(t *testing.T) {
-	rand.SetSpecificSeed(1234567)
-
-	// Setup optimizer with 10 second average block time
-	providerOptimizer := setupProviderOptimizer(1)
-
-	poissonSurvival := func(distanceRequired uint64, lambda float64) float64 {
-		// P(X >= distanceRequired) for X~Poisson(lambda)
-		// = 1 - e^-λ * sum_{i=0}^{distanceRequired-1} λ^i / i!
-		if distanceRequired == 0 {
-			return 1.0
-		}
-		sum := 0.0
-		pow := 1.0
-		fact := 1.0
-		for i := uint64(0); i < distanceRequired; i++ {
-			if i > 0 {
-				pow *= lambda
-				fact *= float64(i)
-			}
-			sum += pow / fact
-		}
-		return 1.0 - stdmath.Exp(-lambda)*sum
-	}
-
-	tests := []struct {
-		name           string
-		requestedBlock int64
-		syncBlock      uint64
-		timeSinceSync  time.Duration
-		expected       float64
-	}{
-		{
-			name:           "latest block request (requestedBlock <= 0)",
-			requestedBlock: -1,
-			syncBlock:      1000,
-			timeSinceSync:  0,
-			expected:       1.0,
-		},
-		{
-			name:           "requested block already synced",
-			requestedBlock: 900, // Provider is at 1000
-			syncBlock:      1000,
-			timeSinceSync:  0,
-			expected:       1.0,
-		},
-		{
-			name:           "requested block equals current sync",
-			requestedBlock: 1000,
-			syncBlock:      1000,
-			timeSinceSync:  0,
-			expected:       1.0,
-		},
-		{
-			name:           "requested block 1 ahead, lambda=1",
-			requestedBlock: 1001,
-			syncBlock:      1000,
-			timeSinceSync:  TEST_AVERAGE_BLOCK_TIME, // lambda = 1
-			expected:       poissonSurvival(1, 1.0),
-		},
-		{
-			name:           "requested block 2 ahead, lambda=1",
-			requestedBlock: 1002,
-			syncBlock:      1000,
-			timeSinceSync:  TEST_AVERAGE_BLOCK_TIME, // lambda = 1
-			expected:       poissonSurvival(2, 1.0),
-		},
-		{
-			name:           "requested block 3 ahead, lambda=1",
-			requestedBlock: 1003,
-			syncBlock:      1000,
-			timeSinceSync:  TEST_AVERAGE_BLOCK_TIME, // lambda = 1
-			expected:       poissonSurvival(3, 1.0),
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			providerAddress := "test_provider_" + tt.name
-
-			// Seed provider data with a controlled sync update time (avoid time.Sleep flakiness)
-			now := time.Now()
-			syncStore, err := score.NewCustomScoreStore(score.SyncScoreType, score.DefaultSyncNum, 1, now.Add(-tt.timeSinceSync))
-			require.NoError(t, err)
-			providerData := ProviderData{
-				Availability: score.NewScoreStore(score.AvailabilityScoreType),
-				Latency:      score.NewScoreStore(score.LatencyScoreType),
-				Sync:         syncStore,
-				SyncBlock:    tt.syncBlock,
-			}
-			set := providerOptimizer.providersStorage.Set(providerAddress, providerData, 1)
-			require.True(t, set, "provider data entry was dropped by cache")
-			// ristretto writes are asynchronous; allow the cache to process the Set
-			time.Sleep(4 * time.Millisecond)
-
-			blockAvail := providerOptimizer.calculateBlockAvailability(providerAddress, tt.requestedBlock)
-			require.InDelta(t, tt.expected, blockAvail, 0.03, "unexpected block availability")
-		})
-	}
 }
 
 // TestHistoricalQuerySelectionDistribution tests that historical queries

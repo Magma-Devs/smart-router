@@ -1,4 +1,6 @@
-package plans
+package chainlib
+
+// Policy and ChainPolicy are the test-only PolicyInf implementation; production uses staticPolicy.
 
 import (
 	epochstoragetypes "github.com/magma-Devs/smart-router/types/epoch"

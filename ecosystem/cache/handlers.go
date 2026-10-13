@@ -33,16 +33,10 @@ func refuseInvalidKeyPrefix(prefix string) error {
 // The error variables and value types below are re-exported so the package
 // surface is unchanged by the split.
 var (
-	NotFoundError     = core.NotFoundError
-	HashMismatchError = core.HashMismatchError
-	EntryTypeError    = core.EntryTypeError
+	EntryTypeError = core.EntryTypeError
 )
 
-const (
-	SEP = ";"
-	// CompressionThreshold is the minimum data size (in bytes) before gzip is attempted.
-	CompressionThreshold = core.CompressionThreshold
-)
+const ()
 
 type RelayerCacheServer struct {
 	relaytypes.UnimplementedRelayerCacheServer
@@ -52,7 +46,6 @@ type RelayerCacheServer struct {
 }
 
 // CacheValue is the stored form of a cached relay entry (core.Envelope).
-type CacheValue = core.Envelope
 
 // engine assembles the semantic core over this server's ristretto stores.
 // Rebuilt per call so fixtures that construct CacheServer directly and set

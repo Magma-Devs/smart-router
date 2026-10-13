@@ -5,7 +5,6 @@ import "github.com/magma-Devs/smart-router/protocol/relaycore"
 // Re-export relaycore types for convenience
 type (
 	Action         = relaycore.Action
-	SendResult     = relaycore.SendResult
 	DecisionOutput = relaycore.DecisionOutput
 	DecisionInput  = relaycore.DecisionInput
 	ResultsSummary = relaycore.ResultsSummary

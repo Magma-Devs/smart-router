@@ -3,7 +3,6 @@ module github.com/magma-Devs/smart-router
 go 1.26.9
 
 require (
-	github.com/cometbft/cometbft v0.38.21
 	github.com/ethereum/go-ethereum v1.17.7
 	github.com/gofiber/fiber/v2 v2.52.15
 	github.com/gofiber/websocket/v2 v2.2.1
@@ -41,9 +40,7 @@ require (
 	go.opentelemetry.io/otel/sdk/log v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	go.uber.org/goleak v1.3.0
-	go.uber.org/mock v0.6.0
 	golang.org/x/time v0.16.0
-	gonum.org/v1/gonum v0.17.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20260928230214-8a89bd6388cc
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
@@ -125,7 +122,6 @@ require (
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/rs/zerolog v1.35.1
-	github.com/sasha-s/go-deadlock v0.3.5 // indirect
 	github.com/savsgio/gotils v0.0.0-20230208104028-c358bd845dee // indirect
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible // indirect
 	github.com/spf13/afero v1.15.0 // indirect
