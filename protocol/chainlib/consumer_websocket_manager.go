@@ -172,20 +172,9 @@ func NewConsumerWebsocketManager(options ConsumerWebsocketManagerOptions) *Consu
 }
 
 func (cwm *ConsumerWebsocketManager) handleRateLimitReached(inpData []byte) ([]byte, error) {
-	rateLimitError := common.JsonRpcRateLimitError
-	id := 0
-	result := gjson.GetBytes(inpData, "id")
-	switch result.Type {
-	case gjson.Number:
-		id = int(result.Int())
-	case gjson.String:
-		idParsed, err := strconv.Atoi(result.Raw)
-		if err == nil {
-			id = idParsed
-		}
-	}
-	rateLimitError.Id = id
-	bytesRateLimitError, err := json.Marshal(rateLimitError)
+	// Echo the caller's id verbatim, as every other local reply does: coercing it to an int
+	// answered string ids (and, through Atoi on the quoted token, numeric strings) with id 0.
+	bytesRateLimitError, err := common.MarshalJsonRPCErrorWithRequestID(common.JsonRpcRateLimitError, inpData)
 	if err != nil {
 		return []byte{}, utils.LavaFormatError("failed marshalling jsonrpc rate limit error", err)
 	}
