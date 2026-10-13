@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -23,6 +24,18 @@ type BaseProtocolMessage struct {
 	directiveHeaders map[string]string
 	relayRequestData *pairingtypes.RelayPrivateData
 	userData         common.UserData
+	// cacheKey memoises HashCacheRequest. The cache lookup and the cache write of one relay run on
+	// different goroutines and must agree on the key, so it is computed once, from the request as
+	// it was first asked for, and the same key is handed to both (MAG-4242).
+	cacheKey cacheKeyMemo
+}
+
+type cacheKeyMemo struct {
+	once      sync.Once
+	chainId   string
+	key       []byte
+	formatter func([]byte) []byte
+	err       error
 }
 
 func (bpm *BaseProtocolMessage) IsDefaultApi() bool {
@@ -43,7 +56,16 @@ func (bpm *BaseProtocolMessage) RelayPrivateData() *pairingtypes.RelayPrivateDat
 }
 
 func (bpm *BaseProtocolMessage) HashCacheRequest(chainId string) ([]byte, func([]byte) []byte, error) {
-	return hashCacheRequest(bpm.relayRequestData, chainId, bpm.explicitExtensionDirective())
+	bpm.cacheKey.once.Do(func() {
+		bpm.cacheKey.chainId = chainId
+		bpm.cacheKey.key, bpm.cacheKey.formatter, bpm.cacheKey.err = hashCacheRequest(bpm.relayRequestData, chainId, bpm.explicitExtensionDirective())
+	})
+	if bpm.cacheKey.chainId != chainId {
+		// A message belongs to one chain. A second chain id is a caller's mistake, answered fresh
+		// rather than with another chain's key.
+		return hashCacheRequest(bpm.relayRequestData, chainId, bpm.explicitExtensionDirective())
+	}
+	return bpm.cacheKey.key, bpm.cacheKey.formatter, bpm.cacheKey.err
 }
 
 // explicitExtensionDirective returns the normalized value of the client's lava-extension directive
