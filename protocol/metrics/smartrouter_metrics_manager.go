@@ -161,6 +161,15 @@ type SmartRouterMetricsManager struct {
 	// defaultMethods bounds how many distinct Default-* names may become label values.
 	defaultMethods *batchSignatureRegistry
 
+	// Per-customer request group (MAG-4081), recorded once per client request by
+	// SetRelayMetrics. The customer label is the caller's project-id header, bounded by
+	// customers (see customer_label.go); customerOverflow reports when that cap binds.
+	customerRequestsTotal   *prometheus.CounterVec   // smartrouter_customer_requests_total
+	customerRequestsFailed  *prometheus.CounterVec   // smartrouter_customer_requests_failed_total
+	customerEndToEndLatency *prometheus.HistogramVec // smartrouter_customer_end_to_end_latency_milliseconds
+	customerOverflow        *prometheus.CounterVec   // smartrouter_customer_overflow_total
+	customers               *batchSignatureRegistry
+
 	// Internal state
 	lock                    sync.RWMutex
 	endpointsHealthChecksOk uint64
@@ -661,6 +670,29 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Help: `Label normalizations that fell into method="Default-other": the spec exhausted its distinct unmatched-API name budget. Sustained growth means clients are hitting URLs the spec does not match — concrete IDs in the path mint a new name per request — which usually indicates a spec gap (e.g. a path variant the templates miss).`,
 	}, []string{"spec"})
 
+	// Per-customer request group (MAG-4081). Request-level, unlike smartrouter_requests_*,
+	// which count every attempt (retries, hedges, cross-validation) and the router's own
+	// tracker traffic. The latency histogram leaves method out: it is the family whose
+	// series multiply, and per-customer latency is asked per chain.
+	customerRequestLabels := []string{"spec", "apiInterface", "customer", "method"}
+	customerRequestsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_customer_requests_total",
+		Help: `Client requests, once each with their final outcome, by the caller's project-id header. customer="DefaultDappID": no header. customer="other": past the per-spec customer cap (see smartrouter_customer_overflow_total). Subscription pushes are not counted; the subscribe request is.`,
+	}, customerRequestLabels)
+	customerRequestsFailed := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_customer_requests_failed_total",
+		Help: "Client requests that ended in an error to the client, by the caller's project-id header. Success rate = 1 - failed / smartrouter_customer_requests_total.",
+	}, customerRequestLabels)
+	customerEndToEndLatency := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "smartrouter_customer_end_to_end_latency_milliseconds",
+		Help:    "End-to-end latency of successful client requests in milliseconds, by the caller's project-id header. Use histogram_quantile() for percentiles.",
+		Buckets: latencyBuckets,
+	}, []string{"spec", "apiInterface", "customer"})
+	customerOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_customer_overflow_total",
+		Help: `Label normalizations that fell into customer="other": the spec exhausted its distinct-customer budget, or the project-id value was too long to be an id. Non-zero means per-customer numbers are lossy for this spec.`,
+	}, []string{"spec"})
+
 	cacheLabels := []string{"spec", "apiInterface", "method", "cache_tier"}
 	cacheRequestsTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cache_requests_total",
@@ -736,6 +768,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	batchSize = registerOrReuse(batchSize)
 	batchSignatureOverflow = registerOrReuse(batchSignatureOverflow)
 	defaultMethodOverflow = registerOrReuse(defaultMethodOverflow)
+	customerRequestsTotal = registerOrReuse(customerRequestsTotal)
+	customerRequestsFailed = registerOrReuse(customerRequestsFailed)
+	customerEndToEndLatency = registerOrReuse(customerEndToEndLatency)
+	customerOverflow = registerOrReuse(customerOverflow)
 	cacheRequestsTotalMetric = registerOrReuse(cacheRequestsTotalMetric)
 	cacheSuccessTotalMetric = registerOrReuse(cacheSuccessTotalMetric)
 	cacheFailedTotalMetric = registerOrReuse(cacheFailedTotalMetric)
@@ -839,6 +875,13 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		// Unmatched-API method bounding
 		defaultMethodOverflow: defaultMethodOverflow,
 		defaultMethods:        newDefaultMethodRegistry(),
+
+		// Per-customer request group
+		customerRequestsTotal:   customerRequestsTotal,
+		customerRequestsFailed:  customerRequestsFailed,
+		customerEndToEndLatency: customerEndToEndLatency,
+		customerOverflow:        customerOverflow,
+		customers:               newCustomerRegistry(),
 
 		// Cache group
 		cacheRequestsTotalMetric: cacheRequestsTotalMetric,
@@ -1968,11 +2011,27 @@ func (m *SmartRouterMetricsManager) SetCSMReportedProvidersCount(chainId, apiInt
 	m.csmReportedProvidersCount.WithLabelValues(chainId, apiInterface).Set(float64(count))
 }
 
-// SetRelayMetrics is a no-op for SmartRouter.
-// In direct RPC mode, relay tracking is done via RecordDirectRelayEnd which
-// uses the correct per-endpoint labels. Allowing this path would cause double
-// counting with a meaningless "default" endpoint_id.
-func (m *SmartRouterMetricsManager) SetRelayMetrics(relayMetric *RelayMetrics, err error) {}
+// SetRelayMetrics records the per-customer request group (MAG-4081). The listeners call it once
+// per client request, through RPCConsumerLogs.AddMetricFor*, after the reply and with the
+// request's final outcome in Success. It does not touch the per-endpoint families: those are
+// per attempt and owned by RecordDirectRelayEnd, and counting them here too would double count.
+//
+// Not counted: a request the router could not parse (no method — it never reached a chain call),
+// and each push on an open subscription (the subscribe request itself is counted).
+func (m *SmartRouterMetricsManager) SetRelayMetrics(relayMetric *RelayMetrics, err error) {
+	if m == nil || relayMetric == nil || relayMetric.ApiMethod == "" || relayMetric.ApiMethod == SubscriptionDeliveryMethod {
+		return
+	}
+	spec, apiInterface := relayMetric.ChainID, relayMetric.APIType
+	customer := m.normalizeCustomerLabel(spec, relayMetric.ProjectHash)
+	method := m.normalizeMethodLabel(spec, relayMetric.ApiMethod)
+	m.customerRequestsTotal.WithLabelValues(spec, apiInterface, customer, method).Inc()
+	if !relayMetric.Success {
+		m.customerRequestsFailed.WithLabelValues(spec, apiInterface, customer, method).Inc()
+		return
+	}
+	m.customerEndToEndLatency.WithLabelValues(spec, apiInterface, customer).Observe(float64(relayMetric.Latency))
+}
 
 // SetVersion records the protocol version of the smart router.
 func (m *SmartRouterMetricsManager) SetVersion(version string) {
