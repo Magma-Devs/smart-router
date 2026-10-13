@@ -112,6 +112,10 @@ type EndpointMonitor struct {
 	// averageBlockTime/divisor, resolved ONCE at construction from the operator's
 	// PollIntervalDivisor. See poll_cadence.go for the knob and the bounds on it.
 	flatPollInterval time.Duration
+	// stallCycles is how many tracker cycles without a new highest block mark an endpoint
+	// head-stalled (MAG-3986). Computed once at construction from the same validated divisor that
+	// produced flatPollInterval (stallCyclesFor), so it is never re-derived from the rounded interval.
+	stallCycles int
 	// tipStaleAfter is the per-endpoint tip staleness horizon (T4/C-D): the shared
 	// chainstate.StalenessWindow, derived once and passed to every endpointtip.Store.Set to
 	// gate downward (reorg) moves.
@@ -153,7 +157,10 @@ type EndpointMonitor struct {
 	// poll path or the relay-harvest path (MAG-2160 / Topic C): it feeds the cheap monotonic
 	// per-chain ChainState tip (SetLatestBlock). Fired AFTER obsMu is released so the tip lock
 	// is never taken while holding the observation lock. Set once at construction; immutable.
-	onTipObservation func(block int64)
+	// It carries the endpoint url and whether the block REPEATS that endpoint's stored tip, so
+	// the router can refuse a repeat vote from an endpoint it holds as head-stalled (MAG-3986):
+	// a frozen node repeating its block is what kept a wrong tip fresh in the Plasma incident.
+	onTipObservation TipObservationFunc
 	// onPollBlock, if set, is invoked with the url and block of every poll recordPollObservation
 	// records for a live tracker and the tip store accepts, fired AFTER obsMu is released like
 	// onTipObservation. See EndpointChainTrackerConfig.OnPollBlock. Set once at construction;
@@ -203,7 +210,7 @@ type EndpointChainTrackerConfig struct {
 	OnFetchError  func(endpointURL string)
 	// OnTipObservation, if set, feeds every positive poll/relay block into the per-chain
 	// ChainState tip (MAG-2160). See EndpointMonitor.onTipObservation.
-	OnTipObservation func(block int64)
+	OnTipObservation TipObservationFunc
 	// OnPollBlock, if set, is invoked with the url and block of every latest-block poll a live
 	// tracker records — including the tracker's first poll and a poll that returns the same
 	// block again, neither of which OnNewBlock reports. Only a block the endpoint's tip store
@@ -283,6 +290,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		apiInterface:      config.ApiInterface,
 		averageBlockTime:  avgBlockTime,
 		flatPollInterval:  flatPollInterval,
+		stallCycles:       stallCyclesFor(pollDivisor),
 		tipStaleAfter:     chainstate.StalenessWindow(avgBlockTime),
 		blocksToSave:      blocksToSave,
 		retryMinDelay:     defaultTrackerStartRetryMin,
@@ -442,8 +450,11 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// forces a verifying real poll. Relay is checked first: it is a local read, and a
 		// busy endpoint's relay tip is fresher than any peer poll.
 		RelayTipFresh: func(now time.Time) bool {
-			if _, ok := m.freshRelayTip(endpointURL, now); ok {
+			if tip, ok := m.freshRelayTip(endpointURL, now); ok {
 				m.noteGateSkip(endpointURL, metrics.TrackerGateSkipSourceRelay)
+				// The skipped cycle is still a cycle of evidence: the relay answered it
+				// (MAG-3986). A peer-covered skip below is not — it is another pod's view.
+				m.countRelayCoveredCycle(endpointURL, gen, tip)
 				return true
 			}
 			if _, ok := m.freshPeerTip(endpointURL, gen, now); ok {
