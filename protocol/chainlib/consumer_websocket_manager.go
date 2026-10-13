@@ -399,8 +399,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	// any later write of them (a test that builds the root command registers the flags again).
 	wsRateLimit := WebSocketRateLimit
 	wsBanDuration := WebSocketBanDuration
+	wsMaxIdle := GetMaxIdleTimeInSeconds()
 	go func() {
-		if wsRateLimit <= 0 && cwm.headerRateLimit <= 0 && GetMaxIdleTimeInSeconds() <= 0 {
+		if wsRateLimit <= 0 && cwm.headerRateLimit <= 0 && wsMaxIdle <= 0 {
 			return
 		}
 		ticker := time.NewTicker(time.Second) // rate limit per second.
@@ -411,7 +412,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				utils.LavaFormatDebug("ctx done in time checker")
 				return
 			case <-ticker.C:
-				if maxIdleTime := GetMaxIdleTimeInSeconds(); maxIdleTime > 0 {
+				if maxIdleTime := wsMaxIdle; maxIdleTime > 0 {
 					utils.LavaFormatDebug("checking idle time", utils.LogAttr("idleFor", idleFor.Load()), utils.LogAttr("maxIdleTime", maxIdleTime), utils.LogAttr("now", time.Now().Unix()))
 					idleDuration := idleFor.Load() + maxIdleTime
 					if time.Now().Unix() > idleDuration {
