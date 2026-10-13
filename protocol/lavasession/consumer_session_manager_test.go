@@ -2936,3 +2936,32 @@ func TestResetBlockedProviders_NoBlockedIsNoOp(t *testing.T) {
 	require.Equal(t, []string{"provider-a"}, csm.validAddresses, "validAddresses must be untouched on a no-op reset")
 	require.Empty(t, csm.currentlyBlockedProviderAddresses)
 }
+
+// The pool-empty bulk release (resetValidAddresses → setValidAddressesToDefaultValue) returned
+// blocked providers to rotation but left the second-chance flag set, so every later failure on
+// them read as a redemption attempt and never re-blocked them; the per-provider release and the
+// operator reset both clear it (MAG-4278).
+func TestResetValidAddresses_ClearsTheRedemptionFlagLikeTheOtherReleases(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+
+	csm.lock.Lock()
+	csm.pairing = map[string]*ConsumerSessionsWithProvider{
+		"provider-a": {PublicLavaAddress: "provider-a", Endpoints: []*Endpoint{{NetworkAddress: "addr-a"}}},
+		"provider-b": {PublicLavaAddress: "provider-b", Endpoints: []*Endpoint{{NetworkAddress: "addr-b"}}},
+	}
+	csm.pairingAddresses = map[uint64]string{0: "provider-a", 1: "provider-b"}
+	csm.pairingAddressesLength = 2
+	csm.validAddresses = nil
+	csm.currentlyBlockedProviderAddresses = []string{"provider-a", "provider-b"}
+	csm.pairing["provider-b"].atomicWriteBlockedStatus(BlockedProviderSessionUsedStatus)
+	csm.lock.Unlock()
+
+	_, didReset := csm.resetValidAddresses("", nil)
+	require.True(t, didReset)
+
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	require.ElementsMatch(t, []string{"provider-a", "provider-b"}, csm.validAddresses)
+	require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing["provider-b"].atomicReadBlockedStatus(),
+		"a provider returned to rotation by the pool-empty release must not keep its redemption flag")
+}

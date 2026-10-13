@@ -1086,6 +1086,12 @@ func (csm *ConsumerSessionManager) setValidAddressesToDefaultValue(addon string,
 		if _, released := csm.releaseBlockRecordLocked(address, false); released {
 			backInRotation = append(backInRotation, address)
 		}
+		// Same reset the per-provider release and the operator reset perform: a provider that
+		// came back through this drain used to keep its redemption flag, so every later failure
+		// read as a second-chance attempt and never re-blocked it until a success landed.
+		if provider := csm.pairing[address]; provider != nil {
+			provider.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
+		}
 	}
 	// ReleaseEpochRebuild is not a decision about any of these providers: UpdateAllProviders drains
 	// the list and then immediately re-blocks whatever carried over. Announcing a release there
