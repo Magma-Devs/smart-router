@@ -2,7 +2,6 @@ package rpcsmartrouter
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net/url"
 	"strings"
@@ -12,14 +11,11 @@ import (
 
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/grpcreflect"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -134,41 +130,20 @@ func (c *UpstreamGRPCStreamConnection) connect(ctx context.Context, timeout time
 		target += parsedURL.Path
 	}
 
-	// Determine TLS configuration
-	var dialOpts []grpc.DialOption
+	// The transport: TLS for grpcs:// or use-tls, built from the endpoint's auth-config the
+	// way every other dialer builds it (cacert-pem, cert-pem/key-pem, allow-insecure);
+	// plaintext only where the config says so.
 	scheme := strings.ToLower(parsedURL.Scheme)
-
 	transportIsSecure := scheme == "grpcs" || c.nodeUrl.AuthConfig.UseTLS
-	if transportIsSecure {
-		// Use TLS
-		tlsConfig := &tls.Config{}
-		if c.nodeUrl.AuthConfig.AllowInsecure {
-			tlsConfig.InsecureSkipVerify = true
-		}
-		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
-	} else {
-		// Insecure connection (for local/dev)
-		if !c.nodeUrl.GrpcConfig.AllowInsecure {
-			return fmt.Errorf("insecure gRPC (grpc://) requires allow-insecure: true in config")
-		}
-		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if !transportIsSecure && !c.nodeUrl.GrpcConfig.AllowInsecure {
+		return fmt.Errorf("insecure gRPC (grpc://) requires allow-insecure: true in config")
 	}
-
-	// Large responses. The shared constant rather than a repeated literal: this pool and
-	// chainproxy.GRPCConnector dial the same upstreams, so a divergence between them would
-	// mean the same endpoint accepted a response on one path and rejected it on the other.
-	dialOpts = append(dialOpts,
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(chainproxy.MaxCallRecvMsgSize)),
-	)
-
-	// MAG-2218: attach the endpoint's configured auth-headers to the subscription
-	// manager's upstream streams, which this pool backs.
 	c.nodeUrl.TokenOverInsecureWarning(transportIsSecure)
-	dialOpts = append(dialOpts, c.nodeUrl.GrpcAuthDialOptions()...)
 
-	// MAG-3887: idle timeout and keepalive, so a flow a middlebox dropped is neither
-	// reused after an idle spell nor left silently under live streams.
-	dialOpts = append(dialOpts, c.liveness.dialOptions()...)
+	// The shared options (receive-size cap, MAG-2218 auth-headers) plus what a streaming
+	// channel adds: the MAG-3887 idle timeout and keepalive, so a flow a middlebox dropped
+	// is neither reused after an idle spell nor left silently under live streams.
+	dialOpts := c.nodeUrl.GRPCDialOptions(c.nodeUrl.AuthConfig.GRPCTransportCredentials(transportIsSecure), c.liveness.dialOptions()...)
 
 	// grpc.NewClient is lazy — it does not establish a connection here.
 	// We force a state transition under the configured timeout so the

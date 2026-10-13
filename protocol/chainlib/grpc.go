@@ -41,8 +41,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const GRPCStatusCodeOnFailedMessages = 32
-
 type GrpcNodeErrorResponse struct {
 	ErrorMessage string `json:"error_message"`
 	ErrorCode    uint32 `json:"error_code"`
@@ -711,13 +709,8 @@ func (apil *GrpcChainListener) GetListeningAddress() string {
 
 type GrpcChainProxy struct {
 	BaseChainProxy
-	conn             grpcConnectorInterface
+	conn             chainproxy.GRPCConnectorInterface
 	descriptorsCache *common.SafeSyncMap[string, *desc.MethodDescriptor]
-}
-type grpcConnectorInterface interface {
-	Close()
-	GetRpc(ctx context.Context, block bool) (*grpc.ClientConn, error)
-	ReturnRpc(rpc *grpc.ClientConn)
 }
 
 func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, parser ChainParser) (ChainProxy, error) {
@@ -737,7 +730,7 @@ func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 	return newGrpcChainProxy(ctx, averageBlockTime, parser, conn, rpcProviderEndpoint)
 }
 
-func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, parser ChainParser, conn grpcConnectorInterface, rpcProviderEndpoint lavasession.RPCProviderEndpoint) (ChainProxy, error) {
+func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, parser ChainParser, conn chainproxy.GRPCConnectorInterface, rpcProviderEndpoint lavasession.RPCProviderEndpoint) (ChainProxy, error) {
 	cp := &GrpcChainProxy{
 		// NodeUrl is what carries grpc-config onto the request path; without it
 		// cp.NodeUrl.GrpcConfig is the zero value and descriptor-source is invisible
@@ -945,7 +938,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 func parseGrpcNodeErrorToReply(ctx context.Context, err error) ([]byte, uint32, error) {
 	var respBytes []byte
 	var marshalingError error
-	var errorCode uint32 = GRPCStatusCodeOnFailedMessages
+	var errorCode uint32 = common.GRPCStatusCodeOnFailedMessages
 	// try fetching status code from error or otherwise use the GRPCStatusCodeOnFailedMessages
 	if statusError, ok := status.FromError(err); ok {
 		errorCode = uint32(statusError.Code())

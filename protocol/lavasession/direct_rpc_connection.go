@@ -645,12 +645,9 @@ func PrewarmDirectConnections(ctx context.Context, connections []DirectRPCConnec
 	}
 }
 
-// grpcConnectorInterface abstracts GRPCConnector for testing
-type grpcConnectorInterface interface {
-	GetRpc(ctx context.Context, block bool) (*grpc.ClientConn, error)
-	ReturnRpc(rpc *grpc.ClientConn)
-	Close()
-}
+// grpcConnectorInterface is the connector seam the tests substitute: the one declaration,
+// chainproxy.GRPCConnectorInterface, under the name this package's fakes use.
+type grpcConnectorInterface = chainproxy.GRPCConnectorInterface
 
 // GRPCMethodHeader is the header key for the gRPC method path
 const GRPCMethodHeader = "x-grpc-method"
@@ -665,7 +662,6 @@ type GRPCNodeErrorResponse struct {
 }
 
 // Default gRPC error code when status cannot be determined
-const GRPCStatusCodeOnFailedMessages = 32
 
 // NewDirectRPCConnection creates a new direct RPC connection based on URL protocol.
 // The apiInterface parameter provides context for protocol detection when URL has no scheme
@@ -2369,7 +2365,7 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 		return nil, fmt.Errorf("gRPC relay cancelled: %w: %w", context.Canceled, err)
 	}
 
-	var errorCode uint32 = GRPCStatusCodeOnFailedMessages
+	var errorCode uint32 = common.GRPCStatusCodeOnFailedMessages
 	var errorMessage string
 
 	if statusErr, ok := status.FromError(err); ok {

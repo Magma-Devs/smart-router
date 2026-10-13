@@ -14,12 +14,10 @@ import (
 	"time"
 
 	"github.com/gogo/status"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 var MaxSessionsAllowedPerProvider = 1000 // Max number of sessions allowed per provider, configurable via flag
@@ -120,39 +118,27 @@ func IsSessionSyncLoss(err error) bool {
 	return code == codes.Code(SessionOutOfSyncGRPCCode) || errors.Is(err, SessionOutOfSyncError)
 }
 
+// ConnectGRPCClient dials a router-side gRPC service (the cache server; the provider
+// relay path) blocking, through the same option builder the upstream dialers use, so
+// the receive-size cap and the TLS rules are the ones every other channel has. The two
+// booleans are the whole configuration such a service takes: no auth-headers, no CA.
 func ConnectGRPCClient(ctx context.Context, address string, allowInsecure bool, skipTLS bool) (*grpc.ClientConn, error) {
-	var opts []grpc.DialOption
+	nodeUrl := common.NodeUrl{Url: address, AuthConfig: common.AuthConfig{UseTLS: !skipTLS, AllowInsecure: allowInsecure}}
 
-	if skipTLS {
-		// Skip TLS encryption completely
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	} else {
-		// Use TLS with optional server verification
-		var tlsConf tls.Config
-		if allowInsecure {
-			tlsConf.InsecureSkipVerify = true // Allows self-signed certificates
-		}
-		credentials := credentials.NewTLS(&tlsConf)
-		opts = append(opts, grpc.WithTransportCredentials(credentials))
-	}
-
-	opts = append(opts, grpc.WithBlock(), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(chainproxy.MaxCallRecvMsgSize)))
-
+	var dialer func(ctx context.Context, addr string) (net.Conn, error)
 	if strings.HasPrefix(address, unixPrefix) {
-		// Unix socket
 		socketPath := strings.TrimPrefix(address, unixPrefix)
-		opts = append(opts, grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+		dialer = func(ctx context.Context, addr string) (net.Conn, error) {
 			return net.Dial("unix", socketPath)
-		}))
+		}
 	} else {
-		// TCP socket
-		opts = append(opts, grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+		dialer = func(ctx context.Context, addr string) (net.Conn, error) {
 			return net.Dial("tcp", addr)
-		}))
+		}
 	}
 
-	conn, err := grpc.DialContext(ctx, address, opts...)
-	return conn, err
+	opts := nodeUrl.GRPCDialOptions(nodeUrl.AuthConfig.GRPCTransportCredentials(!skipTLS), grpc.WithBlock(), grpc.WithContextDialer(dialer))
+	return grpc.DialContext(ctx, address, opts...)
 }
 
 func GenerateSelfSignedCertificate() (tls.Certificate, error) {

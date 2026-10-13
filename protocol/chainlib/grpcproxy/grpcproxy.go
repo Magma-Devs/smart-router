@@ -19,8 +19,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const MaxCallRecvMsgSize = 1024 * 1024 * 512 // 512MB for large debug responses
-
 type ProxyCallBack = func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error)
 
 // StreamProxyCallBack is the server-streaming counterpart of ProxyCallBack. It is
@@ -75,7 +73,7 @@ func NewGRPCProxy(cb ProxyCallBack, healthCheckPath string, cmdFlags common.Cons
 // first, so server-streaming methods are served as streams instead of being forced
 // through the single-message unary path.
 func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionSource ReflectionSource, streamCallback StreamProxyCallBack) (*grpc.Server, *http.Server, error) {
-	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(MaxCallRecvMsgSize) // setting receive size to 32mb instead of 4mb default
+	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(common.GRPCMaxCallRecvMsgSize) // setting receive size to 32mb instead of 4mb default
 	s := grpc.NewServer(grpc.UnknownServiceHandler(makeProxyFunc(cb, streamCallback)), grpc.ForceServerCodec(RawBytesCodec{}), serverReceiveMaxMessageSize)
 	grpc_health_v1.RegisterHealthServer(s, health.NewServer())
 

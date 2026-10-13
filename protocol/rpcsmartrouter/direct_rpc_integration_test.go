@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
@@ -1100,7 +1099,7 @@ func TestBlockExtractionResponseSizeGuard(t *testing.T) {
 	// is reached. Pinning strict inequality keeps "just reuse the overall limit" from turning
 	// the guard into a branch no input can take.
 	t.Run("grpc cap stays below the transport receive limit", func(t *testing.T) {
-		assert.Less(t, maxGRPCResponseSizeForBlockExtraction, chainproxy.MaxCallRecvMsgSize,
+		assert.Less(t, maxGRPCResponseSizeForBlockExtraction, common.GRPCMaxCallRecvMsgSize,
 			"a cap at or above MaxCallRecvMsgSize is unreachable — the transport rejects first")
 	})
 }
