@@ -23,10 +23,12 @@ import (
 // of the whole body decides which answer it votes for. The message comes from the real GraphQL
 // parser, so the vote rule is the one a live relay meets.
 //
-// The out-of-range body is the one Sui mainnet returned on 2026-10-11 (Foundation and Triton
-// alike), and the pruned body is the null Sui documents for a record it no longer holds. Each
-// case's replies arrive in the order listed. The processor stops reading at quorum, so a reply
-// the tally must include comes before the reply that completes the quorum.
+// The bodies are Sui's. The out-of-range body is the one mainnet returned on 2026-10-11 (Foundation
+// and Triton alike) and again on 2026-10-13; the not-indexed body was read from mainnet on
+// 2026-10-13; the pruned body is derived from the server's source, because no public operator
+// prunes checkpoints (see the constants). Each case's replies arrive in the order listed. The
+// processor stops reading at quorum, so a reply the tally must include comes before the reply that
+// completes the quorum.
 func TestGraphQLCrossValidationBuckets(t *testing.T) {
 	ctx := context.Background()
 	emptyBlockParsing := spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY}
@@ -53,9 +55,17 @@ func TestGraphQLCrossValidationBuckets(t *testing.T) {
 		checkpoint          = `{"data":{"checkpoint":{"sequenceNumber":1000,"digest":"BGbVv2N"}}}`
 		checkpointReordered = `{"data": {"checkpoint": {"digest": "BGbVv2N", "sequenceNumber": 1000}}}`
 		otherDigest         = `{"data":{"checkpoint":{"sequenceNumber":1000,"digest":"9yQ3rTf"}}}`
-		pruned              = `{"data":{"checkpoint":null}}`
-		timedOut            = `{"data":null,"errors":[{"message":"Request timed out","extensions":{"code":"REQUEST_TIMEOUT"}}]}`
-		outOfRange          = `{"data":{"address":{"balances":null}},"errors":[{"message":"Request is outside consistent range","locations":[{"line":1,"column":117}],"path":["address","balances"],"extensions":{"code":"BAD_USER_INPUT"}}]}`
+		// A checkpoint past the provider's own head is a bare null: the resolver returns nothing for a
+		// sequence number above the head it serves (graphql.mainnet.sui.io, 2026-10-13).
+		notIndexed = `{"data":{"checkpoint":null}}`
+		// A checkpoint the provider has pruned keeps its object and loses its digest: the resolver
+		// builds the checkpoint for any sequence number up to its head without a store lookup, and only
+		// the contents lookup misses (sui-indexer-alt-graphql, src/api/types/checkpoint/mod.rs,
+		// with_sequence_number and digest; sui-indexer-alt-reader maps the store's NotFound to None).
+		// Derived from the source: no public operator prunes checkpoints, so it cannot be observed.
+		pruned     = `{"data":{"checkpoint":{"sequenceNumber":1000,"digest":null}}}`
+		timedOut   = `{"data":null,"errors":[{"message":"Request timed out","extensions":{"code":"REQUEST_TIMEOUT"}}]}`
+		outOfRange = `{"data":{"address":{"balances":null}},"errors":[{"message":"Request is outside consistent range","locations":[{"line":1,"column":117}],"path":["address","balances"],"extensions":{"code":"BAD_USER_INPUT"}}]}`
 	)
 
 	tests := []struct {
@@ -84,8 +94,8 @@ func TestGraphQLCrossValidationBuckets(t *testing.T) {
 		},
 		{
 			// A null with no errors is an answer, not a node error, so it votes against the data.
-			name:       "a provider that pruned the checkpoint disagrees with one that has it",
-			replies:    []string{pruned, checkpoint},
+			name:       "a provider that has not indexed the checkpoint yet disagrees with one that has it",
+			replies:    []string{notIndexed, checkpoint},
 			threshold:  2,
 			wantVotes:  []int{1, 1},
 			wantReason: common.CrossValidationReasonNoAgreement,
@@ -98,19 +108,23 @@ func TestGraphQLCrossValidationBuckets(t *testing.T) {
 			wantAgreed: checkpoint,
 		},
 		{
-			// Current behavior, not a goal. A pruned record and one that never existed are the same
-			// null, so nothing in the reply can tell them apart. Only the fleet can prevent it: every
+			// Current behavior, not a goal. The router does not read the document, so a pruned
+			// provider's null digest is an answer like any other, and two of them outvote the one that
+			// still holds the data. Until MAG-2863's retention-window slice decides otherwise, every
 			// provider in a cross-validation group has to keep the same history.
-			name:       "a pruned majority outvotes the data",
+			name:       "a pruned majority outvotes the data (current behavior, not a goal)",
 			replies:    []string{checkpoint, pruned, pruned},
 			threshold:  2,
 			wantVotes:  []int{2, 1},
 			wantAgreed: pruned,
 		},
 		{
-			// An error without a server-fault code is the caller's answer. Sui keeps balances for about
-			// an hour on every operator, so every provider refuses an older read the same way.
-			name:       "an error that is the caller's votes like any answer",
+			// Current behavior, not a goal. Sui files "outside consistent range" under BAD_USER_INPUT,
+			// so the router reads it as the caller's answer: it votes, and two of them are the agreed
+			// reply. Retention is per operator (about an hour for balances), so an honest provider that
+			// still holds the data is outvoted by two that no longer do. MAG-2863 keeps retention-window
+			// handling as an open slice, and this row changes with it.
+			name:       "an error that is the caller's votes like any answer (current behavior, not a goal)",
 			request:    balanceRead,
 			replies:    []string{outOfRange, outOfRange},
 			threshold:  2,
