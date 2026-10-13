@@ -735,6 +735,11 @@ func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpc
 		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(res.StatusCode))) // we ignore this error here since this code can be triggered not from grpc
 	}
 	if err != nil {
+		// Classify and mask the transport error the way the REST and GraphQL proxies do; the
+		// raw *url.Error used to leave here with the node's address in it.
+		if parsedError := cp.HandleNodeError(ctx, err); parsedError != nil {
+			return nil, parsedError
+		}
 		return nil, err
 	}
 	// close the response body

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gorilla/websocket"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -20,6 +21,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -770,4 +772,24 @@ func TestTendermintRpcChainListener_UnsubscribeAllReplies(t *testing.T) {
 			require.Equal(t, tc.calls, manager.callCount(), "each of the client's unsubscribe_all requests reaches the subscription manager once")
 		})
 	}
+}
+
+// The REST and JSON-RPC proxies run a transport failure through HandleNodeError, so the router sees a
+// coded, retryable LavaError; the Tendermint URI proxy returned the raw *url.Error (MAG-4278).
+func TestTendermintSendURI_ClassifiesTransportErrorsLikeTheOtherProxies(t *testing.T) {
+	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "LAVA")
+	require.NoError(t, err)
+	parser, err := NewChainParser(spectypes.APIInterfaceTendermintRPC)
+	require.NoError(t, err)
+	parser.SetSpec(spec)
+	chainMessage, err := parser.ParseMsg("status", nil, "", nil, extensionslib.ExtensionInfo{})
+	require.NoError(t, err)
+
+	cp := &tendermintRpcChainProxy{JrpcChainProxy: JrpcChainProxy{
+		BaseChainProxy: BaseChainProxy{NodeUrl: common.NodeUrl{Url: "http://127.0.0.1:1"}, ErrorHandler: &TendermintRPCErrorHandler{}},
+		conn:           &chainproxy.Connector{},
+	}}
+	_, err = cp.SendURI(context.Background(), &rpcInterfaceMessages.TendermintrpcMessage{Path: "status"}, chainMessage)
+	require.Error(t, err)
+	require.ErrorIs(t, err, common.LavaErrorConnectionRefused, "the URI path must hand back the same coded error the REST proxy produces, not the raw *url.Error")
 }
