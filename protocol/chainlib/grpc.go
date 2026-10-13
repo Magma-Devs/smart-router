@@ -424,9 +424,11 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		metricsData := metrics.NewRelayAnalytics(dappID, apil.endpoint.ChainID, apiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
 		consumerIp := common.GetIpFromGrpcContext(ctx)
+		ctx = apil.logger.BeginCustomerRequest(ctx, metricsData)
 		relayResult, err := apil.relaySender.SendRelay(ctx, method, string(reqBody), "", dappID, consumerIp, metricsData, grpcHeaders)
 		relayReply := relayResult.GetReply()
-		apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
+		apil.logger.ObserveCustomerReply(metricsData, relayResult)
+		defer func() { apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues) }()
 
 		if err != nil {
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
@@ -445,7 +447,8 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		unMarshalingError := json.Unmarshal(relayReply.Data, nodeError)
 		metadataToReply := relayReply.Metadata
 		if unMarshalingError == nil {
-			return nil, convertRelayMetaDataToMDMetaData(metadataToReply), status.Error(codes.Code(nodeError.ErrorCode), nodeError.ErrorMessage)
+			err = status.Error(codes.Code(nodeError.ErrorCode), nodeError.ErrorMessage)
+			return nil, convertRelayMetaDataToMDMetaData(metadataToReply), err
 		}
 		return relayReply.Data, convertRelayMetaDataToMDMetaData(metadataToReply), nil
 	}
@@ -478,7 +481,14 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		}
 	}
 
-	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionSource, streamCallback)
+	_, httpServer, err := grpcproxy.NewGRPCProxyWithReflection(sendRelayCallback, apil.endpoint.HealthCheckPath, cmdFlags, apil.healthReporter, reflectionSource, streamCallback, func(ctx context.Context, method string) func(error) {
+		md, _ := metadata.FromIncomingContext(ctx)
+		ctx = utils.ExtractWantedHeadersFromCachedMap(md, ctx)
+		data := metrics.NewRelayAnalytics(extractDappIDFromGrpcHeader(md), apil.endpoint.ChainID, apiInterface)
+		data.ApiMethod = method
+		apil.logger.BeginCustomerRequest(ctx, data)
+		return func(err error) { apil.logger.AddMetricForGrpc(data, err, &md) }
+	})
 	if err != nil {
 		utils.LavaFormatFatal("provider failure RegisterServer", err, utils.Attribute{Key: "listenAddr", Value: apil.endpoint.NetworkAddress})
 	}
@@ -571,6 +581,8 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 			utils.LogAttr("dappID", dappID),
 		)
 
+		ctx = apil.logger.BeginCustomerRequest(ctx, metricsData)
+		metricsData.ComputeUnits = protocolMessage.GetApi().ComputeUnits
 		ctx = WithSubscriptionUpstream(ctx)
 		firstReply, repliesChan, err := subscriptionManager.StartSubscription(ctx, protocolMessage, dappID, consumerIp, connectionUniqueId, metricsData)
 		if reporter, ok := apil.relaySender.(SubscriptionRelayReporter); ok {
@@ -585,6 +597,8 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		// same fields for the life of the subscription — so each side needs its own
 		// copy. ConsumerWebsocketManager copies for the same reason.
 		subscriptionFields := *metricsData
+		subscriptionFields.Customer = nil
+		subscriptionFields.RequestKind = "notification"
 		apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
 		if err != nil {
 			apil.logger.LogRequestAndResponse("grpc stream in/out", true, method, string(reqBody), "", err.Error(), connectionUniqueId, time.Since(startTime), err)

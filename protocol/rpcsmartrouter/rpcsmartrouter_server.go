@@ -1560,6 +1560,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	rpcss.awaitWakeIfIdle(ctx, relaySentTime)
 	var err error
 	relayProcessor, err = rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
+	defer func() { captureCustomerDecision(analytics, protocolMessage, relayProcessor, relayResult, errRet) }()
 
 	// Both failure returns below ask the same question, and the answer cannot differ between them.
 	// Memoised so the results snapshot and its two locks are taken once.

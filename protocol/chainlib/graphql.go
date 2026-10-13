@@ -409,8 +409,10 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 
 		// The url argument is the internal path, not a route: a GraphQL endpoint serves every
 		// operation on one path, and the operation is named in the body.
+		ctx = apil.logger.BeginCustomerRequest(ctx, analytics)
 		relayResult, err := apil.relaySender.SendRelay(ctx, "", requestBody, http.MethodPost, dappID, userIp, analytics, graphqlHeaders)
 		reply := relayResult.GetReply()
+		apil.logger.ObserveCustomerReply(analytics, relayResult)
 		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
@@ -435,6 +437,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	app.Use("/*", func(fiberCtx *fiber.Ctx) error {
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		fiberCtx.Status(fiber.StatusMethodNotAllowed)
+		recordCustomerRejection(apil.logger, fiberCtx, chainID, apiInterface, fiber.ErrMethodNotAllowed)
 		return addHeadersAndSendBytes(fiberCtx, nil, convertToJsonError("graphql requests must be sent as HTTP POST"))
 	})
 

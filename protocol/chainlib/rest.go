@@ -331,8 +331,10 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("body", requestBody),
 			utils.LogAttr("headers", common.RedactMetadata(restHeaders)),
 		)
+		ctx = apil.logger.BeginCustomerRequest(ctx, analytics)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, http.MethodPost, dappID, userIp, analytics, restHeaders)
 		reply := relayResult.GetReply()
+		apil.logger.ObserveCustomerReply(analytics, relayResult)
 		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
 			// Same answer as the catch-all handler below: a verb the spec does not declare is a
@@ -412,8 +414,10 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("headers", common.RedactMetadata(restHeaders)),
 		)
 
+		ctx = apil.logger.BeginCustomerRequest(ctx, analytics)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, fiberCtx.Method(), dappID, userIp, analytics, restHeaders)
 		reply := relayResult.GetReply()
+		apil.logger.ObserveCustomerReply(analytics, relayResult)
 		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
 			if errors.Is(err, common.APINotSupportedError) {

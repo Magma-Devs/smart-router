@@ -173,8 +173,13 @@ func (rpccl *RPCConsumerLogs) RecordProviderLatency(chainId string, apiInterface
 }
 
 func (rpccl *RPCConsumerLogs) AddMetricForHttp(data *RelayMetrics, err error, headers map[string][]string) {
-	// Set Success before SetRelayMetrics and Emit: both read it.
-	data.Success = err == nil
+	// Resolve Success before SetRelayMetrics and Emit; both read the same final verdict.
+	if data.Customer == nil {
+		data.Success = err == nil
+	}
+	if !rpccl.finishCustomer(data, err) {
+		return
+	}
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
 	// headers must hold owned strings: this runs in a goroutine after the reply, and strings.Join
 	// of a single value returns that value itself rather than a copy. The HTTP listeners pass
@@ -193,7 +198,12 @@ func (rpccl *RPCConsumerLogs) emitUsage(data *RelayMetrics) {
 }
 
 func (rpccl *RPCConsumerLogs) AddMetricForWebSocket(data *RelayMetrics, err error) {
-	data.Success = err == nil
+	if data.Customer == nil {
+		data.Success = err == nil
+	}
+	if !rpccl.finishCustomer(data, err) {
+		return
+	}
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
 	rpccl.emitUsage(data)
 }
@@ -207,7 +217,12 @@ func (rpccl *RPCConsumerLogs) AddMetricForGrpc(data *RelayMetrics, err error, me
 		}
 		return headerValue
 	}
-	data.Success = err == nil
+	if data.Customer == nil {
+		data.Success = err == nil
+	}
+	if !rpccl.finishCustomer(data, err) {
+		return
+	}
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
 	// Origin crosses into the async OTel emit path, so it must be an owned string. It is one
 	// already on every listener: the HTTP listeners hand over chainlib's detached copy of fiber's
