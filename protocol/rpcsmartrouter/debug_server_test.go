@@ -1055,3 +1055,19 @@ func TestDebugRuntimeConfig_SmartRouter_PerChainOptimizer(t *testing.T) {
 	// Exactly the chains we wired — no extras, none dropped.
 	require.Equal(t, want, resp.PerChainOptimizer)
 }
+
+// reset-all claims to be the superset of reset-scores, but it never reset the chain trackers (so
+// the tip re-seeded from the pre-reset trackers) nor the probe back-off; both now do (MAG-4278).
+func TestDebugResetAll_SmartRouter_ResetsTrackersAndProbeBackoffLikeResetScores(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	rr := postResetAllRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `"chain-trackers"`)
+	require.Contains(t, rr.Body.String(), `"probe-backoff"`)
+
+	rr = postResetScoresRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `"probe_backoff_reset":0`)
+}

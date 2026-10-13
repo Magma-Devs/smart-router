@@ -1381,9 +1381,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		})
 		trackersReset := resetAllChainTrackers(deps)
 		chainStatesReset := resetAllChainStates(deps)
+		probeBackoffReset := resetAllProbeBackoff(deps)
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"reset":true,"chains_reset":%d,"trackers_reset":%d,"chainstates_reset":%d}`,
-			count, trackersReset, chainStatesReset)
+		fmt.Fprintf(w, `{"reset":true,"chains_reset":%d,"trackers_reset":%d,"chainstates_reset":%d,"probe_backoff_reset":%d}`,
+			count, trackersReset, chainStatesReset, probeBackoffReset)
 	})
 
 	// POST /debug/reset-all — flush every state store the test framework
@@ -1429,6 +1430,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    IS reset here explicitly — this is the operator big-hammer that self-heal can't cover.
 		//    Surfaced in the response body as the "chain-state" capability below.
 		resetAllChainStates(deps)
+		// reset-scores resets the chain trackers and the probe back-off too; reset-all claims to be
+		// the superset, so it does the same (the tip used to re-seed from the trackers after a reset).
+		resetAllChainTrackers(deps)
+		resetAllProbeBackoff(deps)
 		//
 		// 3. Per-CSM transient failure state, and 3b. per-CSM blocked-providers
 		//    list. Both require the router to be present; test fixtures without a
@@ -1520,9 +1525,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// the key only together with the prober that requires it.
 		w.Header().Set("Content-Type", "application/json")
 		if cacheBeFlushed {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","cache-be"]}`)
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","chain-trackers","probe-backoff","cache-be"]}`)
 		} else {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing"]}`)
+			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","chain-trackers","probe-backoff"]}`)
 		}
 	})
 
