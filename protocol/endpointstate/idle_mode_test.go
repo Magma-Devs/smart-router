@@ -327,10 +327,10 @@ func TestIdleMode_WakeChannelStaysOpenWhileTrackerIsStarting(t *testing.T) {
 	require.Less(t, elapsed, pollNowUnstartedGrace+5*time.Second)
 }
 
-// TestIdleMode_QoSFeedStaysPausedUntilTheBurstEnds: the relay that ends an idle period clears
-// IsIdle at once, but the probe's QoS feed stays paused until the wake burst finishes, so a probe
-// cycle that lands mid-burst cannot score the endpoints not yet re-polled as not alive.
-func TestIdleMode_QoSFeedStaysPausedUntilTheBurstEnds(t *testing.T) {
+// TestIdleMode_IdleOrWakingHoldsUntilTheBurstEnds: the relay that ends an idle period clears
+// IsIdle at once, but IdleOrWaking stays true until the wake burst finishes, so a probe cycle that
+// lands mid-burst does not judge the endpoints not yet re-polled (QoS feed, head-stall).
+func TestIdleMode_IdleOrWakingHoldsUntilTheBurstEnds(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	ensureRandSeeded()
@@ -346,7 +346,7 @@ func TestIdleMode_QoSFeedStaysPausedUntilTheBurstEnds(t *testing.T) {
 	})
 	defer m.Stop()
 
-	require.False(t, m.QoSFeedPaused(time.Now()), "an active chain feeds QoS")
+	require.False(t, m.IdleOrWaking(time.Now()), "an active chain is neither idle nor waking")
 
 	conn := &pollNowConn{url: url}
 	conn.fail.Store(true) // an unstarted tracker holds the burst open for pollNowUnstartedGrace
@@ -354,13 +354,13 @@ func TestIdleMode_QoSFeedStaysPausedUntilTheBurstEnds(t *testing.T) {
 	require.NoError(t, err)
 
 	m.forceIdleForTest(2 * MinIdleAfter)
-	require.True(t, m.QoSFeedPaused(time.Now()), "an idle chain withholds the feed")
+	require.True(t, m.IdleOrWaking(time.Now()), "an idle chain")
 
 	wait := m.NoteClientRelay(time.Now())
 	require.NotNil(t, wait)
 	require.False(t, m.IsIdle(time.Now()), "the relay ends the idle period at once")
-	require.True(t, m.QoSFeedPaused(time.Now()), "but the feed stays paused while the burst polls")
+	require.True(t, m.IdleOrWaking(time.Now()), "but it is waking while the burst polls")
 
-	require.Eventually(t, func() bool { return !m.QoSFeedPaused(time.Now()) },
-		pollNowUnstartedGrace+10*time.Second, 20*time.Millisecond, "the pause ends with the burst")
+	require.Eventually(t, func() bool { return !m.IdleOrWaking(time.Now()) },
+		pollNowUnstartedGrace+10*time.Second, 20*time.Millisecond, "it ends with the burst")
 }

@@ -167,12 +167,13 @@ func (m *EndpointMonitor) wakeInProgress() bool {
 	return m.wakeDone != nil
 }
 
-// QoSFeedPaused reports whether the probe loop must withhold its QoS feed at now: while the chain
-// is idle, and while a wake burst is still polling. A relay ends the idle period the instant it is
-// stamped, before the burst's polls land; a probe cycle in that window would still read every
-// endpoint not yet re-polled as not alive and feed it Availability=0. The pause ends with the
-// burst, so an endpoint whose wake poll failed is scored normally on the next cycle.
-func (m *EndpointMonitor) QoSFeedPaused(now time.Time) bool {
+// IdleOrWaking reports whether this chain+interface is idle at now, or a wake burst is still
+// re-polling its endpoints. In that window an endpoint's observation reflects when it was last
+// polled, not how healthy it is: idle polls are paused, and a relay ends the idle period the
+// instant it is stamped, before the burst's polls land. It is a fact about idle mode only; each
+// consumer that must not judge endpoints on it gates on it under its own name (the probe loop's
+// qosFeedPaused and headStallPaused). False whenever idle mode is off.
+func (m *EndpointMonitor) IdleOrWaking(now time.Time) bool {
 	return m.IsIdle(now) || m.wakeInProgress()
 }
 

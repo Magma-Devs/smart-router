@@ -1867,8 +1867,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					// MAG-2550 replay-gate telemetry: how many disabled endpoints are held on
 					// recorded relay evidence, and the cumulative replay outcomes.
 					"EvidenceGatedCount": s.EvidenceGatedCount,
-					// Idle mode: the last cycle withheld its QoS feed because the chain was idle.
+					// Idle mode: the last cycle withheld its QoS feed / skipped the head-stall step
+					// because the chain was idle or a wake burst was still re-polling.
 					"QoSFeedPausedIdle":   s.QoSFeedPausedIdle,
+					"HeadStallPausedIdle": s.HeadStallPausedIdle,
 					"ReplaysAttempted":    s.ReplaysAttempted,
 					"ReplaysRecovered":    s.ReplaysRecovered,
 					"ReplaysStillFailing": s.ReplaysStillFailing,

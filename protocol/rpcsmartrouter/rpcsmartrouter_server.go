@@ -3387,10 +3387,12 @@ type probeLoopStats struct {
 	endpointsScored  int       // endpoints scored in the last cycle
 	reEnabledCount   int       // endpoints the probe re-enabled in the last cycle (F1)
 	syncOmittedCount int       // providers whose last-cycle QoS sample fed no sync evidence (F5)
-	// qosFeedPausedIdle is whether the last cycle withheld its QoS feed because the chain was idle
-	// (endpointstate/idle.go): with the trackers paused every observation ages out and each verdict
-	// reads not-alive, so feeding it would decay every provider's availability over silence.
-	qosFeedPausedIdle bool
+	// qosFeedPausedIdle is whether the last cycle withheld its QoS feed (qosFeedPaused), and
+	// headStallPausedIdle whether it skipped the head-stall step (headStallPaused). Two fields
+	// because they are two decisions: today both follow idle mode, but either may gain a reason
+	// of its own.
+	qosFeedPausedIdle   bool
+	headStallPausedIdle bool
 	// evidenceGatedCount is how many disabled endpoints held recorded relay evidence in the last
 	// cycle (MAG-2550) — endpoints that will need a successful replay (or the attempt-budget
 	// fallback) before re-enabling. Without this a replay-held endpoint is indistinguishable from
@@ -3428,7 +3430,7 @@ func (s *probeLoopStats) setInterval(d time.Duration) {
 }
 
 // recordCycle overwrites the last-cycle snapshot and bumps the completed-cycle counter.
-func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, scored, reEnabled, syncOmitted, evidenceGated int, qosFeedPausedIdle bool) {
+func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, scored, reEnabled, syncOmitted, evidenceGated int, qosFeedPausedIdle, headStallPausedIdle bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cyclesCompleted++
@@ -3439,6 +3441,7 @@ func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, sco
 	s.syncOmittedCount = syncOmitted
 	s.evidenceGatedCount = evidenceGated
 	s.qosFeedPausedIdle = qosFeedPausedIdle
+	s.headStallPausedIdle = headStallPausedIdle
 }
 
 // countReplay records one completed MAG-2550 recovery replay. Called from the replayer's
@@ -3468,6 +3471,7 @@ type probeLoopSnapshot struct {
 	SyncOmittedCount    int
 	EvidenceGatedCount  int
 	QoSFeedPausedIdle   bool
+	HeadStallPausedIdle bool
 	ReplaysAttempted    uint64
 	ReplaysRecovered    uint64
 	ReplaysStillFailing uint64
@@ -3492,6 +3496,7 @@ func (s *probeLoopStats) snapshot() probeLoopSnapshot {
 		SyncOmittedCount:    s.syncOmittedCount,
 		EvidenceGatedCount:  s.evidenceGatedCount,
 		QoSFeedPausedIdle:   s.qosFeedPausedIdle,
+		HeadStallPausedIdle: s.headStallPausedIdle,
 		ReplaysAttempted:    s.replaysAttempted,
 		ReplaysRecovered:    s.replaysRecovered,
 		ReplaysStillFailing: s.replaysStillFailing,
@@ -3590,31 +3595,51 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 	}
 	startedAt := time.Now()
 	endpoints := rpcss.sessionManager.GetAllDirectRPCEndpoints()
-	// Idle mode (endpointstate/idle.go): with the trackers paused and no relays, every observation
-	// ages past the staleness window and each verdict reads "not alive" — the QoS feed would then
-	// hand the optimizer Availability=0 for EVERY provider every cycle and decay the whole pod's
-	// scores over nothing but silence. Withhold the feed while idle and while the wake burst is
-	// still re-polling (QoSFeedPaused); the cycle still runs for the telemetry. Relays re-score
-	// providers at 4x the probe weight the moment traffic returns.
-	idle := rpcss.endpointChainTrackerManager.QoSFeedPaused(startedAt)
+	feedPaused := rpcss.qosFeedPaused(startedAt)
+	stallPaused := rpcss.headStallPaused(startedAt)
 	rpcss.publishChainIdle(startedAt)
 	scored, reEnabled, syncOmitted, evidenceGated := runProbeCycleCore(
 		endpoints,
 		rpcss.endpointChainTrackerManager.GetObservation,
-		baseline, hasBaseline, syncRef, startedAt, cfg, probeAppenderUnlessIdle(appender, idle),
+		baseline, hasBaseline, syncRef, startedAt, cfg, probeAppenderUnlessIdle(appender, feedPaused),
 		rpcss.sessionManager.RestoreRecoveredProvider,
 		rpcss.probeReplayer,
 	)
 	// MAG-3986: after the re-enable pass, so an endpoint the probe just returned to rotation is
-	// counted as usable by never-empty. Skipped while the QoS feed is paused, for the same reason:
-	// no fresh evidence. During a wake burst (or idle heartbeats, which poll one url at a time) the
-	// first url to answer raises the chain's highest block while the others still hold their
-	// pre-idle block, and a url that carried SameBlockCycles >= N into the idle period (every url
-	// of a chain that was quiet before it went idle) would be marked head-stalled for nothing.
-	if !idle {
+	// counted as usable by never-empty.
+	if !stallPaused {
 		rpcss.runHeadStall(endpoints, startedAt)
 	}
-	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, evidenceGated, idle)
+	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, evidenceGated, feedPaused, stallPaused)
+}
+
+// qosFeedPaused is the probe loop's decision to withhold its QoS feed this cycle. Idle mode
+// (endpointstate/idle.go): with the trackers paused and no relays, every observation ages past the
+// staleness window and each verdict reads "not alive" — the feed would hand the optimizer
+// Availability=0 for EVERY provider every cycle and decay the whole pod's scores over nothing but
+// silence. That holds until the wake burst has re-polled, hence IdleOrWaking. The pause ends with
+// the burst, so an endpoint whose wake poll failed is scored normally on the next cycle. Relays
+// re-score providers at 4x the probe weight the moment traffic returns.
+//
+// Its own function, not a shared flag: a future reason to pause scoring belongs here and must not
+// pause the head-stall step (headStallPaused).
+func (rpcss *RPCSmartRouterServer) qosFeedPaused(now time.Time) bool {
+	return rpcss.endpointChainTrackerManager.IdleOrWaking(now)
+}
+
+// headStallPaused is the probe loop's decision to skip the head-stall step (MAG-3986) this cycle.
+// Idle mode: while idle and until the wake burst has re-polled, the endpoints' blocks show when
+// each was last polled, not whether it is stuck. During the burst (or idle heartbeats, which poll
+// one url at a time) the first url to answer raises the chain's highest block while the others
+// still hold their pre-idle block, and a url that carried SameBlockCycles >= N into the idle period
+// (every url of a chain that was quiet before it went idle) would be marked head-stalled for not
+// having answered yet. Head-stall resumes on the first cycle after the burst, with fresh evidence:
+// a url that is really frozen answered its wake poll with the same block and is marked then.
+//
+// Its own function, not a shared flag: it must not follow reasons that pause scoring
+// (qosFeedPaused), which have nothing to do with whether an endpoint is stuck.
+func (rpcss *RPCSmartRouterServer) headStallPaused(now time.Time) bool {
+	return rpcss.endpointChainTrackerManager.IdleOrWaking(now)
 }
 
 // publishChainIdle sets smartrouter_chain_idle to this chain+interface's idle state at now. The

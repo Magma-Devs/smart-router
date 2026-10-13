@@ -298,10 +298,39 @@ func TestProbeCycle_HeadStallWaitsForTheWakeBurst(t *testing.T) {
 
 	f.server.runProbeCycle(nil, cfg)
 	require.False(t, stalledURL(nodeB.URL), "a url still being re-polled by the wake is not head-stalled")
+	require.True(t, f.server.probeStats.snapshot().HeadStallPausedIdle, "/debug/probe-loop shows the step was skipped")
 
-	require.Eventually(t, func() bool { return !f.monitor.QoSFeedPaused(time.Now()) }, 15*time.Second, 50*time.Millisecond)
+	require.Eventually(t, func() bool { return !f.monitor.IdleOrWaking(time.Now()) }, 15*time.Second, 50*time.Millisecond)
 	obsB, _ = f.monitor.GetObservation(nodeB.URL)
 	require.Equal(t, int64(1100), obsB.HighestBlockSeen, "B's wake poll landed")
 	f.server.runProbeCycle(nil, cfg)
 	require.False(t, stalledURL(nodeB.URL))
+}
+
+// TestProbeGates_FollowIdleModeOnly: the probe loop's two pauses (QoS feed, head-stall step) are
+// separate decisions, each driven by idle-mode state alone. Off: never paused. Active: not paused.
+// Idle: both paused.
+func TestProbeGates_FollowIdleModeOnly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	newServer := func(idleAfter time.Duration) *RPCSmartRouterServer {
+		m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+			ChainID: "GATES", ApiInterface: "jsonrpc", AverageBlockTime: time.Minute, BlocksToSave: 1,
+			IdleAfter: idleAfter,
+		})
+		t.Cleanup(m.Stop)
+		return &RPCSmartRouterServer{endpointChainTrackerManager: m}
+	}
+	now := time.Now()
+	later := now.Add(3 * endpointstate.MinIdleAfter)
+
+	off := newServer(0)
+	require.False(t, off.qosFeedPaused(later))
+	require.False(t, off.headStallPaused(later), "idle mode off: head-stall runs every cycle, as before idle mode")
+
+	on := newServer(endpointstate.MinIdleAfter)
+	require.False(t, on.qosFeedPaused(now))
+	require.False(t, on.headStallPaused(now), "active chain")
+	require.True(t, on.qosFeedPaused(later))
+	require.True(t, on.headStallPaused(later), "idle chain")
 }

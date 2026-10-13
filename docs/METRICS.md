@@ -142,8 +142,9 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 > `/debug/endpoint-state` reports `IdleMode` (`off` / `active` / `idle`), `LastClientRelay`,
 > `IdleSince` and `WakeInProgress` per row. The next client request ends it: every endpoint is
 > polled once (a burst of `requests_total`), and `/debug/probe-loop` shows `QoSFeedPausedIdle`
-> flipping back to `false` — while idle the prober withholds its QoS feed rather than score every
-> provider unavailable for being unpolled.
+> and `HeadStallPausedIdle` flipping back to `false` once the burst is done — while idle the prober
+> withholds its QoS feed rather than score every provider unavailable for being unpolled, and skips
+> the head-stall step rather than mark a url stuck for not having been polled yet.
 >
 > `peer` stuck at zero has several unrelated causes. `rpc_endpoint_tracker_gate_errors_total`
 > narrows it to two groups, and the log separates the pair that share a metric shape:

@@ -574,7 +574,7 @@ func TestDebugProbeLoop_ReportsCycleStats(t *testing.T) {
 	var offsetNano atomic.Int64
 	server := &RPCSmartRouterServer{listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
 	server.probeStats.setInterval(5 * time.Second)
-	server.probeStats.recordCycle(time.Now(), 7*time.Millisecond, 4, 1, 2, 1, false)
+	server.probeStats.recordCycle(time.Now(), 7*time.Millisecond, 4, 1, 2, 1, false, false)
 
 	router := &RPCSmartRouter{
 		rpcServers: map[string]*RPCSmartRouterServer{
