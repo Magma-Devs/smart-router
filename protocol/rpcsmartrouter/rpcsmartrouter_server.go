@@ -1524,6 +1524,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// toward the end-to-end latency below on purpose — the client experienced it.
 	rpcss.awaitWakeIfIdle(ctx, relaySentTime)
 	relayProcessor, err := rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
+	defer func() { captureCustomerDecision(analytics, protocolMessage, relayProcessor, relayResult, errRet) }()
 
 	// Both failure returns below ask the same question, and the answer cannot differ between them.
 	// Memoised so the results snapshot and its two locks are taken once.
@@ -1603,7 +1604,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			servedBy = returnedResult.GetProvider()
 		}
 	}
-	utils.LavaFormatInfo("relay finished",
+	utils.LavaFormatDebug("relay decision",
 		utils.LogAttr("served_by", servedBy),
 		utils.LogAttr("stop_reason", relayProcessor.GetStopReason()),
 		utils.LogAttr("status", statusCode),

@@ -13,6 +13,8 @@ const (
 )
 
 type RelayMetrics struct {
+	RequestKind         string           // server-owned: internal, customer, notification
+	Customer            *CustomerRequest // listener-owned lifecycle; nil for internal work and pushed notifications
 	ProjectHash         string
 	Timestamp           time.Time
 	ChainID             string
@@ -36,6 +38,7 @@ type RelayMetrics struct {
 
 func NewRelayAnalytics(projectHash, chainId, apiType string) *RelayMetrics {
 	return &RelayMetrics{
+		RequestKind: "internal",
 		Timestamp:   time.Now(),
 		ProjectHash: projectHash,
 		ChainID:     chainId,
@@ -63,26 +66,28 @@ func (rm *RelayMetrics) SetProcessingTimestampAfterRelay(timestamp time.Time) {
 // (timestamp, project, chain, ...) at query time. JSON tags are kept short to
 // minimize payload size at scale.
 type RelayUsageEvent struct {
-	TimestampNs     int64  `json:"ts"`
-	ProjectHash     string `json:"project"`
-	ChainID         string `json:"chain"`
-	APIInterface    string `json:"api_interface"`
-	APIMethod       string `json:"api_method,omitempty"`
-	ComputeUnits    uint64 `json:"cu"`
-	LatencyMs       int64  `json:"latency_ms"`
-	Success         bool   `json:"success"`
-	CacheHit        bool   `json:"cache_hit,omitempty"`
-	IsWrite         bool   `json:"is_write,omitempty"`
-	IsArchive       bool   `json:"is_archive,omitempty"`
-	IsBatch         bool   `json:"is_batch,omitempty"`
-	IsDebugTrace    bool   `json:"is_debug_trace,omitempty"`
-	HedgeCount      uint64 `json:"hedge_count,omitempty"`
-	ProviderAddress string `json:"provider,omitempty"`
-	Origin          string `json:"origin,omitempty"`
+	Customer        *CustomerTerminal `json:"customer_request,omitempty"`
+	RequestKind     string            `json:"request_kind"`
+	TimestampNs     int64             `json:"ts"`
+	ProjectHash     string            `json:"project"`
+	ChainID         string            `json:"chain"`
+	APIInterface    string            `json:"api_interface"`
+	APIMethod       string            `json:"api_method,omitempty"`
+	ComputeUnits    uint64            `json:"cu"`
+	LatencyMs       int64             `json:"latency_ms"`
+	Success         bool              `json:"success"`
+	CacheHit        bool              `json:"cache_hit,omitempty"`
+	IsWrite         bool              `json:"is_write,omitempty"`
+	IsArchive       bool              `json:"is_archive,omitempty"`
+	IsBatch         bool              `json:"is_batch,omitempty"`
+	IsDebugTrace    bool              `json:"is_debug_trace,omitempty"`
+	HedgeCount      uint64            `json:"hedge_count,omitempty"`
+	ProviderAddress string            `json:"provider,omitempty"`
+	Origin          string            `json:"origin,omitempty"`
 }
 
 func NewRelayUsageEvent(rm *RelayMetrics) RelayUsageEvent {
-	return RelayUsageEvent{
+	event := RelayUsageEvent{
 		TimestampNs:     rm.Timestamp.UnixNano(),
 		ProjectHash:     rm.ProjectHash,
 		ChainID:         rm.ChainID,
@@ -100,4 +105,18 @@ func NewRelayUsageEvent(rm *RelayMetrics) RelayUsageEvent {
 		ProviderAddress: rm.ProviderAddress,
 		Origin:          rm.Origin,
 	}
+	event.RequestKind = rm.RequestKind
+	if event.RequestKind == "" {
+		event.RequestKind = "internal"
+	}
+	if rm.Customer != nil {
+		snapshot := rm.Customer.Snapshot()
+		event.Customer = &snapshot
+		event.RequestKind = snapshot.RequestKind
+		event.Success = snapshot.Outcome == "success"
+		event.CacheHit = snapshot.CacheHit
+		event.ProviderAddress = snapshot.Provider
+		event.LatencyMs = snapshot.DurationMs
+	}
+	return event
 }

@@ -336,6 +336,12 @@ func enqueueWebsocketFrame(ctx, webSocketCtx context.Context, writerDone <-chan 
 }
 
 func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
+	// CLI flags are startup configuration. Snapshot them before spawning the
+	// connection's workers so a later command cannot race an idle/rate checker.
+	connectionRateLimit := WebSocketRateLimit
+	connectionBanDuration := WebSocketBanDuration
+	connectionMaxIdle := GetMaxIdleTimeInSeconds()
+
 	// adding metrics for how many active connections we have.
 	cwm.rpcConsumerLogs.SetWebSocketConnectionActive(cwm.chainId, cwm.apiInterface, true)
 	defer cwm.rpcConsumerLogs.SetWebSocketConnectionActive(cwm.chainId, cwm.apiInterface, false)
@@ -392,7 +398,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	idleFor.Store(time.Now().Unix())
 	requestsPerSecond := &atomic.Uint64{}
 	go func() {
-		if WebSocketRateLimit <= 0 && cwm.headerRateLimit <= 0 && GetMaxIdleTimeInSeconds() <= 0 {
+		if connectionRateLimit <= 0 && cwm.headerRateLimit <= 0 && connectionMaxIdle <= 0 {
 			return
 		}
 		ticker := time.NewTicker(time.Second) // rate limit per second.
@@ -403,7 +409,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				utils.LavaFormatDebug("ctx done in time checker")
 				return
 			case <-ticker.C:
-				if maxIdleTime := GetMaxIdleTimeInSeconds(); maxIdleTime > 0 {
+				if maxIdleTime := connectionMaxIdle; maxIdleTime > 0 {
 					utils.LavaFormatDebug("checking idle time", utils.LogAttr("idleFor", idleFor.Load()), utils.LogAttr("maxIdleTime", maxIdleTime), utils.LogAttr("now", time.Now().Unix()))
 					idleDuration := idleFor.Load() + maxIdleTime
 					if time.Now().Unix() > idleDuration {
@@ -426,15 +432,15 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 						return
 					}
 				}
-				if cwm.headerRateLimit > 0 || WebSocketRateLimit > 0 {
+				if cwm.headerRateLimit > 0 || connectionRateLimit > 0 {
 					// check if rate limit reached, and ban is required
 					currentRequestsPerSecondLoad := requestsPerSecond.Load()
-					if WebSocketBanDuration > 0 && (currentRequestsPerSecondLoad > cwm.headerRateLimit || currentRequestsPerSecondLoad > uint64(WebSocketRateLimit)) {
+					if connectionBanDuration > 0 && (currentRequestsPerSecondLoad > cwm.headerRateLimit || currentRequestsPerSecondLoad > uint64(connectionRateLimit)) {
 						// wait the ban duration before resetting the store.
 						select {
 						case <-webSocketCtx.Done():
 							return
-						case <-time.After(WebSocketBanDuration): // just continue
+						case <-time.After(connectionBanDuration): // just continue
 						}
 					}
 					requestsPerSecond.Store(0)
@@ -459,17 +465,6 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			break
 		}
 
-		// Check rate limit is met
-		currentRequestsPerSecond := requestsPerSecond.Add(1)
-		if (cwm.headerRateLimit > 0 && currentRequestsPerSecond > cwm.headerRateLimit) ||
-			(WebSocketRateLimit > 0 && currentRequestsPerSecond > uint64(WebSocketRateLimit)) {
-			rateLimitResponse, err := cwm.handleRateLimitReached(msg)
-			if err == nil {
-				sendWS(webSocketMsgWithType{messageType: messageType, msg: rateLimitResponse})
-			}
-			continue
-		}
-
 		dappID, ok := websocketConn.Locals(ProjectIDHeader).(string)
 		if !ok {
 			// Log and remove the analyze
@@ -477,6 +472,22 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 			}
+		}
+
+		metricsData := metrics.NewRelayAnalytics(dappID, cwm.chainId, cwm.apiInterface)
+		metricsData.Origin = origin
+		requestCtx := utils.WithUniqueIdentifier(webSocketCtx, utils.GenerateUniqueIdentifier())
+		requestCtx = logger.BeginCustomerRequest(requestCtx, metricsData)
+		// Check rate limit is met
+		currentRequestsPerSecond := requestsPerSecond.Add(1)
+		if (cwm.headerRateLimit > 0 && currentRequestsPerSecond > cwm.headerRateLimit) ||
+			(connectionRateLimit > 0 && currentRequestsPerSecond > uint64(connectionRateLimit)) {
+			rateLimitResponse, err := cwm.handleRateLimitReached(msg)
+			if err == nil {
+				sendWS(webSocketMsgWithType{messageType: messageType, msg: rateLimitResponse})
+			}
+			logger.AddMetricForWebSocket(metricsData, errors.New("websocket request rate limit exceeded"))
+			continue
 		}
 
 		userIp := websocketConn.RemoteAddr().String()
@@ -493,199 +504,202 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			utils.LogAttr("dappID", dappID),
 		)
 
-		metricsData := metrics.NewRelayAnalytics(dappID, cwm.chainId, cwm.apiInterface)
-		metricsData.Origin = origin
-
-		protocolMessage, err := cwm.relaySender.ParseRelay(webSocketCtx, "", string(msg), cwm.connectionType, dappID, userIp, nil)
-		if err != nil {
-			utils.LavaFormatDebug("ws manager could not parse message", utils.LogAttr("message", msg), utils.LogAttr("err", err))
-			// A batch the chain cannot take is a request the caller can fix, so it gets the same
-			// -32600 the POST handler returns rather than the masked GUID the generic formatter
-			// writes. Without this the identical request shape yields an actionable error over
-			// HTTP and an opaque one here.
-			if errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused) {
-				refused := common.JsonRpcInvalidRequestError
-				refused.Error.Data = rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error()
-				if msgData, marshalErr := json.Marshal(refused); marshalErr == nil {
-					sendWS(webSocketMsgWithType{messageType: messageType, msg: msgData})
-					continue
-				}
-			}
-			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
-			if formatterMsg != nil {
-				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
-			}
-			continue
-		}
-
-		// check whether it's a normal relay / unsubscribe / unsubscribe_all otherwise its a subscription flow.
-		if !IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_SUBSCRIBE) {
-			if IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_UNSUBSCRIBE) {
-				responseData, err := cwm.wsSubscriptionManager.Unsubscribe(webSocketCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
-				if err != nil {
-					utils.LavaFormatWarning("error unsubscribing from subscription", err, utils.LogAttr("GUID", webSocketCtx))
-					if err == common.SubscriptionNotFoundError {
-						// Echo the caller's id (JSON-RPC 2.0 §4.2) — the template's hardcoded
-						// id is just a fallback for malformed requests with no id field.
-						msgData, err := common.MarshalJsonRPCErrorWithRequestID(common.JsonRpcSubscriptionNotFoundError, msg)
-						if err != nil {
-							continue
-						}
+		func() {
+			var requestErr error
+			defer func() { logger.AddMetricForWebSocket(metricsData, requestErr) }()
+			protocolMessage, err := cwm.relaySender.ParseRelay(requestCtx, "", string(msg), cwm.connectionType, dappID, userIp, nil)
+			requestErr = err
+			if err != nil {
+				utils.LavaFormatDebug("ws manager could not parse message", utils.LogAttr("message", msg), utils.LogAttr("err", err))
+				// A batch the chain cannot take is a request the caller can fix, so it gets the same
+				// -32600 the POST handler returns rather than the masked GUID the generic formatter
+				// writes. Without this the identical request shape yields an actionable error over
+				// HTTP and an opaque one here.
+				if errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused) {
+					refused := common.JsonRpcInvalidRequestError
+					refused.Error.Data = rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error()
+					if msgData, marshalErr := json.Marshal(refused); marshalErr == nil {
 						sendWS(webSocketMsgWithType{messageType: messageType, msg: msgData})
+						return
+					}
+				}
+				formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+				if formatterMsg != nil {
+					sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
+				}
+				return
+			}
+
+			// check whether it's a normal relay / unsubscribe / unsubscribe_all otherwise its a subscription flow.
+			if !IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_SUBSCRIBE) {
+				if IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_UNSUBSCRIBE) {
+					responseData, err := cwm.wsSubscriptionManager.Unsubscribe(requestCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+					requestErr = err
+					if err != nil {
+						utils.LavaFormatWarning("error unsubscribing from subscription", err, utils.LogAttr("GUID", requestCtx))
+						if err == common.SubscriptionNotFoundError {
+							// Echo the caller's id (JSON-RPC 2.0 §4.2) — the template's hardcoded
+							// id is just a fallback for malformed requests with no id field.
+							msgData, err := common.MarshalJsonRPCErrorWithRequestID(common.JsonRpcSubscriptionNotFoundError, msg)
+							if err != nil {
+								return
+							}
+							sendWS(webSocketMsgWithType{messageType: messageType, msg: msgData})
+						} else {
+							// Send formatted error so client gets feedback (e.g. upstream timeout)
+							formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+							if formatterMsg != nil {
+								sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
+							}
+						}
 					} else {
-						// Send formatted error so client gets feedback (e.g. upstream timeout)
-						formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+						if responseData == nil {
+							// An implementation may report success with no payload, having no
+							// synchronous ack frame from the node to forward. Synthesize a
+							// §4.2-compliant reply so clients don't hang on recv() until they
+							// time out (~15s). The
+							// JSON-RPC envelope is safe here: ConsumerWebsocketManager is
+							// only constructed by jsonRPC.go and tendermintRPC.go, both
+							// JSON-RPC-shaped. Mirrors lavanet/lava#2296.
+							responseData = buildUnsubscribeSuccessReply(msg)
+							if responseData == nil {
+								// A notification gets no reply (JSON-RPC 2.0 §4.1).
+								return
+							}
+							utils.LavaFormatTrace("synthesized unsubscribe ack",
+								utils.LogAttr("GUID", requestCtx),
+								utils.LogAttr("dappID", dappID),
+							)
+						}
+						// Forward the node's response directly to the end user - no transformation or wrapping.
+						sendWS(webSocketMsgWithType{messageType: messageType, msg: responseData})
+					}
+					return
+				} else if IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_UNSUBSCRIBE_ALL) {
+					err := cwm.wsSubscriptionManager.UnsubscribeAll(requestCtx, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+					requestErr = err
+					// The manager tears this client's subscriptions down itself and hands back no
+					// node frame, so the router answers, as the node would have (MAG-4064). A
+					// failed teardown is answered too, under the same id, so the client waiting
+					// on it unblocks. A notification gets no reply.
+					reply := buildUnsubscribeAllSuccessReply(msg)
+					if err != nil {
+						utils.LavaFormatWarning("error unsubscribing from all subscription", err, utils.LogAttr("GUID", requestCtx))
+						reply = buildUnsubscribeAllErrorReply(msg)
+					}
+					if reply != nil {
+						sendWS(webSocketMsgWithType{messageType: messageType, msg: reply})
+					}
+					return
+				} else {
+					// Normal relay over websocket. (not subscription related)
+					relayResult, err := cwm.relaySender.SendParsedRelay(requestCtx, metricsData, protocolMessage)
+					requestErr = err
+					if err != nil {
+						formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not send parsed relay", err), msgSeed, msg, cwm.apiInterface, time.Since(startTime))
 						if formatterMsg != nil {
 							sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 						}
+					} else if relayResultReply := relayResult.GetReply(); relayResultReply != nil {
+						// No need to verify signature since this is already happening inside the SendParsedRelay flow
+						sendWS(webSocketMsgWithType{messageType: messageType, msg: relayResultReply.Data})
+					} else {
+						utils.LavaFormatError("Relay result is nil over websocket normal request flow, should not happen", err, utils.LogAttr("messageType", messageType))
 					}
-				} else {
-					if responseData == nil {
-						// An implementation may report success with no payload, having no
-						// synchronous ack frame from the node to forward. Synthesize a
-						// §4.2-compliant reply so clients don't hang on recv() until they
-						// time out (~15s). The
-						// JSON-RPC envelope is safe here: ConsumerWebsocketManager is
-						// only constructed by jsonRPC.go and tendermintRPC.go, both
-						// JSON-RPC-shaped. Mirrors lavanet/lava#2296.
-						responseData = buildUnsubscribeSuccessReply(msg)
-						if responseData == nil {
-							// A notification gets no reply (JSON-RPC 2.0 §4.1).
-							continue
-						}
-						utils.LavaFormatTrace("synthesized unsubscribe ack",
-							utils.LogAttr("GUID", webSocketCtx),
-							utils.LogAttr("dappID", dappID),
-						)
-					}
-					// Forward the node's response directly to the end user - no transformation or wrapping.
-					sendWS(webSocketMsgWithType{messageType: messageType, msg: responseData})
+					// Emit the relay_usage event for every normal WS relay
+					// (success or failure). The pre-existing flow `continue`d
+					// before reaching AddMetricForWebSocket below, so normal WS
+					// relays were silently dropped from the analytics pipeline.
+					logger.ObserveCustomerReply(metricsData, relayResult)
+					return
 				}
-				continue
-			} else if IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_UNSUBSCRIBE_ALL) {
-				err := cwm.wsSubscriptionManager.UnsubscribeAll(webSocketCtx, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
-				// The manager tears this client's subscriptions down itself and hands back no
-				// node frame, so the router answers, as the node would have (MAG-4064). A
-				// failed teardown is answered too, under the same id, so the client waiting
-				// on it unblocks. A notification gets no reply.
-				reply := buildUnsubscribeAllSuccessReply(msg)
-				if err != nil {
-					utils.LavaFormatWarning("error unsubscribing from all subscription", err, utils.LogAttr("GUID", webSocketCtx))
-					reply = buildUnsubscribeAllErrorReply(msg)
-				}
-				if reply != nil {
-					sendWS(webSocketMsgWithType{messageType: messageType, msg: reply})
-				}
-				continue
-			} else {
-				// Normal relay over websocket. (not subscription related)
-				relayResult, err := cwm.relaySender.SendParsedRelay(webSocketCtx, metricsData, protocolMessage)
-				if err != nil {
-					formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not send parsed relay", err), msgSeed, msg, cwm.apiInterface, time.Since(startTime))
-					if formatterMsg != nil {
-						sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
-					}
-				} else if relayResultReply := relayResult.GetReply(); relayResultReply != nil {
-					// No need to verify signature since this is already happening inside the SendParsedRelay flow
-					sendWS(webSocketMsgWithType{messageType: messageType, msg: relayResultReply.Data})
-				} else {
-					utils.LavaFormatError("Relay result is nil over websocket normal request flow, should not happen", err, utils.LogAttr("messageType", messageType))
-				}
-				// Emit the relay_usage event for every normal WS relay
-				// (success or failure). The pre-existing flow `continue`d
-				// before reaching AddMetricForWebSocket below, so normal WS
-				// relays were silently dropped from the analytics pipeline.
-				go logger.AddMetricForWebSocket(metricsData, err)
-				continue
-			}
-		}
-
-		// Subscription flow
-		outputFormatter := subscriptionReplyFormatter(protocolMessage.GetApiCollection().CollectionData.ApiInterface, protocolMessage.RelayPrivateData().Data)
-
-		reply, subscriptionMsgsChan, err := cwm.wsSubscriptionManager.StartSubscription(webSocketCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
-		// A subscribe never passes SendParsedRelay, which stamps these for a normal request.
-		metricsData.ApiMethod = protocolMessage.GetApi().GetName()
-		metricsData.Latency = time.Since(startTime).Milliseconds()
-		if err != nil {
-			// Every branch below ends in continue, so a failed subscribe is counted here; a
-			// successful one is counted after its fields are snapshotted for the pushes.
-			go logger.AddMetricForWebSocket(metricsData, err)
-			utils.LavaFormatWarning("StartSubscription returned an error", err,
-				utils.LogAttr("GUID", webSocketCtx),
-				utils.LogAttr("dappID", dappID),
-				utils.LogAttr("userIp", userIp),
-				utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
-			)
-
-			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not start subscription", err), msgSeed, msg, cwm.apiInterface, time.Since(startTime))
-			if formatterMsg != nil {
-				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg}) // No need to use outputFormatter here since we are sending an error
-				continue
 			}
 
-			// Handle the case when the error is a method not found error
-			if errors.Is(err, common.APINotSupportedError) {
-				msgData, err := json.Marshal(common.JsonRpcMethodNotFoundError)
-				if err != nil {
-					continue
-				}
+			// Subscription flow
+			metricsData.ApiMethod = protocolMessage.GetApi().Name
+			metricsData.ComputeUnits = protocolMessage.GetApi().ComputeUnits
+			outputFormatter := subscriptionReplyFormatter(protocolMessage.GetApiCollection().CollectionData.ApiInterface, protocolMessage.RelayPrivateData().Data)
 
-				sendWS(webSocketMsgWithType{messageType: messageType, msg: outputFormatter(msgData)})
-				continue
-			}
-			continue
-		}
-
-		// Snapshot the populated RelayMetrics fields for per-delivery
-		// emits. The start-of-subscription emit below races with the
-		// per-message emits on the same pointer (AddMetricForWebSocket
-		// mutates Success) — copy by value so each per-message
-		// goroutine works on its own struct.
-		subscriptionFields := *metricsData
-
-		if subscriptionMsgsChan != nil { // if == nil, it means that we already have an active subscription running on this query
-			go func() {
-				utils.LavaFormatTrace("created go routine for new websocketSubMsgsChan",
-					utils.LogAttr("GUID", webSocketCtx),
+			reply, subscriptionMsgsChan, err := cwm.wsSubscriptionManager.StartSubscription(requestCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+			requestErr = err
+			metricsData.Latency = time.Since(startTime).Milliseconds()
+			if err != nil {
+				utils.LavaFormatWarning("StartSubscription returned an error", err,
+					utils.LogAttr("GUID", requestCtx),
 					utils.LogAttr("dappID", dappID),
 					utils.LogAttr("userIp", userIp),
 					utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
 				)
 
-				for subscriptionMsgReply := range subscriptionMsgsChan {
-					idleFor.Store(time.Now().Unix())
-					sendWS(webSocketMsgWithType{messageType: messageType, msg: outputFormatter(subscriptionMsgReply.Data)})
-					// Per-delivery emission. The originating subscribe is
-					// billed at the spec CU under its real method; each
-					// pushed notification is its own operation charged at
-					// the flat delivery default, so downstream billing is
-					// plain SUM(cu) without subscription-specific rules.
-					perMessage := subscriptionFields
-					perMessage.Timestamp = time.Now()
-					perMessage.ApiMethod = metrics.SubscriptionDeliveryMethod
-					perMessage.ComputeUnits = metrics.DefaultSubscriptionDeliveryCU
-					go logger.AddMetricForWebSocket(&perMessage, nil)
+				formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not start subscription", err), msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+				if formatterMsg != nil {
+					sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg}) // No need to use outputFormatter here since we are sending an error
+					return
 				}
 
-				utils.LavaFormatTrace("subscriptionMsgsChan was closed",
-					utils.LogAttr("GUID", webSocketCtx),
-					utils.LogAttr("dappID", dappID),
-					utils.LogAttr("userIp", userIp),
-					utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
-				)
-			}()
-		}
+				// Handle the case when the error is a method not found error
+				if errors.Is(err, common.APINotSupportedError) {
+					msgData, err := json.Marshal(common.JsonRpcMethodNotFoundError)
+					if err != nil {
+						return
+					}
 
-		go logger.AddMetricForWebSocket(metricsData, err)
+					sendWS(webSocketMsgWithType{messageType: messageType, msg: outputFormatter(msgData)})
+					return
+				}
+				return
+			}
 
-		if reply != nil {
-			reply.Data = outputFormatter(reply.Data) // use that id for the reply
+			// Snapshot the populated RelayMetrics fields for per-delivery
+			// emits. The start-of-subscription emit below races with the
+			// per-message emits on the same pointer (AddMetricForWebSocket
+			// mutates Success) — copy by value so each per-message
+			// goroutine works on its own struct.
+			subscriptionFields := *metricsData
+			subscriptionFields.Customer = nil
+			subscriptionFields.RequestKind = "notification"
 
-			sendWS(webSocketMsgWithType{messageType: messageType, msg: reply.Data})
+			if subscriptionMsgsChan != nil { // if == nil, it means that we already have an active subscription running on this query
+				go func() {
+					utils.LavaFormatTrace("created go routine for new websocketSubMsgsChan",
+						utils.LogAttr("GUID", requestCtx),
+						utils.LogAttr("dappID", dappID),
+						utils.LogAttr("userIp", userIp),
+						utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
+					)
 
-			logger.LogRequestAndResponse("jsonrpc ws msg", false, "ws", websocketConn.LocalAddr().String(), string(msg), string(reply.Data), msgSeed, time.Since(startTime), nil)
-		}
+					for subscriptionMsgReply := range subscriptionMsgsChan {
+						idleFor.Store(time.Now().Unix())
+						sendWS(webSocketMsgWithType{messageType: messageType, msg: outputFormatter(subscriptionMsgReply.Data)})
+						// Per-delivery emission. The originating subscribe is
+						// billed at the spec CU under its real method; each
+						// pushed notification is its own operation charged at
+						// the flat delivery default, so downstream billing is
+						// plain SUM(cu) without subscription-specific rules.
+						perMessage := subscriptionFields
+						perMessage.Timestamp = time.Now()
+						perMessage.ApiMethod = metrics.SubscriptionDeliveryMethod
+						perMessage.ComputeUnits = metrics.DefaultSubscriptionDeliveryCU
+						go logger.AddMetricForWebSocket(&perMessage, nil)
+					}
+
+					utils.LavaFormatTrace("subscriptionMsgsChan was closed",
+						utils.LogAttr("GUID", requestCtx),
+						utils.LogAttr("dappID", dappID),
+						utils.LogAttr("userIp", userIp),
+						utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
+					)
+				}()
+			}
+
+			if reply != nil {
+				reply.Data = outputFormatter(reply.Data) // use that id for the reply
+
+				sendWS(webSocketMsgWithType{messageType: messageType, msg: reply.Data})
+
+				logger.LogRequestAndResponse("jsonrpc ws msg", false, "ws", websocketConn.LocalAddr().String(), string(msg), string(reply.Data), msgSeed, time.Since(startTime), nil)
+			}
+		}()
 	}
 }
 

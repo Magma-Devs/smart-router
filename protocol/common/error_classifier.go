@@ -623,6 +623,10 @@ type NodeErrorClassification struct {
 // misread every novel error body.
 func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, errorCode int, message string) NodeErrorClassification {
 	c := ClassifyError(nil, family, transport, errorCode, message)
+	return nodeErrorClassification(c)
+}
+
+func nodeErrorClassification(c *LavaError) NodeErrorClassification {
 	if c == nil || c == LavaErrorUnknown {
 		return NodeErrorClassification{}
 	}

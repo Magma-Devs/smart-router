@@ -499,9 +499,11 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			utils.LogAttr("headers", common.RedactMetadata(headers)),
 		)
 
+		ctx = apil.logger.BeginCustomerRequest(ctx, metricsData)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path, msg, http.MethodPost, dappID, userIp, metricsData, headers)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
+		apil.logger.ObserveCustomerReply(metricsData, relayResult)
+		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 		if err != nil {
 			// Check if batch size limit exceeded - return 429 rate limit error
 			if errors.Is(err, ErrBatchRequestSizeExceeded) {
@@ -593,6 +595,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			// produced before: it is the only non-upgrade method this listener
 			// serves on /*, registered directly above.
 			fiberCtx.Set(fiber.HeaderAllow, fiber.MethodPost)
+			recordCustomerRejection(apil.logger, fiberCtx, chainID, apiInterface, fiber.ErrMethodNotAllowed)
 			return fiber.ErrMethodNotAllowed
 		}
 		return fiberCtx.Next()
