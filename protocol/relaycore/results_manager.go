@@ -174,6 +174,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// (zero CU, no retry) — a silent retry-starvation bug.
 		chainFamily := common.GetChainFamilyOrDefault(rp.chainID)
 		nodeClassified := common.ClassifyError(common.DetectConnectionError(err), chainFamily, transport, errorCode, err.Error())
+		response.RelayResult.CustomerError = nodeClassified
 		// ERROR only when the endpoint is to blame. A not-found, a pruned height, a rejected
 		// transaction is the node answering the question it was asked, and on REST those are
 		// routine — see LogCodedNodeAnswer. The metric fires either way.

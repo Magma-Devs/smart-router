@@ -333,9 +333,11 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("body", requestBody),
 			utils.LogAttr("headers", common.RedactMetadata(restHeaders)),
 		)
+		ctx = apil.logger.BeginCustomerRequest(ctx, analytics)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, http.MethodPost, dappID, userIp, analytics, restHeaders)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(analytics, err, metadataValues)
+		apil.logger.ObserveCustomerReply(analytics, relayResult)
+		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
 			// Get unique GUID response
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
@@ -407,9 +409,11 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("headers", common.RedactMetadata(restHeaders)),
 		)
 
+		ctx = apil.logger.BeginCustomerRequest(ctx, analytics)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, fiberCtx.Method(), dappID, userIp, analytics, restHeaders)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(analytics, err, metadataValues)
+		apil.logger.ObserveCustomerReply(analytics, relayResult)
+		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
 			if errors.Is(err, common.APINotSupportedError) {
 				utils.LavaFormatError("api method is not supported", err, utils.LogAttr("GUID", ctx))

@@ -51,10 +51,11 @@ var ProbeLoopInterval = 5 * time.Second
 
 // created with NewConsumerSessionManager
 type ConsumerSessionManager struct {
-	rpcEndpoint    *RPCEndpoint // used to filter out endpoints
-	lock           sync.RWMutex
-	pairing        map[string]*ConsumerSessionsWithProvider // key == provider address
-	stickySessions *StickySessionStore
+	customerPrimaryBaseConfigured bool         // observability only: base primaries exist even when verification leaves pairing empty
+	rpcEndpoint                   *RPCEndpoint // used to filter out endpoints
+	lock                          sync.RWMutex
+	pairing                       map[string]*ConsumerSessionsWithProvider // key == provider address
+	stickySessions                *StickySessionStore
 	// stickyClaimCounts mirrors smartrouter_csm_sticky_claims_total in process, indexed by outcome,
 	// so GET /debug/sticky-claims can report it without the metrics port (MAG-3860).
 	stickyClaimCounts [numStickyOutcomes]atomic.Uint64
@@ -1628,8 +1629,19 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 			if len(csm.backupProviders) > 0 {
 				utils.LavaFormatDebug("No regular providers available, trying backup providers", utils.LogAttr("GUID", ctx))
 				// try to get a session from the backup providers
+				inventory := csm.snapshotPoolInventory(addon, extensionNames, ctx)
 				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
 				if err == nil {
+					// Only attribute an unavailable applicable primary pool. An addon
+					// mismatch or ordinary retry exhaustion is not a reroute.
+					if (inventory.capable > 0 && inventory.capableBlocked == inventory.capable) ||
+						(inventory.pairingSize == 0 && csm.customerPrimaryBaseConfiguredForReporting() && addon == "" && len(extensionNames) == 0) {
+						alternatives := make([]string, 0, len(sessionWithProviderMap))
+						for address := range sessionWithProviderMap {
+							alternatives = append(alternatives, address)
+						}
+						metrics.MarkCustomerReroute(ctx, "", "primary-pool-unavailable", alternatives)
+					}
 					// backup providers succeeded, return the session
 					utils.LavaFormatDebug("Successfully got session from backup providers", utils.LogAttr("GUID", ctx))
 					return sessionWithProviderMap, nil
@@ -2427,6 +2439,14 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 			utils.LogAttr("id", stickiness),
 			utils.LogAttr("GUID", ctx))
 		csm.stickySessions.Delete(stickiness)
+		if csm.customerProviderUnavailable(ctx, stickysession.Provider, addon, extensions) {
+			// The alternatives are filled only after real selection completes.
+			defer func() {
+				if err == nil {
+					metrics.MarkCustomerReroute(ctx, stickysession.Provider, "sticky-provider-unavailable", addresses)
+				}
+			}()
+		}
 	}
 
 	if totalValidLength <= 0 {
@@ -2856,6 +2876,9 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 			)
 		}
 		providerAddresses, err = csm.getValidProviderAddresses(ctx, wantedProviderNumber, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider)
+		if reason != "" && csm.customerProviderUnavailable(ctx, ignoredProviders.preferredProvider, addon, extensions) {
+			metrics.MarkCustomerReroute(ctx, ignoredProviders.preferredProvider, "preferred-provider-unavailable", providerAddresses)
+		}
 		if err != nil {
 			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get a provider addresses", utils.LogAttr("error", err), utils.LogAttr("GUID", ctx))
 			return nil, err
@@ -4406,4 +4429,38 @@ func (csm *ConsumerSessionManager) StickyClaimCounts() (shared bool, outcomes ma
 // requested but left pod-local because the configured cache backend cannot hold claims (MAG-3860).
 func (csm *ConsumerSessionManager) SharedStickyRequested() bool {
 	return csm.sharedStickyRequested
+}
+
+// Called under csm.lock. Capability filtering and unrelated blocked providers
+// cannot establish recovery; require this intended provider to be unavailable.
+func (csm *ConsumerSessionManager) customerProviderUnavailable(ctx context.Context, address, addon string, extensions []string) bool {
+	provider := csm.providerByAddress(address)
+	if provider == nil || !provider.IsSupportingAddon(addon) || !provider.IsSupportingExtensions(extensions, ctx) {
+		return false
+	}
+	if slices.Contains(csm.currentlyBlockedProviderAddresses, address) {
+		return true
+	}
+	if _, blocked := csm.blockedBackupProviders[address]; blocked {
+		return true
+	}
+	if csm.rateLimitHoldoff != nil {
+		if _, held := csm.rateLimitHoldoff.ProviderReadyAt(address); held {
+			return true
+		}
+	}
+	return false
+}
+
+// SetCustomerPrimaryBaseConfigured is supplied from configured primary endpoints,
+// not the healthy pairing. It is telemetry evidence only and cannot affect selection.
+func (csm *ConsumerSessionManager) SetCustomerPrimaryBaseConfigured(configured bool) {
+	csm.lock.Lock()
+	defer csm.lock.Unlock()
+	csm.customerPrimaryBaseConfigured = configured
+}
+func (csm *ConsumerSessionManager) customerPrimaryBaseConfiguredForReporting() bool {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	return csm.customerPrimaryBaseConfigured
 }

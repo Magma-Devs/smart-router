@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -134,6 +135,8 @@ type SmartRouterMetricsManager struct {
 	csmReportedProvidersCount      *prometheus.GaugeVec   // smartrouter_csm_reported_providers
 
 	// Router-scoped request group metrics (labels: spec, apiInterface, provider_address, method)
+	customerRequestsReceived *prometheus.CounterVec
+	customerRequestOutcomes  *prometheus.CounterVec
 	routerRequestsTotal      *prometheus.CounterVec
 	routerRequestsSuccess    *prometheus.CounterVec
 	routerRequestsFailed     *prometheus.CounterVec
@@ -626,6 +629,16 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// =========================================================================
 	// Request group metrics
 	// =========================================================================
+	customerTelemetryInfo := registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_customer_telemetry_info", Help: "Customer telemetry schema supported by this router process; use to audit mixed-version coverage.",
+	}, []string{"schema_version"}))
+	customerTelemetryInfo.WithLabelValues("1").Set(1)
+	customerRequestsReceived := registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_customer_requests_received_total", Help: "Logical customer requests received at listeners; excludes internal activity and pushed notifications.",
+	}, []string{"spec", "apiInterface"}))
+	customerRequestOutcomes := registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_customer_request_outcomes_total", Help: "One terminal outcome per logical customer request, including node errors in successful HTTP responses.",
+	}, []string{"spec", "apiInterface", "outcome", "recovery", "cache_hit", "error_name"}))
 	routerRequestLabels := []string{"spec", "apiInterface", "provider_address", "method"}
 
 	routerRequestsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -869,6 +882,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		incidentHedgeAttemptsHistogram:    incidentHedgeAttemptsHistogram,
 
 		// Router-scoped request group
+		customerRequestsReceived: customerRequestsReceived,
+		customerRequestOutcomes:  customerRequestOutcomes,
 		routerRequestsTotal:      routerRequestsTotal,
 		routerRequestsSuccess:    routerRequestsSuccess,
 		routerRequestsFailed:     routerRequestsFailed,
@@ -2124,4 +2139,18 @@ func (m *SmartRouterMetricsManager) StartSelectionStatsUpdater(ctx context.Conte
 			}
 		}
 	}()
+}
+
+// RecordCustomerReceived and RecordCustomerOutcome are independent of OTel queues.
+func (m *SmartRouterMetricsManager) RecordCustomerReceived(chain, apiInterface string) {
+	if m == nil || m.customerRequestsReceived == nil {
+		return
+	}
+	m.customerRequestsReceived.WithLabelValues(chain, apiInterface).Inc()
+}
+func (m *SmartRouterMetricsManager) RecordCustomerOutcome(t CustomerTerminal) {
+	if m == nil || m.customerRequestOutcomes == nil {
+		return
+	}
+	m.customerRequestOutcomes.WithLabelValues(t.Chain, t.APIInterface, t.Outcome, t.Recovery, strconv.FormatBool(t.CacheHit), t.ErrorName).Inc()
 }

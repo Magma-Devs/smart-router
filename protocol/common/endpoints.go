@@ -591,6 +591,7 @@ type ProviderInfo struct {
 const DefaultProviderGroup = "default"
 
 type RelayResult struct {
+	CustomerError       *LavaError // immutable registry identity attached to an observed node error
 	Request             *pairingtypes.RelayRequest
 	Reply               *pairingtypes.RelayReply
 	ProviderInfo        ProviderInfo
@@ -656,7 +657,8 @@ func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transpor
 	if rr == nil {
 		return
 	}
-	classification := ClassifyNodeErrorForRetry(family, transport, errorCode, message)
+	rr.CustomerError = ClassifyError(nil, family, transport, errorCode, message)
+	classification := nodeErrorClassification(rr.CustomerError)
 	rr.IsNonRetryable = classification.IsNonRetryable
 	rr.IsUnsupportedMethod = classification.IsUnsupportedMethod
 	rr.IsRateLimited = classification.IsRateLimited
