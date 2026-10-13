@@ -608,6 +608,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		metricsData.ApiMethod = protocolMessage.GetApi().GetName()
 		metricsData.Latency = time.Since(startTime).Milliseconds()
 		if err != nil {
+			// Every branch below ends in continue, so a failed subscribe is counted here; a
+			// successful one is counted after its fields are snapshotted for the pushes.
+			go logger.AddMetricForWebSocket(metricsData, err)
 			utils.LavaFormatWarning("StartSubscription returned an error", err,
 				utils.LogAttr("GUID", webSocketCtx),
 				utils.LogAttr("dappID", dappID),

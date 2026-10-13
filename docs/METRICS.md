@@ -259,7 +259,8 @@ of any routing decision. Requests without it are counted under
 `customer="DefaultDappID"`.
 
 Each client request is counted once, after the reply, with its final outcome.
-A subscribe is counted once; the pushes on an open subscription are not. A
+A subscribe is counted once, whether it succeeds or fails; the pushes on an
+open subscription are not. A
 request the router could not parse is not counted.
 
 | Metric | Type | Labels | Description |
