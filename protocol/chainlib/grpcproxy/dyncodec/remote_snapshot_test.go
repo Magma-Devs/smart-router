@@ -74,4 +74,73 @@ func TestSnapshotRemote(t *testing.T) {
 		_, err := remote.ProtoFileContainingSymbol("does.not.Exist")
 		require.ErrorIs(t, err, protoregistry.NotFound)
 	})
+
+	t.Run("without a source nothing resolves", func(t *testing.T) {
+		remote := NewSnapshotRemote(nil)
+		_, err := remote.ProtoFileContainingSymbol("google.protobuf.Api")
+		require.ErrorIs(t, err, errNoReflectionSource)
+		_, err = remote.ProtoFileByPath("google/protobuf/api.proto")
+		require.ErrorIs(t, err, errNoReflectionSource)
+	})
+
+	// The first snapshot is taken before an endpoint serves. When none is held the
+	// source is asked with an ended context, which starts one without waiting for
+	// it, so no request sits through a sweep of the node.
+	t.Run("never waits for a first snapshot", func(t *testing.T) {
+		source := &recordingSource{}
+		remote := NewSnapshotRemote(source)
+		_, err := remote.ProtoFileContainingSymbol("google.protobuf.Api")
+		require.ErrorIs(t, err, context.Canceled)
+		require.Equal(t, 1, source.calls)
+		require.True(t, source.contextEnded, "the source must be asked with an ended context")
+	})
+
+	t.Run("one resolution stays on a current snapshot", func(t *testing.T) {
+		source := &recordingSource{snapshots: []grpcproxy.ReflectionSnapshot{
+			&currentGlobalSnapshot{current: true}, &currentGlobalSnapshot{current: true},
+		}}
+		registry := NewRegistry(NewSnapshotRemote(source))
+		// google.protobuf.Api, then api.proto's imports by path: several lookups.
+		_, err := registry.FindDescriptorByName("google.protobuf.Api")
+		require.NoError(t, err)
+		require.Equal(t, 1, source.calls, "every lookup of the resolution reads the first snapshot")
+	})
+
+	t.Run("a stale snapshot is picked again", func(t *testing.T) {
+		stale := &currentGlobalSnapshot{current: false}
+		source := &recordingSource{snapshots: []grpcproxy.ReflectionSnapshot{stale, stale, stale, stale}}
+		remote := NewSnapshotRemote(source)
+		_, err := remote.ProtoFileByPath("google/protobuf/api.proto")
+		require.NoError(t, err)
+		_, err = remote.ProtoFileByPath("google/protobuf/type.proto")
+		require.NoError(t, err)
+		require.Equal(t, 2, source.calls)
+	})
+}
+
+type currentGlobalSnapshot struct {
+	globalSnapshot
+	current bool
+}
+
+func (s *currentGlobalSnapshot) Current() bool { return s.current }
+
+// recordingSource hands out snapshots in order and, with none left, answers like a
+// source whose first snapshot is still being taken: with the context's error.
+type recordingSource struct {
+	snapshots    []grpcproxy.ReflectionSnapshot
+	calls        int
+	contextEnded bool
+}
+
+func (s *recordingSource) ReflectionSnapshot(ctx context.Context) (grpcproxy.ReflectionSnapshot, error) {
+	s.calls++
+	s.contextEnded = ctx.Err() != nil
+	if len(s.snapshots) == 0 {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	snapshot := s.snapshots[0]
+	s.snapshots = s.snapshots[1:]
+	return snapshot, nil
 }

@@ -2,15 +2,14 @@ package chainlib
 
 import (
 	"context"
-	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -95,12 +94,27 @@ func blockByHeightParser() *GrpcChainParser {
 	}
 }
 
+// pendingSource is a source whose first snapshot is still being taken until ready
+// is set: it answers like the router's, with the context's error once ctx ends.
+type pendingSource struct {
+	files *protoregistry.Files
+	ready atomic.Bool
+}
+
+func (s *pendingSource) ReflectionSnapshot(ctx context.Context) (grpcproxy.ReflectionSnapshot, error) {
+	if !s.ready.Load() {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return filesSnapshot{s.files}, nil
+}
+
 // TestGrpcListenerParsesBlockWithoutRelaying covers MAG-4217. To parse the height
 // out of a binary GetBlockByHeight the listener's parser needs the method's
 // descriptor. It used to fetch it by relaying ServerReflectionInfo through the
 // relay path, which refuses reflection as a streaming method: each parse booked a
-// failed relay and the block came out NOT_APPLICABLE. With a reflection source the
-// parser reads the router's snapshots instead and never relays.
+// failed relay and the block came out NOT_APPLICABLE. The parser now reads the
+// router's reflection snapshots, and is given no relay callback at all.
 func TestGrpcListenerParsesBlockWithoutRelaying(t *testing.T) {
 	const height = 33314231
 	files := blockByHeightFiles(t)
@@ -111,13 +125,6 @@ func TestGrpcListenerParsesBlockWithoutRelaying(t *testing.T) {
 	body, err := proto.Marshal(req)
 	require.NoError(t, err)
 
-	// What the relay path answers a reflection relay since the streaming guard.
-	var relays atomic.Int32
-	refusingRelay := func(context.Context, string, []byte) ([]byte, metadata.MD, error) {
-		relays.Add(1)
-		return nil, nil, errors.New("gRPC method is server-streaming upstream but the spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call")
-	}
-
 	requestedBlock := func(t *testing.T, apip *GrpcChainParser) int64 {
 		t.Helper()
 		msg, err := apip.ParseMsg(blockByHeightMethod, body, connectionType_test, nil, extensionslib.ExtensionInfo{})
@@ -126,24 +133,35 @@ func TestGrpcListenerParsesBlockWithoutRelaying(t *testing.T) {
 		return block
 	}
 
-	t.Run("snapshot source parses the height and never relays", func(t *testing.T) {
-		relays.Store(0)
+	t.Run("snapshot source parses the height", func(t *testing.T) {
 		apip := blockByHeightParser()
-		apip.setupForConsumer(refusingRelay, filesSource{files})
+		apip.setupForConsumer(filesSource{files})
 		for range 3 {
 			require.Equal(t, int64(height), requestedBlock(t, apip))
 		}
-		require.Zero(t, relays.Load())
 	})
 
-	t.Run("without a source the refused relay leaves the block unparsed", func(t *testing.T) {
-		relays.Store(0)
+	t.Run("without a source the block is not parsed", func(t *testing.T) {
 		apip := blockByHeightParser()
-		apip.setupForConsumer(refusingRelay, nil)
+		apip.setupForConsumer(nil)
 		for range 3 {
 			require.Equal(t, spectypes.NOT_APPLICABLE, requestedBlock(t, apip))
 		}
-		// Nothing is cached on failure, so every parse relays again.
-		require.Equal(t, int32(3), relays.Load())
+	})
+
+	// The review of #503 measured the first request after a boot waiting ~4s for a
+	// snapshot. With none held yet the parse must not wait: the block is
+	// NOT_APPLICABLE for that request, and parsed once a snapshot is held.
+	t.Run("a snapshot still being taken is not waited for", func(t *testing.T) {
+		source := &pendingSource{files: files}
+		apip := blockByHeightParser()
+		apip.setupForConsumer(source)
+
+		started := time.Now()
+		require.Equal(t, spectypes.NOT_APPLICABLE, requestedBlock(t, apip))
+		require.Less(t, time.Since(started), time.Second)
+
+		source.ready.Store(true)
+		require.Equal(t, int64(height), requestedBlock(t, apip))
 	})
 }
