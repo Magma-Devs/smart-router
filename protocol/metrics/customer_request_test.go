@@ -28,6 +28,7 @@ func (r *customerRecorder) RecordCustomerReceived(string, string) {
 	defer r.mu.Unlock()
 	r.received++
 }
+
 func (r *customerRecorder) RecordCustomerOutcome(t CustomerTerminal) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -45,6 +46,7 @@ func (s *customerSink) Emit(e RelayUsageEvent) {
 	defer s.mu.Unlock()
 	s.events = append(s.events, e)
 }
+
 func customerFixture(t *testing.T) (*RPCConsumerLogs, *customerRecorder, *customerSink, *RelayMetrics, context.Context) {
 	t.Helper()
 	recorder, sink := &customerRecorder{}, &customerSink{}
@@ -56,6 +58,7 @@ func customerFixture(t *testing.T) (*RPCConsumerLogs, *customerRecorder, *custom
 	ctx = logger.BeginCustomerRequest(ctx, data)
 	return logger, recorder, sink, data, ctx
 }
+
 func providerResult(provider string) *common.RelayResult {
 	return &common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: provider}, Reply: &pairingtypes.RelayReply{Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}, StatusCode: 200}
 }
@@ -276,7 +279,8 @@ func TestCustomerPrometheusReconcilesByChainWithoutLegacyCounterChanges(t *testi
 		for _, tuple := range []struct{ outcome, recovery, hit, name string }{
 			{"failure", "none", "false", common.LavaErrorUnknown.Name},
 			{"cancelled", "none", "false", common.LavaErrorContextCanceled.Name},
-			{"success", "none", "true", "none"}, {"success", "both", "false", "none"},
+			{"success", "none", "true", "none"},
+			{"success", "both", "false", "none"},
 		} {
 			require.Equal(t, float64(20), testutil.ToFloat64(manager.customerRequestOutcomes.WithLabelValues(chain, "jsonrpc", tuple.outcome, tuple.recovery, tuple.hit, tuple.name)))
 		}

@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"testing"
+
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func TestCustomerDecisionSnapshotEmptyProcessorAndUnknownWrite(t *testing.T) {

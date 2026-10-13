@@ -2,13 +2,14 @@ package grpcproxy
 
 import (
 	"errors"
+	"testing"
+
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	reflectionv1 "google.golang.org/grpc/reflection/grpc_reflection_v1"
 	reflectionalpha "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 	"google.golang.org/grpc/status"
-	"testing"
 )
 
 type reflectionSendingStream struct {
@@ -18,6 +19,8 @@ type reflectionSendingStream struct {
 }
 
 func (s *reflectionSendingStream) SendMsg(interface{}) error { s.sent++; return s.err }
+
+//nolint:staticcheck // Verify the v1alpha compatibility path as well as the current v1 protocol.
 func TestReflectionTelemetryPreservesTransportVerdictAndCompletesOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

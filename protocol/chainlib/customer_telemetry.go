@@ -2,6 +2,7 @@ package chainlib
 
 import (
 	"context"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/utils"
