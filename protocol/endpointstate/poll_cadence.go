@@ -13,7 +13,8 @@ import (
 // PollDivisorFlagName is the operator knob for the per-endpoint dedicated-poll cadence.
 //
 // Each per-endpoint ChainTracker polls its upstream for the latest block on a FIXED
-// interval of avgBlockTime/divisor (chaintracker.ChainTrackerConfig.FlatPollInterval).
+// interval of avgBlockTime/divisor (chaintracker.ChainTrackerConfig.FlatPollInterval), capped
+// at one minute (chaintracker.HealthyPollInterval): past the cap a lower divisor relieves nothing.
 // The built-in divisor is DefaultPollDivisor — two polls per block time. Lowering it to 1
 // halves the tracker's request volume against every upstream, which is the point: on a
 // metered customer node the dedicated poll is pure overhead the moment served traffic is

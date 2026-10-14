@@ -1064,7 +1064,9 @@ func (m *SmartRouterMetricsManager) RegisterEndpointInternalPath(endpointID, int
 // answerTimeout from now (DefaultURLAnswerTimeout if answerTimeout is not positive). The server
 // passes max(DefaultURLAnswerTimeout, 6 x its trackers' poll interval): up to 4 polls the traffic
 // gate skips, the poll after them, and one interval for that poll's answer. So a url that answers
-// every poll never reads as down between two answers. Every answered poll calls it, a
+// every poll never reads as down between two answers, as long as the tip store accepts what it
+// answers: a poll answering below a still-fresh higher tip (a peer pod's, or a relay's read at a
+// fresher commitment) moves nothing. Every answered poll the tip store accepts calls it, a
 // repeat of the same block included, so a url that keeps answering with one block stands still on
 // its series while its answered-until time keeps moving: that is stuck. A url that stops answering
 // stands still on both: that is down.

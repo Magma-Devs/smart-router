@@ -478,11 +478,11 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// turning it off would swap in a DummyChainTracker, which polls nothing at all.
 		HeadOnlyTracking: m.hashPolling.HeadOnly(),
 		// MAG-2159 (Topic B): per-endpoint trackers use a FIXED flat cadence — the
-		// dedicated poll runs at exactly avgBlockTime/divisor (slowed only by failure
-		// backoff), because relay harvest is the primary block signal and the poll is a
-		// sparse fallback. The divisor defaults to DefaultPollDivisor and is operator-tunable
-		// (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The global tracker
-		// leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
+		// dedicated poll runs at avgBlockTime/divisor capped at chaintracker.BACKOFF_MAX_TIME
+		// (slowed only by failure backoff), because relay harvest is the primary block signal
+		// and the poll is a sparse fallback. The divisor defaults to DefaultPollDivisor and is
+		// operator-tunable (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The
+		// global tracker leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
 		FlatPollInterval: m.flatPollInterval,
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
 		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker

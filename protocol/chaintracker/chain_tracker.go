@@ -145,9 +145,9 @@ type ChainTracker struct {
 	// initial config
 	averageBlockTime time.Duration
 	// flatPollInterval, when > 0, selects the FIXED flat cadence (MAG-2159): the poll runs
-	// at exactly this interval, slowed only by failure backoff; the adaptive tiers and
-	// block-gap recalibration no longer drive the timer. 0 keeps the legacy adaptive
-	// cadence. See ChainTrackerConfig.FlatPollInterval.
+	// at this interval capped at BACKOFF_MAX_TIME (HealthyPollInterval), slowed only by
+	// failure backoff; the adaptive tiers and block-gap recalibration no longer drive the
+	// timer. 0 keeps the legacy adaptive cadence. See ChainTrackerConfig.FlatPollInterval.
 	flatPollInterval time.Duration
 	// relayTipFresh is the traffic gate (MAG-2159 / Topic B): when set and it reports a fresh
 	// relay-harvested tip, the poll cycle is skipped entirely. See ChainTrackerConfig.RelayTipFresh.
@@ -643,7 +643,7 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 	// initial polling = averageBlockTime/16
 	cs.latestChangeTime = time.Time{} // we will discard the first change time, so this is uninitialized
 
-	// Per-endpoint trackers (flatPollInterval > 0) poll at exactly flatPollInterval.
+	// Per-endpoint trackers (flatPollInterval > 0) poll every HealthyPollInterval(flatPollInterval).
 	// CRITICAL (MAG-2159 finding 3): the periodic timer must NOT start counting until
 	// initialization completes — otherwise a slow init lets the timer fire immediately
 	// after the goroutine starts, polling faster than the configured interval on boot.

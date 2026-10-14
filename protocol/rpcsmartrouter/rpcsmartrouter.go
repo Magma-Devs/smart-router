@@ -3835,7 +3835,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// correct across every chain this process serves (each divides its own spec block time).
 	// Validation lives in endpointstate so config.yml and embedded servers get it too.
 	// Process-wide in the same sense as the flag above.
-	cmdRPCSmartRouter.Flags().Float64(endpointstate.PollDivisorFlagName, 0, fmt.Sprintf("polling-relief: per-endpoint chain tracker polls every avgBlockTime/divisor (default %g). Below 1 polls SLOWER than the chain produces blocks — %g is one poll per four block times, the largest relief available. Allowed [%g,%g]; out-of-range reverts to default. Applies to EVERY chain this process serves.", endpointstate.DefaultPollDivisor, endpointstate.MinPollDivisor, endpointstate.MinPollDivisor, endpointstate.MaxPollDivisor))
+	cmdRPCSmartRouter.Flags().Float64(endpointstate.PollDivisorFlagName, 0, fmt.Sprintf("polling-relief: per-endpoint chain tracker polls every avgBlockTime/divisor, but at least once a minute (default %g). Below 1 polls SLOWER than the chain produces blocks — %g is one poll per four block times (or one a minute, if that is more often), the largest relief available. Allowed [%g,%g]; out-of-range reverts to default. Applies to EVERY chain this process serves.", endpointstate.DefaultPollDivisor, endpointstate.MinPollDivisor, endpointstate.MinPollDivisor, endpointstate.MaxPollDivisor))
 	// Idle mode (endpointstate/idle.go). Once a chain+interface has served no client relay for
 	// idle-after, its dedicated polls pause — or drop to idle-poll-interval — until the next client
 	// relay, which polls every endpoint once and waits up to one round trip before it is routed.
