@@ -136,6 +136,7 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 	}
 
 	nodeMsg := apip.newChainMessage(apiCont.api, parsedInput, &restMessage, apiCollection)
+	nodeMsg.applyParsedRange(parsedInput)
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
 }

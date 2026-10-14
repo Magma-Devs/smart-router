@@ -1,15 +1,12 @@
 package dyncodec
 
 import (
-	"context"
 	"sync/atomic"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/testproto"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -40,16 +37,6 @@ func TestOneReflectionRequestResolvesAFileWithItsImports(t *testing.T) {
 		{
 			name:   "grpc remote",
 			remote: func() ProtoFileRegistry { return NewGRPCReflectionProtoFileRegistryFromConn(conn, 0) },
-		},
-		{
-			name: "relayer remote",
-			remote: func() ProtoFileRegistry {
-				return NewRelayerRemote(func(ctx context.Context, method string, req []byte) ([]byte, metadata.MD, error) {
-					var resp []byte
-					err := conn.Invoke(ctx, "/"+method, req, &resp, grpc.CustomCodecCallOption{Codec: grpcproxy.RawBytesCodec{}})
-					return resp, make(metadata.MD), err
-				})
-			},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

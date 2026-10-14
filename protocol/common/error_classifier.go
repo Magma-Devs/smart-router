@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"syscall"
@@ -730,6 +731,17 @@ func DetectConnectionError(err error) *LavaError {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return LavaErrorConnectionTimeout
 	}
+	// A DNS failure that is not a timeout (no such host, server misbehaving) is a connect-phase
+	// fault of the endpoint's name, and an EOF is the socket closing under the request. Both used
+	// to fall through to the generic matchers, land on UNKNOWN_ERROR and count as nobody's fault,
+	// while the sibling connection reset was internal and at fault (MAG-4242).
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return LavaErrorDNSFailure
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return LavaErrorConnectionClosed
+	}
 
 	// Layer 2: string fallback for errors wrapped without %w.
 	if le := detectConnectionErrorFromString(strings.ToLower(err.Error())); le != nil {
@@ -765,6 +777,10 @@ type stringConnectionFallback struct {
 	mustNotContain []string
 	// lava error returned when the row matches.
 	result *LavaError
+	// transportOnly marks a row that only describes how Go's net, net/http and io word a failed
+	// connection. DetectConnectionErrorInReplyText skips it: a node's reply proves the connection
+	// worked, whatever its text says.
+	transportOnly bool
 }
 
 func (r stringConnectionFallback) matches(msg string) bool {
@@ -854,6 +870,18 @@ var stringConnectionFallbacks = []stringConnectionFallback{
 	// upstream stream (distinct from "connection refused" which is a connect
 	// failure before any stream was established).
 	{mustContain: []string{"connection termination"}, result: LavaErrorConnectionReset},
+	// DNS, EOF and the http-served-as-https shapes, as the resolver, io and net/http word them and
+	// as the node error handler rewords them ("Reason: ..."), so the typed checks above have a
+	// string sibling for an error wrapped without %w (MAG-4242). They are transportOnly: a node
+	// answering "unexpected EOF" (a body it could not parse) or "no such host" (a lookup of its
+	// own) is giving its answer, and the reply-text detector must not read that as our transport.
+	{mustContain: []string{"no such host"}, result: LavaErrorDNSFailure, transportOnly: true},
+	{mustContain: []string{"server misbehaving"}, result: LavaErrorDNSFailure, transportOnly: true},
+	{mustContain: []string{"dns resolution failed"}, result: LavaErrorDNSFailure, transportOnly: true},
+	{mustContain: []string{"server gave http response to https client"}, result: LavaErrorTLSMismatch, transportOnly: true},
+	{mustContain: []string{"misconfigured http endpoint as https"}, result: LavaErrorTLSMismatch, transportOnly: true},
+	{mustContain: []string{"unexpected eof"}, result: LavaErrorConnectionClosed, transportOnly: true},
+	{mustContain: []string{"end of input stream reached"}, result: LavaErrorConnectionClosed, transportOnly: true},
 }
 
 // detectConnectionErrorFromString walks stringConnectionFallbacks in order and
@@ -862,6 +890,20 @@ var stringConnectionFallbacks = []stringConnectionFallback{
 func detectConnectionErrorFromString(msg string) *LavaError {
 	for _, row := range stringConnectionFallbacks {
 		if row.matches(msg) {
+			return row.result
+		}
+	}
+	return nil
+}
+
+// DetectConnectionErrorInReplyText reads a node's REPLY text against the string table, without
+// the transportOnly rows. The reply arrived, so the connection to the node worked; a reply is
+// only ever read as a connection fault through the rows that predate MAG-4242 item 5, exactly
+// as the results manager read it before those rows existed.
+func DetectConnectionErrorInReplyText(text string) *LavaError {
+	msg := strings.ToLower(text)
+	for _, row := range stringConnectionFallbacks {
+		if !row.transportOnly && row.matches(msg) {
 			return row.result
 		}
 	}

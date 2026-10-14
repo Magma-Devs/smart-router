@@ -222,7 +222,7 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 			combinedApi = apiCont.api
 			apiCollection = apiCollectionForRootField
 			latestRequestedBlock = parsedBlock
-			earliestRequestedBlock = parsedBlock
+			earliestRequestedBlock = foldParsedEarliest(parsedBlock, parsedInput)
 			continue
 		}
 
@@ -250,6 +250,7 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 			},
 		}
 		latestRequestedBlock, earliestRequestedBlock = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
+		earliestRequestedBlock = foldParsedEarliest(earliestRequestedBlock, parsedInput)
 	}
 
 	// ParseGraphQLMsg rejects an operation that selects no root field, so this is unreachable
@@ -277,8 +278,9 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 	parsedInput.SetBlock(latestRequestedBlock)
 	parsedInput.UsedDefaultValue = parsedDefault
 
+	// A single root has no earliest of its own unless its parsers read a range lower bound.
 	var earliest *int64
-	if len(graphqlMessage.RootFields) > 1 {
+	if len(graphqlMessage.RootFields) > 1 || earliestRequestedBlock != latestRequestedBlock {
 		earliest = &earliestRequestedBlock
 	}
 	nodeMsg := apip.newChainMessage(combinedApi, parsedInput, blockHashes, graphqlMessage, apiCollection)
