@@ -204,6 +204,16 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			extensionInfo.RouterExtensions = append(extensionInfo.RouterExtensions, extensionslib.ArchiveExtension)
 		}
 
+		// What this element adds to a batch's earliest block. RequestedBlock reads an earliest block
+		// of 0 as "unset", so an element at block 0, the chain's first block, joins it as
+		// EARLIEST_BLOCK, as a range lower bound of 0 does in foldParsedEarliest. Kept as 0, it
+		// either lowered the earliest block to "unset" or lost to a "latest"-style sentinel, and
+		// the archive rule judged the batch without its genesis element.
+		elementEarliest := parsedBlock
+		if isBatch && elementEarliest == 0 {
+			elementEarliest = spectypes.EARLIEST_BLOCK
+		}
+
 		if idx == 0 {
 			// on the first entry store them. The earliest block starts at this element's block, not
 			// at the "unset" 0: CompareRequestedBlockInBatch only lowers it, and 0 made every later
@@ -212,7 +222,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
 			latestRequestedBlock = parsedBlock
-			earliestRequestedBlock = foldParsedEarliest(parsedBlock, parsedInput)
+			earliestRequestedBlock = foldParsedEarliest(elementEarliest, parsedInput)
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
@@ -247,8 +257,8 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 				},
 			}
 
-			latestRequestedBlock, earliestRequestedBlock = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
-			earliestRequestedBlock = foldParsedEarliest(earliestRequestedBlock, parsedInput)
+			latestRequestedBlock, _ = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
+			earliestRequestedBlock = foldParsedEarliest(CombineEarliestRequestedBlock(earliestRequestedBlock, elementEarliest), parsedInput)
 		}
 	}
 

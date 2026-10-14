@@ -3,6 +3,7 @@ package chainlib
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
@@ -68,4 +69,39 @@ func TestJsonRpcBatchRequestedBlockKeepsTheDeepestElement(t *testing.T) {
 			require.Equal(t, []string{"archive"}, extensionNames(chainMessage), "the archive rule judges the batch on its deepest element")
 		})
 	}
+}
+
+// A batch element at block 0 asks for the chain's first block. RequestedBlock reads an earliest
+// block of 0 as "unset", so the element joins the batch's earliest block as EARLIEST_BLOCK, as a
+// range lower bound of 0 does; whatever its position and whatever it is batched with, the batch
+// goes to archive. A single request for block 0 is unchanged.
+func TestJsonRpcBatchWithAGenesisElementGoesToArchive(t *testing.T) {
+	chainParser := ethChainParserForRangeTests(t)
+	element := func(id int, block string) string {
+		return `{"jsonrpc":"2.0","id":` + strconv.Itoa(id) + `,"method":"eth_getBlockByNumber","params":["` + block + `",false]}`
+	}
+	blockless := `{"jsonrpc":"2.0","id":3,"method":"net_version","params":[]}`
+	for name, batch := range map[string]string{
+		"recent then genesis":      "[" + element(1, rangeTestRecentHx) + "," + element(2, "0x0") + "]",
+		"genesis then recent":      "[" + element(1, "0x0") + "," + element(2, rangeTestRecentHx) + "]",
+		"latest then genesis":      "[" + element(1, "latest") + "," + element(2, "0x0") + "]",
+		"genesis then latest":      "[" + element(1, "0x0") + "," + element(2, "latest") + "]",
+		"block-less then genesis":  "[" + blockless + "," + element(2, "0x0") + "]",
+		"genesis alone in a batch": "[" + element(1, "0x0") + "]",
+	} {
+		t.Run(name, func(t *testing.T) {
+			chainMessage, err := chainParser.ParseMsg("", []byte(batch), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: rangeTestHead})
+			require.NoError(t, err)
+			_, earliest := chainMessage.RequestedBlock()
+			require.Equal(t, spectypes.EARLIEST_BLOCK, earliest, "a genesis element is the batch's earliest block")
+			require.Equal(t, []string{"archive"}, extensionNames(chainMessage))
+		})
+	}
+
+	single, err := chainParser.ParseMsg("", []byte(element(1, "0x0")), http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: rangeTestHead})
+	require.NoError(t, err)
+	latest, earliest := single.RequestedBlock()
+	require.Equal(t, int64(0), latest)
+	require.Equal(t, int64(0), earliest, "a single request keeps no earliest block of its own")
+	require.Equal(t, []string{"archive"}, extensionNames(single))
 }
