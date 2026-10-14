@@ -102,7 +102,7 @@ linters:
       # cross-package migration tracked under MAG-4243, not a lint fix.
       - linters:
           - staticcheck
-        text: 'SA1019:.*github.com/jhump/protoreflect.*'
+        text: 'SA1019:.*"?github.com/jhump/protoreflect/(desc|dynamic|grpcreflect)"? is deprecated.*'
       - linters:
           - staticcheck
         text: 'SA1019:.*grpc_reflection_v1alpha.*'
@@ -111,17 +111,7 @@ linters:
       # tracked under MAG-4243.
       - linters:
           - staticcheck
-        text: 'SA1019:.*(h2c\.NewHandler|http2\.Server) is deprecated.*'
-      # jhump/protoreflect desc + dynamic are the v1 protobuf reflection API. Moving to
-      # google.golang.org/protobuf/reflect is a dependency migration, not a lint fix.
-      - linters:
-          - staticcheck
-        text: 'SA1019:.*"?github.com/jhump/protoreflect/(desc|dynamic)"? is deprecated.*'
-      # h2c is superseded by http.Server.Protocols (Go 1.24). The cleartext HTTP/2 path
-      # carries the cache and gRPC proxy listeners, so it moves in its own change.
-      - linters:
-          - staticcheck
-        text: 'SA1019:.*golang.org/x/net/http2/h2c.*is deprecated.*'
+        text: 'SA1019:.*golang.org/x/net/http2(/h2c.*|\.Server) is deprecated.*'
       # Error strings are matched by callers, tests and the dashboard; recasing or
       # unpunctuating them is a wire-visible change, decided per error, not by a linter.
       - linters:
