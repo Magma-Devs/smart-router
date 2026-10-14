@@ -1616,6 +1616,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		}()),
 		utils.LogAttr("error", err),
 		utils.LogAttr("GUID", ctx),
+		chainlib.StatefulLogAttr(protocolMessage),
 	)
 
 	// Set the request-level Success once, on the request goroutine (both the success and failure
@@ -2758,6 +2759,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					utils.LogAttr("error", err.Error()),
 					utils.LogAttr("latency", relayLatency),
 					utils.LogAttr("GUID", goroutineCtx),
+					chainlib.StatefulLogAttr(protocolMessage),
 				)
 				errResponse = err
 			} else {
