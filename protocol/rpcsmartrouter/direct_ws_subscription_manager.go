@@ -1501,6 +1501,17 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 
 		case err := <-upstreamSub.Err():
 			if err != nil {
+				// A JSON-RPC error pushed on the subscription is the node ending it, on a
+				// connection that is still healthy. Restoring would resubscribe at once on
+				// that same connection, with no backoff, for the node to end it again: clean
+				// up instead (the deferred cleanupSubscription releases the clients).
+				var nodeErr *rpcclient.JsonError
+				if errors.As(err, &nodeErr) {
+					utils.LavaFormatWarning("DirectWS: upstream ended the subscription with an error", err,
+						utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+					)
+					return
+				}
 				utils.LavaFormatWarning("DirectWS: upstream subscription error",
 					err,
 					utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
