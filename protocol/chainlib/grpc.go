@@ -152,8 +152,12 @@ func (apip *GrpcChainParser) getSupportedApi(name, connectionType string) (*ApiC
 	return apip.BaseChainParser.getSupportedApi(apiKey)
 }
 
-func (apip *GrpcChainParser) setupForConsumer(relayer grpcproxy.ProxyCallBack) {
-	apip.registry = dyncodec.NewRegistry(dyncodec.NewRelayerRemote(relayer))
+// setupForConsumer builds the listener's registry for block parsing on the router's
+// upstream reflection snapshots. It never relays reflection: the relay path refuses
+// it as a streaming method (MAG-4217). Without a source no descriptor resolves, and
+// binary requests parse as NOT_APPLICABLE.
+func (apip *GrpcChainParser) setupForConsumer(reflectionSource grpcproxy.ReflectionSource) {
+	apip.registry = dyncodec.NewRegistry(dyncodec.NewSnapshotRemote(reflectionSource))
 	apip.codec = dyncodec.NewCodec(apip.registry)
 }
 
@@ -489,7 +493,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	apil.httpServer = httpServer
 
 	// setup chain parser
-	apil.chainParser.setupForConsumer(sendRelayCallback)
+	apil.chainParser.setupForConsumer(reflectionSource)
 
 	utils.LavaFormatInfo("Server listening", utils.Attribute{Key: "Address", Value: lis.Addr()})
 
@@ -575,6 +579,9 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		)
 
 		firstReply, repliesChan, err := subscriptionManager.StartSubscription(ctx, protocolMessage, dappID, consumerIp, connectionUniqueId, metricsData)
+		// A subscribe never passes SendParsedRelay, which stamps these for a normal request.
+		metricsData.ApiMethod = protocolMessage.GetApi().GetName()
+		metricsData.Latency = time.Since(startTime).Milliseconds()
 
 		// Snapshot before the emit goroutine starts. AddMetricForGrpc writes Success and
 		// Origin on the struct it is handed, and the per-delivery emits work from these
@@ -646,8 +653,8 @@ func (apil *GrpcChainListener) forwardSubscriptionReplies(ctx context.Context, r
 
 			perMessage := subscriptionFields
 			perMessage.Timestamp = time.Now()
-			perMessage.ApiMethod = SubscriptionDeliveryMethod
-			perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
+			perMessage.ApiMethod = metrics.SubscriptionDeliveryMethod
+			perMessage.ComputeUnits = metrics.DefaultSubscriptionDeliveryCU
 			go apil.logger.AddMetricForGrpc(&perMessage, nil, &metricsHeaders)
 		}
 	}()
