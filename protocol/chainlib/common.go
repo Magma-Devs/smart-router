@@ -560,31 +560,35 @@ func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRe
 		return utils.Max(currentLatest, parsedBlock)
 	}
 
-	earliestCallback := func(currentEarliest int64, parsedBlock int64) int64 {
-		if currentEarliest == spectypes.EARLIEST_BLOCK || parsedBlock == spectypes.EARLIEST_BLOCK {
-			return spectypes.EARLIEST_BLOCK
-		}
+	return latestCallback(currentLatestRequestedBlock, parsedBlock), CombineEarliestRequestedBlock(currentEarliestRequestedBlock, parsedBlock)
+}
 
-		if currentEarliest == spectypes.NOT_APPLICABLE || parsedBlock == spectypes.NOT_APPLICABLE {
-			return spectypes.NOT_APPLICABLE
-		}
+// CombineEarliestRequestedBlock folds parsedBlock into the earliest block a request asks for, be
+// it a batch element or the lower bound of a range: the chain's first block wins over anything, an
+// element nobody could parse makes the whole request unjudgeable, a concrete block wins over a
+// "latest"-style sentinel, and between two concrete blocks the lower one wins.
+func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
+	if currentEarliest == spectypes.EARLIEST_BLOCK || parsedBlock == spectypes.EARLIEST_BLOCK {
+		return spectypes.EARLIEST_BLOCK
+	}
 
-		if currentEarliest < 0 && parsedBlock < 0 {
-			return utils.Min(currentEarliest, parsedBlock)
-		}
+	if currentEarliest == spectypes.NOT_APPLICABLE || parsedBlock == spectypes.NOT_APPLICABLE {
+		return spectypes.NOT_APPLICABLE
+	}
 
-		if currentEarliest > 0 && parsedBlock < 0 {
-			return currentEarliest
-		}
-
-		if currentEarliest < 0 && parsedBlock > 0 {
-			return parsedBlock
-		}
-
+	if currentEarliest < 0 && parsedBlock < 0 {
 		return utils.Min(currentEarliest, parsedBlock)
 	}
 
-	return latestCallback(currentLatestRequestedBlock, parsedBlock), earliestCallback(currentEarliestRequestedBlock, parsedBlock)
+	if currentEarliest > 0 && parsedBlock < 0 {
+		return currentEarliest
+	}
+
+	if currentEarliest < 0 && parsedBlock > 0 {
+		return parsedBlock
+	}
+
+	return utils.Min(currentEarliest, parsedBlock)
 }
 
 // GetRelayTimeout returns the per-attempt WINDOW: how long an endpoint is expected to take, and so

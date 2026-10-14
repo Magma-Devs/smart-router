@@ -903,8 +903,8 @@ func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage Chain
 	return parserInput, nil
 }
 
-// this method will calculate the request hash by changing the original object, and returning the data back to it after calculating the hash
-// couldn't be used in parallel
+// HashCacheRequest derives the cache key for a relay without an extension directive. It computes
+// on a copy and never writes to relayData, so concurrent callers are safe (MAG-4242).
 func HashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId string) ([]byte, func([]byte) []byte, error) {
 	return hashCacheRequest(relayData, chainId, "")
 }
@@ -962,36 +962,20 @@ func metadataForCacheKey(metadata []pairingtypes.Metadata) []pairingtypes.Metada
 // in its own cache lane and cannot collide with a request that was only auto-promoted to the same
 // resolved Extensions. Passing "" reproduces the historical hash, keeping existing entries valid.
 func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explicitExtensionDirective string) ([]byte, func([]byte) []byte, error) {
-	originalData := relayData.Data
-	originalSalt := relayData.Salt
-	originalRequestedBlock := relayData.RequestBlock
-	originalSeenBlock := relayData.SeenBlock
-
-	originalRequestId := relayData.RequestId
-	originalTaskId := relayData.XTaskId
-	originalTxId := relayData.XTxId
-	originalMetadata := relayData.Metadata
-	defer func() {
-		// return all information back to the object on defer (in any case)
-		relayData.Data = originalData
-		relayData.Salt = originalSalt
-		relayData.RequestBlock = originalRequestedBlock
-		relayData.SeenBlock = originalSeenBlock
-
-		relayData.RequestId = originalRequestId
-		relayData.XTaskId = originalTaskId
-		relayData.XTxId = originalTxId
-		relayData.Metadata = originalMetadata
-	}()
-
+	// The key is computed on a copy with the per-request fields cleared, never on the request
+	// itself: the cache lookup runs on the state-machine goroutine and the cache write inside the
+	// attempt's goroutine, and the mutate-and-restore this used to do on the object both hand to
+	// the node raced them (MAG-4242). RelayPrivateData is a plain struct, so the copy carries every
+	// field; the slices it shares with the request are replaced, never written through.
+	keyData := *relayData
 	// we need to remove some data from the request so the cache will hit properly.
 	inputFormatter, outputFormatter := cacheformat.FormatterForRelayRequestAndResponse(relayData.ApiInterface)
-	relayData.Data = inputFormatter(relayData.Data) // remove id from request.
-	relayData.Salt = nil                            // remove salt
-	relayData.SeenBlock = 0                         // remove seen block
-	relayData.RequestId = ""                        // remove request id (unique per request)
-	relayData.XTaskId = nil                         // remove task id (unique per request)
-	relayData.XTxId = nil                           // remove tx id (unique per request)
+	keyData.Data = inputFormatter(relayData.Data) // remove id from request.
+	keyData.Salt = nil                            // remove salt
+	keyData.SeenBlock = 0                         // remove seen block
+	keyData.RequestId = ""                        // remove request id (unique per request)
+	keyData.XTaskId = nil                         // remove task id (unique per request)
+	keyData.XTxId = nil                           // remove tx id (unique per request)
 	// A forwarded Content-Type says how the node reads the bytes in Data. application/json is the
 	// router's own default for a REST body, so a client that names it and one that sends none make
 	// the same request and share a lane: drop it from the key. Every other value stays in the key.
@@ -999,15 +983,15 @@ func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explici
 	// with a 200 (an error envelope or a default result) that is cache-eligible, so a reply to one
 	// reading must never be served for another. The entries left are hashed in a fixed order,
 	// because the listeners hand a request's headers over in map order (metadataForCacheKey).
-	relayData.Metadata = metadataForCacheKey(relayData.Metadata)
+	keyData.Metadata = metadataForCacheKey(relayData.Metadata)
 	// we remove the discrepancy of requested block from the hash, and add it on the cache side instead
 	// this is due to the fact that we don't know the latest seen block at this moment, as on shared state
 	// only the cache has this information. we make sure the hashing at this stage does not include the requested block.
 	// It does include it on the cache key side.
-	relayData.RequestBlock = 0
+	keyData.RequestBlock = 0
 
 	cashHash := &pairingtypes.CacheHash{
-		Request: relayData,
+		Request: &keyData,
 		ChainId: chainId,
 	}
 	cashHashBytes, err := json.Marshal(cashHash)

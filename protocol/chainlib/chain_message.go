@@ -8,6 +8,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/parser"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -53,6 +54,31 @@ func (bcmc *baseChainMessageContainer) UpdateEarliestInMessage(incomingEarliest 
 		}
 	}
 	return updatedSuccessfully
+}
+
+// foldParsedEarliest folds the range lower bound the parsers read for one message (a
+// PARSER_TYPE_BLOCK_EARLIEST parser, e.g. trace_filter's fromBlock) into currentEarliest, the
+// earliest block known so far for the request. The container reads an earliest block of 0 as
+// "none", and a range that starts at block 0 starts at the chain's first block, so 0 is folded in
+// as EARLIEST_BLOCK. A message whose parsers read no bound leaves currentEarliest as it is.
+func foldParsedEarliest(currentEarliest int64, parsedInput *parser.ParsedInput) int64 {
+	earliest, ok := parsedInput.GetEarliestBlock()
+	if !ok {
+		return currentEarliest
+	}
+	if earliest == 0 {
+		earliest = spectypes.EARLIEST_BLOCK
+	}
+	return CombineEarliestRequestedBlock(currentEarliest, earliest)
+}
+
+// applyParsedRange gives a single request the range lower bound its parsers read, so the archive
+// rule judges the range on its deepest block. Without such a bound the message is left as built:
+// no earliest of its own, read as the main block.
+func (bcmc *baseChainMessageContainer) applyParsedRange(parsedInput *parser.ParsedInput) {
+	if earliest := foldParsedEarliest(bcmc.latestRequestedBlock, parsedInput); earliest != bcmc.latestRequestedBlock {
+		bcmc.earliestRequestedBlock = earliest
+	}
 }
 
 func (bcnc *baseChainMessageContainer) GetRequestedBlocksHashes() []string {

@@ -193,7 +193,7 @@ func TestHealthRelayUnderThePreFixWiring(t *testing.T) {
 			relayProcessor := relaycore.NewRelayProcessor(ctx, stateMachine.GetCrossValidationParams(),
 				fleet.server.rpcSmartRouterLogs, fleet.server, stateMachine)
 			// numOfEndpoints 1 is the health path's own fan-out: a health check asks one provider.
-			err = fleet.server.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(message), relayProcessor, nil, nil, false)
+			err = fleet.server.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(message), relayProcessor, nil, nil)
 
 			if tc.refusal == "" {
 				require.NoError(t, err, "one session is not fewer than one, so threshold 1 alone was never the bug")

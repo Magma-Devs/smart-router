@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -181,7 +182,7 @@ func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {
 		processor.SetStopReason(relaycore.StopReasonProcessingTimeout)
 		// EOF classifies as PROTOCOL_CONNECTION_CLOSED, which carries MayHaveReachedNode: an
 		// established connection died after the request was already on the wire.
-		relaycoretest.SendProtocolError(processor, "lava@a", 0, errors.New("EOF"))
+		relaycoretest.SendProtocolError(processor, "lava@a", 0, io.EOF)
 		drain(t, processor)
 		require.True(t, writeOutcomeIsUnknown(msg, processor),
 			"nobody is silent, but a connection that died mid-delivery settles nothing")

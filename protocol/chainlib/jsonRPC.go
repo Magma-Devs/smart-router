@@ -204,11 +204,25 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			extensionInfo.RouterExtensions = append(extensionInfo.RouterExtensions, extensionslib.ArchiveExtension)
 		}
 
+		// What this element adds to a batch's earliest block. RequestedBlock reads an earliest block
+		// of 0 as "unset", so an element at block 0, the chain's first block, joins it as
+		// EARLIEST_BLOCK, as a range lower bound of 0 does in foldParsedEarliest. Kept as 0, it
+		// either lowered the earliest block to "unset" or lost to a "latest"-style sentinel, and
+		// the archive rule judged the batch without its genesis element.
+		elementEarliest := parsedBlock
+		if isBatch && elementEarliest == 0 {
+			elementEarliest = spectypes.EARLIEST_BLOCK
+		}
+
 		if idx == 0 {
-			// on the first entry store them
+			// on the first entry store them. The earliest block starts at this element's block, not
+			// at the "unset" 0: CompareRequestedBlockInBatch only lowers it, and 0 made every later
+			// combination come out 0, so RequestedBlock reported the newest block as the earliest
+			// and the archive rule never saw a batch's deep element (MAG-4242).
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
 			latestRequestedBlock = parsedBlock
+			earliestRequestedBlock = foldParsedEarliest(elementEarliest, parsedInput)
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
@@ -243,20 +257,20 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 				},
 			}
 
-			latestRequestedBlock, earliestRequestedBlock = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
+			latestRequestedBlock, _ = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
+			earliestRequestedBlock = foldParsedEarliest(CombineEarliestRequestedBlock(earliestRequestedBlock, elementEarliest), parsedInput)
 		}
 	}
 
 	var nodeMsg *baseChainMessageContainer
 	if len(msgs) == 1 && !isBatch {
 		nodeMsg = apip.newChainMessage(api, latestRequestedBlock, blockHashes, &msgs[0], apiCollection, parsedDefault)
-	} else {
-		// For single-element batches, earliestRequestedBlock was never updated by
-		// CompareRequestedBlockInBatch (which only runs for idx > 0). With one message,
-		// earliest == latest.
-		if len(msgs) == 1 {
-			earliestRequestedBlock = latestRequestedBlock
+		// A single request has no earliest of its own unless its parsers read a range lower bound
+		// (trace_filter's fromBlock); then the archive rule must judge the range on it.
+		if earliestRequestedBlock != latestRequestedBlock {
+			nodeMsg.earliestRequestedBlock = earliestRequestedBlock
 		}
+	} else {
 		nodeMsg, err = apip.newBatchChainMessage(api, latestRequestedBlock, earliestRequestedBlock, blockHashes, msgs, apiCollection, parsedDefault)
 		if err != nil {
 			return nil, err

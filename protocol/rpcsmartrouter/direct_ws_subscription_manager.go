@@ -1356,10 +1356,27 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	return &pairingtypes.RelayReply{Data: replyData}, true // Joined existing subscription
 }
 
-// checkAndAddPendingSubscription checks for pending subscriptions
+// checkAndAddPendingSubscription checks for pending subscriptions.
+//
+// It returns (nil, false) when the caller is the first for these params and must create the
+// subscription, or (ch, true) when the caller must wait on ch and then join. The caller has
+// already looked for an active subscription, but under a separate acquisition of dwsm.lock:
+// in the gap between that look and this one a creator can both store its subscription and
+// clear its pending entry, so a caller arriving here would see neither and become a second
+// creator. That opened a second upstream subscription for the same params, overwrote the
+// first map entry (orphaning its listener goroutine and its node-side subscription), and
+// incremented totalSubscriptions twice for an entry that is dropped once (MAG-2546). A
+// caller that finds the subscription active is therefore handed an already-settled success
+// so it takes the join path.
 func (dwsm *DirectWSSubscriptionManager) checkAndAddPendingSubscription(hashedParams string) (chan bool, bool) {
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
+
+	if _, active := dwsm.activeSubscriptions[hashedParams]; active {
+		settled := make(chan bool, 1)
+		settled <- true
+		return settled, true
+	}
 
 	pending, found := dwsm.pendingSubscriptions[hashedParams]
 	if !found {
