@@ -145,9 +145,9 @@ type ChainTracker struct {
 	// initial config
 	averageBlockTime time.Duration
 	// flatPollInterval, when > 0, selects the FIXED flat cadence (MAG-2159): the poll runs
-	// at exactly this interval, slowed only by failure backoff; the adaptive tiers and
-	// block-gap recalibration no longer drive the timer. 0 keeps the legacy adaptive
-	// cadence. See ChainTrackerConfig.FlatPollInterval.
+	// at this interval capped at BACKOFF_MAX_TIME (HealthyPollInterval), slowed only by
+	// failure backoff; the adaptive tiers and block-gap recalibration no longer drive the
+	// timer. 0 keeps the legacy adaptive cadence. See ChainTrackerConfig.FlatPollInterval.
 	flatPollInterval time.Duration
 	// relayTipFresh is the traffic gate (MAG-2159 / Topic B): when set and it reports a fresh
 	// relay-harvested tip, the poll cycle is skipped entirely. See ChainTrackerConfig.RelayTipFresh.
@@ -643,7 +643,7 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 	// initial polling = averageBlockTime/16
 	cs.latestChangeTime = time.Time{} // we will discard the first change time, so this is uninitialized
 
-	// Per-endpoint trackers (flatPollInterval > 0) poll at exactly flatPollInterval.
+	// Per-endpoint trackers (flatPollInterval > 0) poll every HealthyPollInterval(flatPollInterval).
 	// CRITICAL (MAG-2159 finding 3): the periodic timer must NOT start counting until
 	// initialization completes — otherwise a slow init lets the timer fire immediately
 	// after the goroutine starts, polling faster than the configured interval on boot.
@@ -662,8 +662,12 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 		return err
 	}
 	if cs.flatPollInterval > 0 {
-		// First periodic poll is a full interval after the final init fetch.
-		cs.timer = time.NewTimer(cs.flatPollInterval)
+		// First periodic poll is one interval after the final init fetch: the interval every
+		// later successful poll waits (HealthyPollInterval), not the raw flatPollInterval, which
+		// exponentialBackoff caps for every poll after this one. The router sizes how long a url's
+		// answer counts from that interval (MAG-4249), so a slow chain's first poll must not wait
+		// longer than its later ones.
+		cs.updateTimer(pollingTime, 0)
 	}
 	utils.LavaFormatDebug("ChainTracker fetched init data successfully")
 	// The block-gap ticker drives the adaptive cadence sweep (Percentile+Stability over
@@ -853,10 +857,20 @@ func (cs *ChainTracker) CurrentPollInterval() time.Duration {
 	return time.Duration(cs.currentPollIntervalNanos.Load())
 }
 
+// HealthyPollInterval is how long a per-endpoint tracker with this FlatPollInterval waits between
+// two polls while they succeed: the flat interval through the same exponentialBackoff call
+// computePollInterval makes, at zero failures. That call caps every interval at
+// BACKOFF_MAX_TIME, so a flat interval above it runs at BACKOFF_MAX_TIME: a 10-minute chain's
+// 5-minute interval at the default divisor polls every minute.
+func HealthyPollInterval(flatPollInterval time.Duration) time.Duration {
+	return exponentialBackoff(flatPollInterval, 0)
+}
+
 // computePollInterval returns the next dedicated-poll interval.
 //
 // When flatPollInterval > 0 (per-endpoint trackers, MAG-2159 / Topic B) the cadence is
-// FIXED: exactly flatPollInterval (avgBlockTime/divisor), slowed only by failure backoff. The
+// FIXED: flatPollInterval (avgBlockTime/divisor) capped at BACKOFF_MAX_TIME
+// (HealthyPollInterval), slowed only by failure backoff. The
 // old adaptive /4, /2, /16 tiers are gone and the block-gap recalibration (which mutates
 // tickerBaseTime) is deliberately ignored here — relay harvest is the primary block
 // signal, so the dedicated poll is a sparse, predictable fallback. Because nothing consumes

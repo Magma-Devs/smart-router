@@ -44,9 +44,10 @@ type ChainTrackerConfig struct {
 	HeadOnlyTracking bool
 
 	// FlatPollInterval, when > 0, switches this tracker to a FIXED flat cadence
-	// (MAG-2159 / Topic B): the dedicated poll runs at exactly this interval, slowed only
-	// by failure backoff. The adaptive /4, /2, /16 tiers AND the block-gap recalibration
-	// are disconnected from scheduling (block-gap estimation still runs for block-time
+	// (MAG-2159 / Topic B): the dedicated poll runs at this interval capped at
+	// BACKOFF_MAX_TIME (HealthyPollInterval), slowed only by failure backoff. The adaptive
+	// /4, /2, /16 tiers AND the block-gap recalibration are disconnected from scheduling
+	// (block-gap estimation still runs for block-time
 	// consumers, it just no longer moves the timer). Per-endpoint trackers set it to
 	// avgBlockTime/divisor (default 2, operator-tunable — see
 	// endpointstate.PollDivisorFlagName) because relay harvest is the primary block signal,

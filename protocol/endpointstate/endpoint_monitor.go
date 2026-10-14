@@ -301,7 +301,9 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// is reported once per chain rather than per tracker.
 	pollDivisor := resolvePollDivisor(config.PollIntervalDivisor, config.ChainID, config.ApiInterface)
 	flatPollInterval := resolveFlatPollInterval(avgBlockTime, pollDivisor)
-	warnIfCadenceOutrunsStaleness(flatPollInterval, avgBlockTime, config.ChainID, config.ApiInterface)
+	// The warning judges the interval the trackers actually wait, which they cap at a minute
+	// (chaintracker.HealthyPollInterval): a slow chain at a low divisor still polls every minute.
+	warnIfCadenceOutrunsStaleness(chaintracker.HealthyPollInterval(flatPollInterval), avgBlockTime, config.ChainID, config.ApiInterface)
 	// Idle mode knobs (idle.go), validated once per chain like the cadence above.
 	idleAfter, idlePollInterval := resolveIdleConfig(config.IdleAfter, config.IdlePollInterval, flatPollInterval, config.ChainID, config.ApiInterface)
 
@@ -394,7 +396,8 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		utils.LogAttr("apiInterface", config.ApiInterface),
 		utils.LogAttr("averageBlockTime", avgBlockTime),
 		utils.LogAttr("divisor", pollDivisor),
-		utils.LogAttr("pollInterval", flatPollInterval),
+		utils.LogAttr("pollInterval", chaintracker.HealthyPollInterval(flatPollInterval)),
+		utils.LogAttr("flatPollInterval", flatPollInterval),
 		utils.LogAttr("overridden", pollDivisor != DefaultPollDivisor),
 	)
 
@@ -478,11 +481,11 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// turning it off would swap in a DummyChainTracker, which polls nothing at all.
 		HeadOnlyTracking: m.hashPolling.HeadOnly(),
 		// MAG-2159 (Topic B): per-endpoint trackers use a FIXED flat cadence — the
-		// dedicated poll runs at exactly avgBlockTime/divisor (slowed only by failure
-		// backoff), because relay harvest is the primary block signal and the poll is a
-		// sparse fallback. The divisor defaults to DefaultPollDivisor and is operator-tunable
-		// (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The global tracker
-		// leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
+		// dedicated poll runs at avgBlockTime/divisor capped at chaintracker.BACKOFF_MAX_TIME
+		// (slowed only by failure backoff), because relay harvest is the primary block signal
+		// and the poll is a sparse fallback. The divisor defaults to DefaultPollDivisor and is
+		// operator-tunable (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The
+		// global tracker leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
 		FlatPollInterval: m.flatPollInterval,
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
 		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker
@@ -950,14 +953,32 @@ func (m *EndpointMonitor) ObservationGeneration(endpointURL string) (uint64, boo
 	return gen, ok
 }
 
-// PollInterval is the cadence each tracker of this monitor polls its endpoint at when the poll
-// succeeds: the chain's block time over the poll divisor. Failures back off from it, and the
-// traffic gate may skip polls an answered relay already covers.
+// PollInterval is how long each tracker of this monitor waits between two polls of its endpoint
+// while they succeed: the chain's block time over the poll divisor, capped at
+// chaintracker.BACKOFF_MAX_TIME the way the tracker's scheduler caps it
+// (chaintracker.HealthyPollInterval). So a 10-minute chain polls every minute, not every 5.
+// Failures back off from it, and the traffic gate may skip polls (WorstCaseGapBetweenPolls).
 func (m *EndpointMonitor) PollInterval() time.Duration {
 	if m == nil {
 		return 0
 	}
-	return m.flatPollInterval
+	return chaintracker.HealthyPollInterval(m.flatPollInterval)
+}
+
+// WorstCaseGapBetweenPolls is the longest a tracker of this monitor can go between two real polls
+// while they succeed. The traffic gate skips a poll while a relay or another pod's poll keeps the
+// endpoint's tip fresh, up to chaintracker.DefaultMaxRelaySkipsBeforePoll in a row, so the next
+// real poll can come that many PollIntervals plus one after the last.
+//
+// It does not shrink to one block time after the last relay, where the relay half of the gate
+// stops skipping. A skip on another pod's poll (MAG-2981) writes nothing on this pod, and a relay
+// writes the url's series only for the provider it went through, so for a url two providers share,
+// only the skip budget bounds the gap between this pod's writes.
+func (m *EndpointMonitor) WorstCaseGapBetweenPolls() time.Duration {
+	if m == nil {
+		return 0
+	}
+	return worstCaseGapBetweenPolls(m.PollInterval())
 }
 
 // GetAllEndpoints returns all endpoint URLs with active ChainTrackers.

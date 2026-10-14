@@ -188,9 +188,9 @@ type SmartRouterMetricsManager struct {
 	optimizerQoSClient *ConsumerOptimizerQoSClient
 }
 
-// DefaultURLAnswerTimeout is the shortest time a url counts as answering after an answer. A
-// chain server whose trackers poll less often than once a minute passes twice its poll interval
-// instead.
+// DefaultURLAnswerTimeout is the shortest time a url counts as answering after an answer. A chain
+// server whose trackers can go longer between two answered polls (the traffic gate's skips plus
+// the poll, and one poll interval more) passes that instead.
 const DefaultURLAnswerTimeout = 2 * time.Minute
 
 // SmartRouterMetricsManagerOptions contains configuration for the metrics manager.
@@ -291,7 +291,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	})
 	endpointURLAnsweredUntil := NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
 		Name:       "rpc_endpoint_url_answered_until_seconds",
-		Help:       "Unix time until which a node url counts as answering: its last answer, a poll or a relay, plus max(2m, 2 x the chain's poll interval). A url past it has stopped answering: it is down, not stuck.",
+		Help:       "Unix time until which a node url counts as answering: its last answer, a poll or a relay, plus max(2m, 6 x the interval its tracker polls at). A url past it has stopped answering: it is down, not stuck.",
 		Labels:     urlLabels,
 		Registerer: prometheus.DefaultRegisterer,
 	})
@@ -1062,8 +1062,11 @@ func (m *SmartRouterMetricsManager) RegisterEndpointInternalPath(endpointID, int
 // SetEndpointURLLatestBlock records the head one url answered with on rpc_endpoint_url_latest_block,
 // for every provider configured with the url, and moves the url's answered-until time to
 // answerTimeout from now (DefaultURLAnswerTimeout if answerTimeout is not positive). The server
-// passes max(DefaultURLAnswerTimeout, 2 x its trackers' poll interval), so a url on a slow chain
-// that answers every poll never reads as down between two polls. Every answered poll calls it, a
+// passes max(DefaultURLAnswerTimeout, 6 x its trackers' poll interval): up to 4 polls the traffic
+// gate skips, the poll after them, and one interval for that poll's answer. So a url that answers
+// every poll never reads as down between two answers, as long as the tip store accepts what it
+// answers: a poll answering below a still-fresh higher tip (a peer pod's, or a relay's read at a
+// fresher commitment) moves nothing. Every answered poll the tip store accepts calls it, a
 // repeat of the same block included, so a url that keeps answering with one block stands still on
 // its series while its answered-until time keeps moving: that is stuck. A url that stops answering
 // stands still on both: that is down.
