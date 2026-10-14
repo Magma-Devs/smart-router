@@ -15,23 +15,32 @@ import (
 
 const DbValueConfirmationAttempts = 5
 
-// LastestCacheStore is the chain-level tip representation: stored with no
-// ristretto TTL, it goes stale for readers via the embedded wall-clock
-// deadline, and the same deadline bounds how long the stored block fences
-// lower writes (MAG-3755). (Name retained from the original implementation.)
+// LastestCacheStore is the chain-level tip representation, held in chainTipStore:
+// it goes stale for readers via the embedded wall-clock deadline, and the same
+// deadline bounds how long the stored block fences lower writes (MAG-3755).
+// (Name retained from the original implementation.)
 type LastestCacheStore struct {
 	latestBlock          int64
 	latestExpirationTime time.Time
 }
 
+// chainTipSweepEvery bounds how many tip writes land between sweeps of stale tips, the same
+// write-driven sweep stickyPins and endpointObservations run.
+const chainTipSweepEvery = 256
+
 // chainTipStore holds the per-chain tips the engine compares requests against. They lived in
 // finalizedCache, whose Set is asynchronous and may be dropped, so every write ran a goroutine
-// that slept 1 ms up to DbValueConfirmationAttempts times to confirm it. A tip is one value per
-// chain, bounded by the number of chains served: a map under a mutex needs no confirmation and
-// no goroutine per write (MAG-4244). The zero value is ready to use.
+// that slept 1 ms up to DbValueConfirmationAttempts times to confirm it. A map under a mutex needs
+// no confirmation and no goroutine per write (MAG-4244). The zero value is ready to use.
+//
+// The key is the writer's (KeyPrefix, ChainId), which the server does not bound, and ristretto
+// used to cap the tips by cost and keep only key hashes. The map keeps each key string, so stale
+// tips are swept: a stale tip reads as absent and fences no write, so dropping one is invisible
+// to every caller.
 type chainTipStore struct {
-	mu   sync.Mutex
-	tips map[string]LastestCacheStore
+	mu     sync.Mutex
+	tips   map[string]LastestCacheStore
+	writes int
 }
 
 func (s *chainTipStore) get(key string) (LastestCacheStore, bool) {
@@ -54,17 +63,28 @@ func (s *chainTipStore) setIfGreaterOrEqualOrStale(key string, tip LastestCacheS
 		s.tips = make(map[string]LastestCacheStore)
 	}
 	s.tips[key] = tip
+	s.writes++
+	if s.writes >= chainTipSweepEvery {
+		s.writes = 0
+		for k, v := range s.tips {
+			if !v.latestExpirationTime.After(now) {
+				delete(s.tips, k)
+			}
+		}
+	}
 }
 
 func (s *chainTipStore) clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tips = nil
+	s.writes = 0
 }
 
 // ristrettoStore adapts the CacheServer's three ristretto caches onto
 // core.KVStore. Relay-entry keys route by namespace prefix to the
-// finalized/temp stores, tip keys live in the finalized store, and heights in
+// finalized/temp stores, shared-state tip keys live in the finalized store (chain
+// tips live in chainTipStore), and heights in
 // the dedicated hashes store. Ristretto writes are asynchronous and lossy (a
 // Set may be dropped or delayed), which is why the monotonic int64 ops write
 // through a confirm-and-retry loop.
@@ -83,7 +103,8 @@ func (r ristrettoStore) route(key string) *ristretto.Cache[string, any] {
 	case strings.HasPrefix(key, core.HeightPrefix):
 		return r.cs.blocksHashesToHeightsCache
 	default:
-		// tip: / chaintip: — shared-state and chain tips live in the finalized store.
+		// tip: — shared-state tips live in the finalized store. Chain tips never get
+		// here: they live in chainTipStore.
 		return r.cs.finalizedCache
 	}
 }

@@ -790,7 +790,7 @@ func (s *Store) GetHeight(ctx context.Context, key string) (int64, bool, error) 
 	}
 	value, parseErr := strconv.ParseInt(raw, 10, 64)
 	if parseErr != nil {
-		return 0, false, nil //nolint:nilerr // a stored tip that does not parse is a miss, not a failure; the next tip write replaces it
+		return 0, false, nil //nolint:nilerr // a stored height that does not parse is a miss, not a failure; the next height write replaces it
 	}
 	return value, true, nil
 }
