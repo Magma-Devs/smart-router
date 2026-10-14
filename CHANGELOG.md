@@ -12,23 +12,115 @@ links collected at the bottom of each section.
 
 ### Highlights
 
-This release introduces several breaking changes to header handling, routing, and configuration validation, starting with strict filtering of upstream response headers; the router now drops vendor, CDN, cookie, and quota headers, passing only standard transport headers like `Content-Type` and `Retry-After` or those explicitly declared in the chain spec, requiring integrators to update clients that depend on the dropped fields. Startup validation is also stricter, as the router will now halt at boot if a cross-validation policy specifies an unconfigured `chain-id`, `api-interface`, or unsupported method, forcing operators to delete or correct stale policies. During request execution, the `lava-relay-timeout` header is no longer honored verbatim above the method's default budget unless operators explicitly set the `--max-caller-relay-timeout` flag, and stateful write methods now completely ignore `lava-cross-validation-*` headers to route strictly by category. Furthermore, node-level refusals like `NODE_METHOD_NOT_FOUND` and `NODE_LIMIT_EXCEEDED` now trigger automatic retries on backup providers rather than failing immediately, which alters the `Lava-Retries` and `Lava-Provider-Address` response headers to report the losing attempts exactly as hedging does following the reversion to v1.5.1 hedging behavior. Beyond these breaking changes, the release adds an idle mode to the chain tracker that pauses polling on quiet chains, introduces the `rpc_endpoint_url_latest_block` metric to automatically rotate out providers stuck on frozen blocks, and expands observability with new per-customer metrics extracted from the `project-id` header alongside a native GraphQL API interface for Sui.
+v1.6.0 changes seven behaviours a client or an operator may depend on. They are listed under **⚠ Breaking changes** below, each with the surface it touches and what to do: four change what a client sees on a reply (upstream response headers, `lava-relay-timeout`, retries after a node refusal, hedge accounting), one can stop the router at boot (cross-validation policy validation), one makes a transaction submission ignore the caller's cross-validation headers, and one changes which requests reach an archive node.
+
+#### Archive routing is decided once, before the first attempt
+
+The router decides whether a request needs an archive node from the request itself, before it picks an endpoint. A request is historical, and goes only to the endpoints that declare the `archive` extension, when any of these holds:
+
+- it names a block deeper than the chain's archive depth, the `rule.block` of the `archive` extension in the chain's spec (127 blocks behind the head on Ethereum);
+- it names the `earliest` block;
+- it carries `lava-extension: archive`.
+
+Endpoints without the extension are skipped whichever tier they are in: on a fleet where only a backup declares `archive`, a historical request goes straight to that backup, and a request for a recent block stays on the primaries. An archive-routed request counts CU at the extension's `cu_multiplier`. A retry re-sends the same request to another endpoint of the same pool; it no longer adds `archive` on the second attempt ([#389]), which used to pull a plain `latest` read into the backup tier, at archive cost, after one failure. The router also reads more of the request than before ([#514]): a JSON-RPC batch is judged on its deepest element, and a range method such as `trace_filter` on its `fromBlock`.
+
+Requests whose block the router cannot read are not routed to archive on their own: methods that name a block or transaction by hash (`eth_getTransactionReceipt`, `eth_getBlockByHash`, `debug_traceTransaction`, `trace_transaction`, Tendermint `block_by_hash`, and the like) and EIP-1898 block objects (`{"blockHash": …}` or `{"blockNumber": …}`) on `eth_call`, `eth_getBalance`, `eth_getStorageAt`, `eth_getTransactionCount`, `eth_getCode` and `eth_getProof`. They stay on the primaries unless the caller sends `lava-extension: archive`. When a caller asks for an extension no node on the router offers, the request is still served and the reply says so in the new `Lava-Extension-Unavailable` header, counted in `smartrouter_extension_unavailable_total` ([#450]).
+
+#### What's new
+
+- **Chain tracker idle mode** ([#505]), off by default. `--chain-tracker-idle-after <duration>` pauses a chain's dedicated upstream polls once it has served no client relay for that long; `--chain-tracker-idle-poll-interval` keeps a slow heartbeat instead (`0` polls nothing while idle). The next client relay wakes the chain with one poll of every endpoint before it is routed. `smartrouter_chain_idle` reports the state; the operator guide is `docs/CHAIN-TRACKER-IDLE-MODE.md`.
+- **A url stuck on a frozen head leaves rotation** ([#494]). A node that keeps answering with the same latest block while another url of the chain has moved past it is taken out of rotation after 10 × `--chain-tracker-poll-divisor` tracker cycles (at least 3), and returns once it answers above the block it was stuck on. A provider with every url out is blocked, so traffic moves to the next primary or to the backup tier.
+- **One latest-block series per url** ([#501]). `rpc_endpoint_url_latest_block{spec, apiInterface, endpoint_id, url, internal_path}` carries each url's own head (the `url` label is scheme and host plus an 8-hex fingerprint, never the api key), so an alert can tell a frozen url from one that trails. `rpc_endpoint_latest_block` now reports a provider's lowest url head. A removed url's series is deleted, not left standing.
+- **Per-customer metrics from the `project-id` header** ([#513]). `smartrouter_customer_requests_total` and `smartrouter_customer_requests_failed_total` (`spec`, `apiInterface`, `customer`, `method`), `smartrouter_customer_end_to_end_latency_milliseconds` (`spec`, `apiInterface`, `customer`) and `smartrouter_customer_overflow_total` (`spec`). A request without the header counts as `DefaultDappID`; each spec admits 512 distinct customers and later values collapse to `other`. The header never reaches an upstream or the cache key.
+- **Native GraphQL API interface** ([#480]), first used for Sui. Each root field is its own API, so cross-validation policies, the stateful-write guard, compute units and tip parsing apply per operation instead of collapsing onto one `/graphql` path.
+- **Cross-validation names the plurality on failure** ([#491]). `lava-cross-validation-plurality-size` and `lava-cross-validation-plurality-providers` carry the largest set of providers that returned the same response when the quorum is not reached; the providers list is empty on a tie.
+- **Chain tip regressions are counted** ([#506]). `smartrouter_latest_block_regressions_total{spec, apiInterface, reason}` (`reason` is `consensus` or `stale_tip`) with an ERROR log, and `smartrouter_latest_block` follows the tip down.
+- **`GET /debug/sticky-claims`** ([#442]) reports the sticky-session claim outcomes per endpoint, cumulative since the pod started.
+- **Endpoint observations travel on the RESP cache backend** ([#390]), so the fleet tracker gate works there too and replicas that share a cache stop each polling every upstream.
+
+#### Notable fixes
+
+- **Failover and sessions.** A blocked provider's disabled endpoint is lent once per request as a real last chance instead of "No pairings available" ([#504]). An upstream connection that answers only 5xx is retired after two in a row, at most once per 5 s, so a load balancer pinned to a dead backend no longer holds the router on 503s until a restart ([#507]). A relay is never handed a WebSocket endpoint ([#487]); a direct RPC session is tied to the endpoint selection chose ([#493]); every provider in `lava-providers-block` is honoured, not just the first two ([#451]); a "data not held" answer scores on sync only ([#460]).
+- **Cross-validation.** The sessions gathered for a request whose quorum is out of reach are released ([#423]); a round stops at the attempt window when only a quiet group is missing ([#454]); startup warns on every min-groups and max-participants shortfall, measured against the configured providers rather than the ones up at boot ([#439]); the health check takes one provider's latest block, not a quorum ([#438]); cross-validation outranks a caller pin at any min-groups ([#393]).
+- **REST.** PUT and PATCH bodies are relayed ([#455]); a JSON body under a generic Content-Type is sent as JSON ([#456]); a non-default Content-Type is part of the cache key ([#457]); a request path can never change the upstream host ([#479]).
+- **gRPC.** A binary call is forwarded as raw bytes ([#446]); idle pooled upstream channels are closed and live streams pinged ([#447]); the chain parser's proto registry is locked against concurrent relays ([#445]); requests parse from reflection snapshots, not relays ([#503]); the descriptor cache is keyed by service, so same-named methods across Cosmos services no longer share one descriptor ([#514]); subscription restores are bounded and classified, and a given-up client stream ends with an error ([#489]); gRPC ABORTED is classified as `NODE_ABORTED`, a non-retryable transaction outcome that is not the endpoint's fault ([#458]).
+- **WebSocket.** A shutdown panic in upstream subscriptions is gone ([#477]); `unsubscribe_all` gets a reply ([#478]); a subscription that became active between two checks is joined ([#508]); a teardown wins over a restore in flight ([#509]); `relay_usage` events carry the client's Origin ([#474]).
+- **Tracing and request headers.** The caller's tracing ids are read on every interface and copied before they outlive the request ([#416]); every request header is owned past the listener, and a pinned provider resolves to the router's own string ([#443]).
+- **Cache and classification.** The chain tip is bounded by what the router believed, and a stale tip yields ([#421]); a dead RESP cache reads as an outage on reads, not a slow one ([#436]); a relay's cache key is computed once, on a copy of the request ([#515]); an upstream EOF, DNS failure or http-as-https is the endpoint's fault ([#518]); batch retries follow the flag, not a hash a batch never has ([#517]); a tagged directive resolves from the url's own internal-path collection ([#482]).
+
+#### Reverted before the tag
+
+The backup-reserve hedge ([#449]) was reverted by [#516] before v1.6.0 was cut. The budget only ends a request, attempts go out one window apart, and the backup tier is reached once the primary pool is exhausted, as in v1.5.8. The [#449] commits still appear under Bug fixes below because that list is generated from history.
+
+#### Removed
+
+The legacy relay-metrics reporter and the New Relic agent are gone ([#472], [#471]); no deployment configured either. Prometheus metrics and the OTel relay-usage sink are unchanged.
+
+#### Build
+
+Go 1.26.9 and golang.org/x/net v0.60.0 ([#502]).
 
 ### Changes
 
 #### ⚠ Breaking changes
-- fix(rpcsmartrouter)!: keep the reply headers a chain's whole API interface declares, pass_ignore included (MAG-3104) ([#420]) [`efbe226`]
-  - an upstream's response headers no longer reach the client unless they are transport headers (Content-Type, Content-Encoding, Retry-After, Date) or headers the chain spec declares in the reply direction for the API interface. Vendor, CDN, cookie and quota headers that passed through before are dropped; the router's own headers are unchanged.
-- fix(rpcsmartrouter)!: count and name a hedge's losing attempt again (MAG-3762) ([#440]) [`62bd7ee`]
-  - for a request where a hedge fires, Lava-Retries and Lava-Provider-Address change relative to v1.5.2 and v1.5.3. The reply again reports the hedge's losing attempt: Lava-Retries is at least 1, and the losing provider is named before the one that answered. This is the behaviour of v1.5.1 and earlier, and what MAG-1818 specifies.
-- fix(rpcsmartrouter)!: refuse a cross-validation policy that could never apply, and log each endpoint's own (MAG-3604) ([#441]) [`d7e638b`]
-  - a cross-validation policy whose chain-id and api-interface match no configured endpoint, or whose method the endpoint's spec does not serve, now stops the router at startup. Such a policy used to load and never apply.
-- fix(relaycore)!: a write routes as a write, whatever headers the caller sends ([#437]) [`5215861`]
-  - a method in the spec's stateful category no longer takes the caller's lava-cross-validation-* headers. It routes by its category and the headers have no effect (HTTP 200, one answer, no lava-cross-validation-* response headers). A malformed header pair on such a method (an unparseable value, one header without its companion, an agreement-threshold above max-participants) used to be refused before dispatch; it is now ignored and the request goes out as a write. A forbid-caller-cv: true policy written on a write under the earlier advice is redundant and harmless.
-- fix(rpcsmartrouter): ignore a non-positive lava-relay-timeout instead of crashing (MAG-3988) ([#452]) [`5c2809f`]
-  - lava-relay-timeout is no longer used verbatim. A value that is not a positive duration is ignored, a value under 300ms is raised to 300ms, and a value above the request's own budget is held to it unless the operator raises --max-caller-relay-timeout (default 0: no extension). Callers who raised it per request for heavy methods, as the public docs recommend, now get the method's own budget. To keep letting callers extend budgets, run with --max-caller-relay-timeout, e.g. 5m, the outbound client's per-attempt limit. The public docs (api/directives.md, configuration/failover/timeout.md, reference/cli.md) still describe the verbatim behaviour.
-- fix(common)!: ask another provider when a node refuses on its own account (MAG-2771) ([#492]) [`fb11aec`]
-  - a reply carrying NODE_METHOD_NOT_FOUND, NODE_UNIMPLEMENTED, NODE_ENDPOINT_NOT_FOUND, NODE_METHOD_NOT_ALLOWED, NODE_LIMIT_EXCEEDED or NODE_UNAUTHORIZED is now retried on another provider instead of being returned at once, so the Lava-Retries and Lava-Provider-Address values on those replies change, and the public error-codes page, which lists these codes as non-retryable, needs an update after the release.
+
+Each entry says what changed, who notices, and what to do. The commits are also listed under their own group below.
+
+1. **Upstream response headers are filtered** ([#420], MAG-3104, [`efbe226`], [`ce4dfd8`])
+
+   An upstream's response headers reach the client only if they are transport headers (`Content-Type`, `Content-Encoding`, `Retry-After`, `Date`) or headers the chain spec declares in the reply direction (`pass_reply`, `pass_both` or `pass_ignore`) for the API interface, taken as the union across the interface's collections. Vendor, CDN, cookie and quota headers that passed through before are dropped. The router's own `Lava-*` headers are unchanged, and a cache hit written by an older router replays the same reduced set.
+
+   *Who notices:* a client that reads an upstream's own headers off a reply, such as a quota, a request id or a cookie.
+
+   *What to do:* declare the header in the chain spec's `headers` with a reply-direction kind. Nothing else makes it pass.
+
+2. **A node's refusal is retried on another provider** ([#492], MAG-2771, [`fb11aec`])
+
+   `NODE_METHOD_NOT_FOUND` (2001), `NODE_UNIMPLEMENTED` (2008), `NODE_ENDPOINT_NOT_FOUND` (2009), `NODE_METHOD_NOT_ALLOWED` (2010) and `NODE_UNAUTHORIZED` (2016) are a node's claim about itself, not a fact about the chain, so the router now asks another provider instead of returning the refusal at once; the refusing endpoint is neither blamed nor scored. `NODE_LIMIT_EXCEEDED` (2011) stays non-retryable, and the refusal of a method the spec does not list (relayed as a `Default-` API) stays final. When the retry gets a different answer, the caller receives the answer that ended the request, not the first refusal.
+
+   *Who notices:* a client that reads `Lava-Retries` and `Lava-Provider-Address`; on these replies the values change. A refusal every provider shares now costs up to the retry limit in upstream calls. The public error-codes page lags this release and still lists the five codes as non-retryable.
+
+   *What to do:* nothing for most clients. Treat a refusal on these codes as the fleet's answer rather than one node's.
+
+3. **`lava-relay-timeout` is bounded** ([#452], MAG-3988 and MAG-3600, [`5c2809f`])
+
+   The header is no longer used verbatim. A value that is not a positive duration is ignored, a value under 300ms is raised to 300ms, and a value above the request's own budget is held to that budget unless the operator sets `--max-caller-relay-timeout` (default `0`: no extension). The reply carries `Lava-Relay-Timeout-Applied` with the window actually used. Before this release a zero or negative value crashed the router, and a large one held a request well past its budget.
+
+   *Who notices:* a caller that raised the header per request for heavy methods beyond the method's own budget, as the public docs used to recommend; it now gets the method's own budget.
+
+   *What to do:* to let callers extend budgets, run with `--max-caller-relay-timeout`, for example `5m`, the outbound client's per-attempt limit. The public docs (`api/directives.md`, `configuration/failover/timeout.md`, `reference/cli.md`) describe the bounded behaviour.
+
+4. **A hedge's losing attempt is counted and named again** ([#440], MAG-3762, [`62bd7ee`])
+
+   For a request where a hedge fires, `Lava-Retries` is at least 1 and the losing provider is named in `Lava-Provider-Address` before the one that answered. This is the behaviour of v1.5.1 and earlier; v1.5.2 and v1.5.3 dropped the losing attempt. The retry metrics (`smartrouter_retries_total`, `smartrouter_retries_success_total`, `smartrouter_retries_failed_total`, `smartrouter_retry_attempts`) count hedged requests again, so the retry and hedging families overlap.
+
+   *Who notices:* dashboards and alerts built on the retry metrics or on `Lava-Retries` against v1.5.2 or v1.5.3.
+
+   *What to do:* expect the v1.5.1 numbers.
+
+5. **A cross-validation policy that can never apply stops the router at startup** ([#441], MAG-3604, [`d7e638b`])
+
+   A policy whose `chain-id` and `api-interface` match no configured endpoint, or whose method the endpoint's spec does not serve (a REST policy names the path template, not a gRPC method name), is refused before anything binds or dials. The error names the policy by its position in `cross-validation.policies` and the endpoints that do exist. Such a policy used to load and never apply, while the startup line counted it as loaded. A policy with neither `enabled` nor `forbid-caller-cv` is a no-op and is left alone; the "policies loaded" line now reports each endpoint's own count and methods.
+
+   *Who notices:* an operator with a stale or misspelled policy; the router does not boot.
+
+   *What to do:* delete or correct the policy the error names before rolling out.
+
+6. **A write routes as a write, whatever headers the caller sends** ([#437], MAG-3603, [`5215861`])
+
+   A method in the spec's stateful category no longer takes the caller's `lava-cross-validation-*` headers. It routes by its category and the headers have no effect: HTTP 200, one answer, no `lava-cross-validation-*` response headers. A cross-validated write used to broadcast the transaction to every stateful node and then report HTTP 500, because only the first node can accept it. A malformed header pair on such a method (an unparseable value, one header without its companion, an agreement threshold above max-participants) used to be refused before dispatch and is now ignored; it is still rejected on a read. A `forbid-caller-cv: true` policy written on a write is redundant and harmless.
+
+   *Who notices:* a client library that sends the cross-validation headers on every request, transaction submissions included.
+
+   *What to do:* nothing, except stop expecting cross-validation response headers on a write.
+
+7. **A retry no longer promotes a request to `archive`** ([#389], MAG-2734, [`c7c605a`])
+
+   Archive routing is decided once, before the first attempt, from the block the request names (see Highlights); a retry re-sends the same request. Requests whose block the router cannot read, by-hash methods and EIP-1898 block objects, lose the automatic archive route they had through the retry.
+
+   *Who notices:* a caller that relied on `eth_getTransactionReceipt`, `debug_traceTransaction`, `trace_transaction`, an `eth_call` with `{"blockHash": …}` or `{"blockNumber": …}`, and the like reaching an archive node on the second attempt. Those requests stay on the primaries.
+
+   *What to do:* send `lava-extension: archive` on requests that need archive state. A chain whose historical requests are misjudged by height is fixed in its spec's `rule.block`.
 
 #### New Features
 - feat(rpcsmartrouter): report the sticky-session claim outcomes on GET /debug/sticky-claims (MAG-3860) ([#442]) [`9a9bf07`]
@@ -198,6 +290,8 @@ This release introduces several breaking changes to header handling, routing, an
 [#457]: https://github.com/magma-Devs/smart-router/pull/457
 [#458]: https://github.com/magma-Devs/smart-router/pull/458
 [#460]: https://github.com/magma-Devs/smart-router/pull/460
+[#471]: https://github.com/magma-Devs/smart-router/pull/471
+[#472]: https://github.com/magma-Devs/smart-router/pull/472
 [#474]: https://github.com/magma-Devs/smart-router/pull/474
 [#477]: https://github.com/magma-Devs/smart-router/pull/477
 [#478]: https://github.com/magma-Devs/smart-router/pull/478
