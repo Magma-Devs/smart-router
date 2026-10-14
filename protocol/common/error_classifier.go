@@ -777,6 +777,10 @@ type stringConnectionFallback struct {
 	mustNotContain []string
 	// lava error returned when the row matches.
 	result *LavaError
+	// transportOnly marks a row that only describes how Go's net, net/http and io word a failed
+	// connection. DetectConnectionErrorInReplyText skips it: a node's reply proves the connection
+	// worked, whatever its text says.
+	transportOnly bool
 }
 
 func (r stringConnectionFallback) matches(msg string) bool {
@@ -868,14 +872,16 @@ var stringConnectionFallbacks = []stringConnectionFallback{
 	{mustContain: []string{"connection termination"}, result: LavaErrorConnectionReset},
 	// DNS, EOF and the http-served-as-https shapes, as the resolver, io and net/http word them and
 	// as the node error handler rewords them ("Reason: ..."), so the typed checks above have a
-	// string sibling for an error wrapped without %w (MAG-4242).
-	{mustContain: []string{"no such host"}, result: LavaErrorDNSFailure},
-	{mustContain: []string{"server misbehaving"}, result: LavaErrorDNSFailure},
-	{mustContain: []string{"dns resolution failed"}, result: LavaErrorDNSFailure},
-	{mustContain: []string{"server gave http response to https client"}, result: LavaErrorTLSMismatch},
-	{mustContain: []string{"misconfigured http endpoint as https"}, result: LavaErrorTLSMismatch},
-	{mustContain: []string{"unexpected eof"}, result: LavaErrorConnectionClosed},
-	{mustContain: []string{"end of input stream reached"}, result: LavaErrorConnectionClosed},
+	// string sibling for an error wrapped without %w (MAG-4242). They are transportOnly: a node
+	// answering "unexpected EOF" (a body it could not parse) or "no such host" (a lookup of its
+	// own) is giving its answer, and the reply-text detector must not read that as our transport.
+	{mustContain: []string{"no such host"}, result: LavaErrorDNSFailure, transportOnly: true},
+	{mustContain: []string{"server misbehaving"}, result: LavaErrorDNSFailure, transportOnly: true},
+	{mustContain: []string{"dns resolution failed"}, result: LavaErrorDNSFailure, transportOnly: true},
+	{mustContain: []string{"server gave http response to https client"}, result: LavaErrorTLSMismatch, transportOnly: true},
+	{mustContain: []string{"misconfigured http endpoint as https"}, result: LavaErrorTLSMismatch, transportOnly: true},
+	{mustContain: []string{"unexpected eof"}, result: LavaErrorConnectionClosed, transportOnly: true},
+	{mustContain: []string{"end of input stream reached"}, result: LavaErrorConnectionClosed, transportOnly: true},
 }
 
 // detectConnectionErrorFromString walks stringConnectionFallbacks in order and
@@ -884,6 +890,20 @@ var stringConnectionFallbacks = []stringConnectionFallback{
 func detectConnectionErrorFromString(msg string) *LavaError {
 	for _, row := range stringConnectionFallbacks {
 		if row.matches(msg) {
+			return row.result
+		}
+	}
+	return nil
+}
+
+// DetectConnectionErrorInReplyText reads a node's REPLY text against the string table, without
+// the transportOnly rows. The reply arrived, so the connection to the node worked; a reply is
+// only ever read as a connection fault through the rows that predate MAG-4242 item 5, exactly
+// as the results manager read it before those rows existed.
+func DetectConnectionErrorInReplyText(text string) *LavaError {
+	msg := strings.ToLower(text)
+	for _, row := range stringConnectionFallbacks {
+		if !row.transportOnly && row.matches(msg) {
 			return row.result
 		}
 	}

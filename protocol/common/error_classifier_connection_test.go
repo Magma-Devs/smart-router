@@ -51,3 +51,21 @@ func TestDetectConnectionError_DNSTimeoutStaysATimeout(t *testing.T) {
 	err := &url.Error{Op: "Post", URL: "https://rpc.example/", Err: &net.DNSError{Err: "i/o timeout", Name: "rpc.example", IsTimeout: true}}
 	require.Equal(t, LavaErrorConnectionTimeout, DetectConnectionError(err))
 }
+
+// TestDetectConnectionErrorInReplyText_KeepsTheTransportOnlyRowsOffNodeReplies: the rows MAG-4242
+// item 5 added describe Go's own transport errors, so a node's reply text that happens to say
+// "unexpected EOF" or "no such host" stays the node's answer. The older rows read reply text as
+// they always have, and the transport path still reads every row.
+func TestDetectConnectionErrorInReplyText_KeepsTheTransportOnlyRowsOffNodeReplies(t *testing.T) {
+	for _, text := range []string{
+		`{"code":3,"message":"unexpected EOF","details":[]}`,
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"lookup sequencer.internal: no such host"}}`,
+		`server gave HTTP response to HTTPS client`,
+		`Provider Side Failed Sending Message, Reason: DNS resolution failed`,
+	} {
+		require.Nil(t, DetectConnectionErrorInReplyText(text), text)
+		require.NotNil(t, DetectConnectionError(errors.New(text)), "the transport path still reads %q", text)
+	}
+	require.Equal(t, LavaErrorConnectionRefused, DetectConnectionErrorInReplyText("dial tcp: connection refused"),
+		"a row that predates item 5 reads reply text exactly as before")
+}
