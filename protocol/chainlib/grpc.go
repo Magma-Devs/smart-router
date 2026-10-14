@@ -434,7 +434,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		consumerIp := common.GetIpFromGrpcContext(ctx)
 		relayResult, err := apil.relaySender.SendRelay(ctx, method, string(reqBody), "", dappID, consumerIp, metricsData, grpcHeaders)
 		relayReply := relayResult.GetReply()
-		go apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
+		apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
 
 		if err != nil {
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
@@ -588,7 +588,7 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		// same fields for the life of the subscription — so each side needs its own
 		// copy. ConsumerWebsocketManager copies for the same reason.
 		subscriptionFields := *metricsData
-		go apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
+		apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
 		if err != nil {
 			apil.logger.LogRequestAndResponse("grpc stream in/out", true, method, string(reqBody), "", err.Error(), connectionUniqueId, time.Since(startTime), err)
 			return nil, utils.LavaFormatError("failed to start gRPC subscription", err,
@@ -655,7 +655,7 @@ func (apil *GrpcChainListener) forwardSubscriptionReplies(ctx context.Context, r
 			perMessage.Timestamp = time.Now()
 			perMessage.ApiMethod = metrics.SubscriptionDeliveryMethod
 			perMessage.ComputeUnits = metrics.DefaultSubscriptionDeliveryCU
-			go apil.logger.AddMetricForGrpc(&perMessage, nil, &metricsHeaders)
+			apil.logger.AddMetricForGrpc(&perMessage, nil, &metricsHeaders)
 		}
 	}()
 	return payloads

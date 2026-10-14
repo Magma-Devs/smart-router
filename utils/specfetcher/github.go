@@ -70,7 +70,7 @@ func (f *Fetcher) fetchFromGitHubAPI(ctx context.Context, info *RepoInfo) (map[s
 	apiCtx, cancel := context.WithTimeout(ctx, f.config.APITimeout)
 	defer cancel()
 
-	resp, err := f.doRequest(apiCtx, http.MethodGet, apiURL, f.setGitHubHeaders)
+	resp, err := f.doRequest(apiCtx, apiURL, f.setGitHubHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch from GitHub API: %w", err)
 	}

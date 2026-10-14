@@ -149,10 +149,10 @@ func TestProbeDirectRPCEndpoints_StalledIsNotUsable(t *testing.T) {
 	cswp := &ConsumerSessionsWithProvider{PublicLavaAddress: "vendor", Endpoints: []*Endpoint{stuck}, StaticProvider: true}
 
 	csm := &ConsumerSessionManager{}
-	_, _, err := csm.probeDirectRPCEndpoints(context.Background(), cswp, "vendor")
+	_, err := csm.probeDirectRPCEndpoints(cswp, "vendor")
 	require.Error(t, err, "a provider whose only endpoint is stalled must stay blocked")
 
 	stuck.RemoveStateReason(EndpointDisableHeadStalled)
-	_, _, err = csm.probeDirectRPCEndpoints(context.Background(), cswp, "vendor")
+	_, err = csm.probeDirectRPCEndpoints(cswp, "vendor")
 	require.NoError(t, err)
 }

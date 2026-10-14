@@ -284,7 +284,7 @@ func (rp *ResultsManagerInst) SetResponse(response *RelayResponse, protocolMessa
 	} else {
 		return rp.setValidResponse(response, protocolMessage)
 	}
-	return nil
+	return nil //nolint:nilerr // a protocol error is recorded on the processor for the policy to weigh; it is not a failure of this call
 }
 
 func (rp *ResultsManagerInst) GetResultsData() (successResults []common.RelayResult, nodeErrors []common.RelayResult, protocolErrors []RelayError) {

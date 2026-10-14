@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -643,7 +644,7 @@ func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chain
 	requiredProviders, requiredGroups := crossValidationShortfall(resolver, chainID, apiInterface, verifiedSizes)
 	backupOnly := len(configured) == 0 && len(resolver.headerlessParams(chainID, apiInterface)) > 0
 	if requiredProviders == 0 && requiredGroups == 0 && !backupOnly {
-		return nil, nil
+		return nil, nil //nolint:nilnil // nil means there is no shortfall to report for this endpoint; the error is for a malformed layout
 	}
 	configuredProviders, configuredGroups := crossValidationShortfall(resolver, chainID, apiInterface, configuredSizes)
 	return &crossValidationFleetAdvisory{
@@ -1204,7 +1205,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 			}
 		}
 		cancelTry()
-		time.Sleep(RelayRetryBackoffDuration)
+		select {
+		case <-ctx.Done():
+			// The caller is gone; another attempt would only fail on the dead context.
+			return success, ctx.Err()
+		case <-time.After(RelayRetryBackoffDuration):
+		}
 	}
 
 	return success, err
@@ -1957,7 +1963,7 @@ func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlo
 // MAG-3807), so the engine finds no h2h: key for any hash. Kept so MAG-3892 has the question in
 // place once a writer exists.
 func (rpcss *RPCSmartRouterServer) newBlocksHashesToHeightsSliceFromRequestedBlockHashes(requestedBlockHashes []string) []*pairingtypes.BlockHashToHeight {
-	var blocksHashesToHeights []*pairingtypes.BlockHashToHeight
+	blocksHashesToHeights := make([]*pairingtypes.BlockHashToHeight, 0, len(requestedBlockHashes))
 	for _, blockHash := range requestedBlockHashes {
 		blocksHashesToHeights = append(blocksHashesToHeights, &pairingtypes.BlockHashToHeight{Hash: blockHash, Height: spectypes.NOT_APPLICABLE})
 	}
@@ -2668,7 +2674,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			}
 			var harvestGen uint64
 			if targetEndpoint != nil && directConn != nil {
-				rpcss.ensureEndpointChainTracker(goroutineCtx, targetEndpoint, directConn)
+				rpcss.ensureEndpointChainTracker(targetEndpoint, directConn)
 				harvestGen = rpcss.endpointObservationGeneration(targetEndpoint.NetworkAddress)
 			}
 
@@ -2682,7 +2688,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				return lostBroadcastRejection(selection, answeredWithNodeError, accepted)
 			}
 
-			relayLatency, err, _ := rpcss.relayInnerDirect(
+			relayLatency, err := rpcss.relayInnerDirect(
 				spanCtx,
 				singleConsumerSession,
 				localRelayResult,
@@ -2690,7 +2696,6 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				attemptBudget,
 				chainMessage,
 				originalRequestData,
-				analytics,
 				func() bool { return requestRanOutOfRoad(relayProcessor.GetStopReason()) },
 				lostBroadcast,
 			)
@@ -3025,7 +3030,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		}
 
 		// Get endpoint's latest block from ChainTracker (if available), fallback to reactive value
-		endpointLatest := int64(0)
+		var endpointLatest int64
 		endpointURL := ""
 
 		// Extract the actual endpoint URL (ChainTrackers are stored by URL, not provider name)
@@ -3559,7 +3564,7 @@ func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence tim
 	rpcss.probeReplayer = &relayProbeRunner{
 		async: true,
 		probe: func(ep *lavasession.EndpointWithDirectConnection, method string, payload []byte, relayTimeout time.Duration) relayProbeVerdict {
-			verdict := rpcss.replayFailingRelay(ep, method, payload, relayTimeout)
+			verdict := rpcss.replayFailingRelay(ep, payload, relayTimeout)
 			rpcss.probeStats.countReplay(verdict)
 			return verdict
 		},
@@ -4066,7 +4071,6 @@ func (rpcss *RPCSmartRouterServer) isGetBlockByNumMethod(chainMessage chainlib.C
 }
 
 func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
-	ctx context.Context,
 	endpoint *lavasession.Endpoint,
 	directConnection lavasession.DirectRPCConnection,
 ) {
@@ -4917,11 +4921,15 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				if err != nil {
 					utils.LavaFormatError("sendRelayToEndpoint failed getting hash for cache request", err, utils.LogAttr("GUID", ctx))
 				} else {
-					utils.LavaFormatDebug("Cache lookup hash generated",
-						utils.LogAttr("GUID", ctx),
-						utils.LogAttr("hashKey", fmt.Sprintf("%x", hashKey)),
-						utils.LogAttr("apiUrl", localRelayData.ApiUrl),
-					)
+					// Only the log line is gated: the rest of this branch IS the cache lookup,
+					// and it must run at every log level.
+					if utils.IsDebugEnabled() {
+						utils.LavaFormatDebug("Cache lookup hash generated",
+							utils.LogAttr("GUID", ctx),
+							utils.LogAttr("hashKey", hex.EncodeToString(hashKey)),
+							utils.LogAttr("apiUrl", localRelayData.ApiUrl),
+						)
+					}
 
 					// Resolve the requested block for cache lookup
 					// The cache server doesn't accept negative blocks
@@ -4983,21 +4991,23 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 						}()
 						cacheReport.PrimaryOutcome = primaryOutcome
 
-						// Generate the actual cache key that will be used for lookup
-						actualLookupCacheKey := make([]byte, len(hashKey))
-						copy(actualLookupCacheKey, hashKey)
-						actualLookupCacheKey = binary.LittleEndian.AppendUint64(actualLookupCacheKey, uint64(requestedBlockForCache))
-
-						utils.LavaFormatDebug("Cache lookup result",
-							utils.LogAttr("GUID", ctx),
-							utils.LogAttr("hashKeyHex", fmt.Sprintf("%x", hashKey)),
-							utils.LogAttr("actualLookupCacheKeyHex", fmt.Sprintf("%x", actualLookupCacheKey)),
-							utils.LogAttr("reqBlock", reqBlock),
-							utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
-							utils.LogAttr("seenBlock", localRelayData.SeenBlock),
-							utils.LogAttr("cacheError", cacheError),
-							utils.LogAttr("replyFound", cacheReply != nil && cacheReply.GetReply() != nil),
-						)
+						if utils.IsDebugEnabled() {
+							// The key the engine actually looked up: the hash plus the block it was
+							// resolved to. Built only for this line, so only when it can be emitted.
+							actualLookupCacheKey := make([]byte, len(hashKey), len(hashKey)+8)
+							copy(actualLookupCacheKey, hashKey)
+							actualLookupCacheKey = binary.LittleEndian.AppendUint64(actualLookupCacheKey, uint64(requestedBlockForCache))
+							utils.LavaFormatDebug("Cache lookup result",
+								utils.LogAttr("GUID", ctx),
+								utils.LogAttr("hashKeyHex", hex.EncodeToString(hashKey)),
+								utils.LogAttr("actualLookupCacheKeyHex", hex.EncodeToString(actualLookupCacheKey)),
+								utils.LogAttr("reqBlock", reqBlock),
+								utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
+								utils.LogAttr("seenBlock", localRelayData.SeenBlock),
+								utils.LogAttr("cacheError", cacheError),
+								utils.LogAttr("replyFound", cacheReply != nil && cacheReply.GetReply() != nil),
+							)
+						}
 						reply := cacheReply.GetReply()
 
 						// Cross-pod consistency (T10): peer pods publish their guarded chain tip under
@@ -5067,11 +5077,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							analytics.IsArchive = chainqueries.IsArchiveRequest(protocolMessage)
 							analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(protocolMessage)
 							analytics.IsBatch = chainqueries.IsBatchRequest(protocolMessage)
-							go rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
-							go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.CacheOutcomeHit, cacheLatencyMs)
+							rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
+							rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.CacheOutcomeHit, cacheLatencyMs)
 							return nil
 						}
-						go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
+						rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
 						// Cache miss - will relay to endpoint
 						latestBlockHashRequested, earliestBlockHashRequested = rpcss.getEarliestBlockHashRequestedFromCacheReply(cacheReply)
 						utils.LavaFormatTrace("[Archive Debug] Reading block hashes from cache", utils.LogAttr("latestBlockHashRequested", latestBlockHashRequested), utils.LogAttr("earliestBlockHashRequested", earliestBlockHashRequested), utils.LogAttr("GUID", ctx))
@@ -5293,14 +5303,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	attemptBudget time.Duration,
 	chainMessage chainlib.ChainMessage,
 	originalRequestData []byte,
-	analytics *metrics.RelayMetrics,
 	budgetExpired func() bool,
 	lostBroadcast func(answeredWithNodeError bool) bool,
-) (relayLatency time.Duration, err error, needsBackoff bool) {
+) (relayLatency time.Duration, err error) {
 	// Get direct connection from session
 	directConnection, ok := singleConsumerSession.GetDirectConnection()
 	if !ok {
-		return 0, fmt.Errorf("session does not have direct RPC connection"), false
+		return 0, fmt.Errorf("session does not have direct RPC connection")
 	}
 
 	if rpcss.debugRelays {
@@ -5340,7 +5349,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
 				utils.LogAttr("GUID", ctx),
 			)
-			return 0, fmt.Errorf("gRPC streaming method %q must be served through the streaming listener, not as a unary relay", methodPath), false
+			return 0, fmt.Errorf("gRPC streaming method %q must be served through the streaming listener, not as a unary relay", methodPath)
 		}
 
 		// Second line of defence for methods the spec does not declare as
@@ -5354,7 +5363,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 					utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
 					utils.LogAttr("GUID", ctx),
 				)
-				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID), false
+				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID)
 			}
 		}
 	}
@@ -5447,7 +5456,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// behind a provider with several was never disabled, never probed for recovery, and never moved
 		// the health metric — while the provider's own QoS availability did drop.
 		var shouldMarkUnhealthy bool
-		shouldMarkUnhealthy, needsBackoff = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
+		shouldMarkUnhealthy, _ = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
 
 		// Apply health tracking based on error classification. The failing request is recorded
 		// FIRST (read-only methods only) so that if this failure crosses the disable threshold,
@@ -5458,7 +5467,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 		}
 
-		return relayLatency, err, needsBackoff
+		return relayLatency, err
 	}
 
 	// Check status code even when err == nil (for REST 5xx/429).
@@ -5482,8 +5491,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	statusCode := result.StatusCode
 	carriesNodeReply := result.IsNodeError && rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData())
 	if (statusCode >= 500 && statusCode != http.StatusNotImplemented && !carriesNodeReply) || statusCode == 429 {
-		shouldMarkUnhealthy, needsBackoffHTTP := classifyHTTPStatus(statusCode)
-		needsBackoff = needsBackoffHTTP
+		shouldMarkUnhealthy, _ := classifyHTTPStatus(statusCode)
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
@@ -5523,7 +5531,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		relayResult.IsNodeAtFault = result.IsNodeAtFault
 		relayResult.ProviderInfo = result.ProviderInfo
 
-		return relayLatency, httpStatusRelayError(statusCode, result.Reply), needsBackoff
+		return relayLatency, httpStatusRelayError(statusCode, result.Reply)
 	}
 
 	// A node error delivered inside a 2xx body reaches here with err == nil and a 200 status, so it
@@ -5603,7 +5611,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		utils.LogAttr("GUID", ctx),
 	)
 
-	return relayLatency, nil, false
+	return relayLatency, nil
 }
 
 func (rpcss *RPCSmartRouterServer) GetProcessingTimeout(chainMessage chainlib.ChainMessage) (processingTimeout time.Duration, relayTimeout time.Duration) {
@@ -5809,7 +5817,7 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			utils.LogAttr("outcome", straggler.Outcome),
 			utils.LogAttr("delayAfterReply", straggler.Delay),
 			utils.LogAttr("method", apiName),
-			utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", consensusHash[:8])),
+			utils.LogAttr("consensusHashHex", hex.EncodeToString(consensusHash[:8])),
 		)
 		group := straggler.ProviderGroup
 		if group == "" {
@@ -5940,7 +5948,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// Emit cross-validation metric (even on failure)
 		if cvParams != nil && rpcss.listenEndpoint != nil && rpcss.rpcSmartRouterLogs != nil {
 			chainId, apiInterface := rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
-			go rpcss.rpcSmartRouterLogs.SetCrossValidationMetric(
+			rpcss.rpcSmartRouterLogs.SetCrossValidationMetric(
 				chainId, apiInterface, apiName, cvSuccess,
 				agreeingProvidersList, disagreeingProvidersList,
 			)
@@ -5950,7 +5958,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			// structural fail-fast emits its own reason via crossValidationFailFast (the two paths are
 			// mutually exclusive).
 			if !cvSuccess && relayResult != nil && relayResult.CrossValidationFailureReason != "" {
-				go rpcss.rpcSmartRouterLogs.SetCrossValidationFailureMetric(
+				rpcss.rpcSmartRouterLogs.SetCrossValidationFailureMetric(
 					chainId, apiInterface, apiName, relayResult.CrossValidationFailureReason,
 				)
 			}
@@ -5991,8 +5999,8 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 					utils.LogAttr("group", group),
 					utils.LogAttr("method", apiName),
 					utils.LogAttr("finality", finality),
-					utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", consensusHash[:8])),
-					utils.LogAttr("outlierHashHex", fmt.Sprintf("%x", outlier.ResponseHash[:8])),
+					utils.LogAttr("consensusHashHex", hex.EncodeToString(consensusHash[:8])),
+					utils.LogAttr("outlierHashHex", hex.EncodeToString(outlier.ResponseHash[:8])),
 				)
 				// The debug read surface for the same dissent the log and the counter describe, keyed
 				// by request so the automation can assert per-request facts a counter cannot carry
@@ -6168,7 +6176,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			if rpcss.listenEndpoint != nil && rpcss.rpcSmartRouterLogs != nil {
 				chainId := rpcss.listenEndpoint.ChainID
 				apiInterface := rpcss.listenEndpoint.ApiInterface
-				go rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
+				rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
 			}
 
 			// When there are retries, show every attempted provider in the order
@@ -6240,11 +6248,11 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		apiInterface := rpcss.listenEndpoint.ApiInterface
 		// Consistency: triggered when the consumer enforces a minimum seen block height
 		if protocolMessage.RelayPrivateData().SeenBlock > 0 {
-			go rpcss.rpcSmartRouterLogs.RecordIncidentConsistency(chainId, apiInterface, apiName, success)
+			rpcss.rpcSmartRouterLogs.RecordIncidentConsistency(chainId, apiInterface, apiName, success)
 		}
 		// Hedge: triggered when the batch ticker fired during this relay
 		if analytics != nil && analytics.HedgeCount > 0 {
-			go rpcss.rpcSmartRouterLogs.RecordIncidentHedgeResult(chainId, apiInterface, apiName, analytics.HedgeCount, success)
+			rpcss.rpcSmartRouterLogs.RecordIncidentHedgeResult(chainId, apiInterface, apiName, analytics.HedgeCount, success)
 		}
 	}
 
@@ -6424,14 +6432,19 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 
 		nodeErrors := relayProcessor.NodeErrors()
 		if len(nodeErrors) > 0 {
-			nodeErrorHeaderString := ""
+			// One buffer for the header: the string concatenation it replaces copied every node
+			// error's body once per provider, and the bodies can be whole error replies.
+			var nodeErrorHeader strings.Builder
 			for _, nodeError := range nodeErrors {
-				nodeErrorHeaderString += fmt.Sprintf("%s: %s,", nodeError.GetProvider(), string(nodeError.Reply.Data))
+				nodeErrorHeader.WriteString(nodeError.GetProvider())
+				nodeErrorHeader.WriteString(": ")
+				nodeErrorHeader.Write(nodeError.Reply.Data)
+				nodeErrorHeader.WriteByte(',')
 			}
 			relayResult.Reply.Metadata = append(relayResult.Reply.Metadata,
 				pairingtypes.Metadata{
 					Name:  common.NODE_ERRORS_PROVIDERS_HEADER_NAME,
-					Value: nodeErrorHeaderString,
+					Value: nodeErrorHeader.String(),
 				})
 		}
 

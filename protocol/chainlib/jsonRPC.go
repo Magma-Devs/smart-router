@@ -515,7 +515,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 
 		relayResult, err := apil.relaySender.SendRelay(ctx, path, msg, http.MethodPost, dappID, userIp, metricsData, headers)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
+		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 		if err != nil {
 			// Check if batch size limit exceeded - return 429 rate limit error
 			if errors.Is(err, ErrBatchRequestSizeExceeded) {
@@ -843,9 +843,8 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		)
 	}
 
-	// Release rpcMessage after all references to it are complete
+	// Release rpcMessage's Result after all references to it are complete
 	rpcMessage.Result = nil
-	rpcMessage = nil
 
 	retData, err := json.Marshal(replyMsg)
 	if err != nil {
@@ -860,9 +859,8 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		},
 	}
 
-	// Clear replyMsg after all references to it are complete
+	// Clear replyMsg's Result after all references to it are complete
 	replyMsg.Result = nil
-	replyMsg = nil
 
 	return reply, err
 }

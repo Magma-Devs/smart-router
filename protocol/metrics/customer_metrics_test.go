@@ -61,7 +61,8 @@ func TestSetRelayMetrics_ObservesLatencyOnSuccessOnly(t *testing.T) {
 	m.SetRelayMetrics(customerRequest("acme", "eth_call", false, 0), fmt.Errorf("upstream failed"))
 
 	require.Equal(t, 1, testutil.CollectAndCount(m.customerEndToEndLatency))
-	hist := m.customerEndToEndLatency.WithLabelValues("ETH1", "jsonrpc", "acme").(prometheus.Histogram)
+	hist, ok := m.customerEndToEndLatency.WithLabelValues("ETH1", "jsonrpc", "acme").(prometheus.Histogram)
+	require.True(t, ok, "the end-to-end latency vector holds histograms")
 	require.Equal(t, 1, histogramSampleCount(t, hist))
 }
 

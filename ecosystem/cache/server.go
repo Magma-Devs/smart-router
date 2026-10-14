@@ -47,6 +47,7 @@ const (
 
 type CacheServer struct {
 	finalizedCache             *ristretto.Cache[string, any]
+	chainTips                  chainTipStore
 	tempCache                  *ristretto.Cache[string, any] // cache for temporary inputs, such as latest blocks
 	blocksHashesToHeightsCache *ristretto.Cache[string, any]
 	// endpointObservations holds the fleet's per-endpoint poll observations for the fleet

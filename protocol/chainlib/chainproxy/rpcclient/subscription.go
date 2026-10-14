@@ -287,12 +287,10 @@ func (sub *ClientSubscription) Unsubscribe() {
 }
 
 // deliver is called by the client's message dispatcher to send a notification value.
-func (sub *ClientSubscription) deliver(result *JsonrpcMessage) (ok bool) {
+func (sub *ClientSubscription) deliver(result *JsonrpcMessage) {
 	select {
 	case sub.in <- result:
-		return true
 	case <-sub.forwardDone:
-		return false
 	}
 }
 
@@ -387,7 +385,11 @@ func (sub *ClientSubscription) forward() (unsubscribeServer bool, err error) {
 				return false, fmt.Errorf("(sub *ClientSubscription) forward() - recv.Interface().(*JsonrpcMessage) - type assertion failed %s", recv.Interface())
 			}
 			if msg.Error != nil {
-				return true, err
+				// The named err is nil here. Returning it closed the subscription without an
+				// error, so the router's listener never saw Err() and never restored or cleaned
+				// up: a subscription the node had ended with an error lived on with nobody
+				// reading it (MAG-4242 item 10). go-ethereum returns the error.
+				return true, msg.Error
 			}
 			if buffer.Len() == maxClientSubscriptionBuffer {
 				return true, ErrSubscriptionQueueOverflow

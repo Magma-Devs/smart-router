@@ -74,7 +74,7 @@ func DialWebsocketWithDialer(ctx context.Context, endpoint string, dialer websoc
 		return nil, err
 	}
 	return newClient(ctx, func(ctx context.Context) (ServerCodec, error) {
-		conn, resp, err := dialer.DialContext(ctx, endpoint, header)
+		conn, resp, err := dialer.DialContext(ctx, endpoint, header) //nolint:bodyclose // gorilla/websocket documents the handshake-failure response as one the caller must not close
 		if err != nil {
 			hErr := wsHandshakeError{err: err}
 			if resp != nil {

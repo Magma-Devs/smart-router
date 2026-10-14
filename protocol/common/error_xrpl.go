@@ -77,14 +77,15 @@ func xrplErrorMappings() []errorMapping {
 	startsWith := func(alternatives string) ErrorMatcher {
 		return MessageRegex(`^(?:HTTP \d+: )?(?:` + alternatives + `)\b`)
 	}
-	mappings := []errorMapping{
+	mappings := make([]errorMapping, 0, 4+len(xrplAPIErrors))
+	mappings = append(mappings,
 		// An engine result says what happened to the transaction, never that the node is broken, so
 		// each is a non-retryable chain error: that keeps the availability gate off the node.
-		{startsWith(`tefPAST_SEQ`), LavaErrorChainNonceTooLow},   // sequence used, often by this very transaction arriving by gossip
-		{startsWith(`tefALREADY`), LavaErrorChainTxAlreadyKnown}, // this exact transaction is already in the ledger
-		{startsWith(`terPRE_SEQ`), LavaErrorChainNonceTooHigh},   // an earlier sequence has not been applied yet
-		{startsWith(xrplRejectionCode), LavaErrorChainTxRejected},
-	}
+		errorMapping{startsWith(`tefPAST_SEQ`), LavaErrorChainNonceTooLow},   // sequence used, often by this very transaction arriving by gossip
+		errorMapping{startsWith(`tefALREADY`), LavaErrorChainTxAlreadyKnown}, // this exact transaction is already in the ledger
+		errorMapping{startsWith(`terPRE_SEQ`), LavaErrorChainNonceTooHigh},   // an earlier sequence has not been applied yet
+		errorMapping{startsWith(xrplRejectionCode), LavaErrorChainTxRejected},
+	)
 	for _, class := range xrplAPIErrors {
 		mappings = append(mappings, errorMapping{startsWith(strings.Join(class.names, "|")), class.lavaError})
 	}

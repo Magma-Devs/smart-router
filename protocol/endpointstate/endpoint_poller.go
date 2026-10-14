@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -480,7 +481,7 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 		retryAfter, _ := common.ParseRetryAfter(http.Header(resp.Headers), time.Now())
 		return nil, &lavasession.HTTPStatusError{
 			StatusCode: resp.StatusCode,
-			Status:     fmt.Sprintf("%d", resp.StatusCode),
+			Status:     strconv.Itoa(resp.StatusCode),
 			Body:       resp.Body,
 			RetryAfter: retryAfter,
 		}
