@@ -33,6 +33,14 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	// guarantees it — the ticker fires on a timer with a relay still in flight, which may
 	// already have broadcast. So the carve-out does not extend to a hedge.
 	rateLimitRetrySafe := input.Summary.OnlyRateLimited && !input.IsTickerHedge
+	// A batch node error is not proof that nothing ran. Under --batch-node-error-on-any one failed
+	// element makes the whole reply a node error, classified by the failed elements' text alone, so a
+	// rate-limited sibling can stand for a batch whose eth_sendRawTransaction was accepted. Only a
+	// refusal of the whole batch at the transport (a protocol error) proves a stateful batch is safe
+	// to send again.
+	if input.Selection == relaycore.Stateful && input.IsBatch && input.Summary.NodeErrors+input.Summary.SpecialNodeErrors > 0 {
+		rateLimitRetrySafe = false
+	}
 
 	if input.Selection == relaycore.Stateful && !rateLimitRetrySafe {
 		return DecisionOutput{Action: Stop, Reason: "Stateful"}

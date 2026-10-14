@@ -88,9 +88,9 @@ func nodeErrorAttempt() *relaycore.RelayResponse {
 	return &relaycore.RelayResponse{
 		RelayResult: common.RelayResult{
 			Request:      &pairingtypes.RelayRequest{RelaySession: &pairingtypes.RelaySession{}, RelayData: &pairingtypes.RelayPrivateData{}},
-			Reply:        &pairingtypes.RelayReply{Data: []byte(`{"message":"bad","code":123}`)},
+			Reply:        &pairingtypes.RelayReply{Data: []byte(`[{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}},{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"internal error"}}]`)},
 			ProviderInfo: common.ProviderInfo{ProviderAddress: batchTestProvider},
-			StatusCode:   500,
+			StatusCode:   200,
 			IsNodeError:  true,
 		},
 	}
