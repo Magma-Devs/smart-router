@@ -191,6 +191,13 @@ func (cri *chainRouterImpl) BatchNodeUrlsByServices(ctx context.Context, rpcProv
 		}
 		cri.setRouterKeyInBatch(nodeUrl, returnedBatch, routerKey, rpcProviderEndpoint, true) // will override existing entries
 
+		// An http url pinned to a path that answers every root api serves the
+		// root too: a vendor that bakes the version into the url (STRK's
+		// `/rpc/v0_10/<key>`) has no root url to give.
+		if !isWs && nodeUrl.InternalPath != "" && chainParser.ServesRootCollection(nodeUrl.InternalPath) {
+			httpRootRouteSet = true
+		}
+
 		if nodeUrl.InternalPath == "" { // root path
 			if !isWs {
 				httpRootRouteSet = true
