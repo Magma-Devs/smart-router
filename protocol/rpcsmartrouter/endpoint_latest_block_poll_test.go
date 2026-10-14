@@ -328,7 +328,7 @@ func TestHarvest_LateWriteForARemovedURLIsUndone(t *testing.T) {
 		AverageBlockTime: 200 * time.Millisecond,
 		BlocksToSave:     1,
 		// cleanupStaleTrackers, between the gate and the harvest's metric write.
-		OnTipObservation: func(int64) {
+		OnTipObservation: func(string, int64, bool) {
 			m.RemoveTracker(url)
 			mm.ForgetEndpointURLLatestBlock("ETH1", "jsonrpc", url)
 		},

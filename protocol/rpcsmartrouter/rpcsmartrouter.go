@@ -838,6 +838,21 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 		}
 		total += csm.ResetEndpointHealth()
 
+		// The operator reset is the one route allowed to clear STATE reasons too (MAG-3986, D8).
+		// The stall counters go with them, or the next probe cycle would re-add head-stalled from
+		// the evidence the operator just discarded (H11).
+		for _, ep := range csm.GetAllDirectRPCEndpoints() {
+			if ep != nil && ep.Endpoint != nil {
+				ep.Endpoint.ClearStateReasons()
+			}
+		}
+		if server := deps.router.rpcServers[chainKey]; server != nil {
+			server.headStall.reset()
+			if server.endpointChainTrackerManager != nil {
+				server.endpointChainTrackerManager.ResetStallCounters()
+			}
+		}
+
 		// Mirror the struct reset onto the Prometheus health gauge so operators see
 		// providers recover immediately rather than at the next epoch tick — without it
 		// the gauge stays stuck at 0 until a successful relay, one a rarely-used backup
@@ -1631,6 +1646,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				}
 				observations := server.endpointChainTrackerManager.SnapshotObservations()
 				backoffByURL := server.endpointChainTrackerManager.BackoffSnapshot()
+				idle := server.endpointChainTrackerManager.IdleSnapshot(time.Now())
 				for _, ep := range csm.GetAllDirectRPCEndpoints() {
 					if ep == nil || ep.Endpoint == nil {
 						continue
@@ -1660,6 +1676,18 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 						"RelayProbeMethod":   health.RelayProbeMethod,
 						"RelayProbeAttempts": health.RelayProbeAttempts,
 						"ReenableProbeFlaps": health.ReenableProbeFlaps,
+						// MAG-3986: Enabled is the event slot only. Usable is what selection
+						// sees — Enabled AND no state reason. StateReasons lists head-stalled
+						// with when it was added and the block it was stuck on; SameBlockCycles
+						// is the evidence that adds it, and a HighestBlockSeen above the stuck
+						// block removes it.
+						"Usable":            health.Usable,
+						"StateReasons":      debugStateReasons(health.StateReasons),
+						"SameBlockCycles":   obs.SameBlockCycles,
+						"LastAnsweredBlock": obs.LastAnsweredBlock,
+						"HighestBlockSeen":  obs.HighestBlockSeen,
+						"Provider":          ep.ProviderAddress,
+						"Backup":            ep.Backup,
 						// PollIntervalMs is the live dedicated-poll cadence: base when healthy,
 						// exponentialBackoff-stretched when the endpoint has been failing. This is the
 						// observable /debug/reset-probe-backoff returns to base (MAG-2395).
@@ -1669,6 +1697,15 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 						// (--enable-fork-detection not set) vs "off-spec-no-block-by-num" (the
 						// chain cannot serve hashes at all, so the flag would not help).
 						"HashPolling": server.endpointChainTrackerManager.HashPollingMode().String(),
+						// Idle mode (endpointstate/idle.go) — chain-level like HashPolling, repeated
+						// per row so a row stands alone: "off" (not configured), "active", or "idle"
+						// (no client relay within --chain-tracker-idle-after; polls paused, so the
+						// poll-health fields above stop moving). WakeInProgress is the burst that
+						// follows the relay ending an idle period, until its first poll lands.
+						"IdleMode":        idleModeString(idle),
+						"LastClientRelay": debugTimeRFC3339(idle.LastClientRelay),
+						"IdleSince":       debugTimeRFC3339(idle.IdleSince),
+						"WakeInProgress":  idle.WakeInProgress,
 					})
 				}
 			}
@@ -1829,11 +1866,20 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					"SyncOmittedCount":    s.SyncOmittedCount,
 					// MAG-2550 replay-gate telemetry: how many disabled endpoints are held on
 					// recorded relay evidence, and the cumulative replay outcomes.
-					"EvidenceGatedCount":  s.EvidenceGatedCount,
+					"EvidenceGatedCount": s.EvidenceGatedCount,
+					// Idle mode: the last cycle withheld its QoS feed / skipped the head-stall step
+					// because the chain was idle or a wake burst was still re-polling.
+					"QoSFeedPausedIdle":   s.QoSFeedPausedIdle,
+					"HeadStallPausedIdle": s.HeadStallPausedIdle,
 					"ReplaysAttempted":    s.ReplaysAttempted,
 					"ReplaysRecovered":    s.ReplaysRecovered,
 					"ReplaysStillFailing": s.ReplaysStillFailing,
 					"ReplaysInconclusive": s.ReplaysInconclusive,
+					// MAG-3986 head-stall transitions, cumulative since process start.
+					"StalledAdded":    s.StalledAdded,
+					"StalledRemoved":  s.StalledRemoved,
+					"StalledKept":     s.StalledKept,
+					"StalledReleased": s.StalledReleased,
 				})
 			}
 			deps.router.mu.Unlock()
@@ -2316,6 +2362,20 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 // /debug/time convention (UTC RFC3339). A zero time renders as the empty string rather than the
 // Go zero-date ("0001-01-01T00:00:00Z"), so a test can cheaply distinguish "never happened"
 // (e.g. DisabledAt on an enabled endpoint) from a real instant.
+// idleModeString renders a chain's idle-mode state for /debug/endpoint-state: "off" when idle
+// mode is not configured (so a reader cannot mistake an unconfigured chain for an active one),
+// else "idle" or "active".
+func idleModeString(snap endpointstate.IdleSnapshot) string {
+	switch {
+	case !snap.Enabled:
+		return "off"
+	case snap.Idle:
+		return "idle"
+	default:
+		return "active"
+	}
+}
+
 func debugTimeRFC3339(t time.Time) string {
 	if t.IsZero() {
 		return ""
@@ -3776,6 +3836,14 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// Validation lives in endpointstate so config.yml and embedded servers get it too.
 	// Process-wide in the same sense as the flag above.
 	cmdRPCSmartRouter.Flags().Float64(endpointstate.PollDivisorFlagName, 0, fmt.Sprintf("polling-relief: per-endpoint chain tracker polls every avgBlockTime/divisor (default %g). Below 1 polls SLOWER than the chain produces blocks — %g is one poll per four block times, the largest relief available. Allowed [%g,%g]; out-of-range reverts to default. Applies to EVERY chain this process serves.", endpointstate.DefaultPollDivisor, endpointstate.MinPollDivisor, endpointstate.MinPollDivisor, endpointstate.MaxPollDivisor))
+	// Idle mode (endpointstate/idle.go). Once a chain+interface has served no client relay for
+	// idle-after, its dedicated polls pause — or drop to idle-poll-interval — until the next client
+	// relay, which polls every endpoint once and waits up to one round trip before it is routed.
+	// Process-wide like the two flags above; the STATE is per chain+interface (an unused websocket
+	// interface goes idle on its own), reported as IdleMode on /debug/endpoint-state and as
+	// smartrouter_chain_idle. The crafted health relay never counts as traffic and keeps running.
+	cmdRPCSmartRouter.Flags().Duration(endpointstate.IdleAfterFlagName, 0, fmt.Sprintf("idle mode: pause the per-endpoint chain tracker polls of a chain that has served no client request for this long, and resume them on the next request (which is held up to %s while every endpoint is polled once). 0 (default) = never pause. Minimum %s. Applies to EVERY chain this process serves; the state is per chain+interface.", wakeWaitCap, endpointstate.MinIdleAfter))
+	cmdRPCSmartRouter.Flags().Duration(endpointstate.IdlePollIntervalFlagName, 0, "idle mode heartbeat: while a chain is idle, still poll each endpoint once per this interval so a dead upstream is noticed and the tip at wake is at most this old. 0 (default) = poll nothing while idle. Needs --"+endpointstate.IdleAfterFlagName+"; a value below the normal poll cadence is raised to it.")
 	cmdRPCSmartRouter.Flags().Var(&strategyFlag, "strategy", fmt.Sprintf("the strategy to use to pick providers (%s)", strings.Join(strategyNames, "|")))
 	defaultSelectorConfig := provideroptimizer.DefaultUpstreamSelectorConfig()
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerAvailabilityWeight, defaultSelectorConfig.AvailabilityWeight, "weight assigned to provider availability when computing selection scores")
@@ -4740,4 +4808,17 @@ func collectGRPCEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, ti
 		}
 	}
 	return endpoints
+}
+
+// debugStateReasons renders an endpoint's state reasons for /debug/endpoint-state.
+func debugStateReasons(entries []lavasession.StateReasonRecord) []map[string]any {
+	out := make([]map[string]any, 0, len(entries))
+	for _, r := range entries {
+		out = append(out, map[string]any{
+			"Reason": string(r.Reason),
+			"Since":  debugTimeRFC3339(r.Since),
+			"Block":  r.Block,
+		})
+	}
+	return out
 }
