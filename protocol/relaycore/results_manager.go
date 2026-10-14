@@ -173,7 +173,8 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// through the JSON-RPC generic bucket as NODE_METHOD_NOT_SUPPORTED
 		// (zero CU, no retry) — a silent retry-starvation bug.
 		chainFamily := common.GetChainFamilyOrDefault(rp.chainID)
-		nodeClassified := common.ClassifyError(common.DetectConnectionError(err), chainFamily, transport, errorCode, err.Error())
+		// err is the node's reply text, so the transport-only rows stay out of it (MAG-4242).
+		nodeClassified := common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
 		// ERROR only when the endpoint is to blame. A not-found, a pruned height, a rejected
 		// transaction is the node answering the question it was asked, and on REST those are
 		// routine — see LogCodedNodeAnswer. The metric fires either way.

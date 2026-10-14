@@ -20,7 +20,7 @@ Errors raised from within the Lava protocol itself — not from nodes or chains.
 | 1001 | `PROTOCOL_CONNECTION_TIMEOUT` | Network operation timed out connecting to provider | Yes |
 | 1002 | `PROTOCOL_CONNECTION_REFUSED` | Provider connection refused | Yes |
 | 1003 | `PROTOCOL_DNS_FAILURE` | DNS resolution failed | Yes |
-| 1004 | `PROTOCOL_TLS_MISMATCH` | HTTP/HTTPS protocol mismatch | No |
+| 1004 | `PROTOCOL_TLS_MISMATCH` | HTTP/HTTPS protocol mismatch | Yes |
 | 1005 | `PROTOCOL_CONNECTION_RESET` | Connection reset by peer | Yes |
 | 1006 | `PROTOCOL_CONNECTION_CLOSED` | Connection closed (EOF) | Yes |
 | 1007 | `PROTOCOL_CONTEXT_DEADLINE` | Caller's context.Context deadline expired before the relay completed | Yes |
