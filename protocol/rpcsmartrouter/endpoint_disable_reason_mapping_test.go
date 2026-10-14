@@ -57,11 +57,11 @@ func classifyThroughRelayPath(err error, transport common.TransportType) *common
 // nobody anything. Pinned here, the wrongness is visible in the source and this test turns red the
 // moment the classifier is fixed, which is the prompt to update the expectations.
 //
-// Cause: common.DetectConnectionError has no branch for *net.DNSError, x509 errors or io.EOF, and
-// the string-fallback table has no matching row, so those faults classify as LavaErrorUnknown —
-// which is CategoryExternal, and every External maps to node-error. That is a pre-existing gap in
-// the shared classifier (it predates the disable-reason work and is used by retry, QoS and backoff
-// as well), so it is fixed in its own ticket rather than here. See MAG-3563.
+// Cause: common.DetectConnectionError had no branch for *net.DNSError, x509 errors or io.EOF, and
+// the string-fallback table had no matching row, so those faults classified as LavaErrorUnknown —
+// which is CategoryExternal, and every External maps to node-error. DNS and EOF were fixed in the
+// shared classifier under MAG-4242 (their rows below now assert "unreachable"); the x509 rows are
+// still known-wrong, because no registry code describes a certificate fault yet.
 func TestEndpointDisableReasonFor_RealTransportFaults(t *testing.T) {
 	refused := syscall.ECONNREFUSED
 	cases := []struct {
@@ -89,9 +89,9 @@ func TestEndpointDisableReasonFor_RealTransportFaults(t *testing.T) {
 		},
 		// ---- KNOWN-WRONG below: all of these are infrastructure faults, none reached the node ----
 		{
-			name: "DNS: no such host", knownWrong: lavasession.EndpointDisableUnreachable,
+			name:      "DNS: no such host",
 			err:       &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "rpc.example", IsNotFound: true}},
-			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableNodeError,
+			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableUnreachable,
 		},
 		{
 			name: "TLS: unknown authority", knownWrong: lavasession.EndpointDisableUnreachable,
@@ -104,9 +104,9 @@ func TestEndpointDisableReasonFor_RealTransportFaults(t *testing.T) {
 			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableNodeError,
 		},
 		{
-			name: "io.EOF", knownWrong: lavasession.EndpointDisableUnreachable,
+			name:      "io.EOF",
 			err:       io.EOF,
-			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableNodeError,
+			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableUnreachable,
 		},
 	}
 

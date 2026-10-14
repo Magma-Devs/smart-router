@@ -164,8 +164,9 @@ func classifyEndpointHealth(classified *common.LavaError, isClientCancellation b
 // different places — the network path versus the node process. Both disable sites route through
 // here, so one upstream fault gets one reason regardless of which api-interface carried it.
 //
-// KNOWN GAP (MAG-3563): DNS, TLS and EOF faults arrive here classified External and are therefore
-// reported as node-error, though no node answered. The gap is in the shared classifier, not this
+// KNOWN GAP: x509 certificate faults still arrive here classified External and are therefore
+// reported as node-error, though no node answered (DNS, EOF and http-served-as-https were fixed in
+// the shared classifier under MAG-4242; MAG-3563 investigated the gap). The gap is in the shared classifier, not this
 // mapping — see the KNOWN-WRONG rows in endpoint_disable_reason_mapping_test.go.
 func endpointDisableReasonFor(classified *common.LavaError) lavasession.EndpointDisableReason {
 	if classified == nil {

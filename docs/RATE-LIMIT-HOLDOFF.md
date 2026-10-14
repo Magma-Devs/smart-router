@@ -32,7 +32,10 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   possibly-executed write". The normal retry limits still bound it. The exception does not
   extend to a ticker hedge: that fires on a timer with a relay still in flight, and an
   in-flight attempt may already have broadcast, so a hedged stateful relay or batch stops
-  exactly as before.
+  exactly as before. Nor does it extend to a stateful batch that the upstream answered: a
+  batch reply is one node error even when some of its elements executed
+  (`--batch-node-error-on-any`), so only a refusal of the whole batch at the transport (HTTP
+  429) lets a batch carrying a write be sent again.
 - **A fully capped chain answers 503.** When every attempt was refused for rate, the
   client gets 503 Service Unavailable — temporarily unservable, not broken — with no
   Retry-After (that stays internal). Any other failure mix keeps its usual shape.

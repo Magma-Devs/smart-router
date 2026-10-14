@@ -584,15 +584,6 @@ func (rp *RelayProcessor) checkEndProcessing(responsesCount int) bool {
 	return false
 }
 
-func (rp *RelayProcessor) getInputMsgInfoHashString() (string, error) {
-	hash, err := rp.RelayStateMachine.GetProtocolMessage().GetRawRequestHash()
-	hashString := ""
-	if err == nil {
-		hashString = string(hash)
-	}
-	return hashString, err
-}
-
 // GetResultsSummary returns a pure data summary for the policy engine. No decisions.
 func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 	if rp == nil {
@@ -603,7 +594,6 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 
 	resultsCount, nodeErrors, specialNodeErrors, protocolErrors := rp.GetResults()
 	_, nodeErrorResults, protocolErrorResults := rp.GetResultsData()
-	_, hashErr := rp.getInputMsgInfoHashString()
 
 	// Check node errors: IsNonRetryable is the umbrella retry gate.
 	// IsUnsupportedMethod is a subset kept for zero-CU and caching only.
@@ -650,7 +640,6 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		HasPermanentProtocolError: hasPermanentProtocolError,
 		HasEpochMismatch:          hasEpochMismatch,
 		OnlyRateLimited:           onlyRateLimited(nodeErrorResults, protocolErrorResults),
-		HashErr:                   hashErr,
 	}
 }
 

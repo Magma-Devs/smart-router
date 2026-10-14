@@ -44,9 +44,10 @@ type ChainTrackerConfig struct {
 	HeadOnlyTracking bool
 
 	// FlatPollInterval, when > 0, switches this tracker to a FIXED flat cadence
-	// (MAG-2159 / Topic B): the dedicated poll runs at exactly this interval, slowed only
-	// by failure backoff. The adaptive /4, /2, /16 tiers AND the block-gap recalibration
-	// are disconnected from scheduling (block-gap estimation still runs for block-time
+	// (MAG-2159 / Topic B): the dedicated poll runs at this interval capped at
+	// BACKOFF_MAX_TIME (HealthyPollInterval), slowed only by failure backoff. The adaptive
+	// /4, /2, /16 tiers AND the block-gap recalibration are disconnected from scheduling
+	// (block-gap estimation still runs for block-time
 	// consumers, it just no longer moves the timer). Per-endpoint trackers set it to
 	// avgBlockTime/divisor (default 2, operator-tunable — see
 	// endpointstate.PollDivisorFlagName) because relay harvest is the primary block signal,
@@ -74,6 +75,19 @@ type ChainTrackerConfig struct {
 	// forever — and every pod keeps proving its OWN path to the upstream. 0 selects
 	// DefaultMaxRelaySkipsBeforePoll. Only meaningful when RelayTipFresh is set.
 	MaxRelaySkipsBeforePoll int
+
+	// IdleGate, when set, is the idle gate: it reports whether this poll cycle must be skipped
+	// because the chain this endpoint serves has had no client relay for longer than the
+	// operator's idle window (endpointstate.IdleAfterFlagName). It is consulted FIRST — before
+	// RelayTipFresh, which also skips without contacting upstream but may read the fleet store to
+	// decide — and a skip is UNBOUNDED: MaxRelaySkipsBeforePoll does not apply, because with
+	// nobody to route there is nothing a verifying poll would protect. sinceLastRealPoll is how
+	// long ago this tracker last reached upstream (the init fetch counts), which lets the monitor
+	// let a slow idle heartbeat through (endpointstate.IdlePollIntervalFlagName). A skip touches
+	// nothing, exactly like a relay-gate skip: no upstream call, no poll-health write, fetchFails
+	// preserved. PollNow (force) bypasses it — the wake burst that ends an idle period is a forced
+	// poll on every endpoint. Per-endpoint trackers set this when idle mode is on; nil is off.
+	IdleGate func(now time.Time, sinceLastRealPoll time.Duration) bool
 }
 
 func (cnf *ChainTrackerConfig) validate() error {

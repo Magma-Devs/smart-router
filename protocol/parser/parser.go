@@ -126,6 +126,26 @@ func ParseRawBlock(rpcInput RPCInput, parsedInput *ParsedInput, defaultValue str
 		}
 	}
 	parsedInput.SetBlock(parsedBlock)
+	parseRawEarliestBlock(rpcInput, parsedInput)
+}
+
+// parseRawEarliestBlock resolves the range lower bound a PARSER_TYPE_BLOCK_EARLIEST parser read,
+// if any. A bound that does not parse is dropped rather than failing the request: the main block
+// decides routing then, as it did before the bound was read at all.
+func parseRawEarliestBlock(rpcInput RPCInput, parsedInput *ParsedInput) {
+	if parsedInput.earliestDataRaw == "" {
+		return
+	}
+	earliest, err := rpcInput.ParseBlock(parsedInput.earliestDataRaw)
+	if err != nil {
+		utils.LavaFormatDebug("failed parsing the earliest block of a range, judging the request on its main block",
+			utils.LogAttr("earliest", parsedInput.earliestDataRaw),
+			utils.LogAttr("err", err),
+		)
+		return
+	}
+	parsedInput.earliestBlock = earliest
+	parsedInput.hasEarliest = true
 }
 
 func parseInputWithLegacyBlockParser(rpcInput RPCInput, blockParser spectypes.BlockParser, dataSource int) (string, bool, error) {
@@ -164,6 +184,7 @@ func parseBlock(rpcInput RPCInput, blockParser spectypes.BlockParser, genericPar
 	if parsedBlockInfo == nil {
 		parsedBlockInfo = NewParsedInput()
 	} else {
+		parsedBlockInfo.earliestDataRaw = unquoteString(parsedBlockInfo.earliestDataRaw)
 		rawBlockFromGenericParser := parsedBlockInfo.parsedDataRaw
 		if rawBlockFromGenericParser != "" {
 			parsedBlockInfo.parsedDataRaw = unquoteString(rawBlockFromGenericParser)
@@ -283,6 +304,13 @@ type ParsedInput struct {
 	parsedHashes     []string
 	parserError      string
 	UsedDefaultValue bool
+	// earliestDataRaw is the lower bound of a block range read by a PARSER_TYPE_BLOCK_EARLIEST
+	// parser (trace_filter's fromBlock, for one), kept beside the block the request is about so
+	// the archive rule can judge a range on its deepest block. Empty when no such parser matched;
+	// earliestBlock and hasEarliest are its parsed form, set by ParseRawBlock.
+	earliestDataRaw string
+	earliestBlock   int64
+	hasEarliest     bool
 }
 
 const RAW_NOT_APPLICABLE = "-1"
@@ -305,6 +333,12 @@ func (p *ParsedInput) GetRawParsedData() string {
 
 func (p *ParsedInput) GetBlock() int64 {
 	return p.parsedBlock
+}
+
+// GetEarliestBlock returns the lower bound of the block range the request names, when a
+// PARSER_TYPE_BLOCK_EARLIEST parser read one. Requests without a range report false.
+func (p *ParsedInput) GetEarliestBlock() (int64, bool) {
+	return p.earliestBlock, p.hasEarliest
 }
 
 func (p *ParsedInput) GetParserError() string {
@@ -351,20 +385,44 @@ func ParseWithGenericParsers(rpcInput RPCInput, genericParsers []spectypes.Gener
 
 	parsingMap := getMapForParse(rpcInput)
 
-	// We try to parse the params with all the generic parsers, the first one that succeeds, its value is returned
+	// The first parser that succeeds answers which block the request is about, and later parsers
+	// of that kind are not evaluated (a rule that does not match logs at warning level). A
+	// PARSER_TYPE_BLOCK_EARLIEST parser does not compete for that answer: it reads the lower bound
+	// of a range, which is carried beside the answer whichever order the spec lists them in.
+	var result *ParsedInput
+	earliestRaw := ""
 	for _, genericParser := range genericParsers {
-		retval, err := parseGeneric(parsingMap, genericParser)
-		if err == nil {
-			return retval, nil
+		isEarliest := genericParser.ParseType == spectypes.PARSER_TYPE_BLOCK_EARLIEST
+		if (isEarliest && earliestRaw != "") || (!isEarliest && result != nil) {
+			continue
 		}
+		retval, err := parseGeneric(parsingMap, genericParser)
+		if err != nil {
+			continue
+		}
+		if isEarliest {
+			earliestRaw = retval.earliestDataRaw
+			continue
+		}
+		result = retval
 	}
 
-	// we didn't find a generic parser that worked. LavaFormat* always returns an
-	// error, whatever the log level.
-	return nil, utils.LavaFormatTrace("failed to parse with generic parsers",
-		utils.LogAttr("parsingMap", parsingMap),
-		utils.LogAttr("genericParsers", genericParsers),
-	)
+	if result == nil && earliestRaw == "" {
+		// we didn't find a generic parser that worked. LavaFormat* always returns an
+		// error, whatever the log level.
+		return nil, utils.LavaFormatTrace("failed to parse with generic parsers",
+			utils.LogAttr("parsingMap", parsingMap),
+			utils.LogAttr("genericParsers", genericParsers),
+		)
+	}
+	if result == nil {
+		// Only the range's lower bound was read; the empty raw data sends parseBlock to the legacy
+		// block parser for the main block, and the bound travels with it.
+		result = NewParsedInput()
+		result.parsedDataRaw = ""
+	}
+	result.earliestDataRaw = earliestRaw
+	return result, nil
 }
 
 func parseRule(rule string, valueInterface interface{}) bool {
@@ -445,6 +503,15 @@ func parseGeneric(input interface{}, genericParser spectypes.GenericParser) (*Pa
 		return parsed, nil
 	case spectypes.PARSER_TYPE_BLOCK_HASH:
 		return parseGenericParserBlockHash(value)
+	// Case Block Earliest: the lower bound of a range (trace_filter's fromBlock). It is not the block
+	// the request is about, so it is carried beside the main block (see ParseWithGenericParsers)
+	// instead of being returned as it; the empty raw data lets parseBlock keep looking for the main
+	// block when this is the only parser that matched.
+	case spectypes.PARSER_TYPE_BLOCK_EARLIEST:
+		parsed := NewParsedInput()
+		parsed.parsedDataRaw = ""
+		parsed.earliestDataRaw = blockInterfaceToString(value)
+		return parsed, nil
 	// TODO: Implement other cases for different parsers
 	default:
 		return nil, fmt.Errorf("unsupported generic parser type")

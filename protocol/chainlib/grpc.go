@@ -152,8 +152,12 @@ func (apip *GrpcChainParser) getSupportedApi(name, connectionType string) (*ApiC
 	return apip.BaseChainParser.getSupportedApi(apiKey)
 }
 
-func (apip *GrpcChainParser) setupForConsumer(relayer grpcproxy.ProxyCallBack) {
-	apip.registry = dyncodec.NewRegistry(dyncodec.NewRelayerRemote(relayer))
+// setupForConsumer builds the listener's registry for block parsing on the router's
+// upstream reflection snapshots. It never relays reflection: the relay path refuses
+// it as a streaming method (MAG-4217). Without a source no descriptor resolves, and
+// binary requests parse as NOT_APPLICABLE.
+func (apip *GrpcChainParser) setupForConsumer(reflectionSource grpcproxy.ReflectionSource) {
+	apip.registry = dyncodec.NewRegistry(dyncodec.NewSnapshotRemote(reflectionSource))
 	apip.codec = dyncodec.NewCodec(apip.registry)
 }
 
@@ -310,6 +314,7 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 	}
 
 	nodeMsg := apip.newChainMessage(apiCont.api, parsedInput, &grpcMessage, apiCollection)
+	nodeMsg.applyParsedRange(parsedInput)
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
 }
@@ -488,7 +493,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	apil.httpServer = httpServer
 
 	// setup chain parser
-	apil.chainParser.setupForConsumer(sendRelayCallback)
+	apil.chainParser.setupForConsumer(reflectionSource)
 
 	utils.LavaFormatInfo("Server listening", utils.Attribute{Key: "Address", Value: lis.Addr()})
 
@@ -574,6 +579,9 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		)
 
 		firstReply, repliesChan, err := subscriptionManager.StartSubscription(ctx, protocolMessage, dappID, consumerIp, connectionUniqueId, metricsData)
+		// A subscribe never passes SendParsedRelay, which stamps these for a normal request.
+		metricsData.ApiMethod = protocolMessage.GetApi().GetName()
+		metricsData.Latency = time.Since(startTime).Milliseconds()
 
 		// Snapshot before the emit goroutine starts. AddMetricForGrpc writes Success and
 		// Origin on the struct it is handed, and the per-delivery emits work from these
@@ -645,8 +653,8 @@ func (apil *GrpcChainListener) forwardSubscriptionReplies(ctx context.Context, r
 
 			perMessage := subscriptionFields
 			perMessage.Timestamp = time.Now()
-			perMessage.ApiMethod = SubscriptionDeliveryMethod
-			perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
+			perMessage.ApiMethod = metrics.SubscriptionDeliveryMethod
+			perMessage.ComputeUnits = metrics.DefaultSubscriptionDeliveryCU
 			apil.logger.AddMetricForGrpc(&perMessage, nil, &metricsHeaders)
 		}
 	}()
@@ -768,6 +776,40 @@ func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, pars
 	return cp, nil
 }
 
+// methodDescriptorFor resolves the descriptor of the method at path ("svc/Method" or "svc.Method")
+// through descriptorSource, caching it on the chain proxy.
+//
+// The cache is keyed by the full symbol, not the bare method name. Method names repeat across
+// services (the Cosmos SDK alone has Params under twelve Query services, Proposal and TallyResult
+// under three), and a cache keyed by "Params" handed every later service the first one's request
+// and reply descriptors: the request was built with the wrong fields and the reply decoded against
+// the wrong shape (MAG-4242).
+//
+// Load then Store rather than LoadOrStore: two relays racing on a cold key resolve the same
+// descriptor twice and store it twice, which is cheaper than resolving on every call and lands on
+// the same value.
+func (cp *GrpcChainProxy) methodDescriptorFor(ctx context.Context, descriptorSource grpcurl.DescriptorSource, path string) (*desc.MethodDescriptor, error) {
+	svc, methodName := rpcInterfaceMessages.ParseSymbol(path)
+	cacheKey := svc + "/" + methodName
+	if methodDescriptor, found, _ := cp.descriptorsCache.Load(cacheKey); found {
+		return methodDescriptor, nil
+	}
+	descriptor, err := descriptorSource.FindSymbol(svc)
+	if err != nil {
+		return nil, utils.LavaFormatError("descriptorSource.FindSymbol", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+	}
+	serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
+	if !ok {
+		return nil, utils.LavaFormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "descriptor", Value: descriptor})
+	}
+	methodDescriptor := serviceDescriptor.FindMethodByName(methodName)
+	if methodDescriptor == nil {
+		return nil, utils.LavaFormatError("serviceDescriptor.FindMethodByName returned nil", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "methodName", Value: methodName})
+	}
+	cp.descriptorsCache.Store(cacheKey, methodDescriptor)
+	return methodDescriptor, nil
+}
+
 func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
 	conn, err := cp.conn.GetRpc(ctx, true)
 	if err != nil {
@@ -801,29 +843,9 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 	if err != nil {
 		return nil, utils.LavaFormatError("failed resolving grpc descriptor source", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
-	svc, methodName := rpcInterfaceMessages.ParseSymbol(nodeMessage.Path)
-
-	// Check if we have method descriptor already cached.
-	// The reason we do Load and then Store here, instead of LoadOrStore:
-	// On the worst case scenario, where 2 threads are accessing the map at the same time, the same descriptor will be stored twice.
-	// It is better than the alternative, which is always creating the descriptor, since the outcome is the same.
-	methodDescriptor, found, _ := cp.descriptorsCache.Load(methodName)
-	if !found { // method descriptor not cached yet, need to fetch it and add to cache
-		var descriptor desc.Descriptor
-		if descriptor, err = descriptorSource.FindSymbol(svc); err != nil {
-			return nil, utils.LavaFormatError("descriptorSource.FindSymbol", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
-		}
-		serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
-		if !ok {
-			return nil, utils.LavaFormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "descriptor", Value: descriptor})
-		}
-		methodDescriptor = serviceDescriptor.FindMethodByName(methodName)
-		if methodDescriptor == nil {
-			return nil, utils.LavaFormatError("serviceDescriptor.FindMethodByName returned nil", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "methodName", Value: methodName})
-		}
-
-		// add the descriptor to the chainProxy cache
-		cp.descriptorsCache.Store(methodName, methodDescriptor)
+	methodDescriptor, err := cp.methodDescriptorFor(ctx, descriptorSource, nodeMessage.Path)
+	if err != nil {
+		return nil, err
 	}
 
 	msgFactory := dynamic.NewMessageFactoryWithDefaults()

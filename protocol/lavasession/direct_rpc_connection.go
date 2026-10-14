@@ -1462,7 +1462,11 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 	// initializeDescriptorSource has already loaded the protoset into the
 	// process-wide cache that backs it. Hybrid still warms — reflection is the half
 	// it falls back to, and that half is the slow one.
+	// The snapshot is still taken here, from the protoset alone.
 	if g.nodeUrl.GrpcConfig.GetDescriptorSource() == common.GrpcDescriptorSourceFile {
+		if fileSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&g.nodeUrl.GrpcConfig, nil); err == nil {
+			g.keepWarmSnapshot(fileSource)
+		}
 		return
 	}
 
@@ -1556,6 +1560,40 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 		utils.LogAttr("methods", methods),
 		utils.LogAttr("alreadyResolving", skipped),
 		utils.LogAttr("duration", time.Since(started)),
+		utils.LogAttr("url", g.nodeUrl.Url))
+
+	if ctx.Err() == nil {
+		g.keepWarmSnapshot(descriptorSource)
+	}
+}
+
+// keepWarmSnapshot builds the reflection snapshot from the warm-up's own session
+// and holds it, unless one was taken or started meanwhile. That session already
+// holds every file the sweep downloaded, so the snapshot costs the node one more
+// ListServices, not a second sweep.
+//
+// Without it the first snapshot is taken on demand, and the gRPC listener parses
+// block numbers from snapshots (MAG-4217): the first request after every boot
+// would wait for a whole sweep of the node, about 4s on a public Cosmos Hub node.
+func (g *GRPCDirectRPCConnection) keepWarmSnapshot(source grpcurl.DescriptorSource) {
+	snapshot, err := buildReflectionSnapshot(source)
+	if err != nil {
+		utils.LavaFormatDebug("gRPC reflection snapshot not taken with the warm-up",
+			utils.LogAttr("error", err.Error()),
+			utils.LogAttr("url", g.nodeUrl.Url))
+		return
+	}
+	snapshot.lookup = g.lookupReflectionSymbol
+
+	g.snapshotMu.Lock()
+	defer g.snapshotMu.Unlock()
+	if g.snapshot != nil || g.snapshotting != nil {
+		return
+	}
+	g.snapshot = snapshot
+	utils.LavaFormatInfo("gRPC reflection snapshot taken with the warm-up",
+		utils.LogAttr("services", len(snapshot.Services)),
+		utils.LogAttr("complete", snapshot.Complete),
 		utils.LogAttr("url", g.nodeUrl.Url))
 }
 

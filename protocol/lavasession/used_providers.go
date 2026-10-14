@@ -88,6 +88,9 @@ type UsedProviders struct {
 	// Defaults to common.DecideEligibility; overridden via SetEligibilityFunc
 	// to use relaypolicy.DecideEligibility (breaking the circular import).
 	eligibilityFunc EligibilityFunc
+	// lastChanceTaken records that this request was already lent a disabled endpoint
+	// (TakeLastChance), so a retrying request is lent at most one.
+	lastChanceTaken bool
 }
 
 // SetChainID attaches a chain ID to this UsedProviders instance so that
@@ -113,6 +116,23 @@ func (up *UsedProviders) SetEligibilityFunc(fn EligibilityFunc) {
 	up.lock.Lock()
 	defer up.lock.Unlock()
 	up.eligibilityFunc = fn
+}
+
+// TakeLastChance claims this request's single last chance: lending a disabled endpoint of a
+// provider the blocked-list fallback handed out. It returns true the first time and false after
+// that, so a request whose lent endpoint fails, and which then retries, is not lent one disabled
+// endpoint after another.
+func (up *UsedProviders) TakeLastChance() bool {
+	if up == nil {
+		return true
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	if up.lastChanceTaken {
+		return false
+	}
+	up.lastChanceTaken = true
+	return true
 }
 
 func (up *UsedProviders) CurrentlyUsed() int {

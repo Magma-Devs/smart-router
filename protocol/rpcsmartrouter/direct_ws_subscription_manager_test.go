@@ -59,6 +59,10 @@ type mockSubscriptionServer struct {
 	// subscriptionSeq makes successive ids distinct, so a test can tell a restored
 	// subscription from the one it replaced.
 	subscriptionSeq int
+
+	// conns holds every server-side socket still open, so a test can drop them all and
+	// watch the router restore its subscriptions.
+	conns []*websocket.Conn
 }
 
 // safeWriteMessage serializes WS writes: handleWS (response) and the spawned sendSubscriptionMessages
@@ -90,6 +94,9 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	defer conn.Close()
+	ms.lock.Lock()
+	ms.conns = append(ms.conns, conn)
+	ms.lock.Unlock()
 
 	for {
 		_, message, err := conn.ReadMessage()
@@ -275,6 +282,28 @@ func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn,
 			}
 		}
 	}
+}
+
+// dropConnections closes every server-side socket, which is what an upstream node
+// restarting looks like from the router: every subscription on those sockets errors and
+// the router re-subscribes over a fresh connection.
+func (ms *mockSubscriptionServer) dropConnections() {
+	ms.lock.Lock()
+	conns := ms.conns
+	ms.conns = nil
+	ms.lock.Unlock()
+	for _, conn := range conns {
+		conn.Close()
+	}
+}
+
+// liveSubscriptions is how many subscriptions the node still believes exist: created and
+// not yet unsubscribed. A router that leaks an upstream subscription leaves this above zero
+// after every client has gone.
+func (ms *mockSubscriptionServer) liveSubscriptions() int {
+	ms.lock.RLock()
+	defer ms.lock.RUnlock()
+	return len(ms.subscriptions)
 }
 
 func (ms *mockSubscriptionServer) Close() {
