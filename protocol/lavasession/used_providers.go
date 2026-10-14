@@ -12,15 +12,16 @@ import (
 )
 
 // A caller that finds another selection in flight for the same request polls for it to finish,
-// every selectionLockPollInterval, for at most MaximumNumberOfSelectionLockAttempts polls. The
-// caller's context bounds the wait first; a deadline on it is honoured as a deadline, not only
-// once its timer fires. GetSessions used to add a context.WithTimeout of its own per call — a
-// timer and a cancel func per relay for a wait that almost never happens — so the bound lives
-// here now, and the common path allocates nothing (MAG-4244).
+// every selectionLockPollInterval, for at most selectionLockMaxWait. The caller's context bounds
+// the wait first; a deadline on it is honoured as a deadline, not only once its timer fires.
+// GetSessions used to add a one-second context.WithTimeout of its own per call — a timer and a
+// cancel func per relay for a wait that almost never happens — so the bound lives here now, and
+// the common path allocates nothing (MAG-4244). That second always ended the wait first (the
+// 500-poll loop under it needed 2.5 s), and it ended it as a done context, so the bound is that
+// second and ends the same way.
 const (
-	MaximumNumberOfSelectionLockAttempts = 500
-	selectionLockPollInterval            = 5 * time.Millisecond
-	selectionLockMaxWait                 = MaximumNumberOfSelectionLockAttempts * selectionLockPollInterval
+	selectionLockPollInterval = 5 * time.Millisecond
+	selectionLockMaxWait      = time.Second
 )
 
 type BlockedProvidersInf interface {
@@ -429,13 +430,17 @@ func (up *UsedProviders) TryLockSelection(ctx context.Context) error {
 	if up == nil {
 		return nil
 	}
+	// A request that is already over takes no selection, free lock or not: the loop this replaced
+	// looked at the context before its first attempt. Err allocates nothing.
+	if ctx.Err() != nil {
+		return ContextDoneNoNeedToLockSelectionError
+	}
 	if up.tryLockSelection() {
 		return nil // the common case: no other selection is running for this request
 	}
 	deadline := time.Now().Add(selectionLockMaxWait)
-	ctxBounds := false
-	if ctxDeadline, ok := ctx.Deadline(); ok && !ctxDeadline.After(deadline) {
-		deadline, ctxBounds = ctxDeadline, true
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
 	}
 	for {
 		select {
@@ -452,13 +457,9 @@ func (up *UsedProviders) TryLockSelection(ctx context.Context) error {
 		}
 		time.Sleep(selectionLockPollInterval)
 	}
-	if ctxBounds || ctx.Err() != nil {
-		utils.LavaFormatTrace("Failed locking selection, context deadline reached")
-		return ContextDoneNoNeedToLockSelectionError
-	}
-
-	// if we got here we failed locking the selection.
-	return utils.LavaFormatError("Failed locking selection after MaximumNumberOfSelectionLockAttempts", nil, utils.LogAttr("GUID", ctx), utils.LogAttr("maxWait", selectionLockMaxWait))
+	// Either bound ends the wait the way GetSessions' own one-second context used to.
+	utils.LavaFormatTrace("Failed locking selection, wait bound reached", utils.LogAttr("GUID", ctx), utils.LogAttr("maxWait", selectionLockMaxWait))
+	return ContextDoneNoNeedToLockSelectionError
 }
 
 func (up *UsedProviders) tryLockSelection() bool {
