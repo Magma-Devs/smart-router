@@ -33,6 +33,14 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	// guarantees it — the ticker fires on a timer with a relay still in flight, which may
 	// already have broadcast. So the carve-out does not extend to a hedge.
 	rateLimitRetrySafe := input.Summary.OnlyRateLimited && !input.IsTickerHedge
+	// A batch node error is not proof that nothing ran. Under --batch-node-error-on-any one failed
+	// element makes the whole reply a node error, classified by the failed elements' text alone, so a
+	// rate-limited sibling can stand for a batch whose eth_sendRawTransaction was accepted. Only a
+	// refusal of the whole batch at the transport (a protocol error) proves a stateful batch is safe
+	// to send again.
+	if input.Selection == relaycore.Stateful && input.IsBatch && input.Summary.NodeErrors+input.Summary.SpecialNodeErrors > 0 {
+		rateLimitRetrySafe = false
+	}
 
 	if input.Selection == relaycore.Stateful && !rateLimitRetrySafe {
 		return DecisionOutput{Action: Stop, Reason: "Stateful"}
@@ -71,15 +79,18 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 		return DecisionOutput{Action: Retry, Reason: "EpochMismatch"}
 	}
 
-	// Steps 5-6 only apply to post-relay retry decisions (gotResults path).
-	// Ticker hedges skip these — the old retryCondition() never checked error
-	// tolerance or hash errors, only mode/limits/unsupported.
+	// Step 5 only applies to post-relay retry decisions (gotResults path).
+	// Ticker hedges skip it — the old retryCondition() never checked error
+	// tolerance, only mode/limits/unsupported.
+	//
+	// A "hash computation failed" stop used to sit here, fed by the request's raw hash. A
+	// JSON-RPC batch has no such hash (WontCalculateBatchHash), so once an attempt had
+	// completed every batch stopped here under that reason: --disable-batch-request-retry=false
+	// changed nothing, and the rate-limit carve-out in step 3 could skip the BatchDisabled stop
+	// but never reach a retry. Whether a batch retries is decided by IsBatch and the flag above,
+	// nowhere else (MAG-4242).
 	if !input.IsTickerHedge {
-		// 5. HASH ERROR CHECK
-		if input.Summary.HashErr != nil {
-			return DecisionOutput{Action: Stop, Reason: "HashComputationFailed"}
-		}
-
+		// 5. ERROR TOLERANCE
 		totalErrors := input.Summary.NodeErrors + input.Summary.SpecialNodeErrors + input.Summary.ProtocolErrors
 		if totalErrors > p.config.RelayRetryLimit {
 			return DecisionOutput{Action: Stop, Reason: "ErrorToleranceExceeded"}
