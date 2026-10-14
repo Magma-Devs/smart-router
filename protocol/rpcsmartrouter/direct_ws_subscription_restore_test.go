@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -60,4 +61,91 @@ func TestRestoreAfterTeardown_LeavesNoUpstreamSubscription(t *testing.T) {
 	require.Equal(t, 0, h.activeSubscriptionCount())
 	require.Eventually(t, func() bool { return goroutinesIn("listenForUpstreamMessages") == 0 },
 		5*time.Second, 10*time.Millisecond, "no upstream listener may outlive the subscription")
+}
+
+// TestUnsubscribeDuringRestore_TellsTheNodeTheRestoredID: the last client's eth_unsubscribe
+// is waiting on the node when the restore commits. Unsubscribe told the node the id it read
+// before its call; the restore replaced that id and connection while the entry was still
+// mapped, so the teardown must tell the node the restored one or it stays live with nobody
+// reading it.
+func TestUnsubscribeDuringRestore_TellsTheNodeTheRestoredID(t *testing.T) {
+	h := newReleaseHarness(t)
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	var reachedOnce sync.Once
+	h.manager.beforeRestoreCommit = func() {
+		reachedOnce.Do(func() { close(reached) })
+		<-release
+	}
+	releaseRestore := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseRestore)
+	upstreamIDOf := func(sub *directActiveSubscription) string {
+		h.manager.lock.RLock()
+		defer h.manager.lock.RUnlock()
+		return sub.upstreamID
+	}
+	nodeHas := func(id string) bool {
+		h.srv.lock.RLock()
+		defer h.srv.lock.RUnlock()
+		_, ok := h.srv.subscriptions[id]
+		return ok
+	}
+
+	sub := h.subscribe("ws-1")
+	t.Cleanup(sub.disconnect)
+	h.manager.lock.RLock()
+	var activeSub *directActiveSubscription
+	for _, s := range h.manager.activeSubscriptions {
+		activeSub = s
+	}
+	h.manager.lock.RUnlock()
+	oldID := upstreamIDOf(activeSub)
+
+	h.srv.dropConnections()
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the restore never re-subscribed on the node")
+	}
+
+	// The node reads and applies the unsubscribe but cannot answer yet.
+	h.srv.writeMu.Lock()
+	unlockNode := sync.OnceFunc(func() { h.srv.writeMu.Unlock() })
+	t.Cleanup(unlockNode)
+	body, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "method": "eth_unsubscribe", "params": []interface{}{sub.routerID}, "id": 2,
+	})
+	require.NoError(t, err)
+	msg := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{method: "eth_unsubscribe", params: []interface{}{sub.routerID}},
+		rawData:               body,
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := h.manager.Unsubscribe(sub.ctx, msg, "dapp", "10.0.0.1", sub.uid, nil)
+		errCh <- err
+	}()
+	require.Eventually(t, func() bool { return h.upstreamCalls("eth_unsubscribe") == 1 },
+		5*time.Second, 5*time.Millisecond)
+
+	// The restore commits while Unsubscribe waits on the node.
+	releaseRestore()
+	require.Eventually(t, func() bool {
+		id := upstreamIDOf(activeSub)
+		mapped, ok := h.manager.idMapper.GetUpstreamID(sub.routerID)
+		return id != oldID && ok && mapped == id
+	}, 5*time.Second, 5*time.Millisecond)
+	restoredID := upstreamIDOf(activeSub)
+
+	unlockNode()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("Unsubscribe never returned")
+	}
+	require.Eventually(t, func() bool { return !nodeHas(restoredID) }, 5*time.Second, 10*time.Millisecond,
+		"the restored upstream subscription was left running on the node after its only client unsubscribed")
+	require.Equal(t, int64(0), h.manager.totalSubscriptions.Load())
+	require.Equal(t, 0, h.activeSubscriptionCount())
 }

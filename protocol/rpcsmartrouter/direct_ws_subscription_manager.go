@@ -1058,9 +1058,12 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	// lastClient is the mapper's view after this client's mapping went, read under the
 	// lock: a client that joined during the unlocked upstream call above registered its
 	// mapping first, so it keeps the subscription. The node was already told, so the
-	// teardown skips the wire call.
+	// teardown skips the wire call — unless a restore committed while that call was in
+	// flight: the node was told the id read before it, and the restored subscription,
+	// with its new id and connection, was never told (MAG-2547).
 	if lastClient {
-		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, false)
+		restoredSinceRead := activeSub.upstreamID != upstreamID || activeSub.upstreamConnection != conn
+		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, restoredSinceRead)
 	}
 
 	return nodeResp, nil
