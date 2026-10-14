@@ -112,6 +112,10 @@ func (bpm *BaseProtocolMessage) addMissingExtensions(updatedProtocolExtensions [
 	return currentPrivateDataExtensions
 }
 
+// UpdateEarliestAndValidateExtensionRules rewrites RelayPrivateData().Extensions in place. Call it
+// only on a message whose cache key has not been asked for yet (a freshly re-parsed one, as
+// updateProtocolMessageIfNeededWithNewEarliestData does): HashCacheRequest memoises the key, and a
+// message rewritten after its first HashCacheRequest would keep handing out the old key.
 func (bpm *BaseProtocolMessage) UpdateEarliestAndValidateExtensionRules(extensionParser *extensionslib.ExtensionParser, earliestBlockHashRequested int64, addon string, seenBlock int64) bool {
 	if earliestBlockHashRequested >= 0 {
 		success := bpm.UpdateEarliestInMessage(earliestBlockHashRequested)

@@ -903,8 +903,8 @@ func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage Chain
 	return parserInput, nil
 }
 
-// this method will calculate the request hash by changing the original object, and returning the data back to it after calculating the hash
-// couldn't be used in parallel
+// HashCacheRequest derives the cache key for a relay without an extension directive. It computes
+// on a copy and never writes to relayData, so concurrent callers are safe (MAG-4242).
 func HashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId string) ([]byte, func([]byte) []byte, error) {
 	return hashCacheRequest(relayData, chainId, "")
 }
