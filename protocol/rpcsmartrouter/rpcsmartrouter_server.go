@@ -4750,12 +4750,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				hashKey, outputFormatter, err := protocolMessage.HashCacheRequest(chainId)
 				if err != nil {
 					utils.LavaFormatError("sendRelayToEndpoint failed getting hash for cache request", err, utils.LogAttr("GUID", ctx))
-				} else if utils.IsDebugEnabled() {
-					utils.LavaFormatDebug("Cache lookup hash generated",
-						utils.LogAttr("GUID", ctx),
-						utils.LogAttr("hashKey", hex.EncodeToString(hashKey)),
-						utils.LogAttr("apiUrl", localRelayData.ApiUrl),
-					)
+				} else {
+					// Only the log line is gated: the rest of this branch IS the cache lookup,
+					// and it must run at every log level.
+					if utils.IsDebugEnabled() {
+						utils.LavaFormatDebug("Cache lookup hash generated",
+							utils.LogAttr("GUID", ctx),
+							utils.LogAttr("hashKey", hex.EncodeToString(hashKey)),
+							utils.LogAttr("apiUrl", localRelayData.ApiUrl),
+						)
+					}
 
 					// Resolve the requested block for cache lookup
 					// The cache server doesn't accept negative blocks
