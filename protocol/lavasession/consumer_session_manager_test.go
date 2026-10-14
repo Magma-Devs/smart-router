@@ -1662,7 +1662,7 @@ func TestDeadConnectionCleanup(t *testing.T) {
 	// This function will iterate through endpoints and call connectEndpoint, which contains the cleanup logic
 	connected, endpointsList, providerAddress, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(
 		ctx,
-		false, // retryDisabledEndpoints
+		endpointPickSkipDisabled,
 		false, // getAllEndpoints
 		"",    // addon
 		nil,   // extensionNames
@@ -2124,7 +2124,7 @@ func TestCanceledContextDoesNotPenalizeEndpoint(t *testing.T) {
 
 	connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(
 		ctx,
-		false, // retryDisabledEndpoints
+		endpointPickSkipDisabled,
 		false, // getAllEndpoints
 		"",    // addon
 		nil,   // extensionNames

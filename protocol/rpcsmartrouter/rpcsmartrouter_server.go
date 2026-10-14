@@ -291,6 +291,11 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// truncate 0.25 to 0 — which is the "unset" sentinel, so an operator asking for the
 		// largest relief would silently receive the default instead.
 		PollIntervalDivisor: viper.GetFloat64(endpointstate.PollDivisorFlagName),
+		// Idle mode (endpointstate/idle.go): pause this chain+interface's dedicated polls once it
+		// has served no client relay for IdleAfter, optionally keeping a slow heartbeat. Both read
+		// from viper for the same reason as the flags above; 0 (absent) is off, the default.
+		IdleAfter:        viper.GetDuration(endpointstate.IdleAfterFlagName),
+		IdlePollInterval: viper.GetDuration(endpointstate.IdlePollIntervalFlagName),
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
@@ -1459,6 +1464,44 @@ func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad, cutO
 	return cutOffMidDelivery
 }
 
+// wakeWaitCap bounds how long a client relay that ends an idle period (or arrives while the wake
+// burst it triggered is still in flight) waits for the first endpoint poll to land before it is
+// routed. One upstream round trip is the intent; the cap keeps a slow upstream from turning idle
+// mode into a latency cliff — past it the request routes as on cold start: no fresh chain tip, so
+// consistency pre-validation is skipped, and the burst keeps polling in the background.
+const wakeWaitCap = time.Second
+
+// awaitWakeIfIdle is idle mode's hook on the client relay path (endpointstate/idle.go). It stamps
+// this relay as activity on the chain and, when the relay ends an idle period — or joins a wake
+// burst already running — holds it until the first endpoint poll of that burst has recorded a
+// fresh tip, capped at wakeWaitCap. With idle mode off, or on an active chain, it is one atomic
+// swap and returns at once.
+//
+// It sits on SendParsedRelay, which every client transport reaches (HTTP via SendRelay, websocket
+// unary messages directly) and the crafted health relay does not (sendRelayWithRetries), so the
+// router's own five-minute health probe cannot keep a chain awake or count as the relay that
+// woke it.
+func (rpcss *RPCSmartRouterServer) awaitWakeIfIdle(ctx context.Context, now time.Time) {
+	if rpcss.endpointChainTrackerManager == nil {
+		return
+	}
+	wait := rpcss.endpointChainTrackerManager.NoteClientRelay(now)
+	if wait == nil {
+		return
+	}
+	timer := time.NewTimer(wakeWaitCap)
+	defer timer.Stop()
+	select {
+	case <-wait:
+	case <-timer.C:
+		utils.LavaFormatDebug("idle wake: routing before the first poll landed (wait cap reached)",
+			utils.LogAttr("GUID", ctx),
+			utils.LogAttr("waitCap", wakeWaitCap),
+		)
+	case <-ctx.Done():
+	}
+}
+
 func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	ctx context.Context,
 	analytics *metrics.RelayMetrics,
@@ -1469,7 +1512,17 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	ctx, span := tracing.StartInternalSpan(ctx, tracing.SpanParsedRelay)
 	defer span.End()
 
+	// The method is known once the request is parsed, so it is set before relaying: a failed
+	// request is counted under its method too (SetRelayMetrics, MAG-4081).
+	if analytics != nil {
+		analytics.ApiMethod = protocolMessage.GetApi().GetName()
+	}
+
 	relaySentTime := time.Now()
+	// Idle mode: this is a client relay. Stamp it, and if it ends an idle period hold it (capped)
+	// until the first endpoint poll has landed so it is routed on fresh tips. The wait counts
+	// toward the end-to-end latency below on purpose — the client experienced it.
+	rpcss.awaitWakeIfIdle(ctx, relaySentTime)
 	relayProcessor, err := rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
 
 	// Both failure returns below ask the same question, and the answer cannot differ between them.
@@ -1627,7 +1680,6 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		analytics.Latency = currentLatency.Milliseconds()
 		api := protocolMessage.GetApi()
 		analytics.ComputeUnits = api.ComputeUnits
-		analytics.ApiMethod = api.Name
 		if rpcss.smartRouterEndpointMetrics != nil {
 			rpcss.smartRouterEndpointMetrics.RecordRouterEndToEndLatency(
 				rpcss.listenEndpoint.ChainID,
@@ -3340,6 +3392,12 @@ type probeLoopStats struct {
 	endpointsScored  int       // endpoints scored in the last cycle
 	reEnabledCount   int       // endpoints the probe re-enabled in the last cycle (F1)
 	syncOmittedCount int       // providers whose last-cycle QoS sample fed no sync evidence (F5)
+	// qosFeedPausedIdle is whether the last cycle withheld its QoS feed (qosFeedPaused), and
+	// headStallPausedIdle whether it skipped the head-stall step (headStallPaused). Two fields
+	// because they are two decisions: today both follow idle mode, but either may gain a reason
+	// of its own.
+	qosFeedPausedIdle   bool
+	headStallPausedIdle bool
 	// evidenceGatedCount is how many disabled endpoints held recorded relay evidence in the last
 	// cycle (MAG-2550) — endpoints that will need a successful replay (or the attempt-budget
 	// fallback) before re-enabling. Without this a replay-held endpoint is indistinguishable from
@@ -3377,7 +3435,7 @@ func (s *probeLoopStats) setInterval(d time.Duration) {
 }
 
 // recordCycle overwrites the last-cycle snapshot and bumps the completed-cycle counter.
-func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, scored, reEnabled, syncOmitted, evidenceGated int) {
+func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, scored, reEnabled, syncOmitted, evidenceGated int, qosFeedPausedIdle, headStallPausedIdle bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cyclesCompleted++
@@ -3387,6 +3445,8 @@ func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, sco
 	s.reEnabledCount = reEnabled
 	s.syncOmittedCount = syncOmitted
 	s.evidenceGatedCount = evidenceGated
+	s.qosFeedPausedIdle = qosFeedPausedIdle
+	s.headStallPausedIdle = headStallPausedIdle
 }
 
 // countReplay records one completed MAG-2550 recovery replay. Called from the replayer's
@@ -3415,6 +3475,8 @@ type probeLoopSnapshot struct {
 	ReEnabledCount      int
 	SyncOmittedCount    int
 	EvidenceGatedCount  int
+	QoSFeedPausedIdle   bool
+	HeadStallPausedIdle bool
 	ReplaysAttempted    uint64
 	ReplaysRecovered    uint64
 	ReplaysStillFailing uint64
@@ -3438,6 +3500,8 @@ func (s *probeLoopStats) snapshot() probeLoopSnapshot {
 		ReEnabledCount:      s.reEnabledCount,
 		SyncOmittedCount:    s.syncOmittedCount,
 		EvidenceGatedCount:  s.evidenceGatedCount,
+		QoSFeedPausedIdle:   s.qosFeedPausedIdle,
+		HeadStallPausedIdle: s.headStallPausedIdle,
 		ReplaysAttempted:    s.replaysAttempted,
 		ReplaysRecovered:    s.replaysRecovered,
 		ReplaysStillFailing: s.replaysStillFailing,
@@ -3504,6 +3568,7 @@ func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence tim
 	// re-enable-only if a future optimizer lacks it, rather than failing to start.
 	appender, _ := rpcss.sessionManager.GetProviderOptimizer().(probeQoSAppender)
 
+	rpcss.publishChainIdle(time.Now()) // the series exists from boot whenever idle mode is on
 	ticker := time.NewTicker(cadence)
 	defer ticker.Stop()
 	for {
@@ -3535,17 +3600,73 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 	}
 	startedAt := time.Now()
 	endpoints := rpcss.sessionManager.GetAllDirectRPCEndpoints()
+	feedPaused := rpcss.qosFeedPaused(startedAt)
+	stallPaused := rpcss.headStallPaused(startedAt)
+	rpcss.publishChainIdle(startedAt)
 	scored, reEnabled, syncOmitted, evidenceGated := runProbeCycleCore(
 		endpoints,
 		rpcss.endpointChainTrackerManager.GetObservation,
-		baseline, hasBaseline, syncRef, startedAt, cfg, appender,
+		baseline, hasBaseline, syncRef, startedAt, cfg, probeAppenderUnlessIdle(appender, feedPaused),
 		rpcss.sessionManager.RestoreRecoveredProvider,
 		rpcss.probeReplayer,
 	)
 	// MAG-3986: after the re-enable pass, so an endpoint the probe just returned to rotation is
 	// counted as usable by never-empty.
-	rpcss.runHeadStall(endpoints, startedAt)
-	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, evidenceGated)
+	if !stallPaused {
+		rpcss.runHeadStall(endpoints, startedAt)
+	}
+	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, evidenceGated, feedPaused, stallPaused)
+}
+
+// qosFeedPaused is the probe loop's decision to withhold its QoS feed this cycle. Idle mode
+// (endpointstate/idle.go): with the trackers paused and no relays, every observation ages past the
+// staleness window and each verdict reads "not alive" — the feed would hand the optimizer
+// Availability=0 for EVERY provider every cycle and decay the whole pod's scores over nothing but
+// silence. That holds until the wake burst has re-polled, hence IdleOrWaking. The pause ends with
+// the burst, so an endpoint whose wake poll failed is scored normally on the next cycle. Relays
+// re-score providers at 4x the probe weight the moment traffic returns.
+//
+// Its own function, not a shared flag: a future reason to pause scoring belongs here and must not
+// pause the head-stall step (headStallPaused).
+func (rpcss *RPCSmartRouterServer) qosFeedPaused(now time.Time) bool {
+	return rpcss.endpointChainTrackerManager.IdleOrWaking(now)
+}
+
+// headStallPaused is the probe loop's decision to skip the head-stall step (MAG-3986) this cycle.
+// Idle mode: while idle and until the wake burst has re-polled, the endpoints' blocks show when
+// each was last polled, not whether it is stuck. During the burst (or idle heartbeats, which poll
+// one url at a time) the first url to answer raises the chain's highest block while the others
+// still hold their pre-idle block, and a url that carried SameBlockCycles >= N into the idle period
+// (every url of a chain that was quiet before it went idle) would be marked head-stalled for not
+// having answered yet. Head-stall resumes on the first cycle after the burst, with fresh evidence:
+// a url that is really frozen answered its wake poll with the same block and is marked then.
+//
+// Its own function, not a shared flag: it must not follow reasons that pause scoring
+// (qosFeedPaused), which have nothing to do with whether an endpoint is stuck.
+func (rpcss *RPCSmartRouterServer) headStallPaused(now time.Time) bool {
+	return rpcss.endpointChainTrackerManager.IdleOrWaking(now)
+}
+
+// publishChainIdle sets smartrouter_chain_idle to this chain+interface's idle state at now. The
+// probe loop is its only writer and publishes every cycle, so the gauge is never more than one
+// cycle behind and cannot stick at a stale value (alerts mute the frozen-tip page on it). Nothing
+// is published while idle mode is off, so the series exists only where the feature is on.
+func (rpcss *RPCSmartRouterServer) publishChainIdle(now time.Time) {
+	monitor := rpcss.endpointChainTrackerManager
+	if monitor == nil || !monitor.IdleModeEnabled() || rpcss.listenEndpoint == nil {
+		return
+	}
+	rpcss.smartRouterEndpointMetrics.SetChainIdle(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, monitor.IsIdle(now))
+}
+
+// probeAppenderUnlessIdle is the one place the idle verdict reaches the QoS feed: nil (no feed)
+// while the chain is idle, the live appender otherwise. runProbeCycleCore already treats a nil
+// appender as "re-enable only", so nothing else changes shape.
+func probeAppenderUnlessIdle(appender probeQoSAppender, idle bool) probeQoSAppender {
+	if idle {
+		return nil
+	}
+	return appender
 }
 
 // runProbeCycleCore is the pure probe-cycle body (no rpcss fields), so it is testable with

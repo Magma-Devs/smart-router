@@ -156,6 +156,12 @@ type ChainTracker struct {
 	relayTipFresh           func(now time.Time) bool
 	maxRelaySkipsBeforePoll int
 	relaySkipsSinceRealPoll int
+	// idleGate is the idle gate (see ChainTrackerConfig.IdleGate). lastRealPoll is when this
+	// tracker last reached upstream — the init fetch, then every cycle that was not skipped,
+	// forced ones included — and feeds the gate's sinceLastRealPoll argument. It is touched only
+	// by the poll goroutine (and by the init path, before that goroutine exists), so no lock.
+	idleGate     func(now time.Time, sinceLastRealPoll time.Duration) bool
+	lastRealPoll time.Time
 	// headOnly (MAG-2218) drops every block-hash fetch: no fork detection, no block queue.
 	// The head still advances from FetchLatestBlockNum. See ChainTrackerConfig.HeadOnlyTracking.
 	headOnly bool
@@ -192,6 +198,12 @@ type ChainTracker struct {
 // fetch with the TRACKER's context (see the pollNowCh case in start), exactly as the timer does.
 type pollNowRequest struct {
 	resp chan error
+}
+
+// FetchTimeout bounds one poll cycle that reaches upstream, on the timer and on PollNow alike.
+// Callers that budget for a poll (the idle wake burst) use it rather than restating the value.
+func FetchTimeout() time.Duration {
+	return max(10*time.Second, common.MinimumTimePerRelayDelay)
 }
 
 func (cs *ChainTracker) IsDummy() bool {
@@ -474,6 +486,16 @@ func (cs *ChainTracker) gotNewBlock(ctx context.Context, newLatestBlock int64) (
 // timer passes false and is unaffected. It is a parameter rather than a second copy of this
 // function deliberately — one body means the forced poll IS the production poll.
 func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context, force bool) (skipped bool, err error) {
+	now := time.Now()
+	// Idle gate (endpointstate.IdleAfterFlagName): the chain this endpoint serves has had no
+	// client relay for the idle window, so the poll's output has no reader — skip the whole cycle,
+	// ahead of the traffic gate (which may consult the fleet store) and outside its skip bound.
+	// force (PollNow) bypasses it: the wake burst that ends an idle period is a forced poll on
+	// every endpoint. The gate decides the heartbeat too, from how long this tracker has gone
+	// without reaching upstream.
+	if !force && cs.idleGate != nil && cs.idleGate(now, now.Sub(cs.lastRealPoll)) {
+		return true, nil
+	}
 	// Traffic gate (MAG-2159 / Topic B). When a fresh relay-harvested tip already covers this
 	// endpoint, the whole poll cycle is redundant — skip it: no FetchLatestBlockNum AND no
 	// fork-check FetchBlockHashByNum (forkChanged fetches a hash every tick, even when the block
@@ -484,11 +506,12 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context, f
 	// maxRelaySkipsBeforePoll consecutive skips we force one real poll for independent
 	// fork/liveness verification. relaySkipsSinceRealPoll is touched only by this single poll
 	// goroutine. The global tracker leaves relayTipFresh nil and never skips.
-	if !force && cs.relayTipFresh != nil && cs.relaySkipsSinceRealPoll < cs.maxRelaySkipsBeforePoll && cs.relayTipFresh(time.Now()) {
+	if !force && cs.relayTipFresh != nil && cs.relaySkipsSinceRealPoll < cs.maxRelaySkipsBeforePoll && cs.relayTipFresh(now) {
 		cs.relaySkipsSinceRealPoll++
 		return true, nil
 	}
 	cs.relaySkipsSinceRealPoll = 0
+	cs.lastRealPoll = now // this cycle reaches upstream, whatever it finds there
 
 	newLatestBlock, err := cs.iChainFetcherWrapper.FetchLatestBlockNum(ctx)
 	if err != nil {
@@ -663,7 +686,7 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 		for {
 			select {
 			case <-cs.timer.C:
-				fetchTimeout := max(10*time.Second, common.MinimumTimePerRelayDelay)
+				fetchTimeout := FetchTimeout()
 				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout) // protect this flow from hanging code
 				skipped, err := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx, false)
 				cancel()
@@ -716,7 +739,7 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 				// same bound as the timer case (fidelity), and a shutdown still cancels the fetch
 				// promptly. The requester's context governs only how long IT waits — a caller that
 				// gives up leaves the poll to finish and record, which is honest: it did happen.
-				fetchTimeout := max(10*time.Second, common.MinimumTimePerRelayDelay)
+				fetchTimeout := FetchTimeout()
 				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 				_, pollErr := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx, true)
 				cancel()
@@ -798,7 +821,7 @@ func (cs *ChainTracker) PollNow(ctx context.Context) error {
 // The split exists because those two waits have unrelated natural lengths. Delivery either happens
 // in microseconds (the goroutine is at its select) or never (there is no goroutine yet), so a
 // caller that suspects the latter wants a short deadline. The cycle itself is bounded by the
-// tracker's own fetch timeout — max(10s, MinimumTimePerRelayDelay) — so applying that same short
+// tracker's own fetch timeout (FetchTimeout) — so applying that same short
 // deadline to the result would routinely abandon a poll that was proceeding normally, and the
 // caller would then read a pre-poll record. See EndpointMonitor.PollNow, the one caller.
 func (cs *ChainTracker) PollNowWithDeliveryDeadline(deliveryCtx, resultCtx context.Context) error {
@@ -929,6 +952,7 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 		}
 		cs.advanceHeadOnly(newLatestBlock)
 		cs.setLatestChangeTime(time.Now())
+		cs.lastRealPoll = time.Now() // the init fetch is this tracker's first real poll
 		return nil
 	}
 
@@ -952,6 +976,7 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 		}
 		return utils.LavaFormatError("critical -- failed fetching data from the node, chain tracker creation error", err, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
 	}
+	cs.lastRealPoll = time.Now() // the init fetch is this tracker's first real poll
 	return nil
 }
 
@@ -1059,6 +1084,7 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		headOnly:                config.HeadOnlyTracking,
 		relayTipFresh:           config.RelayTipFresh,
 		maxRelaySkipsBeforePoll: maxRelaySkips,
+		idleGate:                config.IdleGate,
 		endpoint:                endpoint,
 		resetBackoffCh:          make(chan struct{}, 1),
 		pollNowCh:               make(chan pollNowRequest), // unbuffered: handled by the poll goroutine only
