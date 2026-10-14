@@ -301,7 +301,9 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// is reported once per chain rather than per tracker.
 	pollDivisor := resolvePollDivisor(config.PollIntervalDivisor, config.ChainID, config.ApiInterface)
 	flatPollInterval := resolveFlatPollInterval(avgBlockTime, pollDivisor)
-	warnIfCadenceOutrunsStaleness(flatPollInterval, avgBlockTime, config.ChainID, config.ApiInterface)
+	// The warning judges the interval the trackers actually wait, which they cap at a minute
+	// (chaintracker.HealthyPollInterval): a slow chain at a low divisor still polls every minute.
+	warnIfCadenceOutrunsStaleness(chaintracker.HealthyPollInterval(flatPollInterval), avgBlockTime, config.ChainID, config.ApiInterface)
 	// Idle mode knobs (idle.go), validated once per chain like the cadence above.
 	idleAfter, idlePollInterval := resolveIdleConfig(config.IdleAfter, config.IdlePollInterval, flatPollInterval, config.ChainID, config.ApiInterface)
 
@@ -394,7 +396,8 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		utils.LogAttr("apiInterface", config.ApiInterface),
 		utils.LogAttr("averageBlockTime", avgBlockTime),
 		utils.LogAttr("divisor", pollDivisor),
-		utils.LogAttr("pollInterval", flatPollInterval),
+		utils.LogAttr("pollInterval", chaintracker.HealthyPollInterval(flatPollInterval)),
+		utils.LogAttr("flatPollInterval", flatPollInterval),
 		utils.LogAttr("overridden", pollDivisor != DefaultPollDivisor),
 	)
 
