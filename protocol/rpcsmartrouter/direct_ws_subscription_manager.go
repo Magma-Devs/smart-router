@@ -1674,9 +1674,10 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	}
 	dwsm.lock.Unlock()
 
-	// Notify the pool that the OLD connection no longer has this subscription
-	// This decrements the subscription count on the stale connection
-	if oldConnection != nil && oldConnection != conn {
+	// Notify the pool that the OLD connection no longer has this subscription. This
+	// decrements the subscription count on the stale connection — also when the pool handed
+	// back the same connection object, which it incremented above for the restored one.
+	if oldConnection != nil {
 		activeSub.upstreamPool.NotifySubscriptionRemoved(oldConnection)
 	}
 
