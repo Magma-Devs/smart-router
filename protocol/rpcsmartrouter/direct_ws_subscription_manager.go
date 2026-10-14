@@ -155,6 +155,11 @@ type DirectWSSubscriptionManager struct {
 	// Pending subscriptions for deduplication
 	pendingSubscriptions map[string]*pendingSubscriptionsBroadcastManager
 
+	// beforeRestoreCommit, when set, runs in handleUpstreamDisconnect after the node has
+	// answered the re-subscribe and before the result is committed under dwsm.lock. Nil
+	// outside tests; tests use it to hold a restore at exactly that point.
+	beforeRestoreCommit func()
+
 	// Upstream connection pools keyed by endpoint URL
 	upstreamPools map[string]*UpstreamWSPool
 
@@ -1053,9 +1058,12 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	// lastClient is the mapper's view after this client's mapping went, read under the
 	// lock: a client that joined during the unlocked upstream call above registered its
 	// mapping first, so it keeps the subscription. The node was already told, so the
-	// teardown skips the wire call.
+	// teardown skips the wire call — unless a restore committed while that call was in
+	// flight: the node was told the id read before it, and the restored subscription,
+	// with its new id and connection, was never told (MAG-2547).
 	if lastClient {
-		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, false)
+		restoredSinceRead := activeSub.upstreamID != upstreamID || activeSub.upstreamConnection != conn
+		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, restoredSinceRead)
 	}
 
 	return nodeResp, nil
@@ -1348,10 +1356,27 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	return &pairingtypes.RelayReply{Data: replyData}, true // Joined existing subscription
 }
 
-// checkAndAddPendingSubscription checks for pending subscriptions
+// checkAndAddPendingSubscription checks for pending subscriptions.
+//
+// It returns (nil, false) when the caller is the first for these params and must create the
+// subscription, or (ch, true) when the caller must wait on ch and then join. The caller has
+// already looked for an active subscription, but under a separate acquisition of dwsm.lock:
+// in the gap between that look and this one a creator can both store its subscription and
+// clear its pending entry, so a caller arriving here would see neither and become a second
+// creator. That opened a second upstream subscription for the same params, overwrote the
+// first map entry (orphaning its listener goroutine and its node-side subscription), and
+// incremented totalSubscriptions twice for an entry that is dropped once (MAG-2546). A
+// caller that finds the subscription active is therefore handed an already-settled success
+// so it takes the join path.
 func (dwsm *DirectWSSubscriptionManager) checkAndAddPendingSubscription(hashedParams string) (chan bool, bool) {
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
+
+	if _, active := dwsm.activeSubscriptions[hashedParams]; active {
+		settled := make(chan bool, 1)
+		settled <- true
+		return settled, true
+	}
 
 	pending, found := dwsm.pendingSubscriptions[hashedParams]
 	if !found {
@@ -1481,7 +1506,7 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 	reconnectInFlight := false
 	defer func() {
 		if !reconnectInFlight {
-			dwsm.cleanupSubscription(hashedParams)
+			dwsm.cleanupSubscription(hashedParams, activeSub)
 		}
 	}()
 
@@ -1579,9 +1604,12 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	}
 	defer activeSub.restoring.Store(false)
 
+	dwsm.lock.RLock()
+	connectedClients := len(activeSub.clientRouterIDs)
+	dwsm.lock.RUnlock()
 	utils.LavaFormatInfo("DirectWS: handling upstream disconnect",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
-		utils.LogAttr("connectedClients", len(activeSub.clientRouterIDs)),
+		utils.LogAttr("connectedClients", connectedClients),
 	)
 
 	// Try to reconnect the WebSocket connection
@@ -1590,7 +1618,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 		utils.LavaFormatError("DirectWS: reconnection failed, cleaning up subscription", err,
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
-		dwsm.cleanupSubscription(hashedParams)
+		dwsm.cleanupSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -1605,7 +1633,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 		utils.LavaFormatError("DirectWS: failed to get connection after reconnect", err,
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
-		dwsm.cleanupSubscription(hashedParams)
+		dwsm.cleanupSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -1615,7 +1643,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 		utils.LavaFormatError("DirectWS: failed to restore subscription", err,
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
-		dwsm.cleanupSubscription(hashedParams)
+		dwsm.cleanupSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -1625,8 +1653,29 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	// Increment subscription count on the NEW connection (matching initial creation behavior)
 	conn.IncrementSubscriptions()
 
+	if dwsm.beforeRestoreCommit != nil {
+		dwsm.beforeRestoreCommit()
+	}
+
 	// Update the ID mapping, message channel, and connection bookkeeping
 	dwsm.lock.Lock()
+	if dwsm.activeSubscriptions[hashedParams] != activeSub {
+		// The subscription was torn down while the node was answering the re-subscribe:
+		// its last client left, or it was dropped, and the teardown released everything
+		// the old upstream subscription held. Nothing owns the one just created, so it
+		// ends here — locally, on the node, and in the connection's count — instead of
+		// living on as an upstream subscription nobody reads and a count that stops the
+		// pool from ever scaling the connection down (MAG-2547).
+		dwsm.lock.Unlock()
+		utils.LavaFormatInfo("DirectWS: subscription was torn down while being restored, discarding the restored upstream subscription",
+			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+			utils.LogAttr("newUpstreamID", newUpstreamID),
+		)
+		newUpstreamSub.Unsubscribe()
+		dwsm.teardownUpstreamSubscription(conn, newUpstreamID, activeSub.subscribeMethod)
+		activeSub.upstreamPool.NotifySubscriptionRemoved(conn)
+		return
+	}
 	oldUpstreamID := activeSub.upstreamID
 	oldConnection := activeSub.upstreamConnection // Keep reference to old connection for cleanup
 
@@ -1642,9 +1691,10 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	}
 	dwsm.lock.Unlock()
 
-	// Notify the pool that the OLD connection no longer has this subscription
-	// This decrements the subscription count on the stale connection
-	if oldConnection != nil && oldConnection != conn {
+	// Notify the pool that the OLD connection no longer has this subscription. This
+	// decrements the subscription count on the stale connection — also when the pool handed
+	// back the same connection object, which it incremented above for the restored one.
+	if oldConnection != nil {
 		activeSub.upstreamPool.NotifySubscriptionRemoved(oldConnection)
 	}
 
@@ -1755,13 +1805,22 @@ func (dwsm *DirectWSSubscriptionManager) forgetClientLocked(clientKey string) {
 // local subscription ends and the pool may scale the connection down. The network call runs
 // off the lock. Caller holds dwsm.lock.
 func (dwsm *DirectWSSubscriptionManager) teardownSubscriptionLocked(hashedParams string, activeSub *directActiveSubscription, tellNode bool) {
+	// Everything the goroutine needs is read here, under the lock. A restore that is
+	// mid-flight rewrites upstreamSubscription, upstreamID and upstreamConnection under
+	// this same lock once the node answers, so reading them off the lock raced that
+	// write and could tear down whichever half of the restore it happened to see.
 	upstreamConn := activeSub.upstreamConnection
 	upstreamPool := activeSub.upstreamPool
+	upstreamSub := activeSub.upstreamSubscription
+	upstreamID := activeSub.upstreamID
+	subscribeMethod := activeSub.subscribeMethod
 	go func() {
 		if tellNode {
-			dwsm.teardownUpstreamSubscription(activeSub)
+			dwsm.teardownUpstreamSubscription(upstreamConn, upstreamID, subscribeMethod)
 		}
-		activeSub.upstreamSubscription.Unsubscribe()
+		if upstreamSub != nil {
+			upstreamSub.Unsubscribe()
+		}
 		activeSub.cancel()
 		activeSub.stopUpstreamListener()
 		if upstreamConn != nil {
@@ -1795,41 +1854,53 @@ const upstreamUnsubscribeTimeout = 10 * time.Second
 //
 // Best-effort by design: it also runs where the connection may already be gone
 // (upstream disconnect, shutdown), so a failure is traced rather than warned.
-// Must be called WITHOUT dwsm.lock held — it makes a network call.
-func (dwsm *DirectWSSubscriptionManager) teardownUpstreamSubscription(activeSub *directActiveSubscription) {
-	if activeSub == nil || activeSub.upstreamConnection == nil {
+// Must be called WITHOUT dwsm.lock held — it makes a network call. It takes the
+// connection and id as values rather than reading them off the subscription, because
+// a restore in flight rewrites those fields under dwsm.lock while this runs off it
+// (MAG-2547): the caller snapshots them while it still holds the lock.
+func (dwsm *DirectWSSubscriptionManager) teardownUpstreamSubscription(upstreamConn *UpstreamWSConnection, upstreamID, subscribeMethod string) {
+	if upstreamConn == nil {
 		return
 	}
-	client := activeSub.upstreamConnection.GetClient()
+	client := upstreamConn.GetClient()
 	if client == nil {
 		return
 	}
 
 	var params interface{}
 	if dwsm.apiInterface == "tendermintrpc" {
-		params = map[string]interface{}{"query": activeSub.upstreamID}
+		params = map[string]interface{}{"query": upstreamID}
 	} else {
-		params = []interface{}{activeSub.upstreamID}
+		params = []interface{}{upstreamID}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), upstreamUnsubscribeTimeout)
 	defer cancel()
 	if _, err := client.CallContext(ctx, json.RawMessage("1"),
-		getUnsubscribeMethod(activeSub.subscribeMethod), params, true, false); err != nil {
+		getUnsubscribeMethod(subscribeMethod), params, true, false); err != nil {
 		utils.LavaFormatTrace("DirectWS: upstream unsubscribe on disconnect failed",
 			utils.LogAttr("error", err),
-			utils.LogAttr("upstreamID", activeSub.upstreamID),
+			utils.LogAttr("upstreamID", upstreamID),
 		)
 	}
 }
 
-// cleanupSubscription cleans up a subscription
-func (dwsm *DirectWSSubscriptionManager) cleanupSubscription(hashedParams string) {
+// cleanupSubscription cleans up a subscription, but only the one its caller owns. The map
+// is keyed by params alone, so once owner has been torn down a new client can register a
+// fresh subscription under the same key; a late caller (a listener ending, a restore
+// failing) that cleaned up by key would then destroy that newer subscription.
+func (dwsm *DirectWSSubscriptionManager) cleanupSubscription(hashedParams string, owner *directActiveSubscription) {
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
 
 	activeSub, found := dwsm.activeSubscriptions[hashedParams]
 	if !found {
+		return
+	}
+	if activeSub != owner {
+		utils.LavaFormatTrace("DirectWS: subscription under this key is not the one being cleaned up, leaving it",
+			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+		)
 		return
 	}
 
@@ -1852,8 +1923,10 @@ func (dwsm *DirectWSSubscriptionManager) cleanupSubscription(hashedParams string
 	// pool notify goes after it so the connection is still live when it is used.
 	upstreamConn := activeSub.upstreamConnection
 	upstreamPool := activeSub.upstreamPool
+	upstreamID := activeSub.upstreamID
+	subscribeMethod := activeSub.subscribeMethod
 	go func() {
-		dwsm.teardownUpstreamSubscription(activeSub)
+		dwsm.teardownUpstreamSubscription(upstreamConn, upstreamID, subscribeMethod)
 		if upstreamConn != nil {
 			upstreamPool.NotifySubscriptionRemoved(upstreamConn)
 		}

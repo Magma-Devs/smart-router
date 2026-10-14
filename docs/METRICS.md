@@ -30,6 +30,8 @@ metrics manager.
 | `--metrics-listen-address` | `disabled` | Address to expose Prometheus metrics on, e.g. `:7779` or `localhost:7779`. The literal `disabled` turns the metrics server off entirely. |
 | `--optimizer-qos-sampling-interval` | `1s` | How often the optimizer-QoS sampler refreshes the `rpc_optimizer_selection_score` gauge and — when `--usage-otel-enabled` is set — emits `optimizer_qos` events to the OTel usage pipeline. |
 | `--enable-fork-detection` | `false` | Turns per-endpoint block-hash polling on. Off by default, which pins `rpc_endpoint_tracker_requests_total{kind="block_hash"}` at zero and is the single largest term in tracker request volume. Process-wide: it applies to every chain the process serves, and cannot be scoped to one of them. |
+| `--chain-tracker-idle-after` | `0` (off) | Idle mode ([CHAIN-TRACKER-IDLE-MODE.md](CHAIN-TRACKER-IDLE-MODE.md)). Once a chain+interface has served no client request for this long, its per-endpoint tracker polls pause until the next client request, which polls every endpoint once and is held up to 1s for the first poll to land before it is routed. Minimum `10s`. `rpc_endpoint_tracker_requests_total` flattens and `rpc_endpoint_tracker_gate_skips_total{source="idle"}` climbs while idle; `smartrouter_chain_idle` reads `1`. The router's own health relay does not count as a request and keeps running. Process-wide flag, per chain+interface state. |
+| `--chain-tracker-idle-poll-interval` | `0` (poll nothing while idle) | Idle heartbeat: while a chain is idle, still poll each endpoint once per this interval, so a dead upstream is noticed and the tip at wake is at most this old. Needs `--chain-tracker-idle-after`; a value below the normal poll cadence is raised to it. |
 
 ```bash
 # enable, then scrape
@@ -98,7 +100,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `rpc_endpoint_selection_score` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `score_type` | Selection scores by `score_type` (availability / latency / sync / stake / composite). |
 | `rpc_endpoint_latest_block` | Gauge | `spec`, `apiInterface`, `endpoint_id` | Latest block reported by the endpoint. |
 | `rpc_endpoint_url_latest_block` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `url`, `internal_path` | Latest block one node url of a provider answered with, written on every answered poll (the same block again included) and by the relay harvest: one series per (provider, url), for the stuck-provider alerts. `rpc_endpoint_latest_block` is written by every url of the provider, so it cannot show a url that froze while another moves on (MAG-4204). `url` is a fingerprint of the node url, the first 8 hex digits of its sha256, and nothing of the url itself, since a node url can hold an api key in any part of it; `/debug/endpoint-state` shows it as `URLFingerprint` beside each endpoint, on a router run with its debug server. `internal_path` is the spec path the url serves (`/v2`), empty for the root. ws/wss urls and unregistered urls have no series; a url whose tracker is removed loses it. |
-| `rpc_endpoint_url_answered_until_seconds` | Gauge | as `rpc_endpoint_url_latest_block` | Unix time until which the url counts as answering: its last answer, an answered poll or a harvested relay, plus max(2m, 2 x the chain's poll interval). Past it, the url has stopped answering: it is down, not stuck, and serves no stale block. Compare with `timestamp(rpc_endpoint_url_answered_until_seconds)`, the time the sample was scraped, not `time()`: with `time()` a scrape that arrives late flips an answering url to down, where `timestamp()` only delays the verdict. |
+| `rpc_endpoint_url_answered_until_seconds` | Gauge | as `rpc_endpoint_url_latest_block` | Unix time until which the url counts as answering: its last answer, an answered poll or a harvested relay, plus max(2m, 6 x the interval the url's tracker polls at): up to 4 polls the traffic gate skips, the poll after them, and one interval for that poll's answer. The tracker caps that interval at 1 minute, so BTC polls every minute and a BTC url that dies reads as down 6 minutes after its last answer; ETH and TON keep the 2-minute floor. Past it, the url has stopped answering: it is down, not stuck, and serves no stale block. Compare with `timestamp(rpc_endpoint_url_answered_until_seconds)`, the time the sample was scraped, not `time()`: with `time()` a scrape that arrives late flips an answering url to down, where `timestamp()` only delays the verdict. |
 | `rpc_endpoint_url_relays_serviced_total` | Counter | as `rpc_endpoint_url_latest_block` | Relays one node url of a provider served successfully: the per-url counterpart of `rpc_endpoint_total_relays_serviced`, so a page about a url can ask whether customers' requests reach it. |
 | `rpc_endpoint_fetch_latest_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Latest-block fetch failures. An **event** counter, not a request counter — see the note below. |
 | `rpc_endpoint_fetch_block_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Failed specific-block fetches. |
@@ -106,7 +108,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `rpc_endpoint_fetch_block_success` | Counter | `spec`, `apiInterface`, `endpoint_id` | Successful specific-block fetches. |
 | `rpc_endpoint_tracker_requests_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `kind` | Upstream requests the per-endpoint chain tracker actually sent, by `kind` (`latest_block`, `block_hash`). The only metric that measures tracker **request volume** — see the note below. |
 | `rpc_endpoint_tracker_gate_errors_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `op` | Failed calls to the shared fleet observation store, by `op`: `fetch` (reading a peer's observation before polling — the pod polled instead) or `publish` (sharing this pod's own observation). Non-zero means the cache backend is unreachable, slow, or older than the observation RPCs. |
-| `rpc_endpoint_tracker_gate_skips_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `source` | Poll cycles the tracker's traffic gate suppressed (no upstream request sent), by `source`: `relay` (served traffic kept the tip fresh) or `peer` (another pod's poll, borrowed through the cache backend — needs `--shared-state` + `--cache-be`). The other half of the tracker's cadence next to `rpc_endpoint_tracker_requests_total`. |
+| `rpc_endpoint_tracker_gate_skips_total` | Counter | `spec`, `apiInterface`, `endpoint_id`, `source` | Poll cycles the tracker's traffic gate suppressed (no upstream request sent), by `source`: `relay` (served traffic kept the tip fresh), `peer` (another pod's poll, borrowed through the cache backend — needs `--shared-state` + `--cache-be`), or `idle` (the chain served no client request within `--chain-tracker-idle-after`). The other half of the tracker's cadence next to `rpc_endpoint_tracker_requests_total`. |
 
 > **Tracker requests vs. fetch events.** `rpc_endpoint_fetch_latest_success` counts NEW BLOCK
 > detections and `rpc_endpoint_fetch_latest_fails` counts latest-block fetch failures. Neither
@@ -132,6 +134,17 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 > and the gate's skip budget still forces a local poll every few ticks, so `requests_total` never
 > drops to zero on a live endpoint. On a multi-replica deployment, `peer` skips climbing while
 > `requests_total{kind="latest_block"}` flattens is the feature working.
+>
+> `source="idle"` is idle mode (`--chain-tracker-idle-after`): the chain served no client request
+> for the idle window, so nobody would read the poll's answer and every tick is skipped — this one
+> IS unbounded, so `requests_total` does drop to zero on an idle chain (or to the heartbeat rate
+> with `--chain-tracker-idle-poll-interval`). `smartrouter_chain_idle` reads `1` meanwhile, and
+> `/debug/endpoint-state` reports `IdleMode` (`off` / `active` / `idle`), `LastClientRelay`,
+> `IdleSince` and `WakeInProgress` per row. The next client request ends it: every endpoint is
+> polled once (a burst of `requests_total`), and `/debug/probe-loop` shows `QoSFeedPausedIdle`
+> and `HeadStallPausedIdle` flipping back to `false` once the burst is done — while idle the prober
+> withholds its QoS feed rather than score every provider unavailable for being unpolled, and skips
+> the head-stall step rather than mark a url stuck for not having been polled yet.
 >
 > `peer` stuck at zero has several unrelated causes. `rpc_endpoint_tracker_gate_errors_total`
 > narrows it to two groups, and the log separates the pair that share a metric shape:
@@ -217,6 +230,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `smartrouter_overall_health_breakdown` | Gauge | `spec`, `apiInterface` | Per-chain/interface health. |
 | `smartrouter_latest_block` | Gauge | `spec`, `apiInterface` | Latest block known to the router. |
 | `smartrouter_latest_block_regressions_total` | Counter | `spec`, `apiInterface`, `reason` | Times the router's latest block moved backwards; each one also logs `chain latest block went backwards` at ERROR. `reason="consensus"`: the tip led the endpoint majority by more than the outlier threshold and was snapped down to it. `reason="stale_tip"`: nothing re-confirmed the tip for a TTL and a lower observation was adopted. Alert on `increase(...) > 0`. |
+| `smartrouter_chain_idle` | Gauge | `spec`, `apiInterface` | Idle mode state: `1` while the chain has served no client request within `--chain-tracker-idle-after` and its tracker polls are paused, `0` while active. Absent when idle mode is off. Published by the probe loop every cycle (5 s), not on transitions. The infra `sr-tip-frozen` alert skips a router whose every pod reads `1`. |
 | `smartrouter_protocol_version` | Gauge | `version` | Encoded protocol version. |
 
 #### WebSocket
@@ -243,6 +257,48 @@ with read/write.
 | `smartrouter_requests_debug_trace_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Debug/trace addon requests. |
 | `smartrouter_requests_archive_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Archive requests. |
 | `smartrouter_requests_batch_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Batch requests. |
+
+These count **relays**, not client requests: a request retried, hedged or
+cross-validated increments them once per attempt, and the router's own tracker
+traffic is in them too. For what the client experienced, use the per-customer
+family below, summed over `customer`.
+
+#### Per customer — the `project-id` header
+
+A caller may label each request with its own customer id in the `project-id`
+header (HTTP header or gRPC metadata; on a WebSocket, on the upgrade request).
+The router counts the request under that label and does nothing else with it:
+the header is never sent to an upstream, and it is not part of the cache key or
+of any routing decision. Requests without it are counted under
+`customer="DefaultDappID"`.
+
+Each client request is counted once, after the reply, with its final outcome.
+A subscribe is counted once, whether it succeeds or fails; the pushes on an
+open subscription are not. A
+request the router could not parse is not counted.
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_customer_requests_total` | Counter | `spec`, `apiInterface`, `customer`, `method` | Client requests. |
+| `smartrouter_customer_requests_failed_total` | Counter | `spec`, `apiInterface`, `customer`, `method` | Client requests that ended in an error to the client. |
+| `smartrouter_customer_end_to_end_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `customer` | Latency of successful client requests. No `method`: it is the family whose series multiply. |
+| `smartrouter_customer_overflow_total` | Counter | `spec` | Values collapsed to `customer="other"`. |
+
+`customer` is bounded: the first 512 distinct values per spec keep their own
+series for the life of the process, and later ones — or any value longer than
+128 characters — become `customer="other"`. Non-zero
+`smartrouter_customer_overflow_total` means that spec's per-customer numbers
+are lossy. `method` is normalized as on `smartrouter_requests_total`.
+
+```promql
+# requests per customer per chain
+sum by (customer, spec) (increase(smartrouter_customer_requests_total[1h]))
+# success rate per customer and method
+1 - sum by (customer, method) (rate(smartrouter_customer_requests_failed_total[5m]))
+  / sum by (customer, method) (rate(smartrouter_customer_requests_total[5m]))
+# p95 per customer per chain
+histogram_quantile(0.95, sum by (customer, spec, le) (rate(smartrouter_customer_end_to_end_latency_milliseconds_bucket[5m])))
+```
 
 #### Batch requests and the `method` label
 

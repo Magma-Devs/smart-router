@@ -397,11 +397,8 @@ budget, as it did before these bounds.
 A value at or above the request's own budget turns hedging off for that request. The window is also
 the hedge interval, and the budget is never shorter than the window, so such a value makes the two
 equal and a hedge could only fire as the budget runs out. Retrying after a failed attempt works as
-it does without the header, but an endpoint that goes quiet holds the request for the whole budget.
-Such a request also gets no backup-reserve hedge (MAG-3923). That hedge goes out one window before
-the budget ends, but never before the first window has passed, so when the window equals the budget
-there is no point inside the budget for it and it is not armed: if the primaries go quiet, the
-backup tier is never tried.
+it does without the header, but an endpoint that goes quiet holds the request for the whole budget,
+and no other endpoint, primary or backup, is tried while it does.
 
 `--max-caller-relay-timeout` lets callers extend the budget, up to its value:
 
@@ -410,8 +407,7 @@ backup tier is never tried.
 ```
 
 A request extended this way is one of those: its window is its whole budget, so one quiet endpoint
-can hold it for as long as the caller asked, up to the flag's value, and it gets no backup-reserve
-hedge either.
+can hold it for as long as the caller asked, up to the flag's value.
 
 A reply to a request that carried the header includes `Lava-Relay-Timeout-Applied`: the window the
 router actually used, as a Go duration. Like the router's other reply headers, it is absent when the
@@ -525,10 +521,7 @@ User Request --> Smart Router --> Provider Selection (QoS-based)
 
 1. **Primary Attempt**: Tries direct-rpc providers first (best QoS selected)
 2. **Failure Detection**: Detects errors, timeouts, or unavailability
-3. **Automatic Failover**: Switches to backup providers transparently. A primary that stops answering
-   (rather than refusing) is still "busy" until the budget ends, so a read with no answer yet is also
-   hedged to a backup one attempt window (`--min-relay-timeout` floor) before the processing budget
-   runs out, so the backup still has a full window to answer. Writes are never hedged.
+3. **Automatic Failover**: Switches to backup providers transparently
 4. **Recovery**: Monitors primary providers and switches back when healthy
 
 ## Monitoring
