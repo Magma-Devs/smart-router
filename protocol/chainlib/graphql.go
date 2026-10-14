@@ -143,10 +143,11 @@ func (apip *GraphQLChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 // policy: a request pairing executeTransaction with a query resolves to a stateful api, so the
 // cross-validation stateful guard still sees the write.
 //
-// A root field the spec does not declare is refused, introspection included: `__schema`,
-// `__type` and a root-level `__typename` are served only if the spec declares them as apis, like
-// any other operation. GraphiQL and schema codegen introspect on connect, so they need either
-// that or a direct connection to a node.
+// A root field the spec does not declare is served the way an undeclared method is on every
+// interface: getSupportedApi falls back to the default api (`Default-<field>`, 20 compute units,
+// deterministic, latest block). Introspection is no exception — `__schema`, `__type` and a
+// root-level `__typename` are relayed to the node, so GraphiQL and schema codegen work through
+// the router. A mutation is still a write whatever its root fields resolve to (see below).
 func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType string, metadata []pairingtypes.Metadata, extensionInfo extensionslib.ExtensionInfo) (ChainMessage, error) {
 	if apip == nil {
 		return nil, errors.New("GraphQLChainParser not defined")
