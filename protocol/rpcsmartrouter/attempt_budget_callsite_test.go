@@ -35,6 +35,7 @@ func (m *budgetCallSiteStateMachine) GetRelayTaskChannel() (chan relaycore.Relay
 }
 func (m *budgetCallSiteStateMachine) UpdateBatch(err error)             {}
 func (m *budgetCallSiteStateMachine) GetSelection() relaycore.Selection { return relaycore.Stateless }
+
 func (m *budgetCallSiteStateMachine) GetCrossValidationParams() *common.CrossValidationParams {
 	return nil
 }
