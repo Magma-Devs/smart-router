@@ -81,6 +81,16 @@ const (
 // (MAG-4242). A closed sender, or one whose context has ended, reports TrySendClosed: a caller
 // that drops slow receivers must not take a receiver that left for one.
 func (scs *SafeChannelSender[T]) TrySend(msg T) TrySendOutcome {
+	return scs.SendWithin(msg, 0)
+}
+
+// SendWithin is TrySend with a bounded wait: when the receiver's channel is full it waits up to
+// grace for room before reporting TrySendFull. A receiver that is reading, however slowly, frees
+// a slot within the grace and gets the message; only one that is a full channel behind and frees
+// nothing for grace is reported full. The wait holds the sender's lock, as Send's retries do, so
+// a Close waits for it: keep grace short. A context that ends during the wait reports
+// TrySendClosed.
+func (scs *SafeChannelSender[T]) SendWithin(msg T, grace time.Duration) TrySendOutcome {
 	scs.lock.Lock()
 	defer scs.lock.Unlock()
 	if scs.closed || scs.ctx.Err() != nil {
@@ -90,6 +100,18 @@ func (scs *SafeChannelSender[T]) TrySend(msg T) TrySendOutcome {
 	case scs.ch <- msg:
 		return TrySendDelivered
 	default:
+	}
+	if grace <= 0 {
+		return TrySendFull
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case scs.ch <- msg:
+		return TrySendDelivered
+	case <-scs.ctx.Done():
+		return TrySendClosed
+	case <-timer.C:
 		return TrySendFull
 	}
 }

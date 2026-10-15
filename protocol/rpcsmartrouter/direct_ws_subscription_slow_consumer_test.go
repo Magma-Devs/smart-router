@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"encoding/json"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,12 +35,13 @@ func drainedUntilClosed(replies <-chan *pairingtypes.RelayReply, timeout time.Du
 	}
 }
 
-// TestSlowClientIsDroppedNotWaitedFor is MAG-4242 item 8 on the WebSocket manager. Two clients
-// share one upstream subscription; one never reads. Before the fix the fan-out waited up to
-// 10 ms per push for the slow client (stalling the fast one), then lost the push with nothing
-// counted and nothing told. Now the slow client is dropped once it is a buffer behind — counted,
-// its channel closed so its subscription visibly ends — and the fast client is never stalled.
-func TestSlowClientIsDroppedNotWaitedFor(t *testing.T) {
+// TestSlowClientIsDroppedNotWaitedOnEveryPush is MAG-4242 item 8 on the WebSocket manager. Two
+// clients share one upstream subscription; one never reads. Before the fix the fan-out waited up
+// to 10 ms on every push for the slow client (stalling the fast one), then lost the push with
+// nothing counted and nothing told. Now the slow client is dropped once it is a buffer behind and
+// frees no room within subscriptionClientSendGrace — counted, its channel closed so its
+// subscription ends — and the fast client waits for it once, for the grace, not on every push.
+func TestSlowClientIsDroppedNotWaitedOnEveryPush(t *testing.T) {
 	srv := newMockSubscriptionServer()
 	srv.messageInterval = time.Millisecond
 	t.Cleanup(srv.Close)
@@ -80,4 +82,76 @@ func TestSlowClientIsDroppedNotWaitedFor(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the fast client's channel did not close on disconnect")
 	}
+}
+
+// readEvery drains a client's channel, spending perFrame on each push the way the ingress
+// spends time handing a frame to the client's socket, and counts what arrives. The returned
+// channel closes when the client's channel does.
+func readEvery(replies <-chan *pairingtypes.RelayReply, perFrame time.Duration) (*atomic.Int64, <-chan struct{}) {
+	var received atomic.Int64
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		for range replies {
+			received.Add(1)
+			for start := time.Now(); time.Since(start) < perFrame; {
+			}
+		}
+	}()
+	return &received, closed
+}
+
+// requireEveryPushOrEnd waits until the client has every one of want pushes, and fails as soon as
+// its channel is closed under it instead.
+func requireEveryPushOrEnd(t *testing.T, received *atomic.Int64, closed <-chan struct{}, want int64) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		select {
+		case <-closed:
+			return true
+		default:
+			return received.Load() == want
+		}
+	}, 10*time.Second, time.Millisecond, "the client got %d of %d pushes", received.Load(), want)
+	select {
+	case <-closed:
+		t.Fatalf("the client's subscription was ended under it after %d of %d pushes", received.Load(), want)
+	default:
+	}
+}
+
+// TestBurstyClientThatReadsIsNotDropped: a node publishes a block's logs back to back, and a
+// client that reads every push, only a little slower than they arrive, falls a buffer behind
+// within microseconds of the burst's start. It is keeping up; it must get every push and keep
+// its subscription. Dropped at the first full channel, a client reading 20,000 pushes a second
+// lost its subscription a few hundred pushes into a 1000-log burst.
+func TestBurstyClientThatReadsIsNotDropped(t *testing.T) {
+	srv := newMockSubscriptionServer()
+	srv.messageInterval = time.Hour // only the burst below
+	t.Cleanup(srv.Close)
+	counter := &droppedClientsCounter{}
+	manager := NewDirectWSSubscriptionManager(counter, "jsonrpc", "ETH", "jsonrpc",
+		[]*common.NodeUrl{{Url: srv.URL()}}, nil, nil, nil)
+	t.Cleanup(manager.Close)
+	h := &releaseHarness{t: t, srv: srv, manager: manager}
+
+	sub := h.subscribe("ws-1")
+	_, upstreamID := h.upstreamOf(h.subscriptionOf(sub.clientKey))
+	received, closed := readEvery(sub.replies, 50*time.Microsecond)
+
+	const burst = 1000
+	h.srv.writeToRouter(t, func(write func([]byte)) {
+		for i := range burst {
+			frame, err := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"method":  "eth_subscription",
+				"params":  map[string]any{"subscription": upstreamID, "result": map[string]any{"logIndex": i}},
+			})
+			require.NoError(t, err)
+			write(frame)
+		}
+	})
+	requireEveryPushOrEnd(t, received, closed, burst)
+	require.True(t, h.attached(sub.clientKey))
+	require.Zero(t, counter.dropped.Load(), "a client that reads every push was counted as a slow consumer")
 }

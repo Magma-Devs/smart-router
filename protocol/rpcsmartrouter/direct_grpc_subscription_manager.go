@@ -1006,17 +1006,17 @@ func (dgm *DirectGRPCSubscriptionManager) routeMessageToClients(
 		}
 		// TrySendClosed is a client leaving by another path: its stream ended and the listener's
 		// UnsubscribeAll is on the way. Only a full channel is a client that did not keep up.
-		if info.sender.TrySend(reply) == common.TrySendFull {
+		if info.sender.SendWithin(reply, subscriptionClientSendGrace) == common.TrySendFull {
 			dgm.dropSlowClient(activeSub, clientKey)
 		}
 	}
 }
 
 // dropSlowClient ends the stream of a client whose reply channel is full: it has fallen
-// subscriptionClientReplyBuffer pushes behind and is not catching up. The client's stream ends
-// with errSlowConsumer rather than losing the push silently, and the fan-out never waited for
-// it, so the other clients of the shared subscription were not stalled. The drop is counted,
-// and the subscription is torn down when this was its last client.
+// subscriptionClientReplyBuffer pushes behind and freed no room within
+// subscriptionClientSendGrace. The client's stream ends with errSlowConsumer rather than losing
+// the push silently, and the fan-out waited for it once, for the grace, rather than on every push.
+// The drop is counted, and the subscription is torn down when this was its last client.
 func (dgm *DirectGRPCSubscriptionManager) dropSlowClient(activeSub *grpcActiveSubscription, clientKey string) {
 	activeSub.lock.RLock()
 	_, attached := activeSub.connectedClients[clientKey]

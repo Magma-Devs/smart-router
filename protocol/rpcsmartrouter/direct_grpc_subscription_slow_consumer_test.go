@@ -85,3 +85,30 @@ func TestGRPCDepartedJoinerIsNotCountedAsSlow(t *testing.T) {
 	require.Zero(t, counter.dropped.Load(), "a client that hung up was counted as one that did not keep up")
 	require.NoError(t, manager.SubscriptionEndError(joinerKey), "a client that hung up was given the slow-consumer status")
 }
+
+// TestGRPCBurstyClientThatReadsIsNotDropped: the gRPC side of TestBurstyClientThatReadsIsNotDropped.
+// A client reading every message at 20,000 a second lost its stream to a 300-message burst when
+// the first full channel dropped it.
+func TestGRPCBurstyClientThatReadsIsNotDropped(t *testing.T) {
+	upstream := startFakeStreamingUpstream(t)
+	manager := newManagerAgainstUpstream(t, upstream.addr)
+	counter := &droppedClientsCounter{}
+	manager.metricsManager = counter
+	defer manager.Stop()
+
+	_, replies, err := manager.StartSubscription(context.Background(), newGrpcSubscriptionMessage(t), "dapp", "1.1.1.1", "conn-1", nil)
+	require.NoError(t, err)
+	requireUpstreamStreamOpened(t, upstream)
+	received, closed := readEvery(replies, 50*time.Microsecond)
+
+	const burst = 300
+	for i := range burst {
+		select {
+		case upstream.messages <- marshalStreamPayload(t, fmt.Sprintf("checkpoint-%d", i)):
+		case <-closed:
+			t.Fatalf("the client's stream was ended under it after %d of %d messages", received.Load(), burst)
+		}
+	}
+	requireEveryPushOrEnd(t, received, closed, burst)
+	require.Zero(t, counter.dropped.Load(), "a client that reads every message was counted as a slow consumer")
+}

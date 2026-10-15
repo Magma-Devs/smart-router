@@ -729,8 +729,8 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		)
 	}
 
-	// Create reply channel for this client. Buffered for a burst; a client that lets it fill
-	// is dropped as a slow consumer (dropSlowClient), never waited for.
+	// Create reply channel for this client. Buffered for a burst; a client that lets it fill and
+	// frees no room within subscriptionClientSendGrace is dropped as a slow consumer (dropSlowClient).
 	repliesChannel := make(chan *pairingtypes.RelayReply, subscriptionClientReplyBuffer)
 	safeChannelSender := common.NewSafeChannelSender(ctx, repliesChannel)
 
@@ -1602,7 +1602,7 @@ func (dwsm *DirectWSSubscriptionManager) routeMessageToClients(
 			Data: rewrittenMsg,
 		}
 
-		switch info.sender.TrySend(reply) {
+		switch info.sender.SendWithin(reply, subscriptionClientSendGrace) {
 		case common.TrySendFull:
 			dwsm.dropSlowClient(activeSub.hashedParams, activeSub, clientKey)
 			continue
@@ -1618,11 +1618,12 @@ func (dwsm *DirectWSSubscriptionManager) routeMessageToClients(
 }
 
 // dropSlowClient releases a client whose reply channel is full: it has fallen
-// subscriptionClientReplyBuffer pushes behind and is not catching up. Its channel closes, which
-// ends its subscription at the ingress, rather than losing the push silently (a gap in a
-// subscription stream is worse than a stream that visibly ends) or waiting for it (which stalled
-// every other client of the shared subscription). The drop is counted, and the subscription is
-// torn down when this was its last client. A client already gone by another path is left alone.
+// subscriptionClientReplyBuffer pushes behind and freed no room within
+// subscriptionClientSendGrace. Its channel closes, which ends its subscription at the ingress,
+// rather than losing the push silently (a gap in a subscription stream is worse than a stream
+// that visibly ends) or waiting for it on every push (which stalled every other client of the
+// shared subscription). The drop is counted, and the subscription is torn down when this was its
+// last client. A client already gone by another path is left alone.
 func (dwsm *DirectWSSubscriptionManager) dropSlowClient(hashedParams string, activeSub *directActiveSubscription, clientKey string) {
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
