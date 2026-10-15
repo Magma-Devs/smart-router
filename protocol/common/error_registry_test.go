@@ -145,7 +145,7 @@ func TestErrorRegistry_GetLavaErrorByName(t *testing.T) {
 
 func TestErrorRegistry_IsRetryableStates(t *testing.T) {
 	assert.True(t, isRetryable(1001))  // CONNECTION_TIMEOUT
-	assert.False(t, isRetryable(1004)) // TLS_MISMATCH
+	assert.True(t, isRetryable(1004))  // TLS_MISMATCH: one endpoint's misconfiguration; another endpoint has every chance (MAG-4242)
 	assert.False(t, isRetryable(3001)) // NONCE_TOO_LOW
 	assert.True(t, isRetryable(0))     // UNKNOWN — retryable by default
 }
@@ -823,6 +823,15 @@ func TestDetectConnectionError_StringFallbackTable(t *testing.T) {
 		{"connection reset", "read tcp: connection reset by peer", LavaErrorConnectionReset},
 		// Row 10: envoy connection termination (distinct from refused)
 		{"connection termination", "upstream: connection termination", LavaErrorConnectionReset},
+		// Rows 11–17: DNS, http-served-as-https and EOF, in the resolver's, net/http's and io's
+		// wording and in the node error handler's rewording.
+		{"no such host", `post "https://rpc.example/": dial tcp: lookup rpc.example: no such host`, LavaErrorDNSFailure},
+		{"server misbehaving", "lookup rpc.example on 10.0.0.2:53: server misbehaving", LavaErrorDNSFailure},
+		{"dns resolution failed (rewritten)", "provider side failed sending message, reason: dns resolution failed", LavaErrorDNSFailure},
+		{"http served as https", `post "https://rpc.example/": http: server gave http response to https client`, LavaErrorTLSMismatch},
+		{"http served as https (rewritten)", "provider side failed sending message, reason: misconfigured http endpoint as https", LavaErrorTLSMismatch},
+		{"unexpected eof", "failed reading response: unexpected eof", LavaErrorConnectionClosed},
+		{"eof (rewritten)", "provider side failed sending message, reason: end of input stream reached", LavaErrorConnectionClosed},
 		// Negative case: nothing matches
 		{"unrelated error", "some unrelated node error", nil},
 

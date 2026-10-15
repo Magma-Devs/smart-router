@@ -261,12 +261,14 @@ func NewGRPCConnector(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl
 // the auth attachment cannot be present on one path and missing on another — which is the
 // class of bug MAG-2218 was.
 func (connector *GRPCConnector) grpcDialOptions(transport grpc.DialOption) []grpc.DialOption {
-	opts := []grpc.DialOption{
+	authOpts := connector.nodeUrl.GrpcAuthDialOptions()
+	opts := make([]grpc.DialOption, 0, 3+len(authOpts))
+	opts = append(opts,
 		grpc.WithBlock(),
 		transport,
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(MaxCallRecvMsgSize)),
-	}
-	return append(opts, connector.nodeUrl.GrpcAuthDialOptions()...)
+	)
+	return append(opts, authOpts...)
 }
 
 func getTlsConf(nodeUrl common.NodeUrl) *tls.Config {

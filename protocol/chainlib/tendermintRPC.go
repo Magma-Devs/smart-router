@@ -205,6 +205,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
 			latestRequestedBlock = parsedBlock
+			earliestRequestedBlock = foldParsedEarliest(parsedBlock, parsedInput)
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
@@ -242,6 +243,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 
 		if msgsLength > 1 {
 			latestRequestedBlock, earliestRequestedBlock = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
+			earliestRequestedBlock = foldParsedEarliest(earliestRequestedBlock, parsedInput)
 		}
 	}
 
@@ -252,13 +254,12 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 			tenderMsg.Path = urlPath // add path
 		}
 		nodeMsg = apip.newChainMessage(api, latestRequestedBlock, blockHashes, &tenderMsg, apiCollection, parsedDefault)
-	} else {
-		// For single-element batches, earliestRequestedBlock was never updated by
-		// CompareRequestedBlockInBatch (which only runs for idx > 0). With one message,
-		// earliest == latest.
-		if msgsLength == 1 {
-			earliestRequestedBlock = latestRequestedBlock
+		// A single request has no earliest of its own unless its parsers read a range lower bound;
+		// then the archive rule must judge the range on it.
+		if earliestRequestedBlock != latestRequestedBlock {
+			nodeMsg.earliestRequestedBlock = earliestRequestedBlock
 		}
+	} else {
 		var err error
 		nodeMsg, err = apip.newBatchChainMessage(api, latestRequestedBlock, earliestRequestedBlock, blockHashes, msgs, apiCollection, parsedDefault)
 		if err != nil {
@@ -489,7 +490,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, "", msg, "", dappID, userIp, metricsData, headers)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
+		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 
 		if err != nil {
 			// Check if batch size limit exceeded - return 429 rate limit error
@@ -563,7 +564,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, "", "", dappID, userIp, metricsData, headers)
 		msgSeed := strconv.FormatUint(guid, 10)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
+		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 		if err != nil {
 			// Get unique GUID response
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)

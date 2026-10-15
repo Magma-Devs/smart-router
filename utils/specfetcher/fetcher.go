@@ -304,8 +304,8 @@ type fetchResult struct {
 }
 
 // doRequest performs an HTTP request with the configured client and timeout.
-func (f *Fetcher) doRequest(ctx context.Context, method, url string, setHeaders func(*http.Request)) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+func (f *Fetcher) doRequest(ctx context.Context, url string, setHeaders func(*http.Request)) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -332,7 +332,7 @@ func (f *Fetcher) fetchFilesParallel(ctx context.Context, fileURLs []string, set
 			fetchCtx, cancel := context.WithTimeout(ctx, f.config.FileFetchTimeout)
 			defer cancel()
 
-			resp, err := f.doRequest(fetchCtx, http.MethodGet, url, setHeaders)
+			resp, err := f.doRequest(fetchCtx, url, setHeaders)
 			if err != nil {
 				result.errors = append(result.errors, fmt.Sprintf("%s: %v", url, err))
 				resultChan <- result

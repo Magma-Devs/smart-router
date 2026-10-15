@@ -11,7 +11,18 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-const MaximumNumberOfSelectionLockAttempts = 500
+// A caller that finds another selection in flight for the same request polls for it to finish,
+// every selectionLockPollInterval, for at most selectionLockMaxWait. The caller's context bounds
+// the wait first; a deadline on it is honoured as a deadline, not only once its timer fires.
+// GetSessions used to add a one-second context.WithTimeout of its own per call — a timer and a
+// cancel func per relay for a wait that almost never happens — so the bound lives here now, and
+// the common path allocates nothing (MAG-4244). That second always ended the wait first (the
+// 500-poll loop under it needed 2.5 s), and it ended it as a done context, so the bound is that
+// second and ends the same way.
+const (
+	selectionLockPollInterval = 5 * time.Millisecond
+	selectionLockMaxWait      = time.Second
+)
 
 type BlockedProvidersInf interface {
 	GetBlockedProviders() []string
@@ -67,6 +78,9 @@ type UsedProviders struct {
 	// chain-native messages don't collide with broad Tier-1 substring
 	// matchers). Empty means classification falls back to Tier-1 only.
 	chainID string
+	// lastChanceTaken records that this request was already lent a disabled endpoint
+	// (TakeLastChance), so a retrying request is lent at most one.
+	lastChanceTaken bool
 }
 
 // SetChainID attaches a chain ID to this UsedProviders instance so that
@@ -79,6 +93,23 @@ func (up *UsedProviders) SetChainID(chainID string) {
 	up.lock.Lock()
 	defer up.lock.Unlock()
 	up.chainID = chainID
+}
+
+// TakeLastChance claims this request's single last chance: lending a disabled endpoint of a
+// provider the blocked-list fallback handed out. It returns true the first time and false after
+// that, so a request whose lent endpoint fails, and which then retries, is not lent one disabled
+// endpoint after another.
+func (up *UsedProviders) TakeLastChance() bool {
+	if up == nil {
+		return true
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	if up.lastChanceTaken {
+		return false
+	}
+	up.lastChanceTaken = true
+	return true
 }
 
 func (up *UsedProviders) CurrentlyUsed() int {
@@ -396,22 +427,36 @@ func (up *UsedProviders) TryLockSelection(ctx context.Context) error {
 	if up == nil {
 		return nil
 	}
-	for counter := 0; counter < MaximumNumberOfSelectionLockAttempts; counter++ {
+	// A request that is already over takes no selection, free lock or not: the loop this replaced
+	// looked at the context before its first attempt. Err allocates nothing.
+	if ctx.Err() != nil {
+		return ContextDoneNoNeedToLockSelectionError
+	}
+	if up.tryLockSelection() {
+		return nil // the common case: no other selection is running for this request
+	}
+	deadline := time.Now().Add(selectionLockMaxWait)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	for {
 		select {
 		case <-ctx.Done():
 			utils.LavaFormatTrace("Failed locking selection, context is done")
 			return ContextDoneNoNeedToLockSelectionError
 		default:
-			canSelect := up.tryLockSelection()
-			if canSelect {
-				return nil
-			}
-			time.Sleep(5 * time.Millisecond)
 		}
+		if up.tryLockSelection() {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(selectionLockPollInterval)
 	}
-
-	// if we got here we failed locking the selection.
-	return utils.LavaFormatError("Failed locking selection after MaximumNumberOfSelectionLockAttempts", nil, utils.LogAttr("GUID", ctx))
+	// Either bound ends the wait the way GetSessions' own one-second context used to.
+	utils.LavaFormatTrace("Failed locking selection, wait bound reached", utils.LogAttr("GUID", ctx), utils.LogAttr("maxWait", selectionLockMaxWait))
+	return ContextDoneNoNeedToLockSelectionError
 }
 
 func (up *UsedProviders) tryLockSelection() bool {

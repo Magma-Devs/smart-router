@@ -26,4 +26,9 @@ var ( // Consumer Side Errors
 	// ran", and only a sentinel makes the two distinguishable to errors.Is. Both must map to
 	// "do not trust the record" at the debug boundary (MAG-2649).
 	ErrorPollNowResultNotAwaited = errors.New("poll-now started but its result was not awaited")
+	// ErrorPollNowHeldOff means the poll goroutine took a WakePoll request and declined to send it:
+	// the url is held off after a rate limit, which the idle wake burst does not bypass (MAG-4165).
+	// No poll ran and no observation was written. The error also matches common.StatusCodeError429 and
+	// carries the remaining hold-off as its Retry-After.
+	ErrorPollNowHeldOff = errors.New("poll-now declined: the endpoint is held off after a rate limit")
 )

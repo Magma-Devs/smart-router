@@ -173,19 +173,12 @@ func New(cfg Config) (*Store, error) {
 
 	writeTracker := &endpointTracker{}
 	readTracker := writeTracker
-	writeClient, err := cfg.buildClient(cfg.Addresses, tlsCfg, creds, writeTracker)
-	if err != nil {
-		return nil, err
-	}
+	writeClient := cfg.buildClient(cfg.Addresses, tlsCfg, creds, writeTracker)
 	readClient := writeClient
 	if len(cfg.ReadAddresses) > 0 {
 		warnIfReadSplitIsDiscoveryScoped(cfg)
 		readTracker = &endpointTracker{}
-		readClient, err = cfg.buildClient(cfg.ReadAddresses, tlsCfg, creds, readTracker)
-		if err != nil {
-			_ = writeClient.Close()
-			return nil, err
-		}
+		readClient = cfg.buildClient(cfg.ReadAddresses, tlsCfg, creds, readTracker)
 	}
 
 	store, err := newStore(writeClient, readClient, cfg.KeyPrefix)
@@ -797,7 +790,7 @@ func (s *Store) GetHeight(ctx context.Context, key string) (int64, bool, error) 
 	}
 	value, parseErr := strconv.ParseInt(raw, 10, 64)
 	if parseErr != nil {
-		return 0, false, nil
+		return 0, false, nil //nolint:nilerr // a stored height that does not parse is a miss, not a failure; the next height write replaces it
 	}
 	return value, true, nil
 }

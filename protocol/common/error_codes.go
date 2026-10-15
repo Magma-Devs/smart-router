@@ -22,9 +22,12 @@ var (
 		Code: 1003, Name: "PROTOCOL_DNS_FAILURE", Category: CategoryInternal,
 		Description: "DNS resolution failed", Retryable: true,
 	})
+	// Retryable: the mismatch is this endpoint's configuration, and a retry lands on another
+	// endpoint; the misconfigured one is benched through EndpointAtFault. Non-retryable would stop
+	// the whole relay on one endpoint's misconfiguration.
 	LavaErrorTLSMismatch = registerError(&LavaError{
 		Code: 1004, Name: "PROTOCOL_TLS_MISMATCH", Category: CategoryInternal,
-		Description: "HTTP/HTTPS protocol mismatch", Retryable: false,
+		Description: "HTTP/HTTPS protocol mismatch", Retryable: true,
 	})
 	// MayHaveReachedNode: a reset arrives on an established connection.
 	LavaErrorConnectionReset = registerError(&LavaError{

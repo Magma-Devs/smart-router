@@ -259,6 +259,39 @@ func TestGraphQLChainParserRejectsMalformedRequest(t *testing.T) {
 	}
 }
 
+func TestGraphQLChainParserServesUndeclaredRootFields(t *testing.T) {
+	chainParser := newGraphQLTestParser(t)
+
+	// A root field the spec does not declare falls back to the default api, as an undeclared
+	// method does on every interface. Introspection goes the same way, and a cutover check that
+	// POSTs `{ __typename }` relies on it.
+	for _, test := range []struct {
+		body     string
+		rootName string
+	}{
+		{`{"query":"{ __typename }"}`, "__typename"},
+		{`{"query":"{ __schema { queryType { name } } }"}`, "__schema"},
+		{`{"query":"{ notInTheSpec }"}`, "notInTheSpec"},
+	} {
+		chainMessage, err := chainParser.ParseMsg("", []byte(test.body), graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+		require.NoError(t, err, "body %q should be served", test.body)
+		api := chainMessage.GetApi()
+		require.Equal(t, DefaultApiName+test.rootName, api.Name)
+		require.True(t, api.Enabled)
+		require.EqualValues(t, 0, api.Category.Stateful)
+	}
+
+	// The default api is a deterministic read; the mutation guard still makes an undeclared
+	// mutation a write.
+	chainMessage, err := chainParser.ParseMsg("",
+		[]byte(`{"query":"mutation { notInTheSpec(input: \"x\") { digest } }"}`),
+		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+	require.NoError(t, err)
+	require.Equal(t, DefaultApiName+"notInTheSpec", chainMessage.GetApi().Name)
+	require.EqualValues(t, 1, chainMessage.GetApi().Category.Stateful)
+	require.False(t, chainMessage.GetApi().Category.Deterministic)
+}
+
 func TestGraphQLChainParserChainBlockStats(t *testing.T) {
 	chainParser := newGraphQLTestParser(t)
 
