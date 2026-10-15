@@ -3,11 +3,16 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"runtime"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,6 +93,59 @@ func (ms *mockSubscriptionServer) writeToRouter(t *testing.T, frames func(write 
 	frames(func(frame []byte) { require.NoError(t, conns[0].WriteMessage(websocket.TextMessage, frame)) })
 }
 
+// allGoroutineStacks returns every goroutine's stack, growing the buffer until the dump fits: a
+// package run leaves enough goroutines behind to overflow a fixed one and cut stacks off.
+func allGoroutineStacks() string {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return string(buf[:n])
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// forwarderAlive reports whether the rpcclient goroutine forwarding upstreamSub's pushes still
+// runs. rpcclient ends it when it gives the subscription up, and a stack trace names it by its
+// receiver, so this tells one subscription's end from another's.
+func forwarderAlive(upstreamSub *rpcclient.ClientSubscription) bool {
+	return strings.Contains(allGoroutineStacks(), fmt.Sprintf("(*ClientSubscription).run(%p", upstreamSub))
+}
+
+// overflowSubscription makes rpcclient end a subscription with ErrSubscriptionQueueOverflow on a
+// connection that stays healthy: while the manager's lock holds every listener in
+// routeMessageToClients, the node pushes more than rpcclient queues for one subscription (20000).
+// The listener sees the overflow once the lock is released.
+func overflowSubscription(t *testing.T, h *releaseHarness, activeSub *directActiveSubscription) {
+	t.Helper()
+	h.manager.lock.RLock()
+	upstreamSub, upstreamID := activeSub.upstreamSubscription, activeSub.upstreamID
+	h.manager.lock.RUnlock()
+	require.Eventually(t, func() bool { return forwarderAlive(upstreamSub) }, 5*time.Second, time.Millisecond,
+		"the stack trace no longer names the forwarder by its receiver")
+
+	h.manager.lock.Lock()
+	// Deferred too: a failed require must not leave the listeners, and the harness cleanup's
+	// manager.Close, blocked on the lock until the package times out.
+	unlock := sync.OnceFunc(h.manager.lock.Unlock)
+	defer unlock()
+	h.srv.writeToRouter(t, func(write func([]byte)) {
+		for i := range 20500 {
+			frame, err := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"method":  "eth_subscription",
+				"params":  map[string]any{"subscription": upstreamID, "result": map[string]any{"number": i}},
+			})
+			require.NoError(t, err)
+			write(frame)
+		}
+	})
+	require.Eventually(t, func() bool { return !forwarderAlive(upstreamSub) },
+		10*time.Second, 5*time.Millisecond, "rpcclient never gave up on the subscription's queue")
+	unlock()
+}
+
 // countReplies drains a client's channel in the background and counts what arrives.
 func countReplies(sub subscription) *atomic.Int64 {
 	var n atomic.Int64
@@ -143,6 +201,17 @@ func TestUpstreamError_RetiresTheSharedConnectionOnlyOnASocketFailure(t *testing
 					write(frame)
 				})
 				require.Eventually(t, func() bool { return h.subscriptionOf(first.clientKey) == nil }, 5*time.Second, 5*time.Millisecond)
+			},
+		},
+		{
+			name: "rpcclient gives up on the subscription's queue",
+			end: func(t *testing.T, h *releaseHarness, _ subscription, firstSub *directActiveSubscription, firstUpstreamID string) {
+				conn, _ := h.upstreamOf(firstSub)
+				overflowSubscription(t, h, firstSub)
+				require.Eventually(t, func() bool {
+					restoredConn, restoredID := h.upstreamOf(firstSub)
+					return restoredConn == conn && restoredID != firstUpstreamID
+				}, 5*time.Second, 5*time.Millisecond, "the subscription is restored on the same connection")
 			},
 		},
 		{
