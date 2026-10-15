@@ -1642,15 +1642,11 @@ func (dwsm *DirectWSSubscriptionManager) dropSlowClient(hashedParams string, act
 // on is dead, so the restore's ReconnectWithBackoff reconnects — with its backoff ladder — instead
 // of finding the pool "healthy" and handing the dead socket straight back to the re-subscribe,
 // which then had one dial inside rpcclient and no retry (MAG-4242). A subscription's own end
-// leaves the socket alone: the forward queue overflowing, or the node answering this one
-// subscription with an error, says nothing about the connection, and the restore re-subscribes
-// on it.
+// leaves the socket alone: the forward queue overflowing says nothing about the connection, and
+// the restore re-subscribes on it. A JSON-RPC error the node pushed on the subscription never
+// gets here: the listener reads that as the node ending the subscription and cleans it up.
 func (dwsm *DirectWSSubscriptionManager) retireConnectionOnUpstreamError(activeSub *directActiveSubscription, err error) {
 	if errors.Is(err, rpcclient.ErrSubscriptionQueueOverflow) {
-		return
-	}
-	var nodeErr *rpcclient.JsonError
-	if errors.As(err, &nodeErr) {
 		return
 	}
 	dwsm.lock.RLock()
