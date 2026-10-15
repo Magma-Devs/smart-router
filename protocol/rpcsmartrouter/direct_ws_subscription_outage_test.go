@@ -106,3 +106,32 @@ func TestTeardownUpstreamSubscription_SkipsADeadConnection(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	require.Equal(t, 1, h.upstreamCalls("eth_unsubscribe"), "a dead connection is not")
 }
+
+// TestUnsubscribeDuringOutage_ReleasesTheClient: the node is down and the pool is retrying with
+// backoff, so the subscription lives on to be restored, on a connection the listener marked dead
+// but the pool has not closed yet. The client's eth_unsubscribe must release it locally. Calling
+// the node made rpcclient redial into the outage: the unsubscribe failed, the client stayed
+// attached, and the restore later resumed the pushes it had asked to stop.
+func TestUnsubscribeDuringOutage_ReleasesTheClient(t *testing.T) {
+	h := newReleaseHarness(t)
+	sub := h.subscribe("ws-1")
+	countReplies(sub)
+	conn, _ := h.upstreamOf(h.subscriptionOf(sub.clientKey))
+
+	h.srv.setRefusing(true)
+	h.srv.dropConnections()
+	require.Eventually(t, func() bool { return h.srv.refusedDials.Load() >= 1 },
+		5*time.Second, 5*time.Millisecond, "the pool retries while the node is down")
+	require.False(t, conn.IsHealthy(), "the listener marked the connection dead")
+	require.NotNil(t, conn.GetClient(), "the pool closes the connection only once a reconnect lands")
+
+	h.unsubscribe(sub)
+	require.False(t, h.attached(sub.clientKey), "the client asked to leave")
+	require.Equal(t, 0, h.activeSubscriptionCount())
+	require.Equal(t, int64(0), h.manager.totalSubscriptions.Load())
+
+	// The node comes back: nothing is restored for a subscription nobody holds.
+	h.srv.setRefusing(false)
+	time.Sleep(300 * time.Millisecond)
+	require.Equal(t, 1, h.upstreamCalls("eth_subscribe"), "a subscription the client left was restored")
+}

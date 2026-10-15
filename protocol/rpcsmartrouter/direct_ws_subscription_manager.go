@@ -1027,7 +1027,16 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	var nodeResp []byte
 	if lastClient && conn != nil {
 		client := conn.GetClient()
-		if client != nil {
+		if client == nil || !conn.IsHealthy() {
+			// The socket this subscription lived on is gone, and the node lost the subscription
+			// with it, so there is nobody to tell. A call would only make rpcclient dial again to
+			// say goodbye — into the outage, while the pool is still reconnecting — and fail the
+			// client's unsubscribe. The local release below still runs (MAG-4242).
+			utils.LavaFormatDebug("DirectWS: no upstream unsubscribe for a subscription that died with its connection",
+				utils.LogAttr("upstreamID", upstreamID),
+				utils.LogAttr("clientKey", clientKey),
+			)
+		} else {
 			// Use a timeout: some gateways may not return eth_unsubscribe responses.
 			// Without timeout, CallContext blocks forever and the client gets no reply.
 			callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
