@@ -169,9 +169,21 @@ func (r *Registry) RecordRateLimit(provider, url string, retryAfter time.Duratio
 // RecordAnswer notes that url answered a request — with anything at all, success or a
 // genuine failure. The URL starts clean and the provider escalation is dropped: an
 // account that is serving again must not stay locked out by stale strikes.
+//
+// The URL's url-only entry (provider == url: the per-url chain tracker, WS and gRPC
+// subscriptions) is dropped too. Those paths record a 429 under the URL alone, and the
+// relay path answers under the provider's name; without this a relay serving the URL
+// fine would leave the URL's own strikes standing (MAG-4165).
 func (r *Registry) RecordAnswer(provider, url string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if provider != url {
+		r.clearLocked(url, url)
+	}
+	r.clearLocked(provider, url)
+}
+
+func (r *Registry) clearLocked(provider, url string) {
 	ps := r.providers[provider]
 	if ps == nil {
 		return

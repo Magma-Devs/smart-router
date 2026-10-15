@@ -388,8 +388,10 @@ signal that an upstream is refusing us for load.
 | `smartrouter_rate_limit_holdoff_seconds` | Histogram | `provider` | Applied hold-off duration per `recorded` event, in **seconds** (buckets `15, 30, 60, 120, 300, 600, 1800, 3600` — not the shared millisecond latency buckets). Shows upstream `Retry-After` magnitudes against the exponential default. |
 
 `provider` is the configured provider name on the relay / probe / re-verify paths. The
-ws-subscription path has no provider name and keys the registry by node URL; those keys
-are reduced to `scheme://host` before they become a label, because node URLs can embed
+WS and gRPC subscription paths and the per-url chain tracker key the registry by node URL
+(the tracker so that its poll's 429 holds that URL, not the provider, off — MAG-4165); those
+keys are reduced to `scheme://host` before they become a label, so a `sum by (provider)`
+shows a tracker's or a subscription's 429s under the host, not the provider name, because node URLs can embed
 API keys in their path or query and a credential must never reach a Prometheus series.
 
 ```promql

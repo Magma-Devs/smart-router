@@ -2,6 +2,7 @@ package endpointstate
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -208,6 +209,17 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 		)
 	}
 
+	// A 429 the upstream put inside the body of a 200 — or of a reply on an open WebSocket
+	// connection, where there is no status line — is a rate limit, not a parse failure: type it so
+	// the ChainTracker records a hold-off instead of retrying into the limit (MAG-4165).
+	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, parserInput); rateLimited != nil {
+		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited,
+			utils.LogAttr("chainID", ecf.chainID),
+			utils.LogAttr("endpoint", ecf.endpointURL),
+			utils.LogAttr("method", parsing.ApiName),
+		)
+	}
+
 	parsedInput := parser.ParseBlockFromReply(parserInput, parsing.ResultParsing, parsing.Parsers)
 	blockNum = parsedInput.GetBlock()
 	if blockNum == spectypes.NOT_APPLICABLE {
@@ -337,6 +349,15 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 		)
 	}
 
+	// Same body form as the head fetch: a 429 inside a 200 is a rate limit, not a parse failure.
+	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, parserInput); rateLimited != nil {
+		return "", responseData, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited,
+			utils.LogAttr("chainID", ecf.chainID),
+			utils.LogAttr("endpoint", ecf.endpointURL),
+			utils.LogAttr("method", parsing.ApiName),
+		)
+	}
+
 	res, err := parser.ParseBlockHashFromReplyAndDecode(parserInput, parsing.ResultParsing, parsing.Parsers)
 	if err != nil {
 		return "", responseData, utils.LavaFormatDebug(tagName+" failed ParseBlockHashFromReplyAndDecode",
@@ -382,7 +403,29 @@ func (ecf *EndpointPoller) CustomMessage(ctx context.Context, path string, data 
 	// CustomMessage has exactly one production caller: SVMChainTracker's getLatestBlockhash
 	// poll (the Solana latest-slot read). Counting it as a latest-block request is therefore
 	// accurate today; a second caller with different semantics would need its own kind.
-	return ecf.sendRawRequest(ctx, data, connectionType, apiName, metrics.TrackerRequestKindLatestBlock)
+	reply, err := ecf.sendRawRequest(ctx, data, connectionType, apiName, metrics.TrackerRequestKindLatestBlock)
+	if err != nil {
+		return reply, err
+	}
+	// The SVM poll unmarshals the raw reply itself, so a 429 inside a 200 never reached
+	// RateLimitedReplyError on the way: it decoded to slot 0 with no error and counted as an
+	// answered poll at block 0. Type it here, as FetchLatestBlockNum does for every other
+	// chain (MAG-4165).
+	var envelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(reply, &envelope) == nil && envelope.Error != nil {
+		if rateLimited := chainlib.RateLimitedErrorBody(ecf.chainID, envelope.Error.Code, envelope.Error.Message); rateLimited != nil {
+			return nil, utils.LavaFormatDebugErr(apiName+" upstream refused the request for rate", rateLimited,
+				utils.LogAttr("chainID", ecf.chainID),
+				utils.LogAttr("endpoint", ecf.endpointURL),
+			)
+		}
+	}
+	return reply, nil
 }
 
 // ObserveLatestBlockPoll records a single latest-block poll observation for this

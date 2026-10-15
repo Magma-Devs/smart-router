@@ -2,6 +2,8 @@ package chaintracker
 
 import (
 	"time"
+
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 )
 
 const (
@@ -88,6 +90,19 @@ type ChainTrackerConfig struct {
 	// preserved. PollNow (force) bypasses it — the wake burst that ends an idle period is a forced
 	// poll on every endpoint. Per-endpoint trackers set this when idle mode is on; nil is off.
 	IdleGate func(now time.Time, sinceLastRealPoll time.Duration) bool
+
+	// RateLimitHoldoff is the registry a rate-limited fetch records into and the first fetch
+	// consults before each attempt (docs/RATE-LIMIT-HOLDOFF.md). nil selects the process-wide
+	// holdoff.Shared; tests inject their own. RateLimitURL is the node URL; the tracker records
+	// its own 429s under the URL alone, the key the WS and gRPC subscription paths use, so a
+	// limited poll steers subscriptions off that URL without touching relay selection, which
+	// holds off whole providers. RateLimitProvider is the provider name the relay path records
+	// under: read only, so a relay's hold-off (and the provider escalation) slows the poll too.
+	// An empty provider reads the URL key alone; an empty URL falls back to the fetcher's
+	// endpoint URL (MAG-4165).
+	RateLimitHoldoff  *holdoff.Registry
+	RateLimitProvider string
+	RateLimitURL      string
 }
 
 func (cnf *ChainTrackerConfig) validate() error {

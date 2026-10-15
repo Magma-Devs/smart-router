@@ -406,7 +406,14 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 
 // GetOrCreateTracker returns an existing ChainTracker for the endpoint or creates a new one.
 // Thread-safe - uses lazy initialization to avoid creating trackers for unused endpoints.
+//
+// providerName is the name the relay path records rate-limit hold-offs under (the provider's
+// public address). The tracker reads the relay path's (provider, url) entry, so a relay's
+// hold-off or the provider escalation slows its poll; it records its own 429s under the url
+// alone, so a limited poll never holds the provider off for relay selection. Callers with no
+// provider in hand pass "" and the tracker reads the url key alone (MAG-4165).
 func (m *EndpointMonitor) GetOrCreateTracker(
+	providerName string,
 	endpoint *lavasession.Endpoint,
 	directConnection lavasession.DirectRPCConnection,
 ) (chaintracker.IChainTracker, error) {
@@ -487,6 +494,10 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// operator-tunable (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The
 		// global tracker leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
 		FlatPollInterval: m.flatPollInterval,
+		// Rate-limit hold-off keys: the relay path's provider name (read only) and this url,
+		// which the tracker's own 429s are recorded under (MAG-4165).
+		RateLimitProvider: providerName,
+		RateLimitURL:      endpointURL,
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
 		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker
 		// (above the generic/SVM wrapper split) so it suppresses Solana polls too — the old
@@ -610,7 +621,7 @@ func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTrack
 		default:
 		}
 
-		retryDelay := m.trackerStartRetryDelay(attempt)
+		retryDelay := m.trackerStartRetryDelayAfter(attempt, err)
 		m.setTrackerState(endpointURL, EndpointChainTrackerRetryingStart, err)
 		utils.LavaFormatWarning("ChainTracker startup failed; retrying", err,
 			utils.LogAttr("endpoint", endpointURL),
@@ -680,6 +691,20 @@ func (m *EndpointMonitor) specRequiresHeadOnly() bool {
 	}
 	byNum, _, hasByNum := m.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
 	return !hasByNum || byNum == nil
+}
+
+// trackerStartRetryDelayAfter is the wait before the next start attempt: the ladder below,
+// floored with the hold-off a rate-limited first fetch applied. The tracker hands that hold-off
+// back as the start error's Retry-After (chaintracker.fetchInitDataWithRetry) rather than
+// sleeping it out inside StartAndServe, so the wait happens HERE, with the tracker in
+// retrying_start and the 429 as its last error for the whole of it — where
+// /debug/endpoint-state and PollNow read it. A hold-off never shortens the ladder (MAG-4165).
+func (m *EndpointMonitor) trackerStartRetryDelayAfter(attempt int, err error) time.Duration {
+	delay := m.trackerStartRetryDelay(attempt)
+	if heldFor, ok := common.RetryAfterFrom(err); ok && heldFor > delay {
+		return heldFor
+	}
+	return delay
 }
 
 func (m *EndpointMonitor) trackerStartRetryDelay(attempt int) time.Duration {
@@ -866,7 +891,7 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 	// Polling, and the sentinel classification — is triggerPoll, shared with the idle wake
 	// burst. This wrapper adds what the debug caller needs: the record, and a diagnostic error
 	// naming the tracker's lifecycle state when no poll can be vouched for.
-	ran, pollErr := m.triggerPoll(ctx, endpointURL)
+	ran, pollErr := m.triggerPoll(ctx, endpointURL, false)
 	if errors.Is(pollErr, errNoTrackerForEndpoint) {
 		return EndpointObservation{}, false, utils.LavaFormatError("poll-now: no ChainTracker for endpoint", nil,
 			utils.LogAttr("endpoint", endpointURL),

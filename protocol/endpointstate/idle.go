@@ -269,7 +269,7 @@ func (m *EndpointMonitor) runWake(done chan struct{}, urls []string, startedAt t
 		wg.Add(1)
 		go func(url string) {
 			defer wg.Done()
-			ran, err := m.triggerPoll(ctx, url)
+			ran, err := m.triggerPoll(ctx, url, true)
 			switch {
 			case ran && err == nil:
 				polled.Add(1)
@@ -300,8 +300,12 @@ func (m *EndpointMonitor) runWake(done chan struct{}, urls []string, startedAt t
 // ran=true means the cycle executed and recorded, and err is the poll's own outcome. ran=false
 // means no poll can be vouched for: no tracker for the URL (errNoTrackerForEndpoint), or one of
 // the chaintracker sentinels — not delivered (still starting, retrying, stopped), unsupported
-// (dummy), or delivered but not awaited before ctx expired.
-func (m *EndpointMonitor) triggerPoll(ctx context.Context, endpointURL string) (ran bool, err error) {
+// (dummy), delivered but not awaited before ctx expired, or — for the wake burst only — declined
+// because the url is held off after a rate limit.
+//
+// wake selects the tracker's WakePoll, which declines while the url is held off instead of sending
+// into the hold-off (MAG-4165); the debug trigger passes false and polls regardless, as asked.
+func (m *EndpointMonitor) triggerPoll(ctx context.Context, endpointURL string, wake bool) (ran bool, err error) {
 	m.mu.RLock()
 	tracker, exists := m.trackers[endpointURL]
 	stateBefore := m.trackerStates[endpointURL]
@@ -327,12 +331,24 @@ func (m *EndpointMonitor) triggerPoll(ctx context.Context, endpointURL string) (
 		defer cancelDelivery()
 	}
 
-	pollErr := tracker.PollNowWithDeliveryDeadline(deliveryCtx, ctx)
+	var pollErr error
+	if waker, ok := tracker.(wakePoller); ok && wake {
+		pollErr = waker.WakePoll(deliveryCtx, ctx)
+	} else {
+		pollErr = tracker.PollNowWithDeliveryDeadline(deliveryCtx, ctx)
+	}
 	if errors.Is(pollErr, chaintracker.ErrorPollNowNotDelivered) || errors.Is(pollErr, chaintracker.ErrorPollNowUnsupported) ||
-		errors.Is(pollErr, chaintracker.ErrorPollNowResultNotAwaited) {
+		errors.Is(pollErr, chaintracker.ErrorPollNowResultNotAwaited) || errors.Is(pollErr, chaintracker.ErrorPollNowHeldOff) {
 		return false, pollErr
 	}
 	return true, pollErr
+}
+
+// wakePoller is the part of *chaintracker.ChainTracker the wake burst uses to skip a url that is
+// held off after a rate limit. Asserted rather than added to IChainTracker: the dummy tracker never
+// polls, so it has nothing to decline.
+type wakePoller interface {
+	WakePoll(deliveryCtx, resultCtx context.Context) error
 }
 
 // idleGate is the per-cycle decision wired into every tracker this monitor creates when idle

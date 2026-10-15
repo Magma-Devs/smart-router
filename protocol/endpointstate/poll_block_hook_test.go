@@ -179,7 +179,7 @@ func TestWorstCaseGapBetweenPolls_BoundsTheGapsUnderTheTrafficGate(t *testing.T)
 			}
 			m := NewEndpointMonitor(ctx, cfg)
 			t.Cleanup(m.Stop)
-			_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, &mockDirectRPCConnection{url: url})
+			_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, &mockDirectRPCConnection{url: url})
 			require.NoError(t, err)
 			gen, ok := m.ObservationGeneration(url)
 			require.True(t, ok)

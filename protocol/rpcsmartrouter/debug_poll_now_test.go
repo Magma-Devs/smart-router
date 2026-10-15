@@ -86,7 +86,7 @@ func TestDebugPollNow_TrackerNotPollingIs504(t *testing.T) {
 	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: deadURL}, 5, "jsonrpc")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = directConn.Close() })
-	_, err = monitor.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: deadURL, Enabled: true}, directConn)
+	_, err = monitor.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: deadURL, Enabled: true}, directConn)
 	require.NoError(t, err)
 
 	var offsetNano atomic.Int64
@@ -165,7 +165,7 @@ func TestDebugPollNow_PollsEndpointAndReturnsFreshRecord(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = directConn.Close() })
 
-	_, err = monitor.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: upstream.URL, Enabled: true}, directConn)
+	_, err = monitor.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: upstream.URL, Enabled: true}, directConn)
 	require.NoError(t, err)
 	require.Eventually(t, func() bool {
 		state, _, exists := monitor.GetTrackerState(upstream.URL)
