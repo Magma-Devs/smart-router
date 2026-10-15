@@ -26,6 +26,14 @@ Endpoints without the extension are skipped whichever tier they are in: on a fle
 
 Requests whose block the router cannot read are not routed to archive on their own: methods that name a block or transaction by hash (`eth_getTransactionReceipt`, `eth_getBlockByHash`, `debug_traceTransaction`, `trace_transaction`, Tendermint `block_by_hash`, and the like) and EIP-1898 block objects (`{"blockHash": …}` or `{"blockNumber": …}`) on `eth_call`, `eth_getBalance`, `eth_getStorageAt`, `eth_getTransactionCount`, `eth_getCode` and `eth_getProof`. They stay on the primaries unless the caller sends `lava-extension: archive`. When a caller asks for an extension no node on the router offers, the request is still served and the reply says so in the new `Lava-Extension-Unavailable` header, counted in `smartrouter_extension_unavailable_total` ([#450]).
 
+#### Also new since v1.4.0, the last graduated release
+
+v1.5.0 through v1.5.8 were pre-releases, so an upgrade from v1.4.0 brings everything in their sections below as well. Three of those changes are large enough to repeat here.
+
+- **REST errors are classified the way JSON-RPC errors are.** Until v1.5.5 a REST reply counted as the node's answer unless its status was 5xx or 429, so a Horizon `transaction_failed`, an Aptos `resource_not_found` or a Cosmos tx-not-found was filed as a success, never classified, and on a write the first of them ended the broadcast while a sibling node was still executing the transaction. Every status outside 2xx is now a node error with its own retry and fault verdict ([#448], v1.5.8): a 404 is data the node does not hold, retried on another node and never scored; 401, 402, 403, 407, 426 and 451 are the endpoint refusing the router, retried elsewhere without blaming the node; 409 is a transaction already known, so in a broadcast the accepting node's reply wins over the duplicates; a 400 "block beyond head" is a missing block; malformed-request statuses (400, 406, 411, 412, 414 to 417, 422, 428, 431) are the caller's error. A 5xx that carries the node's own JSON body reaches the caller as-is instead of a router-made 500, an empty 404 or 405 from a gateway in front of the node is a route refusal rather than the node's answer ([#435], v1.5.5), and a node answer the endpoint is not at fault for logs at DEBUG rather than ERROR. The rule was probed live against twelve REST API families; the full status map is section 9 of `docs/ERROR-REGISTRY-DESIGN.md`. v1.6.0 continues it: five `NODE_*` refusal codes are retried on another provider (breaking change 2), a "data not held" answer scores on sync only ([#460]), and an upstream EOF, DNS failure or http-as-https counts against the endpoint ([#518]).
+- **Solana replies are read by path, not decoded.** Every served reply on a Solana router used to be decoded whole to find `result.context.slot`; a 5.9 MB `getBlock` reply cost a full copy and 2.8 ms for a member that `getBlock` never carries. Since v1.5.4 ([#428]) the slot is read by path, `getBlock` replies are skipped outright (8 ns, no allocation), a reply whose result is a list is answered from its first byte, and a truncated reply yields no slot instead of a wrong one. The cache write snapshots the reply instead of deep-copying it through JSON, which took 33 ms and 15 to 20 MB per block and now takes about 100 ns ([#431]), and block-height extraction no longer decodes a whole block to run a block-hash rule that could only return 0 ([#430]). In v1.6.0 the frozen-head detector counts a url's highest slot, so a Solana node whose `context.slot` and finalized slot disagree while both stand still is still taken out of rotation ([#494]).
+- **Heavy responses cost less memory and CPU.** A node url can ask its upstream for gzip with `accept-encoding: gzip` ([#432], v1.5.4); the reply is inflated while it is read, with pooled readers, and a block shrinks four to six times on the wire. An upstream body whose length is announced is read into one buffer of that size instead of a chain of growing buffers ([#429]; for 5.9 MB, 5.6 MiB and 3 allocations instead of 13.9 MiB and 31). JSON-RPC block-height extraction stops at 1 MiB, since a larger JSON-RPC reply is a log filter, a full block or a trace, never the tip ([#430]). Since v1.5.6, `--cache-max-entry-bytes` (default 1 MiB, `0` for no cap) serves a reply above the cap without writing it to the cache, which protects the hit rate of ordinary entries and the cache server's CPU; `smartrouter_cache_write_skipped_total{reason="size"}` and `smartrouter_cache_entry_bytes` show what it skips ([#434]). v1.6.0 adds the audit's efficiency fixes ([#511]): regexps compiled once instead of per error, metric increments counted inline instead of on a goroutine each, and the node-errors header built in one buffer.
+
 #### What's new
 
 - **Chain tracker idle mode** ([#505]), off by default. `--chain-tracker-idle-after <duration>` pauses a chain's dedicated upstream polls once it has served no client relay for that long; `--chain-tracker-idle-poll-interval` keeps a slow heartbeat instead (`0` polls nothing while idle). The next client relay wakes the chain with one poll of every endpoint before it is routed. `smartrouter_chain_idle` reports the state; the operator guide is `docs/CHAIN-TRACKER-IDLE-MODE.md`.
@@ -268,6 +276,13 @@ Each entry says what changed, who notices, and what to do. The commits are also 
 [#420]: https://github.com/magma-Devs/smart-router/pull/420
 [#421]: https://github.com/magma-Devs/smart-router/pull/421
 [#423]: https://github.com/magma-Devs/smart-router/pull/423
+[#428]: https://github.com/magma-Devs/smart-router/pull/428
+[#429]: https://github.com/magma-Devs/smart-router/pull/429
+[#430]: https://github.com/magma-Devs/smart-router/pull/430
+[#431]: https://github.com/magma-Devs/smart-router/pull/431
+[#432]: https://github.com/magma-Devs/smart-router/pull/432
+[#434]: https://github.com/magma-Devs/smart-router/pull/434
+[#435]: https://github.com/magma-Devs/smart-router/pull/435
 [#436]: https://github.com/magma-Devs/smart-router/pull/436
 [#437]: https://github.com/magma-Devs/smart-router/pull/437
 [#438]: https://github.com/magma-Devs/smart-router/pull/438
@@ -280,6 +295,7 @@ Each entry says what changed, who notices, and what to do. The commits are also 
 [#445]: https://github.com/magma-Devs/smart-router/pull/445
 [#446]: https://github.com/magma-Devs/smart-router/pull/446
 [#447]: https://github.com/magma-Devs/smart-router/pull/447
+[#448]: https://github.com/magma-Devs/smart-router/pull/448
 [#449]: https://github.com/magma-Devs/smart-router/pull/449
 [#450]: https://github.com/magma-Devs/smart-router/pull/450
 [#451]: https://github.com/magma-Devs/smart-router/pull/451
