@@ -22,7 +22,9 @@ import (
 // its PEM beside the private key under t.TempDir(), and returns the server-side TLS
 // configuration that presents it together with the two file paths: the certificate's,
 // which doubles as the CA a client verifies the server against (cacert-pem), and the
-// key's (cert-pem/key-pem). Every call mints a fresh key, so two calls give two
+// key's (cert-pem/key-pem). The certificate is valid for server and client
+// authentication, so another call's material can be the client certificate an upstream
+// that requires one verifies. Every call mints a fresh key, so two calls give two
 // unrelated trust anchors.
 func SelfSigned(t testing.TB) (serverTLS *tls.Config, certPath, keyPath string) {
 	t.Helper()
@@ -40,7 +42,7 @@ func SelfSigned(t testing.TB) (serverTLS *tls.Config, certPath, keyPath string) 
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(24 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 		IPAddresses:           []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
