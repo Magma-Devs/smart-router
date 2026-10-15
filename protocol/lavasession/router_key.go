@@ -50,7 +50,7 @@ func (rk *RouterKey) SetExtensions(extensions []string) {
 		}
 	}
 
-	uniqueExtensionsSlice := []string{}
+	uniqueExtensionsSlice := make([]string, 0, len(uniqueExtensions))
 	for addon := range uniqueExtensions { // we are sorting this anyway so we don't have to keep order
 		uniqueExtensionsSlice = append(uniqueExtensionsSlice, addon)
 	}
@@ -73,8 +73,11 @@ func (rk RouterKey) HasExtension(extension string) bool {
 }
 
 func (rk RouterKey) String() string {
-	// uniqueExtensions are sorted on init
-	retStr := rk.uniqueExtensions
+	// uniqueExtensions are sorted on init. A fresh slice: appending to rk.uniqueExtensions
+	// directly could write into spare capacity of a backing array every value copy of this
+	// key shares.
+	retStr := make([]string, 0, len(rk.uniqueExtensions)+2)
+	retStr = append(retStr, rk.uniqueExtensions...)
 	if len(retStr) == 0 {
 		retStr = append(retStr, "")
 	}

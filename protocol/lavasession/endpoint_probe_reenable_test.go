@@ -154,7 +154,7 @@ func TestRecordProbeVerdict_NeverTouchesEnabledEndpoint(t *testing.T) {
 			"the probe never re-enables an already-enabled endpoint")
 	}
 	e.mu.RLock()
-	require.Equal(t, uint64(MaxConsecutiveConnectionAttempts-1), e.ConnectionRefusals,
+	require.Equal(t, MaxConsecutiveConnectionAttempts-1, e.ConnectionRefusals,
 		"probe verdicts on an enabled endpoint must not undo the relay path's refusal climb")
 	require.Equal(t, uint64(0), e.consecutiveHealthyProbes, "the hysteresis streak stays 0 while enabled")
 	e.mu.RUnlock()
@@ -170,7 +170,7 @@ func TestRecordProbeVerdict_NeverTouchesEnabledEndpoint(t *testing.T) {
 // successful real relay (ResetHealth) is what restores the full budget.
 func TestRecordProbeVerdict_TrialBudgetOnProbeReEnable(t *testing.T) {
 	const k = 2
-	require.NotEqual(t, uint64(k), uint64(MaxConsecutiveConnectionAttempts),
+	require.NotEqual(t, uint64(k), MaxConsecutiveConnectionAttempts,
 		"re-enable hysteresis and relay disable threshold must differ (anti-flap)")
 
 	e := &Endpoint{NetworkAddress: "http://ep:8545", Enabled: true}

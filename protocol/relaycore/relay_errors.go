@@ -1,9 +1,11 @@
 package relaycore
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
@@ -31,19 +33,19 @@ func (r *RelayErrors) findMaxAppearances(input map[string][]int) (maxVal int, in
 	return maxVal, indexToReturn
 }
 
-func replacePattern(input, pattern, replacement string) string {
-	re := regexp.MustCompile(pattern)
-	return re.ReplaceAllString(input, replacement)
-}
+// The sanitiser's patterns are compiled once. sanitizeError runs for every error of every failed
+// relay, up to four times per error through GetBestErrorMessageForUser and getAllUniqueErrors, and
+// compiling two regexps each time was most of its cost (MAG-4244).
+var (
+	sessionIDPattern = regexp.MustCompile(`SessionId:\d+`)
+	guidPattern      = regexp.MustCompile(`GUID:\d+`)
+)
 
 func (r *RelayErrors) sanitizeError(err error) string {
 	errMsg := err.Error()
-	// Replace SessionId:(any digit here) with SessionId:*
-	errMsg = replacePattern(errMsg, `SessionId:\d+`, "SessionId:*")
-
-	// Replace GUID:(any digit here) with GUID:*
-	errMsg = replacePattern(errMsg, `GUID:\d+`, "GUID:*")
-
+	// Replace SessionId:(any digit here) with SessionId:* and GUID:(any digit here) with GUID:*
+	errMsg = sessionIDPattern.ReplaceAllString(errMsg, "SessionId:*")
+	errMsg = guidPattern.ReplaceAllString(errMsg, "GUID:*")
 	return errMsg
 }
 
@@ -133,16 +135,18 @@ func (r *RelayErrors) getAllUniqueErrors() []error {
 }
 
 func (r *RelayErrors) mergeAllErrors() error {
-	mergedMessage := ""
+	var merged strings.Builder
 	allErrors := r.getAllUniqueErrors()
 	allErrorsLength := len(allErrors)
 	for idx, message := range allErrors {
-		mergedMessage += strconv.Itoa(idx) + ". " + message.Error()
+		merged.WriteString(strconv.Itoa(idx))
+		merged.WriteString(". ")
+		merged.WriteString(message.Error())
 		if idx < allErrorsLength-1 {
-			mergedMessage += ", "
+			merged.WriteString(", ")
 		}
 	}
-	return fmt.Errorf("%s", mergedMessage)
+	return errors.New(merged.String())
 }
 
 // RelayResponse represents a response from a relay operation

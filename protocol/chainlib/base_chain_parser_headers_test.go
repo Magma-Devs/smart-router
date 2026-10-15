@@ -114,3 +114,43 @@ func TestHandleHeaders_RestContentTypeIsForwardedWithoutDirective(t *testing.T) 
 		require.Empty(t, effectiveHeaders(filtered).Values("Content-Type"))
 	})
 }
+
+// TestHandleHeaders_ProjectIDLabelsAndNeverRoutes pins MAG-4081: the caller's project-id header
+// names the customer a request is counted under, and nothing else. Every relay input downstream
+// of the listener — the upstream request's headers and the cache key, both built from this
+// function's output — must come out identical whatever project-id says, so two customers sending
+// the same call share one cache entry and one routing decision, and a provider never sees the id.
+func TestHandleHeaders_ProjectIDLabelsAndNeverRoutes(t *testing.T) {
+	projectID := func(value string) pairingtypes.Metadata {
+		return pairingtypes.Metadata{Name: ProjectIDHeader, Value: value}
+	}
+	// A header the spec does forward, so the comparison below cannot pass on an empty result.
+	forwarded := pairingtypes.Metadata{Name: "x-cosmos-block-height", Value: "1000"}
+	// CARDANO declares project_id (underscore, the Blockfrost key) pass_send. Exact-name matching
+	// must keep that directive from reaching the hyphenated label header.
+	declare := func(method string) map[ApiKey]*spectypes.Header {
+		return map[ApiKey]*spectypes.Header{
+			{Name: "x-cosmos-block-height", ConnectionType: method}: {Name: "x-cosmos-block-height", Kind: spectypes.Header_pass_send},
+			{Name: "project_id", ConnectionType: method}:            {Name: "project_id", Kind: spectypes.Header_pass_send},
+		}
+	}
+
+	for _, apiInterface := range []string{spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC, spectypes.APIInterfaceRest, spectypes.APIInterfaceGrpc, spectypes.APIInterfaceGraphQL} {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			bcp := &BaseChainParser{headers: declare(method)}
+			collection := &spectypes.ApiCollection{CollectionData: spectypes.CollectionData{ApiInterface: apiInterface, Type: method}}
+			filter := func(metadata ...pairingtypes.Metadata) []pairingtypes.Metadata {
+				filtered, _, _ := bcp.HandleHeaders(metadata, collection, spectypes.Header_pass_send)
+				return filtered
+			}
+
+			without := filter(forwarded)
+			require.Equal(t, []pairingtypes.Metadata{forwarded}, without, "%s %s: control — the declared header is forwarded", apiInterface, method)
+			for _, customer := range []string{"acme", "globex"} {
+				require.Equal(t, without, filter(forwarded, projectID(customer)),
+					"%s %s: project-id must leave the forwarded headers, and so the upstream request and the cache key, unchanged", apiInterface, method)
+				require.Equal(t, without, filter(projectID(customer), forwarded), "%s %s: whatever its position", apiInterface, method)
+			}
+		}
+	}
+}

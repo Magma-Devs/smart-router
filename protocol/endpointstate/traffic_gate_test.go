@@ -155,7 +155,7 @@ func TestEndpointMonitor_SolanaTrafficGate_SuppressesUpstreamPoll(t *testing.T) 
 	t.Cleanup(m.Stop)
 
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-	_, err := m.GetOrCreateTracker(ep, conn)
+	_, err := m.GetOrCreateTracker("", ep, conn)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)

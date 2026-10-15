@@ -154,7 +154,9 @@ func TestGraphQLMessageGetParamsResolvesArguments(t *testing.T) {
 	require.True(t, ok)
 	// json.Number, not float64: a Sui checkpoint sequence number past 2^53 must survive
 	// block_parsing without losing its low digits.
-	require.Equal(t, "329083865", params["sequenceNumber"].(interface{ String() string }).String())
+	seq, ok := params["sequenceNumber"].(interface{ String() string })
+	require.True(t, ok)
+	require.Equal(t, "329083865", seq.String())
 }
 
 func TestGraphQLMessageGetParamsResolvesVariables(t *testing.T) {
@@ -180,12 +182,16 @@ func TestGraphQLMessageGetParamsMultiRootIsPerRoot(t *testing.T) {
 	first := message.RootFieldInput(0)
 	require.NotNil(t, first)
 	require.Equal(t, "checkpoint", first.GetMethod())
-	require.Contains(t, first.GetParams().(map[string]interface{}), "sequenceNumber")
+	firstParams, ok := first.GetParams().(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, firstParams, "sequenceNumber")
 
 	second := message.RootFieldInput(1)
 	require.NotNil(t, second)
 	require.Equal(t, "epoch", second.GetMethod())
-	require.Contains(t, second.GetParams().(map[string]interface{}), "epochId")
+	secondParams, ok := second.GetParams().(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, secondParams, "epochId")
 
 	require.Nil(t, message.RootFieldInput(2))
 	require.Nil(t, message.RootFieldInput(-1))

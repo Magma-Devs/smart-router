@@ -174,7 +174,7 @@ func isBatchPayload(data []byte) bool {
 //     body on transport success (a proxy's HTML error page). Failing OPEN here would degrade the
 //     gate to "always confirm" with no signal; failing CLOSED would escalate the flap hysteresis
 //     on evidence of nothing. Inconclusive does neither.
-func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *lavasession.EndpointWithDirectConnection, method string, payload []byte, relayTimeout time.Duration) relayProbeVerdict {
+func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *lavasession.EndpointWithDirectConnection, payload []byte, relayTimeout time.Duration) relayProbeVerdict {
 	if ep == nil || ep.DirectConnection == nil || len(payload) == 0 {
 		return relayProbeInconclusive
 	}

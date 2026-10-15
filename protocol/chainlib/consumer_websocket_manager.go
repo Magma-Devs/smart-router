@@ -115,9 +115,6 @@ const (
 
 	WebSocketRateLimitHeader            = "x-lava-websocket-rate-limit"
 	WebSocketOpenConnectionsLimitHeader = "x-lava-websocket-open-connections-limit"
-
-	SubscriptionDeliveryMethod           = "subscription_delivery"
-	DefaultSubscriptionDeliveryCU uint64 = 10
 )
 
 type ConsumerWebsocketManager struct {
@@ -587,7 +584,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				// (success or failure). The pre-existing flow `continue`d
 				// before reaching AddMetricForWebSocket below, so normal WS
 				// relays were silently dropped from the analytics pipeline.
-				go logger.AddMetricForWebSocket(metricsData, err)
+				logger.AddMetricForWebSocket(metricsData, err)
 				continue
 			}
 		}
@@ -596,7 +593,13 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		outputFormatter := subscriptionReplyFormatter(protocolMessage.GetApiCollection().CollectionData.ApiInterface, protocolMessage.RelayPrivateData().Data)
 
 		reply, subscriptionMsgsChan, err := cwm.wsSubscriptionManager.StartSubscription(webSocketCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+		// A subscribe never passes SendParsedRelay, which stamps these for a normal request.
+		metricsData.ApiMethod = protocolMessage.GetApi().GetName()
+		metricsData.Latency = time.Since(startTime).Milliseconds()
 		if err != nil {
+			// Every branch below ends in continue, so a failed subscribe is counted here; a
+			// successful one is counted after its fields are snapshotted for the pushes.
+			logger.AddMetricForWebSocket(metricsData, err)
 			utils.LavaFormatWarning("StartSubscription returned an error", err,
 				utils.LogAttr("GUID", webSocketCtx),
 				utils.LogAttr("dappID", dappID),
@@ -649,9 +652,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					// plain SUM(cu) without subscription-specific rules.
 					perMessage := subscriptionFields
 					perMessage.Timestamp = time.Now()
-					perMessage.ApiMethod = SubscriptionDeliveryMethod
-					perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
-					go logger.AddMetricForWebSocket(&perMessage, nil)
+					perMessage.ApiMethod = metrics.SubscriptionDeliveryMethod
+					perMessage.ComputeUnits = metrics.DefaultSubscriptionDeliveryCU
+					logger.AddMetricForWebSocket(&perMessage, nil)
 				}
 
 				utils.LavaFormatTrace("subscriptionMsgsChan was closed",
@@ -663,7 +666,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			}()
 		}
 
-		go logger.AddMetricForWebSocket(metricsData, err)
+		logger.AddMetricForWebSocket(metricsData, err)
 
 		if reply != nil {
 			reply.Data = outputFormatter(reply.Data) // use that id for the reply

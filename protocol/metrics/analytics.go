@@ -4,6 +4,14 @@ import (
 	"time"
 )
 
+// A push on an open subscription is emitted as its own usage event under this method, charged at
+// the flat delivery CU. It is not a request the client made, so the per-customer request counters
+// skip it (SetRelayMetrics); the subscribe request itself is counted under its real method.
+const (
+	SubscriptionDeliveryMethod           = "subscription_delivery"
+	DefaultSubscriptionDeliveryCU uint64 = 10
+)
+
 type RelayMetrics struct {
 	ProjectHash         string
 	Timestamp           time.Time
