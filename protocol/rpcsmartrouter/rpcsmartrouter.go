@@ -575,10 +575,10 @@ func resetAllChainTrackers(deps debugMuxDeps) int {
 }
 
 // resetAllProbeBackoff walks every server's EndpointMonitor and clears the per-endpoint poll
-// back-off so each provider returns to its base poll cadence (MAG-2395). Probe back-off (the
-// fetchFails streak) is otherwise unreachable by any reset endpoint, so a provider that failed
-// before a reset keeps its stretched schedule (up to BACKOFF_MAX_TIME) after it. Nil-safe at every
-// level; returns the total number of trackers signalled across all servers.
+// back-off so each provider returns to its base poll cadence (MAG-2395). Without it a provider that
+// failed before a reset keeps its stretched schedule (up to BACKOFF_MAX_TIME) after it. Called by
+// /debug/reset-probe-backoff and, since MAG-4278, by /debug/reset-scores and /debug/reset-all.
+// Nil-safe at every level; returns the total number of trackers signalled across all servers.
 func resetAllProbeBackoff(deps debugMuxDeps) int {
 	if deps.router == nil {
 		return 0
@@ -1363,7 +1363,8 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/reset-scores — clears optimizer score state without changing
 	// current time offset or NowFunc. Also zeroes per-endpoint chain-tracker
-	// latest-block values and resets the per-chain ChainState tip/baseline. (It
+	// latest-block values, clears the probe back-off (MAG-4278; reported as
+	// probe_backoff_reset) and resets the per-chain ChainState tip/baseline. (It
 	// used to flush the per-chain seen-block caches too; that store was retired by
 	// Topic C C-G, and the ChainState tip that replaced it is what the reset below
 	// now clears.) Gives a recovery path that does not touch session-manager state
@@ -2239,11 +2240,12 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	})
 
 	// POST /debug/reset-probe-backoff — clear the ChainTracker probe back-off on every endpoint so
-	// each provider's poll schedule returns to base cadence (MAG-2395). The back-off (fetchFails
-	// streak) is unreachable by reset-all / reset-scores / reset-endpoint-health / reset-pairing, so
-	// a provider that failed before a reset otherwise keeps its stretched schedule (up to
-	// BACKOFF_MAX_TIME = 1m) after it. Cadence only — nothing else is touched. The effect is
-	// observable as PollIntervalMs returning to base in /debug/endpoint-state.
+	// each provider's poll schedule returns to base cadence (MAG-2395). reset-all and reset-scores
+	// clear the back-off (fetchFails streak) too since MAG-4278; reset-endpoint-health and
+	// reset-pairing do not, so without this a provider that failed before one of those keeps its
+	// stretched schedule (up to BACKOFF_MAX_TIME = 1m) after it. Cadence only — nothing else is
+	// touched here. The effect is observable as PollIntervalMs returning to base in
+	// /debug/endpoint-state.
 	mux.HandleFunc("/debug/reset-probe-backoff", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
