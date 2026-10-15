@@ -208,3 +208,25 @@ func TestNoteFetchOutcome_OwnRateLimitDoesNotHoldTheProviderForRelays(t *testing
 	require.True(t, registry.HeldOff(holdoffTestURL, holdoffTestURL), "the url itself is held, as the ws and gRPC paths key it")
 	require.Greater(t, cs.computePollInterval(0, 0), holdoff.InitialHoldoff, "and the poll still waits its own hold-off out")
 }
+
+// Any answer from the url clears: a relay serving the url fine — recorded by the relay path under
+// the provider's name — lifts the tracker's own url-only hold-off and its poll floor. Without it the
+// tracker's strikes would stand and its poll stay frozen while relays on the same url are answered.
+func TestRelayAnswerLiftsTheTrackersHoldoff(t *testing.T) {
+	registry := holdoff.NewRegistryWithClock(time.Now)
+	cs := &ChainTracker{
+		flatPollInterval: 6 * time.Second,
+		rateLimitHoldoff: registry,
+		holdoffProvider:  holdoffTestProvider,
+		holdoffURL:       holdoffTestURL,
+	}
+	cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 5*time.Minute))
+	require.Greater(t, cs.computePollInterval(0, 0), 4*time.Minute)
+
+	registry.RecordAnswer(holdoffTestProvider, holdoffTestURL) // as relayInnerDirect does on an answer
+
+	require.False(t, registry.HeldOff(holdoffTestURL, holdoffTestURL))
+	require.Equal(t, 6*time.Second, cs.computePollInterval(0, 0), "the poll floor lifts with the registry entry")
+	require.Equal(t, holdoff.InitialHoldoff, cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0)),
+		"and the strikes went with it: the next refusal is a first strike")
+}

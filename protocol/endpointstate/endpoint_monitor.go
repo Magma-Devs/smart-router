@@ -891,7 +891,7 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 	// Polling, and the sentinel classification — is triggerPoll, shared with the idle wake
 	// burst. This wrapper adds what the debug caller needs: the record, and a diagnostic error
 	// naming the tracker's lifecycle state when no poll can be vouched for.
-	ran, pollErr := m.triggerPoll(ctx, endpointURL)
+	ran, pollErr := m.triggerPoll(ctx, endpointURL, false)
 	if errors.Is(pollErr, errNoTrackerForEndpoint) {
 		return EndpointObservation{}, false, utils.LavaFormatError("poll-now: no ChainTracker for endpoint", nil,
 			utils.LogAttr("endpoint", endpointURL),
@@ -902,8 +902,8 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 	// observe, and otherwise it is the prior state, flagged as such by polled=false.
 	observation, _ = m.GetObservation(endpointURL)
 
-	// Four ways to end up holding a record this call cannot vouch for. Undelivered/unsupported/held
-	// off mean no cycle ran; not-awaited means one is running but wrote after we read. All four must report
+	// Three ways to end up holding a record this call cannot vouch for. Undelivered/unsupported mean
+	// no cycle ran; not-awaited means one is running but wrote after we read. All three must report
 	// polled=false — the caller's question is "may I trust this record", not "did a goroutine move".
 	// Name the tracker's lifecycle state in the error: "retrying_start" is a diagnosis, a bare
 	// timeout is not.
@@ -916,11 +916,6 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 			// Distinct message because the operator response is distinct: nothing is wrong with the
 			// tracker, the budget was too short for this upstream.
 			message = "poll-now: a poll is running but its result was not awaited; the record below predates it"
-		}
-		if errors.Is(pollErr, chaintracker.ErrorPollNowHeldOff) {
-			// Nothing is wrong with the tracker either: the url is waiting out a rate-limit hold-off,
-			// which a forced poll does not bypass (MAG-4165).
-			message = "poll-now: no poll ran, the endpoint is held off after a rate limit"
 		}
 		return observation, false, utils.LavaFormatError(message, pollErr,
 			utils.LogAttr("endpoint", endpointURL),

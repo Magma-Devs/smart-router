@@ -362,10 +362,10 @@ func TestEndpointMonitor_PollNow_ResultNotAwaited_ReportsNotPolled(t *testing.T)
 	}, 15*time.Second, 20*time.Millisecond, "the poll the caller stopped waiting for still completed")
 }
 
-// A forced poll declines while the url is held off after a rate limit (MAG-4165). Nothing reached
-// upstream, so the monitor must say so — polled=false, the record handed back is the pre-call one —
-// rather than present that record as this poll's.
-func TestEndpointMonitor_PollNow_HeldOff_ReportsNotPolled(t *testing.T) {
+// While the url is held off after a rate limit, the wake burst's trigger declines (MAG-4165): nothing
+// reaches upstream, so it reports ran=false — the burst counts the url as not polled. The debug
+// trigger is an explicit ask and still polls, so /debug/poll-now's contract is unchanged.
+func TestEndpointMonitor_HeldOff_WakeDeclines_PollNowPolls(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -382,8 +382,14 @@ func TestEndpointMonitor_PollNow_HeldOff_ReportsNotPolled(t *testing.T) {
 	require.True(t, ok)
 	conn.block.Store(9090)
 
-	obs, polled, err := m.PollNow(ctx, url)
-	require.False(t, polled, "a declined poll must never be reported as a completed one")
+	ran, err := m.triggerPoll(ctx, url, true)
+	require.False(t, ran, "a declined wake poll must never count as one that ran")
 	require.ErrorIs(t, err, chaintracker.ErrorPollNowHeldOff)
-	require.Equal(t, before.LatestBlock, obs.LatestBlock, "the record handed back is the pre-call one")
+	obs, _ := m.GetObservation(url)
+	require.Equal(t, before.LatestBlock, obs.LatestBlock, "nothing was polled")
+
+	obs, polled, err := m.PollNow(ctx, url)
+	require.NoError(t, err)
+	require.True(t, polled, "an explicit poll-now goes through a hold-off")
+	require.Equal(t, int64(9090), obs.LatestBlock)
 }

@@ -209,6 +209,9 @@ type ChainTracker struct {
 // fetch with the TRACKER's context (see the pollNowCh case in start), exactly as the timer does.
 type pollNowRequest struct {
 	resp chan error
+	// respectHoldoff declines the poll while the url is held off after a rate limit. Set by
+	// WakePoll (the idle wake burst); an explicit PollNow leaves it false and goes through.
+	respectHoldoff bool
 }
 
 // FetchTimeout bounds one poll cycle that reaches upstream, on the timer and on PollNow alike.
@@ -755,12 +758,13 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 				// promptly. The requester's context governs only how long IT waits — a caller that
 				// gives up leaves the poll to finish and record, which is honest: it did happen.
 				//
-				// A rate-limit hold-off is the one thing a forced poll does NOT bypass: the timer-driven
-				// poll it mirrors is floored by it, and the idle wake burst forces a poll on every url
-				// at once — each one sent into a standing hold-off would re-arm a ban-type limit and add
-				// a strike (MAG-4165). The requester gets ErrorPollNowHeldOff — also the typed rate-limit
-				// error, the remaining wait as its Retry-After; nothing was sent, so nothing is recorded.
-				if heldFor := cs.rateLimitHeldFor(); heldFor > 0 {
+				// The idle wake burst (WakePoll) does not bypass a rate-limit hold-off: it forces a poll
+				// on every url at once, and each one sent into a standing hold-off would re-arm a
+				// ban-type limit and add a strike (MAG-4165). It gets ErrorPollNowHeldOff — also the
+				// typed rate-limit error, the remaining wait as its Retry-After; nothing was sent, so
+				// nothing is recorded. An explicit PollNow (/debug/poll-now) goes through, as an explicit
+				// lava-select-provider outranks a relay hold-off: one asked-for request is the caller's call.
+				if heldFor := cs.rateLimitHeldFor(); req.respectHoldoff && heldFor > 0 {
 					req.resp <- common.RateLimited(fmt.Errorf("%w, %s left", ErrorPollNowHeldOff, heldFor.Round(time.Second)), heldFor)
 					continue
 				}
@@ -836,7 +840,7 @@ func (cs *ChainTracker) ResetBackoff() {
 // reschedules the timer. It does reset the traffic gate's skip budget, because it performs a real
 // poll — so it must not be called inside a test measuring the skip ceiling (MAG-2159).
 func (cs *ChainTracker) PollNow(ctx context.Context) error {
-	return cs.pollNow(ctx, ctx)
+	return cs.pollNow(ctx, ctx, false)
 }
 
 // PollNowWithDeliveryDeadline is PollNow with the two waits bounded separately: deliveryCtx caps
@@ -850,11 +854,18 @@ func (cs *ChainTracker) PollNow(ctx context.Context) error {
 // deadline to the result would routinely abandon a poll that was proceeding normally, and the
 // caller would then read a pre-poll record. See EndpointMonitor.PollNow, the one caller.
 func (cs *ChainTracker) PollNowWithDeliveryDeadline(deliveryCtx, resultCtx context.Context) error {
-	return cs.pollNow(deliveryCtx, resultCtx)
+	return cs.pollNow(deliveryCtx, resultCtx, false)
 }
 
-func (cs *ChainTracker) pollNow(deliveryCtx, resultCtx context.Context) error {
-	req := pollNowRequest{resp: make(chan error, 1)}
+// WakePoll is PollNowWithDeliveryDeadline for the idle wake burst: the same forced cycle, except
+// that it declines with ErrorPollNowHeldOff while the url is held off after a rate limit instead
+// of sending into the hold-off (MAG-4165).
+func (cs *ChainTracker) WakePoll(deliveryCtx, resultCtx context.Context) error {
+	return cs.pollNow(deliveryCtx, resultCtx, true)
+}
+
+func (cs *ChainTracker) pollNow(deliveryCtx, resultCtx context.Context, respectHoldoff bool) error {
+	req := pollNowRequest{resp: make(chan error, 1), respectHoldoff: respectHoldoff}
 	select {
 	case cs.pollNowCh <- req:
 	case <-deliveryCtx.Done():
@@ -968,17 +979,22 @@ func (cs *ChainTracker) floorWithRetryAfter(interval time.Duration) time.Duratio
 	return max(interval, cs.rateLimitHeldFor())
 }
 
-// rateLimitHeldFor is how much longer this tracker's url is held off for a rate limit — by its
-// own last rate-limited fetch or by anything in the registry — and 0 when it is not.
+// rateLimitHeldFor is how much longer this tracker's url is held off for a rate limit, 0 when it
+// is not. With a registry, the registry decides: the tracker's own 429s are recorded there (the
+// applied hold-off is never shorter than the upstream's Retry-After), and an answer anyone gets
+// from the url clears them — a relay serving the url fine lifts the poll's floor too. Without
+// one (a tracker with no url to key on), the tracker's own last rate-limited fetch decides.
 func (cs *ChainTracker) rateLimitHeldFor() time.Duration {
-	wait := time.Duration(0)
+	if cs.rateLimitHoldoff != nil {
+		if readyAt := cs.holdoffReadyAt(); !readyAt.IsZero() {
+			return max(time.Until(readyAt), 0)
+		}
+		return 0
+	}
 	if until := cs.rateLimitedUntil.Load(); until != 0 {
-		wait = time.Until(time.Unix(0, until))
+		return max(time.Until(time.Unix(0, until)), 0)
 	}
-	if readyAt := cs.holdoffReadyAt(); !readyAt.IsZero() {
-		wait = max(wait, time.Until(readyAt))
-	}
-	return max(wait, 0)
+	return 0
 }
 
 // holdoffReadyAt is when the registry stops holding this tracker's url off, the zero time when
