@@ -256,3 +256,33 @@ func TestHandleRateLimitReached_EchoesTheCallersId(t *testing.T) {
 		require.Equal(t, int64(common.JsonRpcRateLimitError.Error.Code), gjson.GetBytes(reply, "error.code").Int())
 	}
 }
+
+// A rate-limited frame with no top-level id is a batch or a notification. The template's own id
+// (1) would answer it under an id the client may have given another request, so the reply follows
+// the other local replies (buildLocalReply): one error per batch member that has an id, as an
+// array, and nothing for a notification (MAG-4278).
+func TestHandleRateLimitReached_AnswersABatchPerMemberAndANotificationNotAtAll(t *testing.T) {
+	cwm := &ConsumerWebsocketManager{}
+
+	batch := `[{"jsonrpc":"2.0","id":7,"method":"eth_blockNumber","params":[]},{"jsonrpc":"2.0","method":"eth_chainId","params":[]},{"jsonrpc":"2.0","id":"b","method":"eth_chainId","params":[]}]`
+	reply, err := cwm.handleRateLimitReached([]byte(batch))
+	require.NoError(t, err)
+	parsed := gjson.ParseBytes(reply)
+	require.True(t, parsed.IsArray(), "a batch is answered with an array, got %s", reply)
+	var ids []string
+	parsed.ForEach(func(_, member gjson.Result) bool {
+		ids = append(ids, member.Get("id").Raw)
+		require.Equal(t, int64(common.JsonRpcRateLimitError.Error.Code), member.Get("error.code").Int())
+		return true
+	})
+	require.Equal(t, []string{"7", `"b"`}, ids, "one error per member that has an id, the notification member skipped")
+
+	for _, frame := range []string{
+		`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[]}`,
+		`[{"jsonrpc":"2.0","method":"eth_blockNumber","params":[]}]`,
+	} {
+		reply, err = cwm.handleRateLimitReached([]byte(frame))
+		require.NoError(t, err)
+		require.Empty(t, reply, "a notification gets no reply: %s", frame)
+	}
+}

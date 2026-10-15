@@ -167,7 +167,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	// requests no tier wins. The caller carries this report on to the provider
 	// result, so the pair survives to the reply either way.
 	cacheReport.SecondaryOutcome = outcome
-	go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierSecondary, outcome, latencyMs)
+	rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierSecondary, outcome, latencyMs)
 	if !hit {
 		// miss, error, and timeout all degrade to a miss; nothing from the reply is
 		// carried forward, so the request proceeds exactly as it would with no
@@ -268,7 +268,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	analytics.IsArchive = chainqueries.IsArchiveRequest(protocolMessage)
 	analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(protocolMessage)
 	analytics.IsBatch = chainqueries.IsBatchRequest(protocolMessage)
-	go rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
+	rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
 
 	utils.LavaFormatDebug("secondary cache hit",
 		utils.LogAttr("chainId", chainId),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"sync"
 	"testing"
 
@@ -240,14 +241,20 @@ func TestHandleAndClassify_SingleMetricPerCall(t *testing.T) {
 			expectedCode: common.LavaErrorUnknown.Code,
 		},
 		{
-			// io.EOF is not in the registry (classifies Unknown), but
+			// net.ErrClosed is not in the registry (classifies Unknown), but
 			// handleGenericErrors recognises it and logs via LavaFormatProduction.
 			// The handler routes the metric through EmitErrorMetric only for
 			// this path so the structured log fires exactly once while the
-			// Prometheus counter still increments.
-			name:         "Unknown + handleGenericErrors logs (io.EOF)",
-			err:          io.EOF,
+			// Prometheus counter still increments. (io.EOF used to be the example
+			// here; it classifies as PROTOCOL_CONNECTION_CLOSED since MAG-4242.)
+			name:         "Unknown + handleGenericErrors logs (net.ErrClosed)",
+			err:          net.ErrClosed,
 			expectedCode: common.LavaErrorUnknown.Code,
+		},
+		{
+			name:         "EOF is a closed connection, not Unknown",
+			err:          io.EOF,
+			expectedCode: common.LavaErrorConnectionClosed.Code,
 		},
 	}
 	for _, tt := range tests {

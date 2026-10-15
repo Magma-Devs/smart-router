@@ -55,9 +55,9 @@ func (h *directRelayHarness) relay(t *testing.T, hasNodeError bool, message stri
 	relayResult := &common.RelayResult{}
 	// attemptBudget and budgetExpired came in with main's write-timeout work. A generous budget
 	// that never expires keeps these tests about endpoint health, which is what they pin.
-	_, _, _ = h.rpcss.relayInnerDirect(
+	_, _ = h.rpcss.relayInnerDirect(
 		context.Background(), h.session, relayResult, 5*time.Second, 30*time.Second,
-		msg, msg.requestData, nil, func() bool { return false }, h.lostBroadcast,
+		msg, msg.requestData, func() bool { return false }, h.lostBroadcast,
 	)
 	// Read directly: the relay above ran synchronously on this goroutine, so there is no
 	// concurrent writer. IsEnabled takes the lock; ConnectionRefusals has no exported accessor.

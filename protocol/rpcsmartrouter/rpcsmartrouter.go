@@ -575,10 +575,10 @@ func resetAllChainTrackers(deps debugMuxDeps) int {
 }
 
 // resetAllProbeBackoff walks every server's EndpointMonitor and clears the per-endpoint poll
-// back-off so each provider returns to its base poll cadence (MAG-2395). Probe back-off (the
-// fetchFails streak) is otherwise unreachable by any reset endpoint, so a provider that failed
-// before a reset keeps its stretched schedule (up to BACKOFF_MAX_TIME) after it. Nil-safe at every
-// level; returns the total number of trackers signalled across all servers.
+// back-off so each provider returns to its base poll cadence (MAG-2395). Without it a provider that
+// failed before a reset keeps its stretched schedule (up to BACKOFF_MAX_TIME) after it. Called by
+// /debug/reset-probe-backoff and, since MAG-4278, by /debug/reset-scores and /debug/reset-all.
+// Nil-safe at every level; returns the total number of trackers signalled across all servers.
 func resetAllProbeBackoff(deps debugMuxDeps) int {
 	if deps.router == nil {
 		return 0
@@ -651,7 +651,7 @@ func reregisterChainTrackerRows(deps debugMuxDeps) (ensured, created int) {
 				continue
 			}
 			ensured++
-			if _, err := server.endpointChainTrackerManager.GetOrCreateTracker(ep.Endpoint, ep.DirectConnection); err != nil {
+			if _, err := server.endpointChainTrackerManager.GetOrCreateTracker(ep.ProviderAddress, ep.Endpoint, ep.DirectConnection); err != nil {
 				utils.LavaFormatWarning("reset-chaintracker-rows: failed to re-register endpoint", err,
 					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
 					utils.LogAttr("chainKey", chainKey),
@@ -1363,7 +1363,8 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/reset-scores — clears optimizer score state without changing
 	// current time offset or NowFunc. Also zeroes per-endpoint chain-tracker
-	// latest-block values and resets the per-chain ChainState tip/baseline. (It
+	// latest-block values, clears the probe back-off (MAG-4278; reported as
+	// probe_backoff_reset) and resets the per-chain ChainState tip/baseline. (It
 	// used to flush the per-chain seen-block caches too; that store was retired by
 	// Topic C C-G, and the ChainState tip that replaced it is what the reset below
 	// now clears.) Gives a recovery path that does not touch session-manager state
@@ -1651,6 +1652,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				}
 				observations := server.endpointChainTrackerManager.SnapshotObservations()
 				backoffByURL := server.endpointChainTrackerManager.BackoffSnapshot()
+				idle := server.endpointChainTrackerManager.IdleSnapshot(time.Now())
 				for _, ep := range csm.GetAllDirectRPCEndpoints() {
 					if ep == nil || ep.Endpoint == nil {
 						continue
@@ -1701,6 +1703,15 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 						// (--enable-fork-detection not set) vs "off-spec-no-block-by-num" (the
 						// chain cannot serve hashes at all, so the flag would not help).
 						"HashPolling": server.endpointChainTrackerManager.HashPollingMode().String(),
+						// Idle mode (endpointstate/idle.go) — chain-level like HashPolling, repeated
+						// per row so a row stands alone: "off" (not configured), "active", or "idle"
+						// (no client relay within --chain-tracker-idle-after; polls paused, so the
+						// poll-health fields above stop moving). WakeInProgress is the burst that
+						// follows the relay ending an idle period, until its first poll lands.
+						"IdleMode":        idleModeString(idle),
+						"LastClientRelay": debugTimeRFC3339(idle.LastClientRelay),
+						"IdleSince":       debugTimeRFC3339(idle.IdleSince),
+						"WakeInProgress":  idle.WakeInProgress,
 					})
 				}
 			}
@@ -1861,7 +1872,11 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					"SyncOmittedCount":    s.SyncOmittedCount,
 					// MAG-2550 replay-gate telemetry: how many disabled endpoints are held on
 					// recorded relay evidence, and the cumulative replay outcomes.
-					"EvidenceGatedCount":  s.EvidenceGatedCount,
+					"EvidenceGatedCount": s.EvidenceGatedCount,
+					// Idle mode: the last cycle withheld its QoS feed / skipped the head-stall step
+					// because the chain was idle or a wake burst was still re-polling.
+					"QoSFeedPausedIdle":   s.QoSFeedPausedIdle,
+					"HeadStallPausedIdle": s.HeadStallPausedIdle,
 					"ReplaysAttempted":    s.ReplaysAttempted,
 					"ReplaysRecovered":    s.ReplaysRecovered,
 					"ReplaysStillFailing": s.ReplaysStillFailing,
@@ -2225,11 +2240,12 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	})
 
 	// POST /debug/reset-probe-backoff — clear the ChainTracker probe back-off on every endpoint so
-	// each provider's poll schedule returns to base cadence (MAG-2395). The back-off (fetchFails
-	// streak) is unreachable by reset-all / reset-scores / reset-endpoint-health / reset-pairing, so
-	// a provider that failed before a reset otherwise keeps its stretched schedule (up to
-	// BACKOFF_MAX_TIME = 1m) after it. Cadence only — nothing else is touched. The effect is
-	// observable as PollIntervalMs returning to base in /debug/endpoint-state.
+	// each provider's poll schedule returns to base cadence (MAG-2395). reset-all and reset-scores
+	// clear the back-off (fetchFails streak) too since MAG-4278; reset-endpoint-health and
+	// reset-pairing do not, so without this a provider that failed before one of those keeps its
+	// stretched schedule (up to BACKOFF_MAX_TIME = 1m) after it. Cadence only — nothing else is
+	// touched here. The effect is observable as PollIntervalMs returning to base in
+	// /debug/endpoint-state.
 	mux.HandleFunc("/debug/reset-probe-backoff", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -2353,6 +2369,20 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 // /debug/time convention (UTC RFC3339). A zero time renders as the empty string rather than the
 // Go zero-date ("0001-01-01T00:00:00Z"), so a test can cheaply distinguish "never happened"
 // (e.g. DisabledAt on an enabled endpoint) from a real instant.
+// idleModeString renders a chain's idle-mode state for /debug/endpoint-state: "off" when idle
+// mode is not configured (so a reader cannot mistake an unconfigured chain for an active one),
+// else "idle" or "active".
+func idleModeString(snap endpointstate.IdleSnapshot) string {
+	switch {
+	case !snap.Enabled:
+		return "off"
+	case snap.Idle:
+		return "idle"
+	default:
+		return "active"
+	}
+}
+
 func debugTimeRFC3339(t time.Time) string {
 	if t.IsZero() {
 		return ""
@@ -3812,7 +3842,15 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// correct across every chain this process serves (each divides its own spec block time).
 	// Validation lives in endpointstate so config.yml and embedded servers get it too.
 	// Process-wide in the same sense as the flag above.
-	cmdRPCSmartRouter.Flags().Float64(endpointstate.PollDivisorFlagName, 0, fmt.Sprintf("polling-relief: per-endpoint chain tracker polls every avgBlockTime/divisor (default %g). Below 1 polls SLOWER than the chain produces blocks — %g is one poll per four block times, the largest relief available. Allowed [%g,%g]; out-of-range reverts to default. Applies to EVERY chain this process serves.", endpointstate.DefaultPollDivisor, endpointstate.MinPollDivisor, endpointstate.MinPollDivisor, endpointstate.MaxPollDivisor))
+	cmdRPCSmartRouter.Flags().Float64(endpointstate.PollDivisorFlagName, 0, fmt.Sprintf("polling-relief: per-endpoint chain tracker polls every avgBlockTime/divisor, but at least once a minute (default %g). Below 1 polls SLOWER than the chain produces blocks — %g is one poll per four block times (or one a minute, if that is more often), the largest relief available. Allowed [%g,%g]; out-of-range reverts to default. Applies to EVERY chain this process serves.", endpointstate.DefaultPollDivisor, endpointstate.MinPollDivisor, endpointstate.MinPollDivisor, endpointstate.MaxPollDivisor))
+	// Idle mode (endpointstate/idle.go). Once a chain+interface has served no client relay for
+	// idle-after, its dedicated polls pause — or drop to idle-poll-interval — until the next client
+	// relay, which polls every endpoint once and waits up to one round trip before it is routed.
+	// Process-wide like the two flags above; the STATE is per chain+interface (an unused websocket
+	// interface goes idle on its own), reported as IdleMode on /debug/endpoint-state and as
+	// smartrouter_chain_idle. The crafted health relay never counts as traffic and keeps running.
+	cmdRPCSmartRouter.Flags().Duration(endpointstate.IdleAfterFlagName, 0, fmt.Sprintf("idle mode: pause the per-endpoint chain tracker polls of a chain that has served no client request for this long, and resume them on the next request (which is held up to %s while every endpoint is polled once). 0 (default) = never pause. Minimum %s. Applies to EVERY chain this process serves; the state is per chain+interface.", wakeWaitCap, endpointstate.MinIdleAfter))
+	cmdRPCSmartRouter.Flags().Duration(endpointstate.IdlePollIntervalFlagName, 0, "idle mode heartbeat: while a chain is idle, still poll each endpoint once per this interval so a dead upstream is noticed and the tip at wake is at most this old. 0 (default) = poll nothing while idle. Needs --"+endpointstate.IdleAfterFlagName+"; a value below the normal poll cadence is raised to it.")
 	cmdRPCSmartRouter.Flags().Var(&strategyFlag, "strategy", fmt.Sprintf("the strategy to use to pick providers (%s)", strings.Join(strategyNames, "|")))
 	defaultSelectorConfig := provideroptimizer.DefaultUpstreamSelectorConfig()
 	cmdRPCSmartRouter.Flags().Float64(common.ProviderOptimizerAvailabilityWeight, defaultSelectorConfig.AvailabilityWeight, "weight assigned to provider availability when computing selection scores")
@@ -3923,7 +3961,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 
 	// batch request size limit
 	cmdRPCSmartRouter.Flags().IntVar(&chainlib.MaxBatchRequestSize, common.MaxBatchRequestSizeFlag, common.DefaultMaxBatchRequestSize, "max number of requests allowed within a batch request, 0 means unlimited")
-	cmdRPCSmartRouter.Flags().BoolVar(&relaycore.DisableBatchRequestRetry, common.DisableBatchRequestRetryFlag, true, "disable retries for batch requests (JSON-RPC batches)")
+	cmdRPCSmartRouter.Flags().BoolVar(&relaycore.DisableBatchRequestRetry, common.DisableBatchRequestRetryFlag, true, "disable retries for batch requests (JSON-RPC batches). A batch refused for rate is still retried, and one carrying a write only after an HTTP 429 (docs/RATE-LIMIT-HOLDOFF.md)")
 
 	// OpenTelemetry tracing.
 	// All standard OTel knobs (endpoint, sampler, service name, TLS, headers, etc.)

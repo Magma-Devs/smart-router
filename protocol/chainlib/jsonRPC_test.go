@@ -722,6 +722,13 @@ func startTestJsonRPCListenerWithHealthPath(t *testing.T, ctx context.Context, h
 // relay: the handlers dereference it) and logger as its metrics and usage sink.
 func startTestJsonRPCListenerWithOptions(t *testing.T, ctx context.Context, healthPath string, relaySender RelaySender, logger *metrics.RPCConsumerLogs) (*JsonRPCChainListener, string) {
 	t.Helper()
+	return startTestJsonRPCListenerWithSubscriptions(t, ctx, healthPath, relaySender, logger, nil)
+}
+
+// startTestJsonRPCListenerWithSubscriptions is startTestJsonRPCListenerWithOptions with
+// wsSubscriptionManager behind the websocket subscribe path.
+func startTestJsonRPCListenerWithSubscriptions(t *testing.T, ctx context.Context, healthPath string, relaySender RelaySender, logger *metrics.RPCConsumerLogs, wsSubscriptionManager WSSubscriptionManager) (*JsonRPCChainListener, string) {
+	t.Helper()
 	// ListenToMessages uses the custom rand package which requires initialization.
 	// The package-level TestMain (chain_router_test.go) does not call InitRandomSeed,
 	// so we do it here. InitRandomSeed is idempotent.
@@ -734,7 +741,7 @@ func startTestJsonRPCListenerWithOptions(t *testing.T, ctx context.Context, heal
 		ApiInterface:    "jsonrpc",
 		HealthCheckPath: healthPath,
 	}
-	listener := NewJrpcChainListener(ctx, endpoint, relaySender, alwaysHealthyReporter{}, logger, nil, nil)
+	listener := NewJrpcChainListener(ctx, endpoint, relaySender, alwaysHealthyReporter{}, logger, nil, wsSubscriptionManager)
 
 	cmdFlags := common.ConsumerCmdFlags{}
 	go listener.Serve(ctx, cmdFlags)
@@ -1041,5 +1048,92 @@ func TestJsonRPCChainListener_WebsocketRelayUsageCarriesOrigin(t *testing.T) {
 				t.Fatal("the websocket relay emitted no relay_usage event")
 			}
 		})
+	}
+}
+
+// subscribeRelayMessage is a parsed eth_subscribe: the websocket manager takes the
+// subscription branch. It answers only what that branch reads before and after a failed
+// StartSubscription.
+type subscribeRelayMessage struct {
+	ProtocolMessage
+}
+
+func (subscribeRelayMessage) GetParseDirective() *spectypes.ParseDirective {
+	return &spectypes.ParseDirective{FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE}
+}
+
+func (subscribeRelayMessage) GetApiCollection() *spectypes.ApiCollection {
+	return &spectypes.ApiCollection{CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceJsonRPC}}
+}
+
+func (subscribeRelayMessage) RelayPrivateData() *pairingtypes.RelayPrivateData {
+	return &pairingtypes.RelayPrivateData{}
+}
+
+func (subscribeRelayMessage) GetApi() *spectypes.Api { return &spectypes.Api{Name: "eth_subscribe"} }
+
+func (subscribeRelayMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
+	return &rpcInterfaceMessages.JsonrpcMessage{}
+}
+
+// wsSubscribeStub parses every websocket message as an eth_subscribe.
+type wsSubscribeStub struct{ wsRelayStub }
+
+func (wsSubscribeStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
+	return subscribeRelayMessage{}, nil
+}
+
+// failingSubscriptions refuses every subscribe.
+type failingSubscriptions struct{ WSSubscriptionManager }
+
+var errSubscribeRefused = errors.New("subscribe refused by every provider")
+
+func (failingSubscriptions) StartSubscription(context.Context, ProtocolMessage, string, string, string, *metrics.RelayMetrics) (*pairingtypes.RelayReply, <-chan *pairingtypes.RelayReply, error) {
+	return nil, nil, errSubscribeRefused
+}
+
+// UnsubscribeAll runs when the connection closes; there is nothing to tear down.
+func (failingSubscriptions) UnsubscribeAll(context.Context, string, string, string, *metrics.RelayMetrics) error {
+	return nil
+}
+
+// MAG-4081: a websocket subscribe that fails is counted once, as a failure, under its
+// method and the caller's customer, the same as a failed gRPC subscribe. Every error
+// branch after StartSubscription continues, so the emit has to run before them.
+func TestJsonRPCChainListener_FailedWebsocketSubscribeIsCounted(t *testing.T) {
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	sink := &usageCaptureSink{events: make(chan metrics.RelayUsageEvent, 8)}
+	logger, err := metrics.NewRPCConsumerLogs(nil, sink, nil)
+	require.NoError(t, err)
+	listener, addr := startTestJsonRPCListenerWithSubscriptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, wsSubscribeStub{}, logger, failingSubscriptions{})
+	t.Cleanup(func() {
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelShutdown()
+		_ = listener.Shutdown(shutdownCtx)
+	})
+
+	client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws", http.Header{"project-id": {"acme"}})
+	require.NoError(t, err)
+	defer client.Close()
+
+	require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","method":"eth_subscribe","params":["newHeads"],"id":1}`)))
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, err = client.ReadMessage()
+	require.NoError(t, err, "the client gets an error reply")
+
+	select {
+	case event := <-sink.events:
+		assert.False(t, event.Success)
+		assert.Equal(t, "eth_subscribe", event.APIMethod)
+		assert.Equal(t, "acme", event.ProjectHash)
+		assert.Equal(t, "ETH1", event.ChainID)
+	case <-time.After(3 * time.Second):
+		t.Fatal("the failed subscribe emitted nothing: it is counted nowhere")
+	}
+	select {
+	case event := <-sink.events:
+		t.Fatalf("the failed subscribe was counted twice: %+v", event)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

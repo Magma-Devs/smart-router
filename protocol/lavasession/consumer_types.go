@@ -96,6 +96,7 @@ type UsedProvidersInf interface {
 	GetUnwantedProvidersToSend(RouterKey) map[string]struct{}
 	AddUnwantedAddresses(address string, routerKey RouterKey)
 	CurrentlyUsed() int
+	TakeLastChance() bool
 }
 
 type SessionInfo struct {
@@ -120,12 +121,26 @@ type ProviderOptimizer interface {
 }
 
 type ignoredProviders struct {
-	providers    map[string]struct{}
-	currentEpoch uint64
+	providers map[string]struct{}
+	// triedByThisRequest is the providers this request already tried: the ones its earlier
+	// attempts used, plus every blocked provider the blocked-list fallback has handed out during
+	// this attempt. providers grows during the attempt too, but it also gains every provider this
+	// attempt passed over because all of its endpoints are disabled — and that provider is exactly
+	// the one the fallback is meant to give its last chance, so the fallback reads this set instead.
+	triedByThisRequest map[string]struct{}
+	currentEpoch       uint64
 	// preferredProvider is this request's GetSessionsOptions.PreferredProvider, carried here
 	// because this is the one piece of per-request state every level of selection receives. It
 	// survives the epoch reset that clears providers: it names a choice, not a failure.
 	preferredProvider string
+}
+
+// markTried adds a provider to triedByThisRequest.
+func (ip *ignoredProviders) markTried(providerAddress string) {
+	if ip.triedByThisRequest == nil {
+		ip.triedByThisRequest = map[string]struct{}{}
+	}
+	ip.triedByThisRequest[providerAddress] = struct{}{}
 }
 
 type EndpointConnection struct {
@@ -856,8 +871,28 @@ func (e *Endpoint) ResetHealth() bool {
 type SessionWithProvider struct {
 	SessionsWithProvider *ConsumerSessionsWithProvider
 	CurrentEpoch         uint64
-	retryConnecting      bool
+	// lastChance marks a provider handed out by the blocked-list fallback because nothing else can
+	// serve this request. GetSessions then picks its endpoint with endpointPickLendDisabled, so a
+	// disabled endpoint is lent for this request instead of skipped.
+	lastChance bool
 }
+
+// endpointPickMode says what fetchEndpointConnectionFromConsumerSessionWithProvider does with an
+// endpoint whose Enabled flag is off (backed off after consecutive failures).
+type endpointPickMode int
+
+const (
+	// endpointPickSkipDisabled skips it. Normal selection.
+	endpointPickSkipDisabled endpointPickMode = iota
+	// endpointPickReconnectDisabled picks it and marks it enabled again once it connects. Used by
+	// the provider-relay reconnect probe.
+	endpointPickReconnectDisabled
+	// endpointPickLendDisabled picks it for this one request WITHOUT marking it enabled, when it is
+	// a direct-RPC endpoint: the last chance when nothing else can serve. A success re-enables it
+	// through the normal relay-success path (ResetHealth); a failure leaves it disabled, its failure
+	// count already past the threshold, so normal traffic keeps skipping it.
+	endpointPickLendDisabled
+)
 
 type SessionWithProviderMap map[string]*SessionWithProvider // key is the provider address
 
@@ -1122,7 +1157,7 @@ func (cswp *ConsumerSessionsWithProvider) GetConsumerSessionInstanceFromEndpoint
 	// try to lock an existing session, if can't create a new one
 	for _, session := range cswp.Sessions {
 		// Match session to connection (different logic for provider-relay vs direct RPC)
-		matchesConnection := false
+		var matchesConnection bool
 		if isProviderRelay {
 			matchesConnection = (session.EndpointConnection == endpointConnection)
 		} else {
@@ -1237,7 +1272,9 @@ func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos [
 // collection — and matches only the endpoint serving the root, so a chain that
 // enables both a root and versioned collections (STRK) keeps its root traffic
 // on the root url.
-func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, retryDisabledEndpoints bool, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
+//
+// mode says what happens to an endpoint whose Enabled flag is off (endpointPickMode).
+func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, mode endpointPickMode, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
 	getConnectionFromConsumerSessionsWithProvider := func(ctx context.Context) (connected bool, endpointPtr []*EndpointAndChosenConnection, allDisabled bool) {
 		endpoints := make([]*EndpointAndChosenConnection, 0)
 		cswp.Lock.Lock()
@@ -1270,16 +1307,19 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			if restrictToPath && !endpoint.ServesInternalPath(*internalPath) {
 				continue
 			}
-			// retryDisabledEndpoints will attempt to reconnect to the provider even though we have disabled the endpoint
-			// this is used on a routine that tries to reconnect to a provider that has been disabled due to being unable to connect to it.
+			// A disabled endpoint is skipped in normal selection. The reconnect probe retries it
+			// (endpointPickReconnectDisabled); the last chance lends it (endpointPickLendDisabled),
+			// but only a direct-RPC endpoint: its connection already exists, so lending sends the
+			// request without a dial. A provider-relay endpoint stays skipped, as before.
 			endpoint.mu.RLock()
 			enabled := endpoint.Enabled
-			// A state reason (head-stalled, MAG-3986) keeps the endpoint out even on the
-			// retry-disabled path: that path retries an endpoint the EVENT slot backed off, and
-			// reconnecting proves nothing about a node that answers but does not follow the chain.
+			// A state reason (head-stalled, MAG-3986) keeps the endpoint out in every pick mode:
+			// reconnect and lend both retry an endpoint the EVENT slot backed off, and neither
+			// proves anything about a node that answers but does not follow the chain.
 			heldByState := endpoint.heldByStateLocked()
 			endpoint.mu.RUnlock()
-			if heldByState || (!retryDisabledEndpoints && !enabled) {
+			lendable := mode == endpointPickLendDisabled && endpoint.IsDirectRPC()
+			if heldByState || (!enabled && mode != endpointPickReconnectDisabled && !lendable) {
 				continue
 			}
 			// A websocket-only endpoint can never answer a relay — see ServesDirectRelays.
@@ -1289,7 +1329,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			if !endpoint.ServesDirectRelays() {
 				continue
 			}
-			if retryDisabledEndpoints {
+			if mode == endpointPickReconnectDisabled && !enabled {
 				utils.LavaFormatDebug("retrying to connect to disabled endpoint", utils.LogAttr("endpoint", endpoint.NetworkAddress), utils.LogAttr("provider", cswp.PublicLavaAddress), utils.LogAttr("GUID", ctx))
 			}
 
@@ -1483,11 +1523,16 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			if !connected_ {
 				continue
 			}
-			endpoint.mu.Lock()
-			cswp.Endpoints[idx].Enabled = true // return enabled once we successfully reconnect
-			// Clear recovery tracking on re-enable so a future disable starts a fresh streak (F1).
-			cswp.Endpoints[idx].clearRecoveryTrackingLocked()
-			endpoint.mu.Unlock()
+			// A lent endpoint stays exactly as it is: it is out of rotation, borrowed for this one
+			// request. Marking it enabled here, before any answer, would put a failing endpoint
+			// back into normal traffic on nothing more than a successful dial.
+			if mode != endpointPickLendDisabled {
+				endpoint.mu.Lock()
+				cswp.Endpoints[idx].Enabled = true // return enabled once we successfully reconnect
+				// Clear recovery tracking on re-enable so a future disable starts a fresh streak (F1).
+				cswp.Endpoints[idx].clearRecoveryTrackingLocked()
+				endpoint.mu.Unlock()
+			}
 			// successful new connection add to endpoints list
 			endpoints = append(endpoints, &EndpointAndChosenConnection{endpoint: endpoint, chosenEndpointConnection: endpointConnection})
 			if !getAllEndpoints {

@@ -285,7 +285,9 @@ func TestASuccessfulDialRetiresOnlyFaultsBeforeItBegan(t *testing.T) {
 				accepted <- struct{}{}
 				go func(c net.Conn) {
 					<-release
-					_ = c.(*tls.Conn).Handshake()
+					if tlsConn, ok := c.(*tls.Conn); ok {
+						_ = tlsConn.Handshake()
+					}
 					_, _ = io.Copy(io.Discard, c)
 				}(conn)
 			}

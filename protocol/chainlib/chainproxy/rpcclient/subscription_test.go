@@ -305,3 +305,25 @@ func TestClientSubscription_ConcurrentCloseUnsubscribeRun(t *testing.T) {
 		require.LessOrEqual(t, values, 1, "iteration %d: at most the one connection error before the close", i)
 	}
 }
+
+// TestClientSubscription_AnErrorPushEndsTheSubscriptionWithThatError pins MAG-4242 item 10.
+// A push whose body carries a JSON-RPC error means the node ended the subscription. forward
+// returned the nil named error for it, so the subscription closed without reporting anything:
+// the router's listener never saw Err(), never restored and never cleaned up, and the
+// subscription lived on with nobody reading it.
+func TestClientSubscription_AnErrorPushEndsTheSubscriptionWithThatError(t *testing.T) {
+	client := &Client{idgen: func() ID { return ID("test-id") }}
+	resultCh := make(chan *JsonrpcMessage, 1)
+	sub := newClientSubscription(client, "test", reflect.ValueOf(resultCh))
+	go sub.run()
+
+	sub.deliver(&JsonrpcMessage{Error: &JsonError{Code: -32000, Message: "subscription ended by the node"}})
+
+	select {
+	case err := <-sub.Err():
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "subscription ended by the node")
+	case <-time.After(time.Second):
+		t.Fatal("the subscription ended without reporting the node's error, so nothing downstream would restore or clean it up")
+	}
+}

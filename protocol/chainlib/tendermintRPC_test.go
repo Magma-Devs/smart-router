@@ -793,3 +793,29 @@ func TestTendermintSendURI_ClassifiesTransportErrorsLikeTheOtherProxies(t *testi
 	require.Error(t, err)
 	require.ErrorIs(t, err, common.LavaErrorConnectionRefused, "the URI path must hand back the same coded error the REST proxy produces, not the raw *url.Error")
 }
+
+// TestCheckResponseErrorForTendermintBatch_SeesTheAppErrorASingleReplySees calls the classifier
+// directly, so it stays green if newBatchChainMessage is pointed back at the JSON-RPC walker. This
+// pins the wiring: a batch the Tendermint parser built classifies an element's
+// result.response.{code,log} app error as a single reply does (MAG-4278).
+func TestTendermintBatchParsedMessage_SeesTheAppErrorASingleReplySees(t *testing.T) {
+	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "LAVA")
+	require.NoError(t, err)
+	parser, err := NewChainParser(spectypes.APIInterfaceTendermintRPC)
+	require.NoError(t, err)
+	parser.SetSpec(spec)
+
+	batch := `[{"jsonrpc":"2.0","id":1,"method":"abci_query","params":{"path":"/cosmos.auth.v1beta1.Query/Account","data":"0a"}},{"jsonrpc":"2.0","id":2,"method":"abci_query","params":{"path":"/cosmos.auth.v1beta1.Query/Account","data":"0b"}}]`
+	chainMessage, err := parser.ParseMsg("", []byte(batch), "", nil, extensionslib.ExtensionInfo{})
+	require.NoError(t, err)
+	require.True(t, chainMessage.IsBatch())
+
+	appError := `{"jsonrpc":"2.0","id":%d,"result":{"response":{"code":22,"log":"account not found"}}}`
+	hasErr, msg := chainMessage.CheckResponseError([]byte("["+fmt.Sprintf(appError, 1)+","+fmt.Sprintf(appError, 2)+"]"), http.StatusOK)
+	require.True(t, hasErr, "every element is an app error, so the batch is a node error as each element is alone")
+	require.Contains(t, msg, "account not found")
+
+	clean := `{"jsonrpc":"2.0","id":2,"result":{"response":{"code":0,"value":"AQ=="}}}`
+	hasErr, _ = chainMessage.CheckResponseError([]byte("["+fmt.Sprintf(appError, 1)+","+clean+"]"), http.StatusOK)
+	require.False(t, hasErr, "default mode: a successful sibling masks the fault")
+}
