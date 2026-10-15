@@ -101,3 +101,23 @@ func TestUpstreamGRPCStreamConnection_ConcurrentColdLookupsShareOneReflectionStr
 	}
 	require.Equal(t, int32(1), streams.Load(), "%d concurrent cold subscribers must share one reflection stream", subscribers)
 }
+
+// The unary connection refuses an out-of-bounds reflection-timeout before anything derives
+// a context from it; the stream pool has no initialize step, so the shared resolver checks
+// it. A unitless "reflection-timeout: 5" decodes to 5ns: without the check every cold
+// subscription on the endpoint failed as a reflection timeout instead of naming the config.
+func TestUpstreamGRPCStreamConnection_AnOutOfBoundsReflectionTimeoutIsRefusedNotTimedOut(t *testing.T) {
+	addr, streams := startCountingReflectionServer(t, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := NewUpstreamGRPCStreamConnection(ctx, &common.NodeUrl{
+		Url:        "grpc://" + addr,
+		GrpcConfig: common.GrpcConfig{AllowInsecure: true, ReflectionTimeout: 5},
+	}, 5*time.Second, grpcChannelLiveness{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	_, err = conn.GetMethodDescriptor(ctx, "grpc.health.v1.Health", "Watch")
+	require.ErrorContains(t, err, "reflection-timeout too short")
+	require.Zero(t, streams.Load(), "no reflection stream is opened on a budget the config does not allow")
+}

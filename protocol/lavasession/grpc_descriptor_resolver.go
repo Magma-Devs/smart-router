@@ -266,7 +266,16 @@ func (r *GRPCDescriptorResolver) runServiceResolution(service string, resolution
 // The budget itself is grpc-config's reflection-timeout (default 5s, validated to
 // 100ms..30s). That knob was defined and validated but never applied to anything;
 // this is the call it was written for.
+//
+// The bounds are checked here, before the context is derived, because not every
+// owner checks them first: the unary connection refuses an out-of-bounds value in
+// initialize, but the subscription stream pool has no such step. Without the check
+// a unitless "reflection-timeout: 5" (5ns) times out every reflection lookup on the
+// stream path, where the unary path refuses the value and names the config.
 func (r *GRPCDescriptorResolver) lookupService(service string) (*desc.ServiceDescriptor, error) {
+	if err := r.grpcConfig.ValidateReflectionTimeout(); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithTimeout(r.lifetime, r.grpcConfig.GetReflectionTimeout())
 	defer cancel()
 
