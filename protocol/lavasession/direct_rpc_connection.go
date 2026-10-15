@@ -1191,7 +1191,7 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 
 	// Parse input data (JSON or binary proto)
 	if len(data) > 0 {
-		if err := g.parseInputMessage(ctx, data, inputMsg, methodDescriptor, conn); err != nil {
+		if err := g.parseInputMessage(ctx, data, inputMsg, conn); err != nil {
 			return nil, utils.LavaFormatError("failed to parse input message", err,
 				utils.LogAttr("method", methodPath))
 		}
@@ -2236,7 +2236,6 @@ func (g *GRPCDirectRPCConnection) parseInputMessage(
 	ctx context.Context,
 	data []byte,
 	msg proto.Message,
-	methodDesc *desc.MethodDescriptor,
 	conn *grpc.ClientConn,
 ) error {
 	// Detect if input is JSON or binary proto

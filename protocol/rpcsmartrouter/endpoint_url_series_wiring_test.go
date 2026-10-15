@@ -54,9 +54,11 @@ func urlSeriesLabels(t *testing.T, name, provider string) []map[string]string {
 	return out
 }
 
-// An answer counts for two of the chain's poll intervals, so a url on a slow chain that answers
-// every poll never reads as down between two polls. A 10-minute chain polls every 5 minutes, so
-// the tracker's first answer counts for 10 — not the 2-minute floor.
+// An answer counts for as long as a url that answers every poll can go between two answers, so it
+// never reads as down between them (MAG-4249). A 10-minute chain's tracker polls every minute (it
+// caps the 5-minute interval), and the traffic gate can skip 4 of those polls, so the tracker's
+// first answer counts for 6 minutes: 5 polls and one more interval. Not the 2-minute floor, and
+// not 2 x 5 minutes.
 func TestURLLatestBlock_AnsweredUntilFollowsTheChainsPollInterval(t *testing.T) {
 	const provider = "lava@mag4204SlowChain"
 	upstream := newHeadUpstream(t, func() int64 { return 1000 }, nil)
@@ -68,8 +70,8 @@ func TestURLLatestBlock_AnsweredUntilFollowsTheChainsPollInterval(t *testing.T) 
 	after := time.Now()
 
 	until := answeredUntil(t, provider)[label]
-	require.GreaterOrEqual(t, until, float64(before.Add(10*time.Minute).Unix()))
-	require.LessOrEqual(t, until, float64(after.Add(10*time.Minute).Unix()))
+	require.GreaterOrEqual(t, until, float64(before.Add(6*time.Minute).Unix()))
+	require.LessOrEqual(t, until, float64(after.Add(6*time.Minute).Unix()))
 }
 
 // The node urls CreateSmartRouterEndpoint registers carry their spec path onto the per-url

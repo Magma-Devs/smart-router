@@ -111,17 +111,25 @@ func TestNewEndpointMonitor_ResolvesFlatPollInterval(t *testing.T) {
 // test would still pass. It reads the cadence back through the same accessor /debug/endpoint-state
 // reports as PollIntervalMs.
 //
-// Both cases use a block time long enough that the poll timer cannot fire inside the test, so what
-// is asserted is the CONFIGURED cadence and never a backed-off or re-scheduled one.
+// Every case's interval is long enough that the poll timer cannot fire inside the test, so what is
+// asserted is the cadence the tracker scheduled after init and never a backed-off one.
+//
+// The tracker caps a healthy interval at chaintracker.BACKOFF_MAX_TIME, so the divisor cases use a
+// block time short enough to stay under the cap, and the last two pin the cap itself: a slower
+// interval runs at one minute from the first poll on. PollInterval, which the router sizes a url's
+// answer timeout from (MAG-4249), must report that same interval.
 func TestEndpointMonitor_PollDivisor_ReachesLiveTracker(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		divisor float64
-		want    time.Duration
+		name         string
+		avgBlockTime time.Duration
+		divisor      float64
+		want         time.Duration
 	}{
-		{name: "default divisor gives half the block time", divisor: 0, want: 30 * time.Second},
-		{name: "divisor 1 gives a full block time", divisor: 1, want: time.Minute},
-		{name: "divisor 0.25 gives four block times", divisor: 0.25, want: 4 * time.Minute},
+		{name: "default divisor gives half the block time", avgBlockTime: 12 * time.Second, divisor: 0, want: 6 * time.Second},
+		{name: "divisor 1 gives a full block time", avgBlockTime: 12 * time.Second, divisor: 1, want: 12 * time.Second},
+		{name: "divisor 0.25 gives four block times", avgBlockTime: 12 * time.Second, divisor: 0.25, want: 48 * time.Second},
+		{name: "four one-minute blocks run at the one-minute cap", avgBlockTime: time.Minute, divisor: 0.25, want: time.Minute},
+		{name: "a 10-minute chain polls every minute", avgBlockTime: 10 * time.Minute, divisor: 0, want: time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -133,7 +141,7 @@ func TestEndpointMonitor_PollDivisor_ReachesLiveTracker(t *testing.T) {
 				ChainParser:         newRealChainParser(t, "ETH1", spectypes.APIInterfaceJsonRPC),
 				ChainID:             "ETH1",
 				ApiInterface:        spectypes.APIInterfaceJsonRPC,
-				AverageBlockTime:    time.Minute,
+				AverageBlockTime:    tc.avgBlockTime,
 				BlocksToSave:        1,
 				PollIntervalDivisor: tc.divisor,
 			})
@@ -142,7 +150,7 @@ func TestEndpointMonitor_PollDivisor_ReachesLiveTracker(t *testing.T) {
 
 			conn := &pollNowConn{url: url}
 			conn.block.Store(1000)
-			_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+			_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 			require.NoError(t, err)
 
 			require.Eventually(t, func() bool {
@@ -151,6 +159,7 @@ func TestEndpointMonitor_PollDivisor_ReachesLiveTracker(t *testing.T) {
 			}, 10*time.Second, 20*time.Millisecond, "the tracker must reach its poll loop before its cadence is read")
 
 			require.Equal(t, tc.want, m.BackoffSnapshot()[url])
+			require.Equal(t, tc.want, m.PollInterval(), "PollInterval is the interval the live tracker waits")
 		})
 	}
 }

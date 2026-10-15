@@ -8,6 +8,466 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.6.0 — 2026-10-14
+
+### Highlights
+
+v1.6.0 changes seven behaviours a client or an operator may depend on. They are listed under **⚠ Breaking changes** below, each with the surface it touches and what to do: four change what a client sees on a reply (upstream response headers, `lava-relay-timeout`, retries after a node refusal, hedge accounting), one can stop the router at boot (cross-validation policy validation), one makes a transaction submission ignore the caller's cross-validation headers, and one changes which requests reach an archive node.
+
+#### Archive routing is decided once, before the first attempt
+
+The router decides whether a request needs an archive node from the request itself, before it picks an endpoint. A request is historical, and goes only to the endpoints that declare the `archive` extension, when any of these holds:
+
+- it names a block deeper than the chain's archive depth, the `rule.block` of the `archive` extension in the chain's spec (127 blocks behind the head on Ethereum);
+- it names the `earliest` block;
+- it carries `lava-extension: archive`.
+
+Endpoints without the extension are skipped whichever tier they are in: on a fleet where only a backup declares `archive`, a historical request goes straight to that backup, and a request for a recent block stays on the primaries. An archive-routed request counts CU at the extension's `cu_multiplier`. A retry re-sends the same request to another endpoint of the same pool; it no longer adds `archive` on the second attempt ([#389]), which used to pull a plain `latest` read into the backup tier, at archive cost, after one failure. The router also reads more of the request than before ([#514]): a JSON-RPC batch is judged on its deepest element, and a range method such as `trace_filter` on its `fromBlock`.
+
+Requests whose block the router cannot read are not routed to archive on their own: methods that name a block or transaction by hash (`eth_getTransactionReceipt`, `eth_getBlockByHash`, `debug_traceTransaction`, `trace_transaction`, Tendermint `block_by_hash`, and the like) and EIP-1898 block objects (`{"blockHash": …}` or `{"blockNumber": …}`) on `eth_call`, `eth_getBalance`, `eth_getStorageAt`, `eth_getTransactionCount`, `eth_getCode` and `eth_getProof`. They stay on the primaries unless the caller sends `lava-extension: archive`. When a caller asks for an extension no node on the router offers, the request is still served and the reply says so in the new `Lava-Extension-Unavailable` header, counted in `smartrouter_extension_unavailable_total` ([#450]).
+
+#### Also new since v1.4.0, the last graduated release
+
+v1.5.0 through v1.5.8 were pre-releases, so an upgrade from v1.4.0 brings everything in their sections below as well. Three of those changes are large enough to repeat here.
+
+- **REST errors are classified the way JSON-RPC errors are.** Until v1.5.5 a REST reply counted as the node's answer unless its status was 5xx or 429, so a Horizon `transaction_failed`, an Aptos `resource_not_found` or a Cosmos tx-not-found was filed as a success, never classified, and on a write the first of them ended the broadcast while a sibling node was still executing the transaction. Every status outside 2xx is now a node error with its own retry and fault verdict ([#448], v1.5.8): a 404 is data the node does not hold, retried on another node and never scored; 401, 402, 403, 407, 426 and 451 are the endpoint refusing the router, retried elsewhere without blaming the node; 409 is a transaction already known, so in a broadcast the accepting node's reply wins over the duplicates; a 400 "block beyond head" is a missing block; malformed-request statuses (400, 406, 411, 412, 414 to 417, 422, 428, 431) are the caller's error. A 5xx that carries the node's own JSON body reaches the caller as-is instead of a router-made 500, an empty 404 or 405 from a gateway in front of the node is a route refusal rather than the node's answer ([#435], v1.5.5), and a node answer the endpoint is not at fault for logs at DEBUG rather than ERROR. The rule was probed live against twelve REST API families; the full status map is section 9 of `docs/ERROR-REGISTRY-DESIGN.md`. v1.6.0 continues it: five `NODE_*` refusal codes are retried on another provider (breaking change 2), a "data not held" answer scores on sync only ([#460]), and an upstream EOF, DNS failure or http-as-https counts against the endpoint ([#518]).
+- **Solana replies are read by path, not decoded.** Every served reply on a Solana router used to be decoded whole to find `result.context.slot`; a 5.9 MB `getBlock` reply cost a full copy and 2.8 ms for a member that `getBlock` never carries. Since v1.5.4 ([#428]) the slot is read by path, `getBlock` replies are skipped outright (8 ns, no allocation), a reply whose result is a list is answered from its first byte, and a truncated reply yields no slot instead of a wrong one. The cache write snapshots the reply instead of deep-copying it through JSON, which took 33 ms and 15 to 20 MB per block and now takes about 100 ns ([#431]), and block-height extraction no longer decodes a whole block to run a block-hash rule that could only return 0 ([#430]). In v1.6.0 the frozen-head detector counts a url's highest slot, so a Solana node whose `context.slot` and finalized slot disagree while both stand still is still taken out of rotation ([#494]).
+- **Heavy responses cost less memory and CPU.** A node url can ask its upstream for gzip with `accept-encoding: gzip` ([#432], v1.5.4); the reply is inflated while it is read, with pooled readers, and a block shrinks four to six times on the wire. An upstream body whose length is announced is read into one buffer of that size instead of a chain of growing buffers ([#429]; for 5.9 MB, 5.6 MiB and 3 allocations instead of 13.9 MiB and 31). JSON-RPC block-height extraction stops at 1 MiB, since a larger JSON-RPC reply is a log filter, a full block or a trace, never the tip ([#430]). Since v1.5.6, `--cache-max-entry-bytes` (default 1 MiB, `0` for no cap) serves a reply above the cap without writing it to the cache, which protects the hit rate of ordinary entries and the cache server's CPU; `smartrouter_cache_write_skipped_total{reason="size"}` and `smartrouter_cache_entry_bytes` show what it skips ([#434]). v1.6.0 adds the audit's efficiency fixes ([#511]): regexps compiled once instead of per error, metric increments counted inline instead of on a goroutine each, and the node-errors header built in one buffer.
+
+#### What's new
+
+- **Chain tracker idle mode** ([#505]), off by default. `--chain-tracker-idle-after <duration>` pauses a chain's dedicated upstream polls once it has served no client relay for that long; `--chain-tracker-idle-poll-interval` keeps a slow heartbeat instead (`0` polls nothing while idle). The next client relay wakes the chain with one poll of every endpoint before it is routed. `smartrouter_chain_idle` reports the state; the operator guide is `docs/CHAIN-TRACKER-IDLE-MODE.md`.
+- **A url stuck on a frozen head leaves rotation** ([#494]). A node that keeps answering with the same latest block while another url of the chain has moved past it is taken out of rotation after 10 × `--chain-tracker-poll-divisor` tracker cycles (at least 3), and returns once it answers above the block it was stuck on. A provider with every url out is blocked, so traffic moves to the next primary or to the backup tier.
+- **One latest-block series per url** ([#501]). `rpc_endpoint_url_latest_block{spec, apiInterface, endpoint_id, url, internal_path}` carries each url's own head (the `url` label is scheme and host plus an 8-hex fingerprint, never the api key), so an alert can tell a frozen url from one that trails. `rpc_endpoint_latest_block` now reports a provider's lowest url head. A removed url's series is deleted, not left standing.
+- **Per-customer metrics from the `project-id` header** ([#513]). `smartrouter_customer_requests_total` and `smartrouter_customer_requests_failed_total` (`spec`, `apiInterface`, `customer`, `method`), `smartrouter_customer_end_to_end_latency_milliseconds` (`spec`, `apiInterface`, `customer`) and `smartrouter_customer_overflow_total` (`spec`). A request without the header counts as `DefaultDappID`; each spec admits 512 distinct customers and later values collapse to `other`. The header never reaches an upstream or the cache key.
+- **Native GraphQL API interface** ([#480]), first used for Sui. Each root field is its own API, so cross-validation policies, the stateful-write guard, compute units and tip parsing apply per operation instead of collapsing onto one `/graphql` path.
+- **Cross-validation names the plurality on failure** ([#491]). `lava-cross-validation-plurality-size` and `lava-cross-validation-plurality-providers` carry the largest set of providers that returned the same response when the quorum is not reached; the providers list is empty on a tie.
+- **Chain tip regressions are counted** ([#506]). `smartrouter_latest_block_regressions_total{spec, apiInterface, reason}` (`reason` is `consensus` or `stale_tip`) with an ERROR log, and `smartrouter_latest_block` follows the tip down.
+- **`GET /debug/sticky-claims`** ([#442]) reports the sticky-session claim outcomes per endpoint, cumulative since the pod started.
+- **Endpoint observations travel on the RESP cache backend** ([#390]), so the fleet tracker gate works there too and replicas that share a cache stop each polling every upstream.
+
+#### Notable fixes
+
+- **Failover and sessions.** A blocked provider's disabled endpoint is lent once per request as a real last chance instead of "No pairings available" ([#504]). An upstream connection that answers only 5xx is retired after two in a row, at most once per 5 s, so a load balancer pinned to a dead backend no longer holds the router on 503s until a restart ([#507]). A relay is never handed a WebSocket endpoint ([#487]); a direct RPC session is tied to the endpoint selection chose ([#493]); every provider in `lava-providers-block` is honoured, not just the first two ([#451]); a "data not held" answer scores on sync only ([#460]).
+- **Cross-validation.** The sessions gathered for a request whose quorum is out of reach are released ([#423]); a round stops at the attempt window when only a quiet group is missing ([#454]); startup warns on every min-groups and max-participants shortfall, measured against the configured providers rather than the ones up at boot ([#439]); the health check takes one provider's latest block, not a quorum ([#438]); cross-validation outranks a caller pin at any min-groups ([#393]).
+- **REST.** PUT and PATCH bodies are relayed ([#455]); a JSON body under a generic Content-Type is sent as JSON ([#456]); a non-default Content-Type is part of the cache key ([#457]); a request path can never change the upstream host ([#479]).
+- **gRPC.** A binary call is forwarded as raw bytes ([#446]); idle pooled upstream channels are closed and live streams pinged ([#447]); the chain parser's proto registry is locked against concurrent relays ([#445]); requests parse from reflection snapshots, not relays ([#503]); the descriptor cache is keyed by service, so same-named methods across Cosmos services no longer share one descriptor ([#514]); subscription restores are bounded and classified, and a given-up client stream ends with an error ([#489]); gRPC ABORTED is classified as `NODE_ABORTED`, a non-retryable transaction outcome that is not the endpoint's fault ([#458]).
+- **WebSocket.** A shutdown panic in upstream subscriptions is gone ([#477]); `unsubscribe_all` gets a reply ([#478]); a subscription that became active between two checks is joined ([#508]); a teardown wins over a restore in flight ([#509]); `relay_usage` events carry the client's Origin ([#474]).
+- **Tracing and request headers.** The caller's tracing ids are read on every interface and copied before they outlive the request ([#416]); every request header is owned past the listener, and a pinned provider resolves to the router's own string ([#443]).
+- **Cache and classification.** The chain tip is bounded by what the router believed, and a stale tip yields ([#421]); a dead RESP cache reads as an outage on reads, not a slow one ([#436]); a relay's cache key is computed once, on a copy of the request ([#515]); an upstream EOF, DNS failure or http-as-https is the endpoint's fault ([#518]); batch retries follow the flag, not a hash a batch never has ([#517]); a tagged directive resolves from the url's own internal-path collection ([#482]).
+
+#### Reverted before the tag
+
+The backup-reserve hedge ([#449]) was reverted by [#516] before v1.6.0 was cut. The budget only ends a request, attempts go out one window apart, and the backup tier is reached once the primary pool is exhausted, as in v1.5.8. The [#449] commits still appear under Bug fixes below because that list is generated from history.
+
+#### Removed
+
+The legacy relay-metrics reporter and the New Relic agent are gone ([#472], [#471]); no deployment configured either. Prometheus metrics and the OTel relay-usage sink are unchanged.
+
+#### Build
+
+Go 1.26.9 and golang.org/x/net v0.60.0 ([#502]).
+
+### Changes
+
+#### ⚠ Breaking changes
+
+Each entry says what changed, who notices, and what to do. The commits are also listed under their own group below.
+
+1. **Upstream response headers are filtered** ([#420], MAG-3104, [`efbe226`], [`ce4dfd8`])
+
+   An upstream's response headers reach the client only if they are transport headers (`Content-Type`, `Content-Encoding`, `Retry-After`, `Date`) or headers the chain spec declares in the reply direction (`pass_reply`, `pass_both` or `pass_ignore`) for the API interface, taken as the union across the interface's collections. Vendor, CDN, cookie and quota headers that passed through before are dropped. The router's own `Lava-*` headers are unchanged, and a cache hit written by an older router replays the same reduced set.
+
+   *Who notices:* a client that reads an upstream's own headers off a reply, such as a quota, a request id or a cookie.
+
+   *What to do:* declare the header in the chain spec's `headers` with a reply-direction kind. Nothing else makes it pass.
+
+2. **A node's refusal is retried on another provider** ([#492], MAG-2771, [`fb11aec`])
+
+   `NODE_METHOD_NOT_FOUND` (2001), `NODE_UNIMPLEMENTED` (2008), `NODE_ENDPOINT_NOT_FOUND` (2009), `NODE_METHOD_NOT_ALLOWED` (2010) and `NODE_UNAUTHORIZED` (2016) are a node's claim about itself, not a fact about the chain, so the router now asks another provider instead of returning the refusal at once; the refusing endpoint is neither blamed nor scored. `NODE_LIMIT_EXCEEDED` (2011) stays non-retryable, and the refusal of a method the spec does not list (relayed as a `Default-` API) stays final. When the retry gets a different answer, the caller receives the answer that ended the request, not the first refusal.
+
+   *Who notices:* a client that reads `Lava-Retries` and `Lava-Provider-Address`; on these replies the values change. A refusal every provider shares now costs up to the retry limit in upstream calls. The public error-codes page lags this release and still lists the five codes as non-retryable.
+
+   *What to do:* nothing for most clients. Treat a refusal on these codes as the fleet's answer rather than one node's.
+
+3. **`lava-relay-timeout` is bounded** ([#452], MAG-3988 and MAG-3600, [`5c2809f`])
+
+   The header is no longer used verbatim. A value that is not a positive duration is ignored, a value under 300ms is raised to 300ms, and a value above the request's own budget is held to that budget unless the operator sets `--max-caller-relay-timeout` (default `0`: no extension). The reply carries `Lava-Relay-Timeout-Applied` with the window actually used. Before this release a zero or negative value crashed the router, and a large one held a request well past its budget.
+
+   *Who notices:* a caller that raised the header per request for heavy methods beyond the method's own budget, as the public docs used to recommend; it now gets the method's own budget.
+
+   *What to do:* to let callers extend budgets, run with `--max-caller-relay-timeout`, for example `5m`, the outbound client's per-attempt limit. The public docs (`api/directives.md`, `configuration/failover/timeout.md`, `reference/cli.md`) describe the bounded behaviour.
+
+4. **A hedge's losing attempt is counted and named again** ([#440], MAG-3762, [`62bd7ee`])
+
+   For a request where a hedge fires, `Lava-Retries` is at least 1 and the losing provider is named in `Lava-Provider-Address` before the one that answered. This is the behaviour of v1.5.1 and earlier; v1.5.2 and v1.5.3 dropped the losing attempt. The retry metrics (`smartrouter_retries_total`, `smartrouter_retries_success_total`, `smartrouter_retries_failed_total`, `smartrouter_retry_attempts`) count hedged requests again, so the retry and hedging families overlap.
+
+   *Who notices:* dashboards and alerts built on the retry metrics or on `Lava-Retries` against v1.5.2 or v1.5.3.
+
+   *What to do:* expect the v1.5.1 numbers.
+
+5. **A cross-validation policy that can never apply stops the router at startup** ([#441], MAG-3604, [`d7e638b`])
+
+   A policy whose `chain-id` and `api-interface` match no configured endpoint, or whose method the endpoint's spec does not serve (a REST policy names the path template, not a gRPC method name), is refused before anything binds or dials. The error names the policy by its position in `cross-validation.policies` and the endpoints that do exist. Such a policy used to load and never apply, while the startup line counted it as loaded. A policy with neither `enabled` nor `forbid-caller-cv` is a no-op and is left alone; the "policies loaded" line now reports each endpoint's own count and methods.
+
+   *Who notices:* an operator with a stale or misspelled policy; the router does not boot.
+
+   *What to do:* delete or correct the policy the error names before rolling out.
+
+6. **A write routes as a write, whatever headers the caller sends** ([#437], MAG-3603, [`5215861`])
+
+   A method in the spec's stateful category no longer takes the caller's `lava-cross-validation-*` headers. It routes by its category and the headers have no effect: HTTP 200, one answer, no `lava-cross-validation-*` response headers. A cross-validated write used to broadcast the transaction to every stateful node and then report HTTP 500, because only the first node can accept it. A malformed header pair on such a method (an unparseable value, one header without its companion, an agreement threshold above max-participants) used to be refused before dispatch and is now ignored; it is still rejected on a read. A `forbid-caller-cv: true` policy written on a write is redundant and harmless.
+
+   *Who notices:* a client library that sends the cross-validation headers on every request, transaction submissions included.
+
+   *What to do:* nothing, except stop expecting cross-validation response headers on a write.
+
+7. **A retry no longer promotes a request to `archive`** ([#389], MAG-2734, [`c7c605a`])
+
+   Archive routing is decided once, before the first attempt, from the block the request names (see Highlights); a retry re-sends the same request. Requests whose block the router cannot read, by-hash methods and EIP-1898 block objects, lose the automatic archive route they had through the retry.
+
+   *Who notices:* a caller that relied on `eth_getTransactionReceipt`, `debug_traceTransaction`, `trace_transaction`, an `eth_call` with `{"blockHash": …}` or `{"blockNumber": …}`, and the like reaching an archive node on the second attempt. Those requests stay on the primaries.
+
+   *What to do:* send `lava-extension: archive` on requests that need archive state. A chain whose historical requests are misjudged by height is fixed in its spec's `rule.block`.
+
+#### New Features
+- feat(rpcsmartrouter): report the sticky-session claim outcomes on GET /debug/sticky-claims (MAG-3860) ([#442]) [`9a9bf07`]
+- feat(chainlib): add a native graphql api interface for Sui (MAG-2863) ([#480]) [`edc9b10`]
+- feat(cache): carry endpoint observations on the KV seam so the fleet tracker gate works on the RESP backend ([#390]) [`fbe2856`]
+- feat(rpcsmartrouter): name the plurality when cross-validation fails (MAG-2192) ([#491]) [`20dfe05`]
+- feat(rpcsmartrouter): count and log the chain's latest block going backwards (MAG-4153) ([#506]) [`043f0fd`]
+- feat(metrics): one rpc_endpoint_url_latest_block series per url of a provider, for the stuck alerts (MAG-4204) ([#501]) [`0bbe3b6`]
+- feat(rpcsmartrouter): take a url that keeps answering a frozen block out of rotation (MAG-3986) ([#494]) [`55bb865`]
+- feat(metrics): count requests, failures and latency per customer from the project-id header (MAG-4081) ([#513]) [`baa9078`]
+- feat(chain-tracker): idle mode, pause tracker polls on a quiet chain and wake on the next client request (MAG-3829) ([#505]) [`a2d8148`]
+
+#### Bug fixes
+- fix(common): classify gRPC ABORTED and DATA_LOSS as node errors (MAG-3995) ([#458]) [`54591e5`]
+- fix(common): NODE_ABORTED is a transaction outcome, and DATA_LOSS stays unregistered (MAG-3995) ([#458]) [`62da26b`]
+- fix(common): say what Sui's ABORTED is, and is not, in the NODE_ABORTED rationale (MAG-3995) ([#458]) [`36542ee`]
+- fix(rpcsmartrouter): forward only the upstream headers the transport or the spec needs (MAG-3104) ([#420]) [`ce4dfd8`]
+- fix(rpcsmartrouter)!: keep the reply headers a chain's whole API interface declares, pass_ignore included (MAG-3104) ([#420]) [`efbe226`]
+- fix(lavasession): a pin no other provider can satisfy must not release the block ([#393]) [`3cd14f0`]
+- fix(rpcsmartrouter): cross-validation outranks a caller pin, at any minGroups ([#393]) [`97d5ed9`]
+- fix(lavasession): resolve the pin before a release is judged able to serve it (MAG-3106) ([#393]) [`906a2d8`]
+- fix(lavasession): hand out a copy of the errored providers, not the live map (MAG-3103) ([#418]) [`44d75c6`]
+- fix(resp-cache): a dead cache reads as an outage on reads, not as a slow one ([#436]) [`f5e9b21`]
+- fix(resp-cache): record reachability only where one endpoint stands behind it ([#436]) [`9ac667e`]
+- fix(resp-cache): record a dial fault on what answered, not on whose clock ran out (MAG-3653) ([#436]) [`0e1b9ee`]
+- fix(rpcsmartrouter): a health check takes one provider's latest block, not a quorum ([#438]) [`e9dc693`]
+- fix(rpcsmartrouter): seal the internal relay against cross-validation, not merely unwire it ([#438]) [`e3655f5`]
+- fix(relaycore): name the real reason when an internal relay ignores cross-validation headers (MAG-3746) ([#438]) [`dcc8ad3`]
+- fix(chainlib): carry the client's Origin on websocket relay_usage events ([#474]) [`a7918e8`]
+- fix(rpcsmartrouter): check min-groups against the configured providers, not the ones up at boot (MAG-3751) ([#439]) [`49fa95d`]
+- fix(rpcsmartrouter): warn at startup for a max-participants shortfall too, and pin the boot path in a test (MAG-3751) ([#439]) [`c017377`]
+- fix(rpcsmartrouter): warn on every cross-validation shortfall at startup, and keep the layout line's keys (MAG-3751) ([#439]) [`d3042be`]
+- fix(rpcsmartrouter): name the answering pod on /debug/sticky-claims, and say what adopted does not prove (MAG-3860) ([#442]) [`6cb23ea`]
+- fix(rpcsmartrouter): say what a reset does to the sticky claim counts, and why SharedSticky is false (MAG-3860) ([#442]) [`c4e2a59`]
+- fix(chainlib): honour every provider in lava-providers-block, not just the first two (MAG-3080) ([#451]) [`283ff53`]
+- fix(relaycore): hedge to the backup tier before the budget ends when primaries go quiet (MAG-3923) ([#449]) [`2d18323`]
+- fix(relaycore): count a hedge asked for in the same instant as the reserve hedge (MAG-3923) ([#449]) [`334fda5`]
+- fix(lavasession): log the reserve hedge's backup selection as a hedge, not a fallback (MAG-3923) ([#449]) [`ea5ad0a`]
+- fix(relaycore): keep counting a hedge in flight when a node error drives a retry (MAG-3923) ([#449]) [`a90ef62`]
+- refactor(lavasession): keep the name of every dispatched session, not only the count (MAG-3762) ([#440]) [`aa005c3`]
+- fix(rpcsmartrouter)!: count and name a hedge's losing attempt again (MAG-3762) ([#440]) [`62bd7ee`]
+- fix(rpcsmartrouter): release a rejected session under the key it was taken with (MAG-3762) ([#440]) [`9178c5b`]
+- fix(rpcsmartrouter): list Lava-Provider-Address in the order the attempts went out (MAG-3762) ([#440]) [`531ea7a`]
+- fix(cache): bound the chain tip by what the router believed, and let a stale tip yield (MAG-3755) ([#421]) [`1df3854`]
+- fix(cache): keep a no-tip pod's own claim, never publish a zero tip, and correct the prose around the guard (MAG-3755) ([#421]) [`b1ec6c6`]
+- fix(rpcsmartrouter): release the sessions a cross-validation request gathered when the quorum is out of reach ([#423]) [`0c51f7a`]
+- fix(rpcsmartrouter): match AddUsed when releasing an entry that has no session (MAG-3286) ([#423]) [`85e9f2d`]
+- fix(rpcsmartrouter): release undispatched sessions through one helper, under each session's own key (MAG-3286) ([#423]) [`d8f2d2b`]
+- fix(chainlib): read the caller's tracing headers on every interface (MAG-3798) ([#416]) [`5d1e294`]
+- fix(chainlib): copy the caller's tracing ids before they outlive the request (MAG-3798) ([#416]) [`8c2610e`]
+- refactor(chainlib): stamp Tendermint's tracing ids after the header-map reads (MAG-3798) ([#416]) [`996f0a7`]
+- fix(chainlib): log the caller's tracing ids at info on Tendermint RPC and gRPC (MAG-3798) ([#416]) [`5b7fe36`]
+- fix(lavasession): resolve a pinned provider to the router's own string, and own every request header past the listener (MAG-3881) ([#443]) [`bf7abc5`]
+- fix(chainlib): prove the header copy through the listeners, and keep /metrics up when one metric fails (MAG-3881) ([#443]) [`e6b1a8a`]
+- fix(chainlib): settle where a gRPC metadata value lives, and prove it against a real server (MAG-3881) ([#443]) [`18e581a`]
+- fix(chainlib): own the limiter's User-Agent, and let the detached-header test fail for a dropped header (MAG-3881) ([#443]) [`920f46c`]
+- fix(rpcclient): stop a shutdown panic in upstream subscriptions ([#477]) [`b3feebe`]
+- fix(chainlib): reply to a websocket unsubscribe_all ([#478]) [`56dba11`]
+- fix(grpc): lock the chain parser's proto registry against concurrent relays ([#445]) [`c9713ed`]
+- fix(chainlib): relay PUT and PATCH request bodies on REST (MAG-4008) ([#455]) [`d007d91`]
+- fix(chainlib): tell the caller when a requested extension no node offers is dropped (MAG-3935) ([#450]) [`91065f6`]
+- fix(rpcsmartrouter)!: refuse a cross-validation policy that could never apply, and log each endpoint's own (MAG-3604) ([#441]) [`d7e638b`]
+- fix(relaycore): stop cross-validation at the attempt window when only a quiet group is missing (MAG-3993) ([#454]) [`6675c4f`]
+- fix(relaycore)!: a write routes as a write, whatever headers the caller sends ([#437]) [`5215861`]
+- fix(rpcsmartrouter): ignore a non-positive lava-relay-timeout instead of crashing (MAG-3988) ([#452]) [`5c2809f`]
+- fix(chainlib): send JSON bodies under a generic Content-Type as JSON (MAG-4006) ([#456]) [`058d8e1`]
+- fix(chainlib): keep non-default Content-Types in the cache key (MAG-4007) ([#457]) [`0a6b18b`]
+- fix(rpcsmartrouter): score a "data not held" answer on sync only, not as a success ([#460]) [`4b87c8f`]
+- fix(grpc): close idle pooled upstream channels and ping live streams ([#447]) [`3b7cdfc`]
+- fix(grpc): forward a binary gRPC call to the node as raw bytes ([#446]) [`f27b719`]
+- fix(redisstore): let a value the observation read rejects stop fencing the publish (MAG-3732) ([#390]) [`0eaa47a`]
+- fix(performance): put the RESP endpoint-observation calls behind the breaker (MAG-3732) ([#390]) [`a362acf`]
+- fix(cache): share RESP endpoint observations across key prefixes, as cache-be does (MAG-3732) ([#390]) [`7efa7b3`]
+- fix(cache): keep RESP endpoint observations under key-prefix (MAG-3732) ([#390]) [`1949100`]
+- fix(common): a REST request path can never change the upstream host ([#479]) [`d13051c`]
+- fix(specs): bring the mirror's cosmos REST and Aptos stateful marks in line with lava-specs (MAG-4155) ([#486]) [`c4485a7`]
+- fix(lavasession): never hand a relay a websocket endpoint (MAG-3477) ([#487]) [`1eee645`]
+- fix(rpcsmartrouter): --epoch-duration help says epochs always run, defaulting to 15m (MAG-4154) ([#484]) [`2fe412c`]
+- fix(grpc): bound and classify gRPC subscription restores, and end given-up client streams with an error (MAG-4177) ([#489]) [`14b3034`]
+- fix(grpc): bound restores by uptime, and keep a subscription's own end out of the reconnect (MAG-4177) ([#489]) [`ed8e917`]
+- fix(grpc): hold off a stream's rate-limited endpoint, strand no end status, and stop polling reconnects (MAG-4177) ([#489]) [`a2d90c4`]
+- fix(lavasession): tie a direct RPC session to the endpoint selection chose (MAG-4025) ([#493]) [`12ff203`]
+- fix(lavasession): retire an upstream connection that answers only 5xx (MAG-4211) ([#507]) [`1a7e4e1`]
+- fix(common)!: ask another provider when a node refuses on its own account (MAG-2771) ([#492]) [`fb11aec`]
+- fix(metrics): report a provider's lowest url head so one stuck url still fires the stuck-provider alerts (MAG-4204) ([#501]) [`33093ee`]
+- fix(metrics): count a stuck url on every answered poll, and drop a url only after 3 failed polls (MAG-4204) ([#501]) [`165c923`]
+- fix(metrics): keep a failing url's head, leave ws urls out, and undo a head written after its url was removed (MAG-4204) ([#501]) [`9332503`]
+- fix(metrics): label a url's series by its fingerprint alone (MAG-4204) ([#501]) [`0ca8efd`]
+- fix(metrics): drop a url's own series once it has given no answer for 2 minutes (MAG-4204) ([#501]) [`5e90850`]
+- refactor(metrics): MAG-4204 option B as written: keep the provider series, and add per-url series that tell stuck from down ([#501]) [`63af99e`]
+- fix(metrics): drop a removed url's relay counter, and compare answered_until with timestamp() (MAG-4204) ([#501]) [`5a17276`]
+- fix(chainlib): resolve a tagged directive from the url's own internal-path collection (MAG-4105) ([#482]) [`d8532fc`]
+- refactor(chainlib): one keyed read for the add-on and base steps of the per-url lookup (MAG-4105) ([#482]) [`feb43f9`]
+- fix(chainlib): parse gRPC requests from reflection snapshots, not relays (MAG-4217) ([#503]) [`435fcf0`]
+- fix(lavasession): give a blocked provider a real last chance instead of "No pairings available" (MAG-4232) ([#504]) [`b33b7fc`]
+- fix(chainlib): compute a relay's cache key once, on a copy of the request (MAG-4242) ([#515]) [`bc6dfec`]
+- fix(common): classify an upstream EOF, DNS failure and http-as-https as the endpoint's fault (MAG-4242) ([#518]) [`bcf9d7d`]
+- fix(chainlib): key the gRPC descriptor cache by service, keep a batch's deepest block, and read a range's lower bound (MAG-4242) ([#514]) [`803d485`]
+- fix(rpcsmartrouter): join a WebSocket subscription that became active between the two checks (MAG-2546) ([#508]) [`d966dbe`]
+- fix(rpcsmartrouter): let a WebSocket teardown win over a restore in flight (MAG-2547) ([#509]) [`30c7545`]
+- fix(metrics): size each url's answered-until time from the poll interval the tracker runs and the traffic gate (MAG-4249) ([#510]) [`2fd1c1e`]
+- fix(relaypolicy): decide batch retries by the flag, not by a hash a batch never has (MAG-4242) ([#517]) [`8e325e8`]
+
+#### Documentation updates
+- docs(common): say what MayHaveReachedNode does and does not do for NODE_ABORTED (MAG-3995) ([#458]) [`1b94175`]
+- docs: correct what a pinned cross-validation request did before the override (MAG-4143) ([#393]) [`536e39f`]
+- docs(resp-cache): scope the kind="error" read reading to standalone (MAG-3653) ([#436]) [`f10367e`]
+- docs(cross-validation): index the readiness symptom where an operator will look ([#438]) [`c56ca12`]
+- docs(metrics): say what the health readings do and do not attest (MAG-3746) ([#438]) [`573bb7a`]
+- docs(cross-validation): the three ATTENTION cases, the layout line's keys, and the backup-only exception (MAG-3751) ([#439]) [`5abd0cb`]
+- docs(cache): say the router writes no block-hash to height mappings (MAG-3807) ([#444]) [`b778757`]
+- docs(rpcsmartrouter): say in the code that no block-hash→height mapping is ever learned (MAG-3807) ([#444]) [`9537e50`]
+- docs(cache): pin the block-hash rule to getblockstats, and name the route #389 removes (MAG-3807) ([#444]) [`63f1b56`]
+- docs(redisstore): name the upstream go-redis issue for the re-auth race ([#413]) [`a3ec336`]
+- docs(redisstore): name the go-redis release path that loses the re-auth wake-up ([#413]) [`77c4eda`]
+- docs(cache): say the chain-tip fence rests on writer clocks, and what a hit's Provider-Latest-Block carries (MAG-3755) ([#421]) [`783ae7a`]
+- docs(cache): stop the KVStore type comment saying a stale tip still fences lower writes (MAG-3755) ([#421]) [`8ab1762`]
+- docs(utils): state the tracing-id ownership rule, not which listener meets it (MAG-3798) ([#416]) [`fb88150`]
+- docs(rpcsmartrouter): say why gRPC streams carry tracing ids and WebSocket does not (MAG-3798) ([#416]) [`ad25ad6`]
+- docs(rpcsmartrouter): say which log lines carry the tracing ids and where they stop (MAG-3798) ([#416]) [`9c4679f`]
+- docs(utils): state the tracing-id ownership rule, not which listener meets it (MAG-3881) ([#443]) [`4369814`]
+- docs(cache): say which servers' clocks an observation's age spans (MAG-3732) ([#390]) [`72be694`]
+- docs(chainlib): an undeclared graphql root field is served, not refused (MAG-4270) ([#521]) [`149d2f5`]
+
+#### Build process updates
+- build(deps): move to Go 1.26.9 and golang.org/x/net v0.60.0 so govulncheck passes (MAG-4230) ([#502]) [`4a0bc8a`]
+
+#### Other work
+- MAG-2734 fix(relaypolicy): stop rewriting the request on retry ([#389]) [`c7c605a`]
+- MAG-2734 fix(relaycore): make the retry guard reach the attempt it guards ([#389]) [`9568adf`]
+- MAG-2734 test(relaycore): drop the retries manager from tests that landed on main after the removal ([#389]) [`40dc024`]
+- MAG-2734 style(rpcsmartrouter): gofmt the XRPL test server literal ([#389]) [`c977835`]
+- MAG-2734 docs: stop describing the removed archive upgrade and retry bans as live ([#389]) [`543b871`]
+- MAG-2734 docs(relaypolicy): name the requests the archive rule cannot judge ([#389]) [`f4d15f2`]
+- perf(utils): look up the gRPC spelling of the tracing headers without allocating (MAG-3798) ([#416]) [`175fda1`]
+- revert: drop the backup-reserve hedge of #449 (MAG-3923) ([#516]) [`5d514dd`]
+- perf(protocol): enable six linters and act on the audit's lint-derived efficiency signals (MAG-4244) ([#511]) [`1979be8`]
+
+[#389]: https://github.com/magma-Devs/smart-router/pull/389
+[#390]: https://github.com/magma-Devs/smart-router/pull/390
+[#393]: https://github.com/magma-Devs/smart-router/pull/393
+[#413]: https://github.com/magma-Devs/smart-router/pull/413
+[#416]: https://github.com/magma-Devs/smart-router/pull/416
+[#418]: https://github.com/magma-Devs/smart-router/pull/418
+[#420]: https://github.com/magma-Devs/smart-router/pull/420
+[#421]: https://github.com/magma-Devs/smart-router/pull/421
+[#423]: https://github.com/magma-Devs/smart-router/pull/423
+[#428]: https://github.com/magma-Devs/smart-router/pull/428
+[#429]: https://github.com/magma-Devs/smart-router/pull/429
+[#430]: https://github.com/magma-Devs/smart-router/pull/430
+[#431]: https://github.com/magma-Devs/smart-router/pull/431
+[#432]: https://github.com/magma-Devs/smart-router/pull/432
+[#434]: https://github.com/magma-Devs/smart-router/pull/434
+[#435]: https://github.com/magma-Devs/smart-router/pull/435
+[#436]: https://github.com/magma-Devs/smart-router/pull/436
+[#437]: https://github.com/magma-Devs/smart-router/pull/437
+[#438]: https://github.com/magma-Devs/smart-router/pull/438
+[#439]: https://github.com/magma-Devs/smart-router/pull/439
+[#440]: https://github.com/magma-Devs/smart-router/pull/440
+[#441]: https://github.com/magma-Devs/smart-router/pull/441
+[#442]: https://github.com/magma-Devs/smart-router/pull/442
+[#443]: https://github.com/magma-Devs/smart-router/pull/443
+[#444]: https://github.com/magma-Devs/smart-router/pull/444
+[#445]: https://github.com/magma-Devs/smart-router/pull/445
+[#446]: https://github.com/magma-Devs/smart-router/pull/446
+[#447]: https://github.com/magma-Devs/smart-router/pull/447
+[#448]: https://github.com/magma-Devs/smart-router/pull/448
+[#449]: https://github.com/magma-Devs/smart-router/pull/449
+[#450]: https://github.com/magma-Devs/smart-router/pull/450
+[#451]: https://github.com/magma-Devs/smart-router/pull/451
+[#452]: https://github.com/magma-Devs/smart-router/pull/452
+[#454]: https://github.com/magma-Devs/smart-router/pull/454
+[#455]: https://github.com/magma-Devs/smart-router/pull/455
+[#456]: https://github.com/magma-Devs/smart-router/pull/456
+[#457]: https://github.com/magma-Devs/smart-router/pull/457
+[#458]: https://github.com/magma-Devs/smart-router/pull/458
+[#460]: https://github.com/magma-Devs/smart-router/pull/460
+[#471]: https://github.com/magma-Devs/smart-router/pull/471
+[#472]: https://github.com/magma-Devs/smart-router/pull/472
+[#474]: https://github.com/magma-Devs/smart-router/pull/474
+[#477]: https://github.com/magma-Devs/smart-router/pull/477
+[#478]: https://github.com/magma-Devs/smart-router/pull/478
+[#479]: https://github.com/magma-Devs/smart-router/pull/479
+[#480]: https://github.com/magma-Devs/smart-router/pull/480
+[#482]: https://github.com/magma-Devs/smart-router/pull/482
+[#484]: https://github.com/magma-Devs/smart-router/pull/484
+[#486]: https://github.com/magma-Devs/smart-router/pull/486
+[#487]: https://github.com/magma-Devs/smart-router/pull/487
+[#489]: https://github.com/magma-Devs/smart-router/pull/489
+[#491]: https://github.com/magma-Devs/smart-router/pull/491
+[#492]: https://github.com/magma-Devs/smart-router/pull/492
+[#493]: https://github.com/magma-Devs/smart-router/pull/493
+[#494]: https://github.com/magma-Devs/smart-router/pull/494
+[#501]: https://github.com/magma-Devs/smart-router/pull/501
+[#502]: https://github.com/magma-Devs/smart-router/pull/502
+[#503]: https://github.com/magma-Devs/smart-router/pull/503
+[#504]: https://github.com/magma-Devs/smart-router/pull/504
+[#505]: https://github.com/magma-Devs/smart-router/pull/505
+[#506]: https://github.com/magma-Devs/smart-router/pull/506
+[#507]: https://github.com/magma-Devs/smart-router/pull/507
+[#508]: https://github.com/magma-Devs/smart-router/pull/508
+[#509]: https://github.com/magma-Devs/smart-router/pull/509
+[#510]: https://github.com/magma-Devs/smart-router/pull/510
+[#511]: https://github.com/magma-Devs/smart-router/pull/511
+[#513]: https://github.com/magma-Devs/smart-router/pull/513
+[#514]: https://github.com/magma-Devs/smart-router/pull/514
+[#515]: https://github.com/magma-Devs/smart-router/pull/515
+[#516]: https://github.com/magma-Devs/smart-router/pull/516
+[#517]: https://github.com/magma-Devs/smart-router/pull/517
+[#518]: https://github.com/magma-Devs/smart-router/pull/518
+[#521]: https://github.com/magma-Devs/smart-router/pull/521
+[`043f0fd`]: https://github.com/magma-Devs/smart-router/commit/043f0fd4e68a96b0fbdb54c8a89dd216d599b044
+[`058d8e1`]: https://github.com/magma-Devs/smart-router/commit/058d8e10d5decd1b1791ad394828b85aac34467a
+[`0a6b18b`]: https://github.com/magma-Devs/smart-router/commit/0a6b18b44f7b0ff1888e4f7f8d4b2adbfbf9772d
+[`0bbe3b6`]: https://github.com/magma-Devs/smart-router/commit/0bbe3b697249a099559043dbd61d4c87beb71cd6
+[`0c51f7a`]: https://github.com/magma-Devs/smart-router/commit/0c51f7a0f8c515370d19b29a63530424f130307a
+[`0ca8efd`]: https://github.com/magma-Devs/smart-router/commit/0ca8efdcba4a0477f70e5b849b9db310eb0465bf
+[`0e1b9ee`]: https://github.com/magma-Devs/smart-router/commit/0e1b9eec3bfb79e1ae3c5bbf857b9d472449b32d
+[`0eaa47a`]: https://github.com/magma-Devs/smart-router/commit/0eaa47a3084c99ea3368b260d6ccf8a827491442
+[`12ff203`]: https://github.com/magma-Devs/smart-router/commit/12ff2037f1716f3992af0e3d9bf7ca873c0598f1
+[`149d2f5`]: https://github.com/magma-Devs/smart-router/commit/149d2f5d28935b74f1ee5326498698fcf9fd9af6
+[`14b3034`]: https://github.com/magma-Devs/smart-router/commit/14b303425a9a54db50c20d52183100b1df6d03d5
+[`165c923`]: https://github.com/magma-Devs/smart-router/commit/165c9232fa496c489f5154028e6d7ff6eb583269
+[`175fda1`]: https://github.com/magma-Devs/smart-router/commit/175fda13ad0f618aafc349cd1d9a64570370b35c
+[`18e581a`]: https://github.com/magma-Devs/smart-router/commit/18e581a2c9ef2abd20414cf9c22c00e890a4947e
+[`1949100`]: https://github.com/magma-Devs/smart-router/commit/1949100f15fbfac6be5be48777ac6dd1a22c40d2
+[`1979be8`]: https://github.com/magma-Devs/smart-router/commit/1979be87701c02da9d28afa2064af1a64707127c
+[`1a7e4e1`]: https://github.com/magma-Devs/smart-router/commit/1a7e4e1911f76e70e7be076000f67d6e12e7378b
+[`1b94175`]: https://github.com/magma-Devs/smart-router/commit/1b94175ad5545823a56a5b167d87d067b0cd5c68
+[`1df3854`]: https://github.com/magma-Devs/smart-router/commit/1df3854455bbd1c732169b61fe624c914c9a3d1c
+[`1eee645`]: https://github.com/magma-Devs/smart-router/commit/1eee645819b52661fffa7026a7da0eaed5393cfe
+[`20dfe05`]: https://github.com/magma-Devs/smart-router/commit/20dfe05b1a8b74a66ee66d44d081127745384686
+[`283ff53`]: https://github.com/magma-Devs/smart-router/commit/283ff533a27541feae959658eb9339801d9232b5
+[`2d18323`]: https://github.com/magma-Devs/smart-router/commit/2d18323c03a9610f8f56b7a167fb4fad7945dcbc
+[`2fd1c1e`]: https://github.com/magma-Devs/smart-router/commit/2fd1c1ed18a6f7bb8eb5c3cb9b7e7141184e49c8
+[`2fe412c`]: https://github.com/magma-Devs/smart-router/commit/2fe412c9d594bee8121e676ee360f94155f03c95
+[`30c7545`]: https://github.com/magma-Devs/smart-router/commit/30c754570edfae5322d9227a19f33491da967bdb
+[`33093ee`]: https://github.com/magma-Devs/smart-router/commit/33093eed0bc78b48faeb64d99d7e27a614fbc852
+[`334fda5`]: https://github.com/magma-Devs/smart-router/commit/334fda5f29e184b186f466c01fa5bc97f86dc2c6
+[`36542ee`]: https://github.com/magma-Devs/smart-router/commit/36542eea89a9277fcea4b41d3612ef9d2f7827f7
+[`3b7cdfc`]: https://github.com/magma-Devs/smart-router/commit/3b7cdfc12edb53e8d0f80514b8f6a95628a9e8c1
+[`3cd14f0`]: https://github.com/magma-Devs/smart-router/commit/3cd14f072b08324a028b83ca0d290907282df04c
+[`40dc024`]: https://github.com/magma-Devs/smart-router/commit/40dc024117f99918bc94ff759afe29db878d9ce5
+[`435fcf0`]: https://github.com/magma-Devs/smart-router/commit/435fcf011f23c391090710575ac2a64977635295
+[`4369814`]: https://github.com/magma-Devs/smart-router/commit/43698148b0e93c2b2f6aebd42e2b9cc09db779ae
+[`44d75c6`]: https://github.com/magma-Devs/smart-router/commit/44d75c66b94dc1cc5602c5b5b07aa40e674c77fa
+[`49fa95d`]: https://github.com/magma-Devs/smart-router/commit/49fa95d62f37cb446b62dbc525ad5f4599ae340a
+[`4a0bc8a`]: https://github.com/magma-Devs/smart-router/commit/4a0bc8af72a81be70058bc3fc9368758fbf0cc54
+[`4b87c8f`]: https://github.com/magma-Devs/smart-router/commit/4b87c8fa5ed7a36d62ecf87f38bbfd4236ed6b47
+[`5215861`]: https://github.com/magma-Devs/smart-router/commit/521586179efc8cea09d6e81e778a49703f890466
+[`531ea7a`]: https://github.com/magma-Devs/smart-router/commit/531ea7a47b32132deb686809b807690c1bccd842
+[`536e39f`]: https://github.com/magma-Devs/smart-router/commit/536e39fc7baad214d660470ebec21575a0e73380
+[`543b871`]: https://github.com/magma-Devs/smart-router/commit/543b87167d0be5af97e1d2d3ae84deb742c3bd6d
+[`54591e5`]: https://github.com/magma-Devs/smart-router/commit/54591e57e18b17f8861a20a3a3feb7c1d9588f59
+[`55bb865`]: https://github.com/magma-Devs/smart-router/commit/55bb8650f3f4bb951d0ce49943e4875cc604d8ba
+[`56dba11`]: https://github.com/magma-Devs/smart-router/commit/56dba11aad03c51dd5b6f9be6a7a5a06d38bb78e
+[`573bb7a`]: https://github.com/magma-Devs/smart-router/commit/573bb7a858c0bc9e582e7a6b743bdcdec53f7b71
+[`5a17276`]: https://github.com/magma-Devs/smart-router/commit/5a17276d54c3981503b519fde0cb312918961f05
+[`5abd0cb`]: https://github.com/magma-Devs/smart-router/commit/5abd0cb4cf09f9e58f137819638c8900bd3751ff
+[`5b7fe36`]: https://github.com/magma-Devs/smart-router/commit/5b7fe362abdb5662d747dd8fc885627faac617dc
+[`5c2809f`]: https://github.com/magma-Devs/smart-router/commit/5c2809f4c16c97df760b5a33c18012e4f45f4c75
+[`5d1e294`]: https://github.com/magma-Devs/smart-router/commit/5d1e2942c0dbad4650b73a5bca022a8a8cbbbb5d
+[`5d514dd`]: https://github.com/magma-Devs/smart-router/commit/5d514dd7d13dd43a46537daa9976eb097d831fe0
+[`5e90850`]: https://github.com/magma-Devs/smart-router/commit/5e90850f9a0b6f6068ebb7c60f9088f1dfc17fad
+[`62bd7ee`]: https://github.com/magma-Devs/smart-router/commit/62bd7ee85c7234e22f5fc487f8449b16095f95a0
+[`62da26b`]: https://github.com/magma-Devs/smart-router/commit/62da26b0dee7f6f9706197f79d71a9229757fd21
+[`63af99e`]: https://github.com/magma-Devs/smart-router/commit/63af99e24b8fa18d0f905de7b805f65d7a192fcf
+[`63f1b56`]: https://github.com/magma-Devs/smart-router/commit/63f1b56aabd04c4184c4179ea2eb620391f1bf5f
+[`6675c4f`]: https://github.com/magma-Devs/smart-router/commit/6675c4fe5fcfd45a0240dafbc6176a84f113e402
+[`6cb23ea`]: https://github.com/magma-Devs/smart-router/commit/6cb23ea1c3c1159da396bd94f51adf9a8594b069
+[`72be694`]: https://github.com/magma-Devs/smart-router/commit/72be69468d7c7bc90a2a8ab103b423ee0b77a304
+[`77c4eda`]: https://github.com/magma-Devs/smart-router/commit/77c4edacdf50615d0db80c8338fe19e48d6f72f7
+[`783ae7a`]: https://github.com/magma-Devs/smart-router/commit/783ae7a9e25879312139a53ee8af4cd6847dc6ae
+[`7efa7b3`]: https://github.com/magma-Devs/smart-router/commit/7efa7b3908f52d1acf299df886ee8215606cf298
+[`803d485`]: https://github.com/magma-Devs/smart-router/commit/803d4852ab9e6868b86454dba2aa7092986b330b
+[`85e9f2d`]: https://github.com/magma-Devs/smart-router/commit/85e9f2da85fde8cb61748bacfdea8fe83e6f4278
+[`8ab1762`]: https://github.com/magma-Devs/smart-router/commit/8ab1762943424a59f1d553e7dc51a09ce4195249
+[`8c2610e`]: https://github.com/magma-Devs/smart-router/commit/8c2610e566450ba8cbcd4bbf84cc9842c1861b38
+[`8e325e8`]: https://github.com/magma-Devs/smart-router/commit/8e325e87a53483fdce9b290407ffdbdb3160a77b
+[`906a2d8`]: https://github.com/magma-Devs/smart-router/commit/906a2d820bf19f778e96174137e8cbe5e49cd2e1
+[`91065f6`]: https://github.com/magma-Devs/smart-router/commit/91065f6ed53e01e3d9f31382c2b2284d99849dc9
+[`9178c5b`]: https://github.com/magma-Devs/smart-router/commit/9178c5b7f1234a7b8b80a6e9c82ab9e07b70c1c8
+[`920f46c`]: https://github.com/magma-Devs/smart-router/commit/920f46c923ce5bc15c208b3f37f9a3aafc17484c
+[`9332503`]: https://github.com/magma-Devs/smart-router/commit/9332503c778b38014300111fadae0849dcb8834b
+[`9537e50`]: https://github.com/magma-Devs/smart-router/commit/9537e5083b6775207af753c0094954f6609005dd
+[`9568adf`]: https://github.com/magma-Devs/smart-router/commit/9568adf75541f864e192c37071943baf88803d86
+[`97d5ed9`]: https://github.com/magma-Devs/smart-router/commit/97d5ed9d8693fe73d8ebfd533fbaead16e4f99fd
+[`996f0a7`]: https://github.com/magma-Devs/smart-router/commit/996f0a79fbbbbfa6bc8ae29c94bfeb4d37d45327
+[`9a9bf07`]: https://github.com/magma-Devs/smart-router/commit/9a9bf07e2b60e9f4cbfa28cf817ab753b3906392
+[`9ac667e`]: https://github.com/magma-Devs/smart-router/commit/9ac667ee6532e60fd1ea6e9d6595e1fe6d2ce1e8
+[`9c4679f`]: https://github.com/magma-Devs/smart-router/commit/9c4679fab45b7f95c0801a05952bf5794dcfcb5e
+[`a2d8148`]: https://github.com/magma-Devs/smart-router/commit/a2d8148bddd63e03afa0a14858333741f770c8e1
+[`a2d90c4`]: https://github.com/magma-Devs/smart-router/commit/a2d90c470170acec1a468d066a685b9d14b83a60
+[`a362acf`]: https://github.com/magma-Devs/smart-router/commit/a362acf5001d9de8505b7fa215a1f018d06ce38b
+[`a3ec336`]: https://github.com/magma-Devs/smart-router/commit/a3ec336cec7cc63ad0498788166173c0c5659da2
+[`a7918e8`]: https://github.com/magma-Devs/smart-router/commit/a7918e8aa5b892f3ca9f6c32950b649d4619d774
+[`a90ef62`]: https://github.com/magma-Devs/smart-router/commit/a90ef6298d7396532b1d76ee92df6d0a33890b84
+[`aa005c3`]: https://github.com/magma-Devs/smart-router/commit/aa005c393f761acaf09407a0f7d3c037c4087942
+[`ad25ad6`]: https://github.com/magma-Devs/smart-router/commit/ad25ad6d02af3e8b0372d8372dac07a1bfd0d96a
+[`b1ec6c6`]: https://github.com/magma-Devs/smart-router/commit/b1ec6c677019962c8c7414943286920987d1265b
+[`b33b7fc`]: https://github.com/magma-Devs/smart-router/commit/b33b7fcdcd4e829eec1dfbd489ce60e354d0f3bd
+[`b3feebe`]: https://github.com/magma-Devs/smart-router/commit/b3feebe05cc6feceeb4a3b5b8c2a62f6af2a8969
+[`b778757`]: https://github.com/magma-Devs/smart-router/commit/b7787577b49386edf3043e9bebdd7dd083035c35
+[`baa9078`]: https://github.com/magma-Devs/smart-router/commit/baa90780922f5736edb7053a7fe0d92c051df8f2
+[`bc6dfec`]: https://github.com/magma-Devs/smart-router/commit/bc6dfec2c1636a9aa11c1bdfac6f72259c04667a
+[`bcf9d7d`]: https://github.com/magma-Devs/smart-router/commit/bcf9d7dbf9d0f5fbd7077bde1b51b482e50cd7ab
+[`bf7abc5`]: https://github.com/magma-Devs/smart-router/commit/bf7abc5088573f4a4530703517d1f98052e8887b
+[`c017377`]: https://github.com/magma-Devs/smart-router/commit/c017377d4105cbef4b07c283164b30d09478b142
+[`c4485a7`]: https://github.com/magma-Devs/smart-router/commit/c4485a7b63d22888c263aff7e312723e3610ba04
+[`c4e2a59`]: https://github.com/magma-Devs/smart-router/commit/c4e2a594e6cd0ec2804486e204c11f088faeacf9
+[`c56ca12`]: https://github.com/magma-Devs/smart-router/commit/c56ca123fa9a89d7c8a429b59f0dea97ee80f1b4
+[`c7c605a`]: https://github.com/magma-Devs/smart-router/commit/c7c605aaa8d177c7260c6b8c855c95a5729a5a08
+[`c9713ed`]: https://github.com/magma-Devs/smart-router/commit/c9713ed66f4c0a2c7c9a0e2ee65cea2b2a826add
+[`c977835`]: https://github.com/magma-Devs/smart-router/commit/c97783537a162937ffe0238a0dce01c3e7617197
+[`ce4dfd8`]: https://github.com/magma-Devs/smart-router/commit/ce4dfd89fe7613ddf858aedf377e86d629ca7fb6
+[`d007d91`]: https://github.com/magma-Devs/smart-router/commit/d007d913d418da6ad673f40946862f7126a3f534
+[`d13051c`]: https://github.com/magma-Devs/smart-router/commit/d13051cfd337dd5ddaff3c907067155563f49c86
+[`d3042be`]: https://github.com/magma-Devs/smart-router/commit/d3042be9e49c80fe845cc5bdf167549ba10380c9
+[`d7e638b`]: https://github.com/magma-Devs/smart-router/commit/d7e638b7d6e6fc6c6bc4a197a4907f6002910ae8
+[`d8532fc`]: https://github.com/magma-Devs/smart-router/commit/d8532fc947faf497674e7405e3cf42c65e9d9893
+[`d8f2d2b`]: https://github.com/magma-Devs/smart-router/commit/d8f2d2b7a232505976c147016a2c71dcb628cd1d
+[`d966dbe`]: https://github.com/magma-Devs/smart-router/commit/d966dbe599d19d013170f1dc9e99353f8d40170f
+[`dcc8ad3`]: https://github.com/magma-Devs/smart-router/commit/dcc8ad3e210e3bed6f158c93071e9f5645607f0b
+[`e3655f5`]: https://github.com/magma-Devs/smart-router/commit/e3655f5cadb24c3868071ef3d2622d9570289678
+[`e6b1a8a`]: https://github.com/magma-Devs/smart-router/commit/e6b1a8a535af45bf6a49b985cbd7a272e461636f
+[`e9dc693`]: https://github.com/magma-Devs/smart-router/commit/e9dc693dc32f6e13373586a93b9ff26670af20e0
+[`ea5ad0a`]: https://github.com/magma-Devs/smart-router/commit/ea5ad0a931af3d26ba67be01e331d9b3f5e8b2b3
+[`ed8e917`]: https://github.com/magma-Devs/smart-router/commit/ed8e917ff05d07e14513cff48c4fbff400e10ed9
+[`edc9b10`]: https://github.com/magma-Devs/smart-router/commit/edc9b10d50597897022af035d54f30077a2c98a3
+[`efbe226`]: https://github.com/magma-Devs/smart-router/commit/efbe2261ae1bb268fbd946bd2bf16cafc53b31b0
+[`f10367e`]: https://github.com/magma-Devs/smart-router/commit/f10367e9f2ab9fadeee9e9831ede8b547e4d8ec7
+[`f27b719`]: https://github.com/magma-Devs/smart-router/commit/f27b719d7bb9927db79b3b138d30f07852c71aeb
+[`f4d15f2`]: https://github.com/magma-Devs/smart-router/commit/f4d15f2352a66a32bc0b3ce66c0ecf8a46fcbf42
+[`f5e9b21`]: https://github.com/magma-Devs/smart-router/commit/f5e9b21530b54d39b963e5d77f0aa5766c50becc
+[`fb11aec`]: https://github.com/magma-Devs/smart-router/commit/fb11aec93d4f2c6c3592a6d87664d82ff0ce3556
+[`fb88150`]: https://github.com/magma-Devs/smart-router/commit/fb88150fbb86eca861a12ffd2605bb8a0487bbce
+[`fbe2856`]: https://github.com/magma-Devs/smart-router/commit/fbe2856075ab581a1943323c64a2ac897e230393
+[`feb43f9`]: https://github.com/magma-Devs/smart-router/commit/feb43f9c239cb40f83b27a1ecbee7340c1040ea1
+
 ## v1.5.8 — 2026-10-03
 
 ### Highlights

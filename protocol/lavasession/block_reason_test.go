@@ -71,7 +71,7 @@ func TestBlockReason_AllEndpointsDisabled_ViaProbe(t *testing.T) {
 	const address = "provider-no-usable-endpoint"
 	csm := singleProviderCSM(t, address, false)
 
-	_, _, err := csm.probeProvider(context.Background(), csm.pairing[address], csm.atomicReadCurrentEpoch(), false)
+	_, err := csm.probeProvider(context.Background(), csm.pairing[address], csm.atomicReadCurrentEpoch(), false)
 	require.Error(t, err, "a provider with no enabled endpoint cannot be probed")
 
 	record := blockedRecord(t, csm, address)

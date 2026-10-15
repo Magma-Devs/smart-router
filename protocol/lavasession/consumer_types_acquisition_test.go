@@ -38,7 +38,7 @@ func TestAcquisition_LeavesRecoveryEvidenceAlone(t *testing.T) {
 	endpoint.RecordFailingRelay("eth_getBalance", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0","latest"]}`), time.Second)
 	require.Equal(t, "eth_getBalance", endpoint.HealthSnapshot().RelayProbeMethod)
 
-	connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), false, false, "", nil, nil)
+	connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickSkipDisabled, false, "", nil, nil)
 	require.NoError(t, err)
 	require.True(t, connected)
 	require.Len(t, endpoints, 1)
@@ -49,7 +49,7 @@ func TestAcquisition_LeavesRecoveryEvidenceAlone(t *testing.T) {
 }
 
 // TestReconnectRoutine_StillReenablesADisabledEndpoint guards the other caller: the reconnect
-// routine asks with retryDisabledEndpoints and must still put a disabled endpoint it reached
+// routine asks with endpointPickReconnectDisabled and must still put a disabled endpoint it reached
 // back into rotation, with the old episode's tracking cleared.
 func TestReconnectRoutine_StillReenablesADisabledEndpoint(t *testing.T) {
 	cswp, endpoint := directRPCProviderForAcquisition(t)
@@ -59,7 +59,7 @@ func TestReconnectRoutine_StillReenablesADisabledEndpoint(t *testing.T) {
 	}
 	require.False(t, endpoint.HealthSnapshot().Enabled)
 
-	connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), true, false, "", nil, nil)
+	connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickReconnectDisabled, false, "", nil, nil)
 	require.NoError(t, err)
 	require.True(t, connected)
 	require.Len(t, endpoints, 1)

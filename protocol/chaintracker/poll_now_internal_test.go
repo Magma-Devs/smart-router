@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/stretchr/testify/require"
 )
 
@@ -304,4 +306,52 @@ func TestChainTracker_PollNow_ConcurrentTriggersAllComplete(t *testing.T) {
 			t.Fatal("a concurrent poll-now trigger was never answered")
 		}
 	}
+}
+
+// The idle wake burst forces a poll on every url at once, so a wake poll sent into a standing
+// rate-limit hold-off would re-arm a ban-type limit and add a strike (MAG-4165). While held,
+// WakePoll sends nothing, writes nothing, and reports its own sentinel — also the typed 429 with
+// the remaining wait. An explicit PollNow (/debug/poll-now) still goes through: one asked-for
+// request is the caller's call, as an explicit lava-select-provider outranks a relay hold-off.
+func TestChainTracker_WakePoll_DeclinesWhileHeldOff_PollNowDoesNot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const url = "wss://held.example:443"
+	registry := holdoff.NewRegistryWithClock(time.Now)
+	fetcher := &advancingFetcher{}
+	fetcher.block.Store(1000)
+	tracker := newCustomChainTracker(fetcher, ChainTrackerConfig{
+		BlocksToSave:          1,
+		AverageBlockTime:      20 * time.Minute,
+		ServerBlockMemory:     100,
+		ChainId:               "ETH1",
+		ParseDirectiveEnabled: true,
+		FlatPollInterval:      10 * time.Minute,
+		RateLimitHoldoff:      registry,
+		RateLimitProvider:     "vendor",
+		RateLimitURL:          url,
+	})
+	ct, ok := tracker.(*ChainTracker)
+	require.True(t, ok)
+	require.NoError(t, ct.StartAndServe(ctx))
+
+	registry.RecordRateLimit("vendor", url, 0) // a relay was refused on this url
+	fetcher.block.Store(1005)
+
+	err := ct.WakePoll(ctx, ctx)
+	require.ErrorIs(t, err, ErrorPollNowHeldOff)
+	require.ErrorIs(t, err, common.StatusCodeError429)
+	heldFor, ok := common.RetryAfterFrom(err)
+	require.True(t, ok)
+	require.Greater(t, heldFor, holdoff.InitialHoldoff-time.Second)
+	require.Equal(t, int64(1000), ct.GetAtomicLatestBlockNum(), "nothing was sent while held off")
+
+	require.NoError(t, ct.PollNow(ctx), "an explicit poll-now is not declined")
+	require.Equal(t, int64(1005), ct.GetAtomicLatestBlockNum())
+
+	registry.RecordAnswer("vendor", url)
+	fetcher.block.Store(1010)
+	require.NoError(t, ct.WakePoll(ctx, ctx))
+	require.Equal(t, int64(1010), ct.GetAtomicLatestBlockNum(), "once the hold-off is gone the wake poll runs")
 }

@@ -94,6 +94,9 @@ func (srsm *SmartRouterRelaySenderMock) ParseRelay(
 	})
 	specId := "ETH1"
 	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(ctx, specId, spectypes.APIInterfaceJsonRPC, serverHandler, nil, "../../", []string{"archive"})
+	if err != nil {
+		return nil, err
+	}
 	defer closeServer()
 	policy := PolicySt{
 		addons:       []string{},
@@ -102,6 +105,9 @@ func (srsm *SmartRouterRelaySenderMock) ParseRelay(
 	}
 	chainParser.SetPolicy(policy, specId, spectypes.APIInterfaceJsonRPC)
 	chainMsg, err := chainParser.ParseMsg(url, []byte(req), connectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0, ExtensionOverride: []string{"archive"}})
+	if err != nil {
+		return nil, err
+	}
 	relayRequestData := lavaprotocol.NewRelayData(ctx, connectionType, url, []byte(req), 0, -2, spectypes.APIInterfaceJsonRPC, chainMsg.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMsg), common.GetExtensionNames(chainMsg.GetExtensions()))
 	protocolMessage = chainlib.NewProtocolMessage(chainMsg, nil, relayRequestData, dappID, consumerIp)
 	return protocolMessage, nil
