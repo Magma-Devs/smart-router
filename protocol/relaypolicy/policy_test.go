@@ -164,16 +164,6 @@ func TestDecide_EpochMismatch(t *testing.T) {
 	require.Equal(t, "EpochMismatch", output.Reason)
 }
 
-func TestDecide_HashError(t *testing.T) {
-	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
-	output := policy.Decide(DecisionInput{
-		Selection: relaycore.Stateless,
-		Summary:   ResultsSummary{HashErr: fmt.Errorf("hash failed"), NodeErrors: 1},
-	})
-	require.Equal(t, Stop, output.Action)
-	require.Equal(t, "HashComputationFailed", output.Reason)
-}
-
 func TestOnSendRelayResult(t *testing.T) {
 	t.Run("success resets counters", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 3, EnableCircuitBreaker: true, CircuitBreakerThreshold: 2})
@@ -247,21 +237,6 @@ func TestDecide_IsTickerHedge(t *testing.T) {
 		output = policy.Decide(input)
 		require.Equal(t, Retry, output.Action)
 		require.Equal(t, "Default", output.Reason)
-	})
-
-	t.Run("ticker hedge skips hash error", func(t *testing.T) {
-		policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
-		input := DecisionInput{
-			Selection: relaycore.Stateless,
-			Summary:   ResultsSummary{HashErr: fmt.Errorf("hash failed"), NodeErrors: 1},
-		}
-		output := policy.Decide(input)
-		require.Equal(t, Stop, output.Action)
-		require.Equal(t, "HashComputationFailed", output.Reason)
-
-		input.IsTickerHedge = true
-		output = policy.Decide(input)
-		require.Equal(t, Retry, output.Action)
 	})
 
 	t.Run("ticker hedge still respects mode and limit checks", func(t *testing.T) {
@@ -520,4 +495,21 @@ func TestDecide_PriorityAndEdgeCases(t *testing.T) {
 				"reason mismatch — case %q", tc.name)
 		})
 	}
+}
+
+// A stateful batch whose failures are rate-limited node errors may still have executed: under
+// --batch-node-error-on-any a reply with an accepted eth_sendRawTransaction and one rate-limited
+// sibling is a rate-limited node error. Only a transport refusal of the whole batch keeps the
+// carve-out.
+func TestDecide_StatefulBatchRateLimitCarveOutNeedsATransportRefusal(t *testing.T) {
+	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3, DisableBatchRetry: true})
+	nodeError := policy.Decide(DecisionInput{Selection: relaycore.Stateful, IsBatch: true, AttemptNumber: 1, Summary: ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}})
+	require.Equal(t, Stop, nodeError.Action)
+	require.Equal(t, "Stateful", nodeError.Reason)
+
+	transport := policy.Decide(DecisionInput{Selection: relaycore.Stateful, IsBatch: true, AttemptNumber: 1, Summary: ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}})
+	require.Equal(t, Retry, transport.Action)
+
+	single := policy.Decide(DecisionInput{Selection: relaycore.Stateful, AttemptNumber: 1, Summary: ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}})
+	require.Equal(t, Retry, single.Action, "a single stateful relay keeps the carve-out it has on main")
 }

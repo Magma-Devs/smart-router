@@ -312,7 +312,7 @@ func replayWith(t *testing.T, conn *fakeDirectConn) relayProbeVerdict {
 		DirectConnection: conn,
 		ProviderAddress:  "provider1",
 	}
-	return rpcss.replayFailingRelay(epc, "eth_call", testEvidence, testEvidenceTimeout)
+	return rpcss.replayFailingRelay(epc, testEvidence, testEvidenceTimeout)
 }
 
 // TestReplayFailingRelay_JudgesByHealthClassification pins the judge's three-way contract:
@@ -379,26 +379,26 @@ func TestReplayFailingRelay_UsesRecordedTimeout(t *testing.T) {
 
 	// A heavy method recorded with a 25s relay budget is judged under ~25s.
 	conn := &fakeDirectConn{resp: okResp()}
-	rpcss.replayFailingRelay(mkEp(conn), "eth_getLogs", testEvidence, 25*time.Second)
+	rpcss.replayFailingRelay(mkEp(conn), testEvidence, 25*time.Second)
 	require.InDelta(t, (25 * time.Second).Seconds(), conn.gotTimeout.Seconds(), 2.0,
 		"the replay context carries the recorded relay budget")
 
 	// No recorded budget (0) floors at minRelayProbeTimeout, as does a shorter one.
 	conn = &fakeDirectConn{resp: okResp()}
-	rpcss.replayFailingRelay(mkEp(conn), "eth_call", testEvidence, 0)
+	rpcss.replayFailingRelay(mkEp(conn), testEvidence, 0)
 	require.InDelta(t, minRelayProbeTimeout.Seconds(), conn.gotTimeout.Seconds(), 2.0,
 		"a missing recorded budget falls back to the floor")
 
 	conn = &fakeDirectConn{resp: okResp()}
-	rpcss.replayFailingRelay(mkEp(conn), "eth_call", testEvidence, time.Second)
+	rpcss.replayFailingRelay(mkEp(conn), testEvidence, time.Second)
 	require.InDelta(t, minRelayProbeTimeout.Seconds(), conn.gotTimeout.Seconds(), 2.0,
 		"a recorded budget below the floor is raised to it")
 }
 
 func TestReplayFailingRelay_NoConnectionIsInconclusive(t *testing.T) {
 	rpcss := replayServer()
-	require.Equal(t, relayProbeInconclusive, rpcss.replayFailingRelay(nil, "eth_call", testEvidence, testEvidenceTimeout))
-	require.Equal(t, relayProbeInconclusive, rpcss.replayFailingRelay(&lavasession.EndpointWithDirectConnection{}, "eth_call", testEvidence, testEvidenceTimeout))
+	require.Equal(t, relayProbeInconclusive, rpcss.replayFailingRelay(nil, testEvidence, testEvidenceTimeout))
+	require.Equal(t, relayProbeInconclusive, rpcss.replayFailingRelay(&lavasession.EndpointWithDirectConnection{}, testEvidence, testEvidenceTimeout))
 }
 
 // ---------------------------------------------------------------------------

@@ -34,8 +34,11 @@ const GRPCStatusCodeOnFailedMessages = 32
 // cacert-pem names the roots the server is verified against, instead of the system
 // roots; it is what it says, a trust anchor, and verification stays on (it used to be
 // switched off right after the pool was loaded, which left the setting with no effect
-// beyond the log line). Without it, cert-pem/key-pem is the client certificate to
-// present. allow-insecure disables server verification altogether, which is what a
+// beyond the log line). cert-pem/key-pem is the client certificate to present, with or
+// without cacert-pem: the two settings fill independent halves of the handshake, and
+// together they are the mutual-TLS setup a private CA implies (the client certificate
+// used to be loaded only when no CA was configured, so that setup silently presented
+// none). allow-insecure disables server verification altogether, which is what a
 // self-signed development endpoint needs. A file that cannot be read is logged and
 // skipped, so the dial proceeds with the system roots as it would with no setting.
 func (ac *AuthConfig) TLSConfig() *tls.Config {
@@ -57,7 +60,8 @@ func (ac *AuthConfig) TLSConfig() *tls.Config {
 				tlsConf.RootCAs = caCertPool
 			}
 		}
-	} else if keyPem, certPem := ac.GetLoadingCertificateParams(); keyPem != "" && certPem != "" {
+	}
+	if keyPem, certPem := ac.GetLoadingCertificateParams(); keyPem != "" && certPem != "" {
 		utils.LavaFormatDebug("Loading certificate from local path", utils.LogAttr("certPem", certPem), utils.LogAttr("keyPem", keyPem))
 		cert, err := tls.LoadX509KeyPair(certPem, keyPem)
 		if err != nil {

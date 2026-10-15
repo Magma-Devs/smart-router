@@ -115,9 +115,6 @@ const (
 
 	WebSocketRateLimitHeader            = "x-lava-websocket-rate-limit"
 	WebSocketOpenConnectionsLimitHeader = "x-lava-websocket-open-connections-limit"
-
-	SubscriptionDeliveryMethod           = "subscription_delivery"
-	DefaultSubscriptionDeliveryCU uint64 = 10
 )
 
 type ConsumerWebsocketManager struct {
@@ -171,14 +168,27 @@ func NewConsumerWebsocketManager(options ConsumerWebsocketManagerOptions) *Consu
 	return cwm
 }
 
+// handleRateLimitReached builds the reply to a frame refused by the rate limit. Like every other
+// local reply it echoes the caller's id verbatim (coercing it to an int answered string ids, and
+// numeric strings through Atoi on the quoted token, with id 0), and like them it goes through
+// buildLocalReply: a batch gets one error per member that has an id, as an array, and a
+// notification gets nothing, so the result can be empty. The template's own id (1) is never
+// sent: a frame with no top-level id would otherwise be answered with an id the client may have
+// given a different request.
 func (cwm *ConsumerWebsocketManager) handleRateLimitReached(inpData []byte) ([]byte, error) {
-	// Echo the caller's id verbatim, as every other local reply does: coercing it to an int
-	// answered string ids (and, through Atoi on the quoted token, numeric strings) with id 0.
-	bytesRateLimitError, err := common.MarshalJsonRPCErrorWithRequestID(common.JsonRpcRateLimitError, inpData)
-	if err != nil {
-		return []byte{}, utils.LavaFormatError("failed marshalling jsonrpc rate limit error", err)
+	var marshalErr error
+	reply := buildLocalReply(inpData, func(request []byte) []byte {
+		bytesRateLimitError, err := common.MarshalJsonRPCErrorWithRequestID(common.JsonRpcRateLimitError, request)
+		if err != nil {
+			marshalErr = err
+			return nil
+		}
+		return bytesRateLimitError
+	})
+	if marshalErr != nil {
+		return []byte{}, utils.LavaFormatError("failed marshalling jsonrpc rate limit error", marshalErr)
 	}
-	return bytesRateLimitError, nil
+	return reply, nil
 }
 
 // subscriptionReplyFormatter remembers the caller's request id and returns the formatter
@@ -456,7 +466,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		if (cwm.headerRateLimit > 0 && currentRequestsPerSecond > cwm.headerRateLimit) ||
 			(WebSocketRateLimit > 0 && currentRequestsPerSecond > uint64(WebSocketRateLimit)) {
 			rateLimitResponse, err := cwm.handleRateLimitReached(msg)
-			if err == nil {
+			if err == nil && len(rateLimitResponse) > 0 {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: rateLimitResponse})
 			}
 			continue
@@ -587,7 +597,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				// (success or failure). The pre-existing flow `continue`d
 				// before reaching AddMetricForWebSocket below, so normal WS
 				// relays were silently dropped from the analytics pipeline.
-				go logger.AddMetricForWebSocket(metricsData, err)
+				logger.AddMetricForWebSocket(metricsData, err)
 				continue
 			}
 		}
@@ -596,7 +606,13 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		outputFormatter := subscriptionReplyFormatter(protocolMessage.GetApiCollection().CollectionData.ApiInterface, protocolMessage.RelayPrivateData().Data)
 
 		reply, subscriptionMsgsChan, err := cwm.wsSubscriptionManager.StartSubscription(webSocketCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+		// A subscribe never passes SendParsedRelay, which stamps these for a normal request.
+		metricsData.ApiMethod = protocolMessage.GetApi().GetName()
+		metricsData.Latency = time.Since(startTime).Milliseconds()
 		if err != nil {
+			// Every branch below ends in continue, so a failed subscribe is counted here; a
+			// successful one is counted after its fields are snapshotted for the pushes.
+			logger.AddMetricForWebSocket(metricsData, err)
 			utils.LavaFormatWarning("StartSubscription returned an error", err,
 				utils.LogAttr("GUID", webSocketCtx),
 				utils.LogAttr("dappID", dappID),
@@ -649,9 +665,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					// plain SUM(cu) without subscription-specific rules.
 					perMessage := subscriptionFields
 					perMessage.Timestamp = time.Now()
-					perMessage.ApiMethod = SubscriptionDeliveryMethod
-					perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
-					go logger.AddMetricForWebSocket(&perMessage, nil)
+					perMessage.ApiMethod = metrics.SubscriptionDeliveryMethod
+					perMessage.ComputeUnits = metrics.DefaultSubscriptionDeliveryCU
+					logger.AddMetricForWebSocket(&perMessage, nil)
 				}
 
 				utils.LavaFormatTrace("subscriptionMsgsChan was closed",
@@ -663,7 +679,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			}()
 		}
 
-		go logger.AddMetricForWebSocket(metricsData, err)
+		logger.AddMetricForWebSocket(metricsData, err)
 
 		if reply != nil {
 			reply.Data = outputFormatter(reply.Data) // use that id for the reply

@@ -129,7 +129,7 @@ func trackProviderURLsEvery(t *testing.T, blockTime time.Duration, provider stri
 		conn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: u.srv.URL}, 5, "jsonrpc")
 		require.NoError(t, err)
 		ep := &lavasession.Endpoint{NetworkAddress: u.srv.URL, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{conn}}
-		_, err = m.GetOrCreateTracker(ep, conn)
+		_, err = m.GetOrCreateTracker("", ep, conn)
 		require.NoError(t, err)
 	}
 	return rpcss, mm
@@ -277,7 +277,7 @@ func TestHarvest_MovesTheRelayedToURLsSeries(t *testing.T) {
 	const url = "http://harvest.mag4204:8545"
 	const provider = "lava@mag4204Harvest"
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-	_, err := m.GetOrCreateTracker(ep, nil)
+	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
@@ -336,7 +336,7 @@ func TestHarvest_LateWriteForARemovedURLIsUndone(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-	_, err := m.GetOrCreateTracker(ep, nil)
+	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
@@ -359,17 +359,39 @@ func TestHarvest_LateWriteForARemovedURLIsUndone(t *testing.T) {
 	require.NotContains(t, answeredUntil(t, provider), metrics.URLFingerprint(url))
 }
 
-// Two poll intervals, never under two minutes: a healthy url on a slow chain answers at least once
-// per poll interval, so it never reads as down between two polls.
-func TestURLAnswerTimeout_IsTwoPollIntervalsAndAtLeastTwoMinutes(t *testing.T) {
-	for poll, want := range map[time.Duration]time.Duration{
-		200 * time.Millisecond: 2 * time.Minute,  // TON
-		6 * time.Second:        2 * time.Minute,  // ETH1
-		5 * time.Minute:        10 * time.Minute, // BTC
-		20 * time.Minute:       40 * time.Minute, // BTC at a 0.5 divisor
+// An answer counts for the longest a url that answers every poll can go between two answers, plus
+// one poll interval, and never under two minutes (MAG-4249). The poll interval is the one the
+// tracker waits, which it caps at a minute: a 10-minute chain polls every minute, so its url's
+// answer counts for 6 minutes at every divisor, not 2 x 5 or 2 x 20.
+func TestURLAnswerTimeout_CoversTheGatesLongestGapBetweenPolls(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		blockTime time.Duration
+		divisor   float64
+		want      time.Duration
+	}{
+		{"fast chain", 400 * time.Millisecond, 0, 2 * time.Minute},
+		{"ETH1", 12 * time.Second, 0, 2 * time.Minute},                   // polls every 6s: 36s, so the floor
+		{"60s chain", time.Minute, 0, 3 * time.Minute},                   // polls every 30s: 5 x 30s + 30s
+		{"LTC", 150 * time.Second, 0, 6 * time.Minute},                   // 75s, capped to a minute
+		{"BTC", 10 * time.Minute, 0, 6 * time.Minute},                    // 5m, capped to a minute
+		{"BTC at a 0.5 divisor", 10 * time.Minute, 0.5, 6 * time.Minute}, // 20m, capped to a minute
 	} {
-		require.Equal(t, want, urlAnswerTimeout(poll), "poll interval %v", poll)
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			m := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+				ChainID:             "ETH1",
+				ApiInterface:        "jsonrpc",
+				AverageBlockTime:    tc.blockTime,
+				BlocksToSave:        1,
+				PollIntervalDivisor: tc.divisor,
+			})
+			defer m.Stop()
+			rpcss := &RPCSmartRouterServer{endpointChainTrackerManager: m}
+			require.Equal(t, tc.want, rpcss.answerTimeout())
+		})
 	}
-	require.Equal(t, 2*time.Minute, urlAnswerTimeout(0))
-	require.Equal(t, 2*time.Minute, urlAnswerTimeout(time.Minute))
+	require.Equal(t, 2*time.Minute, (&RPCSmartRouterServer{}).answerTimeout(), "no trackers: the floor")
+	require.Equal(t, 2*time.Minute, urlAnswerTimeout(0, 0))
 }

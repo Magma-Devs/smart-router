@@ -35,6 +35,20 @@ func TestAuthConfigTLSConfig_CACertificateIsATrustAnchor(t *testing.T) {
 	require.Equal(t, (&AuthConfig{}).TLSConfig(), none.TLSConfig(), "a nil auth-config is the zero configuration")
 }
 
+// cert-pem/key-pem is the client certificate with or without cacert-pem: the CA verifies
+// the server, the certificate identifies the client, and together they are the mutual-TLS
+// pair a private CA implies. The certificate used to be loaded only when no CA was set, so
+// that pair presented none.
+func TestAuthConfigTLSConfig_ClientCertificateBesideACA(t *testing.T) {
+	_, caPath, _ := testcert.SelfSigned(t)
+	_, clientCertPath, clientKeyPath := testcert.SelfSigned(t)
+
+	both := (&AuthConfig{CaCert: caPath, CertPem: clientCertPath, KeyPem: clientKeyPath}).TLSConfig()
+	require.NotNil(t, both.RootCAs, "the configured CA is the root set")
+	require.Len(t, both.Certificates, 1, "the client certificate is presented beside the CA")
+	require.False(t, both.InsecureSkipVerify)
+}
+
 // Every dialer shares the transport, the receive-size cap and the auth-headers, in that
 // order, and keeps its own channel options at the end.
 func TestNodeUrlGRPCDialOptions_SharedOptionsThenTheCallersOwn(t *testing.T) {

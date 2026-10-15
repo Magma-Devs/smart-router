@@ -1,8 +1,6 @@
 package rpcsmartrouter
 
 import (
-	"net/http"
-
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
@@ -18,12 +16,6 @@ func metadataNames(md []pairingtypes.Metadata) []string {
 		names = append(names, m.Name)
 	}
 	return names
-}
-
-// upstreamMetadata is what the senders hand the filter: an http.Header converted the way
-// convertHTTPHeadersToMetadata does it, one entry per name, first value, map order.
-func upstreamMetadata(h http.Header) []pairingtypes.Metadata {
-	return convertHTTPHeadersToMetadata(h)
 }
 
 // aptosLedgerStateHeaders is what api.mainnet.aptoslabs.com sent on GET /v1/ and on

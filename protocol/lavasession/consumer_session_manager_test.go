@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1662,7 +1663,7 @@ func TestDeadConnectionCleanup(t *testing.T) {
 	// This function will iterate through endpoints and call connectEndpoint, which contains the cleanup logic
 	connected, endpointsList, providerAddress, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(
 		ctx,
-		false, // retryDisabledEndpoints
+		endpointPickSkipDisabled,
 		false, // getAllEndpoints
 		"",    // addon
 		nil,   // extensionNames
@@ -1834,7 +1835,7 @@ func TestBackupProviderOptimizerSelection(t *testing.T) {
 	}
 
 	// First call: optimizer picks one backup.
-	result1, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, 0, NewUsedProviders(nil))
+	result1, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, NewUsedProviders(nil))
 	require.NoError(t, err)
 	require.Len(t, result1, 1, "expected exactly one backup provider returned per call")
 	var first string
@@ -1847,7 +1848,7 @@ func TestBackupProviderOptimizerSelection(t *testing.T) {
 	require.True(t, firstIgnored, "selected backup should be in ignoredProviders after call")
 
 	// Second call: optimizer picks the other backup (first is now ignored).
-	result2, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, 0, NewUsedProviders(nil))
+	result2, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, NewUsedProviders(nil))
 	require.NoError(t, err)
 	require.Len(t, result2, 1, "expected exactly one backup provider returned per call")
 	var second string
@@ -1857,7 +1858,7 @@ func TestBackupProviderOptimizerSelection(t *testing.T) {
 	require.NotEqual(t, first, second, "second call should return the other backup provider")
 
 	// Third call: both backups are now ignored — expect an error.
-	_, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupTierFallback, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, 0, NewUsedProviders(nil))
+	_, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "", []string{}, 0, NewUsedProviders(nil))
 	require.Error(t, err, "expected error when all backup providers are exhausted")
 }
 
@@ -1901,8 +1902,8 @@ func TestBackupProviderOptimizerSelection_EndpointCountBoundaries(t *testing.T) 
 			seen := make(map[string]struct{})
 			for call := 0; call < tc.backupCount; call++ {
 				result, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
-					ctx, backupTierFallback, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
-					[]string{}, 0, 0, NewUsedProviders(nil))
+					ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
+					[]string{}, 0, NewUsedProviders(nil))
 				require.NoError(t, err, "call #%d of %d must succeed", call+1, tc.backupCount)
 				require.Len(t, result, 1, "exactly one backup per call (got %d)", len(result))
 				for addr := range result {
@@ -1916,8 +1917,8 @@ func TestBackupProviderOptimizerSelection_EndpointCountBoundaries(t *testing.T) 
 
 			// One more call exhausts the pool.
 			_, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
-				ctx, backupTierFallback, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
-				[]string{}, 0, 0, NewUsedProviders(nil))
+				ctx, ignoredProv, cuForFirstRequest, servicedBlockNumber, "",
+				[]string{}, 0, NewUsedProviders(nil))
 			require.Error(t, err, "expected exhaustion error after %d backups served", tc.backupCount)
 		})
 	}
@@ -2124,7 +2125,7 @@ func TestCanceledContextDoesNotPenalizeEndpoint(t *testing.T) {
 
 	connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(
 		ctx,
-		false, // retryDisabledEndpoints
+		endpointPickSkipDisabled,
 		false, // getAllEndpoints
 		"",    // addon
 		nil,   // extensionNames
@@ -2206,7 +2207,7 @@ func TestBlockProvider_BackupProviderFilteredFromSelection(t *testing.T) {
 	// Attempting to get backup sessions should fail — no eligible backup providers
 	ignored := &ignoredProviders{providers: make(map[string]struct{}), currentEpoch: firstEpochHeight}
 	_, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(
-		context.Background(), backupTierFallback, ignored, 1, servicedBlockNumber, "", nil, 0, 0, NewUsedProviders(nil),
+		context.Background(), ignored, 1, servicedBlockNumber, "", nil, 0, NewUsedProviders(nil),
 	)
 	require.Error(t, err, "blocked backup provider should not be selectable")
 }
@@ -2621,7 +2622,7 @@ func TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint(t *testing.T) {
 	}
 
 	csm := CreateConsumerSessionManager()
-	_, _, probeErr := csm.probeDirectRPCEndpoints(ctx, cswp, cswp.PublicLavaAddress)
+	_, probeErr := csm.probeDirectRPCEndpoints(cswp, cswp.PublicLavaAddress)
 	require.Error(t, probeErr,
 		"a disabled endpoint must cause the direct RPC probe to fail (no usable enabled endpoints)")
 }
@@ -2956,7 +2957,7 @@ func TestResetValidAddresses_ClearsTheRedemptionFlagLikeTheOtherReleases(t *test
 	csm.pairing["provider-b"].atomicWriteBlockedStatus(BlockedProviderSessionUsedStatus)
 	csm.lock.Unlock()
 
-	_, didReset := csm.resetValidAddresses("", nil)
+	didReset := csm.resetValidAddresses("", nil)
 	require.True(t, didReset)
 
 	csm.lock.RLock()
@@ -2964,4 +2965,29 @@ func TestResetValidAddresses_ClearsTheRedemptionFlagLikeTheOtherReleases(t *test
 	require.ElementsMatch(t, []string{"provider-a", "provider-b"}, csm.validAddresses)
 	require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing["provider-b"].atomicReadBlockedStatus(),
 		"a provider returned to rotation by the pool-empty release must not keep its redemption flag")
+}
+
+// The epoch rebuild drains the blocked list too, but re-blocks every carried-over provider a moment
+// later, so none of them is back in rotation. The failed-provider readmit and /debug/reset-pairing
+// rebuild in the same epoch with the same session objects; clearing the redemption flag there
+// would erase a redemption still in flight, and its success would then not return the provider to
+// rotation (MAG-4278).
+func TestSameEpochRebuild_KeepsTheRedemptionFlagOfAReblockedProvider(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	pairing := createPairingList("", true)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
+
+	address := csm.validAddresses[0]
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonExplicitSignal, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
+	// What the blocked-list fallback writes when it hands out a redemption session.
+	csm.pairing[address].atomicWriteBlockedStatus(BlockedProviderSessionUsedStatus)
+
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
+
+	csm.lock.RLock()
+	reblocked := slices.Contains(csm.currentlyBlockedProviderAddresses, address)
+	csm.lock.RUnlock()
+	require.True(t, reblocked, "the rebuild carries the block over")
+	require.Equal(t, BlockedProviderSessionUsedStatus, csm.pairing[address].atomicReadBlockedStatus(),
+		"a provider the rebuild keeps blocked must keep the flag its in-flight redemption reads")
 }

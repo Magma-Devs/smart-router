@@ -103,7 +103,7 @@ func (r *Registry) FindMessageByURL(url string) (protoreflect.MessageType, error
 	mt, err := r.prefTypes.FindMessageByURL(url)
 	r.mu.RUnlock()
 	if err == nil {
-		return mt, err
+		return mt, nil
 	}
 	if !errors.Is(err, protoregistry.NotFound) {
 		return nil, err

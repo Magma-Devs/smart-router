@@ -69,14 +69,6 @@ func (s *RelayerCacheServer) engine() *core.Engine {
 	}
 }
 
-func (s *RelayerCacheServer) getSeenBlockForSharedStateMode(chainId string, sharedStateId string) int64 {
-	return s.engine().GetSharedTip(context.Background(), chainId, sharedStateId)
-}
-
-func (s *RelayerCacheServer) setSeenBlockOnSharedStateMode(chainId, sharedStateId string, seenBlock int64, ttl time.Duration) {
-	s.engine().SetSharedTip(context.Background(), chainId, sharedStateId, seenBlock, ttl)
-}
-
 func (s *RelayerCacheServer) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCacheGet) (*relaytypes.CacheRelayReply, error) {
 	if err := refuseInvalidKeyPrefix(relayCacheGet.GetKeyPrefix()); err != nil {
 		return nil, err
