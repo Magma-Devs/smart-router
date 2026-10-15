@@ -736,8 +736,10 @@ func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpc
 		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(res.StatusCode))) // we ignore this error here since this code can be triggered not from grpc
 	}
 	if err != nil {
-		// Classify and mask the transport error the way the REST and GraphQL proxies do; the
-		// raw *url.Error used to leave here with the node's address in it.
+		// Classify the transport error the way the REST and GraphQL proxies do, so the router
+		// gets a coded LavaError (LavaErrorConnectionRefused for a refused dial) instead of the
+		// raw *url.Error. Nothing is masked: like theirs, the classified error keeps the raw
+		// text, node address included, as its context.
 		if parsedError := cp.HandleNodeError(ctx, err); parsedError != nil {
 			return nil, parsedError
 		}
