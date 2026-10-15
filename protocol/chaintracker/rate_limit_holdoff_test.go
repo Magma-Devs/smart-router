@@ -59,7 +59,8 @@ func TestNoteFetchOutcome_RecordsIntoRegistryAndFloors(t *testing.T) {
 		holdoffURL:       holdoffTestURL,
 	}
 
-	cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0))
+	heldFor := cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0))
+	require.Equal(t, holdoff.InitialHoldoff, heldFor, "the applied hold-off is reported back")
 	require.True(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL), "the 429 must land in the shared registry")
 	got := cs.computePollInterval(0, 0)
 	require.Greater(t, got, holdoff.InitialHoldoff-time.Second, "the next poll waits the applied hold-off out")
@@ -108,6 +109,13 @@ func TestFetchInitDataWithRetry_RateLimitEndsTheBurst(t *testing.T) {
 	require.ErrorIs(t, err, common.StatusCodeError429, "the typed cause must reach the start loop")
 	require.Equal(t, int32(1), fetcher.calls.Load(), "one refused attempt ends the burst")
 	require.True(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL))
+
+	// The applied hold-off rides the error as its Retry-After: the caller retrying the start
+	// waits it out with the tracker's state naming the 429, instead of this tracker sleeping it
+	// out inside StartAndServe where the state would read "starting" with no error.
+	heldFor, ok := common.RetryAfterFrom(err)
+	require.True(t, ok, "the start error must carry the applied hold-off")
+	require.InDelta(t, time.Until(registry.ReadyAt(holdoffTestProvider, holdoffTestURL)), heldFor, float64(time.Second))
 }
 
 // With the endpoint held off — by this tracker's previous start or by anyone else — the first
@@ -146,4 +154,6 @@ func TestFetchInitDataWithRetry_NoKeyNoRegistry(t *testing.T) {
 	err := ct.fetchInitDataWithRetry(context.Background())
 	require.ErrorIs(t, err, common.StatusCodeError429)
 	require.Equal(t, int32(1), fetcher.calls.Load(), "the burst still ends on a rate limit")
+	_, ok = common.RetryAfterFrom(err)
+	require.False(t, ok, "no registry applied a hold-off, so none is claimed")
 }

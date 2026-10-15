@@ -745,7 +745,7 @@ func (cf *ChainFetcher) FetchLatestBlockNumForCollection(ctx context.Context, ad
 			{Key: "error", Value: err},
 		}...)
 	}
-	if rateLimited := cf.rateLimitedReplyError(parserInput); rateLimited != nil {
+	if rateLimited := RateLimitedReplyError(cf.endpoint.ChainID, parserInput); rateLimited != nil {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited, []utils.Attribute{
 			{Key: "chainId", Value: chainId},
 			{Key: "nodeUrl", Value: proxyUrl.Url},
@@ -854,7 +854,7 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 		}...)
 	}
 
-	if rateLimited := cf.rateLimitedReplyError(parserInput); rateLimited != nil {
+	if rateLimited := RateLimitedReplyError(cf.endpoint.ChainID, parserInput); rateLimited != nil {
 		return "", responseData, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited, []utils.Attribute{
 			{Key: "chainId", Value: chainId},
 			{Key: "nodeUrl", Value: proxyUrl.Url},
@@ -899,7 +899,7 @@ func NewChainFetcher(ctx context.Context, options *ChainFetcherOptions) *ChainFe
 	}
 }
 
-// rateLimitedReplyError reads a reply whose JSON-RPC error body is the upstream refusing the
+// RateLimitedReplyError reads a reply whose JSON-RPC error body is the upstream refusing the
 // request for rate — a 429 a gateway mirrors into the body of a 200, or into a reply on an open
 // WebSocket connection, where no HTTP status reaches the transport layer and nothing types the
 // error on the way up. It returns the typed rate-limit error (no Retry-After: a body carries
@@ -908,12 +908,19 @@ func NewChainFetcher(ctx context.Context, options *ChainFetcherOptions) *ChainFe
 // error. "Rate-limited" here is the registry's retryable-and-rate-limited verdict: the upstream is
 // healthy but busy. A non-retryable limit (NODE_LIMIT_EXCEEDED, a request shape the node refuses)
 // is not a reason to hold the endpoint off (MAG-4165).
-func (cf *ChainFetcher) rateLimitedReplyError(input parser.RPCInput) error {
+//
+// Both head / block-hash fetchers call it between formatting the reply and parsing a block out
+// of it: this ChainFetcher (startup verification, re-verification, the health command) and the
+// per-endpoint endpointstate.EndpointPoller behind every per-url ChainTracker, which sends over
+// its own DirectRPCConnection and never passes through here. The poller is the one that polls
+// the url a relay dials, so it is where the body form reached the tracker as an untyped "failed
+// to parse" error.
+func RateLimitedReplyError(chainID string, input parser.RPCInput) error {
 	jsonErr := input.GetError()
 	if jsonErr == nil {
 		return nil
 	}
-	classified := common.ClassifyError(nil, common.GetChainFamilyOrDefault(cf.endpoint.ChainID), common.TransportJsonRPC, jsonErr.Code, jsonErr.Message)
+	classified := common.ClassifyError(nil, common.GetChainFamilyOrDefault(chainID), common.TransportJsonRPC, jsonErr.Code, jsonErr.Message)
 	if classified == nil || !classified.Retryable || !classified.SubCategory.IsRateLimit() {
 		return nil
 	}

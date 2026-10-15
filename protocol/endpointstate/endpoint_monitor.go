@@ -621,7 +621,7 @@ func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTrack
 		default:
 		}
 
-		retryDelay := m.trackerStartRetryDelay(attempt)
+		retryDelay := m.trackerStartRetryDelayAfter(attempt, err)
 		m.setTrackerState(endpointURL, EndpointChainTrackerRetryingStart, err)
 		utils.LavaFormatWarning("ChainTracker startup failed; retrying", err,
 			utils.LogAttr("endpoint", endpointURL),
@@ -691,6 +691,20 @@ func (m *EndpointMonitor) specRequiresHeadOnly() bool {
 	}
 	byNum, _, hasByNum := m.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
 	return !hasByNum || byNum == nil
+}
+
+// trackerStartRetryDelayAfter is the wait before the next start attempt: the ladder below,
+// floored with the hold-off a rate-limited first fetch applied. The tracker hands that hold-off
+// back as the start error's Retry-After (chaintracker.fetchInitDataWithRetry) rather than
+// sleeping it out inside StartAndServe, so the wait happens HERE, with the tracker in
+// retrying_start and the 429 as its last error for the whole of it — where
+// /debug/endpoint-state and PollNow read it. A hold-off never shortens the ladder (MAG-4165).
+func (m *EndpointMonitor) trackerStartRetryDelayAfter(attempt int, err error) time.Duration {
+	delay := m.trackerStartRetryDelay(attempt)
+	if heldFor, ok := common.RetryAfterFrom(err); ok && heldFor > delay {
+		return heldFor
+	}
+	return delay
 }
 
 func (m *EndpointMonitor) trackerStartRetryDelay(attempt int) time.Duration {

@@ -208,6 +208,17 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 		)
 	}
 
+	// A 429 the upstream put inside the body of a 200 — or of a reply on an open WebSocket
+	// connection, where there is no status line — is a rate limit, not a parse failure: type it so
+	// the ChainTracker records a hold-off instead of retrying into the limit (MAG-4165).
+	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, parserInput); rateLimited != nil {
+		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited,
+			utils.LogAttr("chainID", ecf.chainID),
+			utils.LogAttr("endpoint", ecf.endpointURL),
+			utils.LogAttr("method", parsing.ApiName),
+		)
+	}
+
 	parsedInput := parser.ParseBlockFromReply(parserInput, parsing.ResultParsing, parsing.Parsers)
 	blockNum = parsedInput.GetBlock()
 	if blockNum == spectypes.NOT_APPLICABLE {
@@ -334,6 +345,15 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 			utils.LogAttr("endpoint", ecf.endpointURL),
 			utils.LogAttr("method", parsing.ApiName),
 			utils.LogAttr("response", parser.CapStringLen(string(responseData))),
+		)
+	}
+
+	// Same body form as the head fetch: a 429 inside a 200 is a rate limit, not a parse failure.
+	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, parserInput); rateLimited != nil {
+		return "", responseData, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited,
+			utils.LogAttr("chainID", ecf.chainID),
+			utils.LogAttr("endpoint", ecf.endpointURL),
+			utils.LogAttr("method", parsing.ApiName),
 		)
 	}
 

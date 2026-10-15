@@ -915,8 +915,9 @@ func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchF
 // clears the floor, because the upstream answered. It clears the registry entry too, but only
 // when this tracker's own 429 set the floor: a poll that fits under a vendor's cap does not
 // prove relay traffic will, so a hold-off the relay path recorded is the relay path's to clear
-// (docs/RATE-LIMIT-HOLDOFF.md, MAG-4165).
-func (cs *ChainTracker) noteFetchOutcome(err error) {
+// (docs/RATE-LIMIT-HOLDOFF.md, MAG-4165). Returns the hold-off applied to a rate-limited fetch,
+// 0 for any other outcome, so the start path can hand it to whoever retries the start.
+func (cs *ChainTracker) noteFetchOutcome(err error) time.Duration {
 	if errors.Is(err, common.StatusCodeError429) {
 		wait, _ := common.RetryAfterFrom(err)
 		if cs.rateLimitHoldoff != nil {
@@ -925,11 +926,12 @@ func (cs *ChainTracker) noteFetchOutcome(err error) {
 		if wait > 0 {
 			cs.rateLimitedUntil.Store(time.Now().Add(wait).UnixNano())
 		}
-		return
+		return wait
 	}
 	if cs.rateLimitedUntil.Swap(0) != 0 && cs.rateLimitHoldoff != nil {
 		cs.rateLimitHoldoff.RecordAnswer(cs.holdoffProvider, cs.holdoffURL)
 	}
+	return 0
 }
 
 // floorWithRetryAfter stretches the computed poll interval to honour a rate-limit hold-off
@@ -952,10 +954,14 @@ func (cs *ChainTracker) floorWithRetryAfter(interval time.Duration) time.Duratio
 }
 
 // waitOutRateLimitHoldoff blocks until the registry stops holding this endpoint off, or ctx
-// ends. The first fetch calls it before every attempt, so a tracker whose previous start met a
-// 429 — or whose endpoint a relay, a probe or the provider's other leg found rate-limited —
-// does not retry into the limit and re-arm it (MAG-4165). The wait is bounded by the registry's
-// own cap on a hold-off.
+// ends. The first fetch calls it before every attempt, so a tracker whose endpoint a relay, a
+// probe or the provider's other leg found rate-limited does not fire its first fetch into the
+// limit and re-arm it (MAG-4165). The wait is bounded by the registry's own cap on a hold-off.
+// A hold-off this tracker's OWN start-time 429 applied is normally already spent by the time
+// the next attempt reaches here: it rides the start error as its Retry-After, and the caller
+// retrying the start waits it out with the tracker's state naming the 429 (see
+// fetchInitDataWithRetry). Sleeping here instead would leave that state reading "starting" with
+// no error for the whole wait.
 func (cs *ChainTracker) waitOutRateLimitHoldoff(ctx context.Context) error {
 	if cs.rateLimitHoldoff == nil {
 		return nil
@@ -983,14 +989,17 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 		}
 		newLatestBlock, err = cs.iChainFetcherWrapper.FetchLatestBlockNum(ctx)
 		// Every init outcome informs the rate-limit floor and the registry, as a poll's does.
-		cs.noteFetchOutcome(err)
+		heldFor := cs.noteFetchOutcome(err)
 		if err == nil {
 			break
 		}
 		if errors.Is(err, common.StatusCodeError429) {
 			// The upstream refused for rate: the burst ends here. Another attempt now would
-			// re-arm a ban-type limit; the next start waits the recorded hold-off out first.
-			return utils.LavaFormatWarning("chain tracker init: upstream rate-limited the first fetch, backing off", err, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
+			// re-arm a ban-type limit. The applied hold-off rides the error as its Retry-After, so
+			// the caller retrying the start (endpointstate.startTrackerWithRetry) waits it out with
+			// the tracker in retrying_start naming the 429 — not sleeping inside StartAndServe,
+			// where the state would read "starting" with no error for the whole wait.
+			return utils.LavaFormatWarning("chain tracker init: upstream rate-limited the first fetch, backing off", common.RateLimited(err, heldFor), utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
 		}
 		utils.LavaFormatDebug("failed fetching block num data on chain tracker init, retry", utils.Attribute{Key: "retry Num", Value: idx}, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
 		// MAG-2159 finding 3: space out failed init retries for per-endpoint (flat) trackers
@@ -1035,9 +1044,10 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 			break
 		}
 		if errors.Is(err, common.StatusCodeError429) {
-			// Same rule as the head fetch: a rate limit ends the burst and is waited out next start.
-			cs.noteFetchOutcome(err)
-			return utils.LavaFormatWarning("chain tracker init: upstream rate-limited the block fetch, backing off", err, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
+			// Same rule as the head fetch: a rate limit ends the burst, and the applied hold-off
+			// rides the error for the start retry to wait out.
+			heldFor := cs.noteFetchOutcome(err)
+			return utils.LavaFormatWarning("chain tracker init: upstream rate-limited the block fetch, backing off", common.RateLimited(err, heldFor), utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
 		}
 		utils.LavaFormatDebug("failed fetching data on chain tracker init, retry", utils.Attribute{Key: "retry Num", Value: idx}, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
 		// MAG-2159 finding 3: same startup spacing for the previous-blocks init retries.
