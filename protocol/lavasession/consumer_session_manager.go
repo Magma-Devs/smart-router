@@ -1090,7 +1090,13 @@ func (csm *ConsumerSessionManager) setValidAddressesToDefaultValue(addon string,
 		// Same reset the per-provider release and the operator reset perform: a provider that
 		// came back through this drain used to keep its redemption flag, so every later failure
 		// read as a second-chance attempt and never re-blocked it until a success landed.
-		if provider := csm.pairing[address]; provider != nil {
+		//
+		// Not on ReleaseEpochRebuild: UpdateAllProviders re-blocks every carried-over provider
+		// right after this drain, so none of them is back in rotation. The failed-provider
+		// readmit and /debug/reset-pairing rebuild in the same epoch with the same session
+		// objects, and clearing the flag there erases a redemption still in flight, whose
+		// success (OnSessionDone) would then not return the provider to rotation.
+		if provider := csm.pairing[address]; provider != nil && route != ReleaseEpochRebuild {
 			provider.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
 		}
 	}

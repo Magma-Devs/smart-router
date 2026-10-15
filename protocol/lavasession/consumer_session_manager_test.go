@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2964,4 +2965,29 @@ func TestResetValidAddresses_ClearsTheRedemptionFlagLikeTheOtherReleases(t *test
 	require.ElementsMatch(t, []string{"provider-a", "provider-b"}, csm.validAddresses)
 	require.Equal(t, BlockedProviderSessionUnusedStatus, csm.pairing["provider-b"].atomicReadBlockedStatus(),
 		"a provider returned to rotation by the pool-empty release must not keep its redemption flag")
+}
+
+// The epoch rebuild drains the blocked list too, but re-blocks every carried-over provider a moment
+// later, so none of them is back in rotation. The failed-provider readmit and /debug/reset-pairing
+// rebuild in the same epoch with the same session objects; clearing the redemption flag there
+// would erase a redemption still in flight, and its success would then not return the provider to
+// rotation (MAG-4278).
+func TestSameEpochRebuild_KeepsTheRedemptionFlagOfAReblockedProvider(t *testing.T) {
+	csm := CreateConsumerSessionManager()
+	pairing := createPairingList("", true)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
+
+	address := csm.validAddresses[0]
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonExplicitSignal, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
+	// What the blocked-list fallback writes when it hands out a redemption session.
+	csm.pairing[address].atomicWriteBlockedStatus(BlockedProviderSessionUsedStatus)
+
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
+
+	csm.lock.RLock()
+	reblocked := slices.Contains(csm.currentlyBlockedProviderAddresses, address)
+	csm.lock.RUnlock()
+	require.True(t, reblocked, "the rebuild carries the block over")
+	require.Equal(t, BlockedProviderSessionUsedStatus, csm.pairing[address].atomicReadBlockedStatus(),
+		"a provider the rebuild keeps blocked must keep the flag its in-flight redemption reads")
 }
