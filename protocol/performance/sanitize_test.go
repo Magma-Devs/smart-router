@@ -45,7 +45,7 @@ func TestSanitizeForeignCacheReplyDropsIdentityMetadataAndSignatures(t *testing.
 }
 
 // Content-Type and Content-Encoding survive, because Reply.Metadata is the ONLY source
-// of client response headers (addHeadersAndSendBytes / SetResponseFromRelayResult) and
+// of client response headers (addHeadersAndSendBytes) and
 // nothing downstream re-derives them from the body. Dropping them made a secondary hit
 // serve a differently-typed — or, with an encoded body, undecodable — response than the
 // primary tier serves for the same entry.

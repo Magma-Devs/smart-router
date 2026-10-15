@@ -30,8 +30,7 @@ func refuseInvalidKeyPrefix(prefix string) error {
 
 // Cache semantics live in core (a storage-agnostic Engine over a KVStore);
 // this file is the gRPC shim: delegation, hit/miss accounting, and metrics.
-// The error variables and value types below are re-exported so the package
-// surface is unchanged by the split.
+// EntryTypeError is re-exported for the store in this package that reports it.
 var (
 	EntryTypeError = core.EntryTypeError
 )
@@ -42,8 +41,6 @@ type RelayerCacheServer struct {
 	cacheHits   uint64
 	cacheMisses uint64
 }
-
-// CacheValue is the stored form of a cached relay entry (core.Envelope).
 
 // engine assembles the semantic core over this server's ristretto stores.
 // Rebuilt per call so fixtures that construct CacheServer directly and set

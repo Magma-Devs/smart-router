@@ -387,7 +387,7 @@ var GenericErrorMappings = map[TransportType][]GenericMapping{
         {GRPCCodeEquals(codes.Unimplemented),       NODE_UNIMPLEMENTED},
         // HTTP status message matchers also appended at init() — HTTP status strings
         // can appear in gRPC error messages when the underlying transport is HTTP
-        // (e.g. provider relay errors arriving via ClassifyLegacyError)
+        // (e.g. protocol errors classified in relaycore's setErrorResponse)
         // ...
     },
 }

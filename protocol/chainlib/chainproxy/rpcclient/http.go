@@ -78,9 +78,6 @@ func (hc *httpConn) closed() <-chan interface{} {
 	return hc.closeCh
 }
 
-// DefaultHTTPTimeouts represents the default timeout values used if further
-// configuration is not provided.
-
 // DialHTTPWithClient creates a new RPC client that connects to an RPC server over HTTP
 // using the provided HTTP Client.
 func DialHTTPWithClient(endpoint string, client *http.Client) (*Client, error) {

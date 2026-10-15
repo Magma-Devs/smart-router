@@ -341,7 +341,7 @@ func (up *UsedProviders) RemoveUsed(provider string, routerKey RouterKey, err er
 	isSyncLoss := err != nil && IsSessionSyncLoss(err)
 	isFirstSyncLoss := isSyncLoss && !alreadyBlocked
 
-	// Eligibility decision via the injected policy function
+	// Eligibility decision (a pure function of the three flags)
 	result := common.DecideEligibility(isUnsupportedMethod, isSyncLoss, isFirstSyncLoss)
 
 	if result.Action == common.EligibilityAllowRetry {

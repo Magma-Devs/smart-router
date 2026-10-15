@@ -2798,7 +2798,6 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// api-interface, so the value is already scoped where a per-chain override would need it.
 	sessionManager.SetStatefulToBackup(viper.GetBool(common.StatefulToBackupFlag))
 
-	// Set callback to get Lava blockchain block height for RelaySession.Epoch
 	// Store session manager in router for epoch timer callbacks
 	sessionManagerKey := rpcEndpoint.Key() // chainID-apiInterface
 	rpsr.mu.Lock()

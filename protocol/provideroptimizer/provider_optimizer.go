@@ -644,9 +644,6 @@ func getProviderCompositeScore(address string, scores []UpstreamScore) float64 {
 	return 0.0
 }
 
-// calculate the probability a random variable with a poisson distribution
-// poisson distribution calculates the probability of K events, in this case the probability enough blocks pass and the request will be accessible in the block
-
 // calculate the expected average time until this provider catches up with the given latestSync block
 // for the first block difference we take the minimum between the time passed since block arrived and the average block time
 // for any other block we take the averageBlockTime

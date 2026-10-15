@@ -921,8 +921,7 @@ type ConsumerSessionsWithProvider struct {
 	MaxComputeUnits   uint64
 	UsedComputeUnits  uint64
 	PairingEpoch      uint64
-	// whether we already reported this provider this epoch, we can only report one conflict per provider per epoch
-	stakeSize int64 // the stake size the provider staked (ulava)
+	stakeSize         int64 // the stake size the provider staked (ulava)
 
 	// blocked provider recovery status if 0 currently not used, if 1 a session has tried resume communication with this provider
 	// if the provider is not blocked at all this field is irrelevant

@@ -17,15 +17,9 @@ func TestWebsocketConfig_DefaultValues(t *testing.T) {
 	assert.Equal(t, 5000, config.MaxTotalSubscriptions)
 	assert.Equal(t, "warn", config.TotalLimitEnforcement)
 
-	// Verify subscription sharing
-
 	// Verify rate limiting
 	assert.Equal(t, 10, config.SubscriptionsPerMinutePerClient)
 	assert.Equal(t, 20, config.UnsubscribesPerMinutePerClient)
-
-	// Verify message limits
-
-	// Verify timeouts
 
 	// Verify cleanup interval
 	assert.Equal(t, 1*time.Minute, config.CleanupInterval)

@@ -24,8 +24,6 @@ type IChainTracker interface {
 	// GetLatestBlockData returns block hashes for the specified block range and a specific block
 	GetLatestBlockData(fromBlock, toBlock, specificBlock int64) (latestBlock int64, requestedHashes []*BlockStore, changeTime time.Time, err error)
 
-	// RegisterForBlockTimeUpdates registers an updatable to receive block time updates
-
 	// GetLatestBlockNum returns the current latest block number and the time it was last changed
 	GetLatestBlockNum() (int64, time.Time)
 
@@ -62,8 +60,6 @@ type IChainTracker interface {
 
 	// AddBlockGap adds a new block gap measurement
 	AddBlockGap(newData time.Duration, blocks uint64)
-
-	// IsDummy gets the chain tracker weight - a way to differntiate between trackers (dummy tracker with weight 0)
 }
 
 const (

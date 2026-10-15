@@ -273,7 +273,6 @@ func (cf *ChainFetcher) validate(ctx context.Context, perCollection bool) (Provi
 				return admission, err
 			}
 		}
-		// invalidating cache as value might change
 		for _, verification := range verifications {
 			if skipVerification(url, verification.Name) {
 				utils.LavaFormatInfo("Skipping Verification due to provider configuration (skip-verifications setting)", utils.LogAttr("verification", verification.Name))
