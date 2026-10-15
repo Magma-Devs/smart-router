@@ -178,9 +178,10 @@ type ChainTracker struct {
 	currentPollIntervalNanos atomic.Int64
 	// rateLimitedUntil (unix nanos, 0 = none) is the instant until which the polled upstream is
 	// held off after a rate-limited fetch: the hold-off the registry applied — the upstream's
-	// Retry-After when it named one, else the strike schedule. computePollInterval floors the
-	// next interval with it, so a 429 with "Retry-After: 300" is not re-polled at the generic
-	// backoff's 60s ceiling. Written on each real fetch outcome, cleared by any answer.
+	// Retry-After when it named one, else the strike schedule. With a registry it only marks
+	// that this tracker's own 429 set the url's entry (noteFetchOutcome clears the entry only
+	// then); the registry is what floors the poll. Without one (no url to key on) it is the
+	// floor itself. Written on each real fetch outcome, cleared by any answer.
 	rateLimitedUntil atomic.Int64
 	// rateLimitHoldoff, holdoffProvider and holdoffURL: see ChainTrackerConfig.RateLimitHoldoff.
 	// Every rate-limited fetch — first fetch or poll — is recorded under the url alone
@@ -935,9 +936,10 @@ func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchF
 // Retry-After — is recorded into the registry under the url alone, and the hold-off the registry
 // applied (the upstream's Retry-After when it named one, else the strike schedule) is what the
 // next fetch is floored with. Any other answer — success or a different failure the upstream
-// sent — clears the floor, and clears the url-only entry when this tracker's own 429 set the
-// floor (WS and gRPC subscriptions record under the same key, and a poll that fits under a
-// vendor's cap does not prove their traffic will). A fetch that never got an answer (timeout,
+// sent — clears the floor, and clears the url-only entry when this tracker's own 429 set it:
+// the tracker clears only what it recorded, so its poll never drops a WS or gRPC subscription's
+// hold-off on the same key (answers on the relay, probe and re-verify paths do, under the
+// registry's any-answer rule — holdoff.RecordAnswer). A fetch that never got an answer (timeout,
 // refused or reset connection, DNS) clears nothing: the registry's rule is that an ANSWER
 // clears, and a gateway enforcing a ban often drops the connection rather than answering.
 // The relay path's (provider, url) entry is only ever read here, never written or cleared
@@ -971,10 +973,10 @@ func (cs *ChainTracker) noteFetchOutcome(err error) time.Duration {
 
 // floorWithRetryAfter stretches the computed poll interval to honour a rate-limit hold-off
 // that outlasts the generic failure backoff — a 429 with "Retry-After: 300" must not be
-// re-polled at the backoff's 60s ceiling. Two sources: this tracker's own last rate-limited
-// fetch (rateLimitedUntil), and whatever the registry holds for the endpoint right now — a
-// hold-off a relay, a probe or the provider's other leg recorded, or the provider-wide
-// escalation. The vendor said stop, whoever it said it to. It never shortens an interval.
+// re-polled at the backoff's 60s ceiling. The hold-off is rateLimitHeldFor: whatever the
+// registry holds for the url right now — this tracker's own 429s, a relay's, a probe's or a
+// subscription's hold-off, or the provider-wide escalation. The vendor said stop, whoever it
+// said it to. It never shortens an interval.
 func (cs *ChainTracker) floorWithRetryAfter(interval time.Duration) time.Duration {
 	return max(interval, cs.rateLimitHeldFor())
 }

@@ -27,9 +27,10 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   served by the URL lifts their hold-off as well. Strike memory becomes eligible for reclamation after 1h of quiet and is
   reclaimed lazily on the next recorded 429 anywhere in the registry. The one consumer
   that does not clear on every answer is the chain tracker: a poll clears only a hold-off
-  the tracker's own 429 set, because a poll that fits under a vendor's cap does not prove
-  subscription traffic will, and it never clears the relay path's entry (see its row in the
-  consumer map).
+  the tracker's own 429 set — it clears only what it recorded, so its poll never drops a
+  subscription's hold-off on the same URL — and it never clears the relay path's entry (see
+  its row in the consumer map). A probe or re-verify that got no answer (timeout, refused or
+  reset connection) clears nothing either.
 - **Internal only.** The registry and the Retry-After values drive internal retry and
   scheduling decisions. Nothing here is surfaced to the customer.
 - **A rate limit is safe to retry once the attempt has completed.** The upstream refused
