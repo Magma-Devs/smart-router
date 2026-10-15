@@ -53,18 +53,6 @@ func NewWebSocketBackoff() *ExponentialBackoff {
 	}
 }
 
-// NewExponentialBackoff creates a customized backoff with specific parameters
-func NewExponentialBackoff(initial, max time.Duration, multiplier float64, maxRetries int) *ExponentialBackoff {
-	return &ExponentialBackoff{
-		InitialInterval: initial,
-		MaxInterval:     max,
-		Multiplier:      multiplier,
-		JitterFactor:    WebSocketJitterFactor,
-		MaxRetries:      maxRetries,
-		rng:             rand.New(rand.NewSource(time.Now().UnixNano())),
-	}
-}
-
 // NextBackoff returns the next backoff duration, or (0, false) if max retries exceeded.
 // The backoff grows exponentially: initial * multiplier^attempt, capped at MaxInterval.
 // Jitter is applied to spread retries: delay * (1 ± jitter)

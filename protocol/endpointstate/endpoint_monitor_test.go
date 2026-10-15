@@ -103,7 +103,6 @@ func TestEndpointMonitor_GetOrCreateTracker(t *testing.T) {
 
 	// Check initial state
 	require.Equal(t, 0, manager.GetEndpointCount())
-	require.False(t, manager.IsDummy())
 
 	// Cleanup
 	manager.Stop()

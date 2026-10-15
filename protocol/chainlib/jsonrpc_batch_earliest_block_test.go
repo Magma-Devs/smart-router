@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	plantypes "github.com/magma-Devs/smart-router/types/plans"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -40,9 +39,9 @@ func ethChainParserForRangeTests(t *testing.T) ChainParser {
 	require.NoError(t, err)
 	// Extensions are only evaluated once a policy allows them; the trace add-on collection carries
 	// its own archive extension, so the add-on is allowed too.
-	require.NoError(t, chainParser.SetPolicy(&plantypes.Policy{ChainPolicies: []plantypes.ChainPolicy{{
+	require.NoError(t, chainParser.SetPolicy(&Policy{ChainPolicies: []ChainPolicy{{
 		ChainID:      "ETH1",
-		Requirements: []plantypes.ChainRequirement{{Addons: []string{"trace"}, Extensions: []string{"archive"}}},
+		Requirements: []ChainRequirement{{Addons: []string{"trace"}, Extensions: []string{"archive"}}},
 	}}}, "ETH1", spectypes.APIInterfaceJsonRPC))
 	return chainParser
 }

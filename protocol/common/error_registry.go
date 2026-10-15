@@ -627,28 +627,6 @@ func registerError(le *LavaError) *LavaError {
 	return le
 }
 
-// ---------------------------------------------------------------------------
-// Lookup helpers
-// ---------------------------------------------------------------------------
-
-func getLavaError(code uint32) *LavaError {
-	if le, ok := errorRegistry[code]; ok {
-		return le
-	}
-	return LavaErrorUnknown
-}
-
-func getLavaErrorByName(name string) *LavaError {
-	if le, ok := errorRegistryName[name]; ok {
-		return le
-	}
-	return LavaErrorUnknown
-}
-
-func isRetryable(code uint32) bool {
-	return getLavaError(code).Retryable
-}
-
 // LavaWrappedError wraps a LavaError with context, supporting errors.Is matching.
 type LavaWrappedError struct {
 	LavaErr *LavaError
@@ -751,12 +729,4 @@ func NewLavaErrorWrapping(lavaErr *LavaError, cause error) error {
 		return &LavaWrappedError{LavaErr: lavaErr}
 	}
 	return &LavaWrappedError{LavaErr: lavaErr, Context: cause.Error(), cause: cause}
-}
-
-func IsInternal(code uint32) bool {
-	return getLavaError(code).Category == CategoryInternal
-}
-
-func IsExternal(code uint32) bool {
-	return getLavaError(code).Category == CategoryExternal
 }

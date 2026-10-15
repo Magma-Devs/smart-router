@@ -407,8 +407,6 @@ func (s *restHealthRelayStub) SendParsedRelay(ctx context.Context, analytics *me
 	return nil, errors.New("not used")
 }
 
-func (s *restHealthRelayStub) CancelSubscriptionContext(subscriptionKey string) {}
-
 func (s *restHealthRelayStub) seen() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

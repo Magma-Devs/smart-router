@@ -262,10 +262,6 @@ func (nurl NodeUrl) ServesBaseCollection() bool {
 	return !nurl.StandaloneAddons || len(nurl.Addons) == 0
 }
 
-type ChainMessageGetApiInterface interface {
-	GetApi() *spectypes.Api
-}
-
 func (nurl NodeUrl) String() string {
 	urlStr := nurl.UrlStr()
 
@@ -570,11 +566,6 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 	}
 }
 
-type ConflictHandlerInterface interface {
-	ConflictAlreadyReported() bool
-	StoreConflictReported()
-}
-
 type ProviderInfo struct {
 	ProviderAddress           string
 	ProviderReputationSummary float64 // the number represents the average qos for this provider session
@@ -594,9 +585,7 @@ type RelayResult struct {
 	Request             *pairingtypes.RelayRequest
 	Reply               *pairingtypes.RelayReply
 	ProviderInfo        ProviderInfo
-	ReplyServer         pairingtypes.Relayer_RelaySubscribeClient
 	Finalized           bool
-	ConflictHandler     ConflictHandlerInterface
 	StatusCode          int
 	CrossValidation     int
 	ProviderTrailer     metadata.MD // the provider trailer attached to the request. used to transfer useful information (which is not signed so shouldn't be trusted completely).
@@ -663,13 +652,6 @@ func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transpor
 	rr.IsDataScope = classification.IsDataScope
 	rr.IsNodeCapability = classification.IsNodeCapability
 	rr.IsNodeAtFault = classification.IsNodeAtFault
-}
-
-func (rr *RelayResult) GetReplyServer() pairingtypes.Relayer_RelaySubscribeClient {
-	if rr == nil {
-		return nil
-	}
-	return rr.ReplyServer
 }
 
 func (rr *RelayResult) GetReply() *pairingtypes.RelayReply {

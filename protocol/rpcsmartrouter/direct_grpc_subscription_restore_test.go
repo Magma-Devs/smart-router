@@ -628,8 +628,6 @@ func (s *restoreRelaySender) SendParsedRelay(context.Context, *metrics.RelayMetr
 	return nil, errors.New("unary relays are not used here")
 }
 
-func (s *restoreRelaySender) CancelSubscriptionContext(string) {}
-
 func (s *restoreRelaySender) GetGRPCSubscriptionManager() chainlib.GRPCSubscriptionManager {
 	return s.manager
 }

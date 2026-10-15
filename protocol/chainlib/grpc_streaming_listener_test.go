@@ -125,8 +125,6 @@ func (s *stubRelaySender) SendParsedRelay(ctx context.Context, analytics *metric
 	return nil, errors.New("not used")
 }
 
-func (s *stubRelaySender) CancelSubscriptionContext(subscriptionKey string) {}
-
 // --- fixtures ---------------------------------------------------------------
 
 const (

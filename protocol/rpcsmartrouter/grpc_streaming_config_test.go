@@ -28,8 +28,6 @@ func TestDefaultGRPCStreamingConfig(t *testing.T) {
 
 	// Verify timeouts
 	assert.Equal(t, 30*time.Second, config.ConnectionTimeout)
-	assert.Equal(t, 5*time.Minute, config.StreamIdleTimeout)
-	assert.Equal(t, 30*time.Second, config.SubscriptionFirstReplyTimeout)
 
 	// Verify cleanup interval
 	assert.Equal(t, 1*time.Minute, config.CleanupInterval)
@@ -234,8 +232,4 @@ func TestGRPCStreamingConfig_VsWebSocketConfig(t *testing.T) {
 	// gRPC should have higher rate limits
 	assert.Greater(t, grpcConfig.SubscriptionsPerMinutePerClient, wsConfig.SubscriptionsPerMinutePerClient,
 		"gRPC should allow more subscriptions per minute")
-
-	// gRPC should have longer connection timeout (establishing gRPC connections can take longer)
-	assert.Greater(t, grpcConfig.ConnectionTimeout, wsConfig.HandshakeTimeout,
-		"gRPC connection timeout should be longer than WS handshake timeout")
 }

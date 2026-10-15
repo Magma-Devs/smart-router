@@ -14,11 +14,6 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-type UserData struct {
-	ConsumerIp string
-	DappId     string
-}
-
 type BaseProtocolMessage struct {
 	ChainMessage
 	directiveHeaders map[string]string

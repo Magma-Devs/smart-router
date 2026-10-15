@@ -5,12 +5,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/stretchr/testify/require"
 )
 
 // TestSharedStateTipExpiration locks the shared-state tip TTL contract (T10): a pod's published
-// tip lives for SharedStateTipBlockMultiplier * averageBlockTime, floored at ExpirationNonFinalized
-// and then at the hard MinSharedStateTipExpiration, so a chain with an unknown block time still
+// tip lives for core.SharedStateTipBlockMultiplier * averageBlockTime, floored at ExpirationNonFinalized
+// and then at the hard core.MinSharedStateTipExpiration, so a chain with an unknown block time still
 // gets a usable, non-zero TTL instead of never expiring.
 func TestSharedStateTipExpiration(t *testing.T) {
 	cs := &CacheServer{ExpirationNonFinalized: 500 * time.Millisecond}
@@ -24,7 +25,7 @@ func TestSharedStateTipExpiration(t *testing.T) {
 	// Unknown block time (spec omits average_block_time): 0*10 = 0. The 500ms
 	// ExpirationNonFinalized would be non-zero but far too short for a chain tip — it would
 	// evaporate between relays — so the hard floor takes over.
-	require.Equal(t, MinSharedStateTipExpiration, cs.SharedStateTipExpiration(0))
+	require.Equal(t, core.MinSharedStateTipExpiration, cs.SharedStateTipExpiration(0))
 }
 
 // TestSharedStateTipExpiration_FloorSurvivesZeroedFlags is the guarantee ExpirationNonFinalized
@@ -34,9 +35,9 @@ func TestSharedStateTipExpiration(t *testing.T) {
 func TestSharedStateTipExpiration_FloorSurvivesZeroedFlags(t *testing.T) {
 	cs := &CacheServer{ExpirationNonFinalized: 0}
 
-	require.Equal(t, MinSharedStateTipExpiration, cs.SharedStateTipExpiration(0),
+	require.Equal(t, core.MinSharedStateTipExpiration, cs.SharedStateTipExpiration(0),
 		"a zeroed non-finalized expiration must not produce an eternal tip")
-	require.Equal(t, MinSharedStateTipExpiration, cs.SharedStateTipExpiration(100*time.Millisecond),
+	require.Equal(t, core.MinSharedStateTipExpiration, cs.SharedStateTipExpiration(100*time.Millisecond),
 		"a sub-floor derived TTL is lifted to the floor, not left at 1s")
 	require.Positive(t, cs.SharedStateTipExpiration(0), "the TTL is never zero")
 

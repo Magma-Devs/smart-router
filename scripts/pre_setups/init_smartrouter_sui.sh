@@ -15,7 +15,6 @@
 #     SubscriptionService methods, so a fresh fetch already has it. The patch
 #     only bites on an older snapshot, where it prevents a confusing refusal.
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-source "$__dir"/../useful_commands.sh
 . "${__dir}"/../vars/variables.sh
 
 # Use absolute paths for logs
