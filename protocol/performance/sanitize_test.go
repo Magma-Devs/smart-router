@@ -10,8 +10,10 @@ import (
 
 // The allowlist policy: a foreign cache entry's Metadata is an open set of arbitrary
 // upstream response headers that no denylist could be proven to cover, so everything
-// goes EXCEPT the headers that describe how to decode the payload the entry already
-// delivers. Payload fields that carry the response itself survive untouched.
+// goes EXCEPT what the shared reply-header filter keeps (the headers that describe how to
+// decode the payload, the 429 pair, and the spec's reply headers the caller passes; this
+// entry carries none of them). Payload fields that carry the response itself survive
+// untouched.
 func TestSanitizeForeignCacheReplyDropsIdentityMetadataAndSignatures(t *testing.T) {
 	reply := &pairingtypes.RelayReply{
 		Data:                  []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`),

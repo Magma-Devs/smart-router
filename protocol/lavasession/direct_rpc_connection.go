@@ -661,8 +661,6 @@ type GRPCNodeErrorResponse struct {
 	ErrorCode    uint32 `json:"error_code"`
 }
 
-// Default gRPC error code when status cannot be determined
-
 // NewDirectRPCConnection creates a new direct RPC connection based on URL protocol.
 // The apiInterface parameter provides context for protocol detection when URL has no scheme
 // (e.g., bare "host:port" should be treated as gRPC when apiInterface is "grpc").
