@@ -28,7 +28,7 @@ require (
 	github.com/grafana/pyroscope-go v1.4.3
 	github.com/itchyny/gojq v0.12.19
 	github.com/jhump/protoreflect v1.18.1
-	github.com/redis/go-redis/v9 v9.22.0
+	github.com/redis/go-redis/v9 v9.23.0
 	github.com/spf13/pflag v1.0.10
 	github.com/tidwall/gjson v1.20.0
 	github.com/tidwall/sjson v1.2.5
@@ -96,7 +96,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.47.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.47.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.1 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
+	go.uber.org/atomic v1.12.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc // indirect
 )
