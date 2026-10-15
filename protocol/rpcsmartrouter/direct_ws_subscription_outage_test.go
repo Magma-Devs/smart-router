@@ -42,8 +42,8 @@ func TestRestoreAfterUpstreamOutage_ReconnectsWithBackoff(t *testing.T) {
 	require.True(t, h.attached(sub.clientKey), "the client stays attached while the pool retries")
 
 	// The node comes back. The next attempt of the backoff ladder lands and re-subscribes.
-	// (The mock node, like a real one until its own timeout, still lists the subscription
-	// that died with the socket, so the second subscribe call is the restore signal.)
+	// (The mock node, like a real one, forgets the subscription that died with the socket, so
+	// its live count cannot tell the restore apart: the second subscribe call is the signal.)
 	h.srv.setRefusing(false)
 	require.Eventually(t, func() bool { return h.upstreamCalls("eth_subscribe") == 2 },
 		10*time.Second, 10*time.Millisecond, "the subscription must be restored on the node once it is back")
