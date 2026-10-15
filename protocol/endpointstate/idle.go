@@ -329,7 +329,7 @@ func (m *EndpointMonitor) triggerPoll(ctx context.Context, endpointURL string) (
 
 	pollErr := tracker.PollNowWithDeliveryDeadline(deliveryCtx, ctx)
 	if errors.Is(pollErr, chaintracker.ErrorPollNowNotDelivered) || errors.Is(pollErr, chaintracker.ErrorPollNowUnsupported) ||
-		errors.Is(pollErr, chaintracker.ErrorPollNowResultNotAwaited) {
+		errors.Is(pollErr, chaintracker.ErrorPollNowResultNotAwaited) || errors.Is(pollErr, chaintracker.ErrorPollNowHeldOff) {
 		return false, pollErr
 	}
 	return true, pollErr

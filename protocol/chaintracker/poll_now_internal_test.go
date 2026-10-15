@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/stretchr/testify/require"
 )
 
@@ -304,4 +306,48 @@ func TestChainTracker_PollNow_ConcurrentTriggersAllComplete(t *testing.T) {
 			t.Fatal("a concurrent poll-now trigger was never answered")
 		}
 	}
+}
+
+// A forced poll bypasses the traffic gate but not a rate-limit hold-off (MAG-4165). The idle wake
+// burst forces a poll on every url at once, so a forced poll sent into a standing hold-off would
+// re-arm a ban-type limit and add a strike. While held, PollNow sends nothing, writes nothing, and
+// reports its own sentinel — also the typed 429 with the remaining wait — so the debug endpoint
+// says "no poll ran" instead of handing back the old record as fresh.
+func TestChainTracker_PollNow_DeclinesWhileHeldOff(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const url = "wss://held.example:443"
+	registry := holdoff.NewRegistryWithClock(time.Now)
+	fetcher := &advancingFetcher{}
+	fetcher.block.Store(1000)
+	tracker := newCustomChainTracker(fetcher, ChainTrackerConfig{
+		BlocksToSave:          1,
+		AverageBlockTime:      20 * time.Minute,
+		ServerBlockMemory:     100,
+		ChainId:               "ETH1",
+		ParseDirectiveEnabled: true,
+		FlatPollInterval:      10 * time.Minute,
+		RateLimitHoldoff:      registry,
+		RateLimitProvider:     "vendor",
+		RateLimitURL:          url,
+	})
+	ct, ok := tracker.(*ChainTracker)
+	require.True(t, ok)
+	require.NoError(t, ct.StartAndServe(ctx))
+
+	registry.RecordRateLimit("vendor", url, 0) // a relay was refused on this url
+	fetcher.block.Store(1005)
+
+	err := ct.PollNow(ctx)
+	require.ErrorIs(t, err, ErrorPollNowHeldOff)
+	require.ErrorIs(t, err, common.StatusCodeError429)
+	heldFor, ok := common.RetryAfterFrom(err)
+	require.True(t, ok)
+	require.Greater(t, heldFor, holdoff.InitialHoldoff-time.Second)
+	require.Equal(t, int64(1000), ct.GetAtomicLatestBlockNum(), "nothing was sent while held off")
+
+	registry.RecordAnswer("vendor", url)
+	require.NoError(t, ct.PollNow(ctx))
+	require.Equal(t, int64(1005), ct.GetAtomicLatestBlockNum(), "once the hold-off is gone the forced poll runs")
 }

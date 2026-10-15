@@ -25,6 +25,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -359,4 +360,30 @@ func TestEndpointMonitor_PollNow_ResultNotAwaited_ReportsNotPolled(t *testing.T)
 		latest, found := m.GetObservation(url)
 		return found && latest.LatestBlock == 8080
 	}, 15*time.Second, 20*time.Millisecond, "the poll the caller stopped waiting for still completed")
+}
+
+// A forced poll declines while the url is held off after a rate limit (MAG-4165). Nothing reached
+// upstream, so the monitor must say so — polled=false, the record handed back is the pre-call one —
+// rather than present that record as this poll's.
+func TestEndpointMonitor_PollNow_HeldOff_ReportsNotPolled(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const url = "http://eth-pollnow-held:8545"
+	m, conn := newPollNowMonitor(t, ctx, url, 9000)
+	defer m.Stop()
+
+	// The monitor's trackers record into and read the process-wide registry; this url is unique to
+	// this test, and the entry is dropped when it ends.
+	holdoff.Shared.RecordRateLimit(url, url, 0)
+	t.Cleanup(func() { holdoff.Shared.RecordAnswer(url, url) })
+
+	before, ok := m.GetObservation(url)
+	require.True(t, ok)
+	conn.block.Store(9090)
+
+	obs, polled, err := m.PollNow(ctx, url)
+	require.False(t, polled, "a declined poll must never be reported as a completed one")
+	require.ErrorIs(t, err, chaintracker.ErrorPollNowHeldOff)
+	require.Equal(t, before.LatestBlock, obs.LatestBlock, "the record handed back is the pre-call one")
 }

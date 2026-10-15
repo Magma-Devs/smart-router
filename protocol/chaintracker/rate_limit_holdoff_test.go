@@ -61,7 +61,7 @@ func TestNoteFetchOutcome_RecordsIntoRegistryAndFloors(t *testing.T) {
 
 	heldFor := cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0))
 	require.Equal(t, holdoff.InitialHoldoff, heldFor, "the applied hold-off is reported back")
-	require.True(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL), "the 429 must land in the shared registry")
+	require.True(t, registry.HeldOff(holdoffTestURL, holdoffTestURL), "the 429 must land in the shared registry under the url alone")
 	got := cs.computePollInterval(0, 0)
 	require.Greater(t, got, holdoff.InitialHoldoff-time.Second, "the next poll waits the applied hold-off out")
 	require.LessOrEqual(t, got, holdoff.InitialHoldoff)
@@ -73,7 +73,7 @@ func TestNoteFetchOutcome_RecordsIntoRegistryAndFloors(t *testing.T) {
 
 	// The first answer after the tracker's own 429 clears its floor and its registry entry.
 	cs.noteFetchOutcome(nil)
-	require.False(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL))
+	require.False(t, registry.HeldOff(holdoffTestURL, holdoffTestURL))
 	require.Equal(t, 6*time.Second, cs.computePollInterval(0, 0))
 }
 
@@ -108,14 +108,14 @@ func TestFetchInitDataWithRetry_RateLimitEndsTheBurst(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorIs(t, err, common.StatusCodeError429, "the typed cause must reach the start loop")
 	require.Equal(t, int32(1), fetcher.calls.Load(), "one refused attempt ends the burst")
-	require.True(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL))
+	require.True(t, registry.HeldOff(holdoffTestURL, holdoffTestURL))
 
 	// The applied hold-off rides the error as its Retry-After: the caller retrying the start
 	// waits it out with the tracker's state naming the 429, instead of this tracker sleeping it
 	// out inside StartAndServe where the state would read "starting" with no error.
 	heldFor, ok := common.RetryAfterFrom(err)
 	require.True(t, ok, "the start error must carry the applied hold-off")
-	require.InDelta(t, time.Until(registry.ReadyAt(holdoffTestProvider, holdoffTestURL)), heldFor, float64(time.Second))
+	require.InDelta(t, time.Until(registry.ReadyAt(holdoffTestURL, holdoffTestURL)), heldFor, float64(time.Second))
 }
 
 // With the endpoint held off — by this tracker's previous start or by anyone else — the first
@@ -158,10 +158,10 @@ func TestFetchInitDataWithRetry_NoKeyNoRegistry(t *testing.T) {
 	require.False(t, ok, "no registry applied a hold-off, so none is claimed")
 }
 
-// A poll that timed out or could not connect got no answer, so it must not clear the shared
-// entry: the relay path's strikes live under the same keys, and a gateway enforcing a ban often
-// drops connections instead of answering. Clearing here would reset the strike ladder and the
-// provider escalation and let relays rush straight back into the limit (MAG-4165).
+// A poll that timed out or could not connect got no answer, so it must not clear the url's entry:
+// WS and gRPC subscriptions record under the same url-only key, and a gateway enforcing a ban often
+// drops connections instead of answering. Clearing here would reset the strike ladder and send the
+// next poll — and the subscriptions — straight back into the limit (MAG-4165).
 func TestNoteFetchOutcome_NoAnswerKeepsTheHoldoff(t *testing.T) {
 	now := time.Now()
 	registry := holdoff.NewRegistryWithClock(func() time.Time { return now })
@@ -175,11 +175,36 @@ func TestNoteFetchOutcome_NoAnswerKeepsTheHoldoff(t *testing.T) {
 
 	cs.noteFetchOutcome(context.DeadlineExceeded)
 	cs.noteFetchOutcome(errors.New("dial tcp 10.0.0.1:443: connect: connection refused"))
-	require.True(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL), "a fetch with no answer must not clear the hold-off")
+	require.True(t, registry.HeldOff(holdoffTestURL, holdoffTestURL), "a fetch with no answer must not clear the hold-off")
 
 	// The strike survived: the next refusal escalates instead of starting over.
 	require.Equal(t, 2*holdoff.InitialHoldoff, cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0)))
 
 	cs.noteFetchOutcome(nil)
-	require.False(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL), "an answer still clears")
+	require.False(t, registry.HeldOff(holdoffTestURL, holdoffTestURL), "an answer still clears")
+}
+
+// The tracker's own 429 must not hold the provider off for relay selection. Relay selection asks
+// ProviderReadyAt, which holds a provider while every url the registry knows for it is held — and
+// it only knows urls that answered 429. Recorded under the relay path's (provider, url) key, one
+// rate-limited polled leg (say a backup provider's ws:// url, which no relay ever answers on to
+// clear it) pulled the provider's healthy https leg out of selection for as long as the start
+// retry kept re-arming it (MAG-4165).
+func TestNoteFetchOutcome_OwnRateLimitDoesNotHoldTheProviderForRelays(t *testing.T) {
+	registry := holdoff.NewRegistryWithClock(time.Now)
+	cs := &ChainTracker{
+		flatPollInterval: 6 * time.Second,
+		rateLimitHoldoff: registry,
+		holdoffProvider:  holdoffTestProvider,
+		holdoffURL:       holdoffTestURL,
+	}
+
+	for range 3 {
+		cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0))
+	}
+	_, providerHeld := registry.ProviderReadyAt(holdoffTestProvider)
+	require.False(t, providerHeld, "a polled leg's 429 must not take the provider out of relay selection")
+	require.False(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL), "nothing lands under the relay path's key")
+	require.True(t, registry.HeldOff(holdoffTestURL, holdoffTestURL), "the url itself is held, as the ws and gRPC paths key it")
+	require.Greater(t, cs.computePollInterval(0, 0), holdoff.InitialHoldoff, "and the poll still waits its own hold-off out")
 }

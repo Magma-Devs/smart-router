@@ -408,10 +408,10 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 // Thread-safe - uses lazy initialization to avoid creating trackers for unused endpoints.
 //
 // providerName is the name the relay path records rate-limit hold-offs under (the provider's
-// public address); the tracker records and consults the hold-off registry under the same
-// (provider, url) keys, so a 429 met by a poll and a 429 met by a relay land on one entry and
-// two held-off urls of one provider escalate to the provider. Callers with no provider in hand
-// pass "" and the tracker keys on the url alone (MAG-4165).
+// public address). The tracker reads the relay path's (provider, url) entry, so a relay's
+// hold-off or the provider escalation slows its poll; it records its own 429s under the url
+// alone, so a limited poll never holds the provider off for relay selection. Callers with no
+// provider in hand pass "" and the tracker reads the url key alone (MAG-4165).
 func (m *EndpointMonitor) GetOrCreateTracker(
 	providerName string,
 	endpoint *lavasession.Endpoint,
@@ -494,8 +494,8 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// operator-tunable (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The
 		// global tracker leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
 		FlatPollInterval: m.flatPollInterval,
-		// Rate-limit hold-off keys: the relay path's provider name and this url, so the
-		// tracker's 429s and the relays' 429s share one registry entry (MAG-4165).
+		// Rate-limit hold-off keys: the relay path's provider name (read only) and this url,
+		// which the tracker's own 429s are recorded under (MAG-4165).
 		RateLimitProvider: providerName,
 		RateLimitURL:      endpointURL,
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
@@ -902,8 +902,8 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 	// observe, and otherwise it is the prior state, flagged as such by polled=false.
 	observation, _ = m.GetObservation(endpointURL)
 
-	// Three ways to end up holding a record this call cannot vouch for. Undelivered/unsupported mean
-	// no cycle ran; not-awaited means one is running but wrote after we read. All three must report
+	// Four ways to end up holding a record this call cannot vouch for. Undelivered/unsupported/held
+	// off mean no cycle ran; not-awaited means one is running but wrote after we read. All four must report
 	// polled=false — the caller's question is "may I trust this record", not "did a goroutine move".
 	// Name the tracker's lifecycle state in the error: "retrying_start" is a diagnosis, a bare
 	// timeout is not.
@@ -916,6 +916,11 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 			// Distinct message because the operator response is distinct: nothing is wrong with the
 			// tracker, the budget was too short for this upstream.
 			message = "poll-now: a poll is running but its result was not awaited; the record below predates it"
+		}
+		if errors.Is(pollErr, chaintracker.ErrorPollNowHeldOff) {
+			// Nothing is wrong with the tracker either: the url is waiting out a rate-limit hold-off,
+			// which a forced poll does not bypass (MAG-4165).
+			message = "poll-now: no poll ran, the endpoint is held off after a rate limit"
 		}
 		return observation, false, utils.LavaFormatError(message, pollErr,
 			utils.LogAttr("endpoint", endpointURL),

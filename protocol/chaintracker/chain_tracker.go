@@ -183,9 +183,11 @@ type ChainTracker struct {
 	// backoff's 60s ceiling. Written on each real fetch outcome, cleared by any answer.
 	rateLimitedUntil atomic.Int64
 	// rateLimitHoldoff, holdoffProvider and holdoffURL: see ChainTrackerConfig.RateLimitHoldoff.
-	// Every rate-limited fetch — first fetch or poll — is recorded here, the first fetch waits an
-	// existing hold-off out, and the poll is floored with whatever the registry holds for this
-	// endpoint, whoever recorded it. nil disables all three (a tracker with no URL to key on).
+	// Every rate-limited fetch — first fetch or poll — is recorded under the url alone
+	// (holdoffURL, holdoffURL), the first fetch waits an existing hold-off out, and the poll is
+	// floored with whatever the registry holds for this url under either key: the url-only one
+	// (this tracker, a WS or gRPC subscription) or the relay path's (holdoffProvider, holdoffURL).
+	// nil disables all of it (a tracker with no URL to key on).
 	rateLimitHoldoff *holdoff.Registry
 	holdoffProvider  string
 	holdoffURL       string
@@ -752,6 +754,16 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 				// same bound as the timer case (fidelity), and a shutdown still cancels the fetch
 				// promptly. The requester's context governs only how long IT waits — a caller that
 				// gives up leaves the poll to finish and record, which is honest: it did happen.
+				//
+				// A rate-limit hold-off is the one thing a forced poll does NOT bypass: the timer-driven
+				// poll it mirrors is floored by it, and the idle wake burst forces a poll on every url
+				// at once — each one sent into a standing hold-off would re-arm a ban-type limit and add
+				// a strike (MAG-4165). The requester gets ErrorPollNowHeldOff — also the typed rate-limit
+				// error, the remaining wait as its Retry-After; nothing was sent, so nothing is recorded.
+				if heldFor := cs.rateLimitHeldFor(); heldFor > 0 {
+					req.resp <- common.RateLimited(fmt.Errorf("%w, %s left", ErrorPollNowHeldOff, heldFor.Round(time.Second)), heldFor)
+					continue
+				}
 				fetchTimeout := FetchTimeout()
 				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout)
 				_, pollErr := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx, true)
@@ -909,23 +921,28 @@ func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchF
 
 // noteFetchOutcome keeps the rate-limit floor current and the shared hold-off registry
 // informed. A fetch the upstream refused for rate — the typed error, with or without a
-// Retry-After — is recorded into the registry under this endpoint's keys, and the hold-off the
-// registry applied (the upstream's Retry-After when it named one, else the strike schedule) is
-// what the next fetch is floored with. Any other answer — success or a different failure the
-// upstream sent — clears the floor. A fetch that never got an answer (timeout, refused or reset
-// connection, DNS) clears nothing: the registry's rule is that an ANSWER clears, and the entry
-// is shared with the relay path, so a timed-out poll must not wipe the relays' strikes or the
-// provider escalation (a gateway enforcing a ban often drops the connection rather than
-// answering). It clears the registry entry too, but only
-// when this tracker's own 429 set the floor: a poll that fits under a vendor's cap does not
-// prove relay traffic will, so a hold-off the relay path recorded is the relay path's to clear
+// Retry-After — is recorded into the registry under the url alone, and the hold-off the registry
+// applied (the upstream's Retry-After when it named one, else the strike schedule) is what the
+// next fetch is floored with. Any other answer — success or a different failure the upstream
+// sent — clears the floor, and clears the url-only entry when this tracker's own 429 set the
+// floor (WS and gRPC subscriptions record under the same key, and a poll that fits under a
+// vendor's cap does not prove their traffic will). A fetch that never got an answer (timeout,
+// refused or reset connection, DNS) clears nothing: the registry's rule is that an ANSWER
+// clears, and a gateway enforcing a ban often drops the connection rather than answering.
+// The relay path's (provider, url) entry is only ever read here, never written or cleared
 // (docs/RATE-LIMIT-HOLDOFF.md, MAG-4165). Returns the hold-off applied to a rate-limited fetch,
 // 0 for any other outcome, so the start path can hand it to whoever retries the start.
 func (cs *ChainTracker) noteFetchOutcome(err error) time.Duration {
 	if errors.Is(err, common.StatusCodeError429) {
 		wait, _ := common.RetryAfterFrom(err)
 		if cs.rateLimitHoldoff != nil {
-			wait = cs.rateLimitHoldoff.RecordRateLimit(cs.holdoffProvider, cs.holdoffURL, wait)
+			// The url-only key, never the relay path's (provider, url): relay selection holds a
+			// provider off while every url the registry knows for it is held, and the registry
+			// only knows urls that answered 429. A tracker entry under the provider's name would
+			// therefore pull the provider's healthy legs out of relay selection whenever its one
+			// polled leg is limited — and a backup-tier leg with no relay traffic would never be
+			// cleared by an answer on another leg.
+			wait = cs.rateLimitHoldoff.RecordRateLimit(cs.holdoffURL, cs.holdoffURL, wait)
 		}
 		if wait > 0 {
 			cs.rateLimitedUntil.Store(time.Now().Add(wait).UnixNano())
@@ -936,7 +953,7 @@ func (cs *ChainTracker) noteFetchOutcome(err error) time.Duration {
 		return 0
 	}
 	if cs.rateLimitedUntil.Swap(0) != 0 && cs.rateLimitHoldoff != nil {
-		cs.rateLimitHoldoff.RecordAnswer(cs.holdoffProvider, cs.holdoffURL)
+		cs.rateLimitHoldoff.RecordAnswer(cs.holdoffURL, cs.holdoffURL)
 	}
 	return 0
 }
@@ -948,16 +965,37 @@ func (cs *ChainTracker) noteFetchOutcome(err error) time.Duration {
 // hold-off a relay, a probe or the provider's other leg recorded, or the provider-wide
 // escalation. The vendor said stop, whoever it said it to. It never shortens an interval.
 func (cs *ChainTracker) floorWithRetryAfter(interval time.Duration) time.Duration {
-	wait := interval
+	return max(interval, cs.rateLimitHeldFor())
+}
+
+// rateLimitHeldFor is how much longer this tracker's url is held off for a rate limit — by its
+// own last rate-limited fetch or by anything in the registry — and 0 when it is not.
+func (cs *ChainTracker) rateLimitHeldFor() time.Duration {
+	wait := time.Duration(0)
 	if until := cs.rateLimitedUntil.Load(); until != 0 {
-		wait = max(wait, time.Until(time.Unix(0, until)))
+		wait = time.Until(time.Unix(0, until))
 	}
-	if cs.rateLimitHoldoff != nil {
-		if readyAt := cs.rateLimitHoldoff.ReadyAt(cs.holdoffProvider, cs.holdoffURL); !readyAt.IsZero() {
-			wait = max(wait, time.Until(readyAt))
+	if readyAt := cs.holdoffReadyAt(); !readyAt.IsZero() {
+		wait = max(wait, time.Until(readyAt))
+	}
+	return max(wait, 0)
+}
+
+// holdoffReadyAt is when the registry stops holding this tracker's url off, the zero time when
+// it does not: the later of the url-only entry (this tracker's own 429s, a WS or gRPC
+// subscription's) and the relay path's (provider, url) entry, which also carries the provider
+// escalation.
+func (cs *ChainTracker) holdoffReadyAt() time.Time {
+	if cs.rateLimitHoldoff == nil {
+		return time.Time{}
+	}
+	readyAt := cs.rateLimitHoldoff.ReadyAt(cs.holdoffURL, cs.holdoffURL)
+	if cs.holdoffProvider != cs.holdoffURL {
+		if relayReadyAt := cs.rateLimitHoldoff.ReadyAt(cs.holdoffProvider, cs.holdoffURL); relayReadyAt.After(readyAt) {
+			readyAt = relayReadyAt
 		}
 	}
-	return wait
+	return readyAt
 }
 
 // waitOutRateLimitHoldoff blocks until the registry stops holding this endpoint off, or ctx
@@ -970,10 +1008,7 @@ func (cs *ChainTracker) floorWithRetryAfter(interval time.Duration) time.Duratio
 // fetchInitDataWithRetry). Sleeping here instead would leave that state reading "starting" with
 // no error for the whole wait.
 func (cs *ChainTracker) waitOutRateLimitHoldoff(ctx context.Context) error {
-	if cs.rateLimitHoldoff == nil {
-		return nil
-	}
-	readyAt := cs.rateLimitHoldoff.ReadyAt(cs.holdoffProvider, cs.holdoffURL)
+	readyAt := cs.holdoffReadyAt()
 	if readyAt.IsZero() {
 		return nil
 	}
