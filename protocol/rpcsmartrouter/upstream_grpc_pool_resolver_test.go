@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -120,4 +121,19 @@ func TestUpstreamGRPCStreamConnection_AnOutOfBoundsReflectionTimeoutIsRefusedNot
 	_, err = conn.GetMethodDescriptor(ctx, "grpc.health.v1.Health", "Watch")
 	require.ErrorContains(t, err, "reflection-timeout too short")
 	require.Zero(t, streams.Load(), "no reflection stream is opened on a budget the config does not allow")
+}
+
+// A lookup on a closed stream connection reports the connection closed with the unary
+// path's sentinel, which the shared resolver passes through as it is, rather than as a
+// failed lookup logged at ERROR with a plain "connection not available".
+func TestUpstreamGRPCStreamConnection_ALookupOnAClosedConnectionReportsItClosed(t *testing.T) {
+	addr, streams := startCountingReflectionServer(t, 0)
+	conn := newStreamConnectionTo(t, addr)
+	require.NoError(t, conn.Close())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := conn.GetMethodDescriptor(ctx, "grpc.health.v1.Health", "Check")
+	require.ErrorIs(t, err, lavasession.ErrGRPCConnectionClosed)
+	require.Zero(t, streams.Load())
 }

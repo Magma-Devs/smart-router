@@ -112,13 +112,15 @@ func NewUpstreamGRPCStreamConnection(ctx context.Context, nodeUrl *common.NodeUr
 }
 
 // lendChannel hands the resolver this connection's one channel; there is nothing to
-// give back, so the release is a no-op.
+// give back, so the release is a no-op. A closed connection answers with
+// lavasession.ErrGRPCConnectionClosed, the error the unary connection's borrow gives,
+// which the resolver passes through as it is instead of logging a failed lookup.
 func (c *UpstreamGRPCStreamConnection) lendChannel(context.Context) (*grpc.ClientConn, func(), error) {
 	c.lock.RLock()
 	conn := c.conn
 	c.lock.RUnlock()
-	if conn == nil {
-		return nil, nil, fmt.Errorf("connection not available")
+	if conn == nil || c.closed.Load() {
+		return nil, nil, lavasession.ErrGRPCConnectionClosed
 	}
 	return conn, func() {}, nil
 }
