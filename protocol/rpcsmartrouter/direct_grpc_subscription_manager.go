@@ -1004,7 +1004,9 @@ func (dgm *DirectGRPCSubscriptionManager) routeMessageToClients(
 				{Name: MetadataGRPCStreamSeq, Value: fmt.Sprintf("%d", seqNum)},
 			},
 		}
-		if !info.sender.TrySend(reply) {
+		// TrySendClosed is a client leaving by another path: its stream ended and the listener's
+		// UnsubscribeAll is on the way. Only a full channel is a client that did not keep up.
+		if info.sender.TrySend(reply) == common.TrySendFull {
 			dgm.dropSlowClient(activeSub, clientKey)
 		}
 	}

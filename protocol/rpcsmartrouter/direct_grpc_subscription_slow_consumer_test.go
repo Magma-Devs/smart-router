@@ -58,3 +58,30 @@ func TestGRPCSlowClientStreamEndsWithStatus(t *testing.T) {
 	require.Eventually(t, func() bool { return creatorReceived.Load() > before },
 		5*time.Second, 10*time.Millisecond, "the creator keeps receiving after the laggard is dropped")
 }
+
+// TestGRPCDepartedJoinerIsNotCountedAsSlow: a joiner's reply channel is bound to its stream's
+// context. When the client hangs up, the stream's Close releases it through UnsubscribeAll, but
+// a push can reach the fan-out first and find the sender's context ended. That client left; it
+// did not fall behind, so it is neither counted as a slow consumer nor given its status.
+func TestGRPCDepartedJoinerIsNotCountedAsSlow(t *testing.T) {
+	upstream := startFakeStreamingUpstream(t)
+	manager := newManagerAgainstUpstream(t, upstream.addr)
+	counter := &droppedClientsCounter{}
+	manager.metricsManager = counter
+	defer manager.Stop()
+
+	message := newGrpcSubscriptionMessage(t)
+	_, creatorReplies, err := manager.StartSubscription(context.Background(), message, "dapp", "1.1.1.1", "creator-conn", nil)
+	require.NoError(t, err)
+	requireUpstreamStreamOpened(t, upstream)
+	joinerCtx, hangUp := context.WithCancel(context.Background())
+	_, _, err = manager.StartSubscription(joinerCtx, message, "dapp", "1.1.1.1", "joiner-conn", nil)
+	require.NoError(t, err)
+	joinerKey := manager.ClientKey("dapp", "1.1.1.1", "joiner-conn")
+
+	hangUp() // the joiner's stream ended; its UnsubscribeAll has not run yet
+	upstream.messages <- marshalStreamPayload(t, "after-hang-up")
+	require.Equal(t, "after-hang-up", awaitStreamPayload(t, creatorReplies))
+	require.Zero(t, counter.dropped.Load(), "a client that hung up was counted as one that did not keep up")
+	require.NoError(t, manager.SubscriptionEndError(joinerKey), "a client that hung up was given the slow-consumer status")
+}

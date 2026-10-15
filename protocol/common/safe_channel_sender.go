@@ -62,21 +62,35 @@ func (scs *SafeChannelSender[T]) LockAndSendAsynchronously(msg T) {
 	}()
 }
 
-// TrySend delivers msg if the receiver has room for it and reports whether it did. It never
+// TrySendOutcome is what TrySend did with a message.
+type TrySendOutcome int
+
+const (
+	// TrySendDelivered: the receiver had room, and has the message.
+	TrySendDelivered TrySendOutcome = iota
+	// TrySendFull: the receiver's channel is full, so it is not keeping up.
+	TrySendFull
+	// TrySendClosed: the sender was closed or its context ended, so nobody is receiving. The
+	// receiver left; it was not slow.
+	TrySendClosed
+)
+
+// TrySend delivers msg if the receiver has room for it and reports what happened. It never
 // waits and never retries: a receiver that is not keeping up is reported, not waited for, so
 // one slow client cannot stall the fan-out to every other client of a shared subscription
-// (MAG-4242). A closed sender, or one whose context has ended, reports false as well.
-func (scs *SafeChannelSender[T]) TrySend(msg T) bool {
+// (MAG-4242). A closed sender, or one whose context has ended, reports TrySendClosed: a caller
+// that drops slow receivers must not take a receiver that left for one.
+func (scs *SafeChannelSender[T]) TrySend(msg T) TrySendOutcome {
 	scs.lock.Lock()
 	defer scs.lock.Unlock()
 	if scs.closed || scs.ctx.Err() != nil {
-		return false
+		return TrySendClosed
 	}
 	select {
 	case scs.ch <- msg:
-		return true
+		return TrySendDelivered
 	default:
-		return false
+		return TrySendFull
 	}
 }
 

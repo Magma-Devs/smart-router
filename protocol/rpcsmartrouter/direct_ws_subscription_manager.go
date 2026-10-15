@@ -1602,8 +1602,12 @@ func (dwsm *DirectWSSubscriptionManager) routeMessageToClients(
 			Data: rewrittenMsg,
 		}
 
-		if !info.sender.TrySend(reply) {
+		switch info.sender.TrySend(reply) {
+		case common.TrySendFull:
 			dwsm.dropSlowClient(activeSub.hashedParams, activeSub, clientKey)
+			continue
+		case common.TrySendClosed:
+			// The client is leaving by another path, which releases it. It was not slow.
 			continue
 		}
 		utils.LavaFormatTrace("DirectWS: sent message to client with unique router ID",
