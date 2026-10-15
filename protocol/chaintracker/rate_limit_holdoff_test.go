@@ -157,3 +157,29 @@ func TestFetchInitDataWithRetry_NoKeyNoRegistry(t *testing.T) {
 	_, ok = common.RetryAfterFrom(err)
 	require.False(t, ok, "no registry applied a hold-off, so none is claimed")
 }
+
+// A poll that timed out or could not connect got no answer, so it must not clear the shared
+// entry: the relay path's strikes live under the same keys, and a gateway enforcing a ban often
+// drops connections instead of answering. Clearing here would reset the strike ladder and the
+// provider escalation and let relays rush straight back into the limit (MAG-4165).
+func TestNoteFetchOutcome_NoAnswerKeepsTheHoldoff(t *testing.T) {
+	now := time.Now()
+	registry := holdoff.NewRegistryWithClock(func() time.Time { return now })
+	cs := &ChainTracker{
+		flatPollInterval: 6 * time.Second,
+		rateLimitHoldoff: registry,
+		holdoffProvider:  holdoffTestProvider,
+		holdoffURL:       holdoffTestURL,
+	}
+	cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0))
+
+	cs.noteFetchOutcome(context.DeadlineExceeded)
+	cs.noteFetchOutcome(errors.New("dial tcp 10.0.0.1:443: connect: connection refused"))
+	require.True(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL), "a fetch with no answer must not clear the hold-off")
+
+	// The strike survived: the next refusal escalates instead of starting over.
+	require.Equal(t, 2*holdoff.InitialHoldoff, cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0)))
+
+	cs.noteFetchOutcome(nil)
+	require.False(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL), "an answer still clears")
+}

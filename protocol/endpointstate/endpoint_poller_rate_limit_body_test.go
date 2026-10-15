@@ -78,3 +78,29 @@ func TestEndpointPoller_FetchLatestBlockNum_OtherErrorBodyIsNotRateLimited(t *te
 	require.Error(t, err)
 	require.NotErrorIs(t, err, common.StatusCodeError429)
 }
+
+// Solana-family trackers poll through SVMChainTracker, which sends getLatestBlockhash via
+// CustomMessage and unmarshals the raw reply itself — FetchLatestBlockNum's typing never runs.
+// A 429 body decoded to slot 0 with no error: an answered poll at block 0, no hold-off. It must
+// come back as the typed rate limit; any other reply passes through untouched (MAG-4165).
+func TestEndpointPoller_CustomMessage_TypesRateLimitBody(t *testing.T) {
+	const url = "ws://sol-ep:8900"
+	newPoller := func(body string) *EndpointPoller {
+		return NewEndpointPoller(
+			&lavasession.Endpoint{NetworkAddress: url, Enabled: true},
+			&fixedReplyConnection{url: url, body: body},
+			nil,
+			"SOLANA",
+			spectypes.APIInterfaceJsonRPC,
+		)
+	}
+	request := []byte(`{"jsonrpc":"2.0","id":1,"method":"getLatestBlockhash","params":[]}`)
+
+	_, err := newPoller(rateLimitReplyBody).CustomMessage(context.Background(), "", request, "POST", "getLatestBlockhash")
+	require.ErrorIs(t, err, common.StatusCodeError429)
+
+	other := `{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"Node is behind by 42 slots"}}`
+	reply, err := newPoller(other).CustomMessage(context.Background(), "", request, "POST", "getLatestBlockhash")
+	require.NoError(t, err)
+	require.JSONEq(t, other, string(reply))
+}

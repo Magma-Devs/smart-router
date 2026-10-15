@@ -920,11 +920,18 @@ func RateLimitedReplyError(chainID string, input parser.RPCInput) error {
 	if jsonErr == nil {
 		return nil
 	}
-	classified := common.ClassifyError(nil, common.GetChainFamilyOrDefault(chainID), common.TransportJsonRPC, jsonErr.Code, jsonErr.Message)
+	return RateLimitedErrorBody(chainID, jsonErr.Code, jsonErr.Message)
+}
+
+// RateLimitedErrorBody is RateLimitedReplyError for a caller holding the JSON-RPC error's code
+// and message rather than a parsed reply: endpointstate.EndpointPoller.CustomMessage, behind the
+// SVM tracker's latest-slot poll, which reads the raw reply and never builds an RPCInput.
+func RateLimitedErrorBody(chainID string, code int, message string) error {
+	classified := common.ClassifyError(nil, common.GetChainFamilyOrDefault(chainID), common.TransportJsonRPC, code, message)
 	if classified == nil || !classified.Retryable || !classified.SubCategory.IsRateLimit() {
 		return nil
 	}
-	return common.RateLimited(fmt.Errorf("json-rpc error %d: %s", jsonErr.Code, jsonErr.Message), 0)
+	return common.RateLimited(fmt.Errorf("json-rpc error %d: %s", code, message), 0)
 }
 
 func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage ChainMessageForSend) (parsable parser.RPCInput, err error) {

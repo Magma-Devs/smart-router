@@ -911,8 +911,12 @@ func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchF
 // informed. A fetch the upstream refused for rate — the typed error, with or without a
 // Retry-After — is recorded into the registry under this endpoint's keys, and the hold-off the
 // registry applied (the upstream's Retry-After when it named one, else the strike schedule) is
-// what the next fetch is floored with. Any other real outcome — success or a different failure —
-// clears the floor, because the upstream answered. It clears the registry entry too, but only
+// what the next fetch is floored with. Any other answer — success or a different failure the
+// upstream sent — clears the floor. A fetch that never got an answer (timeout, refused or reset
+// connection, DNS) clears nothing: the registry's rule is that an ANSWER clears, and the entry
+// is shared with the relay path, so a timed-out poll must not wipe the relays' strikes or the
+// provider escalation (a gateway enforcing a ban often drops the connection rather than
+// answering). It clears the registry entry too, but only
 // when this tracker's own 429 set the floor: a poll that fits under a vendor's cap does not
 // prove relay traffic will, so a hold-off the relay path recorded is the relay path's to clear
 // (docs/RATE-LIMIT-HOLDOFF.md, MAG-4165). Returns the hold-off applied to a rate-limited fetch,
@@ -927,6 +931,9 @@ func (cs *ChainTracker) noteFetchOutcome(err error) time.Duration {
 			cs.rateLimitedUntil.Store(time.Now().Add(wait).UnixNano())
 		}
 		return wait
+	}
+	if common.DetectConnectionError(err) != nil {
+		return 0
 	}
 	if cs.rateLimitedUntil.Swap(0) != 0 && cs.rateLimitHoldoff != nil {
 		cs.rateLimitHoldoff.RecordAnswer(cs.holdoffProvider, cs.holdoffURL)
