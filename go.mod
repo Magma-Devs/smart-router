@@ -25,7 +25,7 @@ require (
 	github.com/gogo/status v1.1.1
 	github.com/golang/mock v1.6.0
 	github.com/golang/protobuf v1.5.4
-	github.com/grafana/pyroscope-go v1.4.1
+	github.com/grafana/pyroscope-go v1.4.3
 	github.com/itchyny/gojq v0.12.19
 	github.com/jhump/protoreflect v1.18.1
 	github.com/redis/go-redis/v9 v9.22.0
