@@ -1,0 +1,100 @@
+name: E2E test gate
+
+# Sets the e2e-test/linked commit status on a pull request that adds router Go
+# code: success when smart-router-automation's main branch has a test that
+# names the pull request's Jira ticket, failure when it has none.
+# docs/PR-GATES.md describes the rule and the no-e2e-test label.
+#
+# pull_request_target runs this file and the gate's code from main, never from
+# the pull request, so no pull request code runs next to the automation token.
+# The gate clones the automation tests only for a pull request that needs
+# them, and never for one from a fork. The status goes on the pull request's
+# head commit, where a required check looks for it. This repository is public
+# and the automation repository is not: the gate publishes ticket keys and
+# counts, never automation paths.
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+      - ready_for_review
+      - labeled
+      - unlabeled
+  # A test merged to smart-router-automation after a pull request's last event
+  # turns its status green on the next sweep.
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request to check (empty checks every open pull request against main)
+        required: false
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: e2e-test-gate-${{ github.event.pull_request.number || inputs.pr_number || 'sweep' }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-test:
+    name: Check the linked e2e test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+      STATUS_CONTEXT: e2e-test/linked
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Check out the gate from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: tools/prgate
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/prgate/go.mod
+          cache: false
+
+      - name: Check and set the status
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTOMATION_TOKEN: ${{ secrets.SMART_ROUTER_AUTOMATION_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          target=(-sweep)
+          if [ -n "${PR_NUMBER:-}" ]; then
+            target=(-pr "$PR_NUMBER")
+          fi
+          go -C tools/prgate run ./cmd/e2egate \
+            -repo "$GITHUB_REPOSITORY" \
+            -automation-repo Magma-Devs/smart-router-automation \
+            -context "$STATUS_CONTEXT" \
+            -target-url "$RUN_URL" \
+            "${target[@]}"
+
+      # A step before the gate failed (the checkout, the Go setup), so the gate
+      # set no status, and a required check would wait for one forever.
+      - name: Report a gate that could not run
+        if: failure() && steps.gate.outcome == 'skipped' && env.PR_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$sha" \
+            -f state=error \
+            -f context="$STATUS_CONTEXT" \
+            -f description="The e2e test gate could not run: see the workflow run" \
+            -f target_url="$RUN_URL"
