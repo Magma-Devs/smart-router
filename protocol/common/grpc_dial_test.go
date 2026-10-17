@@ -1,6 +1,9 @@
 package common
 
 import (
+	"crypto/x509"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/magma-Devs/smart-router/utils/testcert"
@@ -24,8 +27,19 @@ func TestAuthConfigTLSConfig_CACertificateIsATrustAnchor(t *testing.T) {
 	require.True(t, insecureToo.InsecureSkipVerify, "allow-insecure is the one setting that disables verification")
 
 	missing := (&AuthConfig{CaCert: caPath + ".missing"}).TLSConfig()
-	require.Nil(t, missing.RootCAs, "an unreadable CA file falls back to the system roots")
+	require.NotNil(t, missing.RootCAs, "an unreadable CA file must not fall back to the system roots (nil RootCAs)")
+	require.True(t, missing.RootCAs.Equal(x509.NewCertPool()), "an unreadable CA file trusts nothing")
 	require.False(t, missing.InsecureSkipVerify)
+
+	notPEM := filepath.Join(t.TempDir(), "not-a-certificate.pem")
+	require.NoError(t, os.WriteFile(notPEM, []byte("not a PEM certificate"), 0o600))
+	garbage := (&AuthConfig{CaCert: notPEM}).TLSConfig()
+	require.NotNil(t, garbage.RootCAs, "a CA file with no PEM certificate must not fall back to the system roots")
+	require.True(t, garbage.RootCAs.Equal(x509.NewCertPool()), "a CA file with no PEM certificate trusts nothing")
+	require.False(t, garbage.InsecureSkipVerify)
+
+	missingButInsecure := (&AuthConfig{CaCert: caPath + ".missing", AllowInsecure: true}).TLSConfig()
+	require.True(t, missingButInsecure.InsecureSkipVerify, "allow-insecure still disables verification")
 
 	clientCert := (&AuthConfig{CertPem: caPath, KeyPem: keyPath}).TLSConfig()
 	require.Len(t, clientCert.Certificates, 1, "cert-pem/key-pem is the client certificate to present")

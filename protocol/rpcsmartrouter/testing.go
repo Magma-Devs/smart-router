@@ -205,15 +205,18 @@ func CreateTestRPCSmartRouterCobraCommand() *cobra.Command {
 	cmdTestRPCSmartRouter.Flags().String("log-level", "info", "log level (debug|info|warn|error)")
 	cmdTestRPCSmartRouter.Flags().Uint(chainproxy.ParallelConnectionsFlag, chainproxy.NumberOfParallelConnections, "parallel connections")
 	cmdTestRPCSmartRouter.Flags().Bool(chainproxy.GRPCAllowInsecureConnection, false, "used to test grpc, to allow insecure (self signed cert).")
-	cmdTestRPCSmartRouter.Flags().Bool(chainproxy.GRPCUseTls, true, "use tls configuration for grpc connections to your consumer")
+	cmdTestRPCSmartRouter.Flags().Bool(chainproxy.GRPCUseTls, false, "dial grpc endpoints over TLS only (by default a grpc endpoint is dialled in plaintext first, then over TLS if that fails)")
 	cmdTestRPCSmartRouter.Flags().StringArray(commonlib.UseStaticSpecFlag, nil, "load specs from file, directory, or remote URL — required in smart-router mode (same paths as rpcsmartrouter --use-static-spec)")
 	addSpecTokenFlags(cmdTestRPCSmartRouter.Flags())
 	return cmdTestRPCSmartRouter
 }
 
 // grpcAuthConfigFromFlags reads the gRPC TLS flags from the command's own flag set. The test command
-// used to read them through viper, which only the root command binds to its flag set, so --use-tls
-// (default true) and --allow-insecure-connection were always false there.
+// used to read them through viper, which only the root command binds to its flag set, so both were
+// always false there. --use-tls defaults to false so that stays the default: the gRPC connector
+// dials plaintext first and TLS if that fails, which reaches a router's gRPC listener (plaintext
+// unless its endpoint enables TLS) as well as a TLS one. --use-tls dials TLS only, and
+// --allow-insecure-connection accepts a self-signed certificate on either TLS path (MAG-4278).
 func grpcAuthConfigFromFlags(flags *pflag.FlagSet) commonlib.AuthConfig {
 	useTLS, _ := flags.GetBool(chainproxy.GRPCUseTls)
 	allowInsecure, _ := flags.GetBool(chainproxy.GRPCAllowInsecureConnection)
