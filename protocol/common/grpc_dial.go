@@ -39,8 +39,14 @@ const GRPCStatusCodeOnFailedMessages = 32
 // together they are the mutual-TLS setup a private CA implies (the client certificate
 // used to be loaded only when no CA was configured, so that setup silently presented
 // none). allow-insecure disables server verification altogether, which is what a
-// self-signed development endpoint needs. A file that cannot be read is logged and
-// skipped, so the dial proceeds with the system roots as it would with no setting.
+// self-signed development endpoint needs.
+//
+// A cacert-pem that cannot be loaded (the file is unreadable, or holds no PEM
+// certificate) fails closed: it is logged and nothing is trusted, so every server fails
+// verification until the file is fixed. Falling back to the system roots would turn a
+// mistyped path or a mount that never happened into trust in every public CA, for the
+// one setting whose purpose is to narrow trust to one CA; the RESP cache makes the same
+// call for its CA file (MAG-3683). allow-insecure still disables verification.
 func (ac *AuthConfig) TLSConfig() *tls.Config {
 	tlsConf := &tls.Config{}
 	if ac == nil {
@@ -48,18 +54,17 @@ func (ac *AuthConfig) TLSConfig() *tls.Config {
 	}
 	if cacert := ac.GetCaCertificateParams(); cacert != "" {
 		utils.LavaFormatDebug("Loading ca certificate from local path", utils.LogAttr("cacert", cacert))
+		// An empty pool, not nil: nil means the system roots, and a CA that was configured
+		// but could not be loaded must not widen trust to them.
+		caCertPool := x509.NewCertPool()
 		caCert, err := os.ReadFile(cacert)
 		switch {
 		case err != nil:
-			utils.LavaFormatError("Failed loading CA certificate, continuing with the system roots", err, utils.LogAttr("cacert", cacert))
-		default:
-			caCertPool := x509.NewCertPool()
-			if !caCertPool.AppendCertsFromPEM(caCert) {
-				utils.LavaFormatError("CA certificate file holds no PEM certificate, continuing with the system roots", nil, utils.LogAttr("cacert", cacert))
-			} else {
-				tlsConf.RootCAs = caCertPool
-			}
+			utils.LavaFormatError("Failed loading CA certificate, no server will verify until it is fixed", err, utils.LogAttr("cacert", cacert))
+		case !caCertPool.AppendCertsFromPEM(caCert):
+			utils.LavaFormatError("CA certificate file holds no PEM certificate, no server will verify until it is fixed", nil, utils.LogAttr("cacert", cacert))
 		}
+		tlsConf.RootCAs = caCertPool
 	}
 	if keyPem, certPem := ac.GetLoadingCertificateParams(); keyPem != "" && certPem != "" {
 		utils.LavaFormatDebug("Loading certificate from local path", utils.LogAttr("certPem", certPem), utils.LogAttr("keyPem", keyPem))
