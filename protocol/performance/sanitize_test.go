@@ -4,13 +4,16 @@ import (
 	"testing"
 
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
 // The allowlist policy: a foreign cache entry's Metadata is an open set of arbitrary
 // upstream response headers that no denylist could be proven to cover, so everything
-// goes EXCEPT the headers that describe how to decode the payload the entry already
-// delivers. Payload fields that carry the response itself survive untouched.
+// goes EXCEPT what the shared reply-header filter keeps (the headers that describe how to
+// decode the payload, the 429 pair, and the spec's reply headers the caller passes; this
+// entry carries none of them). Payload fields that carry the response itself survive
+// untouched.
 func TestSanitizeForeignCacheReplyDropsIdentityMetadataAndSignatures(t *testing.T) {
 	reply := &pairingtypes.RelayReply{
 		Data:                  []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`),
@@ -104,6 +107,37 @@ func TestSanitizeForeignCacheReplyDropsLatestBlock(t *testing.T) {
 
 	require.Zero(t, reply.LatestBlock)
 	require.Equal(t, []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`), reply.Data)
+}
+
+// The sanitiser runs the one reply-header filter with the directive lists the caller
+// passes, so a foreign entry keeps the spec's reply headers a primary hit replays and
+// still drops every router-owned name, even one a directive tries to authorise
+// (MAG-4278; before, the sanitiser kept only the transport pair).
+func TestSanitizeForeignCacheReplyAppliesTheSpecsReplyDirectives(t *testing.T) {
+	reply := &pairingtypes.RelayReply{
+		Metadata: []pairingtypes.Metadata{
+			{Name: "Content-Type", Value: "application/json"},
+			{Name: "X-Aptos-Ledger-Version", Value: "7479307940"},
+			{Name: "X-Aptos-Chain-Id", Value: "1"},
+			{Name: "Lava-Provider-Address", Value: "lava@provider1"},
+			{Name: "Server", Value: "cloudflare"},
+		},
+	}
+	interfaceDirectives := []*spectypes.Header{
+		{Name: "x-aptos-ledger-version", Kind: spectypes.Header_pass_reply},
+		{Name: "lava-provider-address", Kind: spectypes.Header_pass_reply},
+	}
+	collectionDirectives := []*spectypes.Header{
+		{Name: "x-aptos-chain-id", Kind: spectypes.Header_pass_both},
+	}
+
+	SanitizeForeignCacheReply(reply, interfaceDirectives, collectionDirectives)
+
+	require.Equal(t, []pairingtypes.Metadata{
+		{Name: "Content-Type", Value: "application/json"},
+		{Name: "X-Aptos-Ledger-Version", Value: "7479307940"},
+		{Name: "X-Aptos-Chain-Id", Value: "1"},
+	}, reply.Metadata)
 }
 
 func TestSanitizeForeignCacheReplyNilAndEmptySafe(t *testing.T) {
