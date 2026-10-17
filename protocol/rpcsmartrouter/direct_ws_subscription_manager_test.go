@@ -1167,7 +1167,7 @@ func TestRouteMessageToClientsPerClientID(t *testing.T) {
 	}
 
 	// Route the message
-	manager.routeMessageToClients(hashedParams, activeSub, upstreamMsg)
+	manager.routeMessageToClients(activeSub, upstreamMsg)
 
 	// Give a moment for async sends
 	time.Sleep(50 * time.Millisecond)

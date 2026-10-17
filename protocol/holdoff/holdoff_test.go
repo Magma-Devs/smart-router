@@ -184,3 +184,20 @@ func TestProviderReadyAt(t *testing.T) {
 		require.Equal(t, t0.Add(3*time.Minute), readyAt)
 	})
 }
+
+// The chain tracker and the WS / gRPC subscription paths record a 429 under the URL alone; the
+// relay path answers under the provider's name. An answer on the URL must clear both, or a URL
+// relays are serving fine keeps its url-only strikes (MAG-4165). Another URL's entry, and another
+// provider's, are untouched.
+func TestRecordAnswer_ClearsTheURLOnlyEntryToo(t *testing.T) {
+	r := NewRegistryWithClock(time.Now)
+	r.RecordRateLimit("https://a", "https://a", 0)
+	r.RecordRateLimit("wss://b", "wss://b", 0)
+	r.RecordRateLimit("other", "https://a", 0)
+
+	r.RecordAnswer("prov", "https://a")
+
+	require.False(t, r.HeldOff("https://a", "https://a"))
+	require.True(t, r.HeldOff("wss://b", "wss://b"), "another url keeps its hold-off")
+	require.True(t, r.HeldOff("other", "https://a"), "another provider's entry is that provider's to clear")
+}

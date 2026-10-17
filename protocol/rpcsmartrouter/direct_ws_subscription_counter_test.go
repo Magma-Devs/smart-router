@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -129,4 +130,53 @@ func TestDirectWS_PendingCheckJoinsASubscriptionStoredSinceTheActiveCheck(t *tes
 	require.Same(t, activeSub, manager.activeSubscriptions[hashedParams],
 		"the creator's entry must not be overwritten")
 	require.Len(t, activeSub.connectedClients, 2)
+}
+
+// TestDirectWS_CleanupOfAClientlessSubscriptionDecrementsTotalAndTellsTheNode pins the
+// cleanup ticker's other branch, the one the ticket's comment and MAG-3527 named: a
+// subscription still registered with no clients left (an Unsubscribe whose id-mapper view
+// said "not last" leaves one) is dropped, the counter comes back down, the node is told to
+// stop publishing, and the pooled connection stops counting it. Unlike the cancelled-context
+// branch, which a live listener reaps before the ticker can, this one is reachable.
+func TestDirectWS_CleanupOfAClientlessSubscriptionDecrementsTotalAndTellsTheNode(t *testing.T) {
+	h := newReleaseHarness(t)
+	sub := h.subscribe("ws-1")
+	t.Cleanup(sub.disconnect)
+	h.manager.lock.Lock()
+	require.Len(t, h.manager.activeSubscriptions, 1)
+	var hashedParams string
+	var activeSub *directActiveSubscription
+	for hp, s := range h.manager.activeSubscriptions {
+		hashedParams, activeSub = hp, s
+	}
+	upstreamID := activeSub.upstreamID
+	activeSub.releaseClientLocked(sub.clientKey)
+	h.manager.forgetSubscriptionForClientLocked(sub.clientKey, hashedParams, false)
+	h.manager.lock.Unlock()
+	nodeHas := func() bool {
+		h.srv.lock.RLock()
+		defer h.srv.lock.RUnlock()
+		_, ok := h.srv.subscriptions[upstreamID]
+		return ok
+	}
+	pooled := func() int32 {
+		h.manager.lock.RLock()
+		defer h.manager.lock.RUnlock()
+		var n int32
+		for _, pool := range h.manager.upstreamPools {
+			n += pool.TotalSubscriptions()
+		}
+		return n
+	}
+	require.True(t, nodeHas())
+	require.Equal(t, int64(1), h.manager.totalSubscriptions.Load())
+
+	h.manager.performCleanup()
+
+	require.Equal(t, int64(0), h.manager.totalSubscriptions.Load(),
+		"cleanup deleted the subscription but left the counter high")
+	require.Equal(t, 0, h.activeSubscriptionCount())
+	require.Eventually(t, func() bool { return h.upstreamCalls("eth_unsubscribe") == 1 && !nodeHas() },
+		5*time.Second, 10*time.Millisecond, "the node was never told to stop publishing")
+	require.Eventually(t, func() bool { return pooled() == 0 }, 5*time.Second, 10*time.Millisecond)
 }

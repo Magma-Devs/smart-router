@@ -40,7 +40,7 @@ func TestCleanupStaleTrackers_DeletesTheRemovedURLsSeries(t *testing.T) {
 
 	keptEp := &lavasession.Endpoint{NetworkAddress: kept, Enabled: true}
 	for _, ep := range []*lavasession.Endpoint{keptEp, {NetworkAddress: dropped, Enabled: true}} {
-		_, err := m.GetOrCreateTracker(ep, nil)
+		_, err := m.GetOrCreateTracker("", ep, nil)
 		require.NoError(t, err)
 	}
 	mm.SetEndpointURLLatestBlock("ETH1", "jsonrpc", dropped, 1000, metrics.DefaultURLAnswerTimeout)

@@ -124,8 +124,10 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 				release := make(chan struct{})
 				releaseAttempt = sync.OnceFunc(func() { close(release) })
 				defer releaseAttempt()
+				doer, ok := conn.(lavasession.HTTPDirectRPCDoer)
+				require.True(t, ok)
 				held = &heldCancelledRESTConnection{
-					HTTPDirectRPCDoer: conn.(lavasession.HTTPDirectRPCDoer),
+					HTTPDirectRPCDoer: doer,
 					cancelled:         make(chan struct{}), release: release,
 				}
 				conn = held

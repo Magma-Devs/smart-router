@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -583,15 +584,6 @@ func (rp *RelayProcessor) checkEndProcessing(responsesCount int) bool {
 	return false
 }
 
-func (rp *RelayProcessor) getInputMsgInfoHashString() (string, error) {
-	hash, err := rp.RelayStateMachine.GetProtocolMessage().GetRawRequestHash()
-	hashString := ""
-	if err == nil {
-		hashString = string(hash)
-	}
-	return hashString, err
-}
-
 // GetResultsSummary returns a pure data summary for the policy engine. No decisions.
 func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 	if rp == nil {
@@ -602,7 +594,6 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 
 	resultsCount, nodeErrors, specialNodeErrors, protocolErrors := rp.GetResults()
 	_, nodeErrorResults, protocolErrorResults := rp.GetResultsData()
-	_, hashErr := rp.getInputMsgInfoHashString()
 
 	// Check node errors: IsNonRetryable is the umbrella retry gate.
 	// IsUnsupportedMethod is a subset kept for zero-CU and caching only.
@@ -649,7 +640,6 @@ func (rp *RelayProcessor) GetResultsSummary() ResultsSummary {
 		HasPermanentProtocolError: hasPermanentProtocolError,
 		HasEpochMismatch:          hasEpochMismatch,
 		OnlyRateLimited:           onlyRateLimited(nodeErrorResults, protocolErrorResults),
-		HashErr:                   hashErr,
 	}
 }
 
@@ -800,7 +790,7 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	// send relay error metrics only on non stateful queries, as stateful queries always return X-1/X errors.
 	if nodeError != nil && rp.selection != Stateful {
 		chainId, apiInterface := rp.chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
-		go rp.metricsInf.SetRelayNodeErrorMetric(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage().GetApi().Name)
+		rp.metricsInf.SetRelayNodeErrorMetric(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage().GetApi().Name)
 		utils.LavaFormatInfo("Relay received a node error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("Error", nodeError), utils.LogAttr("provider", response.RelayResult.ProviderInfo), utils.LogAttr("Request", rp.RelayStateMachine.GetProtocolMessage().GetApi().Name))
 	}
 
@@ -1100,13 +1090,15 @@ type quorumWinner struct {
 func selectQuorumWinner(guid uint64, countMap map[[32]byte]*resultCount, results []common.RelayResult, nilReplies, nilReplyIdx int, nilReplyGroups map[string]struct{}, crossValidationSize, minGroups int, perGroup bool) quorumWinner {
 	var w quorumWinner
 	for hash, count := range countMap {
-		utils.LavaFormatDebug("🔍 [Quorum] Response group details",
-			utils.LogAttr("GUID", guid),
-			utils.LogAttr("responseHashHex", fmt.Sprintf("%x", hash[:8])),
-			utils.LogAttr("matchingProviders", count.count),
-			utils.LogAttr("distinctGroups", len(count.groupCounts)),
-			utils.LogAttr("provider", count.result.ProviderInfo.ProviderAddress),
-		)
+		if utils.IsDebugEnabled() {
+			utils.LavaFormatDebug("🔍 [Quorum] Response group details",
+				utils.LogAttr("GUID", guid),
+				utils.LogAttr("responseHashHex", hex.EncodeToString(hash[:8])),
+				utils.LogAttr("matchingProviders", count.count),
+				utils.LogAttr("distinctGroups", len(count.groupCounts)),
+				utils.LogAttr("provider", count.result.ProviderInfo.ProviderAddress),
+			)
+		}
 		if count.count > w.maxCount {
 			w.maxCount = count.count
 		}
@@ -1240,26 +1232,30 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 			if count, exists := countMap[hash]; exists {
 				count.count++
 				count.groupCounts[quorumGroupOf(result)]++
-				utils.LavaFormatDebug("🔍 [Quorum] Response hash matches existing group",
-					utils.LogAttr("GUID", rp.guid),
-					utils.LogAttr("providerIdx", idx),
-					utils.LogAttr("provider", result.ProviderInfo.ProviderAddress),
-					utils.LogAttr("responseHashHex", fmt.Sprintf("%x", hash[:8])),
-					utils.LogAttr("groupCount", count.count),
-				)
+				if utils.IsDebugEnabled() {
+					utils.LavaFormatDebug("🔍 [Quorum] Response hash matches existing group",
+						utils.LogAttr("GUID", rp.guid),
+						utils.LogAttr("providerIdx", idx),
+						utils.LogAttr("provider", result.ProviderInfo.ProviderAddress),
+						utils.LogAttr("responseHashHex", hex.EncodeToString(hash[:8])),
+						utils.LogAttr("groupCount", count.count),
+					)
+				}
 			} else {
 				countMap[hash] = &resultCount{
 					count:       1,
 					result:      result,
 					groupCounts: map[string]int{quorumGroupOf(result): 1},
 				}
-				utils.LavaFormatDebug("🔍 [Quorum] New unique response hash detected",
-					utils.LogAttr("GUID", rp.guid),
-					utils.LogAttr("providerIdx", idx),
-					utils.LogAttr("provider", result.ProviderInfo.ProviderAddress),
-					utils.LogAttr("responseHashHex", fmt.Sprintf("%x", hash[:8])),
-					utils.LogAttr("uniqueHashesCount", len(countMap)),
-				)
+				if utils.IsDebugEnabled() {
+					utils.LavaFormatDebug("🔍 [Quorum] New unique response hash detected",
+						utils.LogAttr("GUID", rp.guid),
+						utils.LogAttr("providerIdx", idx),
+						utils.LogAttr("provider", result.ProviderInfo.ProviderAddress),
+						utils.LogAttr("responseHashHex", hex.EncodeToString(hash[:8])),
+						utils.LogAttr("uniqueHashesCount", len(countMap)),
+					)
+				}
 			}
 		} else {
 			nilReplies++
@@ -1335,7 +1331,7 @@ func (rp *RelayProcessor) responsesCrossValidation(results []common.RelayResult,
 	utils.LavaFormatInfo("✅ [Quorum] CONSENSUS REACHED",
 		utils.LogAttr("GUID", rp.guid),
 		utils.LogAttr("consensusProvider", mostCommonResult.ProviderInfo.ProviderAddress),
-		utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", winner.hash[:8])),
+		utils.LogAttr("consensusHashHex", hex.EncodeToString(winner.hash[:8])),
 		utils.LogAttr("agreementCount", winner.count),
 		utils.LogAttr("requiredQuorumSize", crossValidationSize),
 		utils.LogAttr("totalResults", len(results)),

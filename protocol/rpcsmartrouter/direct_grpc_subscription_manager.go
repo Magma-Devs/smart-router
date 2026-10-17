@@ -528,7 +528,7 @@ func (dgm *DirectGRPCSubscriptionManager) StartSubscription(
 	}
 
 	// Create new subscription
-	return dgm.createNewSubscription(ctx, chainMessage, methodPath, requestData, hashedParams, clientKey)
+	return dgm.createNewSubscription(ctx, methodPath, requestData, hashedParams, clientKey)
 }
 
 // checkAndAddPendingSubscription mirrors the WebSocket manager's: a creator registers under
@@ -655,7 +655,6 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 // createNewSubscription creates a new upstream subscription
 func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 	ctx context.Context,
-	chainMessage chainlib.ChainMessage,
 	methodPath string,
 	requestData []byte,
 	hashedParams string,
@@ -668,7 +667,7 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 	}
 
 	// Get or create pool
-	pool, err := dgm.getOrCreatePool(ctx, endpoint)
+	pool, err := dgm.getOrCreatePool(endpoint)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get pool: %w", err)
 	}
@@ -1403,7 +1402,7 @@ func (dgm *DirectGRPCSubscriptionManager) createStreamAcknowledgement(routerID, 
 	}
 }
 
-func (dgm *DirectGRPCSubscriptionManager) getOrCreatePool(ctx context.Context, endpoint *common.NodeUrl) (*UpstreamGRPCPool, error) {
+func (dgm *DirectGRPCSubscriptionManager) getOrCreatePool(endpoint *common.NodeUrl) (*UpstreamGRPCPool, error) {
 	dgm.lock.Lock()
 	defer dgm.lock.Unlock()
 

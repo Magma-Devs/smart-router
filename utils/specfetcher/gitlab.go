@@ -76,7 +76,7 @@ func (f *Fetcher) fetchFromGitLabAPI(ctx context.Context, info *RepoInfo) (map[s
 	apiCtx, cancel := context.WithTimeout(ctx, f.config.APITimeout)
 	defer cancel()
 
-	resp, err := f.doRequest(apiCtx, http.MethodGet, apiURL, f.setGitLabHeaders)
+	resp, err := f.doRequest(apiCtx, apiURL, f.setGitLabHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch from GitLab API: %w", err)
 	}

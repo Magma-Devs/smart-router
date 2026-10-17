@@ -501,7 +501,7 @@ func newManagerAgainstUpstream(t *testing.T, addr string) *DirectGRPCSubscriptio
 		[]*common.NodeUrl{endpoint}, nil, nil, nil)
 
 	ctx := context.Background()
-	pool, err := manager.getOrCreatePool(ctx, endpoint)
+	pool, err := manager.getOrCreatePool(endpoint)
 	require.NoError(t, err)
 	conn, err := pool.GetConnectionForStream(ctx)
 	require.NoError(t, err)

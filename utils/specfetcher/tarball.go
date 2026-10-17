@@ -29,7 +29,7 @@ func (f *Fetcher) fetchTarball(ctx context.Context, tarballURL, pathInRepo strin
 	fetchCtx, cancel := context.WithTimeout(ctx, f.config.FileFetchTimeout)
 	defer cancel()
 
-	resp, err := f.doRequest(fetchCtx, http.MethodGet, tarballURL, setHeaders)
+	resp, err := f.doRequest(fetchCtx, tarballURL, setHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch tarball: %w", err)
 	}
