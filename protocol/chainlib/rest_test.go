@@ -570,3 +570,51 @@ func TestRestChainListener_RelaysTheBodyOfMethodsThatCarryOne(t *testing.T) {
 		})
 	}
 }
+
+// restRefusingRelayStub answers every relay with APINotSupportedError, the error ParseRelay
+// returns for a verb the spec does not declare.
+type restRefusingRelayStub struct{ restHealthRelayStub }
+
+func (s *restRefusingRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
+	return nil, common.APINotSupportedError
+}
+
+// The catch-all handler maps an undeclared api to 501; the POST handler used to answer the same
+// refusal with a masked 500 (MAG-4278).
+func TestRestListener_UndeclaredVerbIs501OnEveryHandler(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	listener := NewRestChainListener(ctx, &lavasession.RPCEndpoint{
+		NetworkAddress:  "127.0.0.1:0",
+		ChainID:         "LAV1",
+		ApiInterface:    "rest",
+		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
+	}, &restRefusingRelayStub{}, alwaysHealthyReporter{}, logger)
+	go listener.Serve(ctx, common.ConsumerCmdFlags{})
+	var addr string
+	for deadline := time.Now().Add(3 * time.Second); addr == "" && time.Now().Before(deadline); {
+		if addr = listener.GetListeningAddress(); addr == "" {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	require.NotEmpty(t, addr, "listener never reported a listening address")
+
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		t.Run(method, func(t *testing.T) {
+			req, err := http.NewRequest(method, "http://"+addr+"/cosmos/tx/v1beta1/simulate", strings.NewReader("{}"))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := httpClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			require.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s: %s", method, body)
+		})
+	}
+}

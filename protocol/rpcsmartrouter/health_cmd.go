@@ -172,7 +172,8 @@ running directory, ./config, then ` + defaultNodeHome + `.`,
 			// verified) — see the note there.
 
 			timeout, _ := cmd.Flags().GetDuration("timeout")
-			results := runHealthProbes(ctx, providers, staticSpecPaths, timeout, verifyWs, cvResolver)
+			githubToken, gitlabToken := specTokensFromFlags(cmd.Flags())
+			results := runHealthProbes(ctx, providers, healthSpecSource{paths: staticSpecPaths, githubToken: githubToken, gitlabToken: gitlabToken}, timeout, verifyWs, cvResolver)
 			report := buildHealthReport(results, nil)
 			writeHealthReport(report)
 			// Always exit 0 for a completed run; the JSON is the source of truth.
@@ -187,6 +188,7 @@ running directory, ./config, then ` + defaultNodeHome + `.`,
 	cmdHealth.Flags().Bool(chainproxy.GRPCAllowInsecureConnection, false, "allow insecure (self-signed) grpc connections")
 	cmdHealth.Flags().Bool(chainproxy.GRPCUseTls, true, "use tls for grpc connections")
 	cmdHealth.Flags().StringArray(commonlib.UseStaticSpecFlag, nil, "load specs from file, directory, or remote URL — required (same paths as rpcsmartrouter --use-static-spec)")
+	addSpecTokenFlags(cmdHealth.Flags())
 	return cmdHealth
 }
 
@@ -287,7 +289,7 @@ func collectHealthProviders(args []string, includeBackup bool) ([]healthProvider
 
 // runHealthProbes probes every provider concurrently per (chain, interface) and flattens
 // the per-node-url outcomes into report rows.
-func runHealthProbes(ctx context.Context, providers []healthProvider, staticSpecPaths []string, timeout time.Duration, verifyWs bool, cvResolver *CrossValidationPolicyResolver) []healthEndpointResult {
+func runHealthProbes(ctx context.Context, providers []healthProvider, specs healthSpecSource, timeout time.Duration, verifyWs bool, cvResolver *CrossValidationPolicyResolver) []healthEndpointResult {
 	type indexed struct {
 		idx  int
 		rows []healthEndpointResult
@@ -295,7 +297,7 @@ func runHealthProbes(ctx context.Context, providers []healthProvider, staticSpec
 	out := make(chan indexed, len(providers))
 	for i, provider := range providers {
 		go func(i int, provider healthProvider) {
-			out <- indexed{idx: i, rows: probeProvider(ctx, provider, staticSpecPaths, timeout, verifyWs, cvResolver)}
+			out <- indexed{idx: i, rows: probeProvider(ctx, provider, specs, timeout, verifyWs, cvResolver)}
 		}(i, provider)
 	}
 
@@ -363,10 +365,17 @@ func timedOutRows(provider healthProvider, timeout time.Duration) []healthEndpoi
 	return rows
 }
 
+// healthSpecSource is where a probe loads its spec from: the --use-static-spec paths plus the
+// private-repository tokens the root command already accepts (the probes used to pass none).
+type healthSpecSource struct {
+	paths                    []string
+	githubToken, gitlabToken string
+}
+
 // probeProvider sets up the spec + chain router for one provider and runs the spec
 // verifications against each of its node URLs. A spec-load failure yields one ok:false
 // row per node URL (specValid:false) with no relay attempted.
-func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths []string, timeout time.Duration, verifyWs bool, cvResolver *CrossValidationPolicyResolver) []healthEndpointResult {
+func probeProvider(ctx context.Context, provider healthProvider, specs healthSpecSource, timeout time.Duration, verifyWs bool, cvResolver *CrossValidationPolicyResolver) []healthEndpointResult {
 	// Bound the whole probe (router construction through every verification relay) so a
 	// slow or blocked node aborts at the deadline instead of grinding through the full
 	// connector retry budget. Every connector (HTTP / gRPC / ws) derives each attempt's
@@ -433,7 +442,7 @@ func probeProvider(ctx context.Context, provider healthProvider, staticSpecPaths
 	chainParser.SetSkipWebsocketVerification(!(verifyWs && providerHasWebSocketURL(provider.nodeUrls)))
 
 	rpcEndpoint := lavasession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
-	if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, staticSpecPaths, rpcEndpoint, "", ""); err != nil {
+	if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, specs.paths, rpcEndpoint, specs.githubToken, specs.gitlabToken); err != nil {
 		return rowsFromError(fmt.Errorf("load spec: %w", err))
 	}
 

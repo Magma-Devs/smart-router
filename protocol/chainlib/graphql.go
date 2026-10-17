@@ -381,7 +381,10 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		msgSeed := apil.logger.GetMessageSeed()
 		path := "/" + fiberCtx.Params("*")
 
-		metadataValues := fiberCtx.GetReqHeaders()
+		// Detached copies: fiber hands out strings that alias the per-connection buffer, and
+		// the metrics goroutine reads these after the reply (MAG-3881; this listener had the
+		// pre-fix shape).
+		metadataValues := detachedReqHeaders(fiberCtx)
 		graphqlHeaders := convertToMetadataMap(metadataValues)
 		ctx, cancel := context.WithCancel(context.Background())
 		ctx = utils.WithUniqueIdentifier(ctx, utils.GenerateUniqueIdentifier())

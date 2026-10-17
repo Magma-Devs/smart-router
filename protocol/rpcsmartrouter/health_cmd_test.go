@@ -8,6 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -125,6 +126,41 @@ func TestApplyValidation_FailedCheckSetsNotOk(t *testing.T) {
 	assert.False(t, row.Ok)
 	assert.Equal(t, []string{"archive"}, row.Extensions)
 	assert.Equal(t, "expected and received are different", row.Verifications[0].Error)
+}
+
+// A url whose head probe failed (MAG-4278): ValidateCollect reports the failed fetch-latest-block
+// row, the checks that need no head (here chain-id, passing) and the head-dependent ones failed as
+// "latest block unknown". The row is not ok whatever the head-free checks say, it keeps no height
+// (the endpoint-level backfill skips failed rows, so it costs no relay), and the report's top-level
+// ok is false. The command still exits 0: the JSON is the verdict.
+func TestHealthRollup_FailedHeadProbeIsANotOkRowWithNoHeight(t *testing.T) {
+	row := healthEndpointResult{URL: "https://x", Addons: []string{}, Verifications: []healthVerification{}}
+	applyValidation(&row, chainlib.NodeURLValidation{
+		URL:         "https://x",
+		LatestBlock: spectypes.NOT_APPLICABLE,
+		Verifications: []chainlib.VerificationResult{
+			{Name: "fetch-latest-block", Ok: false, Error: "GET_BLOCKNUM failed sending chainMessage"},
+			{Name: "chain-id", Ok: true},
+			{Name: "pruning", Ok: false, Error: "latest block unknown, the head probe failed: GET_BLOCKNUM failed sending chainMessage"},
+		},
+	})
+	require.False(t, row.Ok)
+	require.Equal(t, spectypes.NOT_APPLICABLE, row.LatestBlock)
+	require.Len(t, row.Verifications, 3, "every row ValidateCollect reported is in the JSON")
+	require.True(t, row.Verifications[1].Ok, "the head-free check keeps its own verdict")
+
+	rows := []healthEndpointResult{row}
+	fetched := 0
+	backfillLatestBlock(rows, func() (int64, error) {
+		fetched++
+		return 9000001, nil
+	})
+	require.Zero(t, fetched, "a failed row needs no height, so nothing is fetched")
+	require.Equal(t, spectypes.NOT_APPLICABLE, rows[0].LatestBlock)
+
+	report := buildHealthReport(rows, nil)
+	require.False(t, report.Ok)
+	require.Nil(t, report.Error, "an endpoint failure is data, not a fatal error")
 }
 
 // MAG-2333: legs that passed every check reported latestBlock 0 whenever the spec had no

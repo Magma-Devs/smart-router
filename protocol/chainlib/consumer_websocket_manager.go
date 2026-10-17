@@ -168,25 +168,27 @@ func NewConsumerWebsocketManager(options ConsumerWebsocketManagerOptions) *Consu
 	return cwm
 }
 
+// handleRateLimitReached builds the reply to a frame refused by the rate limit. Like every other
+// local reply it echoes the caller's id verbatim (coercing it to an int answered string ids, and
+// numeric strings through Atoi on the quoted token, with id 0), and like them it goes through
+// buildLocalReply: a batch gets one error per member that has an id, as an array, and a
+// notification gets nothing, so the result can be empty. The template's own id (1) is never
+// sent: a frame with no top-level id would otherwise be answered with an id the client may have
+// given a different request.
 func (cwm *ConsumerWebsocketManager) handleRateLimitReached(inpData []byte) ([]byte, error) {
-	rateLimitError := common.JsonRpcRateLimitError
-	id := 0
-	result := gjson.GetBytes(inpData, "id")
-	switch result.Type {
-	case gjson.Number:
-		id = int(result.Int())
-	case gjson.String:
-		idParsed, err := strconv.Atoi(result.Raw)
-		if err == nil {
-			id = idParsed
+	var marshalErr error
+	reply := buildLocalReply(inpData, func(request []byte) []byte {
+		bytesRateLimitError, err := common.MarshalJsonRPCErrorWithRequestID(common.JsonRpcRateLimitError, request)
+		if err != nil {
+			marshalErr = err
+			return nil
 		}
+		return bytesRateLimitError
+	})
+	if marshalErr != nil {
+		return []byte{}, utils.LavaFormatError("failed marshalling jsonrpc rate limit error", marshalErr)
 	}
-	rateLimitError.Id = id
-	bytesRateLimitError, err := json.Marshal(rateLimitError)
-	if err != nil {
-		return []byte{}, utils.LavaFormatError("failed marshalling jsonrpc rate limit error", err)
-	}
-	return bytesRateLimitError, nil
+	return reply, nil
 }
 
 // subscriptionReplyFormatter remembers the caller's request id and returns the formatter
@@ -464,7 +466,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		if (cwm.headerRateLimit > 0 && currentRequestsPerSecond > cwm.headerRateLimit) ||
 			(WebSocketRateLimit > 0 && currentRequestsPerSecond > uint64(WebSocketRateLimit)) {
 			rateLimitResponse, err := cwm.handleRateLimitReached(msg)
-			if err == nil {
+			if err == nil && len(rateLimitResponse) > 0 {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: rateLimitResponse})
 			}
 			continue
