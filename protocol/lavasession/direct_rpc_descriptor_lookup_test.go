@@ -397,7 +397,7 @@ func TestMAG2860_LocalCancellationBeatsLookupFailure(t *testing.T) {
 
 		// A waiter arriving on a resolution that is already in flight.
 		resolution := &descriptorResolution{done: make(chan struct{})}
-		g.inflight[service] = resolution
+		g.resolver.inflight[service] = resolution
 
 		// ...whose context is cancelled...
 		ctx, cancel := context.WithCancel(context.Background())
@@ -407,7 +407,7 @@ func TestMAG2860_LocalCancellationBeatsLookupFailure(t *testing.T) {
 		resolution.err = errors.New("lookup failed")
 		close(resolution.done)
 
-		methodDesc, err := g.getMethodDescriptor(ctx, service, "Method")
+		methodDesc, err := g.resolver.MethodDescriptor(ctx, service, "Method")
 		require.Nil(t, methodDesc)
 		require.ErrorIs(t, err, context.Canceled,
 			"iteration %d lost local cancellation and reported the lookup's error instead", i)
@@ -430,18 +430,18 @@ func TestMAG2860_SuccessfulLookupSurvivesCancellation(t *testing.T) {
 	require.NoError(t, g.Prewarm(warmCtx))
 
 	service, method := "grpc.health.v1.Health", "Check"
-	resolution, claimed := g.claimServiceResolution(service)
+	resolution, claimed := g.resolver.claimServiceResolution(service)
 	require.True(t, claimed)
 
-	descriptor, err := g.lookupService(service)
+	descriptor, err := g.resolver.lookupService(service)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	g.publishServiceResolution(service, resolution, descriptor, nil)
+	g.resolver.publishServiceResolution(service, resolution, descriptor, nil)
 
 	// Both select cases ready, and the lookup succeeded.
-	methodDesc, err := g.getMethodDescriptor(ctx, service, method)
+	methodDesc, err := g.resolver.MethodDescriptor(ctx, service, method)
 	require.NoError(t, err, "a descriptor already in hand must not be discarded on cancellation")
 	require.NotNil(t, methodDesc)
 }
