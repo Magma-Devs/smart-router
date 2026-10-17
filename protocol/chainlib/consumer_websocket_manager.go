@@ -391,8 +391,14 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	idleFor := atomic.Int64{}
 	idleFor.Store(time.Now().Unix())
 	requestsPerSecond := &atomic.Uint64{}
+	// The rate-limit settings are process-wide flags set once at startup. Read them once here, in
+	// the connection's own goroutine, so the checker below and the read loop work off one snapshot:
+	// the checker used to read the globals itself, from a goroutine nothing waits for, which raced
+	// any later write of them (a test that builds the root command registers the flags again).
+	wsRateLimit := WebSocketRateLimit
+	wsBanDuration := WebSocketBanDuration
 	go func() {
-		if WebSocketRateLimit <= 0 && cwm.headerRateLimit <= 0 && GetMaxIdleTimeInSeconds() <= 0 {
+		if wsRateLimit <= 0 && cwm.headerRateLimit <= 0 && GetMaxIdleTimeInSeconds() <= 0 {
 			return
 		}
 		ticker := time.NewTicker(time.Second) // rate limit per second.
@@ -426,15 +432,15 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 						return
 					}
 				}
-				if cwm.headerRateLimit > 0 || WebSocketRateLimit > 0 {
+				if cwm.headerRateLimit > 0 || wsRateLimit > 0 {
 					// check if rate limit reached, and ban is required
 					currentRequestsPerSecondLoad := requestsPerSecond.Load()
-					if WebSocketBanDuration > 0 && (currentRequestsPerSecondLoad > cwm.headerRateLimit || currentRequestsPerSecondLoad > uint64(WebSocketRateLimit)) {
+					if wsBanDuration > 0 && (currentRequestsPerSecondLoad > cwm.headerRateLimit || currentRequestsPerSecondLoad > uint64(wsRateLimit)) {
 						// wait the ban duration before resetting the store.
 						select {
 						case <-webSocketCtx.Done():
 							return
-						case <-time.After(WebSocketBanDuration): // just continue
+						case <-time.After(wsBanDuration): // just continue
 						}
 					}
 					requestsPerSecond.Store(0)
@@ -462,7 +468,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		// Check rate limit is met
 		currentRequestsPerSecond := requestsPerSecond.Add(1)
 		if (cwm.headerRateLimit > 0 && currentRequestsPerSecond > cwm.headerRateLimit) ||
-			(WebSocketRateLimit > 0 && currentRequestsPerSecond > uint64(WebSocketRateLimit)) {
+			(wsRateLimit > 0 && currentRequestsPerSecond > uint64(wsRateLimit)) {
 			rateLimitResponse, err := cwm.handleRateLimitReached(msg)
 			if err == nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: rateLimitResponse})
