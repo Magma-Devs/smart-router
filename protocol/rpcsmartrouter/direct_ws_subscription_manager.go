@@ -155,6 +155,11 @@ type DirectWSSubscriptionManager struct {
 	// Pending subscriptions for deduplication
 	pendingSubscriptions map[string]*pendingSubscriptionsBroadcastManager
 
+	// slowClients holds the connections dropSlowClient dropped a subscription of, keyed by
+	// client key, until the ingress reads the drop (SubscriptionEndError) and closes the client's
+	// socket, or the connection ends (forgetClientLocked). Guarded by lock.
+	slowClients map[string]struct{}
+
 	// beforeRestoreCommit, when set, runs in handleUpstreamDisconnect after the node has
 	// answered the re-subscribe and before the result is committed under dwsm.lock. Nil
 	// outside tests; tests use it to hold a restore at exactly that point.
@@ -246,6 +251,7 @@ func NewDirectWSSubscriptionManager(
 		connectedClients:     make(map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]),
 		activeSubscriptions:  make(map[string]*directActiveSubscription),
 		pendingSubscriptions: make(map[string]*pendingSubscriptionsBroadcastManager),
+		slowClients:          make(map[string]struct{}),
 		upstreamPools:        make(map[string]*UpstreamWSPool),
 		idMapper:             NewSubscriptionIDMapper(),
 		metricsManager:       metrics.SafeMetrics(metricsManager),
@@ -729,8 +735,9 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		)
 	}
 
-	// Create reply channel for this client
-	repliesChannel := make(chan *pairingtypes.RelayReply)
+	// Create reply channel for this client. Buffered for a burst; a client that lets it fill and
+	// frees no room within subscriptionClientSendGrace is dropped as a slow consumer (dropSlowClient).
+	repliesChannel := make(chan *pairingtypes.RelayReply, subscriptionClientReplyBuffer)
 	safeChannelSender := common.NewSafeChannelSender(ctx, repliesChannel)
 
 	// Track metrics
@@ -1026,7 +1033,16 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	var nodeResp []byte
 	if lastClient && conn != nil {
 		client := conn.GetClient()
-		if client != nil {
+		if client == nil || !conn.IsHealthy() {
+			// The socket this subscription lived on is gone, and the node lost the subscription
+			// with it, so there is nobody to tell. A call would only make rpcclient dial again to
+			// say goodbye — into the outage, while the pool is still reconnecting — and fail the
+			// client's unsubscribe. The local release below still runs (MAG-4242).
+			utils.LavaFormatDebug("DirectWS: no upstream unsubscribe for a subscription that died with its connection",
+				utils.LogAttr("upstreamID", upstreamID),
+				utils.LogAttr("clientKey", clientKey),
+			)
+		} else {
 			// Use a timeout: some gateways may not return eth_unsubscribe responses.
 			// Without timeout, CallContext blocks forever and the client gets no reply.
 			callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -1541,6 +1557,7 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 					err,
 					utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 				)
+				dwsm.retireConnectionOnUpstreamError(activeSub, err)
 				reconnectInFlight = true
 				go dwsm.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
 			}
@@ -1591,12 +1608,84 @@ func (dwsm *DirectWSSubscriptionManager) routeMessageToClients(
 			Data: rewrittenMsg,
 		}
 
-		info.sender.Send(reply)
+		switch info.sender.SendWithin(reply, subscriptionClientSendGrace) {
+		case common.TrySendFull:
+			dwsm.dropSlowClient(activeSub.hashedParams, activeSub, clientKey)
+			continue
+		case common.TrySendClosed:
+			// The client is leaving by another path, which releases it. It was not slow.
+			continue
+		}
 		utils.LavaFormatTrace("DirectWS: sent message to client with unique router ID",
 			utils.LogAttr("clientKey", clientKey),
 			utils.LogAttr("routerID", info.routerID),
 		)
 	}
+}
+
+// dropSlowClient releases a client whose reply channel is full: it has fallen
+// subscriptionClientReplyBuffer pushes behind and freed no room within
+// subscriptionClientSendGrace. Its channel closes, and the connection is marked so that the
+// ingress, once it has handed the client what the channel still holds, closes the client's socket
+// with 1013 (try again later): the client reconnects and resubscribes, and its other
+// subscriptions on that socket end with it. That replaces losing the push silently (a gap in a
+// subscription stream is worse than a stream that visibly ends) and waiting for the client on
+// every push (which stalled every other client of the shared subscription). The drop is counted,
+// and the subscription is torn down when this was its last client. A client already gone by
+// another path is left alone.
+func (dwsm *DirectWSSubscriptionManager) dropSlowClient(hashedParams string, activeSub *directActiveSubscription, clientKey string) {
+	dwsm.lock.Lock()
+	defer dwsm.lock.Unlock()
+
+	if dwsm.activeSubscriptions[hashedParams] != activeSub {
+		return
+	}
+	clientRouterID, wasAttached := activeSub.releaseClientLocked(clientKey)
+	if !wasAttached {
+		return
+	}
+	// Under the same lock as the channel's close, so the ingress, which reads the mark once it
+	// sees the close, cannot miss it.
+	dwsm.slowClients[clientKey] = struct{}{}
+	if clientRouterID != "" {
+		dwsm.idMapper.RemoveMapping(clientRouterID)
+	}
+	dwsm.forgetSubscriptionForClientLocked(clientKey, hashedParams, false)
+	if dwsm.metricsManager != nil {
+		dwsm.metricsManager.SetSubscriptionClientDroppedMetric(dwsm.chainID, dwsm.apiInterface)
+	}
+	utils.LavaFormatWarning("DirectWS: client is not keeping up with its subscription, dropping it", nil,
+		utils.LogAttr("clientKey", clientKey),
+		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+		utils.LogAttr("pushesBehind", subscriptionClientReplyBuffer),
+	)
+	if len(activeSub.connectedClients) == 0 {
+		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, true)
+	}
+}
+
+// retireConnectionOnUpstreamError tells the pool that the connection a subscription just failed
+// on is dead, so the restore's ReconnectWithBackoff reconnects — with its backoff ladder — instead
+// of finding the pool "healthy" and handing the dead socket straight back to the re-subscribe,
+// which then had one dial inside rpcclient and no retry (MAG-4242). A subscription's own end
+// leaves the socket alone: the forward queue overflowing says nothing about the connection, and
+// the restore re-subscribes on it. A JSON-RPC error the node pushed on the subscription never
+// gets here: the listener reads that as the node ending the subscription and cleans it up.
+func (dwsm *DirectWSSubscriptionManager) retireConnectionOnUpstreamError(activeSub *directActiveSubscription, err error) {
+	if errors.Is(err, rpcclient.ErrSubscriptionQueueOverflow) {
+		return
+	}
+	dwsm.lock.RLock()
+	conn := activeSub.upstreamConnection
+	dwsm.lock.RUnlock()
+	if conn == nil {
+		return
+	}
+	conn.MarkUnhealthy(err)
+	utils.LavaFormatInfo("DirectWS: upstream connection marked dead, the pool will reconnect with backoff",
+		utils.LogAttr("endpoint", conn.sanitizedURL),
+		utils.LogAttr("error", err.Error()),
+	)
 }
 
 // handleUpstreamDisconnect handles upstream connection loss and attempts to restore subscriptions
@@ -1805,6 +1894,7 @@ func (dwsm *DirectWSSubscriptionManager) forgetSubscriptionForClientLocked(clien
 func (dwsm *DirectWSSubscriptionManager) forgetClientLocked(clientKey string) {
 	dwsm.stickyStore.Delete(clientKey)
 	dwsm.rateLimiter.CleanupClient(clientKey)
+	delete(dwsm.slowClients, clientKey)
 	utils.LavaFormatTrace("DirectWS: cleared sticky session and rate limiter for a gone client",
 		utils.LogAttr("clientKey", clientKey),
 	)
@@ -1870,6 +1960,14 @@ const upstreamUnsubscribeTimeout = 10 * time.Second
 // (MAG-2547): the caller snapshots them while it still holds the lock.
 func (dwsm *DirectWSSubscriptionManager) teardownUpstreamSubscription(upstreamConn *UpstreamWSConnection, upstreamID, subscribeMethod string) {
 	if upstreamConn == nil {
+		return
+	}
+	if !upstreamConn.IsHealthy() {
+		// The socket this subscription lived on is gone, and the node lost the subscription
+		// with it. A call here would only make rpcclient dial again to say goodbye.
+		utils.LavaFormatTrace("DirectWS: no upstream unsubscribe for a subscription that died with its connection",
+			utils.LogAttr("upstreamID", upstreamID),
+		)
 		return
 	}
 	client := upstreamConn.GetClient()
@@ -1947,6 +2045,23 @@ func (dwsm *DirectWSSubscriptionManager) cleanupSubscription(hashedParams string
 	)
 }
 
+var _ chainlib.WSSubscriptionEndReporter = (*DirectWSSubscriptionManager)(nil)
+
+// SubscriptionEndError implements chainlib.WSSubscriptionEndReporter:
+// chainlib.ErrSubscriptionClientTooSlow when dropSlowClient dropped a subscription of this
+// connection, nil for every other end of a subscription. Read once: the mark is removed, and the
+// ingress closes the connection, which ends the rest of its subscriptions anyway.
+func (dwsm *DirectWSSubscriptionManager) SubscriptionEndError(dappID, consumerIp, webSocketConnectionUniqueId string) error {
+	clientKey := dwsm.CreateWebSocketConnectionUniqueKey(dappID, consumerIp, webSocketConnectionUniqueId)
+	dwsm.lock.Lock()
+	defer dwsm.lock.Unlock()
+	if _, dropped := dwsm.slowClients[clientKey]; !dropped {
+		return nil
+	}
+	delete(dwsm.slowClients, clientKey)
+	return chainlib.ErrSubscriptionClientTooSlow
+}
+
 // Close closes the subscription manager and all connections
 func (dwsm *DirectWSSubscriptionManager) Close() {
 	dwsm.lock.Lock()
@@ -1965,6 +2080,7 @@ func (dwsm *DirectWSSubscriptionManager) Close() {
 	}
 	dwsm.activeSubscriptions = make(map[string]*directActiveSubscription)
 	dwsm.connectedClients = make(map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply])
+	dwsm.slowClients = make(map[string]struct{})
 
 	// Close all pools
 	for _, pool := range dwsm.upstreamPools {

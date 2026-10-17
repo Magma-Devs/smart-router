@@ -216,6 +216,8 @@ func (p *UpstreamWSPool) GetConnectionForSubscription(ctx context.Context) (*Ups
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
+	p.pruneDeadConnectionsLocked()
+
 	// Find the best connection (healthy with lowest subscription count)
 	var bestConn *UpstreamWSConnection
 	var lowestSubs int32 = int32(p.subscriptionsPerConn + 1) // Start higher than target
@@ -266,6 +268,25 @@ func (p *UpstreamWSPool) GetConnectionForSubscription(ctx context.Context) (*Ups
 
 	// No healthy connections - try to create one
 	return p.createConnectionLocked(ctx)
+}
+
+// pruneDeadConnectionsLocked closes and drops the connections a subscription listener marked
+// dead (MarkUnhealthy), so the pool neither hands one out again nor keeps it forever when a
+// healthy sibling spared ReconnectWithBackoff the trouble. Caller holds p.lock.
+func (p *UpstreamWSPool) pruneDeadConnectionsLocked() {
+	kept := make([]*UpstreamWSConnection, 0, len(p.connections))
+	for _, conn := range p.connections {
+		if conn.IsHealthy() {
+			kept = append(kept, conn)
+			continue
+		}
+		conn.Close()
+		utils.LavaFormatDebug("WebSocket pool: dropped a dead connection",
+			utils.LogAttr("endpoint", p.sanitizedURL),
+			utils.LogAttr("remainingConnections", len(kept)),
+		)
+	}
+	p.connections = kept
 }
 
 // createConnectionLocked creates a new connection (caller must hold lock)
