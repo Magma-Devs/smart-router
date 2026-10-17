@@ -155,6 +155,11 @@ type DirectWSSubscriptionManager struct {
 	// Pending subscriptions for deduplication
 	pendingSubscriptions map[string]*pendingSubscriptionsBroadcastManager
 
+	// slowClients holds the connections dropSlowClient dropped a subscription of, keyed by
+	// client key, until the ingress reads the drop (SubscriptionEndError) and closes the client's
+	// socket, or the connection ends (forgetClientLocked). Guarded by lock.
+	slowClients map[string]struct{}
+
 	// beforeRestoreCommit, when set, runs in handleUpstreamDisconnect after the node has
 	// answered the re-subscribe and before the result is committed under dwsm.lock. Nil
 	// outside tests; tests use it to hold a restore at exactly that point.
@@ -246,6 +251,7 @@ func NewDirectWSSubscriptionManager(
 		connectedClients:     make(map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]),
 		activeSubscriptions:  make(map[string]*directActiveSubscription),
 		pendingSubscriptions: make(map[string]*pendingSubscriptionsBroadcastManager),
+		slowClients:          make(map[string]struct{}),
 		upstreamPools:        make(map[string]*UpstreamWSPool),
 		idMapper:             NewSubscriptionIDMapper(),
 		metricsManager:       metrics.SafeMetrics(metricsManager),
@@ -1619,11 +1625,14 @@ func (dwsm *DirectWSSubscriptionManager) routeMessageToClients(
 
 // dropSlowClient releases a client whose reply channel is full: it has fallen
 // subscriptionClientReplyBuffer pushes behind and freed no room within
-// subscriptionClientSendGrace. Its channel closes, which ends its subscription at the ingress,
-// rather than losing the push silently (a gap in a subscription stream is worse than a stream
-// that visibly ends) or waiting for it on every push (which stalled every other client of the
-// shared subscription). The drop is counted, and the subscription is torn down when this was its
-// last client. A client already gone by another path is left alone.
+// subscriptionClientSendGrace. Its channel closes, and the connection is marked so that the
+// ingress, once it has handed the client what the channel still holds, closes the client's socket
+// with 1013 (try again later): the client reconnects and resubscribes, and its other
+// subscriptions on that socket end with it. That replaces losing the push silently (a gap in a
+// subscription stream is worse than a stream that visibly ends) and waiting for the client on
+// every push (which stalled every other client of the shared subscription). The drop is counted,
+// and the subscription is torn down when this was its last client. A client already gone by
+// another path is left alone.
 func (dwsm *DirectWSSubscriptionManager) dropSlowClient(hashedParams string, activeSub *directActiveSubscription, clientKey string) {
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
@@ -1635,6 +1644,9 @@ func (dwsm *DirectWSSubscriptionManager) dropSlowClient(hashedParams string, act
 	if !wasAttached {
 		return
 	}
+	// Under the same lock as the channel's close, so the ingress, which reads the mark once it
+	// sees the close, cannot miss it.
+	dwsm.slowClients[clientKey] = struct{}{}
 	if clientRouterID != "" {
 		dwsm.idMapper.RemoveMapping(clientRouterID)
 	}
@@ -1882,6 +1894,7 @@ func (dwsm *DirectWSSubscriptionManager) forgetSubscriptionForClientLocked(clien
 func (dwsm *DirectWSSubscriptionManager) forgetClientLocked(clientKey string) {
 	dwsm.stickyStore.Delete(clientKey)
 	dwsm.rateLimiter.CleanupClient(clientKey)
+	delete(dwsm.slowClients, clientKey)
 	utils.LavaFormatTrace("DirectWS: cleared sticky session and rate limiter for a gone client",
 		utils.LogAttr("clientKey", clientKey),
 	)
@@ -2032,6 +2045,23 @@ func (dwsm *DirectWSSubscriptionManager) cleanupSubscription(hashedParams string
 	)
 }
 
+var _ chainlib.WSSubscriptionEndReporter = (*DirectWSSubscriptionManager)(nil)
+
+// SubscriptionEndError implements chainlib.WSSubscriptionEndReporter:
+// chainlib.ErrSubscriptionClientTooSlow when dropSlowClient dropped a subscription of this
+// connection, nil for every other end of a subscription. Read once: the mark is removed, and the
+// ingress closes the connection, which ends the rest of its subscriptions anyway.
+func (dwsm *DirectWSSubscriptionManager) SubscriptionEndError(dappID, consumerIp, webSocketConnectionUniqueId string) error {
+	clientKey := dwsm.CreateWebSocketConnectionUniqueKey(dappID, consumerIp, webSocketConnectionUniqueId)
+	dwsm.lock.Lock()
+	defer dwsm.lock.Unlock()
+	if _, dropped := dwsm.slowClients[clientKey]; !dropped {
+		return nil
+	}
+	delete(dwsm.slowClients, clientKey)
+	return chainlib.ErrSubscriptionClientTooSlow
+}
+
 // Close closes the subscription manager and all connections
 func (dwsm *DirectWSSubscriptionManager) Close() {
 	dwsm.lock.Lock()
@@ -2050,6 +2080,7 @@ func (dwsm *DirectWSSubscriptionManager) Close() {
 	}
 	dwsm.activeSubscriptions = make(map[string]*directActiveSubscription)
 	dwsm.connectedClients = make(map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply])
+	dwsm.slowClients = make(map[string]struct{})
 
 	// Close all pools
 	for _, pool := range dwsm.upstreamPools {

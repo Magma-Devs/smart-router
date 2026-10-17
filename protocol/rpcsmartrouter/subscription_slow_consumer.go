@@ -15,7 +15,9 @@ const subscriptionClientReplyBuffer = 100
 // subscriptionClientSendGrace is how long a push waits for room in a client's full reply channel
 // before the client is dropped as a slow consumer: counted
 // (smartrouter_subscription_clients_dropped_total) and its subscription ended, where the previous
-// poll-and-drop lost the push silently and kept the client (MAG-4242).
+// poll-and-drop lost the push silently and kept the client (MAG-4242). The client is told: a gRPC
+// stream ends with errSlowConsumer, and a WebSocket client's socket is closed with 1013 (try
+// again later), so it reconnects; its other subscriptions on that socket end with it.
 //
 // A drop on the first full channel took healthy clients with it: a node publishes a block's logs
 // back to back, and a client reading every push only a little slower than they arrive is a buffer

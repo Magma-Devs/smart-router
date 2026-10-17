@@ -240,7 +240,7 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `smartrouter_ws_connections_active` | Gauge | `spec`, `apiInterface` | Active WebSocket connections. |
 | `smartrouter_ws_subscriptions_total` | Counter | `spec`, `apiInterface` | Total WebSocket subscription requests. |
 | `smartrouter_ws_subscription_errors_total` | Counter | `spec`, `apiInterface` | Failed WebSocket subscription requests. |
-| `smartrouter_subscription_clients_dropped_total` | Counter | `spec`, `apiInterface` | Clients dropped from a shared subscription for falling behind its pushes: the client's reply buffer stayed full for the send grace (100 pushes and 10 ms today, both code constants). Counts WebSocket and gRPC subscriptions alike; `apiInterface` tells them apart. A dropped gRPC client's stream ends with `UNAVAILABLE`; a dropped WebSocket client stops receiving that subscription's pushes. |
+| `smartrouter_subscription_clients_dropped_total` | Counter | `spec`, `apiInterface` | Clients dropped from a shared subscription for falling behind its pushes: the client's reply buffer stayed full for the send grace (100 pushes and 10 ms today, both code constants). Counts WebSocket and gRPC subscriptions alike; `apiInterface` tells them apart. A dropped gRPC client's stream ends with `UNAVAILABLE`; a dropped WebSocket client's socket is closed with close code 1013 (try again later), which ends its other subscriptions on that socket too. |
 
 #### Request breakdown
 

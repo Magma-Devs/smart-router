@@ -674,6 +674,25 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					utils.LogAttr("userIp", userIp),
 					utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
 				)
+
+				// A client the manager dropped for not keeping up is told the one way a WebSocket
+				// can tell it: its socket closes with 1013 (try again later), so it reconnects and
+				// resubscribes instead of waiting on a socket nothing will ever push to again. The
+				// frame goes through the writer like any other, and the writer then tears the
+				// connection down, so the deferred UnsubscribeAll ends the client's other
+				// subscriptions on it. Any other end of a subscription leaves the socket open.
+				if errors.Is(cwm.subscriptionEndError(dappID, userIp), ErrSubscriptionClientTooSlow) {
+					utils.LavaFormatDebug("websocket subscription client did not keep up, closing its connection",
+						utils.LogAttr("GUID", webSocketCtx),
+						utils.LogAttr("dappID", dappID),
+						utils.LogAttr("userIp", userIp),
+					)
+					sendWS(webSocketMsgWithType{
+						messageType: websocket.CloseMessage,
+						msg:         websocket.FormatCloseMessage(websocket.CloseTryAgainLater, ErrSubscriptionClientTooSlow.Error()),
+						final:       true,
+					})
+				}
 			}()
 		}
 
@@ -687,6 +706,16 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			logger.LogRequestAndResponse("jsonrpc ws msg", false, "ws", websocketConn.LocalAddr().String(), string(msg), string(reply.Data), msgSeed, time.Since(startTime), nil)
 		}
 	}
+}
+
+// subscriptionEndError asks the subscription manager why it ended a subscription of this
+// connection, when the manager reports that at all; nil for an ordinary end.
+func (cwm *ConsumerWebsocketManager) subscriptionEndError(dappID, userIp string) error {
+	reporter, ok := cwm.wsSubscriptionManager.(WSSubscriptionEndReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.SubscriptionEndError(dappID, userIp, cwm.WebsocketConnectionUID)
 }
 
 // buildUnsubscribeSuccessReply synthesizes a JSON-RPC 2.0 success response for an
