@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	relaytypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/pflag"
@@ -172,7 +172,7 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 		}
 	}
 
-	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(chainproxy.MaxCallRecvMsgSize)
+	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(common.GRPCMaxCallRecvMsgSize)
 	s := grpc.NewServer(serverReceiveMaxMessageSize)
 
 	wrappedServer := grpcweb.WrapServer(s)

@@ -182,7 +182,10 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 		return false
 	}
 
-	performance.SanitizeForeignCacheReply(copyReply)
+	// Sanitised with the same directive lists a primary hit is filtered with, so a secondary
+	// hit of an entry answers with the headers a primary hit of the same entry does.
+	interfaceDirectives, collectionDirectives := rpcss.cachedReplyDirectives(protocolMessage)
+	performance.SanitizeForeignCacheReply(copyReply, interfaceDirectives, collectionDirectives)
 	// Re-stamp the zeroed LatestBlock from this router's own GATED tip, so the two tiers
 	// serve the same header set. LatestBlock's only serving-side reader is
 	// appendHeadersToRelayResult, which emits Provider-Latest-Block when the value is

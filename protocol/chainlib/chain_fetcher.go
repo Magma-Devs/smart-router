@@ -99,11 +99,18 @@ func needsLatestBlock(url common.NodeUrl, verifications []VerificationContainer)
 		if skipVerification(url, v.Name) {
 			continue
 		}
-		if v.Value == "" && v.LatestDistance != 0 {
+		if verificationNeedsHead(v) {
 			return true
 		}
 	}
 	return false
+}
+
+// verificationNeedsHead reports whether a verification measures a distance from the chain head:
+// it has no expected value and a LatestDistance. needsLatestBlock asks it of the verifications that
+// will run; ValidateCollect asks it of each one when the head probe failed.
+func verificationNeedsHead(v VerificationContainer) bool {
+	return v.Value == "" && v.LatestDistance != 0
 }
 
 // stopValidateRetries reports whether a failed attempt should end Validate's zero-delay
@@ -334,6 +341,13 @@ type NodeURLValidation struct {
 // decides the health rollup (an endpoint is healthy iff the spec loaded and every verification
 // passed, regardless of severity). Severity is intentionally not surfaced: for a health probe a
 // failed verification is a failed verification.
+//
+// A failed head probe (some verification needs the latest block and every attempt to fetch it
+// failed) is reported as a failed "fetch-latest-block" row, the verdict Validate gives, and
+// LatestBlock stays NOT_APPLICABLE. Each verification that needs the head is then reported failed
+// with "latest block unknown" instead of being run: against an unknown head a latest-distance check
+// passes vacuously. Every other verification still runs, with 0 (Verify's "unknown") as the latest
+// block, so the report still shows what the node does answer (MAG-4278).
 func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation {
 	results := make([]NodeURLValidation, 0, len(cf.endpoint.NodeUrls))
 	for _, url := range cf.endpoint.NodeUrls {
@@ -352,6 +366,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 		verifications = verificationsForNodeUrl(url, verifications)
 
 		var latestBlock int64
+		var headErr error
 		if needsLatestBlock(url, verifications) {
 			for attempts := 0; attempts < 3; attempts++ {
 				// Same collection-aware probe as Validate, so `smartrouter health`
@@ -361,11 +376,36 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 					break
 				}
 			}
+			if err != nil {
+				// Same verdict as validate: a head the node cannot answer fails the url. Verifying
+				// against NOT_APPLICABLE instead made every latest-distance check pass vacuously
+				// against 2^64-1 and reported the url green. Unlike validate this path keeps going:
+				// the checks that need no head still run below.
+				headErr = err
+				latestBlock = 0
+				nodeResult.Verifications = append(nodeResult.Verifications, VerificationResult{
+					Name:  "fetch-latest-block",
+					Ok:    false,
+					Error: err.Error(),
+				})
+			}
 		}
-		nodeResult.LatestBlock = latestBlock
+		if headErr == nil {
+			nodeResult.LatestBlock = latestBlock
+		}
 
 		for _, verification := range verifications {
 			if skipVerification(url, verification.Name) {
+				continue
+			}
+			res := VerificationResult{
+				Name:      verification.Name,
+				Addon:     verification.Addon,
+				Extension: verification.Extension,
+			}
+			if headErr != nil && verificationNeedsHead(verification) {
+				res.Error = fmt.Errorf("latest block unknown, the head probe failed: %w", headErr).Error()
+				nodeResult.Verifications = append(nodeResult.Verifications, res)
 				continue
 			}
 			var verifyErr error
@@ -375,12 +415,7 @@ func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation
 					break
 				}
 			}
-			res := VerificationResult{
-				Name:      verification.Name,
-				Addon:     verification.Addon,
-				Extension: verification.Extension,
-				Ok:        verifyErr == nil,
-			}
+			res.Ok = verifyErr == nil
 			if verifyErr != nil {
 				res.Error = verifyErr.Error()
 			}

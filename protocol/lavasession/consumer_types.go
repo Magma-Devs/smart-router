@@ -1502,14 +1502,24 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			if !connected_ {
 				continue
 			}
-			// A lent endpoint stays exactly as it is: it is out of rotation, borrowed for this one
-			// request. Marking it enabled here, before any answer, would put a failing endpoint
-			// back into normal traffic on nothing more than a successful dial.
-			if mode != endpointPickLendDisabled {
+			// Re-enabled only on the reconnect routine's path (endpointPickReconnectDisabled), and
+			// only when the pre-read above found the endpoint disabled. The relay path used to take
+			// the endpoint's exclusive lock on every acquisition to write Enabled = true and clear
+			// the recovery tracking: a wasted write on the hot path that erased the disable
+			// episode's evidence (disabledAt, the reason, the recorded failing relay the prober
+			// replays) and, when a MarkUnhealthy landed between the pre-read and this write, put a
+			// just-benched endpoint straight back into rotation (MAG-4242). A plain acquisition now
+			// leaves endpoint.mu read-only. A lent endpoint (endpointPickLendDisabled) stays exactly
+			// as it is too: it is out of rotation, borrowed for this one request, and marking it
+			// enabled before any answer would put a failing endpoint back into normal traffic on
+			// nothing more than a successful dial.
+			if mode == endpointPickReconnectDisabled && !enabled {
 				endpoint.mu.Lock()
-				cswp.Endpoints[idx].Enabled = true // return enabled once we successfully reconnect
-				// Clear recovery tracking on re-enable so a future disable starts a fresh streak (F1).
-				cswp.Endpoints[idx].clearRecoveryTrackingLocked()
+				if !cswp.Endpoints[idx].Enabled {
+					cswp.Endpoints[idx].Enabled = true // return enabled once we successfully reconnect
+					// Clear recovery tracking on re-enable so a future disable starts a fresh streak (F1).
+					cswp.Endpoints[idx].clearRecoveryTrackingLocked()
+				}
 				endpoint.mu.Unlock()
 			}
 			// successful new connection add to endpoints list

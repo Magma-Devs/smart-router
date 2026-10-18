@@ -334,6 +334,13 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		reply := relayResult.GetReply()
 		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
+			// Same answer as the catch-all handler below: a verb the spec does not declare is a
+			// 501, not a masked 500.
+			if errors.Is(err, common.APINotSupportedError) {
+				utils.LavaFormatError("api method is not supported", err, utils.LogAttr("GUID", ctx))
+				return common.CreateRestMethodNotFoundError(fiberCtx, chainID)
+			}
+
 			// Get unique GUID response
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 

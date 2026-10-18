@@ -168,25 +168,27 @@ func NewConsumerWebsocketManager(options ConsumerWebsocketManagerOptions) *Consu
 	return cwm
 }
 
+// handleRateLimitReached builds the reply to a frame refused by the rate limit. Like every other
+// local reply it echoes the caller's id verbatim (coercing it to an int answered string ids, and
+// numeric strings through Atoi on the quoted token, with id 0), and like them it goes through
+// buildLocalReply: a batch gets one error per member that has an id, as an array, and a
+// notification gets nothing, so the result can be empty. The template's own id (1) is never
+// sent: a frame with no top-level id would otherwise be answered with an id the client may have
+// given a different request.
 func (cwm *ConsumerWebsocketManager) handleRateLimitReached(inpData []byte) ([]byte, error) {
-	rateLimitError := common.JsonRpcRateLimitError
-	id := 0
-	result := gjson.GetBytes(inpData, "id")
-	switch result.Type {
-	case gjson.Number:
-		id = int(result.Int())
-	case gjson.String:
-		idParsed, err := strconv.Atoi(result.Raw)
-		if err == nil {
-			id = idParsed
+	var marshalErr error
+	reply := buildLocalReply(inpData, func(request []byte) []byte {
+		bytesRateLimitError, err := common.MarshalJsonRPCErrorWithRequestID(common.JsonRpcRateLimitError, request)
+		if err != nil {
+			marshalErr = err
+			return nil
 		}
+		return bytesRateLimitError
+	})
+	if marshalErr != nil {
+		return []byte{}, utils.LavaFormatError("failed marshalling jsonrpc rate limit error", marshalErr)
 	}
-	rateLimitError.Id = id
-	bytesRateLimitError, err := json.Marshal(rateLimitError)
-	if err != nil {
-		return []byte{}, utils.LavaFormatError("failed marshalling jsonrpc rate limit error", err)
-	}
-	return bytesRateLimitError, nil
+	return reply, nil
 }
 
 // subscriptionReplyFormatter remembers the caller's request id and returns the formatter
@@ -391,8 +393,14 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	idleFor := atomic.Int64{}
 	idleFor.Store(time.Now().Unix())
 	requestsPerSecond := &atomic.Uint64{}
+	// The rate-limit settings are process-wide flags set once at startup. Read them once here, in
+	// the connection's own goroutine, so the checker below and the read loop work off one snapshot:
+	// the checker used to read the globals itself, from a goroutine nothing waits for, which raced
+	// any later write of them (a test that builds the root command registers the flags again).
+	wsRateLimit := WebSocketRateLimit
+	wsBanDuration := WebSocketBanDuration
 	go func() {
-		if WebSocketRateLimit <= 0 && cwm.headerRateLimit <= 0 && GetMaxIdleTimeInSeconds() <= 0 {
+		if wsRateLimit <= 0 && cwm.headerRateLimit <= 0 && GetMaxIdleTimeInSeconds() <= 0 {
 			return
 		}
 		ticker := time.NewTicker(time.Second) // rate limit per second.
@@ -426,15 +434,15 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 						return
 					}
 				}
-				if cwm.headerRateLimit > 0 || WebSocketRateLimit > 0 {
+				if cwm.headerRateLimit > 0 || wsRateLimit > 0 {
 					// check if rate limit reached, and ban is required
 					currentRequestsPerSecondLoad := requestsPerSecond.Load()
-					if WebSocketBanDuration > 0 && (currentRequestsPerSecondLoad > cwm.headerRateLimit || currentRequestsPerSecondLoad > uint64(WebSocketRateLimit)) {
+					if wsBanDuration > 0 && (currentRequestsPerSecondLoad > cwm.headerRateLimit || currentRequestsPerSecondLoad > uint64(wsRateLimit)) {
 						// wait the ban duration before resetting the store.
 						select {
 						case <-webSocketCtx.Done():
 							return
-						case <-time.After(WebSocketBanDuration): // just continue
+						case <-time.After(wsBanDuration): // just continue
 						}
 					}
 					requestsPerSecond.Store(0)
@@ -462,9 +470,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		// Check rate limit is met
 		currentRequestsPerSecond := requestsPerSecond.Add(1)
 		if (cwm.headerRateLimit > 0 && currentRequestsPerSecond > cwm.headerRateLimit) ||
-			(WebSocketRateLimit > 0 && currentRequestsPerSecond > uint64(WebSocketRateLimit)) {
+			(wsRateLimit > 0 && currentRequestsPerSecond > uint64(wsRateLimit)) {
 			rateLimitResponse, err := cwm.handleRateLimitReached(msg)
-			if err == nil {
+			if err == nil && len(rateLimitResponse) > 0 {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: rateLimitResponse})
 			}
 			continue
@@ -674,6 +682,25 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					utils.LogAttr("userIp", userIp),
 					utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
 				)
+
+				// A client the manager dropped for not keeping up is told the one way a WebSocket
+				// can tell it: its socket closes with 1013 (try again later), so it reconnects and
+				// resubscribes instead of waiting on a socket nothing will ever push to again. The
+				// frame goes through the writer like any other, and the writer then tears the
+				// connection down, so the deferred UnsubscribeAll ends the client's other
+				// subscriptions on it. Any other end of a subscription leaves the socket open.
+				if errors.Is(cwm.subscriptionEndError(dappID, userIp), ErrSubscriptionClientTooSlow) {
+					utils.LavaFormatDebug("websocket subscription client did not keep up, closing its connection",
+						utils.LogAttr("GUID", webSocketCtx),
+						utils.LogAttr("dappID", dappID),
+						utils.LogAttr("userIp", userIp),
+					)
+					sendWS(webSocketMsgWithType{
+						messageType: websocket.CloseMessage,
+						msg:         websocket.FormatCloseMessage(websocket.CloseTryAgainLater, ErrSubscriptionClientTooSlow.Error()),
+						final:       true,
+					})
+				}
 			}()
 		}
 
@@ -687,6 +714,16 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			logger.LogRequestAndResponse("jsonrpc ws msg", false, "ws", websocketConn.LocalAddr().String(), string(msg), string(reply.Data), msgSeed, time.Since(startTime), nil)
 		}
 	}
+}
+
+// subscriptionEndError asks the subscription manager why it ended a subscription of this
+// connection, when the manager reports that at all; nil for an ordinary end.
+func (cwm *ConsumerWebsocketManager) subscriptionEndError(dappID, userIp string) error {
+	reporter, ok := cwm.wsSubscriptionManager.(WSSubscriptionEndReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.SubscriptionEndError(dappID, userIp, cwm.WebsocketConnectionUID)
 }
 
 // buildUnsubscribeSuccessReply synthesizes a JSON-RPC 2.0 success response for an
