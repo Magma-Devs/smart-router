@@ -13,9 +13,10 @@ import (
 
 const graphqlConnectionType = "POST"
 
-// graphqlTestSpec mirrors the shape a Sui graphql collection will have: one api per root field,
-// each carrying its own compute units and category, plus a GET_BLOCKNUM directive on its own
-// operation name.
+// graphqlTestSpec mirrors the shape of lava-specs sui.json's graphql collection: one api per root
+// field, each carrying its own compute units and category, plus the GET_BLOCKNUM directive sui.json
+// declares. That directive is on serviceConfig, an ordinary query field, read at
+// serviceConfig.availableRange.last.sequenceNumber.
 func graphqlTestSpec() spectypes.Spec {
 	emptyBlockParsing := spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY}
 	return spectypes.Spec{
@@ -49,11 +50,10 @@ func graphqlTestSpec() spectypes.Spec {
 						BlockParsing: emptyBlockParsing,
 					},
 					{
-						Name:         "latestCheckpoint",
+						Name:         "serviceConfig",
 						Enabled:      true,
 						ComputeUnits: 10,
-						Category:     spectypes.SpecCategory{Deterministic: true},
-						BlockParsing: emptyBlockParsing,
+						BlockParsing: spectypes.BlockParser{ParserArg: []string{"latest"}, ParserFunc: spectypes.PARSER_FUNC_DEFAULT},
 					},
 					{
 						// The write surface. stateful:1 is what ValidateNoStatefulPolicies reads
@@ -68,10 +68,10 @@ func graphqlTestSpec() spectypes.Spec {
 				ParseDirectives: []*spectypes.ParseDirective{
 					{
 						FunctionTag:      spectypes.FUNCTION_TAG_GET_BLOCKNUM,
-						FunctionTemplate: `{"query":"{ latestCheckpoint { sequenceNumber } }"}`,
-						ApiName:          "latestCheckpoint",
+						FunctionTemplate: `{"query":"{ serviceConfig { availableRange(type: \"Checkpoint\") { last { sequenceNumber } } } }"}`,
+						ApiName:          "serviceConfig",
 						ResultParsing: spectypes.BlockParser{
-							ParserArg:  []string{"0", "data", "latestCheckpoint", "sequenceNumber"},
+							ParserArg:  []string{"0", "data", "serviceConfig", "availableRange", "last", "sequenceNumber"},
 							ParserFunc: spectypes.PARSER_FUNC_PARSE_CANONICAL,
 						},
 					},
@@ -190,33 +190,45 @@ func TestGraphQLChainParserMutationIsStatefulWhateverTheSpecSays(t *testing.T) {
 	require.True(t, readMessage.GetApi().Category.Deterministic)
 }
 
-func TestGraphQLChainParserTipObservationIsNotPoisonable(t *testing.T) {
+// TestGraphQLChainParserTipDirectiveTagsItsOwnFieldOnly pins what the GET_BLOCKNUM tag says about a
+// request, against the directive sui.json declares (MAG-4373; this test used to run against a
+// fictional latestCheckpoint field and was named TipObservationIsNotPoisonable). The tag follows
+// the root field, so it keeps every other read and every multi-root request out of the tip. It
+// cannot keep a caller's own query on the tip field out, aliases included, because on Sui that
+// field is an ordinary query field. So the tag does not make a relay-harvested tip safe, and the
+// relay path reads no block out of a GraphQL reply at all (rpcsmartrouter
+// TestGraphQLUserRelayCarriesNoReplyBlock, TestGraphQLAliasedTipQueryForgesNoTipOrStallEvidence).
+func TestGraphQLChainParserTipDirectiveTagsItsOwnFieldOnly(t *testing.T) {
 	chainParser := newGraphQLTestParser(t)
+	parse := func(body string) ChainMessage {
+		chainMessage, err := chainParser.ParseMsg("", []byte(body), graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
+		require.NoError(t, err)
+		return chainMessage
+	}
 
 	// The head poll's own request must resolve to the GET_BLOCKNUM directive, or the per-
 	// endpoint ChainTracker cannot read a tip at all.
-	pollMessage, err := chainParser.ParseMsg("",
-		[]byte(`{"query":"{ latestCheckpoint { sequenceNumber } }"}`),
-		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
-	require.NoError(t, err)
-	require.True(t, IsFunctionTagOfType(pollMessage, spectypes.FUNCTION_TAG_GET_BLOCKNUM))
+	directive, _, found := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
+	require.True(t, found)
+	require.True(t, IsFunctionTagOfType(parse(directive.FunctionTemplate), spectypes.FUNCTION_TAG_GET_BLOCKNUM))
 
-	// Ordinary user traffic must not. Under a REST-shaped spec every request would carry the
-	// api name "/graphql" and so resolve to this directive, and whatever the tip parser scraped
-	// out of an arbitrary customer query would be recorded as a current-tip observation.
-	userMessage, err := chainParser.ParseMsg("",
-		[]byte(`{"query":"{ checkpoint(sequenceNumber: 329083865) { digest } }"}`),
-		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
-	require.NoError(t, err)
-	require.False(t, IsFunctionTagOfType(userMessage, spectypes.FUNCTION_TAG_GET_BLOCKNUM))
+	// A read of any other field must not. Under a REST-shaped spec every request would carry the
+	// api name "/graphql" and so resolve to this directive.
+	require.False(t, IsFunctionTagOfType(parse(`{"query":"{ checkpoint(sequenceNumber: 329083865) { digest } }"}`), spectypes.FUNCTION_TAG_GET_BLOCKNUM))
 
-	// Nor may a request smuggle the tip operation in alongside another: the combined api name
+	// Nor may a request smuggle the tip field in alongside another: the combined api name
 	// matches no directive, which is the safe direction.
-	mixedMessage, err := chainParser.ParseMsg("",
-		[]byte(`{"query":"{ latestCheckpoint { sequenceNumber } chainIdentifier }"}`),
-		graphqlConnectionType, nil, extensionslib.ExtensionInfo{})
-	require.NoError(t, err)
-	require.False(t, IsFunctionTagOfType(mixedMessage, spectypes.FUNCTION_TAG_GET_BLOCKNUM))
+	require.False(t, IsFunctionTagOfType(
+		parse(`{"query":"{ serviceConfig { availableRange(type: \"Checkpoint\") { last { sequenceNumber } } } chainIdentifier }"}`),
+		spectypes.FUNCTION_TAG_GET_BLOCKNUM))
+
+	// A caller's own query on the tip field carries the tag exactly like the poll. Identity is the
+	// schema field, never the alias, and the alias is what puts another number on the path the
+	// directive reads: Sui answers this one with the network's transaction count.
+	require.True(t, IsFunctionTagOfType(
+		parse(`{"query":"{ serviceConfig { availableRange(type: \"Checkpoint\") { last { sequenceNumber: networkTotalTransactions } } } }"}`),
+		spectypes.FUNCTION_TAG_GET_BLOCKNUM),
+		"the tag cannot tell the poll from a caller's aliased query; the relay path must not read a tip from either")
 }
 
 func TestGraphQLChainParserCraftMessageFromDirective(t *testing.T) {
@@ -228,10 +240,10 @@ func TestGraphQLChainParserCraftMessageFromDirective(t *testing.T) {
 
 	crafted, err := chainParser.CraftMessage(directive, graphqlConnectionType, nil, nil)
 	require.NoError(t, err)
-	require.Equal(t, "latestCheckpoint", crafted.GetApi().Name)
+	require.Equal(t, "serviceConfig", crafted.GetApi().Name)
 	graphqlMessage, ok := crafted.GetRPCMessage().(*rpcInterfaceMessages.GraphQLMessage)
 	require.True(t, ok)
-	require.Equal(t, "latestCheckpoint", graphqlMessage.GetMethod())
+	require.Equal(t, "serviceConfig", graphqlMessage.GetMethod())
 }
 
 func TestGraphQLChainParserCraftMessageRejectsEmptyTemplate(t *testing.T) {
@@ -240,7 +252,7 @@ func TestGraphQLChainParserCraftMessageRejectsEmptyTemplate(t *testing.T) {
 	// GraphQL names its operation in the body and nowhere else, so unlike gRPC an empty
 	// template is a spec gap rather than an empty request. Accepting it would poll garbage.
 	_, err := chainParser.CraftMessage(
-		&spectypes.ParseDirective{FunctionTag: spectypes.FUNCTION_TAG_GET_BLOCKNUM, ApiName: "latestCheckpoint"},
+		&spectypes.ParseDirective{FunctionTag: spectypes.FUNCTION_TAG_GET_BLOCKNUM, ApiName: "serviceConfig"},
 		graphqlConnectionType, nil, nil)
 	require.Error(t, err)
 }
@@ -336,7 +348,7 @@ func TestGraphQLChainParserCraftMessageFromCraftData(t *testing.T) {
 		ConnectionType: apiCollection.CollectionData.Type,
 	}, nil)
 	require.NoError(t, err)
-	require.Equal(t, "latestCheckpoint", crafted.GetApi().Name)
+	require.Equal(t, "serviceConfig", crafted.GetApi().Name)
 	require.True(t, IsFunctionTagOfType(crafted, spectypes.FUNCTION_TAG_GET_BLOCKNUM))
 }
 
@@ -349,12 +361,12 @@ func TestGraphQLChainParserCraftMessageRejectsTemplateApiMismatch(t *testing.T) 
 	_, err := chainParser.CraftMessage(
 		&spectypes.ParseDirective{
 			FunctionTag:      spectypes.FUNCTION_TAG_GET_BLOCKNUM,
-			ApiName:          "latestCheckpoint",
+			ApiName:          "serviceConfig",
 			FunctionTemplate: `{"query":"{ chainIdentifier }"}`,
 		},
 		graphqlConnectionType,
 		&CraftData{
-			Path:           "latestCheckpoint",
+			Path:           "serviceConfig",
 			Data:           []byte(`{"query":"{ chainIdentifier }"}`),
 			ConnectionType: graphqlConnectionType,
 		}, nil)
