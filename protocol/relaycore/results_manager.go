@@ -28,6 +28,7 @@ type ResultsManager interface {
 	HasResults() bool
 	GetResults() (success int, nodeErrors int, specialNodeErrors int, protocolErrors int)
 	GetResultsData() (successResults []common.RelayResult, nodeErrors []common.RelayResult, protocolErrors []RelayError)
+	GetResultsDetail() (successResults []common.RelayResult, nodeErrors []RelayError, protocolErrors []RelayError)
 	SetResponse(response *RelayResponse, protocolMessage chainlib.ProtocolMessage) (nodeError error)
 	GetBestNodeErrorMessageForUser() RelayError
 	GetBestProtocolErrorMessageForUser() RelayError
@@ -294,6 +295,14 @@ func (rp *ResultsManagerInst) GetResultsData() (successResults []common.RelayRes
 	rp.lock.RLock()
 	defer rp.lock.RUnlock()
 	return rp.successResults, rp.NodeErrors(), rp.protocolResponseErrors.RelayErrors
+}
+
+// GetResultsDetail is GetResultsData with each node error kept as its RelayError, so the error and
+// its classification come along with the result.
+func (rp *ResultsManagerInst) GetResultsDetail() (successResults []common.RelayResult, nodeErrors []RelayError, protocolErrors []RelayError) {
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	return rp.successResults, rp.nodeResponseErrors.RelayErrors, rp.protocolResponseErrors.RelayErrors
 }
 
 func (rp *ResultsManagerInst) GetBestNodeErrorMessageForUser() RelayError {
