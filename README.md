@@ -134,6 +134,11 @@ An upstream with multiple node URLs (e.g. an `https://` and a `wss://` endpoint)
 URL**, distinguished by `url`/`transport`. An endpoint's `ok` is `true` only when the spec loaded
 (`specValid`) **and** every verification passed. Top-level `ok` is the AND of all rows.
 
+When a URL's latest-block call fails, its row starts with a failed `fetch-latest-block` verification
+and reports `latestBlock: -1`. Checks that measure a distance from the head are then reported failed
+with `latest block unknown` instead of being sent; every other check still runs, so the row still
+shows what the node does answer.
+
 | Flag | Default | Purpose |
 | --- | --- | --- |
 | `--use-static-spec` | (required) | Spec source(s) — file, directory, or remote URL (same paths as the main command) |

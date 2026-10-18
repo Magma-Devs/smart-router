@@ -361,6 +361,24 @@ func NewBatchMessage(msgs []JsonrpcMessage) (JsonrpcBatchMessage, error) {
 // checkJsonrpcEnvelope so the rules stay in lockstep with the single path,
 // including the error:null edge case.
 func CheckResponseErrorForJsonRpcBatch(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
+	return checkResponseErrorForBatch(data, httpStatusCode, func(element []byte, _ int) (bool, string) {
+		elemHasErr, elemMsg, _ := checkJsonrpcEnvelope(element, "JSON-RPC batch element")
+		return elemHasErr, elemMsg
+	})
+}
+
+// CheckResponseErrorForTendermintBatch classifies each element with the single-reply Tendermint
+// rule (the JSON-RPC envelope, then the embedded result.response.{code,log}), so an application
+// error inside a batched abci_query is a node error in a batch exactly as it is on its own. The
+// JSON-RPC walker above only reads the envelope, which is right for EVM-shaped replies and wrong
+// for Tendermint's 200-with-app-error shape.
+func CheckResponseErrorForTendermintBatch(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
+	return checkResponseErrorForBatch(data, httpStatusCode, TendermintrpcMessage{}.CheckResponseError)
+}
+
+// checkResponseErrorForBatch walks a batch reply and classifies every element with elementCheck.
+// Default mode: a single success masks any sibling faults; BatchNodeErrorOnAny flips that.
+func checkResponseErrorForBatch(data []byte, httpStatusCode int, elementCheck func(element []byte, httpStatusCode int) (bool, string)) (hasError bool, errorMessage string) {
 	var (
 		hasAnySuccess bool
 		aggregated    strings.Builder
@@ -373,7 +391,7 @@ func CheckResponseErrorForJsonRpcBatch(data []byte, httpStatusCode int) (hasErro
 	}
 
 	walkErr := scanJsonrpcBatchElements(data, func(element []byte) bool {
-		elemHasErr, elemMsg, _ := checkJsonrpcEnvelope(element, "JSON-RPC batch element")
+		elemHasErr, elemMsg := elementCheck(element, httpStatusCode)
 		if elemHasErr {
 			appendFault(elemMsg)
 			return true
