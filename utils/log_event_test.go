@@ -34,12 +34,12 @@ func jsonLines(t *testing.T, out string) []map[string]any {
 
 // A router runs at warn unless a tenant overrides it, and readers rely on the event at either
 // level, so the configured level filters the narrative lines and never the event.
-func TestLavaFormatEvent_WrittenWhateverTheLevel(t *testing.T) {
+func TestLogEvent_WrittenWhateverTheLevel(t *testing.T) {
 	for _, level := range []zerolog.Level{zerolog.DebugLevel, zerolog.InfoLevel, zerolog.WarnLevel, zerolog.ErrorLevel} {
 		t.Run(level.String(), func(t *testing.T) {
 			out := captureLog(t, level, func() {
 				LavaFormatInfo("narrative line")
-				LavaFormatEvent("test_end", testEvent{})
+				LogEvent("test_end", testEvent{})
 			})
 
 			var events, narrative int
@@ -65,7 +65,7 @@ func TestLavaFormatEvent_WrittenWhateverTheLevel(t *testing.T) {
 	}
 }
 
-func TestLavaFormatEvent_ReachesEveryEnabledSink(t *testing.T) {
+func TestLogEvent_ReachesEveryEnabledSink(t *testing.T) {
 	prevRolling := rollingLogLogger
 	t.Cleanup(func() { rollingLogLogger = prevRolling })
 	var rolling bytes.Buffer
@@ -74,7 +74,7 @@ func TestLavaFormatEvent_ReachesEveryEnabledSink(t *testing.T) {
 	EnableDebugLogBuffer(100)
 	t.Cleanup(DisableDebugLogBuffer)
 
-	captureLog(t, zerolog.ErrorLevel, func() { LavaFormatEvent("test_end", testEvent{}) })
+	captureLog(t, zerolog.ErrorLevel, func() { LogEvent("test_end", testEvent{}) })
 
 	require.Len(t, jsonLines(t, rolling.String()), 1, "the rolling file's own level does not filter the event either")
 	var buffered int

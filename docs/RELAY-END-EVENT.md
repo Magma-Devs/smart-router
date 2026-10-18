@@ -5,7 +5,7 @@ by `"event":"relay_end"` and parse it by `schema`, never by message text. This d
 contract for `schema` 1.
 
 - **Every level.** The line is written at INFO on every enabled sink (stderr, the rolling log file,
-  the debug buffer) whatever `--log-level` is: `utils.LavaFormatEvent` writes through a copy of each
+  the debug buffer) whatever `--log-level` is: `utils.LogEvent` writes through a copy of each
   logger with its level filter off. A router at `warn` writes it too.
 - **Exactly once per relay.** Every request a listener hands to the router ends in one `relay_end`,
   on every exit path, including requests refused before anything was sent upstream and cache hits.
@@ -50,7 +50,7 @@ server-streaming subscriptions (not relays); WebSocket frames refused by the con
 | `selection` | string | always | `stateless`, `stateful` or `cross_validation`. `""` when the relay ended before a relay processor existed: a request that did not parse, or invalid cross-validation headers. |
 | `outcome` | string | always | What the client got; see [outcome](#outcome). |
 | `stop_reason` | string | always | Why there was no further attempt: `Success`, `Stateful`, `CrossValidation`, `NonRetryableNodeError`, `PermanentProtocolError`, `UnlistedMethodRefused`, `MaxRetriesReached`, `BatchDisabled`, `ErrorToleranceExceeded`, `AllProvidersExhausted`, `FirstMessageFailed`, `BatchSendFailed`, `ProcessingTimeout` (the budget ran out), `CallerGone` (a WebSocket or gRPC client hung up), `CrossValidationGroupsQuiet`. `""` when the relay ended before its state machine named a reason: `selection` is `""`, the cross-validation capacity check refused the request, or a `router_error` stopped it. |
-| `served_by` | string | always | The upstream whose reply reached the client; `"Cached"` for a cache hit (as the `lava-provider-address` header says). `""` when the client got an error. |
+| `served_by` | string | always | The upstream whose reply reached the client; `"Cached"` for a cache hit, as the provider-address reply header says. `""` when the client got an error. |
 | `status` | number | always | The HTTP status on the router's result. `0` when the router returned no result or one without a status (every attempt failed in transport); the listener then answers with its own status. A `write_unknown` is always `500`, the status the client gets. |
 | `has_reply` | boolean | always | `true` exactly when `outcome` is `ok` or `node_error`: the client got an upstream's or the cache's reply. |
 | `error_code` | string | always | The error registry name (`protocol/common/error_codes.go`) of why the relay did not end `ok`; see [error_code](#error_code). `""` on `ok`. |
@@ -70,7 +70,7 @@ and skips arrays; `| json attempts="attempts"` extracts the raw array.
 | `node_error` | A node's error reply, passed through | `SendParsedRelay` returns a node error with no error: `processNonCrossValidationResult` when nothing succeeded, or a cached node error. A node's rate-limit reply is one too. |
 | `write_unknown` | "transaction status unclear", HTTP 500 | `SendParsedRelay` returns `errUnknownWriteOutcome` (`writeOutcomeIsUnknown`): a stateful relay where no upstream accepted, and one was still silent when the budget ran out or its connection died after the request went out |
 | `no_answer` | An error, after at least one upstream was asked | `SendParsedRelay` returns an error with a dispatched attempt: every attempt failed in transport, timed out or was rate limited, or cross-validation found no quorum |
-| `rejected_before_dispatch` | An error; no upstream was asked | `SendRelay` or the WebSocket manager: the request does not parse (unsupported shape, refused batch). `SendParsedRelay` with nothing dispatched: invalid cross-validation headers, the cross-validation capacity check, an empty provider pool, an unavailable pinned provider (`lava-select-provider`), every endpoint failing consistency pre-validation, or the deadline expiring before dispatch |
+| `rejected_before_dispatch` | An error; no upstream was asked | `SendRelay` or the WebSocket manager: the request does not parse (unsupported shape, refused batch). `SendParsedRelay` with nothing dispatched: invalid cross-validation headers, the cross-validation capacity check, an empty provider pool, an unavailable pinned provider (the select-provider directive), every endpoint failing consistency pre-validation, or the deadline expiring before dispatch |
 | `router_error` | An error, or nothing usable | The router's own machinery failed (`routerFault`): its task loop could not start, the task channel closed without a final instruction, or a relay had no request data. Also `SendParsedRelay` returning neither a reply nor an error, which includes a panic inside it |
 
 ## attempts

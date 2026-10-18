@@ -51,7 +51,7 @@ const (
 // relayEndTextLimit caps error and attempts[].message: a node may answer with a whole body.
 const relayEndTextLimit = 512
 
-// relayEndCachedUpstream names a cache hit, as the lava-provider-address header does.
+// relayEndCachedUpstream names a cache hit, as the provider-address reply header does.
 const relayEndCachedUpstream = "Cached"
 
 // routerFault marks a failure of the router's own machinery, as opposed to the request, the
@@ -159,7 +159,7 @@ var _ chainlib.RelayRejectionReporter = (*RPCSmartRouterServer)(nil)
 
 // writeRelayEnd writes the relay's relay_end event. Each exit calls it once.
 func (rpcss *RPCSmartRouterServer) writeRelayEnd(ctx context.Context, in relayEndInput) {
-	utils.LavaFormatEvent(relayEndEvent, rpcss.buildRelayEnd(ctx, in))
+	utils.LogEvent(relayEndEvent, rpcss.buildRelayEnd(ctx, in))
 }
 
 // ReportRejectedRelay writes the relay_end of a request a listener parsed itself and could not hand
