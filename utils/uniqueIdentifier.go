@@ -3,16 +3,26 @@ package utils
 import (
 	"context"
 	"math/rand"
+	"sync/atomic"
 	"time"
 )
 
 type unique_identifier_ctx_key struct{}
 
-// GenerateUniqueIdentifier mints a request GUID: the unix second in the top 32 bits, 32 random bits
-// below. The second makes any GUID a bounded log search; two GUIDs collide only when minted in the
-// same second with the same random bits.
+// guidLow is the low half of the next GUID: a random start per process, then +1 per mint.
+// Two GUIDs from one process differ in this half until 2^32 mints land in one second, and a
+// clock step that revisits a second finds the counter already past that second's values.
+var guidLow atomic.Uint32
+
+func init() {
+	guidLow.Store(rand.Uint32())
+}
+
+// GenerateUniqueIdentifier mints a request GUID: the unix second in the top 32 bits, the
+// per-process counter below. The second makes any GUID a bounded log search; the counter keeps
+// every GUID one process mints distinct, see guidLow.
 func GenerateUniqueIdentifier() uint64 {
-	return uint64(uint32(time.Now().Unix()))<<32 | uint64(rand.Uint32())
+	return uint64(uint32(time.Now().Unix()))<<32 | uint64(guidLow.Add(1))
 }
 
 func WithUniqueIdentifier(ctx context.Context, guid uint64) context.Context {

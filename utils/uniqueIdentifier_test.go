@@ -2,6 +2,7 @@ package utils
 
 import (
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,14 +26,45 @@ func TestGenerateUniqueIdentifier_DecodesToItsSecond(t *testing.T) {
 	require.Equal(t, guid, parsed)
 }
 
-// GUIDs minted in the same second differ only in the low 32 bits, so those bits must be random.
-func TestGenerateUniqueIdentifier_LowBitsVary(t *testing.T) {
-	const draws = 1000
-	seen := make(map[uint32]struct{}, draws)
+// The dashboard and the relay_end event key a request by its GUID, and a router mints ten
+// thousand in one second, so every GUID one process mints must be distinct.
+func TestGenerateUniqueIdentifier_DistinctWithinAProcess(t *testing.T) {
+	const draws = 100_000
+	seen := make(map[uint64]struct{}, draws)
 	for range draws {
-		seen[uint32(GenerateUniqueIdentifier())] = struct{}{}
+		guid := GenerateUniqueIdentifier()
+		if _, dup := seen[guid]; dup {
+			t.Fatalf("guid %d minted twice", guid)
+		}
+		seen[guid] = struct{}{}
 	}
-	// 1000 draws from 2^32 values collide about once in 8,600 runs; a constant or a counter
-	// stuck on a few values cannot get near this bar.
-	require.Greater(t, len(seen), draws-10)
+}
+
+// Every relay goroutine mints on its own, so the counter must stay distinct under concurrency.
+func TestGenerateUniqueIdentifier_DistinctAcrossGoroutines(t *testing.T) {
+	const workers, perWorker = 8, 20_000
+	results := make([][]uint64, workers)
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out := make([]uint64, perWorker)
+			for i := range out {
+				out[i] = GenerateUniqueIdentifier()
+			}
+			results[w] = out
+		}()
+	}
+	wg.Wait()
+
+	seen := make(map[uint64]struct{}, workers*perWorker)
+	for _, out := range results {
+		for _, guid := range out {
+			if _, dup := seen[guid]; dup {
+				t.Fatalf("guid %d minted twice", guid)
+			}
+			seen[guid] = struct{}{}
+		}
+	}
 }
