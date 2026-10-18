@@ -19,7 +19,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
-	plantypes "github.com/magma-Devs/smart-router/types/plans"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
@@ -263,7 +262,7 @@ func TestExtensions(t *testing.T) {
 	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, specname)
 	require.NoError(t, err)
 
-	chainParser.SetPolicy(&plantypes.Policy{ChainPolicies: []plantypes.ChainPolicy{{ChainID: specname, Requirements: []plantypes.ChainRequirement{{Extensions: []string{"archive"}}}}}}, specname, "jsonrpc")
+	chainParser.SetPolicy(&Policy{ChainPolicies: []ChainPolicy{{ChainID: specname, Requirements: []ChainRequirement{{Extensions: []string{"archive"}}}}}}, specname, "jsonrpc")
 	parsingForCrafting, apiCollection, ok := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
 	require.True(t, ok)
 	collectionData := apiCollection.CollectionData
@@ -1002,8 +1001,6 @@ func (wsRelayStub) ParseRelay(ctx context.Context, url, req, connectionType, dap
 func (wsRelayStub) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
 	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(wsRelayStubReply)}, StatusCode: http.StatusOK}, nil
 }
-
-func (wsRelayStub) CancelSubscriptionContext(subscriptionKey string) {}
 
 // MAG-4055: a websocket relay's relay_usage event carries the Origin the client
 // sent on the handshake, the same as an HTTP or gRPC relay's event does.

@@ -86,13 +86,12 @@ func NewGrpcChainParser() (chainParser *GrpcChainParser, err error) {
 // inner contents of `spec` (a protobuf with nested slices/maps), which is
 // copied by value but whose nested fields remain shared. This is sound only
 // because the live serving path treats spec as immutable post-init; the rare
-// SetSpec / SetPolicy / UpdateBlockTime mutators run at init or at known
-// quiescent moments.
+// SetSpec / SetPolicy mutators run at init or at known quiescent moments.
 //
 // The new BaseChainParser is constructed via struct literal, so its rwLock
 // is a fresh zero-value — no mutex is copied. Note the trade-off: because the
 // clone has a *separate* mutex from the live parser, the two cannot
-// synchronize. If a live-path SetSpec / UpdateBlockTime were to race with a
+// synchronize. If a live-path SetSpec were to race with a
 // validation reader on the clone, the clone could observe a torn write of
 // nested spec fields. We accept that risk since the alternative — sharing the
 // parser instance — corrupts the live registry/codec when validation's bounded
@@ -119,7 +118,6 @@ func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 			allowedAddons:     apip.allowedAddons,
 			allowedExtensions: apip.allowedExtensions,
 			extensionParser:   apip.extensionParser,
-			active:            apip.active,
 
 			// Carried, not re-seeded from the package default: the clone must verify
 			// under the same ws policy as the parser it stands in for.
@@ -128,10 +126,6 @@ func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 		registry: apip.registry,
 		codec:    apip.codec,
 	}
-}
-
-func (bcp *GrpcChainParser) GetUniqueName() string {
-	return "grpc_chain_parser"
 }
 
 func (apip *GrpcChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {

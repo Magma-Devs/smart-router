@@ -44,7 +44,6 @@ func NewUsedProviders(blockedProviders BlockedProvidersInf) *UsedProviders {
 			GetEmptyRouterKey().String(): newSeededUniqueUsedProviders(originalUnwantedProviders),
 		},
 		originalUnwantedProviders: originalUnwantedProviders,
-		eligibilityFunc:           common.DecideEligibility, // default; overridden via SetEligibilityFunc
 	}
 }
 
@@ -56,11 +55,6 @@ type UniqueUsedProviders struct {
 	erroredProviders  map[string]struct{} // providers who returned protocol errors (used to debug relays for now)
 	blockOnSyncLoss   map[string]struct{}
 }
-
-// EligibilityFunc is the function signature for provider eligibility decisions.
-// Injected via SetEligibilityFunc so that lavasession can call relaypolicy
-// without a direct import (breaking the circular dependency).
-type EligibilityFunc func(isUnsupportedMethod, isSyncLoss, isFirstSyncLoss bool) common.EligibilityResult
 
 type UsedProviders struct {
 	lock                      sync.RWMutex
@@ -84,10 +78,6 @@ type UsedProviders struct {
 	// chain-native messages don't collide with broad Tier-1 substring
 	// matchers). Empty means classification falls back to Tier-1 only.
 	chainID string
-	// eligibilityFunc is the injected eligibility decision function.
-	// Defaults to common.DecideEligibility; overridden via SetEligibilityFunc
-	// to use relaypolicy.DecideEligibility (breaking the circular import).
-	eligibilityFunc EligibilityFunc
 	// lastChanceTaken records that this request was already lent a disabled endpoint
 	// (TakeLastChance), so a retrying request is lent at most one.
 	lastChanceTaken bool
@@ -103,19 +93,6 @@ func (up *UsedProviders) SetChainID(chainID string) {
 	up.lock.Lock()
 	defer up.lock.Unlock()
 	up.chainID = chainID
-}
-
-// SetEligibilityFunc overrides the default eligibility function with one from
-// a higher-level package (e.g. relaypolicy.DecideEligibility). This breaks the
-// circular import: lavasession cannot import relaypolicy, but the caller can
-// inject relaypolicy's function here.
-func (up *UsedProviders) SetEligibilityFunc(fn EligibilityFunc) {
-	if up == nil || fn == nil {
-		return
-	}
-	up.lock.Lock()
-	defer up.lock.Unlock()
-	up.eligibilityFunc = fn
 }
 
 // TakeLastChance claims this request's single last chance: lending a disabled endpoint of a
@@ -364,8 +341,8 @@ func (up *UsedProviders) RemoveUsed(provider string, routerKey RouterKey, err er
 	isSyncLoss := err != nil && IsSessionSyncLoss(err)
 	isFirstSyncLoss := isSyncLoss && !alreadyBlocked
 
-	// Eligibility decision via the injected policy function
-	result := up.eligibilityFunc(isUnsupportedMethod, isSyncLoss, isFirstSyncLoss)
+	// Eligibility decision (a pure function of the three flags)
+	result := common.DecideEligibility(isUnsupportedMethod, isSyncLoss, isFirstSyncLoss)
 
 	if result.Action == common.EligibilityAllowRetry {
 		uniqueUsedProviders.blockOnSyncLoss[provider] = struct{}{}

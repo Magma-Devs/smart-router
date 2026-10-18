@@ -1234,3 +1234,31 @@ func TestSuiNetworksAllMapToSuiFamily(t *testing.T) {
 		require.Equal(t, ChainFamilySui, family, "chain %s should map to the Sui family", chainID)
 	}
 }
+
+// Registry lookup helpers used only by tests; the binary classifies through ClassifyError.
+
+func getLavaError(code uint32) *LavaError {
+	if le, ok := errorRegistry[code]; ok {
+		return le
+	}
+	return LavaErrorUnknown
+}
+
+func getLavaErrorByName(name string) *LavaError {
+	if le, ok := errorRegistryName[name]; ok {
+		return le
+	}
+	return LavaErrorUnknown
+}
+
+func isRetryable(code uint32) bool {
+	return getLavaError(code).Retryable
+}
+
+func IsInternal(code uint32) bool {
+	return getLavaError(code).Category == CategoryInternal
+}
+
+func IsExternal(code uint32) bool {
+	return getLavaError(code).Category == CategoryExternal
+}

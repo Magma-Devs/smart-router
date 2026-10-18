@@ -468,8 +468,6 @@ func (s *tendermintGetRelayStub) SendParsedRelay(ctx context.Context, analytics 
 	return nil, errors.New("not used")
 }
 
-func (s *tendermintGetRelayStub) CancelSubscriptionContext(subscriptionKey string) {}
-
 func (s *tendermintGetRelayStub) seen() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -667,8 +665,6 @@ func (s tendermintParsingRelaySender) ParseRelay(ctx context.Context, url, req, 
 func (tendermintParsingRelaySender) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
 	return nil, errors.New("not used")
 }
-
-func (tendermintParsingRelaySender) CancelSubscriptionContext(subscriptionKey string) {}
 
 // unsubscribeAllRecorder is the slice of WSSubscriptionManager an unsubscribe_all uses.
 // It counts the client's own unsubscribe_all calls (they carry the request's metrics;

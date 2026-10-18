@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"testing"
 
-	tenderminttypes "github.com/cometbft/cometbft/rpc/jsonrpc/types"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -140,12 +139,12 @@ func TestConvertErrorToRPCError(t *testing.T) {
 	testTable := []struct {
 		name        string
 		err         error
-		expectedRPC *tenderminttypes.RPCError
+		expectedRPC *RPCError
 	}{
 		{
 			name: "valid error string",
 			err:  fmt.Errorf("test error"),
-			expectedRPC: &tenderminttypes.RPCError{
+			expectedRPC: &RPCError{
 				Code:    -1,
 				Message: "Rpc Error",
 				Data:    "test error",
@@ -269,7 +268,7 @@ func TestConvertTendermintMsg(t *testing.T) {
 				JSONRPC: "2.0",
 				ID:      JSONRPCStringID("abc"),
 				Result:  json.RawMessage(`{"key":"value"}`),
-				Error: &tenderminttypes.RPCError{
+				Error: &RPCError{
 					Code:    0,
 					Message: "error message",
 					Data:    "",

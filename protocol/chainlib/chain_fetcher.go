@@ -28,71 +28,16 @@ const (
 	ChainFetcherHeaderName = "X-LAVA-Provider"
 )
 
-type IChainFetcher interface {
-	FetchLatestBlockNum(ctx context.Context) (int64, error)
-	FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error)
-	FetchEndpoint() lavasession.RPCProviderEndpoint
-	Validate(ctx context.Context) error
-	GetVerificationsStatus() []*pairingtypes.Verification
-	CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error)
-}
-
 type ChainFetcher struct {
-	endpoint            *lavasession.RPCProviderEndpoint
-	chainRouter         ChainRouter
-	chainParser         ChainParser
-	cache               performance.CacheBackend
-	latestBlock         int64
-	verificationsStatus common.SafeSyncMap[string, bool]
-	cachedVerifications atomic.Value // holds []*pairingtypes.Verification for faster access
-	cacheValid          atomic.Bool
-}
-
-func (cf *ChainFetcher) GetVerificationsStatus() []*pairingtypes.Verification {
-	// Try to get from cache first
-	if cf.cacheValid.Load() {
-		value, ok := cf.cachedVerifications.Load().([]*pairingtypes.Verification)
-		if ok {
-			return value
-		} else {
-			utils.LavaFormatError("invalid usage of cachedVerifications, could not cast result into []*pairingtypes.Verification type", nil, utils.Attribute{Key: "cachedVerifications", Value: cf.cachedVerifications.Load()})
-		}
-	}
-
-	// If not in cache, create new slice
-	verifications := make([]*pairingtypes.Verification, 0)
-	cf.verificationsStatus.Range(func(name string, passed bool) bool {
-		verifications = append(verifications, &pairingtypes.Verification{
-			Name:   name,
-			Passed: passed,
-		})
-		return true
-	})
-
-	// Store in cache
-	cf.cachedVerifications.Store(verifications)
-	cf.cacheValid.Store(true)
-	return verifications
-}
-
-// Add this method to invalidate cache when verification status changes
-func (cf *ChainFetcher) invalidateVerificationsCache() {
-	cf.cacheValid.Store(false)
+	endpoint    *lavasession.RPCProviderEndpoint
+	chainRouter ChainRouter
+	chainParser ChainParser
+	cache       performance.CacheBackend
+	latestBlock int64
 }
 
 func (cf *ChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
 	return *cf.endpoint
-}
-
-func (cf *ChainFetcher) getVerificationsKey(verification VerificationContainer, apiInterface string, chainId string) string {
-	key := chainId + "-" + apiInterface + "-" + verification.Name
-	if verification.Addon != "" {
-		key += "-" + verification.Addon
-	}
-	if verification.Extension != "" {
-		key += "-" + verification.Extension
-	}
-	return key
 }
 
 // skipVerification is the single gate deciding whether a verification runs for a node-url.
@@ -335,8 +280,6 @@ func (cf *ChainFetcher) validate(ctx context.Context, perCollection bool) (Provi
 				return admission, err
 			}
 		}
-		// invalidating cache as value might change
-		defer cf.invalidateVerificationsCache()
 		for _, verification := range verifications {
 			if skipVerification(url, verification.Name) {
 				utils.LavaFormatInfo("Skipping Verification due to provider configuration (skip-verifications setting)", utils.LogAttr("verification", verification.Name))
@@ -351,7 +294,6 @@ func (cf *ChainFetcher) validate(ctx context.Context, perCollection bool) (Provi
 				}
 			}
 			if err != nil {
-				cf.verificationsStatus.Store(cf.getVerificationsKey(verification, cf.endpoint.ApiInterface, cf.endpoint.ChainID), false)
 				utils.LavaFormatWarning("failed verification on provider startup", err, utils.LogAttr("verification", verification.Name))
 				if verification.Severity == spectypes.ParseValue_Fail {
 					if service := refusedServiceFor(verification); perCollection && service != "" {
@@ -367,8 +309,6 @@ func (cf *ChainFetcher) validate(ctx context.Context, perCollection bool) (Provi
 					}
 					return admission, utils.LavaFormatError("invalid Verification on provider startup", err, utils.Attribute{Key: "Addons", Value: addons}, utils.Attribute{Key: "verification", Value: verification.Name})
 				}
-			} else {
-				cf.verificationsStatus.Store(cf.getVerificationsKey(verification, cf.endpoint.ApiInterface, cf.endpoint.ChainID), true)
 			}
 		}
 	}
@@ -410,7 +350,6 @@ type NodeURLValidation struct {
 // block, so the report still shows what the node does answer (MAG-4278).
 func (cf *ChainFetcher) ValidateCollect(ctx context.Context) []NodeURLValidation {
 	results := make([]NodeURLValidation, 0, len(cf.endpoint.NodeUrls))
-	defer cf.invalidateVerificationsCache()
 	for _, url := range cf.endpoint.NodeUrls {
 		nodeResult := NodeURLValidation{URL: url.UrlStr(), LatestBlock: spectypes.NOT_APPLICABLE}
 		addons := url.Addons

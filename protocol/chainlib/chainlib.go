@@ -3,22 +3,15 @@ package chainlib
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
-)
-
-const (
-	INTERNAL_ADDRESS = "internal-addr"
 )
 
 func NewChainParser(apiInterface string) (chainParser ChainParser, err error) {
@@ -47,10 +40,6 @@ func NewChainListener(
 	refererData *RefererData,
 	wsSubscriptionManager WSSubscriptionManager,
 ) (ChainListener, error) {
-	if listenEndpoint.NetworkAddress == INTERNAL_ADDRESS {
-		utils.LavaFormatDebug("skipping chain listener for internal address")
-		return NewEmptyChainListener(), nil
-	}
 	switch listenEndpoint.ApiInterface {
 	case spectypes.APIInterfaceJsonRPC:
 		return NewJrpcChainListener(ctx, listenEndpoint, relaySender, healthReporter, rpcConsumerLogs, refererData, wsSubscriptionManager), nil
@@ -81,15 +70,7 @@ type ChainParser interface {
 	GetVerifications(supported []string, internalPath string, apiInterface string) ([]VerificationContainer, error)
 	SeparateAddonsExtensions(ctx context.Context, supported []string) (addons, extensions []string, err error)
 	SetPolicy(policy PolicyInf, chainId string, apiInterface string) error
-	ValidateMessage(ChainMessage) error
-	Active() bool
-	Activate()
-	UpdateBlockTime(newBlockTime time.Duration)
-	GetUniqueName() string
 	ExtensionsParser() *extensionslib.ExtensionParser
-	ExtractDataFromRequest(*http.Request) (url string, data string, connectionType string, metadata []pairingtypes.Metadata, err error)
-	SetResponseFromRelayResult(*common.RelayResult) (*http.Response, error)
-	ParseDirectiveEnabled() bool
 	SkipWebsocketVerification() bool
 	SetSkipWebsocketVerification(skip bool)
 }
@@ -115,14 +96,12 @@ func CloneChainParserForValidation(parser ChainParser) ChainParser {
 }
 
 type ChainMessage interface {
-	SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string
 	RequestedBlock() (latest int64, earliest int64)
 	UpdateLatestBlockInMessage(latestBlock int64, modifyContent bool) (modified bool)
 	AppendHeader(metadata []pairingtypes.Metadata)
 	GetExtensions() []*spectypes.Extension
 	OverrideExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser)
 	GetUnavailableExtensions() []string
-	DisableErrorHandling()
 	TimeoutOverride(...time.Duration) time.Duration
 	GetForceCacheRefresh() bool
 	SetForceCacheRefresh(force bool) bool
@@ -230,7 +209,6 @@ type RelaySender interface {
 		analytics *metrics.RelayMetrics,
 		protocolMessage ProtocolMessage,
 	) (relayResult *common.RelayResult, errRet error)
-	CancelSubscriptionContext(subscriptionKey string)
 }
 
 type ChainListener interface {
@@ -246,7 +224,6 @@ type ChainListener interface {
 // which no caller ever supplied or read once provider relaying was removed.
 type ChainRouter interface {
 	SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend, extensions []string) (relayReply *RelayReplyWrapper, proxyUrl common.NodeUrl, chainId string, err error) // has to be thread safe, reuse code within ParseMsg as common functionality
-	ExtensionsSupported(internalPath string, extensions []string) bool
 }
 
 type ChainProxy interface {
@@ -271,22 +248,4 @@ func GetChainRouter(ctx context.Context, nConns uint, rpcProviderEndpoint *lavas
 		return nil, fmt.Errorf("chain proxy for apiInterface (%s) not found", rpcProviderEndpoint.ApiInterface)
 	}
 	return newChainRouter(ctx, nConns, *rpcProviderEndpoint, chainParser, proxyConstructor)
-}
-
-type EmptyChainListener struct{}
-
-func NewEmptyChainListener() ChainListener {
-	return &EmptyChainListener{}
-}
-
-func (*EmptyChainListener) Serve(ctx context.Context, cmdFlags common.ConsumerCmdFlags) {
-	// do nothing
-}
-
-func (*EmptyChainListener) GetListeningAddress() string {
-	return ""
-}
-
-func (*EmptyChainListener) Shutdown(_ context.Context) error {
-	return nil
 }

@@ -4,14 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -78,7 +75,6 @@ type BaseChainParser struct {
 	allowedAddons     map[string]bool
 	allowedExtensions map[string]struct{}
 	extensionParser   extensionslib.ExtensionParser
-	active            bool
 
 	// skipWebsocketVerification is this parser's own answer to "should verifications be
 	// augmented with the websocket extension, and should the router enforce ws support".
@@ -116,21 +112,6 @@ func (bcp *BaseChainParser) SetSkipWebsocketVerification(skip bool) {
 	bcp.rwLock.Lock()
 	defer bcp.rwLock.Unlock()
 	bcp.skipWebsocketVerification = skip
-}
-
-func (bcp *BaseChainParser) Activate() {
-	bcp.active = true
-}
-
-func (bcp *BaseChainParser) Active() bool {
-	return bcp.active
-}
-
-func (bcp *BaseChainParser) UpdateBlockTime(newBlockTime time.Duration) {
-	bcp.rwLock.Lock()
-	defer bcp.rwLock.Unlock()
-	utils.LavaFormatInfo("chainParser updated block time", utils.Attribute{Key: "newTime", Value: newBlockTime}, utils.Attribute{Key: "oldTime", Value: time.Duration(bcp.spec.AverageBlockTime) * time.Millisecond}, utils.Attribute{Key: "specID", Value: bcp.spec.Index})
-	bcp.spec.AverageBlockTime = newBlockTime.Milliseconds()
 }
 
 // clientBodyHeaders are the request headers that describe the body the client authored.
@@ -211,26 +192,6 @@ func (bcp *BaseChainParser) isAddon(addon string) bool {
 func (bcp *BaseChainParser) isExtension(extension string) bool {
 	_, ok := bcp.allowedExtensions[extension]
 	return ok
-}
-
-// ValidateMessage validates the chain message against the consumer's policy (allowed addons).
-// Should be called after ParseMsg by consumers/providers that enforce policy.
-// Smart-router does not call this since it uses static providers without on-chain policy.
-func (bcp *BaseChainParser) ValidateMessage(chainMsg ChainMessage) error {
-	nodeMessage, ok := chainMsg.(*baseChainMessageContainer)
-	if !ok {
-		return nil
-	}
-	bcp.rwLock.RLock()
-	defer bcp.rwLock.RUnlock()
-	if addon := GetAddon(nodeMessage); addon != "" {
-		if allowed := bcp.allowedAddons[addon]; !allowed {
-			return utils.LavaFormatError("consumer policy does not allow addon", nil,
-				utils.LogAttr("addon", addon),
-			)
-		}
-	}
-	return nil
 }
 
 func (bcp *BaseChainParser) BuildMapFromPolicyQuery(policy PolicyInf, chainId string, apiInterface string) (map[string]struct{}, error) {
@@ -383,15 +344,6 @@ func (bcp *BaseChainParser) Construct(spec spectypes.Spec, internalPaths map[str
 	bcp.allowedAddons = allowedAddons
 	bcp.allowedExtensions = allowedExtensions
 	bcp.extensionParser = extensionslib.NewExtensionParser(bcp.extensionParser.GetConfiguredExtensions())
-}
-
-func (bcp *BaseChainParser) ParseDirectiveEnabled() bool {
-	_, _, ok := bcp.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
-	if !ok {
-		return false
-	}
-	_, _, ok = bcp.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
-	return ok
 }
 
 func (bcp *BaseChainParser) GetParsingByTag(tag spectypes.FUNCTION_TAG) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool) {
@@ -708,55 +660,6 @@ func (apip *BaseChainParser) isValidInternalPath(path string) bool {
 	defer apip.rwLock.RUnlock()
 	_, ok := apip.internalPaths[path]
 	return ok
-}
-
-// take an http request and direct it through the consumer
-func (apip *BaseChainParser) ExtractDataFromRequest(request *http.Request) (url string, data string, connectionType string, metadata []pairingtypes.Metadata, err error) {
-	// Extract relative URL path
-	url = request.URL.Path
-	// Extract connection type
-	connectionType = request.Method
-
-	// Extract metadata
-	for key, values := range request.Header {
-		for _, value := range values {
-			metadata = append(metadata, pairingtypes.Metadata{
-				Name:  key,
-				Value: value,
-			})
-		}
-	}
-
-	// Extract data
-	if request.Body != nil {
-		bodyBytes, err := io.ReadAll(request.Body)
-		if err != nil {
-			return "", "", "", nil, err
-		}
-		data = string(bodyBytes)
-	}
-
-	return url, data, connectionType, metadata, nil
-}
-
-func (apip *BaseChainParser) SetResponseFromRelayResult(relayResult *common.RelayResult) (*http.Response, error) {
-	if relayResult == nil {
-		return nil, errors.New("relayResult is nil")
-	}
-	response := &http.Response{
-		StatusCode: relayResult.StatusCode,
-		Header:     make(http.Header),
-	}
-
-	for _, values := range relayResult.Reply.Metadata {
-		response.Header.Add(values.Name, values.Value)
-	}
-
-	if relayResult.Reply != nil && relayResult.Reply.Data != nil {
-		response.Body = io.NopCloser(strings.NewReader(string(relayResult.Reply.Data)))
-	}
-
-	return response, nil
 }
 
 // getSupportedApi fetches service api from spec by name

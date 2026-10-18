@@ -34,8 +34,6 @@ const (
 	// TTL formula constants moved to core (core.Policy owns the TTL table);
 	// re-exported here for the package's existing consumers and tests.
 	DefaultExpirationForNonFinalized            = core.DefaultExpirationForNonFinalized
-	SharedStateTipBlockMultiplier               = core.SharedStateTipBlockMultiplier
-	MinSharedStateTipExpiration                 = core.MinSharedStateTipExpiration
 	DefaultExpirationTimeFinalizedMultiplier    = 1.0
 	DefaultExpirationTimeNonFinalizedMultiplier = 1.0
 	DefaultExpirationBlocksHashesToHeights      = core.DefaultExpirationBlocksHashesToHeights

@@ -13,8 +13,6 @@ import (
 // Relayer service
 // ---------------------------------------------------------------------------
 
-const Relayer_ServiceName = "smartrouter.pairing.Relayer"
-
 // RelayerClient is the client API for the Relayer service.
 type RelayerClient interface {
 	Relay(ctx context.Context, in *RelayRequest, opts ...grpc.CallOption) (*RelayReply, error)
@@ -215,8 +213,6 @@ var _Relayer_serviceDesc = grpc.ServiceDesc{
 // ---------------------------------------------------------------------------
 // RelayerCache service
 // ---------------------------------------------------------------------------
-
-const RelayerCache_ServiceName = "smartrouter.pairing.RelayerCache"
 
 // RelayerCacheClient is the client API for the RelayerCache service.
 type RelayerCacheClient interface {

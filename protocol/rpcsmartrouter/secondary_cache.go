@@ -246,8 +246,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	// value: an entry whose writer recorded no status is served as an assumed 200,
 	// matching a primary hit. (The chainlib serving paths would reach the same result
 	// on their own — each guards with `if relayResult.GetStatusCode() != 0` before
-	// setting an explicit status — but RelayResult also feeds RoundTrip, which copies
-	// StatusCode straight into an http.Response where a zero is not a valid status.)
+	// setting an explicit status.)
 	if relayResult.StatusCode == 0 {
 		relayResult.StatusCode = http.StatusOK
 	}

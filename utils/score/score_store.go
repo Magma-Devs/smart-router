@@ -10,8 +10,7 @@ import (
 )
 
 const (
-	DecPrecision         int64 = 8
-	InitialDataStaleness       = 24 * time.Hour
+	InitialDataStaleness = 24 * time.Hour
 )
 
 // ScoreStore is a decaying weighted average object that is used to collect
@@ -320,7 +319,6 @@ const (
 	LatencyScoreType      = "latency"
 	SyncScoreType         = "sync"
 	AvailabilityScoreType = "availability"
-	TotalScoreType        = "total"
 
 	// Worst score results for each QoS excellence metric for truncation
 	WorstLatencyScore      float64 = 30      // seconds

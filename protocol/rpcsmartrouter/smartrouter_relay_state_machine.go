@@ -15,16 +15,8 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-// Using interfaces from relaycore
-type (
-	RelayStateMachine          = relaycore.RelayStateMachine
-	ResultsCheckerInf          = relaycore.ResultsCheckerInf
-	RelayStateSendInstructions = relaycore.RelayStateSendInstructions
-)
-
-// SmartRouterRelayStateMachine is an alias for the unified state machine type.
-// Kept for backward compatibility with existing tests.
-type SmartRouterRelayStateMachine = relaycore.UnifiedRelayStateMachine
+// RelayStateMachine is the relaycore state machine interface the server drives.
+type RelayStateMachine = relaycore.RelayStateMachine
 
 // SmartRouterRelaySender is kept as a type alias for the unified interface
 // so that existing test mocks continue to compile.
@@ -51,20 +43,6 @@ func SmartRouterPolicyConfig() relaypolicy.PolicyConfig {
 		CircuitBreakerThreshold: 2,
 		SendRelayAttempts:       SendRelayAttempts,
 	}
-}
-
-// NewSmartRouterRelayStateMachine creates a SmartRouter-mode unified state machine with no per-method
-// policy resolver (selection is purely header-driven). Kept for tests and callers that do not wire a
-// policy resolver.
-func NewSmartRouterRelayStateMachine(
-	ctx context.Context,
-	usedProviders *lavasession.UsedProviders,
-	relaySender SmartRouterRelaySender,
-	protocolMessage chainlib.ProtocolMessage,
-	analytics *metrics.RelayMetrics,
-	debugRelays bool,
-) (RelayStateMachine, error) {
-	return NewSmartRouterRelayStateMachineWithPolicy(ctx, usedProviders, relaySender, protocolMessage, analytics, debugRelays, nil, "", "")
 }
 
 // NewSmartRouterRelayStateMachineWithPolicy is the production constructor: it consults the per-method

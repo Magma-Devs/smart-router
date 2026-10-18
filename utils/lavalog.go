@@ -18,10 +18,6 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-const (
-	EventPrefix = "lava_"
-)
-
 // wrappedLavaError wraps a cause error and preserves error chain traversal
 // for callers using errors.Is() or pkg-errors Cause().
 type wrappedLavaError struct {

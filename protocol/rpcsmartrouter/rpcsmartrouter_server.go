@@ -1117,7 +1117,6 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	var err error
 	usedProviders := lavasession.NewUsedProviders(nil)
 	usedProviders.SetChainID(rpcss.listenEndpoint.ChainID)
-	usedProviders.SetEligibilityFunc(relaypolicy.DecideEligibility)
 
 	// Selection comes from the method's own category only — see internalRelayStateMachine for why
 	// an operator cross-validation policy must not reach a health check.
@@ -1712,7 +1711,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	defer cancel()
 	usedProviders := lavasession.NewUsedProviders(protocolMessage)
 	usedProviders.SetChainID(rpcss.listenEndpoint.ChainID)
-	usedProviders.SetEligibilityFunc(relaypolicy.DecideEligibility)
 
 	// Record retry count when this span ends. BatchNumber is incremented once per
 	// GetSessions success (one batch may contain N parallel sessions for cross-validation,
@@ -1830,10 +1828,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 		utils.LogAttr("GUID", ctx),
 	)
 	return relayProcessor, utils.LavaFormatError("ProcessRelaySend channel closed unexpectedly", nil)
-}
-
-func (rpcss *RPCSmartRouterServer) CancelSubscriptionContext(subscriptionKey string) {
-	// Direct RPC subscription managers handle their own lifecycle.
 }
 
 // getEarliestBlockHashRequestedFromCacheReply folds the reply's BlocksHashesToHeights into
@@ -5689,20 +5683,6 @@ func (rpcss *RPCSmartRouterServer) HandleDirectiveHeadersForMessage(chainMessage
 	chainMessage.SetForceCacheRefresh(ok)
 }
 
-// Iterating over metadataHeaders adding each trailer that fits the header if found to relayResult.Relay.Metadata
-func (rpcss *RPCSmartRouterServer) getMetadataFromRelayTrailer(metadataHeaders []string, relayResult *common.RelayResult) {
-	for _, metadataHeader := range metadataHeaders {
-		trailerValue := relayResult.ProviderTrailer.Get(metadataHeader)
-		if len(trailerValue) > 0 {
-			extensionMD := pairingtypes.Metadata{
-				Name:  metadataHeader,
-				Value: trailerValue[0],
-			}
-			relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, extensionMD)
-		}
-	}
-}
-
 // warnUnavailableExtensions logs, once per extension for the life of this endpoint, that callers
 // are requesting an extension no node offers. It is an operator configuration gap, not a caller
 // error, so once is enough to surface it; the per-request signal is the response header.
@@ -6382,9 +6362,6 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			})
 	}
 
-	// fetch trailer information from the provider by using the provider trailer field.
-	rpcss.getMetadataFromRelayTrailer(chainlib.TrailersToAddToHeaderResponse, relayResult)
-
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 	_, debugRelays := directiveHeaders[common.LAVA_DEBUG_RELAY]
 	if debugRelays {
@@ -6457,22 +6434,6 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				})
 		}
 
-		if relayResult.Request != nil && relayResult.Request.RelaySession != nil {
-			currentReportedProviders := rpcss.sessionManager.GetReportedProviders(uint64(relayResult.Request.RelaySession.Epoch))
-			if len(currentReportedProviders) > 0 {
-				reportedProvidersArray := make([]string, len(currentReportedProviders))
-				for idx, providerAddress := range currentReportedProviders {
-					reportedProvidersArray[idx] = providerAddress.Address
-				}
-				reportedProvidersString := fmt.Sprintf("%v", reportedProvidersArray)
-				reportedProvidersMD := pairingtypes.Metadata{
-					Name:  common.REPORTED_PROVIDERS_HEADER_NAME,
-					Value: reportedProvidersString,
-				}
-				relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, reportedProvidersMD)
-			}
-		}
-
 		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{
 			Name:  common.SMART_ROUTER_VERSION_HEADER_NAME,
 			Value: version.Version,
@@ -6493,28 +6454,6 @@ func (rpcss *RPCSmartRouterServer) IsInitialized() bool {
 	}
 
 	return rpcss.initialized.Load()
-}
-
-func (rpcss *RPCSmartRouterServer) RoundTrip(req *http.Request) (*http.Response, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	guid := utils.GenerateUniqueIdentifier()
-	ctx = utils.WithUniqueIdentifier(ctx, guid)
-	url, data, connectionType, metadata, err := rpcss.chainParser.ExtractDataFromRequest(req)
-	if err != nil {
-		return nil, err
-	}
-	// Use client IP for IP forwarding when available (Raw HTTP transport has no consumerIp param)
-	consumerIp := req.RemoteAddr
-	if h := req.Header.Get(common.IP_FORWARDING_HEADER_NAME); h != "" {
-		consumerIp = h
-	}
-	relayResult, err := rpcss.SendRelay(ctx, url, data, connectionType, "", consumerIp, nil, metadata)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := rpcss.chainParser.SetResponseFromRelayResult(relayResult)
-	return resp, err
 }
 
 // dedupSortedStrings returns a sorted, deduplicated copy of the input slice.

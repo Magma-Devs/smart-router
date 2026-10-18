@@ -60,10 +60,6 @@ type HealthReporter interface {
 	IsHealthy() bool
 }
 
-func NewGRPCProxy(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter) (*grpc.Server, *http.Server, error) {
-	return NewGRPCProxyWithReflection(cb, healthCheckPath, cmdFlags, healthReporter, nil, nil)
-}
-
 // NewGRPCProxyWithReflection creates a gRPC proxy. A separate gRPC server answers
 // reflection, v1 and v1alpha, from reflectionSource, which is what lets tools like
 // grpcurl work against the router; without a source it answers for the reflection

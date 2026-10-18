@@ -55,10 +55,13 @@ func NewResultsManager(guid uint64, chainID string) ResultsManager {
 func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
-	// Protocol errors come from the lavasession/protocolerrors packages and carry an sdkerrors ABCI
-	// code — use ClassifyLegacyError to extract it. These errors travel over gRPC (provider →
-	// consumer), so TransportGRPC is used for the message-based fallback path.
-	classified := common.ClassifyLegacyError(response.Err, common.TransportGRPC)
+	// Protocol errors are plain Go errors (nothing in this fork carries an sdkerrors ABCI code any
+	// more), so they are classified by connection shape and message text. TransportGRPC is the
+	// historical choice for the message-based fallback and is kept so the verdicts do not move.
+	var classified *common.LavaError
+	if response.Err != nil {
+		classified = common.ClassifyError(common.DetectConnectionError(response.Err), common.ChainFamilyUnknown, common.TransportGRPC, 0, response.Err.Error())
+	}
 	// This is a protocol-layer error (session not found, consumer blocked, etc.),
 	// not a node-side error. Pass "" as chainErrorMessage so the chain_error_message
 	// structured field doesn't get polluted with sdkerrors strings. The full

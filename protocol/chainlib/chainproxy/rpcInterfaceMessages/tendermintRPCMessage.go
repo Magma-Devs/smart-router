@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"reflect"
 
-	tenderminttypes "github.com/cometbft/cometbft/rpc/jsonrpc/types"
 	"github.com/goccy/go-json"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
@@ -18,15 +17,6 @@ import (
 type TendermintrpcMessage struct {
 	JsonrpcMessage
 	Path string
-}
-
-func (tm TendermintrpcMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	params, err := json.Marshal(tm.GetParams())
-	if err != nil {
-		utils.LavaFormatWarning("failed marshaling params", err, utils.LogAttr("request", tm))
-		return ""
-	}
-	return string(params)
 }
 
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
@@ -91,14 +81,30 @@ func (tm TendermintrpcMessage) ParseBlock(inp string) (int64, error) {
 	return parser.ParseDefaultBlockParameter(inp)
 }
 
-func GetTendermintRPCError(jsonError *rpcclient.JsonError) (*tenderminttypes.RPCError, error) {
+// RPCError is the error object of a Tendermint JSON-RPC response, in the shape CometBFT's
+// rpc/jsonrpc/types.RPCError has (the only thing the router used that module for).
+type RPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    string `json:"data,omitempty"`
+}
+
+func (err RPCError) Error() string {
+	const baseFormat = "RPC error %v - %s"
+	if err.Data != "" {
+		return fmt.Sprintf(baseFormat+": %s", err.Code, err.Message, err.Data)
+	}
+	return fmt.Sprintf(baseFormat, err.Code, err.Message)
+}
+
+func GetTendermintRPCError(jsonError *rpcclient.JsonError) (*RPCError, error) {
 	// Guard that the jsonError exists
 	//nolint
 	if jsonError == nil {
 		return nil, nil
 	}
 
-	var rpcError *tenderminttypes.RPCError
+	var rpcError *RPCError
 
 	errData := ""
 	var ok bool
@@ -111,7 +117,7 @@ func GetTendermintRPCError(jsonError *rpcclient.JsonError) (*tenderminttypes.RPC
 		}
 	}
 
-	rpcError = &tenderminttypes.RPCError{
+	rpcError = &RPCError{
 		Code:    jsonError.Code,
 		Message: jsonError.Message,
 		Data:    errData,
@@ -119,12 +125,12 @@ func GetTendermintRPCError(jsonError *rpcclient.JsonError) (*tenderminttypes.RPC
 	return rpcError, nil
 }
 
-func ConvertErrorToRPCError(errString string, code int) *tenderminttypes.RPCError {
-	var rpcError *tenderminttypes.RPCError
+func ConvertErrorToRPCError(errString string, code int) *RPCError {
+	var rpcError *RPCError
 	unmarshalError := json.Unmarshal([]byte(errString), &rpcError)
 	if unmarshalError != nil || (rpcError.Data == "" && rpcError.Message == "") {
 		utils.LavaFormatWarning("Failed unmarshalling error tendermintrpc", unmarshalError, utils.Attribute{Key: "err", Value: errString})
-		rpcError = &tenderminttypes.RPCError{
+		rpcError = &RPCError{
 			Code:    code,
 			Message: "Rpc Error",
 			Data:    errString,
@@ -171,10 +177,10 @@ func IdFromRawMessage(rawID json.RawMessage) (jsonrpcId, error) {
 }
 
 type RPCResponse struct {
-	JSONRPC string                    `json:"jsonrpc"`
-	ID      jsonrpcId                 `json:"id,omitempty"`
-	Result  json.RawMessage           `json:"result,omitempty"`
-	Error   *tenderminttypes.RPCError `json:"error,omitempty"`
+	JSONRPC string          `json:"jsonrpc"`
+	ID      jsonrpcId       `json:"id,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *RPCError       `json:"error,omitempty"`
 }
 
 func ConvertTendermintMsg(rpcMsg *rpcclient.JsonrpcMessage) (*RPCResponse, error) {

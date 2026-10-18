@@ -921,9 +921,7 @@ type ConsumerSessionsWithProvider struct {
 	MaxComputeUnits   uint64
 	UsedComputeUnits  uint64
 	PairingEpoch      uint64
-	// whether we already reported this provider this epoch, we can only report one conflict per provider per epoch
-	conflictFoundAndReported uint32 // 0 == not reported, 1 == reported
-	stakeSize                int64  // the stake size the provider staked (ulava)
+	stakeSize         int64 // the stake size the provider staked (ulava)
 
 	// blocked provider recovery status if 0 currently not used, if 1 a session has tried resume communication with this provider
 	// if the provider is not blocked at all this field is irrelevant
@@ -952,25 +950,6 @@ func (cswp *ConsumerSessionsWithProvider) atomicReadBlockedStatus() uint32 {
 
 func (cswp *ConsumerSessionsWithProvider) atomicWriteBlockedStatus(status uint32) {
 	atomic.StoreUint32(&cswp.blockedAndUsedWithChanceForRecoveryStatus, status) // we can only set conflict to "reported".
-}
-
-func (cswp *ConsumerSessionsWithProvider) atomicReadConflictReported() bool {
-	return atomic.LoadUint32(&cswp.conflictFoundAndReported) == 1
-}
-
-func (cswp *ConsumerSessionsWithProvider) atomicWriteConflictReported() {
-	atomic.StoreUint32(&cswp.conflictFoundAndReported, 1) // we can only set conflict to "reported".
-}
-
-// checking if this provider was reported this epoch already, as we can only report once per epoch
-func (cswp *ConsumerSessionsWithProvider) ConflictAlreadyReported() bool {
-	// returns true if reported, false if not.
-	return cswp.atomicReadConflictReported()
-}
-
-// setting this provider as conflict reported.
-func (cswp *ConsumerSessionsWithProvider) StoreConflictReported() {
-	cswp.atomicWriteConflictReported()
 }
 
 func (cswp *ConsumerSessionsWithProvider) IsSupportingAddon(addon string) bool {

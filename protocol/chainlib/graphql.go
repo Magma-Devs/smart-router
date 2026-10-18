@@ -55,10 +55,6 @@ func NewGraphQLChainParser() (chainParser *GraphQLChainParser, err error) {
 	return parser, nil
 }
 
-func (apip *GraphQLChainParser) GetUniqueName() string {
-	return "graphql_chain_parser"
-}
-
 func (apip *GraphQLChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {
 	if apip == nil {
 		return nil, errors.New("ChainParser not defined")

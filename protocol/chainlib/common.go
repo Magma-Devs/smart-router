@@ -39,12 +39,8 @@ const (
 )
 
 var (
-	TrailersToAddToHeaderResponse      = []string{RPCProviderNodeExtension}
-	InvalidResponses                   = []string{"null", "", "nil", "undefined"}
-	FailedSendingSubscriptionToClients = errors.New("Failed Sending Subscription To Clients connection might have been closed by the user")
-	NoActiveSubscriptionFound          = errors.New("no active subscriptions for hashed params.")
-	MaxBatchRequestSize                = 0 // configured via --max-batch-request-size flag, 0 means unlimited
-	ErrBatchRequestSizeExceeded        = errors.New("batch request size exceeded the configured limit")
+	MaxBatchRequestSize         = 0 // configured via --max-batch-request-size flag, 0 means unlimited
+	ErrBatchRequestSizeExceeded = errors.New("batch request size exceeded the configured limit")
 )
 
 type RelayReplyWrapper struct {
@@ -786,19 +782,6 @@ func truncateAndPadString(s string, maxLength int) string {
 	s = fmt.Sprintf("%-*s", maxLength, s)
 
 	return s
-}
-
-// return if response is valid or not - true
-func ValidateNilResponse(responseString string) error {
-	return nil // this feature was disabled in version 0.35.8 due to some nodes request this response.
-	// after the timeout features we can add support for this filtering as it would be parsed and
-	// returned to the user if multiple providers returned the same type of response
-
-	// Removed on 0.35.8
-	// if slices.Contains(InvalidResponses, responseString) {
-	// 	return fmt.Errorf("response returned an empty value: %s", responseString)
-	// }
-	// return nil
 }
 
 func GetTimeoutInfo(chainMessage ChainMessageForSend) common.TimeoutInfo {

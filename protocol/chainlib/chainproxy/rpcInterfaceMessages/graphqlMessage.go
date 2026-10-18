@@ -298,12 +298,6 @@ func (gm *GraphQLMessage) RootFieldNames() []string {
 	return names
 }
 
-func (gm *GraphQLMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	// GraphQL-over-HTTP POST cannot carry a subscription, and the production streaming path on
-	// Sui is gRPC, so this interface serves no subscriptions. See NewGraphQLChainParser.
-	return ""
-}
-
 // GetRawRequestHash hashes everything that makes a GraphQL request unique: the method identity,
 // the body as written, and the forwarded headers.
 //
