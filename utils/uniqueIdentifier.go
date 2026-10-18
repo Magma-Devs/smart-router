@@ -3,12 +3,16 @@ package utils
 import (
 	"context"
 	"math/rand"
+	"time"
 )
 
 type unique_identifier_ctx_key struct{}
 
+// GenerateUniqueIdentifier mints a request GUID: the unix second in the top 32 bits, 32 random bits
+// below. The second makes any GUID a bounded log search; two GUIDs collide only when minted in the
+// same second with the same random bits.
 func GenerateUniqueIdentifier() uint64 {
-	return rand.Uint64()
+	return uint64(uint32(time.Now().Unix()))<<32 | uint64(rand.Uint32())
 }
 
 func WithUniqueIdentifier(ctx context.Context, guid uint64) context.Context {
