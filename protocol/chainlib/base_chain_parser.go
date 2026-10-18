@@ -805,20 +805,6 @@ func findParseDirectiveByTag(apiCollection *spectypes.ApiCollection, tag spectyp
 	return nil
 }
 
-// HeaderPassesOnReply reports whether a spec header directive of this kind lets the node's
-// header through to the client. pass_reply and pass_both say so by name. pass_ignore does
-// too: the spec type defines it as a header that "allows it to pass around but is not
-// signed", that is, passed, but kept out of the signed and compared payload because its
-// value differs per node (Aptos's x-aptos-ledger-timestampusec). The router signs nothing,
-// so "pass" is all that is left of it.
-func HeaderPassesOnReply(kind spectypes.Header_HeaderType) bool {
-	switch kind {
-	case spectypes.Header_pass_reply, spectypes.Header_pass_both, spectypes.Header_pass_ignore:
-		return true
-	}
-	return false
-}
-
 // replyHeaderDirectives collects the reply-direction header directives of the collections
 // in apiCollections (this interface's enabled ones), walking spec.ApiCollections so the
 // order is the spec's and not a map's. The first directive for a name wins; names compare
@@ -838,7 +824,7 @@ func replyHeaderDirectives(spec spectypes.Spec, apiCollections map[CollectionKey
 			continue
 		}
 		for _, header := range apiCollection.Headers {
-			if header == nil || !HeaderPassesOnReply(header.Kind) {
+			if header == nil || !common.HeaderPassesOnReply(header.Kind) {
 				continue
 			}
 			key := strings.ToLower(header.Name)

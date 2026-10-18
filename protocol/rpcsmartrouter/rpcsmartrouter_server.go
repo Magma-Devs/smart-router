@@ -4758,13 +4758,21 @@ func (rpcss *RPCSmartRouterServer) filterCachedReplyMetadata(reply *pairingtypes
 	if reply == nil || len(reply.Metadata) == 0 {
 		return
 	}
-	var collectionDirectives []*spectypes.Header
+	interfaceDirectives, collectionDirectives := rpcss.cachedReplyDirectives(protocolMessage)
+	reply.Metadata = common.FilterUpstreamReplyMetadata(reply.Metadata, interfaceDirectives, collectionDirectives)
+}
+
+// cachedReplyDirectives is the pair of directive lists a cached reply is filtered with,
+// whichever tier served it: the API interface's union and the matched collection's own,
+// the same two the live relay passes. A message with no collection (tests) runs on the
+// union alone.
+func (rpcss *RPCSmartRouterServer) cachedReplyDirectives(protocolMessage chainlib.ProtocolMessage) (interfaceDirectives, collectionDirectives []*spectypes.Header) {
 	if protocolMessage != nil {
 		if apiCollection := protocolMessage.GetApiCollection(); apiCollection != nil {
 			collectionDirectives = apiCollection.Headers
 		}
 	}
-	reply.Metadata = filterUpstreamReplyMetadata(reply.Metadata, rpcss.replyHeaderDirectives(), collectionDirectives)
+	return rpcss.replyHeaderDirectives(), collectionDirectives
 }
 
 // resolvePinDirectives returns the lava-select-provider and lava-stickiness directives,

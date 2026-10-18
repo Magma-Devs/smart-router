@@ -7,13 +7,10 @@ package chainproxy
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,7 +30,6 @@ const (
 	GRPCUseTls                                 = "use-tls"
 	GRPCAllowInsecureConnection                = "allow-insecure-connection"
 	MaximumNumberOfParallelConnectionsAttempts = 10
-	MaxCallRecvMsgSize                         = 1024 * 1024 * 512 // setting receive size to 512mb for large debug responses
 )
 
 // NumberOfParallelConnections is the DEFAULT pool size — the default value of the
@@ -255,52 +251,21 @@ func NewGRPCConnector(lifetimeCtx, dialCtx context.Context, nConns uint, nodeUrl
 	return connector, nil
 }
 
-// grpcDialOptions assembles the options shared by every dial this connector makes: the
-// transport credentials the caller decided on, the receive-size cap, and (MAG-2218) the
-// endpoint's configured auth-headers. All three dial sites in this file go through it, so
-// the auth attachment cannot be present on one path and missing on another — which is the
-// class of bug MAG-2218 was.
-func (connector *GRPCConnector) grpcDialOptions(transport grpc.DialOption) []grpc.DialOption {
-	authOpts := connector.nodeUrl.GrpcAuthDialOptions()
-	opts := make([]grpc.DialOption, 0, 3+len(authOpts))
-	opts = append(opts,
-		grpc.WithBlock(),
-		transport,
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(MaxCallRecvMsgSize)),
-	)
-	return append(opts, authOpts...)
+// GRPCConnectorInterface is what the gRPC chain proxy and the direct gRPC connection
+// need of a GRPCConnector: a pooled client to borrow and hand back, and a way to close
+// the pool. It is the seam their tests substitute, declared once here rather than once
+// per user.
+type GRPCConnectorInterface interface {
+	GetRpc(ctx context.Context, block bool) (*grpc.ClientConn, error)
+	ReturnRpc(rpc *grpc.ClientConn)
+	Close()
 }
 
-func getTlsConf(nodeUrl common.NodeUrl) *tls.Config {
-	var tlsConf tls.Config
-	cacert := nodeUrl.AuthConfig.GetCaCertificateParams()
-	if cacert != "" {
-		utils.LavaFormatDebug("Loading ca certificate from local path", utils.Attribute{Key: "cacert", Value: cacert})
-		caCert, err := os.ReadFile(cacert)
-		if err == nil {
-			caCertPool := x509.NewCertPool()
-			caCertPool.AppendCertsFromPEM(caCert)
-			tlsConf.RootCAs = caCertPool
-			tlsConf.InsecureSkipVerify = true
-		} else {
-			utils.LavaFormatError("Failed loading CA certificate, continuing with a default certificate", err)
-		}
-	} else {
-		keyPem, certPem := nodeUrl.AuthConfig.GetLoadingCertificateParams()
-		if keyPem != "" && certPem != "" {
-			utils.LavaFormatDebug("Loading certificate from local path", utils.Attribute{Key: "certPem", Value: certPem}, utils.Attribute{Key: "keyPem", Value: keyPem})
-			cert, err := tls.LoadX509KeyPair(certPem, keyPem)
-			if err != nil {
-				utils.LavaFormatError("Failed setting up tls certificate from local path, continuing with dynamic certificates", err)
-			} else {
-				tlsConf.Certificates = []tls.Certificate{cert}
-			}
-		}
-	}
-	if nodeUrl.AuthConfig.AllowInsecure {
-		tlsConf.InsecureSkipVerify = true
-	}
-	return &tlsConf
+// dialOptions is every dial this connector makes: the shared options for the endpoint
+// (common.NodeUrl.GRPCDialOptions) with the transport decided here, dialled blocking so a
+// caller waiting on a pool refill fails fast on an unreachable node.
+func (connector *GRPCConnector) dialOptions(transport grpc.DialOption) []grpc.DialOption {
+	return connector.nodeUrl.GRPCDialOptions(transport, grpc.WithBlock())
 }
 
 func (connector *GRPCConnector) setCredentials(credentials credentials.TransportCredentials) {
@@ -354,7 +319,7 @@ func (connector *GRPCConnector) increaseNumberOfClients(ctx context.Context, num
 	for connectionAttempt := 0; connectionAttempt < MaximumNumberOfParallelConnectionsAttempts; connectionAttempt++ {
 		nctx, cancel := connector.nodeUrl.LowerContextTimeoutWithDuration(ctx, common.AverageWorldLatency*2)
 		dialAddr, _ := grpcDialAddress(connector.nodeUrl.Url)
-		grpcClient, err = grpc.DialContext(nctx, dialAddr, connector.grpcDialOptions(connector.getTransportCredentials())...)
+		grpcClient, err = grpc.DialContext(nctx, dialAddr, connector.dialOptions(connector.getTransportCredentials())...)
 		if err != nil {
 			utils.LavaFormatDebug("increaseNumberOfClients, Could not connect to the node, retrying", []utils.Attribute{{Key: "err", Value: err.Error()}, {Key: "Number Of Attempts", Value: connectionAttempt}, {Key: "nodeUrl", Value: connector.nodeUrl.UrlStr()}}...)
 			cancel()
@@ -585,8 +550,7 @@ func (connector *GRPCConnector) createConnection(ctx context.Context, nodeUrl co
 	// in the case the grpc server needs to connect using tls, but we haven't set credentials yet, should only happen once
 	if nodeUrl.AuthConfig.GetUseTls() && connector.getCredentials() == nil {
 		// this will allow us to use self signed certificates in development.
-		tlsConf := getTlsConf(nodeUrl)
-		connector.setCredentials(credentials.NewTLS(tlsConf))
+		connector.setCredentials(credentials.NewTLS(nodeUrl.AuthConfig.TLSConfig()))
 	}
 
 	for {
@@ -604,7 +568,7 @@ func (connector *GRPCConnector) createConnection(ctx context.Context, nodeUrl co
 			return nil, ctx.Err()
 		}
 		nctx, cancel := connector.nodeUrl.LowerContextTimeoutWithDuration(ctx, common.AverageWorldLatency*2)
-		rpcClient, err = grpc.DialContext(nctx, addr, connector.grpcDialOptions(connector.getTransportCredentials())...)
+		rpcClient, err = grpc.DialContext(nctx, addr, connector.dialOptions(connector.getTransportCredentials())...)
 		cancel()
 		if err == nil {
 			return rpcClient, nil
@@ -613,12 +577,11 @@ func (connector *GRPCConnector) createConnection(ctx context.Context, nodeUrl co
 		// in case the provider didn't set TLS config and there are no active connections will do a retry with secure connection in case the endpoint is secure
 		if connector.getCredentials() == nil && connector.numberOfFreeClients()+connector.numberOfUsedClients() == 0 {
 			if credentialsToConnect == nil {
-				tlsConf := getTlsConf(nodeUrl)
-				credentialsToConnect = credentials.NewTLS(tlsConf)
+				credentialsToConnect = credentials.NewTLS(nodeUrl.AuthConfig.TLSConfig())
 			}
 			nctx, cancel := connector.nodeUrl.LowerContextTimeoutWithDuration(ctx, common.AverageWorldLatency*2)
 			var errNew error
-			rpcClient, errNew = grpc.DialContext(nctx, addr, connector.grpcDialOptions(grpc.WithTransportCredentials(credentialsToConnect))...)
+			rpcClient, errNew = grpc.DialContext(nctx, addr, connector.dialOptions(grpc.WithTransportCredentials(credentialsToConnect))...)
 			cancel()
 			if errNew == nil {
 				// this means our endpoint is TLS, and we support upgrading even if the config didn't explicitly say it
