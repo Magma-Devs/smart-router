@@ -372,7 +372,7 @@ func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (h
 // not retried and not scored. Anything else keeps the reply's status.
 func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) int {
 	if httpStatusCode != 0 && (httpStatusCode < 200 || httpStatusCode >= 300) {
-		return httpStatusCode
+		return graphQLGatewayRefusalStatus(data, httpStatusCode)
 	}
 	envelope := graphQLResponseEnvelope{}
 	if err := json.Unmarshal(data, &envelope); err != nil {
