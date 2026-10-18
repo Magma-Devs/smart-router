@@ -656,7 +656,7 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 	// start polling every averageBlockTime/4, then averageBlockTime/8 after passing middle, then averageBlockTime/16 after passing averageBlockTime*3/4
 	// so polling at averageBlockTime/4,averageBlockTime/2,averageBlockTime*5/8,averageBlockTime*3/4,averageBlockTime*13/16,,averageBlockTime*14/16,,averageBlockTime*15/16,averageBlockTime*16/16,averageBlockTime*17/16
 	// initial polling = averageBlockTime/16
-	cs.latestChangeTime = time.Time{} // we will discard the first change time, so this is uninitialized
+	cs.setLatestChangeTime(time.Time{}) // we will discard the first change time, so this is uninitialized
 
 	// Per-endpoint trackers (flatPollInterval > 0) poll every HealthyPollInterval(flatPollInterval).
 	// CRITICAL (MAG-2159 finding 3): the periodic timer must NOT start counting until

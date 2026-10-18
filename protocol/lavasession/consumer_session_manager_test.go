@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2973,21 +2972,24 @@ func TestResetValidAddresses_ClearsTheRedemptionFlagLikeTheOtherReleases(t *test
 // would erase a redemption still in flight, and its success would then not return the provider to
 // rotation (MAG-4278).
 func TestSameEpochRebuild_KeepsTheRedemptionFlagOfAReblockedProvider(t *testing.T) {
+	// The drain is driven directly, under the lock, the way UpdateAllProviders runs it. Going through
+	// UpdateAllProviders instead races its deferred checkAndUnblockHealthyReBlockedProviders, which
+	// runs on a goroutine after a random sleep of up to 500 ms and may release the provider (and
+	// clear its flag, as every release does) before the assertion.
 	csm := CreateConsumerSessionManager()
-	pairing := createPairingList("", true)
-	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
 
-	address := csm.validAddresses[0]
-	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonExplicitSignal, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
+	csm.lock.Lock()
+	csm.pairing = map[string]*ConsumerSessionsWithProvider{
+		"provider-a": {PublicLavaAddress: "provider-a", Endpoints: []*Endpoint{{NetworkAddress: "addr-a"}}},
+	}
+	csm.pairingAddresses = map[uint64]string{0: "provider-a"}
+	csm.pairingAddressesLength = 1
+	csm.currentlyBlockedProviderAddresses = []string{"provider-a"}
 	// What the blocked-list fallback writes when it hands out a redemption session.
-	csm.pairing[address].atomicWriteBlockedStatus(BlockedProviderSessionUsedStatus)
+	csm.pairing["provider-a"].atomicWriteBlockedStatus(BlockedProviderSessionUsedStatus)
+	csm.setValidAddressesToDefaultValue("", nil, context.Background(), ReleaseEpochRebuild)
+	csm.lock.Unlock()
 
-	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
-
-	csm.lock.RLock()
-	reblocked := slices.Contains(csm.currentlyBlockedProviderAddresses, address)
-	csm.lock.RUnlock()
-	require.True(t, reblocked, "the rebuild carries the block over")
-	require.Equal(t, BlockedProviderSessionUsedStatus, csm.pairing[address].atomicReadBlockedStatus(),
-		"a provider the rebuild keeps blocked must keep the flag its in-flight redemption reads")
+	require.Equal(t, BlockedProviderSessionUsedStatus, csm.pairing["provider-a"].atomicReadBlockedStatus(),
+		"the epoch rebuild's drain must keep the flag an in-flight redemption reads")
 }

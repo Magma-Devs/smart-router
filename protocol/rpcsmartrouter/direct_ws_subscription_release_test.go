@@ -33,6 +33,9 @@ func newReleaseHarness(t *testing.T) *releaseHarness {
 		[]*common.NodeUrl{{Url: srv.URL()}},
 		nil, nil, nil,
 	)
+	// Closed before the node: a subscription left live at the end of a test would otherwise
+	// see the node go away and keep the pool reconnecting with backoff into the next tests.
+	t.Cleanup(manager.Close)
 	return &releaseHarness{t: t, srv: srv, manager: manager}
 }
 
