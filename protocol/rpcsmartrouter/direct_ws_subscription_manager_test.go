@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -63,7 +64,15 @@ type mockSubscriptionServer struct {
 	// conns holds every server-side socket still open, so a test can drop them all and
 	// watch the router restore its subscriptions.
 	conns []*websocket.Conn
+
+	// refusing makes the node refuse every new connection, which is what an outage looks
+	// like to the router; refusedDials counts the dials it turned away.
+	refusing     atomic.Bool
+	refusedDials atomic.Int32
 }
+
+// setRefusing turns the node's outage on or off.
+func (ms *mockSubscriptionServer) setRefusing(refuse bool) { ms.refusing.Store(refuse) }
 
 // safeWriteMessage serializes WS writes: handleWS (response) and the spawned sendSubscriptionMessages
 // goroutine both write the same conn, and gorilla/websocket forbids concurrent writers (data race
@@ -89,6 +98,11 @@ func newMockSubscriptionServer() *mockSubscriptionServer {
 }
 
 func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Request) {
+	if ms.refusing.Load() {
+		ms.refusedDials.Add(1)
+		http.Error(w, "node down", http.StatusServiceUnavailable)
+		return
+	}
 	conn, err := ms.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -278,6 +292,10 @@ func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn,
 			}
 			msgBytes, _ := json.Marshal(notification)
 			if err := ms.safeWriteMessage(conn, websocket.TextMessage, msgBytes); err != nil {
+				// The socket is gone, and so is the subscription: a node's subscriptions
+				// live and die with the connection that opened them. The router must not
+				// redial just to unsubscribe one of these (MAG-4242).
+				ms.closeSubscription(subID)
 				return
 			}
 		}
