@@ -626,6 +626,15 @@ type RelayResult struct {
 	// opposed to answering truthfully about a request it cannot satisfy. This is what the
 	// endpoint-health counter reads; see LavaError.EndpointAtFault for why it is not Retryable.
 	IsNodeAtFault bool
+	// EndedOnNodeError is set by the relay processor on the result it hands back when no attempt
+	// succeeded and a node's error answer is what the client receives (MAG-4374). The client still
+	// gets that answer as the node wrote it — a revert, a GraphQL error document, a rejected
+	// signature — so the relay returns no error; but the request did not succeed, and the
+	// request-level verdicts (the retry incident, the customer's request) read this flag rather
+	// than "err == nil". Not the same as IsNodeError, which is the sender's transport-level verdict:
+	// the relay processor files a reply as a node error by CheckResponseError, and on REST a 2xx
+	// carrying a Cosmos transaction error is one while IsNodeError stays false.
+	EndedOnNodeError bool
 	// CacheLookup is what each cache tier did on the attempt that produced this result,
 	// surfaced to the caller as Lava-Cache-Tier / Lava-Cache-Outcome when the request
 	// carried lava-debug-relay. Same shape as the per-request serving facts above that

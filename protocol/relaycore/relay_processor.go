@@ -1444,9 +1444,9 @@ func (rp *RelayProcessor) processCrossValidationResult(
 }
 
 // processNonCrossValidationResult handles Stateful and Stateless modes, which share the same result
-// selection: first success, else the first non-retryable node error, else the first node error, else a
-// failure result built from the best node/protocol error. (Stateful fans out without retries and
-// Stateless retries sequentially, but that difference lives in the state machine, not here.)
+// selection: first success, else the node error the relay ends on (nodeErrorAnswer), else a failure
+// result built from the best node/protocol error. (Stateful fans out without retries and Stateless
+// retries sequentially, but that difference lives in the state machine, not here.)
 func (rp *RelayProcessor) processNonCrossValidationResult(
 	successResults, nodeErrors []common.RelayResult,
 	protocolErrors []RelayError,
@@ -1457,24 +1457,62 @@ func (rp *RelayProcessor) processNonCrossValidationResult(
 		return &result, nil
 	}
 
-	// No successes: return a node error, a non-retryable one first. A non-retryable error is a fact
-	// about the chain or the request, the same from every node, and it is the answer that ended the
-	// request. A retryable one is the node's claim about itself (MAG-2771): a refusal, a limit, data
-	// it does not hold. Taking the first error to arrive handed the caller the refusing provider's
-	// "method not found" even after the provider it was retried on had answered with the revert.
+	// No successes: the relay ends on a node's error answer, returned with no error so the client
+	// receives it as the node wrote it. It is marked, because the request did not succeed: the
+	// request-level verdicts read the mark, not err (MAG-4374).
+	//
+	// Two outcomes are not an answer and go to buildFailureResult instead. Every attempt refused for
+	// rate — the rate limit inside the body (Sui's RESOURCE_EXHAUSTED, a JSON-RPC error whose code is
+	// 429) or a typed 429 — is a chain that is temporarily unservable, a 503 whichever shape the
+	// refusal arrived in; an HTTP 429 always reached that 503, while the in-body shape ended on the
+	// first refusal with a 200. And a node error that is a 2xx with nothing in it carries no answer:
+	// when that is all there is, the client gets a 502 rather than a 200 with no body.
 	if len(nodeErrors) > 0 {
-		for i := range nodeErrors {
-			if nodeErrors[i].IsNonRetryable {
-				result := nodeErrors[i]
+		if !onlyRateLimited(nodeErrors, protocolErrors) {
+			if answer := nodeErrorAnswer(nodeErrors); answer != nil {
+				result := *answer
+				result.EndedOnNodeError = true
 				return &result, nil
 			}
 		}
-		result := nodeErrors[0]
-		return &result, nil
+		return rp.buildFailureResult(nodeErrors, protocolErrors)
 	}
 
 	// No node responses at all - build a failure result from the best node/protocol error.
 	return rp.buildFailureResult(nodeErrors, protocolErrors)
+}
+
+// nodeErrorAnswer picks the node error a relay with no success ends on, a non-retryable one first. A
+// non-retryable error is a fact about the chain or the request, the same from every node, and it is
+// the answer that ended the request. A retryable one is the node's claim about itself (MAG-2771): a
+// refusal, a limit, data it does not hold. Taking the first error to arrive handed the caller the
+// refusing provider's "method not found" even after the provider it was retried on had answered with
+// the revert.
+//
+// A node error that carries no answer (carriesNoAnswer) is never picked: an empty 2xx is what a
+// gateway sends when it has nothing to say, and handing it over told the client its request had
+// succeeded with no result (MAG-4374). Returns nil when every node error is one.
+func nodeErrorAnswer(nodeErrors []common.RelayResult) *common.RelayResult {
+	var first *common.RelayResult
+	for i := range nodeErrors {
+		if carriesNoAnswer(&nodeErrors[i]) {
+			continue
+		}
+		if nodeErrors[i].IsNonRetryable {
+			return &nodeErrors[i]
+		}
+		if first == nil {
+			first = &nodeErrors[i]
+		}
+	}
+	return first
+}
+
+// carriesNoAnswer reports whether a result is a 2xx with an empty body. A non-2xx keeps its status as
+// its answer even with no body (an empty 404 from a gateway is a route refusal, and says so), and a
+// status of 0 is gRPC's codes.OK or "not set", whose error travels outside the body.
+func carriesNoAnswer(result *common.RelayResult) bool {
+	return result.StatusCode >= 200 && result.StatusCode < 300 && len(result.GetReply().GetData()) == 0
 }
 
 // onlyRateLimited reports whether at least one attempt failed and every failure was an
@@ -1542,6 +1580,14 @@ func (rp *RelayProcessor) buildFailureResult(
 		// lock and make the 503 permanent for every later ProcessingResult call.
 		stamped := *returnedResult
 		stamped.StatusCode = http.StatusServiceUnavailable
+		returnedResult = &stamped
+	} else if carriesNoAnswer(returnedResult) {
+		// Every node error was a 2xx with nothing in it (processNonCrossValidationResult picks any
+		// other answer first). Never a 200 without a body (MAG-4374): a 502 is what a gateway that
+		// answered with nothing is, and the client reads the error body the listener writes for a
+		// failed relay. Copied for the same reason as the 503 stamp above.
+		stamped := *returnedResult
+		stamped.StatusCode = http.StatusBadGateway
 		returnedResult = &stamped
 	}
 

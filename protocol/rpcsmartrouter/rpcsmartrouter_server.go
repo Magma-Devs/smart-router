@@ -1623,11 +1623,22 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		utils.LogAttr("GUID", ctx),
 	)
 
+	// Whether the request succeeded, for every request-level verdict below: the retry, consistency
+	// and hedge incidents, and the customer's request. err == nil is not that answer on its own.
+	// A relay that ends on a node's error answer returns no error, so the client receives the
+	// node's own reply — but no attempt succeeded, and reading err alone counted every relay the
+	// customer received as an error as "recovered by retry" and as a customer success (MAG-4374).
+	endedOnNodeError := err == nil && returnedResult != nil && returnedResult.EndedOnNodeError
+	succeeded := err == nil && !endedOnNodeError
+
 	// Set the request-level Success once, on the request goroutine (both the success and failure
 	// paths below flow through here). relayInnerDirect no longer writes analytics.Success, so a
-	// detached CV straggler cannot race this or the downstream consumer (MAG-2187).
+	// detached CV straggler cannot race this or the downstream consumer (MAG-2187). EndedOnNodeError
+	// goes with it: the listener's metric hook recomputes Success from the error it was handed,
+	// which is nil on this path.
 	if analytics != nil {
-		analytics.Success = err == nil
+		analytics.Success = succeeded
+		analytics.EndedOnNodeError = endedOnNodeError
 	}
 
 	// Cross-validation cache write: per-response writes are skipped in the relay goroutines (a
@@ -1641,7 +1652,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		rpcss.tryCacheWrite(ctx, protocolMessage, returnedResult)
 	}
 
-	pendingProviders := rpcss.appendHeadersToRelayResult(ctx, returnedResult, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, err == nil)
+	pendingProviders := rpcss.appendHeadersToRelayResult(ctx, returnedResult, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, succeeded)
 
 	// Start the async straggler watcher AFTER the headers snapshot (MAG-2187): it becomes the responses
 	// channel's sole reader and resolves the exact pending set the header just reported. No-op when

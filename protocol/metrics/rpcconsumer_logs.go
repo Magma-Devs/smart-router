@@ -172,9 +172,17 @@ func (rpccl *RPCConsumerLogs) RecordProviderLatency(chainId string, apiInterface
 	rpccl.consumerMetricsManager.RecordProviderLatency(chainId, apiInterface, providerAddress, method, latencyMs)
 }
 
+// requestSucceeded is a request's final outcome for the per-customer metrics and the usage event:
+// the relay returned no error, and it did not end on a node's error answer. A relay that ends on
+// one returns no error, so the client receives the node's own reply; read from that nil error
+// alone, a request the customer received as an error counted as a success (MAG-4374).
+func requestSucceeded(data *RelayMetrics, err error) bool {
+	return err == nil && !data.EndedOnNodeError
+}
+
 func (rpccl *RPCConsumerLogs) AddMetricForHttp(data *RelayMetrics, err error, headers map[string][]string) {
 	// Set Success before SetRelayMetrics and Emit: both read it.
-	data.Success = err == nil
+	data.Success = requestSucceeded(data, err)
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
 	// headers must hold owned strings: this runs in a goroutine after the reply, and strings.Join
 	// of a single value returns that value itself rather than a copy. The HTTP listeners pass
@@ -193,7 +201,7 @@ func (rpccl *RPCConsumerLogs) emitUsage(data *RelayMetrics) {
 }
 
 func (rpccl *RPCConsumerLogs) AddMetricForWebSocket(data *RelayMetrics, err error) {
-	data.Success = err == nil
+	data.Success = requestSucceeded(data, err)
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
 	rpccl.emitUsage(data)
 }
@@ -207,7 +215,7 @@ func (rpccl *RPCConsumerLogs) AddMetricForGrpc(data *RelayMetrics, err error, me
 		}
 		return headerValue
 	}
-	data.Success = err == nil
+	data.Success = requestSucceeded(data, err)
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
 	// Origin crosses into the async OTel emit path, so it must be an owned string. It is one
 	// already on every listener: the HTTP listeners hand over chainlib's detached copy of fiber's

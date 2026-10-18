@@ -281,7 +281,7 @@ request the router could not parse is not counted.
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `smartrouter_customer_requests_total` | Counter | `spec`, `apiInterface`, `customer`, `method` | Client requests. |
-| `smartrouter_customer_requests_failed_total` | Counter | `spec`, `apiInterface`, `customer`, `method` | Client requests that ended in an error to the client. |
+| `smartrouter_customer_requests_failed_total` | Counter | `spec`, `apiInterface`, `customer`, `method` | Client requests that ended in an error to the client: a router error, or a node's error answer when no attempt succeeded (a revert, a not-found, a rejected transaction, a GraphQL error document — the client receives the node's reply as written, but the request did not succeed; MAG-4374). |
 | `smartrouter_customer_end_to_end_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `customer` | Latency of successful client requests. No `method`: it is the family whose series multiply. |
 | `smartrouter_customer_overflow_total` | Counter | `spec` | Values collapsed to `customer="other"`. |
 
@@ -366,8 +366,8 @@ node on the router offers it, the request is still served without it and the rep
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `smartrouter_retries_total` | Counter | `spec`, `apiInterface`, `method` | Retry attempts triggered (beyond the first try). |
-| `smartrouter_retries_success_total` | Counter | `spec`, `apiInterface`, `method` | Retried requests that succeeded. |
-| `smartrouter_retries_failed_total` | Counter | `spec`, `apiInterface`, `method` | Retried requests that failed. |
+| `smartrouter_retries_success_total` | Counter | `spec`, `apiInterface`, `method` | Retried requests that succeeded. A retried request that ended on a node's error answer is a failed retry, not a recovered one (MAG-4374). |
+| `smartrouter_retries_failed_total` | Counter | `spec`, `apiInterface`, `method` | Retried requests that failed, including those that ended on a node's error answer. |
 | `smartrouter_retry_attempts` | Histogram | `spec`, `apiInterface`, `method` | Attempts per retried request (buckets 1…10). |
 
 A hedged request is counted here as well. A hedge is an extra attempt, and these series are

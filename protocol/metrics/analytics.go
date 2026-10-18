@@ -32,6 +32,11 @@ type RelayMetrics struct {
 	IsBatch         bool
 	// Incident tracking fields — set during relay processing
 	HedgeCount uint64 // number of hedge relays sent by the batch ticker for this request
+	// EndedOnNodeError is true when no attempt succeeded and the client received a node's error
+	// answer (MAG-4374). The relay returns no error on that path, so the client gets the node's own
+	// reply, and the listener's metric hook would read the request as a success from that nil error
+	// alone; this field is what tells it otherwise.
+	EndedOnNodeError bool
 }
 
 func NewRelayAnalytics(projectHash, chainId, apiType string) *RelayMetrics {
