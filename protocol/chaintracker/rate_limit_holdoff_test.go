@@ -177,7 +177,9 @@ func TestNoteFetchOutcome_NoAnswerKeepsTheHoldoff(t *testing.T) {
 	cs.noteFetchOutcome(errors.New("dial tcp 10.0.0.1:443: connect: connection refused"))
 	require.True(t, registry.HeldOff(holdoffTestURL, holdoffTestURL), "a fetch with no answer must not clear the hold-off")
 
-	// The strike survived: the next refusal escalates instead of starting over.
+	// The strike survived: the next refusal escalates instead of starting over. It comes after the
+	// hold-off ran out, as the floored poll's would; one inside it is no new strike (MAG-4386).
+	now = now.Add(holdoff.InitialHoldoff + time.Second)
 	require.Equal(t, 2*holdoff.InitialHoldoff, cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0)))
 
 	cs.noteFetchOutcome(nil)
@@ -206,7 +208,9 @@ func TestNoteFetchOutcome_OwnRateLimitDoesNotHoldTheProviderForRelays(t *testing
 	require.False(t, providerHeld, "a polled leg's 429 must not take the provider out of relay selection")
 	require.False(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL), "nothing lands under the relay path's key")
 	require.True(t, registry.HeldOff(holdoffTestURL, holdoffTestURL), "the url itself is held, as the ws and gRPC paths key it")
-	require.Greater(t, cs.computePollInterval(0, 0), holdoff.InitialHoldoff, "and the poll still waits its own hold-off out")
+	got := cs.computePollInterval(0, 0)
+	require.Greater(t, got, holdoff.InitialHoldoff-time.Second, "and the poll still waits its own hold-off out")
+	require.LessOrEqual(t, got, holdoff.InitialHoldoff, "three refusals inside one hold-off are one strike (MAG-4386)")
 }
 
 // Any answer from the url clears: a relay serving the url fine — recorded by the relay path under
