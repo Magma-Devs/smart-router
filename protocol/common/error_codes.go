@@ -391,8 +391,8 @@ var (
 	// transaction answered with ABORTED can be on chain. It does not decide a write's verdict
 	// here. A gRPC status error comes back as a node error carrying the node's own message, and
 	// writeOutcomeIsUnknown reads this flag only from protocol errors, so the caller gets Sui's
-	// ABORTED answer, with its "retriable with another submission" text, rather than
-	// errUnknownWriteOutcome.
+	// ABORTED answer, with its "retriable with another submission" text, rather than a "transaction
+	// status unclear" error (unclearWriteError).
 	//
 	// A node error, not PROTOCOL_PROVIDER_ABORTED (1013). That code is CategoryInternal, which
 	// would report the endpoint as unreachable and rank the node's own message below internal
