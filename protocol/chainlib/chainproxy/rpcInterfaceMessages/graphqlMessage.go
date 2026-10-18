@@ -114,18 +114,21 @@ type GraphQLMessage struct {
 // the request has to survive string literals containing braces, block strings, aliases, inline
 // comments and root-level fragment spreads. A scanner gets those wrong in the direction that
 // silently files traffic under the wrong api name.
+//
+// A request it cannot read or run is returned as a *GraphQLRequestError, which the listener
+// answers itself as a GraphQL response, the way a node answers the same request (MAG-4351).
 func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 	envelope := graphQLRequestEnvelope{}
 	if err := json.Unmarshal(data, &envelope); err != nil {
-		return nil, fmt.Errorf("failed unmarshalling graphql request body: %w", err)
+		return nil, newGraphQLBadRequestError(data, fmt.Errorf("failed unmarshalling graphql request body: %w", err))
 	}
 	if strings.TrimSpace(envelope.Query) == "" {
-		return nil, errors.New("graphql request carries no query")
+		return nil, newGraphQLNoDocumentError(errors.New("graphql request carries no query"))
 	}
 
 	doc, err := gqlparser.ParseQuery(&ast.Source{Input: envelope.Query})
 	if err != nil {
-		return nil, fmt.Errorf("failed parsing graphql query: %w", err)
+		return nil, newGraphQLParseError(fmt.Errorf("failed parsing graphql query: %w", err))
 	}
 
 	operation, err := selectGraphQLOperation(doc, envelope.OperationName)
@@ -136,7 +139,8 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 	// names with Query (checkpoints, transactions, events). Accepted, a subscription would resolve to
 	// the read of the same name and be cached and cross-validated as that read.
 	if operation.Operation == ast.Subscription {
-		return nil, errors.New("graphql subscriptions are not served over HTTP POST")
+		return nil, newGraphQLOperationError("Subscriptions are not supported on this transport.",
+			errors.New("graphql subscriptions are not served over HTTP POST"))
 	}
 
 	rootFields, err := graphQLRootFields(doc, operation, envelope.Variables)
@@ -159,11 +163,14 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 // GraphQL spec's own rule and not a simplification.
 func selectGraphQLOperation(doc *ast.QueryDocument, operationName string) (*ast.OperationDefinition, error) {
 	if len(doc.Operations) == 0 {
-		return nil, errors.New("graphql document defines no operation")
+		// A document of fragments alone; Sui files it as a parse failure.
+		return nil, newGraphQLCodedError(GraphQLParseFailedCode, "document does not contain an operation", nil,
+			errors.New("graphql document defines no operation"))
 	}
 	if operationName == "" {
 		if len(doc.Operations) > 1 {
-			return nil, errors.New("graphql document defines multiple operations and the request names none")
+			return nil, newGraphQLOperationError("Operation name required in request.",
+				errors.New("graphql document defines multiple operations and the request names none"))
 		}
 		return doc.Operations[0], nil
 	}
@@ -172,7 +179,8 @@ func selectGraphQLOperation(doc *ast.QueryDocument, operationName string) (*ast.
 			return operation, nil
 		}
 	}
-	return nil, fmt.Errorf("graphql document defines no operation named %q", operationName)
+	return nil, newGraphQLOperationError(fmt.Sprintf("Unknown operation named %q", operationName),
+		fmt.Errorf("graphql document defines no operation named %q", operationName))
 }
 
 // graphQLRootFields flattens the operation's root selection set into the fields it actually
@@ -204,12 +212,18 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 					return err
 				}
 			case *ast.FragmentSpread:
+				// Both failures are validation rules (NoFragmentCycles, KnownFragmentNames), answered
+				// at the spread that broke them.
 				if _, cyclic := expanding[typed.Name]; cyclic {
-					return fmt.Errorf("graphql fragment %q is cyclic", typed.Name)
+					return newGraphQLCodedError(GraphQLValidationFailedCode,
+						fmt.Sprintf("Cannot spread fragment %q within itself.", typed.Name), fragmentSpreadLocation(typed),
+						fmt.Errorf("graphql fragment %q is cyclic", typed.Name))
 				}
 				fragment := doc.Fragments.ForName(typed.Name)
 				if fragment == nil {
-					return fmt.Errorf("graphql query spreads undefined fragment %q", typed.Name)
+					return newGraphQLCodedError(GraphQLValidationFailedCode,
+						fmt.Sprintf("Unknown fragment %q.", typed.Name), fragmentSpreadLocation(typed),
+						fmt.Errorf("graphql query spreads undefined fragment %q", typed.Name))
 				}
 				expanding[typed.Name] = struct{}{}
 				err := walk(fragment.SelectionSet)
@@ -226,7 +240,8 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 		return nil, err
 	}
 	if len(rootFields) == 0 {
-		return nil, errors.New("graphql operation selects no root field")
+		return nil, newGraphQLCodedError(GraphQLValidationFailedCode, "The operation selects no field.", nil,
+			errors.New("graphql operation selects no root field"))
 	}
 	return rootFields, nil
 }

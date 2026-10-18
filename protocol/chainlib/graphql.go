@@ -412,6 +412,23 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		relayResult, err := apil.relaySender.SendRelay(ctx, "", requestBody, http.MethodPost, dappID, userIp, analytics, graphqlHeaders)
 		reply := relayResult.GetReply()
 		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
+		// A request the router cannot read never reached a node: it is the caller's mistake, and it
+		// is answered the way a node answers it, as a GraphQL response with the reason and its
+		// position, never as a 5xx (MAG-4351). It is logged as an answer, not as a router failure.
+		// The metric above counts no customer failure for it: the request never named a method.
+		var requestError *rpcInterfaceMessages.GraphQLRequestError
+		if errors.As(err, &requestError) {
+			response := requestError.Response()
+			utils.LavaFormatInfo("graphql request answered without a relay: the router cannot read it",
+				utils.LogAttr("GUID", msgSeed),
+				utils.LogAttr("status", requestError.HTTPStatus),
+				utils.LogAttr("code", requestError.Code),
+				utils.LogAttr("reason", requestError.Error()),
+			)
+			apil.logger.LogRequestAndResponse("graphql in/out", false, http.MethodPost, path, requestBody, string(response), msgSeed, time.Since(startTime), nil)
+			fiberCtx.Status(requestError.HTTPStatus)
+			return addHeadersAndSendBytes(fiberCtx, []pairingtypes.Metadata{{Name: common.GUID_HEADER_NAME, Value: msgSeed}}, response)
+		}
 		if err != nil {
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody, errMasking, msgSeed, time.Since(startTime), err)
