@@ -65,9 +65,12 @@ func TestRestoreAfterTeardown_LeavesNoUpstreamSubscription(t *testing.T) {
 
 // TestUnsubscribeDuringRestore_TellsTheNodeTheRestoredID: the last client's eth_unsubscribe
 // is waiting on the node when the restore commits. Unsubscribe told the node the id it read
-// before its call; the restore replaced that id and connection while the entry was still
-// mapped, so the teardown must tell the node the restored one or it stays live with nobody
-// reading it.
+// before its call; the restore replaced that id while the entry was still mapped, so the
+// teardown must tell the node the restored one or it stays live with nobody reading it.
+//
+// The restore runs on a connection that stays healthy, because rpcclient gave up on the
+// subscription's queue. That is the only restore the unsubscribe can race on the node: after a
+// dropped socket the connection is retired, so there is no node left to call (MAG-4242).
 func TestUnsubscribeDuringRestore_TellsTheNodeTheRestoredID(t *testing.T) {
 	h := newReleaseHarness(t)
 	reached := make(chan struct{})
@@ -93,20 +96,19 @@ func TestUnsubscribeDuringRestore_TellsTheNodeTheRestoredID(t *testing.T) {
 
 	sub := h.subscribe("ws-1")
 	t.Cleanup(sub.disconnect)
-	h.manager.lock.RLock()
-	var activeSub *directActiveSubscription
-	for _, s := range h.manager.activeSubscriptions {
-		activeSub = s
-	}
-	h.manager.lock.RUnlock()
-	oldID := upstreamIDOf(activeSub)
+	// The client reads, as a live one does; a client that stopped would be dropped as slow.
+	countReplies(sub)
+	activeSub := h.subscriptionOf(sub.clientKey)
+	require.NotNil(t, activeSub)
+	conn, oldID := h.upstreamOf(activeSub)
 
-	h.srv.dropConnections()
+	overflowSubscription(t, h, activeSub)
 	select {
 	case <-reached:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the restore never re-subscribed on the node")
 	}
+	require.True(t, conn.IsHealthy(), "the restore's connection must still answer the unsubscribe")
 
 	// The node reads and applies the unsubscribe but cannot answer yet.
 	h.srv.writeMu.Lock()
