@@ -10,9 +10,8 @@ import (
 	"time"
 
 	"github.com/jhump/protoreflect/desc"
-	"github.com/jhump/protoreflect/grpcreflect"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -79,8 +78,15 @@ type UpstreamGRPCStreamConnection struct {
 	createdAt        time.Time
 	activeStreams    atomic.Int32                                        // Number of active streams on this connection
 	descriptorsCache *common.SafeSyncMap[string, *desc.MethodDescriptor] // Cached method descriptors
-	lock             sync.RWMutex
-	closed           atomic.Bool
+	// resolver fills descriptorsCache: the same single-flight, whole-service,
+	// reflection-timeout resolver the unary connection uses (MAG-4278 #18), lent
+	// this connection's channel through lendChannel. lifetime bounds its lookups
+	// and ends with Close.
+	resolver    *lavasession.GRPCDescriptorResolver
+	lifetime    context.Context
+	endLifetime context.CancelFunc
+	lock        sync.RWMutex
+	closed      atomic.Bool
 }
 
 // NewUpstreamGRPCStreamConnection creates a new upstream gRPC connection for streaming
@@ -94,12 +100,29 @@ func NewUpstreamGRPCStreamConnection(ctx context.Context, nodeUrl *common.NodeUr
 		descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
 	}
 	conn.healthy.Store(true)
+	conn.lifetime, conn.endLifetime = context.WithCancel(context.Background())
+	conn.resolver = lavasession.NewGRPCDescriptorResolver(conn.lifetime, &nodeUrl.GrpcConfig, nodeUrl.Url, conn.descriptorsCache, conn.lendChannel)
 
 	if err := conn.connect(ctx, timeout); err != nil {
+		conn.endLifetime()
 		return nil, err
 	}
 
 	return conn, nil
+}
+
+// lendChannel hands the resolver this connection's one channel; there is nothing to
+// give back, so the release is a no-op. A closed connection answers with
+// lavasession.ErrGRPCConnectionClosed, the error the unary connection's borrow gives,
+// which the resolver passes through as it is instead of logging a failed lookup.
+func (c *UpstreamGRPCStreamConnection) lendChannel(context.Context) (*grpc.ClientConn, func(), error) {
+	c.lock.RLock()
+	conn := c.conn
+	c.lock.RUnlock()
+	if conn == nil || c.closed.Load() {
+		return nil, nil, lavasession.ErrGRPCConnectionClosed
+	}
+	return conn, func() {}, nil
 }
 
 // connect establishes the gRPC connection
@@ -218,6 +241,9 @@ func (c *UpstreamGRPCStreamConnection) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil // Already closed
 	}
+	if c.endLifetime != nil { // nil on a connection built as a bare literal (tests)
+		c.endLifetime() // aborts a descriptor lookup still running on this channel
+	}
 
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -261,60 +287,16 @@ func (c *UpstreamGRPCStreamConnection) StreamCount() int32 {
 
 // GetMethodDescriptor retrieves a method descriptor from cache, or resolves it
 // through the node's configured descriptor source (reflection, file, or hybrid).
+// Streaming methods are exactly the ones a partial reflection service tends to
+// omit, so this path needs the file escape hatch as much as the unary one does
+// (MAG-2350); it is the unary connection's resolver, so a cold service costs one
+// reflection stream however many subscriptions ask, and a lookup outlives the
+// caller that started it (MAG-2860).
 func (c *UpstreamGRPCStreamConnection) GetMethodDescriptor(
 	ctx context.Context,
 	service, methodName string,
 ) (*desc.MethodDescriptor, error) {
-	fullMethodName := service + "." + methodName
-
-	// Check cache first
-	if methodDesc, found, _ := c.descriptorsCache.Load(fullMethodName); found {
-		return methodDesc, nil
-	}
-
-	c.lock.RLock()
-	conn := c.conn
-	c.lock.RUnlock()
-
-	if conn == nil {
-		return nil, fmt.Errorf("connection not available")
-	}
-
-	// Resolve through the node's configured descriptor source. Streaming methods are
-	// exactly the ones a partial reflection service tends to omit, so this path needs
-	// the file escape hatch as much as the unary one does (MAG-2350).
-	cl := grpcreflect.NewClientAuto(ctx, conn)
-	defer cl.Reset()
-
-	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&c.nodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
-	if err != nil {
-		return nil, err
-	}
-
-	descriptor, err := descriptorSource.FindSymbol(service)
-	if err != nil {
-		return nil, utils.LavaFormatError("failed to find service descriptor", err,
-			utils.LogAttr("service", service),
-			utils.LogAttr("descriptor-source", c.nodeUrl.GrpcConfig.GetDescriptorSource()))
-	}
-
-	serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
-	if !ok {
-		return nil, utils.LavaFormatError("descriptor is not a ServiceDescriptor", nil,
-			utils.LogAttr("service", service))
-	}
-
-	methodDescriptor := serviceDescriptor.FindMethodByName(methodName)
-	if methodDescriptor == nil {
-		return nil, utils.LavaFormatError("method not found in service", nil,
-			utils.LogAttr("service", service),
-			utils.LogAttr("method", methodName))
-	}
-
-	// Cache the descriptor
-	c.descriptorsCache.Store(fullMethodName, methodDescriptor)
-
-	return methodDescriptor, nil
+	return c.resolver.MethodDescriptor(ctx, service, methodName)
 }
 
 // UpstreamGRPCPool manages a pool of gRPC connections for streaming.
