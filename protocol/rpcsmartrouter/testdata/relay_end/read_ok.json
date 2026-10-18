@@ -1,0 +1,20 @@
+{
+  "GUID": "7720424",
+  "api_interface": "jsonrpc",
+  "error": "",
+  "error_code": "",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "eth_getBalance",
+  "outcome": "ok",
+  "schema": 1,
+  "selection": "stateless",
+  "served_by": "node-a",
+  "stateful": "0",
+  "status": 200,
+  "stop_reason": "Success"
+}

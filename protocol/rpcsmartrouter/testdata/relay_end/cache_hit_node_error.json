@@ -1,0 +1,43 @@
+{
+  "GUID": "7201",
+  "api_interface": "jsonrpc",
+  "attempts": [
+    {
+      "error_code": "NODE_SERVER_ERROR",
+      "message": "header not found",
+      "outcome": "node_error",
+      "returned_to_client": true,
+      "upstream": "Cached"
+    },
+    {
+      "error_code": "NODE_SERVER_ERROR",
+      "message": "header not found",
+      "outcome": "node_error",
+      "returned_to_client": false,
+      "upstream": "Cached"
+    },
+    {
+      "error_code": "NODE_SERVER_ERROR",
+      "message": "header not found",
+      "outcome": "node_error",
+      "returned_to_client": false,
+      "upstream": "Cached"
+    }
+  ],
+  "error": "header not found",
+  "error_code": "NODE_SERVER_ERROR",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "eth_getBlockByNumber",
+  "outcome": "node_error",
+  "schema": 1,
+  "selection": "stateless",
+  "served_by": "Cached",
+  "stateful": "0",
+  "status": 200,
+  "stop_reason": "ErrorToleranceExceeded"
+}

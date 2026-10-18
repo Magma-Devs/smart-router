@@ -1,0 +1,30 @@
+{
+  "GUID": "7285711",
+  "api_interface": "jsonrpc",
+  "attempts": [
+    {
+      "error_code": "CHAIN_EXECUTION_REVERTED",
+      "latency_ms": "<ms>",
+      "message": "execution reverted",
+      "outcome": "node_error",
+      "returned_to_client": true,
+      "upstream": "node-a"
+    }
+  ],
+  "error": "execution reverted",
+  "error_code": "CHAIN_EXECUTION_REVERTED",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "eth_getBalance",
+  "outcome": "node_error",
+  "schema": 1,
+  "selection": "stateless",
+  "served_by": "node-a",
+  "stateful": "0",
+  "status": 200,
+  "stop_reason": "NonRetryableNodeError"
+}

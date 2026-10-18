@@ -1288,6 +1288,7 @@ func (rpcss *RPCSmartRouterServer) SendRelay(
 	analytics *metrics.RelayMetrics,
 	metadata []pairingtypes.Metadata,
 ) (relayResult *common.RelayResult, errRet error) {
+	start := time.Now()
 	// Inject client IP into context so IP forwarding (X-Forwarded-For) works when using HTTP listener.
 	// GetIpFromGrpcContext reads from gRPC peer or from incoming metadata.
 	if consumerIp != "" {
@@ -1318,6 +1319,8 @@ func (rpcss *RPCSmartRouterServer) SendRelay(
 	protocolMessage, err := rpcss.ParseRelay(ctx, url, req, connectionType, dappID, consumerIp, metadata)
 	if err != nil {
 		tracing.RecordError(span, err)
+		// SendParsedRelay writes the event for every request that parses; this one never reaches it.
+		rpcss.writeRelayEnd(ctx, relayEndInput{err: err, cause: err, start: start})
 		return nil, err
 	}
 
@@ -1524,11 +1527,28 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	}
 
 	relaySentTime := time.Now()
+
+	// Every return below ends the relay, so the event is written once, here, from what it returned.
+	// cause is the error the relay's processing ended with, before the unclear-write substitution.
+	var relayProcessor *relaycore.RelayProcessor
+	var cause error
+	defer func() {
+		rpcss.writeRelayEnd(ctx, relayEndInput{
+			protocolMessage: protocolMessage,
+			processor:       relayProcessor,
+			result:          relayResult,
+			err:             errRet,
+			cause:           cause,
+			start:           relaySentTime,
+		})
+	}()
+
 	// Idle mode: this is a client relay. Stamp it, and if it ends an idle period hold it (capped)
 	// until the first endpoint poll has landed so it is routed on fresh tips. The wait counts
 	// toward the end-to-end latency below on purpose — the client experienced it.
 	rpcss.awaitWakeIfIdle(ctx, relaySentTime)
-	relayProcessor, err := rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
+	var err error
+	relayProcessor, err = rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
 
 	// Both failure returns below ask the same question, and the answer cannot differ between them.
 	// Memoised so the results snapshot and its two locks are taken once.
@@ -1541,9 +1561,8 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		return unknownWriteAnswer
 	}
 	if err != nil && (relayProcessor == nil || !relayProcessor.HasResults()) {
-		userData := protocolMessage.GetUserData()
 		// we can't send anymore, and we don't have any responses
-		utils.LavaFormatError("failed getting responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()), utils.LogAttr("userIp", userData.ConsumerIp), utils.LogAttr("relayProcessor", relayProcessor))
+		cause = err
 
 		// A request-time cross-validation fail-fast (capacity/diversity check that aborts before any relay
 		// completes) produces no RelayResult, so the structured failure-reason header would otherwise be
@@ -1556,11 +1575,6 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		}
 
 		if unknownWrite() {
-			utils.LavaFormatWarning("write outcome unknown", err,
-				utils.LogAttr("write_outcome", "unknown"),
-				utils.LogAttr("api", protocolMessage.GetApi().Name),
-				utils.LogAttr("GUID", ctx),
-			)
 			return nil, errUnknownWriteOutcome
 		}
 
@@ -1578,6 +1592,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		}
 		return r, e
 	}()
+	cause = err
 
 	// A request-time cross-validation fail-fast (a capacity/diversity guard that aborted a LATER batch)
 	// may have set a structural reason on the shared processor even though an EARLIER batch produced a
@@ -1590,38 +1605,6 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	if err != nil && relayProcessor != nil {
 		preferStructuralFailureReason(returnedResult, relayProcessor.GetCrossValidationFailFastReason())
 	}
-
-	// The one line describing what the caller got. It fires once per request that produced any
-	// result, and is the only place at INFO that names the provider behind a failed-over response.
-	//
-	// served_by is filled only when bytes were served. GetProvider() also returns a provider on a
-	// failed result, and reporting that would make the field lie on exactly the requests an
-	// operator reads most carefully; the per-endpoint line and `error` attribute those.
-	//
-	// stop_reason says why there was no further attempt — a stateful relay is not retried after a
-	// timeout, since a possibly-executed write must not run twice.
-	servedBy := ""
-	statusCode := 0
-	if returnedResult != nil {
-		statusCode = returnedResult.StatusCode
-		if returnedResult.Reply != nil {
-			servedBy = returnedResult.GetProvider()
-		}
-	}
-	utils.LavaFormatInfo("relay finished",
-		utils.LogAttr("served_by", servedBy),
-		utils.LogAttr("stop_reason", relayProcessor.GetStopReason()),
-		utils.LogAttr("status", statusCode),
-		utils.LogAttr("has_reply", returnedResult != nil && returnedResult.Reply != nil),
-		utils.LogAttr("reply_size", func() int {
-			if returnedResult != nil && returnedResult.Reply != nil {
-				return len(returnedResult.Reply.Data)
-			}
-			return 0
-		}()),
-		utils.LogAttr("error", err),
-		utils.LogAttr("GUID", ctx),
-	)
 
 	// Set the request-level Success once, on the request goroutine (both the success and failure
 	// paths below flow through here). relayInnerDirect no longer writes analytics.Success, so a
@@ -1660,14 +1643,8 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		if analytics != nil {
 			analytics.Success = false
 		}
-		utils.LavaFormatWarning("write outcome unknown", err,
-			utils.LogAttr("write_outcome", "unknown"),
-			utils.LogAttr("api", protocolMessage.GetApi().Name),
-			utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()),
-			utils.LogAttr("GUID", ctx),
-		)
 		// The reply keeps this request's headers; only the status and the message the client reads
-		// are replaced. The underlying error stays in the log line above rather than being
+		// are replaced. The underlying error goes to relay_end's attempts rather than being
 		// concatenated into the reply — "failed relay, insufficient results" in front of "status
 		// unclear" would tell the customer both things at once.
 		return withUnclearWriteStatus(returnedResult), errUnknownWriteOutcome
@@ -1779,11 +1756,11 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 	if err != nil {
 		tracing.RecordError(span, err)
-		return relayProcessor, err
+		return relayProcessor, routerFault{err}
 	}
 
 	// The loop's per-task scaffolding is DEBUG: it fires once per batch and reports nothing the
-	// terminal "relay finished" line does not already carry once per request.
+	// relay_end event does not already carry once per request.
 	utils.LavaFormatDebug("[RPCSmartRouterServer] task channel loop started",
 		utils.LogAttr("GUID", ctx),
 	)
@@ -1827,7 +1804,7 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	utils.LavaFormatError("CHANNEL CLOSED UNEXPECTEDLY", nil,
 		utils.LogAttr("GUID", ctx),
 	)
-	return relayProcessor, utils.LavaFormatError("ProcessRelaySend channel closed unexpectedly", nil)
+	return relayProcessor, routerFault{utils.LavaFormatError("ProcessRelaySend channel closed unexpectedly", nil)}
 }
 
 // getEarliestBlockHashRequestedFromCacheReply folds the reply's BlocksHashesToHeights into
@@ -2693,6 +2670,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				func() bool { return requestRanOutOfRoad(relayProcessor.GetStopReason()) },
 				lostBroadcast,
 			)
+			localRelayResult.AttemptLatency = relayLatency
 
 			// Did the request run out of road, or did we cut this attempt short? Decides below
 			// whether a relay that produced nothing is a hang or a race loser.
@@ -4837,7 +4815,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// and goroutines launched in this call aren't affected by future calls.
 	localRelayData := deepCopyRelayPrivateData(protocolMessage.RelayPrivateData())
 	if localRelayData == nil {
-		return utils.LavaFormatError("RelayPrivateData is nil", nil, utils.LogAttr("GUID", ctx))
+		return routerFault{utils.LavaFormatError("RelayPrivateData is nil", nil, utils.LogAttr("GUID", ctx))}
 	}
 
 	userData := protocolMessage.GetUserData()

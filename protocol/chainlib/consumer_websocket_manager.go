@@ -504,9 +504,14 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		metricsData := metrics.NewRelayAnalytics(dappID, cwm.chainId, cwm.apiInterface)
 		metricsData.Origin = origin
 
+		// startTime is taken before the read blocks, so it counts the client's idle time too.
+		parseStart := time.Now()
 		protocolMessage, err := cwm.relaySender.ParseRelay(webSocketCtx, "", string(msg), cwm.connectionType, dappID, userIp, nil)
 		if err != nil {
 			utils.LavaFormatDebug("ws manager could not parse message", utils.LogAttr("message", msg), utils.LogAttr("err", err))
+			if reporter, ok := cwm.relaySender.(RelayRejectionReporter); ok {
+				reporter.ReportRejectedRelay(webSocketCtx, parseStart, err)
+			}
 			// A batch the chain cannot take is a request the caller can fix, so it gets the same
 			// -32600 the POST handler returns rather than the masked GUID the generic formatter
 			// writes. Without this the identical request shape yields an actionable error over

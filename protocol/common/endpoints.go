@@ -632,6 +632,9 @@ type RelayResult struct {
 	// headers already read (IsNodeError, StatusCode, CrossValidationFailureReason);
 	// see CacheLookupReport for why the cache_tier counter could not answer this.
 	CacheLookup CacheLookupReport
+	// AttemptLatency is how long the upstream attempt behind this result took; zero when no
+	// upstream was asked (a cache hit, a result the router built itself).
+	AttemptLatency time.Duration
 }
 
 // ApplyNodeErrorClassification stamps every registry-derived policy flag onto a node-error

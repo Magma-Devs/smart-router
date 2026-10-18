@@ -40,7 +40,7 @@ func newStopReasonHarness(t *testing.T) (*relaycore.RelayProcessor, *lavasession
 }
 
 // Every terminating path names a reason on the Done instruction, and ProcessRelaySend copies that
-// onto the processor for the request's final "relay finished" line. A blank reason there is the
+// onto the processor for the request's relay_end event. A blank reason there is the
 // state this exists to remove: it makes "why was there no second attempt?" unanswerable at INFO.
 //
 // These drive the real state machine, so dropping any of the reasons at their source — the
