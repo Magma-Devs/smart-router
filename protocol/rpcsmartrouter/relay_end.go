@@ -304,8 +304,10 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 	}
 	end.status = in.result.GetStatusCode()
 
+	// Every reason a write's outcome is unclear is one unclearWriteError, so match the type, not one value.
+	var unclearWrite *unclearWriteError
 	switch {
-	case errors.Is(in.err, errUnknownWriteOutcome):
+	case errors.As(in.err, &unclearWrite):
 		end.outcome = relayOutcomeWriteUnknown
 	case in.err == nil && !served:
 		end.outcome = relayOutcomeRouterError // neither an answer nor an error: the router lost the result
@@ -331,7 +333,8 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 		// What the listener sends, whether or not the router returned a result to carry it.
 		end.status = http.StatusInternalServerError
 		end.errorCode = relayEndWriteUnknownCode(in.cause, end.attempts, requestRanOutOfRoad(end.stopReason))
-		end.errorText = relayEndText(errUnknownWriteOutcome.Error())
+		// The message the client reads, with the reason it gives (MAG-4380).
+		end.errorText = relayEndText(unclearWrite.Error())
 	default:
 		cause := in.cause
 		if cause == nil {
