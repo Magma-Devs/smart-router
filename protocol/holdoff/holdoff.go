@@ -226,6 +226,22 @@ func (r *Registry) ReadyAt(provider, url string) time.Time {
 	return ready
 }
 
+// URLReadyAt is when url stops being held off under either key the paths that talk to it record
+// it by: the url-only key (the chain tracker's poll, WS and gRPC subscriptions) and the relay
+// path's (provider, url) key, which also carries the provider escalation. The later of the two
+// wins; the zero time means neither holds url off. An empty provider, or one equal to url, reads
+// the url-only key alone.
+func (r *Registry) URLReadyAt(provider, url string) time.Time {
+	ready := r.ReadyAt(url, url)
+	if provider == "" || provider == url {
+		return ready
+	}
+	if relayReady := r.ReadyAt(provider, url); relayReady.After(ready) {
+		return relayReady
+	}
+	return ready
+}
+
 // ProviderReadyAt reports whether provider is held off as a whole, and when it next has
 // a URL worth trying. A provider is held off while its name is escalated, or while every
 // URL the registry has been limited on is still held. The registry only knows URLs that

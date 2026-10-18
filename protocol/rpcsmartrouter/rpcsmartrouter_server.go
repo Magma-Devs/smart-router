@@ -3671,7 +3671,9 @@ func probeAppenderUnlessIdle(appender probeQoSAppender, idle bool) probeQoSAppen
 // runProbeCycleCore is the pure probe-cycle body (no rpcss fields), so it is testable with
 // constructed endpoints + a fake observation getter + a fake appender. For every endpoint it renders
 // a verdict, applies the proactive re-enable, then feeds ONE aggregated QoS sample per provider
-// (rule E2). A nil appender still performs the re-enable (QoS feed simply skipped).
+// (rule E2). A nil appender still performs the re-enable (QoS feed simply skipped). The one shared
+// state it reads is the rate-limit hold-off registry (relayHoldoff, which tests swap): a stale
+// endpoint whose url is held off is left out of its provider's sample rather than scored dead.
 //
 // Returns the per-cycle telemetry for /debug/probe-loop (MAG-2202 endpoint 4): scored = endpoints
 // that received a verdict; reEnabled = endpoints the probe re-enabled SYNCHRONOUSLY this cycle
@@ -3743,6 +3745,24 @@ func runProbeCycleCore(
 						target.Endpoint.RelayProbeInconclusive()
 					}
 				})
+			}
+		}
+		// Busy is not dead (MAG-4387). A rate-limit hold-off stops the url's poll on purpose — and on
+		// an interface whose user relays carry no tip, nothing else refreshes the observation — so a
+		// held-off url goes stale for that reason alone. Scored, it fed its provider availability 0
+		// every cycle for the length of the hold-off, and a healthy vendor that only asked us to slow
+		// down was routed away from. Left out instead, under either key the url is held off by: it
+		// counts as neither healthy nor unhealthy, and a provider whose every endpoint is in this state
+		// sends no sample this cycle. A fresh observation is judged as usual, held off or not; the
+		// re-enable pass above is unaffected.
+		if !verdict.Alive {
+			if readyAt := relayHoldoff.URLReadyAt(ep.ProviderAddress, ep.Endpoint.NetworkAddress); !readyAt.IsZero() {
+				utils.LavaFormatDebug("probe leaves a rate-limited endpoint out of its provider's sample",
+					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
+					utils.LogAttr("provider", ep.ProviderAddress),
+					utils.LogAttr("held_off_until", readyAt),
+				)
+				continue
 			}
 		}
 		verdictsByProvider[ep.ProviderAddress] = append(verdictsByProvider[ep.ProviderAddress], verdict)
