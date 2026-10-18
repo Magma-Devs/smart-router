@@ -37,7 +37,7 @@ import (
 // one per exit path. Regenerate with: go test ./protocol/rpcsmartrouter/ -run RelayEnd -update-relay-end
 var updateRelayEndGolden = flag.Bool("update-relay-end", false, "rewrite testdata/relay_end from the captured events")
 
-// captureRelayEnds turns on the in-memory log sink, which LavaFormatEvent writes to like the
+// captureRelayEnds turns on the in-memory log sink, which LogEvent writes to like the
 // others, and returns a reader for the relay_end lines written since.
 func captureRelayEnds(t *testing.T) func() []string {
 	t.Helper()
@@ -77,10 +77,10 @@ func normalizeRelayEnd(t *testing.T, line string, sortAttempts bool) map[string]
 	var event map[string]any
 	require.NoError(t, json.Unmarshal([]byte(line), &event), line)
 	delete(event, "time")
-	require.IsType(t, float64(0), event["latency_ms"])
+	requireRelayEndNumber(t, event, "latency_ms")
 	event["latency_ms"] = "<ms>"
 	// Error texts quote the loopback port and, in their attribute dump, the GUID.
-	guid := event["GUID"].(string)
+	guid := requireRelayEndString(t, event, "GUID")
 	stable := func(text string) string {
 		text = relayEndPort.ReplaceAllString(text, "127.0.0.1:<port>")
 		if guid != "" {
@@ -88,23 +88,45 @@ func normalizeRelayEnd(t *testing.T, line string, sortAttempts bool) map[string]
 		}
 		return text
 	}
-	event["error"] = stable(event["error"].(string))
-	if attempts, ok := event["attempts"].([]any); ok {
-		for _, raw := range attempts {
-			attempt := raw.(map[string]any)
-			if _, known := attempt["latency_ms"]; known {
-				require.IsType(t, float64(0), attempt["latency_ms"])
-				attempt["latency_ms"] = "<ms>"
-			}
-			attempt["message"] = stable(attempt["message"].(string))
-		}
-		if sortAttempts {
-			sort.SliceStable(attempts, func(i, j int) bool {
-				return attempts[i].(map[string]any)["upstream"].(string) < attempts[j].(map[string]any)["upstream"].(string)
-			})
-		}
+	event["error"] = stable(requireRelayEndString(t, event, "error"))
+
+	raw, present := event["attempts"]
+	if !present {
+		return event
 	}
+	list, isList := raw.([]any)
+	require.True(t, isList, "attempts is an array")
+	attempts := make([]map[string]any, 0, len(list))
+	for _, item := range list {
+		attempt, isObject := item.(map[string]any)
+		require.True(t, isObject, "an attempt is an object")
+		if _, known := attempt["latency_ms"]; known {
+			requireRelayEndNumber(t, attempt, "latency_ms")
+			attempt["latency_ms"] = "<ms>"
+		}
+		attempt["message"] = stable(requireRelayEndString(t, attempt, "message"))
+		attempts = append(attempts, attempt)
+	}
+	if sortAttempts {
+		sort.SliceStable(attempts, func(i, j int) bool {
+			return fmt.Sprint(attempts[i]["upstream"]) < fmt.Sprint(attempts[j]["upstream"])
+		})
+	}
+	event["attempts"] = attempts
 	return event
+}
+
+func requireRelayEndString(t *testing.T, object map[string]any, key string) string {
+	t.Helper()
+	value, isString := object[key].(string)
+	require.True(t, isString, "%s is a string", key)
+	return value
+}
+
+func requireRelayEndNumber(t *testing.T, object map[string]any, key string) {
+	t.Helper()
+	_, isNumber := object[key].(float64)
+	require.True(t, isNumber, "%s is a number", key)
 }
 
 func requireRelayEndGolden(t *testing.T, name string, event map[string]any) {
@@ -375,14 +397,14 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 func TestRelayEnd_RestWriteMethodKeepsItsPath(t *testing.T) {
 	rand.InitRandomSeed()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
 	require.NoError(t, err)
 
 	read := captureRelayEnds(t)
-	server := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceRest, chainParser,
+	server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceRest, chainParser,
 		relayEndNode{"node-a", relayEndReply(200, `{"tx_response":{"txhash":"5C504ED4","code":0}}`, 0)})
 	const guid = 7100
 	_, err = sendRelayEnd(t, server, guid, relayEndShortWait, "/cosmos/tx/v1beta1/txs", `{"tx_bytes":"CpIBCo8B","mode":"BROADCAST_MODE_SYNC"}`)
@@ -445,7 +467,7 @@ func relayEndUnit(t *testing.T, in relayEndInput) *relayEnd {
 func TestRelayEnd_RouterError(t *testing.T) {
 	t.Run("a fault of the router's machinery", func(t *testing.T) {
 		fault := routerFault{errors.New("ProcessRelaySend channel closed unexpectedly")}
-		end := relayEndUnit(t, relayEndInput{err: utils.LavaFormatError("failed processing responses from RPC endpoints", fault), cause: fault, start: time.Now()})
+		end := relayEndUnit(t, relayEndInput{err: fmt.Errorf("failed processing responses from RPC endpoints: %w", fault), cause: fault, start: time.Now()})
 		require.Equal(t, relayOutcomeRouterError, end.outcome)
 		require.Equal(t, common.LavaErrorRelayProcessingFailed.Name, end.errorCode)
 		require.Equal(t, "ProcessRelaySend channel closed unexpectedly", end.errorText)
@@ -493,8 +515,10 @@ func TestRelayEnd_AttemptsFollowTheDispatchHistory(t *testing.T) {
 		{ProviderInfo: common.ProviderInfo{ProviderAddress: "node-b"}, Reply: reply, AttemptLatency: 40 * time.Millisecond},
 	}
 	protocolErrors := []relaycore.RelayError{
-		{Err: errors.New("dial tcp: connection refused"), ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}, LavaError: common.LavaErrorConnectionRefused,
-			Response: &relaycore.RelayResponse{RelayResult: common.RelayResult{AttemptLatency: 2 * time.Millisecond}}},
+		{
+			Err: errors.New("dial tcp: connection refused"), ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}, LavaError: common.LavaErrorConnectionRefused,
+			Response: &relaycore.RelayResponse{RelayResult: common.RelayResult{AttemptLatency: 2 * time.Millisecond}},
+		},
 	}
 
 	// node-a failed, node-b answered, and node-a's second attempt has not come back.
@@ -515,19 +539,25 @@ func TestRelayEnd_AttemptsFollowTheDispatchHistory(t *testing.T) {
 // A node's reply settles its upstream, so only a transport error names why a write is unknown, as in
 // writeOutcomeIsUnknown, even when the reply's classification carries MayHaveReachedNode.
 func TestRelayEnd_WriteUnknownCodeComesFromATransportError(t *testing.T) {
-	nodeReply := relayEndNodeErrorAttempt(relaycore.RelayError{Err: errors.New("something odd"), LavaError: common.LavaErrorUnknown,
-		Response: &relaycore.RelayResponse{RelayResult: common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}}}})
+	nodeReply := relayEndNodeErrorAttempt(relaycore.RelayError{
+		Err: errors.New("something odd"), LavaError: common.LavaErrorUnknown,
+		Response: &relaycore.RelayResponse{RelayResult: common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}}},
+	})
 	require.True(t, common.LavaErrorUnknown.MayHaveReachedNode, "the case under test")
-	reset := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: errors.New("connection reset by peer"), LavaError: common.LavaErrorConnectionReset,
-		ProviderInfo: common.ProviderInfo{ProviderAddress: "node-b"}}, false)
+	reset := relayEndProtocolErrorAttempt(relaycore.RelayError{
+		Err: errors.New("connection reset by peer"), LavaError: common.LavaErrorConnectionReset,
+		ProviderInfo: common.ProviderInfo{ProviderAddress: "node-b"},
+	}, false)
 
 	require.Equal(t, common.LavaErrorConnectionReset.Name, relayEndWriteUnknownCode(nil, relayEndAttempts{nodeReply, reset}, false))
 	require.Equal(t, common.LavaErrorContextDeadline.Name, relayEndWriteUnknownCode(nil, relayEndAttempts{nodeReply, reset}, true))
 }
 
 func TestRelayEnd_AttemptOutcomes(t *testing.T) {
-	rateLimited := relayEndNodeErrorAttempt(relaycore.RelayError{Err: errors.New("too many requests"), LavaError: common.LavaErrorNodeRateLimited,
-		Response: &relaycore.RelayResponse{RelayResult: common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}, IsRateLimited: true}}})
+	rateLimited := relayEndNodeErrorAttempt(relaycore.RelayError{
+		Err: errors.New("too many requests"), LavaError: common.LavaErrorNodeRateLimited,
+		Response: &relaycore.RelayResponse{RelayResult: common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}, IsRateLimited: true}},
+	})
 	require.Equal(t, attemptOutcomeRateLimited, rateLimited.outcome)
 	require.Equal(t, "node-a", rateLimited.upstream)
 
@@ -577,14 +607,14 @@ func TestRelayEnd_MethodNeverStartsWithASlash(t *testing.T) {
 func TestRelayEnd_UnlistedRestPathIsWithheld(t *testing.T) {
 	rand.InitRandomSeed()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "COSMOSHUB", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
 	if closeServer != nil {
 		t.Cleanup(closeServer)
 	}
 	require.NoError(t, err)
 
 	read := captureRelayEnds(t)
-	server := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceRest, chainParser, relayEndNode{"node-a", relayEndReply(200, `{}`, 0)})
+	server := newRelayEndServer(t, "COSMOSHUB", spectypes.APIInterfaceRest, chainParser, relayEndNode{"node-a", relayEndReply(200, `{}`, 0)})
 	const guid = 7101
 	_, err = sendRelayEnd(t, server, guid, relayEndShortWait, "/v1/AbC123SecretKey/status?apikey=AbC123SecretKey", "")
 	require.NoError(t, err)
