@@ -19,6 +19,20 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   consecutive strike, capped at 30m before jitter. Jitter extends each hold-off by up to
   +20% and never shortens it, so a fleet held off by one vendor-wide limit does not return
   in a synchronized burst.
+- **One strike per hold-off.** A strike is a hold-off that ended in another 429, not a
+  429. A 429 that arrives while the URL is still held off adds no strike and leaves the
+  hold-off where it is — `RecordRateLimit` returns what is left of it — unless its
+  Retry-After asks for longer, which extends the hold-off to the ask, still without a
+  strike. A vendor's per-second quota answers a burst with one 429 per request already in
+  flight; counted one strike each, seven 429s inside one second took a 30s hold-off to
+  the 30m cap (MAG-4386: QuickNode, 28 real 429s in about 2s, 31-35 min). The
+  provider-name escalation is still checked on every 429.
+- **Only Retry-After is read.** Vendor quota headers are not: QuickNode answers a 429 with
+  `x-ratelimit-reset: 1` and no Retry-After. Under the floor rule a window shorter than
+  the 30s first hold-off changes nothing; the header's unit differs by vendor
+  (delta-seconds, epoch seconds, milliseconds), and the floor rule means a misread can
+  only lengthen a hold-off; and the relay path never sees it, because the reply-header
+  filter (MAG-3104) keeps only Retry-After and Date before the 429 is typed.
 - **Any answer clears.** An upstream that answered a request — success or a genuine
   failure — is no longer refusing us for load: the URL's strikes and the provider
   escalation are dropped, and later failures reach their normal handling at the normal
