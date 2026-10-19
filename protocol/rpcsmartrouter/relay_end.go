@@ -100,14 +100,10 @@ type relayEndAttempt struct {
 type relayEndAttempts []relayEndAttempt
 
 func (e *relayEnd) MarshalZerologObject(event *zerolog.Event) {
-	stateful := "0"
-	if e.stateful {
-		stateful = "1"
-	}
 	event.Str("event", relayEndEvent).
 		Int("schema", relayEndSchema).
 		Str("GUID", e.guid).
-		Str("stateful", stateful).
+		Bool("stateful", e.stateful).
 		Str("method", e.method).
 		Str("api_interface", e.apiInterface).
 		Str("selection", e.selection).

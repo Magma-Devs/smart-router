@@ -24,7 +24,7 @@
   "schema": 1,
   "selection": "stateful",
   "served_by": "node-b",
-  "stateful": "1",
+  "stateful": true,
   "status": 200,
   "stop_reason": "Success"
 }
