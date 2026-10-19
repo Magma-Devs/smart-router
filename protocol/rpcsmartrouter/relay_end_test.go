@@ -583,23 +583,23 @@ func TestRelayEnd_AttemptOutcomes(t *testing.T) {
 }
 
 func TestRelayEnd_MethodNeverStartsWithASlash(t *testing.T) {
-	const rest, jsonrpc, grpc, tendermint = spectypes.APIInterfaceRest, spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceGrpc, spectypes.APIInterfaceTendermintRPC
-	require.Equal(t, "cosmos/tx/v1beta1/txs", relayEndMethod("/cosmos/tx/v1beta1/txs", rest))
-	require.Equal(t, "cosmos/bank/v1beta1/balances/{address}", relayEndMethod("/cosmos/bank/v1beta1/balances/{address}", rest))
-	require.Equal(t, "sui.rpc.v2.LedgerService/GetServiceInfo", relayEndMethod("sui.rpc.v2.LedgerService/GetServiceInfo", grpc))
-	require.Equal(t, "eth_call", relayEndMethod("eth_call", jsonrpc))
-	require.Equal(t, "eth_getBalance&eth_chainId", relayEndMethod("eth_getBalance&eth_chainId", jsonrpc))
-	require.Equal(t, "", relayEndMethod("", jsonrpc))
+	const byURL, inRequest = true, false
+	require.Equal(t, "cosmos/tx/v1beta1/txs", relayEndMethod("/cosmos/tx/v1beta1/txs", byURL))
+	require.Equal(t, "cosmos/bank/v1beta1/balances/{address}", relayEndMethod("/cosmos/bank/v1beta1/balances/{address}", byURL))
+	require.Equal(t, "sui.rpc.v2.LedgerService/GetServiceInfo", relayEndMethod("sui.rpc.v2.LedgerService/GetServiceInfo", inRequest))
+	require.Equal(t, "eth_call", relayEndMethod("eth_call", inRequest))
+	require.Equal(t, "eth_getBalance&eth_chainId", relayEndMethod("eth_getBalance&eth_chainId", inRequest))
+	require.Equal(t, "", relayEndMethod("", inRequest))
 
-	// An unlisted name is what the client sent: kept where it comes from a body or names a gRPC
-	// service, withheld where it is a URL's path or query, however many segments it has.
-	require.Equal(t, "Default-eth_notAMethod", relayEndMethod("Default-eth_notAMethod", jsonrpc))
-	require.Equal(t, "Default-/pkg.v1.Svc/Missing", relayEndMethod("Default-/pkg.v1.Svc/Missing", grpc))
-	require.Equal(t, "Default-REDACTED", relayEndMethod("Default-/v1/AbC123SecretKey/status", rest))
-	require.Equal(t, "Default-REDACTED", relayEndMethod("Default-AbC123SecretKey", tendermint), "a single-segment URI path has no slash")
-	require.Equal(t, "status&Default-REDACTED", relayEndMethod("status&Default-AbC123SecretKey", tendermint), "every member of a batch")
+	// An unlisted name is what the client sent: kept where the request names the method itself,
+	// withheld where it is a URL's path or query, however many segments it has.
+	require.Equal(t, "Default-eth_notAMethod", relayEndMethod("Default-eth_notAMethod", inRequest))
+	require.Equal(t, "Default-/pkg.v1.Svc/Missing", relayEndMethod("Default-/pkg.v1.Svc/Missing", inRequest))
+	require.Equal(t, "status&Default-not_a_method", relayEndMethod("status&Default-not_a_method", inRequest), "a batch is a body")
+	require.Equal(t, "Default-REDACTED", relayEndMethod("Default-/v1/AbC123SecretKey/status", byURL))
+	require.Equal(t, "Default-REDACTED", relayEndMethod("Default-AbC123SecretKey", byURL), "a single-segment URI path has no slash")
 
-	capped := relayEndMethod(strings.Repeat("eth_getBalance&", 200), jsonrpc)
+	capped := relayEndMethod(strings.Repeat("eth_getBalance&", 200), inRequest)
 	require.LessOrEqual(t, len(capped), relayEndMethodLimit+len("...truncated..."))
 }
 
@@ -622,6 +622,51 @@ func TestRelayEnd_UnlistedRestPathIsWithheld(t *testing.T) {
 	line := onlyRelayEnd(t, read(), guid)
 	require.Contains(t, line, `"method":"Default-REDACTED"`)
 	require.NotContains(t, line, "AbC123SecretKey")
+}
+
+// Which interfaces name the api by URL. Tendermint decides per request; the live test below covers it.
+func TestRelayEnd_NamedByURL(t *testing.T) {
+	for _, apiInterface := range []string{spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceGraphQL, spectypes.APIInterfaceGrpc} {
+		require.False(t, relayEndNamedByURL(nil, apiInterface), apiInterface)
+	}
+	require.True(t, relayEndNamedByURL(nil, spectypes.APIInterfaceRest))
+	require.True(t, relayEndNamedByURL(nil, "an interface added later"), "an unknown interface withholds rather than leaks")
+}
+
+// Tendermint names the method in a JSON-RPC body over POST or WebSocket, and in the URL on a URI
+// request. Only the URL form is withheld.
+func TestRelayEnd_TendermintUnlistedMethod(t *testing.T) {
+	rand.InitRandomSeed()
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	require.NoError(t, err)
+
+	read := captureRelayEnds(t)
+	server := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceTendermintRPC, chainParser,
+		relayEndNode{"node-a", relayEndReply(200, `{"jsonrpc":"2.0","id":1,"result":{}}`, 0)})
+
+	for _, tc := range []struct {
+		name, url, body, method string
+		guid                    uint64
+	}{
+		{"JSON-RPC body", "", `{"jsonrpc":"2.0","method":"not_a_method","params":[],"id":1}`, "Default-not_a_method", 7300},
+		{"URI", "not_a_method/AbC123SecretKey?apikey=AbC123SecretKey", "", "Default-REDACTED", 7301},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// As the Tendermint listener calls it: no connection type, and a URI request's path and
+			// query as the url.
+			ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), tc.guid), relayEndShortWait)
+			defer cancel()
+			_, _ = server.SendRelay(ctx, tc.url, tc.body, "", "dapp", "", nil, nil)
+
+			line := onlyRelayEnd(t, read(), tc.guid)
+			require.Equal(t, tc.method, relayEndField(t, line, "method"))
+			require.NotContains(t, line, "AbC123SecretKey")
+		})
+	}
 }
 
 // The free-text fields go through the router's own redactor before they are written.
