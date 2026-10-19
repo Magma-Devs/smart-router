@@ -1530,6 +1530,18 @@ func (rp *RelayProcessor) buildFailureResult(
 		if protocolErr.Response != nil {
 			returnedResult = &protocolErr.Response.RelayResult
 		}
+		// MAG-4218: hand the listener the upstream's own answer (status + body), or
+		// the leaf cause with a 502 when no upstream answered. A copy, as for the 503 stamp below.
+		if cf := clientFacingFromProtocolError(protocolErr.Err, protocolErr.LavaError); cf != nil {
+			stamped := *returnedResult
+			stamped.ClientFacing = cf
+			if cf.UpstreamStatus != 0 {
+				stamped.StatusCode = cf.UpstreamStatus
+			} else {
+				stamped.StatusCode = http.StatusBadGateway
+			}
+			returnedResult = &stamped
+		}
 	}
 
 	// Every attempt was refused for rate: the chain is temporarily unservable, not broken.

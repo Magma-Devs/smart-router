@@ -548,7 +548,13 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			// Construct spec-compliant JSON-RPC 2.0 error envelope (see
 			// convertToJsonRpcError for the rationale — `error` must be an
 			// Object with code/message per §5.1, not a stringified envelope).
-			response := convertToJsonRpcError(errMasking, fiberCtx.Body())
+			var response []byte
+			if cf := relayResult.GetClientFacing(); cf != nil && metrics.ReturnMaskedErrors == "false" {
+				// MAG-4218: the upstream's own answer, or one honest sentence + details in data.
+				response = convertUpstreamErrorToJsonRpc(cf, msgSeed, errMasking, fiberCtx.Body())
+			} else {
+				response = convertToJsonRpcError(errMasking, fiberCtx.Body())
+			}
 			// Return error json response
 			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
 		}

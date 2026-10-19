@@ -257,6 +257,7 @@ var errNotInitialized = errors.New("gRPC connection not initialized yet")
 // HTTPDirectRPCResponse contains complete HTTP response data (Phase 4 REST support)
 type HTTPDirectRPCResponse struct {
 	StatusCode int                 // HTTP status code (200, 404, 500, etc.)
+	Status     string              // HTTP status line text as Go reports it, e.g. "503 Service Unavailable" (MAG-4218)
 	Headers    map[string][]string // Response headers (http.Header compatible)
 	Body       []byte              // Response body
 }
@@ -891,6 +892,11 @@ type HTTPStatusError struct {
 }
 
 func (e *HTTPStatusError) Error() string {
+	// Status is Go's status line, "503 Service Unavailable", which already starts with the code;
+	// only prepend the code when the producer stored something else (MAG-4218).
+	if strings.HasPrefix(e.Status, strconv.Itoa(e.StatusCode)) {
+		return "HTTP " + e.Status
+	}
 	return fmt.Sprintf("HTTP %d %s", e.StatusCode, e.Status)
 }
 
@@ -990,6 +996,7 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	// Don't return error for 4xx/5xx - client needs the response
 	return &HTTPDirectRPCResponse{
 		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
 		Headers:    resp.Header,
 		Body:       body,
 	}, nil

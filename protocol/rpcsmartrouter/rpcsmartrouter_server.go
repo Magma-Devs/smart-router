@@ -1460,6 +1460,9 @@ func withUnclearWriteStatus(result *common.RelayResult) *common.RelayResult {
 	}
 	stamped := *result
 	stamped.StatusCode = http.StatusInternalServerError
+	// MAG-4218: an unclear write outcome is the one case where the router must speak instead of
+	// the node. Drop the forwarded upstream answer so the listener renders errUnknownWriteOutcome.
+	stamped.ClientFacing = nil
 	return &stamped
 }
 

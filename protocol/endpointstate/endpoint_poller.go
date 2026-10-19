@@ -526,7 +526,7 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 		retryAfter, _ := common.ParseRetryAfter(http.Header(resp.Headers), time.Now())
 		return nil, &lavasession.HTTPStatusError{
 			StatusCode: resp.StatusCode,
-			Status:     strconv.Itoa(resp.StatusCode),
+			Status:     pollerStatusText(resp.Status, strconv.Itoa(resp.StatusCode)), // MAG-4218
 			Body:       resp.Body,
 			RetryAfter: retryAfter,
 		}
@@ -542,4 +542,13 @@ func (ecf *EndpointPoller) chainFetcherMetadata() []pairingtypes.Metadata {
 // GetLatestBlock returns the last known latest block number.
 func (ecf *EndpointPoller) GetLatestBlock() int64 {
 	return atomic.LoadInt64(&ecf.latestBlock)
+}
+
+// pollerStatusText prefers the upstream's status line ("503 Service Unavailable") and falls back
+// to the bare number when the transport did not report one (MAG-4218).
+func pollerStatusText(status, fallback string) string {
+	if status != "" {
+		return status
+	}
+	return fallback
 }
