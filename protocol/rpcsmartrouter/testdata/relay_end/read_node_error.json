@@ -11,6 +11,7 @@
       "upstream": "node-a"
     }
   ],
+  "chain": "ETH1",
   "error": "execution reverted",
   "error_code": "CHAIN_EXECUTION_REVERTED",
   "event": "relay_end",

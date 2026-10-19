@@ -2,6 +2,7 @@
   "GUID": "<minted by the listener>",
   "api_interface": "grpc",
   "attempts": [],
+  "chain": "GRPCTEST",
   "error": "Selected provider not available ErrMsg: Header-selected provider is not a valid provider for this request {selectedProvider:node-z,validProviders:grpc-node,addon:,extensions:,GUID:<GUID>}",
   "error_code": "PROTOCOL_PROVIDER_UNAVAILABLE",
   "event": "relay_end",

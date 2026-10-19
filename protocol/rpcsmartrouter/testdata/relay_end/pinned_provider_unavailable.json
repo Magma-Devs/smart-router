@@ -2,6 +2,7 @@
   "GUID": "7958568",
   "api_interface": "jsonrpc",
   "attempts": [],
+  "chain": "ETH1",
   "error": "Selected provider not available ErrMsg: Header-selected provider is not a valid provider for this request {selectedProvider:node-z,validProviders:node-a,addon:,extensions:,GUID:<GUID>}",
   "error_code": "PROTOCOL_PROVIDER_UNAVAILABLE",
   "event": "relay_end",

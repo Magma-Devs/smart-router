@@ -11,6 +11,7 @@
       "upstream": "node-b"
     }
   ],
+  "chain": "ETH1",
   "error": "",
   "error_code": "",
   "event": "relay_end",

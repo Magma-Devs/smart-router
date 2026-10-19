@@ -11,6 +11,7 @@
       "upstream": "node-a"
     }
   ],
+  "chain": "ETH1",
   "error": "failed relay, insufficient results ErrMsg: http request failed: Post \"http://127.0.0.1:<port>\": dial tcp 127.0.0.1:<port>: connect: connection refused: Provider connection refused {GUID:<GUID>}",
   "error_code": "PROTOCOL_CONNECTION_REFUSED",
   "event": "relay_end",

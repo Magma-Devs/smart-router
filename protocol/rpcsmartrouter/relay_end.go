@@ -67,6 +67,7 @@ func isRouterFault(err error) bool {
 
 type relayEnd struct {
 	guid         string
+	chain        string
 	stateful     bool
 	method       string
 	apiInterface string
@@ -105,6 +106,7 @@ func (e *relayEnd) MarshalZerologObject(event *zerolog.Event) {
 		Str("GUID", e.guid).
 		Bool("stateful", e.stateful).
 		Str("method", e.method).
+		Str("chain", e.chain).
 		Str("api_interface", e.apiInterface).
 		Str("selection", e.selection).
 		Str("outcome", e.outcome).
@@ -167,6 +169,7 @@ func (rpcss *RPCSmartRouterServer) ReportRejectedRelay(ctx context.Context, star
 func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEndInput) *relayEnd {
 	end := &relayEnd{latency: time.Since(in.start)}
 	if rpcss.listenEndpoint != nil {
+		end.chain = rpcss.listenEndpoint.ChainID
 		end.apiInterface = rpcss.listenEndpoint.ApiInterface
 	}
 	if guid, found := utils.GetUniqueIdentifier(ctx); found {
