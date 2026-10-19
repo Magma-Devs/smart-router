@@ -3,11 +3,13 @@
   "api_interface": "rest",
   "attempts": [
     {
+      "batch": 0,
       "error_code": "",
       "latency_ms": "<ms>",
       "message": "",
       "outcome": "ok",
       "returned_to_client": true,
+      "sent_ms": "<ms>",
       "upstream": "node-a"
     }
   ],

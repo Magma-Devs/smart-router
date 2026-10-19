@@ -3,19 +3,23 @@
   "api_interface": "jsonrpc",
   "attempts": [
     {
+      "batch": 0,
       "error_code": "PROTOCOL_CONNECTION_REFUSED",
       "latency_ms": "<ms>",
       "message": "http request failed: Post \"http://127.0.0.1:<port>\": dial tcp 127.0.0.1:<port>: connect: connection refused: Provider connection refused",
       "outcome": "transport_error",
       "returned_to_client": false,
+      "sent_ms": "<ms>",
       "upstream": "node-a"
     },
     {
+      "batch": 1,
       "error_code": "",
       "latency_ms": "<ms>",
       "message": "",
       "outcome": "ok",
       "returned_to_client": true,
+      "sent_ms": "<ms>",
       "upstream": "node-b"
     }
   ],

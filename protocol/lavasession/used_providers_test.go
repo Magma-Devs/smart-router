@@ -278,6 +278,35 @@ func TestUsedProviders_SessionsDispatchedIsCumulativeAcrossBatches(t *testing.T)
 		"a provider that answered still counts as one we asked")
 }
 
+// Each dispatch keeps the batch it went out in, which tells a retry or hedge (a later batch) from a
+// broadcast (one batch), and when it was taken, which a timeline of the attempts needs.
+func TestUsedProviders_DispatchesCarryBatchAndTime(t *testing.T) {
+	usedProviders := NewUsedProviders(nil)
+	require.Empty(t, usedProviders.Dispatches())
+	before := time.Now()
+	usedProviders.AddUsed(ConsumerSessionsMap{"lava@a": &SessionInfo{}, "lava@b": &SessionInfo{}}, nil)
+	usedProviders.AddUsed(ConsumerSessionsMap{"lava@c": &SessionInfo{}}, nil)
+
+	batches := map[string]int{}
+	for _, dispatch := range usedProviders.Dispatches() {
+		batches[dispatch.Provider] = dispatch.Batch
+		require.False(t, dispatch.At.Before(before), "taken when the batch was added")
+	}
+	require.Equal(t, map[string]int{"lava@a": 0, "lava@b": 0, "lava@c": 1}, batches, "a broadcast is one batch; the next send is another")
+
+	// A batch released before it was sent leaves its number unused, and the next batch counts on.
+	usedProviders.AddUsed(ConsumerSessionsMap{"lava@d": &SessionInfo{}}, nil)
+	usedProviders.ReleaseFromLatestBatch("lava@d", NewRouterKey(nil), nil)
+	usedProviders.AddUsed(ConsumerSessionsMap{"lava@e": &SessionInfo{}}, nil)
+	dispatches := usedProviders.Dispatches()
+	require.Len(t, dispatches, 4)
+	require.Equal(t, Dispatch{Provider: "lava@e", Batch: 3, At: dispatches[3].At}, dispatches[3])
+
+	// The caller gets a copy.
+	dispatches[0].Batch = 9
+	require.NotEqual(t, 9, usedProviders.Dispatches()[0].Batch)
+}
+
 // The reply's attempt headers name every attempt the request sent, including one that never
 // reported back (MAG-3762), so the names have to survive exactly as the count does: in the order
 // the batches went out, one per session, gone only when released before dispatch.

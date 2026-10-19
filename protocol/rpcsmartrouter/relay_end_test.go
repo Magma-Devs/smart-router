@@ -100,9 +100,11 @@ func normalizeRelayEnd(t *testing.T, line string, sortAttempts bool) map[string]
 	for _, item := range list {
 		attempt, isObject := item.(map[string]any)
 		require.True(t, isObject, "an attempt is an object")
-		if _, known := attempt["latency_ms"]; known {
-			requireRelayEndNumber(t, attempt, "latency_ms")
-			attempt["latency_ms"] = "<ms>"
+		for _, timing := range []string{"latency_ms", "sent_ms"} {
+			if _, known := attempt[timing]; known {
+				requireRelayEndNumber(t, attempt, timing)
+				attempt[timing] = "<ms>"
+			}
 		}
 		attempt["message"] = stable(requireRelayEndString(t, attempt, "message"))
 		attempts = append(attempts, attempt)
@@ -553,7 +555,13 @@ func TestRelayEnd_AttemptsFollowTheDispatchHistory(t *testing.T) {
 	}
 
 	// node-a failed, node-b answered, and node-a's second attempt has not come back.
-	attempts := relayEndAttemptsOf([]string{"node-a", "node-b", "node-a"}, successes, nil, protocolErrors, false)
+	start := time.Now()
+	dispatches := []lavasession.Dispatch{
+		{Provider: "node-a", Batch: 0, At: start.Add(time.Millisecond)},
+		{Provider: "node-b", Batch: 1, At: start.Add(30 * time.Millisecond)},
+		{Provider: "node-a", Batch: 2, At: start.Add(60 * time.Millisecond)},
+	}
+	attempts := relayEndAttemptsOf(dispatches, start, successes, nil, protocolErrors, false)
 	require.Len(t, attempts, 3)
 	require.Equal(t, []string{"node-a", "node-b", "node-a"}, []string{attempts[0].upstream, attempts[1].upstream, attempts[2].upstream})
 	require.Equal(t, attemptOutcomeTransportError, attempts[0].outcome)
@@ -562,8 +570,17 @@ func TestRelayEnd_AttemptsFollowTheDispatchHistory(t *testing.T) {
 	require.Equal(t, 40*time.Millisecond, attempts[1].latency)
 	require.Equal(t, attemptOutcomeCancelled, attempts[2].outcome, "the router stopped waiting for it")
 	require.Zero(t, attempts[2].latency, "an attempt with no result has no latency to report")
+	for i, want := range []time.Duration{time.Millisecond, 30 * time.Millisecond, 60 * time.Millisecond} {
+		require.True(t, attempts[i].sent)
+		require.Equal(t, i, attempts[i].batch, "each went out in its own batch")
+		require.Equal(t, want, attempts[i].sentAfter, "silent or not, an attempt's send time is known")
+	}
 
-	ranOut := relayEndAttemptsOf([]string{"node-a"}, nil, nil, nil, true)
+	cached := relayEndAttemptsOf(nil, start, []common.RelayResult{{Reply: reply, CacheLookup: common.CacheLookupReport{ServedTier: common.CacheTierPrimary}}}, nil, nil, false)
+	require.Len(t, cached, 1)
+	require.False(t, cached[0].sent, "a cache hit was never sent, so it has no batch")
+
+	ranOut := relayEndAttemptsOf([]lavasession.Dispatch{{Provider: "node-a", At: start}}, start, nil, nil, nil, true)
 	require.Equal(t, attemptOutcomeTimeout, ranOut[0].outcome, "silent when the budget ran out")
 }
 
