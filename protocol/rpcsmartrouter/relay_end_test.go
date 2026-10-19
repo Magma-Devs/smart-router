@@ -22,6 +22,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
@@ -180,20 +181,22 @@ func relayEndSilent(w http.ResponseWriter, r *http.Request) {
 // newRelayEndServer is a real router over real upstreams, every one a primary.
 func newRelayEndServer(t *testing.T, chainID, apiInterface string, chainParser chainlib.ChainParser, nodes ...relayEndNode) *RPCSmartRouterServer {
 	t.Helper()
-	return newRelayEndServerWithBackups(t, chainID, apiInterface, chainParser, nodes, nil)
+	server, _ := newRelayEndServerWithBackups(t, chainID, apiInterface, chainParser, nodes, nil)
+	return server
 }
 
 // newRelayEndServerWithBackups adds a backup tier, which the router turns to only when no primary
-// is left.
-func newRelayEndServerWithBackups(t *testing.T, chainID, apiInterface string, chainParser chainlib.ChainParser, primaries, backups []relayEndNode) *RPCSmartRouterServer {
+// is left. It also returns each upstream's URL by name.
+func newRelayEndServerWithBackups(t *testing.T, chainID, apiInterface string, chainParser chainlib.ChainParser, primaries, backups []relayEndNode) (*RPCSmartRouterServer, map[string]string) {
 	t.Helper()
 	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
 	csm := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+	urls := map[string]string{}
 	tier := func(nodes []relayEndNode) map[uint64]*lavasession.ConsumerSessionsWithProvider {
 		providers := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
 		for i, node := range nodes {
-			providers[uint64(i)] = relayEndProvider(t, node)
+			providers[uint64(i)], urls[node.name] = relayEndProvider(t, node)
 		}
 		return providers
 	}
@@ -208,11 +211,12 @@ func newRelayEndServerWithBackups(t *testing.T, chainID, apiInterface string, ch
 		consistencyConfig:  relaycore.DefaultConsistencyValidationConfig(),
 		sessionManager:     csm,
 		rpcSmartRouterLogs: logs,
-	}
+	}, urls
 }
 
-// relayEndProvider serves node on a local address, or reserves one that refuses connections.
-func relayEndProvider(t *testing.T, node relayEndNode) *lavasession.ConsumerSessionsWithProvider {
+// relayEndProvider serves node on a local address, or reserves one that refuses connections, and
+// returns the provider with its URL.
+func relayEndProvider(t *testing.T, node relayEndNode) (*lavasession.ConsumerSessionsWithProvider, string) {
 	t.Helper()
 	var url string
 	if node.handler == nil {
@@ -231,7 +235,7 @@ func relayEndProvider(t *testing.T, node relayEndNode) *lavasession.ConsumerSess
 	endpoint := &lavasession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection}}
 	provider := lavasession.NewConsumerSessionWithProvider(node.name, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
 	provider.StaticProvider = true
-	return provider
+	return provider, url
 }
 
 // sendRelayEnd sends body the way every HTTP listener does: SendRelay, with the GUID the
@@ -413,7 +417,7 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			if tc.backups != nil {
 				backups = tc.backups(t)
 			}
-			server := newRelayEndServerWithBackups(t, "ETH1", spectypes.APIInterfaceJsonRPC, eth, tc.nodes(t), backups)
+			server, _ := newRelayEndServerWithBackups(t, "ETH1", spectypes.APIInterfaceJsonRPC, eth, tc.nodes(t), backups)
 			guid := relayEndCaseGUID(tc.name)
 			timeout := tc.timeout
 			if timeout == 0 {
@@ -422,6 +426,38 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			result, err := sendRelayEnd(t, server, guid, timeout, tc.url, tc.body, tc.metadata...)
 			tc.check(t, result, err)
 			requireRelayEndGolden(t, tc.name, normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), tc.fanOut))
+		})
+	}
+}
+
+// The consistency check passes over an upstream too far behind the chain tip. A read whose only
+// primary lags goes to the synced backup; with no backup, the lagging primary is sent anyway as a
+// stale fallback. The event names the skip, its lag, and the fallback.
+func TestRelayEnd_ConsistencySkipAndStaleFallback(t *testing.T) {
+	rand.InitRandomSeed()
+	eth := ethJsonRPCParser(t)
+	for _, tc := range []struct {
+		name    string
+		backups []relayEndNode
+	}{
+		{"read_skipped_lagging_upstream", []relayEndNode{{"node-b", relayEndReply(200, relayEndBalance, 0)}}},
+		{"read_stale_fallback", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			read := captureRelayEnds(t)
+			primaries := []relayEndNode{{"node-a", relayEndReply(200, relayEndBalance, 0)}}
+			server, urls := newRelayEndServerWithBackups(t, "ETH1", spectypes.APIInterfaceJsonRPC, eth, primaries, tc.backups)
+			server.chainState = seedChainTip(100)
+			tips := map[string]int64{"node-a": 50, "node-b": 100}
+			for name, url := range urls {
+				seedEndpointTip("ETH1", spectypes.APIInterfaceJsonRPC, url, tips[name])
+				key := endpointtip.Key("ETH1", spectypes.APIInterfaceJsonRPC, url)
+				t.Cleanup(func() { endpointtip.Default().Remove(key) })
+			}
+			guid := relayEndCaseGUID(tc.name)
+			_, err := sendRelayEnd(t, server, guid, relayEndShortWait, "", relayEndRead)
+			require.NoError(t, err)
+			requireRelayEndGolden(t, tc.name, normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false))
 		})
 	}
 }

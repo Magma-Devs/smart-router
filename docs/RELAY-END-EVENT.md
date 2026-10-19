@@ -59,7 +59,8 @@ server-streaming subscriptions (not relays); WebSocket frames refused by the con
 | `error` | string | always | `node_error`: the node's error message. `write_unknown`: the message the client gets ("transaction status unclear: …"). Any other failure: the error the relay ended with. `""` on `ok`. |
 | `latency_ms` | number | always | Milliseconds from the router taking the request to the event. A request that parses is timed from `SendParsedRelay` (the parse is not counted); one that does not, from `SendRelay`; a WebSocket frame that does not parse, from its parse. |
 | `is_batch` | boolean | always | A JSON-RPC batch. A batch refused while it is parsed (too large, or not accepted by the chain) is `true` too. |
-| `attempts` | array | when `stateful` is `true`, when `outcome` is not `ok`, or when the relay took more than one attempt or its only attempt failed: a retry, a hedge, a recovery on another upstream | One entry per upstream attempt; see [attempts](#attempts). `[]` when nothing was sent. A read its first attempt answered leaves it out. |
+| `skipped` | array | when the consistency check passed an upstream over | One entry each time the consistency check passed an upstream over before sending because it was too far behind the chain tip: `upstream`, `lag` (blocks behind the tip), `threshold` (the lag allowed) and `batch` (the batch it was passed over in). A skipped upstream got no request then; it is in `attempts` only if it was sent later, as a stale fallback. |
+| `attempts` | array | when `stateful` is `true`, when `outcome` is not `ok`, when the relay took more than one attempt or its only attempt failed (a retry, a hedge, a recovery on another upstream), or when an upstream was skipped | One entry per upstream attempt; see [attempts](#attempts). `[]` when nothing was sent. A read its first attempt answered leaves it out. |
 
 LogQL's `json` parser renders numbers and booleans as strings (`stateful="true"`, `has_reply="false"`, `status="500"`)
 and skips arrays; `| json attempts="attempts"` extracts the raw array.
@@ -96,6 +97,7 @@ errors, successes, not by time.
 | `retryable` | boolean | The router's verdict on the attempt's error, the registry's `Retryable` flag that the narrative lines print as `retryable`: `true` when another upstream may succeed where this one failed. Present when `error_code` is set. |
 | `batch` | number | The batch the attempt went out in, counted from 0. A write's broadcast sends every upstream in one batch; each retry or hedge is the next batch, so a relay with more than one batch was retried. A batch that was taken and then not sent, such as one the consistency check emptied, leaves its number unused. Absent on an attempt that was not sent: a cache hit. |
 | `sent_ms` | number | Milliseconds from the relay's start, the origin of the event's `latency_ms`, to when the attempt was taken for sending. The attempt ended at `sent_ms` plus its `latency_ms`. Absent on an attempt that was not sent. |
+| `stale_fallback` | boolean | `true` on an attempt sent although the consistency check had passed its upstream over, because no other upstream was left: its answer may be stale. Absent otherwise. |
 | `latency_ms` | number | How long the attempt took. Absent when unknown: a cache hit, or an attempt with no result. |
 | `returned_to_client` | boolean | `true` for the one attempt whose reply the client got. `false` on every attempt when the client got an error. |
 

@@ -75,6 +75,8 @@ type UsedProviders struct {
 	// entry also keeps its batch and when it was taken, which tell a retry or hedge from a broadcast.
 	dispatched  []Dispatch
 	batchNumber int
+	// consistencySkips are the upstreams the consistency check passed over, each time it did.
+	consistencySkips []ConsistencySkip
 	// chainID is used for chain-aware unsupported-method detection (so
 	// chain-native messages don't collide with broad Tier-1 substring
 	// matchers). Empty means classification falls back to Tier-1 only.
@@ -90,6 +92,18 @@ type Dispatch struct {
 	Provider string
 	Batch    int
 	At       time.Time
+	// StaleFallback marks a session sent although the consistency check had passed its provider
+	// over, because no other provider was left: its answer may be stale.
+	StaleFallback bool
+}
+
+// ConsistencySkip is a provider the consistency check passed over before sending: it was Lag blocks
+// behind the chain tip, more than the Threshold allowed, in batch Batch. It got no request then.
+type ConsistencySkip struct {
+	Provider  string
+	Lag       int64
+	Threshold int64
+	Batch     int
 }
 
 // SetChainID attaches a chain ID to this UsedProviders instance so that
@@ -173,6 +187,42 @@ func (up *UsedProviders) DispatchedProviders() []string {
 		names[i] = dispatch.Provider
 	}
 	return names
+}
+
+// RecordConsistencySkip records that the consistency check passed provider over in the batch just
+// taken, so the request's record can say who was not asked, and why.
+func (up *UsedProviders) RecordConsistencySkip(provider string, lag, threshold int64) {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	up.consistencySkips = append(up.consistencySkips, ConsistencySkip{Provider: provider, Lag: lag, Threshold: threshold, Batch: max(up.batchNumber-1, 0)})
+}
+
+// ConsistencySkips returns every skip RecordConsistencySkip recorded, in order.
+func (up *UsedProviders) ConsistencySkips() []ConsistencySkip {
+	if up == nil {
+		return nil
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return slices.Clone(up.consistencySkips)
+}
+
+// MarkStaleFallback flags provider's latest dispatch as a stale fallback.
+func (up *UsedProviders) MarkStaleFallback(provider string) {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	for i := len(up.dispatched) - 1; i >= 0; i-- {
+		if up.dispatched[i].Provider == provider {
+			up.dispatched[i].StaleFallback = true
+			return
+		}
+	}
 }
 
 // Dispatches is DispatchedProviders with each session's batch and the time it was taken for sending.
