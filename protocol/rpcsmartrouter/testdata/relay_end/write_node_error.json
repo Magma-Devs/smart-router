@@ -8,6 +8,7 @@
       "latency_ms": "<ms>",
       "message": "nonce too low: next nonce 7, tx nonce 6",
       "outcome": "node_error",
+      "retryable": false,
       "returned_to_client": true,
       "sent_ms": "<ms>",
       "upstream": "node-a"
@@ -18,6 +19,7 @@
       "latency_ms": "<ms>",
       "message": "nonce too low: next nonce 7, tx nonce 6",
       "outcome": "node_error",
+      "retryable": false,
       "returned_to_client": false,
       "sent_ms": "<ms>",
       "upstream": "node-b"

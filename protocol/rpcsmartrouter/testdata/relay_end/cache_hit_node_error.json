@@ -6,6 +6,7 @@
       "error_code": "NODE_SERVER_ERROR",
       "message": "header not found",
       "outcome": "node_error",
+      "retryable": true,
       "returned_to_client": true,
       "upstream": "Cached"
     },
@@ -13,6 +14,7 @@
       "error_code": "NODE_SERVER_ERROR",
       "message": "header not found",
       "outcome": "node_error",
+      "retryable": true,
       "returned_to_client": false,
       "upstream": "Cached"
     },
@@ -20,6 +22,7 @@
       "error_code": "NODE_SERVER_ERROR",
       "message": "header not found",
       "outcome": "node_error",
+      "retryable": true,
       "returned_to_client": false,
       "upstream": "Cached"
     }

@@ -92,6 +92,7 @@ errors, successes, not by time.
 | `outcome` | string | See below. |
 | `error_code` | string | The error registry name of the attempt's error, the value the narrative lines call `error_name`; `UNKNOWN_ERROR` when it was not classified. `""` for `ok` and for an attempt with no result. |
 | `message` | string | The attempt's error: the node's message for a node error, the transport error otherwise. Redacted and capped. `""` for `ok` and for an attempt with no result. |
+| `retryable` | boolean | The router's verdict on the attempt's error, the registry's `Retryable` flag that the narrative lines print as `retryable`: `true` when another upstream may succeed where this one failed. Present when `error_code` is set. |
 | `batch` | number | The batch the attempt went out in, counted from 0. A write's broadcast sends every upstream in one batch; each retry or hedge is the next batch, so a relay with more than one batch was retried. A batch that was taken and then not sent, such as one the consistency check emptied, leaves its number unused. Absent on an attempt that was not sent: a cache hit. |
 | `sent_ms` | number | Milliseconds from the relay's start, the origin of the event's `latency_ms`, to when the attempt was taken for sending. The attempt ended at `sent_ms` plus its `latency_ms`. Absent on an attempt that was not sent. |
 | `latency_ms` | number | How long the attempt took. Absent when unknown: a cache hit, or an attempt with no result. |

@@ -8,6 +8,7 @@
       "latency_ms": "<ms>",
       "message": "http request failed: Post \"http://127.0.0.1:<port>\": dial tcp 127.0.0.1:<port>: connect: connection refused: Provider connection refused",
       "outcome": "transport_error",
+      "retryable": true,
       "returned_to_client": false,
       "sent_ms": "<ms>",
       "upstream": "node-a"
