@@ -3218,6 +3218,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			nil,       // Use default WebSocket config (configurable via CLI flags later)
 		)
 		// Start background cleanup goroutine
+		directWSManager.SetEndpointNames(providerNamesByURL(relevantStaticProviderList, relevantBackupProviderList))
 		directWSManager.Start(ctx)
 		wsSubscriptionManager = directWSManager
 		utils.LavaFormatInfo("Using DirectWSSubscriptionManager for direct WebSocket subscriptions",
@@ -3263,6 +3264,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			nil,       // Use default GRPCStreamingConfig
 		)
 		// Start background cleanup goroutine
+		grpcSubManager.SetEndpointNames(providerNamesByURL(relevantStaticProviderList, relevantBackupProviderList))
 		grpcSubManager.Start(ctx)
 		rpcSmartRouterServer.grpcSubscriptionManager = grpcSubManager
 		utils.LavaFormatInfo("Using DirectGRPCSubscriptionManager for gRPC streaming subscriptions",

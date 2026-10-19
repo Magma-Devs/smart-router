@@ -136,6 +136,9 @@ type DirectGRPCSubscriptionManager struct {
 	// Active subscriptions keyed by hashedParams (method + request params)
 	activeSubscriptions map[string]*grpcActiveSubscription
 
+	// endpointNames names each endpoint's provider for relay_end (SetEndpointNames).
+	endpointNames subscriptionEndpointNames
+
 	// Pending subscriptions for deduplication (prevent duplicate upstream connections)
 	pendingSubscriptions map[string]*pendingSubscriptionsBroadcastManager
 
@@ -290,6 +293,12 @@ func (dgm *DirectGRPCSubscriptionManager) endpointsSnapshot() grpcEndpointsSnaps
 // reports whether anything changed. Counterpart to
 // DirectWSSubscriptionManager.SetEndpoints — see there for why the tiers must track
 // the live pairing and why only live endpoints may be passed in (MAG-2525).
+// SetEndpointNames gives the manager its endpoints' provider names, by URL, which relay_end writes
+// for the upstream a stream went to.
+func (dgm *DirectGRPCSubscriptionManager) SetEndpointNames(names map[string]string) {
+	dgm.endpointNames.set(names)
+}
+
 func (dgm *DirectGRPCSubscriptionManager) SetEndpoints(grpcEndpoints, grpcBackupEndpoints []*common.NodeUrl) (changed bool) {
 	byURL := make(map[string]*common.NodeUrl, len(grpcEndpoints)+len(grpcBackupEndpoints))
 	for _, ep := range grpcEndpoints {
@@ -632,7 +641,9 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 	sub.clientRouterIDs[clientKey] = routerID
 	sub.connectedClients[clientKey] = sender
 	methodPath := sub.methodPath
+	endpointURL := sub.endpointURL
 	sub.lock.Unlock()
+	chainlib.SubscriptionUpstreamFrom(ctx).Joined(dgm.endpointNames.name(endpointURL))
 
 	// Track subscription for this client. Outside sub.lock: trackClientSubscription takes
 	// dgm.lock, and dgm.lock is the outer lock of the pair everywhere else — see the
@@ -659,12 +670,18 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 	requestData []byte,
 	hashedParams string,
 	clientKey string,
-) (*pairingtypes.RelayReply, <-chan *pairingtypes.RelayReply, error) {
+) (reply *pairingtypes.RelayReply, replies <-chan *pairingtypes.RelayReply, err error) {
 	// Select endpoint
 	endpoint, err := dgm.selectEndpoint(ctx, clientKey, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to select endpoint: %w", err)
 	}
+	// From here on the request goes to the endpoint: its pool dials it, reflection asks it for the
+	// method, and the stream opens on it.
+	sentAt := time.Now()
+	defer func() {
+		chainlib.SubscriptionUpstreamFrom(ctx).Sent(dgm.endpointNames.name(endpoint.Url), sentAt, time.Since(sentAt), err)
+	}()
 
 	// Get or create pool
 	pool, err := dgm.getOrCreatePool(endpoint)

@@ -325,6 +325,41 @@ func TestGRPCSubscription_RoutesUpstreamMessagesToClient(t *testing.T) {
 	require.Equal(t, "checkpoint-2", awaitStreamPayload(t, replies))
 }
 
+// The manager records what it did upstream, which the request's relay_end reports: the stream it
+// opened names the endpoint's provider, a second client's identical subscribe joins it and sends
+// nothing, and a stream it could not open records the failure against the endpoint it picked.
+func TestGRPCSubscription_RecordsUpstreamForRelayEnd(t *testing.T) {
+	upstream := startFakeStreamingUpstream(t)
+	manager := newManagerAgainstUpstream(t, upstream.addr)
+	defer manager.Stop()
+	manager.SetEndpointNames(map[string]string{"grpc://" + upstream.addr: "node-grpc"})
+
+	first := chainlib.WithSubscriptionUpstream(context.Background())
+	_, _, err := manager.StartSubscription(first, newGrpcSubscriptionMessage(t), "dapp", "1.1.1.1", "conn-1", nil)
+	require.NoError(t, err)
+	opened := chainlib.SubscriptionUpstreamFrom(first).Record()
+	require.True(t, opened.Sent)
+	require.Equal(t, "node-grpc", opened.Upstream)
+	require.NoError(t, opened.Err)
+
+	second := chainlib.WithSubscriptionUpstream(context.Background())
+	_, _, err = manager.StartSubscription(second, newGrpcSubscriptionMessage(t), "dapp", "2.2.2.2", "conn-2", nil)
+	require.NoError(t, err)
+	require.Equal(t, chainlib.SubscriptionUpstreamRecord{Upstream: "node-grpc", Joined: true}, chainlib.SubscriptionUpstreamFrom(second).Record())
+
+	// Described as unary, the method is refused after the manager reached the endpoint.
+	refusing := newManagerAgainstUpstream(t, upstream.addr)
+	defer refusing.Stop()
+	connectionForUpstream(t, refusing).descriptorsCache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", unaryMethodDescriptor(t))
+	failed := chainlib.WithSubscriptionUpstream(context.Background())
+	_, _, err = refusing.StartSubscription(failed, newGrpcSubscriptionMessage(t), "dapp", "3.3.3.3", "conn-3", nil)
+	require.Error(t, err)
+	record := chainlib.SubscriptionUpstreamFrom(failed).Record()
+	require.True(t, record.Sent)
+	require.Error(t, record.Err)
+	require.Equal(t, sanitizeEndpointURL("grpc://"+upstream.addr), record.Upstream, "a manager given no names falls back to the host")
+}
+
 // TestGRPCSubscription_SurvivesCreatorDisconnect is the ownership rule that makes
 // subscription sharing safe, and it is on by default.
 //

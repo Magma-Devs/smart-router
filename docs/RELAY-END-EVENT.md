@@ -8,7 +8,8 @@ contract for `schema` 1.
   the debug buffer) whatever `--log-level` is: `utils.LogEvent` writes through a copy of each
   logger with its level filter off. A router at `warn` writes it too.
 - **Exactly once per relay.** Every request a listener hands to the router ends in one `relay_end`,
-  on every exit path, including requests refused before anything was sent upstream and cache hits.
+  on every exit path, including requests refused before anything was sent upstream, cache hits,
+  and subscription requests (see [Subscription requests](#subscription-requests)).
 - **Redacted.** `error` and `attempts[].message` go through the router's own redactor
   (`utils.RedactSecrets`) and are capped at 512 bytes plus the `...truncated...` marker, which
   replaces the middle of a longer text.
@@ -28,14 +29,16 @@ contract for `schema` 1.
 | the same, parsed | `SendRelay` → `SendParsedRelay` | `SendParsedRelay`, from one `defer` that every return passes through |
 | WebSocket frame (JSON-RPC and Tendermint), parsed, not a subscription | `ConsumerWebsocketManager` → `SendParsedRelay` | `SendParsedRelay` |
 | WebSocket frame that does not parse | `ConsumerWebsocketManager` → `ParseRelay` fails | `ReportRejectedRelay` (`chainlib.RelayRejectionReporter`) |
+| WebSocket subscribe, unsubscribe or unsubscribe-all frame | `ConsumerWebsocketManager` → the WebSocket subscription manager | `ReportSubscriptionRelay` (`chainlib.SubscriptionRelayReporter`), once the manager returns |
+| gRPC call to a server-streaming method the spec tags as a subscription | the stream callback → the gRPC subscription manager | `ReportSubscriptionRelay`, once the stream opens or fails to |
 
 A gRPC call on a chain with server-streaming methods is parsed first by the stream callback, which
-writes nothing and hands anything that is not a subscription to the unary path above.
+hands anything that is not a subscription to the unary path above.
 
-Not written for: subscribe, unsubscribe and unsubscribe-all frames over WebSocket and gRPC
-server-streaming subscriptions (not relays); WebSocket frames refused by the connection's rate limit
-(refused before they are parsed); requests a listener refuses before calling the router (an HTTP
-405, for one); the router's own health and probe relays.
+Not written for: the messages a subscription pushes to its client; the teardown of a client's
+subscriptions when its socket closes or its stream ends; WebSocket frames refused by the
+connection's rate limit (refused before they are parsed); requests a listener refuses before calling
+the router (an HTTP 405, for one); the router's own health and probe relays.
 
 ## Fields
 
@@ -49,12 +52,12 @@ server-streaming subscriptions (not relays); WebSocket frames refused by the con
 | `method` | string | always | The parsed api name with any leading `/` removed: `cosmos/tx/v1beta1/txs`, `eth_sendRawTransaction`, `cosmos.bank.v1beta1.Query/Balance`. A batch joins its methods with `&`. A method the spec does not list carries the parser's default name, `Default-` and what the client sent. It is kept where the request names the method itself: `jsonrpc`, `graphql` (a root field), `grpc` (a service method), and a `tendermintrpc` JSON-RPC body over POST or WebSocket. It is written `Default-REDACTED` where the name is the client's URL path and query, which may carry a credential: every `rest` request and a `tendermintrpc` URI request. Capped at 256 bytes plus the `...truncated...` marker. `""` for a request that did not parse. |
 | `chain` | string | always | The listener's chain, as the spec names it: `ETH1`, `COSMOSHUB`. A router serves one chain per listener, so this places a request that never reached an upstream too. |
 | `api_interface` | string | always | The listener's interface: `jsonrpc`, `rest`, `tendermintrpc`, `grpc`, `graphql`. |
-| `selection` | string | always | `stateless`, `stateful` or `cross_validation`. `""` when the relay ended before a relay processor existed: a request that did not parse, or invalid cross-validation headers. |
+| `selection` | string | always | `stateless`, `stateful` or `cross_validation`; `subscription` for a subscription request, which a subscription manager serves. `""` when the relay ended before a relay processor existed: a request that did not parse, or invalid cross-validation headers. |
 | `outcome` | string | always | What the client got; see [outcome](#outcome). |
-| `stop_reason` | string | always | Why there was no further attempt: `Success`, `Stateful`, `CrossValidation`, `NonRetryableNodeError`, `PermanentProtocolError`, `UnlistedMethodRefused`, `MaxRetriesReached`, `BatchDisabled`, `ErrorToleranceExceeded`, `AllProvidersExhausted`, `FirstMessageFailed`, `BatchSendFailed`, `ProcessingTimeout` (the budget ran out), `CallerGone` (a WebSocket or gRPC client hung up), `CrossValidationGroupsQuiet`. `""` when the relay ended before its state machine named a reason: `selection` is `""`, the cross-validation capacity check refused the request, or a `router_error` stopped it. |
-| `served_by` | string | always | The upstream whose reply reached the client; `"Cached"` for a cache hit, as the provider-address reply header says. `""` when the client got an error. |
-| `status` | number | always | The HTTP status on the router's result. `0` when the router returned no result or one without a status (every attempt failed in transport); the listener then answers with its own status. A `write_unknown` is always `500`, the status the client gets. |
-| `has_reply` | boolean | always | `true` exactly when `outcome` is `ok` or `node_error`: the client got an upstream's or the cache's reply. |
+| `stop_reason` | string | always | Why there was no further attempt: `Success`, `Stateful`, `CrossValidation`, `NonRetryableNodeError`, `PermanentProtocolError`, `UnlistedMethodRefused`, `MaxRetriesReached`, `BatchDisabled`, `ErrorToleranceExceeded`, `AllProvidersExhausted`, `FirstMessageFailed`, `BatchSendFailed`, `ProcessingTimeout` (the budget ran out), `CallerGone` (a WebSocket or gRPC client hung up), `CrossValidationGroupsQuiet`. `""` when the relay ended before its state machine named a reason: `selection` is `""`, the cross-validation capacity check refused the request, or a `router_error` stopped it; always `""` for a subscription request. |
+| `served_by` | string | always | The upstream whose reply reached the client; `"Cached"` for a cache hit, as the provider-address reply header says. For a subscription request, the upstream its subscription lives on. `""` when the client got an error, and for a subscription request the router answered itself. |
+| `status` | number | always | The HTTP status on the router's result. `0` when the router returned no result or one without a status (every attempt failed in transport); the listener then answers with its own status. A `write_unknown` is always `500`, the status the client gets. `0` for a subscription request. |
+| `has_reply` | boolean | always | `true` exactly when `outcome` is `ok` or `node_error`: the client got an upstream's or the cache's reply, or, to a subscription request, the router's own answer. |
 | `error_code` | string | always | The error registry name (`protocol/common/error_codes.go`) of why the relay did not end `ok`; see [error_code](#error_code). `""` on `ok`. |
 | `error` | string | always | `node_error`: the node's error message. `write_unknown`: the message the client gets ("transaction status unclear: …"). Any other failure: the error the relay ended with. `""` on `ok`. |
 | `latency_ms` | number | always | Milliseconds from the router taking the request to the event. A request that parses is timed from `SendParsedRelay` (the parse is not counted); one that does not, from `SendRelay`; a WebSocket frame that does not parse, from its parse. |
@@ -135,9 +138,31 @@ For `no_answer`, `rejected_before_dispatch` and `router_error`, the first rule t
 | Every endpoint disabled (`lavasession.AllProviderEndpointsDisabledError`) | `PROTOCOL_ALL_ENDPOINTS_DISABLED` |
 | Pinned provider unavailable or already failed | `PROTOCOL_PROVIDER_UNAVAILABLE` |
 | Batch over the configured size (`chainlib.ErrBatchRequestSizeExceeded`) | `PROTOCOL_BATCH_SIZE_EXCEEDED` |
+| An unsubscribe of a subscription the client does not hold (`common.SubscriptionNotFoundError`) | `PROTOCOL_SUBSCRIPTION_NOT_FOUND` |
 | A connection-level error (deadline, cancel, refused, reset, DNS, TLS, EOF) | its code, e.g. `PROTOCOL_CONTEXT_DEADLINE` |
 | Otherwise, the last attempt that has a code (a cross-validation `insufficient-responses` lands here) | that attempt's `error_code` |
 | Nothing applies (a request that does not parse) | `""`; `error` says why |
+
+## Subscription requests
+
+A WebSocket subscribe, unsubscribe or unsubscribe-all frame, and the open of a gRPC server stream,
+is a relay too: it is a request a client waits on, and Substrate's submit-and-watch methods submit
+a transaction through one. Its event has `selection` `subscription`, `stateful` from the spec like
+any relay, and its fields from what the subscription manager did:
+
+| The manager | `outcome` | `served_by` | `attempts` |
+| --- | --- | --- | --- |
+| sent the request upstream and it answered: a new subscription, the last client's unsubscribe | `ok` | that upstream | one, the request it sent |
+| answered from a subscription already open upstream: a second client's identical subscribe | `ok` | the open subscription's upstream | none |
+| answered itself: an unsubscribe while other clients share the subscription, an unsubscribe-all | `ok` | `""` | none |
+| sent the request and it failed upstream, including a node's JSON-RPC refusal, which the router does not pass through | `no_answer` | `""` | one, with the failure |
+| sent nothing: its rate limit or subscription caps, no WebSocket upstream configured, an unknown subscription id | `rejected_before_dispatch` | `""` | none |
+| got an answer upstream and then failed to set the subscription up | `router_error`, `PROTOCOL_SUBSCRIPTION_INIT_FAILED` | `""` | one |
+| failed to tear a client's subscriptions down for an unsubscribe-all | `router_error`, `PROTOCOL_SUBSCRIPTION_CLEANUP_FAILED` | `""` | none |
+
+The upstream is named by provider, as on every relay; the manager picks it by node URL, which may
+carry a credential. The messages a subscription pushes afterwards, and a subscription restored after
+its upstream connection drops, write no event.
 
 ## Collector
 
