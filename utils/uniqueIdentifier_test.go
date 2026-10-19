@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"context"
 	"strconv"
 	"sync"
 	"testing"
@@ -67,4 +68,20 @@ func TestGenerateUniqueIdentifier_DistinctAcrossGoroutines(t *testing.T) {
 			seen[guid] = struct{}{}
 		}
 	}
+}
+
+// A WebSocket frame is a relay with a GUID of its own, carried next to its connection's GUID.
+func TestConnectionIdentifier(t *testing.T) {
+	_, found := GetConnectionIdentifier(context.Background())
+	require.False(t, found, "an HTTP request has no connection identifier")
+
+	connection := WithConnectionIdentifier(WithUniqueIdentifier(context.Background(), 9), 9)
+	frame := WithUniqueIdentifier(connection, 7)
+
+	guid, found := GetUniqueIdentifier(frame)
+	require.True(t, found)
+	require.Equal(t, uint64(7), guid, "the frame's own GUID")
+	connectionGUID, found := GetConnectionIdentifier(frame)
+	require.True(t, found)
+	require.Equal(t, uint64(9), connectionGUID, "the connection's GUID rides along")
 }

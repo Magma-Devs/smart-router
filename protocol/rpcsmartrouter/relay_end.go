@@ -67,6 +67,7 @@ func isRouterFault(err error) bool {
 
 type relayEnd struct {
 	guid         string
+	connection   string
 	chain        string
 	stateful     bool
 	method       string
@@ -106,8 +107,11 @@ type relayEndAttempts []relayEndAttempt
 func (e *relayEnd) MarshalZerologObject(event *zerolog.Event) {
 	event.Str("event", relayEndEvent).
 		Int("schema", relayEndSchema).
-		Str("GUID", e.guid).
-		Bool("stateful", e.stateful).
+		Str("GUID", e.guid)
+	if e.connection != "" {
+		event.Str("connection", e.connection)
+	}
+	event.Bool("stateful", e.stateful).
 		Str("method", e.method).
 		Str("chain", e.chain).
 		Str("api_interface", e.apiInterface).
@@ -195,6 +199,9 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 	}
 	if guid, found := utils.GetUniqueIdentifier(ctx); found {
 		end.guid = strconv.FormatUint(guid, 10)
+	}
+	if connection, found := utils.GetConnectionIdentifier(ctx); found {
+		end.connection = strconv.FormatUint(connection, 10)
 	}
 
 	if in.protocolMessage != nil {
