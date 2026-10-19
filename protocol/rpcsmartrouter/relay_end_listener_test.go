@@ -84,22 +84,30 @@ func TestRelayEnd_JSONRPCListener_HTTPAndWebSocket(t *testing.T) {
 		t.Cleanup(func() { _ = client.Close() })
 
 		seen := len(read())
+		var replies []string
 		for _, frame := range []string{relayEndRead, `{"jsonrpc":"2.0","method":`} {
 			require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(frame)))
 			_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
-			_, _, err := client.ReadMessage()
+			_, reply, err := client.ReadMessage()
 			require.NoError(t, err, "every frame is answered")
+			replies = append(replies, string(reply))
 		}
 
 		events := newRelayEndsSince(read, seen)
 		require.Len(t, events, 2, "one relay_end per frame, the refused one included")
-		connection := relayEndField(t, events[0], "GUID")
+		connection := relayEndField(t, events[0], "connection")
 		require.NotEmpty(t, connection)
-		require.Equal(t, connection, relayEndField(t, events[1], "GUID"), "a WebSocket connection's relays share its GUID")
+		require.Equal(t, connection, relayEndField(t, events[1], "connection"), "both name the connection they came on")
+		refused, isString := relayEndField(t, events[1], "GUID").(string)
+		require.True(t, isString)
+		require.NotEqual(t, relayEndField(t, events[0], "GUID"), refused, "each frame is a relay with its own GUID")
+		require.NotEqual(t, connection, refused, "a frame's GUID is not its connection's")
+		require.Contains(t, replies[1], refused, "the error ID the client reads finds the refused frame's event")
 		for i, name := range []string{"websocket_ok", "websocket_rejected_frame"} {
 			t.Logf("relay_end: %s", events[i])
 			event := normalizeRelayEnd(t, events[i], false)
-			event["GUID"] = "<connection>"
+			event["GUID"] = "<frame>"
+			event["connection"] = "<connection>"
 			requireRelayEndGolden(t, name, event)
 		}
 	})

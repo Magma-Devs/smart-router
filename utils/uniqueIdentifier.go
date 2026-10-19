@@ -44,3 +44,17 @@ func GetUniqueIdentifier(ctx context.Context) (guid uint64, found bool) {
 	}
 	return guid, found
 }
+
+type connectionIdentifierCtxKey struct{}
+
+// WithConnectionIdentifier records the GUID of the connection a relay came on, for a connection that
+// carries many relays, each with a GUID of its own: a WebSocket.
+func WithConnectionIdentifier(ctx context.Context, guid uint64) context.Context {
+	return context.WithValue(ctx, connectionIdentifierCtxKey{}, guid)
+}
+
+// GetConnectionIdentifier returns the GUID WithConnectionIdentifier recorded.
+func GetConnectionIdentifier(ctx context.Context) (guid uint64, found bool) {
+	guid, found = ctx.Value(connectionIdentifierCtxKey{}).(uint64)
+	return guid, found
+}

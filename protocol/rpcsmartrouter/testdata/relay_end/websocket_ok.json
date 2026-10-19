@@ -1,7 +1,8 @@
 {
-  "GUID": "<connection>",
+  "GUID": "<frame>",
   "api_interface": "jsonrpc",
   "chain": "ETH1",
+  "connection": "<connection>",
   "error": "",
   "error_code": "",
   "event": "relay_end",
