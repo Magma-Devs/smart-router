@@ -62,6 +62,10 @@ server-streaming subscriptions (not relays); WebSocket frames refused by the con
 LogQL's `json` parser renders numbers and booleans as strings (`stateful="true"`, `has_reply="false"`, `status="500"`)
 and skips arrays; `| json attempts="attempts"` extracts the raw array.
 
+`error` and `attempts[].message` are prose for a person. The same failure can read differently on
+routers at different `--log-level`s, because an error built by a log formatter whose level is off
+skips the formatting. Match failures on `outcome` and `error_code`, never on that text.
+
 ## outcome
 
 | `outcome` | The client got | Produced by |
