@@ -82,6 +82,7 @@ type relayEnd struct {
 	errorText    string
 	latency      time.Duration
 	isBatch      bool
+	skipped      relayEndSkips
 	attempts     relayEndAttempts
 }
 
@@ -95,6 +96,7 @@ type relayEndAttempt struct {
 	sent             bool // went out as a dispatch, so batch and sentAfter are known
 	batch            int
 	sentAfter        time.Duration // from the relay's start
+	staleFallback    bool          // sent although the consistency check had passed its upstream over
 
 	// Not written: what the relay-level fields are derived from.
 	reply     *pairingtypes.RelayReply
@@ -125,20 +127,41 @@ func (e *relayEnd) MarshalZerologObject(event *zerolog.Event) {
 		Str("error", e.errorText).
 		Int64("latency_ms", e.latency.Milliseconds()).
 		Bool("is_batch", e.isBatch)
+	if len(e.skipped) > 0 {
+		event.Array("skipped", e.skipped)
+	}
 	if e.listsAttempts() {
 		event.Array("attempts", e.attempts)
 	}
 }
 
 // listsAttempts says whether the event carries its attempts: on a write, on a relay that did not end
-// ok, and on one that took more than one attempt or whose only attempt failed, so a read that
-// recovered on another upstream shows what it recovered from. A read its first attempt answered, the
-// common case, leaves them out.
+// ok, on one that took more than one attempt or whose only attempt failed, so a read that recovered
+// on another upstream shows what it recovered from, and on one that passed an upstream over. A read
+// its first attempt answered, the common case, leaves them out.
 func (e *relayEnd) listsAttempts() bool {
-	if e.stateful || e.outcome != relayOutcomeOK || len(e.attempts) > 1 {
+	if e.stateful || e.outcome != relayOutcomeOK || len(e.attempts) > 1 || len(e.skipped) > 0 {
 		return true
 	}
 	return len(e.attempts) == 1 && e.attempts[0].outcome != attemptOutcomeOK
+}
+
+// relayEndSkips are the upstreams the consistency check passed over.
+type relayEndSkips []lavasession.ConsistencySkip
+
+func (skips relayEndSkips) MarshalZerologArray(array *zerolog.Array) {
+	for i := range skips {
+		array.Object(relayEndSkip(skips[i]))
+	}
+}
+
+type relayEndSkip lavasession.ConsistencySkip
+
+func (s relayEndSkip) MarshalZerologObject(event *zerolog.Event) {
+	event.Str("upstream", s.Provider).
+		Int64("lag", s.Lag).
+		Int64("threshold", s.Threshold).
+		Int("batch", s.Batch)
 }
 
 func (attempts relayEndAttempts) MarshalZerologArray(array *zerolog.Array) {
@@ -158,6 +181,9 @@ func (a *relayEndAttempt) MarshalZerologObject(event *zerolog.Event) {
 	if a.sent {
 		event.Int("batch", a.batch).
 			Int64("sent_ms", a.sentAfter.Milliseconds())
+	}
+	if a.staleFallback {
+		event.Bool("stale_fallback", true)
 	}
 	if a.latency > 0 {
 		event.Int64("latency_ms", a.latency.Milliseconds())
@@ -222,6 +248,7 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 		var dispatches []lavasession.Dispatch
 		if usedProviders := in.processor.GetUsedProviders(); usedProviders != nil {
 			dispatches = usedProviders.Dispatches()
+			end.skipped = usedProviders.ConsistencySkips()
 		}
 		dispatched = len(dispatches)
 		successes, nodeErrors, protocolErrors := in.processor.GetResultsDetail()
@@ -330,6 +357,7 @@ func relayEndAttemptsOf(dispatched []lavasession.Dispatch, start time.Time, succ
 		attempt.sent = true
 		attempt.batch = dispatch.Batch
 		attempt.sentAfter = max(dispatch.At.Sub(start), 0)
+		attempt.staleFallback = dispatch.StaleFallback
 		attempts = append(attempts, attempt)
 	}
 	for i := range recorded {

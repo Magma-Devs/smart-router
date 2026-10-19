@@ -2078,6 +2078,22 @@ func sendRelayTaskWithConsistencyFallback(
 	}
 }
 
+// recordConsistencyOutcome puts what the consistency check did to a batch on the request's record:
+// each provider it still passes over is a skip, with its lag, and each provider the stale fallback
+// sent although it failed the check is flagged on its dispatch.
+func recordConsistencyOutcome(usedProviders *lavasession.UsedProviders, consistent map[string]struct{}, sent, passedOver lavasession.ConsumerSessionsMap, lags map[string]consistencyLag) {
+	for provider := range passedOver {
+		if lag, measured := lags[provider]; measured {
+			usedProviders.RecordConsistencySkip(provider, lag.lag, lag.threshold)
+		}
+	}
+	for provider := range sent {
+		if _, passed := consistent[provider]; !passed {
+			usedProviders.MarkStaleFallback(provider)
+		}
+	}
+}
+
 // promoteConsistencyFallback moves previously consistency-rejected sessions
 // back into the valid set only while the one-shot fallback is active. Unknown
 // stale providers remain failed, so activation cannot broaden eligibility past
@@ -2350,13 +2366,18 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	)
 
 	// Pre-request consistency validation: filter out endpoints that are too far behind
-	validSessions, failedSessions, filterErr := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMessage)
+	validSessions, failedSessions, lags, filterErr := rpcss.filterEndpointsByConsistencyWithLag(ctx, sessions, protocolMessage)
+	consistent := make(map[string]struct{}, len(validSessions))
+	for provider := range validSessions {
+		consistent[provider] = struct{}{}
+	}
 	validSessions, failedSessions, promotedFallbacks, filterErr := promoteConsistencyFallback(
 		validSessions,
 		failedSessions,
 		filterErr,
 		consistencyFallback,
 	)
+	recordConsistencyOutcome(relayProcessor.GetUsedProviders(), consistent, validSessions, failedSessions, lags)
 	if promotedFallbacks > 0 {
 		utils.LavaFormatWarning("consistency fallback accepted stale endpoint batch",
 			nil,
@@ -2948,15 +2969,29 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	return nil
 }
 
-// filterEndpointsByConsistency filters out endpoints that are too far behind the user's seen block.
-// This is pre-request validation to avoid wasting requests on endpoints that are likely stale.
-// Returns: validSessions (pass validation), failedSessions (too far behind), and error (if ALL failed).
-// Uses per-endpoint ChainTracker for accurate, continuously-polled block data.
+// filterEndpointsByConsistency is filterEndpointsByConsistencyWithLag without each failed endpoint's lag.
 func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 	ctx context.Context,
 	sessions lavasession.ConsumerSessionsMap,
 	protocolMessage chainlib.ProtocolMessage,
 ) (validSessions lavasession.ConsumerSessionsMap, failedSessions lavasession.ConsumerSessionsMap, filterErr error) {
+	validSessions, failedSessions, _, filterErr = rpcss.filterEndpointsByConsistencyWithLag(ctx, sessions, protocolMessage)
+	return validSessions, failedSessions, filterErr
+}
+
+// consistencyLag is how far behind the chain tip an endpoint that failed the consistency check was,
+// and the lag it was allowed.
+type consistencyLag struct{ lag, threshold int64 }
+
+// filterEndpointsByConsistencyWithLag filters out endpoints that are too far behind the chain tip.
+// This is pre-request validation to avoid wasting requests on endpoints that are likely stale.
+// Returns: validSessions (pass validation), failedSessions (too far behind) with each one's lag, and
+// error (if ALL failed). Uses per-endpoint ChainTracker for accurate, continuously-polled block data.
+func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistencyWithLag(
+	ctx context.Context,
+	sessions lavasession.ConsumerSessionsMap,
+	protocolMessage chainlib.ProtocolMessage,
+) (validSessions lavasession.ConsumerSessionsMap, failedSessions lavasession.ConsumerSessionsMap, lags map[string]consistencyLag, filterErr error) {
 	_, span := tracing.StartInternalSpan(ctx, tracing.SpanFilterEndpointsByConsistency)
 	defer func() {
 		tracing.RecordConsistencyStats(span, len(sessions), len(validSessions), len(failedSessions))
@@ -2968,13 +3003,13 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 
 	// Skip if consistency config is not set
 	if rpcss.consistencyConfig == nil {
-		return sessions, nil, nil
+		return sessions, nil, nil, nil
 	}
 
 	// Get requested block and check if we should validate
 	reqBlock, _ := protocolMessage.RequestedBlock()
 	if relaycore.ShouldSkipConsistencyValidation(reqBlock) {
-		return sessions, nil, nil
+		return sessions, nil, nil, nil
 	}
 
 	// The consistency reference is the global chain tip (Topic C C-G), NOT a per-user seen block.
@@ -2989,12 +3024,13 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 	}
 	if chainTip <= 0 {
 		// No fresh tip to measure against - skip validation rather than guess.
-		return sessions, nil, nil
+		return sessions, nil, nil, nil
 	}
 
 	// Validate each endpoint
 	validSessions = make(lavasession.ConsumerSessionsMap, len(sessions))
 	failedSessions = make(lavasession.ConsumerSessionsMap)
+	lags = make(map[string]consistencyLag)
 
 	for endpointAddress, sessionInfo := range sessions {
 		if sessionInfo == nil || sessionInfo.Session == nil {
@@ -3077,6 +3113,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 				utils.LogAttr("GUID", ctx),
 			)
 			failedSessions[endpointAddress] = sessionInfo
+			lags[endpointAddress] = consistencyLag{lag: lag, threshold: threshold}
 			continue
 		}
 
@@ -3097,7 +3134,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		// stays at DEBUG rather than WARN — two records of one event made anything counting
 		// the sentinel double-count it. skippedCount and GUID moved onto the error so the
 		// single surviving line still carries them.
-		return nil, failedSessions, utils.LavaFormatError("all endpoints failed consistency pre-validation",
+		return nil, failedSessions, lags, utils.LavaFormatError("all endpoints failed consistency pre-validation",
 			lavasession.ConsistencyPreValidationError,
 			utils.LogAttr("totalEndpoints", len(sessions)),
 			utils.LogAttr("skippedCount", skippedCount),
@@ -3116,7 +3153,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		)
 	}
 
-	return validSessions, failedSessions, nil
+	return validSessions, failedSessions, lags, nil
 }
 
 // ensureEndpointChainTracker ensures that a ChainTracker exists for the given endpoint.

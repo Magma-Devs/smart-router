@@ -307,6 +307,27 @@ func TestUsedProviders_DispatchesCarryBatchAndTime(t *testing.T) {
 	require.NotEqual(t, 9, usedProviders.Dispatches()[0].Batch)
 }
 
+// A skip is recorded against the batch it happened in; a stale fallback flags its own dispatch.
+func TestUsedProviders_ConsistencySkipsAndStaleFallback(t *testing.T) {
+	usedProviders := NewUsedProviders(nil)
+	usedProviders.AddUsed(ConsumerSessionsMap{"lava@a": &SessionInfo{}}, nil)
+	usedProviders.RecordConsistencySkip("lava@a", 50, 10)
+	usedProviders.ReleaseFromLatestBatch("lava@a", NewRouterKey(nil), nil)
+	require.Empty(t, usedProviders.Dispatches(), "a skipped provider was never sent")
+
+	usedProviders.AddUsed(ConsumerSessionsMap{"lava@a": &SessionInfo{}}, nil)
+	usedProviders.MarkStaleFallback("lava@a")
+
+	require.Equal(t, []ConsistencySkip{{Provider: "lava@a", Lag: 50, Threshold: 10, Batch: 0}}, usedProviders.ConsistencySkips())
+	dispatches := usedProviders.Dispatches()
+	require.Len(t, dispatches, 1)
+	require.Equal(t, 1, dispatches[0].Batch)
+	require.True(t, dispatches[0].StaleFallback)
+
+	usedProviders.MarkStaleFallback("lava@z") // never sent: nothing to flag
+	require.Len(t, usedProviders.Dispatches(), 1)
+}
+
 // The reply's attempt headers name every attempt the request sent, including one that never
 // reported back (MAG-3762), so the names have to survive exactly as the count does: in the order
 // the batches went out, one per session, gone only when released before dispatch.
