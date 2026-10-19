@@ -4403,6 +4403,21 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	return ""
 }
 
+// cacheAnsweredEarlierAttempt reports whether the cache answered an earlier attempt of this relay.
+// Only node errors are checked, because a cached success ends the relay. A retry after a cached node
+// error goes to an upstream. Another lookup would find the same entry for as long as it lives, so
+// every retry would get the cached error again until the error budget ran out, and no upstream would
+// be asked (MAG-4416). The cached error still answers the first attempt.
+func cacheAnsweredEarlierAttempt(relayProcessor *relaycore.RelayProcessor) bool {
+	_, nodeErrors, _ := relayProcessor.GetResultsData()
+	for _, result := range nodeErrors {
+		if tier := result.CacheLookup.ServedTier; tier == common.CacheTierPrimary || tier == common.CacheTierSecondary {
+			return true
+		}
+	}
+	return false
+}
+
 // tryCacheWrite attempts to write a successful relay response to the cache.
 // It runs in a separate goroutine to avoid blocking the relay response.
 // Cache writes are skipped when:
@@ -4906,6 +4921,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		} else if protocolMessage.GetForceCacheRefresh() {
 			// User requested cache bypass via header
 			utils.LavaFormatDebug("Cache bypassed due to force-cache-refresh header",
+				utils.LogAttr("GUID", ctx),
+				utils.LogAttr("cacheActive", true),
+			)
+		} else if cacheAnsweredEarlierAttempt(relayProcessor) {
+			// This is a retry of a node error the cache answered. Asking the cache again would
+			// return the same entry, so this attempt goes to an upstream (MAG-4416).
+			utils.LavaFormatDebug("Cache bypassed due to a retry after a cached node error",
 				utils.LogAttr("GUID", ctx),
 				utils.LogAttr("cacheActive", true),
 			)

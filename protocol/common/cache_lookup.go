@@ -32,10 +32,11 @@ const (
 	// disconnected. The overwhelmingly common cause of a surprising secondary-cache
 	// result, and the one an operator can fix.
 	CacheOutcomeOff = "off"
-	// CacheOutcomeSkipped: the tier is active but was not asked on this request —
+	// CacheOutcomeSkipped: the tier is active but was not asked on this attempt —
 	// either a bypass rule applied to both tiers (cross-validation, stateful,
-	// lava-force-cache-refresh, a non-cacheable requested block), or the primary
-	// already hit and the secondary is only consulted after a primary non-hit.
+	// lava-force-cache-refresh, a non-cacheable requested block, a retry after a
+	// cached node error), or the primary already hit and the secondary is only
+	// consulted after a primary non-hit.
 	CacheOutcomeSkipped = "skipped"
 	// CacheOutcomeUnknown: this response was never built on a path that performs a
 	// cache lookup at all (a fail-fast result, a synthesized error). Reported rather
@@ -56,8 +57,10 @@ const (
 // header" are the same instant.
 //
 // Per-ATTEMPT, not per-request. Retries and hedges each run their own cache lookup in
-// their own sendRelayToEndpoint call, and each stamps its own results. The report a
-// caller sees therefore describes the lookups made on the attempt whose response won.
+// their own sendRelayToEndpoint call, and each stamps its own results. The exception is
+// a retry after a cached node error: it asks neither tier and reports each active tier
+// as skipped. The report a caller sees therefore describes the lookups made on the
+// attempt whose response won.
 // That is what makes it race-free without a lock: every field is written before the
 // attempt's relay goroutines start, and read-only thereafter.
 type CacheLookupReport struct {
