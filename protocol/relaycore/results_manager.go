@@ -20,6 +20,14 @@ func transportFromProtocolMessage(pm chainlib.ProtocolMessage) common.TransportT
 	return common.TransportJsonRPC
 }
 
+// replyStatusClassifier is a request message whose interface answers its errors inside a 2xx and
+// can say which HTTP status the error registry should classify a reply under
+// (rpcInterfaceMessages.GraphQLMessage). It stands in for the reply's status the way the body's
+// error code does for JSON-RPC.
+type replyStatusClassifier interface {
+	ClassificationStatus(data []byte, httpStatusCode int) int
+}
+
 type ResultsManager interface {
 	String() string
 	NodeResults() []common.RelayResult
@@ -170,6 +178,16 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 			if code := common.ExtractJSONRPCErrorCode(response.RelayResult.Reply.Data); code != 0 {
 				errorCode = code
 			}
+		}
+		// GraphQL answers its node faults inside a 200 as well, so the status says nothing there
+		// either. The message's own rule maps the error's code onto the status the registry's
+		// rows know (RESOURCE_EXHAUSTED a 429, INTERNAL_SERVER_ERROR a 500, a caller's error on a
+		// mutation a 400), which is how the sender already classified this reply for its retry
+		// decision (sendGraphQLRelay). Classified by the 200 instead, every GraphQL node fault was
+		// UNKNOWN_ERROR, logged at DEBUG and never blamed on the endpoint, while the same fault
+		// behind a 503 was an ERROR line with its own name (MAG-4375).
+		if statusClassifier, ok := protocolMessage.GetRPCMessage().(replyStatusClassifier); ok {
+			errorCode = statusClassifier.ClassificationStatus(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
 		}
 		// Resolve chain family so Tier-2 chain-specific matchers win over
 		// Tier-1 generic ones. Without this, chain-native codes like Solana's
