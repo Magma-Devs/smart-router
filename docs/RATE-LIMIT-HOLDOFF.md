@@ -65,7 +65,10 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   RESOURCE_EXHAUSTED with a retry delay), and a JSON-RPC error body with code 429 or a
   "too many requests" / "rate limit" message — the shape a gateway answers with on an open
   WebSocket connection or inside a 200, where no status reaches the transport layer
-  (`common/error_classifier.go`, JSON-RPC table).
+  (`common/error_classifier.go`, JSON-RPC table). On GraphQL, an error coded
+  RESOURCE_EXHAUSTED inside a 200 (Sui's rate and query-cost limit), read through the request
+  message's own classification on the relay path and by both head-poll fetchers alike
+  (MAG-4378).
 
 ## Query APIs
 

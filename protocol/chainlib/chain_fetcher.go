@@ -719,7 +719,7 @@ func (cf *ChainFetcher) FetchLatestBlockNumForCollection(ctx context.Context, ad
 			{Key: "error", Value: err},
 		}...)
 	}
-	if rateLimited := RateLimitedReplyError(cf.endpoint.ChainID, parserInput); rateLimited != nil {
+	if rateLimited := RateLimitedReplyError(cf.endpoint.ChainID, chainMessage, reply.RelayReply.Data, reply.StatusCode, parserInput); rateLimited != nil {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited, []utils.Attribute{
 			{Key: "chainId", Value: chainId},
 			{Key: "nodeUrl", Value: proxyUrl.Url},
@@ -828,7 +828,7 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 		}...)
 	}
 
-	if rateLimited := RateLimitedReplyError(cf.endpoint.ChainID, parserInput); rateLimited != nil {
+	if rateLimited := RateLimitedReplyError(cf.endpoint.ChainID, chainMessage, responseData, reply.StatusCode, parserInput); rateLimited != nil {
 		return "", responseData, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited, []utils.Attribute{
 			{Key: "chainId", Value: chainId},
 			{Key: "nodeUrl", Value: proxyUrl.Url},
@@ -873,15 +873,22 @@ func NewChainFetcher(ctx context.Context, options *ChainFetcherOptions) *ChainFe
 	}
 }
 
-// RateLimitedReplyError reads a reply whose JSON-RPC error body is the upstream refusing the
-// request for rate — a 429 a gateway mirrors into the body of a 200, or into a reply on an open
-// WebSocket connection, where no HTTP status reaches the transport layer and nothing types the
-// error on the way up. It returns the typed rate-limit error (no Retry-After: a body carries
-// none) so the ChainTracker's hold-off and every errors.Is(err, common.StatusCodeError429)
-// consumer read it as they read an HTTP 429, and nil for a reply with no error or with any other
-// error. "Rate-limited" here is the registry's retryable-and-rate-limited verdict: the upstream is
+// RateLimitedReplyError reads a reply whose error body is the upstream refusing the request for
+// rate — a 429 a gateway mirrors into the body of a 200, or into a reply on an open WebSocket
+// connection, where no HTTP status reaches the transport layer and nothing types the error on
+// the way up. It returns the typed rate-limit error (no Retry-After: a body carries none) so the
+// ChainTracker's hold-off and every errors.Is(err, common.StatusCodeError429) consumer read it as
+// they read an HTTP 429, and nil for a reply with no error or with any other error.
+// "Rate-limited" here is the registry's retryable-and-rate-limited verdict: the upstream is
 // healthy but busy. A non-retryable limit (NODE_LIMIT_EXCEEDED, a request shape the node refuses)
 // is not a reason to hold the endpoint off (MAG-4165).
+//
+// Two body forms. A JSON-RPC error envelope is read through input. An interface that answers its
+// errors inside a 2xx in its own shape is read by its request message (replyStatusClassifier):
+// Sui's GraphQL server answers a rate or query-cost limit as an error coded RESOURCE_EXHAUSTED in
+// a 200, which carries no JSON-RPC envelope, so the head poll failed as "failed to parse
+// response", recorded no hold-off and counted a poll failure every cycle (MAG-4378).
+// httpStatusCode is the reply's status, 0 when none reached the caller.
 //
 // Both head / block-hash fetchers call it between formatting the reply and parsing a block out
 // of it: this ChainFetcher (startup verification, re-verification, the health command) and the
@@ -889,12 +896,50 @@ func NewChainFetcher(ctx context.Context, options *ChainFetcherOptions) *ChainFe
 // its own DirectRPCConnection and never passes through here. The poller is the one that polls
 // the url a relay dials, so it is where the body form reached the tracker as an untyped "failed
 // to parse" error.
-func RateLimitedReplyError(chainID string, input parser.RPCInput) error {
+func RateLimitedReplyError(chainID string, chainMessage ChainMessageForSend, data []byte, httpStatusCode int, input parser.RPCInput) error {
+	if rateLimited := rateLimitedClassifiedReply(chainID, chainMessage, data, httpStatusCode); rateLimited != nil {
+		return rateLimited
+	}
 	jsonErr := input.GetError()
 	if jsonErr == nil {
 		return nil
 	}
 	return RateLimitedErrorBody(chainID, jsonErr.Code, jsonErr.Message)
+}
+
+// replyStatusClassifier is a request message whose interface answers its errors inside a 2xx and
+// can say which HTTP status the error registry should classify a reply under
+// (rpcInterfaceMessages.GraphQLMessage, which maps RESOURCE_EXHAUSTED to a 429).
+type replyStatusClassifier interface {
+	ClassificationStatus(data []byte, httpStatusCode int) int
+}
+
+// rateLimitedClassifiedReply is RateLimitedReplyError's reading of an error the request message
+// classifies itself. It classifies the reply the way the relay sender classifies the same reply
+// (sendGraphQLRelay): the message's own error verdict and status, on the transport the collection
+// maps to, so a poll and a relay can never disagree about whether an answer is a rate limit.
+func rateLimitedClassifiedReply(chainID string, chainMessage ChainMessageForSend, data []byte, httpStatusCode int) error {
+	if chainMessage == nil {
+		return nil
+	}
+	classifier, ok := chainMessage.GetRPCMessage().(replyStatusClassifier)
+	if !ok {
+		return nil
+	}
+	hasError, message := chainMessage.CheckResponseError(data, httpStatusCode)
+	if !hasError {
+		return nil
+	}
+	transport := common.TransportREST
+	if collection := chainMessage.GetApiCollection(); collection != nil {
+		transport = common.ApiInterfaceToTransport(collection.CollectionData.ApiInterface)
+	}
+	status := classifier.ClassificationStatus(data, httpStatusCode)
+	classified := common.ClassifyError(nil, common.GetChainFamilyOrDefault(chainID), transport, status, message)
+	if classified == nil || !classified.Retryable || !classified.SubCategory.IsRateLimit() {
+		return nil
+	}
+	return common.RateLimited(fmt.Errorf("reply error classified as %d: %s", status, message), 0)
 }
 
 // RateLimitedErrorBody is RateLimitedReplyError for a caller holding the JSON-RPC error's code

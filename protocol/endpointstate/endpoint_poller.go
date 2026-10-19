@@ -211,8 +211,10 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 
 	// A 429 the upstream put inside the body of a 200 — or of a reply on an open WebSocket
 	// connection, where there is no status line — is a rate limit, not a parse failure: type it so
-	// the ChainTracker records a hold-off instead of retrying into the limit (MAG-4165).
-	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, parserInput); rateLimited != nil {
+	// the ChainTracker records a hold-off instead of retrying into the limit (MAG-4165). That
+	// includes a GraphQL error coded RESOURCE_EXHAUSTED (MAG-4378). No status is passed: the
+	// connection returns a status of 400 or more as an error, and a WebSocket reply has none.
+	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, chainMessage, responseData, 0, parserInput); rateLimited != nil {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
@@ -350,7 +352,7 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 	}
 
 	// Same body form as the head fetch: a 429 inside a 200 is a rate limit, not a parse failure.
-	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, parserInput); rateLimited != nil {
+	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, chainMessage, responseData, 0, parserInput); rateLimited != nil {
 		return "", responseData, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
