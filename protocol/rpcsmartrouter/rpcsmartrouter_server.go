@@ -1909,6 +1909,37 @@ func classifyCachedEntry(ctx context.Context, protocolMessage chainlib.ProtocolM
 	return false, resolvedData
 }
 
+// classifyCachedNodeError gives a node error served from either cache tier the retry verdict a
+// node's reply with the same bytes gets: the JSON-RPC sender's classifyJSONRPCNodeError, on the
+// same chain family. A deterministic error such as a revert then ends the relay with the cached
+// answer, and a retryable one is retried on an upstream (cacheAnsweredEarlierAttempt) (MAG-4416).
+// recordedStatus is the status the entry's writer recorded; zero means it recorded none, read as
+// 200. An entry on another interface, or one CheckResponseError does not judge an error, gets no
+// verdict and is retried like any unclassified node error.
+func (rpcss *RPCSmartRouterServer) classifyCachedNodeError(protocolMessage chainlib.ProtocolMessage, result *common.RelayResult, recordedStatus int) {
+	if !result.IsNodeError || result.Reply == nil {
+		return
+	}
+	apiCollection := protocolMessage.GetApiCollection()
+	if apiCollection == nil {
+		return
+	}
+	switch apiCollection.CollectionData.ApiInterface {
+	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
+	default:
+		return
+	}
+	statusCode := recordedStatus
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	hasError, errorMessage := protocolMessage.CheckResponseError(result.Reply.Data, statusCode)
+	if !hasError {
+		return
+	}
+	classifyJSONRPCNodeError(result, rpcss.directRelayChainFamily(), statusCode, result.Reply.Data, errorMessage)
+}
+
 // primaryLookupVerdict classifies the primary tier's answer the way the secondary tier
 // classifies its own: a hit whose bytes are not a reply this router can serve on the
 // interface (usableCachedReply) is no hit, and is recorded as an error rather than a
@@ -4404,10 +4435,11 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 }
 
 // cacheAnsweredEarlierAttempt reports whether the cache answered an earlier attempt of this relay.
-// Only node errors are checked, because a cached success ends the relay. A retry after a cached node
-// error goes to an upstream. Another lookup would find the same entry for as long as it lives, so
-// every retry would get the cached error again until the error budget ran out, and no upstream would
-// be asked (MAG-4416). The cached error still answers the first attempt.
+// Only node errors are checked, because a cached success ends the relay, and so does a cached error
+// that is not retryable (classifyCachedNodeError). A retry after a retryable one goes to an upstream.
+// Another lookup would find the same entry for as long as it lives, so every retry would get the
+// cached error again until the error budget ran out, and no upstream would be asked (MAG-4416). The
+// cached error still answers the first attempt.
 func cacheAnsweredEarlierAttempt(relayProcessor *relaycore.RelayProcessor) bool {
 	_, nodeErrors, _ := relayProcessor.GetResultsData()
 	for _, result := range nodeErrors {
@@ -5087,6 +5119,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 								// keeps whichever not-consulted value it was seeded with.
 								CacheLookup: cacheReport.ServedBy(common.CacheTierPrimary),
 							}
+							// A cached node error is retried, or not, exactly like a live one.
+							rpcss.classifyCachedNodeError(protocolMessage, &relayResult, cacheReply.GetStatusCode())
 							// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was
 							// current when the response was CACHED — it is not a fresh observation of the
 							// chain head and is not gated on tip-eligibility, so it must NOT feed tip

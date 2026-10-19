@@ -680,76 +680,84 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		IsNodeError: hasError,
 	}
 	if hasError {
-		// JSON-RPC node errors come back as HTTP 200 with the real code inside
-		// error.code. Prefer the body code over the HTTP status so registry
-		// code-based matchers (e.g. -32700, -32602) fire.
-		errorCode := statusCode
-		if jsonrpcCode := common.ExtractJSONRPCErrorCode(responseData); jsonrpcCode != 0 {
-			errorCode = jsonrpcCode
-		}
-		// MAG-1666 — HTTP status digits must reach the classifier.
-		// When the upstream returned a non-2xx HTTP status, prepend the
-		// status to the classifier message so HTTPStatusContains(N) rules
-		// (error_classifier.go::httpStatusMessageMappings) can fire. The
-		// body's JSON-RPC code still wins via CodeEquals priority — those
-		// matchers run before any message-based matcher — so a meaningful
-		// JSON-RPC code like -32601 continues to classify the same way.
-		// The prefix only changes the verdict for HTTP 4xx/5xx responses
-		// that carry a JSON-RPC body with a generic/vendor code where the
-		// HTTP status is the authoritative signal.
-		classifierMessage := errorMessage
-		if statusCode < 200 || statusCode >= 300 {
-			classifierMessage = fmt.Sprintf("HTTP %d: %s", statusCode, errorMessage)
-		}
-		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportJsonRPC, errorCode, classifierMessage)
-
-		// MAG-1870 — HTTP status must be authoritative for 4xx-class transport
-		// errors. The single-pass classification above iterates matchers in
-		// declaration order: code-based matchers first, message-based after.
-		// When the body carries a registered RETRYABLE code (e.g. -32603
-		// NODE_INTERNAL_ERROR, -32000 NODE_SERVER_ERROR) AND the upstream
-		// returned a non-retryable HTTP status (413), the body-code matcher
-		// fires first and HTTPStatusContains never runs — so the retryable
-		// body code masks the non-retryable HTTP verdict and the router retries
-		// pointlessly. 401, 404 and 405 were in that list until MAG-2771 made
-		// them retryable: each is this node's own refusal, which another
-		// provider may not share, so this pass leaves them alone.
-		//
-		// A second classification pass with the raw HTTP statusCode as the
-		// errorCode resolves the conflict: when the HTTP layer says the
-		// upstream rejected the request shape itself (not a node-internal
-		// hiccup), trust that verdict. We only escalate to non-retryable —
-		// never demote — so 2xx body errors keep their existing semantics
-		// and 5xx (which already map to retryable LavaErrors) are unaffected.
-		//
-		// The statusCode != errorCode guard skips the redundant pass in the
-		// bare-body fallback case where ExtractJSONRPCErrorCode returned 0
-		// and the first pass already ran with errorCode = statusCode.
-		//
-		// Only IsNonRetryable escalates here, plus IsNodeCapability when the
-		// status is the node's own refusal. The other fault-axis flags
-		// (IsUnsupportedMethod, IsRateLimited, IsNodeAtFault) keep the first
-		// pass's verdict: the body code is the authoritative statement of
-		// *what* went wrong, and this pass exists to override *retryability*.
-		//
-		// IsNodeCapability is the exception because of what escalating used to
-		// do on the side. A 401, 404 or 405 escalated to non-retryable, and
-		// shouldFailSessionForResult excuses a non-retryable reply, so such a
-		// reply stayed out of the availability score even when its body code
-		// was a retryable one that blames the endpoint. MAG-2771 made those
-		// statuses retryable and so removed that excuse; the capability
-		// carve-out is what keeps the reply out of the score now, so the
-		// endpoint is scored exactly as it was before.
-		if !result.IsNonRetryable && (statusCode < 200 || statusCode >= 300) && statusCode != errorCode {
-			statusVerdict := common.ClassifyNodeErrorForRetry(d.chainFamily, common.TransportJsonRPC, statusCode, classifierMessage)
-			result.IsNonRetryable = statusVerdict.IsNonRetryable
-			if statusVerdict.IsNodeCapability {
-				result.IsNodeCapability = true
-			}
-		}
+		classifyJSONRPCNodeError(result, d.chainFamily, statusCode, responseData, errorMessage)
 	}
 
 	return result, nil
+}
+
+// classifyJSONRPCNodeError stamps the registry's verdict on a JSON-RPC or Tendermint reply that
+// CheckResponseError judged a node error. statusCode is the reply's HTTP status, responseData its
+// body, and errorMessage the text CheckResponseError found. The live sender and both cache tiers
+// (classifyCachedNodeError) call it, so a node error gets the same verdict from either source.
+func classifyJSONRPCNodeError(result *common.RelayResult, family common.ChainFamily, statusCode int, responseData []byte, errorMessage string) {
+	// JSON-RPC node errors come back as HTTP 200 with the real code inside
+	// error.code. Prefer the body code over the HTTP status so registry
+	// code-based matchers (e.g. -32700, -32602) fire.
+	errorCode := statusCode
+	if jsonrpcCode := common.ExtractJSONRPCErrorCode(responseData); jsonrpcCode != 0 {
+		errorCode = jsonrpcCode
+	}
+	// MAG-1666 — HTTP status digits must reach the classifier.
+	// When the upstream returned a non-2xx HTTP status, prepend the
+	// status to the classifier message so HTTPStatusContains(N) rules
+	// (error_classifier.go::httpStatusMessageMappings) can fire. The
+	// body's JSON-RPC code still wins via CodeEquals priority — those
+	// matchers run before any message-based matcher — so a meaningful
+	// JSON-RPC code like -32601 continues to classify the same way.
+	// The prefix only changes the verdict for HTTP 4xx/5xx responses
+	// that carry a JSON-RPC body with a generic/vendor code where the
+	// HTTP status is the authoritative signal.
+	classifierMessage := errorMessage
+	if statusCode < 200 || statusCode >= 300 {
+		classifierMessage = fmt.Sprintf("HTTP %d: %s", statusCode, errorMessage)
+	}
+	result.ApplyNodeErrorClassification(family, common.TransportJsonRPC, errorCode, classifierMessage)
+
+	// MAG-1870 — HTTP status must be authoritative for 4xx-class transport
+	// errors. The single-pass classification above iterates matchers in
+	// declaration order: code-based matchers first, message-based after.
+	// When the body carries a registered RETRYABLE code (e.g. -32603
+	// NODE_INTERNAL_ERROR, -32000 NODE_SERVER_ERROR) AND the upstream
+	// returned a non-retryable HTTP status (413), the body-code matcher
+	// fires first and HTTPStatusContains never runs — so the retryable
+	// body code masks the non-retryable HTTP verdict and the router retries
+	// pointlessly. 401, 404 and 405 were in that list until MAG-2771 made
+	// them retryable: each is this node's own refusal, which another
+	// provider may not share, so this pass leaves them alone.
+	//
+	// A second classification pass with the raw HTTP statusCode as the
+	// errorCode resolves the conflict: when the HTTP layer says the
+	// upstream rejected the request shape itself (not a node-internal
+	// hiccup), trust that verdict. We only escalate to non-retryable —
+	// never demote — so 2xx body errors keep their existing semantics
+	// and 5xx (which already map to retryable LavaErrors) are unaffected.
+	//
+	// The statusCode != errorCode guard skips the redundant pass in the
+	// bare-body fallback case where ExtractJSONRPCErrorCode returned 0
+	// and the first pass already ran with errorCode = statusCode.
+	//
+	// Only IsNonRetryable escalates here, plus IsNodeCapability when the
+	// status is the node's own refusal. The other fault-axis flags
+	// (IsUnsupportedMethod, IsRateLimited, IsNodeAtFault) keep the first
+	// pass's verdict: the body code is the authoritative statement of
+	// *what* went wrong, and this pass exists to override *retryability*.
+	//
+	// IsNodeCapability is the exception because of what escalating used to
+	// do on the side. A 401, 404 or 405 escalated to non-retryable, and
+	// shouldFailSessionForResult excuses a non-retryable reply, so such a
+	// reply stayed out of the availability score even when its body code
+	// was a retryable one that blames the endpoint. MAG-2771 made those
+	// statuses retryable and so removed that excuse; the capability
+	// carve-out is what keeps the reply out of the score now, so the
+	// endpoint is scored exactly as it was before.
+	if !result.IsNonRetryable && (statusCode < 200 || statusCode >= 300) && statusCode != errorCode {
+		statusVerdict := common.ClassifyNodeErrorForRetry(family, common.TransportJsonRPC, statusCode, classifierMessage)
+		result.IsNonRetryable = statusVerdict.IsNonRetryable
+		if statusVerdict.IsNodeCapability {
+			result.IsNodeCapability = true
+		}
+	}
 }
 
 // sendRESTRelay handles REST API requests (Phase 4 corrected implementation)

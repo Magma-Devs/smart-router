@@ -48,9 +48,12 @@ request ──► primary cache ──hit──► served ("Cached")
   judged by its recorded status). An entry that is not a usable reply at all —
   empty, a web page, a truncated envelope, an envelope that carries neither a
   result nor an error, or a batch with such an element — is never served: it
-  counts as a secondary error and the request proceeds to an upstream. When the
-  router retries a cached node error, the retry goes to an upstream and neither
-  cache is asked again for that request.
+  counts as a secondary error and the request proceeds to an upstream. A retry
+  after a cached node error goes to an upstream, and neither cache is asked
+  again for that request. On JSON-RPC and Tendermint the cached error first gets
+  the retry verdict a live one gets, so an error every node gives, such as
+  `execution reverted`, ends the request with the cached answer and is not
+  retried.
 - **Independent of the primary.** The secondary keeps serving while the primary
   is down, and is even valid with no primary configured at all (reads work;
   nothing backfills — the router logs an advisory warning for this topology).
