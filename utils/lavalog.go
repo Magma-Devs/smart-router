@@ -637,6 +637,26 @@ func LavaFormatError(description string, err error, attributes ...Attribute) err
 	return LavaFormatLog(description, err, attributes, LAVA_LOG_ERROR)
 }
 
+// LavaFormatErrorSilent returns the error LavaFormatError returns, word for word, and writes no
+// line: for a failure a declared event already records, which a second line would count twice.
+func LavaFormatErrorSilent(description string, err error, attributes ...Attribute) error {
+	output := RedactSecrets(description)
+	if err != nil {
+		output = fmt.Sprintf("%s ErrMsg: %s", output, RedactSecretsErr(err).Error())
+	}
+	if len(attributes) > 0 {
+		attrStrings := make([]string, 0, len(attributes))
+		for idx, attr := range attributes {
+			attrStrings = append(attrStrings, fmt.Sprintf("%s:%s", attr.Key, RedactSecrets(StrValueForLog(attr.Value, attr.Key, idx, attributes))))
+		}
+		output = fmt.Sprintf("%s %+v", output, "{"+strings.Join(attrStrings, ",")+"}")
+	}
+	if err != nil {
+		return &wrappedLavaError{msg: output, cause: err}
+	}
+	return fmt.Errorf("%s", output)
+}
+
 func LavaFormatWarning(description string, err error, attributes ...Attribute) error {
 	return LavaFormatLog(description, err, attributes, LAVA_LOG_WARN)
 }

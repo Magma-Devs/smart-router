@@ -55,6 +55,28 @@ func captureRelayEnds(t *testing.T) func() []string {
 	}
 }
 
+// retiredLines are the narrative lines relay_end replaces: a reader that counts both shapes would
+// count a request that wrote one of them twice.
+var retiredLines = []string{
+	"relay finished",
+	"failed getting responses from RPC endpoints",
+	"failed processing responses from RPC endpoints",
+	"write outcome unknown",
+}
+
+// requireNoRetiredLine fails when a line written for guid is one relay_end replaces.
+func requireNoRetiredLine(t *testing.T, guid uint64) {
+	t.Helper()
+	mine := `"GUID":"` + strconv.FormatUint(guid, 10) + `"`
+	for _, record := range utils.ReadDebugLogBuffer("", time.Time{}, time.Time{}, 200000) {
+		if line := string(record); strings.Contains(line, mine) {
+			for _, retired := range retiredLines {
+				require.NotContains(t, line, `"message":"`+retired+`"`, "relay_end replaces this line")
+			}
+		}
+	}
+}
+
 // onlyRelayEnd returns the one relay_end written for guid, failing on none or several.
 func onlyRelayEnd(t *testing.T, lines []string, guid uint64) string {
 	t.Helper()
@@ -426,6 +448,7 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			result, err := sendRelayEnd(t, server, guid, timeout, tc.url, tc.body, tc.metadata...)
 			tc.check(t, result, err)
 			requireRelayEndGolden(t, tc.name, normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), tc.fanOut))
+			requireNoRetiredLine(t, guid)
 		})
 	}
 }
