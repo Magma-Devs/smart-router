@@ -24,7 +24,7 @@
   "schema": 1,
   "selection": "stateless",
   "served_by": "node-a",
-  "stateful": "0",
+  "stateful": false,
   "status": 200,
   "stop_reason": "NonRetryableNodeError"
 }

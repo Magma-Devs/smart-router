@@ -30,7 +30,7 @@
   "schema": 1,
   "selection": "stateful",
   "served_by": "",
-  "stateful": "1",
+  "stateful": true,
   "status": 500,
   "stop_reason": "ProcessingTimeout"
 }

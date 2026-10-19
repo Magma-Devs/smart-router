@@ -14,7 +14,7 @@ contract for `schema` 1.
   replaces the middle of a longer text.
 
 ```json
-{"level":"info","event":"relay_end","schema":1,"GUID":"7003","stateful":"1","method":"eth_sendRawTransaction","api_interface":"jsonrpc","selection":"stateful","outcome":"ok","stop_reason":"Success","served_by":"node-b","status":200,"has_reply":true,"error_code":"","error":"","latency_ms":305,"is_batch":false,"attempts":[{"upstream":"node-a","outcome":"node_error","error_code":"CHAIN_NONCE_TOO_LOW","message":"nonce too low: next nonce 7, tx nonce 6","latency_ms":2,"returned_to_client":false},{"upstream":"node-b","outcome":"ok","error_code":"","message":"","latency_ms":304,"returned_to_client":true}],"time":1792323767487910421,"message":"relay_end"}
+{"level":"info","event":"relay_end","schema":1,"GUID":"7003","stateful":true,"method":"eth_sendRawTransaction","api_interface":"jsonrpc","selection":"stateful","outcome":"ok","stop_reason":"Success","served_by":"node-b","status":200,"has_reply":true,"error_code":"","error":"","latency_ms":305,"is_batch":false,"attempts":[{"upstream":"node-a","outcome":"node_error","error_code":"CHAIN_NONCE_TOO_LOW","message":"nonce too low: next nonce 7, tx nonce 6","latency_ms":2,"returned_to_client":false},{"upstream":"node-b","outcome":"ok","error_code":"","message":"","latency_ms":304,"returned_to_client":true}],"time":1792323767487910421,"message":"relay_end"}
 ```
 
 `protocol/rpcsmartrouter/testdata/relay_end/` holds one event per exit path, checked by
@@ -44,7 +44,7 @@ server-streaming subscriptions (not relays); WebSocket frames refused by the con
 | `event` | string | always | `"relay_end"` |
 | `schema` | number | always | `1` |
 | `GUID` | string | always | The request's GUID in decimal, the value every narrative line of the request carries under `GUID`. Every relay on one WebSocket connection shares the connection's GUID. `""` if the context carries none. |
-| `stateful` | string | always | `"1"` when the parsed api's category is stateful (`chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS`), whichever selection path served it (chosen, pinned or sticky); `"0"` otherwise, and for a request that did not parse. |
+| `stateful` | boolean | always | `true` when the parsed api's category is stateful (`chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS`), whichever selection path served it (chosen, pinned or sticky); `false` otherwise, and for a request that did not parse. |
 | `method` | string | always | The parsed api name with any leading `/` removed: `cosmos/tx/v1beta1/txs`, `eth_sendRawTransaction`, `cosmos.bank.v1beta1.Query/Balance`. A batch joins its methods with `&`. A method the spec does not list carries the parser's default name, `Default-` and what the client sent: kept on `jsonrpc` (a name from the body) and `grpc` (a service method), written `Default-REDACTED` on every other interface, where it is the client's URL path and query and may carry a credential; each member of a batch is judged alone. Capped at 256 bytes plus the `...truncated...` marker. `""` for a request that did not parse. |
 | `api_interface` | string | always | The listener's interface: `jsonrpc`, `rest`, `tendermintrpc`, `grpc`, `graphql`. |
 | `selection` | string | always | `stateless`, `stateful` or `cross_validation`. `""` when the relay ended before a relay processor existed: a request that did not parse, or invalid cross-validation headers. |
@@ -57,9 +57,9 @@ server-streaming subscriptions (not relays); WebSocket frames refused by the con
 | `error` | string | always | `node_error`: the node's error message. `write_unknown`: the message the client gets ("transaction status unclear: …"). Any other failure: the error the relay ended with. `""` on `ok`. |
 | `latency_ms` | number | always | Milliseconds from the router taking the request to the event. A request that parses is timed from `SendParsedRelay` (the parse is not counted); one that does not, from `SendRelay`; a WebSocket frame that does not parse, from its parse. |
 | `is_batch` | boolean | always | A JSON-RPC batch. A batch refused while it is parsed (too large, or not accepted by the chain) is `true` too. |
-| `attempts` | array | when `stateful` is `"1"` or `outcome` is not `ok` | One entry per upstream attempt; see [attempts](#attempts). `[]` when nothing was sent. |
+| `attempts` | array | when `stateful` is `true` or `outcome` is not `ok` | One entry per upstream attempt; see [attempts](#attempts). `[]` when nothing was sent. |
 
-LogQL's `json` parser renders numbers and booleans as strings (`has_reply="false"`, `status="500"`)
+LogQL's `json` parser renders numbers and booleans as strings (`stateful="true"`, `has_reply="false"`, `status="500"`)
 and skips arrays; `| json attempts="attempts"` extracts the raw array.
 
 ## outcome

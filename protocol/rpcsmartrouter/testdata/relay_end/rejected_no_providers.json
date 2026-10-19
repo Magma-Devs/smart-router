@@ -15,7 +15,7 @@
   "schema": 1,
   "selection": "stateless",
   "served_by": "",
-  "stateful": "0",
+  "stateful": false,
   "status": 0,
   "stop_reason": "AllProvidersExhausted"
 }

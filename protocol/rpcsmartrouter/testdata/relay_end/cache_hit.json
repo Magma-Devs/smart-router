@@ -14,7 +14,7 @@
   "schema": 1,
   "selection": "stateless",
   "served_by": "Cached",
-  "stateful": "0",
+  "stateful": false,
   "status": 200,
   "stop_reason": "Success"
 }
