@@ -287,7 +287,8 @@ request the router could not parse is not counted.
 
 `customer` is bounded: the first 512 distinct values per spec keep their own
 series for the life of the process, and later ones — or any value longer than
-128 characters — become `customer="other"`. Non-zero
+128 bytes or not valid UTF-8 — become `customer="other"`. An empty value counts
+as `DefaultDappID`. Non-zero
 `smartrouter_customer_overflow_total` means that spec's per-customer numbers
 are lossy. `method` is normalized as on `smartrouter_requests_total`.
 

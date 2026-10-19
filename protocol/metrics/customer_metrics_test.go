@@ -131,3 +131,22 @@ func histogramSampleCount(t *testing.T, h prometheus.Histogram) int {
 	require.NoError(t, (<-ch).Write(&pb))
 	return int(pb.GetHistogram().GetSampleCount())
 }
+
+func TestNormalizeCustomerLabel_CollapsesInvalidUTF8WithoutSpendingBudget(t *testing.T) {
+	m := newSmartRouterForCustomerTest()
+
+	require.NotPanics(t, func() {
+		m.SetRelayMetrics(customerRequest("\xff\xfe", "eth_call", true, 40), nil)
+	})
+	require.Equal(t, 1.0, testutil.ToFloat64(m.customerRequestsTotal.WithLabelValues("ETH1", "jsonrpc", CustomerOther, "eth_call")))
+	require.Equal(t, 1.0, testutil.ToFloat64(m.customerOverflow.WithLabelValues("ETH1")))
+	require.NotContains(t, m.customers.admitted["ETH1"], "\xff\xfe")
+}
+
+func TestNormalizeCustomerLabel_EmptyValueIsNoCustomer(t *testing.T) {
+	m := newSmartRouterForCustomerTest()
+
+	m.SetRelayMetrics(customerRequest("", "eth_call", true, 40), nil)
+	require.Equal(t, 1.0, testutil.ToFloat64(m.customerRequestsTotal.WithLabelValues("ETH1", "jsonrpc", CustomerNone, "eth_call")))
+	require.Zero(t, testutil.ToFloat64(m.customerOverflow.WithLabelValues("ETH1")))
+}
