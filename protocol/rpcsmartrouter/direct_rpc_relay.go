@@ -987,10 +987,18 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	}
 
 	result := &common.RelayResult{
+		// No block is read out of the reply (MAG-4373). A GraphQL caller names the fields of its
+		// own reply, so the path a tip directive reads holds whatever the caller aliased onto it,
+		// and on Sui the tip field (serviceConfig) is an ordinary query field anyone may select:
+		// `last { sequenceNumber: networkTotalTransactions }` answers 6.2 billion against a tip of
+		// ~334 million. Harvested as this endpoint's tip, one such query set its stored tip and
+		// its HighestBlockSeen, which nothing lowers, so head-stall detection could no longer flag
+		// the endpoint until restart. A GraphQL endpoint's tip comes from its tracker's poll only,
+		// which parses the reply to its own request (EndpointPoller.FetchLatestBlockNum); the relay
+		// path stamps that observed tip onto this reply instead (site B, sendRelayToDirectEndpoints).
 		Reply: &pairingtypes.RelayReply{
-			Data:        response.Body,
-			LatestBlock: extractBlockHeightFromJSONResponse(response.Body, chainMessage),
-			Metadata:    convertHTTPHeadersToMetadata(response.Headers),
+			Data:     response.Body,
+			Metadata: convertHTTPHeadersToMetadata(response.Headers),
 		},
 		Finalized:  true,
 		StatusCode: response.StatusCode,

@@ -3994,7 +3994,9 @@ func (rpcss *RPCSmartRouterServer) endpointObservationGeneration(endpointURL str
 //     cannot discriminate, and neither can GetUsedDefaultValue() (non-deterministic for
 //     eth_blockNumber across runs). The spec tag is the only reliable discriminator. A concrete
 //     eth_getBlockByNumber(N) requests N (not LATEST) and is historical.
-//     Reply.LatestBlock is populated for JSON-RPC and gRPC; REST harvests nothing.
+//     Reply.LatestBlock is populated for JSON-RPC and gRPC; REST and GraphQL harvest nothing (a
+//     GraphQL caller names its reply's fields, so the tip directive's path is the caller's to
+//     fill — see sendGraphQLRelay, MAG-4373).
 //
 // Note: RequestedBlock() is not concretized during the relay flow (the
 // UpdateLatestBlockInMessage call in relaycore/results_manager.go is disabled), so it still
