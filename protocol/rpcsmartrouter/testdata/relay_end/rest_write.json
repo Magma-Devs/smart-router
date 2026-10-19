@@ -29,5 +29,6 @@
   "served_by": "node-a",
   "stateful": true,
   "status": 200,
-  "stop_reason": "Success"
+  "stop_reason": "Success",
+  "tx_code": 0
 }
