@@ -68,8 +68,11 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | `skipped` | array | when the consistency check passed an upstream over | One entry each time the consistency check passed an upstream over before sending because it was too far behind the chain tip: `upstream`, `lag` (blocks behind the tip), `threshold` (the lag allowed) and `batch` (the batch it was passed over in). A skipped upstream got no request then; it is in `attempts` only if it was sent later, as a stale fallback. |
 | `attempts` | array | when `stateful` is `true`, when `outcome` is not `ok`, when the relay took more than one attempt or its only attempt failed (a retry, a hedge, a recovery on another upstream), or when an upstream was skipped | One entry per upstream attempt; see [attempts](#attempts). `[]` when nothing was sent. A read its first attempt answered leaves it out. |
 
-LogQL's `json` parser renders numbers and booleans as strings (`stateful="true"`, `has_reply="false"`, `status="500"`)
-and skips arrays; `| json attempts="attempts"` extracts the raw array.
+LogQL's `json` parser renders numbers and booleans as strings (`has_reply="false"`, `status="500"`)
+and skips arrays; `| json attempts="attempts"` extracts the raw array. A field whose name is already a
+stream label is renamed with an `_extracted` suffix: where the collector labels writes `stateful`,
+`| json | stateful="true"` matches nothing, so select writes by that stream label or by the line
+filter `|= "\"stateful\":true"`, which works either way.
 
 `error` and `attempts[].message` are prose for a person. The same failure can read differently on
 routers at different `--log-level`s, because an error built by a log formatter whose level is off
