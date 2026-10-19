@@ -176,7 +176,7 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 	if in.protocolMessage != nil {
 		if api := in.protocolMessage.GetApi(); api != nil {
 			end.stateful = chainlib.GetStateful(in.protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
-			end.method = relayEndMethod(api.Name, end.apiInterface)
+			end.method = relayEndMethod(api.Name, relayEndNamedByURL(in.protocolMessage, end.apiInterface))
 		}
 		end.isBatch = chainqueries.IsBatchRequest(in.protocolMessage)
 	} else {
@@ -435,18 +435,31 @@ const relayEndMethodLimit = 256
 
 // relayEndMethod is the parsed api name without a leading slash: the fleet's log collector rewrites
 // a value that starts with "/" as /REDACTED, which would erase every REST path. A listed name is the
-// spec's. An unlisted one is what the client sent, and on an interface that names the api by URL it
-// is the client's path and query, which may carry a credential the "Default-" prefix would carry
-// past the collector, so it is withheld. JSON-RPC names come from the body and gRPC's are services.
-func relayEndMethod(apiName, apiInterface string) string {
-	keepUnlisted := apiInterface == spectypes.APIInterfaceJsonRPC || apiInterface == spectypes.APIInterfaceGrpc
+// spec's. An unlisted one is what the client sent. When the request named its api by URL, that is
+// the client's path and query, which may carry a credential the "Default-" prefix would carry past
+// the collector, so it is withheld.
+func relayEndMethod(apiName string, namedByURL bool) string {
 	members := strings.Split(apiName, chainlib.SEP)
 	for i, member := range members {
-		if !keepUnlisted && strings.HasPrefix(member, chainlib.DefaultApiName) {
+		if namedByURL && strings.HasPrefix(member, chainlib.DefaultApiName) {
 			members[i] = chainlib.DefaultApiName + "REDACTED"
 		}
 	}
 	return utils.FormatLongString(strings.TrimLeft(strings.Join(members, chainlib.SEP), "/"), relayEndMethodLimit)
+}
+
+// relayEndNamedByURL reports whether the request named its api by URL. JSON-RPC and GraphQL name it
+// in the body and gRPC names a service method. Tendermint does either: its parser reads a request
+// with a body as JSON-RPC, over POST or WebSocket, and one without as a URI. REST, and any interface
+// not listed here, counts as a URL, so an interface added later withholds rather than leaks.
+func relayEndNamedByURL(protocolMessage chainlib.ProtocolMessage, apiInterface string) bool {
+	switch apiInterface {
+	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceGraphQL, spectypes.APIInterfaceGrpc:
+		return false
+	case spectypes.APIInterfaceTendermintRPC:
+		return len(protocolMessage.RelayPrivateData().GetData()) == 0
+	}
+	return true
 }
 
 func relayEndSelection(selection relaycore.Selection) string {
