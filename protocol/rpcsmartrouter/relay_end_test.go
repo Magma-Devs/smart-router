@@ -608,6 +608,10 @@ func TestRelayEnd_AttemptOutcomes(t *testing.T) {
 	})
 	require.Equal(t, attemptOutcomeRateLimited, rateLimited.outcome)
 	require.Equal(t, "node-a", rateLimited.upstream)
+	require.Equal(t, common.LavaErrorNodeRateLimited.Retryable, rateLimited.retryable())
+	unclassified := relayEndNodeErrorAttempt(relaycore.RelayError{Err: errors.New("odd"), Response: &relaycore.RelayResponse{}})
+	require.Equal(t, common.LavaErrorUnknown.Name, unclassified.errorCode)
+	require.Equal(t, common.LavaErrorUnknown.Retryable, unclassified.retryable(), "an unclassified error takes UNKNOWN_ERROR's verdict")
 
 	for _, tc := range []struct {
 		name         string
@@ -626,6 +630,7 @@ func TestRelayEnd_AttemptOutcomes(t *testing.T) {
 			attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: tc.err, LavaError: tc.lavaError, ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}}, tc.ranOutOfRoad)
 			require.Equal(t, tc.want, attempt.outcome)
 			require.Equal(t, tc.lavaError.Name, attempt.errorCode)
+			require.Equal(t, tc.lavaError.Retryable, attempt.retryable(), "the registry's verdict, as the narrative lines print it")
 		})
 	}
 }

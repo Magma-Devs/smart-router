@@ -8,6 +8,7 @@
       "latency_ms": "<ms>",
       "message": "execution reverted",
       "outcome": "node_error",
+      "retryable": false,
       "returned_to_client": true,
       "sent_ms": "<ms>",
       "upstream": "node-a"

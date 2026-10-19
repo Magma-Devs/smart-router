@@ -148,6 +148,9 @@ func (a *relayEndAttempt) MarshalZerologObject(event *zerolog.Event) {
 		Str("outcome", a.outcome).
 		Str("error_code", a.errorCode).
 		Str("message", a.message)
+	if a.errorCode != "" {
+		event.Bool("retryable", a.retryable())
+	}
 	if a.sent {
 		event.Int("batch", a.batch).
 			Int64("sent_ms", a.sentAfter.Milliseconds())
@@ -328,6 +331,16 @@ func relayEndAttemptsOf(dispatched []lavasession.Dispatch, start time.Time, succ
 		}
 	}
 	return attempts
+}
+
+// retryable is the router's verdict on the attempt's error, the registry's Retryable flag the
+// narrative lines print: whether another upstream may succeed where this one failed. An error the
+// registry did not classify takes UNKNOWN_ERROR's, as its error_code does.
+func (a *relayEndAttempt) retryable() bool {
+	if a.lavaError == nil {
+		return common.LavaErrorUnknown.Retryable
+	}
+	return a.lavaError.Retryable
 }
 
 func relayEndNodeErrorAttempt(nodeError relaycore.RelayError) relayEndAttempt {
