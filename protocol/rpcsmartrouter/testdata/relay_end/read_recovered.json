@@ -1,0 +1,39 @@
+{
+  "GUID": "7387963",
+  "api_interface": "jsonrpc",
+  "attempts": [
+    {
+      "error_code": "PROTOCOL_CONNECTION_REFUSED",
+      "latency_ms": "<ms>",
+      "message": "http request failed: Post \"http://127.0.0.1:<port>\": dial tcp 127.0.0.1:<port>: connect: connection refused: Provider connection refused",
+      "outcome": "transport_error",
+      "returned_to_client": false,
+      "upstream": "node-a"
+    },
+    {
+      "error_code": "",
+      "latency_ms": "<ms>",
+      "message": "",
+      "outcome": "ok",
+      "returned_to_client": true,
+      "upstream": "node-b"
+    }
+  ],
+  "chain": "ETH1",
+  "error": "",
+  "error_code": "",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "eth_getBalance",
+  "outcome": "ok",
+  "schema": 1,
+  "selection": "stateless",
+  "served_by": "node-b",
+  "stateful": false,
+  "status": 200,
+  "stop_reason": "Success"
+}

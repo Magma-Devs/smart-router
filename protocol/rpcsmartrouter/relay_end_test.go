@@ -178,33 +178,25 @@ func relayEndSilent(w http.ResponseWriter, r *http.Request) {
 // newRelayEndServer is a real router over real upstreams, every one a primary.
 func newRelayEndServer(t *testing.T, chainID, apiInterface string, chainParser chainlib.ChainParser, nodes ...relayEndNode) *RPCSmartRouterServer {
 	t.Helper()
-	ctx := context.Background()
+	return newRelayEndServerWithBackups(t, chainID, apiInterface, chainParser, nodes, nil)
+}
+
+// newRelayEndServerWithBackups adds a backup tier, which the router turns to only when no primary
+// is left.
+func newRelayEndServerWithBackups(t *testing.T, chainID, apiInterface string, chainParser chainlib.ChainParser, primaries, backups []relayEndNode) *RPCSmartRouterServer {
+	t.Helper()
 	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
 	csm := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
-	primaries := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
-	for i, node := range nodes {
-		var url string
-		if node.handler == nil {
-			refused := httptest.NewServer(http.NotFoundHandler())
-			url = refused.URL
-			refused.Close()
-		} else {
-			upstream := httptest.NewServer(node.handler)
-			t.Cleanup(upstream.Close)
-			// Runs first: a write's attempt outlives its request, and Close waits for its handler.
-			t.Cleanup(upstream.CloseClientConnections)
-			url = upstream.URL
+	tier := func(nodes []relayEndNode) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+		providers := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+		for i, node := range nodes {
+			providers[uint64(i)] = relayEndProvider(t, node)
 		}
-		connection, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
-		require.NoError(t, err)
-		endpoint := &lavasession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection}}
-		provider := lavasession.NewConsumerSessionWithProvider(node.name, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
-		provider.StaticProvider = true
-		primaries[uint64(i)] = provider
+		return providers
 	}
-	if len(nodes) > 0 {
-		require.NoError(t, csm.UpdateAllProviders(1, primaries, map[uint64]*lavasession.ConsumerSessionsWithProvider{}))
+	if len(primaries) > 0 || len(backups) > 0 {
+		require.NoError(t, csm.UpdateAllProviders(1, tier(primaries), tier(backups)))
 	}
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
@@ -215,6 +207,29 @@ func newRelayEndServer(t *testing.T, chainID, apiInterface string, chainParser c
 		sessionManager:     csm,
 		rpcSmartRouterLogs: logs,
 	}
+}
+
+// relayEndProvider serves node on a local address, or reserves one that refuses connections.
+func relayEndProvider(t *testing.T, node relayEndNode) *lavasession.ConsumerSessionsWithProvider {
+	t.Helper()
+	var url string
+	if node.handler == nil {
+		refused := httptest.NewServer(http.NotFoundHandler())
+		url = refused.URL
+		refused.Close()
+	} else {
+		upstream := httptest.NewServer(node.handler)
+		t.Cleanup(upstream.Close)
+		// Runs first: a write's attempt outlives its request, and Close waits for its handler.
+		t.Cleanup(upstream.CloseClientConnections)
+		url = upstream.URL
+	}
+	connection, err := lavasession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: url}, 5, "")
+	require.NoError(t, err)
+	endpoint := &lavasession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection}}
+	provider := lavasession.NewConsumerSessionWithProvider(node.name, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
+	provider.StaticProvider = true
+	return provider
 }
 
 // sendRelayEnd sends body the way every HTTP listener does: SendRelay, with the GUID the
@@ -252,6 +267,7 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 		// fanOut marks a stateful relay, whose single batch goes out in arbitrary order.
 		fanOut   bool
 		nodes    func(t *testing.T) []relayEndNode
+		backups  func(t *testing.T) []relayEndNode
 		url      string
 		body     string
 		metadata []pairingtypes.Metadata
@@ -329,6 +345,17 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			},
 		},
 		{
+			// The only primary refuses the connection, so the read is retried on the backup, which
+			// answers. The client gets an ok; the attempts show the failure it recovered from.
+			name:  "read_recovered",
+			nodes: func(*testing.T) []relayEndNode { return []relayEndNode{{"node-a", nil}} },
+			backups: func(*testing.T) []relayEndNode {
+				return []relayEndNode{{"node-b", relayEndReply(200, relayEndBalance, 0)}}
+			},
+			body:  relayEndRead,
+			check: func(t *testing.T, _ *common.RelayResult, err error) { require.NoError(t, err) },
+		},
+		{
 			name:  "no_answer",
 			nodes: func(*testing.T) []relayEndNode { return []relayEndNode{{"node-a", nil}} },
 			body:  relayEndRead,
@@ -380,7 +407,11 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			read := captureRelayEnds(t)
-			server := newRelayEndServer(t, "ETH1", spectypes.APIInterfaceJsonRPC, eth, tc.nodes(t)...)
+			var backups []relayEndNode
+			if tc.backups != nil {
+				backups = tc.backups(t)
+			}
+			server := newRelayEndServerWithBackups(t, "ETH1", spectypes.APIInterfaceJsonRPC, eth, tc.nodes(t), backups)
 			guid := relayEndCaseGUID(tc.name)
 			timeout := tc.timeout
 			if timeout == 0 {
@@ -579,6 +610,28 @@ func TestRelayEnd_AttemptOutcomes(t *testing.T) {
 			require.Equal(t, tc.want, attempt.outcome)
 			require.Equal(t, tc.lavaError.Name, attempt.errorCode)
 		})
+	}
+}
+
+// A read its only attempt answered is the common case and carries no attempts; anything else does.
+func TestRelayEnd_ListsAttempts(t *testing.T) {
+	ok := relayEndAttempt{outcome: attemptOutcomeOK}
+	failed := relayEndAttempt{outcome: attemptOutcomeTransportError}
+	cancelled := relayEndAttempt{outcome: attemptOutcomeCancelled}
+	for _, tc := range []struct {
+		name string
+		end  relayEnd
+		want bool
+	}{
+		{"a read its only attempt answered", relayEnd{outcome: relayOutcomeOK, attempts: relayEndAttempts{ok}}, false},
+		{"a cache hit with nothing sent", relayEnd{outcome: relayOutcomeOK}, false},
+		{"a read that recovered on another upstream", relayEnd{outcome: relayOutcomeOK, attempts: relayEndAttempts{failed, ok}}, true},
+		{"a hedge whose loser was called off", relayEnd{outcome: relayOutcomeOK, attempts: relayEndAttempts{ok, cancelled}}, true},
+		{"an ok whose only attempt failed", relayEnd{outcome: relayOutcomeOK, attempts: relayEndAttempts{failed}}, true},
+		{"a write", relayEnd{stateful: true, outcome: relayOutcomeOK, attempts: relayEndAttempts{ok}}, true},
+		{"a failure", relayEnd{outcome: relayOutcomeNoAnswer}, true},
+	} {
+		require.Equal(t, tc.want, tc.end.listsAttempts(), tc.name)
 	}
 }
 
