@@ -541,7 +541,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		// check whether it's a normal relay / unsubscribe / unsubscribe_all otherwise its a subscription flow.
 		if !IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_SUBSCRIBE) {
 			if IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_UNSUBSCRIBE) {
-				responseData, err := cwm.wsSubscriptionManager.Unsubscribe(frameCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+				subscriptionCtx := WithSubscriptionUpstream(frameCtx)
+				responseData, err := cwm.wsSubscriptionManager.Unsubscribe(subscriptionCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+				cwm.reportSubscriptionRelay(subscriptionCtx, protocolMessage, parseStart, err)
 				if err != nil {
 					utils.LavaFormatWarning("error unsubscribing from subscription", err, utils.LogAttr("GUID", frameCtx))
 					if err == common.SubscriptionNotFoundError {
@@ -583,7 +585,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				}
 				continue
 			} else if IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_UNSUBSCRIBE_ALL) {
-				err := cwm.wsSubscriptionManager.UnsubscribeAll(frameCtx, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+				subscriptionCtx := WithSubscriptionUpstream(frameCtx)
+				err := cwm.wsSubscriptionManager.UnsubscribeAll(subscriptionCtx, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+				cwm.reportSubscriptionRelay(subscriptionCtx, protocolMessage, parseStart, err)
 				// The manager tears this client's subscriptions down itself and hands back no
 				// node frame, so the router answers, as the node would have (MAG-4064). A
 				// failed teardown is answered too, under the same id, so the client waiting
@@ -623,7 +627,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		// Subscription flow
 		outputFormatter := subscriptionReplyFormatter(protocolMessage.GetApiCollection().CollectionData.ApiInterface, protocolMessage.RelayPrivateData().Data)
 
-		reply, subscriptionMsgsChan, err := cwm.wsSubscriptionManager.StartSubscription(frameCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+		subscriptionCtx := WithSubscriptionUpstream(frameCtx)
+		reply, subscriptionMsgsChan, err := cwm.wsSubscriptionManager.StartSubscription(subscriptionCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+		cwm.reportSubscriptionRelay(subscriptionCtx, protocolMessage, parseStart, err)
 		// A subscribe never passes SendParsedRelay, which stamps these for a normal request.
 		metricsData.ApiMethod = protocolMessage.GetApi().GetName()
 		metricsData.Latency = time.Since(startTime).Milliseconds()
@@ -725,6 +731,15 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 
 			logger.LogRequestAndResponse("jsonrpc ws msg", false, "ws", websocketConn.LocalAddr().String(), string(msg), string(reply.Data), msgSeed, time.Since(startTime), nil)
 		}
+	}
+}
+
+// reportSubscriptionRelay hands a subscription request's outcome to the relay sender, when it records
+// them (SubscriptionRelayReporter). Each subscribe, unsubscribe and unsubscribe-all frame calls it
+// once, after the manager returns.
+func (cwm *ConsumerWebsocketManager) reportSubscriptionRelay(ctx context.Context, protocolMessage ProtocolMessage, start time.Time, err error) {
+	if reporter, ok := cwm.relaySender.(SubscriptionRelayReporter); ok {
+		reporter.ReportSubscriptionRelay(ctx, protocolMessage, start, err)
 	}
 }
 

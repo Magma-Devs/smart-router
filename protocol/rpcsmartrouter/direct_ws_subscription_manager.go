@@ -152,6 +152,9 @@ type DirectWSSubscriptionManager struct {
 	// Active subscriptions keyed by hashedParams
 	activeSubscriptions map[string]*directActiveSubscription
 
+	// endpointNames names each endpoint's provider for relay_end (SetEndpointNames).
+	endpointNames subscriptionEndpointNames
+
 	// Pending subscriptions for deduplication
 	pendingSubscriptions map[string]*pendingSubscriptionsBroadcastManager
 
@@ -303,6 +306,28 @@ func (dwsm *DirectWSSubscriptionManager) endpointsSnapshot() wsEndpointsSnapshot
 // called once per subscription with no ignore set and no retry loop, so a dead entry
 // is handed straight to the client, and a non-empty primary tier suppresses the
 // primary→backup cascade entirely.
+// SetEndpointNames gives the manager its endpoints' provider names, by URL, which relay_end writes
+// for the upstream a subscription request went to.
+func (dwsm *DirectWSSubscriptionManager) SetEndpointNames(names map[string]string) {
+	dwsm.endpointNames.set(names)
+}
+
+// upstreamNameOf names the provider of activeSub's upstream.
+func (dwsm *DirectWSSubscriptionManager) upstreamNameOf(activeSub *directActiveSubscription) string {
+	if activeSub == nil || activeSub.upstreamPool == nil || activeSub.upstreamPool.nodeUrl == nil {
+		return ""
+	}
+	return dwsm.endpointNames.name(activeSub.upstreamPool.nodeUrl.Url)
+}
+
+// subscriptionUpstreamName names the provider of the open subscription hashedParams identifies.
+func (dwsm *DirectWSSubscriptionManager) subscriptionUpstreamName(hashedParams string) string {
+	dwsm.lock.RLock()
+	activeSub := dwsm.activeSubscriptions[hashedParams]
+	dwsm.lock.RUnlock()
+	return dwsm.upstreamNameOf(activeSub)
+}
+
 func (dwsm *DirectWSSubscriptionManager) SetEndpoints(wsEndpoints, wsBackupEndpoints []*common.NodeUrl) (changed bool) {
 	byURL := make(map[string]*common.NodeUrl, len(wsEndpoints)+len(wsBackupEndpoints))
 	for _, ep := range wsEndpoints {
@@ -746,6 +771,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// Check for existing active subscription
 	existingReply, joined := dwsm.checkForActiveSubscriptionAndConnect(ctx, hashedParams, clientKey, safeChannelSender, requestID)
 	if existingReply != nil {
+		chainlib.SubscriptionUpstreamFrom(ctx).Joined(dwsm.subscriptionUpstreamName(hashedParams))
 		if joined {
 			return existingReply, repliesChannel, nil
 		}
@@ -763,6 +789,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 			if success {
 				existingReply, joined := dwsm.checkForActiveSubscriptionAndConnect(ctx, hashedParams, clientKey, safeChannelSender, requestID)
 				if existingReply != nil {
+					chainlib.SubscriptionUpstreamFrom(ctx).Joined(dwsm.subscriptionUpstreamName(hashedParams))
 					if joined {
 						return existingReply, repliesChannel, nil
 					}
@@ -798,6 +825,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// Get connection
 	conn, err := pool.GetConnection(ctx)
 	if err != nil {
+		chainlib.SubscriptionUpstreamFrom(ctx).Sent(dwsm.endpointNames.name(selectedEndpoint.Url), startTime, time.Since(startTime), err)
 		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
 		dwsm.failPendingSubscription(hashedParams)
 		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
@@ -806,6 +834,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 
 	// Create upstream subscription
 	upstreamSub, firstMsg, msgChan, err := dwsm.createUpstreamSubscription(ctx, conn, subscriptionParams, subscribeMethod)
+	chainlib.SubscriptionUpstreamFrom(ctx).Sent(dwsm.endpointNames.name(selectedEndpoint.Url), startTime, time.Since(startTime), err)
 	if err != nil {
 		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
 		dwsm.failPendingSubscription(hashedParams)
@@ -1007,6 +1036,7 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 
 	// Get upstream connection and params before unlock for the CallContext
 	conn := activeSub.upstreamConnection
+	upstreamName := dwsm.upstreamNameOf(activeSub)
 	upstreamID := activeSub.upstreamID
 	numericIDs := activeSub.numericIDs
 	subscribeMethod := activeSub.subscribeMethod
@@ -1046,8 +1076,10 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 			// Use a timeout: some gateways may not return eth_unsubscribe responses.
 			// Without timeout, CallContext blocks forever and the client gets no reply.
 			callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			callStart := time.Now()
 			resp, callErr := client.CallContext(callCtx, requestID, unsubscribeMethod, unsubscribeParams, true, false)
 			cancel()
+			chainlib.SubscriptionUpstreamFrom(ctx).Sent(upstreamName, callStart, time.Since(callStart), callErr)
 			if callErr != nil {
 				utils.LavaFormatWarning("DirectWS: upstream unsubscribe call failed", callErr,
 					utils.LogAttr("upstreamID", upstreamID),

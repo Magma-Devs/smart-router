@@ -14,6 +14,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 )
@@ -390,6 +391,68 @@ func TestStreamRelayCallback_StartFailurePropagates(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, response)
 	require.Contains(t, err.Error(), "no gRPC endpoints available")
+}
+
+// reportingRelaySender records the subscription requests a listener reports.
+type reportingRelaySender struct {
+	*stubRelaySender
+	mu      sync.Mutex
+	reports []subscriptionReport
+}
+
+type subscriptionReport struct {
+	method      string
+	err         error
+	guid        bool // the report's context names the request
+	recordsSent bool // the manager could record on the report's context
+}
+
+func (r *reportingRelaySender) ReportSubscriptionRelay(ctx context.Context, protocolMessage ProtocolMessage, _ time.Time, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, guid := utils.GetUniqueIdentifier(ctx)
+	r.reports = append(r.reports, subscriptionReport{
+		method:      protocolMessage.GetApi().Name,
+		err:         err,
+		guid:        guid,
+		recordsSent: SubscriptionUpstreamFrom(ctx) != nil,
+	})
+}
+
+// A stream's open is a subscription request, reported once with what the manager returned, on a
+// context the manager can record on. A unary call that falls through is the unary path's to report.
+func TestStreamRelayCallback_ReportsEachStreamOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name, method string
+		startErr     error
+		reports      int
+	}{
+		{"a stream that opens", streamingApiName, nil, 1},
+		{"a stream that fails to open", streamingApiName, errors.New("no gRPC endpoints available"), 1},
+		{"a unary call", unaryApiName, nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sender := &reportingRelaySender{stubRelaySender: &stubRelaySender{parser: grpcParserWithSubscription()}}
+			listener := newStreamingListener(t, sender.stubRelaySender)
+			listener.relaySender = sender
+			manager := newStubGRPCSubscriptionManager()
+			manager.startErr = tc.startErr
+
+			_, _ = listener.makeStreamRelayCallback(manager)(context.Background(), tc.method, []byte("{}"))
+
+			sender.mu.Lock()
+			defer sender.mu.Unlock()
+			require.Len(t, sender.reports, tc.reports)
+			if tc.reports == 0 {
+				return
+			}
+			report := sender.reports[0]
+			require.Equal(t, tc.method, report.method)
+			require.Equal(t, tc.startErr, report.err, "the manager's error, as the client gets it")
+			require.True(t, report.guid, "the stream's GUID")
+			require.True(t, report.recordsSent, "the manager could say what it did upstream")
+		})
+	}
 }
 
 // TestForwardSubscriptionReplies_StopsWhenClientGone guards the forwarder against

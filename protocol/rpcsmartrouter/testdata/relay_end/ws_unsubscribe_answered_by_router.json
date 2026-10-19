@@ -1,0 +1,22 @@
+{
+  "GUID": "<frame>",
+  "api_interface": "jsonrpc",
+  "chain": "ETH1",
+  "connection": "<connection>",
+  "error": "",
+  "error_code": "",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "eth_unsubscribe",
+  "outcome": "ok",
+  "schema": 1,
+  "selection": "subscription",
+  "served_by": "",
+  "stateful": false,
+  "status": 0,
+  "stop_reason": ""
+}

@@ -231,8 +231,10 @@ func (rpcss *RPCSmartRouterServer) ReportRejectedRelay(ctx context.Context, star
 	rpcss.writeRelayEnd(ctx, relayEndInput{err: err, cause: err, start: start})
 }
 
-func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEndInput) *relayEnd {
-	end := &relayEnd{latency: time.Since(in.start)}
+// newRelayEnd fills what every exit's event shares: the request's identity, its listener, the
+// method and whether it writes, and how long ago it started.
+func (rpcss *RPCSmartRouterServer) newRelayEnd(ctx context.Context, protocolMessage chainlib.ProtocolMessage, start time.Time, err error) *relayEnd {
+	end := &relayEnd{latency: time.Since(start)}
 	if rpcss.listenEndpoint != nil {
 		end.chain = rpcss.listenEndpoint.ChainID
 		end.apiInterface = rpcss.listenEndpoint.ApiInterface
@@ -244,16 +246,21 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 		end.connection = strconv.FormatUint(connection, 10)
 	}
 
-	if in.protocolMessage != nil {
-		if api := in.protocolMessage.GetApi(); api != nil {
-			end.stateful = chainlib.GetStateful(in.protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
-			end.method = relayEndMethod(api.Name, relayEndNamedByURL(in.protocolMessage, end.apiInterface))
+	if protocolMessage != nil {
+		if api := protocolMessage.GetApi(); api != nil {
+			end.stateful = chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
+			end.method = relayEndMethod(api.Name, relayEndNamedByURL(protocolMessage, end.apiInterface))
 		}
-		end.isBatch = chainqueries.IsBatchRequest(in.protocolMessage)
+		end.isBatch = chainqueries.IsBatchRequest(protocolMessage)
 	} else {
 		// The two refusals of a batch happen while it is parsed, before there is a message to ask.
-		end.isBatch = errors.Is(in.err, chainlib.ErrBatchRequestSizeExceeded) || errors.Is(in.err, rpcInterfaceMessages.ErrJsonrpcBatchRefused)
+		end.isBatch = errors.Is(err, chainlib.ErrBatchRequestSizeExceeded) || errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused)
 	}
+	return end
+}
+
+func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEndInput) *relayEnd {
+	end := rpcss.newRelayEnd(ctx, in.protocolMessage, in.start, in.err)
 
 	dispatched := 0
 	if in.processor != nil {
@@ -477,6 +484,8 @@ func relayEndErrorCode(cause error, result *common.RelayResult, attempts relayEn
 		return common.LavaErrorProviderUnavailable.Name
 	case errors.Is(cause, chainlib.ErrBatchRequestSizeExceeded):
 		return common.LavaErrorBatchSizeExceeded.Name
+	case errors.Is(cause, common.SubscriptionNotFoundError):
+		return common.LavaErrorSubscriptionNotFound.Name
 	}
 	if connectionError := common.DetectConnectionError(cause); connectionError != nil {
 		return connectionError.Name

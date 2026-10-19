@@ -531,6 +531,7 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		dappID := extractDappIDFromGrpcHeader(metadataValues)
 		consumerIp := common.GetIpFromGrpcContext(ctx)
 
+		parseStart := time.Now()
 		protocolMessage, err := apil.relaySender.ParseRelay(ctx, method, string(reqBody), "", dappID, consumerIp, convertToMetadataMapOfSlices(metadataValues))
 		if err != nil {
 			// Not this callback's error to report: an unknown or malformed method must
@@ -570,7 +571,11 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 			utils.LogAttr("dappID", dappID),
 		)
 
+		ctx = WithSubscriptionUpstream(ctx)
 		firstReply, repliesChan, err := subscriptionManager.StartSubscription(ctx, protocolMessage, dappID, consumerIp, connectionUniqueId, metricsData)
+		if reporter, ok := apil.relaySender.(SubscriptionRelayReporter); ok {
+			reporter.ReportSubscriptionRelay(ctx, protocolMessage, parseStart, err)
+		}
 		// A subscribe never passes SendParsedRelay, which stamps these for a normal request.
 		metricsData.ApiMethod = protocolMessage.GetApi().GetName()
 		metricsData.Latency = time.Since(startTime).Milliseconds()
