@@ -91,6 +91,9 @@ type relayEndAttempt struct {
 	message          string
 	latency          time.Duration // zero when unknown
 	returnedToClient bool
+	sent             bool // went out as a dispatch, so batch and sentAfter are known
+	batch            int
+	sentAfter        time.Duration // from the relay's start
 
 	// Not written: what the relay-level fields are derived from.
 	reply     *pairingtypes.RelayReply
@@ -145,6 +148,10 @@ func (a *relayEndAttempt) MarshalZerologObject(event *zerolog.Event) {
 		Str("outcome", a.outcome).
 		Str("error_code", a.errorCode).
 		Str("message", a.message)
+	if a.sent {
+		event.Int("batch", a.batch).
+			Int64("sent_ms", a.sentAfter.Milliseconds())
+	}
 	if a.latency > 0 {
 		event.Int64("latency_ms", a.latency.Milliseconds())
 	}
@@ -202,13 +209,13 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 	if in.processor != nil {
 		end.selection = relayEndSelection(in.processor.GetSelection())
 		end.stopReason = in.processor.GetStopReason()
-		var dispatchedProviders []string
+		var dispatches []lavasession.Dispatch
 		if usedProviders := in.processor.GetUsedProviders(); usedProviders != nil {
-			dispatchedProviders = usedProviders.DispatchedProviders()
+			dispatches = usedProviders.Dispatches()
 		}
-		dispatched = len(dispatchedProviders)
+		dispatched = len(dispatches)
 		successes, nodeErrors, protocolErrors := in.processor.GetResultsDetail()
-		end.attempts = relayEndAttemptsOf(dispatchedProviders, successes, nodeErrors, protocolErrors, requestRanOutOfRoad(end.stopReason))
+		end.attempts = relayEndAttemptsOf(dispatches, in.start, successes, nodeErrors, protocolErrors, requestRanOutOfRoad(end.stopReason))
 	}
 
 	served := in.err == nil && in.result != nil && in.result.Reply != nil
@@ -271,10 +278,11 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 }
 
 // relayEndAttemptsOf lists one attempt per dispatched session, in dispatch order, each paired with
-// the result its upstream recorded; an attempt with none has not answered by the time the relay
-// ends. Results without a dispatch (a cache hit) follow. Within one upstream, results pair in the
-// header's order: protocol errors, node errors, successes.
-func relayEndAttemptsOf(dispatched []string, successes []common.RelayResult, nodeErrors, protocolErrors []relaycore.RelayError, ranOutOfRoad bool) relayEndAttempts {
+// the result its upstream recorded and carrying its batch and when it went out, measured from start;
+// an attempt with no result has not answered by the time the relay ends. Results without a dispatch
+// (a cache hit) follow. Within one upstream, results pair in the header's order: protocol errors,
+// node errors, successes.
+func relayEndAttemptsOf(dispatched []lavasession.Dispatch, start time.Time, successes []common.RelayResult, nodeErrors, protocolErrors []relaycore.RelayError, ranOutOfRoad bool) relayEndAttempts {
 	recorded := make([]relayEndAttempt, 0, len(successes)+len(nodeErrors)+len(protocolErrors))
 	for i := range protocolErrors {
 		recorded = append(recorded, relayEndProtocolErrorAttempt(protocolErrors[i], ranOutOfRoad))
@@ -297,18 +305,22 @@ func relayEndAttemptsOf(dispatched []string, successes []common.RelayResult, nod
 	}
 	used := make([]bool, len(recorded))
 	attempts := make(relayEndAttempts, 0, max(len(dispatched), len(recorded)))
-	for _, upstream := range dispatched {
-		if queue := byUpstream[upstream]; len(queue) > 0 {
-			byUpstream[upstream] = queue[1:]
+	for _, dispatch := range dispatched {
+		var attempt relayEndAttempt
+		if queue := byUpstream[dispatch.Provider]; len(queue) > 0 {
+			byUpstream[dispatch.Provider] = queue[1:]
 			used[queue[0]] = true
-			attempts = append(attempts, recorded[queue[0]])
-			continue
+			attempt = recorded[queue[0]]
+		} else {
+			attempt = relayEndAttempt{upstream: dispatch.Provider, outcome: attemptOutcomeCancelled}
+			if ranOutOfRoad {
+				attempt.outcome = attemptOutcomeTimeout
+			}
 		}
-		silent := relayEndAttempt{upstream: upstream, outcome: attemptOutcomeCancelled}
-		if ranOutOfRoad {
-			silent.outcome = attemptOutcomeTimeout
-		}
-		attempts = append(attempts, silent)
+		attempt.sent = true
+		attempt.batch = dispatch.Batch
+		attempt.sentAfter = max(dispatch.At.Sub(start), 0)
+		attempts = append(attempts, attempt)
 	}
 	for i := range recorded {
 		if !used[i] {
