@@ -754,7 +754,9 @@ func TestRelayEnd_MethodNeverStartsWithASlash(t *testing.T) {
 	require.Equal(t, "sui.rpc.v2.LedgerService/GetServiceInfo", relayEndMethod("sui.rpc.v2.LedgerService/GetServiceInfo", inRequest))
 	require.Equal(t, "eth_call", relayEndMethod("eth_call", inRequest))
 	require.Equal(t, "eth_getBalance&eth_chainId", relayEndMethod("eth_getBalance&eth_chainId", inRequest))
-	require.Equal(t, "", relayEndMethod("", inRequest))
+	require.Equal(t, "", relayEndMethod("", inRequest), "only a request that did not parse has no method")
+	require.Equal(t, "/", relayEndMethod("/", byURL), "a REST api named the root path")
+	require.Equal(t, `"method":"/"`, collectorBarePathRedaction.ReplaceAllString(`"method":"/"`, "${1}REDACTED"), "the collector leaves a lone slash alone")
 
 	// An unlisted name is what the client sent: kept where the request names the method itself,
 	// withheld where it is a URL's path or query, however many segments it has.
