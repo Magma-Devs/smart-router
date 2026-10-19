@@ -97,6 +97,80 @@ func TestStatefulBroadcastWaitsThroughGatewayRefusal(t *testing.T) {
 	require.Equal(t, "node@test", returnedResult.ProviderInfo.ProviderAddress)
 }
 
+// newStatefulGraphQLProcessor builds a relay processor for a GraphQL mutation broadcast to two
+// providers, the way a Sui or Fuel transaction submit fans out.
+func newStatefulGraphQLProcessor(t *testing.T) *RelayProcessor {
+	t.Helper()
+	ctx := context.Background()
+	chainParser, err := chainlib.NewGraphQLChainParser()
+	require.NoError(t, err)
+	chainParser.SetSpec(spectypes.Spec{
+		Index:            "SUI",
+		Enabled:          true,
+		AverageBlockTime: 400,
+		ApiCollections: []*spectypes.ApiCollection{{
+			Enabled:        true,
+			CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGraphQL, Type: http.MethodPost},
+			Apis: []*spectypes.Api{{
+				Name:         "executeTransaction",
+				Enabled:      true,
+				ComputeUnits: 100,
+				Category:     spectypes.SpecCategory{Stateful: 1},
+				BlockParsing: spectypes.BlockParser{ParserArg: []string{""}, ParserFunc: spectypes.PARSER_FUNC_EMPTY},
+			}},
+		}},
+	})
+	mutation := []byte(`{"query":"mutation { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { effects { status } } }"}`)
+	chainMsg, err := chainParser.ParseMsg("", mutation, http.MethodPost, nil, extensionslib.ExtensionInfo{})
+	require.NoError(t, err)
+	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
+	usedProviders := lavasession.NewUsedProviders(nil)
+	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateful))
+
+	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+	require.Nil(t, usedProviders.TryLockSelection(lockCtx))
+	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{"gateway@test": &lavasession.SessionInfo{}, "node@test": &lavasession.SessionInfo{}}, nil)
+	return relayProcessor
+}
+
+// TestStatefulGraphQLBroadcastWaitsThroughGatewayBody is the GraphQL twin of
+// TestStatefulBroadcastWaitsThroughGatewayRefusal (MAG-4369), from the Fuel Sepolia writes of
+// 2026-10-15: the gateway in front of one upstream answers at once with its own JSON under a 200,
+// never forwarding the transaction, and the node behind the other executes it. Neither body below
+// is a GraphQL response, so the broadcast must keep waiting and return the node's reply, not tell
+// the client its transaction failed while it lands.
+func TestStatefulGraphQLBroadcastWaitsThroughGatewayBody(t *testing.T) {
+	executed := `{"data":{"executeTransaction":{"effects":{"status":"SUCCESS"}}}}`
+	for _, gatewayBody := range []string{`{"error":"Invalid API key"}`, `{}`, `{"data":null}`} {
+		t.Run(gatewayBody, func(t *testing.T) {
+			relayProcessor := newStatefulGraphQLProcessor(t)
+
+			go sendRestReply(relayProcessor, "gateway@test", 5*time.Millisecond, http.StatusOK, gatewayBody)
+			go sendRestReply(relayProcessor, "node@test", 80*time.Millisecond, http.StatusOK, executed)
+
+			shortCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+			defer cancel()
+			require.Error(t, relayProcessor.WaitForResults(shortCtx), "the gateway's body ended the wait — it was counted as the answer")
+			hasResults, _ := relayProcessor.HasRequiredNodeResults(1)
+			require.False(t, hasResults, "the gateway's body satisfied the stateful relay")
+			successes, nodeErrors, _, protocolErrors := relayProcessor.GetResults()
+			require.Equal(t, 0, successes)
+			require.Equal(t, 1, nodeErrors)
+			require.Equal(t, 0, protocolErrors)
+
+			longCtx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			require.NoError(t, relayProcessor.WaitForResults(longCtx))
+			returnedResult, err := relayProcessor.ProcessingResult()
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, returnedResult.StatusCode)
+			require.Equal(t, executed, string(returnedResult.Reply.Data))
+			require.Equal(t, "node@test", returnedResult.ProviderInfo.ProviderAddress)
+		})
+	}
+}
+
 // TestStatefulBroadcastWaitsThroughProblemDocumentToo: a 404 carrying a problem document is the
 // chain's own refusal — a node error like any other non-2xx — so a write keeps waiting for its
 // sibling instead of accepting the refusal as the result.

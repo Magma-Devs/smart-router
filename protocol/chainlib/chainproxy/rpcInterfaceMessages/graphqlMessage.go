@@ -1,6 +1,7 @@
 package rpcInterfaceMessages
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/http"
@@ -326,11 +327,23 @@ func (gm *GraphQLMessage) GetRawRequestHash() ([]byte, error) {
 // while a sibling was still executing it. A status of 0 is "not set" and reads as 2xx, as it does
 // for REST.
 //
-// Inside a 2xx, three rules, each one measured against live Sui mainnet:
+// Inside a 2xx, the body first has to be a GraphQL response at all: a non-empty `errors` array,
+// or `data` that is an object. The GraphQL spec allows nothing else (a response without data
+// must carry errors, and data is null only when an error nulled it). A body with neither came
+// from whatever answered in front of the node: `{}`, `{"data":null}`, a gateway's
+// `{"error":"Invalid API key"}`, the JSON-RPC envelope of an upstream on the wrong path. Such a body
+// is a node error, and ClassificationStatus files it as a bad gateway, so it is retried on another
+// provider, blamed on the endpoint and never cached, and a write's broadcast keeps waiting for a
+// sibling. Read as the answer, a gateway's instant 200 ended a broadcast with no transaction id
+// while the other provider executed the transaction (MAG-4369, Fuel Sepolia).
 //
-//  1. An empty or absent `errors` array is a success, even when `data` is null. A read for a
-//     checkpoint that does not exist returns exactly `{"data":{"checkpoint":null}}` with no
-//     errors, and that is the node answering correctly.
+// A GraphQL response then follows three rules, each one measured against live Sui mainnet:
+//
+//  1. An empty or absent `errors` array is a success, even when every field in `data` is null.
+//     A read for a record the node does not hold returns `{"data":{"checkpoint":null}}` with no
+//     errors, for a checkpoint that never existed, one past the tip, an unknown transaction or
+//     an unknown object alike (both public operators, 2026-10-18), and that is the node
+//     answering correctly. A top-level `{"data":null}` without errors is not that answer.
 //  2. An error is the node's fault only when it carries a code in graphQLNodeErrorCodes.
 //  3. Everything else, INCLUDING an error with no extensions block at all, is the caller's
 //     answer: passed through, not retried, not counted against the endpoint. A wrong argument
@@ -347,11 +360,9 @@ func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (h
 		return true, extractErrorMessage(data, httpStatusCode)
 	}
 
-	envelope := graphQLResponseEnvelope{}
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		// A 2xx body that is not a GraphQL document at all did not come from a GraphQL node.
-		// The proxy already rejects non-JSON replies; this catches JSON of the wrong shape.
-		return true, extractErrorMessage(data, httpStatusCode)
+	envelope, isResponse := readGraphQLResponse(data)
+	if !isResponse {
+		return true, graphQLNotAResponsePrefix + extractErrorMessage(data, httpStatusCode)
 	}
 
 	for _, entry := range envelope.Errors {
@@ -366,17 +377,19 @@ func (gm *GraphQLMessage) CheckResponseError(data []byte, httpStatusCode int) (h
 }
 
 // ClassificationStatus returns the HTTP status the error registry should classify a GraphQL
-// node error under. A status outside 2xx is its own answer. Inside a 2xx the status says nothing,
-// so the error's code stands in for it, through graphQLNodeErrorCodes. A mutation error that is
+// node error under. A status outside 2xx is its own answer. Inside a 2xx the status says nothing:
+// a body that is not a GraphQL response classifies as a 502, what a gateway answering in the
+// node's place is, which the registry retries elsewhere and blames on the endpoint; otherwise the
+// error's code stands in for the status, through graphQLNodeErrorCodes. A mutation error that is
 // not a node fault (CheckResponseError's mutation rule) is the caller's and classifies as a 400,
 // not retried and not scored. Anything else keeps the reply's status.
 func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) int {
 	if httpStatusCode != 0 && (httpStatusCode < 200 || httpStatusCode >= 300) {
 		return graphQLGatewayRefusalStatus(data, httpStatusCode)
 	}
-	envelope := graphQLResponseEnvelope{}
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return httpStatusCode
+	envelope, isResponse := readGraphQLResponse(data)
+	if !isResponse {
+		return http.StatusBadGateway
 	}
 	for _, entry := range envelope.Errors {
 		if graphQLErrorIsNodeFault(entry) {
@@ -387,6 +400,28 @@ func (gm *GraphQLMessage) ClassificationStatus(data []byte, httpStatusCode int) 
 		return http.StatusBadRequest
 	}
 	return httpStatusCode
+}
+
+// graphQLNotAResponsePrefix opens the error message of a 2xx body that is not a GraphQL response,
+// so the log line says why a 200 counted as a node error. The body's own message follows it, and
+// the registry's message rows still read that.
+const graphQLNotAResponsePrefix = "reply is not a GraphQL response (no data object, no errors): "
+
+// readGraphQLResponse decodes a 2xx body and reports whether it is a GraphQL response at all: a
+// non-empty errors array, or data that is an object. JSON of another shape (a top-level null, a
+// string, errors that is not an array) is not one either.
+func readGraphQLResponse(data []byte) (envelope graphQLResponseEnvelope, isResponse bool) {
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return graphQLResponseEnvelope{}, false
+	}
+	return envelope, len(envelope.Errors) > 0 || graphQLDataIsObject(envelope.Data)
+}
+
+// graphQLDataIsObject reports whether a response's raw data member holds an object. An absent
+// member and a JSON null both decode to something that is not one.
+func graphQLDataIsObject(data json.RawMessage) bool {
+	trimmed := bytes.TrimLeft(data, " \t\r\n")
+	return len(trimmed) > 0 && trimmed[0] == '{'
 }
 
 // graphQLErrorIsNodeFault reports whether one error entry is the node's fault. An entry with no

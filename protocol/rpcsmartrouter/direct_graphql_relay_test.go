@@ -123,6 +123,53 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			wantNodeError:   true,
 			wantNonRetrying: true,
 		},
+		// A 2xx carrying neither data nor errors is not a GraphQL response (MAG-4369): a gateway
+		// answered, not the node. Retried on another provider and blamed on the endpoint, as a 502.
+		{
+			name:          "an empty object inside a 200 is not the node's answer",
+			status:        http.StatusOK,
+			reply:         `{}`,
+			wantNodeError: true,
+			wantAtFault:   true,
+		},
+		{
+			name:          "null data with no errors inside a 200 is not the node's answer",
+			status:        http.StatusOK,
+			reply:         `{"data":null}`,
+			wantNodeError: true,
+			wantAtFault:   true,
+		},
+		{
+			name:          "a gateway's key rejection inside a 200 is not the node's answer",
+			status:        http.StatusOK,
+			reply:         `{"error":"Invalid API key"}`,
+			wantNodeError: true,
+			wantAtFault:   true,
+		},
+		{
+			name:          "a JSON-RPC error envelope inside a 200 is not the node's answer",
+			status:        http.StatusOK,
+			reply:         `{"jsonrpc":"2.0","id":1,"error":{"code":-32007,"message":"50/second request limit reached"}}`,
+			wantNodeError: true,
+			wantAtFault:   true,
+		},
+		{
+			name:          "an empty 200 is not the node's answer",
+			status:        http.StatusOK,
+			reply:         ``,
+			wantNodeError: true,
+			wantAtFault:   true,
+		},
+		{
+			// On a write this is what ended the broadcast at 0 s while the other provider landed
+			// the transaction (Fuel Sepolia, 2026-10-15).
+			name:          "a gateway's key rejection of a mutation is not the node's answer",
+			request:       mutationBody,
+			status:        http.StatusOK,
+			reply:         `{"error":"Invalid API key"}`,
+			wantNodeError: true,
+			wantAtFault:   true,
+		},
 	}
 
 	for _, test := range tests {
@@ -161,6 +208,8 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			require.Equal(t, test.wantRateLimited, result.IsRateLimited)
 			require.Equal(t, test.wantAtFault, result.IsNodeAtFault)
 			require.Equal(t, test.wantCapability, result.IsNodeCapability)
+			require.Equal(t, !test.wantNodeError, relayProvesEndpointHealthy(result),
+				"only the node's own answer may reset the endpoint's failure count")
 		})
 	}
 }
