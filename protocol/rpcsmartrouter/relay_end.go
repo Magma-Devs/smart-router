@@ -607,7 +607,13 @@ func relayEndMethod(apiName string, namedByURL bool) string {
 			members[i] = chainlib.DefaultApiName + "REDACTED"
 		}
 	}
-	return utils.FormatLongString(strings.TrimLeft(strings.Join(members, chainlib.SEP), "/"), relayEndMethodLimit)
+	method := strings.TrimLeft(strings.Join(members, chainlib.SEP), "/")
+	if method == "" && apiName != "" {
+		// The root path. The collector rewrites a slash only when something follows it, so a lone
+		// "/" survives, and "" stays reserved for a request that did not parse.
+		method = "/"
+	}
+	return utils.FormatLongString(method, relayEndMethodLimit)
 }
 
 // relayEndNamedByURL reports whether the request named its api by URL. JSON-RPC and GraphQL name it
