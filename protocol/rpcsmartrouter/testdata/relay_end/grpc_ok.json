@@ -1,6 +1,7 @@
 {
   "GUID": "<minted by the listener>",
   "api_interface": "grpc",
+  "chain": "GRPCTEST",
   "error": "",
   "error_code": "",
   "event": "relay_end",

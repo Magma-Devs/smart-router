@@ -11,6 +11,7 @@
       "upstream": "node-a"
     }
   ],
+  "chain": "COSMOSHUB",
   "error": "",
   "error_code": "",
   "event": "relay_end",

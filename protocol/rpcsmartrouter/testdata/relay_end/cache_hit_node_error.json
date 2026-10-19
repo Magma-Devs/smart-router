@@ -24,6 +24,7 @@
       "upstream": "Cached"
     }
   ],
+  "chain": "ETH1",
   "error": "header not found",
   "error_code": "NODE_SERVER_ERROR",
   "event": "relay_end",

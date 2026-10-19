@@ -1,6 +1,7 @@
 {
   "GUID": "7720424",
   "api_interface": "jsonrpc",
+  "chain": "ETH1",
   "error": "",
   "error_code": "",
   "event": "relay_end",

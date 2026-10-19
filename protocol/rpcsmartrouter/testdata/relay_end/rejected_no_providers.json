@@ -2,6 +2,7 @@
   "GUID": "7552578",
   "api_interface": "jsonrpc",
   "attempts": [],
+  "chain": "ETH1",
   "error": "No pairings available.",
   "error_code": "PROTOCOL_NO_PROVIDERS",
   "event": "relay_end",

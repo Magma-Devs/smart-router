@@ -17,6 +17,7 @@
       "upstream": "node-b"
     }
   ],
+  "chain": "ETH1",
   "error": "transaction status unclear: timeout reached before any node responded; the transaction may already have been submitted — verify on-chain before resubmitting",
   "error_code": "PROTOCOL_CONTEXT_DEADLINE",
   "event": "relay_end",
