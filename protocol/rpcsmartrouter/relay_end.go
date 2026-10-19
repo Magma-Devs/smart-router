@@ -118,9 +118,20 @@ func (e *relayEnd) MarshalZerologObject(event *zerolog.Event) {
 		Str("error", e.errorText).
 		Int64("latency_ms", e.latency.Milliseconds()).
 		Bool("is_batch", e.isBatch)
-	if e.stateful || e.outcome != relayOutcomeOK {
+	if e.listsAttempts() {
 		event.Array("attempts", e.attempts)
 	}
+}
+
+// listsAttempts says whether the event carries its attempts: on a write, on a relay that did not end
+// ok, and on one that took more than one attempt or whose only attempt failed, so a read that
+// recovered on another upstream shows what it recovered from. A read its first attempt answered, the
+// common case, leaves them out.
+func (e *relayEnd) listsAttempts() bool {
+	if e.stateful || e.outcome != relayOutcomeOK || len(e.attempts) > 1 {
+		return true
+	}
+	return len(e.attempts) == 1 && e.attempts[0].outcome != attemptOutcomeOK
 }
 
 func (attempts relayEndAttempts) MarshalZerologArray(array *zerolog.Array) {

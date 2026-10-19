@@ -58,7 +58,7 @@ server-streaming subscriptions (not relays); WebSocket frames refused by the con
 | `error` | string | always | `node_error`: the node's error message. `write_unknown`: the message the client gets ("transaction status unclear: …"). Any other failure: the error the relay ended with. `""` on `ok`. |
 | `latency_ms` | number | always | Milliseconds from the router taking the request to the event. A request that parses is timed from `SendParsedRelay` (the parse is not counted); one that does not, from `SendRelay`; a WebSocket frame that does not parse, from its parse. |
 | `is_batch` | boolean | always | A JSON-RPC batch. A batch refused while it is parsed (too large, or not accepted by the chain) is `true` too. |
-| `attempts` | array | when `stateful` is `true` or `outcome` is not `ok` | One entry per upstream attempt; see [attempts](#attempts). `[]` when nothing was sent. |
+| `attempts` | array | when `stateful` is `true`, when `outcome` is not `ok`, or when the relay took more than one attempt or its only attempt failed: a retry, a hedge, a recovery on another upstream | One entry per upstream attempt; see [attempts](#attempts). `[]` when nothing was sent. A read its first attempt answered leaves it out. |
 
 LogQL's `json` parser renders numbers and booleans as strings (`stateful="true"`, `has_reply="false"`, `status="500"`)
 and skips arrays; `| json attempts="attempts"` extracts the raw array.
