@@ -1,7 +1,9 @@
 package rpcsmartrouter
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -82,6 +84,9 @@ type relayEnd struct {
 	errorText    string
 	latency      time.Duration
 	isBatch      bool
+	txCode       *uint32 // a Cosmos transaction submit's code, read from the reply
+	txCodespace  string
+	txLog        string
 	skipped      relayEndSkips
 	attempts     relayEndAttempts
 }
@@ -127,6 +132,15 @@ func (e *relayEnd) MarshalZerologObject(event *zerolog.Event) {
 		Str("error", e.errorText).
 		Int64("latency_ms", e.latency.Milliseconds()).
 		Bool("is_batch", e.isBatch)
+	if e.txCode != nil {
+		event.Uint32("tx_code", *e.txCode)
+		if e.txCodespace != "" {
+			event.Str("tx_codespace", e.txCodespace)
+		}
+		if e.txLog != "" {
+			event.Str("tx_log", e.txLog)
+		}
+	}
 	if len(e.skipped) > 0 {
 		event.Array("skipped", e.skipped)
 	}
@@ -271,6 +285,16 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 		}
 	}
 	end.hasReply = served
+	// A Cosmos node answers a refused transaction with a normal reply, so the outcome stays ok and the
+	// reply's code says whether the node took it. gRPC's reply is protobuf and is not read.
+	if served && end.stateful && !end.isBatch && (end.apiInterface == spectypes.APIInterfaceTendermintRPC || end.apiInterface == spectypes.APIInterfaceRest) {
+		if tx, found := cosmosTxOutcome(in.result.Reply.Data); found {
+			end.txCode, end.txCodespace = tx.Code, tx.Codespace
+			if *tx.Code != 0 {
+				end.txLog = relayEndText(cmp.Or(tx.Log, tx.RawLog))
+			}
+		}
+	}
 	end.status = in.result.GetStatusCode()
 
 	switch {
@@ -501,6 +525,61 @@ func relayEndUpstream(result *common.RelayResult) string {
 func servedFromCache(result *common.RelayResult) bool {
 	tier := result.CacheLookup.ServedTier
 	return tier == common.CacheTierPrimary || tier == common.CacheTierSecondary
+}
+
+// cosmosTxReply is what a Cosmos transaction submit's reply says about the transaction. Tendermint's
+// broadcast_tx_sync and _async answer in result, broadcast_tx_commit in result.check_tx and then
+// result.tx_result (deliver_tx before CometBFT 0.38), and the REST endpoint in tx_response.
+type cosmosTxReply struct {
+	Result *struct {
+		cosmosTxResult
+		CheckTx   *cosmosTxResult `json:"check_tx"`
+		TxResult  *cosmosTxResult `json:"tx_result"`
+		DeliverTx *cosmosTxResult `json:"deliver_tx"`
+	} `json:"result"`
+	TxResponse *cosmosTxResult `json:"tx_response"`
+}
+
+type cosmosTxResult struct {
+	Code      *uint32 `json:"code"`
+	Codespace string  `json:"codespace"`
+	Log       string  `json:"log"`
+	RawLog    string  `json:"raw_log"`
+}
+
+// cosmosTxReplyLimit bounds the reply relay_end reads: a submit's answer is small.
+const cosmosTxReplyLimit = 64 << 10
+
+// cosmosTxOutcome reads a Cosmos transaction submit's reply for the transaction's code: the first
+// refusal's, or 0 when every code it names is 0. found is false for a reply that names no code.
+func cosmosTxOutcome(data []byte) (result cosmosTxResult, found bool) {
+	if len(data) == 0 || len(data) > cosmosTxReplyLimit {
+		return cosmosTxResult{}, false
+	}
+	var reply cosmosTxReply
+	if json.Unmarshal(data, &reply) != nil {
+		return cosmosTxResult{}, false
+	}
+	candidates := []*cosmosTxResult{reply.TxResponse}
+	if r := reply.Result; r != nil {
+		candidates = append(candidates, &r.cosmosTxResult, r.CheckTx, r.TxResult, r.DeliverTx)
+	}
+	var accepted *cosmosTxResult
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.Code == nil {
+			continue
+		}
+		if *candidate.Code != 0 {
+			return *candidate, true
+		}
+		if accepted == nil {
+			accepted = candidate
+		}
+	}
+	if accepted == nil {
+		return cosmosTxResult{}, false
+	}
+	return *accepted, true
 }
 
 // relayEndMethodLimit caps method: an unlisted name is whatever the client sent, and a batch joins

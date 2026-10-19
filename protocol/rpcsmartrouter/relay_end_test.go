@@ -462,6 +462,60 @@ func TestRelayEnd_ConsistencySkipAndStaleFallback(t *testing.T) {
 	}
 }
 
+// Every shape a Cosmos submit answers in: a refusal anywhere in it decides, and a reply that names no
+// code is not read as one.
+func TestRelayEnd_CosmosTxOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name, reply, codespace, log string
+		code                        uint32
+		found                       bool
+	}{
+		{"broadcast_tx_sync accepted", `{"jsonrpc":"2.0","id":1,"result":{"code":0,"log":"","hash":"AB"}}`, "", "", 0, true},
+		{"broadcast_tx_sync refused", `{"jsonrpc":"2.0","id":1,"result":{"code":5,"codespace":"sdk","log":"insufficient funds"}}`, "sdk", "insufficient funds", 5, true},
+		{"broadcast_tx_commit refused by the block", `{"result":{"check_tx":{"code":0},"tx_result":{"code":11,"codespace":"sdk","log":"out of gas"}}}`, "sdk", "out of gas", 11, true},
+		{"broadcast_tx_commit before CometBFT 0.38", `{"result":{"check_tx":{"code":0},"deliver_tx":{"code":0}}}`, "", "", 0, true},
+		{"broadcast_tx_commit refused at check", `{"result":{"check_tx":{"code":13,"codespace":"sdk","log":"insufficient fee"},"tx_result":{"code":0}}}`, "sdk", "insufficient fee", 13, true},
+		{"REST refused", `{"tx_response":{"code":32,"codespace":"sdk","raw_log":"account sequence mismatch"}}`, "sdk", "", 32, true},
+		{"a reply with no code", `{"jsonrpc":"2.0","id":1,"result":{"hash":"AB"}}`, "", "", 0, false},
+		{"not JSON", `<html>bad gateway</html>`, "", "", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, found := cosmosTxOutcome([]byte(tc.reply))
+			require.Equal(t, tc.found, found)
+			if !found {
+				return
+			}
+			require.Equal(t, tc.code, *result.Code)
+			require.Equal(t, tc.codespace, result.Codespace)
+			require.Equal(t, tc.log, result.Log)
+		})
+	}
+	_, found := cosmosTxOutcome([]byte(`{"result":{"code":1,"log":"` + strings.Repeat("x", cosmosTxReplyLimit) + `"}}`))
+	require.False(t, found, "a reply too large to be a submit's answer is not parsed")
+}
+
+// A Cosmos node refuses a transaction with a normal reply that carries the refusal's code, which the
+// event reads, so a refused transaction is told from an accepted one.
+func TestRelayEnd_TendermintTxRefused(t *testing.T) {
+	rand.InitRandomSeed()
+	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceTendermintRPC, noop, nil, "../../", nil)
+	if closeServer != nil {
+		t.Cleanup(closeServer)
+	}
+	require.NoError(t, err)
+
+	read := captureRelayEnds(t)
+	const refused = `{"jsonrpc":"2.0","id":1,"result":{"code":5,"data":"","log":"insufficient funds: 10ulava is smaller than 20ulava","codespace":"sdk","hash":"5C504ED4"}}`
+	server := newRelayEndServer(t, "LAVA", spectypes.APIInterfaceTendermintRPC, chainParser, relayEndNode{"node-a", relayEndReply(200, refused, 0)})
+	guid := relayEndCaseGUID("tendermint_tx_refused")
+	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), relayEndShortWait)
+	defer cancel()
+	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", "dapp", "", nil, nil)
+	require.NoError(t, err, "the client gets the node's normal reply")
+	requireRelayEndGolden(t, "tendermint_tx_refused", normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false))
+}
+
 // A REST path is the api name, and the collector would rewrite it as /REDACTED with its slash.
 func TestRelayEnd_RestWriteMethodKeepsItsPath(t *testing.T) {
 	rand.InitRandomSeed()
