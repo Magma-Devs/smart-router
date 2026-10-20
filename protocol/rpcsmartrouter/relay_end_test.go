@@ -503,7 +503,7 @@ func TestRelayEnd_CosmosTxOutcome(t *testing.T) {
 		{"not JSON", `<html>bad gateway</html>`, "", "", 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result, found := cosmosTxOutcome([]byte(tc.reply))
+			result, _, found := cosmosTxOutcome([]byte(tc.reply))
 			require.Equal(t, tc.found, found)
 			if !found {
 				return
@@ -513,8 +513,19 @@ func TestRelayEnd_CosmosTxOutcome(t *testing.T) {
 			require.Equal(t, tc.log, result.Log)
 		})
 	}
-	_, found := cosmosTxOutcome([]byte(`{"result":{"code":1,"log":"` + strings.Repeat("x", cosmosTxReplyLimit) + `"}}`))
+	_, _, found := cosmosTxOutcome([]byte(`{"result":{"code":1,"log":"` + strings.Repeat("x", relayEndTxReplyLimit) + `"}}`))
 	require.False(t, found, "a reply too large to be a submit's answer is not parsed")
+
+	// The hash is wherever the submit's answer puts it, whether or not the reply names a code.
+	for _, tc := range []struct{ name, reply string }{
+		{"broadcast_tx_sync", `{"result":{"code":0,"hash":"AB12"}}`},
+		{"broadcast_tx_commit", `{"result":{"check_tx":{"code":0},"tx_result":{"code":11},"hash":"AB12","height":"0"}}`},
+		{"REST", `{"tx_response":{"code":32,"txhash":"AB12"}}`},
+		{"a reply with no code", `{"result":{"hash":"AB12"}}`},
+	} {
+		_, hash, _ := cosmosTxOutcome([]byte(tc.reply))
+		require.Equal(t, "AB12", hash, tc.name)
+	}
 }
 
 // A Cosmos node refuses a transaction with a normal reply that carries the refusal's code, which the

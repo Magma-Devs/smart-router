@@ -1,0 +1,35 @@
+{
+  "GUID": "7812802",
+  "api_interface": "jsonrpc",
+  "attempts": [
+    {
+      "batch": 0,
+      "error_code": "CHAIN_NONCE_TOO_LOW",
+      "latency_ms": "<ms>",
+      "message": "nonce too low: next nonce 7, tx nonce 6",
+      "outcome": "node_error",
+      "retryable": false,
+      "returned_to_client": true,
+      "sent_ms": "<ms>",
+      "upstream": "node-a"
+    }
+  ],
+  "chain": "ETH1",
+  "error": "nonce too low: next nonce 7, tx nonce 6",
+  "error_code": "CHAIN_NONCE_TOO_LOW",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "eth_sendRawTransaction",
+  "outcome": "node_error",
+  "schema": 1,
+  "selection": "stateful",
+  "served_by": "node-a",
+  "stateful": true,
+  "status": 200,
+  "stop_reason": "Stateful",
+  "tx_hash": "0x2620d49b3fa2ff073b49bce2b5f0382521afd075691e695251929cd67be4f460"
+}
