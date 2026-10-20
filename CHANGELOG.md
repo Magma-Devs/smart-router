@@ -8,6 +8,114 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.6.1 — 2026-10-20
+
+### Highlights
+
+Smart Router v1.6.1 introduces four breaking changes to gRPC TLS validation and GraphQL error handling that operators must address before upgrading. First, gRPC TLS settings are now strictly enforced across all dialers: a `cacert-pem` that is unreadable or fails to verify the dialed host will now refuse the connection instead of falling back to system roots, requiring operators to provide valid certificates or explicitly set the `allow-insecure` flag for self-signed nodes. Second, GraphQL routing changes three behaviors: queries nested deeper than 256 levels are outright refused, 2xx responses lacking both `data` and `errors` objects are scored as node failures rather than valid answers, and 4xx responses containing JSON-RPC error envelopes trigger a retry on a new provider while filing as `NODE_METHOD_NOT_ALLOWED` in `smartrouter_errors_total` instead of returning immediately to the client. Beyond these breaking changes, this release consolidates request telemetry into a single `relay_end` log event that records the chain name, skipped upstreams, stale fallbacks, and a detailed history of every retry attempt with its send time and retryable verdict. Finally, the router optimizes upstream connection management by honoring hold-offs from JSON-RPC 429 rate limit bodies, sharing a single gRPC stream per subscription, and actively dropping dead WebSocket connections and slow subscription clients.
+
+### Changes
+
+#### ⚠ Breaking changes
+- fix(common)!: one TLS config and dial builder for every gRPC dialer, one reply-header filter for every tier (MAG-4279) ([#524]) [`16a42b9`]
+  - the gRPC TLS settings (cacert-pem, cert-pem/key-pem, allow-insecure) now mean the same thing on every dialer, and cacert-pem is enforced. The unary connector verifies the server against cacert-pem: it used to skip verification once a CA was loaded, so a cacert-pem that did not sign the server, or whose certificate does not name the dialled host or IP, now refuses the dial (set allow-insecure for a self-signed development node). Subscription streams now verify against cacert-pem and present cert-pem/key-pem; they used to read allow-insecure alone. cert-pem/key-pem is presented even when cacert-pem is set. A cacert-pem that cannot be loaded (unreadable, or holding no PEM certificate) now fails every dial instead of falling back to the system roots.
+- fix(chainlib)!: a JSON-RPC error envelope under a caller's status on a GraphQL endpoint is the gateway refusing the route (MAG-4379) ([#545]) [`5eff4a0`]
+  - on the graphql interface, a 4xx reply carrying a JSON-RPC error envelope under a status the registry files as the caller's (400, 406, 411, 412, 414-417, 422, 428, 431) is no longer returned to the client as the answer. It is retried on another provider, so the body, Lava-Retries and Lava-Provider-Address the client gets change, and it is filed as NODE_METHOD_NOT_ALLOWED instead of USER_INVALID_REQUEST in smartrouter_errors_total.
+- fix(chainlib)!: a GraphQL 2xx with neither data nor errors is a node error, not the answer (MAG-4369) ([#534]) [`f14fdac`]
+  - a GraphQL reply under a 2xx that carries neither a data object nor errors is no longer the answer. A read is retried on another provider, so the body, Lava-Retries and Lava-Provider-Address the client gets change; a write waits for another provider's answer instead of returning the gateway's body at once; and the endpoint that sent it is scored as failing instead of having its failure count reset.
+- fix(chainlib)!: bound how deeply a GraphQL document may nest (MAG-4359) ([#548]) [`150d616`]
+  - a GraphQL request nested more than 256 levels deep is refused by the router as a request it cannot parse, instead of being relayed to a node.
+
+#### New Features
+- feat(utils): a GUID carries the second it was minted (MAG-4399) ([#539]) [`f017c87`]
+- feat(utils): counter, not random bits, below the GUID second (MAG-4399) ([#539]) [`16a167f`]
+- feat(logs): one relay_end event per relay, at every log level (MAG-4400) ([#543]) [`9fc7505`]
+- feat(logs): name the chain on relay_end (MAG-4400) ([#543]) [`9e23602`]
+- feat(logs): list relay_end attempts whenever a relay took more than one (MAG-4400) ([#543]) [`4a7f9ae`]
+- feat(logs): give each relay_end attempt its batch and send time (MAG-4400) ([#543]) [`4d9a48c`]
+- feat(logs): write each failed attempt's retryable verdict on relay_end (MAG-4400) ([#543]) [`f5a7f0a`]
+- feat(logs): give each WebSocket frame its own GUID (MAG-4400) ([#543]) [`552fd47`]
+- feat(logs): name skipped upstreams and stale fallbacks on relay_end (MAG-4400) ([#543]) [`ec71d3a`]
+- feat(logs): read a Cosmos transaction's code into relay_end (MAG-4400) ([#543]) [`af0da11`]
+- feat(logs): write relay_end for subscription requests (MAG-4400) ([#543]) [`7058ea7`]
+
+#### Bug fixes
+- fix: JSON-RPC 429 bodies are rate limits; tracker honours hold-offs (MAG-4165) ([#488]) [`8ad0ff6`]
+- fix(rpcsmartrouter): retire dead WebSocket connections, drop slow subscription clients, and share one gRPC stream per subscribe (MAG-4242) ([#519]) [`9d1c7fc`]
+- fix(lavasession): leave the endpoint alone on a plain session acquisition (MAG-4242) ([#520]) [`027cc1c`]
+- fix: eleven behaviour drifts between duplicated code paths (MAG-4278) ([#523]) [`f4ebf95`]
+- fix(common)!: one TLS config and dial builder for every gRPC dialer, one reply-header filter for every tier (MAG-4279) ([#524]) [`16a42b9`]
+- fix(lavasession): one descriptor resolver for the unary connection and the subscription stream pool (MAG-4279) ([#525]) [`409e5cd`]
+- fix(rpcsmartrouter): read no tip out of a GraphQL user relay's reply (MAG-4373) ([#535]) [`e7c6e4c`]
+- fix(holdoff): count a 429 burst as one strike (MAG-4386) ([#536]) [`d3413bb`]
+- fix(chainlib): type a GraphQL RESOURCE_EXHAUSTED head-poll answer as a rate limit (MAG-4378) ([#544]) [`fc5d729`]
+- fix(chainlib)!: a JSON-RPC error envelope under a caller's status on a GraphQL endpoint is the gateway refusing the route (MAG-4379) ([#545]) [`5eff4a0`]
+- fix(metrics): keep the customer label valid UTF-8, and count an empty project-id as no customer ([#553]) [`64cb8f1`]
+- refactor(logs): name the event writer utils.LogEvent; lint fixes (MAG-4400) ([#543]) [`dbb6ff1`]
+- fix(logs): write relay_end stateful as a JSON boolean (MAG-4400) ([#543]) [`9d03a90`]
+- fix(logs): withhold an unlisted method only when the URL named it (MAG-4400) ([#543]) [`dfdc63f`]
+- fix(logs): write a lone slash for relay_end's root-path method (MAG-4400) ([#543]) [`e17bde7`]
+- fix(logs): write no failed-processing line beside relay_end (MAG-4400) ([#543]) [`8a7b3a9`]
+- fix(relaycore): classify a GraphQL node fault by its error code, not by the 200 it arrived in (MAG-4375) ([#541]) [`2ecb74f`]
+- fix(chainlib)!: a GraphQL 2xx with neither data nor errors is a node error, not the answer (MAG-4369) ([#534]) [`f14fdac`]
+- fix(chainlib)!: bound how deeply a GraphQL document may nest (MAG-4359) ([#548]) [`150d616`]
+
+#### Documentation updates
+- docs(changelog): rewrite the v1.6.0 highlights and breaking changes ([#527]) [`a70ce1c`]
+- docs(logs): relay_end error is prose; match on outcome and error_code (MAG-4400) ([#543]) [`154be71`]
+- docs(logs): select relay_end writes without the json label clash (MAG-4400) ([#543]) [`ddb149f`]
+
+[#488]: https://github.com/magma-Devs/smart-router/pull/488
+[#519]: https://github.com/magma-Devs/smart-router/pull/519
+[#520]: https://github.com/magma-Devs/smart-router/pull/520
+[#523]: https://github.com/magma-Devs/smart-router/pull/523
+[#524]: https://github.com/magma-Devs/smart-router/pull/524
+[#525]: https://github.com/magma-Devs/smart-router/pull/525
+[#527]: https://github.com/magma-Devs/smart-router/pull/527
+[#534]: https://github.com/magma-Devs/smart-router/pull/534
+[#535]: https://github.com/magma-Devs/smart-router/pull/535
+[#536]: https://github.com/magma-Devs/smart-router/pull/536
+[#539]: https://github.com/magma-Devs/smart-router/pull/539
+[#541]: https://github.com/magma-Devs/smart-router/pull/541
+[#543]: https://github.com/magma-Devs/smart-router/pull/543
+[#544]: https://github.com/magma-Devs/smart-router/pull/544
+[#545]: https://github.com/magma-Devs/smart-router/pull/545
+[#548]: https://github.com/magma-Devs/smart-router/pull/548
+[#553]: https://github.com/magma-Devs/smart-router/pull/553
+[`027cc1c`]: https://github.com/magma-Devs/smart-router/commit/027cc1c66cf30eff4c3780cd1e28610aba65e59f
+[`150d616`]: https://github.com/magma-Devs/smart-router/commit/150d61648b01b7d882c65a03e4ffbb9d38761c60
+[`154be71`]: https://github.com/magma-Devs/smart-router/commit/154be718da8bcce1d3454282ee1100afe650f1be
+[`16a167f`]: https://github.com/magma-Devs/smart-router/commit/16a167fead7e67a8b6fbad9ceefb509b3ed58262
+[`16a42b9`]: https://github.com/magma-Devs/smart-router/commit/16a42b9305c2f05eb49326a4d3962ad5b236229f
+[`2ecb74f`]: https://github.com/magma-Devs/smart-router/commit/2ecb74f137b9d8850755d14a66467106b51c73fb
+[`409e5cd`]: https://github.com/magma-Devs/smart-router/commit/409e5cd8acdb759153666956c2b99ecbfde81f5f
+[`4a7f9ae`]: https://github.com/magma-Devs/smart-router/commit/4a7f9ae282a83fcdacd5471f657aecaeea2ea08e
+[`4d9a48c`]: https://github.com/magma-Devs/smart-router/commit/4d9a48c97c39dfc4ed2973262a6498300059cd1c
+[`552fd47`]: https://github.com/magma-Devs/smart-router/commit/552fd473625a4b5e750bbb9ccb70de2d491899e8
+[`5eff4a0`]: https://github.com/magma-Devs/smart-router/commit/5eff4a0e24e4ae8c5365fe13e94d9c991ea5e3e6
+[`64cb8f1`]: https://github.com/magma-Devs/smart-router/commit/64cb8f1c17a26a1b03abe0174f24f3c7e9ce08b3
+[`7058ea7`]: https://github.com/magma-Devs/smart-router/commit/7058ea7554ee48e1328dbad4653c297b836a388e
+[`8a7b3a9`]: https://github.com/magma-Devs/smart-router/commit/8a7b3a934f946ddba8e56c833191a0ac808844e4
+[`8ad0ff6`]: https://github.com/magma-Devs/smart-router/commit/8ad0ff6f0529e50c653358ee8bf5471abe99484b
+[`9d03a90`]: https://github.com/magma-Devs/smart-router/commit/9d03a90562626db933a62841a99d5e167ddd40c5
+[`9d1c7fc`]: https://github.com/magma-Devs/smart-router/commit/9d1c7fcb71448a08da53e6c4fc2839a15899a02f
+[`9e23602`]: https://github.com/magma-Devs/smart-router/commit/9e23602f473db036fd58533b9799ce2c5be0b05d
+[`9fc7505`]: https://github.com/magma-Devs/smart-router/commit/9fc75050d1cab4031bfccaa67ab8111a7fd1aa77
+[`a70ce1c`]: https://github.com/magma-Devs/smart-router/commit/a70ce1cbd2dd5daba263d119559d43fb426a15c1
+[`af0da11`]: https://github.com/magma-Devs/smart-router/commit/af0da115c1a9802e7ebe40413918f8918e828ead
+[`d3413bb`]: https://github.com/magma-Devs/smart-router/commit/d3413bb9bf31af7c44c17d02f3d57d72eae7c8d5
+[`dbb6ff1`]: https://github.com/magma-Devs/smart-router/commit/dbb6ff162e31be47638915c0e38735d45f7fe63e
+[`ddb149f`]: https://github.com/magma-Devs/smart-router/commit/ddb149fe21cff9b28aff20e5676a1bfd9c153f75
+[`dfdc63f`]: https://github.com/magma-Devs/smart-router/commit/dfdc63feaf4e6d7cf6004d21a28f3a319f32cbca
+[`e17bde7`]: https://github.com/magma-Devs/smart-router/commit/e17bde7cf83f26222b7e4faa0cd0307391c06b8e
+[`e7c6e4c`]: https://github.com/magma-Devs/smart-router/commit/e7c6e4c11b99314e13e9d7424b85e096bb7c5fc6
+[`ec71d3a`]: https://github.com/magma-Devs/smart-router/commit/ec71d3aea026e40cabc08d89af12c250526c6f04
+[`f017c87`]: https://github.com/magma-Devs/smart-router/commit/f017c87a470b32eb24f951a403890b4685f8dc07
+[`f14fdac`]: https://github.com/magma-Devs/smart-router/commit/f14fdac5177bdb4a22aba0c768182d33ca45da08
+[`f4ebf95`]: https://github.com/magma-Devs/smart-router/commit/f4ebf950d0d007643f49d744febc766ec4eb9037
+[`f5a7f0a`]: https://github.com/magma-Devs/smart-router/commit/f5a7f0a909cb9e322282291d2853da4d9611f4ce
+[`fc5d729`]: https://github.com/magma-Devs/smart-router/commit/fc5d7293a97825800688aada46e1c7090c8aac9e
+
 ## v1.6.0 — 2026-10-14
 
 ### Highlights
