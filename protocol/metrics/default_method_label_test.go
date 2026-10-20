@@ -218,3 +218,38 @@ func TestNormalizeMethodLabelShapesBeforeAdmitting(t *testing.T) {
 		testutil.ToFloat64(m.defaultMethodOverflow.WithLabelValues("TEZOS")),
 		"no overflow should be reported when the flood collapses to one shape")
 }
+
+// A label value must be valid UTF-8. A name that is not collapses into the overflow bucket
+// of its kind before admission.
+func TestNormalizeMethodLabelCollapsesNamesThatAreNotUTF8(t *testing.T) {
+	m := newSmartRouterForDefaultLabelTest()
+
+	single := defaultName("/x/\xff")
+	require.Equal(t, DefaultMethodOther, m.normalizeMethodLabel("LAV1", single))
+	require.Equal(t, 1.0, testutil.ToFloat64(m.defaultMethodOverflow.WithLabelValues("LAV1")))
+	require.NotContains(t, m.defaultMethods.admitted["LAV1"], single, "must not spend the budget")
+
+	batch := defaultName("/a\xff") + batchMethodSeparator + "eth_call"
+	require.Equal(t, BatchMethodOther, m.normalizeMethodLabel("LAV1", batch))
+	require.Equal(t, 1.0, testutil.ToFloat64(m.batchSignatureOverflow.WithLabelValues("LAV1", batchOverflowReasonInvalid)))
+
+	matched := "\xffeth_call"
+	require.Equal(t, DefaultMethodOther, m.normalizeMethodLabel("LAV1", matched), "any name, not only Default-*")
+}
+
+// Every recorder that takes a method label goes through normalizeMethodLabel, so a name
+// that is not UTF-8 reaches no WithLabelValues call.
+func TestMethodRecordersTakeANameThatIsNotUTF8(t *testing.T) {
+	m := NewSmartRouterMetricsManager(SmartRouterMetricsManagerOptions{})
+	name := defaultName("/x/\xff")
+	require.NotPanics(t, func() {
+		m.RecordDirectRelayStart("LAV1", "rest", "ep-utf8", name)
+		m.RecordRelaySuccess("LAV1", "rest", "ep-utf8", name, 12)
+		m.RecordRelayError("LAV1", "rest", "ep-utf8", name)
+		m.RecordRouterEndToEndLatency("LAV1", "rest", name, 12)
+		m.SetEndpointEndToEndLatency("LAV1", "rest", "ep-utf8", name, 12)
+		m.RecordCacheResult("LAV1", "rest", name, "hot", "hit", 1)
+		m.RecordIncidentRetry("LAV1", "rest", name, 2, true)
+		m.SetRelayMetrics(&RelayMetrics{ChainID: "LAV1", APIType: "rest", ApiMethod: name, ProjectHash: "acme", Success: true}, nil)
+	})
+}
