@@ -1320,7 +1320,7 @@ func (rpcss *RPCSmartRouterServer) SendRelay(
 	if err != nil {
 		tracing.RecordError(span, err)
 		// SendParsedRelay writes the event for every request that parses; this one never reaches it.
-		rpcss.writeRelayEnd(ctx, relayEndInput{err: err, cause: err, start: start})
+		rpcss.writeRelayEnd(ctx, relayEndInput{err: err, cause: err, start: start, dappID: dappID})
 		return nil, err
 	}
 

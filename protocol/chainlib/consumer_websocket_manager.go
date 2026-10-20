@@ -517,7 +517,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		if err != nil {
 			utils.LavaFormatDebug("ws manager could not parse message", utils.LogAttr("message", msg), utils.LogAttr("err", err))
 			if reporter, ok := cwm.relaySender.(RelayRejectionReporter); ok {
-				reporter.ReportRejectedRelay(frameCtx, parseStart, err)
+				reporter.ReportRejectedRelay(frameCtx, parseStart, dappID, err)
 			}
 			// A batch the chain cannot take is a request the caller can fix, so it gets the same
 			// -32600 the POST handler returns rather than the masked GUID the generic formatter
