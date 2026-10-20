@@ -189,30 +189,39 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 	// fragment under two different root fields is perfectly valid, and a document-wide guard
 	// would refuse it.
 	expanding := map[string]struct{}{}
+	fragments := graphQLFragmentsByName(doc.Fragments)
 
-	var walk func(selectionSet ast.SelectionSet) error
-	walk = func(selectionSet ast.SelectionSet) error {
+	// nesting counts the fragments being expanded around selectionSet. It and the root field
+	// count bound how much of the document the walk visits (MAG-4360).
+	var walk func(selectionSet ast.SelectionSet, nesting int) error
+	walk = func(selectionSet ast.SelectionSet, nesting int) error {
+		if nesting > MaxGraphQLFragmentNesting {
+			return fmt.Errorf("graphql fragments nest more than %d deep", MaxGraphQLFragmentNesting)
+		}
 		for _, selection := range selectionSet {
 			switch typed := selection.(type) {
 			case *ast.Field:
+				if len(rootFields) == MaxGraphQLRootFields {
+					return fmt.Errorf("graphql operation selects more than %d root fields", MaxGraphQLRootFields)
+				}
 				rootFields = append(rootFields, GraphQLRootField{
 					Name: typed.Name,
 					Args: graphQLArguments(typed.Arguments, variables),
 				})
 			case *ast.InlineFragment:
-				if err := walk(typed.SelectionSet); err != nil {
+				if err := walk(typed.SelectionSet, nesting+1); err != nil {
 					return err
 				}
 			case *ast.FragmentSpread:
 				if _, cyclic := expanding[typed.Name]; cyclic {
 					return fmt.Errorf("graphql fragment %q is cyclic", typed.Name)
 				}
-				fragment := doc.Fragments.ForName(typed.Name)
+				fragment := fragments[typed.Name]
 				if fragment == nil {
 					return fmt.Errorf("graphql query spreads undefined fragment %q", typed.Name)
 				}
 				expanding[typed.Name] = struct{}{}
-				err := walk(fragment.SelectionSet)
+				err := walk(fragment.SelectionSet, nesting+1)
 				delete(expanding, typed.Name)
 				if err != nil {
 					return err
@@ -222,7 +231,7 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 		return nil
 	}
 
-	if err := walk(operation.SelectionSet); err != nil {
+	if err := walk(operation.SelectionSet, 0); err != nil {
 		return nil, err
 	}
 	if len(rootFields) == 0 {
