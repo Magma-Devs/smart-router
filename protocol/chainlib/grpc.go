@@ -430,7 +430,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 		if err != nil {
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-			apil.logger.LogRequestAndResponse("grpc in/out", true, method, string(reqBody), "", errMasking, msgSeed, time.Since(startTime), err)
+			apil.logger.LogRequestAndResponse("grpc in/out", true, method, relayBodyForLog(string(reqBody), cmdFlags.DebugRelays), "", errMasking, msgSeed, time.Since(startTime), err)
 			// Even on error the relay result may carry response metadata — notably the
 			// lava-cross-validation-* failure headers synthesized on a quorum/structural failure. Surface it
 			// (the proxy attaches it as gRPC trailers on the error path) so gRPC clients get the same
@@ -470,7 +470,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	var streamCallback grpcproxy.StreamProxyCallBack
 	if subscriptionProvider, ok := apil.relaySender.(GRPCSubscriptionProvider); ok && specHasSubscription {
 		if subscriptionManager := subscriptionProvider.GetGRPCSubscriptionManager(); subscriptionManager != nil {
-			streamCallback = apil.makeStreamRelayCallback(subscriptionManager)
+			streamCallback = apil.makeStreamRelayCallback(subscriptionManager, cmdFlags.DebugRelays)
 			utils.LavaFormatInfo("gRPC server-streaming support enabled",
 				utils.LogAttr("address", apil.endpoint.NetworkAddress),
 				utils.LogAttr("chainID", apil.endpoint.ChainID),
@@ -523,8 +523,9 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 // gRPC stream itself, which grpcproxy holds open and pumps.
 //
 // Returns (nil, nil) for anything that is not a spec-declared gRPC subscription, which
-// puts the call back on the unary path unchanged.
-func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCSubscriptionManager) grpcproxy.StreamProxyCallBack {
+// puts the call back on the unary path unchanged. debugRelays is --debug-relays: it keeps
+// the whole request body on the failure line.
+func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCSubscriptionManager, debugRelays bool) grpcproxy.StreamProxyCallBack {
 	return func(ctx context.Context, method string, reqBody []byte) (*grpcproxy.StreamResponse, error) {
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
@@ -587,7 +588,7 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		subscriptionFields := *metricsData
 		apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
 		if err != nil {
-			apil.logger.LogRequestAndResponse("grpc stream in/out", true, method, string(reqBody), "", err.Error(), connectionUniqueId, time.Since(startTime), err)
+			apil.logger.LogRequestAndResponse("grpc stream in/out", true, method, relayBodyForLog(string(reqBody), debugRelays), "", err.Error(), connectionUniqueId, time.Since(startTime), err)
 			return nil, utils.LavaFormatError("failed to start gRPC subscription", err,
 				utils.LogAttr("GUID", ctx),
 				utils.LogAttr("_method", method),

@@ -395,6 +395,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		analytics.SetProcessingTimestampBeforeRelay(startTime)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		requestBody := string(fiberCtx.Body())
+		loggedBody := relayBodyForLog(requestBody, cmdFlags.DebugRelays)
 		utils.LavaFormatInfo("Consumer received a new GraphQL request",
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
@@ -403,7 +404,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			utils.LogAttr("path", path),
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("msgSeed", msgSeed),
-			utils.LogAttr("body", requestBody),
+			utils.LogAttr("body", loggedBody),
 			utils.LogAttr("headers", common.RedactMetadata(graphqlHeaders)),
 		)
 
@@ -414,7 +415,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-			apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody, errMasking, msgSeed, time.Since(startTime), err)
+			apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, loggedBody, errMasking, msgSeed, time.Since(startTime), err)
 			if relayResult.GetStatusCode() != 0 {
 				fiberCtx.Status(relayResult.StatusCode)
 			} else {

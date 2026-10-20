@@ -134,14 +134,15 @@ func (rpccl *RPCConsumerLogs) GetUniqueGuidResponseForError(responseError error,
 
 // Websocket healthy disconnections throw "websocket: close 1005 (no status)" error,
 // We don't want to alert error monitoring for that purpses.
-func (rpccl *RPCConsumerLogs) AnalyzeWebSocketErrorAndGetFormattedMessage(webSocketAddr string, err error, msgSeed string, msg []byte, rpcType string, timeTaken time.Duration) []byte {
+// msg is the frame as LogRequestAndResponse writes it on the failure line.
+func (rpccl *RPCConsumerLogs) AnalyzeWebSocketErrorAndGetFormattedMessage(webSocketAddr string, err error, msgSeed string, msg string, rpcType string, timeTaken time.Duration) []byte {
 	if err != nil {
 		errMessage := err.Error()
 		if strings.Contains(errMessage, webSocketCloseMessage) {
 			utils.LavaFormatDebug("Websocket connection closed by the user", utils.LogAttr("error", errMessage))
 			return nil
 		}
-		rpccl.LogRequestAndResponse(rpcType+" ws msg", true, "ws", webSocketAddr, string(msg), "", msgSeed, timeTaken, err)
+		rpccl.LogRequestAndResponse(rpcType+" ws msg", true, "ws", webSocketAddr, msg, "", msgSeed, timeTaken, err)
 
 		jsonResponse, err := json.Marshal(fiber.Map{
 			"Error_Received": rpccl.GetUniqueGuidResponseForError(err, msgSeed),
@@ -154,6 +155,10 @@ func (rpccl *RPCConsumerLogs) AnalyzeWebSocketErrorAndGetFormattedMessage(webSoc
 	return nil
 }
 
+// LogRequestAndResponse writes a relay's request and response under its GUID, msgSeed: at error
+// level when the relay failed and at debug otherwise. The failure line carries req as given, so a
+// listener passes the cut form its own request line logs (whole only under --debug-relays); resp is
+// capped here.
 func (rpccl *RPCConsumerLogs) LogRequestAndResponse(module string, hasError bool, method, path, req, resp, msgSeed string, timeTaken time.Duration, err error) {
 	if hasError && err != nil {
 		utils.LavaFormatError(module, err, []utils.Attribute{{Key: "GUID", Value: msgSeed}, {Key: "timeTaken", Value: timeTaken}, {Key: "request", Value: req}, {Key: "response", Value: parser.CapStringLen(resp)}, {Key: "method", Value: method}, {Key: "path", Value: path}, {Key: "HasError", Value: hasError}}...)
