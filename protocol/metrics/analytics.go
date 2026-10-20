@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // A push on an open subscription is emitted as its own usage event under this method, charged at
@@ -89,10 +91,10 @@ type RelayUsageEvent struct {
 func NewRelayUsageEvent(rm *RelayMetrics) RelayUsageEvent {
 	event := RelayUsageEvent{
 		TimestampNs:     rm.Timestamp.UnixNano(),
-		ProjectHash:     rm.ProjectHash,
+		ProjectHash:     validUTF8(rm.ProjectHash),
 		ChainID:         rm.ChainID,
 		APIInterface:    rm.APIType,
-		APIMethod:       rm.ApiMethod,
+		APIMethod:       validUTF8(rm.ApiMethod),
 		ComputeUnits:    rm.ComputeUnits,
 		LatencyMs:       rm.Latency,
 		Success:         rm.Success,
@@ -103,7 +105,7 @@ func NewRelayUsageEvent(rm *RelayMetrics) RelayUsageEvent {
 		IsDebugTrace:    rm.IsDebugTrace,
 		HedgeCount:      rm.HedgeCount,
 		ProviderAddress: rm.ProviderAddress,
-		Origin:          rm.Origin,
+		Origin:          validUTF8(rm.Origin),
 	}
 	event.RequestKind = rm.RequestKind
 	if event.RequestKind == "" {
@@ -111,6 +113,8 @@ func NewRelayUsageEvent(rm *RelayMetrics) RelayUsageEvent {
 	}
 	if rm.Customer != nil {
 		snapshot := rm.Customer.Snapshot()
+		snapshot.RequestID = validUTF8(snapshot.RequestID)
+		snapshot.APIMethod = validUTF8(snapshot.APIMethod)
 		event.Customer = &snapshot
 		event.RequestKind = snapshot.RequestKind
 		event.Success = snapshot.Outcome == "success"
@@ -119,4 +123,14 @@ func NewRelayUsageEvent(rm *RelayMetrics) RelayUsageEvent {
 		event.LatencyMs = snapshot.DurationMs
 	}
 	return event
+}
+
+// validUTF8 keeps a string that came with the request exportable. OTLP carries each
+// attribute as a protobuf string, which must be valid UTF-8, and one invalid value
+// fails the whole export batch. The customer label's cap does not apply here.
+func validUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "\uFFFD")
 }

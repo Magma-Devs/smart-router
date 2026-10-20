@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"unicode/utf8"
 
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/rs/zerolog"
 	zerologlog "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
@@ -60,4 +62,34 @@ func TestCustomerTerminalSameSnapshotInStdoutAndOTel(t *testing.T) {
 	require.Equal(t, exported, logged)
 	require.NotContains(t, stdout.String(), "private-secret")
 	require.NotContains(t, attributes["customer_request"].AsString(), "private-secret")
+}
+
+// Every string attribute of an exported usage record is valid UTF-8, whatever the request
+// carried: OTLP marshals them as protobuf strings, and one invalid value fails the batch.
+func TestUsageRecordAttributesAreValidUTF8(t *testing.T) {
+	exporter := &customerLogExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
+	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+	sink := &OTelUsageSink{provider: provider, logger: provider.Logger("test")}
+	logger, err := NewRPCConsumerLogs(&customerRecorder{}, sink, nil)
+	require.NoError(t, err)
+
+	data := NewRelayAnalytics("acme\xff", "ETH1", "jsonrpc")
+	data.ApiMethod = "Default-/x/\xfe"
+	ctx := utils.WithRequestId(context.Background(), "req-\xff")
+	logger.BeginCustomerRequest(ctx, data)
+	logger.AddMetricForHttp(data, nil, map[string][]string{OriginHeaderKey: {"https://o\xff.example"}})
+	require.Len(t, exporter.records, 1)
+
+	strs := map[string]string{}
+	exporter.records[0].WalkAttributes(func(kv attribute.KeyValue) bool {
+		if v := kv.Value.AsString(); v != "" {
+			strs[string(kv.Key)] = v
+		}
+		return true
+	})
+	for key, value := range strs {
+		require.True(t, utf8.ValidString(value), "attribute %s = %q", key, value)
+	}
+	require.Equal(t, "acme\uFFFD", strs["project"], "the value is kept, not collapsed to other")
 }
