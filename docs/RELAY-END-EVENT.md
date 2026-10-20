@@ -15,7 +15,7 @@ contract for `schema` 1.
   replaces the middle of a longer text.
 
 ```json
-{"level":"info","event":"relay_end","schema":1,"GUID":"7003","stateful":true,"method":"eth_sendRawTransaction","api_interface":"jsonrpc","selection":"stateful","outcome":"ok","stop_reason":"Success","served_by":"node-b","status":200,"has_reply":true,"error_code":"","error":"","latency_ms":305,"is_batch":false,"attempts":[{"upstream":"node-a","outcome":"node_error","error_code":"CHAIN_NONCE_TOO_LOW","message":"nonce too low: next nonce 7, tx nonce 6","latency_ms":2,"returned_to_client":false},{"upstream":"node-b","outcome":"ok","error_code":"","message":"","latency_ms":304,"returned_to_client":true}],"time":1792323767487910421,"message":"relay_end"}
+{"level":"info","event":"relay_end","schema":1,"GUID":"7003","stateful":true,"method":"eth_sendRawTransaction","api_interface":"jsonrpc","selection":"stateful","outcome":"ok","stop_reason":"Success","served_by":"node-b","status":200,"has_reply":true,"error_code":"","error":"","latency_ms":305,"is_batch":false,"tx_hash":"0x2620d49b3fa2ff073b49bce2b5f0382521afd075691e695251929cd67be4f460","attempts":[{"upstream":"node-a","outcome":"node_error","error_code":"CHAIN_NONCE_TOO_LOW","message":"nonce too low: next nonce 7, tx nonce 6","latency_ms":2,"returned_to_client":false},{"upstream":"node-b","outcome":"ok","error_code":"","message":"","latency_ms":304,"returned_to_client":true}],"time":1792323767487910421,"message":"relay_end"}
 ```
 
 `protocol/rpcsmartrouter/testdata/relay_end/` holds one event per exit path, checked by
@@ -62,6 +62,9 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | `error` | string | always | `node_error`: the node's error message. `write_unknown`: the message the client gets ("transaction status unclear: …"). Any other failure: the error the relay ended with. `""` on `ok`. |
 | `latency_ms` | number | always | Milliseconds from the router taking the request to the event. A request that parses is timed from `SendParsedRelay` (the parse is not counted); one that does not, from `SendRelay`; a WebSocket frame that does not parse, from its parse. |
 | `is_batch` | boolean | always | A JSON-RPC batch. A batch refused while it is parsed (too large, or not accepted by the chain) is `true` too. |
+| `tx_hash` | string | on a transaction submit whose reply names the transaction, and on every `eth_sendRawTransaction` whose request carries a signed transaction | The transaction's id on its chain, written as the chain writes it: `0x` and 64 lowercase hex digits on EVM chains, base58 on Solana and Sui, 64 hex digits in the node's case on Cosmos. Read from the reply the client got. For `eth_sendRawTransaction` it is computed from the signed transaction in the request when the reply returns none, so a refused write, a `write_unknown` or a `no_answer` still names a hash to look up. Not read on a batch, or from a reply over 64 KiB. Where each chain's comes from: [Transaction fields by chain](#transaction-fields-by-chain). |
+| `tx_status` | string | when the submit's reply reports the transaction's execution | `success` or `failure`: the chain's execution result, as the send reply reports it, and only that. Sui's submits report it; EVM, Solana and Cosmos submits answer before the transaction executes, so their events never carry it (a Cosmos node's acceptance is `tx_code`). An event without `tx_status` says nothing about whether the transaction executed. |
+| `tx_error` | string | when `tx_status` is `failure` and the reply names the error | The chain's execution error, redacted and capped like `error`. |
 | `tx_code` | number | on a write over `tendermintrpc` or `rest` whose reply names a transaction code | A Cosmos node answers a refused transaction with a normal reply, so `outcome` stays `ok`; this is the code inside it: `0` when the node took the transaction, the refusal's code otherwise. Read from `result.code` (`broadcast_tx_sync`, `broadcast_tx_async`), `result.check_tx` then `result.tx_result` or `result.deliver_tx` (`broadcast_tx_commit`), or `tx_response.code` (`POST /cosmos/tx/v1beta1/txs`); the first non-zero code wins. `broadcast_tx_async` answers before checking, so its `0` means only that the node received the transaction. Not read over `grpc`, whose reply is protobuf. |
 | `tx_codespace` | string | with `tx_code`, when the reply names one | The module the code belongs to, such as `sdk`: a code means something only within its codespace. |
 | `tx_log` | string | when `tx_code` is not `0` | The node's reason for the refusal, redacted and capped like `error`. |
@@ -77,6 +80,27 @@ filter `|= "\"stateful\":true"`, which works either way.
 `error` and `attempts[].message` are prose for a person. The same failure can read differently on
 routers at different `--log-level`s, because an error built by a log formatter whose level is off
 skips the formatting. Match failures on `outcome` and `error_code`, never on that text.
+
+## Transaction fields by chain
+
+`tx_hash`, `tx_status` and `tx_error` are read for the methods below, and only on a request that is
+not a batch. A reply over 64 KiB is not read. A value whose shape is not the chain's (a hash of the
+wrong length, a digest that is not base58) is not written.
+
+| Chain family | `api_interface` | `method` | `tx_hash` from | `tx_status` and `tx_error` from |
+| --- | --- | --- | --- | --- |
+| EVM | `jsonrpc` | `eth_sendRawTransaction` | The reply's `result` when it is `0x` and 32 bytes of hex; otherwise computed from the signed transaction in `params[0]`, the hash the chain gives it. A transaction that does not decode, or whose signature does not verify, gives none. | Not read: the send reply does not report execution. |
+| Solana | `jsonrpc` | `sendTransaction` | The reply's `result`, the transaction's signature (64 bytes in base58). Stellar's `sendTransaction`, which answers with an object, is not read. | Not read: the send reply does not report execution. |
+| Sui | `jsonrpc` | `sui_executeTransactionBlock` | `result.digest`. | `result.effects.status.status` (`success`, `failure`) and `result.effects.status.error`, present when the request asked for `showEffects`. |
+| Sui | `graphql` | `executeTransaction`, as the operation's only root field | `effects.transaction.digest`, else `effects.digest` (the same digest), in `data`'s one entry: the root field's name, or the client's alias for it. | `effects.status` (`SUCCESS` is `success`, `FAILURE` is `failure`) and `effects.executionError.message`. Only what the mutation selected is in the reply, and what it did not select is not written. |
+| Sui | `grpc` | `sui.rpc.v2.TransactionExecutionService/ExecuteTransaction` | Not read: the reply is protobuf. | Not read. |
+| Cosmos SDK | `tendermintrpc` | `broadcast_tx_sync`, `broadcast_tx_async`, `broadcast_tx_commit` | `result.hash`. | Not read; `tx_code` says whether the node took the transaction. |
+| Cosmos SDK | `rest` | `cosmos/tx/v1beta1/txs` (`POST`) | `tx_response.txhash`. | Not read; see `tx_code`. |
+| Cosmos SDK | `grpc` | `cosmos.tx.v1beta1.Service/BroadcastTx` | Not read: the reply is protobuf. | Not read. |
+| Any other chain or method | | | Not read. | Not read. |
+
+On Cosmos the fields are read, as `tx_code` is, only on a write the spec marks stateful: a `GET` of
+`cosmos/tx/v1beta1/txs` is the transaction query by events, a read under the same path.
 
 ## outcome
 
