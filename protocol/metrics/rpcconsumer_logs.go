@@ -123,7 +123,9 @@ func (rpccl *RPCConsumerLogs) GetUniqueGuidResponseForError(responseError error,
 		data.Error = utils.RedactSecrets(responseError.Error())
 	}
 
-	utils.LavaFormatError("UniqueGuidResponseForError", responseError, utils.Attribute{Key: "msgSeed", Value: msgSeed})
+	// The listeners pass the request's GUID in decimal, so GUID reads as it does on the request's
+	// other lines and a search for the request finds this one. msgSeed stays for its readers.
+	utils.LavaFormatError("UniqueGuidResponseForError", responseError, utils.Attribute{Key: "GUID", Value: msgSeed}, utils.Attribute{Key: "msgSeed", Value: msgSeed})
 
 	ret, _ := json.Marshal(data)
 
@@ -145,7 +147,7 @@ func (rpccl *RPCConsumerLogs) AnalyzeWebSocketErrorAndGetFormattedMessage(webSoc
 			"Error_Received": rpccl.GetUniqueGuidResponseForError(err, msgSeed),
 		})
 		if err != nil {
-			utils.LavaFormatError("AnalyzeWebSocketErrorAndGetFormattedMessage unexpected behavior, failed marshalling json response", err, utils.LogAttr("seed", msgSeed))
+			utils.LavaFormatError("AnalyzeWebSocketErrorAndGetFormattedMessage unexpected behavior, failed marshalling json response", err, utils.LogAttr("GUID", msgSeed), utils.LogAttr("seed", msgSeed))
 		}
 		return jsonResponse
 	}

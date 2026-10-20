@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	"github.com/gofiber/websocket/v2"
 	websocket2 "github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/utils"
+	"github.com/rs/zerolog"
+	zerologlog "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,6 +64,45 @@ func TestGetUniqueGuidResponseDeterministic(t *testing.T) {
 
 		assert.Equal(t, err, errorMsg)
 	}
+}
+
+// A request's lines are found with the line filter |= "\"GUID\":\"<id>\"". The error-masking
+// line carries the GUID it is handed under GUID, byte for byte as the request's other lines render
+// it from the request's GUID or its context, and keeps msgSeed.
+func TestGetUniqueGuidResponseForError_LogsTheGUID(t *testing.T) {
+	var mu sync.Mutex
+	var logged strings.Builder
+	prev := zerologlog.Logger
+	zerologlog.Logger = zerolog.New(zerolog.SyncWriter(logWriter(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return logged.Write(p)
+	})))
+	defer func() { zerologlog.Logger = prev }()
+
+	const guid uint64 = 7698754902243305216
+	plog, err := NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	plog.GetUniqueGuidResponseForError(errors.New("no upstream answered"), strconv.FormatUint(guid, 10))
+	// The forms a listener's request line uses: the GUID itself, and the context carrying it.
+	utils.LavaFormatError("request line", nil, utils.LogAttr("GUID", guid))
+	utils.LavaFormatError("request line from the context", nil, utils.LogAttr("GUID", utils.WithUniqueIdentifier(context.Background(), guid)))
+
+	mu.Lock()
+	defer mu.Unlock()
+	lines := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+		record := map[string]any{}
+		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		message, _ := record["message"].(string)
+		lines[message] = line
+	}
+	filter := `"GUID":"` + strconv.FormatUint(guid, 10) + `"`
+	for _, message := range []string{"UniqueGuidResponseForError", "request line", "request line from the context"} {
+		require.Contains(t, lines, message)
+		require.Contains(t, lines[message], filter, "the %q line", message)
+	}
+	require.Contains(t, lines["UniqueGuidResponseForError"], `"msgSeed":"`+strconv.FormatUint(guid, 10)+`"`)
 }
 
 func TestAnalyzeWebSocketErrorAndWriteMessage(t *testing.T) {
