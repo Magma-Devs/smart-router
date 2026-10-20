@@ -273,6 +273,10 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 
 	// handle headers
 	metadata, overwriteReqBlock, _ := apip.HandleHeaders(metadata, apiCollection, spectypes.Header_pass_send)
+	if name, ok := unsendableGrpcHeader(metadata); ok {
+		// grpc-go would refuse to send it, and that local refusal must not count against a node.
+		return nil, fmt.Errorf("gRPC header %q has a value gRPC cannot send", name)
+	}
 
 	settingHeaderDirective, _, _ := apip.GetParsingByTag(spectypes.FUNCTION_TAG_SET_LATEST_IN_METADATA)
 
@@ -992,4 +996,20 @@ func (apil *GrpcChainListener) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	return apil.httpServer.Shutdown(ctx)
+}
+
+// unsendableGrpcHeader names the first header gRPC would refuse to send: a value with a byte
+// outside printable ASCII on a key that is not binary (-bin), the rule grpc-go applies.
+func unsendableGrpcHeader(headers []pairingtypes.Metadata) (string, bool) {
+	for _, header := range headers {
+		if strings.HasSuffix(strings.ToLower(header.Name), "-bin") {
+			continue
+		}
+		for i := 0; i < len(header.Value); i++ {
+			if c := header.Value[i]; c < 0x20 || c > 0x7e {
+				return header.Name, true
+			}
+		}
+	}
+	return "", false
 }
