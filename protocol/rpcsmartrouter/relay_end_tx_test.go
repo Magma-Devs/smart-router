@@ -184,7 +184,7 @@ func TestRelayEnd_TransactionFields(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), timeout)
 			defer cancel()
-			result, err := server.SendRelay(ctx, tc.url, tc.body, connectionType, "dapp", "", nil, nil)
+			result, err := server.SendRelay(ctx, tc.url, tc.body, connectionType, relayEndNoProjectID, "", nil, nil)
 			if tc.check != nil {
 				tc.check(t, result, err)
 			} else {
@@ -279,7 +279,7 @@ func TestRelayEnd_TransactionNotReadOnABatch(t *testing.T) {
 func TestRelayEnd_CosmosTxHashOnlyOnASubmit(t *testing.T) {
 	read := func(t *testing.T, server *RPCSmartRouterServer, url, body, connectionType, reply string) *relayEnd {
 		t.Helper()
-		protocolMessage, err := server.ParseRelay(context.Background(), url, body, connectionType, "dapp", "", nil)
+		protocolMessage, err := server.ParseRelay(context.Background(), url, body, connectionType, relayEndNoProjectID, "", nil)
 		require.NoError(t, err)
 		end := server.newRelayEnd(context.Background(), protocolMessage, time.Now(), nil)
 		end.readTransaction(protocolMessage, []byte(reply))

@@ -179,7 +179,7 @@ func TestRelayEnd_SubscriptionWithoutEndpoints(t *testing.T) {
 // have failed, and a node's JSON-RPC error is its refusal.
 func TestRelayEnd_SubscriptionOutcomes(t *testing.T) {
 	server := newRelayEndServer(t, "ETH1", spectypes.APIInterfaceJsonRPC, ethJsonRPCParser(t))
-	subscribe, err := server.ParseRelay(context.Background(), "", `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`, http.MethodPost, "dapp", "", nil)
+	subscribe, err := server.ParseRelay(context.Background(), "", `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`, http.MethodPost, relayEndNoProjectID, "", nil)
 	require.NoError(t, err)
 	start := time.Now()
 	build := func(protocolMessage chainlib.ProtocolMessage, record func(*chainlib.SubscriptionUpstream), err error) *relayEnd {

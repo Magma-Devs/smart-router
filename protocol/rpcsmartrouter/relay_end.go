@@ -9,12 +9,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -70,6 +72,10 @@ func isRouterFault(err error) bool {
 type relayEnd struct {
 	guid         string
 	connection   string
+	customer     string // the project id, unless it is the listeners' default
+	requestID    string // the caller's X-Request-Id, X-Task-Id and X-Tx-Id
+	taskID       string
+	txID         string
 	chain        string
 	stateful     bool
 	method       string
@@ -120,6 +126,18 @@ func (e *relayEnd) MarshalZerologObject(event *zerolog.Event) {
 		Str("GUID", e.guid)
 	if e.connection != "" {
 		event.Str("connection", e.connection)
+	}
+	if e.customer != "" {
+		event.Str("customer", e.customer)
+	}
+	if e.requestID != "" {
+		event.Str("request_id", e.requestID)
+	}
+	if e.taskID != "" {
+		event.Str("task_id", e.taskID)
+	}
+	if e.txID != "" {
+		event.Str("tx_id", e.txID)
 	}
 	event.Bool("stateful", e.stateful).
 		Str("method", e.method).
@@ -226,6 +244,7 @@ type relayEndInput struct {
 	err             error               // what the listener receives
 	cause           error               // the error the relay's processing ended with
 	start           time.Time
+	dappID          string // the project id of a request that has no protocol message
 }
 
 // The WebSocket manager finds the reporter by type assertion, so a drifted signature would
@@ -239,12 +258,12 @@ func (rpcss *RPCSmartRouterServer) writeRelayEnd(ctx context.Context, in relayEn
 
 // ReportRejectedRelay writes the relay_end of a request a listener parsed itself and could not hand
 // to SendParsedRelay (chainlib.RelayRejectionReporter).
-func (rpcss *RPCSmartRouterServer) ReportRejectedRelay(ctx context.Context, start time.Time, err error) {
-	rpcss.writeRelayEnd(ctx, relayEndInput{err: err, cause: err, start: start})
+func (rpcss *RPCSmartRouterServer) ReportRejectedRelay(ctx context.Context, start time.Time, dappID string, err error) {
+	rpcss.writeRelayEnd(ctx, relayEndInput{err: err, cause: err, start: start, dappID: dappID})
 }
 
-// newRelayEnd fills what every exit's event shares: the request's identity, its listener, the
-// method and whether it writes, and how long ago it started.
+// newRelayEnd fills what every exit's event shares: the request's identity, its caller's ids, its
+// listener, the method and whether it writes, and how long ago it started.
 func (rpcss *RPCSmartRouterServer) newRelayEnd(ctx context.Context, protocolMessage chainlib.ProtocolMessage, start time.Time, err error) *relayEnd {
 	end := &relayEnd{latency: time.Since(start)}
 	if rpcss.listenEndpoint != nil {
@@ -257,8 +276,20 @@ func (rpcss *RPCSmartRouterServer) newRelayEnd(ctx context.Context, protocolMess
 	if connection, found := utils.GetConnectionIdentifier(ctx); found {
 		end.connection = strconv.FormatUint(connection, 10)
 	}
+	// The listeners stamp the caller's tracing headers on the context
+	// (utils.ExtractWantedHeadersFromCachedMap); a header that was absent or empty is not there.
+	if requestID, found := utils.GetRequestId(ctx); found {
+		end.requestID = relayEndID(requestID)
+	}
+	if taskID, found := utils.GetTaskId(ctx); found {
+		end.taskID = relayEndID(taskID)
+	}
+	if txID, found := utils.GetTxId(ctx); found {
+		end.txID = relayEndID(txID)
+	}
 
 	if protocolMessage != nil {
+		end.customer = relayEndCustomer(protocolMessage.GetUserData().DappId)
 		if api := protocolMessage.GetApi(); api != nil {
 			end.stateful = chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
 			end.method = relayEndMethod(api.Name, relayEndNamedByURL(protocolMessage, end.apiInterface))
@@ -273,6 +304,9 @@ func (rpcss *RPCSmartRouterServer) newRelayEnd(ctx context.Context, protocolMess
 
 func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEndInput) *relayEnd {
 	end := rpcss.newRelayEnd(ctx, in.protocolMessage, in.start, in.err)
+	if in.protocolMessage == nil {
+		end.customer = relayEndCustomer(in.dappID)
+	}
 
 	dispatched := 0
 	if in.processor != nil {
@@ -659,4 +693,31 @@ func relayEndSelection(selection relaycore.Selection) string {
 
 func relayEndText(text string) string {
 	return utils.FormatLongString(utils.RedactSecrets(text), relayEndTextLimit)
+}
+
+// relayEndIDLimit caps customer and the caller's ids, which are what the caller sent.
+const relayEndIDLimit = 128
+
+// relayEndCustomer is the project id as customer: none for the id the listeners default to when the
+// project-id header is absent.
+func relayEndCustomer(dappID string) string {
+	if dappID == metrics.CustomerNone {
+		return ""
+	}
+	return relayEndID(dappID)
+}
+
+// relayEndID is a caller-sent id as the event writes it: valid UTF-8, each run of invalid bytes
+// replaced with U+FFFD, and cut to relayEndIDLimit bytes at a rune boundary. Unlike the metrics'
+// customer label it has no admission budget: a log field adds no series.
+func relayEndID(id string) string {
+	id = strings.ToValidUTF8(id, string(utf8.RuneError))
+	if len(id) <= relayEndIDLimit {
+		return id
+	}
+	cut := relayEndIDLimit
+	for !utf8.RuneStart(id[cut]) {
+		cut--
+	}
+	return id[:cut]
 }
