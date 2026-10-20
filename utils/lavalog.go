@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	zerolog "github.com/rs/zerolog"
 	zerologlog "github.com/rs/zerolog/log"
@@ -681,13 +682,41 @@ func LavaFormatTrace(description string, attributes ...Attribute) error {
 	return LavaFormatLog(description, nil, attributes, LAVA_LOG_TRACE)
 }
 
+// FormatLongString shortens a msg longer than maxCharacters bytes to its first two thirds and its
+// last third of maxCharacters, joined by "...truncated...". Each cut lands on a rune boundary, so a
+// valid UTF-8 msg stays valid UTF-8: a rune the cut would split is left out, and the kept parts may
+// be up to three bytes short of the budget. A maxCharacters of 0 keeps msg whole.
 func FormatLongString(msg string, maxCharacters int) string {
 	if maxCharacters != 0 && len(msg) > maxCharacters {
 		postfixLen := maxCharacters / 3
 		prefixLen := maxCharacters - postfixLen
-		return msg[:prefixLen] + "...truncated..." + msg[len(msg)-postfixLen:]
+		return msg[:runeStartAtOrBefore(msg, prefixLen)] + "...truncated..." + msg[runeStartAtOrAfter(msg, len(msg)-postfixLen):]
 	}
 	return msg
+}
+
+// runeStartAtOrBefore returns the last index at or before at where a rune of s starts, so s[:i]
+// ends on a whole rune. It looks back no further than one rune's length: bytes that are not UTF-8
+// leave at where it is.
+func runeStartAtOrBefore(s string, at int) int {
+	for i := at; i >= 0 && i > at-utf8.UTFMax; i-- {
+		if utf8.RuneStart(s[i]) {
+			return i
+		}
+	}
+	return at
+}
+
+// runeStartAtOrAfter returns the first index at or after at where a rune of s starts, or len(s), so
+// s[i:] begins on a whole rune. It looks ahead no further than one rune's length: bytes that are not
+// UTF-8 leave at where it is.
+func runeStartAtOrAfter(s string, at int) int {
+	for i := at; i < at+utf8.UTFMax; i++ {
+		if i == len(s) || utf8.RuneStart(s[i]) {
+			return i
+		}
+	}
+	return at
 }
 
 func ToHexString(hash string) string {
