@@ -9,7 +9,6 @@ import (
 
 	"github.com/goccy/go-json"
 	"github.com/vektah/gqlparser/v2/ast"
-	gqlparser "github.com/vektah/gqlparser/v2/parser"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
@@ -124,7 +123,7 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 		return nil, errors.New("graphql request carries no query")
 	}
 
-	doc, err := gqlparser.ParseQuery(&ast.Source{Input: envelope.Query})
+	doc, err := parseGraphQLQuery(envelope.Query)
 	if err != nil {
 		return nil, fmt.Errorf("failed parsing graphql query: %w", err)
 	}
