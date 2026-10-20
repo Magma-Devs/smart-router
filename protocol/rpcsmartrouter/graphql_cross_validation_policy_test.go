@@ -89,6 +89,34 @@ func TestGraphQLMultiRootCrossValidationPolicy(t *testing.T) {
 		require.Equal(t, 3, sm.GetCrossValidationParams().AgreementThreshold)
 	})
 
+	t.Run("an enabled policy on one root applies to the bundle when another root forbids caller cv", func(t *testing.T) {
+		// The forbid keeps the caller's headers out of the request, not the operator's mandate on
+		// the other root (MAG-4361). A caller asking for a stricter quorum than the policy's floor
+		// gets the floor, and a header that would not parse is not read: its headers never count.
+		resolver := resolverWith(
+			CrossValidationPolicyEntry{ChainID: chainID, ApiInterface: apiInterface, Method: "chainIdentifier", CrossValidationPolicy: CrossValidationPolicy{
+				Enabled: true, MaxParticipants: Bound{Floor: new(3)}, AgreementThreshold: Bound{Floor: new(3)},
+			}},
+			CrossValidationPolicyEntry{ChainID: chainID, ApiInterface: apiInterface, Method: "checkpoint", CrossValidationPolicy: CrossValidationPolicy{ForbidCallerCV: true}},
+		)
+		stricterCaller := map[string]string{
+			common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "5",
+			common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "5",
+		}
+		malformedCaller := map[string]string{common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS: "many"}
+		for _, body := range []string{
+			`{"query":"{ chainIdentifier checkpoint { digest } }"}`,
+			`{"query":"{ checkpoint { digest } chainIdentifier }"}`,
+		} {
+			for _, headers := range []map[string]string{nil, stricterCaller, malformedCaller} {
+				sm := stateMachine(protocolMessage(body, headers), resolver)
+				require.Equal(t, relaycore.CrossValidation, sm.GetSelection(), "%s %v", body, headers)
+				require.Equal(t, 3, sm.GetCrossValidationParams().MaxParticipants, "%s %v", body, headers)
+				require.Equal(t, 3, sm.GetCrossValidationParams().AgreementThreshold, "%s %v", body, headers)
+			}
+		}
+	})
+
 	t.Run("the strictest of two enabled policies wins, whatever the order", func(t *testing.T) {
 		resolver := resolverWith(
 			CrossValidationPolicyEntry{ChainID: chainID, ApiInterface: apiInterface, Method: "chainIdentifier", CrossValidationPolicy: CrossValidationPolicy{
