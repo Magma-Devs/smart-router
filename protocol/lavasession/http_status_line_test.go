@@ -36,3 +36,29 @@ func TestHTTPDirectRPCConnection_StatusLineReachesTheCaller(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, doResp.StatusCode)
 	require.Equal(t, "503 Service Unavailable", doResp.Status)
 }
+
+// Error() is one text per status code whatever the upstream wrote on its status line: the
+// best-error picker groups failed providers by it and the classifier scans it (MAG-4218).
+func TestHTTPStatusError_ErrorIsCanonicalPerStatus(t *testing.T) {
+	cases := []struct {
+		code   int
+		status string
+		want   string
+	}{
+		{503, "503 Service Unavailable", "HTTP 503 Service Unavailable"},
+		{503, "503 Service Temporarily Unavailable", "HTTP 503 Service Unavailable"},
+		{503, "503 Backend fetch failed", "HTTP 503 Service Unavailable"},
+		{503, "503", "HTTP 503 Service Unavailable"},
+		{503, "", "HTTP 503 Service Unavailable"},
+		{504, "504 Gateway Time-out", "HTTP 504 Gateway Timeout"},
+		{429, "429 Too Many Requests", "HTTP 429 Too Many Requests"},
+		// A status Go has no text for (Cloudflare's 52x) is the code alone, no trailing space.
+		{520, "520 ", "HTTP 520"},
+		{522, "522 Origin Connection Time-out", "HTTP 522"},
+	}
+	for _, tc := range cases {
+		err := &HTTPStatusError{StatusCode: tc.code, Status: tc.status}
+		require.Equal(t, tc.want, err.Error(), "status line %q", tc.status)
+		require.Equal(t, tc.status, err.Status, "the upstream's own line is kept for the client")
+	}
+}

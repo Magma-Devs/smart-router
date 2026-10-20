@@ -221,3 +221,46 @@ func TestGetClientFacing_NilSafe(t *testing.T) {
 	var rr *common.RelayResult
 	require.Nil(t, rr.GetClientFacing())
 }
+
+func vendor503Err(statusLine string) error {
+	return common.NewLavaErrorWrapping(common.LavaErrorNodeServiceUnavailable, &lavasession.HTTPStatusError{
+		StatusCode: http.StatusServiceUnavailable,
+		Status:     statusLine,
+	})
+}
+
+// Two vendors that word their 503 differently are still the same error to the picker, so the
+// 503 majority wins over a lone refused connection every time. Before the error text was made
+// canonical, the picker chose between the three at random and about one request in nine got
+// the 502 "no answer from upstream" although two nodes had answered (MAG-4218).
+func TestGetBestErrorMessageForUser_MixedVendor503sStayOneMajority(t *testing.T) {
+	errs := []RelayError{
+		{Err: vendor503Err("503 Service Temporarily Unavailable"), ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@nginx"}, LavaError: common.LavaErrorNodeServiceUnavailable},
+		{Err: vendor503Err("503 Service Unavailable"), ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@go"}, LavaError: common.LavaErrorNodeServiceUnavailable},
+		{Err: refusedErr(), ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@refused"}, LavaError: common.LavaErrorConnectionRefused},
+	}
+	// The map the picker groups by is iterated in random order, so one run proves nothing.
+	for i := 0; i < 200; i++ {
+		picked := (&RelayErrors{RelayErrors: errs}).GetBestErrorMessageForUser()
+		require.NotEqual(t, "lava@refused", picked.ProviderInfo.ProviderAddress, "iteration %d", i)
+	}
+}
+
+// End to end through the processor: the client gets 503 and one of the vendors' own status
+// lines, never the canonical text the router decided on.
+func TestProcessingResult_MixedVendor503sForwardTheVendorsLine(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		rp, _, closer := newTwoProviderProcessor(t)
+		go SendProtocolError(rp, "lava@a", time.Millisecond, vendor503Err("503 Service Temporarily Unavailable"))
+		go SendProtocolError(rp, "lava@b", 2*time.Millisecond, vendor503Err("503 Service Unavailable"))
+		waitForBoth(t, rp)
+
+		result, err := rp.ProcessingResult()
+		closer()
+		require.Error(t, err)
+		require.Equal(t, http.StatusServiceUnavailable, result.StatusCode)
+		cf := result.GetClientFacing()
+		require.NotNil(t, cf)
+		require.Contains(t, []string{"503 Service Temporarily Unavailable", "503 Service Unavailable"}, cf.UpstreamStatusText)
+	}
+}

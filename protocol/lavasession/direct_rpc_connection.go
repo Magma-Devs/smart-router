@@ -883,8 +883,11 @@ func readResponseBody(resp *http.Response) ([]byte, error) {
 // HTTPStatusError represents an HTTP error response (4xx/5xx)
 type HTTPStatusError struct {
 	StatusCode int
-	Status     string
-	Body       []byte
+	// Status is the upstream's own status line, "503 Service Temporarily Unavailable" from an nginx
+	// front, "503 Service Unavailable" from another. It is for the client reply only and is kept out
+	// of Error(), see there. Empty when the producer had no status line.
+	Status string
+	Body   []byte
 	// RetryAfter is what a rate-limiting upstream asked for, or 0 when it sent no usable
 	// Retry-After. Read it through common.RetryAfterFrom rather than the field, so a caller
 	// works the same whichever path produced the error.
@@ -892,12 +895,14 @@ type HTTPStatusError struct {
 }
 
 func (e *HTTPStatusError) Error() string {
-	// Status is Go's status line, "503 Service Unavailable", which already starts with the code;
-	// only prepend the code when the producer stored something else (MAG-4218).
-	if strings.HasPrefix(e.Status, strconv.Itoa(e.StatusCode)) {
-		return "HTTP " + e.Status
+	// One text per status code, whatever the vendor: the best-error picker groups failed providers
+	// by this string and the classifier scans it, so the upstream's own reason phrase (Status)
+	// must not reach it. Two vendors' 503s that read differently stop counting as the same error,
+	// and the picker then chooses between them at random (MAG-4218).
+	if text := http.StatusText(e.StatusCode); text != "" {
+		return fmt.Sprintf("HTTP %d %s", e.StatusCode, text)
 	}
-	return fmt.Sprintf("HTTP %d %s", e.StatusCode, e.Status)
+	return fmt.Sprintf("HTTP %d", e.StatusCode)
 }
 
 // Unwrap presents a 429 as the shared rate-limit error, so errors.Is(err,

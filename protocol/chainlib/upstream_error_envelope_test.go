@@ -11,7 +11,7 @@ import (
 )
 
 // Real shape of the GUID envelope the listener passes in (taken from a local run, MAG-4218).
-const rawRouterMsg503 = `{"Error_GUID":"5907451141264619852","Error":"failed processing responses from RPC endpoints ErrMsg: failed relay, insufficient results ErrMsg: HTTP 503 503: Node temporarily unavailable {GUID:5907451141264619852} {GUID:5907451141264619852,request_id:,task_id:,tx_id:,endpoint:ETH1jsonrpc}"}`
+const rawRouterMsg503 = `{"Error_GUID":"5907451141264619852","Error":"failed processing responses from RPC endpoints ErrMsg: failed relay, insufficient results ErrMsg: HTTP 503 Service Unavailable: Node temporarily unavailable {GUID:5907451141264619852} {GUID:5907451141264619852,request_id:,task_id:,tx_id:,endpoint:ETH1jsonrpc}"}`
 
 type envelopeReply struct {
 	JSONRPC string          `json:"jsonrpc"`

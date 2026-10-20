@@ -607,13 +607,9 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 			utils.LogAttr("status", statusCode),
 			utils.LogAttr("latency", latency),
 		)
-		status := response.Status // MAG-4218: the reason phrase, "503 Service Unavailable", not the number twice
-		if status == "" {
-			status = strconv.Itoa(statusCode)
-		}
 		httpErr := &lavasession.HTTPStatusError{
 			StatusCode: statusCode,
-			Status:     status,
+			Status:     response.Status, // the upstream's own status line, for the client reply (MAG-4218)
 			Body:       responseData,
 		}
 		return nil, classifyAndWrap(httpErr, d.chainFamily, common.TransportJsonRPC)
