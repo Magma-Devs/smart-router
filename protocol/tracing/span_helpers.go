@@ -2,9 +2,11 @@ package tracing
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -88,6 +90,9 @@ func RecordError(span trace.Span, err error) {
 	// Redacted before export: a transport failure's *url.Error carries the full
 	// upstream url, whose path and query hold the vendor api key.
 	err = utils.RedactSecretsErr(err)
+	if msg := err.Error(); !utf8.ValidString(msg) {
+		err = errors.New(validUTF8(msg))
+	}
 	span.RecordError(err)
 	span.SetStatus(otelcodes.Error, err.Error())
 }
@@ -104,9 +109,14 @@ func RecordBody(span trace.Span, attrKey string, body []byte) {
 		return
 	}
 	if bodyAttrLimit > 0 && len(body) > bodyAttrLimit {
-		body = body[:bodyAttrLimit]
+		// Cut at a character boundary: a multi-byte character split here is invalid UTF-8.
+		cut := bodyAttrLimit
+		for cut > 0 && bodyAttrLimit-cut < utf8.UTFMax && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		body = body[:cut]
 	}
-	span.SetAttributes(attribute.String(attrKey, string(body)))
+	span.SetAttributes(attribute.String(attrKey, validUTF8(string(body))))
 }
 
 // RecordRelayAttributes records the standard relay identification attributes
@@ -127,7 +137,7 @@ func RecordRelayMethod(span trace.Span, methodName string) {
 	if !span.IsRecording() {
 		return
 	}
-	span.SetAttributes(attribute.String(attrRelayMethod, methodName))
+	span.SetAttributes(attribute.String(attrRelayMethod, validUTF8(methodName)))
 }
 
 // RecordProviderAttributes records per-provider identification attributes
@@ -225,7 +235,7 @@ func RecordHTTPRequest(span trace.Span, method, urlStr string) {
 		return
 	}
 	attrs := []attribute.KeyValue{
-		semconv.HTTPMethod(method),
+		semconv.HTTPMethod(validUTF8(method)),
 		// scheme://host only — the path and query carry the vendor api key, and
 		// spans leave the process for a collector.
 		semconv.HTTPURL(utils.RedactURL(urlStr)),
@@ -256,7 +266,7 @@ func RecordGRPCRequest(span trace.Span, methodPath, urlStr string) {
 	if !span.IsRecording() {
 		return
 	}
-	service, method := splitGRPCMethod(methodPath)
+	service, method := splitGRPCMethod(validUTF8(methodPath))
 	attrs := []attribute.KeyValue{
 		semconv.RPCSystemGRPC,
 		semconv.RPCMethod(method),
@@ -310,4 +320,14 @@ func splitGRPCMethod(methodPath string) (service, method string) {
 		return strings.TrimPrefix(methodPath[:i], "/"), methodPath[i+1:]
 	}
 	return "", methodPath
+}
+
+// validUTF8 keeps a string that came with the request exportable: OTLP sends span
+// attributes, events and status as protobuf strings, which must be valid UTF-8, and one
+// invalid value drops the whole export batch.
+func validUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "\uFFFD")
 }

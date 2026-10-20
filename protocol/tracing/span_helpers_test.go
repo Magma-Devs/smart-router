@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
@@ -673,4 +674,44 @@ func TestStartServerSpan_AlwaysCreatesServerSpan(t *testing.T) {
 	require.Len(t, spans, 1)
 	require.Equal(t, trace.SpanKindServer, spans[0].SpanKind)
 	require.Equal(t, "smartrouter.SendRelay", spans[0].Name)
+}
+
+// Every string a span exports is valid UTF-8, whatever the request carried: OTLP marshals
+// them as protobuf strings, and one invalid value drops the whole export batch.
+func TestSpanStringsAreValidUTF8(t *testing.T) {
+	tracer, exporter := setupTestTracingWithExporter(t)
+	prevLimit := bodyAttrLimit
+	t.Cleanup(func() { bodyAttrLimit = prevLimit })
+	bodyAttrLimit = 8
+
+	_, span := tracer.Start(context.Background(), "test")
+	RecordRelayMethod(span, "Default-/x/\xff")
+	RecordGRPCRequest(span, "cosmos.Foo/\xfe", "http://node.example:9090")
+	RecordHTTPRequest(span, "G\xffT", "http://node.example:1317/x")
+	RecordBody(span, "body", []byte(`{"a":"xé"}`)) // the limit falls inside é
+	RecordError(span, errors.New("bad \xff"))
+	span.End()
+
+	spans := exporter.GetSpans()
+	require.Len(t, spans, 1)
+	s := spans[0]
+	for _, kv := range s.Attributes {
+		if kv.Value.Type() == attribute.STRING {
+			require.True(t, utf8.ValidString(kv.Value.AsString()), "attribute %s = %q", kv.Key, kv.Value.AsString())
+		}
+	}
+	for _, ev := range s.Events {
+		for _, kv := range ev.Attributes {
+			require.True(t, utf8.ValidString(kv.Value.String()), "event %s attribute %s", ev.Name, kv.Key)
+		}
+	}
+	require.True(t, utf8.ValidString(s.Status.Description), "status %q", s.Status.Description)
+
+	body := ""
+	for _, kv := range s.Attributes {
+		if kv.Key == "body" {
+			body = kv.Value.AsString()
+		}
+	}
+	require.Equal(t, `{"a":"x`, body, "the cut backs off to the start of the split character")
 }
