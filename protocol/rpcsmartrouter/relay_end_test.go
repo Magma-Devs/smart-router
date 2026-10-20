@@ -260,13 +260,16 @@ func relayEndProvider(t *testing.T, node relayEndNode) (*lavasession.ConsumerSes
 	return provider, url
 }
 
+// relayEndNoProjectID is the project id a listener passes for a request without a project-id header.
+const relayEndNoProjectID = metrics.CustomerNone
+
 // sendRelayEnd sends body the way every HTTP listener does: SendRelay, with the GUID the
-// listener minted on the context.
+// listener minted on the context, for a request without a project-id header.
 func sendRelayEnd(t *testing.T, server *RPCSmartRouterServer, guid uint64, timeout time.Duration, url, body string, metadata ...pairingtypes.Metadata) (*common.RelayResult, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), timeout)
 	defer cancel()
-	return server.SendRelay(ctx, url, body, http.MethodPost, "dapp", "", nil, metadata)
+	return server.SendRelay(ctx, url, body, http.MethodPost, relayEndNoProjectID, "", nil, metadata)
 }
 
 const (
@@ -545,7 +548,7 @@ func TestRelayEnd_TendermintTxRefused(t *testing.T) {
 	guid := relayEndCaseGUID("tendermint_tx_refused")
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), relayEndShortWait)
 	defer cancel()
-	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", "dapp", "", nil, nil)
+	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", relayEndNoProjectID, "", nil, nil)
 	require.NoError(t, err, "the client gets the node's normal reply")
 	requireRelayEndGolden(t, "tendermint_tx_refused", normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false))
 }
@@ -861,7 +864,7 @@ func TestRelayEnd_TendermintUnlistedMethod(t *testing.T) {
 			// query as the url.
 			ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), tc.guid), relayEndShortWait)
 			defer cancel()
-			_, _ = server.SendRelay(ctx, tc.url, tc.body, "", "dapp", "", nil, nil)
+			_, _ = server.SendRelay(ctx, tc.url, tc.body, "", relayEndNoProjectID, "", nil, nil)
 
 			line := onlyRelayEnd(t, read(), tc.guid)
 			require.Equal(t, tc.method, relayEndField(t, line, "method"))
