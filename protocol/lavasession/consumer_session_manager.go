@@ -2034,14 +2034,18 @@ const statefulFanoutPerTier = 10
 // Order does not decide who is relayed to: every address returned here gets a session and its own
 // goroutine. It decides only who survives the cap.
 //
+// honourHoldoff says whether a backup held off after a 429 is left out, as getValidProviderAddresses
+// already left held-off primaries out of validAddresses. It is false for a broadcast: a write goes to
+// every provider whatever the hold-off says (MAG-4388).
+//
 // csm must be rlocked here.
-func (csm *ConsumerSessionManager) getProvidersForStatefulCalls(ctx context.Context, validAddresses []string, ignoredProvidersList map[string]struct{}, addon string, extensions []string) []string {
+func (csm *ConsumerSessionManager) getProvidersForStatefulCalls(ctx context.Context, validAddresses []string, ignoredProvidersList map[string]struct{}, addon string, extensions []string, honourHoldoff bool) []string {
 	providers := csm.rankStatefulTier(validAddresses, ignoredProvidersList)
 	if !csm.statefulToBackup {
 		return providers
 	}
 
-	backups := csm.rankStatefulTier(csm.eligibleBackupsForStateful(ctx, ignoredProvidersList, addon, extensions, providers), ignoredProvidersList)
+	backups := csm.rankStatefulTier(csm.eligibleBackupsForStateful(ctx, ignoredProvidersList, addon, extensions, providers, honourHoldoff), ignoredProvidersList)
 	if len(backups) == 0 {
 		return providers
 	}
@@ -2095,8 +2099,8 @@ func (csm *ConsumerSessionManager) rankStatefulTier(addresses []string, ignoredP
 }
 
 // eligibleBackupsForStateful returns the backups a stateful broadcast may include: not already
-// chosen from the primary tier, not already tried by this request, not blocked, able to serve the
-// addon and extensions asked for, and not currently held off after a 429.
+// chosen from the primary tier, not already tried by this request, not blocked, and able to serve
+// the addon and extensions asked for.
 //
 // alreadySelected is the primary tier's result. UpdateAllProviders builds the two pools from
 // separate inputs with no dedup, so one address can sit in both — and appending it twice would put
@@ -2114,13 +2118,16 @@ func (csm *ConsumerSessionManager) rankStatefulTier(addresses []string, ignoredP
 // backup it is paying for is a policy question, and changing it here would widen this change past
 // the broadcast. Revisit it with the tier consolidation, not in passing.
 //
-// The hold-off is a plain exclusion here, unlike filterRateLimitedProviders, which keeps the
-// soonest-to-expire candidate rather than leave a request with nowhere to go. That rescue cannot be
-// needed on this path: the backup tier is additive, and a stateful broadcast only gets here with at
-// least one primary already chosen.
+// A backup held off after a 429 is included, as a held-off primary is: the broadcast is the write's
+// redundancy, and a backup still limiting answers it with a 429 the broadcast does not wait on
+// (MAG-4388). honourHoldoff is set only when the selection is not delivered as a broadcast (a
+// sticky write, a claim candidate), and then a held-off backup is excluded outright, unlike
+// filterRateLimitedProviders, which keeps the soonest-to-expire candidate rather than leave a
+// request with nowhere to go. That rescue cannot be needed on this path: the backup tier is
+// additive.
 //
 // csm must be rlocked here.
-func (csm *ConsumerSessionManager) eligibleBackupsForStateful(ctx context.Context, ignoredProvidersList map[string]struct{}, addon string, extensions []string, alreadySelected []string) []string {
+func (csm *ConsumerSessionManager) eligibleBackupsForStateful(ctx context.Context, ignoredProvidersList map[string]struct{}, addon string, extensions []string, alreadySelected []string, honourHoldoff bool) []string {
 	eligible := make([]string, 0, len(csm.backupProviders))
 	for address, provider := range csm.backupProviders {
 		if provider == nil {
@@ -2138,7 +2145,7 @@ func (csm *ConsumerSessionManager) eligibleBackupsForStateful(ctx context.Contex
 		if !provider.IsSupportingAddon(addon) || !provider.IsSupportingExtensions(extensions, ctx) {
 			continue
 		}
-		if csm.rateLimitHoldoff != nil {
+		if honourHoldoff && csm.rateLimitHoldoff != nil {
 			if _, heldOff := csm.rateLimitHoldoff.ProviderReadyAt(address); heldOff {
 				continue
 			}
@@ -2289,7 +2296,20 @@ func (csm *ConsumerSessionManager) filterRateLimitedProviders(ctx context.Contex
 	return append(ready, soonest)
 }
 
+// getValidProviderAddresses selects the providers a request is sent to. The caller sends the request
+// to every address returned, so a write selected here is broadcast to all of them.
 func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context, wantedProviders int, ignoredProvidersList map[string]struct{}, cu uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, stickiness string, selectedProvider string) (addresses []string, err error) {
+	return csm.selectProviderAddresses(ctx, wantedProviders, ignoredProvidersList, cu, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider, false)
+}
+
+// selectProviderAddresses is getValidProviderAddresses for any caller. pickOne is set by a caller
+// that uses only the first address returned (stickyCandidate proposing a claim): the selection is
+// then a single pick even for a write, so the rate-limit hold-off still applies to it.
+//
+// pickOne is not wantedProviders == 1: the refill in getValidConsumerSessionsWithProvider passes 1
+// for a broadcast too, and a broadcast ignores wantedProviders, so the refill of a write must still
+// skip the hold-off.
+func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, wantedProviders int, ignoredProvidersList map[string]struct{}, cu uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, stickiness string, selectedProvider string, pickOne bool) (addresses []string, err error) {
 	// cs.Lock must be Rlocked here.
 	ignoredProvidersListLength := len(ignoredProvidersList)
 	validAddresses := csm.getValidAddresses(addon, extensions, ctx)
@@ -2422,11 +2442,25 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 	// Rate-limit hold-off (docs/RATE-LIMIT-HOLDOFF.md): prefer providers that are not
 	// currently held off after a 429. A header-pinned provider and an existing sticky
 	// session bypass this above on purpose — an explicit ask outranks the hold-off.
-	validAddresses = csm.filterRateLimitedProviders(ctx, validAddresses, ignoredProvidersList)
+	//
+	// A write broadcast does not apply it (MAG-4388). The hold-off chooses which provider a
+	// request goes to, and a broadcast goes to all of them: a provider still limiting answers the
+	// write with a 429, which is not the answer, so the broadcast waits for the others, and one
+	// that has recovered lands it. Filtering held-off providers out of the broadcast left a write on
+	// one provider for as long as the hold-off lasted, up to its 30-minute cap, and with every
+	// provider held off, on the soonest-to-expire alone. A write that still reaches one provider
+	// keeps the filter: a sticky write collapses to providers[0] below, a pickOne caller uses only
+	// the first address, and the cost strategy does not broadcast.
+	broadcastsWrite := stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS && csm.providerOptimizer.Strategy() != provideroptimizer.StrategyCost
+	deliveredToOne := stickiness != "" || pickOne // the tail collapses a sticky selection to providers[0]
+	honourHoldoff := !broadcastsWrite || deliveredToOne
+	if honourHoldoff {
+		validAddresses = csm.filterRateLimitedProviders(ctx, validAddresses, ignoredProvidersList)
+	}
 
 	var providers []string
-	if stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS && csm.providerOptimizer.Strategy() != provideroptimizer.StrategyCost {
-		providers = csm.getProvidersForStatefulCalls(ctx, validAddresses, ignoredProvidersList, addon, extensions)
+	if broadcastsWrite {
+		providers = csm.getProvidersForStatefulCalls(ctx, validAddresses, ignoredProvidersList, addon, extensions, honourHoldoff)
 	} else if stickiness != "" {
 		var selectionStats *provideroptimizer.SelectionStats
 		providers, selectionStats = csm.providerOptimizer.ChooseUpstreamWithStats(ctx, validAddresses, ignoredProvidersList, cu, requestedBlock)
@@ -4220,7 +4254,9 @@ func (csm *ConsumerSessionManager) stickyClaimTTL() time.Duration {
 func (csm *ConsumerSessionManager) stickyCandidate(ctx context.Context, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32) (string, error) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
-	addresses, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "")
+	// A single pick even for a write: the claim pins the whole session to the first address, so it
+	// is chosen among providers the hold-off is not holding off, as a read's provider is.
+	addresses, err := csm.selectProviderAddresses(ctx, 1, map[string]struct{}{}, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "", true)
 	if err != nil {
 		return "", err
 	}

@@ -129,7 +129,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 	}
 	var api *spectypes.Api
 	var apiCollection *spectypes.ApiCollection
-	var latestRequestedBlock, earliestRequestedBlock int64 = 0, 0
+	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
 	for idx, msg := range msgs {
@@ -210,15 +210,17 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			elementEarliest = spectypes.EARLIEST_BLOCK
 		}
 
+		// The earliest block starts at the first element that names a block, not at the "unset" 0:
+		// CompareRequestedBlockInBatch only lowers it, and 0 made every later combination come out
+		// 0, so RequestedBlock reported the newest block as the earliest and the archive rule never
+		// saw a batch's deep element (MAG-4242). An element that names no block (eth_chainId) does
+		// not decide the batch's block at all; see requestedBlockFold (MAG-4381).
+		blockFold.add(parsedBlock, elementEarliest, parsedInput, overwriteReqBlock == "" && apiNamesNoBlock(apiCont.api))
+
 		if idx == 0 {
-			// on the first entry store them. The earliest block starts at this element's block, not
-			// at the "unset" 0: CompareRequestedBlockInBatch only lowers it, and 0 made every later
-			// combination come out 0, so RequestedBlock reported the newest block as the earliest
-			// and the archive rule never saw a batch's deep element (MAG-4242).
+			// on the first entry store them.
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
-			latestRequestedBlock = parsedBlock
-			earliestRequestedBlock = foldParsedEarliest(elementEarliest, parsedInput)
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
@@ -252,11 +254,9 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 					Encoding:     "",
 				},
 			}
-
-			latestRequestedBlock, _ = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
-			earliestRequestedBlock = foldParsedEarliest(CombineEarliestRequestedBlock(earliestRequestedBlock, elementEarliest), parsedInput)
 		}
 	}
+	latestRequestedBlock, earliestRequestedBlock := blockFold.blocks()
 
 	var nodeMsg *baseChainMessageContainer
 	if len(msgs) == 1 && !isBatch {
