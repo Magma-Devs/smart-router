@@ -8,6 +8,42 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.6.2 — 2026-10-21
+
+### Highlights
+
+Smart Router v1.6.2 introduces three breaking changes affecting GraphQL request validation and write broadcasting during rate limits. First, the router now outright refuses GraphQL requests that expand to more than 300 root fields or nest fragments deeper than 32 levels at the root, rather than relaying them to upstream nodes. Second, when a GraphQL request combines a root under an enabled cross-validation policy with one under a `forbid-caller-cv` policy, the router now enforces cross-validation under the enabled policy without the caller's headers, rather than routing the request to a single provider. Third, write broadcasting behavior during rate-limit hold-offs has changed: writes are now broadcast to all enabled providers regardless of their hold-off status, meaning `lava-fast-tx-participants` will list every provider, recovered providers may serve the winning reply indicated by the `Lava-Provider-Address` header, and still-limited vendors will receive the write and return a 429. Beyond these breaking changes, this release fixes an issue where a single block-less element would prevent the router from caching batch or multi-root GraphQL requests.
+
+### Changes
+
+#### ⚠ Breaking changes
+- fix(chainlib)!: bound the root fields a GraphQL request expands to (MAG-4360) ([#549]) [`d3b38e6`]
+  - a GraphQL request that expands to more than 300 root fields, or nests fragments more than 32 deep at its root, is refused by the router instead of being relayed to a node.
+- fix(rpcsmartrouter)!: an enabled cross-validation policy applies beside a forbidden GraphQL root (MAG-4361) ([#550]) [`0d38f68`]
+  - a GraphQL request that selects a root under an enabled cross-validation policy together with a root under a forbid-caller-cv policy is cross-validated under the enabled policy, without the caller's headers, instead of being served by a single provider.
+- fix(lavasession)!: broadcast a write to every provider during a rate-limit hold-off (MAG-4388) ([#538]) [`52c429c`]
+  - during a rate-limit hold-off a write is broadcast to every enabled provider, held off or not, instead of only to the providers that are not held off (or, with every provider held off, to the soonest to expire). lava-fast-tx-participants lists every provider again, a held-off provider that has recovered can be the one whose reply is returned (Lava-Provider-Address), and a vendor that is still rate-limiting receives the write and answers it with a 429.
+
+#### Bug fixes
+- fix(chainlib)!: bound the root fields a GraphQL request expands to (MAG-4360) ([#549]) [`d3b38e6`]
+- fix(rpcsmartrouter)!: an enabled cross-validation policy applies beside a forbidden GraphQL root (MAG-4361) ([#550]) [`0d38f68`]
+- fix(chainlib): a block-less element no longer makes a batch or multi-root GraphQL request uncacheable (MAG-4381) ([#547]) [`871d770`]
+- fix(lavasession)!: broadcast a write to every provider during a rate-limit hold-off (MAG-4388) ([#538]) [`52c429c`]
+
+#### Build process updates
+- build(deps): move to Go 1.26.10 so govulncheck passes ([#560]) [`2639009`]
+
+[#538]: https://github.com/magma-Devs/smart-router/pull/538
+[#547]: https://github.com/magma-Devs/smart-router/pull/547
+[#549]: https://github.com/magma-Devs/smart-router/pull/549
+[#550]: https://github.com/magma-Devs/smart-router/pull/550
+[#560]: https://github.com/magma-Devs/smart-router/pull/560
+[`0d38f68`]: https://github.com/magma-Devs/smart-router/commit/0d38f68b0b54d6e1448408f581d15d99f5a59158
+[`2639009`]: https://github.com/magma-Devs/smart-router/commit/263900903c76671f52cdc54278c92fcedca8b743
+[`52c429c`]: https://github.com/magma-Devs/smart-router/commit/52c429c2cdc5c6b58e27bee3b2c57cfc968b8dc0
+[`871d770`]: https://github.com/magma-Devs/smart-router/commit/871d770fa0796ca584e89c5b3dd206d9f95aa2f9
+[`d3b38e6`]: https://github.com/magma-Devs/smart-router/commit/d3b38e672e0486d9c38dcfdac6105e3da8802594
+
 ## v1.6.1 — 2026-10-20
 
 ### Highlights
