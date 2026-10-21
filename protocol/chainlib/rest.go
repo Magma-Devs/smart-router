@@ -44,8 +44,9 @@ func (apip *RestChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 	if craftData != nil {
 		var data []byte = nil
 		urlPath := string(craftData.Data)
-		if craftData.ConnectionType == http.MethodPost {
-			// on post we need to send the data provided in the template with the api as method
+		if RestMethodCarriesBody(craftData.ConnectionType) {
+			// A body method sends the template as its body, to the api name as the path. Any other
+			// method's template is the request URL.
 			data = craftData.Data
 			urlPath = craftData.Path
 		}
@@ -233,14 +234,14 @@ type RestChainListener struct {
 	app              *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
-// restMethodCarriesBody reports whether the REST listener relays the request body for
+// RestMethodCarriesBody reports whether the REST listener relays the request body for
 // an HTTP method. POST, PUT and PATCH carry one, and the node receives the body as
 // Fiber's Body() returns it: the client's bytes, decoded first when the client set a
 // Content-Encoding (that header is not forwarded). Every other method is relayed
 // without a body. The same set decides which requests forward the client's
 // Content-Type (forwardsClientBodyHeader), so the router never forwards a Content-Type
 // for bytes it did not send.
-func restMethodCarriesBody(method string) bool {
+func RestMethodCarriesBody(method string) bool {
 	switch method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch:
 		return true
@@ -396,7 +397,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		// POST has its own handler above; PUT and PATCH arrive here and carry a body too.
 		requestBody := ""
-		if restMethodCarriesBody(fiberCtx.Method()) {
+		if RestMethodCarriesBody(fiberCtx.Method()) {
 			requestBody = string(fiberCtx.Body())
 		}
 		utils.LavaFormatInfo("Consumer received a new REST non-POST request",
