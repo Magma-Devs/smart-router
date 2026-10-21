@@ -8,6 +8,20 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.5.9 — 2026-10-21
+
+### Highlights
+
+Smart Router v1.5.9 is v1.5.8 rebuilt on Go 1.26.10 with `golang.org/x/net` v0.60.0; the router's own code is unchanged. Go 1.26.10 makes `crypto/x509` reject any certificate chain that contains one of eight distrusted eMudhra intermediate CA certificates ([GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809)), so the router now refuses a TLS certificate issued through them, whichever trust store it verifies against: the image's system roots or a configured `cacert-pem`. The check is compiled into the binary, which is why the release is a rebuild rather than a change to the image's CA bundle. The toolchain move also carries the standard-library security fixes released since Go 1.26.6, and `x/net` v0.60.0 (the version v1.6.x already ships) carries the HTTP/2 fixes. The same certificate fix for the v1.6 line is v1.6.2.
+
+### Changes
+
+#### Security
+- build(deps): move to Go 1.26.10 (GO-2026-6809), the change [#560] made on main
+- build(deps): move golang.org/x/net to v0.60.0, the version v1.6.x ships
+
+[#560]: https://github.com/magma-Devs/smart-router/pull/560
+
 ## v1.5.8 — 2026-10-03
 
 ### Highlights
