@@ -24,6 +24,8 @@
   "message": "relay_end",
   "method": "broadcast_tx_sync",
   "outcome": "ok",
+  "reply_bytes": 150,
+  "request_bytes": 80,
   "schema": 1,
   "selection": "stateful",
   "served_by": "node-a",

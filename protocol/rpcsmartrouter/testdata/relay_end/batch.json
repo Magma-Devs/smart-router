@@ -12,6 +12,8 @@
   "message": "relay_end",
   "method": "eth_getBalance&eth_chainId",
   "outcome": "ok",
+  "reply_bytes": 82,
+  "request_bytes": 177,
   "schema": 1,
   "selection": "stateless",
   "served_by": "node-a",

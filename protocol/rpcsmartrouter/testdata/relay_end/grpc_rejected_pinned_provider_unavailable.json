@@ -13,6 +13,7 @@
   "message": "relay_end",
   "method": "test.v1.Node/Call",
   "outcome": "rejected_before_dispatch",
+  "request_bytes": 2,
   "schema": 1,
   "selection": "stateless",
   "served_by": "",

@@ -12,6 +12,8 @@
   "message": "relay_end",
   "method": "test.v1.Node/Call",
   "outcome": "ok",
+  "reply_bytes": 2,
+  "request_bytes": 2,
   "schema": 1,
   "selection": "stateless",
   "served_by": "grpc-node",
