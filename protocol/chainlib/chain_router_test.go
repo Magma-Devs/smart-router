@@ -2227,6 +2227,39 @@ func TestChainRouterWithInternalPaths(t *testing.T) {
 					"|websocket|internal-path:/WS|": {{Url: "wss://localhost:1234", InternalPath: "/WS"}},
 				},
 			},
+			{
+				// STRK: the vendor bakes the version into the url, so the only
+				// http url is pinned; that path answers every root api.
+				name:               "root_served_by_a_versioned_path__pinned_http_only__admitted",
+				apiInterface:       apiInterface,
+				specApiCollections: rootServedByVersionedPathCollections(apiInterface, []string{"a", "b"}),
+				nodeUrls: []common.NodeUrl{
+					{Url: "https://localhost:1234/V1", InternalPath: "/V1"},
+				},
+				expectedServicesToNodeUrls: map[string][]common.NodeUrl{
+					"||internal-path:/V1|": {{Url: "https://localhost:1234/V1", InternalPath: "/V1"}},
+				},
+			},
+			{
+				// The root add-on collection that follows the base one must not
+				// hide the base collection from the guard.
+				name:               "root_addon_collection_after_base__ws_only__should_error",
+				apiInterface:       apiInterface,
+				specApiCollections: rootServedByVersionedPathCollections(apiInterface, []string{"a", "b"}),
+				nodeUrls: []common.NodeUrl{
+					{Url: "wss://localhost:1234", InternalPath: ""},
+				},
+				expectedError: true,
+			},
+			{
+				name:               "versioned_path_missing_a_root_api__pinned_http_only__should_error",
+				apiInterface:       apiInterface,
+				specApiCollections: rootServedByVersionedPathCollections(apiInterface, []string{"a"}),
+				nodeUrls: []common.NodeUrl{
+					{Url: "https://localhost:1234/V1", InternalPath: "/V1"},
+				},
+				expectedError: true,
+			},
 		}...)
 	}
 
