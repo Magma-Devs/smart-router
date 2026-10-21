@@ -477,6 +477,13 @@ func (rpcss *RPCSmartRouterServer) craftRelay(ctx context.Context) (ok bool, rel
 
 	path := parsing.ApiName
 	data := []byte(parsing.FunctionTemplate)
+	// A REST template is the request URL, query string included, unless the collection is a POST,
+	// whose template is its body — the rule RestChainParser.CraftMessage applies for the chain
+	// fetcher. Sent as the body of a GET, the query never reaches the node, and a node that refuses
+	// a GET with a body fails every health check.
+	if rpcss.listenEndpoint.ApiInterface == spectypes.APIInterfaceRest && collectionData.Type != http.MethodPost {
+		path, data = parsing.FunctionTemplate, nil
+	}
 	chainMessage, err = rpcss.chainParser.ParseMsg(path, data, collectionData.Type, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	if err != nil {
 		return false, nil, nil, utils.LavaFormatError("failed creating chain message in rpc consumer init relays", err,
