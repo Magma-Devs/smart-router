@@ -14,7 +14,7 @@
   "outcome": "ok",
   "reply_bytes": 2,
   "request_bytes": 2,
-  "schema": 1,
+  "schema": 2,
   "selection": "stateless",
   "served_by": "grpc-node",
   "stateful": false,

@@ -36,7 +36,7 @@
   "method": "eth_sendRawTransaction",
   "outcome": "write_unknown",
   "request_bytes": 168,
-  "schema": 1,
+  "schema": 2,
   "selection": "stateful",
   "served_by": "",
   "stateful": true,

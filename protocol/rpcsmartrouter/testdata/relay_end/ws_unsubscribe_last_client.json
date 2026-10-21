@@ -14,7 +14,7 @@
   "method": "eth_unsubscribe",
   "outcome": "ok",
   "request_bytes": 80,
-  "schema": 1,
+  "schema": 2,
   "selection": "subscription",
   "served_by": "node-ws",
   "stateful": false,

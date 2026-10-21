@@ -26,7 +26,7 @@
   "outcome": "ok",
   "reply_bytes": 102,
   "request_bytes": 304,
-  "schema": 1,
+  "schema": 2,
   "selection": "stateful",
   "served_by": "node-a",
   "stateful": true,

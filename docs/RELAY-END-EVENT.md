@@ -2,7 +2,7 @@
 
 The router writes one `relay_end` line when a relay ends. It is a declared event: readers select it
 by `"event":"relay_end"` and parse it by `schema`, never by message text. This document is the
-contract for `schema` 1.
+contract for `schema` 2.
 
 - **Every level.** The line is written at INFO on every enabled sink (stderr, the rolling log file,
   the debug buffer) whatever `--log-level` is: `utils.LogEvent` writes through a copy of each
@@ -15,7 +15,7 @@ contract for `schema` 1.
   replaces the middle of a longer text.
 
 ```json
-{"level":"info","event":"relay_end","schema":1,"GUID":"7003","stateful":true,"method":"eth_sendRawTransaction","api_interface":"jsonrpc","selection":"stateful","outcome":"ok","stop_reason":"Success","served_by":"node-b","status":200,"has_reply":true,"error_code":"","error":"","latency_ms":305,"is_batch":false,"request_bytes":304,"reply_bytes":102,"tx_hash":"0x2620d49b3fa2ff073b49bce2b5f0382521afd075691e695251929cd67be4f460","attempts":[{"upstream":"node-a","outcome":"node_error","error_code":"CHAIN_NONCE_TOO_LOW","message":"nonce too low: next nonce 7, tx nonce 6","node_code":-32000,"latency_ms":2,"returned_to_client":false},{"upstream":"node-b","outcome":"ok","error_code":"","message":"","latency_ms":304,"returned_to_client":true}],"time":1792323767487910421,"message":"relay_end"}
+{"level":"info","event":"relay_end","schema":2,"GUID":"7003","stateful":true,"method":"eth_sendRawTransaction","api_interface":"jsonrpc","selection":"stateful","outcome":"ok","stop_reason":"Success","served_by":"node-b","status":200,"has_reply":true,"error_code":"","error":"","latency_ms":305,"is_batch":false,"request_bytes":304,"reply_bytes":102,"tx_hash":"0x2620d49b3fa2ff073b49bce2b5f0382521afd075691e695251929cd67be4f460","attempts":[{"upstream":"node-a","outcome":"node_error","error_code":"CHAIN_NONCE_TOO_LOW","message":"nonce too low: next nonce 7, tx nonce 6","node_code":-32000,"latency_ms":2,"returned_to_client":false},{"upstream":"node-b","outcome":"ok","error_code":"","message":"","latency_ms":304,"returned_to_client":true}],"time":1792323767487910421,"message":"relay_end"}
 ```
 
 `protocol/rpcsmartrouter/testdata/relay_end/` holds one event per exit path, checked by
@@ -45,7 +45,7 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | Field | Type | Present | Value |
 | --- | --- | --- | --- |
 | `event` | string | always | `"relay_end"` |
-| `schema` | number | always | `1` |
+| `schema` | number | always | `2` |
 | `GUID` | string | always | The request's GUID in decimal: the value every narrative line of the request carries under `GUID`, and the `Error_GUID` its client gets in an error reply. Each WebSocket frame is a relay with a GUID of its own. `""` if the context carries none. |
 | `connection` | string | WebSocket relays | The GUID of the WebSocket connection the relay came on, which the connection's own lines carry. Groups a connection's relays. |
 | `customer` | string | when the request names a project | The request's project id: the `project-id` header of an HTTP request, of a WebSocket connection's upgrade request (every frame on the connection carries it, a frame that does not parse too), or of a gRPC call's metadata. Absent when the header is absent or empty, which the listeners pass on as `DefaultDappID`, and when it is `DefaultDappID`. Written as the caller sent it, without the metrics' `customer` label's budget: made valid UTF-8 (each run of invalid bytes becomes U+FFFD) and cut to at most 128 bytes at a character boundary. |
@@ -60,7 +60,7 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | `outcome` | string | always | What the client got; see [outcome](#outcome). |
 | `stop_reason` | string | always | Why there was no further attempt: `Success`, `Stateful`, `CrossValidation`, `NonRetryableNodeError`, `PermanentProtocolError`, `UnlistedMethodRefused`, `MaxRetriesReached`, `BatchDisabled`, `ErrorToleranceExceeded`, `AllProvidersExhausted`, `FirstMessageFailed`, `BatchSendFailed`, `ProcessingTimeout` (the budget ran out), `CallerGone` (a WebSocket or gRPC client hung up), `CrossValidationGroupsQuiet`. `""` when the relay ended before its state machine named a reason: `selection` is `""`, the cross-validation capacity check refused the request, or a `router_error` stopped it; always `""` for a subscription request. |
 | `served_by` | string | always | The upstream whose reply reached the client; `"Cached"` for a cache hit, as the provider-address reply header says. For a subscription request, the upstream its subscription lives on. `""` when the client got an error, and for a subscription request the router answered itself. |
-| `status` | number | always | The HTTP status on the router's result. `0` when the router returned no result or one without a status (every attempt failed in transport); the listener then answers with its own status. A `write_unknown` is always `500`, the status the client gets. `0` for a subscription request. |
+| `status` | number | always | The HTTP status on the router's result. When every attempt failed with a protocol error, it is the status the client gets: the upstream's own status when an upstream answered, `502` when every attempt failed in transport (MAG-4218). `0` when the router returned no result or one without a status; the listener then answers with its own status. A `write_unknown` is always `500`, the status the client gets. `0` for a subscription request. |
 | `has_reply` | boolean | always | `true` exactly when `outcome` is `ok` or `node_error`: the client got an upstream's or the cache's reply, or, to a subscription request, the router's own answer. |
 | `error_code` | string | always | The error registry name (`protocol/common/error_codes.go`) of why the relay did not end `ok`; see [error_code](#error_code). `""` on `ok`. |
 | `error` | string | always | `node_error`: the node's error message. `write_unknown`: the message the client gets ("transaction status unclear: …"). Any other failure: the error the relay ended with. `""` on `ok`. |
@@ -208,5 +208,10 @@ as `/REDACTED`, so `method` never starts with `/`; slashes inside it survive. `e
 
 ## Versioning
 
-Adding a field leaves `schema` at 1. Removing a field, changing a field's type or meaning, or adding
+Adding a field leaves `schema` as it is. Removing a field, changing a field's type or meaning, or adding
 a value to `outcome` or to an attempt's `outcome` bumps it.
+
+| `schema` | Change |
+| --- | --- |
+| 1 | First version (MAG-4400). |
+| 2 | `status` on a failed relay is the status the client gets: the upstream's own status when an upstream answered, `502` when every attempt failed in transport. Schema 1 wrote `0` when every attempt failed in transport (MAG-4218). |

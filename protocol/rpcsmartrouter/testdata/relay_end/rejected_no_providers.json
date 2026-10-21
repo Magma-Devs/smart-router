@@ -14,7 +14,7 @@
   "method": "eth_getBalance",
   "outcome": "rejected_before_dispatch",
   "request_bytes": 115,
-  "schema": 1,
+  "schema": 2,
   "selection": "stateless",
   "served_by": "",
   "stateful": false,

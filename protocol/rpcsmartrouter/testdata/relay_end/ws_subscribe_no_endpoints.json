@@ -15,7 +15,7 @@
   "method": "eth_subscribe",
   "outcome": "rejected_before_dispatch",
   "request_bytes": 71,
-  "schema": 1,
+  "schema": 2,
   "selection": "subscription",
   "served_by": "",
   "stateful": false,

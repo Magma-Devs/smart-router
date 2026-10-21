@@ -28,7 +28,7 @@
   "outcome": "node_error",
   "reply_bytes": 100,
   "request_bytes": 304,
-  "schema": 1,
+  "schema": 2,
   "selection": "stateful",
   "served_by": "node-a",
   "stateful": true,

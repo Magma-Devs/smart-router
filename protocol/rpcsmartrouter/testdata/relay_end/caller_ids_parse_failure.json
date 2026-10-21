@@ -15,7 +15,7 @@
   "method": "",
   "outcome": "rejected_before_dispatch",
   "request_id": "req-7f3a9c",
-  "schema": 1,
+  "schema": 2,
   "selection": "",
   "served_by": "",
   "stateful": false,
