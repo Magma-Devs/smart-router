@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"time"
@@ -783,6 +784,10 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	if httpMethod == "" {
 		return nil, fmt.Errorf("HTTP method not set by REST parser")
 	}
+	// A GET or HEAD has no body to send, and some nodes refuse one that carries it.
+	if httpMethod == http.MethodGet || httpMethod == http.MethodHead {
+		restBody = nil
+	}
 
 	// Extract headers as Metadata (preserves delete semantics)
 	headers := restMessage.GetHeaders()
@@ -810,7 +815,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	response, err := httpDoer.DoHTTPRequest(requestCtx, lavasession.HTTPRequestParams{
 		Method:      httpMethod,
 		URL:         fullURL,
-		Body:        restBody, // Send body as-is (for POST/PUT)
+		Body:        restBody, // As-is for a body method; nil for GET and HEAD (above)
 		Headers:     headers,  // Use Metadata (preserves delete semantics)
 		ContentType: "application/json",
 	})
