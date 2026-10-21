@@ -264,3 +264,43 @@ func TestProcessingResult_MixedVendor503sForwardTheVendorsLine(t *testing.T) {
 		require.Contains(t, []string{"503 Service Temporarily Unavailable", "503 Service Unavailable"}, cf.UpstreamStatusText)
 	}
 }
+
+// One upstream answered 503 and the other refused the connection: a one-to-one tie the majority
+// pick breaks at random. The client gets the upstream's 503 whichever error arrives first, never
+// the 502 "no answer from upstream" (MAG-4218).
+func TestProcessingResult_UpstreamAnswerBeatsTransportFailure(t *testing.T) {
+	for _, answerFirst := range []bool{true, false} {
+		answerDelay, refusedDelay := time.Millisecond, 2*time.Millisecond
+		if !answerFirst {
+			answerDelay, refusedDelay = refusedDelay, answerDelay
+		}
+		for i := 0; i < 50; i++ {
+			rp, _, closer := newTwoProviderProcessor(t)
+			go SendProtocolError(rp, "lava@a", answerDelay, upstream503Err("node a down"))
+			go SendProtocolError(rp, "lava@b", refusedDelay, refusedErr())
+			waitForBoth(t, rp)
+
+			result, err := rp.ProcessingResult()
+			closer()
+			require.Error(t, err)
+			require.Equal(t, http.StatusServiceUnavailable, result.StatusCode, "answer first: %v", answerFirst)
+			cf := result.GetClientFacing()
+			require.NotNil(t, cf)
+			require.Equal(t, "node a down", string(cf.UpstreamBody))
+		}
+	}
+}
+
+// A transport failure is the reply only when every attempt failed in transport: next to any
+// other error, that error's reply stands, whichever arrives first.
+func TestReplyProtocolError_TransportFailureIsTheLastResort(t *testing.T) {
+	answered := RelayError{Err: upstream503Err("node a down"), LavaError: common.LavaErrorNodeServiceUnavailable}
+	refused := RelayError{Err: refusedErr(), LavaError: common.LavaErrorConnectionRefused}
+	other := RelayError{Err: errors.New("no providers"), LavaError: common.LavaErrorNoProviders}
+
+	for _, picked := range []RelayError{answered, refused, other} {
+		require.Equal(t, answered.Err, replyProtocolError(picked, []RelayError{refused, other, answered}).Err)
+	}
+	require.Equal(t, other.Err, replyProtocolError(refused, []RelayError{refused, other}).Err)
+	require.Equal(t, refused.Err, replyProtocolError(refused, []RelayError{refused, refused}).Err)
+}

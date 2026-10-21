@@ -47,6 +47,31 @@ func clientFacingFromProtocolError(err error, lavaErr *common.LavaError) *common
 	return nil
 }
 
+// replyProtocolError chooses the error the client's reply is built from (MAG-4218). An upstream's
+// answer beats any other error, and a transport failure is used only when every attempt failed in
+// transport. Within a rank the majority pick stands; a higher rank takes the first such error.
+func replyProtocolError(picked RelayError, all []RelayError) RelayError {
+	best, bestRank := picked, replyRank(picked)
+	for _, candidate := range all {
+		if rank := replyRank(candidate); rank > bestRank {
+			best, bestRank = candidate, rank
+		}
+	}
+	return best
+}
+
+func replyRank(relayError RelayError) int {
+	cf := clientFacingFromProtocolError(relayError.Err, relayError.LavaError)
+	switch {
+	case cf == nil:
+		return 1 // today's reply
+	case cf.UpstreamStatus != 0:
+		return 2 // the upstream answered
+	default:
+		return 0 // no upstream answered
+	}
+}
+
 // leafCause returns the innermost error's text, skipping the registry wrapper's own description.
 func leafCause(err error) string {
 	var wrapped *common.LavaWrappedError

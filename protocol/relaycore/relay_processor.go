@@ -1527,12 +1527,15 @@ func (rp *RelayProcessor) buildFailureResult(
 		protocolErr := rp.GetBestProtocolErrorMessageForUser()
 		processingError = protocolErr.Err
 		bestLavaError = protocolErr.LavaError
-		if protocolErr.Response != nil {
-			returnedResult = &protocolErr.Response.RelayResult
+		// The reply may come from a different error than the one logged and returned: the
+		// majority pick breaks ties at random, and here it would decide the client's status.
+		replyErr := replyProtocolError(protocolErr, protocolErrors)
+		if replyErr.Response != nil {
+			returnedResult = &replyErr.Response.RelayResult
 		}
 		// MAG-4218: hand the listener the upstream's own answer (status + body), or
 		// the leaf cause with a 502 when no upstream answered. A copy, as for the 503 stamp below.
-		if cf := clientFacingFromProtocolError(protocolErr.Err, protocolErr.LavaError); cf != nil {
+		if cf := clientFacingFromProtocolError(replyErr.Err, replyErr.LavaError); cf != nil {
 			stamped := *returnedResult
 			stamped.ClientFacing = cf
 			if cf.UpstreamStatus != 0 {
