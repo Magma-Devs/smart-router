@@ -2305,6 +2305,10 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 // selectProviderAddresses is getValidProviderAddresses for any caller. pickOne is set by a caller
 // that uses only the first address returned (stickyCandidate proposing a claim): the selection is
 // then a single pick even for a write, so the rate-limit hold-off still applies to it.
+//
+// pickOne is not wantedProviders == 1: the refill in getValidConsumerSessionsWithProvider passes 1
+// for a broadcast too, and a broadcast ignores wantedProviders, so the refill of a write must still
+// skip the hold-off.
 func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, wantedProviders int, ignoredProvidersList map[string]struct{}, cu uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, stickiness string, selectedProvider string, pickOne bool) (addresses []string, err error) {
 	// cs.Lock must be Rlocked here.
 	ignoredProvidersListLength := len(ignoredProvidersList)
@@ -2448,7 +2452,8 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 	// keeps the filter: a sticky write collapses to providers[0] below, a pickOne caller uses only
 	// the first address, and the cost strategy does not broadcast.
 	broadcastsWrite := stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS && csm.providerOptimizer.Strategy() != provideroptimizer.StrategyCost
-	honourHoldoff := !broadcastsWrite || stickiness != "" || pickOne
+	deliveredToOne := stickiness != "" || pickOne // the tail collapses a sticky selection to providers[0]
+	honourHoldoff := !broadcastsWrite || deliveredToOne
 	if honourHoldoff {
 		validAddresses = csm.filterRateLimitedProviders(ctx, validAddresses, ignoredProvidersList)
 	}

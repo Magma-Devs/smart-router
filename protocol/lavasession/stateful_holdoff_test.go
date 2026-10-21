@@ -2,6 +2,7 @@ package lavasession
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"testing"
 	"time"
@@ -138,4 +139,24 @@ func TestStatefulSelection_ClaimForAWriteStillSkipsAHeldOffProvider(t *testing.T
 	require.Len(t, sessions, 1, "a claimed session's write goes to the claimed provider")
 	require.Contains(t, sessions, "primary-b", "the fleet claim named the provider that is held off")
 	require.Equal(t, 1, store.writes, "the first request of the session proposes the claim")
+}
+
+// Held-off providers stay in the broadcast, so they count toward the per-tier cap like any other.
+// A tier above statefulFanoutPerTier keeps the top of its ranking whatever the hold-off says, which
+// can leave a ready provider out where the filter used to make room for it. Accepted: past ten
+// providers the write still reaches ten, and a still-limited one answers it with a 429 the broadcast
+// does not wait on.
+func TestStatefulSelection_HeldOffProvidersCountTowardTheCap(t *testing.T) {
+	primaries := make([]string, 0, statefulFanoutPerTier+2)
+	for i := 0; i < statefulFanoutPerTier+2; i++ {
+		primaries = append(primaries, fmt.Sprintf("primary-%02d", i))
+	}
+	csm := heldOffStatefulCSM(t, primaries, nil)
+	// Ties break on the address, so these three rank first.
+	for _, address := range primaries[:3] {
+		csm.rateLimitHoldoff.RecordRateLimit(address, "http://"+address+"/url", 5*time.Minute)
+	}
+
+	require.Equal(t, primaries[:statefulFanoutPerTier], selectAndRelease(t, csm, common.CONSISTENCY_SELECT_ALL_PROVIDERS),
+		"the broadcast is capped at the top of the ranking, held-off providers included")
 }
