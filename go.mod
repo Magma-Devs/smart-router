@@ -1,6 +1,6 @@
 module github.com/magma-Devs/smart-router
 
-go 1.26.6
+go 1.26.10
 
 require (
 	github.com/cometbft/cometbft v0.38.21
