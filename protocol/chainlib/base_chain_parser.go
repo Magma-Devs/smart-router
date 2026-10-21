@@ -133,7 +133,7 @@ func forwardsClientBodyHeader(apiCollection *spectypes.ApiCollection, headerName
 	if apiCollection.CollectionData.ApiInterface != spectypes.APIInterfaceRest {
 		return false
 	}
-	if !restMethodCarriesBody(apiCollection.CollectionData.Type) {
+	if !RestMethodCarriesBody(apiCollection.CollectionData.Type) {
 		return false
 	}
 	_, ok := clientBodyHeaders[headerName]

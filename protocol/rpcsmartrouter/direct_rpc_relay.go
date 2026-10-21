@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
 	"time"
@@ -784,8 +783,9 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	if httpMethod == "" {
 		return nil, fmt.Errorf("HTTP method not set by REST parser")
 	}
-	// A GET or HEAD has no body to send, and some nodes refuse one that carries it.
-	if httpMethod == http.MethodGet || httpMethod == http.MethodHead {
+	// A method that carries no body sends none, whatever the message holds: some nodes refuse a
+	// GET that carries one. Only POST, PUT and PATCH bodies go out.
+	if !chainlib.RestMethodCarriesBody(httpMethod) {
 		restBody = nil
 	}
 
@@ -815,7 +815,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	response, err := httpDoer.DoHTTPRequest(requestCtx, lavasession.HTTPRequestParams{
 		Method:      httpMethod,
 		URL:         fullURL,
-		Body:        restBody, // As-is for a body method; nil for GET and HEAD (above)
+		Body:        restBody, // As-is for a body method; nil for every other method (above)
 		Headers:     headers,  // Use Metadata (preserves delete semantics)
 		ContentType: "application/json",
 	})

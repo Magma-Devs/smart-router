@@ -477,12 +477,16 @@ func (rpcss *RPCSmartRouterServer) craftRelay(ctx context.Context) (ok bool, rel
 
 	path := parsing.ApiName
 	data := []byte(parsing.FunctionTemplate)
-	// A REST template is the request URL, query string included, unless the collection is a POST,
-	// whose template is its body — the rule RestChainParser.CraftMessage applies for the chain
-	// fetcher. Sent as the body of a GET, the query never reaches the node, and a node that refuses
-	// a GET with a body fails every health check.
-	if rpcss.listenEndpoint.ApiInterface == spectypes.APIInterfaceRest && collectionData.Type != http.MethodPost {
-		path, data = parsing.FunctionTemplate, nil
+	// A REST template is the request URL, query string included, unless the collection's method
+	// carries a body, whose template is that body — the rule RestChainParser.CraftMessage applies
+	// for the chain fetcher, which also keeps the api name as the URL when the template is empty.
+	// Sent as the body of a GET, the query never reaches the node, and a node that refuses a GET
+	// with a body fails every health check.
+	if rpcss.listenEndpoint.ApiInterface == spectypes.APIInterfaceRest && !chainlib.RestMethodCarriesBody(collectionData.Type) {
+		data = nil
+		if parsing.FunctionTemplate != "" {
+			path = parsing.FunctionTemplate
+		}
 	}
 	chainMessage, err = rpcss.chainParser.ParseMsg(path, data, collectionData.Type, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	if err != nil {
