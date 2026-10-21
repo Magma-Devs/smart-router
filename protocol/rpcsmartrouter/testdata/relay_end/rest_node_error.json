@@ -1,0 +1,35 @@
+{
+  "GUID": "7106085",
+  "api_interface": "rest",
+  "attempts": [
+    {
+      "batch": 0,
+      "error_code": "USER_INVALID_REQUEST",
+      "latency_ms": "<ms>",
+      "message": "decoding bech32 failed: invalid checksum",
+      "outcome": "node_error",
+      "retryable": false,
+      "returned_to_client": true,
+      "sent_ms": "<ms>",
+      "upstream": "node-a"
+    }
+  ],
+  "chain": "COSMOSHUB",
+  "error": "decoding bech32 failed: invalid checksum",
+  "error_code": "USER_INVALID_REQUEST",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "cosmos/bank/v1beta1/balances/{address}",
+  "outcome": "node_error",
+  "reply_bytes": 76,
+  "schema": 1,
+  "selection": "stateless",
+  "served_by": "node-a",
+  "stateful": false,
+  "status": 400,
+  "stop_reason": "NonRetryableNodeError"
+}

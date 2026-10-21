@@ -207,6 +207,7 @@ func TestRelayEnd_SubscriptionOutcomes(t *testing.T) {
 		require.Len(t, end.attempts, 1)
 		require.Equal(t, attemptOutcomeNodeError, end.attempts[0].outcome)
 		require.Equal(t, "the method eth_subscribe does not exist/is not available", end.attempts[0].message)
+		require.Equal(t, -32601, end.attempts[0].nodeCode, "the node's JSON-RPC error code")
 		require.Equal(t, end.attempts[0].errorCode, end.errorCode)
 	})
 	t.Run("the connection failed", func(t *testing.T) {
@@ -215,6 +216,7 @@ func TestRelayEnd_SubscriptionOutcomes(t *testing.T) {
 			fmt.Errorf("failed to get WebSocket connection: %w", dial))
 		require.Equal(t, relayOutcomeNoAnswer, end.outcome)
 		require.Equal(t, attemptOutcomeTransportError, end.attempts[0].outcome)
+		require.Zero(t, end.attempts[0].nodeCode, "no node reply, so no node code")
 		require.Equal(t, common.LavaErrorConnectionRefused.Name, end.attempts[0].errorCode)
 		require.True(t, end.attempts[0].retryable())
 	})

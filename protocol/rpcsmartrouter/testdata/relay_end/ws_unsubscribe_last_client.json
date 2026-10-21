@@ -13,6 +13,7 @@
   "message": "relay_end",
   "method": "eth_unsubscribe",
   "outcome": "ok",
+  "request_bytes": 80,
   "schema": 1,
   "selection": "subscription",
   "served_by": "node-ws",

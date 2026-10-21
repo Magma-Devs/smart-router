@@ -98,6 +98,11 @@ type relayEnd struct {
 	txLog        string
 	skipped      relayEndSkips
 	attempts     relayEndAttempts
+
+	requestBytes   int
+	replyBytes     int   // -1 when the event has no reply to measure
+	requestedBlock int64 // the block the request names; a negative spec sentinel when it names none
+	seenBlock      int64 // the chain tip the router knew when it parsed the request; 0 when unknown
 }
 
 type relayEndAttempt struct {
@@ -105,6 +110,7 @@ type relayEndAttempt struct {
 	outcome          string
 	errorCode        string
 	message          string
+	nodeCode         int           // the code of the node's JSON-RPC error reply; 0 when there is none
 	latency          time.Duration // zero when unknown
 	returnedToClient bool
 	sent             bool // went out as a dispatch, so batch and sentAfter are known
@@ -153,6 +159,18 @@ func (e *relayEnd) MarshalZerologObject(event *zerolog.Event) {
 		Str("error", e.errorText).
 		Int64("latency_ms", e.latency.Milliseconds()).
 		Bool("is_batch", e.isBatch)
+	if e.requestBytes > 0 {
+		event.Int("request_bytes", e.requestBytes)
+	}
+	if e.replyBytes >= 0 {
+		event.Int("reply_bytes", e.replyBytes)
+	}
+	if e.requestedBlock >= 0 {
+		event.Int64("requested_block", e.requestedBlock)
+	}
+	if e.seenBlock > 0 {
+		event.Int64("seen_block", e.seenBlock)
+	}
 	if e.txHash != "" {
 		event.Str("tx_hash", e.txHash)
 	}
@@ -219,6 +237,9 @@ func (a *relayEndAttempt) MarshalZerologObject(event *zerolog.Event) {
 		Str("outcome", a.outcome).
 		Str("error_code", a.errorCode).
 		Str("message", a.message)
+	if a.nodeCode != 0 {
+		event.Int("node_code", a.nodeCode)
+	}
 	if a.errorCode != "" {
 		event.Bool("retryable", a.retryable())
 	}
@@ -265,7 +286,7 @@ func (rpcss *RPCSmartRouterServer) ReportRejectedRelay(ctx context.Context, star
 // newRelayEnd fills what every exit's event shares: the request's identity, its caller's ids, its
 // listener, the method and whether it writes, and how long ago it started.
 func (rpcss *RPCSmartRouterServer) newRelayEnd(ctx context.Context, protocolMessage chainlib.ProtocolMessage, start time.Time, err error) *relayEnd {
-	end := &relayEnd{latency: time.Since(start)}
+	end := &relayEnd{latency: time.Since(start), replyBytes: -1, requestedBlock: spectypes.NOT_APPLICABLE}
 	if rpcss.listenEndpoint != nil {
 		end.chain = rpcss.listenEndpoint.ChainID
 		end.apiInterface = rpcss.listenEndpoint.ApiInterface
@@ -295,6 +316,11 @@ func (rpcss *RPCSmartRouterServer) newRelayEnd(ctx context.Context, protocolMess
 			end.method = relayEndMethod(api.Name, relayEndNamedByURL(protocolMessage, end.apiInterface))
 		}
 		end.isBatch = chainqueries.IsBatchRequest(protocolMessage)
+		relayData := protocolMessage.RelayPrivateData()
+		end.requestBytes = len(relayData.GetData())
+		end.seenBlock = relayData.GetSeenBlock()
+		// The block as parsed: for a range, its later end.
+		end.requestedBlock, _ = protocolMessage.RequestedBlock()
 	} else {
 		// The two refusals of a batch happen while it is parsed, before there is a message to ask.
 		end.isBatch = errors.Is(err, chainlib.ErrBatchRequestSizeExceeded) || errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused)
@@ -341,6 +367,7 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 	var reply []byte
 	if served {
 		reply = in.result.Reply.Data
+		end.replyBytes = len(reply)
 	}
 	end.readTransaction(in.protocolMessage, reply)
 	end.status = in.result.GetStatusCode()
@@ -451,7 +478,7 @@ func (a *relayEndAttempt) retryable() bool {
 }
 
 func relayEndNodeErrorAttempt(nodeError relaycore.RelayError) relayEndAttempt {
-	attempt := relayEndAttempt{outcome: attemptOutcomeNodeError, lavaError: nodeError.LavaError}
+	attempt := relayEndAttempt{outcome: attemptOutcomeNodeError, lavaError: nodeError.LavaError, nodeCode: nodeError.JSONRPCErrorCode}
 	if nodeError.Response != nil {
 		result := &nodeError.Response.RelayResult
 		attempt.upstream = relayEndUpstream(result)
