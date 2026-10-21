@@ -25,6 +25,7 @@
   "message": "relay_end",
   "method": "author_submitAndWatchExtrinsic",
   "outcome": "ok",
+  "request_bytes": 152,
   "schema": 1,
   "selection": "subscription",
   "served_by": "node-ws",

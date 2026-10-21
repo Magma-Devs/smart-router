@@ -24,6 +24,8 @@
   "message": "relay_end",
   "method": "executeTransaction",
   "outcome": "ok",
+  "reply_bytes": 238,
+  "request_bytes": 182,
   "schema": 1,
   "selection": "stateful",
   "served_by": "node-a",

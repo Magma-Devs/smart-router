@@ -32,6 +32,7 @@
   "message": "relay_end",
   "method": "eth_sendRawTransaction",
   "outcome": "write_unknown",
+  "request_bytes": 168,
   "schema": 1,
   "selection": "stateful",
   "served_by": "",

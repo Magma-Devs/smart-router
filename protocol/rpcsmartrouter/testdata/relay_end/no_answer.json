@@ -25,6 +25,7 @@
   "message": "relay_end",
   "method": "eth_getBalance",
   "outcome": "no_answer",
+  "request_bytes": 115,
   "schema": 1,
   "selection": "stateless",
   "served_by": "",

@@ -24,6 +24,8 @@
   "message": "relay_end",
   "method": "eth_sendRawTransaction",
   "outcome": "ok",
+  "reply_bytes": 102,
+  "request_bytes": 168,
   "schema": 1,
   "selection": "stateful",
   "served_by": "node-b",

@@ -85,6 +85,7 @@ func (rpcss *RPCSmartRouterServer) subscriptionAttempt(upstream chainlib.Subscri
 	var nodeError *rpcclient.JsonError
 	if errors.As(upstream.Err, &nodeError) {
 		attempt.outcome = attemptOutcomeNodeError
+		attempt.nodeCode = nodeError.Code
 		attempt.lavaError = common.ClassifyError(nil, family, transport, nodeError.Code, nodeError.Message)
 		attempt.message = relayEndText(nodeError.Message)
 	} else {

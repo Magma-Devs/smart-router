@@ -24,7 +24,10 @@
   "message": "relay_end",
   "method": "eth_getBalance",
   "outcome": "ok",
+  "reply_bytes": 40,
+  "request_bytes": 115,
   "schema": 1,
+  "seen_block": 100,
   "selection": "stateless",
   "served_by": "node-b",
   "skipped": [

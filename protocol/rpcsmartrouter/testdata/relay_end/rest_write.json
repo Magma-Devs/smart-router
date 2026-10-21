@@ -24,6 +24,8 @@
   "message": "relay_end",
   "method": "cosmos/tx/v1beta1/txs",
   "outcome": "ok",
+  "reply_bytes": 46,
+  "request_bytes": 52,
   "schema": 1,
   "selection": "stateful",
   "served_by": "node-a",

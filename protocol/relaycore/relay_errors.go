@@ -161,6 +161,9 @@ type RelayError struct {
 	ProviderInfo common.ProviderInfo
 	Response     *RelayResponse
 	LavaError    *common.LavaError // classified error code (nil if not yet classified)
+	// JSONRPCErrorCode is the code of a node's JSON-RPC error reply, the one the classifier reads;
+	// 0 for a reply that is not a JSON-RPC error with a code.
+	JSONRPCErrorCode int
 }
 
 func (re RelayError) String() string {
