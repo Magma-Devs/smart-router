@@ -20,7 +20,6 @@ type reflectionSendingStream struct {
 
 func (s *reflectionSendingStream) SendMsg(interface{}) error { s.sent++; return s.err }
 
-//nolint:staticcheck // Verify the v1alpha compatibility path as well as the current v1 protocol.
 func TestReflectionTelemetryPreservesTransportVerdictAndCompletesOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

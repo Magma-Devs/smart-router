@@ -25,7 +25,6 @@ type observedReflectionStream struct {
 
 func (s *observedReflectionStream) complete(err error) { s.once.Do(func() { s.finish(err) }) }
 
-//nolint:staticcheck // Observe v1alpha responses while preserving support for existing reflection clients.
 func (s *observedReflectionStream) SendMsg(message interface{}) error {
 	transportErr := s.ServerStream.SendMsg(message)
 	err := transportErr
