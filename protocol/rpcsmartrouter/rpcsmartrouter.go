@@ -4236,6 +4236,38 @@ func (rpsr *RPCSmartRouter) publishServingTierLocked(chainKey string) {
 		len(rpsr.providerSessions[chainKey]),
 		len(rpsr.backupProviderSessions[chainKey]),
 	)
+	rpsr.publishVerificationFailedLocked(chainKey, inputs)
+}
+
+// publishVerificationFailedLocked marks every configured provider 1 when it is
+// missing from the live pairing and 0 when it is in it. Callers must already hold
+// rpsr.mu.
+//
+// A provider is only ever left out of the pairing by verification: failing it at
+// boot, or being demoted by the epoch re-verifier. Both leave it with no other
+// per-provider series, so without this gauge a backup that never passed looks the
+// same as one that was never configured. Reading the outcome off the session maps,
+// instead of off the failed lists, covers the demotion path too, which never writes
+// those lists.
+func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inputs *chainReverifyInputs) {
+	for _, tier := range []struct {
+		name       string
+		configured []*lavasession.RPCStaticProviderEndpoint
+		active     map[uint64]*lavasession.ConsumerSessionsWithProvider
+	}{
+		{reverifyTierStatic.String(), inputs.configuredStatic, rpsr.providerSessions[chainKey]},
+		{reverifyTierBackup.String(), inputs.configuredBackup, rpsr.backupProviderSessions[chainKey]},
+	} {
+		admitted := make(map[string]struct{}, len(tier.active))
+		for _, s := range tier.active {
+			admitted[s.PublicLavaAddress] = struct{}{}
+		}
+		for _, p := range tier.configured {
+			_, ok := admitted[p.Name]
+			rpsr.smartRouterMetricsManager.SetProviderVerificationFailed(
+				inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name, tier.name, !ok)
+		}
+	}
 }
 
 // subscriptionEndpointSetter is the slice of the Direct WS/gRPC subscription managers
