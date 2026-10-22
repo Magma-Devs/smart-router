@@ -1301,8 +1301,10 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			// endpoint answering above its stuck block does.
 			heldByState := endpoint.heldByStateLocked()
 			endpoint.mu.RUnlock()
-			lendable := mode == endpointPickLendDisabled && endpoint.IsDirectRPC()
-			if (heldByState && !lendable) || (!enabled && mode != endpointPickReconnectDisabled && !lendable) {
+			// lastChanceBorrow: this pick is the request's last chance and the URL is direct RPC, so
+			// it may be borrowed for this one request whatever its health (switched off, stalled).
+			lastChanceBorrow := mode == endpointPickLendDisabled && endpoint.IsDirectRPC()
+			if (heldByState && !lastChanceBorrow) || (!enabled && mode != endpointPickReconnectDisabled && !lastChanceBorrow) {
 				continue
 			}
 			// A websocket-only endpoint can never answer a relay — see ServesDirectRelays.
