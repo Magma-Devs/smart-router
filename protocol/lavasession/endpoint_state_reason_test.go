@@ -105,8 +105,8 @@ func TestStateReason_SurvivesConfirmRelayRecovery(t *testing.T) {
 	require.False(t, e.IsUsable())
 }
 
-// Selection must skip a stalled endpoint in every pick mode: the reconnect path otherwise re-enables
-// whatever it reconnects to, and the last chance otherwise lends a disabled endpoint.
+// Normal selection and the reconnect path skip a stalled endpoint: the reconnect path otherwise
+// re-enables whatever it reconnects to. Only the last chance lends it, and lending clears nothing.
 func TestFetchEndpointConnection_SkipsStalledEndpoint(t *testing.T) {
 	stuck := directRPCEndpoint(t, "https://stuck.example")
 	require.True(t, stuck.AddStateReason(EndpointDisableHeadStalled, probeBase, stalledBlock))
@@ -117,13 +117,23 @@ func TestFetchEndpointConnection_SkipsStalledEndpoint(t *testing.T) {
 		Endpoints:         []*Endpoint{stuck, healthy},
 	}
 
-	for _, mode := range []endpointPickMode{endpointPickSkipDisabled, endpointPickReconnectDisabled, endpointPickLendDisabled} {
+	for _, mode := range []endpointPickMode{endpointPickSkipDisabled, endpointPickReconnectDisabled} {
 		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), mode, true, "", nil, nil)
 		require.NoError(t, err)
 		require.True(t, connected)
 		require.Len(t, endpoints, 1, "mode=%v", mode)
 		require.Equal(t, "https://healthy.example", endpoints[0].endpoint.NetworkAddress)
 	}
+
+	lendOnly := &ConsumerSessionsWithProvider{
+		Sessions:          map[int64]*SingleConsumerSession{},
+		PublicLavaAddress: "vendor",
+		Endpoints:         []*Endpoint{stuck},
+	}
+	connected, endpoints, _, err := lendOnly.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickLendDisabled, false, "", nil, nil)
+	require.NoError(t, err)
+	require.True(t, connected, "the last chance lends a stalled endpoint")
+	require.Equal(t, "https://stuck.example", endpoints[0].endpoint.NetworkAddress)
 	require.False(t, stuck.IsUsable(), "no pick mode may clear the stall")
 }
 
