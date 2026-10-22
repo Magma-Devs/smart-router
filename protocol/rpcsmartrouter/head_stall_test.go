@@ -371,6 +371,126 @@ func TestHeadStall_WebsocketURLDoesNotSatisfyNeverEmpty(t *testing.T) {
 	require.False(t, stalled(t, wss), "a wss url takes no part in the head-stall step")
 }
 
+// withAddons gives the endpoint its node-url's add-on list. The router fills Addons and Extensions
+// from that one list (rpcsmartrouter.go), so this does too.
+func withAddons(e *lavasession.EndpointWithDirectConnection, names ...string) *lavasession.EndpointWithDirectConnection {
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	e.Endpoint.Addons = set
+	e.Endpoint.Extensions = set
+	return e
+}
+
+// MAG-4591, the production shape: the primary is the only url serving debug, and the backup serves
+// the base collection alone, a block ahead. The backup does not make the primary replaceable:
+// taking the primary out failed every debug request for as long as the stall held. It stays, kept
+// once. A second url serving debug, in either tier, lets it go.
+func TestHeadStall_NeverEmptyKeepsTheOnlyAddonURL(t *testing.T) {
+	h := newStallHarness()
+	primary := withAddons(ep("https://primary", "vendor", true), "debug")
+	backup := backupEp("https://backup", "backup")
+	h.obs["https://primary"] = stuckAt(1000, stallN)
+	h.obs["https://backup"] = stuckAt(1001, 0)
+
+	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow, primary, backup))
+	require.False(t, stalled(t, primary), "the only debug url must stay in rotation")
+	require.True(t, primary.Endpoint.IsUsable())
+	require.Equal(t, headStallResult{}, h.step(t, stallNow.Add(5*time.Second), primary, backup), "kept is logged once per episode")
+
+	second := withAddons(backupEp("https://backup2", "backup2"), "debug")
+	h.obs["https://backup2"] = stuckAt(1001, 0)
+	require.Equal(t, headStallResult{added: 1}, h.step(t, stallNow.Add(10*time.Second), primary, backup, second))
+	require.True(t, stalled(t, primary))
+}
+
+// The same for an extension: archive requests carry it as an extension, and a url without archive
+// cannot take them.
+func TestHeadStall_NeverEmptyKeepsTheOnlyArchiveURL(t *testing.T) {
+	h := newStallHarness()
+	archive := withAddons(ep("https://archive", "vendor", true), "archive")
+	pruned := ep("https://pruned", "other", true)
+	h.obs["https://archive"] = stuckAt(1000, stallN)
+	h.obs["https://pruned"] = stuckAt(1001, 0)
+
+	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow, archive, pruned))
+	require.False(t, stalled(t, archive))
+}
+
+// A url that serves only its add-ons (standalone-addons) takes no base-collection request, so it
+// does not make the only base url replaceable.
+func TestHeadStall_StandaloneAddonURLDoesNotCoverTheBase(t *testing.T) {
+	h := newStallHarness()
+	base := ep("https://base", "vendor", true)
+	addonOnly := withAddons(ep("https://addon-only", "other", true), "evm")
+	addonOnly.Endpoint.StandaloneAddons = true
+	require.False(t, addonOnly.Endpoint.ServesBaseCollection())
+	h.obs["https://base"] = stuckAt(1000, stallN)
+	h.obs["https://addon-only"] = stuckAt(1001, 0)
+
+	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow, base, addonOnly))
+	require.False(t, stalled(t, base))
+}
+
+// One other url has to serve at least what the stuck url serves, add-on by add-on. Archive on one
+// url and debug on another leave a debug request for an old block, which needs both, with nowhere
+// to go, so the url that has both stays.
+func TestHeadStall_AddonSetSplitAcrossURLsDoesNotReplaceIt(t *testing.T) {
+	h := newStallHarness()
+	both := withAddons(ep("https://both", "vendor", true), "archive", "debug")
+	archive := withAddons(ep("https://archive", "a", true), "archive")
+	debug := withAddons(ep("https://debug", "d", true), "debug")
+	h.obs["https://both"] = stuckAt(1000, stallN)
+	h.obs["https://archive"] = stuckAt(1001, 0)
+	h.obs["https://debug"] = stuckAt(1001, 0)
+
+	require.Equal(t, headStallResult{kept: 1}, h.step(t, stallNow, both, archive, debug))
+	require.False(t, stalled(t, both))
+}
+
+// Two stuck urls that are each other's only cover for debug: the step takes them out one at a time
+// and reads live state, so the first goes and the second stays.
+func TestHeadStall_TwoStuckAddonURLsKeepOne(t *testing.T) {
+	h := newStallHarness()
+	a := withAddons(ep("https://a", "pa", true), "debug")
+	b := withAddons(ep("https://b", "pb", true), "debug")
+	base := backupEp("https://base", "pc")
+	h.obs["https://a"] = stuckAt(1000, stallN)
+	h.obs["https://b"] = stuckAt(1000, stallN)
+	h.obs["https://base"] = stuckAt(1001, 0)
+
+	require.Equal(t, headStallResult{added: 1, kept: 1}, h.step(t, stallNow, a, b, base))
+	require.True(t, stalled(t, a))
+	require.False(t, stalled(t, b), "b is now the last url serving debug")
+}
+
+// Never-empty after the fact, per request: the stuck debug url went out while a second debug url was
+// usable, and that one is then disabled for node errors. A base-only url is still usable, so the
+// pool is not empty, but nothing takes debug: the stuck url comes back and is kept, not re-added.
+func TestHeadStall_ReleasesTheStuckAddonURLWhenItsLastPeerGoes(t *testing.T) {
+	h := newStallHarness()
+	stuck := withAddons(ep("https://stuck", "pa", true), "debug")
+	peer := withAddons(ep("https://peer", "pb", true), "debug")
+	base := backupEp("https://base", "pc")
+	h.obs["https://stuck"] = stuckAt(1000, stallN)
+	h.obs["https://peer"] = stuckAt(1001, 0)
+	h.obs["https://base"] = stuckAt(1001, 0)
+	require.Equal(t, headStallResult{added: 1}, h.step(t, stallNow, stuck, peer, base))
+
+	peer.Endpoint.Enabled = false
+	require.Equal(t, headStallResult{released: 1}, h.step(t, stallNow.Add(5*time.Second), stuck, peer, base))
+	require.True(t, stuck.Endpoint.IsUsable())
+
+	require.Equal(t, headStallResult{}, h.step(t, stallNow.Add(10*time.Second), stuck, peer, base), "kept, not re-added")
+	require.False(t, stalled(t, stuck))
+
+	// The peer recovers: the stuck url is no longer the only debug url, so it goes back out.
+	peer.Endpoint.ResetHealth()
+	require.Equal(t, headStallResult{added: 1}, h.step(t, stallNow.Add(15*time.Second), stuck, peer, base))
+	require.True(t, stalled(t, stuck))
+}
+
 // Stalled urls do not vote in the consensus baseline: with two frozen urls out of three, the frozen
 // pair would otherwise be the majority and pin the tip.
 func TestConsensusObservations_ExcludesStalledURLs(t *testing.T) {

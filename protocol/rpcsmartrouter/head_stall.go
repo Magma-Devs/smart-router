@@ -1,6 +1,8 @@
 package rpcsmartrouter
 
 import (
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -27,9 +29,10 @@ import (
 //     only while another url of the chain has shown a higher block — a quiet chain marks nothing;
 //   - remove only when the endpoint's highest block goes ABOVE the one it was stuck on (D9, H2) — never because
 //     the counter restarted, which also happens when a tracker is recreated;
-//   - never take out the last usable endpoint of this chain and interface, across both tiers (D13);
-//     re-checked every cycle, releasing the stuck endpoint on the highest block when nothing else is
-//     usable (D22, D26);
+//   - never take out the last usable endpoint of this chain and interface, across both tiers, that
+//     takes some request: the base collection or an add-on, with its extensions (D13, MAG-4591);
+//     re-checked every cycle, releasing the stuck endpoint on the highest block when nothing else
+//     usable takes a request it takes (D22, D26);
 //   - the provider health gauge reads 0 while any of its endpoints holds head-stalled (D24). This step
 //     is the only code that writes the gauge for head-stall: it re-asserts 0 every cycle, so an epoch
 //     reset or a relay success on a sibling url that sets it back to 1 is corrected within one cycle,
@@ -94,6 +97,31 @@ func (s *headStallState) reset() {
 	defer s.mu.Unlock()
 	s.stalled = nil
 	s.kept = nil
+}
+
+// stallService is one request an endpoint takes: an add-on ("" for the base collection) with the
+// extensions the request carries.
+type stallService struct {
+	addon      string
+	extensions []string
+}
+
+// widestServices lists, for each add-on the endpoint takes ("" when it serves the base collection),
+// the request carrying all of its extensions. A url that takes that request takes every narrower one
+// with the same add-on, so it is the only one never-empty has to ask about. The router builds Addons
+// and Extensions from the same node-url list (rpcsmartrouter.go), so this asks whether one other url
+// serves at least what this one serves, add-on by add-on. A set split across two other urls is not
+// enough and the url stays: the safe side, since stale answers beat no answers.
+func widestServices(e *lavasession.Endpoint) []stallService {
+	extensions := slices.Sorted(maps.Keys(e.Extensions))
+	var services []stallService
+	if e.ServesBaseCollection() {
+		services = append(services, stallService{extensions: extensions})
+	}
+	for _, addon := range slices.Sorted(maps.Keys(e.Addons)) {
+		services = append(services, stallService{addon: addon, extensions: extensions})
+	}
+	return services
 }
 
 // headStallResult is what one head-stall step did, for /debug/probe-loop.
@@ -168,14 +196,40 @@ func runHeadStallStep(
 	isUsable := func(e *lavasession.Endpoint) bool { return e.IsUsable() }
 	isEnabled := func(e *lavasession.Endpoint) bool { return e.IsEnabled() }
 	groupUsable := func(g *urlGroup) bool { return groupAny(g, isUsable) }
-	countUsableURLs := func() int {
-		n := 0
-		for _, g := range groups {
-			if groupUsable(g) {
-				n++
+
+	// takenElsewhere reports whether a usable endpoint of another url takes the request, asked
+	// through CheckSupportForServices, the predicate selection itself uses.
+	takenElsewhere := func(g *urlGroup, svc stallService) bool {
+		for _, other := range groups {
+			if other == g {
+				continue
+			}
+			for _, ep := range other.eps {
+				if ep.Endpoint.IsUsable() && ep.Endpoint.CheckSupportForServices(svc.addon, svc.extensions) {
+					return true
+				}
 			}
 		}
-		return n
+		return false
+	}
+
+	// uncovered returns a request the url takes that no other usable url takes — what never-empty
+	// protects (D13). It is asked per add-on, not answered by a count of usable urls: a count let a
+	// url with no add-ons (a backup without debug) stand in for the only url serving debug, and
+	// every debug request failed for as long as the stall held (MAG-4591). Only endpoints whose
+	// event slot is on take anything, so only theirs are asked about.
+	uncovered := func(g *urlGroup) (stallService, bool) {
+		for _, ep := range g.eps {
+			if !ep.Endpoint.IsEnabled() {
+				continue
+			}
+			for _, svc := range widestServices(ep.Endpoint) {
+				if !takenElsewhere(g, svc) {
+					return svc, true
+				}
+			}
+		}
+		return stallService{}, false
 	}
 
 	// providerAllUsable: every url of the provider can be routed to — the only state in which this
@@ -259,8 +313,6 @@ func runHeadStallStep(
 		}
 	}
 
-	usable := countUsableURLs()
-
 	// chainHigh is the highest block any url of this chain and interface has shown. A url is only
 	// stalled when another one has gone above it: if nothing is ahead, the chain itself is quiet
 	// (a testnet with no traffic, a halt), every url answers the same block, and none of them is
@@ -275,7 +327,9 @@ func runHeadStallStep(
 	}
 
 	// 2. Add: N cycles in a row without moving while another url is ahead, unless it is the last
-	// usable url. Every endpoint of the url goes out together, or none does.
+	// usable url taking some request it takes. Every endpoint of the url goes out together, or none
+	// does. Urls are taken out one at a time and uncovered reads live state, so of two stuck urls
+	// that cover each other the second stays.
 	for _, g := range groups {
 		var pending []*lavasession.EndpointWithDirectConnection
 		for _, ep := range g.eps {
@@ -291,19 +345,22 @@ func runHeadStallStep(
 			state.clearKept(g.url)
 			continue
 		}
-		wasUsable := groupUsable(g)
-		if wasUsable && usable <= 1 {
-			if state.markKept(g.url) {
-				res.kept++
-				utils.LavaFormatInfo("head-stalled kept by never-empty", append([]utils.Attribute{
-					utils.LogAttr("endpoint", g.url),
-					utils.LogAttr("provider", pending[0].ProviderAddress),
-					utils.LogAttr("backup", pending[0].Backup),
-					utils.LogAttr("block", obs.HighestBlockSeen),
-					utils.LogAttr("same_block_cycles", obs.SameBlockCycles),
-				}, logAttrs...)...)
+		if groupUsable(g) {
+			if svc, alone := uncovered(g); alone {
+				if state.markKept(g.url) {
+					res.kept++
+					utils.LavaFormatInfo("head-stalled kept by never-empty", append([]utils.Attribute{
+						utils.LogAttr("endpoint", g.url),
+						utils.LogAttr("provider", pending[0].ProviderAddress),
+						utils.LogAttr("backup", pending[0].Backup),
+						utils.LogAttr("block", obs.HighestBlockSeen),
+						utils.LogAttr("same_block_cycles", obs.SameBlockCycles),
+						utils.LogAttr("addon", svc.addon),
+						utils.LogAttr("extensions", svc.extensions),
+					}, logAttrs...)...)
+				}
+				continue
 			}
-			continue
 		}
 		added := false
 		for _, ep := range pending {
@@ -315,9 +372,6 @@ func runHeadStallStep(
 			continue
 		}
 		state.clearKept(g.url)
-		if wasUsable {
-			usable--
-		}
 		res.added++
 		utils.LavaFormatInfo("head-stalled added", append([]utils.Attribute{
 			utils.LogAttr("endpoint", g.url),
@@ -331,11 +385,13 @@ func runHeadStallStep(
 		}, logAttrs...)...)
 	}
 
-	// 3. Never-empty after the fact: something else (50 node errors on the backup) may have emptied
-	// the pool since this url was taken out. Stale answers beat no answers: bring back the stuck url
-	// on the highest block, the most recently stuck on a tie. Only a url with an endpoint whose event
-	// slot is on can actually serve, so only those are candidates.
-	if countUsableURLs() == 0 {
+	// 3. Never-empty after the fact: something else (50 node errors on the backup) may have taken
+	// out the last usable url taking some request since a stuck url that takes it went out. Stale
+	// answers beat no answers: bring back, among the stuck urls taking a request nothing usable
+	// takes, the one on the highest block, the most recently stuck on a tie, and ask again until
+	// every such request has a url. Only a url with an endpoint whose event slot is on can actually
+	// serve, so only those are candidates. Each pass releases a different url, so the loop ends.
+	for {
 		var pick *urlGroup
 		var pickRec lavasession.StateReasonRecord
 		for _, g := range groups {
@@ -346,14 +402,18 @@ func runHeadStallStep(
 			if !groupAny(g, isEnabled) {
 				continue
 			}
+			if _, alone := uncovered(g); !alone {
+				continue
+			}
 			if pick == nil || rec.Block > pickRec.Block || (rec.Block == pickRec.Block && rec.Since.After(pickRec.Since)) {
 				pick, pickRec = g, rec
 			}
 		}
-		if pick != nil && release(pick, "released by never-empty") {
-			state.markKept(pick.url) // it is still stuck: step 2 must keep it, not re-add it
-			res.released++
+		if pick == nil || !release(pick, "released by never-empty") {
+			break
 		}
+		state.markKept(pick.url) // it is still stuck: step 2 must keep it, not re-add it
+		res.released++
 	}
 
 	// Publish this cycle's stalled set, and hold the gauge of every provider with a stalled url at 0.
