@@ -614,7 +614,7 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 	hashedParams string,
 ) (*pairingtypes.RelayReply, <-chan *pairingtypes.RelayReply, error) {
 	sub.lock.Lock()
-	metrics.ObserveCustomerProvider(ctx, sub.endpointURL)
+	metrics.ObserveCustomerProvider(ctx, dgm.endpointNames.name(sub.endpointURL))
 
 	// Liveness, under the same lock cleanupSubscription nils connectedClients beneath —
 	// StartSubscription reads the subscription out of the map under dgm.lock and then
@@ -1454,7 +1454,7 @@ func (dgm *DirectGRPCSubscriptionManager) getOrCreatePool(endpoint *common.NodeU
 func (dgm *DirectGRPCSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (selected *common.NodeUrl, errRet error) {
 	defer func() {
 		if selected != nil {
-			metrics.ObserveCustomerProvider(ctx, selected.Url)
+			metrics.ObserveCustomerProvider(ctx, dgm.endpointNames.name(selected.Url))
 		}
 	}()
 	// One snapshot for the whole cascade — see DirectWSSubscriptionManager.selectEndpoint.
@@ -1491,7 +1491,7 @@ func (dgm *DirectGRPCSubscriptionManager) selectEndpoint(ctx context.Context, cl
 	)
 	if endpoint, err := dgm.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints); err == nil {
 		if snapshot.primaryConfigured && len(snapshot.primary) == 0 {
-			metrics.MarkCustomerReroute(ctx, "", "primary-pool-unavailable", []string{utils.RedactURL(endpoint.Url)})
+			metrics.MarkCustomerReroute(ctx, "", "primary-pool-unavailable", []string{dgm.endpointNames.name(endpoint.Url)})
 		}
 		return endpoint, nil
 	}

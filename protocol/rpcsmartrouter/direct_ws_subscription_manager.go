@@ -504,7 +504,7 @@ func (dwsm *DirectWSSubscriptionManager) performCleanup() {
 func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (selected *common.NodeUrl, errRet error) {
 	defer func() {
 		if selected != nil {
-			metrics.ObserveCustomerProvider(ctx, selected.Url)
+			metrics.ObserveCustomerProvider(ctx, dwsm.endpointNames.name(selected.Url))
 		}
 	}()
 	// One snapshot for the whole cascade: SetEndpoints can swap the tiers underneath
@@ -556,7 +556,7 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 	ep, backupErr := dwsm.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints)
 	if backupErr == nil {
 		if snapshot.primaryConfigured && len(snapshot.primary) == 0 {
-			metrics.MarkCustomerReroute(ctx, "", "primary-pool-unavailable", []string{utils.RedactURL(ep.Url)})
+			metrics.MarkCustomerReroute(ctx, "", "primary-pool-unavailable", []string{dwsm.endpointNames.name(ep.Url)})
 		}
 		return ep, nil
 	}
@@ -1361,7 +1361,7 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 
 	activeSub, found := dwsm.activeSubscriptions[hashedParams]
 	if found && activeSub.upstreamPool != nil {
-		metrics.ObserveCustomerProvider(ctx, activeSub.upstreamPool.nodeUrl.Url)
+		metrics.ObserveCustomerProvider(ctx, dwsm.endpointNames.name(activeSub.upstreamPool.nodeUrl.Url))
 	}
 	if !found {
 		return nil, false

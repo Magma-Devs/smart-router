@@ -9,7 +9,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
-	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
 
@@ -84,12 +83,15 @@ func TestCustomerSubscriptionUnavailableConfiguredPrimaryAndBackupOnly(t *testin
 				}
 				backup := []*common.NodeUrl{{Url: backupURL}}
 				var endpoint *common.NodeUrl
+				names := map[string]string{backupURL: "backup-provider"}
 				if api == "jsonrpc" {
 					manager := NewDirectWSSubscriptionManager(nil, "jsonrpc", "ETH1", api, nil, backup, nil, nil)
+					manager.SetEndpointNames(names)
 					manager.SetCustomerPrimaryConfigured(configured)
 					endpoint, err = manager.selectEndpoint(ctx, "client", nil)
 				} else {
 					manager := NewDirectGRPCSubscriptionManager(nil, "ETH1", api, nil, backup, nil, nil)
+					manager.SetEndpointNames(names)
 					manager.SetCustomerPrimaryConfigured(configured)
 					endpoint, err = manager.selectEndpoint(ctx, "client", nil)
 				}
@@ -97,7 +99,7 @@ func TestCustomerSubscriptionUnavailableConfiguredPrimaryAndBackupOnly(t *testin
 				require.Equal(t, backupURL, endpoint.Url)
 				logger.AddMetricForWebSocket(data, nil)
 				final := data.Customer.Snapshot()
-				require.Equal(t, utils.RedactURL(backupURL), final.Provider)
+				require.Equal(t, "backup-provider", final.Provider, "the provider is the configured name relay_end writes, not the url")
 				want := "none"
 				if configured {
 					want = "reroute"
