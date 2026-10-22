@@ -26,10 +26,10 @@
   "method": "eth_getBalance",
   "outcome": "no_answer",
   "request_bytes": 115,
-  "schema": 1,
+  "schema": 2,
   "selection": "stateless",
   "served_by": "",
   "stateful": false,
-  "status": 0,
+  "status": 502,
   "stop_reason": "AllProvidersExhausted"
 }

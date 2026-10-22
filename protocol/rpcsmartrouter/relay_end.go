@@ -29,7 +29,7 @@ import (
 // to know about bumps relayEndSchema and the document together.
 const (
 	relayEndEvent  = "relay_end"
-	relayEndSchema = 1
+	relayEndSchema = 2
 )
 
 // What the client got.

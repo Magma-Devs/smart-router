@@ -257,6 +257,7 @@ var errNotInitialized = errors.New("gRPC connection not initialized yet")
 // HTTPDirectRPCResponse contains complete HTTP response data (Phase 4 REST support)
 type HTTPDirectRPCResponse struct {
 	StatusCode int                 // HTTP status code (200, 404, 500, etc.)
+	Status     string              // HTTP status line text as Go reports it, e.g. "503 Service Unavailable" (MAG-4218)
 	Headers    map[string][]string // Response headers (http.Header compatible)
 	Body       []byte              // Response body
 }
@@ -882,8 +883,11 @@ func readResponseBody(resp *http.Response) ([]byte, error) {
 // HTTPStatusError represents an HTTP error response (4xx/5xx)
 type HTTPStatusError struct {
 	StatusCode int
-	Status     string
-	Body       []byte
+	// Status is the upstream's own status line, "503 Service Temporarily Unavailable" from an nginx
+	// front, "503 Service Unavailable" from another. It is for the client reply only and is kept out
+	// of Error(), see there. Empty when the producer had no status line.
+	Status string
+	Body   []byte
 	// RetryAfter is what a rate-limiting upstream asked for, or 0 when it sent no usable
 	// Retry-After. Read it through common.RetryAfterFrom rather than the field, so a caller
 	// works the same whichever path produced the error.
@@ -891,7 +895,14 @@ type HTTPStatusError struct {
 }
 
 func (e *HTTPStatusError) Error() string {
-	return fmt.Sprintf("HTTP %d %s", e.StatusCode, e.Status)
+	// One text per status code, whatever the vendor: the best-error picker groups failed providers
+	// by this string and the classifier scans it, so the upstream's own reason phrase (Status)
+	// must not reach it. Two vendors' 503s that read differently stop counting as the same error,
+	// and the picker then chooses between them at random (MAG-4218).
+	if text := http.StatusText(e.StatusCode); text != "" {
+		return fmt.Sprintf("HTTP %d %s", e.StatusCode, text)
+	}
+	return fmt.Sprintf("HTTP %d", e.StatusCode)
 }
 
 // Unwrap presents a 429 as the shared rate-limit error, so errors.Is(err,
@@ -990,6 +1001,7 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	// Don't return error for 4xx/5xx - client needs the response
 	return &HTTPDirectRPCResponse{
 		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
 		Headers:    resp.Header,
 		Body:       body,
 	}, nil

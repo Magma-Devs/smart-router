@@ -609,7 +609,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		)
 		httpErr := &lavasession.HTTPStatusError{
 			StatusCode: statusCode,
-			Status:     strconv.Itoa(statusCode),
+			Status:     response.Status, // the upstream's own status line, for the client reply (MAG-4218)
 			Body:       responseData,
 		}
 		return nil, classifyAndWrap(httpErr, d.chainFamily, common.TransportJsonRPC)

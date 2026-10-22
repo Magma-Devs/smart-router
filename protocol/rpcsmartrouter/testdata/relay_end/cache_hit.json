@@ -15,7 +15,7 @@
   "reply_bytes": 51,
   "request_bytes": 80,
   "requested_block": 100,
-  "schema": 1,
+  "schema": 2,
   "selection": "stateless",
   "served_by": "Cached",
   "stateful": false,
