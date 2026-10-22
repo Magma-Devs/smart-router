@@ -197,6 +197,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		chainFamily := common.GetChainFamilyOrDefault(rp.chainID)
 		// err is the node's reply text, so the transport-only rows stay out of it (MAG-4242).
 		nodeClassified := common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
+		response.RelayResult.CustomerError = nodeClassified
 		// ERROR only when the endpoint is to blame. A not-found, a pruned height, a rejected
 		// transaction is the node answering the question it was asked, and on REST those are
 		// routine — see LogCodedNodeAnswer. The metric fires either way.

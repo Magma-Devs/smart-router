@@ -485,8 +485,10 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("headers", common.RedactMetadata(headers)),
 		)
+		ctx = apil.logger.BeginCustomerRequest(ctx, metricsData)
 		relayResult, err := apil.relaySender.SendRelay(ctx, "", msg, "", dappID, userIp, metricsData, headers)
 		reply := relayResult.GetReply()
+		apil.logger.ObserveCustomerReply(metricsData, relayResult)
 		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 
 		if err != nil {
@@ -558,9 +560,11 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("headers", common.RedactMetadata(headers)),
 		)
+		ctx = apil.logger.BeginCustomerRequest(ctx, metricsData)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, "", "", dappID, userIp, metricsData, headers)
 		msgSeed := strconv.FormatUint(guid, 10)
 		reply := relayResult.GetReply()
+		apil.logger.ObserveCustomerReply(metricsData, relayResult)
 		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 		if err != nil {
 			// Get unique GUID response

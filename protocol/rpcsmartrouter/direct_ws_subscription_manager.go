@@ -145,6 +145,7 @@ func (psbm *pendingSubscriptionsBroadcastManager) broadcastToChannelList(value b
 // The gRPC counterpart is DirectGRPCSubscriptionManager, which follows the same shape:
 // one upstream stream per distinct subscription, fanned out to per-client channels.
 type DirectWSSubscriptionManager struct {
+	primaryConfigured bool // reporting evidence; never consulted by routing
 	// Client-facing (reuse existing patterns)
 	connectedClients map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]
 	// First key: clientKey (dappID:ip:wsUID), Second key: hashedParams
@@ -261,6 +262,7 @@ func NewDirectWSSubscriptionManager(
 		connectionType:       connectionType,
 		chainID:              chainID,
 		apiInterface:         apiInterface,
+		primaryConfigured:    len(wsEndpoints) > 0,
 		wsEndpoints:          wsEndpoints,
 		wsBackupEndpoints:    wsBackupEndpoints,
 		endpointsByURL:       endpointsByURL,
@@ -277,18 +279,20 @@ func NewDirectWSSubscriptionManager(
 // duration of a selection — including across the optimizer call, which must not
 // run while the lock is held.
 type wsEndpointsSnapshot struct {
-	primary []*common.NodeUrl
-	backup  []*common.NodeUrl
-	byURL   map[string]*common.NodeUrl
+	primaryConfigured bool
+	primary           []*common.NodeUrl
+	backup            []*common.NodeUrl
+	byURL             map[string]*common.NodeUrl
 }
 
 func (dwsm *DirectWSSubscriptionManager) endpointsSnapshot() wsEndpointsSnapshot {
 	dwsm.lock.RLock()
 	defer dwsm.lock.RUnlock()
 	return wsEndpointsSnapshot{
-		primary: dwsm.wsEndpoints,
-		backup:  dwsm.wsBackupEndpoints,
-		byURL:   dwsm.endpointsByURL,
+		primaryConfigured: dwsm.primaryConfigured,
+		primary:           dwsm.wsEndpoints,
+		backup:            dwsm.wsBackupEndpoints,
+		byURL:             dwsm.endpointsByURL,
 	}
 }
 
@@ -497,7 +501,12 @@ func (dwsm *DirectWSSubscriptionManager) performCleanup() {
 //
 // Backup-tier consultation mirrors ConsumerSessionManager.getSessionWithProviderOrError
 // (see protocol/lavasession/consumer_session_manager.go:820-852).
-func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (selected *common.NodeUrl, errRet error) {
+	defer func() {
+		if selected != nil {
+			metrics.ObserveCustomerProvider(ctx, dwsm.endpointNames.name(selected.Url))
+		}
+	}()
 	// One snapshot for the whole cascade: SetEndpoints can swap the tiers underneath
 	// us, and re-reading between tiers could see primary from before the swap and
 	// backup from after.
@@ -546,6 +555,9 @@ func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, cli
 	)
 	ep, backupErr := dwsm.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints)
 	if backupErr == nil {
+		if snapshot.primaryConfigured && len(snapshot.primary) == 0 {
+			metrics.MarkCustomerReroute(ctx, "", "primary-pool-unavailable", []string{dwsm.endpointNames.name(ep.Url)})
+		}
 		return ep, nil
 	}
 
@@ -1348,6 +1360,9 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	defer dwsm.lock.Unlock()
 
 	activeSub, found := dwsm.activeSubscriptions[hashedParams]
+	if found && activeSub.upstreamPool != nil {
+		metrics.ObserveCustomerProvider(ctx, dwsm.endpointNames.name(activeSub.upstreamPool.nodeUrl.Url))
+	}
 	if !found {
 		return nil, false
 	}
@@ -2407,3 +2422,11 @@ func rewriteSubscriptionID(msg *rpcclient.JsonrpcMessage, routerID string, numer
 
 // Compile-time interface compliance check
 var _ chainlib.WSSubscriptionManager = (*DirectWSSubscriptionManager)(nil)
+
+// SetCustomerPrimaryConfigured retains configured intent across dark startup and
+// tier refreshes. It is independent of optimizer input and subscription policy.
+func (dwsm *DirectWSSubscriptionManager) SetCustomerPrimaryConfigured(configured bool) {
+	dwsm.lock.Lock()
+	defer dwsm.lock.Unlock()
+	dwsm.primaryConfigured = configured
+}

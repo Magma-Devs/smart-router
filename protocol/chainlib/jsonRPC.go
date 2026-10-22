@@ -501,8 +501,10 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			utils.LogAttr("headers", common.RedactMetadata(headers)),
 		)
 
+		ctx = apil.logger.BeginCustomerRequest(ctx, metricsData)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path, msg, http.MethodPost, dappID, userIp, metricsData, headers)
 		reply := relayResult.GetReply()
+		apil.logger.ObserveCustomerReply(metricsData, relayResult)
 		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 		if err != nil {
 			// Check if batch size limit exceeded - return 429 rate limit error

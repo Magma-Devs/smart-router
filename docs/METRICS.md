@@ -599,3 +599,10 @@ Defined in [`error_metrics.go`](../protocol/metrics/error_metrics.go).
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `smartrouter_errors_total` | Counter | `error_name`, `error_category`, `retryable`, `chain_id` | Errors classified by name, category, retryability, and chain. |
+
+## Weekly customer reports
+
+Use [Customer request telemetry](CUSTOMER-REPORT-TELEMETRY.md) for logical request
+counts, final outcomes, recovery attribution, customer cache rate and the terminal
+snapshot each customer request leaves on its usage event. Existing provider-attempt
+and lookup counters remain available with their original semantics.

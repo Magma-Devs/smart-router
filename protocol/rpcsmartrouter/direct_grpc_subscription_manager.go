@@ -133,6 +133,7 @@ func (sub *grpcActiveSubscription) signalClose() {
 // DirectGRPCSubscriptionManager manages gRPC streaming subscriptions directly to upstream endpoints.
 // This follows the same pattern as DirectWSSubscriptionManager for consistency.
 type DirectGRPCSubscriptionManager struct {
+	primaryConfigured bool // reporting evidence; never consulted by routing
 	// Active subscriptions keyed by hashedParams (method + request params)
 	activeSubscriptions map[string]*grpcActiveSubscription
 
@@ -243,6 +244,7 @@ func NewDirectGRPCSubscriptionManager(
 		metricsManager:       metrics.SafeMetrics(metricsManager),
 		chainID:              chainID,
 		apiInterface:         apiInterface,
+		primaryConfigured:    len(grpcEndpoints) > 0,
 		grpcEndpoints:        grpcEndpoints,
 		grpcBackupEndpoints:  grpcBackupEndpoints,
 		endpointsByURL:       make(map[string]*common.NodeUrl, len(grpcEndpoints)+len(grpcBackupEndpoints)),
@@ -274,18 +276,20 @@ func NewDirectGRPCSubscriptionManager(
 // grpcEndpointsSnapshot is an immutable view of both tiers plus the URL index,
 // taken under the read lock. See wsEndpointsSnapshot — same contract.
 type grpcEndpointsSnapshot struct {
-	primary []*common.NodeUrl
-	backup  []*common.NodeUrl
-	byURL   map[string]*common.NodeUrl
+	primaryConfigured bool
+	primary           []*common.NodeUrl
+	backup            []*common.NodeUrl
+	byURL             map[string]*common.NodeUrl
 }
 
 func (dgm *DirectGRPCSubscriptionManager) endpointsSnapshot() grpcEndpointsSnapshot {
 	dgm.lock.RLock()
 	defer dgm.lock.RUnlock()
 	return grpcEndpointsSnapshot{
-		primary: dgm.grpcEndpoints,
-		backup:  dgm.grpcBackupEndpoints,
-		byURL:   dgm.endpointsByURL,
+		primaryConfigured: dgm.primaryConfigured,
+		primary:           dgm.grpcEndpoints,
+		backup:            dgm.grpcBackupEndpoints,
+		byURL:             dgm.endpointsByURL,
 	}
 }
 
@@ -610,6 +614,7 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 	hashedParams string,
 ) (*pairingtypes.RelayReply, <-chan *pairingtypes.RelayReply, error) {
 	sub.lock.Lock()
+	metrics.ObserveCustomerProvider(ctx, dgm.endpointNames.name(sub.endpointURL))
 
 	// Liveness, under the same lock cleanupSubscription nils connectedClients beneath —
 	// StartSubscription reads the subscription out of the map under dgm.lock and then
@@ -1446,7 +1451,12 @@ func (dgm *DirectGRPCSubscriptionManager) getOrCreatePool(endpoint *common.NodeU
 // (consumer_session_manager.go:820-852). Sticky writes happen in createNewSubscription
 // after the upstream connection is verified, not here, so a primary that fails to
 // connect doesn't pin the client and block the cascade.
-func (dgm *DirectGRPCSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+func (dgm *DirectGRPCSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (selected *common.NodeUrl, errRet error) {
+	defer func() {
+		if selected != nil {
+			metrics.ObserveCustomerProvider(ctx, dgm.endpointNames.name(selected.Url))
+		}
+	}()
 	// One snapshot for the whole cascade — see DirectWSSubscriptionManager.selectEndpoint.
 	snapshot := dgm.endpointsSnapshot()
 
@@ -1480,6 +1490,9 @@ func (dgm *DirectGRPCSubscriptionManager) selectEndpoint(ctx context.Context, cl
 		utils.LogAttr("backupCount", len(snapshot.backup)),
 	)
 	if endpoint, err := dgm.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints); err == nil {
+		if snapshot.primaryConfigured && len(snapshot.primary) == 0 {
+			metrics.MarkCustomerReroute(ctx, "", "primary-pool-unavailable", []string{dgm.endpointNames.name(endpoint.Url)})
+		}
 		return endpoint, nil
 	}
 
@@ -1608,4 +1621,12 @@ func (dgm *DirectGRPCSubscriptionManager) GetClientSubscriptionCount(clientKey s
 	dgm.lock.RLock()
 	defer dgm.lock.RUnlock()
 	return len(dgm.clientSubscriptions[clientKey])
+}
+
+// SetCustomerPrimaryConfigured retains configured intent across dark startup and
+// tier refreshes. It is independent of optimizer input and subscription policy.
+func (dgm *DirectGRPCSubscriptionManager) SetCustomerPrimaryConfigured(configured bool) {
+	dgm.lock.Lock()
+	defer dgm.lock.Unlock()
+	dgm.primaryConfigured = configured
 }
