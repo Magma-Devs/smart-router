@@ -588,6 +588,24 @@ later **demoted to dark** has no retry loop — demoted providers are not fed in
 failed-provider lists — and is only re-checked by the 15m epoch re-verifier. Alert
 windows should assume the 15m case.
 
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_provider_verification_failed` | Gauge | `spec`, `apiInterface`, `provider`, `tier` | `1` while a configured provider is kept out of the pairing because it failed spec verification, `0` while it is admitted. `tier` is `static` or `backup`. |
+
+The serving tier only drops when a whole tier is gone, so a single provider that fails
+verification while others serve leaves it at `2` (or `1`). Such a provider also has no
+other per-provider series — it never reaches the session manager — so before this gauge
+it was visible only in the logs (`provider validation failed — excluding from provider
+list`, then `retry: provider verification still failing` every 3m). There is one series
+per configured provider and tier, published from the same paths as the serving tier, so
+a provider demoted by the epoch re-verifier reads `1` too.
+
+| Condition | Meaning |
+| --- | --- |
+| `smartrouter_provider_verification_failed == 1` for 30m | A configured provider has not passed verification for half an hour. The pool is smaller than configured; read the router's `provider validation failed` log for the reason. |
+
+The same 15m re-check applies to a demoted provider, so keep the window above it.
+
 ---
 
 ## Shared metrics
