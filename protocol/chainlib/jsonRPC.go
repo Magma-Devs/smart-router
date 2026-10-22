@@ -597,7 +597,6 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			// produced before: it is the only non-upgrade method this listener
 			// serves on /*, registered directly above.
 			fiberCtx.Set(fiber.HeaderAllow, fiber.MethodPost)
-			recordCustomerRejection(apil.logger, fiberCtx, chainID, apiInterface, fiber.ErrMethodNotAllowed)
 			return fiber.ErrMethodNotAllowed
 		}
 		return fiberCtx.Next()

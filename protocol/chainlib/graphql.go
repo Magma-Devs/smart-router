@@ -437,7 +437,6 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	app.Use("/*", func(fiberCtx *fiber.Ctx) error {
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		fiberCtx.Status(fiber.StatusMethodNotAllowed)
-		recordCustomerRejection(apil.logger, fiberCtx, chainID, apiInterface, fiber.ErrMethodNotAllowed)
 		return addHeadersAndSendBytes(fiberCtx, nil, convertToJsonError("graphql requests must be sent as HTTP POST"))
 	})
 
