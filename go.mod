@@ -31,7 +31,7 @@ require (
 	github.com/spf13/pflag v1.0.10
 	github.com/tidwall/gjson v1.20.0
 	github.com/tidwall/sjson v1.2.5
-	github.com/vektah/gqlparser/v2 v2.5.60
+	github.com/vektah/gqlparser/v2 v2.5.63
 	go.opentelemetry.io/contrib/exporters/autoexport v0.72.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.23.0
