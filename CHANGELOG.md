@@ -8,6 +8,45 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.6.3 — 2026-10-22
+
+### Highlights
+
+Smart Router v1.6.3 expands the `relay-end` event payload with deeper transaction and caller telemetry for production observability. Integrators can now track submitted transactions directly via the new `tx_hash`, `tx_status`, and `tx_error` fields, while identity fields like `customer`, `request_id`, `task_id`, and `tx_id` map upstream requests back to the originating client. The event payload also introduces request and reply sizes, block heights, and the upstream `node_code`, complemented by two new narrative log lines written per relay when the router operates at the `Debug` log level. Finally, this release resolves REST routing bugs by ensuring REST health checks correctly send their GET template as the URL without a body, and by applying a unified body-method rule for REST relays that preserves the original API name when given an empty template.
+
+### Changes
+
+#### New Features
+- feat(relay-end): name the transaction a submit sends (MAG-4455) ([#556]) [`07bf136`]
+- feat(relay-end): name the customer and the caller's ids (MAG-4456) ([#556]) [`2d42393`]
+- feat(relay-end): add request and reply sizes, blocks and node codes (MAG-4457) ([#556]) [`10f1ae0`]
+- feat(logs): write two per-relay narrative lines at Debug (MAG-4054) ([#569]) [`5144af3`]
+
+#### Bug fixes
+- fix(rpcsmartrouter): a REST health check sends its GET template as the URL, with no body (MAG-4516) ([#561]) [`d44e0f6`]
+- fix(rpcsmartrouter): one body-method rule for REST relays, and an empty template keeps the api name (MAG-4516) ([#561]) [`7373514`]
+
+#### Documentation updates
+- docs(changelog): say v1.6.2 distrusts the compromised eMudhra intermediates (MAG-4522) ([#564]) [`c3a120f`]
+- docs(relay-end): document tx_hash, tx_status and tx_error by chain (MAG-4455) ([#556]) [`8095142`]
+- docs(relay-end): document customer, request_id, task_id and tx_id (MAG-4456) ([#556]) [`f8b606f`]
+- docs(relay-end): document sizes, blocks and node_code (MAG-4457) ([#556]) [`4d7d9bf`]
+
+[#556]: https://github.com/magma-Devs/smart-router/pull/556
+[#561]: https://github.com/magma-Devs/smart-router/pull/561
+[#564]: https://github.com/magma-Devs/smart-router/pull/564
+[#569]: https://github.com/magma-Devs/smart-router/pull/569
+[`07bf136`]: https://github.com/magma-Devs/smart-router/commit/07bf136ef06e9e192a56a2f1739ce93440e04e2a
+[`10f1ae0`]: https://github.com/magma-Devs/smart-router/commit/10f1ae0d18c70b7ee5f45a755aef5b13414bc05c
+[`2d42393`]: https://github.com/magma-Devs/smart-router/commit/2d4239333b9b28833da99c79a28132d216b8f787
+[`4d7d9bf`]: https://github.com/magma-Devs/smart-router/commit/4d7d9bf8b41ff30ac468945969bb175d1b3d677e
+[`5144af3`]: https://github.com/magma-Devs/smart-router/commit/5144af32b829d145338f635e1765f7a09df104ca
+[`7373514`]: https://github.com/magma-Devs/smart-router/commit/7373514c19f6e9c9057fc116ef44375aa09a753a
+[`8095142`]: https://github.com/magma-Devs/smart-router/commit/8095142a85bca67e3e95d250667f1639c2de5a14
+[`c3a120f`]: https://github.com/magma-Devs/smart-router/commit/c3a120f0d6b79e991cb2cf8a954a774221fc6616
+[`d44e0f6`]: https://github.com/magma-Devs/smart-router/commit/d44e0f69e18abbd10c81cf9101d09d79f5361c43
+[`f8b606f`]: https://github.com/magma-Devs/smart-router/commit/f8b606f2c63cd77a3a508596e86cd6029547b1d0
+
 ## v1.6.2 — 2026-10-21
 
 ### Highlights
