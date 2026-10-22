@@ -680,11 +680,11 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, []string{"spec", "apiInterface"})
 	batchSignatureOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_batch_signature_overflow_total",
-		Help: `Label normalizations that fell into method="batch:other". reason="cap": the spec exhausted its distinct-signature budget. reason="wide": one batch spanned more distinct methods than a signature may name. Non-zero means per-batch-type breakdowns are lossy — raise the cap or accept the aggregation.`,
+		Help: `Label normalizations that fell into method="batch:other". reason="cap": the spec exhausted its distinct-signature budget. reason="wide": one batch spanned more distinct methods than a signature may name. reason="invalid": the name was not valid UTF-8. Non-zero means per-batch-type breakdowns are lossy — raise the cap or accept the aggregation.`,
 	}, []string{"spec", "reason"})
 	defaultMethodOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_default_method_overflow_total",
-		Help: `Label normalizations that fell into method="Default-other": the spec exhausted its distinct unmatched-API name budget. Sustained growth means clients are hitting URLs the spec does not match — concrete IDs in the path mint a new name per request — which usually indicates a spec gap (e.g. a path variant the templates miss).`,
+		Help: `Label normalizations that fell into method="Default-other": the spec exhausted its distinct unmatched-API name budget, or a name was not valid UTF-8. Sustained growth means clients are hitting URLs the spec does not match — concrete IDs in the path mint a new name per request — which usually indicates a spec gap (e.g. a path variant the templates miss).`,
 	}, []string{"spec"})
 
 	// Per-customer request group (MAG-4081). Request-level, unlike smartrouter_requests_*,
