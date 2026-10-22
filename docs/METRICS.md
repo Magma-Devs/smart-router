@@ -603,6 +603,6 @@ Defined in [`error_metrics.go`](../protocol/metrics/error_metrics.go).
 ## Weekly customer reports
 
 Use [Customer request telemetry](CUSTOMER-REPORT-TELEMETRY.md) for logical request
-counts, final outcomes, recovery attribution, customer cache rate and canonical
-terminal logs. Existing provider-attempt and lookup counters remain available
-with their original semantics.
+counts, final outcomes, recovery attribution, customer cache rate and the terminal
+snapshot each customer request leaves on its usage event. Existing provider-attempt
+and lookup counters remain available with their original semantics.
