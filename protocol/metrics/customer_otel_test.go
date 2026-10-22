@@ -26,7 +26,9 @@ func (e *customerLogExporter) Export(_ context.Context, records []sdklog.Record)
 func (*customerLogExporter) Shutdown(context.Context) error   { return nil }
 func (*customerLogExporter) ForceFlush(context.Context) error { return nil }
 
-func TestCustomerTerminalSameSnapshotInStdoutAndOTel(t *testing.T) {
+// The terminal snapshot reaches the collector on the usage event alone: relay_end is the one
+// per-relay log line, and the Loki readers that count relays would count a second one twice.
+func TestCustomerTerminalReachesOTelWithoutASecondLogLine(t *testing.T) {
 	exporter := &customerLogExporter{}
 	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
 	t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
@@ -53,14 +55,7 @@ func TestCustomerTerminalSameSnapshotInStdoutAndOTel(t *testing.T) {
 	var exported CustomerTerminal
 	require.NoError(t, json.Unmarshal([]byte(attributes["customer_request"].AsString()), &exported))
 	require.Equal(t, recorder.outcomes[0], exported)
-	var line map[string]string
-	require.NoError(t, json.Unmarshal(stdout.Bytes(), &line))
-	require.Equal(t, "relay finished", line["message"])
-	require.Equal(t, "true", line["terminal"])
-	var logged CustomerTerminal
-	require.NoError(t, json.Unmarshal([]byte(line["customer_request"]), &logged))
-	require.Equal(t, exported, logged)
-	require.NotContains(t, stdout.String(), "private-secret")
+	require.Empty(t, stdout.String(), "a customer request ends in relay_end, not in a line of its own")
 	require.NotContains(t, attributes["customer_request"].AsString(), "private-secret")
 }
 

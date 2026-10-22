@@ -129,8 +129,9 @@ func MarkCustomerReroute(ctx context.Context, provider, reason string, alternati
 	state.reroutes = append(state.reroutes, CustomerReroute{Provider: provider, Reason: reason, Alternatives: append([]string(nil), alternatives...)})
 }
 
-// ObserveCustomerProvider is used by subscription setup, which has no RelayResult.
-// URLs are redacted before they become request evidence; they are never labels.
+// ObserveCustomerProvider is used by subscription setup, which has no RelayResult. The
+// provider is the configured name where the manager knows it, as relay_end writes it; a
+// bare url is redacted before it becomes request evidence. It is never a metric label.
 func ObserveCustomerProvider(ctx context.Context, provider string) {
 	state, _ := ctx.Value(customerRequestKey{}).(*CustomerRequest)
 	if state == nil {
@@ -139,7 +140,7 @@ func ObserveCustomerProvider(ctx context.Context, provider string) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if !state.finished {
-		state.result.Provider = utils.RedactURL(provider)
+		state.result.Provider = utils.RedactIfURL(provider)
 	}
 }
 
@@ -310,24 +311,9 @@ func (rpccl *RPCConsumerLogs) finishCustomer(data *RelayMetrics, err error) bool
 	if recorder, ok := rpccl.consumerMetricsManager.(CustomerMetricsRecorder); ok {
 		recorder.RecordCustomerOutcome(terminal)
 	}
-	snapshotJSON, _ := json.Marshal(terminal)
-	utils.LavaFormatInfo("relay finished",
-		utils.LogAttr("schema_version", terminal.SchemaVersion), utils.LogAttr("terminal", true),
-		utils.LogAttr("request_kind", terminal.RequestKind), utils.LogAttr("GUID", terminal.GUID),
-		utils.LogAttr(utils.KEY_REQUEST_ID, terminal.RequestID), utils.LogAttr("chain", terminal.Chain),
-		utils.LogAttr("api_interface", terminal.APIInterface), utils.LogAttr("api_method", terminal.APIMethod),
-		utils.LogAttr("outcome", terminal.Outcome), utils.LogAttr("recovery", terminal.Recovery),
-		utils.LogAttr("cache_hit", terminal.CacheHit), utils.LogAttr("error_name", terminal.ErrorName),
-		utils.LogAttr("customer_request", string(snapshotJSON)),
-		utils.LogAttr("served_by", func() string {
-			if terminal.HasReply {
-				return terminal.Provider
-			}
-			return ""
-		}()),
-		utils.LogAttr("stop_reason", terminal.StopReason), utils.LogAttr("status", terminal.StatusCode),
-		utils.LogAttr("has_reply", terminal.HasReply), utils.LogAttr("reply_size", terminal.ReplySize),
-		utils.LogAttr("error", terminal.ErrorMessage))
+	// No log line of its own: relay_end (docs/RELAY-END-EVENT.md) is the one per-relay event, and
+	// the Loki readers that count relays select it, so a second line would be counted twice. The
+	// snapshot reaches the collector on the usage event (relay_usage, OTel) instead.
 	return true
 }
 
