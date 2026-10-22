@@ -890,7 +890,8 @@ const (
 	// endpointPickLendDisabled picks it for this one request WITHOUT marking it enabled, when it is
 	// a direct-RPC endpoint: the last chance when nothing else can serve. A success re-enables it
 	// through the normal relay-success path (ResetHealth); a failure leaves it disabled, its failure
-	// count already past the threshold, so normal traffic keeps skipping it.
+	// count already past the threshold, so normal traffic keeps skipping it. A head-stalled
+	// direct-RPC endpoint is lent the same way, and stays head-stalled whatever the answer.
 	endpointPickLendDisabled
 )
 
@@ -1292,13 +1293,16 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			// request without a dial. A provider-relay endpoint stays skipped, as before.
 			endpoint.mu.RLock()
 			enabled := endpoint.Enabled
-			// A state reason (head-stalled, MAG-3986) keeps the endpoint out in every pick mode:
-			// reconnect and lend both retry an endpoint the EVENT slot backed off, and neither
-			// proves anything about a node that answers but does not follow the chain.
+			// A state reason (head-stalled, MAG-3986) keeps the endpoint out of normal selection
+			// and of the reconnect probe. The last chance lends it like a disabled one: nothing
+			// else can serve this request, and a node behind the chain beats no answer — the same
+			// rule head-stall's own never-empty step applies chain-wide, applied here per request,
+			// where the request's add-on is known. Lending does not clear the stall; only the
+			// endpoint answering above its stuck block does.
 			heldByState := endpoint.heldByStateLocked()
 			endpoint.mu.RUnlock()
 			lendable := mode == endpointPickLendDisabled && endpoint.IsDirectRPC()
-			if heldByState || (!enabled && mode != endpointPickReconnectDisabled && !lendable) {
+			if (heldByState && !lendable) || (!enabled && mode != endpointPickReconnectDisabled && !lendable) {
 				continue
 			}
 			// A websocket-only endpoint can never answer a relay — see ServesDirectRelays.
