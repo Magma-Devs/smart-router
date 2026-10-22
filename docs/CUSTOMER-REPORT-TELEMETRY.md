@@ -8,19 +8,22 @@ PDFs, schedules or customer deliveries. All implementation lives in smart-router
 A customer request is one logical request accepted by a client-facing chain
 listener, before parsing or provider selection. JSON-RPC batch envelopes count
 once. Each incoming WebSocket application message counts once, including
-subscribe/unsubscribe and admission rejections. WebSocket upgrade, ping/pong and
-server-pushed notifications do not count. gRPC unary calls count once; a
-subscription or reflection stream counts its establishment once. A stream's
-later deliveries, cancellation, restoration and upstream termination do not
-retroactively revise its establishment outcome.
+subscribe/unsubscribe and a frame the connection's rate limit refuses. WebSocket
+upgrade, ping/pong and server-pushed notifications do not count. gRPC unary calls
+count once; a subscription or reflection stream counts its establishment once. A
+stream's later deliveries, cancellation, restoration and upstream termination do
+not retroactively revise its establishment outcome.
 
 A server-owned `request_kind` distinguishes `customer`, `internal` and
 `notification`. Request headers and API method names cannot set that identity.
 Router-crafted health/init/verification, upstream reflection and replay probes
 have no customer lifecycle. A customer's call to a method also used by a probe
 still counts. Dedicated listener health endpoints and CORS preflight are outside
-the chain-request contract. Gateway rejections and gRPC transport failures before
-callback dispatch require ingress telemetry; they are not router relay outcomes.
+the chain-request contract, and so is an HTTP request a listener refuses before
+parsing because it does not serve the method (answered 405): nothing in it is a
+chain request, and `relay_end` writes nothing for it either. Gateway rejections
+and gRPC transport failures before callback dispatch require ingress telemetry;
+they are not router relay outcomes.
 
 Receipt is recorded synchronously. Completion is the listener's final relay
 verdict, after error classification (including gRPC status conversion), before
@@ -59,11 +62,12 @@ primaries blocked/unavailable -> backup, unavailable local sticky pin -> alterna
 unavailable preferred provider -> alternative. It does not invent a provider
 that the optimizer would have chosen before filtering. Partial-pool outages
 without an explicit intended provider therefore do not claim counterfactual
-recoveries. Subscription setup records its serving endpoint. A configured primary
-subscription tier that is unavailable, followed by successful backup setup, is
-also a reroute; an intentionally backup-only configuration is not. The configured
-intent survives dark startup. These conservative boundaries avoid attributing
-routine backup selection to an outage. They must be preserved in client-facing explanations.
+recoveries. Subscription setup records its serving upstream under the provider
+name `relay_end` writes for it. A configured primary subscription tier that is
+unavailable, followed by successful backup setup, is also a reroute; an
+intentionally backup-only configuration is not. The configured intent survives
+dark startup. These conservative boundaries avoid attributing routine backup
+selection to an outage. They must be preserved in client-facing explanations.
 
 ## Prometheus
 
@@ -74,9 +78,9 @@ lookups or incidents and must not be added to the new request counters.
 The per-customer `smartrouter_customer_requests_total`,
 `smartrouter_customer_requests_failed_total` and latency histogram (MAG-4081)
 also remain available. They count parsed method requests under a bounded
-`customer` label and omit parse failures. Their completion now reads the same
+`customer` label and omit parse failures. Their completion reads the same
 API-level final Success verdict as the terminal snapshot, so an HTTP 200 node
-error is correctly unsuccessful. Each parsed request updates each family once;
+error is unsuccessful there too. Each parsed request updates each family once;
 never add the parsed-request total to the all-request received/outcome totals.
 
 | Metric | Native labels |
@@ -138,71 +142,79 @@ billing ledger. For exact window membership use persisted terminal snapshots'
 `started_at_ns` / `completed_at_ns`, deduplicate by deployment + GUID and audit
 collection gaps. No historical backfill is created by deploying this schema.
 
-## Canonical terminal log and OTel
+## Terminal snapshot, relay_end and OTel
 
-The existing INFO `relay finished` lifecycle is resolved at the listener, after
-unknown-write and API-level verdicts. Earlier processor diagnostics are DEBUG
-`relay decision`. Parse/admission failures now also get a terminal INFO record.
+The router writes one log event per relay, `relay_end`
+([RELAY-END-EVENT.md](RELAY-END-EVENT.md)), at every log level, and the customer
+lifecycle adds no line of its own: the Loki recording rules and the customer
+alert that count relays select `relay_end`, and a second line would be counted
+twice. The customer request's terminal snapshot travels on the usage event
+instead.
 
-The top-level log fields include `schema_version`, `terminal`, `request_kind`,
-`GUID`, the existing request-id key, `chain`, `api_interface`, `api_method`,
-`outcome`, `recovery`, `cache_hit` and `error_name`. The repository log formatter
-renders attributes as strings. `customer_request` contains a JSON-encoded
-snapshot string with typed fields, start/completion/duration, provider/cache tier,
-stop reason, registry code/category/retryability, bounded redacted error text,
-observed attempt outcomes and causal reroute decisions. A pending attempt means
-no recorded result at completion, not a failed provider. Snapshot arrays are
-copied and closed before export; later hedge/CV results cannot change them.
+The snapshot, `customer_request`, is resolved at the listener, after the
+unknown-write and API-level verdicts, for parse and admission failures as well. It
+carries `schema_version`, `terminal`, `request_kind`, `GUID`, the propagated
+request id, `chain`, `api_interface`, `api_method`, start/completion/duration,
+`outcome`, `recovery`, `cache_hit` and cache tier, the serving provider, stop
+reason, the registry's error name/code/category/retryability, bounded redacted
+error text, the observed attempt outcomes and the causal reroute decisions. A
+pending attempt means no recorded result at completion, not a failed provider.
+Snapshot arrays are copied and closed at completion; later hedge/CV results
+cannot change them. Its `GUID` is the one `relay_end` and every narrative line of
+the request carry, so the two join on it.
 
-`relay_usage` carries the same snapshot plus its existing project/CU/classification
-fields. Existing `cache_hit`, `provider` and `success` are populated from the final
-verdict. Notifications preserve their usage/billing events, explicitly marked
-`request_kind="notification"` without a terminal snapshot. The optional OTel sink
-also exports flattened terminal identity/outcome/recovery attributes. Prometheus
-counting and stdout INFO records do not depend on OTel being enabled.
+`relay_usage` carries the snapshot plus its existing project/CU/classification
+fields, and `request_kind`. Its `cache_hit`, `provider`, `success` and `latency_ms`
+are populated from the final verdict; `provider` is `Cached` on a cache hit.
+Pushed notifications keep their usage/billing events, marked
+`request_kind="notification"` without a snapshot. The optional OTel sink exports
+the snapshot as the `customer_request` attribute beside flattened `terminal`,
+`outcome`, `recovery`, `error_name`, `request_id`, `GUID` and `completed_at_ns`.
+Prometheus counting does not depend on OTel being enabled.
 
-Example Loki final failures (adapt stream selector to the deployed labels):
+Loki drill-down reads `relay_end`. Its `outcome` is the relay's, not the
+customer's: `ok` is a success; every other value is a failure for this report.
+The two sets differ at the edges, on purpose: `relay_end` has no `cancelled`
+outcome, and a WebSocket frame the rate limit refuses is a counted customer
+failure with no `relay_end`. Final failures (adapt the stream selector to the
+deployed labels):
 
 ```logql
-{cluster="$cluster"} | json | message="relay finished" | terminal="true" | request_kind="customer" | outcome="failure"
+{cluster="$cluster"} |= "\"event\":\"relay_end\"" | json | outcome!="ok" | selection!="subscription"
 ```
 
-Top error families, counting canonical terminal records rather than attempt logs:
+Top error families, counting relays rather than attempt lines. `error_code` on
+`relay_end` is the registry name the Prometheus `error_name` label carries:
 
 ```logql
-topk(5, sum by (error_name) (count_over_time({cluster="$cluster"} | json | message="relay finished" | terminal="true" | request_kind="customer" | outcome="failure" [7d])))
+topk(5, sum by (error_code) (count_over_time({cluster="$cluster"} |= "\"event\":\"relay_end\"" | json | outcome!="ok" [7d])))
 ```
 
-To inspect the nested snapshot:
-
-```logql
-{cluster="$cluster"} | json | terminal="true" | outcome="failure" | line_format "{{.customer_request}}" | json
-```
-
-Use GUID and the propagated request ID to join each final failure to existing
-classified attempt logs, disabled-provider/hold-off/pool-state events. Count
-affected customer GUIDs, not error lines. Describe observed failure families,
-providers, chains and time ranges; terminal logs alone do not prove a root cause.
-Ingestion that duplicates records needs deduplication before incident counts.
+Use the GUID and the propagated request id to join a failure to the request's
+classified attempt lines and to the disabled-provider, hold-off and pool-state
+events. Count affected customer GUIDs, not error lines. Describe observed failure
+families, providers, chains and time ranges; terminal records alone do not prove
+a root cause. Ingestion that duplicates records needs deduplication before
+incident counts.
 
 ## Deployment work outside this repository
 
 1. Scrape and retain all three new metrics in Alloy/Prometheus/Mimir. Preserve
    native `spec` and `apiInterface` and the customer/deployment identity.
-2. Collect unsampled INFO terminal logs, retain the JSON snapshot and request IDs,
-   and check Loki line/attribute limits. Verify retention covers the report window.
-3. Update existing `loki:sr_final_*` recording rules to select the canonical
-   customer terminal record once. Do not combine old ERROR events with new
-   terminal events; node errors, parse errors and unknown writes would duplicate.
-4. If OTel usage is enabled, verify collector routing and schema preservation.
-   Export is best-effort with bounded queues; delivery is not guaranteed by the
-   router counter. Audit missing events separately from zero failures.
-5. Deploy and verify new-schema coverage across all customer pods before switching
+2. `relay_end` is already collected, and the Loki recording rules
+   (devops-magmadevs) and the customer server-errors alert
+   (smart-router-infrastructure) already read it. This schema changes neither.
+3. If OTel usage is enabled, verify collector routing and schema preservation,
+   including the `customer_request` attribute's size against the collector's
+   attribute limits. Export is best-effort with bounded queues; delivery is not
+   guaranteed by the router counter. Audit missing events separately from zero
+   failures.
+4. Deploy and verify new-schema coverage across all customer pods before switching
    weekly dashboards. Keep old-version periods explicitly incomplete.
-6. Verify a drained known workload end to end: ingress -> router -> metric scrape
-   -> Mimir and stdout/OTel -> Loki, reconcile by chain and unique customer GUID.
-   Gateway-only rejections remain an explicitly separate ingress metric.
+5. Verify a drained known workload end to end: ingress -> router -> metric scrape
+   -> Mimir, and `relay_end`/OTel -> Loki; reconcile by chain and unique customer
+   GUID. Gateway-only rejections remain an explicitly separate ingress metric.
 
 Infrastructure configuration, deployed recording rules and customer dashboards
-must be changed in their owning repositories. This router PR does not claim that
-new telemetry is already present in production Grafana or Loki.
+are changed in their owning repositories. This router change does not put new
+telemetry in production Grafana or Loki by itself.
