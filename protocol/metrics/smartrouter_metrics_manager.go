@@ -130,6 +130,7 @@ type SmartRouterMetricsManager struct {
 	csmBlockedProvidersByReason    *prometheus.GaugeVec   // smartrouter_csm_blocked_providers_by_reason
 	csmBlockedBackupProvidersCount *prometheus.GaugeVec   // smartrouter_csm_blocked_backup_providers
 	endpointServingTier            *prometheus.GaugeVec   // smartrouter_endpoint_serving_tier
+	providerVerificationFailed     *prometheus.GaugeVec   // smartrouter_provider_verification_failed
 	csmStickySessionsCount         *prometheus.GaugeVec   // smartrouter_csm_sticky_sessions
 	csmStickyClaims                *prometheus.CounterVec // smartrouter_csm_sticky_claims_total
 	csmReportedProvidersCount      *prometheus.GaugeVec   // smartrouter_csm_reported_providers
@@ -628,6 +629,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_endpoint_serving_tier",
 		Help: "Which provider tier an endpoint is serving from: 2=primaries, 1=DEGRADED (backups only), 0=DARK (no healthy providers). Since MAG-2525 a dark chain no longer crash-loops, so this gauge — not pod restarts — is the signal that a chain cannot serve. Expected time at 0 depends on how the chain went dark: dark at boot is retried from ~2s (doubling to a 3m ceiling), but a chain demoted to dark after booting healthy is only re-checked by the 15m epoch re-verifier. Size alert windows for the 15m case.",
 	}, csmStateLabels)
+	providerVerificationFailed := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_provider_verification_failed",
+		Help: "1 while a configured provider is kept out of the pairing because it failed spec verification (at boot, or demoted by the epoch re-verifier), 0 while it is admitted. One series per configured provider and tier, so a provider that never passed is visible even though it has no other per-provider series. A provider out at boot is retried every 3m; one demoted later is re-checked every 15m epoch, so size alert windows above both.",
+	}, []string{"spec", "apiInterface", "provider", "tier"})
 
 	// =========================================================================
 	// Request group metrics
@@ -806,6 +811,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	csmStickyClaims = registerOrReuse(csmStickyClaims)
 	csmReportedProvidersCount = registerOrReuse(csmReportedProvidersCount)
 	endpointServingTier = registerOrReuse(endpointServingTier)
+	providerVerificationFailed = registerOrReuse(providerVerificationFailed)
 
 	manager := &SmartRouterMetricsManager{
 		// Endpoint-scoped (with function)
@@ -924,6 +930,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		csmStickyClaims:                csmStickyClaims,
 		csmReportedProvidersCount:      csmReportedProvidersCount,
 		endpointServingTier:            endpointServingTier,
+		providerVerificationFailed:     providerVerificationFailed,
 
 		// Internal state
 		// Start fail-closed (0 = not-ready) so /readyz reports 503 until the
@@ -2026,6 +2033,19 @@ func (m *SmartRouterMetricsManager) SetEndpointServingTier(chainId, apiInterface
 		return
 	}
 	m.endpointServingTier.WithLabelValues(chainId, apiInterface).Set(float64(ServingTier(healthyStatic, healthyBackup)))
+}
+
+// SetProviderVerificationFailed publishes whether a configured provider is held out
+// of the pairing by a failed spec verification. tier is "static" or "backup".
+func (m *SmartRouterMetricsManager) SetProviderVerificationFailed(spec, apiInterface, provider, tier string, failed bool) {
+	if m == nil {
+		return
+	}
+	value := 0.0
+	if failed {
+		value = 1
+	}
+	m.providerVerificationFailed.WithLabelValues(spec, apiInterface, provider, tier).Set(value)
 }
 
 // SetCSMStickySessionsCount publishes the number of live sticky-session affinities.
