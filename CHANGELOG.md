@@ -19,7 +19,9 @@ Smart Router v1.5.10 is v1.5.9 on a current runtime base; the router's own code 
 ### Changes
 
 #### Bug fixes
-- fix(docker): move the runtime base to distroless static-debian13 (MAG-4596)
+- fix(docker): move the runtime base to distroless static-debian13 (MAG-4596), the same change as [#573] on main
+
+[#573]: https://github.com/magma-Devs/smart-router/pull/573
 
 ## v1.5.9 — 2026-10-21
 
