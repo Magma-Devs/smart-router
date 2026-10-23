@@ -121,7 +121,6 @@ type ConsumerWebsocketManager struct {
 	rpcConsumerLogs        *metrics.RPCConsumerLogs
 	cmdFlags               common.ConsumerCmdFlags
 	refererMatchString     string
-	relayMsgLogMaxChars    int
 	chainId                string
 	apiInterface           string
 	connectionType         string
@@ -137,7 +136,6 @@ type ConsumerWebsocketManagerOptions struct {
 	RpcConsumerLogs        *metrics.RPCConsumerLogs
 	RefererMatchString     string
 	CmdFlags               common.ConsumerCmdFlags
-	RelayMsgLogMaxChars    int
 	ChainID                string
 	ApiInterface           string
 	ConnectionType         string
@@ -155,7 +153,6 @@ func NewConsumerWebsocketManager(options ConsumerWebsocketManagerOptions) *Consu
 		rpcConsumerLogs:        options.RpcConsumerLogs,
 		cmdFlags:               options.CmdFlags,
 		refererMatchString:     options.RefererMatchString,
-		relayMsgLogMaxChars:    options.RelayMsgLogMaxChars,
 		chainId:                options.ChainID,
 		apiInterface:           options.ApiInterface,
 		connectionType:         options.ConnectionType,
@@ -459,7 +456,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 
 		if messageType, msg, err = websocketConn.ReadMessage(); err != nil {
 			utils.LavaFormatTrace("error reading msg from the websocket, probably websocket was closed by the user", utils.LogAttr("err", err))
-			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, guidString, msg, cwm.apiInterface, time.Since(startTime))
+			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, guidString, relayBodyForLog(string(msg), cwm.cmdFlags.DebugRelays), cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 			}
@@ -488,7 +485,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		dappID, ok := websocketConn.Locals(ProjectIDHeader).(string)
 		if !ok {
 			// Log and remove the analyze
-			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), nil, msgSeed, []byte("Unable to extract dappID"), cwm.apiInterface, time.Since(startTime))
+			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), nil, msgSeed, "Unable to extract dappID", cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 			}
@@ -496,10 +493,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 
 		userIp := websocketConn.RemoteAddr().String()
 
-		logFormattedMsg := string(msg)
-		if !cwm.cmdFlags.DebugRelays {
-			logFormattedMsg = utils.FormatLongString(logFormattedMsg, cwm.relayMsgLogMaxChars)
-		}
+		logFormattedMsg := relayBodyForLog(string(msg), cwm.cmdFlags.DebugRelays)
 
 		utils.LavaFormatDebug("ws in <<<",
 			utils.LogAttr("seed", msgSeed),
@@ -531,7 +525,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					continue
 				}
 			}
-			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, logFormattedMsg, cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 			}
@@ -556,7 +550,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 						sendWS(webSocketMsgWithType{messageType: messageType, msg: msgData})
 					} else {
 						// Send formatted error so client gets feedback (e.g. upstream timeout)
-						formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+						formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, logFormattedMsg, cwm.apiInterface, time.Since(startTime))
 						if formatterMsg != nil {
 							sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 						}
@@ -605,7 +599,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				// Normal relay over websocket. (not subscription related)
 				relayResult, err := cwm.relaySender.SendParsedRelay(frameCtx, metricsData, protocolMessage)
 				if err != nil {
-					formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not send parsed relay", err), msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+					formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not send parsed relay", err), msgSeed, logFormattedMsg, cwm.apiInterface, time.Since(startTime))
 					if formatterMsg != nil {
 						sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 					}
@@ -644,7 +638,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
 			)
 
-			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not start subscription", err), msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not start subscription", err), msgSeed, logFormattedMsg, cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg}) // No need to use outputFormatter here since we are sending an error
 				continue

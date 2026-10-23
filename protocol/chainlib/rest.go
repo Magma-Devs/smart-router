@@ -320,6 +320,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		analytics.SetProcessingTimestampBeforeRelay(startTime)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		requestBody := string(fiberCtx.Body())
+		loggedBody := relayBodyForLog(requestBody, cmdFlags.DebugRelays)
 		utils.LavaFormatInfo("Consumer received a new REST POST request",
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
@@ -328,7 +329,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("path", path),
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("msgSeed", msgSeed),
-			utils.LogAttr("body", requestBody),
+			utils.LogAttr("body", loggedBody),
 			utils.LogAttr("headers", common.RedactMetadata(restHeaders)),
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, http.MethodPost, dappID, userIp, analytics, restHeaders)
@@ -346,7 +347,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 
 			// Log request and response
-			apil.logger.LogRequestAndResponse("http in/out", true, http.MethodPost, path, requestBody, errMasking, msgSeed, time.Since(startTime), err)
+			apil.logger.LogRequestAndResponse("http in/out", true, http.MethodPost, path, loggedBody, errMasking, msgSeed, time.Since(startTime), err)
 
 			// Set status to internal error\
 			if relayResult.GetStatusCode() != 0 {
@@ -400,6 +401,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		if RestMethodCarriesBody(fiberCtx.Method()) {
 			requestBody = string(fiberCtx.Body())
 		}
+		loggedBody := relayBodyForLog(requestBody, cmdFlags.DebugRelays)
 		utils.LavaFormatInfo("Consumer received a new REST non-POST request",
 			utils.LogAttr("GUID", guid),
 			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
@@ -408,7 +410,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			utils.LogAttr("path", path),
 			utils.LogAttr("seed", msgSeed),
 			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("body", requestBody),
+			utils.LogAttr("body", loggedBody),
 			utils.LogAttr("headers", common.RedactMetadata(restHeaders)),
 		)
 
@@ -425,7 +427,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 
 			// Log request and response
-			apil.logger.LogRequestAndResponse("http in/out", true, fiberCtx.Method(), path, requestBody, errMasking, msgSeed, time.Since(startTime), err)
+			apil.logger.LogRequestAndResponse("http in/out", true, fiberCtx.Method(), path, loggedBody, errMasking, msgSeed, time.Since(startTime), err)
 
 			// Set status to internal error
 			if relayResult.GetStatusCode() != 0 {
