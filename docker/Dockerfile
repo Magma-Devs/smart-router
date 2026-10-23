@@ -21,7 +21,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -trimpath -tags netgo -ldflags '-w -s' \
         -o /out/smartrouter ./cmd/smartrouter
 
-FROM gcr.io/distroless/static-debian12:debug
+# Same runtime base as Dockerfile.release; read the note there before
+# changing it.
+FROM gcr.io/distroless/static-debian13:debug
 COPY --from=build /out/smartrouter /bin/smart-router
 # Bundled chain specs (--use-static-spec specs/) and example configs travel
 # with the image so the router resolves the spec graph offline.
