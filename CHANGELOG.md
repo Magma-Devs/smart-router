@@ -8,6 +8,32 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.6.4 — 2026-10-23
+
+### Highlights
+
+Smart Router v1.6.4 introduces a breaking change to error handling and event logging that requires operators to update their telemetry pipelines to `relay_end` schema 2. The `status` field for a failed relay no longer writes `0`; it now records the upstream's actual HTTP status code, or `502` when all transport attempts fail. Additionally, the router no longer intercepts errors to return a generic HTTP 500 text response, meaning client applications will now receive the upstream node's exact status code and response body. Integrators must consult `docs/RELAY-END-EVENT.md` to verify the schema 2 contract and update clients to parse upstream-native error payloads. Beyond these protocol corrections, this release adjusts the failover routing logic to include a `lastChanceBorrow` condition, which permits the router to lend a head-stalled upstream URL when no other healthy nodes are available to serve the request. Finally, the official Docker image now builds on a distroless `static-debian13` runtime base, reducing the container footprint for production deployments.
+
+### Changes
+
+#### ⚠ Breaking changes
+- fix(protocol)!: return the upstream's own error to the client instead of the router's text (MAG-4218) ([#551]) [`8645963`]
+  - relay_end is schema 2. status on a failed relay is the status the client gets: the upstream's own status when an upstream answered, 502 when every attempt failed in transport, where schema 1 wrote 0. docs/RELAY-END-EVENT.md is the contract for schema 2 and lists the versions. The reply the client reads on this path changes too: the node's status and body instead of HTTP 500 with the router's text.
+
+#### Bug fixes
+- fix(protocol)!: return the upstream's own error to the client instead of the router's text (MAG-4218) ([#551]) [`8645963`]
+- fix(lavasession): the last chance lends a head-stalled URL when nothing else can serve (MAG-4589) ([#570]) [`9eda1ae`]
+- refactor(lavasession): name the last-chance condition lastChanceBorrow (MAG-4589) ([#570]) [`926b0c1`]
+- fix(docker): move the runtime base to distroless static-debian13 (MAG-4596) ([#573]) [`1a74447`]
+
+[#551]: https://github.com/magma-Devs/smart-router/pull/551
+[#570]: https://github.com/magma-Devs/smart-router/pull/570
+[#573]: https://github.com/magma-Devs/smart-router/pull/573
+[`1a74447`]: https://github.com/magma-Devs/smart-router/commit/1a744477d55b53922d49a5a44ef10c0c350d494e
+[`8645963`]: https://github.com/magma-Devs/smart-router/commit/8645963eaa9d3c21ceb1d8d7033526434879de96
+[`926b0c1`]: https://github.com/magma-Devs/smart-router/commit/926b0c1be737cf4bbfaaeefdbbb13d59d85b3d1d
+[`9eda1ae`]: https://github.com/magma-Devs/smart-router/commit/9eda1ae4b974a1632ec9a5771f4e25d47ca851b1
+
 ## v1.6.3 — 2026-10-22
 
 ### Highlights
