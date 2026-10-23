@@ -8,6 +8,19 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.5.10 — 2026-10-23
+
+### Highlights
+
+Smart Router v1.5.10 is v1.5.9 on a current runtime base; the router's own code is unchanged. The image now builds on `gcr.io/distroless/static-debian13:debug`, whose trust store (`ca-certificates 20250419+deb13u1`) no longer contains *emSign ECC Root CA - G3* or *AAA Certificate Services*, the two roots Debian and Mozilla removed over the eMudhra intermediate compromise. The previous base, `static-debian12`, is no longer updated by distroless, so v1.5.9 and every earlier image still trust both.
+
+**Correction to the v1.5.9 notes:** they describe the fix as a rebuild "rather than a change to the image's CA bundle". The root removals had already been published, and this release carries them. The Go 1.26.10 check from v1.5.9 still rejects any chain through the eight compromised intermediates; the trust store now refuses chains through those two roots as well, as a second and independent layer. A host whose certificate chain ends only at one of the two roots now fails TLS verification, as it already does in Mozilla, Chrome and Debian.
+
+### Changes
+
+#### Bug fixes
+- fix(docker): move the runtime base to distroless static-debian13 (MAG-4596)
+
 ## v1.5.9 — 2026-10-21
 
 ### Highlights
