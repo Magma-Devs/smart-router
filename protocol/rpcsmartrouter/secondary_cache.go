@@ -233,6 +233,8 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 		// debug-gated Lava-Cache-Backend header reports.
 		CacheLookup: cacheReport.ServedBy(common.CacheTierSecondary),
 	}
+	// A cached node error is retried, or not, exactly like a live one.
+	rpcss.classifyCachedNodeError(protocolMessage, &relayResult, cacheReply.GetStatusCode())
 
 	// Backfill: the populator owns ALL eligibility — node-error, status-code,
 	// stateful, NOT_APPLICABLE, finalization — so this call is unconditional and the

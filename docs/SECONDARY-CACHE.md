@@ -48,7 +48,12 @@ request ──► primary cache ──hit──► served ("Cached")
   judged by its recorded status). An entry that is not a usable reply at all —
   empty, a web page, a truncated envelope, an envelope that carries neither a
   result nor an error, or a batch with such an element — is never served: it
-  counts as a secondary error and the request proceeds to an upstream.
+  counts as a secondary error and the request proceeds to an upstream. A retry
+  after a cached node error goes to an upstream, and neither cache is asked
+  again for that request. On JSON-RPC and Tendermint the cached error first gets
+  the retry verdict a live one gets, so an error every node gives, such as
+  `execution reverted`, ends the request with the cached answer and is not
+  retried.
 - **Independent of the primary.** The secondary keeps serving while the primary
   is down, and is even valid with no primary configured at all (reads work;
   nothing backfills — the router logs an advisory warning for this topology).
@@ -212,7 +217,7 @@ order, so a caller can match the whole string:
 | --- | --- |
 | `hit` / `miss` / `error` / `timeout` | consulted; same four values the `outcome` metric label uses |
 | `off` | not consulted — unconfigured, or its client has marked itself disconnected |
-| `skipped` | active but not asked: a bypass rule applied (cross-validation, stateful, `lava-force-cache-refresh`, a non-cacheable block), or the primary hit first and the secondary is only consulted after a primary non-hit |
+| `skipped` | active but not asked: a bypass rule applied (cross-validation, stateful, `lava-force-cache-refresh`, a non-cacheable block, a retry after a cached node error), or the primary hit first and the secondary is only consulted after a primary non-hit |
 | `unknown` | not observed at all — this reply was built on a path that performs no cache lookup |
 
 Both headers are emitted on every reply that carries the directive, including
@@ -222,8 +227,9 @@ Both headers are emitted on every reply that carries the directive, including
 Two limits worth knowing:
 
 - **They describe the winning attempt.** Retries and hedges each run their own
-  cache lookup; the reply reports the lookups made on the attempt whose response
-  you received.
+  cache lookup, except a retry after a cached node error, which asks neither
+  tier. The reply reports the lookups made on the attempt whose response you
+  received.
 - **WebSocket has no per-message response headers**, so a cache hit delivered
   over a subscription cannot carry them — the same limitation
   `Lava-Provider-Address` already has there. Use the counters for WebSocket.
