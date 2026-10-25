@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"sync"
 )
 
 // ---------------------------------------------------------------------------
@@ -243,21 +245,57 @@ func (s *Header_HeaderType) UnmarshalJSON(b []byte) error {
 // ParseValue_VerificationSeverity
 // ---------------------------------------------------------------------------
 
+// ParseValue_VerificationSeverity is what a failed verification costs (MAG-3950):
+//   - Fail: the url that failed stops serving, and the provider when no url is left;
+//   - PartialFail: only the service the check covers is switched off;
+//   - Warning: nothing; the failure is logged and published.
+//
+// Default is a value whose spec sets none. It is the zero value, so the 920 values
+// that set none behave as they always have: Fail for a basic check, PartialFail for
+// an add-on or extension check (chainlib.EffectiveSeverity). An explicit Fail on an
+// add-on check makes that add-on mandatory.
 type ParseValue_VerificationSeverity int32
 
 const (
-	ParseValue_Fail    ParseValue_VerificationSeverity = 0
-	ParseValue_Warning ParseValue_VerificationSeverity = 1
+	ParseValue_Default     ParseValue_VerificationSeverity = 0
+	ParseValue_Warning     ParseValue_VerificationSeverity = 1
+	ParseValue_Fail        ParseValue_VerificationSeverity = 2
+	ParseValue_PartialFail ParseValue_VerificationSeverity = 3
 )
 
 var ParseValue_VerificationSeverity_name = map[int32]string{
-	0: "Fail",
+	0: "Default",
 	1: "Warning",
+	2: "Fail",
+	3: "PartialFail",
 }
 
 var ParseValue_VerificationSeverity_value = map[string]int32{
-	"Fail":    0,
-	"Warning": 1,
+	"Default":     0,
+	"Warning":     1,
+	"Fail":        2,
+	"PartialFail": 3,
+}
+
+// unknownSeverities holds the severity names specs gave that this router does not
+// know. Each reads as Default; TakeUnknownSeverities hands them to whoever logs.
+var unknownSeverities sync.Map
+
+// TakeUnknownSeverities returns, once each, the severity names a decoded spec gave
+// that this router does not know, sorted. Each was read as Default, the severity for
+// where its check sits.
+func TakeUnknownSeverities() []string {
+	var names []string
+	unknownSeverities.Range(func(name, _ any) bool {
+		if _, taken := unknownSeverities.LoadAndDelete(name); taken {
+			if text, ok := name.(string); ok {
+				names = append(names, text)
+			}
+		}
+		return true
+	})
+	sort.Strings(names)
+	return names
 }
 
 func (x ParseValue_VerificationSeverity) String() string {
@@ -279,6 +317,10 @@ func (s *ParseValue_VerificationSeverity) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &j); err != nil {
 		return err
 	}
-	*s = ParseValue_VerificationSeverity(ParseValue_VerificationSeverity_value[j])
+	value, known := ParseValue_VerificationSeverity_value[j]
+	if !known && j != "" {
+		unknownSeverities.Store(j, struct{}{})
+	}
+	*s = ParseValue_VerificationSeverity(value)
 	return nil
 }

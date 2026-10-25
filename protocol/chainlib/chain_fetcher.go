@@ -246,6 +246,23 @@ type ProviderAdmission struct {
 	throttle          error
 }
 
+// EffectiveSeverity is what a failed check costs (MAG-3950). A value whose spec sets
+// no severity takes the default for where its check sits, which is what the router
+// has always done: Fail for a basic check, PartialFail for an add-on or extension
+// check. An explicit Fail on an add-on check makes the add-on mandatory: its failure
+// takes the url out. PartialFail on a basic check has no smaller part to switch off,
+// so it acts as Fail.
+func EffectiveSeverity(verification VerificationContainer) spectypes.ParseValue_VerificationSeverity {
+	switch verification.Severity {
+	case spectypes.ParseValue_Warning, spectypes.ParseValue_Fail:
+		return verification.Severity
+	}
+	if refusedServiceFor(verification) == "" {
+		return spectypes.ParseValue_Fail
+	}
+	return spectypes.ParseValue_PartialFail
+}
+
 // refusedServiceFor returns the service a failed verification should be charged
 // to, or "" when the failure belongs to no single service and costs the url.
 //
@@ -587,14 +604,15 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 	return unknown
 }
 
-// Validate reports the first Fail-severity failure on any node url, or nil.
+// Validate reports the first failure on any node url that costs anything (Fail or
+// PartialFail), or nil.
 func (cf *ChainFetcher) Validate(ctx context.Context) error {
 	for _, outcome := range cf.verifyNodeUrls(ctx, verifyOptions{}) {
 		if outcome.err != nil {
 			return outcome.err
 		}
 		for _, check := range outcome.checks {
-			if check.err != nil && check.verification.Severity == spectypes.ParseValue_Fail {
+			if check.err != nil && EffectiveSeverity(check.verification) != spectypes.ParseValue_Warning {
 				return chargedTo(check.verification.Name, utils.LavaFormatError("invalid Verification on provider startup", check.err,
 					utils.Attribute{Key: "Addons", Value: outcome.url.Addons}, utils.Attribute{Key: "verification", Value: check.verification.Name}))
 			}
@@ -604,9 +622,10 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 }
 
 // ValidateCollections runs the same verifications Validate does, on every node
-// url, and charges each Fail-severity failure to the narrowest thing that owns it:
-// one service (MAG-3326), else the url. The provider is refused only when a path it
-// serves has no url left — see servingError.
+// url, and charges each failure that costs anything to what its severity names
+// (EffectiveSeverity): a PartialFail to its one service (MAG-3326), a Fail to the
+// url. The provider is refused only when a path it serves has no url left — see
+// servingError.
 //
 // Deliberately NOT derived: a base-collection failure does not turn a url into a
 // standalone-addons one. Only an operator can tell "serves only EVM by design"
@@ -712,7 +731,7 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 			Name:      check.verification.Name,
 			Addon:     check.verification.Addon,
 			Extension: check.verification.Extension,
-			Severity:  check.verification.Severity.String(),
+			Severity:  EffectiveSeverity(check.verification).String(),
 			Ok:        check.err == nil,
 		}
 		if check.err != nil {
@@ -736,10 +755,10 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 	return result
 }
 
-// admissionFrom charges every failed Fail-severity check to the narrowest thing
-// that owns it — one service on one url, else the url — setting a rate limit apart
-// from a refusal, and refuses the provider only when a path it serves is left with
-// no url (servingError).
+// admissionFrom charges every failed check that costs anything to what its severity
+// names (EffectiveSeverity) — one service on one url for a PartialFail, the url for a
+// Fail — setting a rate limit apart from a refusal, and refuses the provider only
+// when a path it serves is left with no url (servingError).
 func admissionFrom(outcomes []nodeUrlOutcome) (ProviderAdmission, error) {
 	var admission ProviderAdmission
 	for index, outcome := range outcomes {
@@ -758,12 +777,17 @@ func admissionFrom(outcomes []nodeUrlOutcome) (ProviderAdmission, error) {
 			charge(outcome.err)
 		}
 		for _, check := range outcome.checks {
-			if check.err == nil || check.verification.Severity != spectypes.ParseValue_Fail {
+			if check.err == nil {
+				continue
+			}
+			severity := EffectiveSeverity(check.verification)
+			if severity == spectypes.ParseValue_Warning {
 				continue
 			}
 			service := refusedServiceFor(check.verification)
 			switch {
-			case service == "":
+			case service == "" || severity == spectypes.ParseValue_Fail:
+				// A basic check, or an add-on check the spec made mandatory: the url goes.
 				charge(chargedTo(check.verification.Name, fmt.Errorf("%s verification failed: %w", check.verification.Name, check.err)))
 			case IsRateLimitFailure(check.err):
 				admission.throttleService(outcome.url, service, check.err)

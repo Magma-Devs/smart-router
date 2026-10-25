@@ -17,7 +17,6 @@ func headDependentVerification(name string) VerificationContainer {
 	return VerificationContainer{
 		Name:           name,
 		LatestDistance: 100,
-		Severity:       spectypes.ParseValue_Fail,
 	}
 }
 

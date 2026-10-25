@@ -29,7 +29,7 @@ func archiveOnBaseCollection() VerificationContainer {
 	return VerificationContainer{
 		Name:            "pruning",
 		Value:           "0x0",
-		Severity:        spectypes.ParseValue_Fail,
+		Severity:        spectypes.ParseValue_Default, // the spec sets none, as every bundled spec does
 		VerificationKey: VerificationKey{Addon: "", Extension: "archive"},
 		ParseDirective:  spectypes.ParseDirective{FunctionTag: spectypes.FUNCTION_TAG_VERIFICATION, ApiName: "pruning"},
 	}
