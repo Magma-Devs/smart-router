@@ -1541,6 +1541,28 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// demoted primary. Cold — no re-probing; the simulator controls provider
 	// behaviour in the tests this serves. No-op 200 (empty restored) when the
 	// router is absent (test fixtures) so callers can probe it unconditionally.
+	// GET /debug/verification — per chain, what each configured provider is failing, with
+	// the start times smartrouter_provider_verification_failed publishes, and when its next
+	// verification retry is due (MAG-3950). Read-only. It is what an automated test reads
+	// instead of the logs or the metric.
+	mux.HandleFunc("/debug/verification", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		state := map[string]any{"chains": []verificationDebugChain{}}
+		if deps.router != nil {
+			state = deps.router.verificationDebugState()
+		}
+		body, err := json.Marshal(state)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	})
+
 	mux.HandleFunc("/debug/reset-pairing", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -4236,21 +4258,22 @@ func (rpsr *RPCSmartRouter) chainIsDark(sessionManagerKey string) bool {
 // stale reading is worse than none: left at 0 it pages forever after a recovery,
 // left at 2 it stays silent after a demotion takes the last provider away.
 func (rpsr *RPCSmartRouter) publishServingTierLocked(chainKey string) {
-	if rpsr.smartRouterMetricsManager == nil {
-		return
-	}
 	// Labels come from reverifyInputs, the only per-chain record of the endpoint.
 	// Absent in tests that build RPCSmartRouter directly; nothing to publish then.
 	inputs := rpsr.reverifyInputs[chainKey]
 	if inputs == nil || inputs.rpcEndpoint == nil {
 		return
 	}
-	rpsr.smartRouterMetricsManager.SetEndpointServingTier(
-		inputs.rpcEndpoint.ChainID,
-		inputs.rpcEndpoint.ApiInterface,
-		len(rpsr.providerSessions[chainKey]),
-		len(rpsr.backupProviderSessions[chainKey]),
-	)
+	if rpsr.smartRouterMetricsManager != nil {
+		rpsr.smartRouterMetricsManager.SetEndpointServingTier(
+			inputs.rpcEndpoint.ChainID,
+			inputs.rpcEndpoint.ApiInterface,
+			len(rpsr.providerSessions[chainKey]),
+			len(rpsr.backupProviderSessions[chainKey]),
+		)
+	}
+	// Tracked whether or not metrics are published: the transition logs and
+	// /debug/verification read the same record (MAG-3950).
 	rpsr.publishVerificationFailedLocked(chainKey, inputs)
 }
 
@@ -4271,6 +4294,7 @@ func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inp
 	if inputs == nil || inputs.rpcEndpoint == nil {
 		return
 	}
+	now := time.Now()
 	for _, tier := range []struct {
 		tier       reverifyTier
 		configured []*lavasession.RPCStaticProviderEndpoint
@@ -4294,8 +4318,9 @@ func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inp
 			} else if inputs.refusedFor != nil {
 				failures = append(failures, inputs.refusedFor(p)...)
 			}
-			rpsr.smartRouterMetricsManager.SetProviderVerificationFailures(
-				inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name, tier.tier.String(), failures)
+			tracked := inputs.trackFailures(tier.tier, p.Name, failures, now)
+			rpsr.smartRouterMetricsManager.SetProviderVerificationFailuresSince(
+				inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name, tier.tier.String(), tracked)
 		}
 	}
 }

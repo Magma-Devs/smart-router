@@ -124,6 +124,10 @@ type chainReverifyInputs struct {
 	// retries is the chain's verification retry schedule (MAG-3950). Nil in tests that
 	// build chainReverifyInputs by hand; every method on it is nil-safe.
 	retries *retrySchedule
+	// failing is what each provider is failing, with when each failure started, keyed
+	// "<tier>|<name>" (trackFailures). The gauge, the transition logs and
+	// /debug/verification all read it. Guarded by RPCSmartRouter.mu; lazily allocated.
+	failing map[string][]metrics.TimedVerificationFailure
 	// verdictAt is when the probe behind each provider's last applied verdict started,
 	// keyed "<tier>|<name>". A retry probe that started before it lost a race with
 	// another pass, the epoch's, and is dropped: applying it would count that pass's
