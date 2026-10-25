@@ -119,9 +119,10 @@ func verificationNeedsHead(v VerificationContainer) bool {
 // stopValidateRetries reports whether a failed attempt should end Validate's zero-delay
 // retry budget early. The budget exists for a cold-booting node; a rate-limited attempt
 // is different in kind — the extra requests land inside the same limiter window and only
-// add to the load that produced the 429.
+// add to the load that produced the 429. It reads a rate limit the way admission does, so
+// a gRPC 429 that survives only in the status text stops the burst too.
 func stopValidateRetries(err error) bool {
-	return err == nil || errors.Is(err, common.StatusCodeError429)
+	return err == nil || IsRateLimitFailure(err)
 }
 
 // isWebSocketUrl reports whether a node url is dialed as a websocket. A gRPC
