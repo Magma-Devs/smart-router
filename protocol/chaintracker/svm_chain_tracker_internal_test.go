@@ -3,6 +3,7 @@ package chaintracker
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -132,6 +133,44 @@ func TestSVMChainTracker_FetchLatestBlockNum_SameSlotRecordsEachPoll(t *testing.
 	for _, obs := range fetcher.observations {
 		require.Equal(t, int64(777), obs.block)
 		require.NoError(t, obs.err)
+	}
+}
+
+// A node that cannot serve the poll answers with a JSON-RPC error and no result, and the
+// transport hands that over as a reply, not an error (MAG-4613). The poll must fail with the
+// node's own message instead of reading as a successful poll at slot 0, and must leave the
+// slot the tracker last saw alone.
+func TestSVMChainTracker_FetchLatestBlockNum_ErrorReplyIsAFailedPoll(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		reply   string
+		wantMsg string
+	}{
+		{name: "node behind", reply: `{"jsonrpc":"2.0","error":{"code":-32005,"message":"Node is behind by 42 slots"},"id":1}`, wantMsg: "Node is behind by 42 slots"},
+		{name: "internal error", reply: `{"jsonrpc":"2.0","error":{"code":-32603,"message":"Internal error"},"id":1}`, wantMsg: "Internal error"},
+		{name: "null result", reply: `{"jsonrpc":"2.0","result":null,"id":1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fetcher := &svmObserverFetcher{
+				customResponse: []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":777},"value":{"blockhash":"h"}}}`),
+			}
+			svm := newTestSVMChainTracker(t, fetcher)
+			_, err := svm.FetchLatestBlockNum(context.Background())
+			require.NoError(t, err)
+
+			fetcher.customResponse = []byte(tc.reply)
+			_, err = svm.FetchLatestBlockNum(context.Background())
+			require.Error(t, err, "an error reply must fail the poll, not read as slot 0")
+
+			require.Len(t, fetcher.observations, 2)
+			obs := fetcher.observations[1]
+			require.Equal(t, int64(0), obs.block, "a failed poll observes no block")
+			require.Error(t, obs.err, "the failure is recorded on the observation")
+			if tc.wantMsg != "" {
+				require.Contains(t, obs.err.Error(), tc.wantMsg, "the node's own message is kept")
+			}
+			require.Equal(t, int64(777), atomic.LoadInt64(&svm.seenBlock), "a failed poll leaves the last seen slot alone")
+		})
 	}
 }
 
