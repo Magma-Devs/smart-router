@@ -4286,15 +4286,16 @@ func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inp
 //   - scope=url with a service: a service one url lost while another url still serves it;
 //   - scope=url with no service: a node url refused whole.
 func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []metrics.ProviderVerificationFailure {
-	var failures []metrics.ProviderVerificationFailure
-	for _, r := range admission.Refused() {
+	refused, urlChecks := admission.Refused(), admission.RefusedURLChecks()
+	failures := make([]metrics.ProviderVerificationFailure, 0, len(refused)+len(urlChecks))
+	for _, r := range refused {
 		scope := metrics.VerificationScopeService
 		if servedElsewhere(chainParser, provider, admission, r.Service) {
 			scope = metrics.VerificationScopeURL
 		}
 		failures = append(failures, metrics.ProviderVerificationFailure{Scope: scope, Service: r.Service, Check: r.Check})
 	}
-	for _, check := range admission.RefusedURLChecks() {
+	for _, check := range urlChecks {
 		failures = append(failures, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: check})
 	}
 	return failures
