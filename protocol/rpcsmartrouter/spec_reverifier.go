@@ -186,8 +186,8 @@ func applyReverification(
 	activeNames := byName(fresh)
 
 	// probe returns the validation's error, the rate limit a pass that otherwise
-	// succeeded met on part of the provider, and why the url the hold-off is keyed by
-	// (holdoffURLKey: the first one) got no answer when the provider passed without it.
+	// succeeded met on one of the provider's urls, and why the url the hold-off is keyed
+	// by (holdoffURLKey: the first one) got no answer when the provider passed without it.
 	probe := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) (err, throttle, unanswered error) {
 		if inputs.validateFn != nil {
 			return inputs.validateFn(c, p), nil, nil
@@ -213,8 +213,13 @@ func applyReverification(
 			unanswered = cause
 		}
 		// A url or service that was only rate-limited keeps what the last pass knew.
-		throttle = admission.Throttled()
-		if throttle != nil && inputs.admissionFor != nil {
+		// Only a url that was rate-limited backs the provider off, though: the hold-off
+		// is the provider's, and relay selection skips a held provider for every
+		// request. A 429 on one add-on's own check (a premium method's own limit) says
+		// nothing about the base traffic the provider carries; on main that check
+		// refused the add-on alone, and here it keeps the add-on's last verdict.
+		throttle = admission.URLThrottle()
+		if admission.Throttled() != nil && inputs.admissionFor != nil {
 			admission = admission.KeepingThrottledFrom(inputs.admissionFor(p))
 		}
 		// The url grace keeps a url in a session it is already serving. A provider out of

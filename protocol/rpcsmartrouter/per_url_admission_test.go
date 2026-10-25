@@ -258,6 +258,41 @@ func TestApplyReverification_ARateLimitedUrlBacksOffAndChangesNothing(t *testing
 	require.True(t, holdoffs.HeldOff(provider.Name, holdoffURLKey(provider)), "the vendor's limit is honoured on the next pass")
 }
 
+// A 429 on one add-on's own check (here trace_block, a premium method with its own limit)
+// leaves the add-on as the last pass had it and holds nothing. The hold-off is the
+// provider's, and relay selection skips a held provider for every request, so a provider
+// that answers its base checks keeps carrying base traffic.
+func TestApplyReverification_AnAddonsOwnRateLimitHoldsNothing(t *testing.T) {
+	up := newFakeUpstreams(t)
+	provider := staticProvider("ETH1",
+		commonlib.NodeUrl{Url: up.httpURL("/q/" + upTraceRate)},
+		commonlib.NodeUrl{Url: up.httpURL("/q/" + upTraceRate), Addons: []string{"trace"}},
+	)
+	admissions := newAdmissionRegistry()
+	holdoffs := holdoff.NewRegistry()
+	inputs := &chainReverifyInputs{
+		chainParser:                liveParser(t, "ETH1", true),
+		rpcEndpoint:                &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		convertProvidersToSessions: fakeConvert,
+		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider},
+		recordAdmission:            admissions.record,
+		recordReverifiedAdmission:  admissions.recordReverified,
+		admissionFor:               admissions.admissionFor,
+		rateLimitHoldoff:           holdoffs,
+	}
+	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
+
+	next, demoted, _ := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+	require.Contains(t, collectNames(next), provider.Name)
+	require.Empty(t, demoted)
+	require.Contains(t, up.methods("http", "/q/"+upTraceRate), "trace_block", "the add-on's check was asked, or this test proves nothing")
+	_, held := holdoffs.ProviderReadyAt(provider.Name)
+	require.False(t, held, "relay selection still serves the provider")
+	services, keep := admissions.admissionFor(provider).AdmittedServices(provider.NodeUrls[1])
+	require.True(t, keep)
+	require.Equal(t, []string{"trace"}, services, "trace keeps the verdict it had: never refused")
+}
+
 // The retry loop records what it admitted, so the provider comes back without the
 // url it found dead.
 func TestRevalidateTier_RecordsTheAdmission(t *testing.T) {

@@ -282,6 +282,21 @@ func (a ProviderAdmission) URLThrottled(index int) bool {
 	return throttled
 }
 
+// URLThrottle is the rate limit a whole node url met, the first by position: nil when
+// only single services were rate-limited, or nothing was.
+func (a ProviderAdmission) URLThrottle() error {
+	first := -1
+	for index := range a.throttledURLs {
+		if first < 0 || index < first {
+			first = index
+		}
+	}
+	if first < 0 {
+		return nil
+	}
+	return a.throttledURLs[first]
+}
+
 // RefusedURLs lists the positions of the refused node urls, in order.
 func (a ProviderAdmission) RefusedURLs() []int {
 	indices := make([]int, 0, len(a.refusedURLs))

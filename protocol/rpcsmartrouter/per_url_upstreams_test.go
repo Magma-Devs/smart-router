@@ -32,6 +32,7 @@ const (
 	upSlowChain = "slowchain" // ETH1 node that holds eth_chainId for 10s
 	upSubOnly   = "subonly"   // socket that answers eth_subscribe and nothing else
 	upSolana    = "sol"       // Solana node without the token-owner index
+	upTraceRate = "tracerate" // full ETH1 node whose trace_ methods answer 429: a premium method's own limit
 )
 
 const upLatest = 0x1400000
@@ -148,6 +149,14 @@ func (u *fakeUpstreams) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"error":"too many requests"}`))
 		return
+	case upTraceRate:
+		var request map[string]any
+		if json.Unmarshal(raw, &request) == nil && strings.HasPrefix(fmt.Sprint(request["method"]), "trace_") {
+			u.record("http", r.URL.Path, raw)
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"too many requests"}`))
+			return
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(u.answer("http", r.URL.Path, raw))
