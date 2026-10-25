@@ -183,11 +183,12 @@ func applyReverification(
 	var admissionMovedMu sync.Mutex
 	admissionMoved := map[string]struct{}{}
 
-	// probe returns the validation's error, and the rate limit a pass that otherwise
-	// succeeded met on part of the provider.
-	probe := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) (err, throttle error) {
+	// probe returns the validation's error, the rate limit a pass that otherwise
+	// succeeded met on part of the provider, and why the url the hold-off is keyed by
+	// (holdoffURLKey: the first one) got no answer when the provider passed without it.
+	probe := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) (err, throttle, unanswered error) {
 		if inputs.validateFn != nil {
-			return inputs.validateFn(c, p), nil
+			return inputs.validateFn(c, p), nil, nil
 		}
 		// Per-collection here too (MAG-3326). With the all-or-nothing Validate
 		// this path re-probed the UNSTRIPPED config every tick, failed on the
@@ -201,7 +202,13 @@ func applyReverification(
 		// until the process restarts.
 		admission, err := validateProviderCollections(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
 		if err != nil {
-			return err, nil
+			return err, nil, nil
+		}
+		// A provider now passes on its other urls with its first one refused. That
+		// url's refusal is the pass's verdict on it: a dial or a request that got no
+		// answer leaves its hold-off as it was (MAG-4165).
+		if cause := admission.URLRefusal(0); common.DetectConnectionError(cause) != nil {
+			unanswered = cause
 		}
 		// A url or service that was only rate-limited keeps what the last pass knew.
 		throttle = admission.Throttled()
@@ -218,7 +225,7 @@ func applyReverification(
 			admissionMoved[p.Name] = struct{}{}
 			admissionMovedMu.Unlock()
 		}
-		return nil, throttle
+		return nil, throttle, unanswered
 	}
 	if inputs.rateLimitHoldoff == nil {
 		inputs.rateLimitHoldoff = holdoff.Shared
@@ -240,7 +247,7 @@ func applyReverification(
 			)
 			return common.StatusCodeError429
 		}
-		err, throttle := probe(c, p)
+		err, throttle, unanswered := probe(c, p)
 		if isRateLimitFailure(err) {
 			throttle = err
 		}
@@ -257,8 +264,9 @@ func applyReverification(
 		// A probe that got no answer (timeout, refused or reset connection, DNS) is not one:
 		// it clears nothing. A gateway enforcing a ban often drops the connection rather than
 		// answering, and the url's entries are shared — RecordAnswer also drops the per-url
-		// chain tracker's hold-off and strikes (MAG-4165).
-		if common.DetectConnectionError(err) == nil {
+		// chain tracker's hold-off and strikes (MAG-4165). The same goes for the keyed url
+		// alone, when the provider passed on its others.
+		if common.DetectConnectionError(err) == nil && unanswered == nil {
 			inputs.rateLimitHoldoff.RecordAnswer(p.Name, urlKey)
 		}
 		return err

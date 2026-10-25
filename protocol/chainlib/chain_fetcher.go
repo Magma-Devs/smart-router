@@ -269,6 +269,11 @@ func (a ProviderAdmission) URLRefused(index int) bool {
 	return refused
 }
 
+// URLRefusal is why the node url at this position was refused, nil when it was not.
+func (a ProviderAdmission) URLRefusal(index int) error {
+	return a.refusedURLs[index]
+}
+
 // RefusedURLs lists the positions of the refused node urls, in order.
 func (a ProviderAdmission) RefusedURLs() []int {
 	indices := make([]int, 0, len(a.refusedURLs))
