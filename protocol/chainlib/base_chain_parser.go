@@ -278,8 +278,10 @@ func (bcp *BaseChainParser) SeparateAddonsExtensions(ctx context.Context, suppor
 				utils.Attribute{Key: "supported", Value: supportedToCheck})
 		}
 	}
-
-	return addons, extensions, err
+	if err != nil {
+		return addons, extensions, &VerificationFailure{Check: CheckUnsupportedAddon, Err: err}
+	}
+	return addons, extensions, nil
 }
 
 // gets all verifications for an endpoint supporting multiple addons and extensions

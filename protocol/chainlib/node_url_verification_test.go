@@ -61,7 +61,7 @@ func TestServingError_ABasePathNeedsABaseUrl(t *testing.T) {
 	require.ErrorIs(t, baseRefused.servingError([]common.NodeUrl{base, debugOnly}), errNotServed, "the standalone url carries no base traffic")
 
 	var debugRefused ProviderAdmission
-	debugRefused.fail(debugOnly, "debug")
+	debugRefused.fail(debugOnly, "debug", "enabled")
 	require.ErrorIs(t, debugRefused.servingError([]common.NodeUrl{debugOnly}), errKeepsNothing, "a standalone url that keeps nothing serves nothing")
 	require.NoError(t, debugRefused.servingError([]common.NodeUrl{base, debugOnly}), "the base url still serves the path")
 }
@@ -72,7 +72,7 @@ func TestKeepingThrottledFrom(t *testing.T) {
 
 	var previous ProviderAdmission
 	previous.refuseURL(1, errNotServed)
-	previous.fail(url, "trace")
+	previous.fail(url, "trace", "trace")
 
 	var now ProviderAdmission
 	now.throttleURL(1, throttledErr())
