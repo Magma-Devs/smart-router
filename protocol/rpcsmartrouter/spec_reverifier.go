@@ -659,7 +659,17 @@ func validateProviderCollections(
 	// would hit a nil connector. For non-gRPC interfaces this is a no-op
 	// (returns the original parser).
 	validationParser := chainlib.CloneChainParserForValidation(chainParser)
-	if err := chainlib.ProviderShapeError(endpoint, validationParser); err != nil {
+	// The shape rules — an http url is mandatory, a subscribing chain needs a websocket url — are
+	// written for a provider's url group. Since MAG-4219 a provider entity holds one url and
+	// carries the group it was split from in GroupNodeUrls, so the rules read the group, while
+	// the verification below dials this entity's url and no other.
+	shape := endpoint
+	if len(provider.GroupNodeUrls) > 0 {
+		group := *endpoint
+		group.NodeUrls = provider.GroupNodeUrls
+		shape = &group
+	}
+	if err := chainlib.ProviderShapeError(shape, validationParser); err != nil {
 		return chainlib.ProviderAdmission{}, &chainlib.VerificationFailure{Check: chainlib.CheckConfig, Err: err}
 	}
 

@@ -43,6 +43,7 @@ func splitProvidersPerURL(
 		if provider == nil {
 			continue
 		}
+		first := len(entities)
 		for _, node := range mergeSameNodeURLs(provider) {
 			// Expanded per configured url, not per provider, so the index survives expansion
 			// without a field on common.NodeUrl.
@@ -53,6 +54,17 @@ func splitProvidersPerURL(
 				entity.NodeUrls = []common.NodeUrl{url}
 				entities = append(entities, &entity)
 			}
+		}
+		// Every entity of this provider routes its verification over the whole group: the
+		// spec's routing rules (websocket serves the subscription collections, http the rest,
+		// a subscribing chain needs a websocket url in the group) are written for the
+		// operator's url set, and a single url is refused by them on its own.
+		group := make([]common.NodeUrl, 0, len(entities)-first)
+		for _, entity := range entities[first:] {
+			group = append(group, entity.NodeUrls[0])
+		}
+		for _, entity := range entities[first:] {
+			entity.GroupNodeUrls = group
 		}
 	}
 	return entities

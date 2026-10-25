@@ -251,3 +251,36 @@ func TestSplitProvidersPerURL_DownstreamHelpersSeeEntities(t *testing.T) {
 
 	require.NoError(t, lavasession.ValidateUniqueProviderNames(entities))
 }
+
+// The spec verifier routes over a provider's url group — a websocket url is keyed under the
+// websocket extension and needs an http url for the base route, and a subscribing chain needs a
+// websocket url in the group — so every entity carries its group for the router while only its
+// own url is verified. Found by the local run of 2026-10-25 (test plan F-2): an http + ws
+// provider lost both entities at boot without it.
+func TestSplitProvidersPerURL_EntitiesCarryTheirProviderGroup(t *testing.T) {
+	got := splitProvidersPerURL([]*lavasession.RPCStaticProviderEndpoint{
+		splitTestProvider("up-a",
+			common.NodeUrl{Url: "https://a.example"},
+			common.NodeUrl{Url: "wss://a.example/ws"},
+		),
+		splitTestProvider("up-b", common.NodeUrl{Url: "https://b.example"}),
+	}, []string{""}, httpOnlyCollections)
+	require.Equal(t, []string{"up-a/0", "up-a/1", "up-b/0"}, entityNames(got))
+
+	group := []common.NodeUrl{{Url: "https://a.example"}, {Url: "wss://a.example/ws"}}
+	require.Equal(t, group, got[0].GroupNodeUrls)
+	require.Equal(t, group, got[1].GroupNodeUrls, "both entities of up-a see the same group")
+	require.Equal(t, []common.NodeUrl{{Url: "https://b.example"}}, got[2].GroupNodeUrls, "up-b's group is its own url")
+	require.Len(t, got[1].NodeUrls, 1, "the entity itself still holds one url")
+}
+
+func TestSplitProvidersPerURL_GroupIncludesExpandedPaths(t *testing.T) {
+	got := splitProvidersPerURL([]*lavasession.RPCStaticProviderEndpoint{
+		splitTestProvider("chainstack", common.NodeUrl{Url: "https://ton.example/api"}),
+	}, []string{"", "/v2", "/v3"}, httpOnlyCollections)
+	require.Len(t, got, 3)
+	for _, entity := range got {
+		require.Len(t, entity.GroupNodeUrls, 3, "the group is the parent's urls after expansion")
+	}
+	require.Equal(t, "/v3", got[2].GroupNodeUrls[2].InternalPath)
+}

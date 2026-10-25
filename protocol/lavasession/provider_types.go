@@ -47,6 +47,13 @@ type RPCStaticProviderEndpoint struct {
 	// readers that still want it, the lava-select-provider header and the metrics manager. Set
 	// by the split, never read from the file.
 	Parent string `yaml:"-" json:"-" mapstructure:"-"`
+	// GroupNodeUrls is every url of the configured provider this entity was split from, after
+	// internal-path expansion, this entity's own url included (MAG-4219). The spec verifier builds
+	// its routing over them, because the spec's routing rules are written for a provider's url
+	// group — a websocket url serves the subscription collections, an http url the rest, and a
+	// chain that subscribes needs a websocket url somewhere in the group — while only NodeUrls is
+	// verified and admitted. Set by the split, never read from the file; empty means NodeUrls.
+	GroupNodeUrls []common.NodeUrl `yaml:"-" json:"-" mapstructure:"-"`
 }
 
 // ToBase returns the base RPCProviderEndpoint (for compatibility with existing code)
