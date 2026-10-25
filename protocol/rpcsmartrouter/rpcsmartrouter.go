@@ -2825,7 +2825,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			// its expansions with it. Service admission is applied per endpoint below.
 			admission := admissionFor(provider)
 			for _, url := range expandInternalPaths(admittedNodeUrls(provider, admission), chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
-				admittedServices, keep := admission.AdmittedServices(url)
+				admittedServices, keep := admittedServicesFor(chainParser, admission, url)
 				if !keep {
 					// A url that serves only its add-ons and kept none has nothing left.
 					// Building it anyway would empty its service list, flip
@@ -4807,6 +4807,18 @@ func urlRefusal(provider *lavasession.RPCStaticProviderEndpoint, admissionFor fu
 		return func(int) bool { return false }
 	}
 	return admissionFor(provider).URLRefused
+}
+
+// admittedServicesFor is what the endpoint built for url may serve, and whether one is
+// built at all. It reads the url's base traffic as verification and the provider's
+// serving check do (chainlib.ServedAs): a standalone-addons url that names only
+// extensions serves the base collection, so a refused extension does not cost it the url.
+func admittedServicesFor(chainParser chainlib.ChainParser, admission chainlib.ProviderAdmission, url common.NodeUrl) ([]string, bool) {
+	served, err := chainlib.ServedAs(chainParser, url)
+	if err != nil {
+		served = url
+	}
+	return admission.AdmittedServices(served)
 }
 
 // admittedNodeUrls is a provider's configured urls minus the ones its admission

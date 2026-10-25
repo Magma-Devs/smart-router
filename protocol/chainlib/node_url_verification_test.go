@@ -45,6 +45,27 @@ func TestServingError(t *testing.T) {
 	require.Error(t, socketsOnly.servingError(urls[2:]), "a socket serves no path")
 }
 
+// A path that declares a url serving the base collection needs one of those left: a standalone-
+// addons url carries no base traffic. A provider whose urls are all standalone serves its add-ons
+// as long as one of them keeps something (MAG-4231).
+func TestServingError_ABasePathNeedsABaseUrl(t *testing.T) {
+	base := common.NodeUrl{Url: "https://a"}
+	debugOnly := common.NodeUrl{Url: "https://b", Addons: []string{"debug"}, StandaloneAddons: true}
+
+	var none ProviderAdmission
+	require.NoError(t, none.servingError([]common.NodeUrl{base, debugOnly}))
+	require.NoError(t, none.servingError([]common.NodeUrl{debugOnly}), "an add-on-only provider serves its add-ons")
+
+	var baseRefused ProviderAdmission
+	baseRefused.refuseURL(0, errNotServed)
+	require.ErrorIs(t, baseRefused.servingError([]common.NodeUrl{base, debugOnly}), errNotServed, "the standalone url carries no base traffic")
+
+	var debugRefused ProviderAdmission
+	debugRefused.fail(debugOnly, "debug")
+	require.ErrorIs(t, debugRefused.servingError([]common.NodeUrl{debugOnly}), errKeepsNothing, "a standalone url that keeps nothing serves nothing")
+	require.NoError(t, debugRefused.servingError([]common.NodeUrl{base, debugOnly}), "the base url still serves the path")
+}
+
 // A rate limit settles nothing, so the verdict the last pass gave stands for it.
 func TestKeepingThrottledFrom(t *testing.T) {
 	url := common.NodeUrl{Url: "https://a", Addons: []string{"archive", "trace"}}

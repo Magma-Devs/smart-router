@@ -354,3 +354,36 @@ func TestApplyReverification_TheUrlGraceIsForAPairedProvider(t *testing.T) {
 		require.False(t, refusedDead, "a first failed pass keeps the url in the session it serves")
 	})
 }
+
+// A standalone-addons url carries no base traffic, so it cannot keep a provider whose base url
+// failed: the provider is refused and retried, as on main. A provider whose urls are all
+// standalone add-on urls serves its add-ons (MAG-4231).
+func TestValidateProviderCollections_AStandaloneUrlServesNoBasePath(t *testing.T) {
+	up := newFakeUpstreams(t)
+	debugOnly := commonlib.NodeUrl{Url: up.httpURL("/s/" + upDebug), Addons: []string{"debug"}, StandaloneAddons: true}
+	parser := liveParser(t, "ETH1", true)
+
+	_, err := validateProviderCollections(t.Context(), staticProvider("ETH1", commonlib.NodeUrl{Url: up.httpURL("/s/" + upDead)}, debugOnly), parser, 20*time.Second)
+	require.ErrorContains(t, err, "no node url left serving the root path", "nothing is left serving base traffic")
+
+	admission, err := validateProviderCollections(t.Context(), staticProvider("ETH1", debugOnly), parser, 20*time.Second)
+	require.NoError(t, err, "an add-on-only provider serves its add-ons")
+	services, keep := admittedServicesFor(parser, admission, debugOnly)
+	require.True(t, keep)
+	require.Equal(t, []string{"debug"}, services)
+}
+
+// A standalone-addons url that names only extensions serves the base collection (ServedAs). A
+// refused extension costs it the extension, not the url, in the endpoint builder as in
+// verification and in health (MAG-4231).
+func TestAdmittedServicesFor_AnExtensionOnlyStandaloneUrlKeepsTheBase(t *testing.T) {
+	up := newFakeUpstreams(t)
+	url := commonlib.NodeUrl{Url: up.httpURL("/x/" + upPruned), Addons: []string{"archive"}, StandaloneAddons: true}
+	parser := liveParser(t, "ETH1", true)
+
+	admission, err := validateProviderCollections(t.Context(), staticProvider("ETH1", url), parser, 20*time.Second)
+	require.NoError(t, err)
+	services, keep := admittedServicesFor(parser, admission, url)
+	require.True(t, keep, "the url still serves base traffic")
+	require.Empty(t, services, "archive failed on a pruned node")
+}

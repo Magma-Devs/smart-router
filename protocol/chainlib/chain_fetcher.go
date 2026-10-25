@@ -428,15 +428,21 @@ func servicesIn(set map[admissionKey]struct{}, url common.NodeUrl) []string {
 	return found
 }
 
-// servingError says why a provider has nothing left to serve from, or nil. A path
-// it declares a non-websocket url for has failed when every url there was refused,
-// and is unknown when the rest were only rate-limited. A failed path makes the
-// error a failure; only unknown ones make it the rate limit, which re-verification
-// reads as inconclusive.
+// errKeepsNothing is the refusal of a standalone-addons url whose every declared
+// service was refused: it serves no add-on, and by its config no base traffic.
+var errKeepsNothing = errors.New("every service it declares was refused, and it serves no base traffic")
+
+// servingError says why a provider has nothing left to serve from, or nil. nodeUrls
+// are the provider's urls as their endpoints serve them (ServedAs). A path it
+// declares a non-websocket url for has failed when every url there was refused,
+// and is unknown when the rest were only rate-limited. A path that declares a url
+// serving the base collection needs one of those left: a standalone-addons url
+// carries no base traffic. A failed path makes the error a failure; only unknown
+// ones make it the rate limit, which re-verification reads as inconclusive.
 func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 	type pathState struct {
-		served            bool
-		refused, throttle []error
+		served, base, servedBase bool
+		refused, throttle        []error
 	}
 	paths := map[string]*pathState{}
 	var order []string
@@ -450,12 +456,17 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 			paths[url.InternalPath] = state
 			order = append(order, url.InternalPath)
 		}
+		base := url.ServesBaseCollection()
+		state.base = state.base || base
 		if cause, refused := a.refusedURLs[index]; refused {
 			state.refused = append(state.refused, cause)
+		} else if _, keep := a.AdmittedServices(url); !keep {
+			state.refused = append(state.refused, errKeepsNothing)
 		} else if cause, throttled := a.throttledURLs[index]; throttled {
 			state.throttle = append(state.throttle, cause)
 		} else {
 			state.served = true
+			state.servedBase = state.servedBase || base
 		}
 	}
 	if len(order) == 0 {
@@ -470,8 +481,12 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 	var unknown error
 	for _, path := range order {
 		state := paths[path]
+		served := state.served
+		if state.base {
+			served = state.servedBase
+		}
 		switch {
-		case state.served:
+		case served:
 		case len(state.throttle) == 0:
 			return fmt.Errorf("no node url left serving %s: %w", where(path), state.refused[0])
 		case unknown == nil:
@@ -506,7 +521,7 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 // standalone-addons one. Only an operator can tell "serves only EVM by design"
 // from "its Substrate side is down right now".
 func (cf *ChainFetcher) ValidateCollections(ctx context.Context) (ProviderAdmission, error) {
-	return admissionFrom(cf.endpoint, cf.verifyNodeUrls(ctx, verifyOptions{}))
+	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{}))
 }
 
 // VerificationResult is the outcome of running a single spec verification against one node URL.
@@ -553,7 +568,7 @@ type NodeURLValidation struct {
 // nil when the router would admit it. It is the engine behind `smartrouter health`.
 func (cf *ChainFetcher) ValidateReport(ctx context.Context) ([]NodeURLValidation, error) {
 	outcomes := cf.verifyNodeUrls(ctx, verifyOptions{readEveryHead: true})
-	admission, err := admissionFrom(cf.endpoint, outcomes)
+	admission, err := admissionFrom(outcomes)
 	results := make([]NodeURLValidation, 0, len(outcomes))
 	for index, outcome := range outcomes {
 		results = append(results, outcome.report(index, admission))
@@ -578,6 +593,8 @@ type checkOutcome struct {
 // nodeUrlOutcome is one node url's pass: its connection, its head, every check.
 type nodeUrlOutcome struct {
 	url common.NodeUrl
+	// served is url as its relay endpoint serves it (ServedAs).
+	served common.NodeUrl
 	// err is set when the url could not be dialed or its checks could not be listed.
 	err     error
 	head    int64
@@ -614,6 +631,10 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 		result.Refused, result.Refusal = true, cause.Error()
 		return result
 	}
+	if _, keep := admission.AdmittedServices(o.served); !keep {
+		result.Refused, result.Refusal = true, errKeepsNothing.Error()
+		return result
+	}
 	if cause, throttled := admission.throttledURLs[index]; throttled {
 		result.Throttled = cause.Error()
 	}
@@ -626,7 +647,7 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 // that owns it — one service on one url, else the url — setting a rate limit apart
 // from a refusal, and refuses the provider only when a path it serves is left with
 // no url (servingError).
-func admissionFrom(endpoint *lavasession.RPCProviderEndpoint, outcomes []nodeUrlOutcome) (ProviderAdmission, error) {
+func admissionFrom(outcomes []nodeUrlOutcome) (ProviderAdmission, error) {
 	var admission ProviderAdmission
 	for index, outcome := range outcomes {
 		var failed, throttled error
@@ -673,7 +694,11 @@ func admissionFrom(endpoint *lavasession.RPCProviderEndpoint, outcomes []nodeUrl
 			utils.LavaFormatWarning("node url rate-limited its checks; not refusing it", throttled, utils.LogAttr("url", outcome.url.String()))
 		}
 	}
-	return admission, admission.servingError(endpoint.NodeUrls)
+	served := make([]common.NodeUrl, len(outcomes))
+	for index, outcome := range outcomes {
+		served[index] = outcome.served
+	}
+	return admission, admission.servingError(served)
 }
 
 // verifyNodeUrls runs each node url's verifications over its own connection. Urls
@@ -771,13 +796,14 @@ func (g *connectionGroup) dial(ctx context.Context) (ChainRouter, error) {
 // the router widens to the websocket extension, and for none when websocket
 // verification is off — it is then only dialed.
 func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts verifyOptions) (outcome nodeUrlOutcome) {
-	outcome.url = url
+	outcome.url, outcome.served = url, url
 	utils.LavaFormatInfo("starting validation for url", utils.LogAttr("url", url.String()))
-	url, err := servedAs(g.parser, url)
+	url, err := ServedAs(g.parser, url)
 	if err != nil {
 		outcome.err = err
 		return outcome
 	}
+	outcome.served = url
 	verifications, err := g.cf.nodeUrlVerifications(g.parser, url)
 	if err != nil {
 		outcome.err = err
@@ -885,9 +911,11 @@ func (cf *ChainFetcher) nodeUrlVerifications(chainParser ChainParser, url common
 	return verificationsForNodeUrl(url, append(unscoped, scoped...)), nil
 }
 
-// servedAs is a url as its relay endpoint serves it: standalone-addons names add-on
+// ServedAs is a url as its relay endpoint serves it: standalone-addons names add-on
 // collections, so a url declaring only extensions serves the base collection.
-func servedAs(chainParser ChainParser, url common.NodeUrl) (common.NodeUrl, error) {
+// Verification, the provider's serving check and the endpoint builder all read a
+// url's base traffic from it, so they cannot disagree.
+func ServedAs(chainParser ChainParser, url common.NodeUrl) (common.NodeUrl, error) {
 	if !url.StandaloneAddons || len(url.Addons) == 0 {
 		return url, nil
 	}

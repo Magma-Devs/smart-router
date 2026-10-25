@@ -33,6 +33,7 @@ const (
 	upSubOnly   = "subonly"   // socket that answers eth_subscribe and nothing else
 	upSolana    = "sol"       // Solana node without the token-owner index
 	upTraceRate = "tracerate" // full ETH1 node whose trace_ methods answer 429: a premium method's own limit
+	upDebug     = "debug"     // full ETH1 node that serves the debug add-on too
 )
 
 const upLatest = 0x1400000
@@ -218,6 +219,9 @@ func reply(p string, request map[string]any) map[string]any {
 	}
 	if p == upSubOnly && method != "eth_subscribe" {
 		return failure(-32601, "Method not found")
+	}
+	if p == upDebug && method == "debug_getRawHeader" {
+		return result("0xf90211")
 	}
 	switch method {
 	case "eth_subscribe":

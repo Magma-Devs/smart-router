@@ -367,6 +367,25 @@ func TestHealth_WarningSeverityIsCarried(t *testing.T) {
 
 // A check the deadline cut off says so, and so does every check after it: none reads
 // as the connector's own "connector is closed".
+// health reads a standalone url's base traffic as the router does. Beside a dead base url it
+// leaves nothing serving base, so the provider is excluded; and a standalone url whose only
+// add-on failed keeps nothing, so it is refused (MAG-4231).
+func TestHealth_AStandaloneUrlServesNoBasePath(t *testing.T) {
+	up := newFakeUpstreams(t)
+	debugOnly := commonlib.NodeUrl{Url: up.httpURL("/s/" + upDebug), Addons: []string{"debug"}, StandaloneAddons: true}
+	rows := healthProbe(t, "ETH1", true, 20*time.Second, commonlib.NodeUrl{Url: up.httpURL("/s/" + upDead)}, debugOnly)
+	require.Len(t, rows, 2)
+	assert.Equal(t, routerExcluded, rows[0].Router.Verdict)
+	assert.Equal(t, routerExcluded, rows[1].Router.Verdict)
+	assert.True(t, rows[1].Ok, "the debug url's own checks pass")
+
+	noDebug := commonlib.NodeUrl{Url: up.httpURL("/s/" + upArchive), Addons: []string{"debug"}, StandaloneAddons: true}
+	rows = healthProbe(t, "ETH1", true, 20*time.Second, commonlib.NodeUrl{Url: up.httpURL("/s/" + upArchive)}, noDebug)
+	require.Len(t, rows, 2)
+	assert.Equal(t, routerAdmitted, rows[0].Router.Verdict)
+	assert.Equal(t, routerRefused, rows[1].Router.Verdict, "debug is all it declares, and it failed")
+}
+
 // A socket that accepts and never answers its handshake is cut off by the deadline while it is
 // dialed. The row says so, as it does for a check the deadline cut off, and reads no height.
 func TestHealth_ACutOffDialNamesTheDeadline(t *testing.T) {
