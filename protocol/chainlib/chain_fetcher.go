@@ -275,6 +275,13 @@ func (a ProviderAdmission) URLRefusal(index int) error {
 	return a.refusedURLs[index]
 }
 
+// URLThrottled reports whether the pass met only rate limits on the node url at this
+// position, so it could not tell whether the url serves.
+func (a ProviderAdmission) URLThrottled(index int) bool {
+	_, throttled := a.throttledURLs[index]
+	return throttled
+}
+
 // RefusedURLs lists the positions of the refused node urls, in order.
 func (a ProviderAdmission) RefusedURLs() []int {
 	indices := make([]int, 0, len(a.refusedURLs))
@@ -314,13 +321,20 @@ func (a ProviderAdmission) Equal(other ProviderAdmission) bool {
 }
 
 // KeepingThrottledFrom settles what this pass could not: each url or service the
-// vendor only rate-limited keeps the verdict previous gave it.
+// vendor only rate-limited keeps the verdict previous gave it. Nothing in the result
+// is throttled any more, but it still names the urls this pass could only see
+// rate-limited (URLThrottled): the url grace reads that, since a rate limit settles a
+// url's strike no more than its verdict.
 func (a ProviderAdmission) KeepingThrottledFrom(previous ProviderAdmission) ProviderAdmission {
 	kept := a.refusals()
-	for index := range a.throttledURLs {
-		if cause, refused := previous.refusedURLs[index]; refused {
-			kept.refuseURL(index, cause)
+	for index, cause := range a.throttledURLs {
+		if previousCause, refused := previous.refusedURLs[index]; refused {
+			kept.refuseURL(index, previousCause)
 		}
+		if kept.throttledURLs == nil {
+			kept.throttledURLs = map[int]error{}
+		}
+		kept.throttledURLs[index] = cause
 	}
 	for key := range a.throttledServices {
 		if _, refused := previous.refused[key]; refused {

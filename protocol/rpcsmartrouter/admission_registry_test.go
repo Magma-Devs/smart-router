@@ -55,6 +55,38 @@ func TestAdmissionRegistry_AUrlGetsTheProvidersGrace(t *testing.T) {
 	require.False(t, registry.admissionFor(provider).URLRefused(2))
 }
 
+// throttling returns a real admission whose node url at position met only 429s.
+func throttling(t *testing.T, position int) chainlib.ProviderAdmission {
+	t.Helper()
+	up := newFakeUpstreams(t)
+	urls := make([]commonlib.NodeUrl, 3)
+	for i := range urls {
+		urls[i] = commonlib.NodeUrl{Url: up.httpURL("/t/" + string(rune('a'+i)) + "/" + upArchive)}
+	}
+	urls[position].Url = up.httpURL("/t/" + string(rune('a'+position)) + "/" + upThrottled)
+	admission, err := validateProviderCollections(t.Context(), staticProvider("ETH1", urls...), liveParser(t, "ETH1", true), 20*time.Second)
+	require.NoError(t, err)
+	require.True(t, admission.URLThrottled(position), "the url met only 429s")
+	return admission
+}
+
+// A pass that met only a rate limit on a url settles nothing about it, its strike included. A url
+// that fails, is rate-limited, then fails again has failed both passes it answered (MAG-4231).
+func TestAdmissionRegistry_ARateLimitedPassKeepsTheStrike(t *testing.T) {
+	provider := staticProvider("ETH1")
+	registry := newAdmissionRegistry()
+	registry.record(provider, chainlib.ProviderAdmission{})
+	refused, _ := refusing(t, 2)
+	throttled := throttling(t, 2)
+
+	require.False(t, registry.recordReverified(provider, refused), "first failed pass: graced")
+	// What the epoch pass records for a throttled pass.
+	registry.recordReverified(provider, throttled.KeepingThrottledFrom(registry.admissionFor(provider)))
+	require.False(t, registry.admissionFor(provider).URLRefused(2), "a rate limit refuses nothing")
+	require.True(t, registry.recordReverified(provider, refused), "the next failed pass is its second: refused")
+	require.True(t, registry.admissionFor(provider).URLRefused(2))
+}
+
 func TestAdmissionRegistry_ABootOrRetryRecordStandsAsIs(t *testing.T) {
 	provider := staticProvider("ETH1")
 	registry := newAdmissionRegistry()

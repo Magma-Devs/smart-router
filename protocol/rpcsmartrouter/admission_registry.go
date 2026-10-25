@@ -65,8 +65,11 @@ func (r *admissionRegistry) recordReverified(provider *lavasession.RPCStaticProv
 			graced = append(graced, index)
 		}
 	}
+	// A url that answered clears its count. One that was only rate-limited did not
+	// answer: alternating 429s would otherwise keep a failing url from ever reaching
+	// the threshold.
 	for index := range strikes {
-		if !admission.URLRefused(index) {
+		if !admission.URLRefused(index) && !admission.URLThrottled(index) {
 			delete(strikes, index)
 		}
 	}
