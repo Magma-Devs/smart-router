@@ -367,14 +367,21 @@ func sendRefusalTestRequest(t *testing.T, ctx context.Context, chainParser chain
 
 func sendRefusalTestRequestBody(t *testing.T, ctx context.Context, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, body []byte) (*common.RelayResult, error) {
 	t.Helper()
-	chainMessage := parseRefusalTestRequestBody(t, chainParser, body)
-	relayData := lavaprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceJsonRPC,
-		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
-	protocolMessage := chainlib.NewProtocolMessage(chainMessage, nil, relayData, "dapp", "1.2.3.4")
+	protocolMessage := refusalTestProtocolMessage(t, ctx, chainParser, body)
 
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	return server.SendParsedRelay(callCtx, nil, protocolMessage)
+}
+
+// refusalTestProtocolMessage is body as the listener hands it on, for a test that drives the relay
+// itself rather than through SendParsedRelay.
+func refusalTestProtocolMessage(t *testing.T, ctx context.Context, chainParser chainlib.ChainParser, body []byte) chainlib.ProtocolMessage {
+	t.Helper()
+	chainMessage := parseRefusalTestRequestBody(t, chainParser, body)
+	relayData := lavaprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceJsonRPC,
+		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
+	return chainlib.NewProtocolMessage(chainMessage, nil, relayData, "dapp", "1.2.3.4")
 }
 
 func loadRefusalHits(hits *[2]int64) [2]int64 {
