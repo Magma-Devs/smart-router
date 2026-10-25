@@ -136,9 +136,12 @@ type SmartRouterMetricsManager struct {
 	csmStickyClaims                *prometheus.CounterVec // smartrouter_csm_sticky_claims_total
 	csmReportedProvidersCount      *prometheus.GaugeVec   // smartrouter_csm_reported_providers
 	// verificationFailuresMu guards verificationFailures, the failing series last
-	// published per provider, so a republish deletes only the ones that cleared.
+	// published per provider with when each failure started, so a republish deletes
+	// only the ones that cleared and keeps each start.
 	verificationFailuresMu sync.Mutex
-	verificationFailures   map[string][]ProviderVerificationFailure
+	verificationFailures   map[string][]publishedVerificationFailure
+	// verificationNow is the clock a failure's start is read from; nil is time.Now.
+	verificationNow func() time.Time
 	// verificationCheckFailures counts failed check runs: smartrouter_provider_verification_check_failures_total
 	verificationCheckFailures *prometheus.CounterVec
 
@@ -638,7 +641,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels)
 	providerVerificationFailed := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_provider_verification_failed",
-		Help: "1 while a configured provider is failing a verification, labelled with the check it fails. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves. severity: Fail when the failure takes a url or the provider out, PartialFail when it switches off only that service. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, not-run, rate-limited, unknown. A provider out at boot is retried every 3m (from 2s, doubling, while its chain is dark); one demoted later and every service refusal is re-checked every 15m epoch, so size alert windows above both.",
+		Help: "While a configured provider is failing a verification: the unix time in seconds the failure started, labelled with the check it fails. A provider that moves to another check in the same scope and service keeps its start. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves. severity: Fail when the failure takes a url or the provider out, PartialFail when it switches off only that service. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, not-run, rate-limited, unknown. A provider out at boot is retried every 3m (from 2s, doubling, while its chain is dark); one demoted later and every service refusal is re-checked every 15m epoch, so size alert windows above both.",
 	}, verificationFailureLabels)
 	verificationCheckFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_provider_verification_check_failures_total",
@@ -2098,9 +2101,17 @@ func (m *SmartRouterMetricsManager) CountVerificationCheckFailure(spec, apiInter
 	m.verificationCheckFailures.WithLabelValues(spec, apiInterface, provider, tier, failure.Scope, failure.Service, failure.Check, failure.Severity).Inc()
 }
 
+// publishedVerificationFailure is a failing series as last published, with when its
+// failure started.
+type publishedVerificationFailure struct {
+	ProviderVerificationFailure
+	since time.Time
+}
+
 // SetProviderVerificationFailures publishes the checks a configured provider is
-// failing right now, and removes the series of checks it no longer fails. An empty
-// list clears the provider. tier is "static" or "backup".
+// failing right now, each valued with the unix time its failure started, and removes
+// the series of checks it no longer fails. An empty list clears the provider. tier is
+// "static" or "backup".
 //
 // Only series that cleared are deleted, never the whole provider first: a scrape
 // landing between a delete and a re-set would read a gap, and a gap resets an
@@ -2110,29 +2121,59 @@ func (m *SmartRouterMetricsManager) SetProviderVerificationFailures(spec, apiInt
 		return
 	}
 	key := spec + "|" + apiInterface + "|" + provider + "|" + tier
-	labelled := make([]ProviderVerificationFailure, len(failures))
-	for i, f := range failures {
-		labelled[i] = f.withSeverity()
-	}
-	failures = labelled
 	m.verificationFailuresMu.Lock()
 	defer m.verificationFailuresMu.Unlock()
-	for _, old := range m.verificationFailures[key] {
-		if !slices.Contains(failures, old) {
+	now := time.Now()
+	if m.verificationNow != nil {
+		now = m.verificationNow()
+	}
+	previous := m.verificationFailures[key]
+	published := func(set []publishedVerificationFailure, f ProviderVerificationFailure) bool {
+		return slices.ContainsFunc(set, func(p publishedVerificationFailure) bool { return p.ProviderVerificationFailure == f })
+	}
+	next := make([]publishedVerificationFailure, 0, len(failures))
+	for _, f := range failures {
+		f = f.withSeverity()
+		if published(next, f) {
+			continue
+		}
+		next = append(next, publishedVerificationFailure{ProviderVerificationFailure: f, since: failureStart(previous, f, now)})
+	}
+	for _, old := range previous {
+		if !published(next, old.ProviderVerificationFailure) {
 			m.providerVerificationFailed.DeleteLabelValues(spec, apiInterface, provider, tier, old.Scope, old.Service, old.Check, old.Severity)
 		}
 	}
-	for _, f := range failures {
-		m.providerVerificationFailed.WithLabelValues(spec, apiInterface, provider, tier, f.Scope, f.Service, f.Check, f.Severity).Set(1)
+	for _, p := range next {
+		m.providerVerificationFailed.WithLabelValues(spec, apiInterface, provider, tier, p.Scope, p.Service, p.Check, p.Severity).Set(float64(p.since.Unix()))
 	}
 	if m.verificationFailures == nil {
-		m.verificationFailures = map[string][]ProviderVerificationFailure{}
+		m.verificationFailures = map[string][]publishedVerificationFailure{}
 	}
-	if len(failures) == 0 {
+	if len(next) == 0 {
 		delete(m.verificationFailures, key)
 		return
 	}
-	m.verificationFailures[key] = slices.Clone(failures)
+	m.verificationFailures[key] = next
+}
+
+// failureStart is when f started failing: its own series' start when it was already
+// published, else the earliest start in the same scope and service, so a provider
+// that moves to another check keeps the time it started failing, else now.
+func failureStart(previous []publishedVerificationFailure, f ProviderVerificationFailure, now time.Time) time.Time {
+	var earliest time.Time
+	for _, p := range previous {
+		if p.ProviderVerificationFailure == f {
+			return p.since
+		}
+		if p.Scope == f.Scope && p.Service == f.Service && (earliest.IsZero() || p.since.Before(earliest)) {
+			earliest = p.since
+		}
+	}
+	if earliest.IsZero() {
+		return now
+	}
+	return earliest
 }
 
 // SetCSMStickySessionsCount publishes the number of live sticky-session affinities.

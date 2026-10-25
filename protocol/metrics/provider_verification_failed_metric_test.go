@@ -2,46 +2,92 @@ package metrics
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
-func newVerificationFailedManager() *SmartRouterMetricsManager {
+// verificationClock is a test clock for the time a failure started.
+type verificationClock struct{ now time.Time }
+
+func (c *verificationClock) advance(d time.Duration) float64 {
+	c.now = c.now.Add(d)
+	return float64(c.now.Unix())
+}
+
+func newVerificationFailedManager() (*SmartRouterMetricsManager, *verificationClock) {
+	clock := &verificationClock{now: time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)}
 	return &SmartRouterMetricsManager{
 		providerVerificationFailed: prometheus.NewGaugeVec(
 			prometheus.GaugeOpts{Name: "t_sr_provider_verification_failed"},
 			verificationFailureLabels,
 		),
-	}
+		verificationNow: func() time.Time { return clock.now },
+	}, clock
 }
 
+// A failing check is published valued with the unix time it started failing, and keeps
+// that start on every republish while it lasts (MAG-3950: the time it started failing).
 func TestSetProviderVerificationFailures_PublishesTheFailingCheck(t *testing.T) {
-	m := newVerificationFailedManager()
+	m, clock := newVerificationFailedManager()
 	chainID := ProviderVerificationFailure{Scope: VerificationScopeProvider, Check: "chain-id"}
+	started := clock.advance(0)
 
 	m.SetProviderVerificationFailures("XRP", "jsonrpc", "blockdaemon", "backup", []ProviderVerificationFailure{chainID})
 	require.Equal(t, 1, testutil.CollectAndCount(m.providerVerificationFailed))
-	require.Equal(t, 1.0, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("XRP", "jsonrpc", "blockdaemon", "backup", "provider", "", "chain-id", "Fail")))
+	series := m.providerVerificationFailed.WithLabelValues("XRP", "jsonrpc", "blockdaemon", "backup", "provider", "", "chain-id", "Fail")
+	require.Equal(t, started, testutil.ToFloat64(series))
+
+	clock.advance(3 * time.Minute)
+	m.SetProviderVerificationFailures("XRP", "jsonrpc", "blockdaemon", "backup", []ProviderVerificationFailure{chainID})
+	require.Equal(t, started, testutil.ToFloat64(series), "a republish keeps when the failure started")
 }
 
-// A provider that starts failing a different check moves to the new series; the old
-// one is removed rather than left reading 1.
+// A provider that starts failing a different check moves to the new series, and the old
+// one is removed. The new series keeps the time the provider started failing, so "out
+// since" survives the change of check.
 func TestSetProviderVerificationFailures_MovesToTheNewCheck(t *testing.T) {
-	m := newVerificationFailedManager()
+	m, clock := newVerificationFailedManager()
+	started := clock.advance(0)
 	m.SetProviderVerificationFailures("XRP", "jsonrpc", "blockdaemon", "backup",
 		[]ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "latest-block"}})
+	clock.advance(15 * time.Minute)
 	m.SetProviderVerificationFailures("XRP", "jsonrpc", "blockdaemon", "backup",
 		[]ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "chain-id"}})
 
 	require.Equal(t, 1, testutil.CollectAndCount(m.providerVerificationFailed))
-	require.Equal(t, 1.0, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("XRP", "jsonrpc", "blockdaemon", "backup", "provider", "", "chain-id", "Fail")))
+	require.Equal(t, started, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("XRP", "jsonrpc", "blockdaemon", "backup", "provider", "", "chain-id", "Fail")))
+}
+
+// A failure in another scope or service starts its own clock, and so does a failure that
+// comes back after the provider recovered.
+func TestSetProviderVerificationFailures_EachFailureStartsItsOwnClock(t *testing.T) {
+	m, clock := newVerificationFailedManager()
+	outAt := clock.advance(0)
+	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "static",
+		[]ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "chain-id"}})
+	archiveAt := clock.advance(time.Minute)
+	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "static", []ProviderVerificationFailure{
+		{Scope: VerificationScopeProvider, Check: "chain-id"},
+		{Scope: VerificationScopeService, Service: "archive", Check: "pruning"},
+	})
+	require.Equal(t, outAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "lava", "static", "provider", "", "chain-id", "Fail")))
+	require.Equal(t, archiveAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "lava", "static", "service", "archive", "pruning", "PartialFail")))
+
+	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "static", nil)
+	againAt := clock.advance(time.Hour)
+	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "static",
+		[]ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "chain-id"}})
+	require.Equal(t, againAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "lava", "static", "provider", "", "chain-id", "Fail")),
+		"a failure after recovery is a new one")
 }
 
 // Recovery removes the provider's series; other providers keep theirs.
 func TestSetProviderVerificationFailures_RecoveryClearsOnlyThatProvider(t *testing.T) {
-	m := newVerificationFailedManager()
+	m, clock := newVerificationFailedManager()
+	started := clock.advance(0)
 	archive := []ProviderVerificationFailure{{Scope: VerificationScopeService, Service: "archive", Check: "pruning"}}
 	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "backup", archive)
 	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "tatum", "static", archive)
@@ -49,7 +95,7 @@ func TestSetProviderVerificationFailures_RecoveryClearsOnlyThatProvider(t *testi
 	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "backup", nil)
 
 	require.Equal(t, 1, testutil.CollectAndCount(m.providerVerificationFailed))
-	require.Equal(t, 1.0, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "tatum", "static", "service", "archive", "pruning", "PartialFail")))
+	require.Equal(t, started, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "tatum", "static", "service", "archive", "pruning", "PartialFail")))
 }
 
 func TestSetProviderVerificationFailures_NilManager(t *testing.T) {
@@ -81,7 +127,8 @@ func TestCountVerificationCheckFailure_OnePerRun(t *testing.T) {
 // url or the provider out, PartialFail when it switches off one service, whichever scope
 // carries that service.
 func TestSetProviderVerificationFailures_SeverityFollowsWhatTheFailureCosts(t *testing.T) {
-	m := newVerificationFailedManager()
+	m, clock := newVerificationFailedManager()
+	started := clock.advance(0)
 	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "static", []ProviderVerificationFailure{
 		{Scope: VerificationScopeProvider, Check: "chain-id"},
 		{Scope: VerificationScopeService, Service: "archive", Check: "pruning"},
@@ -95,6 +142,6 @@ func TestSetProviderVerificationFailures_SeverityFollowsWhatTheFailureCosts(t *t
 		{"url", "", "connect", "Fail"},
 		{"url", "debug", "enabled", "PartialFail"},
 	} {
-		require.Equal(t, 1.0, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues(append([]string{"ETH1", "jsonrpc", "lava", "static"}, labels...)...)), labels)
+		require.Equal(t, started, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues(append([]string{"ETH1", "jsonrpc", "lava", "static"}, labels...)...)), labels)
 	}
 }
