@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
@@ -246,11 +247,18 @@ func runRetryLoop(t *testing.T, rpsr *RPCSmartRouter, chainKey string, rpcEndpoi
 	convert func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
 ) {
 	t.Helper()
+	runRetryLoopWithParser(t, rpsr, chainKey, nil, rpcEndpoint, convert)
+}
+
+func runRetryLoopWithParser(t *testing.T, rpsr *RPCSmartRouter, chainKey string, chainParser chainlib.ChainParser, rpcEndpoint *lavasession.RPCEndpoint,
+	convert func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
+) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		rpsr.runVerificationRetries(ctx, chainKey, nil, rpcEndpoint, convert)
+		rpsr.runVerificationRetries(ctx, chainKey, chainParser, rpcEndpoint, convert)
 	}()
 	t.Cleanup(func() {
 		cancel()

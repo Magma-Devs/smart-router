@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"math/rand"
+	"slices"
 	"sync"
 	"time"
 
@@ -247,10 +248,11 @@ func (rpsr *RPCSmartRouter) runVerificationRetries(
 		darkBackoff = retryDarkBaseInterval
 		due := schedule.due()
 		static, backup := rpsr.failedProvidersOf(chainKey, due)
-		// A due entry that is out of the pairing no more passed meanwhile, on the epoch.
+		pairedStatic, pairedBackup := rpsr.pairedProvidersOf(chainKey, due)
+		// A due entry neither out of the pairing nor in it is not configured any more.
 		for tier, names := range due {
 			for name := range names {
-				if !containsName(static, backup, tier, name) {
+				if !containsName(static, backup, tier, name) && !containsName(pairedStatic, pairedBackup, tier, name) {
 					schedule.passed(tier, name)
 				}
 			}
@@ -258,7 +260,70 @@ func (rpsr *RPCSmartRouter) runVerificationRetries(
 		if len(static)+len(backup) > 0 {
 			rpsr.retryOutOfPairing(ctx, chainKey, chainParser, rpcEndpoint, convertProvidersToSessions, static, backup, schedule, registry, true)
 		}
+		if len(pairedStatic)+len(pairedBackup) > 0 {
+			rpsr.retryPaired(ctx, chainKey, pairedStatic, pairedBackup)
+		}
 	}
+}
+
+// pairedProvidersOf is the configured providers in the due set that are in the pairing.
+func (rpsr *RPCSmartRouter) pairedProvidersOf(chainKey string, due map[reverifyTier]map[string]struct{}) (static, backup []*lavasession.RPCStaticProviderEndpoint) {
+	rpsr.mu.Lock()
+	defer rpsr.mu.Unlock()
+	inputs := rpsr.reverifyInputs[chainKey]
+	if inputs == nil {
+		return nil, nil
+	}
+	pick := func(tier reverifyTier, sessions map[uint64]*lavasession.ConsumerSessionsWithProvider) []*lavasession.RPCStaticProviderEndpoint {
+		active := byName(sessions)
+		var out []*lavasession.RPCStaticProviderEndpoint
+		for _, p := range inputs.configuredFor(tier) {
+			_, isDue := due[tier][p.Name]
+			_, isActive := active[p.Name]
+			if isDue && isActive {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	return pick(reverifyTierStatic, rpsr.providerSessions[chainKey]), pick(reverifyTierBackup, rpsr.backupProviderSessions[chainKey])
+}
+
+// retryPaired re-verifies providers that serve with something failing — a refused
+// service or url, a url on its first strike, a failed pass under the demote grace — and
+// applies the verdicts as the epoch pass does, without waiting for it. The probes run
+// without the router lock, which an epoch pass holds across its own: at a retry's
+// cadence that would stall every chain behind one provider's timeout. The verdicts are
+// applied under it (decideReverification), and the pairing is pushed only when it moved:
+// UpdateAllProviders resets the session manager's per-epoch state.
+func (rpsr *RPCSmartRouter) retryPaired(ctx context.Context, chainKey string, static, backup []*lavasession.RPCStaticProviderEndpoint) {
+	rpsr.mu.Lock()
+	inputs := rpsr.reverifyInputs[chainKey]
+	rpsr.mu.Unlock()
+	if inputs == nil {
+		return
+	}
+	probedStatic := probeReverification(ctx, inputs, static)
+	probedBackup := probeReverification(ctx, inputs, backup)
+
+	rpsr.mu.Lock()
+	epoch := rpsr.epochTimer.GetCurrentEpoch()
+	nextStatic, demotedStatic, promotedStatic := decideReverification(inputs, rpsr.providerSessions[chainKey], reverifyTierStatic, epoch, probedStatic, true)
+	nextBackup, demotedBackup, promotedBackup := decideReverification(inputs, rpsr.backupProviderSessions[chainKey], reverifyTierBackup, epoch, probedBackup, true)
+	queueDemoted(&rpsr.failedStaticProviders, chainKey, inputs.configuredStatic, demotedStatic, promotedStatic)
+	queueDemoted(&rpsr.failedBackupProviders, chainKey, inputs.configuredBackup, demotedBackup, promotedBackup)
+	if len(demotedStatic)+len(demotedBackup)+len(promotedStatic)+len(promotedBackup) == 0 {
+		// Nothing moved in the pairing; what a provider is failing may have.
+		rpsr.publishVerificationFailedLocked(chainKey, inputs)
+		rpsr.mu.Unlock()
+		return
+	}
+	after, err := rpsr.commitPairingLocked(chainKey, epoch, nextStatic, nextBackup, slices.Concat(demotedStatic, demotedBackup))
+	rpsr.mu.Unlock()
+	if err != nil {
+		utils.LavaFormatWarning("retry: failed to update the pairing", err, utils.LogAttr("chainKey", chainKey))
+	}
+	after()
 }
 
 // retryScheduleFor is a chain's retry schedule and rate-limit hold-off registry, nil
@@ -352,6 +417,9 @@ func (rpsr *RPCSmartRouter) retryOutOfPairing(
 	recoveredBackup, stillFailedBackup := rpsr.revalidateTier(ctx, backup, chainParser, rpcEndpoint, reverifyTierBackup)
 	rpsr.readmitRecoveredProviders(chainKey, rpcEndpoint, convertProvidersToSessions, recoveredStatic, recoveredBackup)
 
+	rpsr.mu.Lock()
+	inputs := rpsr.reverifyInputs[chainKey]
+	rpsr.mu.Unlock()
 	for _, tier := range []struct {
 		tier                 reverifyTier
 		recovered, stillFail []*lavasession.RPCStaticProviderEndpoint
@@ -359,8 +427,14 @@ func (rpsr *RPCSmartRouter) retryOutOfPairing(
 		{reverifyTierStatic, recoveredStatic, stillFailedStatic},
 		{reverifyTierBackup, recoveredBackup, stillFailedBackup},
 	} {
+		// One back with something still failing, a url still refused, stays on the
+		// schedule, so that is retried too.
 		for _, p := range tier.recovered {
-			schedule.passed(tier.tier, p.Name)
+			if inputs != nil && inputs.admissionFor != nil && inputs.degraded(p, inputs.admissionFor(p)) {
+				schedule.failing(tier.tier, p.Name, heldOffUntil(registry, p))
+			} else {
+				schedule.passed(tier.tier, p.Name)
+			}
 		}
 		if !countAttempt {
 			continue
@@ -403,17 +477,5 @@ func queueDemoted(
 				break
 			}
 		}
-	}
-}
-
-// scheduleAfterEpoch counts an epoch pass as an attempt: every provider it left out of
-// the pairing is retried on its backoff from now, and one it promoted is off the
-// schedule.
-func scheduleAfterEpoch(inputs *chainReverifyInputs, tier reverifyTier, out []*lavasession.RPCStaticProviderEndpoint, promoted []string) {
-	for _, name := range promoted {
-		inputs.retries.passed(tier, name)
-	}
-	for _, p := range out {
-		inputs.retries.failing(tier, p.Name, heldOffUntil(inputs.rateLimitHoldoff, p))
 	}
 }

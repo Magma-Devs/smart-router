@@ -3035,6 +3035,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		recordAdmission:            recordAdmission,
 		recordReverifiedAdmission:  admissions.recordReverified,
 		admissionFor:               admissionFor,
+		urlStriking:                admissions.striking,
 		countFailedCheck: func(tier reverifyTier, provider string, failure metrics.ProviderVerificationFailure) {
 			rpsr.smartRouterMetricsManager.CountVerificationCheckFailure(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface, provider, tier.String(), failure)
 		},
@@ -3065,6 +3066,9 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		for _, p := range tier.providers {
 			if _, failed := tier.failed[p]; !failed {
 				inputs.countRefusals(tier.tier, p, admissionFor(p))
+				if inputs.degraded(p, admissionFor(p)) {
+					inputs.retries.failing(tier.tier, p.Name, heldOffUntil(nil, p))
+				}
 			}
 		}
 	}
@@ -4014,7 +4018,6 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// recovered providers into rpsr.providerSessions under the same lock.
 		// The locked section is pure CPU work (map lookups + object creation).
 		rpsr.mu.Lock()
-		sessionManager := rpsr.sessionManagers[chainKey]
 		oldProviderSessions := rpsr.providerSessions[chainKey]
 		oldBackupSessions := rpsr.backupProviderSessions[chainKey]
 
@@ -4113,12 +4116,10 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			pruneRestoredFromFailed(rpsr.failedStaticProviders, chainKey, nameSet(promotedStatic))
 			pruneRestoredFromFailed(rpsr.failedBackupProviders, chainKey, nameSet(promotedBackup))
 			// A provider this pass demoted joins the failed list, so the retry loop retries it
-			// on its backoff instead of leaving it to the next epoch (MAG-3950), and the pass
-			// counts as an attempt for every provider still out.
+			// on its backoff instead of leaving it to the next epoch (MAG-3950). The pass
+			// counted as an attempt for every provider it verified (decideReverification).
 			queueDemoted(&rpsr.failedStaticProviders, chainKey, inputs.configuredStatic, demotedStatic, promotedStatic)
 			queueDemoted(&rpsr.failedBackupProviders, chainKey, inputs.configuredBackup, demotedBackup, promotedBackup)
-			scheduleAfterEpoch(inputs, reverifyTierStatic, rpsr.failedStaticProviders[chainKey], promotedStatic)
-			scheduleAfterEpoch(inputs, reverifyTierBackup, rpsr.failedBackupProviders[chainKey], promotedBackup)
 			// Per-chain re-verify is internally bounded by SpecReVerifyConcurrency,
 			// but updateEpoch iterates chains serially. Surfacing per-chain duration
 			// gives operators a signal when total tick time approaches epoch length —
@@ -4132,53 +4133,63 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			}
 		}
 
-		// Update stored sessions with fresh objects.
-		// When re-verification demotes every backup the map can be empty (not nil).
-		// In that case clear the entry so rpsr.backupProviderSessions stays consistent
-		// with what we hand UpdateAllProviders below — otherwise the stored field would
-		// retain the prior cycle's map.
-		rpsr.providerSessions[chainKey] = freshProviderSessions
-		if len(freshBackupSessions) > 0 {
-			rpsr.backupProviderSessions[chainKey] = freshBackupSessions
-		} else {
-			delete(rpsr.backupProviderSessions, chainKey)
-		}
-		rpsr.publishServingTierLocked(chainKey)
-		rpsr.republishSubscriptionEndpointsLocked(chainKey)
-		server := rpsr.rpcServers[chainKey]
-
-		// UpdateAllProviders stays under rpsr.mu so the (rpsr.providerSessions write
-		// → csm push) pair is atomic with the retry loop's matching pair.
-		// Otherwise the two callers can push snapshots to csm in the opposite order
-		// they wrote rpsr.providerSessions, silently dropping providers until the
-		// next epoch. The synchronous body of UpdateAllProviders is a bounded map
-		// rebuild; probing is dispatched to a goroutine.
-		err := sessionManager.UpdateAllProviders(epoch, freshProviderSessions, freshBackupSessions)
+		// Update stored sessions with fresh objects, and push them to the session manager.
+		after, err := rpsr.commitPairingLocked(chainKey, epoch, freshProviderSessions, freshBackupSessions, demotedSessions)
 		rpsr.mu.Unlock()
-
 		if err != nil {
 			utils.LavaFormatError("Failed to update providers on epoch change", err,
 				utils.LogAttr("epoch", epoch),
 				utils.LogAttr("chainKey", chainKeyLog),
 			)
 		}
-
-		// Now that the session manager is on the new pairing, drop the
-		// DirectRPCConnections that belonged to demoted providers. The session
-		// manager's own purge path closes endpoint.Connections but not
-		// endpoint.DirectConnections — those are smart-router-owned transports
-		// and would otherwise leak across a flap (active → demoted → active rebuilds).
-		if len(demotedSessions) > 0 {
-			go closeDemotedDirectConnections(demotedSessions)
-		}
-
-		// cleanupStaleTrackers is the genuinely heavy work (tracker teardown +
-		// connection close) and stays outside the lock. Must run AFTER
-		// UpdateAllProviders so connections are closed first.
-		if server != nil {
-			rpsr.cleanupStaleTrackers(chainKey, server, freshProviderSessions, freshBackupSessions)
-		}
+		after()
 	}
+}
+
+// commitPairingLocked stores a chain's new pairing and pushes it to the session manager,
+// for the epoch pass, the re-admission of recovered providers and the verification retry
+// alike. Callers hold rpsr.mu, and run the returned func once they release it.
+//
+// When re-verification demotes every backup the map can be empty (not nil). The entry
+// is then cleared, so rpsr.backupProviderSessions stays consistent with what
+// UpdateAllProviders is handed. UpdateAllProviders stays under rpsr.mu so the
+// (rpsr.providerSessions write → csm push) pair is atomic with every other path's:
+// otherwise two of them can push snapshots to csm in the opposite order they wrote
+// rpsr.providerSessions, silently dropping providers until the next epoch. Its
+// synchronous body is a bounded map rebuild; probing is dispatched to a goroutine.
+//
+// The returned func runs once the session manager is on the new pairing. It drops the
+// DirectRPCConnections of the demoted sessions — the session manager's own purge path
+// closes endpoint.Connections but not endpoint.DirectConnections, smart-router-owned
+// transports that would otherwise leak across a flap — and then cleans up stale
+// trackers, the genuinely heavy work (tracker teardown and connection close), outside
+// the lock.
+func (rpsr *RPCSmartRouter) commitPairingLocked(
+	chainKey string,
+	epoch uint64,
+	static, backup map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	demoted []*lavasession.ConsumerSessionsWithProvider,
+) (after func(), err error) {
+	rpsr.providerSessions[chainKey] = static
+	if len(backup) > 0 {
+		rpsr.backupProviderSessions[chainKey] = backup
+	} else {
+		delete(rpsr.backupProviderSessions, chainKey)
+	}
+	rpsr.publishServingTierLocked(chainKey)
+	rpsr.republishSubscriptionEndpointsLocked(chainKey)
+	server := rpsr.rpcServers[chainKey]
+	if sessionManager := rpsr.sessionManagers[chainKey]; sessionManager != nil {
+		err = sessionManager.UpdateAllProviders(epoch, static, backup)
+	}
+	return func() {
+		if len(demoted) > 0 {
+			go closeDemotedDirectConnections(demoted)
+		}
+		if server != nil {
+			rpsr.cleanupStaleTrackers(chainKey, server, static, backup)
+		}
+	}, err
 }
 
 // Dark-chain retry cadence for providers out of the pairing. A chain that still has a
@@ -4557,15 +4568,9 @@ func (rpsr *RPCSmartRouter) readmitRecoveredProviders(
 	mergedStatic := mergeRecoveredSessions(rpsr.providerSessions[sessionManagerKey], recoveredStatic, convertProvidersToSessions, currentEpoch)
 	mergedBackup := mergeRecoveredSessions(rpsr.backupProviderSessions[sessionManagerKey], recoveredBackup, convertProvidersToSessions, currentEpoch)
 
-	rpsr.providerSessions[sessionManagerKey] = mergedStatic
-	if len(mergedBackup) > 0 {
-		rpsr.backupProviderSessions[sessionManagerKey] = mergedBackup
-	}
-	rpsr.publishServingTierLocked(sessionManagerKey)
-	rpsr.republishSubscriptionEndpointsLocked(sessionManagerKey)
-
-	err := rpsr.sessionManagers[sessionManagerKey].UpdateAllProviders(currentEpoch, mergedStatic, mergedBackup)
+	after, err := rpsr.commitPairingLocked(sessionManagerKey, currentEpoch, mergedStatic, mergedBackup, nil)
 	rpsr.mu.Unlock()
+	after()
 
 	if err != nil {
 		utils.LavaFormatWarning("retry: failed to re-register recovered providers", err,
