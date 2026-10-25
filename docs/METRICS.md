@@ -588,6 +588,38 @@ later **demoted to dark** has no retry loop — demoted providers are not fed in
 failed-provider lists — and is only re-checked by the 15m epoch re-verifier. Alert
 windows should assume the 15m case.
 
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_provider_verification_failed` | Gauge | `spec`, `apiInterface`, `provider`, `tier`, `scope`, `service`, `check`, `severity` | While a configured provider is failing a verification: the unix time in seconds the failure started. The series exists only while the failure lasts, and a provider that moves to another check in the same `scope` and `service` keeps its start. `tier` is `static` or `backup`. |
+| `smartrouter_provider_verification_check_failures_total` | Counter | same as above | One per failed check run: at boot, each retry of a provider out at boot, and each 15m epoch pass (a grace run before a demotion included). A rate-limited run is inconclusive and not counted, on any path. `increase(...[$__interval]) > 0` draws one mark per failed run. |
+
+The serving tier only drops when a whole tier is gone, so a single provider that fails
+verification while others serve leaves it at `2` (or `1`). Such a provider also has no
+other per-provider series — it never reaches the session manager — so before this gauge
+it was visible only in the logs (`provider validation failed — excluding from provider
+list`, then `retry: provider verification still failing` on each retry). It is published from
+the same paths as the serving tier, so a provider demoted by the epoch re-verifier shows
+too.
+
+| Label | Values |
+| --- | --- |
+| `scope` | `provider`: the provider is out of the pairing. `service`: the provider still serves, but lost one add-on or extension: no url of it serves that service any more. `url`: the provider still serves, but one of its node urls was refused (MAG-4231 verifies every url on its own): whole when `service` is empty, else for that one service, which another url of the provider still serves. |
+| `service` | The refused add-on or extension (`archive`, `debug`, ...); empty for `scope=provider` and for a url refused whole. |
+| `check` | The spec verification that failed (`chain-id`, `pruning`, ...), or one of: `latest-block` (the head probe before any verification), `unsupported-addon` (the config claims an add-on the spec does not define), `connect` (no connection to the node), `config` (the configured urls cannot work as given: no http(s) url, or no websocket url on a chain that subscribes), `not-run` (the provider's verification deadline passed before this check ran), `rate-limited` (a provider out at boot whose only answer so far is a 429; gauge only, never counted), `unknown`. |
+| `severity` | As MAG-3950 names it: `Fail` when the failure takes a url or the provider out, `PartialFail` when it switches off only `service`. |
+
+A provider out at boot is retried every 3m (from 2s, doubling, while its chain is dark),
+so its series appears and clears within one retry of the change. A demoted provider and
+a refused service are re-checked every 15m epoch.
+
+| Condition | Meaning |
+| --- | --- |
+| `time() - min by (spec, apiInterface, provider, tier) (smartrouter_provider_verification_failed{scope="provider"}) > 1800` | A configured provider has not passed verification for half an hour, on the check `check` names. The pool is smaller than configured. Aggregated by provider, so a provider that moves to another check keeps its start instead of starting a new 30 minutes. |
+| `smartrouter_provider_verification_failed{scope="service"} > 0` | The provider still serves the chain, but not `service`: requests needing it go to other providers. |
+| `smartrouter_provider_verification_failed{scope="url"} > 0` | The provider still serves the chain on its other urls; one was refused, whole or for `service`. |
+
+The same 15m re-check applies to a demoted provider, so keep the window above it.
+
 ---
 
 ## Shared metrics

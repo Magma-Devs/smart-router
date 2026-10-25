@@ -166,6 +166,55 @@ func IsRateLimitFailure(err error) bool {
 	return false
 }
 
+// Checks a provider can fail that are not a spec verification by name. A spec
+// verification fails under its own name (chain-id, pruning, ...).
+const (
+	CheckLatestBlock      = "latest-block"
+	CheckUnsupportedAddon = "unsupported-addon"
+	CheckConnect          = "connect"
+	// CheckConfig is a provider whose configured urls cannot work as given: no
+	// http(s) url, or no websocket url on a chain that subscribes.
+	CheckConfig = "config"
+	// CheckNotRun is a check its pass never started, because the provider's
+	// verification deadline had passed. It says nothing about the check itself.
+	CheckNotRun = "not-run"
+)
+
+// VerificationFailure carries which check a provider failed, so the router can
+// publish it as a metric label instead of leaving it in the error text.
+type VerificationFailure struct {
+	Check string
+	Err   error
+}
+
+func (e *VerificationFailure) Error() string { return e.Err.Error() }
+func (e *VerificationFailure) Unwrap() error { return e.Err }
+
+// FailedCheck returns the check a validation error was charged to, or "" when the
+// error does not carry one.
+func FailedCheck(err error) string {
+	var vf *VerificationFailure
+	if errors.As(err, &vf) {
+		return vf.Check
+	}
+	return ""
+}
+
+// chargedTo is err charged to check, unless it already names one: a check that
+// never ran because the head read failed is a latest-block failure, not its own.
+func chargedTo(check string, err error) error {
+	if FailedCheck(err) != "" {
+		return err
+	}
+	return &VerificationFailure{Check: check, Err: err}
+}
+
+// RefusedService is one service a provider was refused, and the check that refused it.
+type RefusedService struct {
+	Service string
+	Check   string
+}
+
 // admissionKey identifies one refused service on one node url. A comparable
 // struct rather than a joined string: the join needed a NUL sentinel, which is
 // an invariant every reader has to re-verify.
@@ -189,7 +238,8 @@ type admissionKey struct {
 //
 // Empty means everything a url declared was admitted.
 type ProviderAdmission struct {
-	refused           map[admissionKey]struct{}
+	// Each refused service maps to the check that refused it.
+	refused           map[admissionKey]string
 	refusedURLs       map[int]error
 	throttledServices map[admissionKey]struct{}
 	throttledURLs     map[int]error
@@ -228,11 +278,52 @@ func serviceKey(url common.NodeUrl, service string) admissionKey {
 	return admissionKey{url: url.Url, internalPath: url.InternalPath, service: service}
 }
 
-func (a *ProviderAdmission) fail(url common.NodeUrl, service string) {
+func (a *ProviderAdmission) fail(url common.NodeUrl, service, check string) {
 	if a.refused == nil {
-		a.refused = map[admissionKey]struct{}{}
+		a.refused = map[admissionKey]string{}
 	}
-	a.refused[serviceKey(url, service)] = struct{}{}
+	a.refused[serviceKey(url, service)] = check
+}
+
+// Refused lists each refused service once, with the check that refused it, sorted
+// for a stable order. A service refused on several urls appears once.
+func (a ProviderAdmission) Refused() []RefusedService {
+	if len(a.refused) == 0 {
+		return nil
+	}
+	seen := make(map[RefusedService]struct{}, len(a.refused))
+	out := make([]RefusedService, 0, len(a.refused))
+	for key, check := range a.refused {
+		r := RefusedService{Service: key.service, Check: check}
+		if _, dup := seen[r]; dup {
+			continue
+		}
+		seen[r] = struct{}{}
+		out = append(out, r)
+	}
+	slices.SortFunc(out, func(x, y RefusedService) int {
+		if c := strings.Compare(x.Service, y.Service); c != 0 {
+			return c
+		}
+		return strings.Compare(x.Check, y.Check)
+	})
+	return out
+}
+
+// RefusedURLChecks lists, once each and sorted, the checks that refused a node url.
+func (a ProviderAdmission) RefusedURLChecks() []string {
+	var checks []string
+	for _, cause := range a.refusedURLs {
+		check := FailedCheck(cause)
+		if check == "" {
+			check = "unknown"
+		}
+		if !slices.Contains(checks, check) {
+			checks = append(checks, check)
+		}
+	}
+	slices.Sort(checks)
+	return checks
 }
 
 func (a *ProviderAdmission) throttleService(url common.NodeUrl, service string, cause error) {
@@ -352,11 +443,11 @@ func (a ProviderAdmission) KeepingThrottledFrom(previous ProviderAdmission) Prov
 		kept.throttledURLs[index] = cause
 	}
 	for key := range a.throttledServices {
-		if _, refused := previous.refused[key]; refused {
+		if check, refused := previous.refused[key]; refused {
 			if kept.refused == nil {
-				kept.refused = map[admissionKey]struct{}{}
+				kept.refused = map[admissionKey]string{}
 			}
-			kept.refused[key] = struct{}{}
+			kept.refused[key] = check
 		}
 	}
 	return kept
@@ -375,11 +466,11 @@ func (a ProviderAdmission) WithoutURLRefusals(indices []int) ProviderAdmission {
 // refusals is a copy of the refusals alone, sharing no map with a.
 func (a ProviderAdmission) refusals() ProviderAdmission {
 	var copied ProviderAdmission
-	for key := range a.refused {
+	for key, check := range a.refused {
 		if copied.refused == nil {
-			copied.refused = map[admissionKey]struct{}{}
+			copied.refused = map[admissionKey]string{}
 		}
-		copied.refused[key] = struct{}{}
+		copied.refused[key] = check
 	}
 	for index, cause := range a.refusedURLs {
 		copied.refuseURL(index, cause)
@@ -418,7 +509,7 @@ func (a ProviderAdmission) AdmittedServices(url common.NodeUrl) (services []stri
 }
 
 // servicesIn lists, in the url's own order, the url's services found in set.
-func servicesIn(set map[admissionKey]struct{}, url common.NodeUrl) []string {
+func servicesIn[V any](set map[admissionKey]V, url common.NodeUrl) []string {
 	var found []string
 	for _, service := range url.Addons {
 		if _, in := set[serviceKey(url, service)]; in {
@@ -504,8 +595,8 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 		}
 		for _, check := range outcome.checks {
 			if check.err != nil && check.verification.Severity == spectypes.ParseValue_Fail {
-				return utils.LavaFormatError("invalid Verification on provider startup", check.err,
-					utils.Attribute{Key: "Addons", Value: outcome.url.Addons}, utils.Attribute{Key: "verification", Value: check.verification.Name})
+				return chargedTo(check.verification.Name, utils.LavaFormatError("invalid Verification on provider startup", check.err,
+					utils.Attribute{Key: "Addons", Value: outcome.url.Addons}, utils.Attribute{Key: "verification", Value: check.verification.Name}))
 			}
 		}
 	}
@@ -576,8 +667,10 @@ func (cf *ChainFetcher) ValidateReport(ctx context.Context) ([]NodeURLValidation
 	return results, err
 }
 
-// errCheckNotRun marks a check its pass never started: the deadline had passed.
-var errCheckNotRun = errors.New("not run: verification deadline exceeded before this check started")
+// errCheckNotRun marks a check its pass never started: the deadline had passed. It
+// carries its own check, so the failure is not published under the name of a check
+// that never ran.
+var errCheckNotRun error = &VerificationFailure{Check: CheckNotRun, Err: errors.New("not run: verification deadline exceeded before this check started")}
 
 // verifyOptions is how much one verification pass asks of a provider.
 type verifyOptions struct {
@@ -671,11 +764,11 @@ func admissionFrom(outcomes []nodeUrlOutcome) (ProviderAdmission, error) {
 			service := refusedServiceFor(check.verification)
 			switch {
 			case service == "":
-				charge(fmt.Errorf("%s verification failed: %w", check.verification.Name, check.err))
+				charge(chargedTo(check.verification.Name, fmt.Errorf("%s verification failed: %w", check.verification.Name, check.err)))
 			case IsRateLimitFailure(check.err):
 				admission.throttleService(outcome.url, service, check.err)
 			default:
-				admission.fail(outcome.url, service)
+				admission.fail(outcome.url, service, FailedCheck(chargedTo(check.verification.Name, check.err)))
 				utils.LavaFormatWarning("refusing one service for this url, keeping the provider", check.err,
 					utils.LogAttr("url", outcome.url.String()),
 					utils.LogAttr("service", service),
@@ -806,7 +899,8 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 	outcome.served = url
 	verifications, err := g.cf.nodeUrlVerifications(g.parser, url)
 	if err != nil {
-		outcome.err = err
+		// Listing a url's checks fails only on add-ons the spec does not define.
+		outcome.err = chargedTo(CheckUnsupportedAddon, err)
 		return outcome
 	}
 	socket := isWebSocketUrl(url.Url)
@@ -820,7 +914,7 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 	if err != nil {
 		// A dial the deadline cut off reads as a cut-off, as a check it cut off does, and
 		// the url's height was never read.
-		outcome.err = deadlineContext(ctx, fmt.Errorf("connect: %w", err))
+		outcome.err = chargedTo(CheckConnect, deadlineContext(ctx, fmt.Errorf("connect: %w", err)))
 		outcome.head = spectypes.NOT_APPLICABLE
 		return outcome
 	}
@@ -845,7 +939,7 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		case ctx.Err() != nil:
 			verifyErr = errCheckNotRun
 		case verificationNeedsHead(verification) && outcome.headErr != nil:
-			verifyErr = fmt.Errorf("latest block unavailable: %w", outcome.headErr)
+			verifyErr = &VerificationFailure{Check: CheckLatestBlock, Err: fmt.Errorf("latest block unavailable: %w", outcome.headErr)}
 		default:
 			verifyErr = g.check(ctx, router, verification, latestBlock)
 		}
