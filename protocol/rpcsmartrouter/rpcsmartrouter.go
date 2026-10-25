@@ -3043,8 +3043,8 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		countFailedCheck: func(tier reverifyTier, provider string, failure metrics.ProviderVerificationFailure) {
 			rpsr.smartRouterMetricsManager.CountVerificationCheckFailure(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface, provider, tier.String(), failure)
 		},
-		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []chainlib.RefusedService {
-			return refusalsOf(admissionFor(p))
+		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
+			return refusalsOf(chainParser, p, admissionFor(p))
 		},
 		configuredStatic: relevantStaticProviderList,
 		configuredBackup: relevantBackupProviderList,
@@ -3066,7 +3066,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	} {
 		for _, p := range tier.providers {
 			if _, failed := tier.failed[p]; !failed {
-				inputs.countRefusals(tier.tier, p.Name, admissionFor(p))
+				inputs.countRefusals(tier.tier, p, admissionFor(p))
 			}
 		}
 	}
@@ -4272,9 +4272,7 @@ func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inp
 				}
 				failures = append(failures, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeProvider, Check: check})
 			} else if inputs.refusedFor != nil {
-				for _, r := range inputs.refusedFor(p) {
-					failures = append(failures, partialFailure(r))
-				}
+				failures = append(failures, inputs.refusedFor(p)...)
 			}
 			rpsr.smartRouterMetricsManager.SetProviderVerificationFailures(
 				inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name, tier.tier.String(), failures)
@@ -4282,23 +4280,45 @@ func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inp
 	}
 }
 
-// refusalsOf lists what an admitted provider was refused: each service, and each node
-// url as a RefusedService with no service. A provider keeps serving through both.
-func refusalsOf(admission chainlib.ProviderAdmission) []chainlib.RefusedService {
-	refused := admission.Refused()
-	for _, check := range admission.RefusedURLChecks() {
-		refused = append(refused, chainlib.RefusedService{Check: check})
+// refusalsOf is what an admitted provider was refused, as the metric publishes it. A
+// provider keeps serving through all of it:
+//   - scope=service: an add-on or extension no node url of the provider serves any more;
+//   - scope=url with a service: a service one url lost while another url still serves it;
+//   - scope=url with no service: a node url refused whole.
+func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []metrics.ProviderVerificationFailure {
+	var failures []metrics.ProviderVerificationFailure
+	for _, r := range admission.Refused() {
+		scope := metrics.VerificationScopeService
+		if servedElsewhere(chainParser, provider, admission, r.Service) {
+			scope = metrics.VerificationScopeURL
+		}
+		failures = append(failures, metrics.ProviderVerificationFailure{Scope: scope, Service: r.Service, Check: r.Check})
 	}
-	return refused
+	for _, check := range admission.RefusedURLChecks() {
+		failures = append(failures, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: check})
+	}
+	return failures
 }
 
-// partialFailure is a refusal as the metric publishes it: scope=service for one
-// add-on or extension, scope=url for a node url the provider is serving without.
-func partialFailure(r chainlib.RefusedService) metrics.ProviderVerificationFailure {
-	if r.Service == "" {
-		return metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: r.Check}
+// servedElsewhere reports whether a node url of the provider still serves service: a
+// service refused on one url is not lost while another url keeps it.
+func servedElsewhere(chainParser chainlib.ChainParser, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission, service string) bool {
+	for index, url := range provider.NodeUrls {
+		if admission.URLRefused(index) {
+			continue
+		}
+		var services []string
+		var keep bool
+		if chainParser != nil {
+			services, keep = admittedServicesFor(chainParser, admission, url)
+		} else {
+			services, keep = admission.AdmittedServices(url)
+		}
+		if keep && slices.Contains(services, service) {
+			return true
+		}
 	}
-	return metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeService, Service: r.Service, Check: r.Check}
+	return false
 }
 
 // subscriptionEndpointSetter is the slice of the Direct WS/gRPC subscription managers
@@ -4506,7 +4526,7 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 		}
 		rpsr.mu.Lock()
 		if inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]; inputs != nil {
-			inputs.countRefusals(tier, provider.Name, admission)
+			inputs.countRefusals(tier, provider, admission)
 		}
 		rpsr.mu.Unlock()
 		recovered = append(recovered, provider)

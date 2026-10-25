@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -101,10 +102,10 @@ func TestPublishServingTier_ProviderOutCarriesTheFailedCheck(t *testing.T) {
 func TestPublishServingTier_RefusedServiceOfAPairedProvider(t *testing.T) {
 	const spec = "VERIFYFAILEDSERVICE"
 	const chainKey = spec + "-jsonrpc"
-	refused := map[string][]chainlib.RefusedService{"lava": {{Service: "archive", Check: "pruning"}}}
+	refused := map[string][]metrics.ProviderVerificationFailure{"lava": {{Scope: metrics.VerificationScopeService, Service: "archive", Check: "pruning"}}}
 	inputs := &chainReverifyInputs{
 		configuredBackup: []*lavasession.RPCStaticProviderEndpoint{{Name: "lava"}},
-		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []chainlib.RefusedService {
+		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
 			return refused[p.Name]
 		},
 	}
@@ -225,16 +226,32 @@ func TestApplyReverification_RecordsTheFailedCheck(t *testing.T) {
 	require.Equal(t, "pruning", inputs.lastFailure["static|tatum"])
 }
 
-// A refused node url is published with scope=url and no service, so a provider that
-// keeps serving on its other urls still shows what it lost; a refused service keeps
-// scope=service.
-func TestPartialFailure_URLAndServiceScopes(t *testing.T) {
+// What an admitted provider lost is published by what still serves it. A service no url
+// of the provider serves any more is scope=service. A service one url lost while another
+// still serves it is scope=url with that service: requests needing it still reach the
+// provider. A node url refused whole is scope=url with no service.
+func TestRefusalsOf_ScopeFollowsWhatStillServes(t *testing.T) {
+	up := newFakeUpstreams(t)
+	parser := liveParser(t, "ETH1", true)
+	refusals := func(urls ...common.NodeUrl) []metrics.ProviderVerificationFailure {
+		provider := staticProvider("ETH1", urls...)
+		admission, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
+		require.NoError(t, err)
+		return refusalsOf(parser, provider, admission)
+	}
+	pruned := common.NodeUrl{Url: up.httpURL("/rs/" + upPruned), Addons: []string{"archive"}}
+	full := common.NodeUrl{Url: up.httpURL("/rs/" + upArchive), Addons: []string{"archive"}}
+
 	require.Equal(t,
-		metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: "chain-id"},
-		partialFailure(chainlib.RefusedService{Check: "chain-id"}))
+		[]metrics.ProviderVerificationFailure{{Scope: metrics.VerificationScopeService, Service: "archive", Check: "pruning"}},
+		refusals(pruned), "no url serves archive any more")
 	require.Equal(t,
-		metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeService, Service: "archive", Check: "pruning"},
-		partialFailure(chainlib.RefusedService{Service: "archive", Check: "pruning"}))
+		[]metrics.ProviderVerificationFailure{{Scope: metrics.VerificationScopeURL, Service: "archive", Check: "pruning"}},
+		refusals(pruned, full), "the full node still serves archive")
+	require.Equal(t,
+		[]metrics.ProviderVerificationFailure{{Scope: metrics.VerificationScopeURL, Check: "chain-id"}},
+		refusals(common.NodeUrl{Url: up.httpURL("/rs/" + upDead)}, common.NodeUrl{Url: up.httpURL("/rs/" + upArchive)}),
+		"a url refused whole")
 }
 
 func TestPublishServingTier_RefusedURLOfAPairedProvider(t *testing.T) {
@@ -242,8 +259,8 @@ func TestPublishServingTier_RefusedURLOfAPairedProvider(t *testing.T) {
 	const chainKey = spec + "-jsonrpc"
 	inputs := &chainReverifyInputs{
 		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "tatum"}},
-		refusedFor: func(*lavasession.RPCStaticProviderEndpoint) []chainlib.RefusedService {
-			return []chainlib.RefusedService{{Check: chainlib.CheckConnect}}
+		refusedFor: func(*lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
+			return []metrics.ProviderVerificationFailure{{Scope: metrics.VerificationScopeURL, Check: chainlib.CheckConnect}}
 		},
 	}
 	rpsr := newVerificationFailedRouter(t, spec, inputs)

@@ -90,10 +90,9 @@ type chainReverifyInputs struct {
 	// subscription tiers leave out the urls it refused and a rate-limited pass can
 	// keep what the last one knew. Nil in tests that do not build endpoints.
 	admissionFor func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission
-	// refusedFor returns what was last refused to a provider that keeps serving: each
-	// service, and each node url (as a RefusedService with no service), with the check
-	// that refused it. Nil in tests that do not build endpoints.
-	refusedFor func(*lavasession.RPCStaticProviderEndpoint) []chainlib.RefusedService
+	// refusedFor returns what was last refused to a provider that keeps serving, as the
+	// metric publishes it (refusalsOf). Nil in tests that do not build endpoints.
+	refusedFor func(*lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure
 	// lastFailure is the check each provider last failed, keyed "<tier>|<name>" like
 	// demoteFailStreak. Written on every failed verification (boot, the retry loop,
 	// the epoch pass) and read only for a provider that is out of the pairing, so an
@@ -150,12 +149,12 @@ func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, e
 
 // countRefusals counts each service and node url this pass refused a provider it
 // admits, one failed run each.
-func (inputs *chainReverifyInputs) countRefusals(tier reverifyTier, provider string, admission chainlib.ProviderAdmission) {
+func (inputs *chainReverifyInputs) countRefusals(tier reverifyTier, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) {
 	if inputs.countFailedCheck == nil {
 		return
 	}
-	for _, r := range refusalsOf(admission) {
-		inputs.countFailedCheck(tier, provider, partialFailure(r))
+	for _, failure := range refusalsOf(inputs.chainParser, provider, admission) {
+		inputs.countFailedCheck(tier, provider.Name, failure)
 	}
 }
 
@@ -281,7 +280,7 @@ func applyReverification(
 		throttle = admission.URLThrottle()
 		// Counted before the merge below: what it keeps from the last pass was not
 		// failed by this one.
-		inputs.countRefusals(tier, p.Name, admission)
+		inputs.countRefusals(tier, p, admission)
 		if admission.Throttled() != nil && inputs.admissionFor != nil {
 			admission = admission.KeepingThrottledFrom(inputs.admissionFor(p))
 		}
