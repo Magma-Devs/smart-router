@@ -181,7 +181,7 @@ func TestGrpcMetadataPinReachesPinResolution(t *testing.T) {
 	forwarded := forwardedHeaders(parsed)
 	require.Equal(t, "kept", forwarded[grpcDirectivesPassthroughHeader], "a header the spec passes must reach the node")
 	require.NotContains(t, forwarded, common.SELECT_PROVIDER_HEADER_NAME, "the pin is for the router and must not reach the node")
-	selected, _ := resolvePinDirectives(context.Background(), directives, true)
+	selected, _ := resolvePinDirectives(context.Background(), directives)
 	require.Equal(t, "upstream-b", selected, "the first attempt must be pinned to the named upstream")
 }
 
@@ -192,7 +192,7 @@ func TestGrpcMetadataWithoutPinLeavesSelectionToTheRouter(t *testing.T) {
 
 	directives := sender.only(t).GetDirectiveHeaders()
 	require.NotContains(t, directives, common.SELECT_PROVIDER_HEADER_NAME)
-	selected, _ := resolvePinDirectives(context.Background(), directives, true)
+	selected, _ := resolvePinDirectives(context.Background(), directives)
 	require.Empty(t, selected, "an unpinned call must leave the choice to the router")
 }
 

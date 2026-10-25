@@ -69,6 +69,8 @@ func TestRequestRanOutOfRoad_OnlyTheBudget(t *testing.T) {
 		"AllProvidersExhausted",
 		"BatchSendFailed",
 		"FirstMessageFailed",
+		"Pinned",                    // the pinned upstream answered with an error; that answer is final (MAG-2280)
+		"PinnedProviderUnavailable", // the pinned upstream could not be selected; nothing was sent (MAG-4123)
 	} {
 		require.False(t, requestRanOutOfRoad(reason),
 			"%q is not the request running out of budget, so it must not blame an endpoint", reason)

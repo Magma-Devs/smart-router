@@ -323,7 +323,29 @@ func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) Decis
 		Summary:       sm.getResultsSummary(),
 		IsTickerHedge: isTickerHedge,
 		IsDefaultApi:  sm.protocolMessage.IsDefaultApi(),
+		Pinned:        PinnedByDirectives(sm.protocolMessage.GetDirectiveHeaders()),
 	}
+}
+
+// PinnedByDirectives reports whether the caller pinned the request to one upstream with
+// lava-select-provider or lava-stickiness. Read from the request's ORIGINAL headers: a message
+// rebuilt for an archive toggle drops the pin headers on purpose (preserveRetrySafeDirectives),
+// and the pin is a property of the request, not of one attempt. Presence is what counts, as in
+// resolvePinDirectives. A request that cross-validation overrides is not pinned in effect, so
+// callers check the selection first.
+func PinnedByDirectives(directiveHeaders map[string]string) bool {
+	_, selected := directiveHeaders[common.SELECT_PROVIDER_HEADER_NAME]
+	_, sticky := directiveHeaders[common.STICKINESS_HEADER_NAME]
+	return selected || sticky
+}
+
+// PinnedUpstreamUnservable reports a selection error that names the pin: the pinned upstream is
+// unknown, blocked, busy, or too far behind the chain tip (MAG-4123). Resending the same pinned
+// request changes none of that, so the policy stops on it at once instead of after
+// SendRelayAttempts identical refusals, and, for the consistency case, before a resend could run
+// selection without the pin.
+func PinnedUpstreamUnservable(err error) bool {
+	return errors.Is(err, lavasession.SelectedProviderUnavailableError) || errors.Is(err, lavasession.SelectedProviderAlreadyFailedError)
 }
 
 func (sm *UnifiedRelayStateMachine) GetDebugState() bool {
@@ -506,6 +528,10 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 								utils.LogAttr("stillInFlight", stillInFlight),
 							)
 						}
+					} else if PinnedUpstreamUnservable(err) {
+						// A pinned request whose upstream cannot take it: unknown, blocked, busy, or too far
+						// behind the chain tip (MAG-4123). The policy stops at once; nothing was sent.
+						sm.recordStopReason("PinnedProviderUnavailable")
 					} else if sm.usedProviders.BatchNumber() == 0 && sm.policy.GetConsecutiveBatchErrors() == sm.config.SendRelayAttempts+1 {
 						sm.recordStopReason("FirstMessageFailed")
 						utils.LavaFormatWarning("Failed Sending First Message", err, utils.LogAttr("consecutive errors", sm.policy.GetConsecutiveBatchErrors()), utils.LogAttr("GUID", sm.ctx))
