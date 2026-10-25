@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -14,6 +15,10 @@ const (
 	respCacheOpSet       = "set"
 	respCacheOpStickyGet = "sticky_get"
 	respCacheOpStickySet = "sticky_set"
+	// The fleet tracker gate's endpoint observations (MAG-2981): fetch rides the read
+	// breaker, publish the write breaker, like sticky_get / sticky_set.
+	respCacheOpObservationGet = "observation_get"
+	respCacheOpObservationSet = "observation_set"
 
 	respCacheFailureKindError   = "error"
 	respCacheFailureKindTimeout = "timeout"
@@ -77,7 +82,7 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 			}, []string{"role"}),
 			skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
 				Name: "smartrouter_resp_cache_skipped_total",
-				Help: "RESP cache operations skipped without I/O while the breaker on their side was open (endpoint unreachable or slower than its budget), by op (get|set|sticky_get|sticky_set). Never counted as failed: the backend never saw them.",
+				Help: "RESP cache operations skipped without I/O while the breaker on their side was open (endpoint unreachable or slower than its budget), by op (get|set|sticky_get|sticky_set|observation_get|observation_set). Never counted as failed: the backend never saw them.",
 			}, []string{"op"}),
 			breakerOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 				Name: "smartrouter_resp_cache_breaker_open",
@@ -103,15 +108,32 @@ func getRespCacheMetrics() *respCacheMetricsSet {
 }
 
 // recordOpFailure counts a backend-level operation failure; timeouts are
-// distinguished so saturation is separable from outage on dashboards. Both
-// deadline exhaustion (caller budget) and network timeouts (dial/read/write
-// limits — the handshake of a fresh connection is bounded by DialTimeout, not
-// the caller's context) classify as timeouts.
+// distinguished so saturation is separable from outage on dashboards. Deadline
+// exhaustion (the caller's budget) and network timeouts (read/write limits)
+// classify as timeouts — the backend was reachable and did not answer in time.
+//
+// A failure to CONNECT is an outage whatever the operation's own error looked
+// like, and is asked first, because on reads it is the only thing the timeout
+// test can get wrong: a caller budget that expired while the endpoint was
+// refusing connections is an outage the budget merely hid, which a read's
+// budget — a fraction of the dial budget — did on every read of a dead cache
+// before ErrEndpointUnreachable carried the reason out (MAG-3653). The store
+// records that only for a dial the path answered (refused, no route, no such
+// name); a dial that merely timed out could as well be a healthy backend too far
+// away, and stays a timeout here.
 func (m *respCacheMetricsSet) recordOpFailure(op string, err error) {
-	kind := respCacheFailureKindError
+	m.opsFailed.WithLabelValues(op, respCacheFailureKind(err)).Inc()
+}
+
+func respCacheFailureKind(err error) string {
+	// Asked first: an endpoint the store could not reach is an outage however the
+	// failure that reported it happened to look.
+	if errors.Is(err, redisstore.ErrEndpointUnreachable) {
+		return respCacheFailureKindError
+	}
 	var netErr net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
-		kind = respCacheFailureKindTimeout
+		return respCacheFailureKindTimeout
 	}
-	m.opsFailed.WithLabelValues(op, kind).Inc()
+	return respCacheFailureKindError
 }

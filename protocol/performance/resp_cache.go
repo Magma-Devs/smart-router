@@ -605,7 +605,13 @@ func (cache *RespCache) GetEntry(ctx context.Context, relayCacheGet *pairingtype
 		// alongside — the call site degrades either way and labels the outcome.
 		return &pairingtypes.CacheRelayReply{}, cache.skip(respCacheOpGet)
 	}
+	window := cache.store.BeginRead()
 	reply, _, err := cache.engine.GetRelay(ctx, relayCacheGet)
+	// A lookup's budget is shorter than the backend's first dial retry, so a
+	// dead cache used to return a bare context.DeadlineExceeded with the
+	// refusal lost behind it. Annotate restores what the budget hid, from what
+	// the store observed while this lookup ran (MAG-3653).
+	err = window.Annotate(err)
 	cache.noteOperation(cache.readBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpGet, err)
@@ -621,7 +627,9 @@ func (cache *RespCache) SetEntry(ctx context.Context, cacheSet *pairingtypes.Rel
 	if cache.writeBreaker.open.Load() {
 		return cache.skip(respCacheOpSet)
 	}
+	window := cache.store.BeginWrite()
 	err := cache.engine.SetRelay(ctx, cacheSet)
+	err = window.Annotate(err)
 	cache.noteOperation(cache.writeBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpSet, err)
@@ -685,7 +693,9 @@ func (cache *RespCache) GetStickySession(ctx context.Context, chainId, apiInterf
 	if cache.readBreaker.open.Load() {
 		return core.StickyPin{}, false, cache.skip(respCacheOpStickyGet)
 	}
+	window := cache.store.BeginRead()
 	pin, found, err := cache.engine.GetSticky(ctx, chainId, apiInterface, service, stickyId)
+	err = window.Annotate(err)
 	cache.noteOperation(cache.readBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpStickyGet, err)
@@ -703,10 +713,67 @@ func (cache *RespCache) SetStickySessionIfAbsent(ctx context.Context, chainId, a
 	if cache.writeBreaker.open.Load() {
 		return core.StickyPin{}, cache.skip(respCacheOpStickySet)
 	}
+	window := cache.store.BeginWrite()
 	effective, err := cache.engine.SetStickyIfAbsent(ctx, chainId, apiInterface, service, stickyId, pin, ttl)
+	err = window.Annotate(err)
 	cache.noteOperation(cache.writeBreaker, err)
 	if err != nil && errors.Is(err, core.StoreError) {
 		cache.metrics.recordOpFailure(respCacheOpStickySet, err)
 	}
 	return effective, err
+}
+
+// SetEndpointObservation publishes this pod's successful poll of an upstream endpoint for the
+// fleet tracker gate (MAG-2981), straight into the RESP store. The engine validates and clamps
+// exactly as the cache server does for the gRPC backend, and the store stamps the entry with
+// the key primary's TIME.
+//
+// Behind the write breaker like a sticky claim: while it is open the publish is skipped with
+// an error at once — the caller counts it and polls on — instead of holding a pool slot for
+// its budget against a dead backend, and a store failure counts toward opening it.
+func (cache *RespCache) SetEndpointObservation(ctx context.Context, set *pairingtypes.EndpointObservationSet) error {
+	if cache == nil {
+		return NotInitializedError
+	}
+	if cache.writeBreaker.open.Load() {
+		return cache.skip(respCacheOpObservationSet)
+	}
+	window := cache.store.BeginWrite()
+	_, err := cache.engine.PublishEndpointObservation(ctx, set.ChainId, set.ApiInterface, set.EndpointId, set.PodId, set.Block,
+		time.Duration(set.TtlMs)*time.Millisecond)
+	err = window.Annotate(err)
+	cache.noteOperation(cache.writeBreaker, err)
+	if err != nil && errors.Is(err, core.StoreError) {
+		cache.metrics.recordOpFailure(respCacheOpObservationSet, err)
+	}
+	return err
+}
+
+// GetEndpointObservation reads the freshest peer observation of an upstream endpoint. A miss is
+// a reply with Found=false, not an error; the age is the read client's TIME minus the stamp
+// the key primary wrote (see redisstore.Store.GetEndpointObservation).
+//
+// Behind the read breaker like a sticky read: while it is open the fetch is an error at once,
+// never a miss, so a dead backend no longer costs every poll tick its fetch budget.
+func (cache *RespCache) GetEndpointObservation(ctx context.Context, get *pairingtypes.EndpointObservationGet) (*pairingtypes.EndpointObservationReply, error) {
+	if cache == nil {
+		return nil, NotInitializedError
+	}
+	if cache.readBreaker.open.Load() {
+		return nil, cache.skip(respCacheOpObservationGet)
+	}
+	window := cache.store.BeginRead()
+	obs, age, found, err := cache.engine.GetEndpointObservation(ctx, get.ChainId, get.ApiInterface, get.EndpointId)
+	err = window.Annotate(err)
+	cache.noteOperation(cache.readBreaker, err)
+	if err != nil {
+		if errors.Is(err, core.StoreError) {
+			cache.metrics.recordOpFailure(respCacheOpObservationGet, err)
+		}
+		return nil, err
+	}
+	if !found {
+		return &pairingtypes.EndpointObservationReply{}, nil
+	}
+	return &pairingtypes.EndpointObservationReply{Found: true, Block: obs.Block, AgeMs: age.Milliseconds(), PodId: obs.PodID}, nil
 }

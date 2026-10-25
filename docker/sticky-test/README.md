@@ -51,15 +51,24 @@ upstreams — the reported customer bug. A harness that passes either way measur
 
 ## Reading the metrics
 
-With `KEEP=1`, each replica exposes metrics on :7801, :7802, :7803:
+With `KEEP=1`, each replica exposes metrics on :7801, :7802, :7803, and its debug server on
+:9801, :9802, :9803:
 
 ```bash
 curl -s :7801/metrics | grep smartrouter_csm_sticky_claims_total
+curl -s :9801/debug/sticky-claims
 ```
+
+The route reports the same seven counts per endpoint, cumulative for the replica's lifetime,
+with `PodID` naming the replica that answered and `SharedSticky` saying whether the claim
+registry is wired (`SharedStickyReason` says why not: with `STICKY_SHARED_STATE=false` it reads
+`--shared-state not set`). The counts are per replica: read each port, or compare two readings
+only when their `PodID` matches.
 
 - `claimed` — this pod created the claim. Summed across pods it should equal the number of
   DISTINCT session ids used, because a claim is first-writer-wins fleet-wide.
-- `adopted` — this pod took a claim a peer had made. **Zero here on every pod means the
+- `adopted` — this pod routed by a claim it read from the registry: a peer's, or its own after
+  dropping its local copy (`invalidated` moves with it then). **Zero here on every pod means the
   feature is wired but never firing.**
 - `local_hit` — answered from this pod's confirmed table with no round trip.
 - `error` — the claim could not be established and the request was failed rather than

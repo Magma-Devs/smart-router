@@ -2,6 +2,8 @@ package metrics
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"sync"
@@ -12,7 +14,6 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // registerOrReuse registers a Prometheus collector, returning the existing
@@ -56,6 +57,9 @@ type SmartRouterMetricsManager struct {
 	endpointSelectionScore         *prometheus.GaugeVec    // rpc_endpoint_selection_score {spec, apiInterface, endpoint_id, score_type}
 	optimizerSelectionScore        *prometheus.GaugeVec    // rpc_optimizer_selection_score {spec, endpoint_id, score_type}
 	endpointLatestBlock            *MappedLabelsGaugeVec   // rpc_endpoint_latest_block
+	endpointURLLatestBlock         *MappedLabelsGaugeVec   // rpc_endpoint_url_latest_block
+	endpointURLAnsweredUntil       *MappedLabelsGaugeVec   // rpc_endpoint_url_answered_until_seconds
+	endpointURLRelaysServiced      *MappedLabelsCounterVec // rpc_endpoint_url_relays_serviced_total
 	endpointFetchLatestFails       *MappedLabelsCounterVec // rpc_endpoint_fetch_latest_fails
 	endpointFetchBlockFails        *MappedLabelsCounterVec // rpc_endpoint_fetch_block_fails
 	endpointFetchLatestSuccess     *MappedLabelsCounterVec // rpc_endpoint_fetch_latest_success
@@ -74,11 +78,14 @@ type SmartRouterMetricsManager struct {
 	routerOverallHealthBreakdown *prometheus.GaugeVec // smartrouter_overall_health_breakdown {spec, apiInterface}
 
 	// Router-scoped metrics (labels: spec, apiInterface)
-	routerLatestBlock          *prometheus.GaugeVec
-	routerProtocolVersion      *prometheus.GaugeVec
-	routerWsConnectionsActive  *prometheus.GaugeVec
-	routerWsSubscriptionsTotal *prometheus.CounterVec
-	routerWsSubscriptionErrors *prometheus.CounterVec
+	routerLatestBlock            *prometheus.GaugeVec
+	routerLatestBlockRegressions *prometheus.CounterVec // smartrouter_latest_block_regressions_total {spec, apiInterface, reason}
+	routerChainIdle              *prometheus.GaugeVec   // smartrouter_chain_idle {spec, apiInterface}
+	routerProtocolVersion        *prometheus.GaugeVec
+	routerWsConnectionsActive    *prometheus.GaugeVec
+	routerWsSubscriptionsTotal   *prometheus.CounterVec
+	routerWsSubscriptionErrors   *prometheus.CounterVec
+	subscriptionClientsDropped   *prometheus.CounterVec
 
 	// Cross-validation group metrics
 	crossValidationRequestsTotalMetric              *prometheus.CounterVec // smartrouter_cross_validation_requests_total        {spec, apiInterface, method}
@@ -137,6 +144,11 @@ type SmartRouterMetricsManager struct {
 	routerRequestsArchive    *prometheus.CounterVec
 	routerRequestsBatch      *prometheus.CounterVec
 
+	// extensionUnavailableTotal counts replies served without an extension the caller asked for
+	// (MAG-3935). Labels: spec, apiInterface, extension — the extension label is bounded by the
+	// spec's extension names, see RecordExtensionUnavailable.
+	extensionUnavailableTotal *prometheus.CounterVec // smartrouter_extension_unavailable_total
+
 	// Batch-request shape metrics. The `method` label on every family above is collapsed
 	// for batches (see batch_method_label.go) — batchSize carries the element count the
 	// collapse drops, and batchSignatureOverflow reports when the signature cap binds.
@@ -151,6 +163,15 @@ type SmartRouterMetricsManager struct {
 	// defaultMethods bounds how many distinct Default-* names may become label values.
 	defaultMethods *batchSignatureRegistry
 
+	// Per-customer request group (MAG-4081), recorded once per client request by
+	// SetRelayMetrics. The customer label is the caller's project-id header, bounded by
+	// customers (see customer_label.go); customerOverflow reports when that cap binds.
+	customerRequestsTotal   *prometheus.CounterVec   // smartrouter_customer_requests_total
+	customerRequestsFailed  *prometheus.CounterVec   // smartrouter_customer_requests_failed_total
+	customerEndToEndLatency *prometheus.HistogramVec // smartrouter_customer_end_to_end_latency_milliseconds
+	customerOverflow        *prometheus.CounterVec   // smartrouter_customer_overflow_total
+	customers               *batchSignatureRegistry
+
 	// Internal state
 	lock                    sync.RWMutex
 	endpointsHealthChecksOk uint64
@@ -159,8 +180,19 @@ type SmartRouterMetricsManager struct {
 	// ALL provider names sharing the URL — otherwise only the last-registered provider gets
 	// the metric label, leaving its peers stuck at the zero value on dashboards.
 	urlToProviderNames map[string][]string
+	// urlInternalPaths maps a registered url to the spec path it serves ("/v2", or "" for the
+	// root), for the internal_path label of the per-url series. Guarded by lock.
+	urlInternalPaths map[string]string
+	// urlFingerprints maps a registered url to its URLFingerprint, computed once at registration
+	// rather than on every relay. Guarded by lock.
+	urlFingerprints    map[string]string
 	optimizerQoSClient *ConsumerOptimizerQoSClient
 }
+
+// DefaultURLAnswerTimeout is the shortest time a url counts as answering after an answer. A chain
+// server whose trackers can go longer between two answered polls (the traffic gate's skips plus
+// the poll, and one poll interval more) passes that instead.
+const DefaultURLAnswerTimeout = 2 * time.Minute
 
 // SmartRouterMetricsManagerOptions contains configuration for the metrics manager.
 //
@@ -248,6 +280,29 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Registerer: prometheus.DefaultRegisterer,
 	})
 
+	// One series per node url of a provider, for the stuck-provider alerts (MAG-4204). Every url
+	// of a provider writes the provider series above, so that series cannot show a url that
+	// froze while another url of the provider moves on.
+	urlLabels := []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"}
+	endpointURLLatestBlock := NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_url_latest_block",
+		Help:       "Latest block one node url of a provider answered with. url is a fingerprint of the node url: the first 8 hex digits of its sha256.",
+		Labels:     urlLabels,
+		Registerer: prometheus.DefaultRegisterer,
+	})
+	endpointURLAnsweredUntil := NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_url_answered_until_seconds",
+		Help:       "Unix time until which a node url counts as answering: its last answer, a poll or a relay, plus max(2m, 6 x the interval its tracker polls at). A url past it has stopped answering: it is down, not stuck.",
+		Labels:     urlLabels,
+		Registerer: prometheus.DefaultRegisterer,
+	})
+	endpointURLRelaysServiced := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
+		Name:       "rpc_endpoint_url_relays_serviced_total",
+		Help:       "Relays one node url of a provider served successfully.",
+		Labels:     urlLabels,
+		Registerer: prometheus.DefaultRegisterer,
+	})
+
 	endpointFetchLatestFails := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
 		Name:       "rpc_endpoint_fetch_latest_fails",
 		Help:       "Total failed latest-block fetch operations for this RPC endpoint.",
@@ -292,13 +347,15 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	})
 
 	// Counts the poll cycles the tracker's traffic gate suppressed, split by what made the
-	// poll redundant: source="relay" (served traffic kept the tip fresh) or source="peer"
-	// (another pod's poll, borrowed through the cache backend — the fleet gate, MAG-2981).
+	// poll redundant: source="relay" (served traffic kept the tip fresh), source="peer"
+	// (another pod's poll, borrowed through the cache backend — the fleet gate, MAG-2981), or
+	// source="idle" (the chain served no client relay for the idle window, so nobody needs
+	// the poll's answer — idle mode).
 	// Together with rpc_endpoint_tracker_requests_total this shows both halves of the
 	// tracker's cadence: requests sent, and ticks that sent nothing and why.
 	endpointTrackerGateSkips := NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
 		Name:       "rpc_endpoint_tracker_gate_skips_total",
-		Help:       "Total per-endpoint tracker poll cycles suppressed by the traffic gate, by source (relay, peer).",
+		Help:       "Total per-endpoint tracker poll cycles suppressed by the traffic gate, by source (relay, peer, idle).",
 		Labels:     []string{"spec", "apiInterface", "endpoint_id", "source"},
 		Registerer: prometheus.DefaultRegisterer,
 	})
@@ -370,6 +427,22 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Help: "Latest block known by the RPC smart router for this chain/interface.",
 	}, []string{"spec", "apiInterface"})
 
+	// Counts the chain tip moving DOWN (MAG-4153). smartrouter_latest_block is a per-pod gauge that
+	// is also written on every relay, so a drop in it cannot be told apart from a pod restart; this
+	// counter is the alertable signal. reason is chainstate.RegressionReason* — a closed set of two.
+	routerLatestBlockRegressions := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_latest_block_regressions_total",
+		Help: "Times the router's latest block for this chain/interface moved backwards, by reason (consensus, stale_tip).",
+	}, []string{"spec", "apiInterface", "reason"})
+
+	// Idle mode per chain/interface: 1 while the chain has served no client relay for the idle
+	// window and its dedicated polls are paused (or on the idle heartbeat), 0 while active. Left
+	// unset when idle mode is off, so a missing series means "not configured", not "active".
+	routerChainIdle := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_chain_idle",
+		Help: "Idle mode state for this chain/interface (1=idle: no client relay within --chain-tracker-idle-after, tracker polls paused; 0=active).",
+	}, []string{"spec", "apiInterface"})
+
 	routerProtocolVersion := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_protocol_version",
 		Help: "Protocol version of the RPC smart router encoded as major*1e6+minor*1e3+patch.",
@@ -388,6 +461,11 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerWsSubscriptionErrors := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_ws_subscription_errors_total",
 		Help: "Total failed WebSocket subscription requests on the smart router.",
+	}, []string{"spec", "apiInterface"})
+
+	subscriptionClientsDropped := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_subscription_clients_dropped_total",
+		Help: "Clients dropped from a shared subscription (WebSocket or gRPC) because they did not keep up with its pushes.",
 	}, []string{"spec", "apiInterface"})
 
 	crossValidationLabels := []string{"spec", "apiInterface", "method"}
@@ -534,7 +612,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_csm_sticky_claims_total",
 		Help: "Cross-pod sticky-session claim resolutions by outcome. " +
 			"local_hit: answered from this pod's confirmed table, no round trip. " +
-			"adopted: took a claim another pod had already made — the signal that cross-pod stickiness is doing its job, and zero here on a multi-replica fleet means it is wired but never firing. " +
+			"adopted: routed by a live claim read from the registry rather than one held in memory — normally another pod's, the signal that cross-pod stickiness is doing its job, and zero here on a multi-replica fleet means it is wired but never firing; a pod also reads back its own claim after dropping its local copy (see invalidated). " +
 			"claimed: this pod's write created the claim. " +
 			"lost_race: a peer's claim was already live and named a DIFFERENT upstream, so this pod adopted it. " +
 			"(A peer claim naming the same upstream this pod would have picked is indistinguishable from winning, and counts as claimed.) " +
@@ -588,6 +666,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_requests_batch_total",
 		Help: "Total number of batch requests on the smart router.",
 	}, routerRequestLabels)
+	extensionUnavailableTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_extension_unavailable_total",
+		Help: "Requests served without an extension the caller asked for with lava-extension, because no node on this router offers it, per extension. Counted once per request per such extension, on the same replies that carry the Lava-Extension-Unavailable response header. An extension the router adds on its own (archive for a deep eth_call) is never counted. Non-zero means callers depend on an extension this deployment has no node for.",
+	}, []string{"spec", "apiInterface", "extension"})
 
 	batchSize := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "smartrouter_batch_size",
@@ -603,6 +685,29 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	defaultMethodOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_default_method_overflow_total",
 		Help: `Label normalizations that fell into method="Default-other": the spec exhausted its distinct unmatched-API name budget. Sustained growth means clients are hitting URLs the spec does not match — concrete IDs in the path mint a new name per request — which usually indicates a spec gap (e.g. a path variant the templates miss).`,
+	}, []string{"spec"})
+
+	// Per-customer request group (MAG-4081). Request-level, unlike smartrouter_requests_*,
+	// which count every attempt (retries, hedges, cross-validation) and the router's own
+	// tracker traffic. The latency histogram leaves method out: it is the family whose
+	// series multiply, and per-customer latency is asked per chain.
+	customerRequestLabels := []string{"spec", "apiInterface", "customer", "method"}
+	customerRequestsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_customer_requests_total",
+		Help: `Client requests, once each with their final outcome, by the caller's project-id header. customer="DefaultDappID": no header. customer="other": past the per-spec customer cap (see smartrouter_customer_overflow_total). Subscription pushes are not counted; the subscribe request is.`,
+	}, customerRequestLabels)
+	customerRequestsFailed := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_customer_requests_failed_total",
+		Help: "Client requests that ended in an error to the client, by the caller's project-id header. Success rate = 1 - failed / smartrouter_customer_requests_total.",
+	}, customerRequestLabels)
+	customerEndToEndLatency := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "smartrouter_customer_end_to_end_latency_milliseconds",
+		Help:    "End-to-end latency of successful client requests in milliseconds, by the caller's project-id header. Use histogram_quantile() for percentiles.",
+		Buckets: latencyBuckets,
+	}, []string{"spec", "apiInterface", "customer"})
+	customerOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_customer_overflow_total",
+		Help: `Label normalizations that fell into customer="other": the spec exhausted its distinct-customer budget, or the project-id value was too long to be an id. Non-zero means per-customer numbers are lossy for this spec.`,
 	}, []string{"spec"})
 
 	cacheLabels := []string{"spec", "apiInterface", "method", "cache_tier"}
@@ -641,10 +746,13 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerTotalErrored = registerOrReuse(routerTotalErrored)
 	routerEndToEndLatency = registerOrReuse(routerEndToEndLatency)
 	routerLatestBlock = registerOrReuse(routerLatestBlock)
+	routerLatestBlockRegressions = registerOrReuse(routerLatestBlockRegressions)
+	routerChainIdle = registerOrReuse(routerChainIdle)
 	routerProtocolVersion = registerOrReuse(routerProtocolVersion)
 	routerWsConnectionsActive = registerOrReuse(routerWsConnectionsActive)
 	routerWsSubscriptionsTotal = registerOrReuse(routerWsSubscriptionsTotal)
 	routerWsSubscriptionErrors = registerOrReuse(routerWsSubscriptionErrors)
+	subscriptionClientsDropped = registerOrReuse(subscriptionClientsDropped)
 	endpointEndToEndLatency = registerOrReuse(endpointEndToEndLatency)
 	crossValidationRequestsTotalMetric = registerOrReuse(crossValidationRequestsTotalMetric)
 	crossValidationSuccessTotalMetric = registerOrReuse(crossValidationSuccessTotalMetric)
@@ -675,9 +783,14 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	routerRequestsDebugTrace = registerOrReuse(routerRequestsDebugTrace)
 	routerRequestsArchive = registerOrReuse(routerRequestsArchive)
 	routerRequestsBatch = registerOrReuse(routerRequestsBatch)
+	extensionUnavailableTotal = registerOrReuse(extensionUnavailableTotal)
 	batchSize = registerOrReuse(batchSize)
 	batchSignatureOverflow = registerOrReuse(batchSignatureOverflow)
 	defaultMethodOverflow = registerOrReuse(defaultMethodOverflow)
+	customerRequestsTotal = registerOrReuse(customerRequestsTotal)
+	customerRequestsFailed = registerOrReuse(customerRequestsFailed)
+	customerEndToEndLatency = registerOrReuse(customerEndToEndLatency)
+	customerOverflow = registerOrReuse(customerOverflow)
 	cacheRequestsTotalMetric = registerOrReuse(cacheRequestsTotalMetric)
 	cacheSuccessTotalMetric = registerOrReuse(cacheSuccessTotalMetric)
 	cacheFailedTotalMetric = registerOrReuse(cacheFailedTotalMetric)
@@ -708,6 +821,9 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		endpointSelectionScore:         endpointSelectionScore,
 		optimizerSelectionScore:        optimizerSelectionScore,
 		endpointLatestBlock:            endpointLatestBlock,
+		endpointURLLatestBlock:         endpointURLLatestBlock,
+		endpointURLAnsweredUntil:       endpointURLAnsweredUntil,
+		endpointURLRelaysServiced:      endpointURLRelaysServiced,
 		endpointFetchLatestFails:       endpointFetchLatestFails,
 		endpointFetchBlockFails:        endpointFetchBlockFails,
 		endpointFetchLatestSuccess:     endpointFetchLatestSuccess,
@@ -726,11 +842,14 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		routerOverallHealthBreakdown: routerOverallHealthBreakdown,
 
 		// Router-scoped (without function)
-		routerLatestBlock:          routerLatestBlock,
-		routerProtocolVersion:      routerProtocolVersion,
-		routerWsConnectionsActive:  routerWsConnectionsActive,
-		routerWsSubscriptionsTotal: routerWsSubscriptionsTotal,
-		routerWsSubscriptionErrors: routerWsSubscriptionErrors,
+		routerLatestBlock:            routerLatestBlock,
+		routerLatestBlockRegressions: routerLatestBlockRegressions,
+		routerChainIdle:              routerChainIdle,
+		routerProtocolVersion:        routerProtocolVersion,
+		routerWsConnectionsActive:    routerWsConnectionsActive,
+		routerWsSubscriptionsTotal:   routerWsSubscriptionsTotal,
+		routerWsSubscriptionErrors:   routerWsSubscriptionErrors,
+		subscriptionClientsDropped:   subscriptionClientsDropped,
 
 		// Cross-validation group
 		crossValidationRequestsTotalMetric:              crossValidationRequestsTotalMetric,
@@ -767,6 +886,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		routerRequestsArchive:    routerRequestsArchive,
 		routerRequestsBatch:      routerRequestsBatch,
 
+		extensionUnavailableTotal: extensionUnavailableTotal,
+
 		// Batch shape group
 		batchSize:              batchSize,
 		batchSignatureOverflow: batchSignatureOverflow,
@@ -775,6 +896,13 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		// Unmatched-API method bounding
 		defaultMethodOverflow: defaultMethodOverflow,
 		defaultMethods:        newDefaultMethodRegistry(),
+
+		// Per-customer request group
+		customerRequestsTotal:   customerRequestsTotal,
+		customerRequestsFailed:  customerRequestsFailed,
+		customerEndToEndLatency: customerEndToEndLatency,
+		customerOverflow:        customerOverflow,
+		customers:               newCustomerRegistry(),
 
 		// Cache group
 		cacheRequestsTotalMetric: cacheRequestsTotalMetric,
@@ -812,9 +940,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// address leaves the manager in register-only mode (collectors registered, no
 	// socket) — see SmartRouterMetricsManagerOptions.
 	if options.NetworkAddress != "" {
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", promhttp.Handler())
-		manager.registerHTTPHandlers(mux)
+		mux := manager.metricsMux(prometheus.DefaultRegisterer, prometheus.DefaultGatherer)
 
 		go func() {
 			utils.LavaFormatInfo("prometheus endpoint listening", utils.Attribute{Key: "Listen Address", Value: options.NetworkAddress})
@@ -825,6 +951,15 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}
 
 	return manager
+}
+
+// metricsMux is every route the metrics server answers: the page, gathered from the given registry,
+// and the health routes.
+func (m *SmartRouterMetricsManager) metricsMux(registerer prometheus.Registerer, gatherer prometheus.Gatherer) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", newMetricsPageHandler(registerer, gatherer))
+	m.registerHTTPHandlers(mux)
+	return mux
 }
 
 // registerHTTPHandlers wires the health/readiness routes onto the given mux.
@@ -905,6 +1040,140 @@ func (m *SmartRouterMetricsManager) SetEndpointLatestBlock(spec, apiInterface, e
 	for _, providerName := range m.resolveProviderNames(endpointID) {
 		labels := map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": providerName}
 		m.endpointLatestBlock.WithLabelValues(labels).Set(float64(block))
+	}
+}
+
+// URLFingerprint is the url label of the per-url series: the first 8 hex digits of the node url's
+// sha256, and nothing of the url itself. A node url can hold an api key in any part of it, so no
+// part of it is exported. /debug/endpoint-state shows it beside each endpoint, on a router run
+// with its debug server.
+func URLFingerprint(rawURL string) string {
+	sum := sha256.Sum256([]byte(rawURL))
+	return hex.EncodeToString(sum[:4])
+}
+
+// RegisterEndpointInternalPath records the spec path a registered url serves ("/v2", or "" for
+// the root), for the internal_path label of the per-url series. TON's /v2 and /v3 urls share a
+// host, so the fingerprint alone does not tell an operator which of them an alert is about.
+func (m *SmartRouterMetricsManager) RegisterEndpointInternalPath(endpointID, internalPath string) {
+	if m == nil {
+		return
+	}
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	if m.urlInternalPaths == nil {
+		m.urlInternalPaths = make(map[string]string)
+	}
+	m.urlInternalPaths[endpointID] = internalPath
+}
+
+// SetEndpointURLLatestBlock records the head one url answered with on rpc_endpoint_url_latest_block,
+// for every provider configured with the url, and moves the url's answered-until time to
+// answerTimeout from now (DefaultURLAnswerTimeout if answerTimeout is not positive). The server
+// passes max(DefaultURLAnswerTimeout, 6 x its trackers' poll interval): up to 4 polls the traffic
+// gate skips, the poll after them, and one interval for that poll's answer. So a url that answers
+// every poll never reads as down between two answers, as long as the tip store accepts what it
+// answers: a poll answering below a still-fresh higher tip (a peer pod's, or a relay's read at a
+// fresher commitment) moves nothing. Every answered poll the tip store accepts calls it, a
+// repeat of the same block included, so a url that keeps answering with one block stands still on
+// its series while its answered-until time keeps moving: that is stuck. A url that stops answering
+// stands still on both: that is down.
+//
+// Only a registered url gets a series: an unregistered one would name itself as its provider, and
+// a url, even redacted, is not safe to export.
+func (m *SmartRouterMetricsManager) SetEndpointURLLatestBlock(spec, apiInterface, endpointURL string, block int64, answerTimeout time.Duration) {
+	if m == nil || m.endpointURLLatestBlock == nil || block <= 0 {
+		return
+	}
+	answeredUntil := answeredUntilFrom(time.Now(), answerTimeout)
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	for _, providerName := range m.urlToProviderNames[endpointURL] {
+		m.setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL, block, answeredUntil)
+	}
+}
+
+// SetProviderURLLatestBlock is SetEndpointURLLatestBlock for a caller that knows which provider the
+// url belongs to: the relay-harvest path, which reports the provider it relayed to. Only that
+// provider's series moves.
+func (m *SmartRouterMetricsManager) SetProviderURLLatestBlock(spec, apiInterface, providerName, endpointURL string, block int64, answerTimeout time.Duration) {
+	if m == nil || m.endpointURLLatestBlock == nil || block <= 0 {
+		return
+	}
+	answeredUntil := answeredUntilFrom(time.Now(), answerTimeout)
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	if _, registered := m.urlToProviderNames[endpointURL]; !registered {
+		return
+	}
+	m.setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL, block, answeredUntil)
+}
+
+// answeredUntilFrom is the answered-until time of an answer at now.
+func answeredUntilFrom(now time.Time, answerTimeout time.Duration) time.Time {
+	if answerTimeout <= 0 {
+		answerTimeout = DefaultURLAnswerTimeout
+	}
+	return now.Add(answerTimeout)
+}
+
+// setURLLatestBlockLocked writes one url series and its answered-until time. The caller holds lock,
+// for reading.
+func (m *SmartRouterMetricsManager) setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL string, block int64, answeredUntil time.Time) {
+	labels := m.urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL)
+	m.endpointURLLatestBlock.WithLabelValues(labels).Set(float64(block))
+	if m.endpointURLAnsweredUntil != nil {
+		m.endpointURLAnsweredUntil.WithLabelValues(labels).Set(float64(answeredUntil.Unix()))
+	}
+}
+
+// AddEndpointURLRelayServiced counts a relay one url of a provider served successfully, so a page
+// about that url can ask whether customers' requests reach it, not just its provider.
+func (m *SmartRouterMetricsManager) AddEndpointURLRelayServiced(spec, apiInterface, providerName, endpointURL string) {
+	if m == nil || m.endpointURLRelaysServiced == nil {
+		return
+	}
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	if _, registered := m.urlToProviderNames[endpointURL]; !registered {
+		return
+	}
+	m.endpointURLRelaysServiced.WithLabelValues(m.urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL)).Inc()
+}
+
+// ForgetEndpointURLLatestBlock deletes a url's per-url series for every provider configured with
+// it. The caller is a removed tracker: a series left behind would stand still forever, which is
+// what the stuck-provider alerts fire on.
+func (m *SmartRouterMetricsManager) ForgetEndpointURLLatestBlock(spec, apiInterface, endpointURL string) {
+	if m == nil || m.endpointURLLatestBlock == nil {
+		return
+	}
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	for _, providerName := range m.urlToProviderNames[endpointURL] {
+		labels := prometheus.Labels(m.urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL))
+		m.endpointURLLatestBlock.GaugeVec.Delete(labels)
+		if m.endpointURLAnsweredUntil != nil {
+			m.endpointURLAnsweredUntil.GaugeVec.Delete(labels)
+		}
+		if m.endpointURLRelaysServiced != nil {
+			m.endpointURLRelaysServiced.CounterVec.Delete(labels)
+		}
+	}
+}
+
+// urlSeriesLabelsLocked names one url's per-url series. The caller holds lock.
+func (m *SmartRouterMetricsManager) urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL string) map[string]string {
+	fingerprint, ok := m.urlFingerprints[endpointURL]
+	if !ok {
+		fingerprint = URLFingerprint(endpointURL)
+	}
+	return map[string]string{
+		"spec":          spec,
+		"apiInterface":  apiInterface,
+		"endpoint_id":   providerName,
+		"url":           fingerprint,
+		"internal_path": m.urlInternalPaths[endpointURL],
 	}
 }
 
@@ -1017,6 +1286,29 @@ func (m *SmartRouterMetricsManager) SetRouterLatestBlock(spec, apiInterface stri
 	m.routerLatestBlock.WithLabelValues(spec, apiInterface).Set(float64(block))
 }
 
+// RecordRouterLatestBlockRegression counts ONE downward move of the router's latest block for a
+// chain/interface (MAG-4153). reason is a chainstate.RegressionReason* value.
+func (m *SmartRouterMetricsManager) RecordRouterLatestBlockRegression(spec, apiInterface, reason string) {
+	if m == nil || m.routerLatestBlockRegressions == nil {
+		return
+	}
+	m.routerLatestBlockRegressions.WithLabelValues(spec, apiInterface, reason).Inc()
+}
+
+// SetChainIdle publishes a chain/interface's idle-mode state: 1 while it has served no client
+// relay for the idle window and its tracker polls are paused, 0 once a client relay wakes it.
+// Written by the probe loop every cycle (current state, not transitions), never on the relay hot path.
+func (m *SmartRouterMetricsManager) SetChainIdle(spec, apiInterface string, idle bool) {
+	if m == nil || m.routerChainIdle == nil {
+		return
+	}
+	value := 0.0
+	if idle {
+		value = 1
+	}
+	m.routerChainIdle.WithLabelValues(spec, apiInterface).Set(value)
+}
+
 // =============================================================================
 // Health check methods
 // =============================================================================
@@ -1069,6 +1361,12 @@ func (m *SmartRouterMetricsManager) RegisterEndpoint(spec, apiInterface, endpoin
 	}
 	if !alreadyRegistered {
 		m.urlToProviderNames[endpointID] = append(existing, providerName)
+	}
+	if _, ok := m.urlFingerprints[endpointID]; !ok {
+		if m.urlFingerprints == nil {
+			m.urlFingerprints = make(map[string]string)
+		}
+		m.urlFingerprints[endpointID] = URLFingerprint(endpointID)
 	}
 	m.lock.Unlock()
 
@@ -1327,14 +1625,17 @@ func (m *SmartRouterMetricsManager) AddEndpointTrackerRequest(spec, apiInterface
 	m.endpointTrackerRequests.WithLabelValues(labels).Inc()
 }
 
-// TrackerGateSkipSource values for RecordTrackerGateSkip. A closed set of two, mirroring the
-// two signals that can make a dedicated poll redundant.
+// TrackerGateSkipSource values for RecordTrackerGateSkip. A closed set of three, mirroring the
+// three reasons a dedicated poll can be skipped without contacting upstream.
 const (
 	// TrackerGateSkipSourceRelay — served relay traffic kept this endpoint's tip fresh.
 	TrackerGateSkipSourceRelay = "relay"
 	// TrackerGateSkipSourcePeer — another pod polled this endpoint and published the result
 	// to the cache backend (MAG-2981).
 	TrackerGateSkipSourcePeer = "peer"
+	// TrackerGateSkipSourceIdle — the chain served no client relay for the idle window, so
+	// nobody would read the poll's answer (idle mode, --chain-tracker-idle-after).
+	TrackerGateSkipSourceIdle = "idle"
 )
 
 // TrackerGateOp values for RecordTrackerGateError: the two calls the gate makes to the fleet
@@ -1422,6 +1723,18 @@ func (m *SmartRouterMetricsManager) RecordCacheResult(chainId, apiInterface, met
 	// Every attempted lookup is observed — hit-only latency hid exactly the tail
 	// that matters for a network-hop tier.
 	m.cacheLatencyHistogram.WithLabelValues(chainId, apiInterface, method, cacheTier).Observe(latencyMs)
+}
+
+// RecordExtensionUnavailable counts one request served without extension, a caller-requested
+// extension no node on this router offers (MAG-3935). The extension label is bounded without a
+// registry of its own: only names the spec defines as extensions (plus "websocket") survive
+// SeparateAddonsExtensions before they can be recorded as unavailable, so a caller cannot mint
+// series by sending arbitrary lava-extension values.
+func (m *SmartRouterMetricsManager) RecordExtensionUnavailable(chainId, apiInterface, extension string) {
+	if m == nil {
+		return
+	}
+	m.extensionUnavailableTotal.WithLabelValues(chainId, apiInterface, extension).Inc()
 }
 
 // RecordCacheWriteSkipped counts a reply the router served but chose not to write to its
@@ -1739,11 +2052,27 @@ func (m *SmartRouterMetricsManager) SetCSMReportedProvidersCount(chainId, apiInt
 	m.csmReportedProvidersCount.WithLabelValues(chainId, apiInterface).Set(float64(count))
 }
 
-// SetRelayMetrics is a no-op for SmartRouter.
-// In direct RPC mode, relay tracking is done via RecordDirectRelayEnd which
-// uses the correct per-endpoint labels. Allowing this path would cause double
-// counting with a meaningless "default" endpoint_id.
-func (m *SmartRouterMetricsManager) SetRelayMetrics(relayMetric *RelayMetrics, err error) {}
+// SetRelayMetrics records the per-customer request group (MAG-4081). The listeners call it once
+// per client request, through RPCConsumerLogs.AddMetricFor*, after the reply and with the
+// request's final outcome in Success. It does not touch the per-endpoint families: those are
+// per attempt and owned by RecordDirectRelayEnd, and counting them here too would double count.
+//
+// Not counted: a request the router could not parse (no method — it never reached a chain call),
+// and each push on an open subscription (the subscribe request itself is counted).
+func (m *SmartRouterMetricsManager) SetRelayMetrics(relayMetric *RelayMetrics, err error) {
+	if m == nil || relayMetric == nil || relayMetric.ApiMethod == "" || relayMetric.ApiMethod == SubscriptionDeliveryMethod {
+		return
+	}
+	spec, apiInterface := relayMetric.ChainID, relayMetric.APIType
+	customer := m.normalizeCustomerLabel(spec, relayMetric.ProjectHash)
+	method := m.normalizeMethodLabel(spec, relayMetric.ApiMethod)
+	m.customerRequestsTotal.WithLabelValues(spec, apiInterface, customer, method).Inc()
+	if !relayMetric.Success {
+		m.customerRequestsFailed.WithLabelValues(spec, apiInterface, customer, method).Inc()
+		return
+	}
+	m.customerEndToEndLatency.WithLabelValues(spec, apiInterface, customer).Observe(float64(relayMetric.Latency))
+}
 
 // SetVersion records the protocol version of the smart router.
 func (m *SmartRouterMetricsManager) SetVersion(version string) {
@@ -1765,6 +2094,13 @@ func (m *SmartRouterMetricsManager) SetFailedWsSubscriptionRequestMetric(chainId
 		return
 	}
 	m.routerWsSubscriptionErrors.WithLabelValues(chainId, apiInterface).Inc()
+}
+
+func (m *SmartRouterMetricsManager) SetSubscriptionClientDroppedMetric(chainId, apiInterface string) {
+	if m == nil {
+		return
+	}
+	m.subscriptionClientsDropped.WithLabelValues(chainId, apiInterface).Inc()
 }
 
 func (m *SmartRouterMetricsManager) SetWebSocketConnectionActive(chainId, apiInterface string, add bool) {

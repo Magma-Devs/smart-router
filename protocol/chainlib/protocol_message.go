@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -13,16 +14,23 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-type UserData struct {
-	ConsumerIp string
-	DappId     string
-}
-
 type BaseProtocolMessage struct {
 	ChainMessage
 	directiveHeaders map[string]string
 	relayRequestData *pairingtypes.RelayPrivateData
 	userData         common.UserData
+	// cacheKey memoises HashCacheRequest. The cache lookup and the cache write of one relay run on
+	// different goroutines and must agree on the key, so it is computed once, from the request as
+	// it was first asked for, and the same key is handed to both (MAG-4242).
+	cacheKey cacheKeyMemo
+}
+
+type cacheKeyMemo struct {
+	once      sync.Once
+	chainId   string
+	key       []byte
+	formatter func([]byte) []byte
+	err       error
 }
 
 func (bpm *BaseProtocolMessage) IsDefaultApi() bool {
@@ -43,7 +51,16 @@ func (bpm *BaseProtocolMessage) RelayPrivateData() *pairingtypes.RelayPrivateDat
 }
 
 func (bpm *BaseProtocolMessage) HashCacheRequest(chainId string) ([]byte, func([]byte) []byte, error) {
-	return hashCacheRequest(bpm.relayRequestData, chainId, bpm.explicitExtensionDirective())
+	bpm.cacheKey.once.Do(func() {
+		bpm.cacheKey.chainId = chainId
+		bpm.cacheKey.key, bpm.cacheKey.formatter, bpm.cacheKey.err = hashCacheRequest(bpm.relayRequestData, chainId, bpm.explicitExtensionDirective())
+	})
+	if bpm.cacheKey.chainId != chainId {
+		// A message belongs to one chain. A second chain id is a caller's mistake, answered fresh
+		// rather than with another chain's key.
+		return hashCacheRequest(bpm.relayRequestData, chainId, bpm.explicitExtensionDirective())
+	}
+	return bpm.cacheKey.key, bpm.cacheKey.formatter, bpm.cacheKey.err
 }
 
 // explicitExtensionDirective returns the normalized value of the client's lava-extension directive
@@ -90,6 +107,10 @@ func (bpm *BaseProtocolMessage) addMissingExtensions(updatedProtocolExtensions [
 	return currentPrivateDataExtensions
 }
 
+// UpdateEarliestAndValidateExtensionRules rewrites RelayPrivateData().Extensions in place. Call it
+// only on a message whose cache key has not been asked for yet (a freshly re-parsed one, as
+// updateProtocolMessageIfNeededWithNewEarliestData does): HashCacheRequest memoises the key, and a
+// message rewritten after its first HashCacheRequest would keep handing out the old key.
 func (bpm *BaseProtocolMessage) UpdateEarliestAndValidateExtensionRules(extensionParser *extensionslib.ExtensionParser, earliestBlockHashRequested int64, addon string, seenBlock int64) bool {
 	if earliestBlockHashRequested >= 0 {
 		success := bpm.UpdateEarliestInMessage(earliestBlockHashRequested)
@@ -112,18 +133,30 @@ func (bpm *BaseProtocolMessage) UpdateEarliestAndValidateExtensionRules(extensio
 	return false
 }
 
+// GetBlockedProviders returns every provider the caller excluded with lava-providers-block.
+//
+// There is no cap on the count (MAG-3080). One used to silently drop the WHOLE list at three or
+// more names, so the request could land on exactly the providers the caller excluded. Nothing
+// needs the cap: the operator owns the provider set, and a list that excludes every provider
+// fails that caller's request — the exclusion holds through the backup tier and the blocked-list
+// fallback — rather than serving one of them.
+//
+// Entries are trimmed, so "a, b" excludes b rather than a " b" that matches nothing.
 func (bpm *BaseProtocolMessage) GetBlockedProviders() []string {
 	if bpm.directiveHeaders == nil {
 		return nil
 	}
 	blockedProviders, ok := bpm.directiveHeaders[common.BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME]
-	if ok {
-		blockProviders := strings.Split(blockedProviders, ",")
-		if len(blockProviders) <= 2 {
-			return blockProviders
+	if !ok {
+		return nil
+	}
+	var blockProviders []string
+	for _, provider := range strings.Split(blockedProviders, ",") {
+		if provider = strings.TrimSpace(provider); provider != "" {
+			blockProviders = append(blockProviders, provider)
 		}
 	}
-	return nil
+	return blockProviders
 }
 
 func NewProtocolMessage(chainMessage ChainMessage, directiveHeaders map[string]string, relayRequestData *pairingtypes.RelayPrivateData, dappId, consumerIp string) ProtocolMessage {

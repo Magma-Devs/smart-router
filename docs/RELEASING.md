@@ -177,8 +177,8 @@ Each release publishes:
   (linux/amd64, linux/arm64). The `:latest` tag is updated only for
   non-prerelease versions.
 - `sha256sum.txt` — SHA-256 checksums of all binaries
-- `sha256sum.txt.sig` + `sha256sum.txt.pem` — cosign-keyless signature
-  and certificate
+- `sha256sum.txt.sigstore.json` — cosign-keyless Sigstore bundle
+  (signature, certificate and transparency-log proof in one file)
 
 ## Verifying the release
 
@@ -186,8 +186,7 @@ Install [cosign](https://docs.sigstore.dev/cosign/installation/) and run:
 
 ```
 cosign verify-blob \
-  --certificate sha256sum.txt.pem \
-  --signature sha256sum.txt.sig \
+  --bundle sha256sum.txt.sigstore.json \
   --certificate-identity-regexp 'https://github.com/magma-Devs/smart-router/.github/workflows/release.yml@.*' \
   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
   sha256sum.txt

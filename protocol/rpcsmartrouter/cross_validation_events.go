@@ -125,14 +125,6 @@ func enableCrossValidationEventRing(capacity int) {
 	})
 }
 
-// crossValidationEventRecordingEnabled reports whether a ring is installed. The handler answers 503
-// rather than an empty 200 when it is not: "the recorder was never switched on" and "the recorder
-// was on and saw no dissent" are opposite answers, and only one of them means a test measured
-// something.
-func crossValidationEventRecordingEnabled() bool {
-	return crossValidationEventRecorder.Load() != nil
-}
-
 // recordCrossValidationEvent stores one event, or does nothing when recording is off. Seq and
 // RecordedAt are assigned here so callers cannot get them wrong.
 func recordCrossValidationEvent(event crossValidationEvent) {

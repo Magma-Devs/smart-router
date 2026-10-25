@@ -49,12 +49,13 @@ func ScopedChainId(keyPrefix, chainId string) string {
 // (hash, block) identity may hold both variants at once, and lookup order —
 // not the key — expresses finality preference.
 const (
-	RelayFinalizedPrefix = "rel:f:"
-	RelayTempPrefix      = "rel:t:"
-	SharedTipPrefix      = "tip:"
-	ChainTipPrefix       = "chaintip:"
-	HeightPrefix         = "h2h:"
-	StickyPrefix         = "sticky:"
+	RelayFinalizedPrefix      = "rel:f:"
+	RelayTempPrefix           = "rel:t:"
+	SharedTipPrefix           = "tip:"
+	ChainTipPrefix            = "chaintip:"
+	HeightPrefix              = "h2h:"
+	StickyPrefix              = "sticky:"
+	EndpointObservationPrefix = "obs:"
 )
 
 // RelayKey addresses one variant of a cached relay entry.
@@ -106,4 +107,22 @@ func HeightKey(chainId, blockHash string) string {
 // scoped to one chain AND one api interface.
 func StickyKey(chainId, apiInterface, service, stickyId string) string {
 	return StickyPrefix + chainId + ":" + apiInterface + ":" + service + ":" + stickyId
+}
+
+// EndpointObservationKey addresses the fleet's freshest poll observation of one upstream
+// endpoint (the fleet tracker gate). endpointId is the router's digest of the endpoint URL,
+// never the URL itself — URLs carry credentials. The api interface is part of the key because
+// one endpoint may serve several interfaces and the tracker polls each separately.
+//
+// The engine does not fold the router's key prefix into this key, unlike every relay key it
+// derives (MAG-3521). An observation is a fact about one upstream endpoint — "this URL answered
+// at block N" — and two routers polling the same upstream are entitled to share it; a router on
+// a different node set has different endpoint ids and never matches. On the cache-be sidecar
+// that makes observations shared across `cache-be-key-prefix` values. The RESP store heads every
+// key with its own `key-prefix`, this one included, so there sharing follows
+// `resp-cache.key-prefix`: a key outside the prefix would fall outside an ACL user restricted to
+// `~<prefix>:*` and outside the prefix-scoped flush. Routers on different RESP prefixes each
+// poll for themselves, which costs polls but never a wrong answer.
+func EndpointObservationKey(chainId, apiInterface, endpointId string) string {
+	return EndpointObservationPrefix + chainId + ":" + apiInterface + ":" + endpointId
 }

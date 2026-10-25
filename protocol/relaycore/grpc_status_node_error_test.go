@@ -59,6 +59,7 @@ func (grpcChainMessage) RequestedBlock() (int64, int64)                         
 func (grpcChainMessage) UpdateLatestBlockInMessage(int64, bool) bool              { return false }
 func (grpcChainMessage) AppendHeader([]pairingtypes.Metadata)                     {}
 func (grpcChainMessage) GetExtensions() []*spectypes.Extension                    { return nil }
+func (grpcChainMessage) GetUnavailableExtensions() []string                       { return nil }
 func (grpcChainMessage) OverrideExtensions([]string, *extensionslib.ExtensionParser) {
 }
 func (grpcChainMessage) DisableErrorHandling()                          {}

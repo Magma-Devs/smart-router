@@ -2,11 +2,12 @@ package chainlib
 
 import (
 	"math"
+	"strings"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
+	"github.com/magma-Devs/smart-router/protocol/parser"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -16,7 +17,6 @@ type updatableRPCInput interface {
 	rpcInterfaceMessages.GenericMessage
 	UpdateLatestBlockInMessage(latestBlock uint64, modifyContent bool) (success bool)
 	AppendHeader(metadata []pairingtypes.Metadata)
-	SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string
 	GetRawRequestHash() ([]byte, error)
 }
 
@@ -28,10 +28,14 @@ type baseChainMessageContainer struct {
 	msg                    updatableRPCInput
 	apiCollection          *spectypes.ApiCollection
 	extensions             []*spectypes.Extension
-	timeoutOverride        time.Duration
-	forceCacheRefresh      bool
-	parseDirective         *spectypes.ParseDirective // setting the parse directive related to the api, can be nil
-	usedDefaultValue       bool
+	// unavailableExtensions are extensions the caller asked for (lava-extension) that the spec
+	// knows but no node on this router offers. The request is served without them; they are kept
+	// so the reply can say so (MAG-3935).
+	unavailableExtensions []string
+	timeoutOverride       time.Duration
+	forceCacheRefresh     bool
+	parseDirective        *spectypes.ParseDirective // setting the parse directive related to the api, can be nil
+	usedDefaultValue      bool
 
 	// resultErrorParsingMethod passed by each api interface message to parse the result of the message
 	// and validate it doesn't contain a node error
@@ -50,12 +54,33 @@ func (bcmc *baseChainMessageContainer) UpdateEarliestInMessage(incomingEarliest 
 	return updatedSuccessfully
 }
 
-func (bcnc *baseChainMessageContainer) GetRequestedBlocksHashes() []string {
-	return bcnc.requestedBlockHashes
+// foldParsedEarliest folds the range lower bound the parsers read for one message (a
+// PARSER_TYPE_BLOCK_EARLIEST parser, e.g. trace_filter's fromBlock) into currentEarliest, the
+// earliest block known so far for the request. The container reads an earliest block of 0 as
+// "none", and a range that starts at block 0 starts at the chain's first block, so 0 is folded in
+// as EARLIEST_BLOCK. A message whose parsers read no bound leaves currentEarliest as it is.
+func foldParsedEarliest(currentEarliest int64, parsedInput *parser.ParsedInput) int64 {
+	earliest, ok := parsedInput.GetEarliestBlock()
+	if !ok {
+		return currentEarliest
+	}
+	if earliest == 0 {
+		earliest = spectypes.EARLIEST_BLOCK
+	}
+	return CombineEarliestRequestedBlock(currentEarliest, earliest)
 }
 
-func (bcnc *baseChainMessageContainer) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	return bcnc.msg.SubscriptionIdExtractor(reply)
+// applyParsedRange gives a single request the range lower bound its parsers read, so the archive
+// rule judges the range on its deepest block. Without such a bound the message is left as built:
+// no earliest of its own, read as the main block.
+func (bcmc *baseChainMessageContainer) applyParsedRange(parsedInput *parser.ParsedInput) {
+	if earliest := foldParsedEarliest(bcmc.latestRequestedBlock, parsedInput); earliest != bcmc.latestRequestedBlock {
+		bcmc.earliestRequestedBlock = earliest
+	}
+}
+
+func (bcnc *baseChainMessageContainer) GetRequestedBlocksHashes() []string {
+	return bcnc.requestedBlockHashes
 }
 
 // returning parse directive for the api. can be nil.
@@ -96,10 +121,6 @@ func (bcnc *baseChainMessageContainer) SetForceCacheRefresh(force bool) bool {
 
 func (bcnc *baseChainMessageContainer) GetForceCacheRefresh() bool {
 	return bcnc.forceCacheRefresh
-}
-
-func (bcnc *baseChainMessageContainer) DisableErrorHandling() {
-	bcnc.msg.DisableErrorHandling()
 }
 
 func (bcnc baseChainMessageContainer) AppendHeader(metadata []pairingtypes.Metadata) {
@@ -150,12 +171,31 @@ func (bcnc *baseChainMessageContainer) GetExtensions() []*spectypes.Extension {
 	return bcnc.extensions
 }
 
-// adds the following extensions
+// OverrideExtensions adds the extensions the request's lava-extension directive names. One that
+// no node on this router offers is recorded, so the reply can tell the caller it was dropped.
 func (bcnc *baseChainMessageContainer) OverrideExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser) {
+	bcnc.addExtensions(extensionNames, extensionParser, true)
+}
+
+// addRouterExtensions adds extensions the router requires on its own, such as archive for an
+// eth_call deep behind the head. The caller did not ask for them, so one that no node offers is
+// not recorded: the reply names only what the caller requested (MAG-3935).
+func (bcnc *baseChainMessageContainer) addRouterExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser) {
+	bcnc.addExtensions(extensionNames, extensionParser, false)
+}
+
+// adds the following extensions. callerRequested says whether the caller asked for them; only
+// then is one that no node offers recorded as unavailable.
+func (bcnc *baseChainMessageContainer) addExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser, callerRequested bool) {
 	utils.LavaFormatTrace("[Archive Debug] OverrideExtensions called", utils.LogAttr("extensionNames", extensionNames), utils.LogAttr("existingExtensions", len(bcnc.extensions)))
 	existingExtensions := map[string]struct{}{}
 	for _, extension := range bcnc.extensions {
 		existingExtensions[extension.Name] = struct{}{}
+	}
+	// Already reported as unavailable by an earlier call (override, then additional): looking it
+	// up again would only record it twice.
+	for _, extensionName := range bcnc.unavailableExtensions {
+		existingExtensions[extensionName] = struct{}{}
 	}
 	for _, extensionName := range extensionNames {
 		if _, ok := existingExtensions[extensionName]; !ok {
@@ -173,6 +213,14 @@ func (bcnc *baseChainMessageContainer) OverrideExtensions(extensionNames []strin
 				bcnc.updateCUForApi(extension)
 				utils.LavaFormatTrace("[Archive Debug] Extension added", utils.LogAttr("extensionName", extensionName), utils.LogAttr("totalExtensions", len(bcnc.extensions)))
 			} else {
+				if callerRequested {
+					// Readers of this list keep the name past the request (the warn-once register's
+					// keys, metric labels, which Prometheus does not copy). Today's listeners already
+					// hand over owned header strings (detachedReqHeaders, MAG-3881), so this clone is a
+					// guard, not the fix: a listener that passed fasthttp's per-connection buffer
+					// through would have the next keep-alive request rewrite the name in place.
+					bcnc.unavailableExtensions = append(bcnc.unavailableExtensions, strings.Clone(extensionName))
+				}
 				utils.LavaFormatTrace("[Archive Debug] Extension not found", utils.LogAttr("extensionName", extensionName), utils.LogAttr("extensionKey", extensionKey))
 			}
 		} else {
@@ -180,6 +228,12 @@ func (bcnc *baseChainMessageContainer) OverrideExtensions(extensionNames []strin
 		}
 	}
 	utils.LavaFormatTrace("[Archive Debug] OverrideExtensions completed", utils.LogAttr("finalExtensions", len(bcnc.extensions)))
+}
+
+// GetUnavailableExtensions returns the extensions the caller requested that no node on this
+// router offers, in request order. The request was served without them.
+func (bcnc *baseChainMessageContainer) GetUnavailableExtensions() []string {
+	return bcnc.unavailableExtensions
 }
 
 func (bcnc *baseChainMessageContainer) GetUsedDefaultValue() bool {

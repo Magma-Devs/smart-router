@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -406,8 +407,6 @@ func (s *restHealthRelayStub) SendParsedRelay(ctx context.Context, analytics *me
 	return nil, errors.New("not used")
 }
 
-func (s *restHealthRelayStub) CancelSubscriptionContext(subscriptionKey string) {}
-
 func (s *restHealthRelayStub) seen() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -478,6 +477,142 @@ func TestRestChainListener_HealthPathNeverReachesTheRelay(t *testing.T) {
 				"an upgrade on the health path must still be answered by the health check, not the chain")
 
 			require.Empty(t, stub.seen(), "the health path must never reach the relay")
+		})
+	}
+}
+
+// restBodyRelayStub records the method and body of every request the listener relays.
+type restBodyRelayStub struct {
+	restHealthRelayStub
+	relayed []restRelayedRequest
+}
+
+type restRelayedRequest struct {
+	method string
+	body   string
+}
+
+func (s *restBodyRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.relayed = append(s.relayed, restRelayedRequest{method: connectionType, body: req})
+	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(`{}`)}, StatusCode: http.StatusOK}, nil
+}
+
+func (s *restBodyRelayStub) last() restRelayedRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.relayed) == 0 {
+		return restRelayedRequest{}
+	}
+	return s.relayed[len(s.relayed)-1]
+}
+
+// The listener routes POST to its own handler and every other method to the catch-all.
+// PUT and PATCH carry a body as POST does (Concordium's wallet-proxy submits
+// transactions with PUT), so the catch-all must relay it byte for byte. A GET is relayed
+// with an empty body whatever the client attached.
+func TestRestChainListener_RelaysTheBodyOfMethodsThatCarryOne(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stub := &restBodyRelayStub{}
+	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	endpoint := &lavasession.RPCEndpoint{
+		NetworkAddress:  "127.0.0.1:0",
+		ChainID:         "LAV1",
+		ApiInterface:    "rest",
+		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
+	}
+	listener := NewRestChainListener(ctx, endpoint, stub, alwaysHealthyReporter{}, logger)
+	go listener.Serve(ctx, common.ConsumerCmdFlags{})
+
+	var addr string
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && addr == "" {
+		addr = listener.GetListeningAddress()
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.NotEmpty(t, addr, "listener never reported a listening address")
+
+	// Not JSON and not text: the listener must not interpret the body, only carry it.
+	const body = "\x00\x01\xfe raw {bytes"
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+	for _, tc := range []struct {
+		method   string
+		wantBody string
+	}{
+		{http.MethodPost, body},
+		{http.MethodPut, body},
+		{http.MethodPatch, body},
+		{http.MethodGet, ""},
+	} {
+		t.Run(tc.method, func(t *testing.T) {
+			req, err := http.NewRequest(tc.method, "http://"+addr+"/v0/submitRawTransaction", strings.NewReader(body))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/octet-stream")
+			resp, err := httpClient.Do(req)
+			require.NoError(t, err)
+			_, err = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+
+			got := stub.last()
+			require.Equal(t, tc.method, got.method)
+			require.Equal(t, tc.wantBody, got.body)
+		})
+	}
+}
+
+// restRefusingRelayStub answers every relay with APINotSupportedError, the error ParseRelay
+// returns for a verb the spec does not declare.
+type restRefusingRelayStub struct{ restHealthRelayStub }
+
+func (s *restRefusingRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
+	return nil, common.APINotSupportedError
+}
+
+// The catch-all handler maps an undeclared api to 501; the POST handler used to answer the same
+// refusal with a masked 500 (MAG-4278).
+func TestRestListener_UndeclaredVerbIs501OnEveryHandler(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	listener := NewRestChainListener(ctx, &lavasession.RPCEndpoint{
+		NetworkAddress:  "127.0.0.1:0",
+		ChainID:         "LAV1",
+		ApiInterface:    "rest",
+		HealthCheckPath: common.DEFAULT_HEALTH_PATH,
+	}, &restRefusingRelayStub{}, alwaysHealthyReporter{}, logger)
+	go listener.Serve(ctx, common.ConsumerCmdFlags{})
+	var addr string
+	for deadline := time.Now().Add(3 * time.Second); addr == "" && time.Now().Before(deadline); {
+		if addr = listener.GetListeningAddress(); addr == "" {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	require.NotEmpty(t, addr, "listener never reported a listening address")
+
+	httpClient := &http.Client{Timeout: 3 * time.Second}
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		t.Run(method, func(t *testing.T) {
+			req, err := http.NewRequest(method, "http://"+addr+"/cosmos/tx/v1beta1/simulate", strings.NewReader("{}"))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := httpClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			require.Equal(t, http.StatusNotImplemented, resp.StatusCode, "%s: %s", method, body)
 		})
 	}
 }

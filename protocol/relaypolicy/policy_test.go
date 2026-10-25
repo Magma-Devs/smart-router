@@ -41,6 +41,41 @@ func TestDecide_PermanentFailures(t *testing.T) {
 		require.Equal(t, "NonRetryableNodeError", output.Reason)
 	})
 
+	t.Run("a refusal of a method the spec does not list stops", func(t *testing.T) {
+		output := policy.Decide(DecisionInput{
+			Selection:    relaycore.Stateless,
+			Summary:      ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
+			IsDefaultApi: true,
+		})
+		require.Equal(t, Stop, output.Action)
+		require.Equal(t, "UnlistedMethodRefused", output.Reason)
+
+		hedge := policy.Decide(DecisionInput{
+			Selection:     relaycore.Stateless,
+			Summary:       ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
+			IsDefaultApi:  true,
+			IsTickerHedge: true,
+		})
+		require.Equal(t, Stop, hedge.Action, "a hedge must not ask another provider either")
+	})
+
+	t.Run("a refusal of a listed method is retried on a peer (MAG-2771)", func(t *testing.T) {
+		output := policy.Decide(DecisionInput{
+			Selection: relaycore.Stateless,
+			Summary:   ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
+		})
+		require.Equal(t, Retry, output.Action)
+	})
+
+	t.Run("an unlisted method is still retried when nobody refused it", func(t *testing.T) {
+		output := policy.Decide(DecisionInput{
+			Selection:    relaycore.Stateless,
+			Summary:      ResultsSummary{ProtocolErrors: 1},
+			IsDefaultApi: true,
+		})
+		require.Equal(t, Retry, output.Action, "a timeout or a broken node is no answer about the method")
+	})
+
 	t.Run("PermanentProtocolError stops", func(t *testing.T) {
 		output := policy.Decide(DecisionInput{
 			Selection: relaycore.Stateless,
@@ -129,16 +164,6 @@ func TestDecide_EpochMismatch(t *testing.T) {
 	require.Equal(t, "EpochMismatch", output.Reason)
 }
 
-func TestDecide_HashError(t *testing.T) {
-	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
-	output := policy.Decide(DecisionInput{
-		Selection: relaycore.Stateless,
-		Summary:   ResultsSummary{HashErr: fmt.Errorf("hash failed"), NodeErrors: 1},
-	})
-	require.Equal(t, Stop, output.Action)
-	require.Equal(t, "HashComputationFailed", output.Reason)
-}
-
 func TestOnSendRelayResult(t *testing.T) {
 	t.Run("success resets counters", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 3, EnableCircuitBreaker: true, CircuitBreakerThreshold: 2})
@@ -214,21 +239,6 @@ func TestDecide_IsTickerHedge(t *testing.T) {
 		require.Equal(t, "Default", output.Reason)
 	})
 
-	t.Run("ticker hedge skips hash error", func(t *testing.T) {
-		policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
-		input := DecisionInput{
-			Selection: relaycore.Stateless,
-			Summary:   ResultsSummary{HashErr: fmt.Errorf("hash failed"), NodeErrors: 1},
-		}
-		output := policy.Decide(input)
-		require.Equal(t, Stop, output.Action)
-		require.Equal(t, "HashComputationFailed", output.Reason)
-
-		input.IsTickerHedge = true
-		output = policy.Decide(input)
-		require.Equal(t, Retry, output.Action)
-	})
-
 	t.Run("ticker hedge still respects mode and limit checks", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{MaxRetries: 5, RelayRetryLimit: 2, SendRelayAttempts: 3})
 		// MaxRetries should still stop ticker hedges
@@ -254,66 +264,54 @@ func TestDecide_IsTickerHedge(t *testing.T) {
 	})
 }
 
-func TestDecide_ArchiveMutation(t *testing.T) {
-	t.Run("first retry adds archive", func(t *testing.T) {
-		policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
-		archiveStatus := &relaycore.ArchiveStatus{}
-		output := policy.Decide(DecisionInput{
+// TestDecide_RetryNeverRewritesTheRequest records what Decide answers at the attempt numbers the
+// removed archive upgrade keyed on.
+//
+// It is NOT the regression guard, and it cannot be: the upgrade's only observable trace in this
+// package was the Mutation field on DecisionOutput, and removing that field removes the thing an
+// assertion here could look at. Action and Reason read identically before and after, so every
+// case below passes on the unfixed code — verified by running this file against the merge base.
+//
+// The behavioural guards are in relaycore (TestRetryReSendsTheSameRequest, which dispatches
+// batches so the attempt counter actually reaches 1 and 2) and in rpcsmartrouter
+// (TestSmartRouterStateMachineRetryKeepsTheRequestIntact, end to end). Change those if the
+// behaviour changes; this file documents the decision table around them.
+func TestDecide_RetryNeverRewritesTheRequest(t *testing.T) {
+	newPolicy := func() *Policy {
+		return NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
+	}
+
+	t.Run("attempt 1 retries without upgrading to archive", func(t *testing.T) {
+		output := newPolicy().Decide(DecisionInput{
 			Selection:     relaycore.Stateless,
 			AttemptNumber: 1,
 			Summary:       ResultsSummary{NodeErrors: 1},
-			ArchiveStatus: archiveStatus,
-			NodeErrors:    1,
 		})
 		require.Equal(t, Retry, output.Action)
-		require.Equal(t, AddArchive, output.Mutation.ArchiveAction)
-		require.False(t, output.Mutation.CacheHashes)
+		require.Equal(t, "Default", output.Reason)
 	})
 
-	t.Run("upgraded with 2+ errors removes archive and caches hashes", func(t *testing.T) {
-		policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
-		archiveStatus := &relaycore.ArchiveStatus{}
-		archiveStatus.SetUpgraded(true)
-		archiveStatus.SetArchive(true)
-		output := policy.Decide(DecisionInput{
+	t.Run("attempt 2 retries without downgrading from archive", func(t *testing.T) {
+		output := newPolicy().Decide(DecisionInput{
 			Selection:     relaycore.Stateless,
 			AttemptNumber: 2,
 			Summary:       ResultsSummary{NodeErrors: 2},
-			ArchiveStatus: archiveStatus,
-			NodeErrors:    2,
 		})
 		require.Equal(t, Retry, output.Action)
-		require.Equal(t, RemoveArchive, output.Mutation.ArchiveAction)
-		require.True(t, output.Mutation.CacheHashes, "should cache hashes when archive failed with 2+ errors")
+		require.Equal(t, "Default", output.Reason)
 	})
 
-	t.Run("upgraded with 2+ errors on attempt 1 still triggers early bail", func(t *testing.T) {
-		policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
-		archiveStatus := &relaycore.ArchiveStatus{}
-		archiveStatus.SetUpgraded(true)
-		archiveStatus.SetArchive(true)
-		output := policy.Decide(DecisionInput{
+	t.Run("a ticker hedge does not rewrite the request either", func(t *testing.T) {
+		// The hedge path skips the error-tolerance checks, so before the removal it reached the
+		// mutation step with no error at all: a merely SLOW request was upgraded to archive.
+		output := newPolicy().Decide(DecisionInput{
 			Selection:     relaycore.Stateless,
 			AttemptNumber: 1,
-			Summary:       ResultsSummary{NodeErrors: 2},
-			ArchiveStatus: archiveStatus,
-			NodeErrors:    2,
+			Summary:       ResultsSummary{},
+			IsTickerHedge: true,
 		})
 		require.Equal(t, Retry, output.Action)
-		require.Equal(t, RemoveArchive, output.Mutation.ArchiveAction)
-		require.True(t, output.Mutation.CacheHashes, "early bail takes priority over attempt-based logic")
-	})
-
-	t.Run("no archive status returns no mutation", func(t *testing.T) {
-		policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3})
-		output := policy.Decide(DecisionInput{
-			Selection:     relaycore.Stateless,
-			AttemptNumber: 1,
-			Summary:       ResultsSummary{NodeErrors: 1},
-			ArchiveStatus: nil,
-		})
-		require.Equal(t, Retry, output.Action)
-		require.Equal(t, NoChange, output.Mutation.ArchiveAction)
+		require.Equal(t, "Default", output.Reason)
 	})
 }
 
@@ -497,4 +495,21 @@ func TestDecide_PriorityAndEdgeCases(t *testing.T) {
 				"reason mismatch — case %q", tc.name)
 		})
 	}
+}
+
+// A stateful batch whose failures are rate-limited node errors may still have executed: under
+// --batch-node-error-on-any a reply with an accepted eth_sendRawTransaction and one rate-limited
+// sibling is a rate-limited node error. Only a transport refusal of the whole batch keeps the
+// carve-out.
+func TestDecide_StatefulBatchRateLimitCarveOutNeedsATransportRefusal(t *testing.T) {
+	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3, DisableBatchRetry: true})
+	nodeError := policy.Decide(DecisionInput{Selection: relaycore.Stateful, IsBatch: true, AttemptNumber: 1, Summary: ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}})
+	require.Equal(t, Stop, nodeError.Action)
+	require.Equal(t, "Stateful", nodeError.Reason)
+
+	transport := policy.Decide(DecisionInput{Selection: relaycore.Stateful, IsBatch: true, AttemptNumber: 1, Summary: ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}})
+	require.Equal(t, Retry, transport.Action)
+
+	single := policy.Decide(DecisionInput{Selection: relaycore.Stateful, AttemptNumber: 1, Summary: ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}})
+	require.Equal(t, Retry, single.Action, "a single stateful relay keeps the carve-out it has on main")
 }

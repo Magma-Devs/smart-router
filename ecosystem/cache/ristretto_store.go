@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dgraph-io/ristretto/v2"
@@ -14,22 +15,76 @@ import (
 
 const DbValueConfirmationAttempts = 5
 
-// LastestCacheStore is the chain-level tip representation: stored with no
-// ristretto TTL, it goes stale for readers via the embedded wall-clock
-// deadline while the stored block keeps fencing lower writes indefinitely.
+// LastestCacheStore is the chain-level tip representation, held in chainTipStore:
+// it goes stale for readers via the embedded wall-clock deadline, and the same
+// deadline bounds how long the stored block fences lower writes (MAG-3755).
 // (Name retained from the original implementation.)
 type LastestCacheStore struct {
 	latestBlock          int64
 	latestExpirationTime time.Time
 }
 
-func (cv *LastestCacheStore) Cost() int64 {
-	return 8 + 16
+// chainTipSweepEvery bounds how many tip writes land between sweeps of stale tips, the same
+// write-driven sweep stickyPins and endpointObservations run.
+const chainTipSweepEvery = 256
+
+// chainTipStore holds the per-chain tips the engine compares requests against. They lived in
+// finalizedCache, whose Set is asynchronous and may be dropped, so every write ran a goroutine
+// that slept 1 ms up to DbValueConfirmationAttempts times to confirm it. A map under a mutex needs
+// no confirmation and no goroutine per write (MAG-4244). The zero value is ready to use.
+//
+// The key is the writer's (KeyPrefix, ChainId), which the server does not bound, and ristretto
+// used to cap the tips by cost and keep only key hashes. The map keeps each key string, so stale
+// tips are swept: a stale tip reads as absent and fences no write, so dropping one is invisible
+// to every caller.
+type chainTipStore struct {
+	mu     sync.Mutex
+	tips   map[string]LastestCacheStore
+	writes int
+}
+
+func (s *chainTipStore) get(key string) (LastestCacheStore, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tip, ok := s.tips[key]
+	return tip, ok
+}
+
+// setIfGreaterOrEqualOrStale keeps the newer tip. A stored tip fences lower writes only while
+// readers still trust it: past its deadline the next write, lower included, replaces it
+// (MAG-3755). An equal or higher write always lands.
+func (s *chainTipStore) setIfGreaterOrEqualOrStale(key string, tip LastestCacheStore, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, ok := s.tips[key]; ok && existing.latestBlock > tip.latestBlock && existing.latestExpirationTime.After(now) {
+		return
+	}
+	if s.tips == nil {
+		s.tips = make(map[string]LastestCacheStore)
+	}
+	s.tips[key] = tip
+	s.writes++
+	if s.writes >= chainTipSweepEvery {
+		s.writes = 0
+		for k, v := range s.tips {
+			if !v.latestExpirationTime.After(now) {
+				delete(s.tips, k)
+			}
+		}
+	}
+}
+
+func (s *chainTipStore) clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tips = nil
+	s.writes = 0
 }
 
 // ristrettoStore adapts the CacheServer's three ristretto caches onto
 // core.KVStore. Relay-entry keys route by namespace prefix to the
-// finalized/temp stores, tip keys live in the finalized store, and heights in
+// finalized/temp stores, shared-state tip keys live in the finalized store (chain
+// tips live in chainTipStore), and heights in
 // the dedicated hashes store. Ristretto writes are asynchronous and lossy (a
 // Set may be dropped or delayed), which is why the monotonic int64 ops write
 // through a confirm-and-retry loop.
@@ -48,7 +103,8 @@ func (r ristrettoStore) route(key string) *ristretto.Cache[string, any] {
 	case strings.HasPrefix(key, core.HeightPrefix):
 		return r.cs.blocksHashesToHeightsCache
 	default:
-		// tip: / chaintip: — shared-state and chain tips live in the finalized store.
+		// tip: — shared-state tips live in the finalized store. Chain tips never get
+		// here: they live in chainTipStore.
 		return r.cs.finalizedCache
 	}
 }
@@ -110,15 +166,11 @@ func (r ristrettoStore) SetInt64IfGreaterOrEqual(ctx context.Context, key string
 }
 
 func (r ristrettoStore) chainTipRaw(key string) (block int64, expiration time.Time) {
-	value, found := getNonExpiredFromCache(r.cs.finalizedCache, key)
+	tip, found := r.cs.chainTips.get(key)
 	if !found {
 		return spectypes.NOT_APPLICABLE, time.Time{}
 	}
-	if cacheValue, ok := value.(LastestCacheStore); ok {
-		return cacheValue.latestBlock, cacheValue.latestExpirationTime
-	}
-	utils.LavaFormatError("latestBlock value is not a LastestCacheStore", EntryTypeError, utils.Attribute{Key: "value", Value: fmt.Sprintf("%+v", value)})
-	return spectypes.NOT_APPLICABLE, time.Time{}
+	return tip.latestBlock, tip.latestExpirationTime
 }
 
 func (r ristrettoStore) GetChainTip(ctx context.Context, key string) (int64, bool, error) {
@@ -129,20 +181,10 @@ func (r ristrettoStore) GetChainTip(ctx context.Context, key string) (int64, boo
 	return spectypes.NOT_APPLICABLE, false, nil
 }
 
-func (r ristrettoStore) SetChainTipIfGreaterOrEqual(ctx context.Context, key string, block int64) error {
-	cacheStore := LastestCacheStore{latestBlock: block, latestExpirationTime: time.Now().Add(core.DefaultExpirationForNonFinalized)}
+func (r ristrettoStore) SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error {
+	now := time.Now()
 	utils.LavaFormatDebug("setting latest block", utils.Attribute{Key: "key", Value: key}, utils.Attribute{Key: "latestBlock", Value: block})
-	set := func() {
-		r.cs.finalizedCache.Set(key, cacheStore, cacheStore.Cost())
-	}
-	get := func() int64 {
-		// The monotonic guard compares against the RAW stored block, stale or
-		// not — a stale tip is unreadable (GetChainTip reports fresh=false) but
-		// still fences lower writes.
-		existingLatest, _ := r.chainTipRaw(key)
-		return existingLatest
-	}
-	performInt64WriteWithValidationAndRetry(get, set, block)
+	r.cs.chainTips.setIfGreaterOrEqualOrStale(key, LastestCacheStore{latestBlock: block, latestExpirationTime: now.Add(core.DefaultExpirationForNonFinalized)}, now)
 	return nil
 }
 
@@ -199,6 +241,27 @@ func (r ristrettoStore) SetStickyIfAbsent(ctx context.Context, key string, pin c
 	return r.cs.stickyPins.setIfAbsent(key, pin, ttl), nil
 }
 
+// The observation store is the cache server's mutex-guarded map (see endpoint_observations.go
+// for why it is not ristretto); this adapter only routes the seam onto it, so the cache-be RPC
+// handlers and the RESP backend run the same engine code above it.
+func (r ristrettoStore) PublishEndpointObservation(ctx context.Context, key string, obs core.EndpointObservation, ttl time.Duration) (bool, error) {
+	if r.cs.endpointObservations == nil {
+		return false, nil
+	}
+	return r.cs.endpointObservations.set(key, obs.Block, obs.PodID, ttl), nil
+}
+
+func (r ristrettoStore) GetEndpointObservation(ctx context.Context, key string) (core.EndpointObservation, time.Duration, bool, error) {
+	if r.cs.endpointObservations == nil {
+		return core.EndpointObservation{}, 0, false, nil
+	}
+	block, podID, age, found := r.cs.endpointObservations.get(key)
+	if !found {
+		return core.EndpointObservation{}, 0, false, nil
+	}
+	return core.EndpointObservation{Block: block, PodID: podID}, age, true, nil
+}
+
 func (r ristrettoStore) Purge(ctx context.Context) error {
 	if c := r.cs.tempCache; c != nil {
 		c.Clear()
@@ -212,8 +275,12 @@ func (r ristrettoStore) Purge(ctx context.Context) error {
 		c.Clear()
 		c.Wait()
 	}
+	r.cs.chainTips.clear()
 	if r.cs.stickyPins != nil {
 		r.cs.stickyPins.clear()
+	}
+	if r.cs.endpointObservations != nil {
+		r.cs.endpointObservations.clear()
 	}
 	return nil
 }

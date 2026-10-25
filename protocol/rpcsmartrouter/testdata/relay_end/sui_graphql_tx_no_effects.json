@@ -1,0 +1,35 @@
+{
+  "GUID": "7234270",
+  "api_interface": "graphql",
+  "attempts": [
+    {
+      "batch": 0,
+      "error_code": "",
+      "latency_ms": "<ms>",
+      "message": "",
+      "outcome": "ok",
+      "returned_to_client": true,
+      "sent_ms": "<ms>",
+      "upstream": "node-a"
+    }
+  ],
+  "chain": "SUI",
+  "error": "",
+  "error_code": "",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "executeTransaction",
+  "outcome": "ok",
+  "reply_bytes": 64,
+  "request_bytes": 116,
+  "schema": 2,
+  "selection": "stateful",
+  "served_by": "node-a",
+  "stateful": true,
+  "status": 200,
+  "stop_reason": "Success"
+}

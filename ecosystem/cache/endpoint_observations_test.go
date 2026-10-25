@@ -85,13 +85,6 @@ func TestEndpointObservationStore_SweepDropsExpiredEntries(t *testing.T) {
 	require.Equal(t, 1, s.len(), "the sweep removed every expired entry (had %d)", before)
 }
 
-func TestClampEndpointObservationTTL(t *testing.T) {
-	require.Equal(t, MinEndpointObservationTTL, clampEndpointObservationTTL(0))
-	require.Equal(t, MinEndpointObservationTTL, clampEndpointObservationTTL(-time.Second))
-	require.Equal(t, 3*time.Second, clampEndpointObservationTTL(3*time.Second))
-	require.Equal(t, MaxEndpointObservationTTL, clampEndpointObservationTTL(time.Hour))
-}
-
 func TestEndpointObservationRPCs_RoundTripKeyIsolationAndFlush(t *testing.T) {
 	cs := &CacheServer{endpointObservations: newEndpointObservationStore()}
 	srv := &RelayerCacheServer{CacheServer: cs}

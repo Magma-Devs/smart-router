@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -201,13 +203,13 @@ func TestSortedKeys(t *testing.T) {
 
 // The inline gRPC flags reach the inline url only when given: unset, the dial tries
 // plaintext first and upgrades to TLS when that fails.
-func TestInlineAuthFrom(t *testing.T) {
+func TestHealthInlineGrpcAuthFlags(t *testing.T) {
 	flags := CreateHealthCobraCommand().Flags()
-	assert.Equal(t, commonlib.AuthConfig{}, inlineAuthFrom(flags))
+	assert.Equal(t, commonlib.AuthConfig{}, grpcAuthConfigFromFlags(flags))
 
 	require.NoError(t, flags.Set("use-tls", "true"))
 	require.NoError(t, flags.Set("allow-insecure-connection", "true"))
-	assert.Equal(t, commonlib.AuthConfig{UseTLS: true, AllowInsecure: true}, inlineAuthFrom(flags))
+	assert.Equal(t, commonlib.AuthConfig{UseTLS: true, AllowInsecure: true}, grpcAuthConfigFromFlags(flags))
 }
 
 // An inline probe has no provider name, and the url stands in for it. It is printed
@@ -432,4 +434,78 @@ func stubProbe(fn func(context.Context, healthProvider, healthOptions) []healthE
 	savedProbe, savedGrace := healthProbeFn, healthDeadlineGrace
 	healthProbeFn, healthDeadlineGrace = fn, 10*time.Millisecond
 	return func() { healthProbeFn, healthDeadlineGrace = savedProbe, savedGrace }
+}
+
+// A url whose head read failed (MAG-4278): the checks that need no head (here chain-id, passing)
+// keep their own verdict, the head-dependent ones are failed as "latest block unavailable", and the
+// row is not ok, keeps no height and says why. The report's top-level ok is false, and an endpoint
+// failure is data, not a fatal error.
+func TestHealthRollup_FailedHeadReadIsANotOkRowWithNoHeight(t *testing.T) {
+	row := healthEndpointResult{URL: "https://x", Addons: []string{}, Verifications: []healthVerification{}}
+	applyValidation(&row, chainlib.NodeURLValidation{
+		URL:              "https://x",
+		LatestBlock:      spectypes.NOT_APPLICABLE,
+		LatestBlockError: "GET_BLOCKNUM failed sending chainMessage",
+		Verifications: []chainlib.VerificationResult{
+			{Name: "chain-id", Ok: true},
+			{Name: "pruning", Ok: false, Error: "latest block unavailable: GET_BLOCKNUM failed sending chainMessage"},
+		},
+	})
+	require.False(t, row.Ok)
+	require.Equal(t, spectypes.NOT_APPLICABLE, row.LatestBlock)
+	require.Equal(t, "GET_BLOCKNUM failed sending chainMessage", row.LatestBlockError)
+	require.Len(t, row.Verifications, 2, "every check the pass reported is in the JSON")
+	require.True(t, row.Verifications[0].Ok, "the head-free check keeps its own verdict")
+
+	report := buildHealthReport([]healthEndpointResult{row}, nil)
+	require.False(t, report.Ok)
+	require.Nil(t, report.Error, "an endpoint failure is data, not a fatal error")
+}
+
+// TestEndpointsForProviders reduces probe targets to the distinct (chain, api) pairs the cross-validation
+// preflight matches policies against, so a policy for an interface the config does serve is not reported
+// as unserved just because two providers share it.
+func TestEndpointsForProviders(t *testing.T) {
+	got := endpointsForProviders([]healthProvider{
+		{name: "a", chainID: "ETH1", apiInterface: "jsonrpc"},
+		{name: "b", chainID: "ETH1", apiInterface: "jsonrpc"},
+		{name: "c", chainID: "COSMOSHUB", apiInterface: "rest"},
+	})
+	require.Len(t, got, 2, "the two ETH1/jsonrpc providers collapse to one endpoint")
+	pairs := map[string]bool{}
+	for _, e := range got {
+		pairs[e.ChainID+"/"+e.ApiInterface] = true
+	}
+	require.True(t, pairs["ETH1/jsonrpc"])
+	require.True(t, pairs["COSMOSHUB/rest"])
+}
+
+// TestHealthCommand_RejectsUnbootableCrossValidation drives the real health command against a config whose
+// cross-validation policy names a chain/api no endpoint serves. The router refuses to boot on it, so the
+// diagnostic command an operator reaches for to find out why must fail too, non-zero (MAG-3604).
+func TestHealthCommand_RejectsUnbootableCrossValidation(t *testing.T) {
+	dir := t.TempDir()
+	cfg := dir + "/router.yml"
+	require.NoError(t, os.WriteFile(cfg, []byte(
+		"direct-rpc:\n"+
+			"  - name: sim-1\n"+
+			"    chain-id: ETH1\n"+
+			"    api-interface: jsonrpc\n"+
+			"    node-urls:\n"+
+			"      - url: http://127.0.0.1:1\n"+
+			"cross-validation:\n"+
+			"  policies:\n"+
+			"    - chain-id: ETH1\n"+
+			"      api-interface: json-rpc\n"+ // typo: the served interface is jsonrpc
+			"      method: eth_getBalance\n"+
+			"      enabled: true\n"), 0o600))
+
+	cmd := CreateHealthCobraCommand()
+	cmd.SetArgs([]string{cfg, "--use-static-spec", "../../specs/ethereum.json"})
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	err := cmd.Execute()
+	require.Error(t, err, "a config the router would refuse to boot must fail the health command")
+	require.ErrorContains(t, err, "cross-validation")
+	require.ErrorContains(t, err, "no endpoint serves")
 }

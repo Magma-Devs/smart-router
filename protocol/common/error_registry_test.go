@@ -145,7 +145,7 @@ func TestErrorRegistry_GetLavaErrorByName(t *testing.T) {
 
 func TestErrorRegistry_IsRetryableStates(t *testing.T) {
 	assert.True(t, isRetryable(1001))  // CONNECTION_TIMEOUT
-	assert.False(t, isRetryable(1004)) // TLS_MISMATCH
+	assert.True(t, isRetryable(1004))  // TLS_MISMATCH: one endpoint's misconfiguration; another endpoint has every chance (MAG-4242)
 	assert.False(t, isRetryable(3001)) // NONCE_TOO_LOW
 	assert.True(t, isRetryable(0))     // UNKNOWN — retryable by default
 }
@@ -235,14 +235,18 @@ func TestErrorSubCategory_String(t *testing.T) {
 	assert.Equal(t, "unsupported_method", SubCategoryUnsupportedMethod.String())
 }
 
-func TestErrorSubCategory_UnsupportedMethodTagging(t *testing.T) {
-	// 2002 (NODE_METHOD_NOT_SUPPORTED) is intentionally excluded: it's retryable on another provider
-	unsupportedCodes := []uint32{2001, 2008, 2009, 2010}
-	for _, code := range unsupportedCodes {
+func TestErrorSubCategory_NodeRefusalTagging(t *testing.T) {
+	// MAG-2771: a node's own "I do not serve that" is node-capability, retried on another provider,
+	// never the router-terminal unsupported-method subcategory.
+	nodeRefusalCodes := []uint32{2001, 2002, 2008, 2009, 2010, 2016, 2018}
+	for _, code := range nodeRefusalCodes {
 		le := getLavaError(code)
 		require.NotEqual(t, LavaErrorUnknown, le, "code %d not registered", code)
-		assert.True(t, le.SubCategory.IsUnsupportedMethod(),
-			"code %d (%s) should be SubCategoryUnsupportedMethod", code, le.Name)
+		assert.True(t, le.SubCategory.IsNodeCapability(),
+			"code %d (%s) should be SubCategoryNodeCapability", code, le.Name)
+		assert.True(t, le.Retryable, "code %d (%s) should be retryable on another provider", code, le.Name)
+		assert.False(t, le.SubCategory.IsUnsupportedMethod(),
+			"code %d (%s) should NOT be SubCategoryUnsupportedMethod", code, le.Name)
 	}
 
 	// Non-unsupported codes should not be
@@ -545,13 +549,14 @@ func TestClassifyNodeErrorForRetry_DerivesAllFlagsFromSingleLookup(t *testing.T)
 			wantNonRetryable: true,
 		},
 		{
-			name:             "EVM method not found → terminal + unsupported",
+			// MAG-2771: a claim about this node, so another provider is asked.
+			name:             "EVM method not found → retryable node capability, not unsupported",
 			family:           ChainFamilyEVM,
 			transport:        TransportJsonRPC,
 			errorCode:        -32601,
 			message:          "method not found",
-			wantNonRetryable: true,
-			wantUnsupported:  true,
+			wantNonRetryable: false,
+			wantUnsupported:  false,
 		},
 		{
 			name:             "JSON-RPC body code -32700 parse error → terminal, not unsupported",
@@ -818,6 +823,15 @@ func TestDetectConnectionError_StringFallbackTable(t *testing.T) {
 		{"connection reset", "read tcp: connection reset by peer", LavaErrorConnectionReset},
 		// Row 10: envoy connection termination (distinct from refused)
 		{"connection termination", "upstream: connection termination", LavaErrorConnectionReset},
+		// Rows 11–17: DNS, http-served-as-https and EOF, in the resolver's, net/http's and io's
+		// wording and in the node error handler's rewording.
+		{"no such host", `post "https://rpc.example/": dial tcp: lookup rpc.example: no such host`, LavaErrorDNSFailure},
+		{"server misbehaving", "lookup rpc.example on 10.0.0.2:53: server misbehaving", LavaErrorDNSFailure},
+		{"dns resolution failed (rewritten)", "provider side failed sending message, reason: dns resolution failed", LavaErrorDNSFailure},
+		{"http served as https", `post "https://rpc.example/": http: server gave http response to https client`, LavaErrorTLSMismatch},
+		{"http served as https (rewritten)", "provider side failed sending message, reason: misconfigured http endpoint as https", LavaErrorTLSMismatch},
+		{"unexpected eof", "failed reading response: unexpected eof", LavaErrorConnectionClosed},
+		{"eof (rewritten)", "provider side failed sending message, reason: end of input stream reached", LavaErrorConnectionClosed},
 		// Negative case: nothing matches
 		{"unrelated error", "some unrelated node error", nil},
 
@@ -867,6 +881,21 @@ func TestClassifyError_TransportScoping(t *testing.T) {
 	// gRPC code should NOT match in JSON-RPC transport
 	result = ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 14, "service unavailable")
 	assert.NotEqual(t, LavaErrorNodeServiceUnavailable, result)
+
+	// MAG-3995: gRPC ABORTED (10) is a node error with its own name. On Sui it is the validators'
+	// answer to a submitted transaction, so it is non-retryable and not the endpoint's fault. It
+	// is not the internal PROTOCOL_PROVIDER_ABORTED code.
+	result = ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 10, "")
+	assert.Equal(t, LavaErrorNodeAborted, result)
+	assert.Equal(t, CategoryExternal, result.Category, "the node answered; internal would read as unreachable")
+	assert.False(t, result.Retryable, "resubmitting is the client's call; the flag keeps the answer off the endpoint")
+	assert.True(t, result.MayHaveReachedNode, "Sui's already-finalized case can mean the transaction is on chain")
+	assert.False(t, result.EndpointAtFault())
+	assert.NotEqual(t, LavaErrorNodeAborted, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 10, ""),
+		"JSON-RPC 10 is not a gRPC status")
+
+	// DATA_LOSS (15) stays unregistered: no node we route to sends it.
+	assert.Equal(t, LavaErrorUnknown, ClassifyError(nil, ChainFamilyCosmosSDK, TransportGRPC, 15, ""))
 }
 
 func TestClassifyError_ChainSpecificMappings(t *testing.T) {
@@ -959,6 +988,30 @@ func TestClassifyError_GenericJsonRPCMappings(t *testing.T) {
 	}
 }
 
+// Besu's duplicate-submission wording is matched on whole words: "unknown transaction" is not a
+// duplicate, and reading it as one would stop the retry and pin a wallet to a node that never
+// took its transaction (MAG-4032).
+func TestClassifyError_KnownTransactionIsWordBounded(t *testing.T) {
+	tests := []struct {
+		message   string
+		duplicate bool
+	}{
+		{"Known transaction", true},
+		{"known transaction", true},
+		{"Error: Known transaction", true},
+		{"unknown transaction type", false},
+		{"Unknown transaction", false},
+	}
+	for tcIndex, tc := range tests {
+		result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, -32000, tc.message)
+		if tc.duplicate {
+			assert.Equal(t, LavaErrorChainTxAlreadyKnown, result, "tc #%d %q", tcIndex, tc.message)
+		} else {
+			assert.NotEqual(t, LavaErrorChainTxAlreadyKnown, result, "tc #%d %q", tcIndex, tc.message)
+		}
+	}
+}
+
 // TestClassifyError_UnsupportedMethodMatchersAreNarrow locks in the tight scope
 // of the zero-CU unsupported-method matchers. A false positive here silently
 // stops retries and bills nothing, so these cases must stay precise.
@@ -1028,19 +1081,24 @@ func TestClassifyError_GenericRESTMappings(t *testing.T) {
 // TestClassifyError_REST501NotImplemented pins the classifier half of the MAG-1576
 // "REST not implemented" fix. The REST relay path classifies on the HTTP status code
 // itself (errorCode = StatusCode), so a Cosmos node's 501 must map to
-// NODE_UNIMPLEMENTED and be non-retryable — otherwise the router would retry an
-// unsupported method as if it were a transient server error.
+// NODE_UNIMPLEMENTED — the node saying it does not implement the method — and never
+// to a transient server error, which would blame the endpoint.
+//
+// MAG-1576 also made it non-retryable. MAG-2771 reversed that half: one gateway
+// implements a route another does not, so the request goes to another provider,
+// while the endpoint that answered 501 stays unblamed.
 func TestClassifyError_REST501NotImplemented(t *testing.T) {
 	// Code-based path: the REST relay forwards errorCode = HTTP status (501).
 	result := ClassifyError(nil, ChainFamilyCosmosSDK, TransportREST, 501, "Not Implemented")
 	assert.Equal(t, LavaErrorNodeUnimplemented, result,
 		"REST 501 must classify as NODE_UNIMPLEMENTED, got %s", result.Name)
-	assert.False(t, result.Retryable, "NODE_UNIMPLEMENTED must be non-retryable")
+	assert.True(t, result.Retryable, "NODE_UNIMPLEMENTED is retryable on another provider")
+	assert.False(t, result.EndpointAtFault(), "NODE_UNIMPLEMENTED must not blame the endpoint")
 
 	// The umbrella retry verdict the relay path actually consults.
-	assert.True(t,
+	assert.False(t,
 		IsNonRetryableNodeErrorWithContext(ChainFamilyCosmosSDK, TransportREST, 501, "Not Implemented"),
-		"REST 501 must be non-retryable")
+		"REST 501 must be retryable on another provider")
 }
 
 // TestClassifyError_GenericJsonRPCHTTPStatusMappings is the JSON-RPC analogue
@@ -1163,4 +1221,44 @@ func checkShadow(t *testing.T, i, j int, a, b errorMapping) {
 		t.Errorf("matcher[%d] CodeEquals(%d)→%s shadows matcher[%d] CodeEquals(%d)→%s",
 			i, aCode.code, a.LavaError.Name, j, bCode.code, b.LavaError.Name)
 	}
+}
+
+// TestSuiNetworksAllMapToSuiFamily guards the gap this test was added for: sui.json declares
+// SUI (mainnet), SUIT (testnet) and SUID (devnet), but only the testnet was registered, so
+// mainnet and devnet traffic fell through to ChainFamilyUnknown and skipped every family-scoped
+// matcher — on the network customers actually run.
+func TestSuiNetworksAllMapToSuiFamily(t *testing.T) {
+	for _, chainID := range []string{"SUI", "SUIT", "SUID"} {
+		family, registered := GetChainFamily(chainID)
+		require.True(t, registered, "chain %s is not registered in chainFamilyMap", chainID)
+		require.Equal(t, ChainFamilySui, family, "chain %s should map to the Sui family", chainID)
+	}
+}
+
+// Registry lookup helpers used only by tests; the binary classifies through ClassifyError.
+
+func getLavaError(code uint32) *LavaError {
+	if le, ok := errorRegistry[code]; ok {
+		return le
+	}
+	return LavaErrorUnknown
+}
+
+func getLavaErrorByName(name string) *LavaError {
+	if le, ok := errorRegistryName[name]; ok {
+		return le
+	}
+	return LavaErrorUnknown
+}
+
+func isRetryable(code uint32) bool {
+	return getLavaError(code).Retryable
+}
+
+func IsInternal(code uint32) bool {
+	return getLavaError(code).Category == CategoryInternal
+}
+
+func IsExternal(code uint32) bool {
+	return getLavaError(code).Category == CategoryExternal
 }

@@ -15,14 +15,17 @@ import (
 // transportFromProtocolMessage derives the TransportType from the protocol message's API collection.
 func transportFromProtocolMessage(pm chainlib.ProtocolMessage) common.TransportType {
 	if collection := pm.GetApiCollection(); collection != nil {
-		switch collection.CollectionData.ApiInterface {
-		case "rest":
-			return common.TransportREST
-		case "grpc":
-			return common.TransportGRPC
-		}
+		return common.ApiInterfaceToTransport(collection.CollectionData.ApiInterface)
 	}
-	return common.TransportJsonRPC // default for jsonrpc and tendermintrpc
+	return common.TransportJsonRPC
+}
+
+// replyStatusClassifier is a request message whose interface answers its errors inside a 2xx and
+// can say which HTTP status the error registry should classify a reply under
+// (rpcInterfaceMessages.GraphQLMessage). It stands in for the reply's status the way the body's
+// error code does for JSON-RPC.
+type replyStatusClassifier interface {
+	ClassificationStatus(data []byte, httpStatusCode int) int
 }
 
 type ResultsManager interface {
@@ -33,6 +36,7 @@ type ResultsManager interface {
 	HasResults() bool
 	GetResults() (success int, nodeErrors int, specialNodeErrors int, protocolErrors int)
 	GetResultsData() (successResults []common.RelayResult, nodeErrors []common.RelayResult, protocolErrors []RelayError)
+	GetResultsDetail() (successResults []common.RelayResult, nodeErrors []RelayError, protocolErrors []RelayError)
 	SetResponse(response *RelayResponse, protocolMessage chainlib.ProtocolMessage) (nodeError error)
 	GetBestNodeErrorMessageForUser() RelayError
 	GetBestProtocolErrorMessageForUser() RelayError
@@ -60,10 +64,13 @@ func NewResultsManager(guid uint64, chainID string) ResultsManager {
 func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
-	// Protocol errors come from the lavasession/protocolerrors packages and carry an sdkerrors ABCI
-	// code — use ClassifyLegacyError to extract it. These errors travel over gRPC (provider →
-	// consumer), so TransportGRPC is used for the message-based fallback path.
-	classified := common.ClassifyLegacyError(response.Err, common.TransportGRPC)
+	// Protocol errors are plain Go errors (nothing in this fork carries an sdkerrors ABCI code any
+	// more), so they are classified by connection shape and message text. TransportGRPC is the
+	// historical choice for the message-based fallback and is kept so the verdicts do not move.
+	var classified *common.LavaError
+	if response.Err != nil {
+		classified = common.ClassifyError(common.DetectConnectionError(response.Err), common.ChainFamilyUnknown, common.TransportGRPC, 0, response.Err.Error())
+	}
 	// This is a protocol-layer error (session not found, consumer blocked, etc.),
 	// not a node-side error. Pass "" as chainErrorMessage so the chain_error_message
 	// structured field doesn't get polluted with sdkerrors strings. The full
@@ -167,10 +174,21 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// Use the HTTP status code for classification; for JSON-RPC, the HTTP status is 200
 		// even on errors, so extract the actual JSON-RPC error code from the response body.
 		errorCode := response.RelayResult.StatusCode
+		jsonRPCErrorCode := 0
 		if transport == common.TransportJsonRPC && response.RelayResult.Reply.Data != nil {
 			if code := common.ExtractJSONRPCErrorCode(response.RelayResult.Reply.Data); code != 0 {
-				errorCode = code
+				errorCode, jsonRPCErrorCode = code, code
 			}
+		}
+		// GraphQL answers its node faults inside a 200 as well, so the status says nothing there
+		// either. The message's own rule maps the error's code onto the status the registry's
+		// rows know (RESOURCE_EXHAUSTED a 429, INTERNAL_SERVER_ERROR a 500, a caller's error on a
+		// mutation a 400), which is how the sender already classified this reply for its retry
+		// decision (sendGraphQLRelay). Classified by the 200 instead, every GraphQL node fault was
+		// UNKNOWN_ERROR, logged at DEBUG and never blamed on the endpoint, while the same fault
+		// behind a 503 was an ERROR line with its own name (MAG-4375).
+		if statusClassifier, ok := protocolMessage.GetRPCMessage().(replyStatusClassifier); ok {
+			errorCode = statusClassifier.ClassificationStatus(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
 		}
 		// Resolve chain family so Tier-2 chain-specific matchers win over
 		// Tier-1 generic ones. Without this, chain-native codes like Solana's
@@ -178,8 +196,18 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// through the JSON-RPC generic bucket as NODE_METHOD_NOT_SUPPORTED
 		// (zero CU, no retry) — a silent retry-starvation bug.
 		chainFamily := common.GetChainFamilyOrDefault(rp.chainID)
-		nodeClassified := common.ClassifyError(common.DetectConnectionError(err), chainFamily, transport, errorCode, err.Error())
-		common.LogCodedError("received node error reply from provider", err, nodeClassified, rp.chainID, errorCode, err.Error(),
+		// err is the node's reply text, so the transport-only rows stay out of it (MAG-4242).
+		nodeClassified := common.ClassifyError(common.DetectConnectionErrorInReplyText(errorMessage), chainFamily, transport, errorCode, err.Error())
+		// ERROR only when the endpoint is to blame. A not-found, a pruned height, a rejected
+		// transaction is the node answering the question it was asked, and on REST those are
+		// routine — see LogCodedNodeAnswer. The metric fires either way.
+		logNodeError := common.LogCodedNodeAnswer
+		if nodeClassified.EndpointAtFault() {
+			logNodeError = func(description string, err error, lavaError *common.LavaError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) {
+				common.LogCodedError(description, err, lavaError, chainID, chainErrorCode, chainErrorMessage, attributes...)
+			}
+		}
+		logNodeError("received node error reply from provider", err, nodeClassified, rp.chainID, errorCode, err.Error(),
 			utils.LogAttr("GUID", rp.guid),
 			utils.LogAttr("provider", response.RelayResult.ProviderInfo),
 			utils.LogAttr("statusCode", response.RelayResult.StatusCode),
@@ -190,7 +218,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 			utils.LogAttr("requestPayload", parser.CapStringLen(reqPayload)),
 			utils.LogAttr("requestHeaders", reqHeaders),
 		)
-		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, LavaError: nodeClassified})
+		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, LavaError: nodeClassified, JSONRPCErrorCode: jsonRPCErrorCode})
 		return err
 	}
 	rp.successResults = append(rp.successResults, response.RelayResult)
@@ -279,13 +307,21 @@ func (rp *ResultsManagerInst) SetResponse(response *RelayResponse, protocolMessa
 	} else {
 		return rp.setValidResponse(response, protocolMessage)
 	}
-	return nil
+	return nil //nolint:nilerr // a protocol error is recorded on the processor for the policy to weigh; it is not a failure of this call
 }
 
 func (rp *ResultsManagerInst) GetResultsData() (successResults []common.RelayResult, nodeErrors []common.RelayResult, protocolErrors []RelayError) {
 	rp.lock.RLock()
 	defer rp.lock.RUnlock()
 	return rp.successResults, rp.NodeErrors(), rp.protocolResponseErrors.RelayErrors
+}
+
+// GetResultsDetail is GetResultsData with each node error kept as its RelayError, so the error and
+// its classification come along with the result.
+func (rp *ResultsManagerInst) GetResultsDetail() (successResults []common.RelayResult, nodeErrors []RelayError, protocolErrors []RelayError) {
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	return rp.successResults, rp.nodeResponseErrors.RelayErrors, rp.protocolResponseErrors.RelayErrors
 }
 
 func (rp *ResultsManagerInst) GetBestNodeErrorMessageForUser() RelayError {

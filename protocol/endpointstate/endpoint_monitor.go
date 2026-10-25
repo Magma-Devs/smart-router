@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -38,7 +39,7 @@ const (
 	// whose state merely lagged.
 	//
 	// Delivery only. It deliberately does NOT bound the poll cycle that follows: that is bounded by
-	// the tracker's own fetch timeout, max(10s, MinimumTimePerRelayDelay), which is several times
+	// the tracker's own fetch timeout, chaintracker.FetchTimeout(), which is several times
 	// this grace. Capping both with this value would abandon healthy polls mid-flight and leave the
 	// caller reading a pre-poll record.
 	pollNowUnstartedGrace = 2 * time.Second
@@ -112,6 +113,10 @@ type EndpointMonitor struct {
 	// averageBlockTime/divisor, resolved ONCE at construction from the operator's
 	// PollIntervalDivisor. See poll_cadence.go for the knob and the bounds on it.
 	flatPollInterval time.Duration
+	// stallCycles is how many tracker cycles without a new highest block mark an endpoint
+	// head-stalled (MAG-3986). Computed once at construction from the same validated divisor that
+	// produced flatPollInterval (stallCyclesFor), so it is never re-derived from the rounded interval.
+	stallCycles int
 	// tipStaleAfter is the per-endpoint tip staleness horizon (T4/C-D): the shared
 	// chainstate.StalenessWindow, derived once and passed to every endpointtip.Store.Set to
 	// gate downward (reorg) moves.
@@ -144,6 +149,25 @@ type EndpointMonitor struct {
 	peerObservations PeerObservationStore
 	podID            string
 
+	// Idle mode (idle.go). idleAfter 0 = off; idlePollInterval 0 = poll nothing while idle.
+	idleAfter        time.Duration
+	idlePollInterval time.Duration
+	// lastClientRelayNanos is the unix-nano stamp of the last CLIENT relay this chain+interface
+	// served — crafted health relays never reach the stamping call site — seeded with the
+	// monitor's construction time, so a freshly started process is "active" for one idle window
+	// before it can go idle. Written by NoteClientRelay on the relay hot path (one atomic swap),
+	// read by every tracker's idle gate, the probe loop and the debug view.
+	lastClientRelayNanos atomic.Int64
+	// idleAnnounced is log state only (the "chain idle" line, once per idle period); decisions
+	// read the stamp. The first idle skip sets it, the wake clears it.
+	idleAnnounced atomic.Bool
+	// wakeDone is non-nil while a wake burst is in flight and is closed once the first endpoint
+	// poll of the burst has recorded a fresh tip (or every poll has finished). Guarded by wakeMu.
+	wakeMu   sync.Mutex
+	wakeDone chan struct{}
+	// wakeBursts counts the wake bursts started, one per idle period a relay ended.
+	wakeBursts atomic.Uint64
+
 	// Callbacks for events (optional)
 	onFork        func(endpointURL string, blockNum int64)
 	onNewBlock    func(endpointURL string, fromBlock, toBlock int64)
@@ -153,7 +177,15 @@ type EndpointMonitor struct {
 	// poll path or the relay-harvest path (MAG-2160 / Topic C): it feeds the cheap monotonic
 	// per-chain ChainState tip (SetLatestBlock). Fired AFTER obsMu is released so the tip lock
 	// is never taken while holding the observation lock. Set once at construction; immutable.
-	onTipObservation func(block int64)
+	// It carries the endpoint url and whether the block REPEATS that endpoint's stored tip, so
+	// the router can refuse a repeat vote from an endpoint it holds as head-stalled (MAG-3986):
+	// a frozen node repeating its block is what kept a wrong tip fresh in the Plasma incident.
+	onTipObservation TipObservationFunc
+	// onPollBlock, if set, is invoked with the url and block of every poll recordPollObservation
+	// records for a live tracker and the tip store accepts, fired AFTER obsMu is released like
+	// onTipObservation. See EndpointChainTrackerConfig.OnPollBlock. Set once at construction;
+	// immutable.
+	onPollBlock func(endpointURL string, block int64)
 	// onGateSkip, if set, is invoked once per poll cycle the traffic gate suppressed, with the
 	// source that made the poll redundant (metrics.TrackerGateSkipSource*).
 	onGateSkip func(endpointURL, source string)
@@ -191,6 +223,15 @@ type EndpointChainTrackerConfig struct {
 	// how this combines with a spec that cannot serve hashes at all.
 	EnableForkDetection bool
 
+	// IdleAfter turns idle mode on (idle.go): after this long without a client relay the
+	// chain's dedicated polls pause until the next client relay wakes it. 0 = off (the default);
+	// below MinIdleAfter reverts to off with a warning. See IdleAfterFlagName.
+	IdleAfter time.Duration
+	// IdlePollInterval is the idle heartbeat: while idle each endpoint is still polled once per
+	// this interval. 0 = poll nothing while idle. Ignored unless IdleAfter is set; a value below
+	// the normal cadence is raised to it. See IdlePollIntervalFlagName.
+	IdlePollInterval time.Duration
+
 	// Optional callbacks
 	OnFork        func(endpointURL string, blockNum int64)
 	OnNewBlock    func(endpointURL string, fromBlock, toBlock int64)
@@ -198,7 +239,15 @@ type EndpointChainTrackerConfig struct {
 	OnFetchError  func(endpointURL string)
 	// OnTipObservation, if set, feeds every positive poll/relay block into the per-chain
 	// ChainState tip (MAG-2160). See EndpointMonitor.onTipObservation.
-	OnTipObservation func(block int64)
+	OnTipObservation TipObservationFunc
+	// OnPollBlock, if set, is invoked with the url and block of every latest-block poll a live
+	// tracker records — including the tracker's first poll and a poll that returns the same
+	// block again, neither of which OnNewBlock reports. Only a block the endpoint's tip store
+	// accepted is reported: a repeat of the stored block is, a straggler below a still-fresh
+	// tip is not, and a failed poll reports nothing. A poll from a removed or replaced tracker
+	// is not reported (the observation's own generation gate), but the call runs after that
+	// gate's lock is released, so it can land just after the tracker is removed.
+	OnPollBlock func(endpointURL string, block int64)
 
 	// PeerObservations, when set, enables the fleet half of the traffic gate (MAG-2981): this
 	// pod publishes its successful polls to the store and borrows fresh observations from
@@ -252,7 +301,11 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 	// is reported once per chain rather than per tracker.
 	pollDivisor := resolvePollDivisor(config.PollIntervalDivisor, config.ChainID, config.ApiInterface)
 	flatPollInterval := resolveFlatPollInterval(avgBlockTime, pollDivisor)
-	warnIfCadenceOutrunsStaleness(flatPollInterval, avgBlockTime, config.ChainID, config.ApiInterface)
+	// The warning judges the interval the trackers actually wait, which they cap at a minute
+	// (chaintracker.HealthyPollInterval): a slow chain at a low divisor still polls every minute.
+	warnIfCadenceOutrunsStaleness(chaintracker.HealthyPollInterval(flatPollInterval), avgBlockTime, config.ChainID, config.ApiInterface)
+	// Idle mode knobs (idle.go), validated once per chain like the cadence above.
+	idleAfter, idlePollInterval := resolveIdleConfig(config.IdleAfter, config.IdlePollInterval, flatPollInterval, config.ChainID, config.ApiInterface)
 
 	ctxWithCancel, cancel := context.WithCancel(ctx)
 
@@ -270,6 +323,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		apiInterface:      config.ApiInterface,
 		averageBlockTime:  avgBlockTime,
 		flatPollInterval:  flatPollInterval,
+		stallCycles:       stallCyclesFor(pollDivisor),
 		tipStaleAfter:     chainstate.StalenessWindow(avgBlockTime),
 		blocksToSave:      blocksToSave,
 		retryMinDelay:     defaultTrackerStartRetryMin,
@@ -281,13 +335,27 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		onConsistency:      config.OnConsistency,
 		onFetchError:       config.OnFetchError,
 		onTipObservation:   config.OnTipObservation,
+		onPollBlock:        config.OnPollBlock,
 		onGateSkip:         config.OnGateSkip,
 		onGateError:        config.OnGateError,
 		onTrackerRequest:   config.OnTrackerRequest,
 		peerObservations:   config.PeerObservations,
 		podID:              LocalPodID(),
+		idleAfter:          idleAfter,
+		idlePollInterval:   idlePollInterval,
 		ctx:                ctxWithCancel,
 		cancel:             cancel,
+	}
+	// A new process starts "active": it may go idle only after a full idle window with no
+	// client relay, so a rollout never boots straight into paused polls.
+	manager.lastClientRelayNanos.Store(time.Now().UnixNano())
+	if idleAfter > 0 {
+		utils.LavaFormatInfo("chain tracker idle mode enabled: polls pause after a quiet window and resume on the next client relay",
+			utils.LogAttr("chainID", config.ChainID),
+			utils.LogAttr("apiInterface", config.ApiInterface),
+			utils.LogAttr("idleAfter", idleAfter),
+			utils.LogAttr("idlePollInterval", idlePollInterval),
+		)
 	}
 
 	// Resolved after the struct exists because it reads manager.chainParser. Both inputs are
@@ -328,7 +396,8 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		utils.LogAttr("apiInterface", config.ApiInterface),
 		utils.LogAttr("averageBlockTime", avgBlockTime),
 		utils.LogAttr("divisor", pollDivisor),
-		utils.LogAttr("pollInterval", flatPollInterval),
+		utils.LogAttr("pollInterval", chaintracker.HealthyPollInterval(flatPollInterval)),
+		utils.LogAttr("flatPollInterval", flatPollInterval),
 		utils.LogAttr("overridden", pollDivisor != DefaultPollDivisor),
 	)
 
@@ -337,7 +406,14 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 
 // GetOrCreateTracker returns an existing ChainTracker for the endpoint or creates a new one.
 // Thread-safe - uses lazy initialization to avoid creating trackers for unused endpoints.
+//
+// providerName is the name the relay path records rate-limit hold-offs under (the provider's
+// public address). The tracker reads the relay path's (provider, url) entry, so a relay's
+// hold-off or the provider escalation slows its poll; it records its own 429s under the url
+// alone, so a limited poll never holds the provider off for relay selection. Callers with no
+// provider in hand pass "" and the tracker reads the url key alone (MAG-4165).
 func (m *EndpointMonitor) GetOrCreateTracker(
+	providerName string,
 	endpoint *lavasession.Endpoint,
 	directConnection lavasession.DirectRPCConnection,
 ) (chaintracker.IChainTracker, error) {
@@ -412,12 +488,16 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// turning it off would swap in a DummyChainTracker, which polls nothing at all.
 		HeadOnlyTracking: m.hashPolling.HeadOnly(),
 		// MAG-2159 (Topic B): per-endpoint trackers use a FIXED flat cadence — the
-		// dedicated poll runs at exactly avgBlockTime/divisor (slowed only by failure
-		// backoff), because relay harvest is the primary block signal and the poll is a
-		// sparse fallback. The divisor defaults to DefaultPollDivisor and is operator-tunable
-		// (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The global tracker
-		// leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
+		// dedicated poll runs at avgBlockTime/divisor capped at chaintracker.BACKOFF_MAX_TIME
+		// (slowed only by failure backoff), because relay harvest is the primary block signal
+		// and the poll is a sparse fallback. The divisor defaults to DefaultPollDivisor and is
+		// operator-tunable (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The
+		// global tracker leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
 		FlatPollInterval: m.flatPollInterval,
+		// Rate-limit hold-off keys: the relay path's provider name (read only) and this url,
+		// which the tracker's own 429s are recorded under (MAG-4165).
+		RateLimitProvider: providerName,
+		RateLimitURL:      endpointURL,
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
 		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker
 		// (above the generic/SVM wrapper split) so it suppresses Solana polls too — the old
@@ -428,8 +508,11 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// forces a verifying real poll. Relay is checked first: it is a local read, and a
 		// busy endpoint's relay tip is fresher than any peer poll.
 		RelayTipFresh: func(now time.Time) bool {
-			if _, ok := m.freshRelayTip(endpointURL, now); ok {
+			if tip, ok := m.freshRelayTip(endpointURL, now); ok {
 				m.noteGateSkip(endpointURL, metrics.TrackerGateSkipSourceRelay)
+				// The skipped cycle is still a cycle of evidence: the relay answered it
+				// (MAG-3986). A peer-covered skip below is not — it is another pod's view.
+				m.countRelayCoveredCycle(endpointURL, gen, tip)
 				return true
 			}
 			if _, ok := m.freshPeerTip(endpointURL, gen, now); ok {
@@ -438,6 +521,13 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 			}
 			return false
 		},
+	}
+	// Idle gate (idle.go): consulted before the traffic gate, unbounded, bypassed by PollNow.
+	// Wired only when idle mode is on so an unconfigured tracker pays nothing per tick.
+	if m.idleAfter > 0 {
+		config.IdleGate = func(now time.Time, sinceLastRealPoll time.Duration) bool {
+			return m.idleGate(endpointURL, now, sinceLastRealPoll)
+		}
 	}
 
 	// Set up callbacks with endpoint context
@@ -531,7 +621,7 @@ func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTrack
 		default:
 		}
 
-		retryDelay := m.trackerStartRetryDelay(attempt)
+		retryDelay := m.trackerStartRetryDelayAfter(attempt, err)
 		m.setTrackerState(endpointURL, EndpointChainTrackerRetryingStart, err)
 		utils.LavaFormatWarning("ChainTracker startup failed; retrying", err,
 			utils.LogAttr("endpoint", endpointURL),
@@ -601,6 +691,20 @@ func (m *EndpointMonitor) specRequiresHeadOnly() bool {
 	}
 	byNum, _, hasByNum := m.chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
 	return !hasByNum || byNum == nil
+}
+
+// trackerStartRetryDelayAfter is the wait before the next start attempt: the ladder below,
+// floored with the hold-off a rate-limited first fetch applied. The tracker hands that hold-off
+// back as the start error's Retry-After (chaintracker.fetchInitDataWithRetry) rather than
+// sleeping it out inside StartAndServe, so the wait happens HERE, with the tracker in
+// retrying_start and the 429 as its last error for the whole of it — where
+// /debug/endpoint-state and PollNow read it. A hold-off never shortens the ladder (MAG-4165).
+func (m *EndpointMonitor) trackerStartRetryDelayAfter(attempt int, err error) time.Duration {
+	delay := m.trackerStartRetryDelay(attempt)
+	if heldFor, ok := common.RetryAfterFrom(err); ok && heldFor > delay {
+		return heldFor
+	}
+	return delay
 }
 
 func (m *EndpointMonitor) trackerStartRetryDelay(attempt int) time.Duration {
@@ -783,38 +887,17 @@ func (m *EndpointMonitor) BackoffSnapshot() map[string]time.Duration {
 // setTrackerState), so the lock is released BEFORE the trigger — holding it across the wait would
 // deadlock the monitor against its own poll loop the first time a poll observed a new block.
 func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (observation EndpointObservation, polled bool, err error) {
-	m.mu.RLock()
-	tracker, exists := m.trackers[endpointURL]
-	stateBefore := m.trackerStates[endpointURL]
-	m.mu.RUnlock()
-
-	if !exists {
+	// The trigger itself — tracker lookup, the delivery grace for a tracker that is not yet
+	// Polling, and the sentinel classification — is triggerPoll, shared with the idle wake
+	// burst. This wrapper adds what the debug caller needs: the record, and a diagnostic error
+	// naming the tracker's lifecycle state when no poll can be vouched for.
+	ran, pollErr := m.triggerPoll(ctx, endpointURL, false)
+	if errors.Is(pollErr, errNoTrackerForEndpoint) {
 		return EndpointObservation{}, false, utils.LavaFormatError("poll-now: no ChainTracker for endpoint", nil,
 			utils.LogAttr("endpoint", endpointURL),
 			utils.LogAttr("chainID", m.chainID),
 		)
 	}
-
-	// A tracker that is not yet Polling has no poll goroutine to take the request — start() spawns
-	// it only after the init fetch succeeds — so an endpoint stuck retrying a dead upstream would
-	// otherwise burn the caller's whole budget waiting for a receiver that does not exist. Cap that
-	// wait instead. Deliberately a shorter DEADLINE and not a rejection: the state can lag the
-	// goroutine by a hair (it flips to Polling just after start returns), and in that window the
-	// send is taken instantly anyway, so nothing that could have succeeded is refused.
-	//
-	// The grace bounds DELIVERY ONLY. Once the goroutine has the request, the cycle it runs is
-	// bounded by the tracker's own fetch timeout — several times this grace — and is awaited on the
-	// caller's full budget, exactly as for a tracker that was already Polling. Bounding both with
-	// the grace would turn the lagging-state window into the worst outcome of all: the send taken,
-	// the poll running, and the caller timing out on a healthy cycle with a pre-poll record in hand.
-	deliveryCtx := ctx
-	if stateBefore != EndpointChainTrackerPolling {
-		var cancelDelivery context.CancelFunc
-		deliveryCtx, cancelDelivery = context.WithTimeout(ctx, pollNowUnstartedGrace)
-		defer cancelDelivery()
-	}
-
-	pollErr := tracker.PollNowWithDeliveryDeadline(deliveryCtx, ctx)
 	// Report the record either way: on a failed poll it carries the failure the caller came to
 	// observe, and otherwise it is the prior state, flagged as such by polled=false.
 	observation, _ = m.GetObservation(endpointURL)
@@ -824,8 +907,7 @@ func (m *EndpointMonitor) PollNow(ctx context.Context, endpointURL string) (obse
 	// polled=false — the caller's question is "may I trust this record", not "did a goroutine move".
 	// Name the tracker's lifecycle state in the error: "retrying_start" is a diagnosis, a bare
 	// timeout is not.
-	if errors.Is(pollErr, chaintracker.ErrorPollNowNotDelivered) || errors.Is(pollErr, chaintracker.ErrorPollNowUnsupported) ||
-		errors.Is(pollErr, chaintracker.ErrorPollNowResultNotAwaited) {
+	if !ran {
 		// Read the state HERE, not before the attempt: what matters to whoever is diagnosing is the
 		// tracker's state at the moment the attempt gave out.
 		state, _, _ := m.GetTrackerState(endpointURL)
@@ -896,6 +978,34 @@ func (m *EndpointMonitor) ObservationGeneration(endpointURL string) (uint64, boo
 	return gen, ok
 }
 
+// PollInterval is how long each tracker of this monitor waits between two polls of its endpoint
+// while they succeed: the chain's block time over the poll divisor, capped at
+// chaintracker.BACKOFF_MAX_TIME the way the tracker's scheduler caps it
+// (chaintracker.HealthyPollInterval). So a 10-minute chain polls every minute, not every 5.
+// Failures back off from it, and the traffic gate may skip polls (WorstCaseGapBetweenPolls).
+func (m *EndpointMonitor) PollInterval() time.Duration {
+	if m == nil {
+		return 0
+	}
+	return chaintracker.HealthyPollInterval(m.flatPollInterval)
+}
+
+// WorstCaseGapBetweenPolls is the longest a tracker of this monitor can go between two real polls
+// while they succeed. The traffic gate skips a poll while a relay or another pod's poll keeps the
+// endpoint's tip fresh, up to chaintracker.DefaultMaxRelaySkipsBeforePoll in a row, so the next
+// real poll can come that many PollIntervals plus one after the last.
+//
+// It does not shrink to one block time after the last relay, where the relay half of the gate
+// stops skipping. A skip on another pod's poll (MAG-2981) writes nothing on this pod, and a relay
+// writes the url's series only for the provider it went through, so for a url two providers share,
+// only the skip budget bounds the gap between this pod's writes.
+func (m *EndpointMonitor) WorstCaseGapBetweenPolls() time.Duration {
+	if m == nil {
+		return 0
+	}
+	return worstCaseGapBetweenPolls(m.PollInterval())
+}
+
 // GetAllEndpoints returns all endpoint URLs with active ChainTrackers.
 func (m *EndpointMonitor) GetAllEndpoints() []string {
 	m.mu.RLock()
@@ -958,9 +1068,4 @@ func (m *EndpointMonitor) Stop() {
 		utils.LogAttr("chainID", m.chainID),
 		utils.LogAttr("trackersStopped", trackerCount),
 	)
-}
-
-// IsDummy returns false - this is a real manager.
-func (m *EndpointMonitor) IsDummy() bool {
-	return false
 }

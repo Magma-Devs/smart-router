@@ -252,12 +252,14 @@ func TestNewSentinelWiringDoesNotRecordControlPlaneDials(t *testing.T) {
 		"control-plane dials through the real construction must never be recorded as the data node")
 }
 
-// The plain dialer records everything it dials; standalone and cluster depend
-// on that (every dial there is a data dial).
+// The plain dialer records every ADDRESS it dials; standalone and cluster depend
+// on that (every dial there is a data dial). Reachability is the other channel
+// and does not follow the same rule — only standalone records it, because only
+// standalone has one endpoint for a fault to be about (see trackingDialer).
 func TestTrackingDialerRecordsEveryDial(t *testing.T) {
 	node := listenLocal(t)
 	tracker := &endpointTracker{}
-	dial := trackingDialer(nil, time.Second, tracker)
+	dial := trackingDialer(nil, time.Second, tracker, true)
 
 	conn, err := dial(context.Background(), "tcp", node.Addr().String())
 	require.NoError(t, err)
@@ -347,7 +349,9 @@ func TestClusterOptionsMapping(t *testing.T) {
 
 	require.Equal(t, cfg.Addresses, opts.Addrs,
 		"the configuration endpoint is the discovery seed — never a full node list")
-	require.Same(t, provider, opts.StreamingCredentialsProvider.(*StreamingProvider))
+	got, ok := opts.StreamingCredentialsProvider.(*StreamingProvider)
+	require.True(t, ok)
+	require.Same(t, provider, got)
 }
 
 // MAG-3728: the streaming provider is the piece that kept abandoned

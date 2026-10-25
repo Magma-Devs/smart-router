@@ -227,9 +227,10 @@ func applyReverification(
 	// A provider that answered with a rate-limit is held off rather than re-probed. The
 	// skip returns the rate-limit error itself, so the reconciliation below reaches the
 	// same inconclusive verdict it would have from a fresh 429 — membership unchanged,
-	// streak untouched — without spending a request to learn it. Any other outcome clears
+	// streak untouched — without spending a request to learn it. Any other answer clears
 	// the penalty: an upstream that is answering us again, even to report a genuine
-	// capability failure, is no longer refusing us for load.
+	// capability failure, is no longer refusing us for load. A probe with no answer clears
+	// nothing.
 	validate := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
 		urlKey := holdoffURLKey(p)
 		if inputs.rateLimitHoldoff.HeldOff(p.Name, urlKey) {
@@ -253,7 +254,13 @@ func applyReverification(
 			)
 			return err
 		}
-		inputs.rateLimitHoldoff.RecordAnswer(p.Name, urlKey)
+		// A probe that got no answer (timeout, refused or reset connection, DNS) is not one:
+		// it clears nothing. A gateway enforcing a ban often drops the connection rather than
+		// answering, and the url's entries are shared — RecordAnswer also drops the per-url
+		// chain tracker's hold-off and strikes (MAG-4165).
+		if common.DetectConnectionError(err) == nil {
+			inputs.rateLimitHoldoff.RecordAnswer(p.Name, urlKey)
+		}
 		return err
 	}
 

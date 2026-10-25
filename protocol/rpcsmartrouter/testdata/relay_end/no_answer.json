@@ -1,0 +1,35 @@
+{
+  "GUID": "7846121",
+  "api_interface": "jsonrpc",
+  "attempts": [
+    {
+      "batch": 0,
+      "error_code": "PROTOCOL_CONNECTION_REFUSED",
+      "latency_ms": "<ms>",
+      "message": "http request failed: Post \"http://127.0.0.1:<port>\": dial tcp 127.0.0.1:<port>: connect: connection refused: Provider connection refused",
+      "outcome": "transport_error",
+      "retryable": true,
+      "returned_to_client": false,
+      "sent_ms": "<ms>",
+      "upstream": "node-a"
+    }
+  ],
+  "chain": "ETH1",
+  "error": "failed relay, insufficient results ErrMsg: http request failed: Post \"http://127.0.0.1:<port>\": dial tcp 127.0.0.1:<port>: connect: connection refused: Provider connection refused {GUID:<GUID>}",
+  "error_code": "PROTOCOL_CONNECTION_REFUSED",
+  "event": "relay_end",
+  "has_reply": false,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "eth_getBalance",
+  "outcome": "no_answer",
+  "request_bytes": 115,
+  "schema": 2,
+  "selection": "stateless",
+  "served_by": "",
+  "stateful": false,
+  "status": 502,
+  "stop_reason": "AllProvidersExhausted"
+}

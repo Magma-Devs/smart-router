@@ -20,7 +20,7 @@ Errors raised from within the Lava protocol itself — not from nodes or chains.
 | 1001 | `PROTOCOL_CONNECTION_TIMEOUT` | Network operation timed out connecting to provider | Yes |
 | 1002 | `PROTOCOL_CONNECTION_REFUSED` | Provider connection refused | Yes |
 | 1003 | `PROTOCOL_DNS_FAILURE` | DNS resolution failed | Yes |
-| 1004 | `PROTOCOL_TLS_MISMATCH` | HTTP/HTTPS protocol mismatch | No |
+| 1004 | `PROTOCOL_TLS_MISMATCH` | HTTP/HTTPS protocol mismatch | Yes |
 | 1005 | `PROTOCOL_CONNECTION_RESET` | Connection reset by peer | Yes |
 | 1006 | `PROTOCOL_CONNECTION_CLOSED` | Connection closed (EOF) | Yes |
 | 1007 | `PROTOCOL_CONTEXT_DEADLINE` | Caller's context.Context deadline expired before the relay completed | Yes |
@@ -28,9 +28,9 @@ Errors raised from within the Lava protocol itself — not from nodes or chains.
 | 1009 | `PROTOCOL_NETWORK_UNREACHABLE` | Network or host unreachable (no route) | Yes |
 | 1010 | `PROTOCOL_NO_PROVIDERS` | No providers/pairings available | No |
 | 1011 | `PROTOCOL_ALL_ENDPOINTS_DISABLED` | All provider endpoints disabled | No |
-| 1012 | `PROTOCOL_PROVIDER_UNAVAILABLE` | Provider service unavailable (gRPC UNAVAILABLE) | Yes |
-| 1013 | `PROTOCOL_PROVIDER_ABORTED` | Provider aborted (gRPC ABORTED) | Yes |
-| 1014 | `PROTOCOL_PROVIDER_DATA_LOSS` | Provider data loss (gRPC DATA_LOSS) | Yes |
+| 1012 | `PROTOCOL_PROVIDER_UNAVAILABLE` | Provider service unavailable (gRPC UNAVAILABLE). Not produced by the smart router: a node's gRPC status is a node error (2006) | Yes |
+| 1013 | `PROTOCOL_PROVIDER_ABORTED` | Provider aborted (gRPC ABORTED). Not produced by the smart router: a node's gRPC status is a node error (2019) | Yes |
+| 1014 | `PROTOCOL_PROVIDER_DATA_LOSS` | Provider data loss (gRPC DATA_LOSS). Not produced by the smart router. No node it routes to sends gRPC DATA_LOSS; if one did, it would classify `UNKNOWN_ERROR` | Yes |
 | 1020 | `PROTOCOL_RATE_LIMITED` | Lava-side rate limit exceeded (SubCategoryRateLimit) | No |
 | 1021 | `PROTOCOL_MAX_CU_EXCEEDED` | Maximum compute units exceeded for session | No |
 | 1022 | `PROTOCOL_BATCH_SIZE_EXCEEDED` | Batch request size exceeded limit | No |
@@ -55,23 +55,25 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | Code | Name | Description | Retryable | Standard Code |
 |------|------|-------------|-----------|---------------|
 | **Generic Node Errors (2000-2099)** |||||
-| 2001 | `NODE_METHOD_NOT_FOUND` | Method does not exist on this node (unknown to the API surface); non-retryable (SubCategoryUnsupportedMethod) | No | JSON-RPC -32601 |
+| 2001 | `NODE_METHOD_NOT_FOUND` | Node reports the method is not on its surface; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | JSON-RPC -32601 |
 | 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider (SubCategoryNodeCapability) | Yes | JSON-RPC -32004 |
 | 2003 | `NODE_INTERNAL_ERROR` | Internal node error | Yes | JSON-RPC -32603 |
 | 2004 | `NODE_SERVER_ERROR` | Generic server error | Yes | JSON-RPC -32000 |
-| 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / MessageContains("rate limit") |
+| 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / JSON-RPC code 429 / MessageContains("rate limit", "too many requests") |
 | 2006 | `NODE_SERVICE_UNAVAILABLE` | Node temporarily unavailable | Yes | HTTP 503 |
 | 2007 | `NODE_SYNCING` | Node is syncing/catching up | Yes | MessageContains("node is syncing" / "catching up to the chain") |
-| 2008 | `NODE_UNIMPLEMENTED` | gRPC method unimplemented (SubCategoryUnsupportedMethod) | No | gRPC 12 |
-| 2009 | `NODE_ENDPOINT_NOT_FOUND` | REST endpoint not found (SubCategoryUnsupportedMethod) | No | HTTP 404 |
-| 2010 | `NODE_METHOD_NOT_ALLOWED` | REST method not allowed (SubCategoryUnsupportedMethod) | No | HTTP 405 |
+| 2008 | `NODE_UNIMPLEMENTED` | Method not implemented on this node; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | gRPC 12, HTTP 501 |
+| 2009 | `NODE_ENDPOINT_NOT_FOUND` | Endpoint not found on this node; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | REST message rows ("endpoint/route/path not found"); JSON-RPC and gRPC `HTTPStatusContains(404)`. A REST HTTP 404 is 2017 — see §9 |
+| 2010 | `NODE_METHOD_NOT_ALLOWED` | HTTP method not allowed by this node; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | HTTP 405 |
 | 2011 | `NODE_LIMIT_EXCEEDED` | Request exceeds node limit (e.g., eth_getLogs range) (SubCategoryRateLimit) | No | JSON-RPC -32005 |
 | 2012 | `NODE_RESOURCE_NOT_FOUND` | Resource not found at node level (SubCategoryDataScope) | Yes | JSON-RPC -32001 |
 | 2013 | `NODE_RESOURCE_UNAVAILABLE` | Resource exists but unavailable (SubCategoryDataScope) | Yes | JSON-RPC -32002 |
 | 2014 | `NODE_GATEWAY_TIMEOUT` | Gateway timeout (HTTP 504 from provider) | Yes | HTTP 504 |
 | 2015 | `NODE_BAD_GATEWAY` | Bad gateway (HTTP 502 from provider) | Yes | HTTP 502 |
-| 2016 | `NODE_UNAUTHORIZED` | Upstream rejected router credentials (HTTP 401) | No | HTTP 401 |
+| 2016 | `NODE_UNAUTHORIZED` | Upstream rejected router credentials (HTTP 401); another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | JSON-RPC and gRPC `HTTPStatusContains(401)`. A REST HTTP 401 is 2018 — see §9 |
+| 2018 | `NODE_ACCESS_DENIED` | Endpoint refused the router itself — credentials, plan or quota, WAF or IP rule, proxy auth, protocol, region | Yes | REST HTTP 401, 402, 403, 407, 426, 451 |
 | 2017 | `NODE_DATA_NOT_HELD` | Endpoint does not hold the requested data — pruned or never existed (SubCategoryDataScope) | Yes | gRPC 5, gRPC 11 |
+| 2019 | `NODE_ABORTED` | Node aborted the operation. On Sui (the only sender), the validators' answer to a submitted transaction: consensus rejection, expired status, an input object that does not exist yet, already finalized under other signatures, or another transient processing failure. Sui's own message calls it retriable with another submission, which is the client's call; not evidence against the endpoint, so not scored | No | gRPC 10 |
 
 > **SubCategoryDataScope is no longer 2017 alone.** FAILOVER-TASKS section 2 extended it to every
 > "the answer you want is not here" code: 2012, 2013, 3201-3206, and the chain-specific not-found
@@ -170,7 +172,7 @@ Uses a **tiered classification system** (see Section 3 for details):
 ### Layer D: User Errors (`USER_*` — range 4000-4999) — Category: External
 Errors caused by malformed or invalid client requests — classified by nature of error, regardless of where caught (pre-forwarding by Lava or returned by node).
 
-Layer D codes are non-retryable but charge **normal CU** — the provider does real work on every call because the response is not cached (the next request from the same client may carry valid input). Only `SubCategoryUnsupportedMethod` errors get the zero-CU carve-out, because those responses *are* cached and the provider won't be hit again.
+Layer D codes are non-retryable but charge **normal CU** — the provider does real work on every call because the response is not cached (the next request from the same client may carry valid input). Only `SubCategoryUnsupportedMethod` errors get the zero-CU carve-out, because those responses *are* cached and the provider won't be hit again. Since MAG-2771 no registered code carries that subcategory (decision 11).
 
 | Code | Name | Description | Retryable | Standard Code |
 |------|------|-------------|-----------|---------------|
@@ -376,7 +378,7 @@ var GenericErrorMappings = map[TransportType][]GenericMapping{
     TransportREST: {
         {HTTPStatusEquals(429),                     NODE_RATE_LIMITED},
         {HTTPStatusEquals(503),                     NODE_SERVICE_UNAVAILABLE},
-        {HTTPStatusEquals(404),                     NODE_ENDPOINT_NOT_FOUND},
+        {HTTPStatusEquals(404),                     NODE_DATA_NOT_HELD},   // REST only; see §9
         {HTTPStatusEquals(405),                     NODE_METHOD_NOT_ALLOWED},
         // ...
     },
@@ -385,7 +387,7 @@ var GenericErrorMappings = map[TransportType][]GenericMapping{
         {GRPCCodeEquals(codes.Unimplemented),       NODE_UNIMPLEMENTED},
         // HTTP status message matchers also appended at init() — HTTP status strings
         // can appear in gRPC error messages when the underlying transport is HTTP
-        // (e.g. provider relay errors arriving via ClassifyLegacyError)
+        // (e.g. protocol errors classified in relaycore's setErrorResponse)
         // ...
     },
 }
@@ -606,13 +608,15 @@ _Blocked on protocol upgrade: sdkerrors carry ABCI codes used in the gRPC wire f
 
 6. **Transport-scoped generic matching**: `ClassifyError` accepts a `TransportType` parameter. Generic (Tier 1) matchers are partitioned by transport (JSON-RPC, REST, gRPC) so that EVM/JSON-RPC chains never evaluate gRPC matchers and vice versa.
 
-7. **Unsupported methods use `SubCategoryUnsupportedMethod`.** Codes 2001, 2008, 2009, and 2010 have `SubCategory: SubCategoryUnsupportedMethod`. This replaces the current pattern-matching approach (`IsUnsupportedMethodError`, `IsUnsupportedMethodMessage`) with a subcategory check via `LavaError.SubCategory.IsUnsupportedMethod()`. The special behavior (zero CU, cached response, no provider scoring) is derived from the subcategory. The retry short-circuit itself runs off the registry's `Retryable` flag — see Decision 10. _(Note: 2002 `NODE_METHOD_NOT_SUPPORTED` was removed from this list during Phase 7 review — it represents a method that exists but is disabled on this node, which is a retryable condition on a different provider. It has `Retryable: true` and no subcategory.)_
+7. **Unsupported methods use `SubCategoryUnsupportedMethod`.** Codes 2001, 2008, 2009, and 2010 have `SubCategory: SubCategoryUnsupportedMethod`. This replaces the current pattern-matching approach (`IsUnsupportedMethodError`, `IsUnsupportedMethodMessage`) with a subcategory check via `LavaError.SubCategory.IsUnsupportedMethod()`. The special behavior (zero CU, cached response, no provider scoring) is derived from the subcategory. The retry short-circuit itself runs off the registry's `Retryable` flag — see Decision 10. _(Note: 2002 `NODE_METHOD_NOT_SUPPORTED` was removed from this list during Phase 7 review — it represents a method that exists but is disabled on this node, which is a retryable condition on a different provider. It has `Retryable: true` and no subcategory.)_ _(Superseded by decision 11: no registered code carries `SubCategoryUnsupportedMethod` any more.)_
 
 8. **Two-level error grouping: Category + SubCategory.** Category is `Internal` (errors Lava introduces — protocol layer) vs `External` (errors the user would get regardless of Lava — node, chain, user input). SubCategory provides finer classification within each category (e.g., UnsupportedMethod, Connection, Session, ChainExecution, ChainState, UserInput). SubCategories to be finalized before Phase 1 implementation.
 
 9. **Transparent hop: original errors pass through unchanged.** The router/consumer is a transparent hop — the user always receives the original error from the node, unmodified. `LavaError` classification is metadata for internal use only (logging, metrics, endpoint health). Unknown/unmatched errors default to `CategoryExternal` because they are node pass-throughs. _(Clarification added in Phase 7: `handleAndClassify` wraps classified errors in `LavaWrappedError` on the **Go error return path** — this is internal plumbing for retry/health decisions and never reaches the user. The actual node response body travels separately and is always returned unmodified to the user. The "transparent hop" principle applies to the response body, not the internal Go error return.)_
 
-10. **Retryable is the primary retry signal, not SubCategory.** The consumer and smart-router retry state machines short-circuit on `LavaError.Retryable=false` via `RelayResult.IsNonRetryable`, populated at classification time on both paths (consumer: `rpcconsumer_server.go`; smart-router: `direct_rpc_relay.go` / `rpcsmartrouter_server.go`). This covers every terminal classification — `CHAIN_EXECUTION_REVERTED`, `CHAIN_OUT_OF_GAS`, `CHAIN_DOUBLE_SPEND`, `CHAIN_INVALID_SIGNATURE`, all of 3000-range — not only unsupported methods. SubCategory continues to govern adjacent policy: `SubCategoryUnsupportedMethod` triggers the zero-CU carve-out and caching, and `SubCategoryRateLimit` drives backoff without marking the endpoint unhealthy. `SubCategoryDataScope` is the third such axis and the one Retryable cannot express: the errors are retryable (a pruned endpoint's miss is an archive endpoint's hit) yet must stay out of the availability signal, because the endpoint answered truthfully about its own data scope. `rpcsmartrouter.shouldFailSessionForResult` reads all three. Layer D user-input errors are non-retryable but charge normal CU — the provider does real work because responses are not cached. `relay_processor.HasNonRetryableUserFacingErrors` keys off the `IsNonRetryable` flag rather than re-classifying, so adding a new non-retryable error type requires no state-machine changes.
+10. **Retryable is the primary retry signal, not SubCategory.** The consumer and smart-router retry state machines short-circuit on `LavaError.Retryable=false` via `RelayResult.IsNonRetryable`, populated at classification time on both paths (consumer: `rpcconsumer_server.go`; smart-router: `direct_rpc_relay.go` / `rpcsmartrouter_server.go`). This covers every terminal classification — `CHAIN_EXECUTION_REVERTED`, `CHAIN_OUT_OF_GAS`, `CHAIN_DOUBLE_SPEND`, `CHAIN_INVALID_SIGNATURE`, all of 3000-range — not only unsupported methods. SubCategory continues to govern adjacent policy: `SubCategoryUnsupportedMethod` triggers the zero-CU carve-out and caching, and `SubCategoryRateLimit` drives backoff without marking the endpoint unhealthy. `SubCategoryDataScope` is the third such axis and the one Retryable cannot express: the errors are retryable (a pruned endpoint's miss may be another endpoint's hit; the retry no longer adds the archive extension, so it reaches an archive endpoint only if selection picks one — see MAG-4142) yet must stay out of the availability signal, because the endpoint answered truthfully about its own data scope. `rpcsmartrouter.shouldFailSessionForResult` reads all three. Layer D user-input errors are non-retryable but charge normal CU — the provider does real work because responses are not cached. `relay_processor.HasNonRetryableUserFacingErrors` keys off the `IsNonRetryable` flag rather than re-classifying, so adding a new non-retryable error type requires no state-machine changes.
+
+11. **A node's refusal of its own is retried on another provider (MAG-2771).** A refusal ends the request only if it is a fact about the chain. A `NODE_*` refusal is a claim the node makes about itself — the methods it serves, the routes its front end knows, the credentials it was given — so it is provider-local until a peer confirms it. `NODE_METHOD_NOT_FOUND` (2001), `NODE_UNIMPLEMENTED` (2008), `NODE_ENDPOINT_NOT_FOUND` (2009), `NODE_METHOD_NOT_ALLOWED` (2010) and `NODE_UNAUTHORIZED` (2016) are therefore `Retryable: true` with `SubCategoryNodeCapability`, alongside 2002 and 2018: the request goes to another provider, and the endpoint that refused is neither blamed nor scored. `NODE_LIMIT_EXCEEDED` (2011) is left out for now: a `-32005` is usually a cap on the request that every provider shares, and its `SubCategoryRateLimit` hold-off would spread to every provider a retry reached, so retrying it needs its own hold-off design. On the wire a method a provider's plan disables cannot be told apart from one that does not exist (MAG-2735: one provider answered `-32601` for `net_listening` while its peer served it). With two providers, being wrong in the retry direction costs one extra call on a request that was already failing; being wrong in the other is a customer-visible failure. `CHAIN_*` and `USER_*` codes are the same answer from every node and stay non-retryable. Writes are unchanged: a stateful relay is already delivered to every upstream at once, and `relaypolicy` never re-sends one except after a rate limit. Two rules keep the retry honest. A method the spec does not list (a `Default-` API: a typo, a scanner, another chain's method) is forwarded only because the spec cannot rule it out, so its refusal stays final (`relaypolicy`, `UnlistedMethodRefused`). And when a peer ends the request with a non-retryable answer, that answer is what the caller gets, not the refusal that came first (`relaycore.processNonCrossValidationResult`).
 
 ## 8. Chains Analyzed
 
@@ -629,3 +633,139 @@ _Blocked on protocol upgrade: sdkerrors carry ABCI codes used in the gRPC wire f
 | **Aptos** | Partial — custom REST error format | No (generic codes sufficient) | Error format differs but semantics map to generic codes |
 | **Stellar** | Yes — typed error URIs + result_codes | No (generic codes sufficient) | REST-based, HTTP codes sufficient for retry decisions |
 | **Cosmos SDK** | Standard — tx_response.code | No (generic codes sufficient) | Standard patterns, well-covered by generic tier |
+
+## 9. REST replies: any status outside 2xx is a node error
+
+REST has no error object, so the "is this a node error" question JSON-RPC answers from the
+envelope has to be answered from the status. Twelve REST chain families were probed live on
+2026-09-27 (Cosmos gRPC-gateway, Horizon, Aptos, Substrate sidecar, Tezos, Algorand, Beacon,
+Stacks, Tron, TON, nodeos, MultiversX). No status-code *range* separates a chain's refusal from a
+success across them: Horizon reports a rejected transaction as a 400 problem document and a
+missing account as a 404, Aptos a pruned version as a 410, Cosmos a missing transaction as a 404
+and a bad address as a 500, the sidecar a missing block hash as a 500. Every one of those is the
+node answering "no". Full write-up:
+`agent_docs/bug-reports/dfns-investigations/rest-stateful-bug/rest-blockchain-errors-research.md`
+(local).
+
+So `RestMessage.CheckResponseError` treats **every status outside 2xx as a node error** (a 429
+keeps its rate-limit handling; a 2xx is a success unless its body carries a Cosmos transaction
+error; a status of 0 is "not set" and reads as a success). The body travels to the caller
+unchanged. What "node error" changes is the same as on JSON-RPC:
+
+- A write broadcast keeps waiting for a sibling's success instead of taking the first refusal
+  as the result (the dfns incident: a gateway's empty 404 ended the fan-out while the other
+  vendor broadcast the transaction). This is the whole of what MAG-3972/3974/3976 need.
+- The error registry classifies the reply, and its REST status rows decide the rest.
+- Every REST node error is counted the way a JSON-RPC one is (`smartrouter_errors_total`,
+  `lava-identified-node-error: true` on the reply) and logged as "received node error reply from
+  provider": at ERROR when the endpoint is at fault, at DEBUG when it is not (9.3, item 6). It is
+  not cached — no non-2xx reply ever was.
+
+### 9.1 Status rows — current verdicts
+
+Retried = the registry marks it retryable, so the relay policy has no stop reason until the
+retry budget is spent (`relaycore.RelayRetryLimit`, default 2 ⇒ up to 3 upstream calls). At fault
+= `LavaError.EndpointAtFault`, which drives `MarkUnhealthy` and the endpoint's consecutive-refusal
+counter (`--bench-after`, default 50, reset only by a 2xx) — and, through
+`shouldFailSessionForResult`, the availability signal.
+
+**Order is the contract.** Rows run specific-to-general: what the node *said*, then what status it
+used. A status code is the fallback, never the specialisation. The reverse order silently
+reclassified anything whose body carried a specific message under a generic status — a 400 saying
+"method not allowed" or "route not found" lost its route-refusal verdict and was returned as the
+caller's bad request instead of going to another provider.
+
+| matched on | code | retried | at fault |
+| --- | --- | --- | --- |
+| body: "endpoint/route/path not found" | `NODE_ENDPOINT_NOT_FOUND` | yes | no (node-capability) |
+| body: "method not allowed" | `NODE_METHOD_NOT_ALLOWED` | yes | no (node-capability) |
+| body: sidecar/gateway "block beyond head"; `400` + "unknown block" | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
+| `500` + "is not available, lowest height" (Cosmos) | `CHAIN_STATE_PRUNED` | yes | no (data-scope) |
+| `500` + "decoding bech32 failed" (Cosmos) | `USER_INVALID_PARAMS` | no | no |
+| `500` + "unable to retrieve header and parent" (sidecar) | `CHAIN_BLOCK_NOT_FOUND` | yes | no (data-scope) |
+| `500` + "transaction not found" (MultiversX) | `CHAIN_TX_NOT_FOUND` | yes | no (data-scope) |
+| `400` `406` `411` `412` `414`–`417` `428` `431` | `USER_INVALID_REQUEST` | no | no |
+| `401` `402` `403` `407` `426` `451` | `NODE_ACCESS_DENIED` (2018) | yes | no (node-capability) |
+| `404` | `NODE_DATA_NOT_HELD` | yes | no (data-scope) |
+| `405` | `NODE_METHOD_NOT_ALLOWED` | yes | no (node-capability) |
+| `408` | `NODE_SERVICE_UNAVAILABLE` | yes | yes |
+| `409` | `CHAIN_TX_ALREADY_KNOWN` | no | no |
+| `410` | `CHAIN_STATE_PRUNED` | yes | no (data-scope) |
+| `413` | `USER_REQUEST_TOO_LARGE` | no | no |
+| `422` | `USER_INVALID_PARAMS` | no | no |
+| `429` | `NODE_RATE_LIMITED` | yes | no (capacity) |
+| `500` `503` `520`–`530`, otherwise | `NODE_INTERNAL_ERROR` / `NODE_SERVICE_UNAVAILABLE` / `NODE_SERVER_ERROR` | yes | **yes** |
+| `501` | `NODE_UNIMPLEMENTED` | yes | no (node-capability) |
+| `502` `504` | `NODE_BAD_GATEWAY` / `NODE_GATEWAY_TIMEOUT` | yes | yes |
+| no row (including every `3xx`) | `UNKNOWN_ERROR` | yes | no, but **scored** by the availability gate |
+
+Two rules hold the "at fault" column together:
+
+- **A reply the node produced by refusing the request is never the endpoint's fault.** It answered
+  truthfully about what it holds (`404`, `410`, a pruned height) or what its configuration will
+  serve (`401`–`451`), and neither is evidence it cannot serve. Blaming it walks the refusal
+  counter and disables the URL for *every* path, which is how a vendor gating one path behind a
+  plan, or one wrong shared credential, could take an endpoint out.
+- **A 5xx the router cannot read as the caller's answer still is.** The four `500` rows above are
+  gated on bodies probed live on 2026-09-27, so an empty, HTML or unexplained 500 stays
+  `NODE_INTERNAL_ERROR` and at fault. Four families answer a caller's mistake with a 500 (finding
+  3 of the research doc), and excusing *every* 500 to cover them would have thrown away the signal
+  for a genuinely broken node.
+
+These rows live in the REST-only table on purpose: on JSON-RPC and gRPC a bare 400 or 403 is a
+gateway or WAF in front of the node, where "unknown ⇒ retry elsewhere" stays the right call.
+`TestRESTStatusRowsDoNotReachOtherTransports` pins that `ClassifyError` on those two transports is
+untouched — but note that the transport-looping helpers (`IsNonRetryableNodeError`,
+`IsUnsupportedMethodError`, `chainlib.IsUnsupportedMethodError`) walk the REST table whatever the
+caller's transport is, so a REST row can still be reached from a JSON-RPC call site.
+`TestRESTRowsDoNotBreakTheUnsupportedMethodCarveOut` covers that reach.
+
+### 9.2 A REST 5xx keeps the node's own JSON reply
+
+`relayInnerDirect` used to turn every 5xx except 501 into a Go error before the reply was read, so
+when every node answered Horizon's `503 {"tx_status":"TRY_AGAIN_LATER"}` the client got a
+router-made 500. It now skips a 5xx whose body is JSON and whose status the registry does not mark
+`MayHaveReachedNode` (`rpcInterfaceMessages.ServerErrorIsNodeReply`). `502`/`504`/`522`/`524` keep
+the old path: a gateway that failed may already have forwarded the request, so a write's outcome
+stays "unclear". Blame and retry are unchanged by this step — the status rows above still decide
+them.
+
+### 9.3 Decisions taken in review
+
+Raised on PR #448 and settled there. Recorded because each one is a place where the obvious
+reading was the wrong one.
+
+1. **401/403 are not at fault.** Retryable, node-capability. See the first rule in 9.1.
+2. **A 500 that is the caller's answer is not at fault** — but only the probed shapes, not every
+   500. See the second rule in 9.1.
+3. **A 404 is retried.** It keeps the lagging-node and gateway case working, at up to 3 upstream
+   calls per not-found read, which is the dominant REST read pattern (a client polling for an
+   unmined transaction). Accepted together with 6, which is what makes the cost bearable.
+4. **400, 409, 413 and 422 are not retried.** The research doc made every blockchain
+   error retryable only because it deferred retry-worthiness to a later step; the probe data
+   settles it, and no other node can answer these. 405 and 501 were in this list until MAG-2771:
+   each is the gateway's own refusal of a verb or a route, which another provider may not share,
+   so both are now retried (decision 11).
+5. **Message rows above status rows.** The ordering contract in 9.1.
+6. **A not-at-fault node error logs at DEBUG**, not ERROR. The metric is unchanged
+   (`LogCodedNodeAnswer` fires `EmitErrorMetric` exactly as `LogCodedError` does), so
+   `smartrouter_errors_total` keeps counting; only the level moves.
+
+7. **The broadcast fix and the status map ship together.** Change 1 alone would make every REST
+   non-2xx a node error with no row to govern it, and the table's default for a status with no
+   row is "unknown": retried on up to three providers *and* scored by the availability gate. A
+   Horizon 400 `transaction_failed` would cost three upstream calls and three availability hits,
+   worse than main, where it was a success. The map is what makes change 1 safe to deploy
+   (decided 2026-10-02 on PR #448).
+
+### 9.4 Not covered by this rule, on purpose
+
+- Tron and TON report errors inside a 200 body (`{"Error":…}`, `{"code":"SIGERROR"}`,
+  `{"ok":false}`) and need a body check per chain family — §5 step 2, a separate decision.
+- An empty or non-JSON **2xx** is still served as the answer and still ends a broadcast
+  (MAG-3971). The fix site is the sender's existing malformed-2xx guard, not
+  `CheckResponseError`, which cannot see whether the request is a write.
+- A 5xx whose body is the JSON literal `null` passes `json.Valid` and reaches the client as the
+  node's reply (MAG-4060).
+- Cross-validation counts only successes toward a quorum, so on a REST interface under a CV
+  policy identical not-found answers no longer form one. No tenant runs CV on REST today.

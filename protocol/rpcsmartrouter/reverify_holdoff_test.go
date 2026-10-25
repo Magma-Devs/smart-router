@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -99,4 +100,42 @@ func TestReverify_RetryAfterFloorsTheHoldoff(t *testing.T) {
 
 	runCycles(t, inputs, map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("tatum")}, 1)
 	require.Equal(t, now.Add(5*time.Minute), reg.ReadyAt("tatum", "tatum"))
+}
+
+// A probe that got no answer is not an answer (MAG-4165). A gateway enforcing a ban often drops
+// the connection, and the url's entries are shared: clearing here wiped the per-url chain tracker's
+// hold-off and strikes too, sending its poll straight back into the ban at first-strike timing.
+func TestReverify_NoAnswerKeepsTheStrikes(t *testing.T) {
+	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
+	start := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	now := start
+	reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
+
+	script := []error{common.StatusCodeError429, errors.New("read tcp 10.0.0.1:443: connection reset by peer"), common.StatusCodeError429}
+	probes := 0
+	inputs := &chainReverifyInputs{
+		rpcEndpoint:                rpc,
+		convertProvidersToSessions: fakeConvert,
+		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{makeProvider("tatum")},
+		rateLimitHoldoff:           reg,
+		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+			err := script[probes]
+			probes++
+			return err
+		},
+	}
+	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
+
+	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 100)
+	require.True(t, reg.HeldOff("tatum", "tatum"))
+
+	// Past expiry the probe goes out and the connection drops: no answer, so the strike stands.
+	now = start.Add(holdoff.InitialHoldoff + time.Second)
+	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 101)
+	require.Equal(t, 2, probes)
+
+	// The next refusal is a second strike — twice the initial penalty — not a fresh first one.
+	_, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
+	require.Equal(t, 3, probes)
+	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt("tatum", "tatum"))
 }

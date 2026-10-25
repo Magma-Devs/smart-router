@@ -51,7 +51,7 @@ func TestReadWaitsThroughEmptyMessageError(t *testing.T) {
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "127.0.0.1")
 	usedProviders := lavasession.NewUsedProviders(nil)
-	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateless))
+	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateless))
 
 	// Nothing else contends for the selection lock, so it is taken at once; a short deadline here
 	// would only add a way to fail on a loaded machine.

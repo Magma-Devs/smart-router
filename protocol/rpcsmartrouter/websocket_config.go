@@ -16,20 +16,9 @@ type WebsocketConfig struct {
 	MaxTotalSubscriptions     int    // Global subscription warning/limit threshold (default: 5000)
 	TotalLimitEnforcement     string // "warn" or "reject" (default: "warn")
 
-	// Subscription sharing
-	SubscriptionSharingEnabled bool // Enable subscription deduplication (default: true)
-
 	// Rate limiting
 	SubscriptionsPerMinutePerClient int // Max subscription creates per minute per client (default: 10)
 	UnsubscribesPerMinutePerClient  int // Max unsubscribe requests per minute per client (default: 20)
-
-	// Message limits
-	MaxMessageSize int64 // Maximum message size in bytes (default: 1MB = 1048576)
-
-	// Timeouts
-	HandshakeTimeout              time.Duration // WebSocket handshake timeout (default: 10s)
-	WriteTimeout                  time.Duration // Write timeout for sending messages (default: 10s)
-	SubscriptionFirstReplyTimeout time.Duration // Timeout for first subscription reply (default: 10s)
 
 	// Cleanup
 	CleanupInterval time.Duration // Interval for stale subscription cleanup (default: 1 minute)
@@ -50,20 +39,9 @@ func DefaultWebsocketConfig() *WebsocketConfig {
 		MaxTotalSubscriptions:     5000,
 		TotalLimitEnforcement:     "warn",
 
-		// Subscription sharing
-		SubscriptionSharingEnabled: true,
-
 		// Rate limiting
 		SubscriptionsPerMinutePerClient: 10,
 		UnsubscribesPerMinutePerClient:  20,
-
-		// Message limits
-		MaxMessageSize: 1048576, // 1 MB
-
-		// Timeouts
-		HandshakeTimeout:              10 * time.Second,
-		WriteTimeout:                  10 * time.Second,
-		SubscriptionFirstReplyTimeout: 10 * time.Second,
 
 		// Cleanup
 		CleanupInterval: 1 * time.Minute,

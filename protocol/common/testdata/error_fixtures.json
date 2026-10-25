@@ -341,6 +341,26 @@
       "expected_name": "CHAIN_TX_ALREADY_KNOWN"
     },
     {
+      "name": "besu_known_transaction",
+      "chain_family": "EVM",
+      "transport": "jsonrpc",
+      "error_code": -32000,
+      "error_message": "Known transaction",
+      "expected_lava_code": 3007,
+      "expected_name": "CHAIN_TX_ALREADY_KNOWN",
+      "_note": "Besu's duplicate-submission rejection (MAG-4032). Without its matcher the -32000 code classified it NODE_SERVER_ERROR, retryable and at fault."
+    },
+    {
+      "name": "solana_already_processed",
+      "chain_family": "Solana",
+      "transport": "jsonrpc",
+      "error_code": -32002,
+      "error_message": "Transaction simulation failed: This transaction has already been processed",
+      "expected_lava_code": 3305,
+      "expected_name": "CHAIN_SOLANA_SIMULATION_FAILED",
+      "_note": "Solana's duplicate-submission rejection. The -32002 code already makes it non-retryable, so it is not scored against the node (MAG-4032)."
+    },
+    {
       "name": "nethermind_gas_limit_below_intrinsic",
       "chain_family": "EVM",
       "transport": "jsonrpc",
@@ -754,6 +774,90 @@
       "error_message": "NOT_SYNCED_YET: Node still syncing",
       "expected_lava_code": 3363,
       "expected_name": "CHAIN_NEAR_NOT_SYNCED_YET"
+    },
+
+    {
+      "_comment": "--- XRP Ledger (submit engine results, HTTP 200) ---",
+      "name": "xrpl_tef_past_seq",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "tefPAST_SEQ: This sequence number has already passed.",
+      "expected_lava_code": 3001,
+      "expected_name": "CHAIN_NONCE_TOO_LOW"
+    },
+    {
+      "name": "xrpl_tef_already",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "tefALREADY: The exact transaction was already in this ledger.",
+      "expected_lava_code": 3007,
+      "expected_name": "CHAIN_TX_ALREADY_KNOWN"
+    },
+    {
+      "name": "xrpl_ter_pre_seq",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "terPRE_SEQ: Missing/inapplicable prior transaction.",
+      "expected_lava_code": 3002,
+      "expected_name": "CHAIN_NONCE_TOO_HIGH"
+    },
+    {
+      "name": "xrpl_tem_bad_fee",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "temBAD_FEE: Invalid fee, negative or not XRP.",
+      "expected_lava_code": 3014,
+      "expected_name": "CHAIN_TX_REJECTED"
+    },
+    {
+      "name": "xrpl_tel_insuf_fee_p",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "telINSUF_FEE_P: Fee insufficient.",
+      "expected_lava_code": 3014,
+      "expected_name": "CHAIN_TX_REJECTED"
+    },
+    {
+      "_comment": "--- XRP Ledger (submit API errors, inside result with status:error) ---",
+      "name": "xrpl_api_no_network",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "noNetwork: Not synced to the network.",
+      "expected_lava_code": 2007,
+      "expected_name": "NODE_SYNCING"
+    },
+    {
+      "name": "xrpl_api_too_busy",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "tooBusy: The server is too busy to help you now.",
+      "expected_lava_code": 2005,
+      "expected_name": "NODE_RATE_LIMITED"
+    },
+    {
+      "name": "xrpl_api_slow_down_http_429",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 429,
+      "error_message": "HTTP 429: slowDown: You are placing too much load on the server.",
+      "expected_lava_code": 2005,
+      "expected_name": "NODE_RATE_LIMITED"
+    },
+    {
+      "name": "xrpl_api_invalid_transaction",
+      "chain_family": "XRP",
+      "transport": "jsonrpc",
+      "error_code": 200,
+      "error_message": "invalidTransaction: Transaction length invalid",
+      "expected_lava_code": 4003,
+      "expected_name": "USER_INVALID_PARAMS"
     },
 
     {

@@ -43,10 +43,6 @@ func NewTendermintRpcChainParser() (chainParser *TendermintChainParser, err erro
 	return parser, nil
 }
 
-func (bcp *TendermintChainParser) GetUniqueName() string {
-	return "tendermint_chain_parser"
-}
-
 func (apip *TendermintChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {
 	if apip == nil {
 		return nil, errors.New("ChainParser not defined")
@@ -154,7 +150,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 
 	var api *spectypes.Api
 	var apiCollection *spectypes.ApiCollection
-	var latestRequestedBlock, earliestRequestedBlock int64 = 0, spectypes.LATEST_BLOCK
+	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
 	for idx, msg := range msgs {
@@ -202,13 +198,15 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 			}
 		}
 
+		// An element that names no block (status) does not decide the batch's block; see
+		// requestedBlockFold (MAG-4381).
 		parsedBlock := parsedInput.GetBlock()
+		blockFold.add(parsedBlock, parsedBlock, parsedInput, overwriteReqBlock == "" && apiNamesNoBlock(apiCont.api))
 
 		if idx == 0 {
 			// on the first entry store them
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
-			latestRequestedBlock = parsedBlock
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
@@ -243,11 +241,8 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 				},
 			}
 		}
-
-		if msgsLength > 1 {
-			latestRequestedBlock, earliestRequestedBlock = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
-		}
 	}
+	latestRequestedBlock, earliestRequestedBlock := blockFold.blocks()
 
 	var nodeMsg *baseChainMessageContainer
 	if msgsLength == 1 && !isBatch {
@@ -256,13 +251,12 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 			tenderMsg.Path = urlPath // add path
 		}
 		nodeMsg = apip.newChainMessage(api, latestRequestedBlock, blockHashes, &tenderMsg, apiCollection, parsedDefault)
-	} else {
-		// For single-element batches, earliestRequestedBlock was never updated by
-		// CompareRequestedBlockInBatch (which only runs for idx > 0). With one message,
-		// earliest == latest.
-		if msgsLength == 1 {
-			earliestRequestedBlock = latestRequestedBlock
+		// A single request has no earliest of its own unless its parsers read a range lower bound;
+		// then the archive rule must judge the range on it.
+		if earliestRequestedBlock != latestRequestedBlock {
+			nodeMsg.earliestRequestedBlock = earliestRequestedBlock
 		}
+	} else {
 		var err error
 		nodeMsg, err = apip.newBatchChainMessage(api, latestRequestedBlock, earliestRequestedBlock, blockHashes, msgs, apiCollection, parsedDefault)
 		if err != nil {
@@ -287,17 +281,11 @@ func (*TendermintChainParser) newBatchChainMessage(serviceApi *spectypes.Api, re
 		requestedBlockHashes:     requestedHashes,
 		msg:                      &batchMessage,
 		earliestRequestedBlock:   earliestRequestedBlock,
-		resultErrorParsingMethod: rpcInterfaceMessages.CheckResponseErrorForJsonRpcBatch,
+		resultErrorParsingMethod: rpcInterfaceMessages.CheckResponseErrorForTendermintBatch,
 		parseDirective:           GetParseDirective(serviceApi, apiCollection),
 		usedDefaultValue:         usedDefaultValue,
 	}
 	return nodeMsg, err
-}
-
-// overwritten because tendermintrpc doesnt use POST but an empty connecionType
-func (apip *TendermintChainParser) ExtractDataFromRequest(request *http.Request) (url string, data string, connectionType string, metadata []pairingtypes.Metadata, err error) {
-	url, data, _, metadata, err = apip.BaseChainParser.ExtractDataFromRequest(request)
-	return url, data, "", metadata, err
 }
 
 func (*TendermintChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedHashes []string, msg *rpcInterfaceMessages.TendermintrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
@@ -459,7 +447,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 
 		consumerWebsocketManager.ListenToMessages(ctx)
 	})
-	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, apil.logger.StoreMetricData)
+	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback)
 	app.Get("/ws", wsUpgradeMiddleware, websocketCallbackWithDappID)
 	app.Get("/websocket", wsUpgradeMiddleware, websocketCallbackWithDappID) // catching http://HOST:PORT/1/websocket requests.
 
@@ -467,8 +455,6 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		// Set response header content-type to application/json
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		startTime := time.Now()
-		endTx := apil.logger.LogStartTransaction("tendermint-WebSocket")
-		defer endTx()
 		dappID := extractDappIDFromFiberContext(fiberCtx)
 		metricsData := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
@@ -478,9 +464,10 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		defer cancel() // incase there's a problem make sure to cancel the connection
 		msgSeed := strconv.FormatUint(guid, 10)
 		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := fiberCtx.GetReqHeaders()
+		metadataValues := detachedReqHeaders(fiberCtx)
 		headers := convertToMetadataMap(metadataValues)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 
 		msg := string(fiberCtx.Body())
 		logFormattedMsg := msg
@@ -488,8 +475,11 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			logFormattedMsg = utils.FormatLongString(logFormattedMsg, relayMsgLogMaxChars)
 		}
 
-		utils.LavaFormatDebug("in <<<",
+		utils.LavaFormatInfo("in <<<",
 			utils.LogAttr("GUID", ctx),
+			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+			utils.LogAttr(utils.KEY_TASK_ID, ctx),
+			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("seed", msgSeed),
 			utils.LogAttr("_msg", logFormattedMsg),
 			utils.LogAttr("dappID", dappID),
@@ -497,7 +487,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, "", msg, "", dappID, userIp, metricsData, headers)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
+		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 
 		if err != nil {
 			// Check if batch size limit exceeded - return 429 rate limit error
@@ -544,8 +534,6 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		// Set response header content-type to application/json
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 
-		endTx := apil.logger.LogStartTransaction("tendermint-WebSocket")
-		defer endTx()
 		startTime := time.Now()
 		query := "?" + string(fiberCtx.Request().URI().QueryString())
 		path := fiberCtx.Params("*")
@@ -557,11 +545,15 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		metricsData := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
 		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := fiberCtx.GetReqHeaders()
+		metadataValues := detachedReqHeaders(fiberCtx)
 		headers := convertToMetadataMap(metadataValues)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
-		utils.LavaFormatDebug("urirpc in <<<",
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
+		utils.LavaFormatInfo("urirpc in <<<",
 			utils.LogAttr("GUID", ctx),
+			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+			utils.LogAttr(utils.KEY_TASK_ID, ctx),
+			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("_msg", path),
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("headers", common.RedactMetadata(headers)),
@@ -569,7 +561,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, "", "", dappID, userIp, metricsData, headers)
 		msgSeed := strconv.FormatUint(guid, 10)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
+		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 		if err != nil {
 			// Get unique GUID response
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
@@ -731,6 +723,13 @@ func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpc
 		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(res.StatusCode))) // we ignore this error here since this code can be triggered not from grpc
 	}
 	if err != nil {
+		// Classify the transport error the way the REST and GraphQL proxies do, so the router
+		// gets a coded LavaError (LavaErrorConnectionRefused for a refused dial) instead of the
+		// raw *url.Error. Nothing is masked: like theirs, the classified error keeps the raw
+		// text, node address included, as its context.
+		if parsedError := cp.HandleNodeError(ctx, err); parsedError != nil {
+			return nil, parsedError
+		}
 		return nil, err
 	}
 	// close the response body
@@ -823,14 +822,6 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 		return nil, utils.LavaFormatError("tendermintRPC error", err)
 	}
 
-	// if we didn't get a node error.
-	if replyMsg.Error == nil {
-		// validate result is valid
-		responseIsNilValidationError := ValidateNilResponse(string(replyMsg.Result))
-		if responseIsNilValidationError != nil {
-			return nil, responseIsNilValidationError
-		}
-	}
 	err = cp.ValidateRequestAndResponseIds(nodeMessage.ID, rpcMessage.ID)
 	if err != nil {
 		// When there's a response error, the node may return an empty/invalid ID,

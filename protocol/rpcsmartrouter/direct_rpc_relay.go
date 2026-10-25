@@ -34,6 +34,12 @@ type DirectRPCRelaySender struct {
 	originalRequestData []byte             // Original request bytes (for batch support)
 	chainFamily         common.ChainFamily // Chain family for Tier 2 classification (-1 if unknown)
 	groupLabel          string             // Cross-validation group label of this provider (may be empty)
+	// replyHeaderDirectives is the reply-direction header directives of the relay's API
+	// interface, resolved by the server from the chain parser across every collection of
+	// the interface (ChainParser.ReplyHeaderDirectives). SendDirectRelay keeps these
+	// upstream headers, and the matched collection's own, in the reply; a sender built
+	// without them (tests) runs on the matched collection alone. MAG-3104.
+	replyHeaderDirectives []*spectypes.Header
 }
 
 // maxGRPCResponseSizeForBlockExtraction is the threshold above which gRPC block-height
@@ -476,15 +482,33 @@ func (d *DirectRPCRelaySender) SendDirectRelay(
 	chainMessage chainlib.ChainMessage,
 	attemptBudget time.Duration,
 ) (*common.RelayResult, error) {
-	// Branch based on API interface
 	apiCollection := chainMessage.GetApiCollection()
+	result, err := d.sendForInterface(ctx, chainMessage, apiCollection, attemptBudget)
+	if result != nil && result.Reply != nil {
+		// An upstream's headers reach the client only through this filter (MAG-3104). It
+		// runs here, once, for every transport and every arm of the senders, a gRPC error
+		// body returned as a result included; the senders hand it the raw set.
+		result.Reply.Metadata = common.FilterUpstreamReplyMetadata(result.Reply.Metadata, d.replyHeaderDirectives, apiCollection.Headers)
+	}
+	return result, err
+}
 
+// sendForInterface dispatches to the sender for the API interface of the matched collection.
+func (d *DirectRPCRelaySender) sendForInterface(
+	ctx context.Context,
+	chainMessage chainlib.ChainMessage,
+	apiCollection *spectypes.ApiCollection,
+	attemptBudget time.Duration,
+) (*common.RelayResult, error) {
 	switch apiCollection.CollectionData.ApiInterface {
 	case "jsonrpc", "tendermintrpc":
 		return d.sendJSONRPCRelay(ctx, chainMessage, attemptBudget)
 
 	case "rest":
 		return d.sendRESTRelay(ctx, chainMessage, attemptBudget)
+
+	case "graphql":
+		return d.sendGraphQLRelay(ctx, chainMessage, attemptBudget)
 
 	case "grpc":
 		return d.sendGRPCRelay(ctx, chainMessage, attemptBudget)
@@ -585,7 +609,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		)
 		httpErr := &lavasession.HTTPStatusError{
 			StatusCode: statusCode,
-			Status:     fmt.Sprintf("%d", statusCode),
+			Status:     response.Status, // the upstream's own status line, for the client reply (MAG-4218)
 			Body:       responseData,
 		}
 		return nil, classifyAndWrap(httpErr, d.chainFamily, common.TransportJsonRPC)
@@ -684,10 +708,12 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		// declaration order: code-based matchers first, message-based after.
 		// When the body carries a registered RETRYABLE code (e.g. -32603
 		// NODE_INTERNAL_ERROR, -32000 NODE_SERVER_ERROR) AND the upstream
-		// returned a non-retryable HTTP status (404/405/413), the body-code
-		// matcher fires first and HTTPStatusContains never runs — so the
-		// retryable body code masks the non-retryable HTTP verdict and the
-		// router retries pointlessly.
+		// returned a non-retryable HTTP status (413), the body-code matcher
+		// fires first and HTTPStatusContains never runs — so the retryable
+		// body code masks the non-retryable HTTP verdict and the router retries
+		// pointlessly. 401, 404 and 405 were in that list until MAG-2771 made
+		// them retryable: each is this node's own refusal, which another
+		// provider may not share, so this pass leaves them alone.
 		//
 		// A second classification pass with the raw HTTP statusCode as the
 		// errorCode resolves the conflict: when the HTTP layer says the
@@ -700,12 +726,26 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		// bare-body fallback case where ExtractJSONRPCErrorCode returned 0
 		// and the first pass already ran with errorCode = statusCode.
 		//
-		// Only IsNonRetryable escalates here. The fault-axis flags
-		// (IsUnsupportedMethod, IsRateLimited) keep the first pass's verdict:
-		// the body code is the authoritative statement of *what* went wrong,
-		// and this pass exists solely to override *retryability*.
+		// Only IsNonRetryable escalates here, plus IsNodeCapability when the
+		// status is the node's own refusal. The other fault-axis flags
+		// (IsUnsupportedMethod, IsRateLimited, IsNodeAtFault) keep the first
+		// pass's verdict: the body code is the authoritative statement of
+		// *what* went wrong, and this pass exists to override *retryability*.
+		//
+		// IsNodeCapability is the exception because of what escalating used to
+		// do on the side. A 401, 404 or 405 escalated to non-retryable, and
+		// shouldFailSessionForResult excuses a non-retryable reply, so such a
+		// reply stayed out of the availability score even when its body code
+		// was a retryable one that blames the endpoint. MAG-2771 made those
+		// statuses retryable and so removed that excuse; the capability
+		// carve-out is what keeps the reply out of the score now, so the
+		// endpoint is scored exactly as it was before.
 		if !result.IsNonRetryable && (statusCode < 200 || statusCode >= 300) && statusCode != errorCode {
-			result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, statusCode, classifierMessage)
+			statusVerdict := common.ClassifyNodeErrorForRetry(d.chainFamily, common.TransportJsonRPC, statusCode, classifierMessage)
+			result.IsNonRetryable = statusVerdict.IsNonRetryable
+			if statusVerdict.IsNodeCapability {
+				result.IsNodeCapability = true
+			}
 		}
 	}
 
@@ -743,6 +783,11 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	if httpMethod == "" {
 		return nil, fmt.Errorf("HTTP method not set by REST parser")
 	}
+	// A method that carries no body sends none, whatever the message holds: some nodes refuse a
+	// GET that carries one. Only POST, PUT and PATCH bodies go out.
+	if !chainlib.RestMethodCarriesBody(httpMethod) {
+		restBody = nil
+	}
 
 	// Extract headers as Metadata (preserves delete semantics)
 	headers := restMessage.GetHeaders()
@@ -770,7 +815,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	response, err := httpDoer.DoHTTPRequest(requestCtx, lavasession.HTTPRequestParams{
 		Method:      httpMethod,
 		URL:         fullURL,
-		Body:        restBody, // Send body as-is (for POST/PUT)
+		Body:        restBody, // As-is for a body method; nil for every other method (above)
 		Headers:     headers,  // Use Metadata (preserves delete semantics)
 		ContentType: "application/json",
 	})
@@ -801,8 +846,8 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		)
 	}
 
-	// Let the chain message parse domain-specific REST errors (e.g. Cosmos tx errors on HTTP 200),
-	// and say which 4xx are the caller's answer and which are a refused route.
+	// Let the chain message parse domain-specific REST errors (e.g. Cosmos tx errors on HTTP 200)
+	// and say whether the status is a success at all.
 	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
 	if hasError && errorMessage != "" {
 		utils.LavaFormatDebug("REST response contains error",
@@ -811,24 +856,20 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		)
 	}
 
-	// Proper error classification (don't treat all 4xx as node errors)
+	// The transport-level flag follows CheckResponseError, so this and the relay processor's
+	// node-error list cannot disagree: any status outside 2xx is a node error. Two carve-outs
+	// keep their old meaning: a 429 is capacity (the registry's rate-limit row and the hold-off
+	// own it, and the flag stays false so the availability gate reads the carve-out), and a 2xx
+	// carrying an application error in its body (a Cosmos tx_response.code) is a
+	// request/application error, not a node error at the transport level.
 	var isNodeError bool
 	switch {
-	case response.StatusCode >= 500:
-		isNodeError = true // Server error
 	case response.StatusCode == 429:
-		isNodeError = false // Rate limit (not node issue)
-	case response.StatusCode >= 400:
-		// A 4xx is the caller's answer, passed through — unless the message's classifier says the
-		// route was refused (any 405, or a 404 without a JSON body), in which case the endpoint
-		// never served the request. One rule, owned by CheckResponseError, so this flag and the
-		// relay processor's verdict cannot disagree: this flag is what gates the
-		// lava-identified-node-error header and the cache write.
-		isNodeError = hasError
-	default:
-		// A 2xx carrying an application error in its body (a Cosmos tx_response.code) is NOT a
-		// node error at the transport level; it is a request/application error.
 		isNodeError = false
+	case response.StatusCode == 0 || (response.StatusCode >= 200 && response.StatusCode < 300):
+		isNodeError = false
+	default:
+		isNodeError = hasError
 	}
 
 	// Convert response headers to metadata
@@ -859,6 +900,129 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 
 	utils.LavaFormatTrace("REST request completed",
 		utils.LogAttr("method", httpMethod),
+		utils.LogAttr("status", response.StatusCode),
+		utils.LogAttr("response_size", len(response.Body)),
+		utils.LogAttr("latency", latency),
+		utils.LogAttr("is_node_error", isNodeError),
+	)
+
+	return result, nil
+}
+
+// sendGraphQLRelay posts a GraphQL document to the endpoint's base URL.
+//
+// Every operation shares that one URL, so the body is the request: it is sent exactly as the
+// caller wrote it. Errors are classified on the REST transport, which GraphQL-over-HTTP shares
+// (see common.ApiInterfaceToTransport); what counts as a node error is decided by
+// GraphQLMessage.CheckResponseError, since GraphQL reports most failures inside a 200.
+func (d *DirectRPCRelaySender) sendGraphQLRelay(
+	ctx context.Context,
+	chainMessage chainlib.ChainMessage,
+	attemptBudget time.Duration,
+) (*common.RelayResult, error) {
+	nodeUrl := d.directConnection.GetNodeUrl()
+	requestCtx, cancel := nodeUrl.LowerContextTimeoutWithDuration(ctx, attemptBudget)
+	defer cancel()
+
+	rpcMessage := chainMessage.GetRPCMessage()
+	graphqlMessage, ok := rpcMessage.(*rpcInterfaceMessages.GraphQLMessage)
+	if !ok {
+		return nil, fmt.Errorf("expected GraphQLMessage for GraphQL API, got %T", rpcMessage)
+	}
+
+	httpDoer, ok := d.directConnection.(lavasession.HTTPDirectRPCDoer)
+	if !ok {
+		return nil, fmt.Errorf("connection doesn't support GraphQL (HTTP)")
+	}
+
+	httpParams := lavasession.HTTPRequestParams{
+		Method:      "POST",
+		URL:         nodeUrl.Url,
+		Body:        graphqlMessage.Msg,
+		Headers:     graphqlMessage.GetHeaders(), // Preserves duplicates, empty value = delete
+		ContentType: "application/json",
+	}
+
+	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendGraphQLRelay)
+	defer span.End()
+	tracing.RecordHTTPRequest(span, httpParams.Method, httpParams.URL)
+	httpParams.Headers = tracing.InjectHTTP(requestCtx, httpParams.Headers)
+
+	startTime := time.Now()
+	response, err := httpDoer.DoHTTPRequest(requestCtx, httpParams)
+	latency := time.Since(startTime)
+	tracing.RecordHTTPResponse(span, response)
+
+	if err != nil {
+		tracing.RecordError(span, err)
+		return nil, classifyAndWrap(err, d.chainFamily, common.TransportREST)
+	}
+
+	// Every GraphQL reply is a JSON document, errors included, so a 2xx body that does not
+	// parse is a truncated or corrupted reply: a transport failure, as on JSON-RPC.
+	if response.StatusCode >= 200 && response.StatusCode < 300 && len(response.Body) > 0 && !json.Valid(response.Body) {
+		utils.LavaFormatDebug("direct GraphQL response is not valid JSON",
+			utils.LogAttr("endpoint", d.endpointName),
+			utils.LogAttr("status_code", response.StatusCode),
+			utils.LogAttr("response_size", len(response.Body)),
+		)
+		return nil, classifyAndWrap(
+			fmt.Errorf("malformed GraphQL response: body is not valid JSON"),
+			d.chainFamily, common.TransportREST,
+		)
+	}
+
+	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
+	if hasError && errorMessage != "" {
+		utils.LavaFormatDebug("GraphQL response contains error",
+			utils.LogAttr("endpoint", d.endpointName),
+			utils.LogAttr("error", errorMessage),
+		)
+	}
+
+	// As on REST, a 429 is capacity rather than a node error at the transport level: the
+	// registry's rate-limit row and the hold-off own it. An in-body RESOURCE_EXHAUSTED stays a
+	// node error and reaches the same handling through IsRateLimited, as a JSON-RPC body's
+	// rate limit does.
+	isNodeError := hasError && response.StatusCode != 429
+
+	providerAddress := d.endpointName
+	if providerAddress == "" {
+		providerAddress = sanitizeEndpointURL(d.directConnection.GetURL())
+	}
+
+	result := &common.RelayResult{
+		// No block is read out of the reply (MAG-4373). A GraphQL caller names the fields of its
+		// own reply, so the path a tip directive reads holds whatever the caller aliased onto it,
+		// and on Sui the tip field (serviceConfig) is an ordinary query field anyone may select:
+		// `last { sequenceNumber: networkTotalTransactions }` answers 6.2 billion against a tip of
+		// ~334 million. Harvested as this endpoint's tip, one such query set its stored tip and
+		// its HighestBlockSeen, which nothing lowers, so head-stall detection could no longer flag
+		// the endpoint until restart. A GraphQL endpoint's tip comes from its tracker's poll only,
+		// which parses the reply to its own request (EndpointPoller.FetchLatestBlockNum); the relay
+		// path stamps that observed tip onto this reply instead (site B, sendRelayToDirectEndpoints).
+		Reply: &pairingtypes.RelayReply{
+			Data:     response.Body,
+			Metadata: convertHTTPHeadersToMetadata(response.Headers),
+		},
+		Finalized:  true,
+		StatusCode: response.StatusCode,
+		ProviderInfo: common.ProviderInfo{
+			ProviderAddress: providerAddress,
+			ProviderGroup:   d.groupLabel,
+		},
+		IsNodeError: isNodeError,
+	}
+	if hasError {
+		// A GraphQL node error usually arrives inside a 200, so the status alone would leave
+		// the registry with nothing to go on: the message stands in for it (RESOURCE_EXHAUSTED
+		// classifies as a 429, a caller's error on a mutation as a 400).
+		classificationStatus := graphqlMessage.ClassificationStatus(response.Body, response.StatusCode)
+		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, classificationStatus, errorMessage)
+	}
+
+	utils.LavaFormatTrace("GraphQL request completed",
+		utils.LogAttr("method", chainMessage.GetApi().Name),
 		utils.LogAttr("status", response.StatusCode),
 		utils.LogAttr("response_size", len(response.Body)),
 		utils.LogAttr("latency", latency),
@@ -1050,7 +1214,12 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 	// Set parsing data on grpcMessage for block height extraction (QoS sync tracking)
 	// This is required because FormatResponseForParsing needs the method descriptor and formatter
 	// to properly parse the binary protobuf response into JSON for block extraction.
-	// The descriptor is cached by GRPCDirectRPCConnection during SendRequest.
+	// The descriptor comes from the connection's cache. For a JSON request it is there, because
+	// the send resolved it. A binary request goes out without one (invokeRaw), and
+	// relayInnerDirect's streaming check does not wait for it either: it is cached once the
+	// warm-up sweep, a JSON request on the same service (the endpoint poller) or the background
+	// lookup an earlier relay started has resolved it. Until then, and on a node without working
+	// reflection, a binary reply's block is not extracted.
 	if descriptorProvider, ok := d.directConnection.(lavasession.GRPCDescriptorProvider); ok {
 		if methodDesc := descriptorProvider.GetCachedMethodDescriptor(methodPath); methodDesc != nil {
 			formatter := createGRPCFormatter(methodDesc)
@@ -1088,6 +1257,60 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 	return result, nil
 }
 
+// grpcMethodIsServerStreaming reports whether methodPath is server-streaming upstream,
+// as far as the connection's descriptor can tell; false when it has none.
+//
+// Only a JSON body waits for the descriptor: the send converts it through that same
+// descriptor, so waiting here costs nothing extra. The wait is bounded by the WINDOW, not
+// the budget: detached CV relay contexts carry no deadline, and a capability check must
+// not consume the whole request.
+//
+// A binary body goes to the node without a descriptor (MAG-3886), so a stalled or missing
+// reflection service must not hold it here either. It uses the cached descriptor and, when
+// that is cold, resolves it in the background for the next call. The lookup is shared per
+// service and bounded by the node's reflection-timeout, so it always ends.
+func grpcMethodIsServerStreaming(
+	ctx context.Context,
+	resolver lavasession.GRPCMethodResolver,
+	conn lavasession.DirectRPCConnection,
+	chainMessage chainlib.ChainMessage,
+	methodPath string,
+	window time.Duration,
+) bool {
+	if grpcRelayNeedsDescriptor(chainMessage) {
+		checkCtx, cancel := context.WithTimeout(ctx, window)
+		defer cancel()
+		methodDesc, err := resolver.ResolveMethodDescriptor(checkCtx, methodPath)
+		return err == nil && methodDesc.IsServerStreaming()
+	}
+	if methodDesc := cachedGRPCMethodDescriptor(conn, methodPath); methodDesc != nil {
+		return methodDesc.IsServerStreaming()
+	}
+	go func() { _, _ = resolver.ResolveMethodDescriptor(context.Background(), methodPath) }()
+	return false
+}
+
+// grpcRelayNeedsDescriptor reports whether a gRPC relay's body is JSON, which the
+// connection has to convert through the method's descriptor before it can send it.
+// A binary body goes to the node as it is and needs none (MAG-3886).
+func grpcRelayNeedsDescriptor(chainMessage chainlib.ChainMessage) bool {
+	grpcMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
+	if !ok {
+		return true
+	}
+	return lavasession.GRPCRequestNeedsDescriptor(grpcMessage.Msg)
+}
+
+// cachedGRPCMethodDescriptor returns the connection's cached descriptor for methodPath,
+// or nil when it has none, without waiting on a lookup.
+func cachedGRPCMethodDescriptor(conn lavasession.DirectRPCConnection, methodPath string) *desc.MethodDescriptor {
+	provider, ok := conn.(lavasession.GRPCDescriptorProvider)
+	if !ok {
+		return nil
+	}
+	return provider.GetCachedMethodDescriptor(methodPath)
+}
+
 // looksLikeJSONOpening returns true when the first non-whitespace byte of
 // data is a JSON structural opener ('{' or '['). Used to skip JSON validity
 // checks on REST endpoints that legitimately return non-JSON content (plain
@@ -1106,7 +1329,10 @@ func looksLikeJSONOpening(data []byte) bool {
 	return false
 }
 
-// convertHTTPHeadersToMetadata converts http.Header to pairingtypes.Metadata
+// convertHTTPHeadersToMetadata turns an upstream's response headers (http.Header or gRPC
+// metadata, both map[string][]string) into reply metadata, one entry per name with the
+// first value. The set is raw: SendDirectRelay passes it through
+// common.FilterUpstreamReplyMetadata before it leaves the sender (MAG-3104).
 func convertHTTPHeadersToMetadata(headers map[string][]string) []pairingtypes.Metadata {
 	metadata := make([]pairingtypes.Metadata, 0, len(headers))
 	for name, values := range headers {

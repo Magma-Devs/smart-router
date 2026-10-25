@@ -208,6 +208,11 @@ type ClientSubscription struct {
 	// It is closed by Unsubscribe.
 	err     chan error
 	errOnce sync.Once
+	// errMu orders the forwarding loop's send on err against Unsubscribe's close of it, and
+	// errClosed records the close. Unsubscribe does not wait for run (see Unsubscribe), so
+	// without them run can send on the closed channel and panic.
+	errMu     sync.Mutex
+	errClosed bool
 
 	// Closing of the subscription is requested by sending on 'quit'. This is handled by
 	// the forwarding loop, which closes 'forwardDone' when it has stopped sending to
@@ -273,18 +278,19 @@ func (sub *ClientSubscription) Unsubscribe() {
 		default:
 			// Unsubscribe already requested (or subscription already closed).
 		}
+		sub.errMu.Lock()
+		sub.errClosed = true
 		close(sub.err)
+		sub.errMu.Unlock()
 		sub.client.forgetSubscription(sub)
 	})
 }
 
 // deliver is called by the client's message dispatcher to send a notification value.
-func (sub *ClientSubscription) deliver(result *JsonrpcMessage) (ok bool) {
+func (sub *ClientSubscription) deliver(result *JsonrpcMessage) {
 	select {
 	case sub.in <- result:
-		return true
 	case <-sub.forwardDone:
-		return false
 	}
 }
 
@@ -314,10 +320,25 @@ func (sub *ClientSubscription) run() {
 			// nil error because it's not an error, but we can't close sub.err here.
 			err = nil
 		}
-		select {
-		case sub.err <- err:
-		default:
-		}
+		sub.sendErr(err)
+	}
+}
+
+// sendErr hands err to the reader of Err, unless Unsubscribe has already closed the channel.
+//
+// Unsubscribe closes err without waiting for the forwarding loop. So whenever the loop ends on
+// anything but errUnsubscribed (connection loss, Client.Close, queue overflow), this send can
+// come after that close, whether or not Unsubscribe's own signal reached quit. Sending on the
+// closed channel would panic, so the error is dropped: nobody can receive it once err is closed.
+func (sub *ClientSubscription) sendErr(err error) {
+	sub.errMu.Lock()
+	defer sub.errMu.Unlock()
+	if sub.errClosed {
+		return
+	}
+	select {
+	case sub.err <- err:
+	default:
 	}
 }
 
@@ -364,7 +385,11 @@ func (sub *ClientSubscription) forward() (unsubscribeServer bool, err error) {
 				return false, fmt.Errorf("(sub *ClientSubscription) forward() - recv.Interface().(*JsonrpcMessage) - type assertion failed %s", recv.Interface())
 			}
 			if msg.Error != nil {
-				return true, err
+				// The named err is nil here. Returning it closed the subscription without an
+				// error, so the router's listener never saw Err() and never restored or cleaned
+				// up: a subscription the node had ended with an error lived on with nobody
+				// reading it (MAG-4242 item 10). go-ethereum returns the error.
+				return true, msg.Error
 			}
 			if buffer.Len() == maxClientSubscriptionBuffer {
 				return true, ErrSubscriptionQueueOverflow

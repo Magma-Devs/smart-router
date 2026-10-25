@@ -6,7 +6,6 @@ import (
 	"reflect"
 	"testing"
 
-	tenderminttypes "github.com/cometbft/cometbft/rpc/jsonrpc/types"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -140,12 +139,12 @@ func TestConvertErrorToRPCError(t *testing.T) {
 	testTable := []struct {
 		name        string
 		err         error
-		expectedRPC *tenderminttypes.RPCError
+		expectedRPC *RPCError
 	}{
 		{
 			name: "valid error string",
 			err:  fmt.Errorf("test error"),
-			expectedRPC: &tenderminttypes.RPCError{
+			expectedRPC: &RPCError{
 				Code:    -1,
 				Message: "Rpc Error",
 				Data:    "test error",
@@ -269,7 +268,7 @@ func TestConvertTendermintMsg(t *testing.T) {
 				JSONRPC: "2.0",
 				ID:      JSONRPCStringID("abc"),
 				Result:  json.RawMessage(`{"key":"value"}`),
-				Error: &tenderminttypes.RPCError{
+				Error: &RPCError{
 					Code:    0,
 					Message: "error message",
 					Data:    "",
@@ -412,4 +411,30 @@ func TestTendermintrpcMessage_CheckResponseError(t *testing.T) {
 		require.True(t, hasError)
 		require.Equal(t, "insufficient fees", msg)
 	})
+}
+
+// A batched abci_query that answers with an application error inside a 200 envelope is a node
+// error on its own (CheckResponseError reads result.response.{code,log}); the batch walker used
+// to read only the envelope and call the same element a success (MAG-4278).
+func TestCheckResponseErrorForTendermintBatch_SeesTheAppErrorASingleReplySees(t *testing.T) {
+	appError := `{"jsonrpc":"2.0","id":1,"result":{"response":{"code":5,"log":"account not found"}}}`
+	hasErr, msg := TendermintrpcMessage{}.CheckResponseError([]byte(appError), 200)
+	require.True(t, hasErr)
+	require.Equal(t, "account not found", msg)
+
+	hasErr, msg = CheckResponseErrorForTendermintBatch([]byte("["+appError+"]"), 200)
+	require.True(t, hasErr, "the batch walker must apply the Tendermint rule per element")
+	require.Equal(t, "account not found", msg)
+
+	clean := `{"jsonrpc":"2.0","id":2,"result":{"response":{"code":0,"value":"AQ=="}}}`
+	hasErr, _ = CheckResponseErrorForTendermintBatch([]byte("["+clean+"]"), 200)
+	require.False(t, hasErr)
+
+	// Default mode: a successful sibling masks the fault, exactly as for JSON-RPC batches.
+	hasErr, _ = CheckResponseErrorForTendermintBatch([]byte("["+appError+","+clean+"]"), 200)
+	require.False(t, hasErr)
+
+	// The JSON-RPC walker keeps its envelope-only rule: EVM replies carry no inner code.
+	hasErr, _ = CheckResponseErrorForJsonRpcBatch([]byte("["+appError+"]"), 200)
+	require.False(t, hasErr)
 }

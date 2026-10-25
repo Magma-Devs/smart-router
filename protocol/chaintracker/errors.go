@@ -6,8 +6,6 @@ var ( // Consumer Side Errors
 	InvalidConfigErrorBlocksToSave  = errors.New("blocks to save wasn't defined in config")
 	InvalidConfigBlockTime          = errors.New("average block time wasn't defined in config")
 	InvalidLatestBlockNumValue      = errors.New("returned latest block num should be greater than 0, but it's not")
-	InvalidReturnedHashes           = errors.New("returned requestedHashes key count should be greater than 0, but it's not")
-	ErrorFailedToFetchLatestBlock   = errors.New("Failed to fetch latest block from node")
 	InvalidRequestedBlocks          = errors.New("provided requested blocks for function do not compose a valid request")
 	RequestedBlocksOutOfRange       = errors.New("requested blocks are outside the supported range by the state tracker")
 	ErrorFailedToFetchTooEarlyBlock = errors.New("server memory protection triggered, requested block is too early")
@@ -28,4 +26,9 @@ var ( // Consumer Side Errors
 	// ran", and only a sentinel makes the two distinguishable to errors.Is. Both must map to
 	// "do not trust the record" at the debug boundary (MAG-2649).
 	ErrorPollNowResultNotAwaited = errors.New("poll-now started but its result was not awaited")
+	// ErrorPollNowHeldOff means the poll goroutine took a WakePoll request and declined to send it:
+	// the url is held off after a rate limit, which the idle wake burst does not bypass (MAG-4165).
+	// No poll ran and no observation was written. The error also matches common.StatusCodeError429 and
+	// carries the remaining hold-off as its Retry-After.
+	ErrorPollNowHeldOff = errors.New("poll-now declined: the endpoint is held off after a rate limit")
 )

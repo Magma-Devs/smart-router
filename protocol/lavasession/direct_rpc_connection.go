@@ -257,6 +257,7 @@ var errNotInitialized = errors.New("gRPC connection not initialized yet")
 // HTTPDirectRPCResponse contains complete HTTP response data (Phase 4 REST support)
 type HTTPDirectRPCResponse struct {
 	StatusCode int                 // HTTP status code (200, 404, 500, etc.)
+	Status     string              // HTTP status line text as Go reports it, e.g. "503 Service Unavailable" (MAG-4218)
 	Headers    map[string][]string // Response headers (http.Header compatible)
 	Body       []byte              // Response body
 }
@@ -285,6 +286,95 @@ type HTTPDirectRPCConnection struct {
 	nodeUrl  common.NodeUrl
 	protocol DirectRPCProtocol
 	client   *http.Client
+
+	// consecutive5xx counts 5xx replies since this url last answered anything
+	// else, and retireConn asks the next request to retire the connection it
+	// rides (MAG-4211). See markRetireIfDue.
+	consecutive5xx atomic.Uint32
+	retireConn     atomic.Bool
+	// lastConnRetire is when a streak last armed retireConn, in Unix
+	// nanoseconds (0: never). See minConnRetireInterval.
+	lastConnRetire atomic.Int64
+}
+
+// consecutive5xxBeforeConnRetire is how many 5xx replies in a row, with nothing
+// else in between, retire the upstream connection. It is the smallest count that
+// is a streak rather than a single failure: one 5xx is something a healthy
+// vendor sends now and then, and recycling its connection each time would only
+// add handshakes. Erring low is cheap the other way round: a wrongly retired
+// connection costs TLS-resumed dials (see minConnRetireInterval), and a stuck one
+// kept the dfns optimism-sepolia router down for 50 minutes.
+const consecutive5xxBeforeConnRetire = 2
+
+// minConnRetireInterval is the least time between two retirements of this url's
+// connection. A retirement under concurrent traffic is not one dial: once the
+// HTTP/2 connection is marked not-reusable, every request that needs a
+// connection before a new one is up dials its own, and all but one of those are
+// closed again. Without this floor, an upstream answering 5xx on every
+// connection was re-dialed after every streak, which came to more than one TLS
+// dial per request with 64 requests in flight, and the 5xx still arriving on a
+// just-retired connection retired its replacement too. The first retirement is
+// never delayed, so a connection pinned to a dead backend is still dropped on its
+// first streak; the floor only spaces out the ones after it.
+const minConnRetireInterval = 5 * time.Second
+
+// markRetireIfDue sets req.Close when a 5xx streak has asked for the connection
+// to be retired, so that the stuck connection is dropped and the request after
+// this one dials a new one.
+//
+// Why this is needed: the shared transport keeps one HTTP/2 connection per host
+// (or a keep-alive HTTP/1.1 pool) and only drops it on a transport error, a
+// GOAWAY, or IdleConnTimeout. Under steady traffic none of those happen, and a
+// 5xx is a well-formed reply that does not touch the connection. A vendor load
+// balancer that pins our connection to a dead backend and answers 503 on it,
+// while new connections reach healthy ones, therefore held the router on 503s
+// until the pod restarted (MAG-4211).
+//
+// req.Close retires only the connection this request is sent on, which is why it
+// works on the process-wide shared transport without affecting other hosts. On
+// HTTP/2 it marks the connection not-reusable: in-flight streams finish and the
+// next request dials. On HTTP/1.1 the connection closes after this response. The
+// request itself still goes out on the old connection, so it probably gets
+// another 5xx, and recovery takes effect from the request after it.
+//
+// The streak is counted per url, not per connection. That singles out the stuck
+// connection on HTTP/2, where all of a host's requests share one. It does not
+// when several HTTP/1.1 connections are pooled to the host: successes on the
+// healthy ones end the streak, and the request carrying req.Close may ride a
+// healthy one, so a single stuck connection among them can stay in the pool.
+func (h *HTTPDirectRPCConnection) markRetireIfDue(req *http.Request) {
+	if h.retireConn.CompareAndSwap(true, false) {
+		req.Close = true
+	}
+}
+
+// observeStatus counts the reply toward a 5xx streak, or ends the streak. A full
+// streak starts the count over and arms one retirement, unless one was armed less
+// than minConnRetireInterval ago, so that a vendor that is really down gets at
+// most one fresh connection per interval and not one per streak.
+func (h *HTTPDirectRPCConnection) observeStatus(statusCode int) {
+	if statusCode < http.StatusInternalServerError {
+		h.consecutive5xx.Store(0)
+		return
+	}
+	n := h.consecutive5xx.Add(1)
+	if n < consecutive5xxBeforeConnRetire || !h.consecutive5xx.CompareAndSwap(n, 0) {
+		return
+	}
+	now := time.Now().UnixNano()
+	last := h.lastConnRetire.Load()
+	if last != 0 && now-last < int64(minConnRetireInterval) {
+		return
+	}
+	if !h.lastConnRetire.CompareAndSwap(last, now) {
+		return
+	}
+	h.retireConn.Store(true)
+	utils.LavaFormatWarning("upstream answered only 5xx; retiring its connection so the next request dials a new one", nil,
+		utils.LogAttr("url", h.nodeUrl.UrlStr()),
+		utils.LogAttr("status", statusCode),
+		utils.LogAttr("consecutive5xx", n),
+	)
 }
 
 // WebSocketDirectRPCConnection implements DirectRPCConnection for WebSocket/WSS.
@@ -310,11 +400,10 @@ type WebSocketDirectRPCConnection struct {
 	client *rpcclient.Client // lazily dialed on first SendRequest, then cached
 	closed bool              // set by Close(); prevents re-dialing a closed connection
 
-	// wireID issues a connection-unique JSON-RPC id per request. rpcclient.Client
-	// multiplexes concurrent requests on one socket and routes replies by id
-	// (handler.respWait is a plain id→op map), so reusing a caller-supplied id
-	// across concurrent calls would misroute responses. We send a unique wire id
-	// and restore the caller's original id on the reply before returning.
+	// wireID issues a connection-unique JSON-RPC id per request, and the caller's
+	// original id is restored on the reply before returning. rpcclient.Client
+	// draws an id of its own for every call on a socket too; this connection keeps
+	// one so that matching a reply to its request does not rest on the client alone.
 	wireID atomic.Uint64
 }
 
@@ -357,12 +446,12 @@ type GRPCDirectRPCConnection struct {
 	// Descriptor handling
 	descriptorsCache *common.SafeSyncMap[string, *desc.MethodDescriptor]
 
-	// inflight holds the one running descriptor lookup per service, so N concurrent
-	// relays for the same service share a single reflection round trip instead of
-	// each opening their own. Set at construction like descriptorsCache; resolveMu
-	// guards it and is a leaf lock — no other lock is taken while it is held.
-	inflight  map[string]*descriptorResolution
-	resolveMu sync.Mutex
+	// resolver resolves and caches method descriptors for this connection: the
+	// single-flight registry, the whole-service fill and the reflection-timeout
+	// budget (MAG-2860) live there, shared with the subscription stream pool. It
+	// borrows pooled clients through borrowConn. Set at construction like
+	// descriptorsCache, which it shares with the warm-up sweep.
+	resolver *GRPCDescriptorResolver
 
 	// Reflection snapshot state, guarded by snapshotMu and usable at its zero value.
 	// snapshotting is non-nil while a snapshot is being taken and closed when it
@@ -429,25 +518,34 @@ type GRPCDirectRPCConnection struct {
 // re-parenting it on a context this connection does not own is the bug.
 func newGRPCDirectRPCConnection(nodeUrl common.NodeUrl) *GRPCDirectRPCConnection {
 	connectorCtx, connectorCancel := context.WithCancel(context.Background())
-	return &GRPCDirectRPCConnection{
+	g := &GRPCDirectRPCConnection{
 		nodeUrl:          nodeUrl,
 		descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
-		inflight:         map[string]*descriptorResolution{},
 		warmed:           make(chan struct{}),
 		connectorCtx:     connectorCtx,
 		connectorCancel:  connectorCancel,
 	}
+	g.resolver = NewGRPCDescriptorResolver(connectorCtx, &g.nodeUrl.GrpcConfig, g.nodeUrl.Url, g.descriptorsCache, g.borrowConn)
+	return g
 }
 
-// descriptorResolution is a single in-flight service-descriptor lookup, shared by
-// every relay that asks for the same service while it runs.
-//
-// svc and err are written once, before done is closed, and read only after it —
-// the close is the happens-before edge, so no lock is needed on them.
-type descriptorResolution struct {
-	done chan struct{}
-	svc  *desc.ServiceDescriptor // nil unless err == nil
-	err  error
+// borrowConn lends a pooled client to a descriptor lookup or a reflection query:
+// checked out under connMu, so Close cannot swap the connector out from under the
+// checkout, and handed back through the same connector. ErrGRPCConnectionClosed
+// when there is no connector any more.
+func (g *GRPCDirectRPCConnection) borrowConn(ctx context.Context) (*grpc.ClientConn, func(), error) {
+	g.connMu.RLock()
+	connector := g.connector
+	if connector == nil {
+		g.connMu.RUnlock()
+		return nil, nil, ErrGRPCConnectionClosed
+	}
+	conn, err := connector.GetRpc(ctx, true)
+	g.connMu.RUnlock()
+	if err != nil {
+		return nil, nil, err
+	}
+	return conn, func() { connector.ReturnRpc(conn) }, nil
 }
 
 // grpcConnectorFactory mirrors chainproxy.NewGRPCConnector, including its two
@@ -557,12 +655,9 @@ func PrewarmDirectConnections(ctx context.Context, connections []DirectRPCConnec
 	}
 }
 
-// grpcConnectorInterface abstracts GRPCConnector for testing
-type grpcConnectorInterface interface {
-	GetRpc(ctx context.Context, block bool) (*grpc.ClientConn, error)
-	ReturnRpc(rpc *grpc.ClientConn)
-	Close()
-}
+// grpcConnectorInterface is the connector seam the tests substitute: the one declaration,
+// chainproxy.GRPCConnectorInterface, under the name this package's fakes use.
+type grpcConnectorInterface = chainproxy.GRPCConnectorInterface
 
 // GRPCMethodHeader is the header key for the gRPC method path
 const GRPCMethodHeader = "x-grpc-method"
@@ -575,9 +670,6 @@ type GRPCNodeErrorResponse struct {
 	ErrorMessage string `json:"error_message"`
 	ErrorCode    uint32 `json:"error_code"`
 }
-
-// Default gRPC error code when status cannot be determined
-const GRPCStatusCodeOnFailedMessages = 32
 
 // NewDirectRPCConnection creates a new direct RPC connection based on URL protocol.
 // The apiInterface parameter provides context for protocol detection when URL has no scheme
@@ -709,12 +801,14 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	// inflated by readHTTPResponseBody instead.
 	// Set *after* caller headers so it cannot be accidentally overridden.
 	req.Header.Set("Accept-Encoding", h.nodeUrl.UpstreamAcceptEncoding())
+	h.markRetireIfDue(req)
 
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	h.observeStatus(resp.StatusCode)
 
 	body, err := readHTTPResponseBody(resp)
 	if err != nil {
@@ -789,8 +883,11 @@ func readResponseBody(resp *http.Response) ([]byte, error) {
 // HTTPStatusError represents an HTTP error response (4xx/5xx)
 type HTTPStatusError struct {
 	StatusCode int
-	Status     string
-	Body       []byte
+	// Status is the upstream's own status line, "503 Service Temporarily Unavailable" from an nginx
+	// front, "503 Service Unavailable" from another. It is for the client reply only and is kept out
+	// of Error(), see there. Empty when the producer had no status line.
+	Status string
+	Body   []byte
 	// RetryAfter is what a rate-limiting upstream asked for, or 0 when it sent no usable
 	// Retry-After. Read it through common.RetryAfterFrom rather than the field, so a caller
 	// works the same whichever path produced the error.
@@ -798,7 +895,14 @@ type HTTPStatusError struct {
 }
 
 func (e *HTTPStatusError) Error() string {
-	return fmt.Sprintf("HTTP %d %s", e.StatusCode, e.Status)
+	// One text per status code, whatever the vendor: the best-error picker groups failed providers
+	// by this string and the classifier scans it, so the upstream's own reason phrase (Status)
+	// must not reach it. Two vendors' 503s that read differently stop counting as the same error,
+	// and the picker then chooses between them at random (MAG-4218).
+	if text := http.StatusText(e.StatusCode); text != "" {
+		return fmt.Sprintf("HTTP %d %s", e.StatusCode, text)
+	}
+	return fmt.Sprintf("HTTP %d", e.StatusCode)
 }
 
 // Unwrap presents a 429 as the shared rate-limit error, so errors.Is(err,
@@ -877,6 +981,7 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	// SendRequest above for the full rationale. Set last so it cannot be
 	// overridden by per-request headers.
 	req.Header.Set("Accept-Encoding", h.nodeUrl.UpstreamAcceptEncoding())
+	h.markRetireIfDue(req)
 
 	// Send request
 	resp, err := h.client.Do(req)
@@ -884,6 +989,7 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 		return nil, fmt.Errorf("http request failed: %w", err)
 	}
 	defer resp.Body.Close()
+	h.observeStatus(resp.StatusCode)
 
 	// Read response body, inflated if the upstream gzipped it
 	body, err := readHTTPResponseBody(resp)
@@ -895,6 +1001,7 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	// Don't return error for 4xx/5xx - client needs the response
 	return &HTTPDirectRPCResponse{
 		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
 		Headers:    resp.Header,
 		Body:       body,
 	}, nil
@@ -926,8 +1033,8 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 		return nil, fmt.Errorf("failed to parse JSON-RPC request for WebSocket %s: %w", w.nodeUrl.UrlStr(), err)
 	}
 
-	// Send a connection-unique wire id so concurrent requests can't collide in
-	// the client's id→response map, then restore the caller's id on the reply.
+	// Call under a connection-unique id rather than the caller's, so concurrent
+	// requests cannot collide, then restore the caller's id on the reply.
 	wireID := json.RawMessage(strconv.FormatUint(w.wireID.Add(1), 10))
 
 	reply, err := client.CallContext(ctx, wireID, reqMsg.Method, reqMsg.Params, w.isJsonRPC, false)
@@ -935,10 +1042,8 @@ func (w *WebSocketDirectRPCConnection) SendRequest(
 		return nil, err
 	}
 
-	// Restore the caller's id on a COPY of the reply. The rpcclient dispatch
-	// goroutine may still read the returned reply concurrently, so mutating it
-	// in place is a data race — we only read it (to copy) and write the id on
-	// our own value.
+	// Restore the caller's id on a copy of the reply, so that this does not
+	// depend on the client handing back a message of its own.
 	out := *reply
 	out.ID = reqMsg.ID // caller's id (omitted/empty for notifications)
 
@@ -1076,11 +1181,18 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 		ctx = metadata.NewOutgoingContext(ctx, md)
 	}
 
+	// A binary request goes to the node as the caller's bytes, and the reply comes
+	// back as the node's bytes. Nothing here reads either, so no descriptor is
+	// needed; only a JSON body has to be converted through the method's descriptor.
+	if !isJSONRequest(data) {
+		return g.invokeRaw(ctx, conn, methodPath, data)
+	}
+
 	// Parse service and method name
 	svc, methodName := rpcInterfaceMessages.ParseSymbol(methodPath)
 
 	// Get method descriptor (with caching)
-	methodDescriptor, err := g.getMethodDescriptor(ctx, svc, methodName)
+	methodDescriptor, err := g.resolver.MethodDescriptor(ctx, svc, methodName)
 	if err != nil {
 		return nil, utils.LavaFormatError("failed to get method descriptor", err,
 			utils.LogAttr("method", methodPath))
@@ -1094,7 +1206,7 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 
 	// Parse input data (JSON or binary proto)
 	if len(data) > 0 {
-		if err := g.parseInputMessage(ctx, data, inputMsg, methodDescriptor, conn); err != nil {
+		if err := g.parseInputMessage(ctx, data, inputMsg, conn); err != nil {
 			return nil, utils.LavaFormatError("failed to parse input message", err,
 				utils.LogAttr("method", methodPath))
 		}
@@ -1365,7 +1477,11 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 	// initializeDescriptorSource has already loaded the protoset into the
 	// process-wide cache that backs it. Hybrid still warms — reflection is the half
 	// it falls back to, and that half is the slow one.
+	// The snapshot is still taken here, from the protoset alone.
 	if g.nodeUrl.GrpcConfig.GetDescriptorSource() == common.GrpcDescriptorSourceFile {
+		if fileSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&g.nodeUrl.GrpcConfig, nil); err == nil {
+			g.keepWarmSnapshot(fileSource)
+		}
 		return
 	}
 
@@ -1373,21 +1489,14 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 		descriptorWarmupBudgetFactor*g.nodeUrl.GrpcConfig.GetReflectionTimeout())
 	defer cancel()
 
-	g.connMu.RLock()
-	connector := g.connector
-	if connector == nil {
-		g.connMu.RUnlock()
-		return
-	}
-	conn, err := connector.GetRpc(ctx, true)
-	g.connMu.RUnlock()
+	conn, release, err := g.borrowConn(ctx)
 	if err != nil {
 		utils.LavaFormatDebug("gRPC descriptor warm-up skipped, no connection",
 			utils.LogAttr("error", err.Error()),
 			utils.LogAttr("url", g.nodeUrl.Url))
 		return
 	}
-	defer connector.ReturnRpc(conn)
+	defer release()
 
 	// One reflection client for the whole sweep. grpcreflect caches the file
 	// descriptors it downloads per client, and services on a node share most of
@@ -1430,7 +1539,7 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 		// this sweep exists to avoid, against a node whose reflection is the reason
 		// we are sweeping at all. Skip it and move on — the sweep has other services
 		// to reach, and waiting would only serialize the two.
-		resolution, claimed := g.claimServiceResolution(service)
+		resolution, claimed := g.resolver.claimServiceResolution(service)
 		if !claimed {
 			skipped++
 			continue
@@ -1438,7 +1547,7 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 
 		serviceDescriptor, err := resolveServiceFrom(descriptorSource, service)
 		if err == nil {
-			g.cacheServiceMethods(serviceDescriptor)
+			g.resolver.cacheServiceMethods(serviceDescriptor)
 			warmed++
 			methods += len(serviceDescriptor.GetMethods())
 		} else {
@@ -1451,7 +1560,7 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 		}
 
 		// Always publish: relays that joined this claim mid-sweep are waiting on it.
-		g.publishServiceResolution(service, resolution, serviceDescriptor, err)
+		g.resolver.publishServiceResolution(service, resolution, serviceDescriptor, err)
 	}
 
 	utils.LavaFormatInfo("gRPC descriptor cache warmed",
@@ -1459,6 +1568,40 @@ func (g *GRPCDirectRPCConnection) warmDescriptorCache() {
 		utils.LogAttr("methods", methods),
 		utils.LogAttr("alreadyResolving", skipped),
 		utils.LogAttr("duration", time.Since(started)),
+		utils.LogAttr("url", g.nodeUrl.Url))
+
+	if ctx.Err() == nil {
+		g.keepWarmSnapshot(descriptorSource)
+	}
+}
+
+// keepWarmSnapshot builds the reflection snapshot from the warm-up's own session
+// and holds it, unless one was taken or started meanwhile. That session already
+// holds every file the sweep downloaded, so the snapshot costs the node one more
+// ListServices, not a second sweep.
+//
+// Without it the first snapshot is taken on demand, and the gRPC listener parses
+// block numbers from snapshots (MAG-4217): the first request after every boot
+// would wait for a whole sweep of the node, about 4s on a public Cosmos Hub node.
+func (g *GRPCDirectRPCConnection) keepWarmSnapshot(source grpcurl.DescriptorSource) {
+	snapshot, err := buildReflectionSnapshot(source)
+	if err != nil {
+		utils.LavaFormatDebug("gRPC reflection snapshot not taken with the warm-up",
+			utils.LogAttr("error", err.Error()),
+			utils.LogAttr("url", g.nodeUrl.Url))
+		return
+	}
+	snapshot.lookup = g.lookupReflectionSymbol
+
+	g.snapshotMu.Lock()
+	defer g.snapshotMu.Unlock()
+	if g.snapshot != nil || g.snapshotting != nil {
+		return
+	}
+	g.snapshot = snapshot
+	utils.LavaFormatInfo("gRPC reflection snapshot taken with the warm-up",
+		utils.LogAttr("services", len(snapshot.Services)),
+		utils.LogAttr("complete", snapshot.Complete),
 		utils.LogAttr("url", g.nodeUrl.Url))
 }
 
@@ -1479,18 +1622,6 @@ func resolveServiceFrom(descriptorSource grpcurl.DescriptorSource, service strin
 	}
 
 	return serviceDescriptor, nil
-}
-
-// cacheServiceMethods stores every method of a resolved service.
-//
-// Every method, not only the one that was asked for: resolving the service
-// resolved all of them, and the cache is keyed per method — so without this the
-// second method on a service pays the full cold cost again.
-func (g *GRPCDirectRPCConnection) cacheServiceMethods(serviceDescriptor *desc.ServiceDescriptor) {
-	service := serviceDescriptor.GetFullyQualifiedName()
-	for _, method := range serviceDescriptor.GetMethods() {
-		g.descriptorsCache.Store(service+"."+method.GetName(), method)
-	}
 }
 
 // validateURL checks if the gRPC URL is valid
@@ -1553,239 +1684,12 @@ func (g *GRPCDirectRPCConnection) initializeDescriptorSource() error {
 	return nil
 }
 
-// getMethodDescriptor retrieves the method descriptor from cache, or waits on a
-// lookup against the node's configured descriptor source (reflection, file, or
-// hybrid).
-//
-// The WAIT is bounded by the caller's ctx. The LOOKUP is not (MAG-2860): it runs
-// on its own budget and caches what it finds even if this relay has already given
-// up, so the cost of a cold cache is paid once for the endpoint rather than once
-// per attempt. See resolveService.
-func (g *GRPCDirectRPCConnection) getMethodDescriptor(
-	ctx context.Context,
-	service, methodName string,
-) (*desc.MethodDescriptor, error) {
-	fullMethodName := service + "." + methodName
-
-	// Check cache first
-	if methodDesc, found, _ := g.descriptorsCache.Load(fullMethodName); found {
-		return methodDesc, nil
-	}
-
-	resolution := g.resolveService(service)
-
-	var finished bool
-	select {
-	case <-resolution.done:
-		finished = true
-	case <-ctx.Done():
-		// Both cases can be ready at once, and select picks among ready cases at
-		// RANDOM — so landing here proves nothing about the lookup. Ask again before
-		// deciding anything, or roughly half of the races report whichever outcome
-		// the runtime happened to choose.
-		select {
-		case <-resolution.done:
-			finished = true
-		default:
-		}
-	}
-
-	// A lookup that SUCCEEDED is used whatever the caller's context now says. The
-	// descriptor is in hand and costs nothing to return; discarding it would fail a
-	// relay we can still serve, and the cancellation will be noticed by the caller
-	// on its own terms anyway.
-	if finished && resolution.err == nil {
-		methodDescriptor := resolution.svc.FindMethodByName(methodName)
-		if methodDescriptor == nil {
-			return nil, utils.LavaFormatError("method not found in service", nil,
-				utils.LogAttr("service", service),
-				utils.LogAttr("method", methodName))
-		}
-		return methodDescriptor, nil
-	}
-
-	// Some other resolution — the warm-up sweep, or another relay's lookup — may
-	// have cached this method while we waited. A descriptor is a descriptor.
-	if methodDesc, found, _ := g.descriptorsCache.Load(fullMethodName); found {
-		return methodDesc, nil
-	}
-
-	// From here the lookup has given us nothing, so the question is only which
-	// error to report. The caller's own context wins over the lookup's error
-	// whenever both are available.
-	//
-	// This is not cosmetic. common.IsClientCancellation matches on the
-	// context.Canceled SENTINEL, and a relay the router itself abandoned — a loser
-	// of a stateful fan-out race, or a client that hung up — must not be scored
-	// against the endpoint. Reporting the lookup's generic failure instead drops
-	// that sentinel and hands endpoint health a node error that never happened.
-	// The risk is asymmetric in the same way handleGRPCError's cancellation branch
-	// is: over-reporting cancellation only skips scoring a relay whose result we
-	// were discarding, while under-reporting it penalises an endpoint that did
-	// nothing wrong.
-	//
-	// Passing ctx.Err() through rather than flattening it into a message is what
-	// keeps the sentinel reachable by errors.Is.
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		// The lookup itself is NOT abandoned here — it runs on its own budget and
-		// caches what it finds, so the next relay to this endpoint is not cold. That
-		// is what stops one slow endpoint being permanently unusable (MAG-2860).
-		return nil, utils.LavaFormatWarning("gRPC descriptor lookup outlived the relay, continuing in background", ctxErr,
-			utils.LogAttr("service", service),
-			utils.LogAttr("method", methodName),
-			utils.LogAttr("url", g.nodeUrl.Url))
-	}
-
-	// Unreachable unless the lookup finished: the select above only returns on one
-	// of the two channels, and a live ctx means it was resolution.done.
-	return nil, resolution.err
-}
-
-// resolveService starts — or joins — the one running lookup of `service` on this
-// endpoint, and returns the handle to wait on.
-//
-// Deduplicating matters here for the same reason detaching does: a cold service is
-// cold for every relay at once, and letting each of them open its own reflection
-// stream turns one slow lookup into N concurrent ones against a node that is
-// already too slow to answer inside a relay timeout.
-func (g *GRPCDirectRPCConnection) resolveService(service string) *descriptorResolution {
-	resolution, claimed := g.claimServiceResolution(service)
-	if claimed {
-		go g.runServiceResolution(service, resolution)
-	}
-	return resolution
-}
-
-// claimServiceResolution registers the caller as the one resolving `service`, or
-// hands back the resolution already running for it.
-//
-// The claim is what keeps the warm-up sweep and the on-demand path from resolving
-// the same service twice: whichever reaches a service first owns it, and the
-// other either waits on it (a relay) or skips it (the sweep, which has other
-// services to get on with).
-func (g *GRPCDirectRPCConnection) claimServiceResolution(service string) (resolution *descriptorResolution, claimed bool) {
-	g.resolveMu.Lock()
-	defer g.resolveMu.Unlock()
-
-	if existing, ok := g.inflight[service]; ok {
-		return existing, false
-	}
-
-	resolution = &descriptorResolution{done: make(chan struct{})}
-	g.inflight[service] = resolution
-	return resolution, true
-}
-
-// publishServiceResolution ends a claimed resolution, waking every waiter.
-//
-// It must be reached on every path out of a claimed lookup, including failures:
-// a claim that is never published is a resolution every future waiter blocks on
-// until its own context expires.
-func (g *GRPCDirectRPCConnection) publishServiceResolution(
-	service string,
-	resolution *descriptorResolution,
-	serviceDescriptor *desc.ServiceDescriptor,
-	err error,
-) {
-	resolution.svc, resolution.err = serviceDescriptor, err
-
-	// Drop the entry BEFORE publishing, so a relay that arrives after a failed
-	// lookup starts a fresh one instead of joining a finished one and being handed
-	// its stale error. Waiters already holding this resolution still get the real
-	// answer. The cost is a short window in which a second lookup can start while
-	// this one is finishing; the cache check in getMethodDescriptor makes that a
-	// no-op as soon as one of them succeeds.
-	g.resolveMu.Lock()
-	if g.inflight[service] == resolution {
-		delete(g.inflight, service)
-	}
-	g.resolveMu.Unlock()
-
-	close(resolution.done)
-}
-
-// runServiceResolution performs one claimed service lookup and publishes it.
-func (g *GRPCDirectRPCConnection) runServiceResolution(service string, resolution *descriptorResolution) {
-	started := time.Now()
-
-	serviceDescriptor, err := g.lookupService(service)
-	if err == nil {
-		// Cache before publishing: a waiter woken by the close below re-checks the
-		// cache, and finding it already filled is one less way to race.
-		g.cacheServiceMethods(serviceDescriptor)
-
-		utils.LavaFormatDebug("gRPC service descriptor resolved",
-			utils.LogAttr("service", service),
-			utils.LogAttr("methods", len(serviceDescriptor.GetMethods())),
-			utils.LogAttr("duration", time.Since(started)),
-			utils.LogAttr("url", g.nodeUrl.Url))
-	}
-
-	g.publishServiceResolution(service, resolution, serviceDescriptor, err)
-}
-
-// lookupService resolves one service descriptor on a budget of its own.
-//
-// The context is rooted at connectorCtx, never at a relay's. A relay's deadline is
-// how long the CALLER waits, not how long the lookup may take; bounding the lookup
-// by it meant a node whose reflection is slower than one relay could never finish
-// one, and so could never cache one. Rooting it at the connection's lifetime keeps
-// Close prompt all the same — the cancellation in Close step 2 aborts this and
-// releases the pooled client below before the drain in step 5 waits on it.
-//
-// The budget itself is grpc-config's reflection-timeout (default 5s, validated to
-// 100ms..30s). That knob was defined and validated but never applied to anything;
-// this is the call it was written for.
-func (g *GRPCDirectRPCConnection) lookupService(service string) (*desc.ServiceDescriptor, error) {
-	ctx, cancel := context.WithTimeout(g.connectorCtx, g.nodeUrl.GrpcConfig.GetReflectionTimeout())
-	defer cancel()
-
-	// Borrow a client of our own rather than reusing the one the triggering relay
-	// holds: that relay hands its client back the moment it gives up on us, and a
-	// handed-back client can be closed outright (ReturnRpc closes it when the pool
-	// is over-full or being torn down). Borrowing keeps the connector's accounting
-	// true for exactly as long as we use it.
-	g.connMu.RLock()
-	connector := g.connector
-	if connector == nil {
-		g.connMu.RUnlock()
-		return nil, ErrGRPCConnectionClosed
-	}
-	conn, err := connector.GetRpc(ctx, true)
-	g.connMu.RUnlock()
-	if err != nil {
-		return nil, utils.LavaFormatError("gRPC get connection failed for descriptor lookup", err,
-			utils.LogAttr("service", service),
-			utils.LogAttr("url", g.nodeUrl.Url))
-	}
-	defer connector.ReturnRpc(conn)
-
-	// Resolve through the node's configured descriptor source. In "reflection" mode
-	// (the default) this is exactly the reflection client below; in "file" mode the
-	// client is built but never queried.
-	cl := grpcreflect.NewClientAuto(ctx, conn)
-	defer cl.Reset()
-
-	descriptorSource, err := rpcInterfaceMessages.DescriptorSourceForGrpcConfig(&g.nodeUrl.GrpcConfig, rpcInterfaceMessages.DescriptorSourceFromServer(cl))
-	if err != nil {
-		return nil, err
-	}
-
-	serviceDescriptor, err := resolveServiceFrom(descriptorSource, service)
-	if err != nil {
-		return nil, utils.LavaFormatError("failed to find service descriptor", err,
-			utils.LogAttr("service", service),
-			utils.LogAttr("descriptor-source", g.nodeUrl.GrpcConfig.GetDescriptorSource()),
-			utils.LogAttr("reflection-timeout", g.nodeUrl.GrpcConfig.GetReflectionTimeout()))
-	}
-
-	return serviceDescriptor, nil
-}
-
 // GetCachedMethodDescriptor returns a cached method descriptor for the given method path.
 // This implements the GRPCDescriptorProvider interface.
 // The methodPath should be in format "service/method" (e.g., "cosmos.bank.v1beta1.Query/TotalSupply")
-// Returns nil if no descriptor is cached (call SendRequest first to populate cache).
+// Returns nil if no descriptor is cached. The warm-up sweep, a JSON request and
+// ResolveMethodDescriptor fill the cache; a binary request does not, because it goes to
+// the node without a descriptor (see invokeRaw).
 func (g *GRPCDirectRPCConnection) GetCachedMethodDescriptor(methodPath string) *desc.MethodDescriptor {
 	// Parse the method path to get the full name used in cache
 	svc, methodName := rpcInterfaceMessages.ParseSymbol(methodPath)
@@ -1804,7 +1708,7 @@ func (g *GRPCDirectRPCConnection) ResolveMethodDescriptor(ctx context.Context, m
 		return nil, errNotInitialized
 	}
 	service, method := rpcInterfaceMessages.ParseSymbol(methodPath)
-	return g.getMethodDescriptor(ctx, service, method)
+	return g.resolver.MethodDescriptor(ctx, service, method)
 }
 
 // PeekReflectionSnapshot implements GRPCReflectionSnapshotter.
@@ -1970,18 +1874,14 @@ func (g *GRPCDirectRPCConnection) withDescriptorSource(ctx context.Context, use 
 		defer context.AfterFunc(g.connectorCtx, cancel)()
 	}
 
-	g.connMu.RLock()
-	connector := g.connector
-	if connector == nil {
-		g.connMu.RUnlock()
-		return ErrGRPCConnectionClosed
-	}
-	conn, err := connector.GetRpc(ctx, true)
-	g.connMu.RUnlock()
+	conn, release, err := g.borrowConn(ctx)
 	if err != nil {
+		if errors.Is(err, ErrGRPCConnectionClosed) {
+			return err
+		}
 		return fmt.Errorf("no connection: %w", err)
 	}
-	defer connector.ReturnRpc(conn)
+	defer release()
 
 	cl := grpcreflect.NewClientAuto(ctx, conn)
 	defer cl.Reset()
@@ -2099,11 +1999,10 @@ func (g *GRPCDirectRPCConnection) parseInputMessage(
 	ctx context.Context,
 	data []byte,
 	msg proto.Message,
-	methodDesc *desc.MethodDescriptor,
 	conn *grpc.ClientConn,
 ) error {
 	// Detect if input is JSON or binary proto
-	if len(data) > 0 && (data[0] == '{' || data[0] == '[') {
+	if isJSONRequest(data) {
 		// JSON input - use grpcurl parser. The parser resolves any message types the
 		// request references, so it needs the same descriptor source as the method
 		// lookup did — reflection-only here would defeat "file" mode (MAG-2350).
@@ -2141,6 +2040,62 @@ func (g *GRPCDirectRPCConnection) parseInputMessage(
 	return nil
 }
 
+// isJSONRequest reports whether a gRPC request body is JSON rather than binary
+// protobuf. A protobuf message never starts with '{' or '[': both are start-group
+// tags, which proto3 encoders do not emit.
+func isJSONRequest(data []byte) bool {
+	return len(data) > 0 && (data[0] == '{' || data[0] == '[')
+}
+
+// GRPCRequestNeedsDescriptor reports whether SendRequest has to resolve the method's
+// descriptor to send this body: true for a JSON body, false for a binary one, which
+// goes to the node unchanged (see invokeRaw).
+func GRPCRequestNeedsDescriptor(data []byte) bool {
+	return isJSONRequest(data)
+}
+
+// invokeRaw sends a binary request to the node unchanged and returns the node's
+// reply unchanged, with the response headers. It needs no descriptor, so it works
+// whether or not the node serves reflection.
+func (g *GRPCDirectRPCConnection) invokeRaw(ctx context.Context, conn *grpc.ClientConn, methodPath string, data []byte) (*DirectRPCResponse, error) {
+	var reply []byte
+	var respHeaders metadata.MD
+	err := conn.Invoke(ctx, "/"+methodPath, data, &reply, grpc.ForceCodec(rawProtoCodec{}), grpc.Header(&respHeaders))
+	if err != nil {
+		return g.handleGRPCError(ctx, err, respHeaders)
+	}
+	return &DirectRPCResponse{
+		Data:       reply,
+		Metadata:   respHeaders,
+		StatusCode: http.StatusOK,
+	}, nil
+}
+
+// rawProtoCodec carries protobuf messages as their wire bytes. It is named "proto"
+// so calls go out as application/grpc+proto, which every gRPC server reads.
+type rawProtoCodec struct{}
+
+func (rawProtoCodec) Marshal(v any) ([]byte, error) {
+	b, ok := v.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("raw proto codec: cannot marshal %T", v)
+	}
+	return b, nil
+}
+
+// Unmarshal keeps data as the reply: grpc-go hands a codec of this kind its own
+// copy of the message, so nothing else reuses the slice.
+func (rawProtoCodec) Unmarshal(data []byte, v any) error {
+	b, ok := v.(*[]byte)
+	if !ok {
+		return fmt.Errorf("raw proto codec: cannot unmarshal into %T", v)
+	}
+	*b = data
+	return nil
+}
+
+func (rawProtoCodec) Name() string { return "proto" }
+
 // handleGRPCError handles gRPC errors and returns an appropriate response
 func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error, respHeaders metadata.MD) (*DirectRPCResponse, error) {
 	// A relay the router itself cancelled — a loser of a stateful fan-out race,
@@ -2176,7 +2131,7 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 		return nil, fmt.Errorf("gRPC relay cancelled: %w: %w", context.Canceled, err)
 	}
 
-	var errorCode uint32 = GRPCStatusCodeOnFailedMessages
+	var errorCode uint32 = common.GRPCStatusCodeOnFailedMessages
 	var errorMessage string
 
 	if statusErr, ok := status.FromError(err); ok {

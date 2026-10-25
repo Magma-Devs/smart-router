@@ -178,11 +178,28 @@ func TestSendGRPCRelay_StatusErrorClassification(t *testing.T) {
 			name:                  "Unimplemented is a capability gap, not a failure",
 			code:                  codes.Unimplemented,
 			nodeMessage:           "unknown service cosmos.bank.v1beta1.Query",
-			wantNonRetryable:      true,
-			wantUnsupportedMethod: true,
+			wantNonRetryable:      false,
+			wantUnsupportedMethod: false,
 			wantScored:            false,
-			why: "IsUnsupportedMethod gates the zero-CU carve-out and caching policy; it is reachable " +
-				"only because ApplyNodeErrorClassification assigns the whole flag set, not IsNonRetryable alone",
+			why: "MAG-2771: another gateway may implement the service, so the request goes on, and " +
+				"node-capability keeps the endpoint out of the availability signal — reachable only " +
+				"because ApplyNodeErrorClassification assigns the whole flag set, not IsNonRetryable alone",
+		},
+		{
+			name:             "Aborted is the validators' verdict on a write, not the endpoint's fault",
+			code:             codes.Aborted,
+			nodeMessage:      "Transaction execution failed: rejected by consensus",
+			wantNonRetryable: true,
+			wantScored:       false,
+			why: "MAG-3995: Sui sends ABORTED only on transaction submission, relaying what the validators " +
+				"answered; scoring it charged every endpoint the write was broadcast to for a verdict none of them made",
+		},
+		{
+			name:        "DataLoss stays unregistered and scored",
+			code:        codes.DataLoss,
+			nodeMessage: "unrecoverable data loss",
+			wantScored:  true,
+			why:         "MAG-3995: no node we route to sends it, so it keeps the uncatalogued default",
 		},
 		{
 			name:        "Unavailable is the endpoint's fault and stays scoreable",
@@ -337,4 +354,27 @@ func TestHealthResetRequiresPositiveProof(t *testing.T) {
 	// a strange 403 looked perfectly healthy again.
 	require.False(t, relayProvesEndpointHealthy(&common.RelayResult{StatusCode: 403}),
 		"an unrecognised 4xx must not wipe the endpoint's failure record")
+}
+
+// MAG-3995: gRPC ABORTED used to classify as UNKNOWN_ERROR, which scored it against every endpoint a
+// Sui transaction was broadcast to. It is the validators' answer to the write, relayed by the
+// fullnode, so it is now non-retryable and neither scored nor counted toward benching. DataLoss is
+// the unregistered control.
+func TestSendGRPCRelay_AbortedIsNotTheEndpointsFault(t *testing.T) {
+	require.Equal(t, common.LavaErrorNodeAborted,
+		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.Aborted), "rejected by consensus"))
+
+	aborted := grpcStatusRelay(t, codes.Aborted, "rejected by consensus")
+	require.True(t, aborted.IsNodeError, "still a node error, so it is never served as a success or cached")
+	require.True(t, aborted.IsNonRetryable, "resubmitting is the client's call; the flag keeps the answer off the endpoint")
+	require.False(t, aborted.IsNodeAtFault, "the validators' verdict must not count toward --bench-after")
+	require.False(t, shouldFailSessionForResult(nil, aborted), "nor lower the endpoint's availability score")
+	require.False(t, relayProvesEndpointHealthy(aborted), "and it is not proof of health either")
+
+	dataLoss := grpcStatusRelay(t, codes.DataLoss, "unrecoverable data loss")
+	require.Equal(t, common.LavaErrorUnknown,
+		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.DataLoss), "unrecoverable data loss"),
+		"DataLoss has no row")
+	require.False(t, dataLoss.IsNodeAtFault, "an unclassified answer is never evidence against the endpoint")
+	require.True(t, shouldFailSessionForResult(nil, dataLoss), "but it keeps the uncatalogued default: scored")
 }

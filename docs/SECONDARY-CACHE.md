@@ -56,15 +56,21 @@ request ──► primary cache ──hit──► served ("Cached")
   they came from — the upstream's response headers plus the writer's
   signatures. Every entry crossing in from the secondary is copied and stripped
   before it is served or backfilled: `Sig` and `SigBlocks` go entirely, and
-  `Metadata` is reduced to an **allowlist** of the headers that describe how to
-  decode the payload (`Content-Type`, `Content-Encoding`). Everything else in it
-  goes, including header names this router has never heard of — an allowlist
-  rather than a denylist because upstream response headers are an open set that
-  no denylist can be proven to cover. The caller therefore sees the response
-  body, its content type, and the router's own locally minted headers
-  (`Lava-Provider-Address: Cached`, the GUID, `Provider-Latest-Block`) — the
-  same header set a primary-cache hit produces. The stripped copy is the only
-  copy used, so nothing unsanitized can reach your primary cache either.
+  `Metadata` is reduced by the same **allowlist** filter a primary hit and the
+  live path run (`common.FilterUpstreamReplyMetadata`): the headers that
+  describe how to decode the payload (`Content-Type`, `Content-Encoding`), the
+  429 pair (`Retry-After`, `Date`), and the headers the chain spec declares in
+  the reply direction. A name the router mints itself (`lava-*`,
+  `Provider-Latest-Block`, `Smart-Router-Version`, `status-code`) never
+  survives, even when a spec directive names it. Everything else in it goes,
+  including header names this router has never heard of — an allowlist rather
+  than a denylist because upstream response headers are an open set that no
+  denylist can be proven to cover. The caller therefore sees the response body,
+  its content type, the chain's declared reply headers, and the router's own
+  locally minted headers (`Lava-Provider-Address: Cached`, the GUID,
+  `Provider-Latest-Block`) — the same header set a primary-cache hit produces.
+  The stripped copy is the only copy used, so nothing unsanitized can reach
+  your primary cache either.
 - **No foreign block heights.** The entry's `LatestBlock` is dropped in the same
   step, and the router re-stamps its *own* tracked tip in its place so
   `Provider-Latest-Block` stays truthful and locally sourced. Left as-is, the
@@ -72,13 +78,15 @@ request ──► primary cache ──hit──► served ("Cached")
   block that `latest`, `safe`, `finalized` and `pending` resolve to — chain-wide,
   and unlowerable until it expires.
 - **No foreign hash→height mappings.** For the same reason, the secondary is
-  never asked for the block-hash→height mappings the primary tier supplies. Those
-  heights raise the effective requested block (gating endpoint sync and optimizer
-  selection) and decide archive routing, and the two tiers' values were folded
-  max-for-latest / min-for-earliest — so the more extreme value always won and a
-  foreign tier would beat your own primary by construction. Hash-keyed archive
-  detection therefore uses your primary's mappings alone, or none in a
-  secondary-only topology, exactly as on a router with no cache configured.
+  never asked for block-hash→height mappings. Heights from a cache would raise the
+  effective requested block (gating endpoint sync and optimizer selection) and
+  steer archive routing. The two tiers' values were folded max-for-latest /
+  min-for-earliest, so the more extreme value always won and a foreign tier would
+  beat your own primary by construction. The router writes no mappings today, so
+  your primary has none to supply either (see
+  [RESP-CACHE.md](RESP-CACHE.md#block-hash-to-height-mappings)). Hash-keyed archive
+  detection has no mappings in any topology, exactly as on a router with no cache
+  configured.
 
 Any backend that speaks the Smart Router cache protocol works as either tier —
 the secondary is simply a second `smartrouter cache` address. Run the same cache
@@ -564,10 +572,12 @@ Lava-Cache-Outcome: primary=miss,secondary=hit
 
 `Lava-Provider-Address` alone cannot close this step — a primary hit and a
 secondary hit both report `Cached`, both carry the same locally minted header
-set, and the body is the same bytes. (The one difference is invisible here and
-by design: an entry that came from the secondary replays only its
-`Content-Type` / `Content-Encoding`, not whatever other upstream headers the
-writer's node happened to send.)
+set, and the body is the same bytes. The upstream headers they replay are the
+same too: both tiers run the live path's filter
+(`common.FilterUpstreamReplyMetadata`, MAG-3104) when they serve an entry, so
+either replays `Content-Type`, `Content-Encoding`, `Retry-After`, `Date` and the
+spec's own reply headers, and nothing else the writer's node happened to send,
+whichever router wrote the entry.
 
 `Lava-Cache-Tier` names the tier that answered, and `Lava-Cache-Outcome` says
 what each tier did on the way. Both are part of the reply, so there is nothing
@@ -696,7 +706,7 @@ walkthrough](#manual-demo-walkthrough); this section records where each one is
 | Configurable lookup timeout; exceeded = miss | Met | `secondary-cache-timeout`, default `50ms` |
 | Failure never affects serving; primary-grade resilience | Met | Same reconnect loop and non-blocking failure semantics as the primary |
 | Backwards compatible when unconfigured | Met | No secondary series in metrics, no added step in the request path |
-| No provider-identifying metadata exposed | Met — and **not** a no-op | The format *does* carry it (`Sig`, `SigBlocks`, `Metadata` holding upstream response headers). `Sig`/`SigBlocks` are dropped entirely and `Metadata` is reduced to the `Content-Type`/`Content-Encoding` allowlist, on a private copy that becomes the only copy used. Allowlist, not denylist: upstream headers are an open set. `TestSanitizeForeignCacheReplyDropsIdentityMetadataAndSignatures`, `TestSanitizeForeignCacheReplyKeepsTransportHeaders`, `TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill` |
+| No provider-identifying metadata exposed | Met — and **not** a no-op | The format *does* carry it (`Sig`, `SigBlocks`, `Metadata` holding upstream response headers). `Sig`/`SigBlocks` are dropped entirely and `Metadata` is reduced by the reply-header allowlist every tier runs (the transport pair, the 429 pair and the spec's reply headers; never a router-owned name), on a private copy that becomes the only copy used. Allowlist, not denylist: upstream headers are an open set. `TestSanitizeForeignCacheReplyDropsIdentityMetadataAndSignatures`, `TestSanitizeForeignCacheReplyKeepsTransportHeaders`, `TestSanitizeForeignCacheReplyAppliesTheSpecsReplyDirectives`, `TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill`, `TestSecondaryCacheHitReplaysTheSameFilteredHeadersAsAPrimaryHit` |
 | No foreign chain state adopted | Met on all four channels | `SeenBlock` is never fed to `adoptSharedStateTip` (`TestSecondarySeenBlockNeverAdoptedIntoChainState`); `Reply.LatestBlock` is zeroed by the sanitizer and re-stamped from the local tip, so the backfill cannot publish a foreign head as the primary's chain-level tip, where it would shift `LATEST`/`SAFE`/`FINALIZED`/`PENDING` resolution chain-wide (`TestSanitizeForeignCacheReplyDropsLatestBlock`, `TestSecondaryHitRestampsLatestBlockFromLocalTip`, `TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill`); `BlocksHashesToHeights` — which sits on the outer `CacheRelayReply`, beyond the sanitizer's reach — is never requested, so foreign heights cannot raise the effective requested block or force archive routing (`TestSecondaryLookupNeverRequestsForeignBlockHashHeights`); and the backfill's validity-floor lift is clamped to the local gated tip, so the lookup **key** itself — the one foreign-vouched scalar the sanitizer cannot reach, since for an explicit-block request it is the raw user-chosen height — cannot be published as the primary's chain-level tip either (`TestSecondaryFutureKeyBackfillNeverRaisesPrimaryChainTip`) |
 
 ### Nice-to-have requirements

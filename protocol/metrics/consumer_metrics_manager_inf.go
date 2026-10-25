@@ -53,6 +53,7 @@ func (NoOpConsumerMetrics) RecordStickyClaim(string, string, string)            
 func (NoOpConsumerMetrics) SetCSMReportedProvidersCount(string, string, int)               {}
 func (NoOpConsumerMetrics) SetWsSubscriptionRequestMetric(string, string)                  {}
 func (NoOpConsumerMetrics) SetFailedWsSubscriptionRequestMetric(string, string)            {}
+func (NoOpConsumerMetrics) SetSubscriptionClientDroppedMetric(string, string)              {}
 func (NoOpConsumerMetrics) SetWebSocketConnectionActive(string, string, bool)              {}
 func (NoOpConsumerMetrics) SetVersion(string)                                              {}
 func (NoOpConsumerMetrics) StartSelectionStatsUpdater(context.Context, time.Duration)      {}
@@ -129,6 +130,9 @@ type ConsumerMetricsManagerInf interface {
 	// --- WebSocket (DirectWSSubscriptionManager) ---
 	SetWsSubscriptionRequestMetric(chainId string, apiInterface string)
 	SetFailedWsSubscriptionRequestMetric(chainId string, apiInterface string)
+	// SetSubscriptionClientDroppedMetric counts a client dropped from a shared subscription
+	// (WebSocket or gRPC) because it did not keep up with the pushes.
+	SetSubscriptionClientDroppedMetric(chainId string, apiInterface string)
 	SetWebSocketConnectionActive(chainId string, apiInterface string, add bool)
 
 	// --- Misc (RPCConsumerLogs / rpcsmartrouter.go) ---

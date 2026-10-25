@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -59,7 +60,19 @@ type mockSubscriptionServer struct {
 	// subscriptionSeq makes successive ids distinct, so a test can tell a restored
 	// subscription from the one it replaced.
 	subscriptionSeq int
+
+	// conns holds every server-side socket still open, so a test can drop them all and
+	// watch the router restore its subscriptions.
+	conns []*websocket.Conn
+
+	// refusing makes the node refuse every new connection, which is what an outage looks
+	// like to the router; refusedDials counts the dials it turned away.
+	refusing     atomic.Bool
+	refusedDials atomic.Int32
 }
+
+// setRefusing turns the node's outage on or off.
+func (ms *mockSubscriptionServer) setRefusing(refuse bool) { ms.refusing.Store(refuse) }
 
 // safeWriteMessage serializes WS writes: handleWS (response) and the spawned sendSubscriptionMessages
 // goroutine both write the same conn, and gorilla/websocket forbids concurrent writers (data race
@@ -85,11 +98,19 @@ func newMockSubscriptionServer() *mockSubscriptionServer {
 }
 
 func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Request) {
+	if ms.refusing.Load() {
+		ms.refusedDials.Add(1)
+		http.Error(w, "node down", http.StatusServiceUnavailable)
+		return
+	}
 	conn, err := ms.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
 	}
 	defer conn.Close()
+	ms.lock.Lock()
+	ms.conns = append(ms.conns, conn)
+	ms.lock.Unlock()
 
 	for {
 		_, message, err := conn.ReadMessage()
@@ -271,10 +292,36 @@ func (ms *mockSubscriptionServer) sendSubscriptionMessages(conn *websocket.Conn,
 			}
 			msgBytes, _ := json.Marshal(notification)
 			if err := ms.safeWriteMessage(conn, websocket.TextMessage, msgBytes); err != nil {
+				// The socket is gone, and so is the subscription: a node's subscriptions
+				// live and die with the connection that opened them. The router must not
+				// redial just to unsubscribe one of these (MAG-4242).
+				ms.closeSubscription(subID)
 				return
 			}
 		}
 	}
+}
+
+// dropConnections closes every server-side socket, which is what an upstream node
+// restarting looks like from the router: every subscription on those sockets errors and
+// the router re-subscribes over a fresh connection.
+func (ms *mockSubscriptionServer) dropConnections() {
+	ms.lock.Lock()
+	conns := ms.conns
+	ms.conns = nil
+	ms.lock.Unlock()
+	for _, conn := range conns {
+		conn.Close()
+	}
+}
+
+// liveSubscriptions is how many subscriptions the node still believes exist: created and
+// not yet unsubscribed. A router that leaks an upstream subscription leaves this above zero
+// after every client has gone.
+func (ms *mockSubscriptionServer) liveSubscriptions() int {
+	ms.lock.RLock()
+	defer ms.lock.RUnlock()
+	return len(ms.subscriptions)
 }
 
 func (ms *mockSubscriptionServer) Close() {
@@ -301,6 +348,8 @@ type mockWSProtocolMessage struct {
 func (m *mockWSProtocolMessage) GetApi() *spectypes.Api {
 	return &spectypes.Api{Name: m.method}
 }
+
+func (m *mockWSProtocolMessage) GetUnavailableExtensions() []string { return nil }
 
 func (m *mockWSProtocolMessage) GetApiCollection() *spectypes.ApiCollection {
 	return &spectypes.ApiCollection{
@@ -715,10 +764,8 @@ func TestUnsubscribeRateLimiting(t *testing.T) {
 		PerClientLimitEnforcement:       "warn",
 		MaxTotalSubscriptions:           5000,
 		TotalLimitEnforcement:           "warn",
-		SubscriptionSharingEnabled:      true,
 		SubscriptionsPerMinutePerClient: 10,
 		UnsubscribesPerMinutePerClient:  2, // Very low limit for testing
-		MaxMessageSize:                  1048576,
 		CleanupInterval:                 time.Minute,
 	}
 
@@ -773,10 +820,8 @@ func TestUnsubscribeAllNotRateLimited(t *testing.T) {
 		PerClientLimitEnforcement:       "warn",
 		MaxTotalSubscriptions:           5000,
 		TotalLimitEnforcement:           "warn",
-		SubscriptionSharingEnabled:      true,
 		SubscriptionsPerMinutePerClient: 10,
 		UnsubscribesPerMinutePerClient:  1, // Extremely low limit
-		MaxMessageSize:                  1048576,
 		CleanupInterval:                 time.Minute,
 	}
 
@@ -1118,7 +1163,7 @@ func TestRouteMessageToClientsPerClientID(t *testing.T) {
 	}
 
 	// Route the message
-	manager.routeMessageToClients(hashedParams, activeSub, upstreamMsg)
+	manager.routeMessageToClients(activeSub, upstreamMsg)
 
 	// Give a moment for async sends
 	time.Sleep(50 * time.Millisecond)
@@ -1272,10 +1317,8 @@ func TestUnsubscribeRouterIDOwnershipValidation(t *testing.T) {
 		PerClientLimitEnforcement:       "warn",
 		MaxTotalSubscriptions:           5000,
 		TotalLimitEnforcement:           "warn",
-		SubscriptionSharingEnabled:      true,
 		SubscriptionsPerMinutePerClient: 60, // High limit to avoid rate limiting
 		UnsubscribesPerMinutePerClient:  60,
-		MaxMessageSize:                  1048576,
 		CleanupInterval:                 time.Minute,
 	}
 
@@ -2283,10 +2326,8 @@ func TestUnsubscribe_AcceptsUpstreamIDFallback(t *testing.T) {
 		PerClientLimitEnforcement:       "warn",
 		MaxTotalSubscriptions:           5000,
 		TotalLimitEnforcement:           "warn",
-		SubscriptionSharingEnabled:      true,
 		SubscriptionsPerMinutePerClient: 60,
 		UnsubscribesPerMinutePerClient:  60,
-		MaxMessageSize:                  1048576,
 		CleanupInterval:                 time.Minute,
 	}
 
@@ -2675,10 +2716,8 @@ func TestUnsubscribe_StillRejectsForeignSubscription(t *testing.T) {
 		PerClientLimitEnforcement:       "warn",
 		MaxTotalSubscriptions:           5000,
 		TotalLimitEnforcement:           "warn",
-		SubscriptionSharingEnabled:      true,
 		SubscriptionsPerMinutePerClient: 60,
 		UnsubscribesPerMinutePerClient:  60,
-		MaxMessageSize:                  1048576,
 		CleanupInterval:                 time.Minute,
 	}
 

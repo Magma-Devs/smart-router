@@ -1,6 +1,7 @@
 package endpointstate
 
 import (
+	"math"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
@@ -57,6 +58,57 @@ type EndpointObservation struct {
 	LastPollLatency         time.Duration // transport round-trip of the last successful poll
 	LastPollError           string        // last poll error (empty if the last poll succeeded)
 	ConsecutivePollFailures int           // reset to 0 on a successful poll
+
+	// Stall evidence (MAG-3986), written by the poll path, the relay path and the traffic gate,
+	// from THIS pod's own polls and relays only — never a peer pod's:
+	//   - LastAnsweredBlock is the block the endpoint answered with most recently.
+	//   - HighestBlockSeen is the highest block it has ever answered with.
+	//   - SameBlockCycles counts consecutive tracker cycles in which the endpoint answered without
+	//     going above HighestBlockSeen: a successful poll, or a cycle the traffic gate skipped
+	//     because a fresh relay answer already covered it. Only a NEW highest block resets it to 0.
+	//     A lower answer counts like a repeat: a load balancer failing over to a backend frozen
+	//     below what the url already reported is not moving either. Comparing against the previous
+	//     answer instead would reset on every alternation between two frozen values — which is
+	//     what a frozen Solana node does, because relays report context.slot at the client's
+	//     commitment (confirmed/processed) while the poll reports the finalized slot. A failed
+	//     poll, a peer-gate skip or an idle skip leave it unchanged.
+	LastAnsweredBlock int64
+	// It counts evidence, not time, so a router that stops polling (idle mode) never judges a
+	// URL on the silence. The probe loop reads it and decides head-stalled.
+	SameBlockCycles  int
+	HighestBlockSeen int64
+	// lastCountedRelayAt is the relay stamp the last relay-covered cycle counted, so one relay
+	// answer that spans two poll cycles is counted once.
+	lastCountedRelayAt time.Time
+}
+
+// TipObservationFunc receives every block an endpoint observation fed to the per-endpoint tip
+// store: the endpoint url, the block, and whether the block REPEATS the url's stored tip (equal to
+// it) rather than advancing or re-adopting it.
+type TipObservationFunc func(endpointURL string, block int64, repeat bool)
+
+// noteAnsweredBlockLocked folds one answered block into the stall evidence. A block above the
+// highest one seen resets the same-block counter; any other block adds one cycle only when
+// countRepeat is set (a poll is one tracker cycle; a relay is not — relay-covered cycles are
+// counted once per cycle by countRelayCoveredCycle). The first answer only records the block:
+// nothing is counted before an endpoint has answered once.
+func (o *EndpointObservation) noteAnsweredBlockLocked(block int64, countRepeat bool) {
+	o.LastAnsweredBlock = block
+	if block > o.HighestBlockSeen {
+		o.HighestBlockSeen = block
+		o.SameBlockCycles = 0
+		return
+	}
+	if countRepeat {
+		o.SameBlockCycles++
+	}
+}
+
+// tipRepeats reports whether block equals the url's currently stored tip — a repeat vote rather
+// than an advance. Called under obsMu, before the Set it describes.
+func (m *EndpointMonitor) tipRepeats(endpointURL string, block int64) bool {
+	prior, ok := endpointtip.Default().Get(m.tipKey(endpointURL))
+	return ok && prior.Block == block
 }
 
 // recordPollObservation records the outcome of a single dedicated poll. It fires on
@@ -90,25 +142,24 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 	// the tip store ACCEPTED it — a block behind our own fresh tip is a straggler the fleet store
 	// would reject too, and publishing it would burn a throttle window for nothing.
 	var tipBlock, publishBlock int64
+	var tipRepeat bool
 	defer func() {
 		if tipBlock > 0 && m.onTipObservation != nil {
-			m.onTipObservation(tipBlock)
+			m.onTipObservation(endpointURL, tipBlock, tipRepeat)
 		}
 		if publishBlock > 0 {
 			m.publishLocalObservation(endpointURL, publishBlock)
+		}
+		// The same accepted block, with its url, for rpc_endpoint_url_latest_block.
+		if tipBlock > 0 && m.onPollBlock != nil {
+			m.onPollBlock(endpointURL, tipBlock)
 		}
 	}()
 
 	m.obsMu.Lock()
 	defer m.obsMu.Unlock()
 
-	if m.stopped {
-		return
-	}
-	// Generation gate: ignore callbacks from a removed/replaced tracker instance. The
-	// generation must still EXIST (a removed URL has no entry) and match — requiring
-	// existence also rejects a stray gen==0 rather than matching the absent-map default.
-	if liveGen, ok := m.generations[endpointURL]; !ok || liveGen != gen {
+	if !m.acceptsLocked(endpointURL, gen) {
 		return
 	}
 
@@ -126,6 +177,10 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		o.LastPollLatency = latency
 		o.LastPollError = ""
 		o.ConsecutivePollFailures = 0
+		// Stall evidence: an answer that does not go above the highest block seen is one more
+		// cycle without moving; a new highest block resets the count.
+		o.noteAnsweredBlockLocked(block, true)
+		repeat := m.tipRepeats(endpointURL, block)
 		// The block triple lives in the single-source-of-truth endpointtip store, not on
 		// this record. Set applies the block-monotonic guard (T4) and reports whether it
 		// advanced the tip — only then do we feed the per-chain consensus tip. Called under
@@ -137,6 +192,7 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 			Source:     endpointtip.SourcePoll,
 		}, m.tipStaleAfter) {
 			tipBlock = block // feed the per-chain tip after unlock
+			tipRepeat = repeat
 			if m.shouldPublishLocked(endpointURL, at) {
 				publishBlock = block
 			}
@@ -184,9 +240,10 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 	// Feed the per-chain tip after releasing obsMu (see recordPollObservation). Both tipBlock and
 	// publishBlock stay 0 unless the write is accepted (generation + monotonic guards pass).
 	var tipBlock, publishBlock int64
+	var tipRepeat bool
 	defer func() {
 		if tipBlock > 0 && m.onTipObservation != nil {
-			m.onTipObservation(tipBlock)
+			m.onTipObservation(endpointURL, tipBlock, tipRepeat)
 		}
 		if publishBlock > 0 {
 			m.publishLocalObservation(endpointURL, publishBlock)
@@ -196,14 +253,7 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 	m.obsMu.Lock()
 	defer m.obsMu.Unlock()
 
-	if m.stopped {
-		return false
-	}
-	// Generation gate: reject relays whose captured generation no longer matches the live
-	// one (removed/replaced tracker), mirroring recordPollObservation. Requiring existence
-	// rejects an unknown endpoint (and a stray gen==0) instead of matching the absent
-	// map default of 0.
-	if liveGen, ok := m.generations[endpointURL]; !ok || liveGen != gen {
+	if !m.acceptsLocked(endpointURL, gen) {
 		return false
 	}
 
@@ -211,9 +261,13 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 	// see for it) so SnapshotObservations — which iterates the map — includes a relay-only
 	// endpoint in the per-chain consensus. The block triple itself lives in the endpointtip
 	// store; the map entry carries only poll-health, which a relay never touches.
-	if _, exists := m.observations[endpointURL]; !exists {
-		m.observations[endpointURL] = EndpointObservation{}
-	}
+	o := m.observations[endpointURL] // zero value if absent
+	// Stall evidence: a relay with a new highest block resets the counter. Any other relay is
+	// counted once per tracker cycle by the traffic gate (countRelayCoveredCycle), not per relay,
+	// so a busy endpoint's request rate never inflates it.
+	o.noteAnsweredBlockLocked(block, false)
+	m.observations[endpointURL] = o
+	repeat := m.tipRepeats(endpointURL, block)
 
 	// Set applies the block-monotonic guard (T4) and reports whether it advanced the tip.
 	// Lock order obsMu → store lock.
@@ -223,6 +277,7 @@ func (m *EndpointMonitor) RecordRelayObservation(endpointURL string, gen uint64,
 		Source:     endpointtip.SourceRelay,
 	}, m.tipStaleAfter) {
 		tipBlock = block // feed the per-chain tip after unlock
+		tipRepeat = repeat
 		// A served relay is first-hand contact with the node, so it feeds the fleet store on the
 		// same terms as a poll — otherwise the pods that know an endpoint best publish least,
 		// because the traffic that gives them that knowledge is what suppresses their poll.
@@ -292,17 +347,87 @@ func (m *EndpointMonitor) SnapshotObservations() map[string]EndpointObservation 
 // (force a real poll every N intervals, to independently catch a cached/lying upstream)
 // is the unstated half of the ticket's idle-endpoint-minimum item and lands with the
 // probing layer (Topic D), when a live poll-health consumer first exists.
-func (m *EndpointMonitor) freshRelayTip(endpointURL string, now time.Time) (int64, bool) {
+//
+// It returns the whole tip, not only the block, so the traffic gate can tell one relay answer from
+// the next by its ObservedAt stamp when it counts relay-covered cycles (MAG-3986).
+func (m *EndpointMonitor) freshRelayTip(endpointURL string, now time.Time) (endpointtip.Tip, bool) {
 	// Read the tip straight from the single-source-of-truth store (no obsMu needed — the
 	// triple no longer lives in the observation map).
 	tip, ok := endpointtip.Default().Get(m.tipKey(endpointURL))
 	if !ok || tip.Source != endpointtip.SourceRelay || tip.Block <= 0 {
-		return 0, false
+		return endpointtip.Tip{}, false
 	}
 	if now.Sub(tip.ObservedAt) > m.relayGateFreshness {
-		return 0, false // tip too stale: fall through to a real poll (the liveness floor)
+		return endpointtip.Tip{}, false // tip too stale: fall through to a real poll (the liveness floor)
 	}
-	return tip.Block, true
+	return tip, true
+}
+
+// countRelayCoveredCycle records stall evidence for a tracker cycle the traffic gate skipped
+// because a fresh relay answer from THIS pod already covered it (MAG-3986). It counts the cycle
+// only when the relay did not go above the endpoint's highest block and is a NEWER answer than the
+// last one counted — one relay answer that spans two poll cycles is one piece of evidence, not two.
+func (m *EndpointMonitor) countRelayCoveredCycle(endpointURL string, gen uint64, tip endpointtip.Tip) {
+	m.obsMu.Lock()
+	defer m.obsMu.Unlock()
+	if !m.acceptsLocked(endpointURL, gen) {
+		return
+	}
+	o, exists := m.observations[endpointURL]
+	if !exists || o.HighestBlockSeen <= 0 || !tip.ObservedAt.After(o.lastCountedRelayAt) {
+		return
+	}
+	o.noteAnsweredBlockLocked(tip.Block, true) // the same counting rule as a poll
+	o.lastCountedRelayAt = tip.ObservedAt
+	m.observations[endpointURL] = o
+}
+
+// acceptsLocked is the write gate every observation path shares: the monitor is not stopped, and
+// the caller's generation is the url's live one. A callback from a removed or replaced tracker
+// carries a stale generation and is dropped, so a late in-flight poll or relay can neither recreate
+// a deleted record nor overwrite a fresh tracker's record for the same url. The generation must
+// EXIST as well as match: a removed url has no entry, and requiring it rejects a stray gen==0
+// instead of matching the absent-map default. Caller must hold obsMu.
+func (m *EndpointMonitor) acceptsLocked(endpointURL string, gen uint64) bool {
+	if m.stopped {
+		return false
+	}
+	liveGen, ok := m.generations[endpointURL]
+	return ok && liveGen == gen
+}
+
+// ResetStallCounters zeroes every endpoint's same-block counter, keeping the blocks seen.
+// The operator reset (/debug/reset-endpoint-health) calls it together with clearing head-stalled,
+// so the next probe check does not re-add the reason from the evidence that was just discarded.
+func (m *EndpointMonitor) ResetStallCounters() {
+	m.obsMu.Lock()
+	defer m.obsMu.Unlock()
+	for url, o := range m.observations {
+		o.SameBlockCycles = 0
+		m.observations[url] = o
+	}
+}
+
+// minStallCycles floors StallCycleThreshold so one or two odd answers never decide, even at the
+// slowest poll divisor (MAG-3986, H10).
+const minStallCycles = 3
+
+// StallCycleThreshold is how many consecutive same-block cycles mark an endpoint head-stalled:
+// 10 × the poll divisor, rounded up, floored at minStallCycles. The tracker ticks every
+// averageBlockTime / divisor, so while the router is active this is about 10 block times whatever
+// divisor the operator chose (MAG-3986, D20).
+func (m *EndpointMonitor) StallCycleThreshold() int {
+	return m.stallCycles
+}
+
+// stallCyclesFor turns an already validated poll divisor (resolvePollDivisor) into the stall
+// threshold: 10 × divisor cycles, rounded up, floored at minStallCycles.
+func stallCyclesFor(divisor float64) int {
+	n := int(math.Ceil(10 * divisor))
+	if n < minStallCycles {
+		return minStallCycles
+	}
+	return n
 }
 
 // tipKey builds this monitor's composite key into the shared endpointtip store. Keying

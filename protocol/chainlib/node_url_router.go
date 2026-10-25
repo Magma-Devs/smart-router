@@ -45,8 +45,6 @@ func (r nodeUrlRouter) SendNodeMsg(ctx context.Context, chainMessage ChainMessag
 	return reply, url, chainID, err
 }
 
-func (nodeUrlRouter) ExtensionsSupported(string, []string) bool { return true }
-
 func chainProxyConstructor(apiInterface string) (func(context.Context, uint, lavasession.RPCProviderEndpoint, ChainParser) (ChainProxy, error), error) {
 	switch apiInterface {
 	case spectypes.APIInterfaceJsonRPC:
@@ -57,6 +55,8 @@ func chainProxyConstructor(apiInterface string) (func(context.Context, uint, lav
 		return NewRestChainProxy, nil
 	case spectypes.APIInterfaceGrpc:
 		return NewGrpcChainProxy, nil
+	case spectypes.APIInterfaceGraphQL:
+		return NewGraphQLChainProxy, nil
 	default:
 		return nil, fmt.Errorf("chain proxy for apiInterface (%s) not found", apiInterface)
 	}

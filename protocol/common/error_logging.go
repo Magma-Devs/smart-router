@@ -81,6 +81,30 @@ func LogCodedError(description string, err error, lavaError *LavaError, chainID 
 	return utils.LavaFormatError(description, err, buildCodedAttrs(lavaError, chainID, chainErrorCode, chainErrorMessage, attributes...)...)
 }
 
+// LogCodedNodeAnswer logs a classified node error at DEBUG level, with the same structured
+// fields and the same metrics callback as LogCodedError.
+//
+// For the replies where the node processed the request and refused it — a not-found, a pruned
+// height, a rejected transaction — ERROR is the wrong level. On REST those are routine: every
+// status outside 2xx is a node error, and the dominant REST read is a client polling for a
+// transaction that has not landed yet, so an ERROR line per attempt (with the request payload
+// attached) is emitted at request rate and buries the failures an operator needs to see. The
+// metric still fires, so nothing stops being counted; only the level changes.
+//
+// Callers choose between this and LogCodedError on LavaError.EndpointAtFault: if the endpoint is
+// to blame, the line stays at ERROR.
+func LogCodedNodeAnswer(description string, err error, lavaError *LavaError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) {
+	if lavaError == nil {
+		lavaError = LavaErrorUnknown
+	}
+	EmitErrorMetric(lavaError, chainID)
+	attrs := buildCodedAttrs(lavaError, chainID, chainErrorCode, chainErrorMessage, attributes...)
+	if err != nil {
+		attrs = append(attrs, utils.Attribute{Key: "error", Value: err.Error()})
+	}
+	utils.LavaFormatDebug(description, attrs...)
+}
+
 // ExtractJSONRPCErrorCode extracts the error code from a JSON-RPC error response body.
 // Returns 0 if the body is not a valid JSON-RPC error.
 func ExtractJSONRPCErrorCode(data []byte) int {

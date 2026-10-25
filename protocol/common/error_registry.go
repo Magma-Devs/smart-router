@@ -37,7 +37,7 @@ type ErrorSubCategory int
 
 const (
 	SubCategoryNone              ErrorSubCategory = iota
-	SubCategoryUnsupportedMethod                  // zero retries, zero CU, cached response, no provider scoring
+	SubCategoryUnsupportedMethod                  // zero retries, zero CU, cached response, no provider scoring; no registered code carries it since MAG-2771
 	SubCategoryRateLimit                          // rate-limit signal: endpoint is healthy but busy, apply backoff, do not mark unhealthy
 	SubCategoryDataScope                          // endpoint does not hold the data: retry elsewhere may help, but it is not unhealthy
 	SubCategoryNodeCapability                     // endpoint does not offer this capability: retry elsewhere may help, but it is not unhealthy
@@ -91,9 +91,11 @@ func (sc ErrorSubCategory) IsDataScope() bool {
 }
 
 // IsNodeCapability reports whether this subcategory represents "the endpoint answered
-// authoritatively that it does not offer this capability" — a method that exists on the
-// API surface but is switched off on this particular node (provider tier, policy, admin
-// config). NODE_METHOD_NOT_SUPPORTED (2002) is the case.
+// authoritatively that it does not offer this capability" — a method, route, verb or credential
+// this particular node will not serve (provider tier, policy, admin config, gateway). The codes
+// are NODE_METHOD_NOT_SUPPORTED (2002), NODE_ACCESS_DENIED (2018) and, since MAG-2771,
+// NODE_METHOD_NOT_FOUND (2001), NODE_UNIMPLEMENTED (2008), NODE_ENDPOINT_NOT_FOUND (2009),
+// NODE_METHOD_NOT_ALLOWED (2010) and NODE_UNAUTHORIZED (2016).
 //
 // It is the same fault axis as IsDataScope, one level up: data scope is "I do not hold
 // that", capability is "I do not serve that". Both mean the endpoint did its job and told
@@ -102,9 +104,10 @@ func (sc ErrorSubCategory) IsDataScope() bool {
 //
 // Deliberately NOT SubCategoryUnsupportedMethod, even though the wording is close.
 // ShouldRetryErrorWithContext hard-stops on that subcategory REGARDLESS of the Retryable
-// flag, so reusing it would kill the retry this classification exists to allow. The
-// distinction is real: NODE_METHOD_NOT_FOUND (2001) means the method exists nowhere, so
-// retrying is pointless; 2002 means it exists but not here, so retrying is the whole point.
+// flag, so reusing it would kill the retry this classification exists to allow. 2001 used to
+// sit there on the reading that "method not found" means the method exists nowhere. On the
+// wire it cannot be told apart from "not here" — one provider's plan switches off what its
+// peer serves — so MAG-2771 moved it, and the other node refusals, to this axis.
 //
 // Health-tracking callers should therefore keep retrying elsewhere but leave the
 // endpoint's availability score untouched.
@@ -335,8 +338,11 @@ var chainFamilyMap = map[string]ChainFamily{
 	"APT1": ChainFamilyAptos,
 
 	// Sui — shares Move heritage with Aptos but has a distinct JSON-RPC surface
-	// and error taxonomy, so it gets its own family.
-	"SUIT": ChainFamilySui,
+	// and error taxonomy, so it gets its own family. SUI is mainnet, SUIT testnet,
+	// SUID devnet; sui.json declares all three. Listing only the testnet left
+	// mainnet traffic falling through to ChainFamilyUnknown, which skips every
+	// family-scoped matcher — on the network customers actually run.
+	"SUI": ChainFamilySui, "SUIT": ChainFamilySui, "SUID": ChainFamilySui,
 
 	// NEAR
 	"NEAR": ChainFamilyNEAR, "NEART": ChainFamilyNEAR,
@@ -465,6 +471,31 @@ func (m messageRegexMatcher) Matches(_ int, errorMessage string) bool {
 
 func MessageRegex(pattern string) ErrorMatcher {
 	return messageRegexMatcher{re: regexp.MustCompile(pattern)}
+}
+
+// CodeAndMessage matches only when BOTH the error code and a case-insensitive
+// message substring match. It exists for rows whose message alone is too broad to
+// stand on its own: nodeos says "unknown block" in a 400, but the same words in a
+// 500 body are not evidence of a block-not-found, and on REST the raw response body
+// is what reaches the matcher as the message (extractErrorMessage's fallback), so a
+// bare substring row is matched against whatever the upstream happened to print.
+type codeAndMessageMatcher struct {
+	code      int
+	substring string // pre-lowercased at construction time
+}
+
+func (m codeAndMessageMatcher) Matches(errorCode int, errorMessage string) bool {
+	return errorCode == m.code && strings.Contains(strings.ToLower(errorMessage), m.substring)
+}
+
+// matchesLowered keeps this matcher on ClassifyError's fast path, so adding rows of
+// this kind costs no extra strings.ToLower per classification.
+func (m codeAndMessageMatcher) matchesLowered(errorCode int, loweredMessage string) bool {
+	return errorCode == m.code && strings.Contains(loweredMessage, m.substring)
+}
+
+func CodeAndMessage(code int, substring string) ErrorMatcher {
+	return codeAndMessageMatcher{code: code, substring: strings.ToLower(substring)}
 }
 
 // HTTPStatusContains matches an HTTP status code in the error message with non-digit
@@ -596,28 +627,6 @@ func registerError(le *LavaError) *LavaError {
 	return le
 }
 
-// ---------------------------------------------------------------------------
-// Lookup helpers
-// ---------------------------------------------------------------------------
-
-func getLavaError(code uint32) *LavaError {
-	if le, ok := errorRegistry[code]; ok {
-		return le
-	}
-	return LavaErrorUnknown
-}
-
-func getLavaErrorByName(name string) *LavaError {
-	if le, ok := errorRegistryName[name]; ok {
-		return le
-	}
-	return LavaErrorUnknown
-}
-
-func isRetryable(code uint32) bool {
-	return getLavaError(code).Retryable
-}
-
 // LavaWrappedError wraps a LavaError with context, supporting errors.Is matching.
 type LavaWrappedError struct {
 	LavaErr *LavaError
@@ -720,12 +729,4 @@ func NewLavaErrorWrapping(lavaErr *LavaError, cause error) error {
 		return &LavaWrappedError{LavaErr: lavaErr}
 	}
 	return &LavaWrappedError{LavaErr: lavaErr, Context: cause.Error(), cause: cause}
-}
-
-func IsInternal(code uint32) bool {
-	return getLavaError(code).Category == CategoryInternal
-}
-
-func IsExternal(code uint32) bool {
-	return getLavaError(code).Category == CategoryExternal
 }

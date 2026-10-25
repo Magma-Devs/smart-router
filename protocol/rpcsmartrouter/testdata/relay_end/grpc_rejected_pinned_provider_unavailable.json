@@ -1,0 +1,23 @@
+{
+  "GUID": "<minted by the listener>",
+  "api_interface": "grpc",
+  "attempts": [],
+  "chain": "GRPCTEST",
+  "error": "Selected provider not available ErrMsg: Header-selected provider is not a valid provider for this request {selectedProvider:node-z,validProviders:grpc-node,addon:,extensions:,GUID:<GUID>}",
+  "error_code": "PROTOCOL_PROVIDER_UNAVAILABLE",
+  "event": "relay_end",
+  "has_reply": false,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "test.v1.Node/Call",
+  "outcome": "rejected_before_dispatch",
+  "request_bytes": 2,
+  "schema": 2,
+  "selection": "stateless",
+  "served_by": "",
+  "stateful": false,
+  "status": 0,
+  "stop_reason": "FirstMessageFailed"
+}

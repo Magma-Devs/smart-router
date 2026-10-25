@@ -6,7 +6,6 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 )
@@ -21,7 +20,6 @@ type RelayStateMachine interface {
 	GetCrossValidationParams() *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
 	GetUsedProviders() *lavasession.UsedProviders
 	SetResultsChecker(resultsChecker ResultsCheckerInf)
-	SetRelayRetriesManager(relayRetriesManager *lavaprotocol.RelayRetriesManager)
 }
 
 // ResultsCheckerInf interface for checking results
@@ -30,6 +28,10 @@ type ResultsCheckerInf interface {
 	HasRequiredNodeResults(tries int) (bool, int)
 	GetCrossValidationParams() *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
 	GetResultsSummary() ResultsSummary
+	// CrossValidationMissingOnlyGroups reports whether a cross-validation request should stop at its attempt
+	// window: some response hash has reached the agreement threshold without satisfying the quorum rule, and
+	// only providers of under-staffed groups, still silent, could complete a quorum on any hash.
+	CrossValidationMissingOnlyGroups() bool
 }
 
 // MetricsInterface for relay processor metrics
@@ -74,6 +76,7 @@ type ResultsSummary struct {
 	SpecialNodeErrors         int
 	ProtocolErrors            int
 	HasNonRetryableNodeError  bool // any node error with IsNonRetryable flag (umbrella — THE RETRY GATE)
+	HasNodeCapabilityRefusal  bool // any node error with IsNodeCapability: the node said it does not serve this request
 	HasUnsupportedMethod      bool // subset of non-retryable, for caching decisions and zero-CU
 	HasPermanentProtocolError bool // any non-retryable protocol error (excluding epoch mismatch)
 	HasEpochMismatch          bool // any protocol error is epoch mismatch
@@ -81,7 +84,6 @@ type ResultsSummary struct {
 	// an upstream rate limit — the one failure that is safe to retry even for a stateful
 	// relay or a batch, because the upstream refused before executing anything.
 	OnlyRateLimited bool
-	HashErr         error // hash computation error (nil = hash OK)
 }
 
 // Action represents the post-relay decision action.
@@ -114,26 +116,13 @@ const (
 	SendStop
 )
 
-// ArchiveAction represents the archive mutation to apply.
-type ArchiveAction int
-
-const (
-	ArchiveNoChange ArchiveAction = iota
-	ArchiveAdd
-	ArchiveRemove
-)
-
-// MutationOutput holds archive + cache side effects.
-type MutationOutput struct {
-	ArchiveAction ArchiveAction
-	CacheHashes   bool
-}
-
 // DecisionOutput tells the state machine what to do.
+//
+// There is no mutation field: a retry re-sends the same request elsewhere, it does not rewrite
+// it. See Policy.Decide for why the archive add/remove that used to live here is gone.
 type DecisionOutput struct {
-	Action   Action
-	Mutation MutationOutput
-	Reason   string
+	Action Action
+	Reason string
 }
 
 // DecisionInput is assembled by the state machine for the policy engine.
@@ -142,12 +131,10 @@ type DecisionInput struct {
 	AttemptNumber int
 	IsBatch       bool
 	Summary       ResultsSummary
-	ArchiveStatus *ArchiveStatus
-	// NodeErrors is from the state machine's atomic counter (set by HasRequiredNodeResults).
-	// Used only by decideMutation() for archive threshold checks. Differs from
-	// Summary.NodeErrors (from GetResultsSummary scan) in source but should converge.
-	NodeErrors    uint64
 	IsTickerHedge bool // true when called from ticker.C (hedge), false from gotResults (retry)
+	// IsDefaultApi is true when the request names a method the spec does not list: the parser
+	// forwarded it as a Default- API only because the spec cannot rule it out.
+	IsDefaultApi bool
 }
 
 // RelayPolicyInf is the interface that the policy engine must implement.
@@ -169,4 +156,10 @@ type StateMachineConfig struct {
 	MaxRetries int
 	// SendRelayAttempts is the number of consecutive batch errors before giving up
 	SendRelayAttempts int
+	// CallerCVIgnoredReason names, for the debug line only, why a request's cross-validation headers
+	// are ignored when forbidCallerCrossValidation is set. Empty reads as the operator's
+	// forbid-caller-cv policy, which is the only way a CLIENT request reaches that branch. The
+	// router's own internal relays set it, so a health check does not log a policy nobody wrote
+	// (MAG-3746).
+	CallerCVIgnoredReason string
 }

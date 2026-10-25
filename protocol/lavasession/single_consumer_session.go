@@ -53,6 +53,14 @@ func (scs *SingleConsumerSession) SetUsageForSession(cuNeededForSession uint64, 
 	return nil
 }
 
+// RouterKey is the key this session was taken under, which is also the key UsedProviders filed
+// its provider under: AddUsed reads it from here. A release has to name the same key. The
+// request's own extensions are not always that key, because a request that degrades to a
+// regular provider takes its sessions under the plain key.
+func (scs *SingleConsumerSession) RouterKey() RouterKey {
+	return scs.routerKey
+}
+
 func (scs *SingleConsumerSession) Free(err error) {
 	if scs.usedProviders != nil {
 		scs.usedProviders.RemoveUsed(scs.Parent.PublicLavaAddress, scs.routerKey, err)

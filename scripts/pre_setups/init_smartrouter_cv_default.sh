@@ -38,7 +38,11 @@
 
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 PROJECT_ROOT=$(cd "${__dir}"/../.. && pwd)
-source "$__dir"/../useful_commands.sh
+# command_exists used to come from scripts/useful_commands.sh, whose other helpers all drove the
+# lavad chain CLI and were removed with it.
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
 
 LOGS_DIR="${PROJECT_ROOT}/debugging/logs"
 mkdir -p "$LOGS_DIR"

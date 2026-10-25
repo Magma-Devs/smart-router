@@ -19,7 +19,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
-	plantypes "github.com/magma-Devs/smart-router/types/plans"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -262,7 +262,7 @@ func TestExtensions(t *testing.T) {
 	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, specname)
 	require.NoError(t, err)
 
-	chainParser.SetPolicy(&plantypes.Policy{ChainPolicies: []plantypes.ChainPolicy{{ChainID: specname, Requirements: []plantypes.ChainRequirement{{Extensions: []string{"archive"}}}}}}, specname, "jsonrpc")
+	chainParser.SetPolicy(&Policy{ChainPolicies: []ChainPolicy{{ChainID: specname, Requirements: []ChainRequirement{{Extensions: []string{"archive"}}}}}}, specname, "jsonrpc")
 	parsingForCrafting, apiCollection, ok := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
 	require.True(t, ok)
 	collectionData := apiCollection.CollectionData
@@ -711,6 +711,23 @@ func startTestJsonRPCListener(t *testing.T, ctx context.Context, slowHandler boo
 // healthPath, so a test can put it where an operator might: on "/".
 func startTestJsonRPCListenerWithHealthPath(t *testing.T, ctx context.Context, healthPath string) (*JsonRPCChainListener, string) {
 	t.Helper()
+	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	return startTestJsonRPCListenerWithOptions(t, ctx, healthPath, nil, logger)
+}
+
+// startTestJsonRPCListenerWithOptions serves a listener with its health route on
+// healthPath, relaySender behind its relay paths (nil when a test never sends a
+// relay: the handlers dereference it) and logger as its metrics and usage sink.
+func startTestJsonRPCListenerWithOptions(t *testing.T, ctx context.Context, healthPath string, relaySender RelaySender, logger *metrics.RPCConsumerLogs) (*JsonRPCChainListener, string) {
+	t.Helper()
+	return startTestJsonRPCListenerWithSubscriptions(t, ctx, healthPath, relaySender, logger, nil)
+}
+
+// startTestJsonRPCListenerWithSubscriptions is startTestJsonRPCListenerWithOptions with
+// wsSubscriptionManager behind the websocket subscribe path.
+func startTestJsonRPCListenerWithSubscriptions(t *testing.T, ctx context.Context, healthPath string, relaySender RelaySender, logger *metrics.RPCConsumerLogs, wsSubscriptionManager WSSubscriptionManager) (*JsonRPCChainListener, string) {
+	t.Helper()
 	// ListenToMessages uses the custom rand package which requires initialization.
 	// The package-level TestMain (chain_router_test.go) does not call InitRandomSeed,
 	// so we do it here. InitRandomSeed is idempotent.
@@ -723,9 +740,7 @@ func startTestJsonRPCListenerWithHealthPath(t *testing.T, ctx context.Context, h
 		ApiInterface:    "jsonrpc",
 		HealthCheckPath: healthPath,
 	}
-	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
-	require.NoError(t, err)
-	listener := NewJrpcChainListener(ctx, endpoint, nil, alwaysHealthyReporter{}, logger, nil, nil)
+	listener := NewJrpcChainListener(ctx, endpoint, relaySender, alwaysHealthyReporter{}, logger, nil, wsSubscriptionManager)
 
 	cmdFlags := common.ConsumerCmdFlags{}
 	go listener.Serve(ctx, cmdFlags)
@@ -948,5 +963,174 @@ func TestJsonRPCChainListener_IdleConnectionIsReleasedWhenClientIgnoresClose(t *
 	case <-handlerReturned:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the idle connection's handler never returned: the router is holding it for the life of the process")
+	}
+}
+
+// usageCaptureSink hands every relay_usage event the router emits to the test.
+type usageCaptureSink struct {
+	events chan metrics.RelayUsageEvent
+}
+
+func (s *usageCaptureSink) Emit(event metrics.RelayUsageEvent)                { s.events <- event }
+func (s *usageCaptureSink) EmitOptimizerQoS(metrics.OptimizerQoSReportToSend) {}
+func (s *usageCaptureSink) Stats() metrics.SinkStats                          { return metrics.SinkStats{} }
+func (s *usageCaptureSink) Close()                                            {}
+
+// plainRelayMessage is a parsed relay with no parse directive, so the websocket
+// manager takes the normal-relay branch. It only answers GetParseDirective: any
+// other call reaches the nil ProtocolMessage and fails the test loudly.
+type plainRelayMessage struct {
+	ProtocolMessage
+}
+
+func (plainRelayMessage) GetParseDirective() *spectypes.ParseDirective { return nil }
+
+const wsRelayStubReply = `{"jsonrpc":"2.0","id":1,"result":"0x1"}`
+
+// wsRelayStub is the slice of RelaySender a normal websocket relay uses.
+type wsRelayStub struct{}
+
+func (wsRelayStub) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
+	return nil, errors.New("not used")
+}
+
+func (wsRelayStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
+	return plainRelayMessage{}, nil
+}
+
+func (wsRelayStub) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
+	return &common.RelayResult{Reply: &pairingtypes.RelayReply{Data: []byte(wsRelayStubReply)}, StatusCode: http.StatusOK}, nil
+}
+
+// MAG-4055: a websocket relay's relay_usage event carries the Origin the client
+// sent on the handshake, the same as an HTTP or gRPC relay's event does.
+func TestJsonRPCChainListener_WebsocketRelayUsageCarriesOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header http.Header
+		want   string
+	}{
+		{name: "origin sent", header: http.Header{"Origin": {"https://app.example"}}, want: "https://app.example"},
+		{name: "no origin", header: nil, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			serveCtx, cancelServe := context.WithCancel(context.Background())
+			defer cancelServe()
+			sink := &usageCaptureSink{events: make(chan metrics.RelayUsageEvent, 8)}
+			logger, err := metrics.NewRPCConsumerLogs(nil, sink, nil)
+			require.NoError(t, err)
+			listener, addr := startTestJsonRPCListenerWithOptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, wsRelayStub{}, logger)
+			t.Cleanup(func() {
+				shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancelShutdown()
+				_ = listener.Shutdown(shutdownCtx)
+			})
+
+			client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws", tc.header)
+			require.NoError(t, err)
+			defer client.Close()
+
+			require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`)))
+			_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+			_, reply, err := client.ReadMessage()
+			require.NoError(t, err)
+			require.JSONEq(t, wsRelayStubReply, string(reply))
+
+			select {
+			case event := <-sink.events:
+				assert.Equal(t, tc.want, event.Origin)
+				assert.Equal(t, "ETH1", event.ChainID)
+				assert.True(t, event.Success)
+			case <-time.After(3 * time.Second):
+				t.Fatal("the websocket relay emitted no relay_usage event")
+			}
+		})
+	}
+}
+
+// subscribeRelayMessage is a parsed eth_subscribe: the websocket manager takes the
+// subscription branch. It answers only what that branch reads before and after a failed
+// StartSubscription.
+type subscribeRelayMessage struct {
+	ProtocolMessage
+}
+
+func (subscribeRelayMessage) GetParseDirective() *spectypes.ParseDirective {
+	return &spectypes.ParseDirective{FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE}
+}
+
+func (subscribeRelayMessage) GetApiCollection() *spectypes.ApiCollection {
+	return &spectypes.ApiCollection{CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceJsonRPC}}
+}
+
+func (subscribeRelayMessage) RelayPrivateData() *pairingtypes.RelayPrivateData {
+	return &pairingtypes.RelayPrivateData{}
+}
+
+func (subscribeRelayMessage) GetApi() *spectypes.Api { return &spectypes.Api{Name: "eth_subscribe"} }
+
+func (subscribeRelayMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
+	return &rpcInterfaceMessages.JsonrpcMessage{}
+}
+
+// wsSubscribeStub parses every websocket message as an eth_subscribe.
+type wsSubscribeStub struct{ wsRelayStub }
+
+func (wsSubscribeStub) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []pairingtypes.Metadata) (ProtocolMessage, error) {
+	return subscribeRelayMessage{}, nil
+}
+
+// failingSubscriptions refuses every subscribe.
+type failingSubscriptions struct{ WSSubscriptionManager }
+
+var errSubscribeRefused = errors.New("subscribe refused by every provider")
+
+func (failingSubscriptions) StartSubscription(context.Context, ProtocolMessage, string, string, string, *metrics.RelayMetrics) (*pairingtypes.RelayReply, <-chan *pairingtypes.RelayReply, error) {
+	return nil, nil, errSubscribeRefused
+}
+
+// UnsubscribeAll runs when the connection closes; there is nothing to tear down.
+func (failingSubscriptions) UnsubscribeAll(context.Context, string, string, string, *metrics.RelayMetrics) error {
+	return nil
+}
+
+// MAG-4081: a websocket subscribe that fails is counted once, as a failure, under its
+// method and the caller's customer, the same as a failed gRPC subscribe. Every error
+// branch after StartSubscription continues, so the emit has to run before them.
+func TestJsonRPCChainListener_FailedWebsocketSubscribeIsCounted(t *testing.T) {
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	sink := &usageCaptureSink{events: make(chan metrics.RelayUsageEvent, 8)}
+	logger, err := metrics.NewRPCConsumerLogs(nil, sink, nil)
+	require.NoError(t, err)
+	listener, addr := startTestJsonRPCListenerWithSubscriptions(t, serveCtx, common.DEFAULT_HEALTH_PATH, wsSubscribeStub{}, logger, failingSubscriptions{})
+	t.Cleanup(func() {
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelShutdown()
+		_ = listener.Shutdown(shutdownCtx)
+	})
+
+	client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws", http.Header{"project-id": {"acme"}})
+	require.NoError(t, err)
+	defer client.Close()
+
+	require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","method":"eth_subscribe","params":["newHeads"],"id":1}`)))
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, _, err = client.ReadMessage()
+	require.NoError(t, err, "the client gets an error reply")
+
+	select {
+	case event := <-sink.events:
+		assert.False(t, event.Success)
+		assert.Equal(t, "eth_subscribe", event.APIMethod)
+		assert.Equal(t, "acme", event.ProjectHash)
+		assert.Equal(t, "ETH1", event.ChainID)
+	case <-time.After(3 * time.Second):
+		t.Fatal("the failed subscribe emitted nothing: it is counted nowhere")
+	}
+	select {
+	case event := <-sink.events:
+		t.Fatalf("the failed subscribe was counted twice: %+v", event)
+	case <-time.After(200 * time.Millisecond):
 	}
 }

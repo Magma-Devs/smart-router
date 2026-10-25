@@ -6,13 +6,11 @@ package chainlib
 
 import (
 	context "context"
-	http "net/http"
 	reflect "reflect"
 	time "time"
 
 	gomock "github.com/golang/mock/gomock"
 	rpcInterfaceMessages "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	extensionslib "github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
 	metrics "github.com/magma-Devs/smart-router/protocol/metrics"
@@ -41,32 +39,6 @@ func NewMockChainParser(ctrl *gomock.Controller) *MockChainParser {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockChainParser) EXPECT() *MockChainParserMockRecorder {
 	return m.recorder
-}
-
-// Activate mocks base method.
-func (m *MockChainParser) Activate() {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Activate")
-}
-
-// Activate indicates an expected call of Activate.
-func (mr *MockChainParserMockRecorder) Activate() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Activate", reflect.TypeOf((*MockChainParser)(nil).Activate))
-}
-
-// Active mocks base method.
-func (m *MockChainParser) Active() bool {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Active")
-	ret0, _ := ret[0].(bool)
-	return ret0
-}
-
-// Active indicates an expected call of Active.
-func (mr *MockChainParserMockRecorder) Active() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Active", reflect.TypeOf((*MockChainParser)(nil).Active))
 }
 
 // ChainBlockStats mocks base method.
@@ -115,24 +87,6 @@ func (mr *MockChainParserMockRecorder) ExtensionsParser() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExtensionsParser", reflect.TypeOf((*MockChainParser)(nil).ExtensionsParser))
 }
 
-// ExtractDataFromRequest mocks base method.
-func (m *MockChainParser) ExtractDataFromRequest(arg0 *http.Request) (string, string, string, []relay.Metadata, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ExtractDataFromRequest", arg0)
-	ret0, _ := ret[0].(string)
-	ret1, _ := ret[1].(string)
-	ret2, _ := ret[2].(string)
-	ret3, _ := ret[3].([]relay.Metadata)
-	ret4, _ := ret[4].(error)
-	return ret0, ret1, ret2, ret3, ret4
-}
-
-// ExtractDataFromRequest indicates an expected call of ExtractDataFromRequest.
-func (mr *MockChainParserMockRecorder) ExtractDataFromRequest(arg0 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExtractDataFromRequest", reflect.TypeOf((*MockChainParser)(nil).ExtractDataFromRequest), arg0)
-}
-
 // GetAllInternalPaths mocks base method.
 func (m *MockChainParser) GetAllInternalPaths() []string {
 	m.ctrl.T.Helper()
@@ -179,20 +133,6 @@ func (mr *MockChainParserMockRecorder) GetParsingByTagForCollection(tag, addons,
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetParsingByTagForCollection", reflect.TypeOf((*MockChainParser)(nil).GetParsingByTagForCollection), tag, addons, internalPath, allowBaseFallback)
 }
 
-// GetUniqueName mocks base method.
-func (m *MockChainParser) GetUniqueName() string {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetUniqueName")
-	ret0, _ := ret[0].(string)
-	return ret0
-}
-
-// GetUniqueName indicates an expected call of GetUniqueName.
-func (mr *MockChainParserMockRecorder) GetUniqueName() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUniqueName", reflect.TypeOf((*MockChainParser)(nil).GetUniqueName))
-}
-
 // GetVerifications mocks base method.
 func (m *MockChainParser) GetVerifications(supported []string, internalPath, apiInterface string) ([]VerificationContainer, error) {
 	m.ctrl.T.Helper()
@@ -224,6 +164,20 @@ func (mr *MockChainParserMockRecorder) HandleHeaders(metadata, apiCollection, he
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "HandleHeaders", reflect.TypeOf((*MockChainParser)(nil).HandleHeaders), metadata, apiCollection, headersDirection)
 }
 
+// ReplyHeaderDirectives mocks base method.
+func (m *MockChainParser) ReplyHeaderDirectives() []*spec.Header {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ReplyHeaderDirectives")
+	ret0, _ := ret[0].([]*spec.Header)
+	return ret0
+}
+
+// ReplyHeaderDirectives indicates an expected call of ReplyHeaderDirectives.
+func (mr *MockChainParserMockRecorder) ReplyHeaderDirectives() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReplyHeaderDirectives", reflect.TypeOf((*MockChainParser)(nil).ReplyHeaderDirectives))
+}
+
 // IsInternalPathEnabled mocks base method.
 func (m *MockChainParser) IsInternalPathEnabled(internalPath, apiInterface, addon string) bool {
 	m.ctrl.T.Helper()
@@ -250,20 +204,6 @@ func (m *MockChainParser) IsTagInCollection(tag spec.FUNCTION_TAG, collectionKey
 func (mr *MockChainParserMockRecorder) IsTagInCollection(tag, collectionKey interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsTagInCollection", reflect.TypeOf((*MockChainParser)(nil).IsTagInCollection), tag, collectionKey)
-}
-
-// ParseDirectiveEnabled mocks base method.
-func (m *MockChainParser) ParseDirectiveEnabled() bool {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ParseDirectiveEnabled")
-	ret0, _ := ret[0].(bool)
-	return ret0
-}
-
-// ParseDirectiveEnabled indicates an expected call of ParseDirectiveEnabled.
-func (mr *MockChainParserMockRecorder) ParseDirectiveEnabled() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ParseDirectiveEnabled", reflect.TypeOf((*MockChainParser)(nil).ParseDirectiveEnabled))
 }
 
 // ParseMsg mocks base method.
@@ -311,21 +251,6 @@ func (mr *MockChainParserMockRecorder) SetPolicy(policy, chainId, apiInterface i
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetPolicy", reflect.TypeOf((*MockChainParser)(nil).SetPolicy), policy, chainId, apiInterface)
 }
 
-// SetResponseFromRelayResult mocks base method.
-func (m *MockChainParser) SetResponseFromRelayResult(arg0 *common.RelayResult) (*http.Response, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SetResponseFromRelayResult", arg0)
-	ret0, _ := ret[0].(*http.Response)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// SetResponseFromRelayResult indicates an expected call of SetResponseFromRelayResult.
-func (mr *MockChainParserMockRecorder) SetResponseFromRelayResult(arg0 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetResponseFromRelayResult", reflect.TypeOf((*MockChainParser)(nil).SetResponseFromRelayResult), arg0)
-}
-
 // SetSkipWebsocketVerification mocks base method.
 func (m *MockChainParser) SetSkipWebsocketVerification(skip bool) {
 	m.ctrl.T.Helper()
@@ -362,32 +287,6 @@ func (m *MockChainParser) SkipWebsocketVerification() bool {
 func (mr *MockChainParserMockRecorder) SkipWebsocketVerification() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SkipWebsocketVerification", reflect.TypeOf((*MockChainParser)(nil).SkipWebsocketVerification))
-}
-
-// UpdateBlockTime mocks base method.
-func (m *MockChainParser) UpdateBlockTime(newBlockTime time.Duration) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "UpdateBlockTime", newBlockTime)
-}
-
-// UpdateBlockTime indicates an expected call of UpdateBlockTime.
-func (mr *MockChainParserMockRecorder) UpdateBlockTime(newBlockTime interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateBlockTime", reflect.TypeOf((*MockChainParser)(nil).UpdateBlockTime), newBlockTime)
-}
-
-// ValidateMessage mocks base method.
-func (m *MockChainParser) ValidateMessage(arg0 ChainMessage) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ValidateMessage", arg0)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// ValidateMessage indicates an expected call of ValidateMessage.
-func (mr *MockChainParserMockRecorder) ValidateMessage(arg0 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ValidateMessage", reflect.TypeOf((*MockChainParser)(nil).ValidateMessage), arg0)
 }
 
 // MockChainMessage is a mock of ChainMessage interface.
@@ -438,18 +337,6 @@ func (m *MockChainMessage) CheckResponseError(data []byte, httpStatusCode int) (
 func (mr *MockChainMessageMockRecorder) CheckResponseError(data, httpStatusCode interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CheckResponseError", reflect.TypeOf((*MockChainMessage)(nil).CheckResponseError), data, httpStatusCode)
-}
-
-// DisableErrorHandling mocks base method.
-func (m *MockChainMessage) DisableErrorHandling() {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "DisableErrorHandling")
-}
-
-// DisableErrorHandling indicates an expected call of DisableErrorHandling.
-func (mr *MockChainMessageMockRecorder) DisableErrorHandling() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DisableErrorHandling", reflect.TypeOf((*MockChainMessage)(nil).DisableErrorHandling))
 }
 
 // GetApi mocks base method.
@@ -605,6 +492,20 @@ func (mr *MockChainMessageMockRecorder) OverrideExtensions(extensionNames, exten
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OverrideExtensions", reflect.TypeOf((*MockChainMessage)(nil).OverrideExtensions), extensionNames, extensionParser)
 }
 
+// GetUnavailableExtensions mocks base method.
+func (m *MockChainMessage) GetUnavailableExtensions() []string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetUnavailableExtensions")
+	ret0, _ := ret[0].([]string)
+	return ret0
+}
+
+// GetUnavailableExtensions indicates an expected call of GetUnavailableExtensions.
+func (mr *MockChainMessageMockRecorder) GetUnavailableExtensions() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUnavailableExtensions", reflect.TypeOf((*MockChainMessage)(nil).GetUnavailableExtensions))
+}
+
 // RequestedBlock mocks base method.
 func (m *MockChainMessage) RequestedBlock() (int64, int64) {
 	m.ctrl.T.Helper()
@@ -644,20 +545,6 @@ func (m *MockChainMessage) SetForceCacheRefresh(force bool) bool {
 func (mr *MockChainMessageMockRecorder) SetForceCacheRefresh(force interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetForceCacheRefresh", reflect.TypeOf((*MockChainMessage)(nil).SetForceCacheRefresh), force)
-}
-
-// SubscriptionIdExtractor mocks base method.
-func (m *MockChainMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SubscriptionIdExtractor", reply)
-	ret0, _ := ret[0].(string)
-	return ret0
-}
-
-// SubscriptionIdExtractor indicates an expected call of SubscriptionIdExtractor.
-func (mr *MockChainMessageMockRecorder) SubscriptionIdExtractor(reply interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SubscriptionIdExtractor", reflect.TypeOf((*MockChainMessage)(nil).SubscriptionIdExtractor), reply)
 }
 
 // TimeoutOverride mocks base method.
@@ -878,18 +765,6 @@ func (m *MockRelaySender) EXPECT() *MockRelaySenderMockRecorder {
 	return m.recorder
 }
 
-// CancelSubscriptionContext mocks base method.
-func (m *MockRelaySender) CancelSubscriptionContext(subscriptionKey string) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "CancelSubscriptionContext", subscriptionKey)
-}
-
-// CancelSubscriptionContext indicates an expected call of CancelSubscriptionContext.
-func (mr *MockRelaySenderMockRecorder) CancelSubscriptionContext(subscriptionKey interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CancelSubscriptionContext", reflect.TypeOf((*MockRelaySender)(nil).CancelSubscriptionContext), subscriptionKey)
-}
-
 // ParseRelay mocks base method.
 func (m *MockRelaySender) ParseRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, metadata []relay.Metadata) (ProtocolMessage, error) {
 	m.ctrl.T.Helper()
@@ -1019,20 +894,6 @@ func NewMockChainRouter(ctrl *gomock.Controller) *MockChainRouter {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockChainRouter) EXPECT() *MockChainRouterMockRecorder {
 	return m.recorder
-}
-
-// ExtensionsSupported mocks base method.
-func (m *MockChainRouter) ExtensionsSupported(internalPath string, extensions []string) bool {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ExtensionsSupported", internalPath, extensions)
-	ret0, _ := ret[0].(bool)
-	return ret0
-}
-
-// ExtensionsSupported indicates an expected call of ExtensionsSupported.
-func (mr *MockChainRouterMockRecorder) ExtensionsSupported(internalPath, extensions interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExtensionsSupported", reflect.TypeOf((*MockChainRouter)(nil).ExtensionsSupported), internalPath, extensions)
 }
 
 // SendNodeMsg mocks base method.

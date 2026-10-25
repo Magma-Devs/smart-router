@@ -108,7 +108,7 @@ func TestRelayProcessor_CrossValidationOutlierRealPath(t *testing.T) {
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
 	usedProviders := lavasession.NewUsedProviders(nil)
 	sm := newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation) // threshold 2, minGroups 1
-	rp := NewRelayProcessor(ctx, sm.crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
+	rp := NewRelayProcessor(ctx, sm.crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, sm)
 
 	mkResp := func(provider, group, data string) *RelayResponse {
 		return &RelayResponse{
@@ -244,7 +244,7 @@ func TestRelayProcessor_CrossValidationFailureRealPath(t *testing.T) {
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
 	usedProviders := lavasession.NewUsedProviders(nil)
 	sm := newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation) // threshold 2, minGroups 1
-	rp := NewRelayProcessor(ctx, sm.crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
+	rp := NewRelayProcessor(ctx, sm.crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, sm)
 
 	mkResp := func(provider, group, data string) *RelayResponse {
 		return &RelayResponse{
@@ -502,7 +502,7 @@ func TestRelayProcessor_PerGroupNilReplyRealPath(t *testing.T) {
 		selection:             CrossValidation,
 		crossValidationParams: &common.CrossValidationParams{MaxParticipants: 8, AgreementThreshold: 2, MinGroups: 2, PerGroupQuorum: true},
 	}
-	rp := NewRelayProcessor(ctx, sm.crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, RelayRetriesManagerInstance, sm)
+	rp := NewRelayProcessor(ctx, sm.crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, sm)
 
 	mkResp := func(provider, group, data string) *RelayResponse {
 		return &RelayResponse{
@@ -534,4 +534,220 @@ func TestRelayProcessor_PerGroupNilReplyRealPath(t *testing.T) {
 	result, err := rp.ProcessingResult()
 	require.NoError(t, err, "real per-group quorum must succeed despite earlier nil replies")
 	require.Equal(t, "A", string(result.Reply.Data))
+}
+
+// TestCrossValidationMissingOnlyGroups covers the predicate the state machine reads at the attempt window
+// (MAG-3993): true only when some real hash reached the agreement count without the quorum, and no provider
+// still in flight outside an under-staffed group could complete a quorum on any hash.
+func TestCrossValidationMissingOnlyGroups(t *testing.T) {
+	zero := [32]byte{}
+	hashA := [32]byte{0xA1}
+	hashB := [32]byte{0xB2}
+	defaultParams := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 3, MinGroups: 2}
+	perGroupParams := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5, MinGroups: 2, PerGroupQuorum: true}
+	wideParams := &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 6, MinGroups: 2}
+
+	// layout is what the dispatcher records and the processor files: the group of every provider the request
+	// was sent to, which of them have answered (success or error), and the under-staffed groups.
+	type layout struct {
+		groups       map[string]string
+		answered     []string
+		understaffed []string
+		noGroup      []string // sent the request, but with no recorded group
+	}
+	// The MAG-3993 shape: p1 and p2 in g1 have answered; p3, the sole member of g2, has not.
+	soleMemberQuiet := &layout{
+		groups:       map[string]string{"p1": "g1", "p2": "g1", "p3": "g2"},
+		answered:     []string{"p1", "p2"},
+		understaffed: []string{"g2"},
+	}
+	agreedInG1 := map[[32]byte]*quorumStat{hashA: {count: 2, groupCounts: map[string]int{"g1": 2}}}
+
+	for _, tc := range []struct {
+		name      string
+		selection Selection
+		params    *common.CrossValidationParams
+		quorum    map[[32]byte]*quorumStat
+		layout    *layout // nil: the dispatcher recorded none
+		want      bool
+	}{
+		{
+			name: "count met in one group, and only an under-staffed group's provider is left", selection: CrossValidation, params: defaultParams,
+			quorum: agreedInG1, layout: soleMemberQuiet,
+			want: true,
+		},
+		{
+			name: "count not met: agreement itself is missing", selection: CrossValidation, params: defaultParams,
+			quorum: map[[32]byte]*quorumStat{
+				hashA: {count: 1, groupCounts: map[string]int{"g1": 1}},
+				hashB: {count: 1, groupCounts: map[string]int{"g2": 1}},
+			},
+			layout: soleMemberQuiet,
+			want:   false,
+		},
+		{
+			name: "quorum reached: nothing is missing", selection: CrossValidation, params: defaultParams,
+			quorum: map[[32]byte]*quorumStat{hashA: {count: 2, groupCounts: map[string]int{"g1": 1, "g2": 1}}},
+			layout: soleMemberQuiet,
+			want:   false,
+		},
+		{
+			name: "no answers yet", selection: CrossValidation, params: defaultParams,
+			quorum: map[[32]byte]*quorumStat{}, layout: soleMemberQuiet,
+			want: false,
+		},
+		{
+			name: "nil replies are a fallback, not a reason to stop", selection: CrossValidation, params: defaultParams,
+			quorum: map[[32]byte]*quorumStat{zero: {count: 2, groupCounts: map[string]int{"g1": 2}}}, layout: soleMemberQuiet,
+			want: false,
+		},
+		{
+			// The finding-1 fleet: both groups hold three providers, so neither is under-staffed.
+			name: "a provider from an adequately staffed group could still add the missing group", selection: CrossValidation, params: wideParams,
+			quorum: agreedInG1,
+			layout: &layout{
+				groups:   map[string]string{"p1": "g1", "p2": "g1", "p3": "g1", "p4": "g2", "p5": "g2", "p6": "g2"},
+				answered: []string{"p1", "p2"},
+			},
+			want: false,
+		},
+		{
+			// A cannot be completed by p3, which shares its group, but B can: one answer from g3 and one from g1.
+			name: "the quorum can still form on another hash, from a group that has already answered", selection: CrossValidation, params: wideParams,
+			quorum: map[[32]byte]*quorumStat{
+				hashA: {count: 2, groupCounts: map[string]int{"g1": 2}},
+				hashB: {count: 1, groupCounts: map[string]int{"g3": 1}},
+			},
+			layout: &layout{
+				groups:       map[string]string{"p1": "g1", "p2": "g1", "p3": "g1", "p4": "g3"},
+				answered:     []string{"p1", "p2", "p4"},
+				understaffed: []string{"g3"},
+			},
+			want: false,
+		},
+		{
+			name: "a sibling in the agreeing group cannot add a group", selection: CrossValidation, params: wideParams,
+			quorum: agreedInG1,
+			layout: &layout{
+				groups:       map[string]string{"p1": "g1", "p2": "g1", "p3": "g1", "p4": "g2"},
+				answered:     []string{"p1", "p2"},
+				understaffed: []string{"g2"},
+			},
+			want: true,
+		},
+		{
+			// p4 answered B; counting it as still in flight would let it complete A.
+			name: "a provider that has answered is not waited on", selection: CrossValidation, params: wideParams,
+			quorum: map[[32]byte]*quorumStat{
+				hashA: {count: 2, groupCounts: map[string]int{"g1": 2}},
+				hashB: {count: 1, groupCounts: map[string]int{"g2": 1}},
+			},
+			layout: &layout{
+				groups:       map[string]string{"p1": "g1", "p2": "g1", "p4": "g2", "p5": "g3"},
+				answered:     []string{"p1", "p2", "p4"},
+				understaffed: []string{"g3"},
+			},
+			want: true,
+		},
+		{
+			name: "a nil quorum that providers in flight could still form keeps the request waiting", selection: CrossValidation, params: wideParams,
+			quorum: map[[32]byte]*quorumStat{
+				hashA: {count: 2, groupCounts: map[string]int{"g1": 2}},
+				zero:  {count: 1, groupCounts: map[string]int{"g2": 1}},
+			},
+			layout: &layout{
+				groups:   map[string]string{"p1": "g1", "p2": "g1", "p3": "g1", "p4": "g2"},
+				answered: []string{"p1", "p2", "p4"},
+			},
+			want: false,
+		},
+		{
+			name: "no layout recorded: it cannot tell, so it does not stop", selection: CrossValidation, params: defaultParams,
+			quorum: agreedInG1,
+			want:   false,
+		},
+		{
+			name: "a provider in flight with no recorded group: it cannot tell, so it does not stop", selection: CrossValidation, params: defaultParams,
+			quorum: agreedInG1,
+			layout: &layout{
+				groups:       map[string]string{"p1": "g1", "p2": "g1", "p3": "g2"},
+				answered:     []string{"p1", "p2"},
+				understaffed: []string{"g2"},
+				noGroup:      []string{"p4"},
+			},
+			want: false,
+		},
+		{
+			// What completes a per-group quorum is a second answer from a group that has answered once.
+			name: "per-group: a second answer from a group that answered once can still complete it", selection: CrossValidation, params: perGroupParams,
+			quorum: map[[32]byte]*quorumStat{hashA: {count: 3, groupCounts: map[string]int{"g1": 2, "g2": 1}}},
+			layout: &layout{
+				groups:   map[string]string{"p1": "g1", "p2": "g1", "p3": "g2", "p4": "g2"},
+				answered: []string{"p1", "p2", "p3"},
+			},
+			want: false,
+		},
+		{
+			// p4 answered with an error, and p5's group is too small ever to corroborate on its own.
+			name: "per-group: no second answer can come, so no quorum can form", selection: CrossValidation, params: perGroupParams,
+			quorum: map[[32]byte]*quorumStat{hashA: {count: 3, groupCounts: map[string]int{"g1": 2, "g2": 1}}},
+			layout: &layout{
+				groups:       map[string]string{"p1": "g1", "p2": "g1", "p3": "g2", "p4": "g2", "p5": "g3"},
+				answered:     []string{"p1", "p2", "p3", "p4"},
+				understaffed: []string{"g3"},
+			},
+			want: true,
+		},
+		{
+			name: "min-groups 1 is reached on count alone", selection: CrossValidation,
+			params: &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 3, MinGroups: 1},
+			quorum: agreedInG1, layout: soleMemberQuiet,
+			want: false,
+		},
+		{
+			name: "not cross-validation", selection: Stateless, params: defaultParams,
+			quorum: agreedInG1, layout: soleMemberQuiet,
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rp := &RelayProcessor{crossValidationParams: tc.params, selection: tc.selection, quorumMap: tc.quorum}
+			if tc.layout != nil {
+				queried := append([]string(nil), tc.layout.noGroup...)
+				for provider := range tc.layout.groups {
+					queried = append(queried, provider)
+				}
+				rp.SetCrossValidationQueriedProviders(queried)
+				rp.SetCrossValidationGroupLayout(tc.layout.groups, tc.layout.understaffed)
+				rp.crossValidationAnswered = make(map[string]struct{})
+				for _, provider := range tc.layout.answered {
+					rp.crossValidationAnswered[provider] = struct{}{}
+				}
+			}
+			require.Equal(t, tc.want, rp.CrossValidationMissingOnlyGroups())
+		})
+	}
+	var nilRP *RelayProcessor
+	require.False(t, nilRP.CrossValidationMissingOnlyGroups())
+}
+
+// TestRecordCrossValidationResponse_MarksEveryAnswer pins the bookkeeping the attempt-window check relies on:
+// every filed response marks its provider as answered, an error included, or a provider that failed would
+// count as still in flight for the rest of the request. Only a success enters the tally.
+func TestRecordCrossValidationResponse_MarksEveryAnswer(t *testing.T) {
+	rp := &RelayProcessor{selection: CrossValidation, quorumMap: map[[32]byte]*quorumStat{}}
+	hash := [32]byte{0xA1}
+	answer := func(provider string) *RelayResponse {
+		return &RelayResponse{RelayResult: common.RelayResult{
+			ResponseHash: hash,
+			ProviderInfo: common.ProviderInfo{ProviderAddress: provider, ProviderGroup: "g1"},
+		}}
+	}
+	rp.recordCrossValidationResponse(answer("p1"), true)
+	rp.recordCrossValidationResponse(answer("p2"), false)
+
+	require.Contains(t, rp.crossValidationAnswered, "p1")
+	require.Contains(t, rp.crossValidationAnswered, "p2", "an error is an answer: the provider is no longer in flight")
+	require.Equal(t, 1, rp.quorumMap[hash].count, "only the success is tallied")
+	require.Equal(t, map[string]int{"g1": 1}, rp.quorumMap[hash].groupCounts)
 }

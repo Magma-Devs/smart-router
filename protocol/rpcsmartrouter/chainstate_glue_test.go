@@ -247,7 +247,7 @@ func TestRecomputeChainStateConsensus_PopulatedSnapshotSetsBaseline(t *testing.T
 	// Two endpoints report the same tip via relay harvest → a strict majority.
 	for _, url := range []string{"http://a:8545", "http://b:8545"} {
 		ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-		_, err := m.GetOrCreateTracker(ep, nil)
+		_, err := m.GetOrCreateTracker("", ep, nil)
 		require.NoError(t, err)
 		gen, ok := m.ObservationGeneration(url)
 		require.True(t, ok)
@@ -284,7 +284,7 @@ func TestSiteB_ObservationFresherThanTrackerAtomic(t *testing.T) {
 
 	url := "http://ep:8545"
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-	_, err := m.GetOrCreateTracker(ep, nil) // tracker exists, but its poll atomic stays 0 (nil conn)
+	_, err := m.GetOrCreateTracker("", ep, nil) // tracker exists, but its poll atomic stays 0 (nil conn)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
@@ -386,7 +386,7 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 		BlocksToSave:     1,
 		// Production wiring (rpcsmartrouter_server.go OnTipObservation): every accepted
 		// poll/relay observation drives the per-chain ChainState tip.
-		OnTipObservation: func(block int64) { cs.SetLatestBlock(block) },
+		OnTipObservation: func(_ string, block int64, _ bool) { cs.SetLatestBlock(block) },
 	})
 	t.Cleanup(m.Stop)
 
@@ -400,7 +400,7 @@ func TestHarvest_ArchiveRoutingTipGuardedByChainState(t *testing.T) {
 
 	url := "http://ep:8545"
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-	_, err := m.GetOrCreateTracker(ep, nil)
+	_, err := m.GetOrCreateTracker("", ep, nil)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)
@@ -546,7 +546,7 @@ func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
 		ApiInterface:     "jsonrpc",
 		AverageBlockTime: 200 * time.Millisecond,
 		BlocksToSave:     1,
-		OnTipObservation: func(block int64) { cs.SetLatestBlock(block) },
+		OnTipObservation: func(_ string, block int64, _ bool) { cs.SetLatestBlock(block) },
 	})
 	t.Cleanup(m.Stop)
 
@@ -561,7 +561,7 @@ func TestEndpointSyncGap_NoBaselinePodFallsBackToObservedTip(t *testing.T) {
 	cm := &mockChainMessage{api: &spectypes.Api{Name: "eth_blockNumber"}, requestedBlock: spectypes.LATEST_BLOCK}
 	for _, url := range []string{leaderURL, laggardURL} {
 		ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-		_, err := m.GetOrCreateTracker(ep, nil)
+		_, err := m.GetOrCreateTracker("", ep, nil)
 		require.NoError(t, err)
 		gen, ok := m.ObservationGeneration(url)
 		require.True(t, ok)
@@ -685,10 +685,10 @@ func TestOnTipObservation_GaugeAdvancesUnderPollOnlyTraffic(t *testing.T) {
 	}
 
 	// Two consecutive poll observations — no relay anywhere in this test — must move the gauge.
-	rpcss.onTipObservation(25_638_537)
+	rpcss.onTipObservation("https://poll.example", 25_638_537, false)
 	require.Equal(t, float64(25_638_537), readRouterLatestBlockGauge(t),
 		"first poll observation must seed the gauge — pre-fix, only a relay could")
-	rpcss.onTipObservation(25_638_545)
+	rpcss.onTipObservation("https://poll.example", 25_638_545, false)
 	require.Equal(t, float64(25_638_545), readRouterLatestBlockGauge(t),
 		"the gauge must track the tip under poll-only traffic — the frozen-gauge case from MAG-2629")
 
@@ -698,13 +698,69 @@ func TestOnTipObservation_GaugeAdvancesUnderPollOnlyTraffic(t *testing.T) {
 	// that state must leave the gauge UNTOUCHED: a stale tip must not advance it, and zeroing it
 	// would turn routine TTL expiry into a false "chain reset" on the graph.
 	cs.SetDebugClockOffset(200 * time.Second)
-	rpcss.onTipObservation(25_638_600)
+	rpcss.onTipObservation("https://poll.example", 25_638_600, false)
 	require.Equal(t, float64(25_638_545), readRouterLatestBlockGauge(t),
 		"a stale gated read must leave the gauge at its last fresh value")
 	cs.SetDebugClockOffset(0)
 
 	// Nil-guards: fixtures build servers without metrics or ChainState wired — the hook fires
 	// from tracker callbacks and must never panic on such a server.
-	(&RPCSmartRouterServer{}).onTipObservation(1)
-	(&RPCSmartRouterServer{chainState: cs}).onTipObservation(1)
+	(&RPCSmartRouterServer{}).onTipObservation("https://poll.example", 1, false)
+	(&RPCSmartRouterServer{chainState: cs}).onTipObservation("https://poll.example", 1, false)
+}
+
+// readBlockRegressions reads smartrouter_latest_block_regressions_total for ETH1/jsonrpc and one
+// reason off the default registry; 0 when the series does not exist yet. Shared registry, so
+// callers assert on a before/after delta.
+func readBlockRegressions(t *testing.T, reason string) float64 {
+	t.Helper()
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "smartrouter_latest_block_regressions_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			lm := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				lm[lp.GetName()] = lp.GetValue()
+			}
+			if lm["spec"] == "ETH1" && lm["apiInterface"] == "jsonrpc" && lm["reason"] == reason {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
+}
+
+// MAG-4153: the chain's latest block moving backwards is counted (the fleet alert's signal) and
+// pulls smartrouter_latest_block down with it. Built through newChainState, the constructor
+// ServeRPCRequests uses, so dropping the hook from production wiring fails this test.
+func TestChainBlockRegression_CountedAndGaugeFollows(t *testing.T) {
+	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
+	rpcss := &RPCSmartRouterServer{
+		smartRouterEndpointMetrics: mm,
+		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+	}
+	rpcss.chainState = rpcss.newChainState(12 * time.Second)
+
+	consensusBefore := readBlockRegressions(t, chainstate.RegressionReasonConsensus)
+	staleBefore := readBlockRegressions(t, chainstate.RegressionReasonStaleTip)
+
+	// A tip far ahead of a fresh majority: Recompute snaps it down to the baseline.
+	rpcss.onTipObservation("a", 25_000_000, false)
+	now := time.Now()
+	rpcss.chainState.Recompute([]chainstate.BlockObservation{
+		{URL: "a", Block: 20_000_000, ObservedAt: now},
+		{URL: "b", Block: 20_000_000, ObservedAt: now},
+	})
+	require.Equal(t, consensusBefore+1, readBlockRegressions(t, chainstate.RegressionReasonConsensus))
+	require.Equal(t, float64(20_000_000), readRouterLatestBlockGauge(t),
+		"the gauge follows the tip down instead of holding the rejected higher block")
+
+	// Tip goes stale, then a lower observation is re-adopted.
+	rpcss.chainState.SetDebugClockOffset(10 * time.Minute)
+	rpcss.chainState.SetLatestBlock(19_999_990)
+	require.Equal(t, staleBefore+1, readBlockRegressions(t, chainstate.RegressionReasonStaleTip))
+	require.Equal(t, float64(19_999_990), readRouterLatestBlockGauge(t))
 }

@@ -1,0 +1,38 @@
+{
+  "GUID": "7965367",
+  "api_interface": "tendermintrpc",
+  "attempts": [
+    {
+      "batch": 0,
+      "error_code": "",
+      "latency_ms": "<ms>",
+      "message": "",
+      "outcome": "ok",
+      "returned_to_client": true,
+      "sent_ms": "<ms>",
+      "upstream": "node-a"
+    }
+  ],
+  "chain": "LAVA",
+  "error": "",
+  "error_code": "",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "broadcast_tx_sync",
+  "outcome": "ok",
+  "reply_bytes": 150,
+  "request_bytes": 80,
+  "schema": 2,
+  "selection": "stateful",
+  "served_by": "node-a",
+  "stateful": true,
+  "status": 200,
+  "stop_reason": "Success",
+  "tx_code": 5,
+  "tx_codespace": "sdk",
+  "tx_log": "insufficient funds: 10ulava is smaller than 20ulava"
+}

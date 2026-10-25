@@ -33,6 +33,9 @@ func newReleaseHarness(t *testing.T) *releaseHarness {
 		[]*common.NodeUrl{{Url: srv.URL()}},
 		nil, nil, nil,
 	)
+	// Closed before the node: a subscription left live at the end of a test would otherwise
+	// see the node go away and keep the pool reconnecting with backoff into the next tests.
+	t.Cleanup(manager.Close)
 	return &releaseHarness{t: t, srv: srv, manager: manager}
 }
 
@@ -130,6 +133,27 @@ func (h *releaseHarness) attached(clientKey string) bool {
 		}
 	}
 	return false
+}
+
+// pooledSubscriptionCount sums what every pooled upstream connection believes it carries.
+// The pool scales a connection down only when this reaches zero, so a count left behind
+// keeps a connection open for the life of the process.
+func (h *releaseHarness) pooledSubscriptionCount() int32 {
+	h.manager.lock.RLock()
+	pools := make([]*UpstreamWSPool, 0, len(h.manager.upstreamPools))
+	for _, pool := range h.manager.upstreamPools {
+		pools = append(pools, pool)
+	}
+	h.manager.lock.RUnlock()
+	var n int32
+	for _, pool := range pools {
+		pool.lock.RLock()
+		for _, conn := range pool.connections {
+			n += conn.SubscriptionCount()
+		}
+		pool.lock.RUnlock()
+	}
+	return n
 }
 
 func (h *releaseHarness) activeSubscriptionCount() int {

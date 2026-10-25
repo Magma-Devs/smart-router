@@ -77,7 +77,7 @@ func TestFreshRelayTip_OnlyRelaySourceSuppressesPoll(t *testing.T) {
 
 		tip, ok := m.freshRelayTip(url, now)
 		require.True(t, ok, "a fresh relay tip suppresses the poll")
-		require.Equal(t, int64(1000), tip)
+		require.Equal(t, int64(1000), tip.Block)
 	})
 
 	t.Run("fresh poll observation does NOT suppress the poll", func(t *testing.T) {
@@ -155,7 +155,7 @@ func TestEndpointMonitor_SolanaTrafficGate_SuppressesUpstreamPoll(t *testing.T) 
 	t.Cleanup(m.Stop)
 
 	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
-	_, err := m.GetOrCreateTracker(ep, conn)
+	_, err := m.GetOrCreateTracker("", ep, conn)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)
 	require.True(t, ok)

@@ -87,6 +87,15 @@ func TestRESTRelay_ClientContentTypeReachesTheWire(t *testing.T) {
 		require.Equal(t, "application/json", got)
 	})
 
+	t.Run("a JSON document under a client library's default content-type goes as application/json", func(t *testing.T) {
+		// curl -d sends a form type and a browser fetch sends text/plain when the caller set
+		// no header; strict nodes answer 415 to JSON labelled either way.
+		for _, generic := range []string{contentTypeFormURLEncoded, "text/plain;charset=UTF-8"} {
+			got := relay(t, cosmosSimulatePath, `{"tx_bytes":"AAAA"}`, []pairingtypes.Metadata{{Name: "Content-Type", Value: generic}})
+			require.Equal(t, "application/json", got, "client sent %q", generic)
+		}
+	})
+
 	t.Run("an undeclared header other than content-type is still not forwarded", func(t *testing.T) {
 		// The carve-out is for the header that describes the body, nothing wider; spec
 		// directives keep governing every other header.
@@ -109,6 +118,34 @@ func TestRESTRelay_SpecOverrideStillWinsOverClientContentType(t *testing.T) {
 
 	got := relay(t, cosmosSimulatePath, "tx_bytes=AAAA", []pairingtypes.Metadata{{Name: "Content-Type", Value: "application/json"}})
 	require.Equal(t, contentTypeFormURLEncoded, got, "a spec pass_override is the operator's explicit intent and must beat the client's header")
+}
+
+// TestRESTRelay_DeclaredPassSendNormalizesGenericContentType covers a spec that declares
+// content-type as pass_send (APT1 does, so BCS submissions reach the fullnode): the
+// generic-default rewrite applies there too, while a specific type is forwarded as sent.
+func TestRESTRelay_DeclaredPassSendNormalizesGenericContentType(t *testing.T) {
+	relay := contentTypeRelayHarness(t, "LAVA", spectypes.APIInterfaceRest, func(spec *spectypes.Spec) {
+		var declared bool
+		for _, collection := range spec.ApiCollections {
+			if collection.CollectionData.ApiInterface == spectypes.APIInterfaceRest && collection.CollectionData.Type == http.MethodPost {
+				collection.Headers = append(collection.Headers, &spectypes.Header{Name: "content-type", Kind: spectypes.Header_pass_send})
+				declared = true
+			}
+		}
+		require.True(t, declared, "the spec needs a REST POST collection to carry the directive")
+	})
+
+	got := relay(t, cosmosSimulatePath, `{"tx_bytes":"AAAA"}`, []pairingtypes.Metadata{{Name: "Content-Type", Value: contentTypeFormURLEncoded}})
+	require.Equal(t, "application/json", got)
+
+	// TEZOS declares content-type pass_send too, and /injection/operation takes the signed
+	// operation as a JSON string; Octez answers 415 to it under a form or text type.
+	got = relay(t, cosmosSimulatePath, `"6c0a1f"`, []pairingtypes.Metadata{{Name: "Content-Type", Value: contentTypeFormURLEncoded}})
+	require.Equal(t, "application/json", got)
+
+	const bcs = "application/x.aptos.signed_transaction+bcs"
+	got = relay(t, cosmosSimulatePath, "\x00\x01bcs", []pairingtypes.Metadata{{Name: "Content-Type", Value: bcs}})
+	require.Equal(t, bcs, got)
 }
 
 // TestJSONRPCRelay_IgnoresClientContentType is the boundary of MAG-2745: JSON-RPC

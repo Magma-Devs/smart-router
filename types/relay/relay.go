@@ -525,11 +525,6 @@ func (rs RelaySession) DataToSign() []byte {
 	return buf
 }
 
-// HashRounds implements sigs.Signable.
-func (rs RelaySession) HashRounds() int {
-	return 1
-}
-
 // RelayRequest pairs a signed session header with the private relay data.
 type RelayRequest struct {
 	RelaySession *RelaySession     `json:"relay_session"`

@@ -30,18 +30,9 @@ func refuseInvalidKeyPrefix(prefix string) error {
 
 // Cache semantics live in core (a storage-agnostic Engine over a KVStore);
 // this file is the gRPC shim: delegation, hit/miss accounting, and metrics.
-// The error variables and value types below are re-exported so the package
-// surface is unchanged by the split.
+// EntryTypeError is re-exported for the store in this package that reports it.
 var (
-	NotFoundError     = core.NotFoundError
-	HashMismatchError = core.HashMismatchError
-	EntryTypeError    = core.EntryTypeError
-)
-
-const (
-	SEP = ";"
-	// CompressionThreshold is the minimum data size (in bytes) before gzip is attempted.
-	CompressionThreshold = core.CompressionThreshold
+	EntryTypeError = core.EntryTypeError
 )
 
 type RelayerCacheServer struct {
@@ -50,9 +41,6 @@ type RelayerCacheServer struct {
 	cacheHits   uint64
 	cacheMisses uint64
 }
-
-// CacheValue is the stored form of a cached relay entry (core.Envelope).
-type CacheValue = core.Envelope
 
 // engine assembles the semantic core over this server's ristretto stores.
 // Rebuilt per call so fixtures that construct CacheServer directly and set
@@ -67,14 +55,6 @@ func (s *RelayerCacheServer) engine() *core.Engine {
 			BlocksHashesToHeights: s.CacheServer.ExpirationBlocksHashesToHeights,
 		},
 	}
-}
-
-func (s *RelayerCacheServer) getSeenBlockForSharedStateMode(chainId string, sharedStateId string) int64 {
-	return s.engine().GetSharedTip(context.Background(), chainId, sharedStateId)
-}
-
-func (s *RelayerCacheServer) setSeenBlockOnSharedStateMode(chainId, sharedStateId string, seenBlock int64, ttl time.Duration) {
-	s.engine().SetSharedTip(context.Background(), chainId, sharedStateId, seenBlock, ttl)
 }
 
 func (s *RelayerCacheServer) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCacheGet) (*relaytypes.CacheRelayReply, error) {
@@ -137,9 +117,6 @@ func (s *RelayerCacheServer) FlushCache(ctx context.Context, req *emptypb.Empty)
 	}
 	if err := s.engine().Purge(ctx); err != nil {
 		return nil, err
-	}
-	if s.CacheServer.endpointObservations != nil {
-		s.CacheServer.endpointObservations.clear()
 	}
 	utils.LavaFormatInfo("cache server flushed by FlushCache RPC")
 	return &emptypb.Empty{}, nil

@@ -19,6 +19,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/utils"
+	"github.com/magma-Devs/smart-router/utils/rand"
 	scoreutils "github.com/magma-Devs/smart-router/utils/score"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -317,10 +318,11 @@ func postResetEndpointHealthRouter(mux http.Handler) *httptest.ResponseRecorder 
 	return rr
 }
 
-// stateEndpointPaths are the read-only state endpoints added for MAG-2202.
-var stateEndpointPaths = []string{"/debug/endpoint-state", "/debug/chain-state", "/debug/provider-routing", "/debug/probe-loop"}
+// stateEndpointPaths are the read-only state endpoints: the four added for MAG-2202, and
+// /debug/sticky-claims (MAG-3860).
+var stateEndpointPaths = []string{"/debug/endpoint-state", "/debug/chain-state", "/debug/provider-routing", "/debug/probe-loop", "/debug/sticky-claims"}
 
-// TestDebugStateEndpoints_MethodNotAllowed: all three are GET-only (the acceptance criterion that any
+// TestDebugStateEndpoints_MethodNotAllowed: each is GET-only (the acceptance criterion that any
 // non-GET method returns 405).
 func TestDebugStateEndpoints_MethodNotAllowed(t *testing.T) {
 	var offsetNano atomic.Int64
@@ -573,7 +575,7 @@ func TestDebugProbeLoop_ReportsCycleStats(t *testing.T) {
 	var offsetNano atomic.Int64
 	server := &RPCSmartRouterServer{listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
 	server.probeStats.setInterval(5 * time.Second)
-	server.probeStats.recordCycle(time.Now(), 7*time.Millisecond, 4, 1, 2, 1)
+	server.probeStats.recordCycle(time.Now(), 7*time.Millisecond, 4, 1, 2, 1, false, false)
 
 	router := &RPCSmartRouter{
 		rpcServers: map[string]*RPCSmartRouterServer{
@@ -1053,4 +1055,62 @@ func TestDebugRuntimeConfig_SmartRouter_PerChainOptimizer(t *testing.T) {
 
 	// Exactly the chains we wired — no extras, none dropped.
 	require.Equal(t, want, resp.PerChainOptimizer)
+}
+
+// reset-all claims to be the superset of reset-scores, but it never reset the chain trackers (so
+// the tip re-seeded from the pre-reset trackers) nor the probe back-off; both now do (MAG-4278).
+func TestDebugResetAll_SmartRouter_ResetsTrackersAndProbeBackoffLikeResetScores(t *testing.T) {
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+
+	rr := postResetAllRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `"chain-trackers"`)
+	require.Contains(t, rr.Body.String(), `"probe-backoff"`)
+
+	rr = postResetScoresRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.Contains(t, rr.Body.String(), `"probe_backoff_reset":0`)
+}
+
+// The test above wires no router, so it pins only the "cleared" strings: it stays green with the
+// two reset calls removed. This one seeds a real per-endpoint tip and checks that reset-all drops
+// it (MAG-4278).
+func TestDebugResetAll_SmartRouter_DropsTheEndpointTip(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	monitor := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+		ChainParser:      newRealChainParserForHarvest(t, "ETH1"),
+		ChainID:          "ETH1",
+		ApiInterface:     "jsonrpc",
+		AverageBlockTime: time.Hour, // no poll lands during the test
+		BlocksToSave:     1,
+	})
+	t.Cleanup(monitor.Stop)
+
+	url := "http://reset-all-drops-the-tip:8545"
+	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	_, err := monitor.GetOrCreateTracker("", ep, nil)
+	require.NoError(t, err)
+	gen, ok := monitor.ObservationGeneration(url)
+	require.True(t, ok)
+	server := &RPCSmartRouterServer{endpointChainTrackerManager: monitor, listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
+	server.recordRelayBlockObservation(ep, gen, 12345)
+	observation, _ := monitor.GetObservation(url)
+	require.Equal(t, int64(12345), observation.LatestBlock)
+
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{
+		optimizers: newEmptyOptimizersRouter(),
+		offsetNano: &offsetNano,
+		router:     &RPCSmartRouter{rpcServers: map[string]*RPCSmartRouterServer{"ETH1-jsonrpc": server}},
+	})
+	rr := postResetAllRouter(mux)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	observation, _ = monitor.GetObservation(url)
+	require.Zero(t, observation.LatestBlock, "reset-all must drop the endpoint tip it reports as cleared")
 }

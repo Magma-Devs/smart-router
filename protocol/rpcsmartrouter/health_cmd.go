@@ -18,7 +18,6 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
@@ -94,6 +93,8 @@ type healthOptions struct {
 	timeout         time.Duration
 	skipWebsocket   bool
 	concurrency     int
+	// cvResolver is parsed once in RunE and shared read-only by every probe (MAG-3604).
+	cvResolver *CrossValidationPolicyResolver
 }
 
 // CreateHealthCobraCommand builds the `smartrouter health` command: a one-shot,
@@ -151,8 +152,7 @@ running directory, ./config, then ` + defaultNodeHome + `.`,
 			if len(opts.staticSpecPaths) == 0 {
 				return emitFatal(fmt.Errorf("--use-static-spec is required (smart-router mode has no live spec source)"))
 			}
-			opts.githubToken, _ = cmd.Flags().GetString(commonlib.GitHubTokenFlag)
-			opts.gitlabToken, _ = cmd.Flags().GetString(commonlib.GitLabTokenFlag)
+			opts.githubToken, opts.gitlabToken = specTokensFromFlags(cmd.Flags())
 			opts.timeout, _ = cmd.Flags().GetDuration("timeout")
 			opts.skipWebsocket, _ = cmd.Flags().GetBool(commonlib.SkipWebsocketVerificationFlag)
 			opts.concurrency, _ = cmd.Flags().GetInt("concurrency")
@@ -161,12 +161,29 @@ running directory, ./config, then ` + defaultNodeHome + `.`,
 			}
 			includeBackup, _ := cmd.Flags().GetBool("include-backup")
 
-			providers, err := collectHealthProviders(args, includeBackup, inlineAuthFrom(cmd.Flags()))
+			providers, err := collectHealthProviders(args, includeBackup, grpcAuthConfigFromFlags(cmd.Flags()))
 			if err != nil {
 				return emitFatal(err)
 			}
 			if len(providers) == 0 {
 				return emitFatal(fmt.Errorf("no endpoints to probe — config has no direct-rpc providers and no inline endpoints were given"))
+			}
+
+			// A cross-validation config the router would refuse to boot must fail this command too — it is
+			// what an operator reaches for to find out why a config will not start (MAG-3604). This is the
+			// context-free half (a policy naming a chain-id/api-interface no endpoint serves, the
+			// enabled/forbid contradiction), decidable without a spec. The spec-dependent method guard is
+			// applied per endpoint inside probeProvider, where the parser is already built, and surfaces as
+			// a row error rather than a fatal one — consistent with how this command reports endpoint faults.
+			cvConfig, err := ParseCrossValidationConfig(viper.GetViper())
+			if err != nil {
+				return emitFatal(utils.LavaFormatError("invalid cross-validation configuration", err))
+			}
+			if opts.cvResolver, err = NewCrossValidationPolicyResolver(cvConfig); err != nil {
+				return emitFatal(utils.LavaFormatError("invalid cross-validation configuration", err))
+			}
+			if err := validatePolicyEndpoints(cvConfig, endpointsForProviders(providers)); err != nil {
+				return emitFatal(utils.LavaFormatError("invalid cross-validation configuration", err))
 			}
 
 			results := runHealthProbes(context.Background(), providers, opts)
@@ -184,18 +201,24 @@ running directory, ./config, then ` + defaultNodeHome + `.`,
 	cmdHealth.Flags().Bool(chainproxy.GRPCAllowInsecureConnection, false, "inline endpoints: allow insecure (self-signed) grpc connections; a config's node urls carry their own auth-config")
 	cmdHealth.Flags().Bool(chainproxy.GRPCUseTls, false, "inline endpoints: dial grpc over tls only; unset, a plaintext dial is tried first and upgraded to tls when it fails")
 	cmdHealth.Flags().StringArray(commonlib.UseStaticSpecFlag, nil, "load specs from file, directory, or remote URL — required (same paths as rpcsmartrouter --use-static-spec)")
-	cmdHealth.Flags().String(commonlib.GitHubTokenFlag, "", "GitHub personal access token for a private spec repository")
-	cmdHealth.Flags().String(commonlib.GitLabTokenFlag, "", "GitLab personal access token for a private spec repository")
+	addSpecTokenFlags(cmdHealth.Flags())
 	return cmdHealth
 }
 
-// inlineAuthFrom is the auth-config the inline gRPC flags give an inline url. Both
-// default off: a gRPC dial then tries plaintext first and upgrades to TLS when that
-// fails.
-func inlineAuthFrom(flags *pflag.FlagSet) commonlib.AuthConfig {
-	useTLS, _ := flags.GetBool(chainproxy.GRPCUseTls)
-	allowInsecure, _ := flags.GetBool(chainproxy.GRPCAllowInsecureConnection)
-	return commonlib.AuthConfig{UseTLS: useTLS, AllowInsecure: allowInsecure}
+// endpointsForProviders reduces the probe targets to the distinct (chain-id, api-interface) pairs the
+// cross-validation preflight matches policies against — the same identity a request's policy lookup uses.
+func endpointsForProviders(providers []healthProvider) []*lavasession.RPCEndpoint {
+	seen := map[string]struct{}{}
+	var endpoints []*lavasession.RPCEndpoint
+	for _, p := range providers {
+		key := p.chainID + "\x00" + p.apiInterface
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		endpoints = append(endpoints, &lavasession.RPCEndpoint{ChainID: p.chainID, ApiInterface: p.apiInterface})
+	}
+	return endpoints
 }
 
 // collectHealthProviders normalizes probe targets from either inline args or a config file.
@@ -391,6 +414,14 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 	rpcEndpoint := lavasession.RPCEndpoint{ChainID: provider.chainID, ApiInterface: provider.apiInterface}
 	if err := statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(ctx, chainParser, opts.staticSpecPaths, rpcEndpoint, opts.githubToken, opts.gitlabToken); err != nil {
 		return rowsFromError(fmt.Errorf("load spec: %w", err))
+	}
+
+	// The spec-dependent cross-validation guard the router runs at boot: a policy naming a method this
+	// endpoint's spec does not serve can never apply (MAG-3604). The parser is loaded, so check it here and
+	// report a violation as a row error — a config the router would refuse to boot then shows as not-ok. The
+	// resolver is parsed once in RunE and shared read-only, so the concurrent probes touch no global config.
+	if cvErr := validateCrossValidationSpecGuards(opts.cvResolver, chainParser, provider.chainID, provider.apiInterface); cvErr != nil {
+		return rowsFromError(cvErr)
 	}
 
 	endpoint := &lavasession.RPCProviderEndpoint{

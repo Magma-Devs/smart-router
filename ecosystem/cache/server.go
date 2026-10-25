@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto/v2"
 	"github.com/improbable-eng/grpc-web/go/grpcweb"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	relaytypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/spf13/pflag"
@@ -34,8 +34,6 @@ const (
 	// TTL formula constants moved to core (core.Policy owns the TTL table);
 	// re-exported here for the package's existing consumers and tests.
 	DefaultExpirationForNonFinalized            = core.DefaultExpirationForNonFinalized
-	SharedStateTipBlockMultiplier               = core.SharedStateTipBlockMultiplier
-	MinSharedStateTipExpiration                 = core.MinSharedStateTipExpiration
 	DefaultExpirationTimeFinalizedMultiplier    = 1.0
 	DefaultExpirationTimeNonFinalizedMultiplier = 1.0
 	DefaultExpirationBlocksHashesToHeights      = core.DefaultExpirationBlocksHashesToHeights
@@ -47,6 +45,7 @@ const (
 
 type CacheServer struct {
 	finalizedCache             *ristretto.Cache[string, any]
+	chainTips                  chainTipStore
 	tempCache                  *ristretto.Cache[string, any] // cache for temporary inputs, such as latest blocks
 	blocksHashesToHeightsCache *ristretto.Cache[string, any]
 	// endpointObservations holds the fleet's per-endpoint poll observations for the fleet
@@ -173,7 +172,7 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 		}
 	}
 
-	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(chainproxy.MaxCallRecvMsgSize)
+	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(common.GRPCMaxCallRecvMsgSize)
 	s := grpc.NewServer(serverReceiveMaxMessageSize)
 
 	wrappedServer := grpcweb.WrapServer(s)

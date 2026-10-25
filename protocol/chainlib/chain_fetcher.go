@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,72 +29,17 @@ const (
 	ChainFetcherHeaderName = "X-LAVA-Provider"
 )
 
-type IChainFetcher interface {
-	FetchLatestBlockNum(ctx context.Context) (int64, error)
-	FetchBlockHashByNum(ctx context.Context, blockNum int64) (string, error)
-	FetchEndpoint() lavasession.RPCProviderEndpoint
-	Validate(ctx context.Context) error
-	GetVerificationsStatus() []*pairingtypes.Verification
-	CustomMessage(ctx context.Context, path string, data []byte, connectionType string, apiName string) ([]byte, error)
-}
-
 type ChainFetcher struct {
-	endpoint            *lavasession.RPCProviderEndpoint
-	chainRouter         ChainRouter
-	nodeUrlRouter       NodeUrlRouterFactory
-	chainParser         ChainParser
-	cache               performance.CacheBackend
-	latestBlock         int64
-	verificationsStatus common.SafeSyncMap[string, bool]
-	cachedVerifications atomic.Value // holds []*pairingtypes.Verification for faster access
-	cacheValid          atomic.Bool
-}
-
-func (cf *ChainFetcher) GetVerificationsStatus() []*pairingtypes.Verification {
-	// Try to get from cache first
-	if cf.cacheValid.Load() {
-		value, ok := cf.cachedVerifications.Load().([]*pairingtypes.Verification)
-		if ok {
-			return value
-		} else {
-			utils.LavaFormatError("invalid usage of cachedVerifications, could not cast result into []*pairingtypes.Verification type", nil, utils.Attribute{Key: "cachedVerifications", Value: cf.cachedVerifications.Load()})
-		}
-	}
-
-	// If not in cache, create new slice
-	verifications := make([]*pairingtypes.Verification, 0)
-	cf.verificationsStatus.Range(func(name string, passed bool) bool {
-		verifications = append(verifications, &pairingtypes.Verification{
-			Name:   name,
-			Passed: passed,
-		})
-		return true
-	})
-
-	// Store in cache
-	cf.cachedVerifications.Store(verifications)
-	cf.cacheValid.Store(true)
-	return verifications
-}
-
-// Add this method to invalidate cache when verification status changes
-func (cf *ChainFetcher) invalidateVerificationsCache() {
-	cf.cacheValid.Store(false)
+	endpoint      *lavasession.RPCProviderEndpoint
+	chainRouter   ChainRouter
+	nodeUrlRouter NodeUrlRouterFactory
+	chainParser   ChainParser
+	cache         performance.CacheBackend
+	latestBlock   int64
 }
 
 func (cf *ChainFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
 	return *cf.endpoint
-}
-
-func (cf *ChainFetcher) getVerificationsKey(verification VerificationContainer, apiInterface string, chainId string) string {
-	key := chainId + "-" + apiInterface + "-" + verification.Name
-	if verification.Addon != "" {
-		key += "-" + verification.Addon
-	}
-	if verification.Extension != "" {
-		key += "-" + verification.Extension
-	}
-	return key
 }
 
 // skipVerification is the single gate deciding whether a verification runs for a node-url.
@@ -141,12 +87,6 @@ func verificationsForNodeUrl(url common.NodeUrl, verifications []VerificationCon
 	return kept
 }
 
-// verificationNeedsHead reports whether a verification is measured against the
-// chain head, and so cannot run without one.
-func verificationNeedsHead(verification VerificationContainer) bool {
-	return verification.Value == "" && verification.LatestDistance != 0
-}
-
 // needsLatestBlock reports whether any verification that will ACTUALLY RUN for this
 // node-url depends on the chain head, and therefore whether Validate has to spend a
 // FetchLatestBlockNum relay against the upstream before verifying.
@@ -166,6 +106,14 @@ func needsLatestBlock(url common.NodeUrl, verifications []VerificationContainer)
 		}
 	}
 	return false
+}
+
+// verificationNeedsHead reports whether a verification measures a distance from the chain head:
+// it has no expected value and a LatestDistance, and so cannot run without a head. needsLatestBlock
+// asks it of the verifications that will run; a url's pass asks it of each one when the head read
+// failed.
+func verificationNeedsHead(v VerificationContainer) bool {
+	return v.Value == "" && v.LatestDistance != 0
 }
 
 // stopValidateRetries reports whether a failed attempt should end Validate's zero-delay
@@ -699,7 +647,6 @@ func admissionFrom(endpoint *lavasession.RPCProviderEndpoint, outcomes []nodeUrl
 // concurrently, so one that hangs costs only itself. Outcomes are in configured
 // order.
 func (cf *ChainFetcher) verifyNodeUrls(ctx context.Context, opts verifyOptions) []nodeUrlOutcome {
-	defer cf.invalidateVerificationsCache()
 	outcomes := make([]nodeUrlOutcome, len(cf.endpoint.NodeUrls))
 	var wg sync.WaitGroup
 	for _, positions := range connectionGroups(cf.endpoint.NodeUrls) {
@@ -838,7 +785,6 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		default:
 			verifyErr = g.check(ctx, router, verification, latestBlock)
 		}
-		g.cf.verificationsStatus.Store(g.cf.getVerificationsKey(verification, g.cf.endpoint.ApiInterface, g.cf.endpoint.ChainID), verifyErr == nil)
 		outcome.checks = append(outcome.checks, checkOutcome{verification: verification, err: verifyErr})
 		if verifyErr != nil {
 			utils.LavaFormatWarning("failed verification on provider startup", verifyErr, utils.LogAttr("verification", verification.Name))
@@ -990,6 +936,11 @@ func (cf *ChainFetcher) populateCache(relayData *pairingtypes.RelayPrivateData, 
 		}
 
 		_, averageBlockTime, _, _ := cf.chainParser.ChainBlockStats()
+		// BlocksHashesToHeights is left unset on purpose: the router learns no
+		// block-hash→height mappings (MAG-3807). In the router this write is unreachable
+		// anyway — every NewChainFetcher passes Cache: nil (health_cmd.go, spec_reverifier.go,
+		// testing.go) — but it is the site a future writer would most plausibly wire up
+		// first, so the omission is stated here rather than implied (MAG-3892).
 		err = cf.cache.SetEntry(new_ctx, &pairingtypes.RelayCacheSet{
 			RequestHash:      hash,
 			BlockHash:        requestedBlockHash,
@@ -1268,6 +1219,13 @@ func (cf *ChainFetcher) fetchLatestBlockNumVia(ctx context.Context, router Chain
 			{Key: "error", Value: err},
 		}...)
 	}
+	if rateLimited := RateLimitedReplyError(cf.endpoint.ChainID, chainMessage, reply.RelayReply.Data, reply.StatusCode, parserInput); rateLimited != nil {
+		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited, []utils.Attribute{
+			{Key: "chainId", Value: chainId},
+			{Key: "nodeUrl", Value: proxyUrl.Url},
+			{Key: "Method", Value: parsing.ApiName},
+		}...)
+	}
 	parsedInput := parser.ParseBlockFromReply(parserInput, parsing.ResultParsing, parsing.Parsers)
 	blockNum := parsedInput.GetBlock()
 	if blockNum == spectypes.NOT_APPLICABLE {
@@ -1370,6 +1328,13 @@ func (cf *ChainFetcher) fetchSingleBlockHashByNum(ctx context.Context, blockNum 
 		}...)
 	}
 
+	if rateLimited := RateLimitedReplyError(cf.endpoint.ChainID, chainMessage, responseData, reply.StatusCode, parserInput); rateLimited != nil {
+		return "", responseData, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited, []utils.Attribute{
+			{Key: "chainId", Value: chainId},
+			{Key: "nodeUrl", Value: proxyUrl.Url},
+			{Key: "Method", Value: parsing.ApiName},
+		}...)
+	}
 	res, err := parser.ParseBlockHashFromReplyAndDecode(parserInput, parsing.ResultParsing, parsing.Parsers)
 	if err != nil {
 		return "", responseData, utils.LavaFormatDebug(tagName+" Failed ParseMessageResponse", []utils.Attribute{
@@ -1412,6 +1377,86 @@ func NewChainFetcher(ctx context.Context, options *ChainFetcherOptions) *ChainFe
 	}
 }
 
+// RateLimitedReplyError reads a reply whose error body is the upstream refusing the request for
+// rate — a 429 a gateway mirrors into the body of a 200, or into a reply on an open WebSocket
+// connection, where no HTTP status reaches the transport layer and nothing types the error on
+// the way up. It returns the typed rate-limit error (no Retry-After: a body carries none) so the
+// ChainTracker's hold-off and every errors.Is(err, common.StatusCodeError429) consumer read it as
+// they read an HTTP 429, and nil for a reply with no error or with any other error.
+// "Rate-limited" here is the registry's retryable-and-rate-limited verdict: the upstream is
+// healthy but busy. A non-retryable limit (NODE_LIMIT_EXCEEDED, a request shape the node refuses)
+// is not a reason to hold the endpoint off (MAG-4165).
+//
+// Two body forms. A JSON-RPC error envelope is read through input. An interface that answers its
+// errors inside a 2xx in its own shape is read by its request message (replyStatusClassifier):
+// Sui's GraphQL server answers a rate or query-cost limit as an error coded RESOURCE_EXHAUSTED in
+// a 200, which carries no JSON-RPC envelope, so the head poll failed as "failed to parse
+// response", recorded no hold-off and counted a poll failure every cycle (MAG-4378).
+// httpStatusCode is the reply's status, 0 when none reached the caller.
+//
+// Both head / block-hash fetchers call it between formatting the reply and parsing a block out
+// of it: this ChainFetcher (startup verification, re-verification, the health command) and the
+// per-endpoint endpointstate.EndpointPoller behind every per-url ChainTracker, which sends over
+// its own DirectRPCConnection and never passes through here. The poller is the one that polls
+// the url a relay dials, so it is where the body form reached the tracker as an untyped "failed
+// to parse" error.
+func RateLimitedReplyError(chainID string, chainMessage ChainMessageForSend, data []byte, httpStatusCode int, input parser.RPCInput) error {
+	if rateLimited := rateLimitedClassifiedReply(chainID, chainMessage, data, httpStatusCode); rateLimited != nil {
+		return rateLimited
+	}
+	jsonErr := input.GetError()
+	if jsonErr == nil {
+		return nil
+	}
+	return RateLimitedErrorBody(chainID, jsonErr.Code, jsonErr.Message)
+}
+
+// replyStatusClassifier is a request message whose interface answers its errors inside a 2xx and
+// can say which HTTP status the error registry should classify a reply under
+// (rpcInterfaceMessages.GraphQLMessage, which maps RESOURCE_EXHAUSTED to a 429).
+type replyStatusClassifier interface {
+	ClassificationStatus(data []byte, httpStatusCode int) int
+}
+
+// rateLimitedClassifiedReply is RateLimitedReplyError's reading of an error the request message
+// classifies itself. It classifies the reply the way the relay sender classifies the same reply
+// (sendGraphQLRelay): the message's own error verdict and status, on the transport the collection
+// maps to, so a poll and a relay can never disagree about whether an answer is a rate limit.
+func rateLimitedClassifiedReply(chainID string, chainMessage ChainMessageForSend, data []byte, httpStatusCode int) error {
+	if chainMessage == nil {
+		return nil
+	}
+	classifier, ok := chainMessage.GetRPCMessage().(replyStatusClassifier)
+	if !ok {
+		return nil
+	}
+	hasError, message := chainMessage.CheckResponseError(data, httpStatusCode)
+	if !hasError {
+		return nil
+	}
+	transport := common.TransportREST
+	if collection := chainMessage.GetApiCollection(); collection != nil {
+		transport = common.ApiInterfaceToTransport(collection.CollectionData.ApiInterface)
+	}
+	status := classifier.ClassificationStatus(data, httpStatusCode)
+	classified := common.ClassifyError(nil, common.GetChainFamilyOrDefault(chainID), transport, status, message)
+	if classified == nil || !classified.Retryable || !classified.SubCategory.IsRateLimit() {
+		return nil
+	}
+	return common.RateLimited(fmt.Errorf("reply error classified as %d: %s", status, message), 0)
+}
+
+// RateLimitedErrorBody is RateLimitedReplyError for a caller holding the JSON-RPC error's code
+// and message rather than a parsed reply: endpointstate.EndpointPoller.CustomMessage, behind the
+// SVM tracker's latest-slot poll, which reads the raw reply and never builds an RPCInput.
+func RateLimitedErrorBody(chainID string, code int, message string) error {
+	classified := common.ClassifyError(nil, common.GetChainFamilyOrDefault(chainID), common.TransportJsonRPC, code, message)
+	if classified == nil || !classified.Retryable || !classified.SubCategory.IsRateLimit() {
+		return nil
+	}
+	return common.RateLimited(fmt.Errorf("json-rpc error %d: %s", code, message), 0)
+}
+
 func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage ChainMessageForSend) (parsable parser.RPCInput, err error) {
 	var parserInput parser.RPCInput
 	respData := reply.Data
@@ -1430,31 +1475,57 @@ func FormatResponseForParsing(reply *pairingtypes.RelayReply, chainMessage Chain
 	return parserInput, nil
 }
 
-// this method will calculate the request hash by changing the original object, and returning the data back to it after calculating the hash
-// couldn't be used in parallel
+// HashCacheRequest derives the cache key for a relay without an extension directive. It computes
+// on a copy and never writes to relayData, so concurrent callers are safe (MAG-4242).
 func HashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId string) ([]byte, func([]byte) []byte, error) {
 	return hashCacheRequest(relayData, chainId, "")
 }
 
-// isClientBodyHeader reports whether a metadata entry is one of clientBodyHeaders.
-func isClientBodyHeader(entry pairingtypes.Metadata) bool {
-	_, ok := clientBodyHeaders[strings.ToLower(entry.Name)]
-	return ok
+// isDefaultContentType reports whether a metadata entry is a Content-Type whose media type is
+// application/json, the type the router sends for a REST body when the client names none.
+func isDefaultContentType(entry pairingtypes.Metadata) bool {
+	if !strings.EqualFold(entry.Name, "content-type") {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(entry.Value)
+	return err == nil && mediaType == "application/json"
 }
 
-// metadataWithoutClientBodyHeaders returns metadata with the clientBodyHeaders entries removed,
-// or metadata itself when it carries none, so the common case allocates nothing.
-func metadataWithoutClientBodyHeaders(metadata []pairingtypes.Metadata) []pairingtypes.Metadata {
-	if !slices.ContainsFunc(metadata, isClientBodyHeader) {
+// metadataWithoutDefaultContentType returns metadata with an application/json Content-Type
+// removed, or metadata itself when it carries none, so the common case allocates nothing.
+func metadataWithoutDefaultContentType(metadata []pairingtypes.Metadata) []pairingtypes.Metadata {
+	if !slices.ContainsFunc(metadata, isDefaultContentType) {
 		return metadata
 	}
 	kept := make([]pairingtypes.Metadata, 0, len(metadata)-1)
 	for _, entry := range metadata {
-		if !isClientBodyHeader(entry) {
+		if !isDefaultContentType(entry) {
 			kept = append(kept, entry)
 		}
 	}
 	return kept
+}
+
+// metadataForCacheKey returns the metadata hashCacheRequest puts in the key: metadata without an
+// application/json Content-Type, in a fixed order. The listeners build the forwarded metadata by
+// ranging over a map of the request's headers, so two identical requests can list the same headers
+// in different orders, and json.Marshal keeps whatever order it is handed. Sorting by name, then
+// value, makes the key a function of the headers alone. It sorts a copy: the caller's slice is what
+// the transport sends next, and spec overrides rely on its order (they come last and are applied
+// in order).
+func metadataForCacheKey(metadata []pairingtypes.Metadata) []pairingtypes.Metadata {
+	kept := metadataWithoutDefaultContentType(metadata)
+	if len(kept) < 2 {
+		return kept
+	}
+	sorted := slices.Clone(kept)
+	slices.SortStableFunc(sorted, func(a, b pairingtypes.Metadata) int {
+		if byName := strings.Compare(a.Name, b.Name); byName != 0 {
+			return byName
+		}
+		return strings.Compare(a.Value, b.Value)
+	})
+	return sorted
 }
 
 // hashCacheRequest derives the cache key for a relay. explicitExtensionDirective carries the
@@ -1463,49 +1534,36 @@ func metadataWithoutClientBodyHeaders(metadata []pairingtypes.Metadata) []pairin
 // in its own cache lane and cannot collide with a request that was only auto-promoted to the same
 // resolved Extensions. Passing "" reproduces the historical hash, keeping existing entries valid.
 func hashCacheRequest(relayData *pairingtypes.RelayPrivateData, chainId, explicitExtensionDirective string) ([]byte, func([]byte) []byte, error) {
-	originalData := relayData.Data
-	originalSalt := relayData.Salt
-	originalRequestedBlock := relayData.RequestBlock
-	originalSeenBlock := relayData.SeenBlock
-
-	originalRequestId := relayData.RequestId
-	originalTaskId := relayData.XTaskId
-	originalTxId := relayData.XTxId
-	originalMetadata := relayData.Metadata
-	defer func() {
-		// return all information back to the object on defer (in any case)
-		relayData.Data = originalData
-		relayData.Salt = originalSalt
-		relayData.RequestBlock = originalRequestedBlock
-		relayData.SeenBlock = originalSeenBlock
-
-		relayData.RequestId = originalRequestId
-		relayData.XTaskId = originalTaskId
-		relayData.XTxId = originalTxId
-		relayData.Metadata = originalMetadata
-	}()
-
+	// The key is computed on a copy with the per-request fields cleared, never on the request
+	// itself: the cache lookup runs on the state-machine goroutine and the cache write inside the
+	// attempt's goroutine, and the mutate-and-restore this used to do on the object both hand to
+	// the node raced them (MAG-4242). RelayPrivateData is a plain struct, so the copy carries every
+	// field; the slices it shares with the request are replaced, never written through.
+	keyData := *relayData
 	// we need to remove some data from the request so the cache will hit properly.
 	inputFormatter, outputFormatter := cacheformat.FormatterForRelayRequestAndResponse(relayData.ApiInterface)
-	relayData.Data = inputFormatter(relayData.Data) // remove id from request.
-	relayData.Salt = nil                            // remove salt
-	relayData.SeenBlock = 0                         // remove seen block
-	relayData.RequestId = ""                        // remove request id (unique per request)
-	relayData.XTaskId = nil                         // remove task id (unique per request)
-	relayData.XTxId = nil                           // remove tx id (unique per request)
-	// A client body header (content-type, forwarded on REST bodies since MAG-2745) says how the
-	// node should read the bytes in Data, which are already in the key. Two clients sending the
-	// same body with and without it are the same request; a value the node cannot read is a
-	// non-2xx answer that is never written. Keep it out so it cannot split the lane.
-	relayData.Metadata = metadataWithoutClientBodyHeaders(relayData.Metadata)
+	keyData.Data = inputFormatter(relayData.Data) // remove id from request.
+	keyData.Salt = nil                            // remove salt
+	keyData.SeenBlock = 0                         // remove seen block
+	keyData.RequestId = ""                        // remove request id (unique per request)
+	keyData.XTaskId = nil                         // remove task id (unique per request)
+	keyData.XTxId = nil                           // remove tx id (unique per request)
+	// A forwarded Content-Type says how the node reads the bytes in Data. application/json is the
+	// router's own default for a REST body, so a client that names it and one that sends none make
+	// the same request and share a lane: drop it from the key. Every other value stays in the key.
+	// It tells the node to read the same bytes differently, and some nodes answer a misread body
+	// with a 200 (an error envelope or a default result) that is cache-eligible, so a reply to one
+	// reading must never be served for another. The entries left are hashed in a fixed order,
+	// because the listeners hand a request's headers over in map order (metadataForCacheKey).
+	keyData.Metadata = metadataForCacheKey(relayData.Metadata)
 	// we remove the discrepancy of requested block from the hash, and add it on the cache side instead
 	// this is due to the fact that we don't know the latest seen block at this moment, as on shared state
 	// only the cache has this information. we make sure the hashing at this stage does not include the requested block.
 	// It does include it on the cache key side.
-	relayData.RequestBlock = 0
+	keyData.RequestBlock = 0
 
 	cashHash := &pairingtypes.CacheHash{
-		Request: relayData,
+		Request: &keyData,
 		ChainId: chainId,
 	}
 	cashHashBytes, err := json.Marshal(cashHash)

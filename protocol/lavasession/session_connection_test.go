@@ -303,6 +303,7 @@ func TestGetConsumerSessionInstanceFromEndpoint_Integration(t *testing.T) {
 		endpointConnection,
 		qosManager,
 		networkAddress,
+		nil,
 	)
 
 	// Verify session creation succeeded

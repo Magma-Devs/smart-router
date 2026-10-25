@@ -2,26 +2,21 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-// Using interfaces from relaycore
-type (
-	RelayStateMachine          = relaycore.RelayStateMachine
-	ResultsCheckerInf          = relaycore.ResultsCheckerInf
-	RelayStateSendInstructions = relaycore.RelayStateSendInstructions
-)
-
-// SmartRouterRelayStateMachine is an alias for the unified state machine type.
-// Kept for backward compatibility with existing tests.
-type SmartRouterRelayStateMachine = relaycore.UnifiedRelayStateMachine
+// RelayStateMachine is the relaycore state machine interface the server drives.
+type RelayStateMachine = relaycore.RelayStateMachine
 
 // SmartRouterRelaySender is kept as a type alias for the unified interface
 // so that existing test mocks continue to compile.
@@ -50,25 +45,16 @@ func SmartRouterPolicyConfig() relaypolicy.PolicyConfig {
 	}
 }
 
-// NewSmartRouterRelayStateMachine creates a SmartRouter-mode unified state machine with no per-method
-// policy resolver (selection is purely header-driven). Kept for tests and callers that do not wire a
-// policy resolver.
-func NewSmartRouterRelayStateMachine(
-	ctx context.Context,
-	usedProviders *lavasession.UsedProviders,
-	relaySender SmartRouterRelaySender,
-	protocolMessage chainlib.ProtocolMessage,
-	analytics *metrics.RelayMetrics,
-	debugRelays bool,
-) (RelayStateMachine, error) {
-	return NewSmartRouterRelayStateMachineWithPolicy(ctx, usedProviders, relaySender, protocolMessage, analytics, debugRelays, nil, "", "")
-}
-
 // NewSmartRouterRelayStateMachineWithPolicy is the production constructor: it consults the per-method
 // cross-validation policy resolver (which lives in this package — relaycore cannot import it) and, when a
 // policy applies, injects the resolved params as an override so the unified state machine selects
 // CrossValidation regardless of the method's stateful category. resolver may be nil / empty, in which
 // case behavior is identical to the header-driven path.
+//
+// It reads the caller's cross-validation headers here as well, ahead of the state machine, so a policy
+// can be resolved against what the caller asked for — and therefore skips that read for a method that
+// routes as a write, whose headers are ignored either way. Without the skip this constructor failed such
+// a request outright on a header it could not parse (MAG-3603).
 func NewSmartRouterRelayStateMachineWithPolicy(
 	ctx context.Context,
 	usedProviders *lavasession.UsedProviders,
@@ -88,14 +74,60 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		// headers do not even error) and signal the state machine to ignore caller headers. This must be
 		// checked before Resolve, since Resolve returns applies=false for a forbid policy — which on its own
 		// would just let the machine fall back to the caller's headers.
-		forbidCallerCV = resolver.ForbidsCallerCV(chainID, apiInterface, method)
-		if !forbidCallerCV {
-			caller, callerPresent, err := protocolMessage.GetCrossValidationParameters()
-			if callerPresent && err != nil {
-				return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
+		//
+		// A GraphQL request that selects several root fields is named after all of them, and that
+		// combined name matches no policy. Each root's policy is consulted instead: a forbid on any
+		// root keeps the caller's headers out of the whole request, an enabled policy on any root
+		// still applies, and the strictest policy that applies wins, so bundling a governed operation
+		// with another can neither escape its policy nor weaken it.
+		policyMethods := crossValidationPolicyMethods(apiInterface, method)
+		for _, policyMethod := range policyMethods {
+			if resolver.ForbidsCallerCV(chainID, apiInterface, policyMethod) {
+				forbidCallerCV = true
 			}
-			if eff, applies := resolver.Resolve(chainID, apiInterface, method, caller, callerPresent); applies {
-				cvOverride = &eff
+		}
+		// routesAsWrite, not isWrite: the stateful category is what decides routing, and four of
+		// the fifteen methods carrying it are not chain writes at all (see the state machine's
+		// own note). What matters here is how the method routes.
+		routesAsWrite := chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
+		// A write's cross-validation headers are not read here, and this is the half of MAG-3603
+		// that the state machine cannot fix on its own. Resolve returns (callerParams,
+		// callerPresent) for a method that has no policy of its own, so with ANY policy
+		// configured — for any method at all — a write's own headers came back as a resolved
+		// override, and cvOverride is the machine's FIRST branch, ahead of the write branch by
+		// design (Finding A). Routing the write as a write in the machine was therefore inert on
+		// every router that had a cross-validation policy.
+		//
+		// It also stopped the request outright when a value would not parse, before the machine
+		// could ignore the headers at all.
+		//
+		// So the startup guard is NOT what keeps a policy override off a write, which an earlier
+		// version of this comment claimed: validateCrossValidationStartup only rejects an ENABLED
+		// policy whose own method is stateful, and says nothing about a write with no policy
+		// borrowing the caller's headers. This skip is what keeps it off.
+		if !routesAsWrite {
+			// A forbid keeps out the caller's headers, never the operator's own policies: an enabled
+			// policy on another root of the same request still applies, resolved as though the caller
+			// sent no headers. The forbid used to skip this lookup too, so an enabled policy did not
+			// apply to a request that also selected a forbidden root (MAG-4361).
+			var caller common.CrossValidationParams
+			var callerPresent bool
+			if !forbidCallerCV {
+				var err error
+				caller, callerPresent, err = protocolMessage.GetCrossValidationParameters()
+				if callerPresent && err != nil {
+					return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
+				}
+			}
+			for _, policyMethod := range policyMethods {
+				if eff, applies := resolver.Resolve(chainID, apiInterface, policyMethod, caller, callerPresent); applies {
+					if cvOverride == nil || stricterCrossValidation(eff, *cvOverride) {
+						cvOverride = &eff
+					}
+				}
+			}
+			if cvOverride != nil {
+				eff := *cvOverride
 				if debugRelays {
 					utils.LavaFormatDebug("[CrossValidation] per-method policy resolved",
 						utils.LogAttr("chainID", chainID),
@@ -108,8 +140,13 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 						utils.LogAttr("GUID", ctx))
 				}
 			}
-		} else if debugRelays {
-			utils.LavaFormatDebug("[CrossValidation] per-method policy forbids caller-driven cross-validation",
+		}
+		if debugRelays && (forbidCallerCV || routesAsWrite) {
+			// Two reasons reach here now, and naming the wrong one sends an operator looking for
+			// a policy nobody wrote: before the write skip above, this branch was reachable only
+			// when a forbid policy existed. Both can hold at once, and then both are named.
+			utils.LavaFormatDebug("[CrossValidation] caller cross-validation headers not consulted",
+				utils.LogAttr("reason", callerCVSkipReason(forbidCallerCV, routesAsWrite)),
 				utils.LogAttr("chainID", chainID),
 				utils.LogAttr("apiInterface", apiInterface),
 				utils.LogAttr("method", method),
@@ -130,4 +167,45 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		cvOverride,
 		forbidCallerCV,
 	)
+}
+
+// crossValidationPolicyMethods returns the method names a request's cross-validation policy is
+// looked up under: the request's own name, or for a GraphQL request selecting several root fields,
+// each root field's name. JSON-RPC batches keep their combined name.
+func crossValidationPolicyMethods(apiInterface, method string) []string {
+	if strings.EqualFold(apiInterface, spectypes.APIInterfaceGraphQL) && strings.Contains(method, rpcInterfaceMessages.GraphQLMethodSeparator) {
+		return strings.Split(method, rpcInterfaceMessages.GraphQLMethodSeparator)
+	}
+	return []string{method}
+}
+
+// stricterCrossValidation reports whether a demands more agreement than b: a higher agreement
+// threshold first, then more groups, then per-group quorum, then more participants.
+func stricterCrossValidation(a, b common.CrossValidationParams) bool {
+	if a.AgreementThreshold != b.AgreementThreshold {
+		return a.AgreementThreshold > b.AgreementThreshold
+	}
+	if a.MinGroups != b.MinGroups {
+		return a.MinGroups > b.MinGroups
+	}
+	if a.PerGroupQuorum != b.PerGroupQuorum {
+		return a.PerGroupQuorum
+	}
+	return a.MaxParticipants > b.MaxParticipants
+}
+
+// callerCVSkipReason names, for the --debug-relays line, why the caller's cross-validation headers
+// were not consulted. Both causes can hold at once: an operator who followed the advice given before
+// MAG-3603 wrote `forbid-caller-cv: true` on a write, and a write now ignores the headers on its own
+// account. Naming only the write then hides the policy they wrote, which is the confusion the reason
+// exists to prevent, so both are named. Reached only when at least one cause holds.
+func callerCVSkipReason(forbidCallerCV, routesAsWrite bool) string {
+	switch {
+	case routesAsWrite && forbidCallerCV:
+		return "method routes as a write (a forbid-caller-cv policy also applies; it is redundant on a write)"
+	case routesAsWrite:
+		return "method routes as a write"
+	default:
+		return "forbidden by per-method policy"
+	}
 }

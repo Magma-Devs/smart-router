@@ -81,6 +81,7 @@ func (f *fixedScoreOptimizer) AppendRelayFailure(string)                        
 func (f *fixedScoreOptimizer) AppendRelayData(string, time.Duration, uint64, uint64) {}
 func (f *fixedScoreOptimizer) AppendRelayDataConsensus(string, time.Duration, uint64, uint64, provideroptimizer.SyncReference) {
 }
+func (f *fixedScoreOptimizer) AppendSyncData(string, uint64, provideroptimizer.SyncReference) {}
 
 func (f *fixedScoreOptimizer) GetReputationReportForProvider(address string) (*pairingtypes.QualityOfServiceReport, time.Time) {
 	return f.qos[address], time.Time{}

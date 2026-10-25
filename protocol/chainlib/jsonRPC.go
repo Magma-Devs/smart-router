@@ -51,10 +51,6 @@ func NewJrpcChainParser() (chainParser *JsonRPCChainParser, err error) {
 	return parser, nil
 }
 
-func (bcp *JsonRPCChainParser) GetUniqueName() string {
-	return "jsonrpc_chain_parser"
-}
-
 func (apip *JsonRPCChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {
 	if apip == nil {
 		return nil, errors.New("ChainParser not defined")
@@ -126,9 +122,14 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			utils.LogAttr("maxAllowed", MaxBatchRequestSize),
 		)
 	}
+	if isBatch {
+		if err := rpcInterfaceMessages.CheckJsonrpcBatch(apip.chainFamily(), msgs); err != nil {
+			return nil, utils.LavaFormatWarning("JSON-RPC batch refused", err, utils.LogAttr("batchSize", len(msgs)))
+		}
+	}
 	var api *spectypes.Api
 	var apiCollection *spectypes.ApiCollection
-	var latestRequestedBlock, earliestRequestedBlock int64 = 0, 0
+	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
 	for idx, msg := range msgs {
@@ -194,15 +195,32 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			extensionInfo.LatestBlock > ethCallArchiveBlockDepth &&
 			uint64(parsedBlock) < extensionInfo.LatestBlock-ethCallArchiveBlockDepth {
 			utils.LavaFormatInfo("adding extension requirement to archive since block is 127 before lastest block")
-			// change to archive
-			extensionInfo.AdditionalExtensions = append(extensionInfo.AdditionalExtensions, extensionslib.ArchiveExtension)
+			// change to archive. The router asks for it, not the caller, so a fleet without an
+			// archive node serves the call without it and does not report it back (MAG-3935).
+			extensionInfo.RouterExtensions = append(extensionInfo.RouterExtensions, extensionslib.ArchiveExtension)
 		}
 
+		// What this element adds to a batch's earliest block. RequestedBlock reads an earliest block
+		// of 0 as "unset", so an element at block 0, the chain's first block, joins it as
+		// EARLIEST_BLOCK, as a range lower bound of 0 does in foldParsedEarliest. Kept as 0, it
+		// either lowered the earliest block to "unset" or lost to a "latest"-style sentinel, and
+		// the archive rule judged the batch without its genesis element.
+		elementEarliest := parsedBlock
+		if isBatch && elementEarliest == 0 {
+			elementEarliest = spectypes.EARLIEST_BLOCK
+		}
+
+		// The earliest block starts at the first element that names a block, not at the "unset" 0:
+		// CompareRequestedBlockInBatch only lowers it, and 0 made every later combination come out
+		// 0, so RequestedBlock reported the newest block as the earliest and the archive rule never
+		// saw a batch's deep element (MAG-4242). An element that names no block (eth_chainId) does
+		// not decide the batch's block at all; see requestedBlockFold (MAG-4381).
+		blockFold.add(parsedBlock, elementEarliest, parsedInput, overwriteReqBlock == "" && apiNamesNoBlock(apiCont.api))
+
 		if idx == 0 {
-			// on the first entry store them
+			// on the first entry store them.
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
-			latestRequestedBlock = parsedBlock
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
@@ -236,21 +254,19 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 					Encoding:     "",
 				},
 			}
-
-			latestRequestedBlock, earliestRequestedBlock = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
 		}
 	}
+	latestRequestedBlock, earliestRequestedBlock := blockFold.blocks()
 
 	var nodeMsg *baseChainMessageContainer
 	if len(msgs) == 1 && !isBatch {
 		nodeMsg = apip.newChainMessage(api, latestRequestedBlock, blockHashes, &msgs[0], apiCollection, parsedDefault)
-	} else {
-		// For single-element batches, earliestRequestedBlock was never updated by
-		// CompareRequestedBlockInBatch (which only runs for idx > 0). With one message,
-		// earliest == latest.
-		if len(msgs) == 1 {
-			earliestRequestedBlock = latestRequestedBlock
+		// A single request has no earliest of its own unless its parsers read a range lower bound
+		// (trace_filter's fromBlock); then the archive rule must judge the range on it.
+		if earliestRequestedBlock != latestRequestedBlock {
+			nodeMsg.earliestRequestedBlock = earliestRequestedBlock
 		}
+	} else {
 		nodeMsg, err = apip.newBatchChainMessage(api, latestRequestedBlock, earliestRequestedBlock, blockHashes, msgs, apiCollection, parsedDefault)
 		if err != nil {
 			return nil, err
@@ -279,14 +295,14 @@ func (*JsonRPCChainParser) newBatchChainMessage(serviceApi *spectypes.Api, reque
 	return nodeMsg, err
 }
 
-func (*JsonRPCChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedBlockHashes []string, msg *rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
+func (apip *JsonRPCChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedBlockHashes []string, msg *rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
 	nodeMsg := &baseChainMessageContainer{
 		api:                      serviceApi,
 		apiCollection:            apiCollection,
 		latestRequestedBlock:     requestedBlock,
 		requestedBlockHashes:     requestedBlockHashes,
 		msg:                      msg,
-		resultErrorParsingMethod: msg.CheckResponseError,
+		resultErrorParsingMethod: rpcInterfaceMessages.JsonrpcResponseErrorChecker(apip.chainFamily(), msg),
 		parseDirective:           GetParseDirective(serviceApi, apiCollection),
 		usedDefaultValue:         usedDefaultValue,
 	}
@@ -307,14 +323,6 @@ func (apip *JsonRPCChainParser) SetSpec(spec spectypes.Spec) {
 	// extract server and tagged apis from spec
 	internalPaths, serverApis, taggedApis, apiCollections, headers, verifications := getServiceApis(spec, spectypes.APIInterfaceJsonRPC)
 	apip.BaseChainParser.Construct(spec, internalPaths, taggedApis, serverApis, apiCollections, headers, verifications)
-}
-
-func (apip *JsonRPCChainParser) GetInternalPaths() map[string]struct{} {
-	internalPaths := map[string]struct{}{}
-	for _, apiCollection := range apip.apiCollections {
-		internalPaths[apiCollection.CollectionData.InternalPath] = struct{}{}
-	}
-	return internalPaths
 }
 
 // ChainBlockStats returns block stats from spec
@@ -448,7 +456,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 
 		consumerWebsocketManager.ListenToMessages(ctx)
 	})
-	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback, apil.logger.StoreMetricData)
+	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback)
 	app.Get("/ws", wsUpgradeMiddleware, websocketCallbackWithDappID)
 	app.Get("/websocket", wsUpgradeMiddleware, websocketCallbackWithDappID) // catching http://HOST:PORT/1/websocket requests.
 
@@ -456,8 +464,6 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// Set response header content-type to application/json
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		startTime := time.Now()
-		endTx := apil.logger.LogStartTransaction("jsonRpc-http post")
-		defer endTx()
 		dappID := extractDappIDFromFiberContext(fiberCtx)
 		metricsData := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
@@ -471,7 +477,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		}
 
 		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := fiberCtx.GetReqHeaders()
+		metadataValues := detachedReqHeaders(fiberCtx)
 		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		headers := convertToMetadataMap(metadataValues)
@@ -497,12 +503,21 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 
 		relayResult, err := apil.relaySender.SendRelay(ctx, path, msg, http.MethodPost, dappID, userIp, metricsData, headers)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
+		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
 		if err != nil {
 			// Check if batch size limit exceeded - return 429 rate limit error
 			if errors.Is(err, ErrBatchRequestSizeExceeded) {
 				errorResponse, _ := json.Marshal(common.JsonRpcBatchSizeExceededError)
 				return fiberCtx.Status(fiber.StatusTooManyRequests).SendString(string(errorResponse))
+			}
+
+			// A batch the chain cannot take (an XRPL submit inside one). The node itself would refuse it
+			// with a 400, so the caller gets the same verdict, as a JSON-RPC invalid request.
+			if errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused) {
+				refused := common.JsonRpcInvalidRequestError
+				refused.Error.Data = rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error()
+				errorResponse, _ := json.Marshal(refused)
+				return fiberCtx.Status(fiber.StatusBadRequest).SendString(string(errorResponse))
 			}
 
 			if errors.Is(err, common.APINotSupportedError) {
@@ -533,7 +548,13 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			// Construct spec-compliant JSON-RPC 2.0 error envelope (see
 			// convertToJsonRpcError for the rationale — `error` must be an
 			// Object with code/message per §5.1, not a stringified envelope).
-			response := convertToJsonRpcError(errMasking, fiberCtx.Body())
+			var response []byte
+			if cf := relayResult.GetClientFacing(); cf != nil && metrics.ReturnMaskedErrors == "false" {
+				// MAG-4218: the upstream's own answer, or one honest sentence + details in data.
+				response = convertUpstreamErrorToJsonRpc(cf, msgSeed, errMasking, fiberCtx.Body())
+			} else {
+				response = convertToJsonRpcError(errMasking, fiberCtx.Body())
+			}
 			// Return error json response
 			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
 		}
@@ -790,14 +811,6 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		return nil, utils.LavaFormatError("jsonRPC error", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
 
-	// validate result is valid
-	if replyMsg.Error == nil {
-		responseIsNilValidationError := ValidateNilResponse(string(replyMsg.Result))
-		if responseIsNilValidationError != nil {
-			return nil, responseIsNilValidationError
-		}
-	}
-
 	err = cp.ValidateRequestAndResponseIds(nodeMessage.ID, replyMsg.ID)
 	if err != nil {
 		// When there's a response error (e.g., "Apikey is expired"), the node may return
@@ -816,9 +829,8 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		)
 	}
 
-	// Release rpcMessage after all references to it are complete
+	// Release rpcMessage's Result after all references to it are complete
 	rpcMessage.Result = nil
-	rpcMessage = nil
 
 	retData, err := json.Marshal(replyMsg)
 	if err != nil {
@@ -833,9 +845,8 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		},
 	}
 
-	// Clear replyMsg after all references to it are complete
+	// Clear replyMsg's Result after all references to it are complete
 	replyMsg.Result = nil
-	replyMsg = nil
 
 	return reply, err
 }

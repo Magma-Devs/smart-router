@@ -17,7 +17,7 @@ cleanup() {
     echo "==> tearing down"
     "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
   else
-    echo "==> stack left running (KEEP=1). Ingress on :18080, router metrics on :7801-3"
+    echo "==> stack left running (KEEP=1). Ingress on :18080, router metrics on :7801-3, debug servers on :9801-3"
   fi
 }
 trap cleanup EXIT
@@ -59,6 +59,11 @@ if [[ $status -ne 0 ]]; then
     echo "--- router on :${port}"
     curl -fsS -m 5 "http://127.0.0.1:${port}/metrics" 2>/dev/null \
       | grep '^smartrouter_csm_sticky' || echo "    (no sticky metrics reported)"
+  done
+  echo "==> the same counts per replica from GET /debug/sticky-claims (PodID names the replica)"
+  for port in 9801 9802 9803; do
+    echo "--- debug server on :${port}"
+    curl -fsS -m 5 "http://127.0.0.1:${port}/debug/sticky-claims" 2>/dev/null || echo "    (debug server not answering)"
   done
 fi
 

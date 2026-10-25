@@ -153,7 +153,7 @@ func runSecondaryLookupWithReport(t *testing.T, rpcss *RPCSmartRouterServer, pro
 	usedProviders := lavasession.NewUsedProviders(nil)
 	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil}, protocolMessage, nil, false)
 	require.NoError(t, err)
-	relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayRetriesManagerInstance, stateMachine)
+	relayProcessor := relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine)
 
 	waitCtx, waitCancel := context.WithTimeout(ctx, 3*time.Second)
 	defer waitCancel()
@@ -484,8 +484,8 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 	// A foreign zone's chain head, wildly ahead of this router's. Unlike the
 	// identity fields this one is not merely embarrassing: on the backfill path
 	// SetRelay publishes Response.LatestBlock as the cache server's chain-level tip
-	// through a monotonic-max write, and that key is what LATEST/SAFE/FINALIZED/
-	// PENDING resolve to for the whole chain until it expires.
+	// through a write that only moves up while the tip is fresh (MAG-3755), and that
+	// key is what LATEST/SAFE/FINALIZED/PENDING resolve to for the whole chain.
 	const foreignHead = int64(987654321)
 	fake := &fakeCacheReader{
 		active: true,
@@ -733,7 +733,7 @@ func TestSecondaryHitOmitsLatestBlockWithNoLocalTip(t *testing.T) {
 // (sendRelayToEndpoint resolves only LATEST against the local tip), and the
 // exact-key lift raises the SET's validity floor to it. SetRelay then publishes
 // max(Response.LatestBlock, SeenBlock) as the cache server's chain-level tip via a
-// monotonic-max write, and that key is what LATEST/SAFE/FINALIZED/PENDING resolve
+// write that only moves up while the tip is fresh (MAG-3755), and that key is what LATEST/SAFE/FINALIZED/PENDING resolve
 // to for the whole chain. Unbounded, one request at a user-chosen far-future key,
 // answered by a foreign secondary whose reply is fully sanitize-clean — the poison
 // is the KEY, not the payload, so nothing SanitizeForeignCacheReply can reach —

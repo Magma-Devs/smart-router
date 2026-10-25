@@ -51,6 +51,14 @@ func (f *fakeSharedSticky) PublishIfAbsent(_ context.Context, chainID, apiInterf
 	return provider, epoch, nil
 }
 
+// purge drops every claim, which is what a cache purge does to the registry: /debug/reset-all flushes
+// the cache that holds the claims along with the pod's local pins.
+func (f *fakeSharedSticky) purge() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.claims = map[string]StickySession{}
+}
+
 func stickyCSM(t *testing.T, store SharedStickyStore) *ConsumerSessionManager {
 	t.Helper()
 	csm := CreateConsumerSessionManager()

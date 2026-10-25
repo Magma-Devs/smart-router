@@ -55,7 +55,7 @@ func TestReplayFailingRelay_RecordsRateLimitIntoHoldoff(t *testing.T) {
 		ProviderAddress:  "provider1",
 	}
 
-	verdict := rpcss.replayFailingRelay(epc, "eth_call", testEvidence, testEvidenceTimeout)
+	verdict := rpcss.replayFailingRelay(epc, testEvidence, testEvidenceTimeout)
 	require.Equal(t, relayProbeInconclusive, verdict)
 	require.True(t, reg.HeldOff("provider1", "http://fake:8545"))
 	// The floor: at least the vendor's ask (jitter may extend it).
@@ -76,7 +76,7 @@ func TestReplayFailingRelay_SkipsWhileHeldOff(t *testing.T) {
 		ProviderAddress:  "provider1",
 	}
 
-	verdict := rpcss.replayFailingRelay(epc, "eth_call", testEvidence, testEvidenceTimeout)
+	verdict := rpcss.replayFailingRelay(epc, testEvidence, testEvidenceTimeout)
 	require.Equal(t, relayProbeInconclusive, verdict)
 	require.Nil(t, conn.gotPayload, "a held-off endpoint must not be probed")
 }
@@ -90,8 +90,10 @@ func TestReplayFailingRelay_RecoveredClearsHoldoff(t *testing.T) {
 	reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
 	relayHoldoff = reg
 
-	// Two strikes, then let the hold-off expire.
+	// Two strikes, then let the hold-off expire. A strike is a hold-off that ended in another
+	// 429, so the second comes after the first ran out (MAG-4386).
 	reg.RecordRateLimit("provider1", "http://fake:8545", 0)
+	now = now.Add(holdoff.InitialHoldoff + time.Second)
 	reg.RecordRateLimit("provider1", "http://fake:8545", 0)
 	now = now.Add(2 * time.Minute)
 	require.False(t, reg.HeldOff("provider1", "http://fake:8545"))
@@ -104,7 +106,7 @@ func TestReplayFailingRelay_RecoveredClearsHoldoff(t *testing.T) {
 		ProviderAddress:  "provider1",
 	}
 
-	verdict := rpcss.replayFailingRelay(epc, "eth_call", testEvidence, testEvidenceTimeout)
+	verdict := rpcss.replayFailingRelay(epc, testEvidence, testEvidenceTimeout)
 	require.Equal(t, relayProbeRecovered, verdict)
 
 	// The recovery cleared the strikes: a fresh 429 starts from the initial penalty.

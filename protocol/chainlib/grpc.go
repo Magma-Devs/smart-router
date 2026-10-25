@@ -41,8 +41,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const GRPCStatusCodeOnFailedMessages = 32
-
 type GrpcNodeErrorResponse struct {
 	ErrorMessage string `json:"error_message"`
 	ErrorCode    uint32 `json:"error_code"`
@@ -88,13 +86,12 @@ func NewGrpcChainParser() (chainParser *GrpcChainParser, err error) {
 // inner contents of `spec` (a protobuf with nested slices/maps), which is
 // copied by value but whose nested fields remain shared. This is sound only
 // because the live serving path treats spec as immutable post-init; the rare
-// SetSpec / SetPolicy / UpdateBlockTime mutators run at init or at known
-// quiescent moments.
+// SetSpec / SetPolicy mutators run at init or at known quiescent moments.
 //
 // The new BaseChainParser is constructed via struct literal, so its rwLock
 // is a fresh zero-value — no mutex is copied. Note the trade-off: because the
 // clone has a *separate* mutex from the live parser, the two cannot
-// synchronize. If a live-path SetSpec / UpdateBlockTime were to race with a
+// synchronize. If a live-path SetSpec were to race with a
 // validation reader on the clone, the clone could observe a torn write of
 // nested spec fields. We accept that risk since the alternative — sharing the
 // parser instance — corrupts the live registry/codec when validation's bounded
@@ -121,7 +118,6 @@ func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 			allowedAddons:     apip.allowedAddons,
 			allowedExtensions: apip.allowedExtensions,
 			extensionParser:   apip.extensionParser,
-			active:            apip.active,
 
 			// Carried, not re-seeded from the package default: the clone must verify
 			// under the same ws policy as the parser it stands in for.
@@ -130,10 +126,6 @@ func (apip *GrpcChainParser) cloneForValidation() *GrpcChainParser {
 		registry: apip.registry,
 		codec:    apip.codec,
 	}
-}
-
-func (bcp *GrpcChainParser) GetUniqueName() string {
-	return "grpc_chain_parser"
 }
 
 func (apip *GrpcChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {
@@ -152,8 +144,12 @@ func (apip *GrpcChainParser) getSupportedApi(name, connectionType string) (*ApiC
 	return apip.BaseChainParser.getSupportedApi(apiKey)
 }
 
-func (apip *GrpcChainParser) setupForConsumer(relayer grpcproxy.ProxyCallBack) {
-	apip.registry = dyncodec.NewRegistry(dyncodec.NewRelayerRemote(relayer))
+// setupForConsumer builds the listener's registry for block parsing on the router's
+// upstream reflection snapshots. It never relays reflection: the relay path refuses
+// it as a streaming method (MAG-4217). Without a source no descriptor resolves, and
+// binary requests parse as NOT_APPLICABLE.
+func (apip *GrpcChainParser) setupForConsumer(reflectionSource grpcproxy.ReflectionSource) {
+	apip.registry = dyncodec.NewRegistry(dyncodec.NewSnapshotRemote(reflectionSource))
 	apip.codec = dyncodec.NewCodec(apip.registry)
 }
 
@@ -307,6 +303,7 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 	}
 
 	nodeMsg := apip.newChainMessage(apiCont.api, parsedInput, &grpcMessage, apiCollection)
+	nodeMsg.applyParsedRange(parsedInput)
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
 }
@@ -407,13 +404,17 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		ctx = utils.WithUniqueIdentifier(ctx, guid)
 		msgSeed := strconv.FormatUint(guid, 10)
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		startTime := time.Now()
 		// Extract dappID from grpc header
 		dappID := extractDappIDFromGrpcHeader(metadataValues)
 
 		grpcHeaders := convertToMetadataMapOfSlices(metadataValues)
-		utils.LavaFormatDebug("in <<< GRPC Relay ",
+		utils.LavaFormatInfo("in <<< GRPC Relay ",
 			utils.LogAttr("GUID", ctx),
+			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+			utils.LogAttr(utils.KEY_TASK_ID, ctx),
+			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("_method", method),
 			utils.LogAttr("headers", common.RedactMetadata(grpcHeaders)),
 		)
@@ -422,7 +423,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		consumerIp := common.GetIpFromGrpcContext(ctx)
 		relayResult, err := apil.relaySender.SendRelay(ctx, method, string(reqBody), "", dappID, consumerIp, metricsData, grpcHeaders)
 		relayReply := relayResult.GetReply()
-		go apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
+		apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
 
 		if err != nil {
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
@@ -481,7 +482,7 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	apil.httpServer = httpServer
 
 	// setup chain parser
-	apil.chainParser.setupForConsumer(sendRelayCallback)
+	apil.chainParser.setupForConsumer(reflectionSource)
 
 	utils.LavaFormatInfo("Server listening", utils.Attribute{Key: "Address", Value: lis.Addr()})
 
@@ -523,9 +524,11 @@ func (apil *GrpcChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCSubscriptionManager) grpcproxy.StreamProxyCallBack {
 	return func(ctx context.Context, method string, reqBody []byte) (*grpcproxy.StreamResponse, error) {
 		metadataValues, _ := metadata.FromIncomingContext(ctx)
+		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
 		dappID := extractDappIDFromGrpcHeader(metadataValues)
 		consumerIp := common.GetIpFromGrpcContext(ctx)
 
+		parseStart := time.Now()
 		protocolMessage, err := apil.relaySender.ParseRelay(ctx, method, string(reqBody), "", dappID, consumerIp, convertToMetadataMapOfSlices(metadataValues))
 		if err != nil {
 			// Not this callback's error to report: an unknown or malformed method must
@@ -556,20 +559,30 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 		metricsData := metrics.NewRelayAnalytics(dappID, apil.endpoint.ChainID, apil.endpoint.ApiInterface)
 		metricsData.SetProcessingTimestampBeforeRelay(startTime)
 
-		utils.LavaFormatDebug("in <<< GRPC stream subscribe",
+		utils.LavaFormatInfo("in <<< GRPC stream subscribe",
 			utils.LogAttr("GUID", ctx),
+			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+			utils.LogAttr(utils.KEY_TASK_ID, ctx),
+			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
 			utils.LogAttr("_method", method),
 			utils.LogAttr("dappID", dappID),
 		)
 
+		ctx = WithSubscriptionUpstream(ctx)
 		firstReply, repliesChan, err := subscriptionManager.StartSubscription(ctx, protocolMessage, dappID, consumerIp, connectionUniqueId, metricsData)
+		if reporter, ok := apil.relaySender.(SubscriptionRelayReporter); ok {
+			reporter.ReportSubscriptionRelay(ctx, protocolMessage, parseStart, err)
+		}
+		// A subscribe never passes SendParsedRelay, which stamps these for a normal request.
+		metricsData.ApiMethod = protocolMessage.GetApi().GetName()
+		metricsData.Latency = time.Since(startTime).Milliseconds()
 
 		// Snapshot before the emit goroutine starts. AddMetricForGrpc writes Success and
 		// Origin on the struct it is handed, and the per-delivery emits work from these
 		// same fields for the life of the subscription — so each side needs its own
 		// copy. ConsumerWebsocketManager copies for the same reason.
 		subscriptionFields := *metricsData
-		go apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
+		apil.logger.AddMetricForGrpc(metricsData, err, &metadataValues)
 		if err != nil {
 			apil.logger.LogRequestAndResponse("grpc stream in/out", true, method, string(reqBody), "", err.Error(), connectionUniqueId, time.Since(startTime), err)
 			return nil, utils.LavaFormatError("failed to start gRPC subscription", err,
@@ -579,8 +592,16 @@ func (apil *GrpcChainListener) makeStreamRelayCallback(subscriptionManager GRPCS
 			)
 		}
 
+		// The manager closes the reply channel both when the upstream ends and when it
+		// gives the subscription up; only the second must reach the client as an error.
+		var endError func() error
+		if reporter, ok := subscriptionManager.(GRPCSubscriptionEndReporter); ok {
+			endError = func() error { return reporter.SubscriptionEndError(clientKey) }
+		}
+
 		return &grpcproxy.StreamResponse{
 			Replies: apil.forwardSubscriptionReplies(ctx, repliesChan, subscriptionFields, snapshotMetricsHeaders(metadataValues)),
+			Err:     endError,
 			// firstReply's payload is a JSON acknowledgement, which would not decode as
 			// the method's output type — only its subscription id is carried, as headers.
 			Metadata: streamResponseHeaders(firstReply.GetMetadata()),
@@ -610,7 +631,8 @@ func (apil *GrpcChainListener) forwardSubscriptionReplies(ctx context.Context, r
 	payloads := make(chan []byte)
 	go func() {
 		// Closing tells grpcproxy the upstream ended, which closes the client stream
-		// with OK.
+		// with OK, or with the error StreamResponse.Err reports when the manager gave
+		// the subscription up.
 		defer close(payloads)
 		for reply := range repliesChan {
 			select {
@@ -625,9 +647,9 @@ func (apil *GrpcChainListener) forwardSubscriptionReplies(ctx context.Context, r
 
 			perMessage := subscriptionFields
 			perMessage.Timestamp = time.Now()
-			perMessage.ApiMethod = SubscriptionDeliveryMethod
-			perMessage.ComputeUnits = DefaultSubscriptionDeliveryCU
-			go apil.logger.AddMetricForGrpc(&perMessage, nil, &metricsHeaders)
+			perMessage.ApiMethod = metrics.SubscriptionDeliveryMethod
+			perMessage.ComputeUnits = metrics.DefaultSubscriptionDeliveryCU
+			apil.logger.AddMetricForGrpc(&perMessage, nil, &metricsHeaders)
 		}
 	}()
 	return payloads
@@ -664,16 +686,16 @@ func streamResponseHeaders(md []pairingtypes.Metadata) metadata.MD {
 	return headers
 }
 
-// snapshotMetricsHeaders detaches the headers AddMetricForGrpc reads from the request
-// metadata. gRPC metadata strings can alias the transport receive buffer, and a
-// subscription's per-delivery emits keep referring to them for as long as the stream
-// lives — far past the point where the unary path would have released them.
+// snapshotMetricsHeaders copies the headers AddMetricForGrpc reads out of the request
+// metadata, because a subscription's per-delivery emits keep referring to them for as long
+// as the stream lives — far past the point where the unary path would have released them.
+// The copy is a guard, not a requirement: grpc-go decodes every metadata value into its own
+// string (x/net's hpack decoder allocates, and a -bin value is base64-decoded into a fresh
+// one), so incoming metadata never aliases the transport receive buffer (MAG-3881).
 func snapshotMetricsHeaders(metadataValues metadata.MD) metadata.MD {
 	snapshot := metadata.MD{}
-	for _, key := range []string{metrics.RefererHeaderKey, metrics.UserAgentHeaderKey, metrics.OriginHeaderKey} {
-		if values := metadataValues.Get(key); len(values) > 0 {
-			snapshot.Set(key, strings.Clone(values[0]))
-		}
+	if values := metadataValues.Get(metrics.OriginHeaderKey); len(values) > 0 {
+		snapshot.Set(metrics.OriginHeaderKey, strings.Clone(values[0]))
 	}
 	return snapshot
 }
@@ -687,13 +709,8 @@ func (apil *GrpcChainListener) GetListeningAddress() string {
 
 type GrpcChainProxy struct {
 	BaseChainProxy
-	conn             grpcConnectorInterface
+	conn             chainproxy.GRPCConnectorInterface
 	descriptorsCache *common.SafeSyncMap[string, *desc.MethodDescriptor]
-}
-type grpcConnectorInterface interface {
-	Close()
-	GetRpc(ctx context.Context, block bool) (*grpc.ClientConn, error)
-	ReturnRpc(rpc *grpc.ClientConn)
 }
 
 func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, parser ChainParser) (ChainProxy, error) {
@@ -713,7 +730,7 @@ func NewGrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 	return newGrpcChainProxy(ctx, averageBlockTime, parser, conn, rpcProviderEndpoint)
 }
 
-func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, parser ChainParser, conn grpcConnectorInterface, rpcProviderEndpoint lavasession.RPCProviderEndpoint) (ChainProxy, error) {
+func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, parser ChainParser, conn chainproxy.GRPCConnectorInterface, rpcProviderEndpoint lavasession.RPCProviderEndpoint) (ChainProxy, error) {
 	cp := &GrpcChainProxy{
 		// NodeUrl is what carries grpc-config onto the request path; without it
 		// cp.NodeUrl.GrpcConfig is the zero value and descriptor-source is invisible
@@ -746,6 +763,40 @@ func newGrpcChainProxy(ctx context.Context, averageBlockTime time.Duration, pars
 		return nil, fmt.Errorf("grpc chain proxy: failed to setup parser: %w", err)
 	}
 	return cp, nil
+}
+
+// methodDescriptorFor resolves the descriptor of the method at path ("svc/Method" or "svc.Method")
+// through descriptorSource, caching it on the chain proxy.
+//
+// The cache is keyed by the full symbol, not the bare method name. Method names repeat across
+// services (the Cosmos SDK alone has Params under twelve Query services, Proposal and TallyResult
+// under three), and a cache keyed by "Params" handed every later service the first one's request
+// and reply descriptors: the request was built with the wrong fields and the reply decoded against
+// the wrong shape (MAG-4242).
+//
+// Load then Store rather than LoadOrStore: two relays racing on a cold key resolve the same
+// descriptor twice and store it twice, which is cheaper than resolving on every call and lands on
+// the same value.
+func (cp *GrpcChainProxy) methodDescriptorFor(ctx context.Context, descriptorSource grpcurl.DescriptorSource, path string) (*desc.MethodDescriptor, error) {
+	svc, methodName := rpcInterfaceMessages.ParseSymbol(path)
+	cacheKey := svc + "/" + methodName
+	if methodDescriptor, found, _ := cp.descriptorsCache.Load(cacheKey); found {
+		return methodDescriptor, nil
+	}
+	descriptor, err := descriptorSource.FindSymbol(svc)
+	if err != nil {
+		return nil, utils.LavaFormatError("descriptorSource.FindSymbol", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+	}
+	serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
+	if !ok {
+		return nil, utils.LavaFormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "descriptor", Value: descriptor})
+	}
+	methodDescriptor := serviceDescriptor.FindMethodByName(methodName)
+	if methodDescriptor == nil {
+		return nil, utils.LavaFormatError("serviceDescriptor.FindMethodByName returned nil", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "methodName", Value: methodName})
+	}
+	cp.descriptorsCache.Store(cacheKey, methodDescriptor)
+	return methodDescriptor, nil
 }
 
 func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
@@ -781,29 +832,9 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 	if err != nil {
 		return nil, utils.LavaFormatError("failed resolving grpc descriptor source", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
 	}
-	svc, methodName := rpcInterfaceMessages.ParseSymbol(nodeMessage.Path)
-
-	// Check if we have method descriptor already cached.
-	// The reason we do Load and then Store here, instead of LoadOrStore:
-	// On the worst case scenario, where 2 threads are accessing the map at the same time, the same descriptor will be stored twice.
-	// It is better than the alternative, which is always creating the descriptor, since the outcome is the same.
-	methodDescriptor, found, _ := cp.descriptorsCache.Load(methodName)
-	if !found { // method descriptor not cached yet, need to fetch it and add to cache
-		var descriptor desc.Descriptor
-		if descriptor, err = descriptorSource.FindSymbol(svc); err != nil {
-			return nil, utils.LavaFormatError("descriptorSource.FindSymbol", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
-		}
-		serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)
-		if !ok {
-			return nil, utils.LavaFormatError("serviceDescriptor, ok := descriptor.(*desc.ServiceDescriptor)", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "descriptor", Value: descriptor})
-		}
-		methodDescriptor = serviceDescriptor.FindMethodByName(methodName)
-		if methodDescriptor == nil {
-			return nil, utils.LavaFormatError("serviceDescriptor.FindMethodByName returned nil", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "methodName", Value: methodName})
-		}
-
-		// add the descriptor to the chainProxy cache
-		cp.descriptorsCache.Store(methodName, methodDescriptor)
+	methodDescriptor, err := cp.methodDescriptorFor(ctx, descriptorSource, nodeMessage.Path)
+	if err != nil {
+		return nil, err
 	}
 
 	msgFactory := dynamic.NewMessageFactoryWithDefaults()
@@ -921,7 +952,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 func parseGrpcNodeErrorToReply(ctx context.Context, err error) ([]byte, uint32, error) {
 	var respBytes []byte
 	var marshalingError error
-	var errorCode uint32 = GRPCStatusCodeOnFailedMessages
+	var errorCode uint32 = common.GRPCStatusCodeOnFailedMessages
 	// try fetching status code from error or otherwise use the GRPCStatusCodeOnFailedMessages
 	if statusError, ok := status.FromError(err); ok {
 		errorCode = uint32(statusError.Code())

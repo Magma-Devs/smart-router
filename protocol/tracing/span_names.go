@@ -13,6 +13,7 @@ const (
 	SpanRelayInnerDirect             = "smartrouter.relayInnerDirect"
 	SpanSendJSONRPCRelay             = "smartrouter.sendJSONRPCRelay"
 	SpanSendRESTRelay                = "smartrouter.sendRESTRelay"
+	SpanSendGraphQLRelay             = "smartrouter.sendGraphQLRelay"
 	SpanSendGRPCRelay                = "smartrouter.sendGRPCRelay"
 )
 

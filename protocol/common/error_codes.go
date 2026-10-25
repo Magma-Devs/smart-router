@@ -22,9 +22,12 @@ var (
 		Code: 1003, Name: "PROTOCOL_DNS_FAILURE", Category: CategoryInternal,
 		Description: "DNS resolution failed", Retryable: true,
 	})
+	// Retryable: the mismatch is this endpoint's configuration, and a retry lands on another
+	// endpoint; the misconfigured one is benched through EndpointAtFault. Non-retryable would stop
+	// the whole relay on one endpoint's misconfiguration.
 	LavaErrorTLSMismatch = registerError(&LavaError{
 		Code: 1004, Name: "PROTOCOL_TLS_MISMATCH", Category: CategoryInternal,
-		Description: "HTTP/HTTPS protocol mismatch", Retryable: false,
+		Description: "HTTP/HTTPS protocol mismatch", Retryable: true,
 	})
 	// MayHaveReachedNode: a reset arrives on an established connection.
 	LavaErrorConnectionReset = registerError(&LavaError{
@@ -193,20 +196,38 @@ var (
 
 var (
 	// Generic node errors (2000-2099)
+	//
+	// MAG-2771: a refusal ends the request only if it is a fact about the chain. A NODE_* refusal
+	// is a claim the node makes about itself — the methods it serves, the routes its front end
+	// knows, the credentials it was given — so it is provider-local until a peer
+	// confirms it, and the request goes to another provider before the caller is failed. Being
+	// wrong in that direction costs one extra call on a request that was already failing; being
+	// wrong in the other is a customer-visible failure on a method another provider serves.
+	// CHAIN_* (3xxx) codes are the same answer from every honest node and stay non-retryable.
+	//
+	// 2001, 2008, 2009, 2010 and 2016 are SubCategoryNodeCapability, as NODE_METHOD_NOT_SUPPORTED
+	// and NODE_ACCESS_DENIED already were: the endpoint answered truthfully about what it serves,
+	// so it is neither blamed (EndpointAtFault) nor scored (the availability gate's capability
+	// carve-out). Retryable alone, without the subcategory, would make each of them count against
+	// the endpoint that said no. NODE_LIMIT_EXCEEDED (2011) is left out; see its entry.
+
+	// NODE_METHOD_NOT_FOUND: the node says the method is not on its surface (-32601). On the wire
+	// that cannot be told apart from a method its plan switches off: on MAG-2735's fleet one
+	// provider answered -32601 for net_listening while the other served it, and the router handed
+	// the refusal to the caller without asking. The Name field is a Prometheus label; keep it.
 	LavaErrorNodeMethodNotFound = registerError(&LavaError{
 		Code: 2001, Name: "NODE_METHOD_NOT_FOUND", Category: CategoryExternal,
-		SubCategory: SubCategoryUnsupportedMethod,
-		Description: "Method does not exist on this node (unknown to the API surface); non-retryable", Retryable: false,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "Node reports the method is not on its surface; another provider may serve it", Retryable: true,
 	})
-	// NODE_METHOD_NOT_SUPPORTED: the method exists but this node has disabled
-	// it (e.g. provider tier, admin config). Distinct from NODE_METHOD_NOT_FOUND
-	// in that it IS retryable on another provider. The Name field is a
-	// Prometheus label so keep it stable — the distinction lives in the
-	// description and the Retryable flag.
+	// NODE_METHOD_NOT_SUPPORTED: the node says the method exists but is disabled on it (provider
+	// tier, policy, admin config). Retryable on another provider, as NODE_METHOD_NOT_FOUND now is
+	// too: the two differ in what the node said, not in what the router does with it. The Name
+	// field is a Prometheus label so keep it stable.
 	LavaErrorNodeMethodNotSupported = registerError(&LavaError{
 		Code: 2002, Name: "NODE_METHOD_NOT_SUPPORTED", Category: CategoryExternal,
 		SubCategory: SubCategoryNodeCapability,
-		Description: "Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider. Distinct from NODE_METHOD_NOT_FOUND (2001) which means the method does not exist at all.", Retryable: true,
+		Description: "Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider.", Retryable: true,
 	})
 	LavaErrorNodeInternalError = registerError(&LavaError{
 		Code: 2003, Name: "NODE_INTERNAL_ERROR", Category: CategoryExternal,
@@ -229,21 +250,32 @@ var (
 		Code: 2007, Name: "NODE_SYNCING", Category: CategoryExternal,
 		Description: "Node is syncing/catching up", Retryable: true,
 	})
+	// NODE_UNIMPLEMENTED: gRPC Unimplemented or HTTP 501. One gateway implements a method or route
+	// that another does not.
 	LavaErrorNodeUnimplemented = registerError(&LavaError{
 		Code: 2008, Name: "NODE_UNIMPLEMENTED", Category: CategoryExternal,
-		SubCategory: SubCategoryUnsupportedMethod,
-		Description: "gRPC method unimplemented", Retryable: false,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "Method not implemented on this node (gRPC Unimplemented, HTTP 501); another provider may serve it", Retryable: true,
 	})
+	// NODE_ENDPOINT_NOT_FOUND: this node's front end does not route the path. Route sets differ
+	// per provider. A REST HTTP 404 is NODE_DATA_NOT_HELD instead.
 	LavaErrorNodeEndpointNotFound = registerError(&LavaError{
 		Code: 2009, Name: "NODE_ENDPOINT_NOT_FOUND", Category: CategoryExternal,
-		SubCategory: SubCategoryUnsupportedMethod,
-		Description: "REST endpoint not found", Retryable: false,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "Endpoint not found on this node; another provider may serve it", Retryable: true,
 	})
+	// NODE_METHOD_NOT_ALLOWED: HTTP 405 from this node's front end. Another provider's gateway
+	// may allow the same request.
 	LavaErrorNodeMethodNotAllowed = registerError(&LavaError{
 		Code: 2010, Name: "NODE_METHOD_NOT_ALLOWED", Category: CategoryExternal,
-		SubCategory: SubCategoryUnsupportedMethod,
-		Description: "REST method not allowed", Retryable: false,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "HTTP method not allowed by this node (HTTP 405); another provider may serve it", Retryable: true,
 	})
+	// NODE_LIMIT_EXCEEDED stays non-retryable, outside MAG-2771's rule for now. A -32005 is usually
+	// a cap on the request that every provider shares ("query returned more than 10000 results"),
+	// and it carries SubCategoryRateLimit, so a retry would hold off every provider it reached, and
+	// a client repeating the request would take the whole pool out of rotation. Retrying it needs
+	// its own hold-off design.
 	LavaErrorNodeLimitExceeded = registerError(&LavaError{
 		Code: 2011, Name: "NODE_LIMIT_EXCEEDED", Category: CategoryExternal,
 		SubCategory: SubCategoryRateLimit,
@@ -273,13 +305,37 @@ var (
 		Description: "Bad gateway (HTTP 502 from provider)", Retryable: true,
 		MayHaveReachedNode: true,
 	})
-	// NODE_UNAUTHORIZED: upstream rejected the smart-router's credentials
-	// (HTTP 401). Non-retryable because the same credentials are reused on
-	// every attempt — retrying just multiplies the same auth failure across
-	// providers. Operator must fix the auth-config for the affected endpoint.
+	// NODE_UNAUTHORIZED: the node rejected the credentials the router sent it (HTTP 401 on
+	// JSON-RPC and gRPC; a REST 401 is NODE_ACCESS_DENIED). Credentials are configured per node
+	// url, so this is a claim about the key this provider was given, and another provider's key
+	// may be fine. It used to be non-retryable on the assumption that one credential fronts every
+	// provider. When that is so, the retry costs one more 401 on a request that was already
+	// failing. The operator still has to fix the auth-config for the endpoint.
 	LavaErrorNodeUnauthorized = registerError(&LavaError{
 		Code: 2016, Name: "NODE_UNAUTHORIZED", Category: CategoryExternal,
-		Description: "Upstream rejected router credentials (HTTP 401)", Retryable: false,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "Upstream rejected router credentials (HTTP 401); another provider may serve it", Retryable: true,
+	})
+	// NODE_ACCESS_DENIED: the endpoint refused the router itself — its credentials (401), its
+	// plan or quota (402), a WAF or IP rule (403), a proxy wanting credentials (407), a protocol
+	// it will not speak (426), or a region it will not serve (451). Used on REST, where the status
+	// is the endpoint's own answer. Unlike NODE_UNAUTHORIZED it is retryable: each provider has
+	// its own credentials and its own rules, so another provider can serve the same request.
+	// JSON-RPC and gRPC keep NODE_UNAUTHORIZED for 401.
+	//
+	// SubCategoryNodeCapability, so the endpoint is NOT at fault. This is the same shape as
+	// NODE_METHOD_NOT_SUPPORTED: the endpoint answered truthfully about what it will serve, and
+	// what it will serve is a property of its configuration, not evidence that it is broken.
+	// Blaming it instead walks the consecutive-refusal counter (MaxConsecutiveConnectionAttempts,
+	// default 50, reset only by a 2xx) and disables the URL for EVERY path — so a vendor gating
+	// one path behind a plan took out the whole endpoint, and a wrong or expired shared credential
+	// took out every endpoint that uses it, because a 401 fails every path and nothing ever resets
+	// the counter. REST also gets no replayable probe evidence (recordRelayProbeEvidence is
+	// JSON-RPC only), so recovery would be poll-only.
+	LavaErrorNodeAccessDenied = registerError(&LavaError{
+		Code: 2018, Name: "NODE_ACCESS_DENIED", Category: CategoryExternal,
+		SubCategory: SubCategoryNodeCapability,
+		Description: "Endpoint refused the router (credentials, plan, WAF, region); another provider may serve it", Retryable: true,
 	})
 	// NODE_DATA_NOT_HELD: the endpoint answered correctly and the answer is "I do
 	// not have this" — a pruned height, an object that never existed, a request
@@ -302,6 +358,45 @@ var (
 		Code: 2017, Name: "NODE_DATA_NOT_HELD", Category: CategoryExternal,
 		SubCategory: SubCategoryDataScope,
 		Description: "Endpoint does not hold the requested data (pruned or never existed)", Retryable: true,
+	})
+
+	// NODE_ABORTED is a node answering with gRPC ABORTED (10) (MAG-3995). It classified as
+	// UNKNOWN_ERROR before.
+	//
+	// The only node known to send it is Sui, and only when a transaction is submitted
+	// (sui-rpc-api maps the transaction driver's Aborted category to it, plus one direct case,
+	// "already finalized but with different user signatures"). Cosmos SDK, CometBFT, ibc-go,
+	// wasmd, Lava and Concordium never send it. Sui's own definition, in sui-core's
+	// transaction_driver/error.rs, is "transient failure during transaction processing that
+	// prevents the transaction from finalization. Retriable with new transaction submission",
+	// and the message a client receives starts "Transaction processing aborted (retriable with
+	// another submission)". The named cases are a consensus rejection, a status dropped from the
+	// validator's cache, and an input object or package that does not exist yet; categorize()
+	// falls back to Aborted for every validator error Sui does not list otherwise.
+	//
+	// So ABORTED is what the validators answered when the fullnode's transaction driver
+	// submitted the write. It is not evidence against the fullnode the router sent it to, and
+	// whether to submit again is the client's call: ExecuteTransaction is stateful, so the
+	// router never re-sends a write, and policy.Decide stops a stateful relay before it reads
+	// HasNonRetryableNodeError. What Retryable=false does here is keep the answer off the
+	// endpoint: CategoryExternal + !Retryable is excused by EndpointAtFault, and IsNonRetryable
+	// keeps it out of the availability score. Left as UNKNOWN_ERROR, it was scored against every
+	// endpoint the write was broadcast to.
+	//
+	// MayHaveReachedNode is true because the node answered: the already-finalized case means a
+	// transaction answered with ABORTED can be on chain. It does not decide a write's verdict
+	// here. A gRPC status error comes back as a node error carrying the node's own message, and
+	// writeOutcomeIsUnknown reads this flag only from protocol errors, so the caller gets Sui's
+	// ABORTED answer, with its "retriable with another submission" text, rather than
+	// errUnknownWriteOutcome.
+	//
+	// A node error, not PROTOCOL_PROVIDER_ABORTED (1013). That code is CategoryInternal, which
+	// would report the endpoint as unreachable and rank the node's own message below internal
+	// errors. It also claims the request never reached the node.
+	LavaErrorNodeAborted = registerError(&LavaError{
+		Code: 2019, Name: "NODE_ABORTED", Category: CategoryExternal,
+		Description: "Node aborted the operation (gRPC ABORTED); on Sui, the validators' answer to a submitted transaction, retriable by the client with a new submission", Retryable: false,
+		MayHaveReachedNode: true,
 	})
 
 	// Bitcoin/UTXO node errors (2100-2149)

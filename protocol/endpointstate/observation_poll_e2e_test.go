@@ -36,9 +36,15 @@ func ensureRandSeeded() {
 // SetSpec) WITHOUT the HTTP server/connector that helper also spins up — the connector's
 // background goroutine + the helper's SetGlobalLoggingLevel write otherwise data-race
 // with each other across tests under -race. We only need a parser, so we build just one.
-func newRealChainParser(t *testing.T, specIndex, apiInterface string) chainlib.ChainParser {
+//
+// specDirs defaults to the repo's bundled specs/; a test that needs a spec shape the
+// bundle does not carry (chainlib's testdata) names its own directories.
+func newRealChainParser(t *testing.T, specIndex, apiInterface string, specDirs ...string) chainlib.ChainParser {
 	t.Helper()
-	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, specIndex)
+	if len(specDirs) == 0 {
+		specDirs = []string{"../../specs/"}
+	}
+	spec, err := specutils.GetSpecFromLocalDirs(specDirs, specIndex)
 	require.NoError(t, err)
 	cp, err := chainlib.NewChainParser(apiInterface)
 	require.NoError(t, err)
@@ -105,7 +111,7 @@ func TestEndpointMonitor_RealPoll_NonSVM_PopulatesObservation(t *testing.T) {
 
 	url := "http://eth-ep:8545"
 	conn := &mockDirectRPCConnection{url: url}
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -152,7 +158,7 @@ func TestEndpointMonitor_RealPoll_SVM_PopulatesObservation(t *testing.T) {
 	require.NotNil(t, m)
 	defer m.Stop()
 
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -192,7 +198,7 @@ func TestEndpointMonitor_RealPoll_SVM_FailureRecordsFailure(t *testing.T) {
 	require.NotNil(t, m)
 	defer m.Stop()
 
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {

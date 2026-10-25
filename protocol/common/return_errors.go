@@ -51,6 +51,15 @@ var JsonRpcBatchSizeExceededError = JsonRPCErrorMessage{
 	},
 }
 
+var JsonRpcInvalidRequestError = JsonRPCErrorMessage{
+	JsonRPC: "2.0",
+	Id:      1,
+	Error: JsonRPCError{
+		Code:    -32600,
+		Message: "Invalid Request",
+	},
+}
+
 var JsonRpcParseError = JsonRPCErrorMessage{
 	JsonRPC: "2.0",
 	Id:      -1,

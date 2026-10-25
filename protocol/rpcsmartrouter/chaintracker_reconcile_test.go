@@ -26,12 +26,19 @@ type reconcileFixture struct {
 
 func newReconcileFixture(t *testing.T, ctx context.Context) *reconcileFixture {
 	t.Helper()
+	return newReconcileFixtureWith(t, ctx, nil)
+}
+
+// newReconcileFixtureWith is newReconcileFixture with a hook that adjusts the monitor config
+// before the monitor is built (idle mode, poll divisor).
+func newReconcileFixtureWith(t *testing.T, ctx context.Context, adjust func(*endpointstate.EndpointChainTrackerConfig)) *reconcileFixture {
+	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
 
 	const chainID, apiInterface = "ETH1", "jsonrpc"
-	monitor := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+	monitorCfg := endpointstate.EndpointChainTrackerConfig{
 		ChainParser:  newRealChainParserForHarvest(t, chainID),
 		ChainID:      chainID,
 		ApiInterface: apiInterface,
@@ -40,7 +47,11 @@ func newReconcileFixture(t *testing.T, ctx context.Context) *reconcileFixture {
 		// here asserts on poll results, only on tracker REGISTRATION.
 		AverageBlockTime: 30 * time.Second,
 		BlocksToSave:     1,
-	})
+	}
+	if adjust != nil {
+		adjust(&monitorCfg)
+	}
+	monitor := endpointstate.NewEndpointMonitor(ctx, monitorCfg)
 	t.Cleanup(monitor.Stop)
 
 	rpcEndpoint := &lavasession.RPCEndpoint{
