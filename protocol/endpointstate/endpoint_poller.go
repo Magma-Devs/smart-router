@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -428,6 +429,13 @@ func (ecf *EndpointPoller) CustomMessage(ctx context.Context, path string, data 
 	}
 	return reply, nil
 }
+
+// Compile-time proof that the poller is the chaintracker.PollObserver the SVM wrapper looks
+// for. The wrapper finds the hook by a run-time type assertion and skips recording silently
+// when it is absent, so a changed parameter here would otherwise stop every Solana-family
+// endpoint from recording poll observations with no build or unit-test failure to show for
+// it (MAG-2221).
+var _ chaintracker.PollObserver = (*EndpointPoller)(nil)
 
 // ObserveLatestBlockPoll records a single latest-block poll observation for this
 // endpoint (Topic A / MAG-2158). It implements chaintracker.PollObserver so the SVM
