@@ -763,7 +763,10 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 
 	router, err := g.dial(ctx)
 	if err != nil {
-		outcome.err = fmt.Errorf("connect: %w", err)
+		// A dial the deadline cut off reads as a cut-off, as a check it cut off does, and
+		// the url's height was never read.
+		outcome.err = deadlineContext(ctx, fmt.Errorf("connect: %w", err))
+		outcome.head = spectypes.NOT_APPLICABLE
 		return outcome
 	}
 

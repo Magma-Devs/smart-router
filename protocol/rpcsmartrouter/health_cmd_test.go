@@ -367,6 +367,17 @@ func TestHealth_WarningSeverityIsCarried(t *testing.T) {
 
 // A check the deadline cut off says so, and so does every check after it: none reads
 // as the connector's own "connector is closed".
+// A socket that accepts and never answers its handshake is cut off by the deadline while it is
+// dialed. The row says so, as it does for a check the deadline cut off, and reads no height.
+func TestHealth_ACutOffDialNamesTheDeadline(t *testing.T) {
+	rows := healthProbe(t, "ETH1", true, 1500*time.Millisecond, commonlib.NodeUrl{Url: stalledSocket(t)})
+	require.Len(t, rows, 1)
+	assert.Contains(t, rows[0].Error, "verification deadline exceeded")
+	assert.Contains(t, rows[0].Error, "connect:")
+	assert.Equal(t, int64(-1), rows[0].LatestBlock)
+	assert.False(t, rows[0].Ok)
+}
+
 func TestHealth_DeadlineNamesItself(t *testing.T) {
 	up := newFakeUpstreams(t)
 	rows := healthProbe(t, "ETH1", true, 2*time.Second, commonlib.NodeUrl{Url: up.httpURL("/g/" + upSlowChain)})
