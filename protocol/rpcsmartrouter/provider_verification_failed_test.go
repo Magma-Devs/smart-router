@@ -59,7 +59,9 @@ func newVerificationFailedRouter(t *testing.T, spec string, inputs *chainReverif
 		smartRouterMetricsManager: mm,
 		providerSessions:          map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider{},
 		backupProviderSessions:    map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider{},
-		reverifyInputs:            map[string]*chainReverifyInputs{spec + "-jsonrpc": inputs},
+		// Keyed as the router keys a chain's inputs, so code that looks them up by
+		// RPCEndpoint.Key() (the retry loop) finds them.
+		reverifyInputs: map[string]*chainReverifyInputs{inputs.rpcEndpoint.Key(): inputs},
 	}
 }
 
@@ -68,7 +70,7 @@ func newVerificationFailedRouter(t *testing.T, spec string, inputs *chainReverif
 // that never passed had no series of any kind.
 func TestPublishServingTier_ProviderOutCarriesTheFailedCheck(t *testing.T) {
 	const spec = "VERIFYFAILEDCHECK"
-	const chainKey = spec + "-jsonrpc"
+	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	inputs := &chainReverifyInputs{
 		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "tatum"}, {Name: "gk8"}},
 		configuredBackup: []*lavasession.RPCStaticProviderEndpoint{{Name: "blockdaemon"}},
@@ -101,7 +103,7 @@ func TestPublishServingTier_ProviderOutCarriesTheFailedCheck(t *testing.T) {
 // belongs to. It keeps serving, and the lost service is what the series names.
 func TestPublishServingTier_RefusedServiceOfAPairedProvider(t *testing.T) {
 	const spec = "VERIFYFAILEDSERVICE"
-	const chainKey = spec + "-jsonrpc"
+	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	refused := map[string][]metrics.ProviderVerificationFailure{"lava": {{Scope: metrics.VerificationScopeService, Service: "archive", Check: "pruning"}}}
 	inputs := &chainReverifyInputs{
 		configuredBackup: []*lavasession.RPCStaticProviderEndpoint{{Name: "lava"}},
@@ -125,7 +127,7 @@ func TestPublishServingTier_RefusedServiceOfAPairedProvider(t *testing.T) {
 // hidden by its admitted primary.
 func TestPublishServingTier_VerificationFailedKeepsTiersApart(t *testing.T) {
 	const spec = "VERIFYFAILEDTIERS"
-	const chainKey = spec + "-jsonrpc"
+	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	inputs := &chainReverifyInputs{
 		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "lava"}},
 		configuredBackup: []*lavasession.RPCStaticProviderEndpoint{{Name: "lava"}},
@@ -142,7 +144,7 @@ func TestPublishServingTier_VerificationFailedKeepsTiersApart(t *testing.T) {
 // provider is out either way, and losing the series would hide that.
 func TestPublishServingTier_UncheckedErrorIsUnknown(t *testing.T) {
 	const spec = "VERIFYFAILEDUNKNOWN"
-	const chainKey = spec + "-jsonrpc"
+	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	inputs := &chainReverifyInputs{
 		configuredBackup: []*lavasession.RPCStaticProviderEndpoint{{Name: "blockdaemon"}},
 	}
@@ -206,6 +208,31 @@ func TestNoteFailure_ARateLimitIsNotAFailedCheck(t *testing.T) {
 	require.Equal(t, []string{"known|pruning"}, counted, "only the failed check is a counted run")
 }
 
+// The retry loop records why a provider out at boot still fails and counts the run, through
+// the inputs the router keyed by RPCEndpoint.Key(). A run the node only rate-limited is no
+// failed check: it is not counted, and a provider with no other verdict reads rate-limited.
+func TestRevalidateTier_NotesAndCountsTheFailedCheck(t *testing.T) {
+	up := newFakeUpstreams(t)
+	var counted []string
+	inputs := &chainReverifyInputs{
+		countFailedCheck: func(tier reverifyTier, provider string, f metrics.ProviderVerificationFailure) {
+			counted = append(counted, tier.String()+"|"+provider+"|"+f.Scope+"|"+f.Check)
+		},
+	}
+	rpsr := newVerificationFailedRouter(t, "VERIFYFAILEDRETRY", inputs)
+	dead := staticProvider("ETH1", common.NodeUrl{Url: up.httpURL("/rt/" + upDead)})
+	dead.Name = "dead"
+	throttled := staticProvider("ETH1", common.NodeUrl{Url: up.httpURL("/rt/" + upThrottled)})
+	throttled.Name = "throttled"
+
+	_, stillFailed := rpsr.revalidateTier(t.Context(), []*lavasession.RPCStaticProviderEndpoint{dead, throttled},
+		liveParser(t, "ETH1", true), inputs.rpcEndpoint, reverifyTierBackup)
+	require.Len(t, stillFailed, 2)
+	require.Equal(t, []string{"backup|dead|provider|chain-id"}, counted, "the dead node failed chain-id; the throttled one failed nothing")
+	require.Equal(t, "chain-id", inputs.lastFailure["backup|dead"])
+	require.Equal(t, checkRateLimited, inputs.lastFailure["backup|throttled"])
+}
+
 func applyReverificationKeep(inputs *chainReverifyInputs, fresh map[uint64]*lavasession.ConsumerSessionsWithProvider) map[uint64]*lavasession.ConsumerSessionsWithProvider {
 	next, _, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, 1)
 	return next
@@ -256,7 +283,7 @@ func TestRefusalsOf_ScopeFollowsWhatStillServes(t *testing.T) {
 
 func TestPublishServingTier_RefusedURLOfAPairedProvider(t *testing.T) {
 	const spec = "VERIFYFAILEDURL"
-	const chainKey = spec + "-jsonrpc"
+	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	inputs := &chainReverifyInputs{
 		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "tatum"}},
 		refusedFor: func(*lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
