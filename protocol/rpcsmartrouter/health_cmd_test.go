@@ -90,6 +90,15 @@ func TestApplyValidation(t *testing.T) {
 		})
 		assert.False(t, row.Ok)
 	})
+	t.Run("an add-on the spec does not define fails the row and names it", func(t *testing.T) {
+		row := healthEndpointResult{Verifications: []healthVerification{}}
+		applyValidation(&row, chainlib.NodeURLValidation{
+			Verifications:   []chainlib.VerificationResult{{Name: "chain-id", Severity: "Fail", Ok: true}},
+			UnknownServices: []string{"archiv"},
+		})
+		assert.False(t, row.Ok)
+		assert.Equal(t, "addons the spec does not define: archiv", row.Error)
+	})
 	t.Run("an unreachable url is not ok with no check run", func(t *testing.T) {
 		row := healthEndpointResult{Verifications: []healthVerification{}}
 		applyValidation(&row, chainlib.NodeURLValidation{Error: "connect: connection refused", LatestBlock: -1})

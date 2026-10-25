@@ -306,9 +306,15 @@ func TestValidate_ChargesTheFailedCheck(t *testing.T) {
 		require.Equal(t, []RefusedService{{Service: "archive", Check: "pruning"}}, admission.Refused())
 	})
 
-	t.Run("an add-on the spec does not define", func(t *testing.T) {
+	// A name the spec does not define is dropped before the checks are listed
+	// (DefinedServices), so a listing that fails anyway still costs the url, under
+	// the check that names the cause.
+	t.Run("checks that cannot be listed", func(t *testing.T) {
 		ctrl := gomock.NewController(t)
 		parser := NewMockChainParser(ctrl)
+		parser.EXPECT().SeparateAddonsExtensions(gomock.Any(), gomock.Any()).
+			DoAndReturn(func(_ context.Context, supported []string) ([]string, []string, error) { return supported, nil, nil }).
+			AnyTimes()
 		parser.EXPECT().GetVerifications(gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(nil, errors.New("invalid supported to check, is neither an addon or an extension")).AnyTimes()
 		fetcher := &ChainFetcher{

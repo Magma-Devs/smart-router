@@ -665,12 +665,14 @@ type NodeURLValidation struct {
 	// Refused: the router builds nothing for this url, for the reason Refusal
 	// gives. Throttled: its checks were only rate-limited, which decides nothing.
 	// RefusedServices / ThrottledServices: the same, for one service of a url the
-	// router otherwise admits.
+	// router otherwise admits. UnknownServices are the refused ones the spec does
+	// not define at all.
 	Refused           bool
 	Refusal           string
 	Throttled         string
 	RefusedServices   []string
 	ThrottledServices []string
+	UnknownServices   []string
 }
 
 // ValidateReport verifies every node url over its own connection, reads each url's
@@ -712,6 +714,9 @@ type nodeUrlOutcome struct {
 	head    int64
 	headErr error
 	checks  []checkOutcome
+	// unknown are the names in the url's addons the spec does not define. The url is
+	// verified without them, and admission refuses each as a service.
+	unknown []string
 }
 
 func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLValidation {
@@ -752,6 +757,7 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 	}
 	result.RefusedServices = servicesIn(admission.refused, o.url)
 	result.ThrottledServices = servicesIn(admission.throttledServices, o.url)
+	result.UnknownServices = o.unknown
 	return result
 }
 
@@ -775,6 +781,14 @@ func admissionFrom(outcomes []nodeUrlOutcome) (ProviderAdmission, error) {
 		}
 		if outcome.err != nil {
 			charge(outcome.err)
+		}
+		for _, name := range outcome.unknown {
+			admission.fail(outcome.url, name, CheckUnsupportedAddon)
+			utils.LavaFormatWarning("ignoring a node url add-on this spec does not define; the url serves the rest", nil,
+				utils.LogAttr("url", outcome.url.String()),
+				utils.LogAttr("addon", name),
+				utils.LogAttr("hint", "fix the name in the url's addons, or remove it"),
+			)
 		}
 		for _, check := range outcome.checks {
 			if check.err == nil {
@@ -921,9 +935,11 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		return outcome
 	}
 	outcome.served = url
+	url.Addons, outcome.unknown = DefinedServices(g.parser, url.Addons)
 	verifications, err := g.cf.nodeUrlVerifications(g.parser, url)
 	if err != nil {
-		// Listing a url's checks fails only on add-ons the spec does not define.
+		// Listing a url's checks fails only on add-ons the spec does not define,
+		// which DefinedServices has just dropped.
 		outcome.err = chargedTo(CheckUnsupportedAddon, err)
 		return outcome
 	}
@@ -1033,18 +1049,52 @@ func (cf *ChainFetcher) nodeUrlVerifications(chainParser ChainParser, url common
 // collections, so a url declaring only extensions serves the base collection.
 // Verification, the provider's serving check and the endpoint builder all read a
 // url's base traffic from it, so they cannot disagree.
+//
+// A name the spec does not define does not count as an add-on (MAG-3950). On a
+// standalone-addons url that defines no add-on, such a name may have been the url's
+// only add-on, and the url takes no base traffic, so it is refused: it keeps nothing.
 func ServedAs(chainParser ChainParser, url common.NodeUrl) (common.NodeUrl, error) {
 	if !url.StandaloneAddons || len(url.Addons) == 0 {
 		return url, nil
 	}
-	addons, _, err := chainParser.SeparateAddonsExtensions(context.Background(), url.Addons)
-	if err != nil {
-		return url, err
-	}
+	addons, extensions, err := chainParser.SeparateAddonsExtensions(context.Background(), url.Addons)
 	if len(addons) == 0 {
+		if err != nil {
+			_, unknown := definedServices(url.Addons, addons, extensions)
+			return url, &VerificationFailure{Check: CheckUnsupportedAddon, Err: fmt.Errorf(
+				"standalone-addons url declares no add-on this spec defines (%s is neither an add-on nor an extension), and serves no base traffic",
+				strings.Join(unknown, ", "))}
+		}
 		url.StandaloneAddons = false
 	}
 	return url, nil
+}
+
+// DefinedServices splits a url's addons into the names the spec defines, as an add-on
+// or an extension, and the ones it does not, each in the url's order. A name the spec
+// does not define is ignored where the url is served (MAG-3950): admission refuses it
+// as a service with check unsupported-addon, and the url serves the rest.
+func DefinedServices(chainParser ChainParser, declared []string) (defined, unknown []string) {
+	if len(declared) == 0 {
+		return declared, nil
+	}
+	addons, extensions, err := chainParser.SeparateAddonsExtensions(context.Background(), declared)
+	if err == nil {
+		return declared, nil
+	}
+	return definedServices(declared, addons, extensions)
+}
+
+func definedServices(declared, addons, extensions []string) (defined, unknown []string) {
+	for _, name := range declared {
+		switch {
+		case name == "" || slices.Contains(addons, name) || slices.Contains(extensions, name):
+			defined = append(defined, name)
+		case !slices.Contains(unknown, name):
+			unknown = append(unknown, name)
+		}
+	}
+	return defined, unknown
 }
 
 // socketVerifications keeps the checks a websocket url answers for: those in a

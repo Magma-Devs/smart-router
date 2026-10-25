@@ -2429,14 +2429,9 @@ func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
 // everything else over http.
 func subscriptionCollectionProbe(chainParser chainlib.ChainParser) func(internalPath string, declaredAddons []string) bool {
 	return func(internalPath string, declaredAddons []string) bool {
-		addons, _, err := chainParser.SeparateAddonsExtensions(context.Background(), declaredAddons)
-		if err != nil {
-			// Verification refuses a url whose add-ons cannot be read, so this
-			// is reached only outside admission; an unreadable addon set falls
-			// back to "http collection" — the shape all but STRK's three ws
-			// paths have.
-			return false
-		}
+		// A name the spec does not define is ignored, as admission ignores it
+		// (MAG-3950): addons holds the add-ons the spec does define.
+		addons, _, _ := chainParser.SeparateAddonsExtensions(context.Background(), declaredAddons)
 		if len(addons) == 0 {
 			addons = append(addons, "")
 		}
@@ -4951,7 +4946,9 @@ func urlRefusal(provider *lavasession.RPCStaticProviderEndpoint, admissionFor fu
 func admittedServicesFor(chainParser chainlib.ChainParser, admission chainlib.ProviderAdmission, url common.NodeUrl) ([]string, bool) {
 	served, err := chainlib.ServedAs(chainParser, url)
 	if err != nil {
-		served = url
+		// A standalone-addons url that declares no add-on the spec defines keeps
+		// nothing, as verification and the serving check read it.
+		return nil, false
 	}
 	return admission.AdmittedServices(served)
 }
