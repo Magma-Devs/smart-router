@@ -338,11 +338,12 @@ var (
 // the command, which then reports that provider as timed out. The wedged probe runs
 // on without its --concurrency slot.
 func probeWithDeadline(ctx context.Context, provider healthProvider, opts healthOptions) []healthEndpointResult {
+	probe := healthProbeFn // read here: the wedged goroutine below may outlive its caller
 	if opts.timeout <= 0 {
-		return healthProbeFn(ctx, provider, opts)
+		return probe(ctx, provider, opts)
 	}
 	done := make(chan []healthEndpointResult, 1)
-	go func() { done <- healthProbeFn(ctx, provider, opts) }()
+	go func() { done <- probe(ctx, provider, opts) }()
 	wait := time.NewTimer(opts.timeout + healthDeadlineGrace)
 	defer wait.Stop()
 	select {
