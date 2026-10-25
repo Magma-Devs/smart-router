@@ -4128,7 +4128,8 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 
 // chainTrackerReconcileInterval is how often initializeChainTrackers re-walks the live pairing
 // looking for direct-RPC endpoints that have no ChainTracker. It is deliberately short relative to
-// the paths that ADMIT an endpoint after startup (retryFailedProviders' 2s–3m retry, the ~15m
+// the paths that ADMIT an endpoint after startup (the verification retry loop: 2s–3m while a chain
+// is dark, else 30s doubling to 15m; the ~15m
 // epoch re-verify), because it is the only thing standing between a late-admitted endpoint and
 // permanent silence — a reconcile pass is a map lookup per endpoint when nothing is missing, so the
 // cost of running it often is nil. Package-level var, not a const, so tests can shorten it.
@@ -4141,7 +4142,7 @@ var chainTrackerReconcileInterval = 15 * time.Second
 // MAG-2622 — why this is a LOOP and not the one-shot it used to be. Endpoints enter the pairing at
 // three points AFTER this function's first pass, and none of them registered a tracker:
 //
-//	retryFailedProviders   an upstream that failed boot verification recovers (2s–3m adaptive retry)
+//	runVerificationRetries an upstream out of the pairing recovers (its retry backoff, MAG-3950)
 //	applyReverification promote  a demoted provider passes re-verification (epoch tick)
 //	rebuildPairingFromConfig     /debug/reset-pairing re-admits cold
 //

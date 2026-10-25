@@ -118,6 +118,32 @@ type chainReverifyInputs struct {
 	// falls back to the process-wide holdoff.Shared, so one vendor's cap slows every
 	// chain this process probes through it; tests inject their own.
 	rateLimitHoldoff *holdoff.Registry
+	// retries is the chain's verification retry schedule (MAG-3950). Nil in tests that
+	// build chainReverifyInputs by hand; every method on it is nil-safe.
+	retries *retrySchedule
+	// verdictAt is when the probe behind each provider's last applied verdict started,
+	// keyed "<tier>|<name>". A retry probe that started before it lost a race with
+	// another pass, the epoch's, and is dropped: applying it would count that pass's
+	// failure twice. Guarded by RPCSmartRouter.mu; lazily allocated.
+	verdictAt map[string]time.Time
+}
+
+// superseded reports whether a verdict newer than a probe started at started was
+// applied while it ran. Callers hold RPCSmartRouter.mu.
+func (inputs *chainReverifyInputs) superseded(tier reverifyTier, name string, started time.Time) bool {
+	return inputs.verdictAt[retryKey(tier, name)].After(started)
+}
+
+// appliedVerdict records that a verdict from a probe started at started was applied. A
+// rate limit is no verdict, and does not count. Callers hold RPCSmartRouter.mu.
+func (inputs *chainReverifyInputs) appliedVerdict(tier reverifyTier, name string, started time.Time, err error) {
+	if isRateLimitFailure(err) {
+		return
+	}
+	if inputs.verdictAt == nil {
+		inputs.verdictAt = make(map[string]time.Time)
+	}
+	inputs.verdictAt[retryKey(tier, name)] = started
 }
 
 // checkRateLimited is the check of a provider whose only verdict so far is a rate
@@ -219,7 +245,7 @@ func isRateLimitFailure(err error) bool {
 //
 // The third return is the names promoted this cycle. updateEpoch needs them to drop
 // those providers from the failed lists — promoting here while leaving them pending
-// for retryFailedProviders produces two sessions for one provider.
+// for the retry loop produces two sessions for one provider.
 func applyReverification(
 	ctx context.Context,
 	inputs *chainReverifyInputs,
@@ -350,6 +376,7 @@ func applyReverification(
 	// WaitGroup makes that contract explicit and removes the trap of a future
 	// edit accidentally short-circuiting validation.
 	results := make([]error, len(configured))
+	started := time.Now()
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, SpecReVerifyConcurrency)
 	for i, p := range configured {
@@ -370,6 +397,7 @@ func applyReverification(
 	}
 	for i, p := range configured {
 		err := results[i]
+		inputs.appliedVerdict(tier, p.Name, started, err)
 		_, wasActive := activeNames[p.Name]
 		streakKey := tier.String() + "|" + p.Name
 		if err == nil {

@@ -170,9 +170,9 @@ func TestChainIsDark(t *testing.T) {
 func TestRetryIntervalFor(t *testing.T) {
 	require.Equal(t, retryDarkBaseInterval, retryIntervalFor(true),
 		"a chain that cannot serve retries promptly — every second is downtime")
-	require.Equal(t, retryMaxInterval, retryIntervalFor(false),
-		"a merely degraded chain waits the full interval; retries buy redundancy, not availability")
-	require.Less(t, retryDarkBaseInterval, retryMaxInterval)
+	require.Equal(t, VerificationRetryDelay, retryIntervalFor(false),
+		"a merely degraded chain waits the first verification retry delay; retries buy redundancy, not availability")
+	require.Less(t, retryDarkBaseInterval, VerificationRetryDelay)
 }
 
 func TestSeedInitialHealth_DarkChainReportsUnhealthyImmediately(t *testing.T) {
@@ -286,8 +286,7 @@ func TestReadmitRecoveredProviders_RestoresBothTiers(t *testing.T) {
 		return out
 	}
 
-	rpsr.readmitRecoveredProviders(chainKey, rpcEndpoint, convert,
-		staticProviders, nil, backupProviders, nil)
+	rpsr.readmitRecoveredProviders(chainKey, rpcEndpoint, convert, staticProviders, backupProviders)
 
 	require.Len(t, rpsr.providerSessions[chainKey], 1, "primary re-admitted")
 	require.Len(t, rpsr.backupProviderSessions[chainKey], 1, "backup re-admitted — backups are retried too now")
@@ -311,7 +310,7 @@ func TestReadmitRecoveredProviders_NoRecoveriesStillRecordsStillFailed(t *testin
 			t.Fatal("nothing recovered — must not build sessions")
 			return nil
 		},
-		nil, stillFailing, nil, nil)
+		nil, nil)
 
 	require.Len(t, rpsr.failedStaticProviders[chainKey], 1, "still queued for the next retry")
 	require.Empty(t, rpsr.providerSessions[chainKey])
@@ -320,7 +319,7 @@ func TestReadmitRecoveredProviders_NoRecoveriesStillRecordsStillFailed(t *testin
 
 // A dark chain must keep retrying and start serving as soon as an upstream returns,
 // without a process restart. This is MAG-2525's headline requirement.
-func TestRetryFailedProviders_DarkChainAdoptsProviderWhenItReturns(t *testing.T) {
+func TestVerificationRetries_DarkChainAdoptsProviderWhenItReturns(t *testing.T) {
 	rand.InitRandomSeed()
 	shortenRetryIntervals(t)
 	const chainKey = "BSC-jsonrpc"
@@ -348,7 +347,7 @@ func TestRetryFailedProviders_DarkChainAdoptsProviderWhenItReturns(t *testing.T)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		rpsr.retryFailedProviders(ctx, chainKey, nil, rpcEndpoint,
+		rpsr.runVerificationRetries(ctx, chainKey, nil, rpcEndpoint,
 			func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
 				out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
 				for i, p := range providers {
@@ -361,20 +360,22 @@ func TestRetryFailedProviders_DarkChainAdoptsProviderWhenItReturns(t *testing.T)
 	// The dark backoff doubles from its base, so three attempts land well inside this.
 	require.Eventually(t, func() bool { return !rpsr.chainIsDark(chainKey) }, 10*time.Second, 5*time.Millisecond,
 		"a dark chain must adopt a recovered provider on the fast backoff, not wait for the 15m epoch tick")
+	require.GreaterOrEqual(t, atomic.LoadInt32(&attempts), int32(3))
+	require.Empty(t, rpsr.failedStaticProviders[chainKey])
 
-	// With nothing left failing, the loop reports done and exits on its own.
+	// The loop runs for the life of the chain, and stops with it.
+	cancel()
 	select {
 	case <-done:
-	case <-time.After(retryMaxInterval + 5*time.Second):
-		cancel()
-		<-done
-		t.Fatal("retry loop should self-terminate once every provider has recovered")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry loop must stop when its context is cancelled")
 	}
-
-	require.GreaterOrEqual(t, atomic.LoadInt32(&attempts), int32(3))
 }
 
-func TestRetryFailedProviders_StopsWhenNothingIsPending(t *testing.T) {
+// With nothing failing the loop sleeps until something is scheduled, never building a
+// session, and stops with its context (MAG-3950: it no longer exits when its lists empty,
+// or a provider demoted later would never be retried).
+func TestVerificationRetries_IdlesUntilCancelled(t *testing.T) {
 	rand.InitRandomSeed()
 	shortenRetryIntervals(t)
 	const chainKey = "BSC-jsonrpc"
@@ -390,7 +391,7 @@ func TestRetryFailedProviders_StopsWhenNothingIsPending(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		rpsr.retryFailedProviders(ctx, chainKey, nil, rpcEndpoint,
+		rpsr.runVerificationRetries(ctx, chainKey, nil, rpcEndpoint,
 			func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
 				t.Error("no failed providers — must not build sessions")
 				return nil
@@ -399,15 +400,19 @@ func TestRetryFailedProviders_StopsWhenNothingIsPending(t *testing.T) {
 
 	select {
 	case <-done:
-	case <-time.After(retryDarkBaseInterval + 5*time.Second):
-		cancel()
-		<-done
-		t.Fatal("loop must exit when both failed lists are empty")
+		t.Fatal("the loop must keep running with nothing pending")
+	case <-time.After(10 * retryDarkBaseInterval):
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry loop must stop when its context is cancelled")
 	}
 }
 
 // One chain being dark must not disturb another chain's state.
-func TestRetryFailedProviders_ChainsAreIsolated(t *testing.T) {
+func TestVerificationRetries_ChainsAreIsolated(t *testing.T) {
 	rand.InitRandomSeed()
 	shortenRetryIntervals(t)
 	rpsr := createTestRPCSmartRouter()
@@ -437,7 +442,7 @@ func TestRetryFailedProviders_ChainsAreIsolated(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		rpsr.retryFailedProviders(ctx, darkKey, nil, darkEndpoint,
+		rpsr.runVerificationRetries(ctx, darkKey, nil, darkEndpoint,
 			func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
 				return nil
 			})
@@ -461,15 +466,19 @@ func swapBootValidate(fn func(context.Context, *lavasession.RPCStaticProviderEnd
 }
 
 // shortenRetryIntervals compresses the retry cadence so loop behavior can be
-// exercised in milliseconds. The ratio between the two is preserved, since the
-// point of the design is that a dark chain retries far sooner than a degraded one.
+// exercised in milliseconds. The ratios are preserved, since the point of the design
+// is that a dark chain retries far sooner than a degraded one.
 func shortenRetryIntervals(t *testing.T) {
 	t.Helper()
 	prevDark, prevMax := retryDarkBaseInterval, retryMaxInterval
+	prevDelay, prevMaxDelay := VerificationRetryDelay, VerificationRetryMaxDelay
 	retryDarkBaseInterval = 10 * time.Millisecond
 	retryMaxInterval = 500 * time.Millisecond
+	VerificationRetryDelay = 150 * time.Millisecond
+	VerificationRetryMaxDelay = 4500 * time.Millisecond
 	t.Cleanup(func() {
 		retryDarkBaseInterval, retryMaxInterval = prevDark, prevMax
+		VerificationRetryDelay, VerificationRetryMaxDelay = prevDelay, prevMaxDelay
 	})
 }
 
