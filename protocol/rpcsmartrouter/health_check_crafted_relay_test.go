@@ -35,6 +35,13 @@ type healthRelayFleet struct {
 // newHealthRelayFleet wires the fleet under the given policy, written for the latest-block method.
 func newHealthRelayFleet(t *testing.T, policy CrossValidationPolicy) *healthRelayFleet {
 	t.Helper()
+	return newHealthRelayFleetAnswering(t, &policy, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`)
+}
+
+// newHealthRelayFleetAnswering is newHealthRelayFleet with the upstream's reply chosen. A nil
+// policy configures none.
+func newHealthRelayFleetAnswering(t *testing.T, policy *CrossValidationPolicy, reply string) *healthRelayFleet {
+	t.Helper()
 	rand.InitRandomSeed()
 	ctx := t.Context()
 
@@ -42,7 +49,7 @@ func newHealthRelayFleet(t *testing.T, policy CrossValidationPolicy) *healthRela
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		served.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x10"}`))
+		_, _ = w.Write([]byte(reply))
 	})
 	chainParser, _, _, closeServer, providerEndpoint, err := chainlib.CreateChainLibMocks(
 		ctx, "ETH1", spectypes.APIInterfaceJsonRPC, upstream, nil, "../../", nil)
@@ -74,12 +81,14 @@ func newHealthRelayFleet(t *testing.T, policy CrossValidationPolicy) *healthRela
 	rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 	require.NoError(t, sessionManager.UpdateAllProviders(1, pairingList, nil))
 
-	resolver, err := NewCrossValidationPolicyResolver(CrossValidationConfig{
-		Policies: []CrossValidationPolicyEntry{{
+	var config CrossValidationConfig
+	if policy != nil {
+		config.Policies = []CrossValidationPolicyEntry{{
 			ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_blockNumber",
-			CrossValidationPolicy: policy,
-		}},
-	})
+			CrossValidationPolicy: *policy,
+		}}
+	}
+	resolver, err := NewCrossValidationPolicyResolver(config)
 	require.NoError(t, err)
 
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
@@ -208,6 +217,30 @@ func TestHealthRelayUnderThePreFixWiring(t *testing.T) {
 				"refused before anything was sent — which is why no node was ever asked whether it was healthy")
 		})
 	}
+}
+
+// TestSendCraftedRelays_ErrorAnswerIsNotHealthy is MAG-4617. ProcessingResult returns a node
+// error with err == nil when nothing succeeded, and the health check took any reply as a pass. In
+// production the reply was a gRPC call that hit the try's own deadline, which the gRPC transport
+// reports as a node error: sui-testnet stayed Ready for seven minutes without egress, its health
+// check "succeeding" with latestBlock 0. Every upstream here answers the latest-block call with an
+// error, so the check must fail however many tries it gets.
+func TestSendCraftedRelays_ErrorAnswerIsNotHealthy(t *testing.T) {
+	fleet := newHealthRelayFleetAnswering(t, nil,
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}`)
+
+	success, _ := fleet.server.sendCraftedRelays(2, false)
+	require.Positive(t, fleet.served.Load(), "premise: the upstreams were asked")
+	require.False(t, success, "an error answer is not a healthy upstream")
+}
+
+// The same fleet answering with a result passes, so the case above fails on the answer alone.
+func TestSendCraftedRelays_ResultAnswerIsHealthy(t *testing.T) {
+	fleet := newHealthRelayFleetAnswering(t, nil, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`)
+
+	success, err := fleet.server.sendCraftedRelays(2, false)
+	require.NoError(t, err)
+	require.True(t, success)
 }
 
 func thresholdName(threshold int) string {

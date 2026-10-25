@@ -3894,7 +3894,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check; when false, /readyz and /metrics/overall-health report 503 unconditionally, so keep it on under a readiness probe")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthIntervalFlag, RelayHealthIntervalFlagDefault, "interval between relay health checks")
-	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthUnhealthyIntervalFlag, RelayHealthUnhealthyIntervalFlagDefault, "probe interval while a chain is unhealthy; bounds how fast /readyz recovers after upstreams come back (clamped to relays-health-interval)")
+	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthUnhealthyIntervalFlag, RelayHealthUnhealthyIntervalFlagDefault, "probe interval while a chain is unhealthy, and the longest a client relay no upstream answered waits for the next probe; bounds how fast /readyz follows upstreams going away and coming back (clamped to relays-health-interval)")
 	// Registered as a flagset-owned Bool (NOT BoolVar bound to the lavasession global): BoolVar writes
 	// the bound global at registration time, which raced probe goroutines reading it. Applied to the
 	// atomic global in RunE via lavasession.SetDebugProbes.
