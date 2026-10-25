@@ -105,22 +105,42 @@ func TestSplitProvidersPerURL(t *testing.T) {
 		require.Equal(t, []string{"chainstack/0", "chainstack/0/v2", "chainstack/1"}, entityNames(got))
 	})
 
-	t.Run("the same node listed twice is one entity with both add-on sets", func(t *testing.T) {
+	t.Run("the same node listed twice with the same add-ons is one entity", func(t *testing.T) {
+		// The chart's double archive entry (MAG-4025).
 		auth := common.AuthConfig{AuthHeaders: map[string]string{"x-api-key": "k1"}}
 		got := splitProvidersPerURL([]*lavasession.RPCStaticProviderEndpoint{
 			splitTestProvider("chainstack",
 				common.NodeUrl{Url: "https://a.example", AuthConfig: auth, Addons: []string{"archive"}, StandaloneAddons: true, Methods: []string{"eth_getLogs"}},
 				common.NodeUrl{Url: "https://b.example"},
-				common.NodeUrl{Url: "https://a.example", AuthConfig: auth, Addons: []string{"debug", "archive"}, SkipVerifications: []string{"pruning"}},
+				common.NodeUrl{Url: "https://a.example", AuthConfig: auth, Addons: []string{"archive"}, SkipVerifications: []string{"pruning"}},
 			),
 		}, noPaths, httpOnlyCollections)
 		require.Equal(t, []string{"chainstack/0", "chainstack/1"}, entityNames(got))
 		merged := got[0].NodeUrls[0]
-		require.Equal(t, []string{"archive", "debug"}, merged.Addons)
+		require.Equal(t, []string{"archive"}, merged.Addons)
 		require.Equal(t, []string{"pruning"}, merged.SkipVerifications)
 		require.Equal(t, []string{"eth_getLogs"}, merged.Methods)
 		require.False(t, merged.StandaloneAddons, "an entry that did not opt out claims the base collection for the node")
 		require.Equal(t, auth, merged.AuthConfig)
+	})
+
+	t.Run("the same url with different add-ons stays two entities", func(t *testing.T) {
+		// [archive] and [debug] are each routable by the spec verifier; their union [archive, debug]
+		// is not (no route for debug without archive), so folding them would refuse the node that
+		// main admits as two urls. Found by the local run of 2026-10-25 (test plan F-1).
+		got := splitProvidersPerURL([]*lavasession.RPCStaticProviderEndpoint{
+			splitTestProvider("dup",
+				common.NodeUrl{Url: "https://a.example", Addons: []string{"archive"}},
+				common.NodeUrl{Url: "https://b.example"},
+				common.NodeUrl{Url: "https://a.example", Addons: []string{"debug"}},
+				common.NodeUrl{Url: "https://a.example", Addons: []string{"debug", "archive"}},
+				common.NodeUrl{Url: "https://a.example", Addons: []string{"archive", "debug"}}, // same set as the previous, different order
+			),
+		}, noPaths, httpOnlyCollections)
+		require.Equal(t, []string{"dup/0", "dup/1", "dup/2", "dup/3"}, entityNames(got))
+		require.Equal(t, []string{"archive"}, got[0].NodeUrls[0].Addons)
+		require.Equal(t, []string{"debug"}, got[2].NodeUrls[0].Addons)
+		require.Equal(t, []string{"debug", "archive"}, got[3].NodeUrls[0].Addons, "the first spelling of the set is kept")
 	})
 
 	t.Run("the same url with different credentials is two nodes", func(t *testing.T) {
@@ -151,24 +171,25 @@ func TestSplitProvidersPerURL(t *testing.T) {
 		got := splitProvidersPerURL([]*lavasession.RPCStaticProviderEndpoint{
 			splitTestProvider("chainstack",
 				common.NodeUrl{Url: "https://a.example", Timeout: 3 * time.Second, Addons: []string{"archive"}},
-				common.NodeUrl{Url: "https://a.example", Timeout: 9 * time.Second, IpForwarding: true, Addons: []string{"debug"}},
+				common.NodeUrl{Url: "https://a.example", Timeout: 9 * time.Second, IpForwarding: true, Addons: []string{"archive"}},
 			),
 		}, noPaths, httpOnlyCollections)
 		require.Len(t, got, 1)
 		require.Equal(t, 3*time.Second, got[0].NodeUrls[0].Timeout)
 		require.False(t, got[0].NodeUrls[0].IpForwarding)
-		require.Equal(t, []string{"archive", "debug"}, got[0].NodeUrls[0].Addons)
+		require.Equal(t, []string{"archive"}, got[0].NodeUrls[0].Addons)
 	})
 
 	t.Run("a merged node is expanded once", func(t *testing.T) {
 		got := splitProvidersPerURL([]*lavasession.RPCStaticProviderEndpoint{
 			splitTestProvider("chainstack",
+				common.NodeUrl{Url: "https://ton.example/api", Addons: []string{"archive"}, SkipVerifications: []string{"pruning"}},
 				common.NodeUrl{Url: "https://ton.example/api", Addons: []string{"archive"}},
-				common.NodeUrl{Url: "https://ton.example/api", Addons: []string{"debug"}},
 			),
 		}, []string{"", "/v2"}, httpOnlyCollections)
 		require.Equal(t, []string{"chainstack/0", "chainstack/0/v2"}, entityNames(got))
-		require.Equal(t, []string{"archive", "debug"}, got[1].NodeUrls[0].Addons)
+		require.Equal(t, []string{"archive"}, got[1].NodeUrls[0].Addons)
+		require.Equal(t, []string{"pruning"}, got[1].NodeUrls[0].SkipVerifications)
 	})
 
 	t.Run("deterministic", func(t *testing.T) {

@@ -21,10 +21,10 @@ import (
 // each, and a lagging url hid behind a healthy sibling while the first usable url in config order
 // served every relay. With one url per entity each of those is per url, and none of them changes.
 //
-// Per configured provider: entries that name the same node (same url, internal path and
-// credentials) are merged into one with the union of their add-ons; each url is expanded over the
-// spec's internal paths exactly as the session builder used to do it; and every resulting url
-// becomes an entity carrying the parent's chain, api-interface, stake and group label. The index
+// Per configured provider: entries that name the same node the same way (same url, internal path,
+// credentials and declared add-ons) are folded into one; each url is expanded over the spec's
+// internal paths exactly as the session builder used to do it; and every resulting url becomes an
+// entity carrying the parent's chain, api-interface, stake and group label. The index
 // is the url's position in the configured node-urls, fixed before merging and expansion, and an
 // auto-expanded path url appends its path: chainstack/0, chainstack/1, chainstack/0/v2. A
 // provider with one url is name/0 — always, so adding a second url later does not rename the
@@ -75,11 +75,17 @@ type indexedNodeURL struct {
 	url   common.NodeUrl
 }
 
-// mergeSameNodeURLs folds configured entries that name the same node into one, keeping config
-// order and the first entry's index. The same node means the same url, internal path and
-// credentials: one url listed under two api keys is two nodes as far as the operator can tell,
-// and stays two entities. The case this merges is one url listed twice to declare two add-on
-// sets, which used to be dropped on chains with internal paths and to share one tracker
+// mergeSameNodeURLs folds configured entries that declare the same node the same way into one,
+// keeping config order and the first entry's index. Same means the same url, internal path,
+// credentials AND add-ons. One url listed under two api keys is two nodes as far as the operator
+// can tell, and stays two entities. One url listed with two different add-on sets ([archive] and
+// [debug]) also stays two entities, on purpose: the spec verifier builds a per-url route table from
+// the declared add-ons, and a url declaring an extension together with an add-on ([archive, debug])
+// is a shape it refuses — it strips every add-on at once for the extension-less copy, so "debug
+// without archive" has no route. Two entries with one add-on each are routable; their union is not.
+// Keeping them apart is what main did with two urls, and each gets its own name and score here.
+// What this folds is the same url listed twice with the same add-ons (the chart's double archive
+// entry), which used to be dropped on chains with internal paths and to share one tracker
 // everywhere else (MAG-4025).
 func mergeSameNodeURLs(provider *lavasession.RPCStaticProviderEndpoint) []indexedNodeURL {
 	merged := make([]indexedNodeURL, 0, len(provider.NodeUrls))
@@ -97,8 +103,9 @@ func mergeSameNodeURLs(provider *lavasession.RPCStaticProviderEndpoint) []indexe
 	return merged
 }
 
-// nodeKey identifies a node: its url, the spec path it serves and the credentials it is reached
-// with. Two entries with equal keys are one node declared twice.
+// nodeKey identifies a node declaration: its url, the spec path it serves, the add-ons it declares
+// (as a set) and the credentials it is reached with. Two entries with equal keys are one node
+// declared twice.
 func nodeKey(url common.NodeUrl) string {
 	auth := url.AuthConfig
 	headers := make([]string, 0, len(auth.AuthHeaders))
@@ -106,10 +113,14 @@ func nodeKey(url common.NodeUrl) string {
 		headers = append(headers, name)
 	}
 	sort.Strings(headers)
+	addons := append([]string(nil), url.Addons...)
+	sort.Strings(addons)
 	var b strings.Builder
 	b.WriteString(url.Url)
 	b.WriteByte(0)
 	b.WriteString(url.InternalPath)
+	b.WriteByte(0)
+	b.WriteString(strings.Join(addons, ","))
 	for _, name := range headers {
 		b.WriteByte(0)
 		b.WriteString(name)
@@ -121,10 +132,11 @@ func nodeKey(url common.NodeUrl) string {
 	return b.String()
 }
 
-// mergeNodeURL folds `other` into `kept`, the first entry for this node. The lists that declare
-// what the node serves are unioned; standalone-addons holds only if every entry opted out of the
-// base collection, since an entry that did not opt out claims the base collection for the node.
-// The connection settings are the first entry's; a difference is an operator mistake worth a
+// mergeNodeURL folds `other` into `kept`, the first entry for this node. The add-ons are equal by
+// construction (part of the node key); the union only drops a duplicate. The other lists that
+// declare what the node serves are unioned; standalone-addons holds only if every entry opted out
+// of the base collection, since an entry that did not opt out claims the base collection for the
+// node. The connection settings are the first entry's; a difference is an operator mistake worth a
 // warning, not a reason to refuse a config that runs in production today.
 func mergeNodeURL(parent string, index int, kept, other common.NodeUrl) common.NodeUrl {
 	kept.Addons = unionStrings(kept.Addons, other.Addons)
