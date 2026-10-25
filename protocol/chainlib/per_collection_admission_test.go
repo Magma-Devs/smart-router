@@ -72,7 +72,7 @@ func TestAdmittedServices(t *testing.T) {
 	t.Run("refuses only the named service", func(t *testing.T) {
 		url := common.NodeUrl{Url: "https://a", Addons: []string{"archive", "debug"}}
 		var admission ProviderAdmission
-		admission.fail(url, "archive")
+		admission.fail(url, "archive", "pruning")
 
 		services, keep := admission.AdmittedServices(url)
 		require.True(t, keep)
@@ -84,7 +84,7 @@ func TestAdmittedServices(t *testing.T) {
 		root := common.NodeUrl{Url: "https://a", Addons: []string{"archive"}}
 		v2 := common.NodeUrl{Url: "https://a", InternalPath: "/v2", Addons: []string{"archive"}}
 		var admission ProviderAdmission
-		admission.fail(v2, "archive")
+		admission.fail(v2, "archive", "pruning")
 
 		services, _ := admission.AdmittedServices(root)
 		require.Equal(t, []string{"archive"}, services, "the root path keeps it")
@@ -100,7 +100,7 @@ func TestAdmittedServices(t *testing.T) {
 		require.False(t, url.ServesBaseCollection())
 
 		var admission ProviderAdmission
-		admission.fail(url, "evm")
+		admission.fail(url, "evm", "pruning")
 		services, keep := admission.AdmittedServices(url)
 		require.False(t, keep, "nothing left to serve — must not become a base-collection endpoint")
 		require.Empty(t, services)
@@ -109,7 +109,7 @@ func TestAdmittedServices(t *testing.T) {
 	t.Run("an ordinary url that kept nothing is still served", func(t *testing.T) {
 		url := common.NodeUrl{Url: "https://a", Addons: []string{"archive"}}
 		var admission ProviderAdmission
-		admission.fail(url, "archive")
+		admission.fail(url, "archive", "pruning")
 		services, keep := admission.AdmittedServices(url)
 		require.True(t, keep, "it still serves the base collection")
 		require.Empty(t, services)
@@ -252,23 +252,76 @@ func TestProviderAdmission_Equal(t *testing.T) {
 	require.True(t, empty.Equal(ProviderAdmission{}), "two clean passes are equal")
 
 	var one ProviderAdmission
-	one.fail(url, "archive")
+	one.fail(url, "archive", "pruning")
 	require.False(t, empty.Equal(one), "a service becoming refused is a change")
 	require.False(t, one.Equal(empty), "and a service recovering is too")
 
 	var same ProviderAdmission
-	same.fail(url, "archive")
+	same.fail(url, "archive", "pruning")
 	require.True(t, one.Equal(same), "the same refusal twice is not a change")
 
 	var two ProviderAdmission
-	two.fail(url, "archive")
-	two.fail(url, "debug")
+	two.fail(url, "archive", "pruning")
+	two.fail(url, "debug", "pruning")
 	require.False(t, one.Equal(two), "a second refusal on the same url is a change")
 
 	// Same service name, different url: distinct refusals, so not equal. Length
 	// alone would not catch this.
 	var elsewhere ProviderAdmission
-	elsewhere.fail(other, "archive")
+	elsewhere.fail(other, "archive", "pruning")
 	require.False(t, one.Equal(elsewhere), "same service on a different url is a different refusal")
 	require.Equal(t, len(one.refused), len(elsewhere.refused), "and the counts match, so length alone cannot tell")
+}
+
+// The check a provider failed travels as a value, so the router can publish it as a
+// metric label instead of leaving it in the error text.
+func TestValidate_ChargesTheFailedCheck(t *testing.T) {
+	url := common.NodeUrl{Url: "https://a", Addons: []string{"archive"}}
+
+	t.Run("a fatal verification is charged to its name", func(t *testing.T) {
+		fetcher := newValidationFetcher(t, url,
+			[]VerificationContainer{baseCollectionOnly("chain-id"), archiveOnBaseCollection()}, errors.New("down"))
+		_, err := fetcher.ValidateCollections(context.Background())
+		require.Equal(t, "chain-id", FailedCheck(err))
+		require.ErrorContains(t, err, "chain-id verification failed", "the error text is unchanged")
+
+		require.Equal(t, "chain-id", FailedCheck(fetcher.Validate(context.Background())), "the all-or-nothing path too")
+	})
+
+	t.Run("a refused service records the verification that refused it", func(t *testing.T) {
+		fetcher := newValidationFetcher(t, url, []VerificationContainer{archiveOnBaseCollection()}, errors.New("not an archive node"))
+		admission, err := fetcher.ValidateCollections(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, []RefusedService{{Service: "archive", Check: "pruning"}}, admission.Refused())
+	})
+
+	t.Run("an add-on the spec does not define", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		parser := NewMockChainParser(ctrl)
+		parser.EXPECT().GetVerifications(gomock.Any(), gomock.Any(), gomock.Any()).
+			Return(nil, errors.New("invalid supported to check, is neither an addon or an extension")).AnyTimes()
+		fetcher := &ChainFetcher{
+			endpoint: &lavasession.RPCProviderEndpoint{
+				ChainID: "AVALANCHEP", ApiInterface: spectypes.APIInterfaceJsonRPC,
+				NodeUrls: []common.NodeUrl{url},
+			},
+			chainParser: parser,
+			chainRouter: NewMockChainRouter(ctrl),
+		}
+		require.Equal(t, CheckUnsupportedAddon, FailedCheck(fetcher.Validate(context.Background())))
+	})
+
+	t.Run("an error with no check", func(t *testing.T) {
+		require.Equal(t, "", FailedCheck(errors.New("plain")))
+	})
+}
+
+// A service refused on several urls is one entry: the metric publishes it once.
+func TestProviderAdmission_RefusedDedupesAcrossUrls(t *testing.T) {
+	var admission ProviderAdmission
+	admission.fail(common.NodeUrl{Url: "https://a"}, "archive", "pruning")
+	admission.fail(common.NodeUrl{Url: "https://b"}, "archive", "pruning")
+	admission.fail(common.NodeUrl{Url: "https://a"}, "debug", "trace")
+	require.Equal(t, []RefusedService{{Service: "archive", Check: "pruning"}, {Service: "debug", Check: "trace"}}, admission.Refused())
+	require.Nil(t, ProviderAdmission{}.Refused())
 }

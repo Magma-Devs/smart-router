@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -134,6 +135,10 @@ type SmartRouterMetricsManager struct {
 	csmStickySessionsCount         *prometheus.GaugeVec   // smartrouter_csm_sticky_sessions
 	csmStickyClaims                *prometheus.CounterVec // smartrouter_csm_sticky_claims_total
 	csmReportedProvidersCount      *prometheus.GaugeVec   // smartrouter_csm_reported_providers
+	// verificationFailuresMu guards verificationFailures, the failing series last
+	// published per provider, so a republish deletes only the ones that cleared.
+	verificationFailuresMu sync.Mutex
+	verificationFailures   map[string][]ProviderVerificationFailure
 
 	// Router-scoped request group metrics (labels: spec, apiInterface, provider_address, method)
 	routerRequestsTotal      *prometheus.CounterVec
@@ -631,8 +636,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels)
 	providerVerificationFailed := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_provider_verification_failed",
-		Help: "1 while a configured provider is kept out of the pairing because it failed spec verification (at boot, or demoted by the epoch re-verifier), 0 while it is admitted. One series per configured provider and tier, so a provider that never passed is visible even though it has no other per-provider series. A provider out at boot is retried every 3m; one demoted later is re-checked every 15m epoch, so size alert windows above both.",
-	}, []string{"spec", "apiInterface", "provider", "tier"})
+		Help: "1 while a configured provider is failing a verification, labelled with the check it fails. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, unknown. A provider out at boot is retried every 3m; one demoted later and every service refusal is re-checked every 15m epoch, so size alert windows above both.",
+	}, []string{"spec", "apiInterface", "provider", "tier", "scope", "service", "check"})
 
 	// =========================================================================
 	// Request group metrics
@@ -2035,17 +2040,51 @@ func (m *SmartRouterMetricsManager) SetEndpointServingTier(chainId, apiInterface
 	m.endpointServingTier.WithLabelValues(chainId, apiInterface).Set(float64(ServingTier(healthyStatic, healthyBackup)))
 }
 
-// SetProviderVerificationFailed publishes whether a configured provider is held out
-// of the pairing by a failed spec verification. tier is "static" or "backup".
-func (m *SmartRouterMetricsManager) SetProviderVerificationFailed(spec, apiInterface, provider, tier string, failed bool) {
+// Scopes of smartrouter_provider_verification_failed.
+const (
+	VerificationScopeProvider = "provider"
+	VerificationScopeService  = "service"
+	VerificationScopeURL      = "url"
+)
+
+// ProviderVerificationFailure is one failing check of one provider. Service is
+// empty for scope=provider.
+type ProviderVerificationFailure struct {
+	Scope   string
+	Service string
+	Check   string
+}
+
+// SetProviderVerificationFailures publishes the checks a configured provider is
+// failing right now, and removes the series of checks it no longer fails. An empty
+// list clears the provider. tier is "static" or "backup".
+//
+// Only series that cleared are deleted, never the whole provider first: a scrape
+// landing between a delete and a re-set would read a gap, and a gap resets an
+// alert's pending timer.
+func (m *SmartRouterMetricsManager) SetProviderVerificationFailures(spec, apiInterface, provider, tier string, failures []ProviderVerificationFailure) {
 	if m == nil {
 		return
 	}
-	value := 0.0
-	if failed {
-		value = 1
+	key := spec + "|" + apiInterface + "|" + provider + "|" + tier
+	m.verificationFailuresMu.Lock()
+	defer m.verificationFailuresMu.Unlock()
+	for _, old := range m.verificationFailures[key] {
+		if !slices.Contains(failures, old) {
+			m.providerVerificationFailed.DeleteLabelValues(spec, apiInterface, provider, tier, old.Scope, old.Service, old.Check)
+		}
 	}
-	m.providerVerificationFailed.WithLabelValues(spec, apiInterface, provider, tier).Set(value)
+	for _, f := range failures {
+		m.providerVerificationFailed.WithLabelValues(spec, apiInterface, provider, tier, f.Scope, f.Service, f.Check).Set(1)
+	}
+	if m.verificationFailures == nil {
+		m.verificationFailures = map[string][]ProviderVerificationFailure{}
+	}
+	if len(failures) == 0 {
+		delete(m.verificationFailures, key)
+		return
+	}
+	m.verificationFailures[key] = slices.Clone(failures)
 }
 
 // SetCSMStickySessionsCount publishes the number of live sticky-session affinities.

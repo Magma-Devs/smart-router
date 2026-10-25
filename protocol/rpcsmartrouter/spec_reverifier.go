@@ -89,6 +89,16 @@ type chainReverifyInputs struct {
 	// subscription tiers leave out the urls it refused and a rate-limited pass can
 	// keep what the last one knew. Nil in tests that do not build endpoints.
 	admissionFor func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission
+	// refusedFor returns what was last refused to a provider that keeps serving: each
+	// service, and each node url (as a RefusedService with no service), with the check
+	// that refused it. Nil in tests that do not build endpoints.
+	refusedFor func(*lavasession.RPCStaticProviderEndpoint) []chainlib.RefusedService
+	// lastFailure is the check each provider last failed, keyed "<tier>|<name>" like
+	// demoteFailStreak. Written on every failed verification (boot, the retry loop,
+	// the epoch pass) and read only for a provider that is out of the pairing, so an
+	// entry left behind by a provider that later passed is never published. Guarded
+	// by RPCSmartRouter.mu; lazily allocated.
+	lastFailure map[string]string
 	// demoteFailStreak counts CONSECUTIVE failed re-verify cycles per active provider, keyed
 	// "<tier>|<name>" so a name configured in both tiers cannot share a counter. It is the only
 	// state that survives between epoch ticks, and it exists so a transient outage overlapping
@@ -105,6 +115,22 @@ type chainReverifyInputs struct {
 	// falls back to the process-wide holdoff.Shared, so one vendor's cap slows every
 	// chain this process probes through it; tests inject their own.
 	rateLimitHoldoff *holdoff.Registry
+}
+
+// noteFailure records the check a provider just failed. Callers hold RPCSmartRouter.mu.
+func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, err error) {
+	if inputs.lastFailure == nil {
+		inputs.lastFailure = make(map[string]string)
+	}
+	inputs.lastFailure[tier.String()+"|"+name] = failureCheck(err)
+}
+
+// failureCheck names the check an error was charged to, "unknown" when it carries none.
+func failureCheck(err error) string {
+	if check := chainlib.FailedCheck(err); check != "" {
+		return check
+	}
+	return "unknown"
 }
 
 // holdoffURLKey is the URL tier's key for a probed provider: its first node URL, so two
@@ -354,6 +380,7 @@ func applyReverification(
 			)
 			continue
 		}
+		inputs.noteFailure(tier, p.Name, err)
 		if !wasActive {
 			// Already out of the pairing — nothing to demote, and the streak governs only the
 			// demote decision, so keep it clear (a later promote then gets a full grace budget).
@@ -505,8 +532,8 @@ func validateProviderTier(
 	// It returns true when the admitted set actually moved, which is what tells
 	// applyReverification to rebuild that provider's session.
 	recordAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool,
-) (map[*lavasession.RPCStaticProviderEndpoint]struct{}, []*lavasession.RPCStaticProviderEndpoint) {
-	failedSet := make(map[*lavasession.RPCStaticProviderEndpoint]struct{})
+) (map[*lavasession.RPCStaticProviderEndpoint]error, []*lavasession.RPCStaticProviderEndpoint) {
+	failedSet := make(map[*lavasession.RPCStaticProviderEndpoint]error)
 	if len(providers) == 0 {
 		return failedSet, nil
 	}
@@ -550,7 +577,7 @@ func validateProviderTier(
 	var failedOrdered []*lavasession.RPCStaticProviderEndpoint
 	for i, p := range providers {
 		if err := results[i]; err != nil {
-			failedSet[p] = struct{}{}
+			failedSet[p] = err
 			failedOrdered = append(failedOrdered, p)
 			utils.LavaFormatWarning("provider validation failed — excluding from provider list", err,
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
@@ -597,13 +624,13 @@ func validateProviderCollections(
 	// (returns the original parser).
 	validationParser := chainlib.CloneChainParserForValidation(chainParser)
 	if err := chainlib.ProviderShapeError(endpoint, validationParser); err != nil {
-		return chainlib.ProviderAdmission{}, err
+		return chainlib.ProviderAdmission{}, &chainlib.VerificationFailure{Check: chainlib.CheckConfig, Err: err}
 	}
 
 	parallelConnections := uint(lavasession.DefaultMaximumStreamsOverASingleConnection)
 	nodeUrlRouter, err := chainlib.NewNodeUrlRouterFactory(parallelConnections, endpoint)
 	if err != nil {
-		return chainlib.ProviderAdmission{}, err
+		return chainlib.ProviderAdmission{}, &chainlib.VerificationFailure{Check: chainlib.CheckConfig, Err: err}
 	}
 
 	verificationFetcher := chainlib.NewChainFetcher(attemptCtx, &chainlib.ChainFetcherOptions{

@@ -3033,16 +3033,26 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// separate goroutine — re-validation runs synchronously from the epoch
 	// callback, bounded by SpecReVerifyConcurrency.
 	rpsr.mu.Lock()
-	rpsr.reverifyInputs[sessionManagerKey] = &chainReverifyInputs{
+	inputs := &chainReverifyInputs{
 		chainParser:                chainParser,
 		rpcEndpoint:                rpcEndpoint,
 		convertProvidersToSessions: convertProvidersToSessions,
 		recordAdmission:            recordAdmission,
 		recordReverifiedAdmission:  admissions.recordReverified,
 		admissionFor:               admissionFor,
-		configuredStatic:           relevantStaticProviderList,
-		configuredBackup:           relevantBackupProviderList,
+		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []chainlib.RefusedService {
+			return refusalsOf(admissionFor(p))
+		},
+		configuredStatic: relevantStaticProviderList,
+		configuredBackup: relevantBackupProviderList,
 	}
+	for p, err := range failedStaticSet {
+		inputs.noteFailure(reverifyTierStatic, p.Name, err)
+	}
+	for p, err := range failedBackupSet {
+		inputs.noteFailure(reverifyTierBackup, p.Name, err)
+	}
+	rpsr.reverifyInputs[sessionManagerKey] = inputs
 	rpsr.mu.Unlock()
 
 	// ============================================================================
@@ -4207,35 +4217,70 @@ func (rpsr *RPCSmartRouter) publishServingTierLocked(chainKey string) {
 	rpsr.publishVerificationFailedLocked(chainKey, inputs)
 }
 
-// publishVerificationFailedLocked marks every configured provider 1 when it is
-// missing from the live pairing and 0 when it is in it. Callers must already hold
-// rpsr.mu.
+// publishVerificationFailedLocked publishes, for every configured provider, the
+// checks it is failing right now. Callers must already hold rpsr.mu.
 //
-// A provider is only ever left out of the pairing by verification: failing it at
-// boot, or being demoted by the epoch re-verifier. Both leave it with no other
-// per-provider series, so without this gauge a backup that never passed looks the
-// same as one that was never configured. Reading the outcome off the session maps,
-// instead of off the failed lists, covers the demotion path too, which never writes
-// those lists.
+// A provider missing from the live pairing gets one scope=provider series, named
+// after the check it last failed. Verification is the only thing that leaves a
+// configured provider out: failing it at boot, or being demoted by the epoch
+// re-verifier. Reading "missing" off the session maps rather than the failed lists
+// covers the demotion path too, which never writes those lists.
+//
+// A provider in the pairing gets one scope=service series per add-on or extension
+// it was refused, so losing archive while still serving the base chain shows too.
+// A provider with neither has no series.
 func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inputs *chainReverifyInputs) {
+	if inputs == nil || inputs.rpcEndpoint == nil {
+		return
+	}
 	for _, tier := range []struct {
-		name       string
+		tier       reverifyTier
 		configured []*lavasession.RPCStaticProviderEndpoint
 		active     map[uint64]*lavasession.ConsumerSessionsWithProvider
 	}{
-		{reverifyTierStatic.String(), inputs.configuredStatic, rpsr.providerSessions[chainKey]},
-		{reverifyTierBackup.String(), inputs.configuredBackup, rpsr.backupProviderSessions[chainKey]},
+		{reverifyTierStatic, inputs.configuredStatic, rpsr.providerSessions[chainKey]},
+		{reverifyTierBackup, inputs.configuredBackup, rpsr.backupProviderSessions[chainKey]},
 	} {
 		admitted := make(map[string]struct{}, len(tier.active))
 		for _, s := range tier.active {
 			admitted[s.PublicLavaAddress] = struct{}{}
 		}
 		for _, p := range tier.configured {
-			_, ok := admitted[p.Name]
-			rpsr.smartRouterMetricsManager.SetProviderVerificationFailed(
-				inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name, tier.name, !ok)
+			var failures []metrics.ProviderVerificationFailure
+			if _, ok := admitted[p.Name]; !ok {
+				check := inputs.lastFailure[tier.tier.String()+"|"+p.Name]
+				if check == "" {
+					check = "unknown"
+				}
+				failures = append(failures, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeProvider, Check: check})
+			} else if inputs.refusedFor != nil {
+				for _, r := range inputs.refusedFor(p) {
+					failures = append(failures, partialFailure(r))
+				}
+			}
+			rpsr.smartRouterMetricsManager.SetProviderVerificationFailures(
+				inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name, tier.tier.String(), failures)
 		}
 	}
+}
+
+// refusalsOf lists what an admitted provider was refused: each service, and each node
+// url as a RefusedService with no service. A provider keeps serving through both.
+func refusalsOf(admission chainlib.ProviderAdmission) []chainlib.RefusedService {
+	refused := admission.Refused()
+	for _, check := range admission.RefusedURLChecks() {
+		refused = append(refused, chainlib.RefusedService{Check: check})
+	}
+	return refused
+}
+
+// partialFailure is a refusal as the metric publishes it: scope=service for one
+// add-on or extension, scope=url for a node url the provider is serving without.
+func partialFailure(r chainlib.RefusedService) metrics.ProviderVerificationFailure {
+	if r.Service == "" {
+		return metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: r.Check}
+	}
+	return metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeService, Service: r.Service, Check: r.Check}
 }
 
 // subscriptionEndpointSetter is the slice of the Direct WS/gRPC subscription managers
@@ -4399,6 +4444,16 @@ var retryValidateFn = func(ctx context.Context, provider *lavasession.RPCStaticP
 	return validateProviderCollections(ctx, provider, chainParser, BootValidateTimeout)
 }
 
+// noteVerificationFailure records the check a provider failed on the retry loop,
+// which runs without the router lock.
+func (rpsr *RPCSmartRouter) noteVerificationFailure(chainKey string, tier reverifyTier, name string, err error) {
+	rpsr.mu.Lock()
+	defer rpsr.mu.Unlock()
+	if inputs := rpsr.reverifyInputs[chainKey]; inputs != nil {
+		inputs.noteFailure(tier, name, err)
+	}
+}
+
 // revalidateTier re-runs verification over one tier's failed providers, returning
 // the recovered and still-failing partitions in configured order.
 func (rpsr *RPCSmartRouter) revalidateTier(
@@ -4420,6 +4475,7 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 		admission, err := retryValidateFn(ctx, provider, chainParser)
 		if err != nil {
 			stillFailed = append(stillFailed, provider)
+			rpsr.noteVerificationFailure(rpcEndpoint.Key(), tier, provider.Name, err)
 			utils.LavaFormatWarning("retry: provider verification still failing", err,
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("tier", tier.String()),
@@ -4462,6 +4518,9 @@ func (rpsr *RPCSmartRouter) readmitRecoveredProviders(
 	rpsr.failedBackupProviders[sessionManagerKey] = stillFailedBackup
 
 	if len(recoveredStatic) == 0 && len(recoveredBackup) == 0 {
+		// Nothing moved in the pairing, but a provider still out may now be
+		// failing a different check than the one published.
+		rpsr.publishVerificationFailedLocked(sessionManagerKey, rpsr.reverifyInputs[sessionManagerKey])
 		rpsr.mu.Unlock()
 		return
 	}
