@@ -144,13 +144,13 @@ Top-level `ok` is the AND of all rows.
 | `admitted` | Served, minus any `refusedServices` — the add-ons and extensions whose own checks failed |
 | `refused` | Dropped: it failed a check no single service owns, or could not be dialed. The provider serves from its other URLs |
 | `excluded` | The whole provider is dropped: a path it serves has no URL left, or its node URLs are a list the router cannot serve from (`reason` says which) |
-| `unknown` | The probe could not decide — its spec did not load, or it timed out |
+| `unknown` | The probe could not decide — its spec did not load, it timed out, or the URL's checks were only rate-limited |
 
 A failed `Warning` check fails the row but never the verdict: the router logs it and serves.
 
-When a URL's latest-block call fails, its row starts with a failed `fetch-latest-block` verification
-and reports `latestBlock: -1`. Checks that measure a distance from the head are then reported failed
-with `latest block unknown` instead of being sent; every other check still runs, so the row still
+When a URL's latest-block call fails, its row reports `latestBlock: -1` and the cause in
+`latestBlockError`. Checks that measure a distance from the head are then reported failed with
+`latest block unavailable` instead of being sent; every other check still runs, so the row still
 shows what the node does answer.
 
 | Flag | Default | Purpose |
@@ -161,7 +161,7 @@ shows what the node does answer.
 | `--timeout` | `30s` | Per-upstream budget for dialing and every relay; a slow or blocked node aborts instead of hanging, and an upstream that has not finished `5s` after it is reported as a timed-out row |
 | `--concurrency` | `8` | How many upstreams are probed at once |
 | `--skip-websocket-verification` | `false` | Only dial `ws(s)://` URLs, running no check over them (see note) |
-| `--use-tls` / `--allow-insecure-connection` | `true` / `false` | Inline gRPC endpoints only; a config's node URLs carry their own `auth-config` |
+| `--use-tls` / `--allow-insecure-connection` | `false` / `false` | Inline gRPC endpoints only; a config's node URLs carry their own `auth-config`. Unset, the dial tries plaintext first and upgrades to TLS when that fails |
 | `--log-level` | `info` | Log verbosity (written to stderr) |
 
 > **Websockets mirror the router's flag.** By default a `ws(s)://` URL runs, over the socket, every
