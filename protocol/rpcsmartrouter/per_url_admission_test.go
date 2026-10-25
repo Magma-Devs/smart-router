@@ -278,3 +278,44 @@ func TestRevalidateTier_RecordsTheAdmission(t *testing.T) {
 	require.Empty(t, stillFailed)
 	require.True(t, admissions.admissionFor(provider).URLRefused(1))
 }
+
+// The url grace keeps a url that fails one epoch pass in a session it already serves. A provider
+// out of the pairing has no such session: the pass promotes it with the admission it just gave it,
+// so it comes back without the url that pass refused, as it does from the failed-provider retry.
+func TestApplyReverification_TheUrlGraceIsForAPairedProvider(t *testing.T) {
+	up := newFakeUpstreams(t)
+	pass := func(t *testing.T, paired bool) (refusedDead bool, names map[string]struct{}) {
+		provider := staticProvider("ETH1",
+			commonlib.NodeUrl{Url: up.httpURL("/r/" + upDead)},
+			commonlib.NodeUrl{Url: up.httpURL("/r/" + upArchive)},
+		)
+		admissions := newAdmissionRegistry()
+		inputs := &chainReverifyInputs{
+			chainParser:                liveParser(t, "ETH1", true),
+			rpcEndpoint:                &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			convertProvidersToSessions: fakeConvert,
+			configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider},
+			recordAdmission:            admissions.record,
+			recordReverifiedAdmission:  admissions.recordReverified,
+			admissionFor:               admissions.admissionFor,
+			rateLimitHoldoff:           holdoff.NewRegistry(),
+		}
+		active := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+		if paired {
+			active[0] = makeSession(provider.Name)
+		}
+		next, _, _ := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+		return admissions.admissionFor(provider).URLRefused(0), collectNames(next)
+	}
+
+	t.Run("out of the pairing", func(t *testing.T) {
+		refusedDead, names := pass(t, false)
+		require.Contains(t, names, "p", "its second url carries it back")
+		require.True(t, refusedDead, "promoted without the url this pass refused")
+	})
+	t.Run("paired", func(t *testing.T) {
+		refusedDead, names := pass(t, true)
+		require.Contains(t, names, "p")
+		require.False(t, refusedDead, "a first failed pass keeps the url in the session it serves")
+	})
+}

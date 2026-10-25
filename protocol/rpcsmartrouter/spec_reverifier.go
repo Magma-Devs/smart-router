@@ -182,6 +182,8 @@ func applyReverification(
 	// rebuilt below rather than left with the endpoints they were built with.
 	var admissionMovedMu sync.Mutex
 	admissionMoved := map[string]struct{}{}
+	// Read-only from here on: the probes below read it concurrently.
+	activeNames := byName(fresh)
 
 	// probe returns the validation's error, the rate limit a pass that otherwise
 	// succeeded met on part of the provider, and why the url the hold-off is keyed by
@@ -215,8 +217,11 @@ func applyReverification(
 		if throttle != nil && inputs.admissionFor != nil {
 			admission = admission.KeepingThrottledFrom(inputs.admissionFor(p))
 		}
+		// The url grace keeps a url in a session it is already serving. A provider out of
+		// the pairing is promoted with this pass's admission, so it comes back without
+		// the url this pass refused, as it does from the failed-provider retry.
 		record := inputs.recordReverifiedAdmission
-		if record == nil {
+		if _, active := activeNames[p.Name]; !active || record == nil {
 			record = inputs.recordAdmission
 		}
 		if record != nil && record(p, admission) {
@@ -291,7 +296,6 @@ func applyReverification(
 	}
 	wg.Wait()
 
-	activeNames := byName(fresh)
 	healthyNames := make(map[string]struct{}, len(configured))
 	var toAdmit []*lavasession.RPCStaticProviderEndpoint
 	if inputs.demoteFailStreak == nil {
