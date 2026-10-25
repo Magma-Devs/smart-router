@@ -638,12 +638,12 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels)
 	providerVerificationFailed := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_provider_verification_failed",
-		Help: "1 while a configured provider is failing a verification, labelled with the check it fails. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, unknown. A provider out at boot is retried every 3m; one demoted later and every service refusal is re-checked every 15m epoch, so size alert windows above both.",
-	}, []string{"spec", "apiInterface", "provider", "tier", "scope", "service", "check"})
+		Help: "1 while a configured provider is failing a verification, labelled with the check it fails. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves. severity: Fail when the failure takes a url or the provider out, PartialFail when it switches off only that service. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, not-run, rate-limited, unknown. A provider out at boot is retried every 3m (from 2s, doubling, while its chain is dark); one demoted later and every service refusal is re-checked every 15m epoch, so size alert windows above both.",
+	}, verificationFailureLabels)
 	verificationCheckFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_provider_verification_check_failures_total",
-		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service). A provider out at boot is re-run every 3m; an admitted provider and every service are re-run every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted.",
-	}, []string{"spec", "apiInterface", "provider", "tier", "scope", "service", "check"})
+		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service), scope=url when it costs one node url. A provider out at boot is re-run every 3m; an admitted provider and every service are re-run every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted.",
+	}, verificationFailureLabels)
 
 	// =========================================================================
 	// Request group metrics
@@ -2055,12 +2055,37 @@ const (
 	VerificationScopeURL      = "url"
 )
 
+// Severities of a failing verification, as MAG-3950 names them: Fail takes a url or the
+// provider out, PartialFail switches off only the service the check covers.
+const (
+	VerificationSeverityFail        = "Fail"
+	VerificationSeverityPartialFail = "PartialFail"
+)
+
+// verificationFailureLabels are the labels of both verification-failure metrics.
+var verificationFailureLabels = []string{"spec", "apiInterface", "provider", "tier", "scope", "service", "check", "severity"}
+
 // ProviderVerificationFailure is one failing check of one provider. Service is
-// empty for scope=provider.
+// empty unless the failure costs one service.
 type ProviderVerificationFailure struct {
 	Scope   string
 	Service string
 	Check   string
+	// Severity is the label as published. Empty reads it from what the failure costs:
+	// PartialFail when it costs one service, Fail when it costs a url or the provider.
+	Severity string
+}
+
+// withSeverity is f with its severity label filled in.
+func (f ProviderVerificationFailure) withSeverity() ProviderVerificationFailure {
+	if f.Severity != "" {
+		return f
+	}
+	f.Severity = VerificationSeverityFail
+	if f.Service != "" {
+		f.Severity = VerificationSeverityPartialFail
+	}
+	return f
 }
 
 // CountVerificationCheckFailure counts one failed run of a verification check.
@@ -2069,7 +2094,8 @@ func (m *SmartRouterMetricsManager) CountVerificationCheckFailure(spec, apiInter
 	if m == nil {
 		return
 	}
-	m.verificationCheckFailures.WithLabelValues(spec, apiInterface, provider, tier, failure.Scope, failure.Service, failure.Check).Inc()
+	failure = failure.withSeverity()
+	m.verificationCheckFailures.WithLabelValues(spec, apiInterface, provider, tier, failure.Scope, failure.Service, failure.Check, failure.Severity).Inc()
 }
 
 // SetProviderVerificationFailures publishes the checks a configured provider is
@@ -2084,15 +2110,20 @@ func (m *SmartRouterMetricsManager) SetProviderVerificationFailures(spec, apiInt
 		return
 	}
 	key := spec + "|" + apiInterface + "|" + provider + "|" + tier
+	labelled := make([]ProviderVerificationFailure, len(failures))
+	for i, f := range failures {
+		labelled[i] = f.withSeverity()
+	}
+	failures = labelled
 	m.verificationFailuresMu.Lock()
 	defer m.verificationFailuresMu.Unlock()
 	for _, old := range m.verificationFailures[key] {
 		if !slices.Contains(failures, old) {
-			m.providerVerificationFailed.DeleteLabelValues(spec, apiInterface, provider, tier, old.Scope, old.Service, old.Check)
+			m.providerVerificationFailed.DeleteLabelValues(spec, apiInterface, provider, tier, old.Scope, old.Service, old.Check, old.Severity)
 		}
 	}
 	for _, f := range failures {
-		m.providerVerificationFailed.WithLabelValues(spec, apiInterface, provider, tier, f.Scope, f.Service, f.Check).Set(1)
+		m.providerVerificationFailed.WithLabelValues(spec, apiInterface, provider, tier, f.Scope, f.Service, f.Check, f.Severity).Set(1)
 	}
 	if m.verificationFailures == nil {
 		m.verificationFailures = map[string][]ProviderVerificationFailure{}

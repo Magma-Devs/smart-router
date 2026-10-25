@@ -17,7 +17,7 @@ import (
 )
 
 // verificationFailedSeries returns every published series of the gauge for one spec,
-// each as "<provider>|<tier>|<scope>|<service>|<check>" mapped to its value.
+// each as "<provider>|<tier>|<scope>|<service>|<check>|<severity>" mapped to its value.
 func verificationFailedSeries(t *testing.T, spec string) map[string]float64 {
 	t.Helper()
 	mfs, err := prometheus.DefaultGatherer.Gather()
@@ -35,7 +35,7 @@ func verificationFailedSeries(t *testing.T, spec string) map[string]float64 {
 			if lm["spec"] != spec {
 				continue
 			}
-			key := lm["provider"] + "|" + lm["tier"] + "|" + lm["scope"] + "|" + lm["service"] + "|" + lm["check"]
+			key := lm["provider"] + "|" + lm["tier"] + "|" + lm["scope"] + "|" + lm["service"] + "|" + lm["check"] + "|" + lm["severity"]
 			out[key] = m.GetGauge().GetValue()
 		}
 	}
@@ -82,21 +82,21 @@ func TestPublishServingTier_ProviderOutCarriesTheFailedCheck(t *testing.T) {
 
 	rpsr.publishServingTierLocked(chainKey)
 	require.Equal(t, map[string]float64{
-		"gk8|static|provider||chain-id":             1,
-		"blockdaemon|backup|provider||latest-block": 1,
+		"gk8|static|provider||chain-id|Fail":             1,
+		"blockdaemon|backup|provider||latest-block|Fail": 1,
 	}, verificationFailedSeries(t, spec), "an admitted provider with nothing refused has no series")
 
 	// The backup recovers: its series goes away; the primary still out keeps its own.
 	rpsr.backupProviderSessions[chainKey] = sessionsFor("blockdaemon")
 	rpsr.publishServingTierLocked(chainKey)
-	require.Equal(t, map[string]float64{"gk8|static|provider||chain-id": 1}, verificationFailedSeries(t, spec))
+	require.Equal(t, map[string]float64{"gk8|static|provider||chain-id|Fail": 1}, verificationFailedSeries(t, spec))
 
 	// The epoch re-verifier demotes the other primary. The demotion path never writes
 	// the failed lists, only lastFailure, and the provider must still show.
 	inputs.noteFailure(reverifyTierStatic, "tatum", &chainlib.VerificationFailure{Check: "pruning", Err: errors.New("pruned")})
 	rpsr.providerSessions[chainKey] = sessionsFor("gk8")
 	rpsr.publishServingTierLocked(chainKey)
-	require.Equal(t, map[string]float64{"tatum|static|provider||pruning": 1}, verificationFailedSeries(t, spec))
+	require.Equal(t, map[string]float64{"tatum|static|provider||pruning|Fail": 1}, verificationFailedSeries(t, spec))
 }
 
 // A provider failing a check but still paired loses only the service that check
@@ -115,7 +115,7 @@ func TestPublishServingTier_RefusedServiceOfAPairedProvider(t *testing.T) {
 	rpsr.backupProviderSessions[chainKey] = sessionsFor("lava")
 
 	rpsr.publishServingTierLocked(chainKey)
-	require.Equal(t, map[string]float64{"lava|backup|service|archive|pruning": 1}, verificationFailedSeries(t, spec))
+	require.Equal(t, map[string]float64{"lava|backup|service|archive|pruning|PartialFail": 1}, verificationFailedSeries(t, spec))
 
 	// archive passes again at the next epoch: the series clears.
 	refused["lava"] = nil
@@ -137,7 +137,7 @@ func TestPublishServingTier_VerificationFailedKeepsTiersApart(t *testing.T) {
 	inputs.noteFailure(reverifyTierBackup, "lava", &chainlib.VerificationFailure{Check: chainlib.CheckUnsupportedAddon, Err: errors.New("no addon")})
 
 	rpsr.publishServingTierLocked(chainKey)
-	require.Equal(t, map[string]float64{"lava|backup|provider||unsupported-addon": 1}, verificationFailedSeries(t, spec))
+	require.Equal(t, map[string]float64{"lava|backup|provider||unsupported-addon|Fail": 1}, verificationFailedSeries(t, spec))
 }
 
 // An error that carries no check is published as unknown rather than dropped: the
@@ -152,7 +152,7 @@ func TestPublishServingTier_UncheckedErrorIsUnknown(t *testing.T) {
 	inputs.noteFailure(reverifyTierBackup, "blockdaemon", errors.New("plain error"))
 
 	rpsr.publishServingTierLocked(chainKey)
-	require.Equal(t, map[string]float64{"blockdaemon|backup|provider||unknown": 1}, verificationFailedSeries(t, spec))
+	require.Equal(t, map[string]float64{"blockdaemon|backup|provider||unknown|Fail": 1}, verificationFailedSeries(t, spec))
 }
 
 // Every failed epoch run is counted, the grace runs before a demotion included; a
@@ -294,5 +294,5 @@ func TestPublishServingTier_RefusedURLOfAPairedProvider(t *testing.T) {
 	rpsr.providerSessions[chainKey] = sessionsFor("tatum")
 
 	rpsr.publishServingTierLocked(chainKey)
-	require.Equal(t, map[string]float64{"tatum|static|url||connect": 1}, verificationFailedSeries(t, spec))
+	require.Equal(t, map[string]float64{"tatum|static|url||connect|Fail": 1}, verificationFailedSeries(t, spec))
 }
