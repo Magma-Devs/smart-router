@@ -3,6 +3,7 @@ package chainlib
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -91,37 +92,36 @@ func TestChainFetcher_FetchLatestBlockNum_PlainErrorIsNotRateLimit(t *testing.T)
 	require.False(t, ok)
 }
 
-// validate aborts a url whose head probe fails; ValidateCollect used to carry on and verify every
-// latest-distance check against NOT_APPLICABLE (2^64-1 once cast), reporting the url green to
-// `smartrouter health`. The failed probe is now a failed fetch-latest-block row, each check that
-// needs the head is failed as "latest block unknown", and the rest still run (MAG-4278).
-func TestValidateCollect_FailedHeadProbeFailsTheURL(t *testing.T) {
+// The health report used to carry on past a failed head probe and verify every latest-distance
+// check against NOT_APPLICABLE (2^64-1 once cast), reporting the url green to `smartrouter health`.
+// A failed head read is now the row's latestBlockError, each check that needs the head is failed as
+// "latest block unavailable" without being run, and the rest still run (MAG-4278).
+func TestValidateReport_FailedHeadReadFailsTheURL(t *testing.T) {
 	cf := newEthChainFetcherWithRouterErr(t, errors.New("node down"))
 	cf.endpoint.NodeUrls = []common.NodeUrl{{Url: "http://127.0.0.1:1"}}
 	verifications, err := cf.chainParser.GetVerifications(nil, "", cf.endpoint.ApiInterface)
 	require.NoError(t, err)
 
-	results := cf.ValidateCollect(context.Background())
+	results, admissionErr := cf.ValidateReport(context.Background())
+	require.Error(t, admissionErr, "the provider's only url failed, so the router would not admit it")
 	require.Len(t, results, 1)
 	row := results[0]
 	require.Equal(t, spectypes.NOT_APPLICABLE, row.LatestBlock)
-	require.Len(t, row.Verifications, 1+len(verifications), "the head row, then one row per verification")
-	require.Equal(t, "fetch-latest-block", row.Verifications[0].Name)
-	require.False(t, row.Verifications[0].Ok)
-	require.Contains(t, row.Verifications[0].Error, "node down")
+	require.Contains(t, row.LatestBlockError, "node down")
+	require.Len(t, row.Verifications, len(verifications), "one row per verification")
 
 	headDependent, headFree := 0, 0
 	for i, verification := range verifications {
-		got := row.Verifications[i+1]
+		got := row.Verifications[i]
 		require.Equal(t, verification.Name, got.Name)
 		require.False(t, got.Ok, "every relay fails, so no verification passes: %s", got.Name)
 		if verificationNeedsHead(verification) {
 			headDependent++
-			require.Contains(t, got.Error, "latest block unknown", got.Name)
+			require.Contains(t, got.Error, "latest block unavailable", got.Name)
 			require.Contains(t, got.Error, "node down", "the head error is carried: %s", got.Name)
 		} else {
 			headFree++
-			require.NotContains(t, got.Error, "latest block unknown", "a check that needs no head is run: %s", got.Name)
+			require.NotContains(t, got.Error, "latest block unavailable", "a check that needs no head is run: %s", got.Name)
 		}
 	}
 	require.Positive(t, headDependent, "ETH1 has a latest-distance check, or this test proves nothing")
@@ -152,17 +152,20 @@ func (r *headOnlyRefusingRouter) ExtensionsSupported(internalPath string, extens
 
 // A node that answers everything but the head probe keeps the checks it passes in the health
 // report: chain-id needs no head and is reported ok, the latest-distance check (pruning) is failed
-// as "latest block unknown" without being sent, and the url still does not pass (MAG-4278).
-func TestValidateCollect_HeadFailureStillReportsHeadIndependentChecks(t *testing.T) {
+// as "latest block unavailable" without being sent, and the url still does not pass (MAG-4278).
+func TestValidateReport_HeadFailureStillReportsHeadIndependentChecks(t *testing.T) {
 	router := &headOnlyRefusingRouter{sent: map[string]int{}}
 	cf := newEthChainFetcherWithRouterErr(t, nil)
 	cf.chainRouter = router
 	cf.endpoint.NodeUrls = []common.NodeUrl{{Url: "http://127.0.0.1:1"}}
 
-	results := cf.ValidateCollect(context.Background())
+	results, admissionErr := cf.ValidateReport(context.Background())
+	require.Error(t, admissionErr, "a failed base check refuses the provider's only url")
 	require.Len(t, results, 1)
 	row := results[0]
 	require.Equal(t, spectypes.NOT_APPLICABLE, row.LatestBlock, "no head was measured")
+	require.Contains(t, row.LatestBlockError, "head probe refused")
+	require.True(t, row.Refused)
 
 	byName := map[string]VerificationResult{}
 	allOk := true
@@ -171,8 +174,6 @@ func TestValidateCollect_HeadFailureStillReportsHeadIndependentChecks(t *testing
 		allOk = allOk && v.Ok
 	}
 	require.False(t, allOk, "a url whose head probe failed does not pass")
-	require.False(t, byName["fetch-latest-block"].Ok)
-	require.Contains(t, byName["fetch-latest-block"].Error, "head probe refused")
 
 	chainID, reported := byName["chain-id"]
 	require.True(t, reported, "chain-id needs no head; it must still be reported")
@@ -181,11 +182,51 @@ func TestValidateCollect_HeadFailureStillReportsHeadIndependentChecks(t *testing
 	pruning, reported := byName["pruning"]
 	require.True(t, reported, "a check that needs the head is reported failed, not dropped")
 	require.False(t, pruning.Ok)
-	require.Contains(t, pruning.Error, "latest block unknown")
+	require.Contains(t, pruning.Error, "latest block unavailable")
 	require.Contains(t, pruning.Error, "head probe refused", "the head error says why")
 
 	router.mu.Lock()
 	defer router.mu.Unlock()
 	require.Positive(t, router.sent["eth_chainId"], "the head-independent check was sent")
 	require.Zero(t, router.sent["eth_getBlockByNumber"], "the latest-distance check is not sent against an unknown head")
+}
+
+// movingHeadRouter answers every relay with 0x1, except the head probe: each eth_blockNumber
+// answers a block higher than the last, like a chain that moved between two reads.
+type movingHeadRouter struct {
+	mu   sync.Mutex
+	head int
+	sent map[string]int
+}
+
+func (r *movingHeadRouter) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend, extensions []string) (*RelayReplyWrapper, common.NodeUrl, string, error) {
+	method := chainMessage.GetApi().Name
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sent[method]++
+	result := "0x1"
+	if method == "eth_blockNumber" {
+		r.head++
+		result = fmt.Sprintf("0x%x", 0x1400000+r.head)
+	}
+	return &RelayReplyWrapper{StatusCode: http.StatusOK, RelayReply: &pairingtypes.RelayReply{Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"` + result + `"}`)}}, common.NodeUrl{}, "", nil
+}
+
+// Urls that share a connection are asked each check once. Each add-on set reads its own head, so
+// the head can differ between them; a check not measured from the head is still one ask (MAG-4231).
+func TestValidateReport_AHeadFreeCheckIsAskedOnceAsTheHeadMoves(t *testing.T) {
+	router := &movingHeadRouter{sent: map[string]int{}}
+	cf := newEthChainFetcherWithRouterErr(t, nil)
+	cf.chainRouter = router
+	cf.endpoint.NodeUrls = []common.NodeUrl{
+		{Url: "http://127.0.0.1:1"},
+		{Url: "http://127.0.0.1:1", Addons: []string{"trace"}},
+		{Url: "http://127.0.0.1:1", Addons: []string{"debug"}},
+	}
+
+	_, _ = cf.ValidateReport(context.Background())
+	router.mu.Lock()
+	defer router.mu.Unlock()
+	require.Greater(t, router.sent["eth_blockNumber"], 1, "each add-on set reads its own head, or this test proves nothing")
+	require.Equal(t, 1, router.sent["eth_chainId"], "chain-id is not measured from the head: one ask for the shared connection")
 }

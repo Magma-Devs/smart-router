@@ -236,11 +236,11 @@ func TestByName(t *testing.T) {
 	require.Contains(t, got, "Y")
 }
 
-// TestValidateProvider_SmokeWiring exercises validateProvider end-to-end:
-// clone-isolation lookup, GetChainRouter, ChainFetcher construction, and
-// Validate dispatch. It uses an empty REST spec (so GetVerifications returns
+// TestValidateProvider_SmokeWiring exercises validateProviderCollections end-to-end:
+// clone-isolation lookup, the per-url proxy factory, ChainFetcher construction,
+// and ValidateCollections dispatch. It uses an empty REST spec (so GetVerifications returns
 // nothing and Validate succeeds without hitting the wire), which means a
-// fully-broken function — wrong chainParser threading, GetChainRouter
+// fully-broken function — wrong chainParser threading, proxy factory
 // signature drift, NewChainFetcher option struct mismatch, etc. — would fail
 // here even though no real network probe is performed. The cancellable-ctx
 // argument ensures a regression that ignored ctx couldn't pass the timeout
@@ -265,14 +265,14 @@ func TestValidateProvider_SmokeWiring(t *testing.T) {
 	start := time.Now()
 	go func() {
 		defer close(done)
-		_ = validateProvider(context.Background(), provider, parser, 2*time.Second)
+		_, _ = validateProviderCollections(context.Background(), provider, parser, 2*time.Second)
 	}()
 
 	select {
 	case <-done:
-		require.Less(t, time.Since(start), 3*time.Second, "validateProvider must complete within the timeout bound")
+		require.Less(t, time.Since(start), 3*time.Second, "validateProviderCollections must complete within the timeout bound")
 	case <-time.After(5 * time.Second):
-		t.Fatal("validateProvider hung past its timeout argument — wiring regression")
+		t.Fatal("validateProviderCollections hung past its timeout argument — wiring regression")
 	}
 }
 

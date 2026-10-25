@@ -55,7 +55,7 @@ func boundRegistry(t *testing.T, message chainlib.ChainMessage) *dyncodec.Regist
 // The ticket's Expected clause is "a recovering provider is validated against a
 // copy of the parser, not the live one", and that is what this asserts — against
 // the real recovery path, not a stand-in. revalidateTier is the production
-// function; it calls the real retryValidateFn -> validateProvider, which is where
+// function; it calls the real retryValidateFn -> validateProviderCollections, which is where
 // CloneChainParserForValidation is applied. Deleting that one call fails this test.
 //
 // TestCloneChainParserForValidation_GrpcIsolation in chainlib covers the helper in
@@ -102,8 +102,8 @@ func TestRevalidateTier_DoesNotRebindLiveGrpcParser(t *testing.T) {
 	}
 
 	// The production recovery pass, verbatim: revalidateTier -> retryValidateFn ->
-	// validateProvider -> CloneChainParserForValidation -> GetChainRouter, with
-	// validateProvider's own attemptCtx cancelled on the way out.
+	// validateProviderCollections -> CloneChainParserForValidation -> a proxy per
+	// node url, with validateProviderCollections' own attemptCtx cancelled on the way out.
 	recovered, stillFailed := (&RPCSmartRouter{}).revalidateTier(
 		ctx,
 		[]*lavasession.RPCStaticProviderEndpoint{provider},
@@ -113,7 +113,7 @@ func TestRevalidateTier_DoesNotRebindLiveGrpcParser(t *testing.T) {
 	)
 
 	// Verification has to have reached the mutation for the assertions below to mean
-	// anything: if GetChainRouter had failed early, setupForProvider would never run
+	// anything: if the proxy had failed to build, setupForProvider would never run
 	// and the live parser would be untouched for the wrong reason. A recovered
 	// provider proves the router AND the fetcher were built against this endpoint.
 	require.Empty(t, stillFailed, "the mock upstream should verify; otherwise this test proves nothing")
@@ -135,7 +135,7 @@ func TestRevalidateTier_DoesNotRebindLiveGrpcParser(t *testing.T) {
 	// Smoke check, NOT a regression assertion. SendNodeMsg builds its descriptor
 	// source from the ChainProxy's own connector and never reads GrpcMessage.Registry,
 	// so it cannot observe this ticket's defect — verified: it passes with the clone
-	// removed from validateProvider. What it does prove is the adjacent property that
+	// removed from validateProviderCollections. What it does prove is the adjacent property that
 	// the serving connector itself outlived recovery's teardown.
 	reply, _, _, err := servingRouter.SendNodeMsg(ctx, craftGetBlockMessage(t, chainParser), nil)
 	require.NoError(t, err, "the serving connector must survive background recovery")

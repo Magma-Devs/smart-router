@@ -132,6 +132,11 @@ func newValidationFetcher(t *testing.T, url common.NodeUrl, verifications []Veri
 	t.Cleanup(ctrl.Finish)
 
 	parser := NewMockChainParser(ctrl)
+	// Every declared service reads as an add-on, so each url's checks come from one
+	// GetVerifications call — the one these tests pin.
+	parser.EXPECT().SeparateAddonsExtensions(gomock.Any(), gomock.Any()).
+		DoAndReturn(func(_ context.Context, supported []string) ([]string, []string, error) { return supported, nil, nil }).
+		AnyTimes()
 	parser.EXPECT().GetVerifications(gomock.Any(), gomock.Any(), gomock.Any()).Return(verifications, nil).AnyTimes()
 	router := NewMockChainRouter(ctrl)
 	if verifyErr != nil {

@@ -87,8 +87,7 @@ func TestWSProbeConfig(t *testing.T) {
 	if len(up.URLs) != len(want) || up.URLs[0] != base || up.URLs[1] != ws {
 		t.Fatalf("upstream URLs = %v, want %v (http base first, then ws)", up.URLs, want)
 	}
-	// No addons at this step — ws is verified before addons are chosen, so no
-	// archive ws-widening / skip-verifications should leak into the gate probe.
+	// No addons at this step — ws is verified before addons are chosen.
 	if len(up.Addons) != 0 {
 		t.Errorf("probe upstream must carry no addons, got %v", up.Addons)
 	}
@@ -109,12 +108,8 @@ func TestWSProbeConfig(t *testing.T) {
 	}
 }
 
-// TestAddonProbeConfigIsHTTPOnly locks in the archive false-negative fix: the addon
-// probe declares NO ws url, even on a subscription interface. Declaring a ws url
-// ws-widens the archive verification to {archive,websocket}; the emitter's
-// skip-verifications:[pruning] then strips the archive verification entirely, leaving
-// the row with zero verifications, which SupportedAddons reads as "unsupported" —
-// the false negative the user hit. http-only keeps the real {archive} verification.
+// TestAddonProbeConfigIsHTTPOnly: the addon probe declares NO ws url, even on a
+// subscription interface — an addon is verified over the http endpoint itself.
 func TestAddonProbeConfigIsHTTPOnly(t *testing.T) {
 	l := Listener{Chain: catalog.Chain{Index: "ETH1"}, Iface: "jsonrpc"}
 	base := "https://eth1.lava.build"
@@ -131,37 +126,13 @@ func TestAddonProbeConfigIsHTTPOnly(t *testing.T) {
 	if len(up.Addons) != 1 || up.Addons[0] != "archive" {
 		t.Errorf("addon probe addons = %v, want [archive]", up.Addons)
 	}
-	// The rendered YAML must NOT carry a ws url, and (no ws → no widening) must NOT
-	// carry the skip-verifications the emitter would add for an archive+ws upstream.
+	// The rendered YAML must NOT carry a ws url, nor skip any verification.
 	y := cfg.YAML()
 	if strings.Contains(y, "wss://") || strings.Contains(y, "ws://") {
 		t.Errorf("addon probe YAML must not declare a ws url\n---\n%s", y)
 	}
 	if strings.Contains(y, "skip-verifications") {
-		t.Errorf("http-only archive probe must not emit skip-verifications (no ws → no widening)\n---\n%s", y)
-	}
-}
-
-// TestArchiveWsCaveat: the archive-over-ws caveat shows ONLY for a confirmed
-// `archive` on a subscription interface that paired a ws url. Everything else
-// (no ws, non-archive addon, non-subscription interface) gets no caveat.
-func TestArchiveWsCaveat(t *testing.T) {
-	sub := Listener{Chain: catalog.Chain{Index: "ETH1"}, Iface: "jsonrpc"}
-	rest := Listener{Chain: catalog.Chain{Index: "LAVA"}, Iface: "rest"}
-
-	if c := archiveWsCaveat(sub, true, "archive"); c == "" {
-		t.Error("archive + ws on jsonrpc should produce a caveat")
-	} else if !strings.Contains(c, "archive over ws is not served") {
-		t.Errorf("caveat should state archive-over-ws isn't served, got %q", c)
-	}
-	if c := archiveWsCaveat(sub, false, "archive"); c != "" {
-		t.Errorf("archive WITHOUT ws → no caveat, got %q", c)
-	}
-	if c := archiveWsCaveat(sub, true, "debug"); c != "" {
-		t.Errorf("non-archive addon → no caveat, got %q", c)
-	}
-	if c := archiveWsCaveat(rest, true, "archive"); c != "" {
-		t.Errorf("archive on non-subscription interface → no caveat, got %q", c)
+		t.Errorf("the archive probe must not skip any verification\n---\n%s", y)
 	}
 }
 

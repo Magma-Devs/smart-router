@@ -78,67 +78,39 @@ func TestRender(t *testing.T) {
 	}
 }
 
-// TestArchiveWsSkipPruning: an upstream with BOTH a ws url and the archive
-// extension on a subscription interface gets `skip-verifications: ["pruning"]` on
-// its archive node-url (so the ws-widened archive verification doesn't exclude the
-// provider at boot). archive WITHOUT ws, and ws WITHOUT archive, get no skip; nor
-// does archive on a non-subscription interface (rest).
-func TestArchiveWsSkipPruning(t *testing.T) {
-	// archive + ws on jsonrpc → skip emitted, on the archive url.
+// TestArchiveWsEmitsNoSkip: every node url is verified over its own connection, so an
+// archive url beside a ws url boots with its own archive check — the emitter skips none.
+func TestArchiveWsEmitsNoSkip(t *testing.T) {
 	withWs := (&Config{
 		Listeners: []Listener{{ChainID: "ETH1", Iface: "jsonrpc", Port: 3360}},
 		Primary: []Upstream{{
 			Name: "eth", ChainID: "ETH1", Iface: "jsonrpc",
-			URLs:   []string{"https://eth1.lava.build", "wss://eth1.lava.build/websocket"},
+			URLs:   []string{"https://ethereum-rpc.publicnode.com", "wss://ethereum-rpc.publicnode.com"},
 			Addons: []string{"archive", "debug"},
 		}},
 	}).YAML()
-	if !contains(withWs, `skip-verifications: ["pruning"]`) {
-		t.Errorf("archive+ws jsonrpc should emit skip-verifications: [pruning]\n---\n%s", withWs)
+	if contains(withWs, `skip-verifications:`) {
+		t.Errorf("archive+ws must not emit skip-verifications\n---\n%s", withWs)
 	}
-	// Exactly once — only the archive node-url, not debug.
-	if n := countOf(withWs, `skip-verifications:`); n != 1 {
-		t.Errorf("skip-verifications should appear once (archive url only), got %d\n---\n%s", n, withWs)
+	if n := countOf(withWs, `addons: ["archive"]`); n != 1 {
+		t.Errorf("archive should get its own node url once, got %d\n---\n%s", n, withWs)
 	}
+}
 
-	// archive WITHOUT ws → no skip (nothing widens the archive verification).
-	noWs := (&Config{
+// TestAuthOnEveryNodeUrl: each node url is verified and dialed on its own, so a keyed
+// upstream's ws url and every addon copy carry the key too.
+func TestAuthOnEveryNodeUrl(t *testing.T) {
+	y := (&Config{
 		Listeners: []Listener{{ChainID: "ETH1", Iface: "jsonrpc", Port: 3360}},
 		Primary: []Upstream{{
 			Name: "eth", ChainID: "ETH1", Iface: "jsonrpc",
-			URLs:   []string{"https://eth1.lava.build"},
-			Addons: []string{"archive"},
+			URLs:   []string{"https://eth.example.com", "wss://eth.example.com"},
+			Addons: []string{"archive", "debug"},
+			Auth:   &Auth{Var: "RPC_KEY_ETH1", Kind: "header:x-api-key"},
 		}},
 	}).YAML()
-	if contains(noWs, `skip-verifications:`) {
-		t.Errorf("archive without ws must NOT emit skip-verifications\n---\n%s", noWs)
-	}
-
-	// archive on a NON-subscription interface (rest) + ws → no skip (rest isn't
-	// ws-widened; in practice rest has no ws, but guard the interface check too).
-	rest := (&Config{
-		Listeners: []Listener{{ChainID: "LAVA", Iface: "rest", Port: 3364}},
-		Primary: []Upstream{{
-			Name: "lava", ChainID: "LAVA", Iface: "rest",
-			URLs:   []string{"https://lava.rest.lava.build", "wss://lava.rest.lava.build/websocket"},
-			Addons: []string{"archive"},
-		}},
-	}).YAML()
-	if contains(rest, `skip-verifications:`) {
-		t.Errorf("archive on rest must NOT emit skip-verifications\n---\n%s", rest)
-	}
-
-	// ws WITHOUT archive → no skip.
-	noArch := (&Config{
-		Listeners: []Listener{{ChainID: "ETH1", Iface: "jsonrpc", Port: 3360}},
-		Primary: []Upstream{{
-			Name: "eth", ChainID: "ETH1", Iface: "jsonrpc",
-			URLs:   []string{"https://eth1.lava.build", "wss://eth1.lava.build/websocket"},
-			Addons: []string{"debug"},
-		}},
-	}).YAML()
-	if contains(noArch, `skip-verifications:`) {
-		t.Errorf("ws without archive must NOT emit skip-verifications\n---\n%s", noArch)
+	if n := countOf(y, `x-api-key: "${RPC_KEY_ETH1}"`); n != 4 {
+		t.Errorf("want the key on all 4 node urls (base, ws, archive, debug), got %d\n---\n%s", n, y)
 	}
 }
 
