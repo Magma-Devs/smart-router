@@ -4240,8 +4240,9 @@ func (rpsr *RPCSmartRouter) publishServingTierLocked(chainKey string) {
 // covers the demotion path too, which never writes those lists.
 //
 // A provider in the pairing gets one scope=service series per add-on or extension
-// it was refused, so losing archive while still serving the base chain shows too.
-// A provider with neither has no series.
+// it was refused, so losing archive while still serving the base chain shows too,
+// and one scope=none series per Warning-severity check it fails. A provider with
+// none of these has no series.
 func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inputs *chainReverifyInputs) {
 	if inputs == nil || inputs.rpcEndpoint == nil {
 		return
@@ -4275,11 +4276,12 @@ func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inp
 	}
 }
 
-// refusalsOf is what an admitted provider was refused, as the metric publishes it. A
-// provider keeps serving through all of it:
+// refusalsOf is what an admitted provider was refused, and the Warning checks it
+// fails, as the metric publishes them. A provider keeps serving through all of it:
 //   - scope=service: an add-on or extension no node url of the provider serves any more;
 //   - scope=url with a service: a service one url lost while another url still serves it;
-//   - scope=url with no service: a node url refused whole.
+//   - scope=url with no service: a node url refused whole;
+//   - scope=none: a check whose severity is Warning; nothing was switched off.
 func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []metrics.ProviderVerificationFailure {
 	refused, urlChecks := admission.Refused(), admission.RefusedURLChecks()
 	failures := make([]metrics.ProviderVerificationFailure, 0, len(refused)+len(urlChecks))
@@ -4292,6 +4294,11 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStati
 	}
 	for _, check := range urlChecks {
 		failures = append(failures, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: check})
+	}
+	for _, w := range admission.Warnings() {
+		failures = append(failures, metrics.ProviderVerificationFailure{
+			Scope: metrics.VerificationScopeNone, Service: w.Service, Check: w.Check, Severity: metrics.VerificationSeverityWarning,
+		})
 	}
 	return failures
 }

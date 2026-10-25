@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"mime"
 	"slices"
 	"strconv"
@@ -209,6 +210,13 @@ func chargedTo(check string, err error) error {
 	return &VerificationFailure{Check: check, Err: err}
 }
 
+// Warning is one Warning-severity check a provider is failing, and the service it
+// covers ("" for a basic check). It switches nothing off (MAG-3950).
+type Warning struct {
+	Service string
+	Check   string
+}
+
 // RefusedService is one service a provider was refused, and the check that refused it.
 type RefusedService struct {
 	Service string
@@ -244,6 +252,17 @@ type ProviderAdmission struct {
 	throttledServices map[admissionKey]struct{}
 	throttledURLs     map[int]error
 	throttle          error
+	// warned are the failed checks whose severity is Warning, and unsettled the ones
+	// a rate limit or the deadline kept from answering, which keep what the last pass
+	// knew. Neither switches anything off (MAG-3950).
+	warned    map[warningKey]struct{}
+	unsettled map[warningKey]struct{}
+}
+
+// warningKey is one Warning-severity check of one service of one node url.
+type warningKey struct {
+	admissionKey
+	check string
 }
 
 // EffectiveSeverity is what a failed check costs (MAG-3950). A value whose spec sets
@@ -343,6 +362,47 @@ func (a ProviderAdmission) RefusedURLChecks() []string {
 	return checks
 }
 
+func (a *ProviderAdmission) warn(url common.NodeUrl, service, check string) {
+	if a.warned == nil {
+		a.warned = map[warningKey]struct{}{}
+	}
+	a.warned[warningKey{serviceKey(url, service), check}] = struct{}{}
+}
+
+// unsettle marks a Warning check this pass did not decide, and like a rate limit it
+// makes re-verification keep what the last pass knew (KeepingThrottledFrom).
+func (a *ProviderAdmission) unsettle(url common.NodeUrl, service, check string, cause error) {
+	if a.unsettled == nil {
+		a.unsettled = map[warningKey]struct{}{}
+	}
+	a.unsettled[warningKey{serviceKey(url, service), check}] = struct{}{}
+	if a.throttle == nil {
+		a.throttle = cause
+	}
+}
+
+// Warnings lists each failing Warning-severity check once, sorted for a stable order.
+// A check failing on several urls appears once.
+func (a ProviderAdmission) Warnings() []Warning {
+	if len(a.warned) == 0 {
+		return nil
+	}
+	out := make([]Warning, 0, len(a.warned))
+	for key := range a.warned {
+		w := Warning{Service: key.service, Check: key.check}
+		if !slices.Contains(out, w) {
+			out = append(out, w)
+		}
+	}
+	slices.SortFunc(out, func(x, y Warning) int {
+		if c := strings.Compare(x.Service, y.Service); c != 0 {
+			return c
+		}
+		return strings.Compare(x.Check, y.Check)
+	})
+	return out
+}
+
 func (a *ProviderAdmission) throttleService(url common.NodeUrl, service string, cause error) {
 	if a.throttledServices == nil {
 		a.throttledServices = map[admissionKey]struct{}{}
@@ -415,13 +475,15 @@ func (a ProviderAdmission) RefusedURLs() []int {
 	return indices
 }
 
-// Throttled is the first rate limit this pass met in place of an answer, or nil.
+// Throttled is the first rate limit this pass met in place of an answer, or nil. A
+// Warning check the deadline cut off counts too: it decided nothing either.
 func (a ProviderAdmission) Throttled() error { return a.throttle }
 
 // Any reports whether any service or url was refused.
 func (a ProviderAdmission) Any() bool { return len(a.refused) > 0 || len(a.refusedURLs) > 0 }
 
 // Equal reports whether two admissions refuse exactly the same services and urls.
+// Warnings are not compared: they switch nothing off, so they never move a session.
 // The epoch path uses it to notice that a provider's admitted set has moved, which
 // is the trigger for rebuilding its session — an active session reuses the
 // endpoints it was built with, so a recovered service is not picked up by
@@ -450,6 +512,15 @@ func (a ProviderAdmission) Equal(other ProviderAdmission) bool {
 // url's strike no more than its verdict.
 func (a ProviderAdmission) KeepingThrottledFrom(previous ProviderAdmission) ProviderAdmission {
 	kept := a.refusals()
+	kept.warned = maps.Clone(a.warned)
+	for key := range a.unsettled {
+		if _, warned := previous.warned[key]; warned {
+			if kept.warned == nil {
+				kept.warned = map[warningKey]struct{}{}
+			}
+			kept.warned[key] = struct{}{}
+		}
+	}
 	for index, cause := range a.throttledURLs {
 		if previousCause, refused := previous.refusedURLs[index]; refused {
 			kept.refuseURL(index, previousCause)
@@ -474,6 +545,7 @@ func (a ProviderAdmission) KeepingThrottledFrom(previous ProviderAdmission) Prov
 func (a ProviderAdmission) WithoutURLRefusals(indices []int) ProviderAdmission {
 	kept := a.refusals()
 	kept.throttledURLs, kept.throttledServices, kept.throttle = a.throttledURLs, a.throttledServices, a.throttle
+	kept.warned, kept.unsettled = a.warned, a.unsettled
 	for _, index := range indices {
 		delete(kept.refusedURLs, index)
 	}
@@ -795,10 +867,17 @@ func admissionFrom(outcomes []nodeUrlOutcome) (ProviderAdmission, error) {
 				continue
 			}
 			severity := EffectiveSeverity(check.verification)
+			service := refusedServiceFor(check.verification)
 			if severity == spectypes.ParseValue_Warning {
+				// Switches nothing off; published so it is seen (MAG-3950). A rate
+				// limit or the deadline decided nothing, so it is not a failure.
+				if IsRateLimitFailure(check.err) || FailedCheck(check.err) == CheckNotRun {
+					admission.unsettle(outcome.url, service, check.verification.Name, check.err)
+				} else {
+					admission.warn(outcome.url, service, check.verification.Name)
+				}
 				continue
 			}
-			service := refusedServiceFor(check.verification)
 			switch {
 			case service == "" || severity == spectypes.ParseValue_Fail:
 				// A basic check, or an add-on check the spec made mandatory: the url goes.

@@ -139,3 +139,33 @@ func bundledSpecIndexes(t *testing.T, dir string) []string {
 	}
 	return indexes
 }
+
+// A failing Warning check is kept apart from refusals: it refuses nothing and never
+// moves a session, and a pass that a rate limit or the deadline kept from answering
+// it keeps what the last pass knew, as a throttled service does (MAG-3950).
+func TestAdmissionFrom_AWarningIsKeptApartFromRefusals(t *testing.T) {
+	url := common.NodeUrl{Url: "https://a"}
+	warning := baseCollectionOnly("tokens-owner-indexed")
+	warning.Severity = spectypes.ParseValue_Warning
+	admit := func(err error) ProviderAdmission {
+		admission, serving := admissionFrom([]nodeUrlOutcome{{url: url, served: url, checks: []checkOutcome{{verification: warning, err: err}}}})
+		require.NoError(t, serving)
+		return admission
+	}
+
+	failed := admit(errors.New("no owner index"))
+	require.Equal(t, []Warning{{Check: "tokens-owner-indexed"}}, failed.Warnings())
+	require.False(t, failed.Any())
+	require.True(t, failed.Equal(ProviderAdmission{}))
+	require.Nil(t, failed.Throttled())
+	require.Equal(t, failed.Warnings(), failed.WithoutURLRefusals(nil).Warnings(), "the url grace keeps it")
+
+	for name, err := range map[string]error{"rate-limited": throttledErr(), "not run": errCheckNotRun} {
+		undecided := admit(err)
+		require.Empty(t, undecided.Warnings(), "%s is not a failure", name)
+		require.NotNil(t, undecided.Throttled(), "%s makes re-verification keep the last pass", name)
+		require.Equal(t, failed.Warnings(), undecided.KeepingThrottledFrom(failed).Warnings(), name)
+		require.Empty(t, undecided.KeepingThrottledFrom(ProviderAdmission{}).Warnings(), "%s does not invent one", name)
+	}
+	require.Empty(t, ProviderAdmission{}.KeepingThrottledFrom(failed).Warnings(), "a check that passed clears it")
+}
