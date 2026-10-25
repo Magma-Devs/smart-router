@@ -121,13 +121,28 @@ type chainReverifyInputs struct {
 	rateLimitHoldoff *holdoff.Registry
 }
 
+// checkRateLimited is the check of a provider whose only verdict so far is a rate
+// limit: out of the pairing at boot because its node refused it for asking too fast.
+const checkRateLimited = "rate-limited"
+
 // noteFailure records the check a provider just failed. Callers hold RPCSmartRouter.mu.
+//
+// A rate limit is not a failed check: the node refused to answer, so nothing is counted
+// and the check the provider last failed stands, as on the epoch pass. One that has
+// failed nothing else, out at boot on a 429, reads as rate-limited.
 func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, err error) {
 	if inputs.lastFailure == nil {
 		inputs.lastFailure = make(map[string]string)
 	}
+	key := tier.String() + "|" + name
+	if isRateLimitFailure(err) {
+		if _, known := inputs.lastFailure[key]; !known {
+			inputs.lastFailure[key] = checkRateLimited
+		}
+		return
+	}
 	check := failureCheck(err)
-	inputs.lastFailure[tier.String()+"|"+name] = check
+	inputs.lastFailure[key] = check
 	if inputs.countFailedCheck != nil {
 		inputs.countFailedCheck(tier, name, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeProvider, Check: check})
 	}

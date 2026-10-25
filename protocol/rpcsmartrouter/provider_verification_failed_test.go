@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -178,6 +179,30 @@ func TestApplyReverification_CountsEachFailedRun(t *testing.T) {
 	rateLimited = true
 	applyReverificationKeep(inputs, active)
 	require.Len(t, counted, 2, "a rate-limited run is not a failed check")
+}
+
+// A rate limit is not a failed check on any path, boot and the retry loop included: the
+// run is not counted, and the check a provider last failed stands. A provider whose only
+// verdict is a 429 reads as rate-limited, not as the check the 429 interrupted.
+func TestNoteFailure_ARateLimitIsNotAFailedCheck(t *testing.T) {
+	var counted []string
+	inputs := &chainReverifyInputs{
+		countFailedCheck: func(_ reverifyTier, provider string, f metrics.ProviderVerificationFailure) {
+			counted = append(counted, provider+"|"+f.Check)
+		},
+	}
+	throttled := fmt.Errorf("no node url verified serving the root path: %w",
+		&chainlib.VerificationFailure{Check: "chain-id", Err: fmt.Errorf("chain-id verification failed: %w", common.StatusCodeError429)})
+	require.Equal(t, "chain-id", chainlib.FailedCheck(throttled), "the 429 interrupted chain-id, or this test proves nothing")
+
+	inputs.noteFailure(reverifyTierBackup, "fresh", throttled)
+	require.Equal(t, checkRateLimited, inputs.lastFailure["backup|fresh"])
+
+	inputs.noteFailure(reverifyTierBackup, "known", &chainlib.VerificationFailure{Check: "pruning", Err: errors.New("pruned")})
+	inputs.noteFailure(reverifyTierBackup, "known", throttled)
+	require.Equal(t, "pruning", inputs.lastFailure["backup|known"], "the last failed check stands")
+
+	require.Equal(t, []string{"known|pruning"}, counted, "only the failed check is a counted run")
 }
 
 func applyReverificationKeep(inputs *chainReverifyInputs, fresh map[uint64]*lavasession.ConsumerSessionsWithProvider) map[uint64]*lavasession.ConsumerSessionsWithProvider {
