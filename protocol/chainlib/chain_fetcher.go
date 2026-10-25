@@ -811,10 +811,16 @@ func (g *connectionGroup) head(ctx context.Context, router ChainRouter, url comm
 
 func (g *connectionGroup) check(ctx context.Context, router ChainRouter, verification VerificationContainer, latestBlock uint64) error {
 	parsing := verification.ParseDirective
+	// verifyVia reads the head only for a check measured from it. Every other check is the
+	// same request whatever height a url read, and the head can move between two urls' reads.
+	head := latestBlock
+	if verification.LatestDistance == 0 {
+		head = 0
+	}
 	key := strings.Join([]string{
 		verification.Name, verification.Addon, verification.Extension, verification.InternalPath,
 		verification.ConnectionType, parsing.ApiName, parsing.FunctionTemplate, verification.Value,
-		strconv.FormatUint(verification.LatestDistance, 10), strconv.FormatUint(latestBlock, 10),
+		strconv.FormatUint(verification.LatestDistance, 10), strconv.FormatUint(head, 10),
 	}, "\x00")
 	if err, asked := g.checks[key]; asked {
 		return err

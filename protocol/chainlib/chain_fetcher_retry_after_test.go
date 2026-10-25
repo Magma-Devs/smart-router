@@ -3,6 +3,7 @@ package chainlib
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -188,4 +189,44 @@ func TestValidateReport_HeadFailureStillReportsHeadIndependentChecks(t *testing.
 	defer router.mu.Unlock()
 	require.Positive(t, router.sent["eth_chainId"], "the head-independent check was sent")
 	require.Zero(t, router.sent["eth_getBlockByNumber"], "the latest-distance check is not sent against an unknown head")
+}
+
+// movingHeadRouter answers every relay with 0x1, except the head probe: each eth_blockNumber
+// answers a block higher than the last, like a chain that moved between two reads.
+type movingHeadRouter struct {
+	mu   sync.Mutex
+	head int
+	sent map[string]int
+}
+
+func (r *movingHeadRouter) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend, extensions []string) (*RelayReplyWrapper, common.NodeUrl, string, error) {
+	method := chainMessage.GetApi().Name
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sent[method]++
+	result := "0x1"
+	if method == "eth_blockNumber" {
+		r.head++
+		result = fmt.Sprintf("0x%x", 0x1400000+r.head)
+	}
+	return &RelayReplyWrapper{StatusCode: http.StatusOK, RelayReply: &pairingtypes.RelayReply{Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"` + result + `"}`)}}, common.NodeUrl{}, "", nil
+}
+
+// Urls that share a connection are asked each check once. Each add-on set reads its own head, so
+// the head can differ between them; a check not measured from the head is still one ask (MAG-4231).
+func TestValidateReport_AHeadFreeCheckIsAskedOnceAsTheHeadMoves(t *testing.T) {
+	router := &movingHeadRouter{sent: map[string]int{}}
+	cf := newEthChainFetcherWithRouterErr(t, nil)
+	cf.chainRouter = router
+	cf.endpoint.NodeUrls = []common.NodeUrl{
+		{Url: "http://127.0.0.1:1"},
+		{Url: "http://127.0.0.1:1", Addons: []string{"trace"}},
+		{Url: "http://127.0.0.1:1", Addons: []string{"debug"}},
+	}
+
+	_, _ = cf.ValidateReport(context.Background())
+	router.mu.Lock()
+	defer router.mu.Unlock()
+	require.Greater(t, router.sent["eth_blockNumber"], 1, "each add-on set reads its own head, or this test proves nothing")
+	require.Equal(t, 1, router.sent["eth_chainId"], "chain-id is not measured from the head: one ask for the shared connection")
 }
