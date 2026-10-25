@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -150,6 +151,40 @@ func TestPublishServingTier_UncheckedErrorIsUnknown(t *testing.T) {
 	require.Equal(t, map[string]float64{"blockdaemon|backup|provider||unknown": 1}, verificationFailedSeries(t, spec))
 }
 
+// Every failed epoch run is counted, the grace runs before a demotion included; a
+// rate-limited run is inconclusive and is not.
+func TestApplyReverification_CountsEachFailedRun(t *testing.T) {
+	var counted []string
+	rateLimited := false
+	inputs := &chainReverifyInputs{
+		rpcEndpoint:      &lavasession.RPCEndpoint{ChainID: "VERIFYFAILEDRUNS", ApiInterface: "jsonrpc"},
+		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "tatum"}},
+		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+			if rateLimited {
+				return common.StatusCodeError429
+			}
+			return &chainlib.VerificationFailure{Check: "chain-id", Err: errors.New("wrong chain")}
+		},
+		rateLimitHoldoff: holdoff.NewRegistry(),
+		countFailedCheck: func(tier reverifyTier, provider string, f metrics.ProviderVerificationFailure) {
+			counted = append(counted, tier.String()+"|"+provider+"|"+f.Scope+"|"+f.Check)
+		},
+	}
+	active := applyReverificationKeep(inputs, sessionsFor("tatum"))
+	active = applyReverificationKeep(inputs, active)
+	require.Equal(t, []string{"static|tatum|provider|chain-id", "static|tatum|provider|chain-id"}, counted,
+		"the grace run and the demoting run are both failed runs")
+
+	rateLimited = true
+	applyReverificationKeep(inputs, active)
+	require.Len(t, counted, 2, "a rate-limited run is not a failed check")
+}
+
+func applyReverificationKeep(inputs *chainReverifyInputs, fresh map[uint64]*lavasession.ConsumerSessionsWithProvider) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+	next, _, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, 1)
+	return next
+}
+
 // The epoch pass records why an active provider failed, including when it is still
 // inside the demotion grace, so the check is known the moment it is demoted.
 func TestApplyReverification_RecordsTheFailedCheck(t *testing.T) {
@@ -163,4 +198,32 @@ func TestApplyReverification_RecordsTheFailedCheck(t *testing.T) {
 	}
 	applyReverification(context.Background(), inputs, sessionsFor("tatum"), reverifyTierStatic, 1)
 	require.Equal(t, "pruning", inputs.lastFailure["static|tatum"])
+}
+
+// A refused node url is published with scope=url and no service, so a provider that
+// keeps serving on its other urls still shows what it lost; a refused service keeps
+// scope=service.
+func TestPartialFailure_URLAndServiceScopes(t *testing.T) {
+	require.Equal(t,
+		metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: "chain-id"},
+		partialFailure(chainlib.RefusedService{Check: "chain-id"}))
+	require.Equal(t,
+		metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeService, Service: "archive", Check: "pruning"},
+		partialFailure(chainlib.RefusedService{Service: "archive", Check: "pruning"}))
+}
+
+func TestPublishServingTier_RefusedURLOfAPairedProvider(t *testing.T) {
+	const spec = "VERIFYFAILEDURL"
+	const chainKey = spec + "-jsonrpc"
+	inputs := &chainReverifyInputs{
+		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "tatum"}},
+		refusedFor: func(*lavasession.RPCStaticProviderEndpoint) []chainlib.RefusedService {
+			return []chainlib.RefusedService{{Check: chainlib.CheckConnect}}
+		},
+	}
+	rpsr := newVerificationFailedRouter(t, spec, inputs)
+	rpsr.providerSessions[chainKey] = sessionsFor("tatum")
+
+	rpsr.publishServingTierLocked(chainKey)
+	require.Equal(t, map[string]float64{"tatum|static|url||connect": 1}, verificationFailedSeries(t, spec))
 }

@@ -59,3 +59,20 @@ func TestSetProviderVerificationFailures_NilManager(t *testing.T) {
 			[]ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "chain-id"}})
 	})
 }
+
+// Each failed run is one increment, so a chart can draw one mark per run.
+func TestCountVerificationCheckFailure_OnePerRun(t *testing.T) {
+	m := &SmartRouterMetricsManager{
+		verificationCheckFailures: prometheus.NewCounterVec(
+			prometheus.CounterOpts{Name: "t_sr_provider_verification_check_failures_total"},
+			[]string{"spec", "apiInterface", "provider", "tier", "scope", "service", "check"},
+		),
+	}
+	archive := ProviderVerificationFailure{Scope: VerificationScopeService, Service: "archive", Check: "pruning"}
+	m.CountVerificationCheckFailure("ETH1", "jsonrpc", "lava", "backup", archive)
+	m.CountVerificationCheckFailure("ETH1", "jsonrpc", "lava", "backup", archive)
+	require.Equal(t, 2.0, testutil.ToFloat64(m.verificationCheckFailures.WithLabelValues("ETH1", "jsonrpc", "lava", "backup", "service", "archive", "pruning")))
+
+	var nilManager *SmartRouterMetricsManager
+	require.NotPanics(t, func() { nilManager.CountVerificationCheckFailure("ETH1", "jsonrpc", "lava", "backup", archive) })
+}

@@ -591,6 +591,7 @@ windows should assume the 15m case.
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `smartrouter_provider_verification_failed` | Gauge | `spec`, `apiInterface`, `provider`, `tier`, `scope`, `service`, `check` | `1` while a configured provider is failing a verification; the series exists only while the failure lasts. `tier` is `static` or `backup`. |
+| `smartrouter_provider_verification_check_failures_total` | Counter | same as above | One per failed check run: at boot, each 3m retry of a provider out at boot, and each 15m epoch pass (a grace run before a demotion included). A rate-limited run is inconclusive and not counted. `increase(...[$__interval]) > 0` draws one mark per failed run. |
 
 The serving tier only drops when a whole tier is gone, so a single provider that fails
 verification while others serve leaves it at `2` (or `1`). Such a provider also has no
@@ -602,9 +603,9 @@ too.
 
 | Label | Values |
 | --- | --- |
-| `scope` | `provider`: the provider is out of the pairing. `service`: the provider still serves, but one add-on or extension was refused. |
+| `scope` | `provider`: the provider is out of the pairing. `service`: the provider still serves, but one add-on or extension was refused. `url`: the provider still serves, but one of its node urls was refused (MAG-4231 verifies every url on its own). |
 | `service` | The refused add-on or extension (`archive`, `debug`, ...) for `scope=service`; empty for `scope=provider`. |
-| `check` | The spec verification that failed (`chain-id`, `pruning`, ...), or one of: `latest-block` (the head probe before any verification), `unsupported-addon` (the config claims an add-on the spec does not define), `connect` (no connection to the node), `unknown`. |
+| `check` | The spec verification that failed (`chain-id`, `pruning`, ...), or one of: `latest-block` (the head probe before any verification), `unsupported-addon` (the config claims an add-on the spec does not define), `connect` (no connection to the node), `config` (the configured urls cannot work as given: no http(s) url, or no websocket url on a chain that subscribes), `unknown`. |
 
 A provider out at boot is retried every 3m, so its series appears and clears within 3m
 of the change. A demoted provider and a refused service are re-checked every 15m epoch.
@@ -613,6 +614,7 @@ of the change. A demoted provider and a refused service are re-checked every 15m
 | --- | --- |
 | `smartrouter_provider_verification_failed{scope="provider"} == 1` for 30m | A configured provider has not passed verification for half an hour, on the check `check` names. The pool is smaller than configured. |
 | `smartrouter_provider_verification_failed{scope="service"} == 1` | The provider still serves the chain, but not `service`: requests needing it go to other providers. |
+| `smartrouter_provider_verification_failed{scope="url"} == 1` | The provider still serves the chain on its other urls; one was refused. |
 
 The same 15m re-check applies to a demoted provider, so keep the window above it.
 

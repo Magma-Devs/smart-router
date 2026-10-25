@@ -3040,6 +3040,9 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		recordAdmission:            recordAdmission,
 		recordReverifiedAdmission:  admissions.recordReverified,
 		admissionFor:               admissionFor,
+		countFailedCheck: func(tier reverifyTier, provider string, failure metrics.ProviderVerificationFailure) {
+			rpsr.smartRouterMetricsManager.CountVerificationCheckFailure(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface, provider, tier.String(), failure)
+		},
 		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []chainlib.RefusedService {
 			return refusalsOf(admissionFor(p))
 		},
@@ -3051,6 +3054,21 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	}
 	for p, err := range failedBackupSet {
 		inputs.noteFailure(reverifyTierBackup, p.Name, err)
+	}
+	// What boot refused a provider it admitted, as recorded unmerged by PHASE 1.
+	for _, tier := range []struct {
+		tier      reverifyTier
+		providers []*lavasession.RPCStaticProviderEndpoint
+		failed    map[*lavasession.RPCStaticProviderEndpoint]error
+	}{
+		{reverifyTierStatic, relevantStaticProviderList, failedStaticSet},
+		{reverifyTierBackup, relevantBackupProviderList, failedBackupSet},
+	} {
+		for _, p := range tier.providers {
+			if _, failed := tier.failed[p]; !failed {
+				inputs.countRefusals(tier.tier, p.Name, admissionFor(p))
+			}
+		}
 	}
 	rpsr.reverifyInputs[sessionManagerKey] = inputs
 	rpsr.mu.Unlock()
@@ -4486,6 +4504,11 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 		if record != nil {
 			record(provider, admission)
 		}
+		rpsr.mu.Lock()
+		if inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]; inputs != nil {
+			inputs.countRefusals(tier, provider.Name, admission)
+		}
+		rpsr.mu.Unlock()
 		recovered = append(recovered, provider)
 		utils.LavaFormatInfo("[+] provider recovered and passed verification",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),

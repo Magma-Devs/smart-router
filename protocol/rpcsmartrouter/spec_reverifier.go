@@ -9,6 +9,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -99,6 +100,9 @@ type chainReverifyInputs struct {
 	// entry left behind by a provider that later passed is never published. Guarded
 	// by RPCSmartRouter.mu; lazily allocated.
 	lastFailure map[string]string
+	// countFailedCheck counts one failed check run on the metric. Nil in tests that
+	// do not publish metrics.
+	countFailedCheck func(tier reverifyTier, provider string, failure metrics.ProviderVerificationFailure)
 	// demoteFailStreak counts CONSECUTIVE failed re-verify cycles per active provider, keyed
 	// "<tier>|<name>" so a name configured in both tiers cannot share a counter. It is the only
 	// state that survives between epoch ticks, and it exists so a transient outage overlapping
@@ -122,7 +126,22 @@ func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, e
 	if inputs.lastFailure == nil {
 		inputs.lastFailure = make(map[string]string)
 	}
-	inputs.lastFailure[tier.String()+"|"+name] = failureCheck(err)
+	check := failureCheck(err)
+	inputs.lastFailure[tier.String()+"|"+name] = check
+	if inputs.countFailedCheck != nil {
+		inputs.countFailedCheck(tier, name, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeProvider, Check: check})
+	}
+}
+
+// countRefusals counts each service and node url this pass refused a provider it
+// admits, one failed run each.
+func (inputs *chainReverifyInputs) countRefusals(tier reverifyTier, provider string, admission chainlib.ProviderAdmission) {
+	if inputs.countFailedCheck == nil {
+		return
+	}
+	for _, r := range refusalsOf(admission) {
+		inputs.countFailedCheck(tier, provider, partialFailure(r))
+	}
 }
 
 // failureCheck names the check an error was charged to, "unknown" when it carries none.
@@ -245,6 +264,9 @@ func applyReverification(
 		// nothing about the base traffic the provider carries; on main that check
 		// refused the add-on alone, and here it keeps the add-on's last verdict.
 		throttle = admission.URLThrottle()
+		// Counted before the merge below: what it keeps from the last pass was not
+		// failed by this one.
+		inputs.countRefusals(tier, p.Name, admission)
 		if admission.Throttled() != nil && inputs.admissionFor != nil {
 			admission = admission.KeepingThrottledFrom(inputs.admissionFor(p))
 		}

@@ -139,6 +139,8 @@ type SmartRouterMetricsManager struct {
 	// published per provider, so a republish deletes only the ones that cleared.
 	verificationFailuresMu sync.Mutex
 	verificationFailures   map[string][]ProviderVerificationFailure
+	// verificationCheckFailures counts failed check runs: smartrouter_provider_verification_check_failures_total
+	verificationCheckFailures *prometheus.CounterVec
 
 	// Router-scoped request group metrics (labels: spec, apiInterface, provider_address, method)
 	routerRequestsTotal      *prometheus.CounterVec
@@ -638,6 +640,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_provider_verification_failed",
 		Help: "1 while a configured provider is failing a verification, labelled with the check it fails. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, unknown. A provider out at boot is retried every 3m; one demoted later and every service refusal is re-checked every 15m epoch, so size alert windows above both.",
 	}, []string{"spec", "apiInterface", "provider", "tier", "scope", "service", "check"})
+	verificationCheckFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_provider_verification_check_failures_total",
+		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service). A provider out at boot is re-run every 3m; an admitted provider and every service are re-run every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted.",
+	}, []string{"spec", "apiInterface", "provider", "tier", "scope", "service", "check"})
 
 	// =========================================================================
 	// Request group metrics
@@ -817,6 +823,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	csmReportedProvidersCount = registerOrReuse(csmReportedProvidersCount)
 	endpointServingTier = registerOrReuse(endpointServingTier)
 	providerVerificationFailed = registerOrReuse(providerVerificationFailed)
+	verificationCheckFailures = registerOrReuse(verificationCheckFailures)
 
 	manager := &SmartRouterMetricsManager{
 		// Endpoint-scoped (with function)
@@ -936,6 +943,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		csmReportedProvidersCount:      csmReportedProvidersCount,
 		endpointServingTier:            endpointServingTier,
 		providerVerificationFailed:     providerVerificationFailed,
+		verificationCheckFailures:      verificationCheckFailures,
 
 		// Internal state
 		// Start fail-closed (0 = not-ready) so /readyz reports 503 until the
@@ -2053,6 +2061,15 @@ type ProviderVerificationFailure struct {
 	Scope   string
 	Service string
 	Check   string
+}
+
+// CountVerificationCheckFailure counts one failed run of a verification check.
+// tier is "static" or "backup".
+func (m *SmartRouterMetricsManager) CountVerificationCheckFailure(spec, apiInterface, provider, tier string, failure ProviderVerificationFailure) {
+	if m == nil {
+		return
+	}
+	m.verificationCheckFailures.WithLabelValues(spec, apiInterface, provider, tier, failure.Scope, failure.Service, failure.Check).Inc()
 }
 
 // SetProviderVerificationFailures publishes the checks a configured provider is
