@@ -70,7 +70,13 @@ name and the `disabled` sentinel live in
 - **Common labels**:
   - `spec` — chain spec id (e.g. `ETH1`, `LAV1`).
   - `apiInterface` — `jsonrpc`, `tendermintrpc`, `rest`, `grpc`.
-  - `endpoint_id` — the configured upstream RPC endpoint.
+  - `endpoint_id` — one node url of a configured provider, named `<provider>/<index>` after the
+    url's position in the provider's `node-urls` (`chainstack/0`, `chainstack/1`); a url the router
+    generates for a spec internal path appends the path (`chainstack/0/v2`). A provider with one
+    url is `<provider>/0`. The router splits every configured provider into one such entity per
+    url before verification, so every provider-level mechanism — score, blocking, retry, pinning,
+    rate-limit hold-off, verification, these series — is per url (MAG-4219). `lava-select-provider`
+    accepts the configured name (any url of it) or an entity name (that url only).
   - `provider_address` — provider the relay was routed to.
   - `method` — RPC method name.
   - `kind` — closed-set request classifier (`rpc_endpoint_tracker_requests_total` only):
@@ -105,11 +111,11 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 | `rpc_endpoint_total_cancelled` | Counter | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays the router aborted before completion: the losing side of a hedged read, a broadcast delivery still running 5 s after the caller was answered, and client disconnects. **Not an endpoint fault** — excluded from `rpc_endpoint_total_errored` and from QoS/availability scoring. |
 | `rpc_endpoint_requests_in_flight` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `function` | Relays currently in flight to this endpoint. |
 | `rpc_endpoint_end_to_end_latency_milliseconds` | Histogram | `spec`, `apiInterface`, `endpoint_id`, `function` | End-to-end latency per function for this endpoint. |
-| `rpc_endpoint_overall_health` | Gauge | `spec`, `apiInterface`, `endpoint_id` | Endpoint health (1 healthy / 0 unhealthy). `endpoint_id` is the provider name, so the value covers all of its URLs. It also reads 0 while any of them is marked `head-stalled`: it keeps answering, but its highest block has not gone up for 10 × the poll divisor tracker cycles while another URL of the same chain has shown a higher block. A quiet chain, where no URL moves, marks nothing and leaves the gauge alone. The probe loop re-asserts that 0 every 5 s, and sets 1 again once the URL moves and every URL of the provider is usable (see `/debug/endpoint-state` fields `StateReasons`, `SameBlockCycles`, `HighestBlockSeen`). |
+| `rpc_endpoint_overall_health` | Gauge | `spec`, `apiInterface`, `endpoint_id` | Endpoint health (1 healthy / 0 unhealthy), per url since MAG-4219. It also reads 0 while the url is marked `head-stalled`: it keeps answering, but its highest block has not gone up for 10 × the poll divisor tracker cycles while another URL of the same chain has shown a higher block. A quiet chain, where no URL moves, marks nothing and leaves the gauge alone. The probe loop re-asserts that 0 every 5 s, and sets 1 again once the URL moves and is usable (see `/debug/endpoint-state` fields `StateReasons`, `SameBlockCycles`, `HighestBlockSeen`). |
 | `rpc_endpoint_overall_health_breakdown` | Gauge | `spec`, `apiInterface` | Aggregate health per chain/interface. |
 | `rpc_endpoint_selection_score` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `score_type` | Selection scores by `score_type` (availability / latency / sync / stake / composite). |
 | `rpc_endpoint_latest_block` | Gauge | `spec`, `apiInterface`, `endpoint_id` | Latest block reported by the endpoint. |
-| `rpc_endpoint_url_latest_block` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `url`, `internal_path` | Latest block one node url of a provider answered with, written on every answered poll (the same block again included) and by the relay harvest: one series per (provider, url), for the stuck-provider alerts. `rpc_endpoint_latest_block` is written by every url of the provider, so it cannot show a url that froze while another moves on (MAG-4204). `url` is a fingerprint of the node url, the first 8 hex digits of its sha256, and nothing of the url itself, since a node url can hold an api key in any part of it; `/debug/endpoint-state` shows it as `URLFingerprint` beside each endpoint, on a router run with its debug server. `internal_path` is the spec path the url serves (`/v2`), empty for the root. ws/wss urls and unregistered urls have no series; a url whose tracker is removed loses it. |
+| `rpc_endpoint_url_latest_block` | Gauge | `spec`, `apiInterface`, `endpoint_id`, `url`, `internal_path` | Latest block one node url answered with, written on every answered poll (the same block again included) and by the relay harvest: one series per url, for the stuck-provider alerts. Added when `endpoint_id` was still the provider name and `rpc_endpoint_latest_block` was written by every url of the provider, so it could not show a url that froze while another moved on (MAG-4204); since MAG-4219 `endpoint_id` is itself per url and the two series carry the same value, this one keeping the `url` and `internal_path` labels the alert rules read. `url` is a fingerprint of the node url, the first 8 hex digits of its sha256, and nothing of the url itself, since a node url can hold an api key in any part of it; `/debug/endpoint-state` shows it as `URLFingerprint` beside each endpoint, on a router run with its debug server. `internal_path` is the spec path the url serves (`/v2`), empty for the root. ws/wss urls and unregistered urls have no series; a url whose tracker is removed loses it. |
 | `rpc_endpoint_url_answered_until_seconds` | Gauge | as `rpc_endpoint_url_latest_block` | Unix time until which the url counts as answering: its last answer, an answered poll or a harvested relay, plus max(2m, 6 x the interval the url's tracker polls at): up to 4 polls the traffic gate skips, the poll after them, and one interval for that poll's answer. The tracker caps that interval at 1 minute, so BTC polls every minute and a BTC url that dies reads as down 6 minutes after its last answer; ETH and TON keep the 2-minute floor. Past it, the url has stopped answering: it is down, not stuck, and serves no stale block. Compare with `timestamp(rpc_endpoint_url_answered_until_seconds)`, the time the sample was scraped, not `time()`: with `time()` a scrape that arrives late flips an answering url to down, where `timestamp()` only delays the verdict. |
 | `rpc_endpoint_url_relays_serviced_total` | Counter | as `rpc_endpoint_url_latest_block` | Relays one node url of a provider served successfully: the per-url counterpart of `rpc_endpoint_total_relays_serviced`, so a page about a url can ask whether customers' requests reach it. |
 | `rpc_endpoint_fetch_latest_fails` | Counter | `spec`, `apiInterface`, `endpoint_id` | Latest-block fetch failures. An **event** counter, not a request counter — see the note below. |
@@ -191,9 +197,10 @@ They split into **endpoint-scoped** (`rpc_endpoint_*`) and **router-scoped**
 > the new-block callback fires, so new blocks stop being counted at all; without the hash step
 > they are recorded again.
 >
-> Like `rpc_endpoint_fetch_*`, this counter fans out across every provider configured on a shared
-> URL, so `endpoint_id` carries a provider name. Group by `endpoint_id` when reading it — a bare
-> `sum()` counts one physical request once per provider sharing that URL.
+> Like `rpc_endpoint_fetch_*`, this counter fans out across every entity configured on a shared
+> URL (two providers naming the same url, or one url listed under two credentials), so
+> `endpoint_id` carries an entity name. Group by `endpoint_id` when reading it — a bare `sum()`
+> counts one physical request once per entity sharing that URL.
 
 > **Reading cancelled relays.** A cancelled relay is one the router stopped: the losing side of a
 > hedged read, whose other attempt answered first; a broadcast delivery still running 5 s after the

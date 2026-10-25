@@ -195,16 +195,17 @@ func TestCreateSmartRouterEndpoint_GroupDownAtBoot(t *testing.T) {
 			fleetTestPrimary("sim-3", "group-b", down.URL))
 		require.NoError(t, err)
 		key := (&lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}).Key()
-		require.Equal(t, map[string][]string{"group-a": {"sim-1", "sim-2"}}, rpsr.sessionManagers[key].ProviderGroupAssignments(),
+		// Since MAG-4219 a provider is served through one entity per url, named "<provider>/<index>".
+		require.Equal(t, map[string][]string{"group-a": {"sim-1/0", "sim-2/0"}}, rpsr.sessionManagers[key].ProviderGroupAssignments(),
 			"sim-3 failed verification, so only group-a is serving")
 		require.Len(t, rpsr.failedStaticProviders[key], 1, "and sim-3 is queued for the background retry")
-		require.Equal(t, "sim-3", rpsr.failedStaticProviders[key][0].Name)
+		require.Equal(t, "sim-3/0", rpsr.failedStaticProviders[key][0].Name)
 
 		// The router said so: the ATTENTION line names the provider that is out and the requirement it
 		// breaks, and the layout line kept its meaning (distinctGroups counts the groups serving now).
 		boot := bytes.Join(utils.ReadDebugLogBuffer("", time.Time{}, time.Time{}, 5000), []byte("\n"))
 		require.Contains(t, string(boot), "ATTENTION: the providers that passed startup verification cannot meet a cross-validation policy")
-		require.Contains(t, string(boot), `"unavailableProviders":"sim-3"`)
+		require.Contains(t, string(boot), `"unavailableProviders":"sim-3/0"`)
 		require.Contains(t, string(boot), `"requiredGroups":"2"`)
 		require.Contains(t, string(boot), `"distinctGroups":"1"`)
 		require.Contains(t, string(boot), `"configuredGroups":"2"`)

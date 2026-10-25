@@ -932,6 +932,10 @@ type ConsumerSessionsWithProvider struct {
 	// It rides on the provider record so it can be read off a session's Parent without an address-keyed lookup.
 	// Empty string means the implicit common.DefaultProviderGroup.
 	GroupLabel string
+	// Parent is the configured provider name this entity was split from (MAG-4219), the name a
+	// lava-select-provider header may still use to mean "any url of this provider". Empty for a
+	// record that was not built from the per-url split (tests, lava pairings).
+	Parent string
 }
 
 func NewConsumerSessionWithProvider(publicLavaAddress string, pairingEndpoints []*Endpoint, maxCu uint64, epoch uint64, stakeSize int64) *ConsumerSessionsWithProvider {

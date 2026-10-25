@@ -41,6 +41,12 @@ type RPCStaticProviderEndpoint struct {
 	// Empty means the provider belongs to the implicit common.DefaultProviderGroup; it has no effect unless a
 	// per-method policy sets a group-diversity requirement.
 	GroupLabel string `yaml:"group-label,omitempty" json:"group-label,omitempty" mapstructure:"group-label,omitempty"`
+	// Parent is the configured provider name this entity was split from (MAG-4219). The router
+	// splits every configured provider into one single-url entity per url, named
+	// "<provider>/<index>", before verification; Parent keeps the configured name for the two
+	// readers that still want it, the lava-select-provider header and the metrics manager. Set
+	// by the split, never read from the file.
+	Parent string `yaml:"-" json:"-" mapstructure:"-"`
 }
 
 // ToBase returns the base RPCProviderEndpoint (for compatibility with existing code)

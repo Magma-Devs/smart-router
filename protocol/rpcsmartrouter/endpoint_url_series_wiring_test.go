@@ -237,7 +237,8 @@ func TestCreateSmartRouterEndpoint_PollsWriteEachURLsSeries(t *testing.T) {
 	require.NoError(t, err)
 	head.Store(movedHead)
 
-	for provider, url := range map[string]string{"sim-1": up1.URL, "sim-2": up2.URL} {
+	// Since MAG-4219 each url is its own entity, "<provider>/<index>", and endpoint_id names it.
+	for provider, url := range map[string]string{"sim-1/0": up1.URL, "sim-2/0": up2.URL} {
 		label := metrics.URLFingerprint(url)
 		require.Eventually(t, func() bool { return urlBlocks(t, provider)[label] == movedHead }, 45*time.Second, 50*time.Millisecond,
 			"%s's url gets the head its tracker polled after the boot", provider)

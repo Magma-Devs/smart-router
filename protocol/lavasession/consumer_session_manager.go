@@ -2242,6 +2242,47 @@ func resolveSelectedProviderAddress(selectedProvider string, addresses []string)
 	return "", folded
 }
 
+// addressesWithParent resolves a lava-select-provider header that names a configured provider
+// rather than one of its url entities (MAG-4219). The router splits "chainstack" into
+// "chainstack/0", "chainstack/1", ... before verification, and a header saying "chainstack" still
+// means "any url of chainstack": every valid address whose entity was split from that provider
+// is returned for the ordinary selection to rank. Exact match first, then case-folded, the rule
+// resolveSelectedProviderAddress applies to entity names; a fold that spans more than one
+// configured provider comes back as the collision instead, so the caller reports it rather than
+// serving a provider the caller did not ask for.
+//
+// csm.lock must be held for reading by the caller: pairing is read here.
+func (csm *ConsumerSessionManager) addressesWithParent(parent string, addresses []string) (siblings []string, ambiguousParents []string) {
+	foldedByParent := map[string][]string{}
+	for _, address := range addresses {
+		cswp, ok := csm.pairing[address]
+		if !ok || cswp == nil || cswp.Parent == "" {
+			continue
+		}
+		if cswp.Parent == parent {
+			siblings = append(siblings, address)
+			continue
+		}
+		if strings.EqualFold(cswp.Parent, parent) {
+			foldedByParent[cswp.Parent] = append(foldedByParent[cswp.Parent], address)
+		}
+	}
+	if len(siblings) > 0 {
+		return siblings, nil
+	}
+	if len(foldedByParent) == 1 {
+		for _, folded := range foldedByParent {
+			return folded, nil
+		}
+	}
+	for name := range foldedByParent {
+		ambiguousParents = append(ambiguousParents, name)
+	}
+	// Sorted so the same collision reports the same way on every run.
+	sort.Strings(ambiguousParents)
+	return nil, ambiguousParents
+}
+
 // Get a valid provider address.
 // filterRateLimitedProviders drops providers currently held off after a rate limit —
 // unless that would leave nothing choosable: the request must still be served (the
@@ -2339,57 +2380,87 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 		}
 
 		if providerAddress == "" {
-			// Return error instead of falling back to random selection.
+			// The header may name the configured provider rather than one of its url entities
+			// (MAG-4219): "chainstack" for "chainstack/0", "chainstack/1", ... Then every url of it
+			// is a candidate and the ordinary selection below ranks among them: the hold-off, the
+			// in-request ignored set and the optimizer apply as to any other request. That is also
+			// what bounds the caller's refill loop here: once every sibling is in the ignored set
+			// the pool is empty and the ordinary path says so, where a single pinned address needs
+			// the explicit guard below.
+			siblings, ambiguousParents := csm.addressesWithParent(selectedProvider, validAddresses)
+			if len(ambiguousParents) > 0 {
+				return nil, utils.LavaFormatError(
+					"Selected provider name matches more than one provider",
+					SelectedProviderUnavailableError,
+					utils.LogAttr("selectedProvider", selectedProvider),
+					utils.LogAttr("matchingProviders", ambiguousParents),
+					utils.LogAttr("addon", addon),
+					utils.LogAttr("extensions", extensions),
+					utils.LogAttr("GUID", ctx),
+				)
+			}
+			if len(siblings) == 0 {
+				// Return error instead of falling back to random selection.
+				//
+				// Deliberately broad. This branch fires both for a name that is not configured at
+				// all and for one that is configured but not usable for this request — blocked
+				// (removeAddressFromValidAddresses pops it into currentlyBlockedProviderAddresses)
+				// or not serving this addon/extension, since getValidAddresses returns the filtered
+				// list. Calling that "unknown" would tell an operator their provider does not exist
+				// in the middle of an outage, which is the same class of misdirection the split of
+				// this error from SelectedProviderAlreadyFailedError exists to remove. The sentinel
+				// carries the precision; this description has to stay true for every way the branch
+				// is reached.
+				return nil, utils.LavaFormatError(
+					"Selected provider not available",
+					SelectedProviderUnavailableError,
+					utils.LogAttr("selectedProvider", selectedProvider),
+					utils.LogAttr("validProviders", validAddresses),
+					utils.LogAttr("addon", addon),
+					utils.LogAttr("extensions", extensions),
+					utils.LogAttr("GUID", ctx),
+				)
+			}
+			validAddresses = siblings
+			validAddressesLength = len(validAddresses)
+			totalValidLength = validAddressesLength - ignoredProvidersListLength
+			utils.LavaFormatDebug("Provider selected via header: choosing among its urls",
+				utils.LogAttr("requestedProvider", selectedProvider),
+				utils.LogAttr("urls", siblings),
+				utils.LogAttr("addon", addon),
+				utils.LogAttr("extensions", extensions),
+				utils.LogAttr("GUID", ctx))
+		} else {
+			// If the pinned provider has already been added to ignoredProvidersList during this
+			// GetSessions call (e.g. a prior fetchEndpointConnectionFromConsumerSessionWithProvider
+			// returned connected=false), the outer loop would otherwise re-call us with the same
+			// selectedProvider and we'd return the same address again — an unbounded spin. Bound
+			// it here by returning an error the caller propagates as a single attempt.
 			//
-			// Deliberately broad. This branch fires both for a name that is not configured at
-			// all and for one that is configured but not usable for this request — blocked
-			// (removeAddressFromValidAddresses pops it into currentlyBlockedProviderAddresses)
-			// or not serving this addon/extension, since getValidAddresses returns the filtered
-			// list. Calling that "unknown" would tell an operator their provider does not exist
-			// in the middle of an outage, which is the same class of misdirection the split of
-			// this error from SelectedProviderAlreadyFailedError exists to remove. The sentinel
-			// carries the precision; this description has to stay true for every way the branch
-			// is reached.
-			return nil, utils.LavaFormatError(
-				"Selected provider not available",
-				SelectedProviderUnavailableError,
-				utils.LogAttr("selectedProvider", selectedProvider),
-				utils.LogAttr("validProviders", validAddresses),
-				utils.LogAttr("addon", addon),
-				utils.LogAttr("extensions", extensions),
-				utils.LogAttr("GUID", ctx),
-			)
-		}
+			// Looked up by the resolved address, exactly: the set is only ever written with
+			// addresses that came out of the pairing, so folding case here as well would let a
+			// case-twin's failure reject a provider that never failed.
+			if _, ignored := ignoredProvidersList[providerAddress]; ignored {
+				return nil, utils.LavaFormatWarning(
+					"Selected provider cannot be retried",
+					SelectedProviderAlreadyFailedError,
+					utils.LogAttr("provider", providerAddress),
+					utils.LogAttr("selectedProvider", selectedProvider),
+					utils.LogAttr("addon", addon),
+					utils.LogAttr("extensions", extensions),
+					utils.LogAttr("GUID", ctx),
+				)
+			}
 
-		// If the pinned provider has already been added to ignoredProvidersList during this
-		// GetSessions call (e.g. a prior fetchEndpointConnectionFromConsumerSessionWithProvider
-		// returned connected=false), the outer loop would otherwise re-call us with the same
-		// selectedProvider and we'd return the same address again — an unbounded spin. Bound
-		// it here by returning an error the caller propagates as a single attempt.
-		//
-		// Looked up by the resolved address, exactly: the set is only ever written with
-		// addresses that came out of the pairing, so folding case here as well would let a
-		// case-twin's failure reject a provider that never failed.
-		if _, ignored := ignoredProvidersList[providerAddress]; ignored {
-			return nil, utils.LavaFormatWarning(
-				"Selected provider cannot be retried",
-				SelectedProviderAlreadyFailedError,
+			addresses = []string{providerAddress}
+			utils.LavaFormatInfo("Provider selected via header",
 				utils.LogAttr("provider", providerAddress),
-				utils.LogAttr("selectedProvider", selectedProvider),
+				utils.LogAttr("requestedProvider", selectedProvider),
 				utils.LogAttr("addon", addon),
 				utils.LogAttr("extensions", extensions),
-				utils.LogAttr("GUID", ctx),
-			)
+				utils.LogAttr("GUID", ctx))
+			return addresses, nil
 		}
-
-		addresses = []string{providerAddress}
-		utils.LavaFormatInfo("Provider selected via header",
-			utils.LogAttr("provider", providerAddress),
-			utils.LogAttr("requestedProvider", selectedProvider),
-			utils.LogAttr("addon", addon),
-			utils.LogAttr("extensions", extensions),
-			utils.LogAttr("GUID", ctx))
-		return addresses, nil
 	}
 
 	if stickysession, ok := csm.stickySessions.Get(stickiness); ok {

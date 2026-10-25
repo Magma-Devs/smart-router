@@ -191,6 +191,11 @@ type SmartRouterMetricsManager struct {
 	// ALL provider names sharing the URL — otherwise only the last-registered provider gets
 	// the metric label, leaving its peers stuck at the zero value on dashboards.
 	urlToProviderNames map[string][]string
+	// providerNames is every provider name RegisterEndpoint has seen. resolveProviderNames passes
+	// a registered name through untouched; since MAG-4219 an entity is named "<provider>/<index>",
+	// and the slash would otherwise read as a url path and come back as "chainstack/[redacted]".
+	// Guarded by lock.
+	providerNames map[string]struct{}
 	// urlInternalPaths maps a registered url to the spec path it serves ("/v2", or "" for the
 	// root), for the internal_path label of the per-url series. Guarded by lock.
 	urlInternalPaths map[string]string
@@ -956,6 +961,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		// until it has actually verified a provider.
 		endpointsHealthChecksOk: 0,
 		urlToProviderNames:      make(map[string][]string),
+		providerNames:           make(map[string]struct{}),
 		optimizerQoSClient:      options.OptimizerQoSClient,
 	}
 
@@ -1385,6 +1391,10 @@ func (m *SmartRouterMetricsManager) RegisterEndpoint(spec, apiInterface, endpoin
 	if !alreadyRegistered {
 		m.urlToProviderNames[endpointID] = append(existing, providerName)
 	}
+	if m.providerNames == nil {
+		m.providerNames = make(map[string]struct{})
+	}
+	m.providerNames[providerName] = struct{}{}
 	if _, ok := m.urlFingerprints[endpointID]; !ok {
 		if m.urlFingerprints == nil {
 			m.urlFingerprints = make(map[string]string)
@@ -1412,10 +1422,15 @@ func (m *SmartRouterMetricsManager) resolveProviderNames(urlOrName string) []str
 		copy(out, names)
 		return out
 	}
+	// A registered provider name passes through untouched. An entity name carries a slash
+	// ("chainstack/0", MAG-4219), which RedactIfURL would read as a url path.
+	if _, known := m.providerNames[urlOrName]; known {
+		return []string{urlOrName}
+	}
 	// Unregistered input is either a provider name (passed straight through by
 	// callers that already resolved it) or a url that never reached
-	// RegisterEndpoint. RedactIfURL leaves the name alone — a lava address is not
-	// a url — and keeps a node-url's api key out of a scraped, retained label.
+	// RegisterEndpoint. RedactIfURL leaves a slash-free name alone — a lava address
+	// is not a url — and keeps a node-url's api key out of a scraped, retained label.
 	return []string{utils.RedactIfURL(urlOrName)}
 }
 

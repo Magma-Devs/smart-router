@@ -2667,6 +2667,27 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		}
 	}
 
+	// One provider entity per url (MAG-4219). Everything below keys on the provider name — the
+	// optimizer score, the blocked list, the retry skip-list, the pin header, the rate-limit
+	// hold-off, admission and re-verification, every rpc_endpoint_* series, every log line — so a
+	// provider with several urls shared one of each, and a lagging url hid behind a healthy
+	// sibling while the first usable url in config order served every relay. Splitting here,
+	// before verification, makes all of them per url without changing any of them. It needs the
+	// chain parser for the spec's internal paths, which is why it runs per chain and not at
+	// config load.
+	internalPaths := chainParser.GetAllInternalPaths()
+	relevantStaticProviderList = splitProvidersPerURL(relevantStaticProviderList, internalPaths, subscriptionCollectionProbe(chainParser))
+	relevantBackupProviderList = splitProvidersPerURL(relevantBackupProviderList, internalPaths, subscriptionCollectionProbe(chainParser))
+	// The configured names were checked at config load (MAG-2724). The entity names are checked
+	// again: one is a configured name plus an index and, for a shared root, a spec path, and a
+	// configured name may spell exactly that.
+	if err = lavasession.ValidateUniqueProviderNames(relevantStaticProviderList, relevantBackupProviderList); err != nil {
+		err = utils.LavaFormatError("provider names collide after the per-url split", err,
+			utils.Attribute{Key: "chainID", Value: chainID})
+		errCh <- err
+		return err
+	}
+
 	if len(relevantStaticProviderList) == 0 && len(relevantBackupProviderList) == 0 {
 		err = utils.LavaFormatError("no static or backup providers configured for chain", nil,
 			utils.Attribute{Key: "chainID", Value: chainID})
@@ -2818,13 +2839,13 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			}
 
 			endpoints := []*lavasession.Endpoint{}
-			// expandInternalPaths gets each admitted url with its declared add-ons. Its
-			// subscription probe resolves a collection from them to decide ws-vs-http,
-			// so narrowing them here would move endpoints in or out per internal path as
-			// a side effect of admission (MAG-3326 review); a refused url goes whole,
-			// its expansions with it. Service admission is applied per endpoint below.
+			// The urls arrive one per entity and already expanded over the spec's internal
+			// paths: splitProvidersPerURL did that on the raw config, before verification
+			// (MAG-4219). Expanding again here would hand a root entity every path a second
+			// time. A refused url goes whole (admittedNodeUrls); service admission is applied
+			// per endpoint below, never to the url list (MAG-3326 review).
 			admission := admissionFor(provider)
-			for _, url := range expandInternalPaths(admittedNodeUrls(provider, admission), chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
+			for _, url := range admittedNodeUrls(provider, admission) {
 				admittedServices, keep := admittedServicesFor(chainParser, admission, url)
 				if !keep {
 					// A url that serves only its add-ons and kept none has nothing left.
@@ -2946,6 +2967,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			)
 			providerEntry.StaticProvider = true
 			providerEntry.GroupLabel = provider.GroupLabel // cross-validation group-diversity label (may be empty)
+			providerEntry.Parent = provider.Parent         // the configured provider this url entity was split from (MAG-4219)
 			sessions[uint64(idx)] = providerEntry
 		}
 
@@ -4043,6 +4065,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			)
 			freshSession.StaticProvider = oldSession.StaticProvider
 			freshSession.GroupLabel = oldSession.GroupLabel // cross-validation group must survive epoch refresh
+			freshSession.Parent = oldSession.Parent         // so does the configured name the pin header resolves (MAG-4219)
 			freshProviderSessions[idx] = freshSession
 
 			utils.LavaFormatDebug("Created fresh provider session for epoch",
@@ -4072,6 +4095,7 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			)
 			freshSession.StaticProvider = oldSession.StaticProvider
 			freshSession.GroupLabel = oldSession.GroupLabel // cross-validation group must survive epoch refresh
+			freshSession.Parent = oldSession.Parent         // so does the configured name the pin header resolves (MAG-4219)
 			freshBackupSessions[idx] = freshSession
 
 			utils.LavaFormatDebug("Created fresh backup provider session for epoch",
