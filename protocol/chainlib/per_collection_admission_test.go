@@ -159,6 +159,17 @@ func newValidationFetcher(t *testing.T, url common.NodeUrl, verifications []Veri
 	}
 }
 
+// A check the provider's verification deadline never reached is charged to not-run, not to
+// the check it never ran; the wording the endpoint engine reads is unchanged (MAG-4594).
+func TestValidateCollections_ACheckTheDeadlineNeverReachedIsNotRun(t *testing.T) {
+	fetcher := newValidationFetcher(t, common.NodeUrl{Url: "https://a"}, []VerificationContainer{baseCollectionOnly("chain-id")}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := fetcher.ValidateCollections(ctx)
+	require.Equal(t, CheckNotRun, FailedCheck(err))
+	require.ErrorContains(t, err, "not run: verification deadline exceeded before this check started")
+}
+
 // TestValidateCollections_ArchiveUrlKeepsTheProvider is the ticket's motivating
 // case, in the shape specs/ethereum.json produces: "attach an archive url to an
 // otherwise healthy provider, have it fail the archive check, lose the provider".

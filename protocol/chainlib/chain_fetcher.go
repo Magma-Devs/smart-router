@@ -175,6 +175,9 @@ const (
 	// CheckConfig is a provider whose configured urls cannot work as given: no
 	// http(s) url, or no websocket url on a chain that subscribes.
 	CheckConfig = "config"
+	// CheckNotRun is a check its pass never started, because the provider's
+	// verification deadline had passed. It says nothing about the check itself.
+	CheckNotRun = "not-run"
 )
 
 // VerificationFailure carries which check a provider failed, so the router can
@@ -664,8 +667,10 @@ func (cf *ChainFetcher) ValidateReport(ctx context.Context) ([]NodeURLValidation
 	return results, err
 }
 
-// errCheckNotRun marks a check its pass never started: the deadline had passed.
-var errCheckNotRun = errors.New("not run: verification deadline exceeded before this check started")
+// errCheckNotRun marks a check its pass never started: the deadline had passed. It
+// carries its own check, so the failure is not published under the name of a check
+// that never ran.
+var errCheckNotRun error = &VerificationFailure{Check: CheckNotRun, Err: errors.New("not run: verification deadline exceeded before this check started")}
 
 // verifyOptions is how much one verification pass asks of a provider.
 type verifyOptions struct {
