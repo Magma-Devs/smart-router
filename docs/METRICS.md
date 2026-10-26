@@ -17,20 +17,30 @@ metrics manager.
 | `/metrics/health-overall` | text | Alias of the above (backward-compat path) |
 
 > **What the health readings attest.** `/metrics/overall-health` and `/readyz` (served on this same
-> port) answer whether a chain can serve relays: the router's own health check takes one provider's
-> latest block. That check is exempt from per-method cross-validation policies
+> port) answer whether this router reaches the upstreams of a chain: the router's own health check
+> asks for the latest block, one provider at a time. That check is exempt from per-method cross-validation policies
 > (MAG-3746), and neither reading attests that a policy-governed method currently has quorum
 > capacity — a router reporting healthy and Ready can still refuse such a method with
 > `insufficient-capacity`. Alert on the cross-validation series below for that, not on readiness.
 >
-> **When they change.** Each chain+interface is healthy until its health check fails, and the router
-> is healthy while any one of them is. The check passes only when an upstream answers the
-> latest-block request with a result: an error answer or no answer fails it. It runs every
-> `--relays-health-interval` (default `5m`), and each client relay an upstream answers pushes it
-> back, so a busy healthy chain is not probed. A client relay that ends without an upstream's answer
-> (an error, a timeout, no provider left) brings the check to within
-> `--relays-health-unhealthy-interval` (default `15s`), and so does another chain+interface of the
-> same router turning unhealthy. A cache hit and a client that hangs up change nothing. While
+> **When they change.** Each chain+interface is healthy or unhealthy, and the router is healthy while
+> any one of them is. Its health check sends the latest-block request, moving to another upstream
+> when a try fails, and ends in one of three verdicts:
+>
+> - **A result** from an upstream makes the chain healthy.
+> - **No answer at all** makes it unhealthy: every try timed out, failed to connect, or had no
+>   upstream to go to. This is what differs between replicas, so it is what takes one out of
+>   rotation.
+> - **An error, an error status or a rate limit** from an upstream leaves the chain as it was. The
+>   answer shows this router reaches its upstreams, and every replica sharing them gets the same
+>   one, so it is no reason to take this replica out. It does not show the chain serves either, so
+>   an unhealthy chain stays unhealthy until a check gets a result.
+>
+> The check runs every `--relays-health-interval` (default `5m`), and each client relay an upstream
+> answers with a result pushes it back, so a busy healthy chain is not probed. A client relay no
+> upstream answered brings the check to within `--relays-health-unhealthy-interval` (default
+> `15s`), and so does another chain+interface of the same router turning unhealthy. A client relay
+> an upstream answered with an error, a cache hit and a client that hangs up change nothing. While
 > unhealthy the check repeats at that interval, so recovery shows within it.
 
 ### Configuration
