@@ -42,7 +42,15 @@ func TestServingError(t *testing.T) {
 	require.True(t, IsRateLimitFailure(throttled.servingError(urls[:1])), "nothing but a throttle: inconclusive")
 
 	var socketsOnly ProviderAdmission
-	require.Error(t, socketsOnly.servingError(urls[2:]), "a socket serves no path")
+	// Since MAG-4219 a websocket url is a provider entity of its own, so a url list that is all
+	// websockets is the normal shape of a subscription leg: it serves unless refused.
+	require.NoError(t, socketsOnly.servingError(urls[2:]), "a lone socket that was not refused serves (its subscriptions)")
+	var socketRefused ProviderAdmission
+	socketRefused.refuseURL(0, errNotServed) // index 0 of urls[2:], the socket
+	require.ErrorIs(t, socketRefused.servingError(urls[2:]), errNotServed, "a refused socket is refused")
+	var socketThrottled ProviderAdmission
+	socketThrottled.throttleURL(0, throttledErr())
+	require.True(t, IsRateLimitFailure(socketThrottled.servingError(urls[2:])), "a rate-limited socket is inconclusive, as an http url is")
 }
 
 // A path that declares a url serving the base collection needs one of those left: a standalone-

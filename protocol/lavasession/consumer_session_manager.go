@@ -1527,7 +1527,7 @@ func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[stri
 // try. Releasing then leaves the pool looking healthy while nothing in it can serve.
 //
 // Returns ok=false when nothing was released, or when the retry after a release still found nothing.
-func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx context.Context, wantedProviderNumber int, tempIgnoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensionNames []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int) (SessionWithProviderMap, bool) {
+func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx context.Context, wantedProviderNumber int, tempIgnoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensionNames []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int, internalPath *string) (SessionWithProviderMap, bool) {
 	if len(csm.cacheAddonAddresses(addon, extensionNames, ctx)) != 0 {
 		return nil, false
 	}
@@ -1629,7 +1629,7 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 		)
 	}
 
-	sessionWithProviderMap, err := csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+	sessionWithProviderMap, err := csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget, internalPath)
 	if err != nil {
 		return nil, false
 	}
@@ -1638,8 +1638,8 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 	return sessionWithProviderMap, true
 }
 
-func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Context, wantedProviderNumber int, usedProviders UsedProvidersInf, tempIgnoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensionNames []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int) (sessionWithProviderMap SessionWithProviderMap, err error) {
-	sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Context, wantedProviderNumber int, usedProviders UsedProvidersInf, tempIgnoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensionNames []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int, internalPath *string) (sessionWithProviderMap SessionWithProviderMap, err error) {
+	sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget, internalPath)
 	if err != nil {
 		if errors.Is(err, PairingListEmptyError) {
 			// Emergency fallback chain, in order: backup providers, then releasing the standing
@@ -1647,7 +1647,7 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 			if len(csm.backupProviders) > 0 {
 				utils.LavaFormatDebug("No regular providers available, trying backup providers", utils.LogAttr("GUID", ctx))
 				// try to get a session from the backup providers
-				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, virtualEpoch, usedProviders)
+				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, virtualEpoch, usedProviders, internalPath)
 				if err == nil {
 					// backup providers succeeded, return the session
 					utils.LavaFormatDebug("Successfully got session from backup providers", utils.LogAttr("GUID", ctx))
@@ -1663,13 +1663,13 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 			// consulted — so backup was unreachable via this path, and the block never held for
 			// longer than a single request. Running it here is what lets "every primary is blocked"
 			// actually mean "serve backup".
-			if released, ok := csm.releaseBlockedProvidersIfPoolEmpty(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget); ok {
+			if released, ok := csm.releaseBlockedProvidersIfPoolEmpty(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget, internalPath); ok {
 				return released, nil
 			}
 
 			// try to recover a session from the currently blocked providers
 			var errOnRetry error
-			sessionWithProviderMap, errOnRetry = csm.tryGetConsumerSessionWithProviderFromBlockedProviderList(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders)
+			sessionWithProviderMap, errOnRetry = csm.tryGetConsumerSessionWithProviderFromBlockedProviderList(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, usedProviders, internalPath)
 			if errOnRetry != nil {
 				utils.LavaFormatDebug("All providers failed (regular, backup, and blocked)", utils.LogAttr("GUID", ctx))
 				return nil, errOnRetry
@@ -1681,7 +1681,7 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 			// still has to release the blocked list, exactly as the old top-of-GetSessions reset
 			// did: without this, lava-select-provider stops resolving the moment every provider is
 			// blocked, even though the pinned provider is sitting in that blocked list.
-			if released, ok := csm.releaseBlockedProvidersIfPoolEmpty(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget); ok {
+			if released, ok := csm.releaseBlockedProvidersIfPoolEmpty(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget, internalPath); ok {
 				return released, nil
 			}
 			return nil, err
@@ -1872,7 +1872,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	utils.LavaFormatTrace("GetSessions tempIgnoredProviders", utils.LogAttr("tempIgnoredProviders", tempIgnoredProviders), utils.LogAttr("GUID", ctx))
 
 	// Get a valid consumerSessionsWithProvider
-	sessionWithProviderMap, err := csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+	sessionWithProviderMap, err := csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget, internalPath)
 	if err != nil {
 		utils.LavaFormatTrace("GetSessions error", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 		return nil, err
@@ -2020,7 +2020,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		}
 
 		// If we do not have enough fetch more
-		sessionWithProviderMap, err = csm.getSessionWithProviderOrError(ctx, 1, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+		sessionWithProviderMap, err = csm.getSessionWithProviderOrError(ctx, 1, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget, internalPath)
 		// If error exists but we have sessions, return them
 		if err != nil && len(sessions) != 0 {
 			return sessions, nil
@@ -2258,6 +2258,29 @@ func resolveSelectedProviderAddress(selectedProvider string, addresses []string)
 	return "", folded
 }
 
+// narrowToInternalPath keeps, of the candidate providers, the ones with a url for the collection's
+// internal path, when any of them has one; otherwise it returns the candidates as they are. This is
+// the rule fetchEndpointConnectionFromConsumerSessionWithProvider applies among one provider's
+// endpoints (prefer the exact path, fall back to any), lifted to the candidate list because since
+// MAG-4219 a provider entity holds one url: a TON v3 api must land on the "/v3" entity, not on
+// whichever entity of the vendor the optimizer ranked first. A nil path is a relay that resolved no
+// collection, and narrows nothing. csm.lock must be held for reading by the caller.
+func (csm *ConsumerSessionManager) narrowToInternalPath(addresses []string, internalPath *string) []string {
+	if internalPath == nil {
+		return addresses
+	}
+	exact := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		if cswp, ok := csm.pairing[address]; ok && cswp.servesInternalPath(*internalPath) {
+			exact = append(exact, address)
+		}
+	}
+	if len(exact) == 0 {
+		return addresses
+	}
+	return exact
+}
+
 // addressesWithParent resolves a lava-select-provider header that names a configured provider
 // rather than one of its url entities (MAG-4219). The router splits "chainstack" into
 // "chainstack/0", "chainstack/1", ... before verification, and a header saying "chainstack" still
@@ -2355,8 +2378,8 @@ func (csm *ConsumerSessionManager) filterRateLimitedProviders(ctx context.Contex
 
 // getValidProviderAddresses selects the providers a request is sent to. The caller sends the request
 // to every address returned, so a write selected here is broadcast to all of them.
-func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context, wantedProviders int, ignoredProvidersList map[string]struct{}, cu uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, stickiness string, selectedProvider string) (addresses []string, err error) {
-	return csm.selectProviderAddresses(ctx, wantedProviders, ignoredProvidersList, cu, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider, false)
+func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context, wantedProviders int, ignoredProvidersList map[string]struct{}, cu uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, stickiness string, selectedProvider string, internalPath *string) (addresses []string, err error) {
+	return csm.selectProviderAddresses(ctx, wantedProviders, ignoredProvidersList, cu, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider, false, internalPath)
 }
 
 // selectProviderAddresses is getValidProviderAddresses for any caller. pickOne is set by a caller
@@ -2366,10 +2389,10 @@ func (csm *ConsumerSessionManager) getValidProviderAddresses(ctx context.Context
 // pickOne is not wantedProviders == 1: the refill in getValidConsumerSessionsWithProvider passes 1
 // for a broadcast too, and a broadcast ignores wantedProviders, so the refill of a write must still
 // skip the hold-off.
-func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, wantedProviders int, ignoredProvidersList map[string]struct{}, cu uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, stickiness string, selectedProvider string, pickOne bool) (addresses []string, err error) {
+func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, wantedProviders int, ignoredProvidersList map[string]struct{}, cu uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, stickiness string, selectedProvider string, pickOne bool, internalPath *string) (addresses []string, err error) {
 	// cs.Lock must be Rlocked here.
 	ignoredProvidersListLength := len(ignoredProvidersList)
-	validAddresses := csm.getValidAddresses(addon, extensions, ctx)
+	validAddresses := csm.narrowToInternalPath(csm.getValidAddresses(addon, extensions, ctx), internalPath)
 	validAddressesLength := len(validAddresses)
 	totalValidLength := validAddressesLength - ignoredProvidersListLength
 
@@ -2698,7 +2721,7 @@ func (csm *ConsumerSessionManager) blockedProvidersByCuServedLocked() []*Consume
 // (UsedProvidersInf.TakeLastChance), so a retrying request is not lent one disabled endpoint after
 // another. A blocked provider whose endpoint already works again (a stale block) is served as
 // before, with no such limit.
-func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedProviderList(ctx context.Context, wantedProviderNumber int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) {
+func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedProviderList(ctx context.Context, wantedProviderNumber int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, usedProviders UsedProvidersInf, internalPath *string) (sessionWithProviderMap SessionWithProviderMap, err error) {
 	csm.lock.RLock()
 	// we do not defer yet as we might need to unlock due to an epoch change
 
@@ -2716,7 +2739,7 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 		csm.lock.RUnlock() // unlock because getValidConsumerSessionsWithProvider is locking.
 		// Emergency blocked-provider fallback: group-blind selection. The diversity / per-group gate still
 		// enforces the requirement, so a non-diverse fallback fails rather than under-validates.
-		return csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, ignoredProviders, cuNeededForSession, requestedBlock, addon, extensions, stateful, virtualEpoch, "", "", groupBlindMinGroups, groupBlindPerGroupTarget)
+		return csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, ignoredProviders, cuNeededForSession, requestedBlock, addon, extensions, stateful, virtualEpoch, "", "", groupBlindMinGroups, groupBlindPerGroupTarget, internalPath)
 	}
 
 	// if we got here we validated the epoch is still the same epoch as we expected and we need to fetch a session from the blocked provider list.
@@ -2765,7 +2788,7 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 }
 
 // getValidConsumerSessionsWithProviderFromBackupProviderList retrieves valid backup provider sessions for emergency fallback when no regular providers are available.
-func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) { //nolint:unparam // virtualEpoch is unused: CU accounting never trips in this fork (MAG-4243); kept so the backup path mirrors the primary one
+func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, virtualEpoch uint64, usedProviders UsedProvidersInf, internalPath *string) (sessionWithProviderMap SessionWithProviderMap, err error) { //nolint:unparam // virtualEpoch is unused: CU accounting never trips in this fork (MAG-4243); kept so the backup path mirrors the primary one
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
@@ -2812,6 +2835,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 
 		backupProviderAddresses = append(backupProviderAddresses, providerAddress)
 	}
+	backupProviderAddresses = csm.narrowToInternalPath(backupProviderAddresses, internalPath)
 
 	if len(backupProviderAddresses) == 0 {
 		utils.LavaFormatInfo("[BackupProviders] No eligible backup providers after filtering (all ignored or addon mismatch)",
@@ -2872,7 +2896,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	return sessionWithProviderMap, nil
 }
 
-func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx context.Context, wantedProviderNumber int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int) (sessionWithProviderMap SessionWithProviderMap, err error) {
+func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx context.Context, wantedProviderNumber int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int, internalPath *string) (sessionWithProviderMap SessionWithProviderMap, err error) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
@@ -2901,7 +2925,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 		// Both are still passed empty explicitly, so this fetch says what it selects on rather than
 		// inheriting it. GetSessions has already cleared them for minGroups > 1 and reported the
 		// override, so by the time we get here there is nothing left to discard or to warn about.
-		ranked, rankErr := csm.getValidProviderAddresses(ctx, len(csm.validAddresses), ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "")
+		ranked, rankErr := csm.getValidProviderAddresses(ctx, len(csm.validAddresses), ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "", internalPath)
 		if rankErr != nil {
 			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get group-diverse provider addresses", utils.LogAttr("error", rankErr), utils.LogAttr("GUID", ctx))
 			return nil, rankErr
@@ -2921,7 +2945,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 				utils.LogAttr("GUID", ctx),
 			)
 		}
-		providerAddresses, err = csm.getValidProviderAddresses(ctx, wantedProviderNumber, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider)
+		providerAddresses, err = csm.getValidProviderAddresses(ctx, wantedProviderNumber, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider, internalPath)
 		if err != nil {
 			utils.LavaFormatDebug(csm.rpcEndpoint.ChainID+" could not get a provider addresses", utils.LogAttr("error", err), utils.LogAttr("GUID", ctx))
 			return nil, err
@@ -2989,7 +3013,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 		// Carrying it through routes the refill into the "selected provider already failed in
 		// this request" guard, so the request fails instead — which is what pinning means. The
 		// first fetch above has always passed it; only this one did not.
-		providerAddresses, err = csm.getValidProviderAddresses(ctx, 1, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider)
+		providerAddresses, err = csm.getValidProviderAddresses(ctx, 1, ignoredProviders.providers, cuNeededForSession, requestedBlock, addon, extensions, stateful, stickiness, selectedProvider, internalPath)
 
 		// If error exists but we have providers, return them
 		if err != nil && len(sessionWithProviderMap) != 0 {
@@ -4347,7 +4371,7 @@ func (csm *ConsumerSessionManager) stickyCandidate(ctx context.Context, cuNeeded
 	defer csm.lock.RUnlock()
 	// A single pick even for a write: the claim pins the whole session to the first address, so it
 	// is chosen among providers the hold-off is not holding off, as a read's provider is.
-	addresses, err := csm.selectProviderAddresses(ctx, 1, map[string]struct{}{}, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "", true)
+	addresses, err := csm.selectProviderAddresses(ctx, 1, map[string]struct{}{}, cuNeededForSession, requestedBlock, addon, extensions, stateful, "", "", true, nil)
 	if err != nil {
 		return "", err
 	}

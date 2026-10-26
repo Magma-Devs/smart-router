@@ -40,7 +40,7 @@ func TestSelectedProvider_ParentNameSelectsAmongItsURLs(t *testing.T) {
 
 	t.Run("the configured name resolves to one of its urls", func(t *testing.T) {
 		for range 20 {
-			got, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "chainstack")
+			got, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "chainstack", nil)
 			require.NoError(t, err)
 			require.Len(t, got, 1)
 			require.True(t, strings.HasPrefix(got[0], "chainstack/"), "got %q", got[0])
@@ -48,14 +48,14 @@ func TestSelectedProvider_ParentNameSelectsAmongItsURLs(t *testing.T) {
 	})
 
 	t.Run("the configured name, case-folded", func(t *testing.T) {
-		got, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "CHAINSTACK")
+		got, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "CHAINSTACK", nil)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		require.True(t, strings.HasPrefix(got[0], "chainstack/"), "got %q", got[0])
 	})
 
 	t.Run("an entity name pins that url alone", func(t *testing.T) {
-		got, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "chainstack/1")
+		got, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "chainstack/1", nil)
 		require.NoError(t, err)
 		require.Equal(t, []string{"chainstack/1"}, got)
 	})
@@ -63,7 +63,7 @@ func TestSelectedProvider_ParentNameSelectsAmongItsURLs(t *testing.T) {
 	t.Run("a sibling already set aside in this request is not handed back", func(t *testing.T) {
 		ignored := map[string]struct{}{"chainstack/0": {}}
 		for range 20 {
-			got, err := csm.getValidProviderAddresses(ctx, 1, ignored, 10, 100, "", nil, common.NO_STATE, "", "chainstack")
+			got, err := csm.getValidProviderAddresses(ctx, 1, ignored, 10, 100, "", nil, common.NO_STATE, "", "chainstack", nil)
 			require.NoError(t, err)
 			require.Equal(t, []string{"chainstack/1"}, got)
 		}
@@ -71,13 +71,13 @@ func TestSelectedProvider_ParentNameSelectsAmongItsURLs(t *testing.T) {
 
 	t.Run("every url set aside ends the request instead of spinning", func(t *testing.T) {
 		ignored := map[string]struct{}{"chainstack/0": {}, "chainstack/1": {}}
-		_, err := csm.getValidProviderAddresses(ctx, 1, ignored, 10, 100, "", nil, common.NO_STATE, "", "chainstack")
+		_, err := csm.getValidProviderAddresses(ctx, 1, ignored, 10, 100, "", nil, common.NO_STATE, "", "chainstack", nil)
 		require.Error(t, err)
 		require.True(t, errors.Is(err, PairingListEmptyError), "got %v", err)
 	})
 
 	t.Run("a name that is neither a provider nor an entity is unavailable", func(t *testing.T) {
-		_, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "alchemy")
+		_, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "alchemy", nil)
 		require.Error(t, err)
 		require.True(t, errors.Is(err, SelectedProviderUnavailableError), "got %v", err)
 	})
@@ -86,7 +86,7 @@ func TestSelectedProvider_ParentNameSelectsAmongItsURLs(t *testing.T) {
 		// tatum is the only other provider; a parent pin on chainstack must not reach it even
 		// when one sibling is set aside.
 		ignored := map[string]struct{}{"chainstack/1": {}}
-		got, err := csm.getValidProviderAddresses(ctx, 1, ignored, 10, 100, "", nil, common.NO_STATE, "", "chainstack")
+		got, err := csm.getValidProviderAddresses(ctx, 1, ignored, 10, 100, "", nil, common.NO_STATE, "", "chainstack", nil)
 		require.NoError(t, err)
 		require.Equal(t, []string{"chainstack/0"}, got)
 	})
@@ -103,11 +103,11 @@ func TestSelectedProvider_ParentCaseTwinsAreAmbiguous(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	ctx := context.Background()
 
-	_, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "CHAINSTACK")
+	_, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "CHAINSTACK", nil)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderUnavailableError), "got %v", err)
 
-	got, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "Chainstack")
+	got, err := csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "Chainstack", nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{"Chainstack/0"}, got, "an exact parent match wins over the fold")
 }

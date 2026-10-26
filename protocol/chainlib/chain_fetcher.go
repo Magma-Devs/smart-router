@@ -561,7 +561,11 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 		}
 	}
 	if len(order) == 0 {
-		return errors.New("no node url left serving the root path: every configured url is a websocket")
+		// Every url is a websocket. Since MAG-4219 each node url is its own provider entity,
+		// so a websocket url stands here alone as a matter of course, as it stood beside its
+		// http sibling before: dialed, answering the checks the router widens to the websocket
+		// extension, and nothing more asked of it. It serves unless it was refused.
+		return a.socketServingError(nodeUrls)
 	}
 	where := func(path string) string {
 		if path == "" {
@@ -585,6 +589,32 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 		}
 	}
 	return unknown
+}
+
+// socketServingError is servingError for urls that are all websockets: served when one of them
+// was neither refused nor rate-limited; a failure when one was refused and none was only
+// rate-limited; otherwise the rate limit, which re-verification reads as inconclusive.
+func (a ProviderAdmission) socketServingError(nodeUrls []common.NodeUrl) error {
+	var refused, throttle []error
+	for index, url := range nodeUrls {
+		if cause, isRefused := a.refusedURLs[index]; isRefused {
+			refused = append(refused, cause)
+		} else if _, keep := a.AdmittedServices(url); !keep {
+			refused = append(refused, errKeepsNothing)
+		} else if cause, throttled := a.throttledURLs[index]; throttled {
+			throttle = append(throttle, cause)
+		} else {
+			return nil
+		}
+	}
+	switch {
+	case len(nodeUrls) == 0:
+		return errors.New("no node url configured")
+	case len(throttle) == 0:
+		return fmt.Errorf("no websocket url left serving: %w", refused[0])
+	default:
+		return fmt.Errorf("no websocket url verified serving: %w", throttle[0])
+	}
 }
 
 // Validate reports the first Fail-severity failure on any node url, or nil.

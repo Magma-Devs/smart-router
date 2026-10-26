@@ -73,13 +73,13 @@ func TestSubscriptionOnlyEntity_TrackedButNeverARelayCandidate(t *testing.T) {
 	require.Equal(t, []string{"bk/1"}, eligibleBackups, "the ws backup is not a write-broadcast candidate")
 
 	for range 20 {
-		got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "")
+		got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "", nil)
 		require.NoError(t, err)
 		require.Equal(t, []string{"up-a/0"}, got)
 	}
 
 	// The pin header names the configured provider: only the relay-capable url answers.
-	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "up-a")
+	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "up-a", nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{"up-a/0"}, got)
 }
@@ -92,7 +92,7 @@ func TestSubscriptionOnlyEntity_WebsocketOnlyProviderLeavesNoRelayCandidate(t *t
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, map[uint64]*ConsumerSessionsWithProvider{
 		0: entity("wsonly/0", "wsonly", directEndpoint(t, "wss://127.0.0.1:1/ws")),
 	}, nil))
-	_, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "")
+	_, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "", nil)
 	require.Error(t, err)
 	require.Len(t, csm.GetAllDirectRPCEndpoints(), 1, "still tracked and probed")
 }

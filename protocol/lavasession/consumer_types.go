@@ -340,6 +340,17 @@ func (cswp *ConsumerSessionsWithProvider) servesOnlySubscriptions() bool {
 	return true
 }
 
+// servesInternalPath reports whether one of this provider's endpoints is the url to dial for an
+// api served under internalPath — see Endpoint.ServesInternalPath and narrowToInternalPath.
+func (cswp *ConsumerSessionsWithProvider) servesInternalPath(internalPath string) bool {
+	for _, endpoint := range cswp.Endpoints {
+		if endpoint.ServesInternalPath(internalPath) {
+			return true
+		}
+	}
+	return false
+}
+
 // ServesInternalPath reports whether this endpoint's url is the one to dial for
 // an api served under `internalPath`.
 func (e *Endpoint) ServesInternalPath(internalPath string) bool {
