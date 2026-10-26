@@ -16,7 +16,7 @@ import (
 // this test proves the unhealthy cadence took over.
 func TestRelaysMonitor_ProbesFasterWhileUnhealthy(t *testing.T) {
 	var healthy atomic.Bool
-	relaySender := func() (bool, error) { return healthy.Load(), nil }
+	relaySender := func() ProbeVerdict { return verdictOf(healthy.Load()) }
 
 	monitor := NewRelaysMonitor(time.Hour, 10*time.Millisecond, "test_chain", "rest")
 	monitor.SetRelaySender(relaySender)
@@ -43,9 +43,9 @@ func startHealthyMonitor(t *testing.T, upstreamUp *atomic.Bool) *RelaysMonitor {
 	upstreamUp.Store(true)
 	monitor := NewRelaysMonitor(time.Hour, 20*time.Millisecond, "test_chain", "graphql")
 	var probed atomic.Int32
-	monitor.SetRelaySender(func() (bool, error) {
+	monitor.SetRelaySender(func() ProbeVerdict {
 		probed.Add(1)
-		return upstreamUp.Load(), nil
+		return verdictOf(upstreamUp.Load())
 	})
 	recorded := bootProbeRecorded(monitor)
 	monitor.Start(t.Context())
@@ -114,7 +114,7 @@ func TestRelaysMonitor_ProbeSoonDuringTheBootProbeDoesNotOverlapIt(t *testing.T)
 	var overlapped atomic.Bool
 	release := make(chan struct{})
 	monitor := NewRelaysMonitor(time.Hour, 10*time.Millisecond, "test_chain", "graphql")
-	monitor.SetRelaySender(func() (bool, error) {
+	monitor.SetRelaySender(func() ProbeVerdict {
 		if inFlight.Add(1) > 1 {
 			overlapped.Store(true)
 		}
@@ -122,7 +122,7 @@ func TestRelaysMonitor_ProbeSoonDuringTheBootProbeDoesNotOverlapIt(t *testing.T)
 		if calls.Add(1) == 1 {
 			<-release // the boot probe, still waiting on its upstreams
 		}
-		return false, nil
+		return ProbeUnreachable
 	})
 	monitor.Start(t.Context())
 
@@ -136,12 +136,70 @@ func TestRelaysMonitor_ProbeSoonDuringTheBootProbeDoesNotOverlapIt(t *testing.T)
 	require.False(t, overlapped.Load(), "two probes ran at once")
 }
 
+// verdictOf is the verdict of a probe that either got a result or got no answer at all.
+func verdictOf(healthy bool) ProbeVerdict {
+	if healthy {
+		return ProbeHealthy
+	}
+	return ProbeUnreachable
+}
+
+// MAG-4641: an upstream that answers with an error or a rate limit is reachable, and every replica
+// sharing it sees the same answer, so it must not take a healthy chain out of rotation.
+func TestRelaysMonitor_InconclusiveProbeKeepsAHealthyChainHealthy(t *testing.T) {
+	var verdict atomic.Int32
+	verdict.Store(int32(ProbeHealthy))
+	var probed atomic.Int32
+	monitor := NewRelaysMonitor(time.Hour, 20*time.Millisecond, "test_chain", "jsonrpc")
+	monitor.SetRelaySender(func() ProbeVerdict {
+		probed.Add(1)
+		return ProbeVerdict(verdict.Load())
+	})
+	recorded := bootProbeRecorded(monitor)
+	monitor.Start(t.Context())
+	require.Eventually(t, recorded, time.Second, time.Millisecond)
+	require.True(t, monitor.IsHealthy())
+
+	verdict.Store(int32(ProbeInconclusive))
+	monitor.ProbeSoon()
+	require.Eventually(t, func() bool { return probed.Load() == 2 }, time.Second, time.Millisecond,
+		"premise: the inconclusive probe ran")
+	require.Never(t, func() bool { return !monitor.IsHealthy() }, 200*time.Millisecond, time.Millisecond,
+		"an upstream that answered is reachable")
+	require.Equal(t, int32(2), probed.Load(), "a healthy chain stays on the healthy cadence")
+}
+
+// The other direction: a chain whose probe found no upstream answering stays unhealthy until one
+// answers with a result, and keeps probing on the unhealthy cadence meanwhile, so the result is
+// seen within it.
+func TestRelaysMonitor_InconclusiveProbeKeepsAnUnhealthyChainUnhealthy(t *testing.T) {
+	var verdict atomic.Int32
+	verdict.Store(int32(ProbeUnreachable))
+	var probed atomic.Int32
+	monitor := NewRelaysMonitor(time.Hour, 10*time.Millisecond, "test_chain", "jsonrpc")
+	monitor.SetRelaySender(func() ProbeVerdict {
+		probed.Add(1)
+		return ProbeVerdict(verdict.Load())
+	})
+	monitor.Start(t.Context())
+	require.Eventually(t, func() bool { return !monitor.IsHealthy() }, time.Second, time.Millisecond)
+
+	verdict.Store(int32(ProbeInconclusive))
+	from := probed.Load()
+	require.Eventually(t, func() bool { return probed.Load() >= from+5 }, time.Second, time.Millisecond,
+		"an unhealthy chain keeps probing on the unhealthy cadence")
+	require.False(t, monitor.IsHealthy(), "an error answer does not prove the chain serves")
+
+	verdict.Store(int32(ProbeHealthy))
+	require.Eventually(t, monitor.IsHealthy, time.Second, time.Millisecond)
+}
+
 func TestHappyFlow(t *testing.T) {
 	// atomic: read by the monitor's probe goroutines while the test writes it.
 	var isHealthy atomic.Bool
 	isHealthy.Store(true)
-	relaySender := func() (bool, error) {
-		return isHealthy.Load(), nil
+	relaySender := func() ProbeVerdict {
+		return verdictOf(isHealthy.Load())
 	}
 
 	interval := time.Second * 3
