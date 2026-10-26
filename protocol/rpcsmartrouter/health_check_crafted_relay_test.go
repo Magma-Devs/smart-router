@@ -2,8 +2,10 @@ package rpcsmartrouter
 
 import (
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -30,6 +32,8 @@ type healthRelayFleet struct {
 	server   *RPCSmartRouterServer
 	served   *atomic.Int32
 	resolver *CrossValidationPolicyResolver
+	// stopUpstream closes the upstream's listener, so later requests are refused.
+	stopUpstream func()
 }
 
 // newHealthRelayFleet wires the fleet under the given policy, written for the latest-block method.
@@ -42,20 +46,33 @@ func newHealthRelayFleet(t *testing.T, policy CrossValidationPolicy) *healthRela
 // policy configures none.
 func newHealthRelayFleetAnswering(t *testing.T, policy *CrossValidationPolicy, reply string) *healthRelayFleet {
 	t.Helper()
+	return newHealthRelayFleetServing(t, policy, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(reply))
+	})
+}
+
+// newHealthRelayFleetServing is newHealthRelayFleetAnswering with the upstream's handler chosen.
+// served counts every request the handler receives.
+func newHealthRelayFleetServing(t *testing.T, policy *CrossValidationPolicy, handler http.HandlerFunc) *healthRelayFleet {
+	t.Helper()
 	rand.InitRandomSeed()
 	ctx := t.Context()
 
 	var served atomic.Int32
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		served.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(reply))
+		handler(w, r)
 	})
 	chainParser, _, _, closeServer, providerEndpoint, err := chainlib.CreateChainLibMocks(
 		ctx, "ETH1", spectypes.APIInterfaceJsonRPC, upstream, nil, "../../", nil)
-	if closeServer != nil {
-		t.Cleanup(closeServer)
+	var stopOnce sync.Once
+	stopUpstream := func() {
+		if closeServer != nil {
+			stopOnce.Do(closeServer)
+		}
 	}
+	t.Cleanup(stopUpstream)
 	require.NoError(t, err)
 
 	// Three providers, one upstream. Each holds its own connection, so session selection has a real
@@ -95,8 +112,9 @@ func newHealthRelayFleetAnswering(t *testing.T, policy *CrossValidationPolicy, r
 	require.NoError(t, err)
 
 	return &healthRelayFleet{
-		served:   &served,
-		resolver: resolver,
+		served:       &served,
+		resolver:     resolver,
+		stopUpstream: stopUpstream,
 		server: &RPCSmartRouterServer{
 			chainParser:             chainParser,
 			sessionManager:          sessionManager,
@@ -153,9 +171,9 @@ func TestSendCraftedRelays_IgnoresCrossValidationPolicy(t *testing.T) {
 			require.Equal(t, relaycore.CrossValidation, clientSM.GetSelection())
 			require.Equal(t, threshold, clientSM.GetCrossValidationParams().AgreementThreshold)
 
-			success, err := fleet.server.sendCraftedRelays(1, false)
+			verdict, err := fleet.server.sendCraftedRelays(1, false)
 			require.NoError(t, err)
-			require.True(t, success,
+			require.Equal(t, metrics.ProbeHealthy, verdict,
 				"the health check must pass under a policy on its own method — threshold %d", threshold)
 			require.Positive(t, fleet.served.Load(),
 				"and it must pass by actually reaching a node, not by being skipped")
@@ -219,28 +237,119 @@ func TestHealthRelayUnderThePreFixWiring(t *testing.T) {
 	}
 }
 
-// TestSendCraftedRelays_ErrorAnswerIsNotHealthy is MAG-4617. ProcessingResult returns a node
-// error with err == nil when nothing succeeded, and the health check took any reply as a pass. In
-// production the reply was a gRPC call that hit the try's own deadline, which the gRPC transport
-// reports as a node error: sui-testnet stayed Ready for seven minutes without egress, its health
-// check "succeeding" with latestBlock 0. Every upstream here answers the latest-block call with an
-// error, so the check must fail however many tries it gets.
-func TestSendCraftedRelays_ErrorAnswerIsNotHealthy(t *testing.T) {
-	fleet := newHealthRelayFleetAnswering(t, nil,
-		`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}`)
+// TestSendCraftedRelays_VerdictFollowsReachability is MAG-4641, through the real probe against a
+// live upstream. Only a result is health (MAG-4617: the check used to pass on an error answer). An
+// upstream that answers, however badly, is reachable, and every replica sharing it gets the same
+// answer, so the probe is inconclusive and readiness keeps its verdict. No answer at all is
+// unreachable, and that is what takes a replica out of rotation.
+func TestSendCraftedRelays_VerdictFollowsReachability(t *testing.T) {
+	answering := func(status int, body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+		stopped bool // the upstream's listener is closed before the probe
+		stalls  bool // the upstream never answers
+		retries int
+		want    metrics.ProbeVerdict
+	}{
+		{name: "a result", handler: answering(http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`), want: metrics.ProbeHealthy},
+		{name: "an error answer", handler: answering(http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}`), want: metrics.ProbeInconclusive},
+		{name: "an HTTP 503", handler: answering(http.StatusServiceUnavailable, `<html>origin down</html>`), want: metrics.ProbeInconclusive},
+		{name: "an HTTP 403", handler: answering(http.StatusForbidden, `{"error":"invalid api key"}`), want: metrics.ProbeInconclusive},
+		{name: "a rate limit", handler: answering(http.StatusTooManyRequests, `{"error":"too many requests"}`), want: metrics.ProbeInconclusive},
+		{name: "a dropped connection", handler: dropConnection, want: metrics.ProbeUnreachable},
+		{name: "a refused connection", handler: answering(http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`), stopped: true, want: metrics.ProbeUnreachable},
+		// One try, so the case costs one try deadline rather than six.
+		{name: "a stall to the deadline", stalls: true, retries: 1, want: metrics.ProbeUnreachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, release := tc.handler, func() {}
+			if tc.stalls {
+				handler, release = stalling()
+			}
+			fleet := newHealthRelayFleetServing(t, nil, handler)
+			t.Cleanup(release)
+			if tc.stopped {
+				fleet.stopUpstream()
+			}
+			retries := tc.retries
+			if retries == 0 {
+				retries = 2
+			}
 
-	success, _ := fleet.server.sendCraftedRelays(2, false)
-	require.Positive(t, fleet.served.Load(), "premise: the upstreams were asked")
-	require.False(t, success, "an error answer is not a healthy upstream")
+			verdict, _ := fleet.server.sendCraftedRelays(retries, false)
+			if tc.stopped {
+				require.Zero(t, fleet.served.Load(), "premise: nothing reached the upstream")
+			} else {
+				require.Positive(t, fleet.served.Load(), "premise: the upstream was asked")
+			}
+			require.Equal(t, tc.want, verdict)
+		})
+	}
 }
 
-// The same fleet answering with a result passes, so the case above fails on the answer alone.
-func TestSendCraftedRelays_ResultAnswerIsHealthy(t *testing.T) {
-	fleet := newHealthRelayFleetAnswering(t, nil, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`)
+// dropConnection closes the connection without an answer.
+func dropConnection(w http.ResponseWriter, _ *http.Request) {
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err == nil {
+		_ = conn.Close()
+	}
+}
 
-	success, err := fleet.server.sendCraftedRelays(2, false)
+// stalling returns a handler that never answers, and the release that ends it. The router's
+// deadline cuts each request off on its side; the test server is not told, so the handler waits for
+// the release. Register the release with t.Cleanup after building the fleet: cleanups run
+// last-registered first, so it then runs before the fleet's cleanups close the server.
+func stalling() (http.HandlerFunc, func()) {
+	release := make(chan struct{})
+	var once sync.Once
+	handler := func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}
+	return handler, func() { once.Do(func() { close(release) }) }
+}
+
+// TestSendCraftedRelays_AStalledTryDoesNotAnswerTheNext: an attempt cut off at its try's deadline
+// still delivers its response, late. Were that response read by the next try, the next try would
+// take it as its own answer and cut off its own attempt microseconds after sending it, passing the
+// same late response down to the try after, so one stall would fail every try of the check. The
+// upstream here stalls on its first request and then answers each request with a result after
+// 50 ms: slower than reading a response already waiting, far faster than the try deadline. The
+// check must pass on its second try.
+func TestSendCraftedRelays_AStalledTryDoesNotAnswerTheNext(t *testing.T) {
+	var requests atomic.Int32
+	release := make(chan struct{})
+	fleet := newHealthRelayFleetServing(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			// Stalled. The router's deadline cuts the request off on its side; the test server is
+			// not told, so the handler waits for the test to end.
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x10"}`))
+	})
+	t.Cleanup(func() { close(release) }) // runs before the fleet's cleanups close the server
+
+	start := time.Now()
+	verdict, err := fleet.server.sendCraftedRelays(MaxRelayRetries, false)
+	require.GreaterOrEqual(t, time.Since(start), internalRelayTryTimeout, "premise: the first try stalled to its deadline")
+	require.GreaterOrEqual(t, fleet.served.Load(), int32(2), "premise: a later try reached the upstream")
 	require.NoError(t, err)
-	require.True(t, success)
+	require.Equal(t, metrics.ProbeHealthy, verdict, "the try after the stall got a result from the upstream")
 }
 
 func thresholdName(threshold int) string {

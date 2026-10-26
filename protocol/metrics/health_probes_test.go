@@ -137,8 +137,8 @@ func TestReadyz_FlipsOnTransitionWithoutWaitingForTicker(t *testing.T) {
 	require.Equal(t, http.StatusOK, getStatus(t, srv.URL+"/readyz"),
 		"a recovery transition must reach /readyz without waiting for the aggregator ticker")
 
-	// healthy → unhealthy: a failed probe pulls the pod immediately.
-	monitor.recordProbeResult(false)
+	// healthy → unhealthy: a probe no upstream answered pulls the pod immediately.
+	monitor.recordProbeResult(ProbeUnreachable)
 	require.Equal(t, http.StatusServiceUnavailable, getStatus(t, srv.URL+"/readyz"),
 		"a failure transition must reach /readyz without waiting for the aggregator ticker")
 }

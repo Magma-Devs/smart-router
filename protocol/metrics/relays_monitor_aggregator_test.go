@@ -21,7 +21,7 @@ func (r *recordedHealth) UpdateHealthcheckStatusBreakdown(string, string, bool) 
 func TestRelaysMonitorAggregator_UnhealthyChainProbesTheOthersSoon(t *testing.T) {
 	var upstreamUp atomic.Bool
 	upstreamUp.Store(true)
-	sender := func() (bool, error) { return upstreamUp.Load(), nil }
+	sender := func() ProbeVerdict { return verdictOf(upstreamUp.Load()) }
 
 	health := &recordedHealth{}
 	aggregator := NewRelaysMonitorAggregator(time.Hour, health)

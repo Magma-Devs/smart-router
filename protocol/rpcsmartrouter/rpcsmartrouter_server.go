@@ -373,12 +373,12 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 
 	// we trigger a latest block call to get some more information on our RPC endpoints, using the relays monitor
 	if cmdFlags.RelaysHealthEnableFlag {
-		rpcss.relaysMonitor.SetRelaySender(func() (bool, error) {
-			success, err := rpcss.sendCraftedRelaysWrapper(ctx, initialRelays)
-			if success {
+		rpcss.relaysMonitor.SetRelaySender(func() metrics.ProbeVerdict {
+			verdict, _ := rpcss.sendCraftedRelaysWrapper(ctx, initialRelays)
+			if verdict == metrics.ProbeHealthy {
 				initialRelays = false
 			}
-			return success, err
+			return verdict
 		})
 		rpcss.relaysMonitor.Start(ctx)
 	} else {
@@ -407,16 +407,16 @@ func (rpcss *RPCSmartRouterServer) GetGRPCSubscriptionManager() chainlib.GRPCSub
 	return rpcss.grpcSubscriptionManager
 }
 
-func (rpcss *RPCSmartRouterServer) sendCraftedRelaysWrapper(ctx context.Context, initialRelays bool) (bool, error) {
+func (rpcss *RPCSmartRouterServer) sendCraftedRelaysWrapper(ctx context.Context, initialRelays bool) (metrics.ProbeVerdict, error) {
 	if initialRelays {
 		// Only start after everything is initialized - check consumer session manager
 		rpcss.waitForPairing(ctx)
 	}
-	success, err := rpcss.sendCraftedRelays(MaxRelayRetries, initialRelays)
-	if success {
+	verdict, err := rpcss.sendCraftedRelays(MaxRelayRetries, initialRelays)
+	if verdict == metrics.ProbeHealthy {
 		rpcss.initialized.Store(true)
 	}
-	return success, err
+	return verdict, err
 }
 
 func (rpcss *RPCSmartRouterServer) waitForPairing(ctx context.Context) {
@@ -1123,8 +1123,12 @@ func (rpcss *RPCSmartRouterServer) internalRelayStateMachine(ctx context.Context
 	)
 }
 
-func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, retries int, initialRelays bool, protocolMessage chainlib.ProtocolMessage) (bool, error) {
-	success := false
+// sendRelayWithRetries is the health probe: up to retries tries of the latest-block request, each at
+// an endpoint the earlier tries did not use. Its verdict is ProbeHealthy once a try gets a result,
+// ProbeInconclusive when an upstream answered but never with a result, and ProbeUnreachable when no
+// upstream answered at all (see upstreamAnswerFrom for what counts as an answer).
+func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, retries int, initialRelays bool, protocolMessage chainlib.ProtocolMessage) (metrics.ProbeVerdict, error) {
+	verdict := metrics.ProbeUnreachable
 	var err error
 	usedProviders := lavasession.NewUsedProviders(nil)
 	usedProviders.SetChainID(rpcss.listenEndpoint.ChainID)
@@ -1133,7 +1137,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	// an operator cross-validation policy must not reach a health check.
 	stateMachine, err := rpcss.internalRelayStateMachine(ctx, usedProviders, protocolMessage)
 	if err != nil {
-		return false, err
+		return metrics.ProbeUnreachable, err
 	}
 
 	// Get cross-validation parameters from the state machine (nil for Stateless/Stateful)
@@ -1145,18 +1149,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	// hole if this path ever gains a selection that does cross-validate. Readiness deliberately
 	// does not attest a policied method's quorum capacity — see internalRelayStateMachine.
 	if _, err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
-		return false, err
+		return metrics.ProbeUnreachable, err
 	}
 
-	// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
-	// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
-	relayProcessor := relaycore.NewRelayProcessor(
-		ctx,
-		crossValidationParams,
-		rpcss.rpcSmartRouterLogs,
-		rpcss,
-		stateMachine,
-	)
 	usedEndpointsResets := 1
 	for i := 0; i < retries; i++ {
 		// Check if we even have enough endpoints to communicate with them all.
@@ -1164,13 +1159,29 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		// Instead of spamming no pairing available on bootstrap
 		if ((i + 1) * usedEndpointsResets) > rpcss.sessionManager.GetNumberOfValidProviders() {
 			usedEndpointsResets++
-			relayProcessor.GetUsedProviders().ClearUnwanted()
+			usedProviders.ClearUnwanted()
 		}
 		// One try, one short deadline. Bounding the try rather than the whole loop keeps the point of
 		// the loop — up to `retries` attempts at different endpoints — while stopping any single hung
 		// endpoint from consuming a client-sized budget. Cancelled on both exits below rather than
 		// deferred, so a hung attempt from this try does not outlive it.
 		tryCtx, cancelTry := context.WithTimeout(ctx, internalRelayTryTimeout)
+		// One processor per try, built on the try's context (MAG-4639). An attempt cut off at its
+		// try's deadline still delivers its response, late. A processor shared with the next try
+		// would hand that response to it as its answer, and the next try would then cut off its own
+		// attempt, so one stall would fail every try. On its own processor the late response lands
+		// where nothing reads it. The state machine and its used providers stay shared, so each try
+		// still goes to an endpoint the earlier ones did not use.
+		//
+		// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
+		// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
+		relayProcessor := relaycore.NewRelayProcessor(
+			tryCtx,
+			crossValidationParams,
+			rpcss.rpcSmartRouterLogs,
+			rpcss,
+			stateMachine,
+		)
 		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil)
 		if errors.Is(err, lavasession.PairingListEmptyError) {
 			// we don't have pairings anymore, could be related to unwanted endpoints
@@ -1185,8 +1196,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 				utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
 			} else {
 				relayResult, err := relayProcessor.ProcessingResult()
-				// ProcessingResult hands back a node error with err == nil when nothing succeeded, and
-				// a gRPC call that hit this try's deadline arrives as one. Only a real answer is health.
+				// ProcessingResult hands back a node error with err == nil when nothing succeeded. Only
+				// a result is health; an error answer makes the probe inconclusive, below.
 				if err == nil && relayResult != nil && relayResult.Reply != nil && relayProvesEndpointHealthy(relayResult) {
 					utils.LavaFormatInfo("[+] init relay succeeded",
 						utils.LogAttr("GUID", ctx),
@@ -1202,7 +1213,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 					// lying-high health-relay response ChainState rejected still move the router-wide
 					// tip. The gated harvest is the single tip-update path.
 					rpcss.relaysMonitor.LogRelay()
-					success = true
+					verdict = metrics.ProbeHealthy
 					// If this is the first time we send relays, we want to send all of them, instead of break on first successful relay
 					// That way, we populate the endpoints with the latest blocks with successful relays
 					if !initialRelays {
@@ -1225,20 +1236,25 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 				}
 			}
 		}
+		// Read from this try's processor only: what reached it before the try's deadline. A try
+		// that timed out holds nothing, which is no answer.
+		if verdict == metrics.ProbeUnreachable && upstreamAnswerOf(relayProcessor) != upstreamAnswerNone {
+			verdict = metrics.ProbeInconclusive
+		}
 		cancelTry()
 		select {
 		case <-ctx.Done():
 			// The caller is gone; another attempt would only fail on the dead context.
-			return success, ctx.Err()
+			return verdict, ctx.Err()
 		case <-time.After(RelayRetryBackoffDuration):
 		}
 	}
 
-	return success, err
+	return verdict, err
 }
 
 // sending a few latest blocks relays to RPC endpoints in order to have data for endpoint selection when relays start arriving
-func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays bool) (bool, error) {
+func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays bool) (metrics.ProbeVerdict, error) {
 	utils.LavaFormatDebug("Sending crafted relays",
 		utils.LogAttr("chainId", rpcss.listenEndpoint.ChainID),
 		utils.LogAttr("apiInterface", rpcss.listenEndpoint.ApiInterface),
@@ -1251,7 +1267,7 @@ func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays 
 	defer cancel()
 	ok, relay, chainMessage, _ := rpcss.craftRelay(ctx)
 	if !ok {
-		return true, nil
+		return metrics.ProbeHealthy, nil
 	}
 	protocolMessage := chainlib.NewProtocolMessage(chainMessage, nil, relay, initRelaysDappId, initRelaysSmartRouterIp)
 	return rpcss.sendRelayWithRetries(ctx, retries, initialRelays, protocolMessage)
@@ -1558,7 +1574,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	var relayProcessor *relaycore.RelayProcessor
 	var cause error
 	defer func() {
-		rpcss.noteRelayHealth(ctx, relayResult, errRet)
+		rpcss.noteRelayHealth(ctx, relayProcessor, relayResult, errRet)
 		rpcss.writeRelayEnd(ctx, relayEndInput{
 			protocolMessage: protocolMessage,
 			processor:       relayProcessor,
@@ -1701,40 +1717,106 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	return returnedResult, nil
 }
 
+// upstreamAnswer is what a relay's attempts show about its upstreams: whether any answered, and how.
+type upstreamAnswer int
+
+const (
+	upstreamAnswerNone   upstreamAnswer = iota // no upstream answered: timeouts, transport errors, or nothing sent
+	upstreamAnswerError                        // an upstream answered, but not with a result
+	upstreamAnswerResult                       // an upstream answered with a result
+)
+
+// upstreamAnswerOf reads a relay processor's recorded attempts. A nil processor sent nothing.
+func upstreamAnswerOf(processor *relaycore.RelayProcessor) upstreamAnswer {
+	if processor == nil {
+		return upstreamAnswerNone
+	}
+	successes, nodeErrors, protocolErrors := processor.GetResultsDetail()
+	return upstreamAnswerFrom(successes, nodeErrors, protocolErrors)
+}
+
+// upstreamAnswerFrom is the readiness rule for one relay's attempts (MAG-4641). Readiness asks
+// whether this replica reaches its upstreams: a replica that does not differs from its siblings,
+// while an upstream's own failure reaches every replica alike. So an answer of any kind counts,
+// and it needs positive evidence: a result, a node error, an upstream's HTTP error status, or a
+// rate limit. Anything else is no answer, an uncatalogued failure included, which keeps the rule
+// failing closed: a timeout, a refused or reset connection, a DNS or TLS failure, an attempt the
+// router stopped, or nothing sent at all.
+func upstreamAnswerFrom(successes []common.RelayResult, nodeErrors, protocolErrors []relaycore.RelayError) upstreamAnswer {
+	for i := range successes {
+		if relayProvesEndpointHealthy(&successes[i]) {
+			return upstreamAnswerResult
+		}
+	}
+	if len(successes) > 0 || len(nodeErrors) > 0 {
+		return upstreamAnswerError
+	}
+	for i := range protocolErrors {
+		if protocolErrorIsAnAnswer(protocolErrors[i]) {
+			return upstreamAnswerError
+		}
+	}
+	return upstreamAnswerNone
+}
+
+// protocolErrorIsAnAnswer reports whether a failed attempt ended on something its upstream sent. A
+// rate limit and the JSON-RPC sender's HTTPStatusError are typed. REST fails an attempt on an error
+// status with a plain error, after copying the reply's node-error and rate-limit flags onto the
+// attempt's result, so those flags are the evidence there.
+func protocolErrorIsAnAnswer(protocolError relaycore.RelayError) bool {
+	err := protocolError.GetError()
+	if protocolError.LavaError.IsRateLimited() || errors.Is(err, common.StatusCodeError429) {
+		return true
+	}
+	var status *lavasession.HTTPStatusError
+	if errors.As(err, &status) {
+		return true
+	}
+	if protocolError.Response == nil {
+		return false
+	}
+	result := &protocolError.Response.RelayResult
+	return result.IsNodeError || result.IsRateLimited
+}
+
 // relayHealthSignal is what one client relay tells the chain's readiness monitor.
 type relayHealthSignal int
 
 const (
-	relayHealthNone   relayHealthSignal = iota // no upstream was judged: a cache hit, a client that hung up
-	relayHealthServed                          // an upstream answered it
-	relayHealthFailed                          // it ended without an upstream answering it
+	relayHealthNone       relayHealthSignal = iota // nothing about reach: a cache hit, a client that hung up, an upstream's error answer
+	relayHealthServed                              // an upstream answered it with a result
+	relayHealthUnanswered                          // no upstream answered it
 )
 
-// relayHealthSignalOf classifies a finished client relay by the rule the health probe uses: only a
-// real upstream answer counts. A node error, a timeout or no answer at all is a failure.
-func relayHealthSignalOf(ctx context.Context, result *common.RelayResult, err error) relayHealthSignal {
+// relayHealthSignalOf classifies a finished client relay by the rule the health probe uses. A
+// result proves the chain healthy. No answer at all is reason to probe now. An upstream's error
+// answer says the replica reaches it, which is nothing to act on: it is the caller's mistake (a
+// revert, a bad parameter) as often as the upstream's.
+func relayHealthSignalOf(ctx context.Context, processor *relaycore.RelayProcessor, result *common.RelayResult, err error) relayHealthSignal {
 	if common.IsClientCancellation(err, ctx) {
 		return relayHealthNone
 	}
-	if err != nil || result == nil || result.Reply == nil {
-		return relayHealthFailed
-	}
-	if servedFromCache(result) {
+	if result != nil && servedFromCache(result) {
 		return relayHealthNone
 	}
-	if relayProvesEndpointHealthy(result) {
+	switch upstreamAnswerOf(processor) {
+	case upstreamAnswerResult:
 		return relayHealthServed
+	case upstreamAnswerError:
+		return relayHealthNone
+	default:
+		return relayHealthUnanswered
 	}
-	return relayHealthFailed
 }
 
 // noteRelayHealth feeds a finished client relay to the readiness monitor: a served relay proves the
-// chain healthy and defers the probe, and a failed one brings the probe forward to decide.
-func (rpcss *RPCSmartRouterServer) noteRelayHealth(ctx context.Context, result *common.RelayResult, err error) {
-	switch relayHealthSignalOf(ctx, result, err) {
+// chain healthy and defers the probe, and one no upstream answered brings the probe forward to
+// decide.
+func (rpcss *RPCSmartRouterServer) noteRelayHealth(ctx context.Context, processor *relaycore.RelayProcessor, result *common.RelayResult, err error) {
+	switch relayHealthSignalOf(ctx, processor, result, err) {
 	case relayHealthServed:
 		rpcss.relaysMonitor.LogRelay()
-	case relayHealthFailed:
+	case relayHealthUnanswered:
 		rpcss.relaysMonitor.ProbeSoon()
 	}
 }
