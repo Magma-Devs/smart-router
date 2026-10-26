@@ -30,7 +30,9 @@ func TestRelaysMonitorAggregator_UnhealthyChainProbesTheOthersSoon(t *testing.T)
 	for _, monitor := range []*RelaysMonitor{graphql, grpc} {
 		monitor.SetRelaySender(sender)
 		aggregator.RegisterRelaysMonitor(monitor.apiInterface, monitor)
+		recorded := bootProbeRecorded(monitor)
 		monitor.Start(t.Context())
+		require.Eventually(t, recorded, time.Second, time.Millisecond)
 	}
 	aggregator.StartMonitoring(t.Context())
 	require.Eventually(t, health.overall.Load, time.Second, time.Millisecond)

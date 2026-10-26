@@ -47,10 +47,27 @@ func startHealthyMonitor(t *testing.T, upstreamUp *atomic.Bool) *RelaysMonitor {
 		probed.Add(1)
 		return upstreamUp.Load(), nil
 	})
+	recorded := bootProbeRecorded(monitor)
 	monitor.Start(t.Context())
-	require.Eventually(t, func() bool { return probed.Load() == 1 }, time.Second, time.Millisecond)
+	require.Eventually(t, recorded, time.Second, time.Millisecond)
+	require.Equal(t, int32(1), probed.Load())
 	require.True(t, monitor.IsHealthy())
 	return monitor
+}
+
+// bootProbeRecorded returns a condition that turns true once the boot probe has recorded its
+// verdict, which is later than its sender returning. Call it before Start. A ProbeSoon that lands
+// between the two is replaced by the boot probe's own cadence, by design: the probe in flight
+// decides. A test that calls ProbeSoon after waiting on the sender alone races that.
+func bootProbeRecorded(monitor *RelaysMonitor) func() bool {
+	monitor.lock.RLock()
+	scheduled := monitor.nextProbe
+	monitor.lock.RUnlock()
+	return func() bool {
+		monitor.lock.RLock()
+		defer monitor.lock.RUnlock()
+		return monitor.nextProbe.After(scheduled)
+	}
 }
 
 // MAG-4617: a chain whose traffic stops succeeding must not wait out the healthy cadence
