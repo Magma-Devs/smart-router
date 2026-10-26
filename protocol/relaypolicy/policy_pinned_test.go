@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/stretchr/testify/require"
@@ -58,4 +59,14 @@ func TestOnSendRelayResult_PinnedUpstreamUnservableStopsAtOnce(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 3})
 		require.Equal(t, SendRetry, policy.OnSendRelayResult(fmt.Errorf("dial failed"), false, relaycore.Stateless))
 	})
+}
+
+// The policy sees Pinned=false for a pin sent with lava-pin-allow-retry: true (relaycore.PinnedByDirectives),
+// so it decides exactly as for an unpinned request: a node error retries, the window hedges.
+func TestDecide_PinWithAllowRetryIsDecidedAsUnpinned(t *testing.T) {
+	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3})
+	pinned := relaycore.PinnedByDirectives(map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "p1", common.PIN_ALLOW_RETRY_HEADER_NAME: "true"})
+	require.False(t, pinned)
+	require.Equal(t, Retry, policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: pinned, Summary: ResultsSummary{NodeErrors: 1}}).Action)
+	require.Equal(t, Retry, policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: pinned, IsTickerHedge: true}).Action)
 }

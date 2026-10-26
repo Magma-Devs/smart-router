@@ -4,6 +4,7 @@ import (
 	context "context"
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -333,10 +334,23 @@ func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) Decis
 // and the pin is a property of the request, not of one attempt. Presence is what counts, as in
 // resolvePinDirectives. A request that cross-validation overrides is not pinned in effect, so
 // callers check the selection first.
+//
+// A pin sent with lava-pin-allow-retry: true is not pinned in this sense: the caller asked for the
+// pinned provider on the first attempt only and allowed retries and hedges elsewhere, so the
+// policy and the consistency gate treat it like an unpinned request (see PinAllowsRetry).
 func PinnedByDirectives(directiveHeaders map[string]string) bool {
 	_, selected := directiveHeaders[common.SELECT_PROVIDER_HEADER_NAME]
 	_, sticky := directiveHeaders[common.STICKINESS_HEADER_NAME]
-	return selected || sticky
+	return (selected || sticky) && !PinAllowsRetry(directiveHeaders)
+}
+
+// PinAllowsRetry reports whether the caller sent lava-pin-allow-retry: true. Only the value "true"
+// (any case) turns it on, unlike the presence-only lava-force-cache-refresh: "false" must not
+// silently mean yes. With it, a pin from lava-select-provider or lava-stickiness applies to the
+// first attempt only (the pre-MAG-2280 rule, now opt-in): a retry or a hedge may go to another
+// provider and is counted in Lava-Retries, and the session's pin itself is never moved.
+func PinAllowsRetry(directiveHeaders map[string]string) bool {
+	return strings.EqualFold(strings.TrimSpace(directiveHeaders[common.PIN_ALLOW_RETRY_HEADER_NAME]), "true")
 }
 
 // PinnedUpstreamUnservable reports a selection error that names the pin: the pinned upstream is

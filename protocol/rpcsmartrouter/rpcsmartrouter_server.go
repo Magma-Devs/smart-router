@@ -4871,7 +4871,15 @@ func (rpcss *RPCSmartRouterServer) cachedReplyDirectives(protocolMessage chainli
 // not checked to have reached the block. And it left the pin on the failing node for the next
 // request. MAG-2280 settled the contract the other way; MAG-4123 is the same rule for the
 // router's own consistency gate.
-func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]string) (selectedProvider, stickiness string) {
+//
+// The caller can ask for the old first-attempt-only pin with lava-pin-allow-retry: true
+// (relaycore.PinAllowsRetry). Then a later attempt (firstAttempt false: a batch has already been
+// dispatched) reads no pin, so a retry or hedge is free to reach another provider. firstAttempt
+// stays true while nothing has been dispatched, so a resend after a selection failure keeps it.
+func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]string, firstAttempt bool) (selectedProvider, stickiness string) {
+	if !firstAttempt && relaycore.PinAllowsRetry(directiveHeaders) {
+		return "", ""
+	}
 	if id, ok := directiveHeaders[common.STICKINESS_HEADER_NAME]; ok {
 		stickiness = id
 		utils.LavaFormatTrace("found stickiness header", utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
@@ -5239,8 +5247,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 
 	// lava-select-provider / lava-stickiness apply to every attempt: a pinned request is never
-	// served by another provider (MAG-2280, MAG-4123). See resolvePinDirectives.
-	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders)
+	// served by another provider (MAG-2280, MAG-4123), unless the caller sent
+	// lava-pin-allow-retry: true, which keeps the pin to the first attempt. See resolvePinDirectives.
+	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders, usedProviders.BatchNumber() == 0)
 
 	// Dropped here rather than inside lavasession so the rest of this call stays coherent: the
 	// failover cascade reads selectedProvider to decide whether releasing the blocked provider
