@@ -584,7 +584,6 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 	}
 
 	csm.reportedProviders.Reset()
-	csm.pairingAddressesLength = uint64(pairingListLength)
 	csm.numberOfResets = 0
 
 	providerAddressToEndpoint := map[string]string{}
@@ -603,13 +602,29 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 		previousPairingAddresses = append(previousPairingAddresses, address)
 	}
 	csm.pairing = make(map[string]*ConsumerSessionsWithProvider, pairingListLength)
-	for idx, provider := range pairingList {
-		csm.pairingAddresses[idx] = provider.PublicLavaAddress
+	// A websocket-only entity (MAG-4219: a vendor's ws url beside its https url is a provider
+	// of its own) is in the pairing map, which is what the chain trackers, the probe loop and
+	// the metrics iterate, and out of the address list, which is what defines a relay
+	// candidate: it is never picked, blocked, pinned or counted in a cross-validation group.
+	// Before the split such a url was skipped at the endpoint walk (ServesDirectRelays) after
+	// its provider had already been chosen; as an entity it would have been chosen on every
+	// other pick and fallen through each time.
+	subscriptionOnly := make([]string, 0)
+	var relayIndex uint64
+	for _, provider := range pairingList {
 		csm.pairing[provider.PublicLavaAddress] = provider
 		if len(provider.Endpoints) > 0 {
 			providerAddressToEndpoint[provider.PublicLavaAddress] = provider.Endpoints[0].NetworkAddress
 		}
+		if provider.servesOnlySubscriptions() {
+			subscriptionOnly = append(subscriptionOnly, provider.PublicLavaAddress)
+			continue
+		}
+		csm.pairingAddresses[relayIndex] = provider.PublicLavaAddress
+		relayIndex++
 	}
+	csm.pairingAddressesLength = relayIndex
+	sort.Strings(subscriptionOnly)
 	csm.setValidAddressesToDefaultValue("", nil, context.Background(), ReleaseEpochRebuild) // the starting point is that valid addresses are equal to pairing addresses.
 
 	// Re-block providers that were blocked in previous epoch and still exist in new pairing
@@ -715,6 +730,7 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 		utils.LogAttr("backup_providers", currentBackupAddresses),
 		utils.LogAttr("backup_added", backupAdded),
 		utils.LogAttr("backup_removed", backupRemoved),
+		utils.LogAttr("subscription_only", subscriptionOnly),
 	)
 
 	// Close old connections OUTSIDE the lock to prevent blocking other operations
@@ -2130,7 +2146,7 @@ func (csm *ConsumerSessionManager) rankStatefulTier(addresses []string, ignoredP
 func (csm *ConsumerSessionManager) eligibleBackupsForStateful(ctx context.Context, ignoredProvidersList map[string]struct{}, addon string, extensions []string, alreadySelected []string, honourHoldoff bool) []string {
 	eligible := make([]string, 0, len(csm.backupProviders))
 	for address, provider := range csm.backupProviders {
-		if provider == nil {
+		if provider == nil || provider.servesOnlySubscriptions() {
 			continue
 		}
 		if slices.Contains(alreadySelected, address) {
@@ -2775,6 +2791,10 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	// Get valid backup provider addresses that support the required addon and extensions
 	backupProviderAddresses := []string{}
 	for providerAddress, consumerSessionsWithProvider := range csm.backupProviders {
+		// A websocket-only entity serves subscriptions, never a relay (MAG-4219).
+		if consumerSessionsWithProvider.servesOnlySubscriptions() {
+			continue
+		}
 		// Skip if provider is in ignored list (already tried or failed this request)
 		if _, exists := ignoredProviders.providers[providerAddress]; exists {
 			continue

@@ -320,6 +320,26 @@ func (e *Endpoint) ServesDirectRelays() bool {
 	}
 }
 
+// servesOnlySubscriptions reports whether this provider has endpoints and none of them can
+// answer a relay — every url is a websocket (Endpoint.ServesDirectRelays). Since MAG-4219 a ws://
+// url is a provider entity of its own, so this is the normal shape of the subscription leg a
+// vendor lists beside its https url. Such an entity stays in the pairing for its chain tracker,
+// its probes, its health gauge and its series, and is never a relay candidate: UpdateAllProviders
+// keeps it out of the address list, and the backup paths skip it. The subscription manager
+// serves subscriptions from its own ws url list, so nothing is lost on that side. A provider with
+// no endpoints at all is not this rule's business.
+func (cswp *ConsumerSessionsWithProvider) servesOnlySubscriptions() bool {
+	if len(cswp.Endpoints) == 0 {
+		return false
+	}
+	for _, endpoint := range cswp.Endpoints {
+		if endpoint.ServesDirectRelays() {
+			return false
+		}
+	}
+	return true
+}
+
 // ServesInternalPath reports whether this endpoint's url is the one to dial for
 // an api served under `internalPath`.
 func (e *Endpoint) ServesInternalPath(internalPath string) bool {
