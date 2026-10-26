@@ -1148,15 +1148,6 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		return false, err
 	}
 
-	// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
-	// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
-	relayProcessor := relaycore.NewRelayProcessor(
-		ctx,
-		crossValidationParams,
-		rpcss.rpcSmartRouterLogs,
-		rpcss,
-		stateMachine,
-	)
 	usedEndpointsResets := 1
 	for i := 0; i < retries; i++ {
 		// Check if we even have enough endpoints to communicate with them all.
@@ -1164,13 +1155,29 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		// Instead of spamming no pairing available on bootstrap
 		if ((i + 1) * usedEndpointsResets) > rpcss.sessionManager.GetNumberOfValidProviders() {
 			usedEndpointsResets++
-			relayProcessor.GetUsedProviders().ClearUnwanted()
+			usedProviders.ClearUnwanted()
 		}
 		// One try, one short deadline. Bounding the try rather than the whole loop keeps the point of
 		// the loop — up to `retries` attempts at different endpoints — while stopping any single hung
 		// endpoint from consuming a client-sized budget. Cancelled on both exits below rather than
 		// deferred, so a hung attempt from this try does not outlive it.
 		tryCtx, cancelTry := context.WithTimeout(ctx, internalRelayTryTimeout)
+		// One processor per try, built on the try's context (MAG-4639). An attempt cut off at its
+		// try's deadline still delivers its response, late. A processor shared with the next try
+		// would hand that response to it as its answer, and the next try would then cut off its own
+		// attempt, so one stall would fail every try. On its own processor the late response lands
+		// where nothing reads it. The state machine and its used providers stay shared, so each try
+		// still goes to an endpoint the earlier ones did not use.
+		//
+		// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
+		// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
+		relayProcessor := relaycore.NewRelayProcessor(
+			tryCtx,
+			crossValidationParams,
+			rpcss.rpcSmartRouterLogs,
+			rpcss,
+			stateMachine,
+		)
 		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil)
 		if errors.Is(err, lavasession.PairingListEmptyError) {
 			// we don't have pairings anymore, could be related to unwanted endpoints

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -42,14 +43,23 @@ func newHealthRelayFleet(t *testing.T, policy CrossValidationPolicy) *healthRela
 // policy configures none.
 func newHealthRelayFleetAnswering(t *testing.T, policy *CrossValidationPolicy, reply string) *healthRelayFleet {
 	t.Helper()
+	return newHealthRelayFleetServing(t, policy, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(reply))
+	})
+}
+
+// newHealthRelayFleetServing is newHealthRelayFleetAnswering with the upstream's handler chosen.
+// served counts every request the handler receives.
+func newHealthRelayFleetServing(t *testing.T, policy *CrossValidationPolicy, handler http.HandlerFunc) *healthRelayFleet {
+	t.Helper()
 	rand.InitRandomSeed()
 	ctx := t.Context()
 
 	var served atomic.Int32
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		served.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(reply))
+		handler(w, r)
 	})
 	chainParser, _, _, closeServer, providerEndpoint, err := chainlib.CreateChainLibMocks(
 		ctx, "ETH1", spectypes.APIInterfaceJsonRPC, upstream, nil, "../../", nil)
@@ -241,6 +251,40 @@ func TestSendCraftedRelays_ResultAnswerIsHealthy(t *testing.T) {
 	success, err := fleet.server.sendCraftedRelays(2, false)
 	require.NoError(t, err)
 	require.True(t, success)
+}
+
+// TestSendCraftedRelays_AStalledTryDoesNotAnswerTheNext: an attempt cut off at its try's deadline
+// still delivers its response, late. Were that response read by the next try, the next try would
+// take it as its own answer and cut off its own attempt microseconds after sending it, passing the
+// same late response down to the try after, so one stall would fail every try of the check. The
+// upstream here stalls on its first request and then answers each request with a result after
+// 50 ms: slower than reading a response already waiting, far faster than the try deadline. The
+// check must pass on its second try.
+func TestSendCraftedRelays_AStalledTryDoesNotAnswerTheNext(t *testing.T) {
+	var requests atomic.Int32
+	release := make(chan struct{})
+	fleet := newHealthRelayFleetServing(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			// Stalled. The router's deadline cuts the request off on its side; the test server is
+			// not told, so the handler waits for the test to end.
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x10"}`))
+	})
+	t.Cleanup(func() { close(release) }) // runs before the fleet's cleanups close the server
+
+	start := time.Now()
+	success, err := fleet.server.sendCraftedRelays(MaxRelayRetries, false)
+	require.GreaterOrEqual(t, time.Since(start), internalRelayTryTimeout, "premise: the first try stalled to its deadline")
+	require.GreaterOrEqual(t, fleet.served.Load(), int32(2), "premise: a later try reached the upstream")
+	require.NoError(t, err)
+	require.True(t, success, "the try after the stall got a result from the upstream")
 }
 
 func thresholdName(threshold int) string {
