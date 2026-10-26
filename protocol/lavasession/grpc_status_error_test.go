@@ -95,18 +95,36 @@ func TestHandleGRPCError_CancelledRelayKeepsItsCause(t *testing.T) {
 // the remaining condition has to stay exact. A ctx whose DEADLINE expired is also
 // non-nil, and relabelling a timeout as a client cancellation would let a genuinely
 // slow endpoint escape being blamed for it.
+//
+// MAG-4625: the timeout is the router's, not the node's answer, so it carries no
+// response and wraps context.DeadlineExceeded, as an HTTP timeout does.
 func TestHandleGRPCError_ExpiredDeadlineIsNotACancellation(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 	require.ErrorIs(t, ctx.Err(), context.DeadlineExceeded, "precondition: expired, not cancelled")
 
 	g := &GRPCDirectRPCConnection{}
-	resp, err := g.handleGRPCError(ctx, status.Error(codes.DeadlineExceeded, "context deadline exceeded"), nil)
+	cause := status.Error(codes.DeadlineExceeded, "context deadline exceeded")
+	resp, err := g.handleGRPCError(ctx, cause, nil)
 
-	require.NotNil(t, resp,
-		"a timeout is the endpoint's problem and must keep its response so the node-error arm runs")
+	require.Nil(t, resp, "the router's own timeout is not an answer from the node")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, cause, "the gRPC status survives for logs")
 	require.False(t, errors.Is(err, context.Canceled),
 		"a slow endpoint must not be excused as a relay we cancelled")
+}
+
+// A node that answers DEADLINE_EXCEEDED itself, while the router's context is live, did
+// answer: that stays a node error.
+func TestHandleGRPCError_NodeSentDeadlineIsTheNodesAnswer(t *testing.T) {
+	g := &GRPCDirectRPCConnection{}
+	resp, err := g.handleGRPCError(context.Background(), status.Error(codes.DeadlineExceeded, "query timed out on the node"), nil)
+
+	require.NotNil(t, resp, "the node's own status keeps its response so the node-error arm runs")
+	require.False(t, errors.Is(err, context.DeadlineExceeded), "nothing local timed out")
+	var statusErr *GRPCStatusError
+	require.ErrorAs(t, err, &statusErr)
+	require.Equal(t, uint32(codes.DeadlineExceeded), statusErr.Code)
 }
 
 // TestHandleGRPCError_RemoteCancellationIsNotLocal is the collateral guard for

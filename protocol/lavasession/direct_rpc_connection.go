@@ -2131,6 +2131,13 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 		return nil, fmt.Errorf("gRPC relay cancelled: %w: %w", context.Canceled, err)
 	}
 
+	// The router's own deadline passed: a timeout, as on every HTTP transport, and the
+	// endpoint is still blamed for it. It is not the node's answer, so no response. A node
+	// that sends DEADLINE_EXCEEDED itself leaves this context live and stays a node error.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return nil, fmt.Errorf("gRPC relay timed out: %w: %w", context.DeadlineExceeded, err)
+	}
+
 	var errorCode uint32 = common.GRPCStatusCodeOnFailedMessages
 	var errorMessage string
 
