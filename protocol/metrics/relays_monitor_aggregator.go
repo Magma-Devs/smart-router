@@ -43,9 +43,26 @@ func (rma *RelaysMonitorAggregator) RegisterRelaysMonitor(rpcEndpointKey string,
 	// moment a chain's health changes instead of up to a full ticker interval
 	// later. The callback fires only on transitions (see storeHealthStatus),
 	// so relay-hot-path LogRelay calls don't reach here in steady state.
-	relaysMonitor.SetOnStatusChange(func(bool) {
+	relaysMonitor.SetOnStatusChange(func(healthy bool) {
 		rma.runHealthCheck()
+		if !healthy {
+			rma.probeOthersSoon(relaysMonitor)
+		}
 	})
+}
+
+// probeOthersSoon asks every other chain to probe soon. Readiness holds while any
+// chain is healthy, and an idle chain's verdict can be 5 minutes old when the
+// cause (a node losing egress) took every chain down. Each call is its own
+// goroutine: this runs under the caller monitor's lock and must not take another.
+func (rma *RelaysMonitorAggregator) probeOthersSoon(except *RelaysMonitor) {
+	rma.lock.RLock()
+	defer rma.lock.RUnlock()
+	for _, relaysMonitor := range rma.relaysMonitors {
+		if relaysMonitor != except {
+			go relaysMonitor.ProbeSoon()
+		}
+	}
 }
 
 func (rma *RelaysMonitorAggregator) StartMonitoring(ctx context.Context) {

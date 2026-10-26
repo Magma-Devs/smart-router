@@ -1185,7 +1185,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 				utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
 			} else {
 				relayResult, err := relayProcessor.ProcessingResult()
-				if err == nil && relayResult != nil && relayResult.Reply != nil {
+				// ProcessingResult hands back a node error with err == nil when nothing succeeded, and
+				// a gRPC call that hit this try's deadline arrives as one. Only a real answer is health.
+				if err == nil && relayResult != nil && relayResult.Reply != nil && relayProvesEndpointHealthy(relayResult) {
 					utils.LavaFormatInfo("[+] init relay succeeded",
 						utils.LogAttr("GUID", ctx),
 						utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
@@ -1209,6 +1211,15 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 					}
 				} else if err != nil {
 					utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
+				} else if relayResult != nil && relayResult.Reply != nil {
+					utils.LavaFormatError("[-] init relay answered with an error", nil,
+						utils.LogAttr("GUID", ctx),
+						utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
+						utils.LogAttr("APIInterface", rpcss.listenEndpoint.ApiInterface),
+						utils.LogAttr("endpoint", relayResult.ProviderInfo.ProviderAddress),
+						utils.LogAttr("statusCode", relayResult.StatusCode),
+						utils.LogAttr("reply", relayEndText(string(relayResult.Reply.Data))),
+					)
 				} else {
 					utils.LavaFormatError("[-] failed sending init relay - nil result", nil, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
 				}
@@ -1547,6 +1558,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	var relayProcessor *relaycore.RelayProcessor
 	var cause error
 	defer func() {
+		rpcss.noteRelayHealth(ctx, relayResult, errRet)
 		rpcss.writeRelayEnd(ctx, relayEndInput{
 			protocolMessage: protocolMessage,
 			processor:       relayProcessor,
@@ -1686,8 +1698,45 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			)
 		}
 	}
-	rpcss.relaysMonitor.LogRelay()
 	return returnedResult, nil
+}
+
+// relayHealthSignal is what one client relay tells the chain's readiness monitor.
+type relayHealthSignal int
+
+const (
+	relayHealthNone   relayHealthSignal = iota // no upstream was judged: a cache hit, a client that hung up
+	relayHealthServed                          // an upstream answered it
+	relayHealthFailed                          // it ended without an upstream answering it
+)
+
+// relayHealthSignalOf classifies a finished client relay by the rule the health probe uses: only a
+// real upstream answer counts. A node error, a timeout or no answer at all is a failure.
+func relayHealthSignalOf(ctx context.Context, result *common.RelayResult, err error) relayHealthSignal {
+	if common.IsClientCancellation(err, ctx) {
+		return relayHealthNone
+	}
+	if err != nil || result == nil || result.Reply == nil {
+		return relayHealthFailed
+	}
+	if servedFromCache(result) {
+		return relayHealthNone
+	}
+	if relayProvesEndpointHealthy(result) {
+		return relayHealthServed
+	}
+	return relayHealthFailed
+}
+
+// noteRelayHealth feeds a finished client relay to the readiness monitor: a served relay proves the
+// chain healthy and defers the probe, and a failed one brings the probe forward to decide.
+func (rpcss *RPCSmartRouterServer) noteRelayHealth(ctx context.Context, result *common.RelayResult, err error) {
+	switch relayHealthSignalOf(ctx, result, err) {
+	case relayHealthServed:
+		rpcss.relaysMonitor.LogRelay()
+	case relayHealthFailed:
+		rpcss.relaysMonitor.ProbeSoon()
+	}
 }
 
 func (rpcss *RPCSmartRouterServer) GetChainIdAndApiInterface() (string, string) {

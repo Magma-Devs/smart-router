@@ -22,6 +22,16 @@ metrics manager.
 > (MAG-3746), and neither reading attests that a policy-governed method currently has quorum
 > capacity — a router reporting healthy and Ready can still refuse such a method with
 > `insufficient-capacity`. Alert on the cross-validation series below for that, not on readiness.
+>
+> **When they change.** Each chain+interface is healthy until its health check fails, and the router
+> is healthy while any one of them is. The check passes only when an upstream answers the
+> latest-block request with a result: an error answer or no answer fails it. It runs every
+> `--relays-health-interval` (default `5m`), and each client relay an upstream answers pushes it
+> back, so a busy healthy chain is not probed. A client relay that ends without an upstream's answer
+> (an error, a timeout, no provider left) brings the check to within
+> `--relays-health-unhealthy-interval` (default `15s`), and so does another chain+interface of the
+> same router turning unhealthy. A cache hit and a client that hangs up change nothing. While
+> unhealthy the check repeats at that interval, so recovery shows within it.
 
 ### Configuration
 
