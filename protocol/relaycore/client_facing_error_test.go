@@ -309,3 +309,48 @@ func TestReplyProtocolError_TransportFailureIsTheLastResort(t *testing.T) {
 	require.Equal(t, other.Err, replyProtocolError(refused, []RelayError{refused, other}).Err)
 	require.Equal(t, refused.Err, replyProtocolError(refused, []RelayError{refused, refused}).Err)
 }
+
+func upstream429RelayError(body string) RelayError {
+	return RelayError{
+		Err:       common.NewLavaErrorWrapping(common.LavaErrorNodeRateLimited, &lavasession.HTTPStatusError{StatusCode: http.StatusTooManyRequests, Body: []byte(body)}),
+		LavaError: common.LavaErrorNodeRateLimited,
+	}
+}
+
+// A fault beats a throttle: one upstream's 503 next to two 429s is the 503, whatever the majority
+// (MAG-4638). A 429 still beats router text and a transport failure, and all-429 stays 429.
+func TestReplyProtocolError_FaultBeatsThrottle(t *testing.T) {
+	answered := RelayError{Err: upstream503Err("node a down"), LavaError: common.LavaErrorNodeServiceUnavailable}
+	throttled := upstream429RelayError("quota")
+	refused := RelayError{Err: refusedErr(), LavaError: common.LavaErrorConnectionRefused}
+	other := RelayError{Err: errors.New("no providers"), LavaError: common.LavaErrorNoProviders}
+
+	require.Equal(t, answered.Err, replyProtocolError(throttled, []RelayError{throttled, throttled, answered}).Err)
+	require.Equal(t, throttled.Err, replyProtocolError(refused, []RelayError{refused, throttled}).Err)
+	require.Equal(t, throttled.Err, replyProtocolError(other, []RelayError{other, other, throttled}).Err)
+	require.Equal(t, throttled.Err, replyProtocolError(throttled, []RelayError{throttled, throttled}).Err)
+}
+
+// End to end through the processor: a retry round of 429s does not outvote the 503 an earlier
+// attempt got, whichever arrives first.
+func TestProcessingResult_A503BeatsTwo429s(t *testing.T) {
+	for _, answerFirst := range []bool{true, false} {
+		answerDelay, throttleDelay := time.Millisecond, 2*time.Millisecond
+		if !answerFirst {
+			answerDelay, throttleDelay = throttleDelay, answerDelay
+		}
+		rp, usedProviders, closer := newTwoProviderProcessor(t)
+		go SendProtocolError(rp, "lava@a", answerDelay, upstream503Err("node a down"))
+		go SendProtocolError(rp, "lava@b", throttleDelay, upstream429RelayError("quota").Err)
+		waitForBoth(t, rp)
+		startBatch(t, usedProviders, "lava@c")
+		go SendProtocolError(rp, "lava@c", time.Millisecond, upstream429RelayError("quota").Err)
+		waitForBoth(t, rp)
+
+		result, err := rp.ProcessingResult()
+		closer()
+		require.Error(t, err)
+		require.Equal(t, http.StatusServiceUnavailable, result.StatusCode, "answer first: %v", answerFirst)
+		require.Equal(t, "node a down", string(result.GetClientFacing().UpstreamBody))
+	}
+}
