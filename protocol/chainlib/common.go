@@ -545,11 +545,14 @@ func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRe
 			return utils.Max(currentLatest, parsedBlock)
 		}
 
-		if currentLatest > 0 && parsedBlock < 0 && parsedBlock != spectypes.EARLIEST_BLOCK {
+		// Block 0 is a numeric block like any other on this side: a "latest"-style sentinel is
+		// newer than it, so a batch mixing "latest" with block 0 asks about "latest", not about
+		// block 0 (which the cache would file as finalized).
+		if currentLatest >= 0 && parsedBlock < 0 && parsedBlock != spectypes.EARLIEST_BLOCK {
 			return parsedBlock
 		}
 
-		if currentLatest < 0 && parsedBlock > 0 && currentLatest != spectypes.EARLIEST_BLOCK {
+		if currentLatest < 0 && parsedBlock >= 0 && currentLatest != spectypes.EARLIEST_BLOCK {
 			return currentLatest
 		}
 
