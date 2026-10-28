@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -203,9 +202,9 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 				require.Contains(t, envelope.Error, "verify on-chain before resubmitting")
 				require.NotContains(t, envelope.Error, "failed")
 			} else if tc.method == http.MethodGet {
-				require.Equal(t, http.StatusInternalServerError, response.StatusCode)
-				require.Contains(t, string(body), fmt.Sprintf("HTTP %d", tc.status))
-				require.NotContains(t, string(body), "transaction status unclear")
+				// A read has no unclear outcome: the upstream's answer goes back as is (MAG-4481).
+				require.Equal(t, tc.status, response.StatusCode)
+				require.JSONEq(t, tc.body, string(body))
 			} else {
 				require.Equal(t, tc.status, response.StatusCode)
 				require.JSONEq(t, tc.body, string(body))

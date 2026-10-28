@@ -266,8 +266,8 @@ func TestStatefulBroadcastWaitsThroughARateLimit(t *testing.T) {
 				result, err := sendWrite(t, tc, chainParser, server)
 				require.Error(t, err, "no provider executed the write")
 				require.NotNil(t, result)
-				require.Equal(t, http.StatusServiceUnavailable, result.StatusCode,
-					"every provider refused for rate: the chain is temporarily unservable, and 503 says so")
+				require.Equal(t, http.StatusTooManyRequests, result.StatusCode,
+					"every provider refused for rate: the client gets the node's own 429, not a router-made 503 (MAG-4481)")
 				require.Equal(t, int64(1), atomic.LoadInt64(&hits[0]))
 				require.Equal(t, int64(1), atomic.LoadInt64(&hits[1]))
 			})

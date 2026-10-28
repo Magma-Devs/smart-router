@@ -49,23 +49,44 @@ func TestClientFacingFromProtocolError_UpstreamAnswered(t *testing.T) {
 // Every code that means "the upstream never answered" yields the leaf cause and no status.
 func TestClientFacingFromProtocolError_TransportFailures(t *testing.T) {
 	leaf := errors.New("dial tcp 10.0.0.1:443: connect: connection refused")
-	for _, lavaErr := range []*common.LavaError{
-		common.LavaErrorConnectionTimeout,
-		common.LavaErrorConnectionRefused,
-		common.LavaErrorDNSFailure,
-		common.LavaErrorTLSMismatch,
-		common.LavaErrorConnectionReset,
-		common.LavaErrorConnectionClosed,
-		common.LavaErrorContextDeadline,
+	for _, tc := range []struct {
+		lavaErr *common.LavaError
+		status  int // 504 for a timeout, 502 otherwise (MAG-4481)
+	}{
+		{common.LavaErrorConnectionTimeout, http.StatusGatewayTimeout},
+		{common.LavaErrorConnectionRefused, http.StatusBadGateway},
+		{common.LavaErrorDNSFailure, http.StatusBadGateway},
+		{common.LavaErrorTLSMismatch, http.StatusBadGateway},
+		{common.LavaErrorConnectionReset, http.StatusBadGateway},
+		{common.LavaErrorConnectionClosed, http.StatusBadGateway},
+		{common.LavaErrorContextDeadline, http.StatusGatewayTimeout},
+		{common.LavaErrorNetworkUnreachable, http.StatusBadGateway},
 	} {
-		t.Run(lavaErr.Name, func(t *testing.T) {
-			cf := clientFacingFromProtocolError(common.NewLavaErrorWrapping(lavaErr, leaf), lavaErr)
+		t.Run(tc.lavaErr.Name, func(t *testing.T) {
+			cf := clientFacingFromProtocolError(common.NewLavaErrorWrapping(tc.lavaErr, leaf), tc.lavaErr)
 			require.NotNil(t, cf)
 			require.Zero(t, cf.UpstreamStatus)
 			require.Equal(t, leaf.Error(), cf.Cause, "the retained cause, not the registry description")
-			require.Equal(t, lavaErr.Code, cf.RouterErrorCode)
+			require.Equal(t, tc.lavaErr.Code, cf.RouterErrorCode)
+			require.Equal(t, tc.status, NoAnswerStatus(cf))
+			require.Equal(t, tc.status == http.StatusGatewayTimeout, cf.TimedOut)
 		})
 	}
+}
+
+// 1043 is not a transport failure any more: nothing produces it (MAG-4481).
+func TestClientFacingFromProtocolError_1043IsNotATransportFailure(t *testing.T) {
+	noResponse := common.LavaErrorNoResponseTimeout
+	require.EqualValues(t, 1043, noResponse.Code)
+	require.Nil(t, clientFacingFromProtocolError(common.NewLavaErrorWrapping(noResponse, errors.New("x")), noResponse))
+}
+
+// The upstream's Content-Type travels with its body.
+func TestClientFacingFromProtocolError_CarriesContentType(t *testing.T) {
+	cf := clientFacingFromProtocolError(&lavasession.HTTPStatusError{StatusCode: 520, Body: []byte("<html/>"), ContentType: "text/html"}, nil)
+	require.NotNil(t, cf)
+	require.Equal(t, 520, cf.UpstreamStatus)
+	require.Equal(t, "text/html", cf.UpstreamContentType)
 }
 
 // Anything else keeps today's reply: no client-facing answer at all.
@@ -183,22 +204,6 @@ func TestProcessingResult_ClientFacingDoesNotStick(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, http.StatusBadGateway, second.StatusCode, "same inputs, same answer")
 	require.NotSame(t, first, second, "each call returns its own copy")
-}
-
-// Every attempt was refused for rate: the 503 stamp still wins, and nothing is forwarded
-// because a typed 429 is not an upstream status error on this path.
-func TestProcessingResult_AllRateLimitedStill503WithoutClientFacing(t *testing.T) {
-	rp, _, closer := newTwoProviderProcessor(t)
-	defer closer()
-
-	go SendProtocolError(rp, "lava@a", time.Millisecond, common.RateLimited(errors.New("HTTP 429"), 0))
-	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, common.RateLimited(errors.New("HTTP 429"), 0))
-	waitForBoth(t, rp)
-
-	result, err := rp.ProcessingResult()
-	require.Error(t, err)
-	require.Equal(t, http.StatusServiceUnavailable, result.StatusCode)
-	require.Nil(t, result.GetClientFacing())
 }
 
 // A node error beats a protocol error, as before, and is never stamped: the node's reply is

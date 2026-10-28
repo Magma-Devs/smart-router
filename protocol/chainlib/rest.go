@@ -345,18 +345,17 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			// Get unique GUID response
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 
-			// Log request and response
-			apil.logger.LogRequestAndResponse("http in/out", true, http.MethodPost, path, requestBody, errMasking, msgSeed, time.Since(startTime), err)
-
-			// Set status to internal error\
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
+			// MAG-4481: the upstream's own answer as is, or the router's 502/504 when none answered.
+			// The request log records what the client is sent.
+			if failed, ok := buildFailedRelayReply(relayResult, msgSeed, nil, noAnswerJsonError); ok {
+				apil.logger.LogRequestAndResponse("http in/out", true, http.MethodPost, path, requestBody, loggedReply(failed.body), msgSeed, time.Since(startTime), err)
+				return sendFailedRelayReply(fiberCtx, failed, reply.GetMetadata())
 			}
 
 			// Construct json response
 			response := convertToJsonError(errMasking)
+			apil.logger.LogRequestAndResponse("http in/out", true, http.MethodPost, path, requestBody, loggedReply(response), msgSeed, time.Since(startTime), err)
+			fiberCtx.Status(failedRelayStatus(relayResult))
 
 			// Return error json response
 			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
@@ -424,18 +423,17 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			// Get unique GUID response
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 
-			// Log request and response
-			apil.logger.LogRequestAndResponse("http in/out", true, fiberCtx.Method(), path, requestBody, errMasking, msgSeed, time.Since(startTime), err)
-
-			// Set status to internal error
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
+			// MAG-4481: the upstream's own answer as is, or the router's 502/504 when none answered.
+			// The request log records what the client is sent.
+			if failed, ok := buildFailedRelayReply(relayResult, msgSeed, nil, noAnswerJsonError); ok {
+				apil.logger.LogRequestAndResponse("http in/out", true, fiberCtx.Method(), path, requestBody, loggedReply(failed.body), msgSeed, time.Since(startTime), err)
+				return sendFailedRelayReply(fiberCtx, failed, reply.GetMetadata())
 			}
 
 			// Construct json response
 			response := convertToJsonError(errMasking)
+			apil.logger.LogRequestAndResponse("http in/out", true, fiberCtx.Method(), path, requestBody, loggedReply(response), msgSeed, time.Since(startTime), err)
+			fiberCtx.Status(failedRelayStatus(relayResult))
 
 			// Return error json response
 			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)

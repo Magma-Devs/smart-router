@@ -53,14 +53,20 @@ func startBatch(t *testing.T, usedProviders *lavasession.UsedProviders, provider
 	usedProviders.AddUsed(sessions, nil)
 }
 
-// Every attempt refused for rate: the chain is temporarily unservable, not broken — the
-// client gets 503, and the policy summary says the failures were only rate limits.
-func TestProcessingResult_AllRateLimitedIs503(t *testing.T) {
+// upstream429Err is what the sender records for an upstream's HTTP 429: the upstream's answer,
+// unwrapping to the typed rate-limit sentinel.
+func upstream429Err(body string, retryAfter time.Duration) error {
+	return &lavasession.HTTPStatusError{StatusCode: http.StatusTooManyRequests, Body: []byte(body), RetryAfter: retryAfter}
+}
+
+// Every attempt refused for rate: the policy summary says the failures were only rate limits, and
+// the client gets the node's own 429 and body as is. It used to get a router-made 503 (MAG-4481 B).
+func TestProcessingResult_AllRateLimitedIsTheNodes429(t *testing.T) {
 	rp, _, closer := newTwoProviderProcessor(t)
 	defer closer()
 
-	go SendProtocolError(rp, "lava@a", time.Millisecond, common.RateLimited(errors.New("HTTP 429"), 30*time.Second))
-	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, common.RateLimited(errors.New("HTTP 429"), 0))
+	go SendProtocolError(rp, "lava@a", time.Millisecond, upstream429Err(`{"error":"quota"}`, 30*time.Second))
+	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, upstream429Err(`{"error":"quota"}`, 0))
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	_ = rp.WaitForResults(ctx)
@@ -71,7 +77,10 @@ func TestProcessingResult_AllRateLimitedIs503(t *testing.T) {
 
 	result, err := rp.ProcessingResult()
 	require.Error(t, err)
-	require.Equal(t, http.StatusServiceUnavailable, result.StatusCode)
+	require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
+	require.NotNil(t, result.GetClientFacing())
+	require.Equal(t, http.StatusTooManyRequests, result.GetClientFacing().UpstreamStatus)
+	require.Equal(t, `{"error":"quota"}`, string(result.GetClientFacing().UpstreamBody))
 }
 
 // Mixed failures keep today's shape — the best error's own result, status untouched (the
@@ -93,26 +102,25 @@ func TestProcessingResult_MixedFailuresUnchanged(t *testing.T) {
 	require.Equal(t, 0, result.StatusCode, "the protocol error's own result is returned as before")
 }
 
-// The 503 is stamped on a copy, never on the stored result. sendRelayWithRetries reuses one
-// processor and calls ProcessingResult() per iteration, so an all-429 iteration must not
-// leave a 503 behind for a later, mixed one to inherit.
-func TestProcessingResult_RateLimited503DoesNotStick(t *testing.T) {
+// The status is stamped on a copy, never on the stored result. sendRelayWithRetries reuses one
+// processor and calls ProcessingResult() per iteration, so an all-429 iteration must not leave a
+// 429 behind for a later one to inherit.
+func TestProcessingResult_RateLimited429DoesNotStick(t *testing.T) {
 	rp, usedProviders, closer := newTwoProviderProcessor(t)
 	defer closer()
 
 	// Iteration 1: every failure is a rate limit.
-	go SendProtocolError(rp, "lava@a", time.Millisecond, common.RateLimited(errors.New("HTTP 429"), 0))
-	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, common.RateLimited(errors.New("HTTP 429"), 0))
+	go SendProtocolError(rp, "lava@a", time.Millisecond, upstream429Err("", 0))
+	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, upstream429Err("", 0))
 	firstCtx, cancelFirst := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancelFirst()
 	_ = rp.WaitForResults(firstCtx)
 
 	result, err := rp.ProcessingResult()
 	require.Error(t, err)
-	require.Equal(t, http.StatusServiceUnavailable, result.StatusCode)
+	require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
 
-	// Iteration 2: the retry lands on an endpoint that is down rather than capped, so the
-	// chain is no longer merely unservable and the 429 result must report its own status.
+	// Iteration 2: the retry lands on an endpoint that is down rather than capped.
 	startBatch(t, usedProviders, "lava@c")
 	go SendProtocolError(rp, "lava@c", time.Millisecond, errors.New("connection refused"))
 	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -120,7 +128,10 @@ func TestProcessingResult_RateLimited503DoesNotStick(t *testing.T) {
 	_ = rp.WaitForResults(secondCtx)
 
 	require.False(t, rp.GetResultsSummary().OnlyRateLimited)
-	result, err = rp.ProcessingResult()
+	_, err = rp.ProcessingResult()
 	require.Error(t, err)
-	require.Equal(t, 0, result.StatusCode, "the earlier 503 must not have been stamped onto the stored result")
+	for _, stored := range storedProtocolResults(t, rp) {
+		require.Zero(t, stored.StatusCode, "the 429 must not have been stamped onto a stored result")
+		require.Nil(t, stored.ClientFacing)
+	}
 }
