@@ -39,6 +39,17 @@ type tierUpstream struct {
 
 func (u *tierUpstream) requests() int64 { return atomic.LoadInt64(&u.hits) }
 
+// statusWhenNobodyServes is what the caller gets when every provider failed in this shape, under
+// the status rule of MAG-4218: the node's own status when a node answered (503 here), and 502
+// when no node answered (a refused connection). Routers before that rule answered 500, which is
+// what the ticket measured.
+func statusWhenNobodyServes(behaviour upstreamBehaviour) int {
+	if behaviour == refusesTheConnection {
+		return http.StatusBadGateway
+	}
+	return http.StatusServiceUnavailable
+}
+
 const tierTestAnswer = `{"jsonrpc":"2.0","id":1,"result":"0x10"}`
 
 // newTieredTestServer builds a router over local upstreams, primaries first, then backups. A
@@ -144,6 +155,7 @@ func TestBackupServesWhenEveryPrimaryFailsAtTheRetryLimit_MAG3978(t *testing.T) 
 				require.NoError(t, sendErr, "the backup serves, so the caller must get its answer")
 				require.NotNil(t, result.Reply)
 				require.Contains(t, string(result.Reply.Data), `"result":"0x10"`, "the caller gets the backup's answer")
+				require.Equal(t, http.StatusOK, result.StatusCode)
 				order := dispatchOrder(result)
 				require.Len(t, order, 4, "three primaries, then the backup: %v", order)
 				require.ElementsMatch(t, []string{"primary-a", "primary-b", "primary-c"}, order[:3], "every primary is asked before the backup")
@@ -189,35 +201,48 @@ func TestBackupServesWhenEveryPrimaryFailsAtTheRetryLimit_MAG3978(t *testing.T) 
 				require.Equal(t, "backup-1", order[4])
 				require.Equal(t, "4", refusalReplyHeader(result, common.RETRY_COUNT_HEADER_NAME), "every primary, then the backup")
 			})
+
+			t.Run("three primaries and three backups fail: every backup is asked before the request fails", func(t *testing.T) {
+				// Six providers, six attempts: the limit waits for each untried backup and ends the
+				// request only once none is left. The caller then gets the status the failure shape
+				// carries, not a success and not a router 500.
+				primaries := failingUpstreams(shape.behaviour, "primary-a", "primary-b", "primary-c")
+				backups := failingUpstreams(shape.behaviour, "backup-1", "backup-2", "backup-3")
+				server := newTieredTestServer(t, chainParser, logs, primaries, backups)
+
+				result, sendErr := sendRefusalTestRequest(t, ctx, chainParser, server)
+				require.Error(t, sendErr, "nobody can serve")
+				require.NotNil(t, result, "the failed relay still carries its status and headers")
+				require.Equal(t, statusWhenNobodyServes(shape.behaviour), result.StatusCode)
+				require.ElementsMatch(t, []string{"primary-a", "primary-b", "primary-c", "backup-1", "backup-2", "backup-3"}, dispatchOrder(result), "all six are asked once")
+				require.Equal(t, "5", refusalReplyHeader(result, common.RETRY_COUNT_HEADER_NAME))
+				if shape.behaviour == answersUnavailable {
+					for _, upstream := range append(primaries, backups...) {
+						require.Equal(t, int64(1), upstream.requests(), "%s is asked exactly once", upstream.name)
+					}
+				}
+			})
+
+			t.Run("control: with no backup tier the limit still stops the request after three primaries", func(t *testing.T) {
+				// Four failing primaries, so a fourth attempt would have somewhere to go and the
+				// limit is the only thing that can stop the request.
+				primaries := failingUpstreams(shape.behaviour, "primary-a", "primary-b", "primary-c", "primary-d")
+				server := newTieredTestServer(t, chainParser, logs, primaries, nil)
+
+				result, sendErr := sendRefusalTestRequest(t, ctx, chainParser, server)
+				require.Error(t, sendErr, "nobody can serve, and the limit ends the request")
+				require.NotNil(t, result)
+				require.Equal(t, statusWhenNobodyServes(shape.behaviour), result.StatusCode)
+				require.Len(t, dispatchOrder(result), 3, "the limit of 2 allows three attempts; the fourth primary is never asked: %v", dispatchOrder(result))
+				require.Equal(t, "2", refusalReplyHeader(result, common.RETRY_COUNT_HEADER_NAME))
+				if shape.behaviour == answersUnavailable {
+					var asked int64
+					for _, primary := range primaries {
+						asked += primary.requests()
+					}
+					require.Equal(t, int64(3), asked)
+				}
+			})
 		})
 	}
-
-	t.Run("three primaries and three backups fail: every backup is asked before the request fails", func(t *testing.T) {
-		// 503 upstreams, so every attempt is countable. Six providers, six attempts: the limit
-		// waits for each untried backup and ends the request only once none is left.
-		primaries := failingUpstreams(answersUnavailable, "primary-a", "primary-b", "primary-c")
-		backups := failingUpstreams(answersUnavailable, "backup-1", "backup-2", "backup-3")
-		server := newTieredTestServer(t, chainParser, logs, primaries, backups)
-
-		_, sendErr := sendRefusalTestRequest(t, ctx, chainParser, server)
-		require.Error(t, sendErr, "nobody can serve")
-		for _, upstream := range append(primaries, backups...) {
-			require.Equal(t, int64(1), upstream.requests(), "%s is asked exactly once", upstream.name)
-		}
-	})
-
-	t.Run("control: with no backup tier the limit still stops the request after three primaries", func(t *testing.T) {
-		// Four 503 primaries, so a fourth attempt would have somewhere to go and the limit is the
-		// only thing that can stop the request. Hits are countable for this shape.
-		primaries := failingUpstreams(answersUnavailable, "primary-a", "primary-b", "primary-c", "primary-d")
-		server := newTieredTestServer(t, chainParser, logs, primaries, nil)
-
-		_, sendErr := sendRefusalTestRequest(t, ctx, chainParser, server)
-		require.Error(t, sendErr, "nobody can serve, and the limit ends the request")
-		var asked int64
-		for _, primary := range primaries {
-			asked += primary.requests()
-		}
-		require.Equal(t, int64(3), asked, "the limit of 2 allows three attempts; the fourth primary is never asked")
-	})
 }
