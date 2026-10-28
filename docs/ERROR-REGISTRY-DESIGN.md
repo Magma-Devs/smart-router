@@ -669,7 +669,9 @@ unchanged. What "node error" changes is the same as on JSON-RPC:
 ### 9.1 Status rows — current verdicts
 
 Retried = the registry marks it retryable, so the relay policy has no stop reason until the
-retry budget is spent (`relaycore.RelayRetryLimit`, default 2 ⇒ up to 3 upstream calls). At fault
+retry budget is spent (`relaycore.RelayRetryLimit`, default 2 ⇒ up to 3 upstream calls) — or,
+while a backup provider that could serve the request has not been asked, until it has been: the
+budget does not end a request one dispatch short of the backup tier (MAG-3978). At fault
 = `LavaError.EndpointAtFault`, which drives `MarkUnhealthy` and the endpoint's consecutive-refusal
 counter (`--bench-after`, default 50, reset only by a 2xx) — and, through
 `shouldFailSessionForResult`, the availability signal.

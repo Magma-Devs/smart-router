@@ -70,6 +70,10 @@ func (srsm *SmartRouterRelaySenderMock) GetChainIdAndApiInterface() (string, str
 	return "testUno", "testDos"
 }
 
+func (srsm *SmartRouterRelaySenderMock) HasUntriedBackup(context.Context, chainlib.ProtocolMessage, *lavasession.UsedProviders) bool {
+	return false
+}
+
 func (srsm *SmartRouterRelaySenderMock) ParseRelay(
 	ctx context.Context,
 	url string,

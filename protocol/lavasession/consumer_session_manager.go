@@ -2678,6 +2678,44 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 }
 
 // getValidConsumerSessionsWithProviderFromBackupProviderList retrieves valid backup provider sessions for emergency fallback when no regular providers are available.
+// eligibleBackupAddressesLocked lists the backup providers the fallback in
+// getSessionWithProviderOrError would consider for a request: not in tried (used or unwanted by
+// this request), not blocked this epoch, and serving addon and extensions. The fallback and
+// HasEligibleBackup read the same list, so the policy's view of the tier cannot drift from what
+// selection does.
+//
+// csm must be rlocked here.
+func (csm *ConsumerSessionManager) eligibleBackupAddressesLocked(ctx context.Context, tried map[string]struct{}, addon string, extensions []string) []string {
+	addresses := make([]string, 0, len(csm.backupProviders))
+	for address, provider := range csm.backupProviders {
+		if provider == nil {
+			continue
+		}
+		if _, alreadyTried := tried[address]; alreadyTried {
+			continue
+		}
+		if _, blocked := csm.blockedBackupProviders[address]; blocked {
+			continue
+		}
+		if !provider.IsSupportingAddon(addon) || !provider.IsSupportingExtensions(extensions, ctx) {
+			continue
+		}
+		addresses = append(addresses, address)
+	}
+	return addresses
+}
+
+// HasEligibleBackup reports whether the backup fallback could still hand a request a provider: one
+// not in tried, not blocked this epoch, and serving addon and extensions. tried is the request's
+// used-and-unwanted set under its router key (UsedProviders.GetUnwantedProvidersToSend), which is
+// what the fallback skips on the next GetSessions. The relay policy asks before it fails a request
+// on the error tolerance (MAG-3978).
+func (csm *ConsumerSessionManager) HasEligibleBackup(ctx context.Context, tried map[string]struct{}, addon string, extensions []string) bool {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	return len(csm.eligibleBackupAddressesLocked(ctx, tried, addon, extensions)) > 0
+}
+
 func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) { //nolint:unparam // virtualEpoch is unused: CU accounting never trips in this fork (MAG-4243); kept so the backup path mirrors the primary one
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
@@ -2701,26 +2739,9 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 		return nil, utils.LavaFormatError("no backup providers configured", nil, utils.LogAttr("GUID", ctx))
 	}
 
-	// Get valid backup provider addresses that support the required addon and extensions
-	backupProviderAddresses := []string{}
-	for providerAddress, consumerSessionsWithProvider := range csm.backupProviders {
-		// Skip if provider is in ignored list (already tried or failed this request)
-		if _, exists := ignoredProviders.providers[providerAddress]; exists {
-			continue
-		}
-
-		// Skip if provider is blocked this epoch due to repeated failures
-		if _, blocked := csm.blockedBackupProviders[providerAddress]; blocked {
-			continue
-		}
-
-		// Validate backup provider supports required addons and extensions (simplified validation for emergency scenarios)
-		if !consumerSessionsWithProvider.IsSupportingAddon(addon) || !consumerSessionsWithProvider.IsSupportingExtensions(extensions, ctx) {
-			continue
-		}
-
-		backupProviderAddresses = append(backupProviderAddresses, providerAddress)
-	}
+	// The backups this request can still be handed: the list HasEligibleBackup answers from, so
+	// what the relay policy was told about the tier is what is selected here.
+	backupProviderAddresses := csm.eligibleBackupAddressesLocked(ctx, ignoredProviders.providers, addon, extensions)
 
 	if len(backupProviderAddresses) == 0 {
 		utils.LavaFormatInfo("[BackupProviders] No eligible backup providers after filtering (all ignored or addon mismatch)",

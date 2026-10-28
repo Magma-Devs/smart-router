@@ -1825,6 +1825,20 @@ func (rpcss *RPCSmartRouterServer) GetChainIdAndApiInterface() (string, string) 
 	return rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
 }
 
+// HasUntriedBackup answers the relay policy before it fails a request on the error tolerance:
+// could the next GetSessions still hand this request to a backup? The set it hands the session
+// manager is the request's used-and-unwanted providers under its router key, the same set the
+// backup fallback skips, so a true here means the next dispatch reaches the backup tier rather
+// than PairingListEmptyError (MAG-3978).
+func (rpcss *RPCSmartRouterServer) HasUntriedBackup(ctx context.Context, protocolMessage chainlib.ProtocolMessage, usedProviders *lavasession.UsedProviders) bool {
+	if rpcss.sessionManager == nil || protocolMessage == nil {
+		return false
+	}
+	extensions := protocolMessage.GetExtensions()
+	tried := usedProviders.GetUnwantedProvidersToSend(lavasession.NewRouterKeyFromExtensions(extensions))
+	return rpcss.sessionManager.HasEligibleBackup(ctx, tried, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(extensions))
+}
+
 func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protocolMessage chainlib.ProtocolMessage, analytics *metrics.RelayMetrics) (*relaycore.RelayProcessor, error) {
 	ctx, span := tracing.StartInternalSpan(ctx, tracing.SpanProcessRelaySend)
 	defer span.End()

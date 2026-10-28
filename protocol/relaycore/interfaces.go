@@ -67,6 +67,12 @@ type RelaySenderInf interface {
 	RelayParserInf
 	GetProcessingTimeout(chainMessage chainlib.ChainMessage) (processingTimeout time.Duration, relayTimeout time.Duration)
 	GetChainIdAndApiInterface() (string, string)
+	// HasUntriedBackup reports whether the backup tier still holds a provider this request has not
+	// been sent to and that could serve it: not blocked this epoch, not used or unwanted under the
+	// request's router key, and serving its addon and extensions. The policy reads it before it
+	// fails a request on the error tolerance, because that stop used to land one dispatch before
+	// selection would have exhausted the primary pool and reached that backup (MAG-3978).
+	HasUntriedBackup(ctx context.Context, protocolMessage chainlib.ProtocolMessage, usedProviders *lavasession.UsedProviders) bool
 }
 
 // ResultsSummary is pure data reported by the RelayProcessor for the policy engine.
@@ -135,6 +141,10 @@ type DecisionInput struct {
 	// IsDefaultApi is true when the request names a method the spec does not list: the parser
 	// forwarded it as a Default- API only because the spec cannot rule it out.
 	IsDefaultApi bool
+	// UntriedBackupRemains is true when a backup provider that could serve this request has not
+	// been asked yet, as RelaySenderInf.HasUntriedBackup reports it. Filled on the gotResults path
+	// only: the error tolerance it feeds is not checked for a hedge.
+	UntriedBackupRemains bool
 }
 
 // RelayPolicyInf is the interface that the policy engine must implement.

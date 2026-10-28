@@ -34,6 +34,10 @@ func (s *stubRelaySender) GetProcessingTimeout(chainlib.ChainMessage) (time.Dura
 
 func (s *stubRelaySender) GetChainIdAndApiInterface() (string, string) { return "LAVA", "rest" }
 
+func (s *stubRelaySender) HasUntriedBackup(context.Context, chainlib.ProtocolMessage, *lavasession.UsedProviders) bool {
+	return false
+}
+
 func newRetryTestProtocolMessage(t *testing.T, extensions []string, directiveHeaders map[string]string) chainlib.ProtocolMessage {
 	t.Helper()
 	ctx := context.Background()

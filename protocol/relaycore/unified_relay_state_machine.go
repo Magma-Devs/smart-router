@@ -316,7 +316,7 @@ func signalReturnCondition(returnCondition chan<- error, err error) {
 
 // buildDecisionInput assembles the DecisionInput for the policy engine.
 func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) DecisionInput {
-	return DecisionInput{
+	input := DecisionInput{
 		Selection:     sm.selection,
 		AttemptNumber: sm.usedProviders.BatchNumber(),
 		IsBatch:       sm.protocolMessage.IsBatch(),
@@ -324,6 +324,12 @@ func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) Decis
 		IsTickerHedge: isTickerHedge,
 		IsDefaultApi:  sm.protocolMessage.IsDefaultApi(),
 	}
+	// Only the gotResults path checks the error tolerance, so only it asks about the backup tier:
+	// the answer costs the session manager's read lock, and a hedge would discard it.
+	if !isTickerHedge && sm.relaySender != nil {
+		input.UntriedBackupRemains = sm.relaySender.HasUntriedBackup(sm.ctx, sm.GetProtocolMessage(), sm.usedProviders)
+	}
+	return input
 }
 
 func (sm *UnifiedRelayStateMachine) GetDebugState() bool {

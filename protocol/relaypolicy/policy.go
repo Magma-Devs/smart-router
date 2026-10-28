@@ -91,8 +91,17 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	// nowhere else (MAG-4242).
 	if !input.IsTickerHedge {
 		// 5. ERROR TOLERANCE
+		//
+		// The limit does not end a request that selection can still hand to a backup. The backup
+		// tier is reached only once every primary has been tried, and a pool of RelayRetryLimit+1
+		// primaries (three, at the default) fails for the (RelayRetryLimit+1)th time on the very
+		// attempt that exhausts it. The stop here therefore landed one dispatch before the
+		// fallback, and a healthy backup never served (MAG-3978). While a backup that could serve
+		// the request has not been asked, the request goes on down the tier order; once none is
+		// left, the limit applies as before. The permanent-failure and MaxRetries stops above
+		// still end the request first, and the dispatch order itself is unchanged.
 		totalErrors := input.Summary.NodeErrors + input.Summary.SpecialNodeErrors + input.Summary.ProtocolErrors
-		if totalErrors > p.config.RelayRetryLimit {
+		if totalErrors > p.config.RelayRetryLimit && !input.UntriedBackupRemains {
 			return DecisionOutput{Action: Stop, Reason: "ErrorToleranceExceeded"}
 		}
 	}
