@@ -310,6 +310,46 @@ func TestReplyProtocolError_TransportFailureIsTheLastResort(t *testing.T) {
 	require.Equal(t, refused.Err, replyProtocolError(refused, []RelayError{refused, refused}).Err)
 }
 
+// timeoutErr is a dial or request that ran out of time: no upstream answered, and the reply is 504.
+func timeoutErr() error {
+	return common.NewLavaErrorWrapping(common.LavaErrorContextDeadline, fmt.Errorf("http request failed: %w", context.DeadlineExceeded))
+}
+
+// A refused connection next to a timeout is a one-to-one tie between two no-answers, which the
+// majority pick breaks at random. The timeout wins, so the client gets 504 on every run, whichever
+// arrives first. Before the fix this gave 502 on about 33 runs in 40 and 504 on the rest.
+func TestProcessingResult_ATimeoutBeatsARefusedConnection(t *testing.T) {
+	for _, timeoutFirst := range []bool{true, false} {
+		timeoutDelay, refusedDelay := time.Millisecond, 2*time.Millisecond
+		if !timeoutFirst {
+			timeoutDelay, refusedDelay = refusedDelay, timeoutDelay
+		}
+		for i := 0; i < 40; i++ {
+			rp, _, closer := newTwoProviderProcessor(t)
+			go SendProtocolError(rp, "lava@a", refusedDelay, refusedErr())
+			go SendProtocolError(rp, "lava@b", timeoutDelay, timeoutErr())
+			waitForBoth(t, rp)
+
+			result, err := rp.ProcessingResult()
+			closer()
+			require.Error(t, err)
+			require.Equal(t, http.StatusGatewayTimeout, result.StatusCode, "timeout first: %v, run %d", timeoutFirst, i)
+			require.True(t, result.GetClientFacing().TimedOut)
+		}
+	}
+}
+
+// Among the no-answers a timeout ranks first, and both still lose to any other error.
+func TestReplyProtocolError_ATimeoutBeatsOtherTransportFailures(t *testing.T) {
+	refused := RelayError{Err: refusedErr(), LavaError: common.LavaErrorConnectionRefused}
+	timedOut := RelayError{Err: timeoutErr(), LavaError: common.LavaErrorContextDeadline}
+	other := RelayError{Err: errors.New("no providers"), LavaError: common.LavaErrorNoProviders}
+
+	require.Equal(t, timedOut.Err, replyProtocolError(refused, []RelayError{refused, refused, timedOut}).Err)
+	require.Equal(t, timedOut.Err, replyProtocolError(timedOut, []RelayError{timedOut, refused}).Err)
+	require.Equal(t, other.Err, replyProtocolError(timedOut, []RelayError{timedOut, other}).Err)
+}
+
 func upstream429RelayError(body string) RelayError {
 	return RelayError{
 		Err:       common.NewLavaErrorWrapping(common.LavaErrorNodeRateLimited, &lavasession.HTTPStatusError{StatusCode: http.StatusTooManyRequests, Body: []byte(body)}),

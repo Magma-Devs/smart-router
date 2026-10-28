@@ -1510,7 +1510,9 @@ func relayFailureLogAttrs(err error, attrs ...utils.Attribute) []utils.Attribute
 }
 
 // withNoAnswerTimeout names the request's processing timeout in a 504 reply, which the relay
-// processor builds without knowing it. Copied rather than mutated, as in withUnclearWriteStatus.
+// processor builds without knowing it. It is the request's budget, not the time the failed attempt
+// took: a connect timeout (1001) that gave up early still reads "within <processing timeout>".
+// Copied rather than mutated, as in withUnclearWriteStatus.
 func (rpcss *RPCSmartRouterServer) withNoAnswerTimeout(result *common.RelayResult, protocolMessage chainlib.ProtocolMessage) *common.RelayResult {
 	cf := result.GetClientFacing()
 	if cf == nil || !cf.TimedOut || cf.Timeout > 0 {
