@@ -69,16 +69,21 @@ func TestOnPollBlock_ReportsEveryAnsweredPoll(t *testing.T) {
 	m.recordPollObservation(url, gen, 0, 0, errors.New("503"), at(2))                    // a failed poll
 	m.recordPollObservation(url, gen, 0, 0, nil, at(3))                                  // answered without a block
 	m.recordPollObservation(url, gen, 100, time.Millisecond, nil, at(4))                 // answers again, same block
-	m.recordPollObservation(url, gen, 90, time.Millisecond, nil, at(5))                  // below a fresh tip: not accepted
+	m.recordPollObservation(url, gen, 90, time.Millisecond, nil, at(5))                  // below a fresh tip: still an answer
 	m.recordPollObservation(url, gen, 101, time.Millisecond, nil, at(6))                 // a new head
 	m.recordPollObservation(url, gen, 102, time.Millisecond, nil, at(5).Add(-time.Hour)) // an older attempt: dropped
 	m.recordPollObservation(url, gen+1, 103, time.Millisecond, nil, at(7))               // a replaced tracker: dropped
 
-	require.Equal(t, []polledBlock{{url, 100}, {url, 100}, {url, 100}, {url, 101}}, sink.snapshot())
+	// The block 90 row is MAG-4347. The tip store drops a block below a still-fresh stored
+	// tip, and the hook used to report only what the store accepted — so a url that answered
+	// every poll wrote nothing to its own series, and the answered-until time the stuck alerts
+	// read went stale. The block reported is the one the url ANSWERED, not the stored tip, so
+	// a url stuck on an old block still reads as stuck.
+	require.Equal(t, []polledBlock{{url, 100}, {url, 100}, {url, 100}, {url, 90}, {url, 101}}, sink.snapshot())
 
 	m.Stop()
 	m.recordPollObservation(url, gen, 104, time.Millisecond, nil, at(8))
-	require.Len(t, sink.snapshot(), 4, "nothing is reported after Stop")
+	require.Len(t, sink.snapshot(), 5, "nothing is reported after Stop")
 }
 
 // A relay observation is not a poll: the harvest path reports its own provider-scoped head,
