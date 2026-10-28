@@ -77,6 +77,10 @@ type mockSubscriptionServer struct {
 	// unsubscribeUnanswered makes the node apply an unsubscribe and never answer it, as some
 	// gateways do: the router's call runs out its deadline.
 	unsubscribeUnanswered atomic.Bool
+
+	// rejectSubscribes makes the node answer every subscribe with a JSON-RPC error, which is
+	// a failed subscribe rather than a subscription that ends later (MAG-2685).
+	rejectSubscribes atomic.Bool
 }
 
 // setRefusing turns the node's outage on or off.
@@ -156,6 +160,17 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 				"jsonrpc": "2.0",
 				"id":      req.ID,
 				"result":  true,
+			}
+			respBytes, _ := json.Marshal(response)
+			ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)
+			continue
+		}
+
+		if ms.rejectSubscribes.Load() {
+			response := map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"error":   map[string]interface{}{"code": -32601, "message": "the method " + req.Method + " does not exist"},
 			}
 			respBytes, _ := json.Marshal(response)
 			ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)

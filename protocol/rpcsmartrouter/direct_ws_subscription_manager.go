@@ -95,6 +95,20 @@ type directActiveSubscription struct {
 
 	// Restoration state
 	restoring atomic.Bool // Prevents concurrent restoration attempts
+
+	// restoresWithoutProgress counts restores since the last progress: a restored
+	// subscription that stayed up for restoreStableAfter. Past maxRestoresWithoutProgress
+	// the subscription is given up.
+	//
+	// Each WS restore spawns a fresh listener, whose own failure spawns the next restore, so
+	// without a bound a node that accepts a subscribe and drops it immediately is
+	// re-subscribed for the life of the process — one round trip per cycle, on every
+	// subscription it does this to. The gRPC manager has carried this bound since MAG-4177;
+	// this is the WebSocket side catching up (MAG-4278 item 11).
+	restoresWithoutProgress atomic.Int32
+
+	// lastRestoredAt is when the last restore committed, in unix nanoseconds; 0 for none.
+	lastRestoredAt atomic.Int64
 }
 
 // attachClientLocked registers a client on the subscription. The caller holds dwsm.lock,
@@ -848,8 +862,9 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// Get or create upstream pool for selected endpoint
 	pool := dwsm.GetOrCreatePool(selectedEndpoint)
 
-	// Get connection
-	conn, err := pool.GetConnection(ctx)
+	// Get a connection, with this subscription's slot counted on it already (see
+	// ReserveConnectionForSubscription); every failure below releases the slot.
+	conn, err := pool.ReserveConnectionForSubscription(ctx)
 	if err != nil {
 		chainlib.SubscriptionUpstreamFrom(ctx).Sent(dwsm.endpointNames.name(selectedEndpoint.Url), startTime, time.Since(startTime), err)
 		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
@@ -862,6 +877,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	upstreamSub, firstMsg, msgChan, err := dwsm.createUpstreamSubscription(ctx, conn, subscriptionParams, subscribeMethod)
 	chainlib.SubscriptionUpstreamFrom(ctx).Sent(dwsm.endpointNames.name(selectedEndpoint.Url), startTime, time.Since(startTime), err)
 	if err != nil {
+		pool.NotifySubscriptionRemoved(conn)
 		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
 		dwsm.failPendingSubscription(hashedParams)
 		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
@@ -913,6 +929,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	firstReplyData, err := createSubscriptionReply(routerID, requestID, firstMsg, dwsm.apiInterface, numericIDs)
 	if err != nil {
 		upstreamSub.Unsubscribe()
+		pool.NotifySubscriptionRemoved(conn)
 		dwsm.failPendingSubscription(hashedParams)
 		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
 		return nil, nil, fmt.Errorf("failed to create subscription reply: %w", err)
@@ -929,9 +946,6 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	// underneath every client that had joined, and the same rule already holds for
 	// the gRPC manager (MAG-3722). Teardown goes through teardownSubscriptionLocked.
 	subCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-
-	// Increment subscription count on the connection (for pool auto-scaling)
-	conn.IncrementSubscriptions()
 
 	// Store active subscription
 	activeSub := &directActiveSubscription{
@@ -1766,6 +1780,23 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 		utils.LogAttr("connectedClients", connectedClients),
 	)
 
+	// Bound the restores. A restored subscription that stayed up for restoreStableAfter was
+	// progress, even on a quiet one that delivered nothing since; only restores that keep
+	// failing sooner add up. Without this a node that accepts a subscribe and drops it at once
+	// is re-subscribed for the life of the process.
+	if last := activeSub.lastRestoredAt.Load(); last != 0 && time.Since(time.Unix(0, last)) >= restoreStableAfter {
+		activeSub.restoresWithoutProgress.Store(0)
+	}
+	if attempt := activeSub.restoresWithoutProgress.Add(1); attempt > maxRestoresWithoutProgress {
+		utils.LavaFormatWarning("DirectWS: subscription keeps failing, giving it up", nil,
+			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+			utils.LogAttr("restoresWithoutProgress", attempt-1),
+			utils.LogAttr("connectedClients", connectedClients),
+		)
+		dwsm.cleanupSubscription(hashedParams, activeSub)
+		return
+	}
+
 	// Try to reconnect the WebSocket connection
 	err := activeSub.upstreamPool.ReconnectWithBackoff(ctx)
 	if err != nil {
@@ -1781,8 +1812,9 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 	)
 
-	// Get the restored connection
-	conn, err := activeSub.upstreamPool.GetConnection(ctx)
+	// Get the restored connection, with this subscription's slot counted on it already, so
+	// releasing the old connection below cannot scale the new one down as unused.
+	conn, err := activeSub.upstreamPool.ReserveConnectionForSubscription(ctx)
 	if err != nil {
 		utils.LavaFormatError("DirectWS: failed to get connection after reconnect", err,
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
@@ -1794,6 +1826,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	// Re-subscribe using the stored params and method
 	newUpstreamSub, firstMsg, newMsgChan, err := dwsm.createUpstreamSubscription(ctx, conn, activeSub.subscriptionParams, activeSub.subscribeMethod)
 	if err != nil {
+		activeSub.upstreamPool.NotifySubscriptionRemoved(conn)
 		utils.LavaFormatError("DirectWS: failed to restore subscription", err,
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
@@ -1803,9 +1836,6 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 
 	// Extract new upstream subscription ID based on API interface
 	newUpstreamID := getSubscriptionID(dwsm.apiInterface, firstMsg, activeSub.subscriptionParams)
-
-	// Increment subscription count on the NEW connection (matching initial creation behavior)
-	conn.IncrementSubscriptions()
 
 	if dwsm.beforeRestoreCommit != nil {
 		dwsm.beforeRestoreCommit()
@@ -1864,6 +1894,8 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	for _, routerID := range clientRouterIDs {
 		dwsm.idMapper.RegisterMapping(routerID, newUpstreamID)
 	}
+
+	activeSub.lastRestoredAt.Store(time.Now().UnixNano())
 
 	utils.LavaFormatInfo("DirectWS: subscription restored successfully",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
@@ -2012,6 +2044,21 @@ func (dwsm *DirectWSSubscriptionManager) endUpstreamSubscriptionLocked(activeSub
 // upstreamUnsubscribeTimeout bounds the teardown call below. Some gateways never
 // answer an unsubscribe; without a bound the disconnect path would block on one.
 const upstreamUnsubscribeTimeout = 10 * time.Second
+
+const (
+	// maxRestoresWithoutProgress bounds how many times one subscription is restored without
+	// progress before it is given up. Progress is a restored subscription that stayed up for
+	// restoreStableAfter. Same bound and the same reasoning as the gRPC manager's
+	// defaultMaxRestoresWithoutProgress, which this mirrors.
+	maxRestoresWithoutProgress = 5
+
+	// restoreStableAfter is how long a restored subscription must stay up to count as
+	// progress. Uptime rather than a delivered push: a quiet subscription can go minutes
+	// without one, so the reconnects a load balancer's connection age limit causes now and
+	// then must not use up its restores; and a subscription that delivers and then fails
+	// each time it is reopened has made no progress, however much it delivered.
+	restoreStableAfter = 30 * time.Second
+)
 
 // teardownUpstreamSubscription tells the NODE to stop pushing.
 //
