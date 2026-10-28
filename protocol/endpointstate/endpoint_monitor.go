@@ -181,8 +181,8 @@ type EndpointMonitor struct {
 	// the router can refuse a repeat vote from an endpoint it holds as head-stalled (MAG-3986):
 	// a frozen node repeating its block is what kept a wrong tip fresh in the Plasma incident.
 	onTipObservation TipObservationFunc
-	// onPollBlock, if set, is invoked with the url and block of every poll recordPollObservation
-	// records for a live tracker and the tip store accepts, fired AFTER obsMu is released like
+	// onPollBlock, if set, is invoked with the url and the block of every ANSWERED poll
+	// recordPollObservation records for a live tracker, fired AFTER obsMu is released like
 	// onTipObservation. See EndpointChainTrackerConfig.OnPollBlock. Set once at construction;
 	// immutable.
 	onPollBlock func(endpointURL string, block int64)
@@ -242,10 +242,11 @@ type EndpointChainTrackerConfig struct {
 	OnTipObservation TipObservationFunc
 	// OnPollBlock, if set, is invoked with the url and block of every latest-block poll a live
 	// tracker records — including the tracker's first poll and a poll that returns the same
-	// block again, neither of which OnNewBlock reports. Only a block the endpoint's tip store
-	// accepted is reported: a repeat of the stored block is, a straggler below a still-fresh
-	// tip is not, and a failed poll reports nothing. A poll from a removed or replaced tracker
-	// is not reported (the observation's own generation gate), but the call runs after that
+	// block again, neither of which OnNewBlock reports. Every ANSWERED poll is reported, with
+	// the block the url answered, whatever the endpoint's tip store then did with it: a
+	// straggler below a still-fresh stored tip is reported too, because the url answered
+	// (MAG-4347). A failed poll reports nothing. A poll from a removed or replaced tracker is
+	// not reported (the observation's own generation gate), but the call runs after that
 	// gate's lock is released, so it can land just after the tracker is removed.
 	OnPollBlock func(endpointURL string, block int64)
 

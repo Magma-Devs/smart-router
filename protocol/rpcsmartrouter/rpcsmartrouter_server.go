@@ -3991,11 +3991,12 @@ func (rpcss *RPCSmartRouterServer) answerTimeout() time.Duration {
 
 // onEndpointPollBlock is the EndpointMonitor's OnPollBlock hook. It records the head a url
 // answered with on rpc_endpoint_url_latest_block (MAG-4204), on every answered poll: the tracker's
-// first poll and every repeat of the same block included, which OnNewBlock never reports. So a url
-// that keeps answering with one block stands still on its own series while its answered-until time
-// keeps moving, which is what the stuck alerts look for; a url that stops answering stops both,
-// which they leave alone. rpc_endpoint_latest_block, the provider series, is still written by
-// OnNewBlock and the relay harvest, as before.
+// first poll, every repeat of the same block, and an answer below a tip the router already holds
+// from a peer or a relay, none of which OnNewBlock reports. So a url that keeps answering with one
+// block stands still on its own series while its answered-until time keeps moving, which is what
+// the stuck alerts look for; a url that stops answering stops both, which they leave alone.
+// rpc_endpoint_latest_block, the provider series, is still written by OnNewBlock and the relay
+// harvest, as before.
 //
 // A ws/wss url is left out. It never serves a relay (Endpoint.ServesDirectRelays), so its head
 // says nothing about the answers customers' relays get.
