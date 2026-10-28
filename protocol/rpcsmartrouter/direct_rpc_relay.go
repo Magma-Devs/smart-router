@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"time"
@@ -608,9 +609,10 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 			utils.LogAttr("latency", latency),
 		)
 		httpErr := &lavasession.HTTPStatusError{
-			StatusCode: statusCode,
-			Status:     response.Status, // the upstream's own status line, for the client reply (MAG-4218)
-			Body:       responseData,
+			StatusCode:  statusCode,
+			Status:      response.Status, // the upstream's own status line, for the client reply (MAG-4218)
+			Body:        responseData,
+			ContentType: http.Header(response.Headers).Get("Content-Type"),
 		}
 		return nil, classifyAndWrap(httpErr, d.chainFamily, common.TransportJsonRPC)
 	}
