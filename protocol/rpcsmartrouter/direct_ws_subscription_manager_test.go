@@ -33,6 +33,10 @@ type mockSubscriptionServer struct {
 	upgrader        websocket.Upgrader
 	subscriptions   map[string]chan struct{} // subscription ID -> close channel
 	observedMethods []string                 // every JSON-RPC method the server was actually asked for
+	// observedFrames is every request frame verbatim, so a test can read a call's params as
+	// well as its method: the id shape the router puts on an unsubscribe is half of what
+	// MAG-4278 item 1 got wrong, and a method-only record cannot show it.
+	observedFrames  [][]byte
 	lock            sync.RWMutex
 	writeMu         sync.Mutex // serializes conn.WriteMessage — gorilla requires a single concurrent writer
 	messageInterval time.Duration
@@ -132,7 +136,7 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 
-		ms.recordMethod(req.Method)
+		ms.recordMethod(req.Method, message)
 
 		// Classify by whether the caller handed us a LIVE subscription id, never by
 		// the method name. This harness used to gate on "_subscribe"/"_unsubscribe"
@@ -198,10 +202,11 @@ func (ms *mockSubscriptionServer) firstSubscriptionParam(params interface{}) (st
 	return "", false
 }
 
-func (ms *mockSubscriptionServer) recordMethod(method string) {
+func (ms *mockSubscriptionServer) recordMethod(method string, frame []byte) {
 	ms.lock.Lock()
 	defer ms.lock.Unlock()
 	ms.observedMethods = append(ms.observedMethods, method)
+	ms.observedFrames = append(ms.observedFrames, append([]byte(nil), frame...))
 }
 
 // ObservedMethods returns the JSON-RPC methods the upstream was actually asked
@@ -350,6 +355,12 @@ func (ms *mockSubscriptionServer) URL() string {
 type mockWSProtocolMessage struct {
 	method string
 	params interface{}
+
+	// parseDirectives are the spec directives of the collection this message resolved to.
+	// The manager reads them to pair a subscribe method with the unsubscribe method the node
+	// is told on teardown (MAG-4278 item 1), so a test that exercises a teardown has to carry
+	// the pairs its chain declares. Nil leaves the collection with none, as before.
+	parseDirectives []*spectypes.ParseDirective
 }
 
 func (m *mockWSProtocolMessage) GetApi() *spectypes.Api {
@@ -363,7 +374,29 @@ func (m *mockWSProtocolMessage) GetApiCollection() *spectypes.ApiCollection {
 		CollectionData: spectypes.CollectionData{
 			ApiInterface: "jsonrpc",
 		},
+		ParseDirectives: m.parseDirectives,
 	}
+}
+
+// subscriptionDirectives builds the SUBSCRIBE/UNSUBSCRIBE parse directives of a collection
+// from subscribe/unsubscribe api-name pairs, in the order a spec lists them: all the
+// subscribes, then all the unsubscribes, which is what every Substrate spec does.
+func subscriptionDirectives(pairs ...[2]string) []*spectypes.ParseDirective {
+	directives := make([]*spectypes.ParseDirective, 0, 2*len(pairs))
+	for _, pair := range pairs {
+		directives = append(directives, &spectypes.ParseDirective{
+			FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE, ApiName: pair[0],
+		})
+	}
+	for _, pair := range pairs {
+		if pair[1] == "" {
+			continue
+		}
+		directives = append(directives, &spectypes.ParseDirective{
+			FunctionTag: spectypes.FUNCTION_TAG_UNSUBSCRIBE, ApiName: pair[1],
+		})
+	}
+	return directives
 }
 
 func (m *mockWSProtocolMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
@@ -2807,14 +2840,17 @@ func TestResolveUnsubscribeMethod_UsesClientMethodName(t *testing.T) {
 			// the spec by name is what lands on the protocol message.
 			pm := &mockWSProtocolMessage{method: pair.unsubscribe}
 
-			got := resolveUnsubscribeMethod(pm, pair.subscribe)
+			got := resolveUnsubscribeMethod(pm, pair.unsubscribe)
 			assert.Equal(t, pair.unsubscribe, got,
 				"router must call upstream with the method the client invoked")
 
 			// MAG-3297 regression guard: deriving from the subscribe method cannot
 			// produce this name. If someone reinstates derivation here, the assertion
-			// above stops holding and this one says why.
-			assert.NotEqual(t, pair.unsubscribe, getUnsubscribeMethod(pair.subscribe),
+			// above stops holding and this one says why. The spec-backed resolution the
+			// teardown paths use does produce it (MAG-4278 item 1) — see
+			// TestResolveTeardownUnsubscribeMethod.
+			derived, _ := derivedUnsubscribeMethod(pair.subscribe)
+			assert.NotEqual(t, pair.unsubscribe, derived,
 				"derivation is expected to be wrong for Substrate — it is why this fix exists")
 		})
 	}
@@ -2834,9 +2870,11 @@ func TestResolveUnsubscribeMethod_EthAndTendermintUnchanged(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pm := &mockWSProtocolMessage{method: tc.unsubscribe}
-			assert.Equal(t, tc.unsubscribe, resolveUnsubscribeMethod(pm, tc.subscribe))
-			// These are the cases the old derivation hardcoded, so it agrees.
-			assert.Equal(t, tc.unsubscribe, getUnsubscribeMethod(tc.subscribe))
+			assert.Equal(t, tc.unsubscribe, resolveUnsubscribeMethod(pm, tc.unsubscribe))
+			// These are the two cases the legacy derivation names outright, so it agrees.
+			derived, ok := derivedUnsubscribeMethod(tc.subscribe)
+			assert.True(t, ok)
+			assert.Equal(t, tc.unsubscribe, derived)
 		})
 	}
 }
@@ -2852,17 +2890,17 @@ func (m *mockWSProtocolMessageNoApi) GetApi() *spectypes.Api { return nil }
 func TestResolveUnsubscribeMethod_FallsBackWithoutApi(t *testing.T) {
 	t.Run("nil api", func(t *testing.T) {
 		pm := &mockWSProtocolMessageNoApi{mockWSProtocolMessage{method: "chain_unsubscribeNewHeads"}}
-		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_subscribe"),
-			"with no api to read, fall back to derivation rather than sending an empty method")
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_unsubscribe"),
+			"with no api to read, fall back to the subscription's resolved method rather than sending an empty one")
 	})
 
 	t.Run("empty api name", func(t *testing.T) {
 		pm := &mockWSProtocolMessage{method: ""}
-		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_subscribe"))
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_unsubscribe"))
 	})
 
 	t.Run("nil message", func(t *testing.T) {
-		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(nil, "eth_subscribe"))
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(nil, "eth_unsubscribe"))
 	})
 
 	// The one row here whose input the parser can actually hand you. A method the
@@ -2875,7 +2913,7 @@ func TestResolveUnsubscribeMethod_FallsBackWithoutApi(t *testing.T) {
 	// the guard belongs to this function, not to its caller's invariant.
 	t.Run("synthesised default api name", func(t *testing.T) {
 		pm := &mockWSProtocolMessage{method: chainlib.DefaultApiName + "chain_unsubscribeNewHeads"}
-		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_subscribe"),
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_unsubscribe"),
 			"a Default-prefixed name is not a wire method")
 	})
 }
@@ -3105,6 +3143,22 @@ func TestCreateSubscriptionReply_SolanaNumeric(t *testing.T) {
 		"result must be the router id as a JSON number, not the upstream id and not a string")
 }
 
+// solanaSubscriptionDirectives are the SUBSCRIBE/UNSUBSCRIBE pairs the SOLANA spec declares
+// in its WS-ONLY collection, which is what the manager pairs a teardown method from.
+func solanaSubscriptionDirectives() []*spectypes.ParseDirective {
+	return subscriptionDirectives(
+		[2]string{"accountSubscribe", "accountUnsubscribe"},
+		[2]string{"blockSubscribe", "blockUnsubscribe"},
+		[2]string{"logsSubscribe", "logsUnsubscribe"},
+		[2]string{"programSubscribe", "programUnsubscribe"},
+		[2]string{"rootSubscribe", "rootUnsubscribe"},
+		[2]string{"signatureSubscribe", "signatureUnsubscribe"},
+		[2]string{"slotSubscribe", "slotUnsubscribe"},
+		[2]string{"slotsUpdatesSubscribe", "slotsUpdatesUnsubscribe"},
+		[2]string{"voteSubscribe", "voteUnsubscribe"},
+	)
+}
+
 // solanaSubscribeMessage builds the accountSubscribe the tests below drive the manager with.
 func solanaSubscribeMessage(t *testing.T, requestID int) *mockWSProtocolMessageWithRawData {
 	t.Helper()
@@ -3116,8 +3170,9 @@ func solanaSubscribeMessage(t *testing.T, requestID int) *mockWSProtocolMessageW
 	require.NoError(t, err)
 	return &mockWSProtocolMessageWithRawData{
 		mockWSProtocolMessage: mockWSProtocolMessage{
-			method: "accountSubscribe",
-			params: []interface{}{account},
+			method:          "accountSubscribe",
+			params:          []interface{}{account},
+			parseDirectives: solanaSubscriptionDirectives(),
 		},
 		rawData: body,
 	}
