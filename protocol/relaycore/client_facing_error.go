@@ -64,7 +64,9 @@ func NoAnswerStatus(cf *common.ClientFacingError) int {
 
 // replyProtocolError chooses the error the client's reply is built from (MAG-4218). An upstream's
 // answer beats any other error, a fault beats a throttle (a 503 next to two 429s is the 503), and
-// a transport failure is used only when every attempt failed in transport. Within a rank the
+// a transport failure is used only when every attempt failed in transport. Among transport
+// failures a timeout wins, so a refused connection next to a timeout is always the 504, never a
+// 502 on some runs: the majority pick breaks a tie at random (MAG-4481). Within a rank the
 // majority pick stands; a higher rank takes the first such error.
 func replyProtocolError(picked RelayError, all []RelayError) RelayError {
 	best, bestRank := picked, replyRank(picked)
@@ -80,16 +82,18 @@ func replyRank(relayError RelayError) int {
 	cf := clientFacingFromProtocolError(relayError.Err, relayError.LavaError)
 	switch {
 	case cf == nil:
-		return 1 // today's reply
+		return 2 // today's reply
 	case cf.UpstreamStatus == http.StatusTooManyRequests:
 		// The upstream answered, but only to say it is throttling us. Before MAG-4481 a 429
 		// carried no body and ranked as today's reply, so another upstream's fault won; keeping
 		// the body must not change that.
-		return 2
+		return 3
 	case cf.UpstreamStatus != 0:
-		return 3 // the upstream answered
+		return 4 // the upstream answered
+	case cf.TimedOut:
+		return 1 // no upstream answered in time: 504
 	default:
-		return 0 // no upstream answered
+		return 0 // no upstream answered: 502
 	}
 }
 

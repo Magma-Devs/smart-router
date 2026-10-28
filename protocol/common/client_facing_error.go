@@ -16,6 +16,7 @@ type ClientFacingError struct {
 	// TimedOut marks a no-answer that is a timeout: the reply is 504 and names Timeout.
 	TimedOut bool
 	// Timeout is the request's processing timeout, filled by the router once the relay has ended.
+	// It is the budget the request had, not how long the failed attempt took.
 	Timeout         time.Duration
 	RouterErrorCode uint32 // the registry classification, as metadata
 	RouterErrorName string
