@@ -63,8 +63,9 @@ func NoAnswerStatus(cf *common.ClientFacingError) int {
 }
 
 // replyProtocolError chooses the error the client's reply is built from (MAG-4218). An upstream's
-// answer beats any other error, and a transport failure is used only when every attempt failed in
-// transport. Within a rank the majority pick stands; a higher rank takes the first such error.
+// answer beats any other error, a fault beats a throttle (a 503 next to two 429s is the 503), and
+// a transport failure is used only when every attempt failed in transport. Within a rank the
+// majority pick stands; a higher rank takes the first such error.
 func replyProtocolError(picked RelayError, all []RelayError) RelayError {
 	best, bestRank := picked, replyRank(picked)
 	for _, candidate := range all {
@@ -80,8 +81,13 @@ func replyRank(relayError RelayError) int {
 	switch {
 	case cf == nil:
 		return 1 // today's reply
+	case cf.UpstreamStatus == http.StatusTooManyRequests:
+		// The upstream answered, but only to say it is throttling us. Before MAG-4481 a 429
+		// carried no body and ranked as today's reply, so another upstream's fault won; keeping
+		// the body must not change that.
+		return 2
 	case cf.UpstreamStatus != 0:
-		return 2 // the upstream answered
+		return 3 // the upstream answered
 	default:
 		return 0 // no upstream answered
 	}
