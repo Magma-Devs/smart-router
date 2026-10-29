@@ -298,7 +298,7 @@ func (e *Endpoint) IsDirectRPC() bool {
 // relay can use it: the JSON-RPC and REST relay paths require an HTTPDirectRPCDoer and
 // refuse a websocket connection outright, and the gRPC path needs a gRPC one. The url is
 // there for subscriptions, which never come through endpoint selection — they are served
-// by DirectWSSubscriptionManager from its own ws url list (collectWSEndpoints).
+// by DirectWSSubscriptionManager from its own ws url list (collectEndpoints).
 //
 // While the https sibling is enabled this never shows, because selection returns the first
 // enabled endpoint and the https url is listed first. Once that sibling is backed off for
