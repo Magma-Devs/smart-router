@@ -13,6 +13,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9/auth"
 )
 
 // Topology selects how the client reaches the backend.
@@ -667,14 +668,19 @@ func (cfg Config) standaloneOptions(addrs []string, tlsCfg *tls.Config, provider
 		// letting a slow backend inject latency far past that budget.
 		ContextTimeoutEnabled: true,
 	}
-	// A typed-nil provider must never reach the interface field: go-redis
-	// would call it and nil-panic on the first connection.
-	if provider != nil {
-		opts.StreamingCredentialsProvider = provider
-	} else {
-		opts.Username, opts.Password = cfg.Username, cfg.Password
-	}
+	opts.StreamingCredentialsProvider, opts.Username, opts.Password = cfg.clientAuth(provider)
 	return opts
+}
+
+// clientAuth is the credential rule of the standalone and cluster clients: a
+// file-backed credential rides the streaming provider, a static one travels in
+// the options. A typed-nil provider must never reach the interface field:
+// go-redis would call it and nil-panic on the first connection.
+func (cfg Config) clientAuth(provider *StreamingProvider) (streaming auth.StreamingCredentialsProvider, username, password string) {
+	if provider != nil {
+		return provider, "", ""
+	}
+	return nil, cfg.Username, cfg.Password
 }
 
 // failoverOptions carries data-node credentials through
@@ -712,7 +718,7 @@ func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source Cre
 }
 
 // clusterOptions builds the cluster client options; the credential rule is
-// standaloneOptions's.
+// clientAuth's, as for standaloneOptions.
 func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *StreamingProvider, tracker *endpointTracker) *redis.ClusterOptions {
 	opts := &redis.ClusterOptions{
 		Dialer:       trackingDialer(tlsCfg, cfg.dialTimeout(), tracker, false),
@@ -725,11 +731,7 @@ func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *S
 		// See standaloneOptions: the caller's deadline must bound socket I/O.
 		ContextTimeoutEnabled: true,
 	}
-	if provider != nil {
-		opts.StreamingCredentialsProvider = provider
-	} else {
-		opts.Username, opts.Password = cfg.Username, cfg.Password
-	}
+	opts.StreamingCredentialsProvider, opts.Username, opts.Password = cfg.clientAuth(provider)
 	return opts
 }
 

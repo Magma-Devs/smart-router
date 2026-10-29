@@ -382,13 +382,7 @@ const (
 
 // ClampStickyTTL bounds a requested sticky TTL to [MinStickyTTL, MaxStickyTTL].
 func ClampStickyTTL(requested time.Duration) time.Duration {
-	if requested < MinStickyTTL {
-		return MinStickyTTL
-	}
-	if requested > MaxStickyTTL {
-		return MaxStickyTTL
-	}
-	return requested
+	return min(max(requested, MinStickyTTL), MaxStickyTTL)
 }
 
 // GetSticky reads the fleet's sticky pin for one session id.
@@ -436,13 +430,7 @@ const (
 // ClampEndpointObservationTTL bounds a requested TTL to
 // [MinEndpointObservationTTL, MaxEndpointObservationTTL].
 func ClampEndpointObservationTTL(requested time.Duration) time.Duration {
-	if requested < MinEndpointObservationTTL {
-		return MinEndpointObservationTTL
-	}
-	if requested > MaxEndpointObservationTTL {
-		return MaxEndpointObservationTTL
-	}
-	return requested
+	return min(max(requested, MinEndpointObservationTTL), MaxEndpointObservationTTL)
 }
 
 // PublishEndpointObservation records one pod's successful poll of an upstream endpoint so peer
