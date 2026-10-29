@@ -4,6 +4,7 @@ import (
 	context "context"
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -323,7 +324,42 @@ func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) Decis
 		Summary:       sm.getResultsSummary(),
 		IsTickerHedge: isTickerHedge,
 		IsDefaultApi:  sm.protocolMessage.IsDefaultApi(),
+		Pinned:        PinnedByDirectives(sm.protocolMessage.GetDirectiveHeaders()),
 	}
+}
+
+// PinnedByDirectives reports whether the caller pinned the request to one upstream with
+// lava-select-provider or lava-stickiness. Read from the request's ORIGINAL headers: a message
+// rebuilt for an archive toggle drops the pin headers on purpose (preserveRetrySafeDirectives),
+// and the pin is a property of the request, not of one attempt. Presence is what counts, as in
+// resolvePinDirectives. A request that cross-validation overrides is not pinned in effect, so
+// callers check the selection first.
+//
+// A pin sent with lava-pin-allow-retry: true is not pinned in this sense: the caller asked for the
+// pinned provider on the first attempt only and allowed retries and hedges elsewhere, so the
+// policy and the consistency gate treat it like an unpinned request (see PinAllowsRetry).
+func PinnedByDirectives(directiveHeaders map[string]string) bool {
+	_, selected := directiveHeaders[common.SELECT_PROVIDER_HEADER_NAME]
+	_, sticky := directiveHeaders[common.STICKINESS_HEADER_NAME]
+	return (selected || sticky) && !PinAllowsRetry(directiveHeaders)
+}
+
+// PinAllowsRetry reports whether the caller sent lava-pin-allow-retry: true. Only the value "true"
+// (any case) turns it on, unlike the presence-only lava-force-cache-refresh: "false" must not
+// silently mean yes. With it, a pin from lava-select-provider or lava-stickiness applies to the
+// first attempt only (the pre-MAG-2280 rule, now opt-in): a retry or a hedge may go to another
+// provider and is counted in Lava-Retries, and the session's pin itself is never moved.
+func PinAllowsRetry(directiveHeaders map[string]string) bool {
+	return strings.EqualFold(strings.TrimSpace(directiveHeaders[common.PIN_ALLOW_RETRY_HEADER_NAME]), "true")
+}
+
+// PinnedUpstreamUnservable reports a selection error that names the pin: the pinned upstream is
+// unknown, blocked, busy, or too far behind the chain tip (MAG-4123). Resending the same pinned
+// request changes none of that, so the policy stops on it at once instead of after
+// SendRelayAttempts identical refusals, and, for the consistency case, before a resend could run
+// selection without the pin.
+func PinnedUpstreamUnservable(err error) bool {
+	return errors.Is(err, lavasession.SelectedProviderUnavailableError) || errors.Is(err, lavasession.SelectedProviderAlreadyFailedError)
 }
 
 func (sm *UnifiedRelayStateMachine) GetDebugState() bool {
@@ -506,6 +542,10 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 								utils.LogAttr("stillInFlight", stillInFlight),
 							)
 						}
+					} else if PinnedUpstreamUnservable(err) {
+						// A pinned request whose upstream cannot take it: unknown, blocked, busy, or too far
+						// behind the chain tip (MAG-4123). The policy stops at once; nothing was sent.
+						sm.recordStopReason("PinnedProviderUnavailable")
 					} else if sm.usedProviders.BatchNumber() == 0 && sm.policy.GetConsecutiveBatchErrors() == sm.config.SendRelayAttempts+1 {
 						sm.recordStopReason("FirstMessageFailed")
 						utils.LavaFormatWarning("Failed Sending First Message", err, utils.LogAttr("consecutive errors", sm.policy.GetConsecutiveBatchErrors()), utils.LogAttr("GUID", sm.ctx))

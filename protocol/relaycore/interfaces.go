@@ -135,6 +135,10 @@ type DecisionInput struct {
 	// IsDefaultApi is true when the request names a method the spec does not list: the parser
 	// forwarded it as a Default- API only because the spec cannot rule it out.
 	IsDefaultApi bool
+	// Pinned is true when the caller pinned the request to one upstream with lava-select-provider or
+	// lava-stickiness. A pinned request is answered by that upstream or not at all: Decide never
+	// retries or hedges it on another one (MAG-2280, MAG-4123).
+	Pinned bool
 }
 
 // RelayPolicyInf is the interface that the policy engine must implement.

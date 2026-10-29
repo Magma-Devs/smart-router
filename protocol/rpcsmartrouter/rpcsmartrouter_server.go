@@ -2558,6 +2558,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 
 	// If ALL sessions failed consistency validation, return error to trigger retry with different providers
 	if filterErr != nil {
+		// Unless the request is pinned: then there is no different provider it may go to, and the
+		// retry this error starts used to drop the pin and serve the request from a fresher node
+		// with Lava-Retries 0, silently (MAG-4123). The request fails instead, naming the lag.
+		// Cross-validation overrides pins, so it keeps the retry.
+		if relayProcessor.GetSelection() != relaycore.CrossValidation && relaycore.PinnedByDirectives(protocolMessage.GetDirectiveHeaders()) {
+			return pinnedConsistencyRejection(ctx, failedSessions, lags)
+		}
 		// This is a request-time candidate-set failure (the whole batch was filtered out before any relay
 		// ran), so carry the structured reason on the shared processor for the failure-reason header — same
 		// as the other fail-fast sites. The error itself is left unchanged. If a later retry batch succeeds,
@@ -4932,15 +4939,27 @@ func (rpcss *RPCSmartRouterServer) cachedReplyDirectives(protocolMessage chainli
 	return rpcss.replyHeaderDirectives(), collectionDirectives
 }
 
-// resolvePinDirectives returns the lava-select-provider and lava-stickiness directives,
-// honored only on the first attempt. On a retry (firstAttempt == false) both are returned
-// empty so the relay falls through to a different provider instead of re-pinning the one
-// that just failed — otherwise a pinned provider that returned a retryable node error gets
-// re-selected, or the retry dead-ends on "Selected provider cannot be retried"
-// (MAG-2228). firstAttempt is BatchNumber()==0, which stays 0 when attempt 1 never reached a
-// provider (e.g. PairingListEmpty), so the pin is correctly re-honored in that case.
+// resolvePinDirectives returns the lava-select-provider and lava-stickiness directives.
+//
+// Honoured on every attempt. A pinned request is answered by the pinned upstream or fails with
+// that upstream's error: the retry policy never retries or hedges it on another one (see
+// Policy.Decide, "Pinned"), so a second batch cannot normally exist. Should one ever be sent,
+// the pin still applies and selection refuses the already-tried upstream loudly
+// (SelectedProviderAlreadyFailedError) rather than quietly serving the request elsewhere.
+//
+// MAG-2228 had this drop the pin on retries, so a pinned upstream's retryable error failed over
+// to a peer. That made a sticky session straddle two nodes mid-sequence: for the head-then-fetch
+// pattern the header exists for, the exact false gap it was meant to prevent, since the peer is
+// not checked to have reached the block. And it left the pin on the failing node for the next
+// request. MAG-2280 settled the contract the other way; MAG-4123 is the same rule for the
+// router's own consistency gate.
+//
+// The caller can ask for the old first-attempt-only pin with lava-pin-allow-retry: true
+// (relaycore.PinAllowsRetry). Then a later attempt (firstAttempt false: a batch has already been
+// dispatched) reads no pin, so a retry or hedge is free to reach another provider. firstAttempt
+// stays true while nothing has been dispatched, so a resend after a selection failure keeps it.
 func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]string, firstAttempt bool) (selectedProvider, stickiness string) {
-	if !firstAttempt {
+	if !firstAttempt && relaycore.PinAllowsRetry(directiveHeaders) {
 		return "", ""
 	}
 	if id, ok := directiveHeaders[common.STICKINESS_HEADER_NAME]; ok {
@@ -4952,6 +4971,24 @@ func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]strin
 		utils.LavaFormatTrace("found provider selection header", utils.LogAttr("provider", selectedProvider), utils.LogAttr("GUID", ctx))
 	}
 	return selectedProvider, stickiness
+}
+
+// pinnedConsistencyRejection is the terminal error for a pinned request whose upstream the
+// consistency gate judged too far behind the chain tip (MAG-4123). It wraps
+// SelectedProviderUnavailableError, "cannot serve this request", which the policy stops on at
+// once (relaycore.PinnedUpstreamUnservable), so no resend runs selection without the pin. The
+// client gets an error rather than another node's answer. The session keeps its choice: a
+// lagging upstream is not a dead one, and the health machinery, not this gate, decides when a
+// stalled upstream leaves the pool and with it the pin.
+func pinnedConsistencyRejection(ctx context.Context, failed lavasession.ConsumerSessionsMap, lags map[string]consistencyLag) error {
+	attrs := []utils.Attribute{utils.LogAttr("GUID", ctx)}
+	for provider := range failed {
+		attrs = append(attrs, utils.LogAttr("provider", provider))
+		if lag, ok := lags[provider]; ok {
+			attrs = append(attrs, utils.LogAttr("lag", lag.lag), utils.LogAttr("threshold", lag.threshold))
+		}
+	}
+	return utils.LavaFormatWarning("pinned provider is too far behind the chain tip; a pinned request is not served by another provider", lavasession.SelectedProviderUnavailableError, attrs...)
 }
 
 // crossValidationOverridesPin reports whether cross-validation displaces the caller's
@@ -5291,9 +5328,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	usedProviders := relayProcessor.GetUsedProviders()
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 
-	// MAG-2228: honor lava-select-provider / lava-stickiness only on the FIRST attempt.
-	// On a retry (a provider batch has already been dispatched, so BatchNumber > 0) the
-	// relay must be free to fall through to a different provider. See resolvePinDirectives.
+	// lava-select-provider / lava-stickiness apply to every attempt: a pinned request is never
+	// served by another provider (MAG-2280, MAG-4123), unless the caller sent
+	// lava-pin-allow-retry: true, which keeps the pin to the first attempt. See resolvePinDirectives.
 	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders, usedProviders.BatchNumber() == 0)
 
 	// Dropped here rather than inside lavasession so the rest of this call stays coherent: the

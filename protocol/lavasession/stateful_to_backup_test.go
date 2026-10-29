@@ -268,7 +268,7 @@ func TestStatefulSelection_DoesNotMutateTheSharedAddressSlice(t *testing.T) {
 			defer wg.Done()
 			csm.lock.RLock()
 			defer csm.lock.RUnlock()
-			_, _ = csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, cuForFirstRequest, servicedBlockNumber, "", nil, common.CONSISTENCY_SELECT_ALL_PROVIDERS, "", "")
+			_, _ = csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, nil, cuForFirstRequest, servicedBlockNumber, "", nil, common.CONSISTENCY_SELECT_ALL_PROVIDERS, "", "")
 		}()
 		go func() {
 			defer wg.Done()
