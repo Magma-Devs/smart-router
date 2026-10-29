@@ -4,7 +4,7 @@ go 1.26.10
 
 require (
 	github.com/ethereum/go-ethereum v1.17.10
-	github.com/gofiber/fiber/v2 v2.52.15
+	github.com/gofiber/fiber/v2 v2.52.16
 	github.com/gofiber/websocket/v2 v2.2.1
 	github.com/gogo/protobuf v1.3.3
 	github.com/spf13/cast v1.10.0 // indirect
