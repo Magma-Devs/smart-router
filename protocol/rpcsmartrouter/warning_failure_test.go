@@ -18,7 +18,7 @@ import (
 func TestValidateProviderCollections_AWarningIsPublishedAndSwitchesNothingOff(t *testing.T) {
 	up := newFakeUpstreams(t)
 	parser := liveParser(t, "SOLANA", true)
-	provider := staticProvider("SOLANA", commonlib.NodeUrl{Url: up.httpURL("/n/" + upSolana)})
+	provider := staticProvider("SOLANA", commonlib.NodeUrl{Url: up.httpURL("/n/" + upSolana)}, commonlib.NodeUrl{Url: up.wsURL("/n/" + upSolana)})
 
 	admission, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
 	require.NoError(t, err)
