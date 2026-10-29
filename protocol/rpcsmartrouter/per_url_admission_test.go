@@ -257,9 +257,9 @@ func TestApplyReverification_ARateLimitedUrlBacksOffAndChangesNothing(t *testing
 	require.Empty(t, promoted, "nothing moved, so nothing is rebuilt")
 	require.False(t, admissions.admissionFor(provider).Any())
 	archive, throttled := provider.NodeUrls[0].Url, provider.NodeUrls[1].Url
-	require.True(t, holdoffs.HeldOff(provider.Name, throttled), "the vendor's limit is honoured on the url that answered 429")
-	require.False(t, holdoffs.HeldOff(provider.Name, archive), "the first url answered, so relays keep going to it")
-	_, held := holdoffs.ProviderReadyAt(provider.Name, []string{archive, throttled})
+	require.True(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), throttled), "the vendor's limit is honoured on the url that answered 429")
+	require.False(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), archive), "the first url answered, so relays keep going to it")
+	_, held := holdoffs.ProviderReadyAt(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), []string{archive, throttled})
 	require.False(t, held, "relay selection still has the archive url")
 }
 
@@ -291,9 +291,9 @@ func TestApplyReverification_ARateLimitBehindAWebsocketFirstUrlHoldsTheRelayUrl(
 	require.Contains(t, collectNames(next), provider.Name)
 	require.Empty(t, demoted)
 	socket, throttled, archive := provider.NodeUrls[0].Url, provider.NodeUrls[1].Url, provider.NodeUrls[2].Url
-	require.True(t, holdoffs.HeldOff(provider.Name, throttled), "the https url that answered 429 is held")
-	require.False(t, holdoffs.HeldOff(provider.Name, socket))
-	require.False(t, holdoffs.HeldOff(provider.Name, archive))
+	require.True(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), throttled), "the https url that answered 429 is held")
+	require.False(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), socket))
+	require.False(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), archive))
 }
 
 // A 429 on one add-on's own check (here trace_block, a premium method with its own limit)
@@ -324,7 +324,7 @@ func TestApplyReverification_AnAddonsOwnRateLimitHoldsNothing(t *testing.T) {
 	require.Contains(t, collectNames(next), provider.Name)
 	require.Empty(t, demoted)
 	require.Contains(t, up.methods("http", "/q/"+upTraceRate), "trace_block", "the add-on's check was asked, or this test proves nothing")
-	_, held := holdoffs.ProviderReadyAt(provider.Name, holdoffURLKeys(provider))
+	_, held := holdoffs.ProviderReadyAt(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), holdoffURLKeys(provider))
 	require.False(t, held, "relay selection still serves the provider")
 	services, keep := admissions.admissionFor(provider).AdmittedServices(provider.NodeUrls[1])
 	require.True(t, keep)

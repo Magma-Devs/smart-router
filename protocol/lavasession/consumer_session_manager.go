@@ -1879,7 +1879,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 			if sessionWithProvider.lastChance {
 				pickMode = endpointPickLendDisabled
 			}
-			connected, endpoints, _, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, pickMode, false, addon, extensionNames, internalPath, csm.rateLimitHoldoff)
+			connected, endpoints, _, err := consumerSessionsWithProvider.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, pickMode, false, addon, extensionNames, internalPath, csm.urlHeldOff(providerAddress))
 			if err != nil {
 				// verify err is AllProviderEndpointsDisabled and report.
 				if errors.Is(err, AllProviderEndpointsDisabledError) {
@@ -2253,7 +2253,26 @@ func (csm *ConsumerSessionManager) providerHeldOff(address string, addon string,
 	if provider := csm.providerByAddress(address); provider != nil {
 		urls = provider.relayURLs(addon, extensions, internalPath)
 	}
-	return csm.rateLimitHoldoff.ProviderReadyAt(address, urls)
+	return csm.rateLimitHoldoff.ProviderReadyAt(csm.holdoffKey(address), urls)
+}
+
+// holdoffKey is the rate-limit registry key of the provider at address on this chain and
+// api-interface (holdoff.ProviderKey), the key the relay path records its 429s under.
+func (csm *ConsumerSessionManager) holdoffKey(address string) string {
+	if csm.rpcEndpoint == nil {
+		return holdoff.ProviderKey("", "", address)
+	}
+	return holdoff.ProviderKey(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, address)
+}
+
+// urlHeldOff tells the url walk of the provider at address which of its urls are held off
+// after a rate limit; nil without a registry, which keeps the walk in config order.
+func (csm *ConsumerSessionManager) urlHeldOff(address string) func(url string) bool {
+	if csm.rateLimitHoldoff == nil {
+		return nil
+	}
+	key := csm.holdoffKey(address)
+	return func(url string) bool { return csm.rateLimitHoldoff.HeldOff(key, url) }
 }
 
 // Get a valid provider address.

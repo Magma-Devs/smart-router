@@ -12,6 +12,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -496,7 +497,7 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		FlatPollInterval: m.flatPollInterval,
 		// Rate-limit hold-off keys: the relay path's provider name (read only) and this url,
 		// which the tracker's own 429s are recorded under (MAG-4165).
-		RateLimitProvider: providerName,
+		RateLimitProvider: holdoff.ProviderKey(m.chainID, m.apiInterface, providerName),
 		RateLimitURL:      endpointURL,
 		// Traffic gate (Topic B): the dedicated poll skips its ENTIRE cycle when a fresh
 		// relay-harvested tip already covers the endpoint. The gate lives on the ChainTracker

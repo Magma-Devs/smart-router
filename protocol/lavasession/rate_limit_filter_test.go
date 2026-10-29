@@ -26,7 +26,7 @@ func filterFixture(t *testing.T) (*ConsumerSessionManager, *holdoff.Registry, *t
 // records one per url it dialed: a provider is held only while each of its urls is (MAG-4732).
 func holdOffProvider(csm *ConsumerSessionManager, address string, retryAfter time.Duration) {
 	for _, endpoint := range csm.providerByAddress(address).Endpoints {
-		csm.rateLimitHoldoff.RecordRateLimit(address, endpoint.NetworkAddress, retryAfter)
+		csm.rateLimitHoldoff.RecordRateLimit(csm.holdoffKey(address), endpoint.NetworkAddress, retryAfter)
 	}
 }
 
@@ -44,7 +44,7 @@ func TestFilterRateLimitedProviders_NilRegistryPassesThrough(t *testing.T) {
 
 func TestFilterRateLimitedProviders_DropsHeldProviders(t *testing.T) {
 	csm, reg, _ := filterFixture(t)
-	reg.RecordRateLimit("b", "url-b", 5*time.Minute)
+	reg.RecordRateLimit(csm.holdoffKey("b"), "url-b", 5*time.Minute)
 
 	got := csm.filterRateLimitedProviders(context.Background(), []string{"a", "b", "c"}, nil, "", nil, nil)
 	require.ElementsMatch(t, []string{"a", "c"}, got)
@@ -52,7 +52,7 @@ func TestFilterRateLimitedProviders_DropsHeldProviders(t *testing.T) {
 
 func TestFilterRateLimitedProviders_ExpiredHoldIsChoosableAgain(t *testing.T) {
 	csm, reg, now := filterFixture(t)
-	reg.RecordRateLimit("b", "url-b", time.Minute)
+	reg.RecordRateLimit(csm.holdoffKey("b"), "url-b", time.Minute)
 	*now = now.Add(2 * time.Minute)
 
 	got := csm.filterRateLimitedProviders(context.Background(), []string{"a", "b"}, nil, "", nil, nil)
@@ -63,9 +63,9 @@ func TestFilterRateLimitedProviders_ExpiredHoldIsChoosableAgain(t *testing.T) {
 // must still be served, and the customer is never answered with a synthesized 429.
 func TestFilterRateLimitedProviders_AllHeldKeepsSoonestToExpire(t *testing.T) {
 	csm, reg, _ := filterFixture(t)
-	reg.RecordRateLimit("a", "url-a", 10*time.Minute)
-	reg.RecordRateLimit("b", "url-b", 2*time.Minute)
-	reg.RecordRateLimit("c", "url-c", 30*time.Minute)
+	reg.RecordRateLimit(csm.holdoffKey("a"), "url-a", 10*time.Minute)
+	reg.RecordRateLimit(csm.holdoffKey("b"), "url-b", 2*time.Minute)
+	reg.RecordRateLimit(csm.holdoffKey("c"), "url-c", 30*time.Minute)
 
 	got := csm.filterRateLimitedProviders(context.Background(), []string{"a", "b", "c"}, nil, "", nil, nil)
 	require.Equal(t, []string{"b"}, got)
@@ -75,8 +75,8 @@ func TestFilterRateLimitedProviders_AllHeldKeepsSoonestToExpire(t *testing.T) {
 // are already ignored for this request, the soonest-to-expire held one is kept.
 func TestFilterRateLimitedProviders_IgnoredReadyDoesNotCount(t *testing.T) {
 	csm, reg, _ := filterFixture(t)
-	reg.RecordRateLimit("b", "url-b", 2*time.Minute)
-	reg.RecordRateLimit("c", "url-c", 10*time.Minute)
+	reg.RecordRateLimit(csm.holdoffKey("b"), "url-b", 2*time.Minute)
+	reg.RecordRateLimit(csm.holdoffKey("c"), "url-c", 10*time.Minute)
 	ignored := map[string]struct{}{"a": {}}
 
 	got := csm.filterRateLimitedProviders(context.Background(), []string{"a", "b", "c"}, ignored, "", nil, nil)
@@ -86,8 +86,8 @@ func TestFilterRateLimitedProviders_IgnoredReadyDoesNotCount(t *testing.T) {
 // A held provider that is also ignored this request cannot be the fallback.
 func TestFilterRateLimitedProviders_HeldAndIgnoredCannotFallBack(t *testing.T) {
 	csm, reg, _ := filterFixture(t)
-	reg.RecordRateLimit("a", "url-a", 2*time.Minute)
-	reg.RecordRateLimit("b", "url-b", 10*time.Minute)
+	reg.RecordRateLimit(csm.holdoffKey("a"), "url-a", 2*time.Minute)
+	reg.RecordRateLimit(csm.holdoffKey("b"), "url-b", 10*time.Minute)
 	ignored := map[string]struct{}{"a": {}}
 
 	got := csm.filterRateLimitedProviders(context.Background(), []string{"a", "b"}, ignored, "", nil, nil)

@@ -66,18 +66,18 @@ func TestReverify_AnswerAfterHoldoffClears(t *testing.T) {
 	// Cycle 1: 429 → held off for the initial penalty.
 	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 100)
 	require.Equal(t, 1, probes)
-	require.True(t, reg.HeldOff("tatum", "tatum"))
+	require.True(t, reg.HeldOff(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
 	// Cycle 2, past expiry: probed again, answers cleanly → hold-off and strikes cleared.
 	now = start.Add(holdoff.InitialHoldoff + time.Second)
 	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 101)
 	require.Equal(t, 2, probes)
-	require.False(t, reg.HeldOff("tatum", "tatum"))
+	require.False(t, reg.HeldOff(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
 	// Cycle 3: a fresh 429 starts from the initial penalty again, proving the reset.
 	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
 	require.Equal(t, 3, probes)
-	require.Equal(t, now.Add(holdoff.InitialHoldoff), reg.ReadyAt("tatum", "tatum"))
+	require.Equal(t, now.Add(holdoff.InitialHoldoff), reg.ReadyAt(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
 	require.Contains(t, collectNames(active), "tatum", "rate-limited cycles never demoted")
 }
@@ -100,7 +100,7 @@ func TestReverify_RetryAfterFloorsTheHoldoff(t *testing.T) {
 	}
 
 	runCycles(t, inputs, map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("tatum")}, 1)
-	require.Equal(t, now.Add(5*time.Minute), reg.ReadyAt("tatum", "tatum"))
+	require.Equal(t, now.Add(5*time.Minute), reg.ReadyAt(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 }
 
 // A probe that got no answer is not an answer (MAG-4165). A gateway enforcing a ban often drops
@@ -128,7 +128,7 @@ func TestReverify_NoAnswerKeepsTheStrikes(t *testing.T) {
 	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
 
 	active, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 100)
-	require.True(t, reg.HeldOff("tatum", "tatum"))
+	require.True(t, reg.HeldOff(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 
 	// Past expiry the probe goes out and the connection drops: no answer, so the strike stands.
 	now = start.Add(holdoff.InitialHoldoff + time.Second)
@@ -138,7 +138,7 @@ func TestReverify_NoAnswerKeepsTheStrikes(t *testing.T) {
 	// The next refusal is a second strike — twice the initial penalty — not a fresh first one.
 	_, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
 	require.Equal(t, 3, probes)
-	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt("tatum", "tatum"))
+	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt(holdoff.ProviderKey("TEST", "jsonrpc", "tatum"), "tatum"))
 }
 
 // The same holds for the url the hold-off is keyed by when the provider passes on its others. Each
@@ -161,7 +161,7 @@ func TestReverify_ProviderPassingOnItsOtherUrlKeepsTheDeadUrlsStrikes(t *testing
 	reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
 	urlKey := holdoffURLKeys(provider)[0]
 	require.Equal(t, refusing, urlKey, "the hold-off is keyed by the refusing url")
-	reg.RecordRateLimit(provider.Name, urlKey, 0)
+	reg.RecordRateLimit(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), urlKey, 0)
 
 	admissions := newAdmissionRegistry()
 	inputs := &chainReverifyInputs{
@@ -182,6 +182,6 @@ func TestReverify_ProviderPassingOnItsOtherUrlKeepsTheDeadUrlsStrikes(t *testing
 	require.Contains(t, collectNames(next), provider.Name, "the provider serves from its second url")
 
 	// The first url's next refusal is a second strike, not a fresh first one.
-	reg.RecordRateLimit(provider.Name, urlKey, 0)
-	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt(provider.Name, urlKey))
+	reg.RecordRateLimit(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), urlKey, 0)
+	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), urlKey))
 }

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -1294,21 +1293,21 @@ func (cswp *ConsumerSessionsWithProvider) relayURLs(addon string, extensions []s
 }
 
 // endpointsByHoldoffLocked is cswp.Endpoints with every url held off after a rate limit moved to
-// the back; both groups keep config order. Nothing is dropped: when every url that fits the
-// request is held, one is still handed out, as filterRateLimitedProviders keeps a held provider
-// rather than leave a request with nowhere to go (MAG-4732). The held urls need no order of their
-// own: two held at once escalate to the provider name, which holds them all until the longest
-// ends. A nil registry keeps config order.
+// the back (heldOff says which); both groups keep config order. Nothing is dropped: when every
+// url that fits the request is held, one is still handed out, as filterRateLimitedProviders keeps
+// a held provider rather than leave a request with nowhere to go (MAG-4732). The held urls need no
+// order of their own: two held at once escalate to the provider, which holds them all until the
+// longest ends. A nil heldOff keeps config order.
 //
 // cswp.Lock must be held.
-func (cswp *ConsumerSessionsWithProvider) endpointsByHoldoffLocked(holdoffs *holdoff.Registry) []*Endpoint {
-	if holdoffs == nil {
+func (cswp *ConsumerSessionsWithProvider) endpointsByHoldoffLocked(heldOff func(url string) bool) []*Endpoint {
+	if heldOff == nil {
 		return cswp.Endpoints
 	}
 	free := make([]*Endpoint, 0, len(cswp.Endpoints))
 	var held []*Endpoint
 	for _, endpoint := range cswp.Endpoints {
-		if holdoffs.HeldOff(cswp.PublicLavaAddress, endpoint.NetworkAddress) {
+		if heldOff(endpoint.NetworkAddress) {
 			held = append(held, endpoint)
 		} else {
 			free = append(free, endpoint)
@@ -1327,7 +1326,7 @@ func (cswp *ConsumerSessionsWithProvider) endpointsByHoldoffLocked(holdoffs *hol
 // on the root url.
 //
 // mode says what happens to an endpoint whose Enabled flag is off (endpointPickMode).
-func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, mode endpointPickMode, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string, holdoffs *holdoff.Registry) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
+func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, mode endpointPickMode, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string, heldOff func(url string) bool) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
 	getConnectionFromConsumerSessionsWithProvider := func(ctx context.Context) (connected bool, endpointPtr []*EndpointAndChosenConnection, allDisabled bool) {
 		endpoints := make([]*EndpointAndChosenConnection, 0)
 		cswp.Lock.Lock()
@@ -1335,7 +1334,7 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 		restrictToPath := cswp.restrictsToPathLocked(internalPath)
 		// A url held off after a rate limit goes to the back of the list, so a free sibling is
 		// handed out first; nothing is skipped for it (endpointsByHoldoffLocked).
-		for _, endpoint := range cswp.endpointsByHoldoffLocked(holdoffs) {
+		for _, endpoint := range cswp.endpointsByHoldoffLocked(heldOff) {
 			if restrictToPath && !endpoint.ServesInternalPath(*internalPath) {
 				continue
 			}

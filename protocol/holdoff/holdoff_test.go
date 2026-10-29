@@ -147,6 +147,23 @@ func TestUnknownIsNotHeldOff(t *testing.T) {
 	require.True(t, r.ReadyAt("vendor", "u").IsZero())
 }
 
+// Escalation belongs to one entry: the same name on another api-interface or chain is another
+// key, and two held urls of one entry leave it free (MAG-4732, review of #618).
+func TestProviderKey_EscalationStaysOnOneEntry(t *testing.T) {
+	r, _ := newTestRegistry(t0)
+	jsonrpc := ProviderKey("ETH1", "jsonrpc", "chainstack")
+	r.RecordRateLimit(jsonrpc, "a", 5*time.Minute)
+	r.RecordRateLimit(jsonrpc, "b", 5*time.Minute) // escalates the jsonrpc entry
+
+	_, held := r.ProviderReadyAt(jsonrpc, []string{"a", "b", "c"})
+	require.True(t, held, "the entry's free url c is held by the escalation")
+	_, held = r.ProviderReadyAt(ProviderKey("ETH1", "rest", "chainstack"), []string{"rest-url"})
+	require.False(t, held)
+	_, held = r.ProviderReadyAt(ProviderKey("BASE", "jsonrpc", "chainstack"), []string{"base-url"})
+	require.False(t, held)
+	require.Empty(t, ProviderKey("ETH1", "jsonrpc", ""), "no provider stays no provider")
+}
+
 func TestProviderReadyAt(t *testing.T) {
 	t.Run("unknown provider is not held", func(t *testing.T) {
 		r, _ := newTestRegistry(t0)

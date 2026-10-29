@@ -9,10 +9,12 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
 ## Semantics
 
 - **Tiered keying.** A 429 holds off the endpoint URL that returned it. When 2 distinct
-  URLs of one provider name are held off at once, the hold-off escalates to the provider
-  name — a vendor cap is account-wide, and per-URL keying alone would let the process
-  keep hammering the account through its other chains. The provider-wide hold-off ends
-  when its longest-held member does.
+  URLs of one provider are held off at once, the hold-off escalates to the provider — a
+  vendor cap is account-wide, and per-URL keying alone would let the process keep
+  hammering the account through the provider's other URLs. The provider is one configured
+  entry: its name on one chain and api-interface (`holdoff.ProviderKey`), so an escalation
+  holds that entry and not the same name on other chains or interfaces (MAG-4732). The
+  provider-wide hold-off ends when its longest-held member does.
 - **Retry-After is the floor.** When the upstream said how long to wait
   (`common.RetryAfterFrom` on the typed error), the hold-off is at least that long,
   bounded at 1h including jitter. Otherwise a per-URL exponential: 30s doubling per
@@ -79,7 +81,7 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   it next has a URL worth trying. `urls` are the provider's urls that could serve the request
   being placed (usable, able to answer a relay, serving its add-on, extensions and internal
   path): the caller knows them, the registry only knows URLs that answered 429. The provider
-  is held while its name is escalated or while every one of `urls` is held; a url with no
+  is held while it is escalated or while every one of `urls` is held; a url with no
   entry is free (MAG-4732).
 
 ## Consumer map
@@ -102,7 +104,7 @@ off" means on its path. This table is the catalog; add a row when wiring a new c
 The registry emits its own events, so every consumer is covered without wiring
 (labels, buckets, and PromQL recipes in [METRICS.md](METRICS.md#rate-limit-hold-off)):
 
-- `smartrouter_rate_limit_holdoffs_total{provider, event}` — `recorded` (a 429 held an
+- `smartrouter_rate_limit_holdoffs_total{provider, event}` (`provider` is the plain name, summed over chains and interfaces) — `recorded` (a 429 held an
   endpoint off), `escalated` (counted on the transition to a provider-wide hold-off),
   `cleared` (an answer dropped a standing penalty).
 - `smartrouter_rate_limit_holdoff_seconds{provider}` — histogram of applied hold-offs,

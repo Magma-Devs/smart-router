@@ -319,9 +319,11 @@ func applyReverification(
 	// url's entries are shared — RecordAnswer also drops the per-url chain tracker's
 	// hold-off and strikes (MAG-4165).
 	validate := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+		// The provider on this chain and api-interface, as relay selection keys it.
+		holdoffKey := holdoff.ProviderKey(inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name)
 		keys := holdoffURLKeys(p)
 		for _, key := range keys {
-			if inputs.rateLimitHoldoff.HeldOff(p.Name, key) {
+			if inputs.rateLimitHoldoff.HeldOff(holdoffKey, key) {
 				utils.LavaFormatDebug("re-verify: provider held off after a rate-limit, skipping probe",
 					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 					utils.LogAttr("provider", p.Name),
@@ -346,7 +348,7 @@ func applyReverification(
 			switch {
 			case throttle != nil:
 				retryAfter, _ := common.RetryAfterFrom(throttle)
-				delay := inputs.rateLimitHoldoff.RecordRateLimit(p.Name, key, retryAfter)
+				delay := inputs.rateLimitHoldoff.RecordRateLimit(holdoffKey, key, retryAfter)
 				utils.LavaFormatWarning("re-verify: provider url rate-limited, backing off", throttle,
 					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 					utils.LogAttr("provider", p.Name),
@@ -354,7 +356,7 @@ func applyReverification(
 					utils.LogAttr("holdoff", delay.String()),
 				)
 			case answered:
-				inputs.rateLimitHoldoff.RecordAnswer(p.Name, key)
+				inputs.rateLimitHoldoff.RecordAnswer(holdoffKey, key)
 			}
 		}
 		return err
