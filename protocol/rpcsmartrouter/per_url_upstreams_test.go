@@ -80,6 +80,8 @@ type fakeUpstreams struct {
 	ws   *httptest.Server
 	mu   sync.Mutex
 	seen map[string][]string // "<transport> <path>" → methods, in arrival order
+	// overrides holds the personality become gave a path.
+	overrides map[string]string
 }
 
 func newFakeUpstreams(t *testing.T) *fakeUpstreams {
@@ -116,6 +118,28 @@ func (u *fakeUpstreams) wsURL(path string) string {
 	return "ws" + strings.TrimPrefix(u.ws.URL, "http") + path
 }
 
+// become makes the url at path answer as personality from now on, whatever its last
+// segment says, so a test can flip a node between passes.
+func (u *fakeUpstreams) become(path, personality string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.overrides == nil {
+		u.overrides = map[string]string{}
+	}
+	u.overrides[path] = personality
+}
+
+// personalityOf is how the url at path answers: its last segment, unless become said
+// otherwise.
+func (u *fakeUpstreams) personalityOf(path string) string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if p, ok := u.overrides[path]; ok {
+		return p
+	}
+	return personality(path)
+}
+
 // methods returns what one url received, over one transport.
 func (u *fakeUpstreams) methods(transport, path string) []string {
 	u.mu.Lock()
@@ -125,7 +149,7 @@ func (u *fakeUpstreams) methods(transport, path string) []string {
 
 func (u *fakeUpstreams) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
-	switch personality(r.URL.Path) {
+	switch u.personalityOf(r.URL.Path) {
 	case upHang:
 		u.record("http", r.URL.Path, raw)
 		select {
@@ -183,7 +207,7 @@ func (u *fakeUpstreams) answer(transport, path string, raw []byte) []byte {
 	requests := u.record(transport, path, raw)
 	replies := make([]map[string]any, 0, len(requests))
 	for _, request := range requests {
-		replies = append(replies, reply(personality(path), request))
+		replies = append(replies, reply(u.personalityOf(path), request))
 	}
 	var out []byte
 	if strings.HasPrefix(strings.TrimSpace(string(raw)), "[") {

@@ -131,6 +131,10 @@ const (
 	// ProbeLoopIntervalFlagName is the cadence of the MAG-2161 (Topic D) proactive health prober —
 	// the telemetry-driven loop that owns direct-RPC endpoint health and probe-fed QoS.
 	ProbeLoopIntervalFlagName = "probe-loop-interval"
+	// VerificationRetryDelayFlag is how long a provider failing a spec verification waits for
+	// its first retry, and VerificationRetryMaxDelayFlag the longest it waits (MAG-3950).
+	VerificationRetryDelayFlag    = "verification-retry-delay"
+	VerificationRetryMaxDelayFlag = "verification-retry-max-delay"
 
 	// batch request size limit
 	MaxBatchRequestSizeFlag        = "max-batch-request-size"

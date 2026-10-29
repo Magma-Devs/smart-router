@@ -139,7 +139,7 @@ type SmartRouterMetricsManager struct {
 	// published per provider with when each failure started, so a republish deletes
 	// only the ones that cleared and keeps each start.
 	verificationFailuresMu sync.Mutex
-	verificationFailures   map[string][]publishedVerificationFailure
+	verificationFailures   map[string][]TimedVerificationFailure
 	// verificationNow is the clock a failure's start is read from; nil is time.Now.
 	verificationNow func() time.Time
 	// verificationCheckFailures counts failed check runs: smartrouter_provider_verification_check_failures_total
@@ -637,15 +637,15 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels)
 	endpointServingTier := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_endpoint_serving_tier",
-		Help: "Which provider tier an endpoint is serving from: 2=primaries, 1=DEGRADED (backups only), 0=DARK (no healthy providers). Since MAG-2525 a dark chain no longer crash-loops, so this gauge — not pod restarts — is the signal that a chain cannot serve. Expected time at 0 depends on how the chain went dark: dark at boot is retried from ~2s (doubling to a 3m ceiling), but a chain demoted to dark after booting healthy is only re-checked by the 15m epoch re-verifier. Size alert windows for the 15m case.",
+		Help: "Which provider tier an endpoint is serving from: 2=primaries, 1=DEGRADED (backups only), 0=DARK (no healthy providers). Since MAG-2525 a dark chain no longer crash-loops, so this gauge — not pod restarts — is the signal that a chain cannot serve. While a chain is dark, at boot or after the epoch re-verifier demoted its last provider, its providers are retried from ~2s (doubling to a 3m ceiling). Size alert windows for the 3m ceiling.",
 	}, csmStateLabels)
 	providerVerificationFailed := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_provider_verification_failed",
-		Help: "While a configured provider is failing a verification: the unix time in seconds the failure started, labelled with the check it fails. A provider that moves to another check in the same scope and service keeps its start. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves. scope=none: a check the spec gives severity Warning is failing, and nothing was switched off. severity: Fail when the failure takes a url or the provider out, PartialFail when it switches off only that service, Warning when it switches off nothing. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, not-run, rate-limited, unknown. A provider out at boot is retried every 3m (from 2s, doubling, while its chain is dark); one demoted later and every service refusal is re-checked every 15m epoch, so size alert windows above both.",
+		Help: "While a configured provider is failing a verification: the unix time in seconds the failure started, labelled with the check it fails. A provider that moves to another check in the same scope and service keeps its start. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves. scope=none: a check the spec gives severity Warning is failing, and nothing was switched off. severity: Fail when the failure takes a url or the provider out, PartialFail when it switches off only that service, Warning when it switches off nothing. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, not-run, rate-limited, unknown. A failing provider, service or url is retried from --verification-retry-delay (30s), doubling to --verification-retry-max-delay (15m), and from 2s doubling to 3m while its chain is dark; a Warning check is re-checked every 15m epoch. Size alert windows above 15m.",
 	}, verificationFailureLabels)
 	verificationCheckFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_provider_verification_check_failures_total",
-		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service), scope=url when it costs one node url, scope=none when it costs nothing (severity Warning). A provider out at boot is re-run every 3m; an admitted provider and every service are re-run every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted.",
+		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service), scope=url when it costs one node url, scope=none when it costs nothing (severity Warning). A failing provider, service or url is re-run on its retry backoff (30s doubling to 15m, by default) and on every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted.",
 	}, verificationFailureLabels)
 
 	// =========================================================================
@@ -2106,11 +2106,26 @@ func (m *SmartRouterMetricsManager) CountVerificationCheckFailure(spec, apiInter
 	m.verificationCheckFailures.WithLabelValues(spec, apiInterface, provider, tier, failure.Scope, failure.Service, failure.Check, failure.Severity).Inc()
 }
 
-// publishedVerificationFailure is a failing series as last published, with when its
-// failure started.
-type publishedVerificationFailure struct {
+// TimedVerificationFailure is a failing check with the time its failure started.
+type TimedVerificationFailure struct {
 	ProviderVerificationFailure
-	since time.Time
+	Since time.Time
+}
+
+// VerificationFailuresSince is failures, each once and with its severity label, with the
+// time each started failing (failureStart) given the failures in previous. The router
+// tracks its providers' failing checks with it and publishes what it tracked, so its log
+// lines, its debug endpoint and the gauge agree on when a failure started.
+func VerificationFailuresSince(previous []TimedVerificationFailure, failures []ProviderVerificationFailure, now time.Time) []TimedVerificationFailure {
+	next := make([]TimedVerificationFailure, 0, len(failures))
+	for _, f := range failures {
+		f = f.withSeverity()
+		if slices.ContainsFunc(next, func(n TimedVerificationFailure) bool { return n.ProviderVerificationFailure == f }) {
+			continue
+		}
+		next = append(next, TimedVerificationFailure{ProviderVerificationFailure: f, Since: failureStart(previous, f, now)})
+	}
+	return next
 }
 
 // SetProviderVerificationFailures publishes the checks a configured provider is
@@ -2125,35 +2140,47 @@ func (m *SmartRouterMetricsManager) SetProviderVerificationFailures(spec, apiInt
 	if m == nil {
 		return
 	}
-	key := spec + "|" + apiInterface + "|" + provider + "|" + tier
 	m.verificationFailuresMu.Lock()
 	defer m.verificationFailuresMu.Unlock()
 	now := time.Now()
 	if m.verificationNow != nil {
 		now = m.verificationNow()
 	}
-	previous := m.verificationFailures[key]
-	published := func(set []publishedVerificationFailure, f ProviderVerificationFailure) bool {
-		return slices.ContainsFunc(set, func(p publishedVerificationFailure) bool { return p.ProviderVerificationFailure == f })
+	key := spec + "|" + apiInterface + "|" + provider + "|" + tier
+	m.publishVerificationFailuresLocked(spec, apiInterface, provider, tier, VerificationFailuresSince(m.verificationFailures[key], failures, now))
+}
+
+// SetProviderVerificationFailuresSince is SetProviderVerificationFailures with the start
+// of each failure as the caller tracks it (VerificationFailuresSince).
+func (m *SmartRouterMetricsManager) SetProviderVerificationFailuresSince(spec, apiInterface, provider, tier string, failures []TimedVerificationFailure) {
+	if m == nil {
+		return
 	}
-	next := make([]publishedVerificationFailure, 0, len(failures))
+	m.verificationFailuresMu.Lock()
+	defer m.verificationFailuresMu.Unlock()
+	m.publishVerificationFailuresLocked(spec, apiInterface, provider, tier, failures)
+}
+
+func (m *SmartRouterMetricsManager) publishVerificationFailuresLocked(spec, apiInterface, provider, tier string, failures []TimedVerificationFailure) {
+	key := spec + "|" + apiInterface + "|" + provider + "|" + tier
+	next := make([]TimedVerificationFailure, 0, len(failures))
 	for _, f := range failures {
-		f = f.withSeverity()
-		if published(next, f) {
-			continue
-		}
-		next = append(next, publishedVerificationFailure{ProviderVerificationFailure: f, since: failureStart(previous, f, now)})
+		f.ProviderVerificationFailure = f.withSeverity()
+		next = append(next, f)
 	}
-	for _, old := range previous {
+	published := func(set []TimedVerificationFailure, f ProviderVerificationFailure) bool {
+		return slices.ContainsFunc(set, func(p TimedVerificationFailure) bool { return p.ProviderVerificationFailure == f })
+	}
+	for _, old := range m.verificationFailures[key] {
 		if !published(next, old.ProviderVerificationFailure) {
 			m.providerVerificationFailed.DeleteLabelValues(spec, apiInterface, provider, tier, old.Scope, old.Service, old.Check, old.Severity)
 		}
 	}
 	for _, p := range next {
-		m.providerVerificationFailed.WithLabelValues(spec, apiInterface, provider, tier, p.Scope, p.Service, p.Check, p.Severity).Set(float64(p.since.Unix()))
+		m.providerVerificationFailed.WithLabelValues(spec, apiInterface, provider, tier, p.Scope, p.Service, p.Check, p.Severity).Set(float64(p.Since.Unix()))
 	}
 	if m.verificationFailures == nil {
-		m.verificationFailures = map[string][]publishedVerificationFailure{}
+		m.verificationFailures = map[string][]TimedVerificationFailure{}
 	}
 	if len(next) == 0 {
 		delete(m.verificationFailures, key)
@@ -2166,14 +2193,14 @@ func (m *SmartRouterMetricsManager) SetProviderVerificationFailures(spec, apiInt
 // published, else the earliest start in the same scope and service, so a provider
 // that moves to another check keeps the time it started failing, else now. Warning
 // checks fail independently of each other, so a new one starts now.
-func failureStart(previous []publishedVerificationFailure, f ProviderVerificationFailure, now time.Time) time.Time {
+func failureStart(previous []TimedVerificationFailure, f ProviderVerificationFailure, now time.Time) time.Time {
 	var earliest time.Time
 	for _, p := range previous {
 		if p.ProviderVerificationFailure == f {
-			return p.since
+			return p.Since
 		}
-		if f.Scope != VerificationScopeNone && p.Scope == f.Scope && p.Service == f.Service && (earliest.IsZero() || p.since.Before(earliest)) {
-			earliest = p.since
+		if f.Scope != VerificationScopeNone && p.Scope == f.Scope && p.Service == f.Service && (earliest.IsZero() || p.Since.Before(earliest)) {
+			earliest = p.Since
 		}
 	}
 	if earliest.IsZero() {
