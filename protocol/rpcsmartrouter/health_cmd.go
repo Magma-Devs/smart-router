@@ -447,6 +447,7 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 	if excluded == nil {
 		excluded = admissionErr
 	}
+	missingWebsocket := chainlib.MissingWebsocket(endpoint.NodeUrls, chainParser)
 
 	rows := make([]healthEndpointResult, 0, len(provider.nodeUrls))
 	for i, url := range provider.nodeUrls {
@@ -454,9 +455,27 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 		row.SpecValid = true
 		applyValidation(&row, validations[i])
 		row.Router = routerVerdict(validations[i], excluded)
+		if missingWebsocket {
+			row.Router = row.Router.withoutSubscriptions()
+		}
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// noWebsocketReason is what an admitted row adds when its provider has no ws(s) url on
+// a chain that subscribes: the router serves it without subscriptions (MAG-3950).
+const noWebsocketReason = "no ws(s) node url: serves no subscriptions"
+
+func (v healthRouterVerdict) withoutSubscriptions() healthRouterVerdict {
+	if v.Verdict != routerAdmitted {
+		return v
+	}
+	if v.Reason != "" {
+		v.Reason += "; "
+	}
+	v.Reason += noWebsocketReason
+	return v
 }
 
 // applyValidation folds one node url's results into its row: every verification, the

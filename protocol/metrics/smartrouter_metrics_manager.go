@@ -645,7 +645,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, verificationFailureLabels)
 	verificationCheckFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_provider_verification_check_failures_total",
-		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service), scope=url when it costs one node url, scope=none when it costs nothing (severity Warning). A failing provider, service or url is re-run on its retry backoff (30s doubling to 15m, by default) and on every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted.",
+		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service), scope=url when it costs one node url, scope=none when it costs nothing (severity Warning). A failing provider, service or url is re-run on its retry backoff (30s doubling to 15m, by default) and on every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted, and a missing websocket url (check missing-url) ran nothing.",
 	}, verificationFailureLabels)
 
 	// =========================================================================
