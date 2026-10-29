@@ -197,6 +197,10 @@ See the [dashboard README](https://github.com/Magma-Devs/smart-router-dashboard/
 for configuration (auth, the values file, logs profile, pointing it at an
 existing router on `:7779`, etc.).
 
+### Run on Kubernetes
+
+Smart Router runs on Kubernetes, and Magma Devs supports Kubernetes deployments: [contact the team](https://magmadevs.com/contact) to run it on your cluster or for help with one. [`docs/KUBERNETES.md`](docs/KUBERNETES.md) lists the probes and flags a cluster needs.
+
 ## AI / Codex setup
 
 Using Codex or another AI coding agent to run Smart Router locally?
