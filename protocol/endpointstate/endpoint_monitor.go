@@ -491,8 +491,9 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		// dedicated poll runs at avgBlockTime/divisor capped at chaintracker.BACKOFF_MAX_TIME
 		// (slowed only by failure backoff), because relay harvest is the primary block signal
 		// and the poll is a sparse fallback. The divisor defaults to DefaultPollDivisor and is
-		// operator-tunable (PollDivisorFlagName), resolved once in NewEndpointMonitor. (The
-		// global tracker leaves this 0 and keeps its legacy adaptive cadence until Topic C.)
+		// operator-tunable (PollDivisorFlagName), resolved once in NewEndpointMonitor. It is the
+		// tracker's only cadence: the global tracker that once ran an adaptive one went with
+		// MAG-2160 / Topic C, and the adaptive scheduler itself with MAG-4398.
 		FlatPollInterval: m.flatPollInterval,
 		// Rate-limit hold-off keys: the relay path's provider name (read only) and this url,
 		// which the tracker's own 429s are recorded under (MAG-4165).

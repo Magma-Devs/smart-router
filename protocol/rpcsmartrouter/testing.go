@@ -6,11 +6,13 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	"github.com/magma-Devs/smart-router/utils"
@@ -105,6 +107,10 @@ func startTesting(ctx context.Context, rpcEndpoints []*lavasession.RPCProviderEn
 				NewLatestCallback:     printOnNewLatestCallback,
 				ConsistencyCallback:   consistencyErrorCallback,
 				ParseDirectiveEnabled: true,
+				// The cadence the router itself polls at, so this command diagnoses the thing it
+				// runs beside rather than a scheduler of its own. It used to leave this unset,
+				// which was the one remaining caller of the legacy adaptive tiers (MAG-4398).
+				FlatPollInterval: time.Duration(float64(averageBlockTime) / endpointstate.DefaultPollDivisor),
 			}
 			chainFetcher := chainlib.NewChainFetcher(ctx, &chainlib.ChainFetcherOptions{ChainRouter: chainProxy, ChainParser: chainParser, Endpoint: rpcProviderEndpoint, Cache: nil})
 			chainTracker, err := chaintracker.NewChainTracker(ctx, chainFetcher, chainTrackerConfig)

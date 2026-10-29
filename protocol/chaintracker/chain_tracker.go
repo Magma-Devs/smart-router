@@ -16,7 +16,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 )
 
 // IChainTracker represents the interface for chain tracking functionality
@@ -57,17 +56,12 @@ type IChainTracker interface {
 
 	// StartAndServe starts the chain tracker and serves gRPC if configured
 	StartAndServe(ctx context.Context) error
-
-	// AddBlockGap adds a new block gap measurement
-	AddBlockGap(newData time.Duration, blocks uint64)
 }
 
 const (
-	initRetriesCount       = 4
-	BACKOFF_MAX_TIME       = 1 * time.Minute
-	maxFails               = 10
-	GoodStabilityThreshold = 0.3
-	PollingUpdateLength    = 10
+	initRetriesCount = 4
+	BACKOFF_MAX_TIME = 1 * time.Minute
+	maxFails         = 10
 	// DefaultMaxRelaySkipsBeforePoll bounds how many consecutive poll cycles the traffic gate
 	// (MAG-2159) may skip before forcing one real poll for independent fork/liveness
 	// verification. Deliberately small: store-#2 staleness (the tracker atomic that consistency
@@ -79,13 +73,6 @@ const (
 	// it reads: consistency pre-validation prefers the relay-fed tip store and only falls back
 	// to this atomic when the store is empty — precisely when the gate never skips.
 	DefaultMaxRelaySkipsBeforePoll = 4
-	// MostFrequentPollingMultiplier is the fixed multiplier the legacy adaptive cadence uses
-	// (global tracker only — per-endpoint trackers run a fixed FlatPollInterval and never reach
-	// the adaptive tiers). It is the SOLE feeder of cs.pollingTimeMultiplier. The adaptive tiers
-	// compute base/(multiplier/4), so the multiplier must stay >= 4 to avoid a divide-by-zero;
-	// 16 satisfies that by construction. It is a fixed built-in with no operator-supplied
-	// value to range-validate.
-	MostFrequentPollingMultiplier = 16
 )
 
 type ChainFetcher interface {
@@ -113,8 +100,7 @@ func (cs *DefaultChainTrackerFetcher) FetchBlockHashByNum(ctx context.Context, b
 
 type ChainTracker struct {
 	chainFetcher            ChainFetcher // used to communicate with the node
-	pollingTimeMultiplier   time.Duration
-	blocksToSave            uint64 // how many finalized blocks to keep
+	blocksToSave            uint64       // how many finalized blocks to keep
 	latestBlockNum          int64
 	blockQueueMu            sync.RWMutex
 	blocksQueue             []BlockStore                    // holds all past hashes up until latest block
@@ -130,14 +116,13 @@ type ChainTracker struct {
 	timer                   *time.Timer
 	latestChangeTime        time.Time
 	startupTime             time.Time
-	blockEventsGap          []time.Duration
 
 	// initial config
 	averageBlockTime time.Duration
-	// flatPollInterval, when > 0, selects the FIXED flat cadence (MAG-2159): the poll runs
-	// at this interval capped at BACKOFF_MAX_TIME (HealthyPollInterval), slowed only by
-	// failure backoff; the adaptive tiers and block-gap recalibration no longer drive the
-	// timer. 0 keeps the legacy adaptive cadence. See ChainTrackerConfig.FlatPollInterval.
+	// flatPollInterval is the tracker's cadence: the poll runs at this interval capped at
+	// BACKOFF_MAX_TIME (HealthyPollInterval), slowed only by failure backoff. Always
+	// positive — NewChainTracker floors a non-positive config value to the average block
+	// time. See ChainTrackerConfig.FlatPollInterval.
 	flatPollInterval time.Duration
 	// relayTipFresh is the traffic gate (MAG-2159 / Topic B): when set and it reports a fresh
 	// relay-harvested tip, the poll cycle is skipped entirely. See ChainTrackerConfig.RelayTipFresh.
@@ -556,15 +541,6 @@ func (cs *ChainTracker) fetchAllPreviousBlocksIfNecessary(ctx context.Context, f
 			if cs.newLatestCallback != nil {
 				cs.newLatestCallback(prev_latest, newLatestBlock, latestHash) // TODO: this is calling the latest hash only repeatedly, this is not precise, currently not used anywhere except for prints
 			}
-			// update our timer resolution. AddBlockGap only feeds the adaptive block-gap sweep,
-			// which flat per-endpoint trackers do not run (fixed cadence, and no block-time-update
-			// consumer registers on them) — so skip the per-block append for them. setLatestChangeTime
-			// stays unconditional: getLatestChangeTime still drives the not-updated/emergency path.
-			prevChangeTime := cs.getLatestChangeTime()
-			if cs.flatPollInterval == 0 && !prevChangeTime.IsZero() {
-				blocksUpdated := uint64(newLatestBlock - prev_latest)
-				cs.AddBlockGap(time.Since(prevChangeTime), blocksUpdated)
-			}
 			cs.setLatestChangeTime(time.Now())
 		}
 		if forked {
@@ -623,22 +599,7 @@ func nextFetchFails(current uint64, skipped, failed bool) uint64 {
 // this function starts the fetching timer periodically checking by polling if updates are necessary
 func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) error {
 	// how often to query latest block.
-	// chainTracker polls blocks in the following strategy:
-	// start polling every averageBlockTime/4, then averageBlockTime/8 after passing middle, then averageBlockTime/16 after passing averageBlockTime*3/4
-	// so polling at averageBlockTime/4,averageBlockTime/2,averageBlockTime*5/8,averageBlockTime*3/4,averageBlockTime*13/16,,averageBlockTime*14/16,,averageBlockTime*15/16,averageBlockTime*16/16,averageBlockTime*17/16
-	// initial polling = averageBlockTime/16
 	cs.setLatestChangeTime(time.Time{}) // we will discard the first change time, so this is uninitialized
-
-	// Per-endpoint trackers (flatPollInterval > 0) poll every HealthyPollInterval(flatPollInterval).
-	// CRITICAL (MAG-2159 finding 3): the periodic timer must NOT start counting until
-	// initialization completes — otherwise a slow init lets the timer fire immediately
-	// after the goroutine starts, polling faster than the configured interval on boot.
-	// So for the flat cadence we create the timer AFTER fetchInitDataWithRetry; the legacy
-	// adaptive path (global tracker) keeps its original ordering, unchanged.
-	if cs.flatPollInterval == 0 {
-		initialPollingTime := pollingTime / cs.pollingTimeMultiplier // on boot we need to query often to catch changes
-		cs.timer = time.NewTimer(initialPollingTime)
-	}
 
 	err := cs.fetchInitDataWithRetry(ctx)
 	if err != nil {
@@ -647,31 +608,20 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 		}
 		return err
 	}
-	if cs.flatPollInterval > 0 {
-		// First periodic poll is one interval after the final init fetch: the interval every
-		// later successful poll waits (HealthyPollInterval), not the raw flatPollInterval, which
-		// exponentialBackoff caps for every poll after this one. The router sizes how long a url's
-		// answer counts from that interval (MAG-4249), so a slow chain's first poll must not wait
-		// longer than its later ones.
-		cs.updateTimer(pollingTime, 0)
-	}
+	// CRITICAL (MAG-2159 finding 3): the periodic timer must NOT start counting until
+	// initialization completes — otherwise a slow init lets the timer fire immediately after the
+	// goroutine starts, polling faster than the configured interval on boot. So the timer is
+	// created HERE, after fetchInitDataWithRetry.
+	//
+	// The first periodic poll is one interval after the final init fetch: the interval every later
+	// successful poll waits (HealthyPollInterval), not the raw flatPollInterval, which
+	// exponentialBackoff caps for every poll after this one. The router sizes how long a url's
+	// answer counts from that interval (MAG-4249), so a slow chain's first poll must not wait
+	// longer than its later ones.
+	cs.updateTimer(0)
 	utils.LavaFormatDebug("ChainTracker fetched init data successfully")
-	// The block-gap ticker drives the adaptive cadence sweep (Percentile+Stability over
-	// blockEventsGap) and feeds block-time-update registrations. Flat per-endpoint trackers poll
-	// at a FIXED cadence (computePollInterval ignores the sweep) and have no registered block-time
-	// consumers, so the sweep would be pure wasted CPU/allocation per endpoint — start the ticker
-	// ONLY for the global adaptive tracker. A nil channel parks the select case forever.
-	var blockGapTicker *time.Ticker
-	var blockGapTick <-chan time.Time
-	if cs.flatPollInterval == 0 {
-		blockGapTicker = time.NewTicker(pollingTime) // initially every block we check for a polling time
-		blockGapTick = blockGapTicker.C
-	}
 	// Polls blocks and keeps a queue of them
 	go func() {
-		if blockGapTicker != nil {
-			defer blockGapTicker.Stop() // Ensure ticker is stopped when goroutine exits
-		}
 		fetchFails := uint64(0)
 		for {
 			select {
@@ -690,21 +640,13 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 					// rate-limit floor; a real poll's outcome does both.
 					cs.noteFetchOutcome(err)
 				}
-				cs.updateTimer(pollingTime, fetchFails)
+				cs.updateTimer(fetchFails)
 				if err != nil {
 					if fetchFails > maxFails {
 						utils.LavaFormatError("failed to fetch all previous blocks and was necessary", err, utils.Attribute{Key: "fetchFails", Value: fetchFails}, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
 					} else {
 						utils.LavaFormatDebug("failed to fetch all previous blocks", utils.Attribute{Key: "error", Value: err}, utils.Attribute{Key: "fetchFails", Value: fetchFails}, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
 					}
-				}
-			case <-blockGapTick:
-				// Only reachable for the global adaptive tracker (flat trackers leave blockGapTick
-				// nil), so blockGapTicker is non-nil here.
-				var enoughSamples bool
-				pollingTime, enoughSamples = cs.updatePollingTimeBasedOnBlockGap(pollingTime)
-				if enoughSamples {
-					blockGapTicker.Reset(pollingTime * 10)
 				}
 			case req := <-cs.pollNowCh:
 				// /debug/poll-now (MAG-2649): run the SAME cycle the timer case above runs, right
@@ -757,7 +699,7 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 				if cs.timer != nil {
 					cs.timer.Stop()
 				}
-				cs.updateTimer(pollingTime, fetchFails)
+				cs.updateTimer(fetchFails)
 			case <-ctx.Done():
 				cs.timer.Stop()
 				return
@@ -767,8 +709,8 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 	return nil
 }
 
-func (cs *ChainTracker) updateTimer(tickerBaseTime time.Duration, fetchFails uint64) {
-	interval := cs.computePollInterval(tickerBaseTime, fetchFails)
+func (cs *ChainTracker) updateTimer(fetchFails uint64) {
+	interval := cs.computePollInterval(fetchFails)
 	cs.currentPollIntervalNanos.Store(int64(interval)) // publish live cadence for /debug/endpoint-state (MAG-2395)
 	cs.timer = time.NewTimer(interval)
 }
@@ -862,44 +804,25 @@ func (cs *ChainTracker) CurrentPollInterval() time.Duration {
 }
 
 // HealthyPollInterval is how long a per-endpoint tracker with this FlatPollInterval waits between
-// two polls while they succeed: the flat interval through the same exponentialBackoff call
-// computePollInterval makes, at zero failures. That call caps every interval at
-// BACKOFF_MAX_TIME, so a flat interval above it runs at BACKOFF_MAX_TIME: a 10-minute chain's
-// 5-minute interval at the default divisor polls every minute.
+// two successful polls: the interval capped at BACKOFF_MAX_TIME, which is what exponentialBackoff
+// returns for zero failures. The router sizes a url's answered-until window from it (MAG-4249).
 func HealthyPollInterval(flatPollInterval time.Duration) time.Duration {
 	return exponentialBackoff(flatPollInterval, 0)
 }
 
-// computePollInterval returns the next dedicated-poll interval.
+// computePollInterval is the interval the next dedicated poll waits.
 //
-// When flatPollInterval > 0 (per-endpoint trackers, MAG-2159 / Topic B) the cadence is
-// FIXED: flatPollInterval (avgBlockTime/divisor) capped at BACKOFF_MAX_TIME
-// (HealthyPollInterval), slowed only by failure backoff. The
-// old adaptive /4, /2, /16 tiers are gone and the block-gap recalibration (which mutates
-// tickerBaseTime) is deliberately ignored here — relay harvest is the primary block
-// signal, so the dedicated poll is a sparse, predictable fallback. Because nothing consumes
-// the sweep for a flat tracker (this timer ignores it AND no block-time-update consumer
-// registers on per-endpoint trackers), start() does not even run the block-gap machinery for
-// them — the ticker and the per-block AddBlockGap append are skipped entirely (finding 4).
+// A flat tracker's cadence is FIXED: flatPollInterval (avgBlockTime/divisor) capped at
+// BACKOFF_MAX_TIME (HealthyPollInterval), stretched only by exponentialBackoff on consecutive
+// failures and floored by a standing rate-limit hold-off.
 //
-// When flatPollInterval == 0 (the global tracker, until Topic C removes it) the legacy
-// adaptive tiers are preserved, since its readers are not yet harvest-fed.
-func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchFails uint64) time.Duration {
-	if cs.flatPollInterval > 0 {
-		return cs.floorWithRetryAfter(exponentialBackoff(cs.flatPollInterval, fetchFails))
-	}
-
-	var newPollingTime time.Duration
-	blockGap := cs.smallestBlockGap()
-	timeSinceLastUpdate := time.Since(cs.getLatestChangeTime())
-	if timeSinceLastUpdate <= tickerBaseTime/2 && blockGap > tickerBaseTime/4 {
-		newPollingTime = tickerBaseTime / (cs.pollingTimeMultiplier / 4)
-	} else if timeSinceLastUpdate <= (tickerBaseTime*3)/4 && blockGap > tickerBaseTime/4 {
-		newPollingTime = tickerBaseTime / (cs.pollingTimeMultiplier / 2)
-	} else {
-		newPollingTime = tickerBaseTime / cs.pollingTimeMultiplier
-	}
-	return cs.floorWithRetryAfter(exponentialBackoff(newPollingTime, fetchFails))
+// The legacy adaptive tiers that used to live here are gone (MAG-4398). They scheduled from a
+// block-gap sweep and were reachable only with flatPollInterval == 0, which no caller leaves:
+// the serving path (endpointstate) always resolves a positive interval, the global tracker that
+// once used the tiers went with MAG-2160 / Topic C, and the sweep had no test left after
+// PR #522 removed its only one.
+func (cs *ChainTracker) computePollInterval(fetchFails uint64) time.Duration {
+	return cs.floorWithRetryAfter(exponentialBackoff(cs.flatPollInterval, fetchFails))
 }
 
 // noteFetchOutcome keeps the rate-limit floor current and the shared hold-off registry
@@ -1099,57 +1022,6 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 	return nil
 }
 
-func (ct *ChainTracker) updatePollingTimeBasedOnBlockGap(pollingTime time.Duration) (pollTime time.Duration, enoughSampled bool) {
-	blockGapsLen := len(ct.blockEventsGap)
-	if blockGapsLen > PollingUpdateLength { // check we have enough samples
-		// smaller times give more resolution to indentify changes, and also make block arrival predictions more optimistic
-		// so we take a 0.33 percentile because we want to be on the safe side by have a smaller time than expected
-		percentileTime := lavaslices.Percentile(ct.blockEventsGap, 0.33, false)
-		stability := lavaslices.Stability(ct.blockEventsGap, percentileTime)
-		utils.LavaFormatTrace("block gaps",
-			utils.LogAttr("block gaps", ct.blockEventsGap),
-			utils.LogAttr("specID", ct.endpoint.ChainID),
-		)
-
-		if blockGapsLen > int(ct.serverBlockMemory)-2 || stability < GoodStabilityThreshold {
-			// only update if there is a 10% difference or more
-			if percentileTime < (pollingTime*9/10) || percentileTime > (pollingTime*11/10) {
-				utils.LavaFormatInfo("updated chain tracker polling time", utils.Attribute{Key: "blocks measured", Value: blockGapsLen}, utils.Attribute{Key: "median new polling time", Value: percentileTime}, utils.Attribute{Key: "original polling time", Value: pollingTime}, utils.Attribute{Key: "chainID", Value: ct.endpoint.ChainID}, utils.Attribute{Key: "stability", Value: stability})
-				if percentileTime > pollingTime*2 {
-					utils.LavaFormatWarning("[-] substantial polling time increase for chain detected", nil, utils.Attribute{Key: "median new polling time", Value: percentileTime}, utils.Attribute{Key: "original polling time", Value: pollingTime}, utils.Attribute{Key: "chainID", Value: ct.endpoint.ChainID}, utils.Attribute{Key: "stability", Value: stability})
-				}
-				return percentileTime, true
-			}
-			return pollingTime, true
-		} else {
-			utils.LavaFormatDebug("current stability measurement",
-				utils.LogAttr("chainID", ct.endpoint.ChainID),
-				utils.LogAttr("stability", stability),
-			)
-		}
-	}
-	return pollingTime, false
-}
-
-func (ct *ChainTracker) AddBlockGap(newData time.Duration, blocks uint64) {
-	averageBlockTimeForOneBlock := newData / time.Duration(blocks)
-	if uint64(len(ct.blockEventsGap)) < ct.serverBlockMemory {
-		ct.blockEventsGap = append(ct.blockEventsGap, averageBlockTimeForOneBlock)
-	} else {
-		// we need to discard an index at random because this list is sorted by values and not by insertion time
-		randomIndex := rand.Intn(len(ct.blockEventsGap)) // it's not inclusive so len is fine
-		ct.blockEventsGap[randomIndex] = averageBlockTimeForOneBlock
-	}
-}
-
-func (ct *ChainTracker) smallestBlockGap() time.Duration {
-	length := len(ct.blockEventsGap)
-	if length < PollingUpdateLength {
-		return 0
-	}
-	return ct.blockEventsGap[0] // this list is sorted
-}
-
 // StartAndServe starts the chain tracker's poll loop. The historical gRPC `IChainTracker`
 // server (the only thing the old `serve()` did) was removed in MAG-2160 / Topic C along with
 // the global tracker that exposed it: no in-tree caller consumed it and no tracker ever set a
@@ -1164,12 +1036,19 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		return &DummyChainTracker{}
 	}
 
-	// The legacy adaptive cadence (global tracker only — per-endpoint trackers set
-	// FlatPollInterval and never reach the adaptive tiers) uses the fixed built-in
-	// MostFrequentPollingMultiplier (16, >= the divide-by-zero floor of 4). There is no runtime
-	// override: the old per-tracker config.PollingTimeMultiplier knob was set by nobody and was
-	// removed in the MAG-2159 knob consolidation.
-	pollingTime := MostFrequentPollingMultiplier
+	// Every tracker runs one flat cadence. A caller that leaves FlatPollInterval unset gets one
+	// poll per average block time — the conservative end of the range endpointstate resolves
+	// (MinPollDivisor floors its divisor at exactly this) and the same value
+	// resolveFlatPollInterval falls back to. It is floored here rather than left at 0, because a
+	// 0 used to select a second scheduler silently and now would schedule nothing at all.
+	flatPollInterval := config.FlatPollInterval
+	if flatPollInterval <= 0 {
+		flatPollInterval = config.AverageBlockTime
+		utils.LavaFormatInfo("chain tracker given no poll interval, polling once per average block time",
+			utils.LogAttr("chainID", config.ChainId),
+			utils.LogAttr("pollInterval", flatPollInterval),
+		)
+	}
 
 	// Traffic-gate skip bound (MAG-2159): default when the caller leaves it 0.
 	maxRelaySkips := config.MaxRelaySkipsBeforePoll
@@ -1209,11 +1088,9 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		latestBlockNum:          0,
 		serverBlockMemory:       config.ServerBlockMemory,
 		blockCheckpointDistance: config.BlocksCheckpointDistance,
-		blockEventsGap:          []time.Duration{},
 		startupTime:             time.Now(),
-		pollingTimeMultiplier:   time.Duration(pollingTime),
 		averageBlockTime:        config.AverageBlockTime,
-		flatPollInterval:        config.FlatPollInterval,
+		flatPollInterval:        flatPollInterval,
 		headOnly:                config.HeadOnlyTracking,
 		relayTipFresh:           config.RelayTipFresh,
 		maxRelaySkipsBeforePoll: maxRelaySkips,
@@ -1228,7 +1105,7 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 	// Publish the base cadence up front so /debug/endpoint-state reports a sensible PollIntervalMs
 	// before the first poll reschedules it (0 for the legacy global tracker, which is not a
 	// per-endpoint row). See CurrentPollInterval / updateTimer (MAG-2395).
-	chainTracker.currentPollIntervalNanos.Store(int64(config.FlatPollInterval))
+	chainTracker.currentPollIntervalNanos.Store(int64(flatPollInterval))
 
 	switch config.ChainId {
 	// TODO: we can do it better by creating a spec fields for custom trackers.
