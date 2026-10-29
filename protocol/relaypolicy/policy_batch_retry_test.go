@@ -112,30 +112,30 @@ func rateLimitedAttempt() *relaycore.RelayResponse {
 // policy stopped on it after any completed attempt: --disable-batch-request-retry=false had no
 // effect, and the rate-limit carve-out could skip the BatchDisabled stop but never reach a retry.
 func TestDecide_BatchRetriesAreDecidedByTheFlagAlone(t *testing.T) {
-	decide := func(t *testing.T, disableBatchRetry bool, attempt *relaycore.RelayResponse) (ResultsSummary, DecisionOutput) {
+	decide := func(t *testing.T, disableBatchRetry bool, attempt *relaycore.RelayResponse) (relaycore.ResultsSummary, relaycore.DecisionOutput) {
 		t.Helper()
 		relayProcessor, protocolMessage := batchRelayProcessor(t)
 		completeAttempt(relayProcessor, attempt)
 		summary := relayProcessor.GetResultsSummary()
 		policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3, DisableBatchRetry: disableBatchRetry})
-		return summary, policy.Decide(DecisionInput{Selection: relaycore.Stateless, AttemptNumber: 1, IsBatch: protocolMessage.IsBatch(), Summary: summary})
+		return summary, policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, AttemptNumber: 1, IsBatch: protocolMessage.IsBatch(), Summary: summary})
 	}
 
 	t.Run("with batch retries enabled a failed batch is retried like any other relay", func(t *testing.T) {
 		summary, out := decide(t, false, nodeErrorAttempt())
 		require.Equal(t, 1, summary.NodeErrors, "the attempt must have been drained into the summary")
-		require.Equal(t, Retry, out.Action, "reason: %s", out.Reason)
+		require.Equal(t, relaycore.ActionRetry, out.Action, "reason: %s", out.Reason)
 		require.Equal(t, "Default", out.Reason)
 	})
 	t.Run("with batch retries disabled a rate-limited batch gets the carve-out", func(t *testing.T) {
 		summary, out := decide(t, true, rateLimitedAttempt())
 		require.True(t, summary.OnlyRateLimited, "the attempt must register as a rate limit for the carve-out to apply")
-		require.Equal(t, Retry, out.Action, "reason: %s", out.Reason)
+		require.Equal(t, relaycore.ActionRetry, out.Action, "reason: %s", out.Reason)
 	})
 	t.Run("with batch retries disabled any other batch failure stops as BatchDisabled", func(t *testing.T) {
 		summary, out := decide(t, true, nodeErrorAttempt())
 		require.Equal(t, 1, summary.NodeErrors)
-		require.Equal(t, Stop, out.Action)
+		require.Equal(t, relaycore.ActionStop, out.Action)
 		require.Equal(t, "BatchDisabled", out.Reason)
 	})
 }
