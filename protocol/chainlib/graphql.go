@@ -357,20 +357,8 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 				logMethod: http.MethodPost, logPath: path,
 			}
 		},
-		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-			utils.LavaFormatInfo("Consumer received a new GraphQL request",
-				utils.LogAttr("GUID", guid),
-				utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-				utils.LogAttr(utils.KEY_TASK_ID, ctx),
-				utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
-				utils.LogAttr("path", req.path),
-				utils.LogAttr("dappID", dappID),
-				utils.LogAttr("msgSeed", msgSeed),
-				utils.LogAttr("body", req.body),
-				utils.LogAttr("headers", common.RedactMetadata(headers)),
-			)
-		},
-		logModule: "graphql in/out",
+		logReceived: logReceivedWithSeedAfterDapp("Consumer received a new GraphQL request"),
+		logModule:   "graphql in/out",
 		errorBody: func(_ *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
 			return convertToJsonError(errMasking)
 		},

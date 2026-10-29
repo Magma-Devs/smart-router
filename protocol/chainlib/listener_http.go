@@ -113,6 +113,30 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 	}
 }
 
+// receivedAttrs are a received line's GUID and the tracing ids ctx carries, followed by the
+// handler's own attributes.
+func receivedAttrs(ctx context.Context, guid uint64, attrs ...utils.Attribute) []utils.Attribute {
+	return append([]utils.Attribute{
+		utils.LogAttr("GUID", guid),
+		utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+		utils.LogAttr(utils.KEY_TASK_ID, ctx),
+		utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
+	}, attrs...)
+}
+
+// logReceivedWithSeedAfterDapp writes the received line the REST POST and GraphQL handlers share.
+func logReceivedWithSeedAfterDapp(message string) func(context.Context, uint64, string, string, httpRelayRequest, []pairingtypes.Metadata) {
+	return func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
+		utils.LavaFormatInfo(message, receivedAttrs(ctx, guid,
+			utils.LogAttr("path", req.path),
+			utils.LogAttr("dappID", dappID),
+			utils.LogAttr("msgSeed", msgSeed),
+			utils.LogAttr("body", req.body),
+			utils.LogAttr("headers", common.RedactMetadata(headers)),
+		)...)
+	}
+}
+
 // listen binds app, records the address it bound and serves until ctx ends.
 func (apil *chainListenerBase) listen(ctx context.Context, app *fiber.App) {
 	addrChannel := make(chan string)

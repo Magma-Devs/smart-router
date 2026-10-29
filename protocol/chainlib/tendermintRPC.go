@@ -354,16 +354,12 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			return httpRelayRequest{body: string(fiberCtx.Body()), logMethod: "POST", logPath: fiberCtx.Request().URI().String()}
 		},
 		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-			utils.LavaFormatInfo("in <<<",
-				utils.LogAttr("GUID", ctx),
-				utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-				utils.LogAttr(utils.KEY_TASK_ID, ctx),
-				utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
+			utils.LavaFormatInfo("in <<<", traceAttrs(ctx,
 				utils.LogAttr("seed", msgSeed),
 				utils.LogAttr("_msg", truncatedRelayBody(cmdFlags, req.body)),
 				utils.LogAttr("dappID", dappID),
 				utils.LogAttr("headers", common.RedactMetadata(headers)),
-			)
+			)...)
 		},
 		logModule: "tendermint http in/out",
 		answerError: func(_ context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (bool, error) {
@@ -385,15 +381,11 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			return httpRelayRequest{path: path, url: path + query, logMethod: "GET", logPath: fiberCtx.Request().URI().String()}
 		},
 		logReceived: func(ctx context.Context, _ uint64, _, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-			utils.LavaFormatInfo("urirpc in <<<",
-				utils.LogAttr("GUID", ctx),
-				utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-				utils.LogAttr(utils.KEY_TASK_ID, ctx),
-				utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
+			utils.LavaFormatInfo("urirpc in <<<", traceAttrs(ctx,
 				utils.LogAttr("_msg", req.path),
 				utils.LogAttr("dappID", dappID),
 				utils.LogAttr("headers", common.RedactMetadata(headers)),
-			)
+			)...)
 		},
 		logModule: "tendermint http in/out",
 		errorBody: func(fiberCtx *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {

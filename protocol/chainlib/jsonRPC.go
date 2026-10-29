@@ -363,17 +363,13 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			}
 		},
 		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-			utils.LavaFormatInfo("Consumer received a new JSON-RPC request",
-				utils.LogAttr("GUID", guid),
-				utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-				utils.LogAttr(utils.KEY_TASK_ID, ctx),
-				utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
+			utils.LavaFormatInfo("Consumer received a new JSON-RPC request", receivedAttrs(ctx, guid,
 				utils.LogAttr("path", req.path),
 				utils.LogAttr("seed", msgSeed),
 				utils.LogAttr("body", truncatedRelayBody(cmdFlags, req.body)),
 				utils.LogAttr("dappID", dappID),
 				utils.LogAttr("headers", common.RedactMetadata(headers)),
-			)
+			)...)
 		},
 		logModule: "jsonrpc http",
 		answerError: func(_ context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (bool, error) {

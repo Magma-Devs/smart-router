@@ -290,19 +290,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 				logMethod: http.MethodPost, logPath: path,
 			}
 		},
-		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-			utils.LavaFormatInfo("Consumer received a new REST POST request",
-				utils.LogAttr("GUID", guid),
-				utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-				utils.LogAttr(utils.KEY_TASK_ID, ctx),
-				utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
-				utils.LogAttr("path", req.path),
-				utils.LogAttr("dappID", dappID),
-				utils.LogAttr("msgSeed", msgSeed),
-				utils.LogAttr("body", req.body),
-				utils.LogAttr("headers", common.RedactMetadata(headers)),
-			)
-		},
+		logReceived: logReceivedWithSeedAfterDapp("Consumer received a new REST POST request"),
 		logModule:   "http in/out",
 		answerError: answerMethodNotFound,
 		errorBody:   errorBody,
@@ -324,17 +312,13 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			}
 		},
 		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-			utils.LavaFormatInfo("Consumer received a new REST non-POST request",
-				utils.LogAttr("GUID", guid),
-				utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-				utils.LogAttr(utils.KEY_TASK_ID, ctx),
-				utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
+			utils.LavaFormatInfo("Consumer received a new REST non-POST request", receivedAttrs(ctx, guid,
 				utils.LogAttr("path", req.path),
 				utils.LogAttr("seed", msgSeed),
 				utils.LogAttr("dappID", dappID),
 				utils.LogAttr("body", req.body),
 				utils.LogAttr("headers", common.RedactMetadata(headers)),
-			)
+			)...)
 		},
 		logModule:   "http in/out",
 		answerError: answerMethodNotFound,
