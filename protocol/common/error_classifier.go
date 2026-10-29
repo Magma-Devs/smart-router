@@ -354,7 +354,12 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// via httpStatusCodeMappings() and httpStatusMessageMappings()
 	},
 
-	TransportGRPC: {
+	TransportGRPC: grpcErrorMappings(),
+}
+
+// grpcErrorMappings is the gRPC transport's generic table, in match order.
+func grpcErrorMappings() []errorMapping {
+	mappings := []errorMapping{
 		// gRPC status code matchers (codes from google.golang.org/grpc/codes)
 		//
 		// A code earns a row here only when its verdict is the SAME at every
@@ -390,15 +395,29 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// is Retryable=true so the pruned-node-to-archive-node retry survives, and
 		// SubCategoryDataScope is what keeps the gate off an endpoint that answered
 		// truthfully about its own data scope.
-		{GRPCCodeEquals(5), LavaErrorNodeDataNotHeld},         // codes.NotFound
-		{GRPCCodeEquals(11), LavaErrorNodeDataNotHeld},        // codes.OutOfRange
-		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented},      // codes.Unimplemented
-		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
+		{GRPCCodeEquals(5), LavaErrorNodeDataNotHeld},    // codes.NotFound
+		{GRPCCodeEquals(11), LavaErrorNodeDataNotHeld},   // codes.OutOfRange
+		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented}, // codes.Unimplemented
 		// codes.Aborted (MAG-3995): on Sui, the one node that sends it, it is the validators'
 		// answer to a submitted transaction, relayed by the fullnode, and Sui's own message calls
 		// it retriable with another submission. Not evidence against the endpoint, and the
 		// resubmission is the client's call, so non-retryable; see LavaErrorNodeAborted.
 		{GRPCCodeEquals(10), LavaErrorNodeAborted}, // codes.Aborted
+	}
+
+	// The rate-limit texts come next, one row per GRPCRateLimitTexts entry, the list
+	// RateLimitFromGRPC reads, so the transport's typed rate limit and this verdict agree. They
+	// precede codes.Unavailable: a vendor's HTTP edge leaves "429 (Too Many Requests)" inside it,
+	// and with the code row first that reply was NODE_SERVICE_UNAVAILABLE and marked the endpoint
+	// unhealthy while the transport held it off as a rate limit (MAG-4278 item 5). They follow the
+	// five code rows above, whose verdicts a rate-limit text does not override; see
+	// TestGRPCRateLimitTexts_TheCodeRowsAboveStillDecide.
+	for _, text := range GRPCRateLimitTexts {
+		mappings = append(mappings, errorMapping{MessageContains(text), LavaErrorNodeRateLimited})
+	}
+
+	return append(mappings, []errorMapping{
+		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
 		// Deliberately NOT registered, each for its own reason — do not add them
 		// as a block, which is how `Code >= 13` went wrong in the first place:
 		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
@@ -406,8 +425,8 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		//   7  PermissionDenied  - credentials are configured per endpoint, so one
 		//   16 Unauthenticated     rejecting ours is unusable to us and should demote.
 		//   8  ResourceExhausted - ambiguous in the gRPC spec (per-user quota vs.
-		//                          out of disk). The "rate limit" message row below
-		//                          catches the quota case without asserting the code
+		//                          out of disk). The rate-limit text rows (see above)
+		//                          catch the quota case without asserting the code
 		//                          alone means "healthy but busy".
 		//   1  Canceled          - a LOCAL cancellation never reaches this table;
 		//                          handleGRPCError resolves it structurally. One that
@@ -416,12 +435,10 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		//                          ibc-go, wasmd, Lava, Concordium or Sui (MAG-3995). A row
 		//                          would be a verdict on a status nobody has seen.
 		// Message-based matchers for gRPC errors conveyed without status codes
-		{MessageContains("rate limit"), LavaErrorNodeRateLimited},
-		{MessageContains("enhance_your_calm"), LavaErrorNodeRateLimited}, // HTTP/2 GOAWAY ENHANCE_YOUR_CALM
 		{MessageContains("unimplemented"), LavaErrorNodeUnimplemented},
 		{MessageContains("not implemented"), LavaErrorNodeUnimplemented},
 		{MessageContains("service not found"), LavaErrorNodeUnimplemented},
-	},
+	}...)
 }
 
 // ---------------------------------------------------------------------------
@@ -626,7 +643,11 @@ type NodeErrorClassification struct {
 // and callers that treat a false flag as an affirmative classification will
 // misread every novel error body.
 func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, errorCode int, message string) NodeErrorClassification {
-	c := ClassifyError(nil, family, transport, errorCode, message)
+	return nodeErrorClassificationOf(ClassifyError(nil, family, transport, errorCode, message))
+}
+
+// nodeErrorClassificationOf derives the policy flags of one registry verdict.
+func nodeErrorClassificationOf(c *LavaError) NodeErrorClassification {
 	if c == nil || c == LavaErrorUnknown {
 		return NodeErrorClassification{}
 	}
