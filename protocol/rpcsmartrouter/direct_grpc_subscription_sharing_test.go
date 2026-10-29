@@ -295,9 +295,9 @@ func TestGRPCStartSubscription_ReleasesClientStateOnFailure(t *testing.T) {
 		require.Error(t, err, "a non-streaming method must not open a subscription")
 	}
 
-	manager.rateLimiter.lock.Lock()
+	manager.rateLimiter.mu.Lock()
 	strandedLimiters := len(manager.rateLimiter.subscribeLimiters)
-	manager.rateLimiter.lock.Unlock()
+	manager.rateLimiter.mu.Unlock()
 	require.Zero(t, strandedLimiters,
 		"a failed subscribe must not strand a rate-limiter entry under a key that will never be seen again")
 

@@ -515,8 +515,8 @@ func TestNewDirectWSSubscriptionManager(t *testing.T) {
 	assert.NotNil(t, manager.upstreamPools)
 	assert.NotNil(t, manager.idMapper)
 	assert.Equal(t, "ETH", manager.chainID)
-	assert.Len(t, manager.wsEndpoints, 1)
-	assert.Equal(t, "wss://test.example.com", manager.wsEndpoints[0].Url)
+	assert.Len(t, manager.primary, 1)
+	assert.Equal(t, "wss://test.example.com", manager.primary[0].Url)
 }
 
 // TestCreateWebSocketConnectionUniqueKey tests the client key generation
@@ -815,13 +815,15 @@ func TestActiveSubscriptionTracksPerClientRouterIDs(t *testing.T) {
 func TestUnsubscribeRateLimiting(t *testing.T) {
 	// Create a config with very low unsubscribe limit for testing
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 10,
-		UnsubscribesPerMinutePerClient:  2, // Very low limit for testing
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 10,
+			UnsubscribesPerMinutePerClient:  2, // Very low limit for testing
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	nodeUrl := &common.NodeUrl{Url: "wss://test.example.com"}
@@ -871,13 +873,15 @@ func TestUnsubscribeRateLimiting(t *testing.T) {
 func TestUnsubscribeAllNotRateLimited(t *testing.T) {
 	// Create a config with very low unsubscribe limit
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 10,
-		UnsubscribesPerMinutePerClient:  1, // Extremely low limit
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 10,
+			UnsubscribesPerMinutePerClient:  1, // Extremely low limit
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	nodeUrl := &common.NodeUrl{Url: "wss://test.example.com"}
@@ -1368,13 +1372,15 @@ func TestReconnectionUpdatesConnectionBookkeeping(t *testing.T) {
 func TestUnsubscribeRouterIDOwnershipValidation(t *testing.T) {
 	// Create a config with high limits to avoid rate limiting
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 60, // High limit to avoid rate limiting
-		UnsubscribesPerMinutePerClient:  60,
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 60, // High limit to avoid rate limiting
+			UnsubscribesPerMinutePerClient:  60,
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	nodeUrl := &common.NodeUrl{Url: "wss://test.example.com"}
@@ -2377,13 +2383,15 @@ func TestCreateSubscriptionReply_EchoesStringRequestID(t *testing.T) {
 // an entry in clientRouterIDs for that subscription, so this remains safe.
 func TestUnsubscribe_AcceptsUpstreamIDFallback(t *testing.T) {
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 60,
-		UnsubscribesPerMinutePerClient:  60,
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 60,
+			UnsubscribesPerMinutePerClient:  60,
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	manager := NewDirectWSSubscriptionManager(
@@ -2767,13 +2775,15 @@ func TestListenForUpstreamMessages_NilUpstreamSubDoesNotPanic(t *testing.T) {
 // open a hole that lets one client unsubscribe another client's shared subscription.
 func TestUnsubscribe_StillRejectsForeignSubscription(t *testing.T) {
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 60,
-		UnsubscribesPerMinutePerClient:  60,
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 60,
+			UnsubscribesPerMinutePerClient:  60,
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	manager := NewDirectWSSubscriptionManager(
