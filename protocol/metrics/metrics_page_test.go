@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
-	zerologlog "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,13 +53,12 @@ func TestMetricsPage_OneBadMetricLeavesTheRestOfThePageUp(t *testing.T) {
 
 	var mu sync.Mutex
 	var logged strings.Builder
-	prev := zerologlog.Logger
-	zerologlog.Logger = zerolog.New(zerolog.SyncWriter(logWriter(func(p []byte) (int, error) {
+	restore := utils.SetStdLogger(zerolog.New(zerolog.SyncWriter(logWriter(func(p []byte) (int, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		return logged.Write(p)
-	})))
-	defer func() { zerologlog.Logger = prev }()
+	}))))
+	defer restore()
 
 	page := newMetricsPageHandler(registry, registry)
 	first := httptest.NewRecorder()

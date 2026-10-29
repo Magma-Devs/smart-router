@@ -208,7 +208,7 @@ func TestHappyFlow(t *testing.T) {
 
 	relaysMonitor := NewRelaysMonitor(interval, interval, "test_chain", "rest")
 	relaysMonitor.SetRelaySender(relaySender)
-	relaysMonitor.Start(context.Background())
+	relaysMonitor.Start(t.Context()) // stops with the test: its probes log, and must not outlive it
 
 	t.Run("HappyFlow", func(t *testing.T) {
 		// Log a relay
