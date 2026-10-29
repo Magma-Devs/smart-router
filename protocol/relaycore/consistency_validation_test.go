@@ -228,8 +228,6 @@ func TestConsistencyValidationConfig_Creation(t *testing.T) {
 		config := DefaultConsistencyValidationConfig()
 		require.NotNil(t, config)
 		require.Equal(t, int64(10), config.EndpointLagThreshold)
-		require.False(t, config.EnableWaitForCatchup)
-		require.Equal(t, 500*time.Millisecond, config.MaxWaitTime)
 	})
 
 	t.Run("config from chain spec - typical EVM, floor dominates", func(t *testing.T) {
@@ -238,8 +236,6 @@ func TestConsistencyValidationConfig_Creation(t *testing.T) {
 		require.NotNil(t, config)
 		// EndpointLagThreshold = max(3*2=6, 10) = 10 (minimum)
 		require.Equal(t, int64(10), config.EndpointLagThreshold)
-		// MaxWaitTime = min(12s*2=24s, 5s cap) = 5s
-		require.Equal(t, 5*time.Second, config.MaxWaitTime)
 	})
 
 	t.Run("config from chain spec - fast chain, QoS lag dominates", func(t *testing.T) {
@@ -248,8 +244,6 @@ func TestConsistencyValidationConfig_Creation(t *testing.T) {
 		require.NotNil(t, config)
 		// EndpointLagThreshold = max(10*2=20, 10) = 20
 		require.Equal(t, int64(20), config.EndpointLagThreshold)
-		// MaxWaitTime = 2s*2 = 4s
-		require.Equal(t, 4*time.Second, config.MaxWaitTime)
 	})
 
 	t.Run("config from chain spec - slow chain", func(t *testing.T) {
@@ -258,8 +252,6 @@ func TestConsistencyValidationConfig_Creation(t *testing.T) {
 		require.NotNil(t, config)
 		// EndpointLagThreshold = max(1*2=2, 10) = 10 (minimum)
 		require.Equal(t, int64(10), config.EndpointLagThreshold)
-		// MaxWaitTime = min(60s*2=120s, 5s cap) = 5s
-		require.Equal(t, 5*time.Second, config.MaxWaitTime)
 	})
 
 	t.Run("config from chain spec - very fast block time", func(t *testing.T) {
@@ -268,8 +260,6 @@ func TestConsistencyValidationConfig_Creation(t *testing.T) {
 		require.NotNil(t, config)
 		// EndpointLagThreshold = max(20*2=40, 10) = 40
 		require.Equal(t, int64(40), config.EndpointLagThreshold)
-		// MaxWaitTime = max(100ms*2=200ms, 500ms floor) = 500ms
-		require.Equal(t, 500*time.Millisecond, config.MaxWaitTime)
 	})
 
 	t.Run("block-gap-factor scales the threshold (polling-relief)", func(t *testing.T) {

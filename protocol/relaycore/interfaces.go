@@ -26,7 +26,6 @@ type RelayStateMachine interface {
 type ResultsCheckerInf interface {
 	WaitForResults(ctx context.Context) error
 	HasRequiredNodeResults(tries int) (bool, int)
-	GetCrossValidationParams() *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
 	GetResultsSummary() ResultsSummary
 	// CrossValidationMissingOnlyGroups reports whether a cross-validation request should stop at its attempt
 	// window: some response hash has reached the agreement threshold without satisfying the quorum rule, and
@@ -61,12 +60,16 @@ func (rssi *RelayStateSendInstructions) IsDone() bool {
 	return rssi.Done || rssi.Err != nil
 }
 
-// RelaySenderInf is the unified interface for relay senders (Consumer and SmartRouter).
-// Both ConsumerRelaySender and SmartRouterRelaySender have identical signatures.
+// RelaySenderInf is what the relay state machine needs from the router that owns it: the
+// processing timeout for a message. It is all the state machine calls through this type.
+//
+// It used to also embed RelayParserInf (ParseRelay) and declare GetChainIdAndApiInterface.
+// Neither was ever called through RelaySenderInf: the router calls ParseRelay on its concrete
+// type, chainlib calls it through its own chainlib.RelaySender, and the relay processor reads
+// the chain id through ChainIdAndApiInterfaceGetter (MAG-4243). Every sender mock implemented
+// both for nothing. Implementations keep the methods; only the requirement is gone.
 type RelaySenderInf interface {
-	RelayParserInf
 	GetProcessingTimeout(chainMessage chainlib.ChainMessage) (processingTimeout time.Duration, relayTimeout time.Duration)
-	GetChainIdAndApiInterface() (string, string)
 }
 
 // ResultsSummary is pure data reported by the RelayProcessor for the policy engine.
