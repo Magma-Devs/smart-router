@@ -397,147 +397,108 @@ func (ws *UpstreamSelector) normalizeAvailability(availability float64) float64 
 	return normalized
 }
 
-// normalizeLatency converts latency score to 0-1 range where higher is better
-// Input: latency in seconds (lower is better)
-// Output: normalized score where 1.0 = best, 0.0 = worst
-//
-// Phase 2 (Hybrid P10-P90 Approach):
-//   - Uses P10-P90 adaptive range from T-Digest for better distribution
-//   - Formula: normalized = 1 - (clamp(latency, P10, P90) - P10) / (P90 - P10)
-//   - This provides 85-95% range utilization vs 70-85% with P95-only
-//   - Robust to both-sided outliers (excludes bottom 10% and top 10%)
-//
-// Phase 1 (Fallback):
-//   - Uses fixed maximum expected latency (score.WorstLatencyScore = 30s)
-//   - Formula: normalized = 1 - (latency / maxLatency)
+// normalizeLatency scores latency in seconds on a 0-1 scale where higher is better: 1 for
+// the fastest, 0 for the slowest. See normalizeInverted for the scale. Latency falls back to
+// score.WorstLatencyScore (30 s). Its adaptive P10-P90 range uses 85-95% of the score range,
+// against 70-85% with P95 alone.
 func (ws *UpstreamSelector) normalizeLatency(latency float64) float64 {
-	// Phase 2: Adaptive P10-P90 normalization (if enabled)
-	if ws.useAdaptiveLatencyMax && ws.adaptiveLatencyGetter != nil {
-		p10, p90 := ws.adaptiveLatencyGetter()
-
-		// Validate adaptive bounds
-		if math.IsNaN(p10) || math.IsNaN(p90) || math.IsInf(p10, 0) || math.IsInf(p90, 0) || p10 <= 0 || p90 <= 0 || p90 <= p10 {
-			// Invalid bounds, fallback to Phase 1
-			utils.LavaFormatWarning("invalid adaptive latency bounds, falling back to fixed max",
-				nil,
-				utils.LogAttr("p10", p10),
-				utils.LogAttr("p90", p90),
-			)
-		} else {
-			// Clamp latency to P10-P90 range
-			clampedLatency := latency
-			wasClampedLow := false
-			wasClampedHigh := false
-
-			if clampedLatency < p10 {
-				clampedLatency = p10
-				wasClampedLow = true
-			}
-			if clampedLatency > p90 {
-				clampedLatency = p90
-				wasClampedHigh = true
-			}
-
-			// Normalize: 1 - (Li - P10) / (P90 - P10)
-			// This gives better distribution than simple 1 - (L / P90)
-			normalized := 1.0 - (clampedLatency-p10)/(p90-p10)
-
-			// Clamp to [0, 1] (should already be in range, but defensive)
-			if normalized < 0 {
-				normalized = 0
-			}
-			if normalized > 1.0 {
-				normalized = 1.0
-			}
-
-			// Log normalization details for distribution visualization
-			utils.LavaFormatTrace("[LatencyNormalization] P10-P90 normalization applied",
-				utils.LogAttr("raw_latency", latency),
-				utils.LogAttr("clamped_latency", clampedLatency),
-				utils.LogAttr("p10", p10),
-				utils.LogAttr("p90", p90),
-				utils.LogAttr("range_p10_p90", p90-p10),
-				utils.LogAttr("normalized_score", normalized),
-				utils.LogAttr("was_clamped_low", wasClampedLow),
-				utils.LogAttr("was_clamped_high", wasClampedHigh),
-			)
-
-			return normalized
-		}
-	}
-
-	// Phase 1 (Fallback): Use fixed maximum expected latency
-	const maxLatency = score.WorstLatencyScore
-	if latency <= 0 {
-		utils.LavaFormatTrace("[LatencyNormalization] Perfect latency",
-			utils.LogAttr("latency", latency),
-			utils.LogAttr("normalized_score", 1.0),
-		)
-		return 1.0 // Perfect latency
-	}
-
-	// Normalize to 0-1 range, inverted so lower latency = higher score
-	normalized := 1.0 - (latency / maxLatency)
-	if normalized < 0 {
-		normalized = 0 // Clamp to 0 for extremely high latency
-	}
-
-	// Log normalization details for distribution visualization
-	utils.LavaFormatTrace("[LatencyNormalization] Fixed max normalization applied",
-		utils.LogAttr("raw_latency", latency),
-		utils.LogAttr("max_latency", maxLatency),
-		utils.LogAttr("normalized_score", normalized),
-	)
-
-	return normalized
+	return normalizeInverted(latency, ws.useAdaptiveLatencyMax, ws.adaptiveLatencyGetter, &latencyNormalization)
 }
 
-// normalizeSync converts sync lag to 0-1 range where higher is better
-// Input: sync lag in seconds (lower is better)
-// Output: normalized score where 1.0 = best, 0.0 = worst
-//
-// Phase 2 (Hybrid P10-P90 Approach):
-//   - Uses P10-P90 adaptive range from T-Digest for better distribution
-//   - Formula: normalized = 1 - (clamp(syncLag, P10, P90) - P10) / (P90 - P10)
-//   - This provides 85-95% range utilization vs 55-70% with P95-only
-//   - Robust to both-sided outliers (excludes bottom 10% and top 10%)
-//
-// Phase 1 (Fallback):
-//   - Uses fixed maximum expected sync lag (score.WorstSyncScore = 1200s)
-//   - Formula: normalized = 1 - (syncLag / maxSyncLag)
+// normalizeSync scores sync lag in seconds on a 0-1 scale where higher is better: 1 for the
+// most in sync, 0 for the furthest behind. See normalizeInverted for the scale. Sync falls
+// back to score.WorstSyncScore (1200 s). Its adaptive P10-P90 range uses 85-95% of the score
+// range, against 55-70% with P95 alone.
 func (ws *UpstreamSelector) normalizeSync(syncLag float64) float64 {
-	// Phase 2: Adaptive P10-P90 normalization (if enabled)
-	if ws.useAdaptiveSyncMax && ws.adaptiveSyncGetter != nil {
-		p10, p90 := ws.adaptiveSyncGetter()
+	return normalizeInverted(syncLag, ws.useAdaptiveSyncMax, ws.adaptiveSyncGetter, &syncNormalization)
+}
 
-		// Validate adaptive bounds
+// invertedNormalization is one "lower is better" QoS dimension's fixed part: the worst value
+// it falls back to and the words its log lines use. Latency and sync lag are normalized by
+// the same algorithm (normalizeInverted) and differ only here (MAG-4244 section 7).
+//
+// The log text is held as whole literals, not assembled from a dimension name, and the worst
+// value is boxed into its log attribute ONCE: normalizeInverted runs once per provider per
+// selection, and Go evaluates log arguments even when trace logging is off, so building
+// strings or boxing a value per call would allocate on every selection.
+type invertedNormalization struct {
+	worst   float64         // the fixed worst value the scale falls back to
+	maxAttr utils.Attribute // worst as a log attribute, boxed once
+
+	invalidBoundsMsg   string // warning when the adaptive bounds cannot describe a range
+	adaptiveAppliedMsg string
+	perfectMsg         string
+	fixedAppliedMsg    string
+
+	valueKey   string // the dimension's own name for its value, in the perfect-score line
+	rawKey     string
+	clampedKey string
+}
+
+var latencyNormalization = invertedNormalization{
+	worst:              score.WorstLatencyScore,
+	maxAttr:            utils.LogAttr("max_latency", score.WorstLatencyScore),
+	invalidBoundsMsg:   "invalid adaptive latency bounds, falling back to fixed max",
+	adaptiveAppliedMsg: "[LatencyNormalization] P10-P90 normalization applied",
+	perfectMsg:         "[LatencyNormalization] Perfect latency",
+	fixedAppliedMsg:    "[LatencyNormalization] Fixed max normalization applied",
+	valueKey:           "latency",
+	rawKey:             "raw_latency",
+	clampedKey:         "clamped_latency",
+}
+
+var syncNormalization = invertedNormalization{
+	worst:              score.WorstSyncScore,
+	maxAttr:            utils.LogAttr("max_sync_lag", score.WorstSyncScore),
+	invalidBoundsMsg:   "invalid adaptive sync bounds, falling back to fixed max",
+	adaptiveAppliedMsg: "[SyncNormalization] P10-P90 normalization applied",
+	perfectMsg:         "[SyncNormalization] Perfect sync",
+	fixedAppliedMsg:    "[SyncNormalization] Fixed max normalization applied",
+	valueKey:           "sync_lag",
+	rawKey:             "raw_sync_lag",
+	clampedKey:         "clamped_sync_lag",
+}
+
+// normalizeInverted converts a "lower is better" value to a 0-1 score where higher is
+// better: 1.0 is the best, 0.0 the worst.
+//
+// Adaptive (when adaptive is on and bounds is set): the P10-P90 range from the T-Digest,
+// robust to outliers on both sides because it excludes the bottom and top 10%.
+//
+//	normalized = 1 - (clamp(value, P10, P90) - P10) / (P90 - P10)
+//
+// Fixed (otherwise, or when the bounds cannot describe a range):
+//
+//	normalized = 1 - value / n.worst, clamped at 0; 1 for any value at or below zero
+func normalizeInverted(value float64, adaptive bool, bounds func() (p10, p90 float64), n *invertedNormalization) float64 {
+	if adaptive && bounds != nil {
+		p10, p90 := bounds()
+
 		if math.IsNaN(p10) || math.IsNaN(p90) || math.IsInf(p10, 0) || math.IsInf(p90, 0) || p10 <= 0 || p90 <= 0 || p90 <= p10 {
-			// Invalid bounds, fallback to Phase 1
-			utils.LavaFormatWarning("invalid adaptive sync bounds, falling back to fixed max",
+			// Bounds that cannot describe a range: fall back to the fixed maximum.
+			utils.LavaFormatWarning(n.invalidBoundsMsg,
 				nil,
 				utils.LogAttr("p10", p10),
 				utils.LogAttr("p90", p90),
 			)
 		} else {
-			// Clamp sync lag to P10-P90 range
-			clampedSyncLag := syncLag
+			clamped := value
 			wasClampedLow := false
 			wasClampedHigh := false
 
-			if clampedSyncLag < p10 {
-				clampedSyncLag = p10
+			if clamped < p10 {
+				clamped = p10
 				wasClampedLow = true
 			}
-			if clampedSyncLag > p90 {
-				clampedSyncLag = p90
+			if clamped > p90 {
+				clamped = p90
 				wasClampedHigh = true
 			}
 
-			// Normalize: 1 - (Si - P10) / (P90 - P10)
-			// This gives better distribution than simple 1 - (S / P90)
-			normalized := 1.0 - (clampedSyncLag-p10)/(p90-p10)
+			// 1 - (Vi - P10) / (P90 - P10): a better spread than 1 - V / P90.
+			normalized := 1.0 - (clamped-p10)/(p90-p10)
 
-			// Clamp to [0, 1] (should already be in range, but defensive)
+			// Already in [0, 1] after the clamp above; kept defensive.
 			if normalized < 0 {
 				normalized = 0
 			}
@@ -545,10 +506,9 @@ func (ws *UpstreamSelector) normalizeSync(syncLag float64) float64 {
 				normalized = 1.0
 			}
 
-			// Log normalization details for distribution visualization
-			utils.LavaFormatTrace("[SyncNormalization] P10-P90 normalization applied",
-				utils.LogAttr("raw_sync_lag", syncLag),
-				utils.LogAttr("clamped_sync_lag", clampedSyncLag),
+			utils.LavaFormatTrace(n.adaptiveAppliedMsg,
+				utils.LogAttr(n.rawKey, value),
+				utils.LogAttr(n.clampedKey, clamped),
 				utils.LogAttr("p10", p10),
 				utils.LogAttr("p90", p90),
 				utils.LogAttr("range_p10_p90", p90-p10),
@@ -561,26 +521,23 @@ func (ws *UpstreamSelector) normalizeSync(syncLag float64) float64 {
 		}
 	}
 
-	// Phase 1 (Fallback): Use fixed maximum expected sync lag
-	const maxSyncLag = score.WorstSyncScore
-	if syncLag <= 0 {
-		utils.LavaFormatTrace("[SyncNormalization] Perfect sync",
-			utils.LogAttr("sync_lag", syncLag),
+	if value <= 0 {
+		utils.LavaFormatTrace(n.perfectMsg,
+			utils.LogAttr(n.valueKey, value),
 			utils.LogAttr("normalized_score", 1.0),
 		)
-		return 1.0 // Perfect sync
+		return 1.0
 	}
 
-	// Normalize to 0-1 range, inverted so lower sync = higher score
-	normalized := 1.0 - (syncLag / maxSyncLag)
+	// Inverted, so a lower value scores higher; clamped at 0 past the worst value.
+	normalized := 1.0 - (value / n.worst)
 	if normalized < 0 {
-		normalized = 0 // Clamp to 0 for extremely poor sync
+		normalized = 0
 	}
 
-	// Log normalization details for distribution visualization
-	utils.LavaFormatTrace("[SyncNormalization] Fixed max normalization applied",
-		utils.LogAttr("raw_sync_lag", syncLag),
-		utils.LogAttr("max_sync_lag", maxSyncLag),
+	utils.LavaFormatTrace(n.fixedAppliedMsg,
+		utils.LogAttr(n.rawKey, value),
+		n.maxAttr,
 		utils.LogAttr("normalized_score", normalized),
 	)
 
