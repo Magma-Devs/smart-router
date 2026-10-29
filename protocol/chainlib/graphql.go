@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -334,12 +333,8 @@ func (apip *GraphQLChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 }
 
 type GraphQLChainListener struct {
-	endpoint         *lavasession.RPCEndpoint
-	relaySender      RelaySender
-	healthReporter   HealthReporter
-	logger           *metrics.RPCConsumerLogs
-	listeningAddress atomic.Pointer[string]
-	app              *fiber.App // captured during Serve so Shutdown can drain HTTP
+	chainListenerBase
+	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewGraphQLChainListener creates a new instance of GraphQLChainListener
@@ -348,10 +343,12 @@ func NewGraphQLChainListener(ctx context.Context, listenEndpoint *lavasession.RP
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
 ) (chainListener *GraphQLChainListener) {
 	return &GraphQLChainListener{
-		endpoint:       listenEndpoint,
-		relaySender:    relaySender,
-		healthReporter: healthReporter,
-		logger:         rpcConsumerLogs,
+		chainListenerBase: chainListenerBase{
+			endpoint:       listenEndpoint,
+			relaySender:    relaySender,
+			healthReporter: healthReporter,
+			logger:         rpcConsumerLogs,
+		},
 	}
 }
 
@@ -446,13 +443,6 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	}()
 
 	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
-}
-
-func (apil *GraphQLChainListener) GetListeningAddress() string {
-	if p := apil.listeningAddress.Load(); p != nil {
-		return *p
-	}
-	return ""
 }
 
 // Shutdown drains in-flight HTTP requests and closes the listener.

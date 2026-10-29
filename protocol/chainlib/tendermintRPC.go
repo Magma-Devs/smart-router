@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -338,13 +337,9 @@ func (apip *TendermintChainParser) ChainBlockStats() (allowedBlockLagForQosSync 
 }
 
 type TendermintRpcChainListener struct {
-	endpoint                   *lavasession.RPCEndpoint
-	relaySender                RelaySender
-	healthReporter             HealthReporter
-	logger                     *metrics.RPCConsumerLogs
+	chainListenerBase
 	refererData                *RefererData
 	wsSubscriptionManager      WSSubscriptionManager
-	listeningAddress           atomic.Pointer[string]
 	websocketConnectionLimiter *WebsocketConnectionLimiter
 	app                        *fiber.App     // captured during Serve so Shutdown can drain HTTP
 	wsWG                       sync.WaitGroup // tracks active downstream WS goroutines for Shutdown drain
@@ -359,10 +354,12 @@ func NewTendermintRpcChainListener(ctx context.Context, listenEndpoint *lavasess
 ) (chainListener *TendermintRpcChainListener) {
 	// Create a new instance of TendermintRpcChainListener
 	chainListener = &TendermintRpcChainListener{
-		endpoint:                   listenEndpoint,
-		relaySender:                relaySender,
-		healthReporter:             healthReporter,
-		logger:                     rpcConsumerLogs,
+		chainListenerBase: chainListenerBase{
+			endpoint:       listenEndpoint,
+			relaySender:    relaySender,
+			healthReporter: healthReporter,
+			logger:         rpcConsumerLogs,
+		},
 		refererData:                refererData,
 		wsSubscriptionManager:      wsSubscriptionManager,
 		websocketConnectionLimiter: &WebsocketConnectionLimiter{ipToNumberOfActiveConnections: make(map[string]int64)},
@@ -617,13 +614,6 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 	}()
 
 	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
-}
-
-func (apil *TendermintRpcChainListener) GetListeningAddress() string {
-	if p := apil.listeningAddress.Load(); p != nil {
-		return *p
-	}
-	return ""
 }
 
 type tendermintRpcChainProxy struct {

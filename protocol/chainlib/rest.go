@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
@@ -226,12 +225,8 @@ func (apip *RestChainParser) ChainBlockStats() (allowedBlockLagForQosSync int64,
 }
 
 type RestChainListener struct {
-	endpoint         *lavasession.RPCEndpoint
-	relaySender      RelaySender
-	healthReporter   HealthReporter
-	logger           *metrics.RPCConsumerLogs
-	listeningAddress atomic.Pointer[string]
-	app              *fiber.App // captured during Serve so Shutdown can drain HTTP
+	chainListenerBase
+	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // RestMethodCarriesBody reports whether the REST listener relays the request body for
@@ -267,10 +262,12 @@ func NewRestChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEn
 ) (chainListener *RestChainListener) {
 	// Create a new instance of JsonRPCChainListener
 	chainListener = &RestChainListener{
-		endpoint:       listenEndpoint,
-		relaySender:    relaySender,
-		healthReporter: healthReporter,
-		logger:         rpcConsumerLogs,
+		chainListenerBase: chainListenerBase{
+			endpoint:       listenEndpoint,
+			relaySender:    relaySender,
+			healthReporter: healthReporter,
+			logger:         rpcConsumerLogs,
+		},
 	}
 
 	return chainListener
@@ -464,13 +461,6 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	}()
 
 	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
-}
-
-func (apil *RestChainListener) GetListeningAddress() string {
-	if p := apil.listeningAddress.Load(); p != nil {
-		return *p
-	}
-	return ""
 }
 
 type RestChainProxy struct {

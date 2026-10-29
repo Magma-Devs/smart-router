@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -18,6 +19,8 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	common "github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -696,6 +699,23 @@ func stripBrotliAcceptEncoding(c *fiber.Ctx) error {
 // websocket upgrade. Only those listeners may hand an upgrade on the health path
 // past the health handler; see the health route below for why the distinction has
 // to be explicit rather than inferred.
+// chainListenerBase holds what every chain listener is built with, and the address it
+// listens on once Serve has bound it.
+type chainListenerBase struct {
+	endpoint         *lavasession.RPCEndpoint
+	relaySender      RelaySender
+	healthReporter   HealthReporter
+	logger           *metrics.RPCConsumerLogs
+	listeningAddress atomic.Pointer[string]
+}
+
+func (apil *chainListenerBase) GetListeningAddress() string {
+	if p := apil.listeningAddress.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
 func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades bool) *fiber.App {
 	app := fiber.New(fiber.Config{
 		JSONEncoder: json.Marshal,

@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -345,13 +344,9 @@ func (apip *JsonRPCChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 }
 
 type JsonRPCChainListener struct {
-	endpoint                   *lavasession.RPCEndpoint
-	relaySender                RelaySender
-	healthReporter             HealthReporter
-	logger                     *metrics.RPCConsumerLogs
+	chainListenerBase
 	refererData                *RefererData
 	wsSubscriptionManager      WSSubscriptionManager
-	listeningAddress           atomic.Pointer[string]
 	websocketConnectionLimiter *WebsocketConnectionLimiter
 	app                        *fiber.App     // captured during Serve so Shutdown can drain HTTP
 	wsWG                       sync.WaitGroup // tracks active downstream WS goroutines for Shutdown drain
@@ -366,10 +361,12 @@ func NewJrpcChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEn
 ) (chainListener *JsonRPCChainListener) {
 	// Create a new instance of JsonRPCChainListener
 	chainListener = &JsonRPCChainListener{
-		endpoint:                   listenEndpoint,
-		relaySender:                relaySender,
-		healthReporter:             healthReporter,
-		logger:                     rpcConsumerLogs,
+		chainListenerBase: chainListenerBase{
+			endpoint:       listenEndpoint,
+			relaySender:    relaySender,
+			healthReporter: healthReporter,
+			logger:         rpcConsumerLogs,
+		},
 		refererData:                refererData,
 		wsSubscriptionManager:      wsSubscriptionManager,
 		websocketConnectionLimiter: &WebsocketConnectionLimiter{ipToNumberOfActiveConnections: make(map[string]int64)},
@@ -614,13 +611,6 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	}()
 
 	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
-}
-
-func (apil *JsonRPCChainListener) GetListeningAddress() string {
-	if p := apil.listeningAddress.Load(); p != nil {
-		return *p
-	}
-	return ""
 }
 
 type JrpcChainProxy struct {

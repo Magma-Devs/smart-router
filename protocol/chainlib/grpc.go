@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -360,13 +359,9 @@ func (apip *GrpcChainParser) ChainBlockStats() (allowedBlockLagForQosSync int64,
 }
 
 type GrpcChainListener struct {
-	endpoint         *lavasession.RPCEndpoint
-	relaySender      RelaySender
-	logger           *metrics.RPCConsumerLogs
-	chainParser      *GrpcChainParser
-	healthReporter   HealthReporter
-	listeningAddress atomic.Pointer[string]
-	httpServer       *http.Server // captured during Serve so Shutdown can call httpServer.Shutdown
+	chainListenerBase
+	chainParser *GrpcChainParser
+	httpServer  *http.Server // captured during Serve so Shutdown can call httpServer.Shutdown
 }
 
 func NewGrpcChainListener(
@@ -379,11 +374,13 @@ func NewGrpcChainListener(
 ) (chainListener *GrpcChainListener) {
 	// Create a new instance of GrpcChainListener
 	chainListener = &GrpcChainListener{
-		endpoint:       listenEndpoint,
-		relaySender:    relaySender,
-		logger:         rpcConsumerLogs,
-		chainParser:    chainParser.(*GrpcChainParser),
-		healthReporter: healthReporter,
+		chainListenerBase: chainListenerBase{
+			endpoint:       listenEndpoint,
+			relaySender:    relaySender,
+			healthReporter: healthReporter,
+			logger:         rpcConsumerLogs,
+		},
+		chainParser: chainParser.(*GrpcChainParser),
 	}
 	return chainListener
 }
@@ -698,13 +695,6 @@ func snapshotMetricsHeaders(metadataValues metadata.MD) metadata.MD {
 		snapshot.Set(metrics.OriginHeaderKey, strings.Clone(values[0]))
 	}
 	return snapshot
-}
-
-func (apil *GrpcChainListener) GetListeningAddress() string {
-	if p := apil.listeningAddress.Load(); p != nil {
-		return *p
-	}
-	return ""
 }
 
 type GrpcChainProxy struct {
