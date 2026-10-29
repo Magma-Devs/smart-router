@@ -2429,14 +2429,9 @@ func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
 // everything else over http.
 func subscriptionCollectionProbe(chainParser chainlib.ChainParser) func(internalPath string, declaredAddons []string) bool {
 	return func(internalPath string, declaredAddons []string) bool {
-		addons, _, err := chainParser.SeparateAddonsExtensions(context.Background(), declaredAddons)
-		if err != nil {
-			// Verification refuses a url whose add-ons cannot be read, so this
-			// is reached only outside admission; an unreadable addon set falls
-			// back to "http collection" — the shape all but STRK's three ws
-			// paths have.
-			return false
-		}
+		// A name the spec does not define is ignored, as admission ignores it
+		// (MAG-3950): addons holds the add-ons the spec does define.
+		addons, _, _ := chainParser.SeparateAddonsExtensions(context.Background(), declaredAddons)
 		if len(addons) == 0 {
 			addons = append(addons, "")
 		}
@@ -4245,8 +4240,9 @@ func (rpsr *RPCSmartRouter) publishServingTierLocked(chainKey string) {
 // covers the demotion path too, which never writes those lists.
 //
 // A provider in the pairing gets one scope=service series per add-on or extension
-// it was refused, so losing archive while still serving the base chain shows too.
-// A provider with neither has no series.
+// it was refused, so losing archive while still serving the base chain shows too,
+// and one scope=none series per Warning-severity check it fails. A provider with
+// none of these has no series.
 func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inputs *chainReverifyInputs) {
 	if inputs == nil || inputs.rpcEndpoint == nil {
 		return
@@ -4280,11 +4276,12 @@ func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inp
 	}
 }
 
-// refusalsOf is what an admitted provider was refused, as the metric publishes it. A
-// provider keeps serving through all of it:
+// refusalsOf is what an admitted provider was refused, and the Warning checks it
+// fails, as the metric publishes them. A provider keeps serving through all of it:
 //   - scope=service: an add-on or extension no node url of the provider serves any more;
 //   - scope=url with a service: a service one url lost while another url still serves it;
-//   - scope=url with no service: a node url refused whole.
+//   - scope=url with no service: a node url refused whole;
+//   - scope=none: a check whose severity is Warning; nothing was switched off.
 func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []metrics.ProviderVerificationFailure {
 	refused, urlChecks := admission.Refused(), admission.RefusedURLChecks()
 	failures := make([]metrics.ProviderVerificationFailure, 0, len(refused)+len(urlChecks))
@@ -4297,6 +4294,11 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStati
 	}
 	for _, check := range urlChecks {
 		failures = append(failures, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: check})
+	}
+	for _, w := range admission.Warnings() {
+		failures = append(failures, metrics.ProviderVerificationFailure{
+			Scope: metrics.VerificationScopeNone, Service: w.Service, Check: w.Check, Severity: metrics.VerificationSeverityWarning,
+		})
 	}
 	return failures
 }
@@ -4951,7 +4953,9 @@ func urlRefusal(provider *lavasession.RPCStaticProviderEndpoint, admissionFor fu
 func admittedServicesFor(chainParser chainlib.ChainParser, admission chainlib.ProviderAdmission, url common.NodeUrl) ([]string, bool) {
 	served, err := chainlib.ServedAs(chainParser, url)
 	if err != nil {
-		served = url
+		// A standalone-addons url that declares no add-on the spec defines keeps
+		// nothing, as verification and the serving check read it.
+		return nil, false
 	}
 	return admission.AdmittedServices(served)
 }

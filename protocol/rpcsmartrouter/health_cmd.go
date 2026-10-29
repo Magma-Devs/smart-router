@@ -460,15 +460,21 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 }
 
 // applyValidation folds one node url's results into its row: every verification, the
-// extensions they covered, the url's height, and ok = the url was reached and every
-// verification passed, whatever its severity. Pure (no I/O), so the mapping and the
-// rollup are unit-testable.
+// extensions they covered, the url's height, and ok = the url was reached, every
+// add-on it names is one the spec defines, and every verification passed, whatever
+// its severity. A name the spec does not define fails the row with an error naming
+// it, as it did when the router refused the url for it: the router now serves the
+// rest (MAG-3950), which the row's router verdict says. Pure (no I/O), so the mapping
+// and the rollup are unit-testable.
 func applyValidation(row *healthEndpointResult, v chainlib.NodeURLValidation) {
 	row.LatestBlock = v.LatestBlock
 	row.LatestBlockError = v.LatestBlockError
 	row.Error = v.Error
+	if row.Error == "" && len(v.UnknownServices) > 0 {
+		row.Error = "addons the spec does not define: " + strings.Join(v.UnknownServices, ", ")
+	}
 	extensions := map[string]struct{}{}
-	allOk := v.Error == ""
+	allOk := row.Error == ""
 	for _, vr := range v.Verifications {
 		row.Verifications = append(row.Verifications, healthVerification{
 			Name:      vr.Name,
@@ -503,9 +509,14 @@ func routerVerdict(v chainlib.NodeURLValidation, providerExcluded error) healthR
 		return healthRouterVerdict{Verdict: routerUnknown, RefusedServices: []string{}, Reason: "rate-limited: " + v.Throttled}
 	}
 	verdict := healthRouterVerdict{Verdict: routerAdmitted, RefusedServices: nonNilStrings(v.RefusedServices)}
-	if len(v.ThrottledServices) > 0 {
-		verdict.Reason = "rate-limited, not verified: " + strings.Join(v.ThrottledServices, ", ")
+	var reasons []string
+	if len(v.UnknownServices) > 0 {
+		reasons = append(reasons, "not defined by this spec, ignored: "+strings.Join(v.UnknownServices, ", "))
 	}
+	if len(v.ThrottledServices) > 0 {
+		reasons = append(reasons, "rate-limited, not verified: "+strings.Join(v.ThrottledServices, ", "))
+	}
+	verdict.Reason = strings.Join(reasons, "; ")
 	return verdict
 }
 

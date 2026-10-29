@@ -148,7 +148,7 @@ func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, e
 }
 
 // countRefusals counts each service and node url this pass refused a provider it
-// admits, one failed run each.
+// admits, and each Warning check it failed, one failed run each.
 func (inputs *chainReverifyInputs) countRefusals(tier reverifyTier, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) {
 	if inputs.countFailedCheck == nil {
 		return
