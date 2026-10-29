@@ -3,6 +3,7 @@ package metrics
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
@@ -14,43 +15,16 @@ import (
 func newSmartRouterForURLFanoutTest() *SmartRouterMetricsManager {
 	endpointLabels := []string{"spec", "apiInterface", "endpoint_id"}
 	return &SmartRouterMetricsManager{
-		endpointLatestBlock: NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-			Name:   "t_sr_endpoint_latest_block",
-			Labels: endpointLabels,
-		}),
-		endpointURLLatestBlock: NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-			Name:   "t_sr_endpoint_url_latest_block",
-			Labels: []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"},
-		}),
-		endpointURLAnsweredUntil: NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-			Name:   "t_sr_endpoint_url_answered_until_seconds",
-			Labels: []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"},
-		}),
-		endpointURLRelaysServiced: NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-			Name:   "t_sr_endpoint_url_relays_serviced_total",
-			Labels: []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"},
-		}),
-		endpointFetchLatestSuccess: NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-			Name:   "t_sr_endpoint_fetch_latest_success",
-			Labels: endpointLabels,
-		}),
-		endpointFetchLatestFails: NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-			Name:   "t_sr_endpoint_fetch_latest_fails",
-			Labels: endpointLabels,
-		}),
-		endpointFetchBlockSuccess: NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-			Name:   "t_sr_endpoint_fetch_block_success",
-			Labels: endpointLabels,
-		}),
-		endpointFetchBlockFails: NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-			Name:   "t_sr_endpoint_fetch_block_fails",
-			Labels: endpointLabels,
-		}),
-		endpointOverallHealth: NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-			Name:   "t_sr_endpoint_overall_health",
-			Labels: endpointLabels,
-		}),
-		urlToProviderNames: make(map[string][]string),
+		endpointLatestBlock:        prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_endpoint_latest_block"}, endpointLabels),
+		endpointURLLatestBlock:     prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_endpoint_url_latest_block"}, []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"}),
+		endpointURLAnsweredUntil:   prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_endpoint_url_answered_until_seconds"}, []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"}),
+		endpointURLRelaysServiced:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_url_relays_serviced_total"}, []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"}),
+		endpointFetchLatestSuccess: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_latest_success"}, endpointLabels),
+		endpointFetchLatestFails:   prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_latest_fails"}, endpointLabels),
+		endpointFetchBlockSuccess:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_block_success"}, endpointLabels),
+		endpointFetchBlockFails:    prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_endpoint_fetch_block_fails"}, endpointLabels),
+		endpointOverallHealth:      prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_endpoint_overall_health"}, endpointLabels),
+		urlToProviderNames:         make(map[string][]string),
 	}
 }
 
@@ -114,12 +88,8 @@ func TestSetEndpointLatestBlock_FansOutAcrossSharedURL(t *testing.T) {
 
 	m.SetEndpointLatestBlock("BASE", "jsonrpc", sharedURL, block)
 
-	lava1 := testutil.ToFloat64(m.endpointLatestBlock.WithLabelValues(map[string]string{
-		"spec": "BASE", "apiInterface": "jsonrpc", "endpoint_id": "lava1",
-	}))
-	lava2 := testutil.ToFloat64(m.endpointLatestBlock.WithLabelValues(map[string]string{
-		"spec": "BASE", "apiInterface": "jsonrpc", "endpoint_id": "lava2",
-	}))
+	lava1 := testutil.ToFloat64(m.endpointLatestBlock.WithLabelValues("BASE", "jsonrpc", "lava1"))
+	lava2 := testutil.ToFloat64(m.endpointLatestBlock.WithLabelValues("BASE", "jsonrpc", "lava2"))
 	require.Equal(t, float64(block), lava1, "lava1 must receive the block update from the shared URL")
 	require.Equal(t, float64(block), lava2, "lava2 must receive the block update from the shared URL")
 }
@@ -137,12 +107,8 @@ func TestRecordBlockFetch_FansOutAcrossSharedURL(t *testing.T) {
 	// isLatest=true, success=true → hits endpointFetchLatestSuccess for each provider.
 	m.RecordBlockFetch("BASE", "jsonrpc", sharedURL, true, true)
 
-	bp1 := testutil.ToFloat64(m.endpointFetchLatestSuccess.WithLabelValues(map[string]string{
-		"spec": "BASE", "apiInterface": "jsonrpc", "endpoint_id": "blockpi1",
-	}))
-	bp2 := testutil.ToFloat64(m.endpointFetchLatestSuccess.WithLabelValues(map[string]string{
-		"spec": "BASE", "apiInterface": "jsonrpc", "endpoint_id": "blockpi2",
-	}))
+	bp1 := testutil.ToFloat64(m.endpointFetchLatestSuccess.WithLabelValues("BASE", "jsonrpc", "blockpi1"))
+	bp2 := testutil.ToFloat64(m.endpointFetchLatestSuccess.WithLabelValues("BASE", "jsonrpc", "blockpi2"))
 	require.Equal(t, float64(1), bp1, "blockpi1 must be incremented")
 	require.Equal(t, float64(1), bp2, "blockpi2 must be incremented")
 }
