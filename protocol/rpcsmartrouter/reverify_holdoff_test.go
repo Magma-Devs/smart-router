@@ -159,7 +159,7 @@ func TestReverify_ProviderPassingOnItsOtherUrlKeepsTheDeadUrlsStrikes(t *testing
 	start := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
 	now := start
 	reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
-	urlKey := holdoffURLKey(provider)
+	urlKey := holdoffURLKeys(provider)[0]
 	require.Equal(t, refusing, urlKey, "the hold-off is keyed by the refusing url")
 	reg.RecordRateLimit(provider.Name, urlKey, 0)
 
