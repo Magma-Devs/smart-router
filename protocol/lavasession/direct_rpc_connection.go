@@ -449,9 +449,14 @@ type GRPCDirectRPCConnection struct {
 
 	// resolver resolves and caches method descriptors for this connection: the
 	// single-flight registry, the whole-service fill and the reflection-timeout
-	// budget (MAG-2860) live there, shared with the subscription stream pool. It
-	// borrows pooled clients through borrowConn. Set at construction like
-	// descriptorsCache, which it shares with the warm-up sweep.
+	// budget (MAG-2860) live there. It borrows pooled clients through borrowConn. Set
+	// at construction like descriptorsCache, which it shares with the warm-up sweep.
+	//
+	// It is this connection's own, NOT shared with the subscription stream pool: that
+	// pool owns a second GRPCDescriptorResolver over a second cache, because a resolver
+	// can only run reflection on a channel its owner holds and the two hold different
+	// channels (MAG-4397). The rules are shared; the instance and the cache are not, so
+	// a cold service is resolved once on the unary path and once on the stream path.
 	resolver *GRPCDescriptorResolver
 
 	// Reflection snapshot state, guarded by snapshotMu and usable at its zero value.
