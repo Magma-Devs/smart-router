@@ -5,14 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
@@ -24,7 +20,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/parser"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -320,11 +315,8 @@ func (apip *JsonRPCChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 
 type JsonRPCChainListener struct {
 	chainListenerBase
-	refererData                *RefererData
-	wsSubscriptionManager      WSSubscriptionManager
-	websocketConnectionLimiter *WebsocketConnectionLimiter
-	app                        *fiber.App     // captured during Serve so Shutdown can drain HTTP
-	wsWG                       sync.WaitGroup // tracks active downstream WS goroutines for Shutdown drain
+	wsListenerBase
+	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewJrpcChainListener creates a new instance of JsonRPCChainListener
@@ -334,20 +326,15 @@ func NewJrpcChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEn
 	refererData *RefererData,
 	wsSubscriptionManager WSSubscriptionManager,
 ) (chainListener *JsonRPCChainListener) {
-	// Create a new instance of JsonRPCChainListener
-	chainListener = &JsonRPCChainListener{
+	return &JsonRPCChainListener{
 		chainListenerBase: chainListenerBase{
 			endpoint:       listenEndpoint,
 			relaySender:    relaySender,
 			healthReporter: healthReporter,
 			logger:         rpcConsumerLogs,
 		},
-		refererData:                refererData,
-		wsSubscriptionManager:      wsSubscriptionManager,
-		websocketConnectionLimiter: &WebsocketConnectionLimiter{ipToNumberOfActiveConnections: make(map[string]int64)},
+		wsListenerBase: newWSListenerBase(refererData, wsSubscriptionManager),
 	}
-
-	return chainListener
 }
 
 // Serve http server for JsonRPCChainListener
@@ -356,210 +343,65 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	if apil == nil {
 		return
 	}
-	test_mode := common.IsTestMode(ctx)
 	// Setup HTTP Server
 	// true: this listener registers a GET catch-all that upgrades, so the health
 	// route may hand an upgrade on its own path past the health handler.
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true)
 	apil.app = app
 
-	// wsWG.Add must run synchronously inside the request handler so that
-	// app.ShutdownWithContext (which waits for in-flight handlers but stops
-	// tracking hijacked WS connections) is guaranteed to observe the Add
-	// before wsWG.Wait runs. Doing the Add inside the websocket goroutine
-	// would race: the goroutine is scheduled after the connection is hijacked
-	// and may not have called Add by the time Wait sees counter == 0.
-	//
-	// Registered as per-route middleware (not app.Use) so /ws and /websocket
-	// are covered uniformly without depending on fiber's mount-prefix matching.
-	wsUpgradeMiddleware := func(c *fiber.Ctx) error {
-		apil.websocketConnectionLimiter.HandleFiberRateLimitFlags(c)
-
-		// IsWebSocketUpgrade returns true if the client
-		// requested upgrade to the WebSocket protocol.
-		if !websocket.IsWebSocketUpgrade(c) {
-			return fiber.ErrUpgradeRequired
-		}
-		apil.wsWG.Add(1)
-		c.Locals("allowed", true)
-		err := c.Next()
-		// If the upgrade did not succeed (anything other than 101 Switching
-		// Protocols), the websocket goroutine will not run, so balance the Add.
-		if c.Response().StatusCode() != fiber.StatusSwitchingProtocols {
-			apil.wsWG.Done()
-		}
-		return err
-	}
+	// ConnectionType POST: ParseMsg needs it to find the subscription method in the spec.
+	wsUpgradeMiddleware, websocketCallbackWithDappID := apil.websocketRoutes(ctx, app, &apil.chainListenerBase, cmdFlags, "jsonrpc", fiber.MethodPost)
 
 	chainID := apil.endpoint.ChainID
-	apiInterface := apil.endpoint.ApiInterface
-
-	webSocketCallback := websocket.New(func(websocketConn *websocket.Conn) {
-		defer apil.wsWG.Done()
-		canOpenConnection, decreaseIpConnection := apil.websocketConnectionLimiter.CanOpenConnection(websocketConn)
-		defer decreaseIpConnection()
-		if !canOpenConnection {
-			return
-		}
-		rateLimitInf := websocketConn.Locals(WebSocketRateLimitHeader)
-		rateLimit, assertionSuccessful := rateLimitInf.(int64)
-		if !assertionSuccessful || rateLimit < 0 {
-			rateLimit = 0
-		}
-
-		utils.LavaFormatDebug("jsonrpc websocket opened", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
-		defer utils.LavaFormatDebug("jsonrpc websocket closed", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
-
-		consumerWebsocketManager := NewConsumerWebsocketManager(ConsumerWebsocketManagerOptions{
-			WebsocketConn:          websocketConn,
-			RpcConsumerLogs:        apil.logger,
-			RefererMatchString:     refererMatchString,
-			CmdFlags:               cmdFlags,
-			RelayMsgLogMaxChars:    relayMsgLogMaxChars,
-			ChainID:                chainID,
-			ApiInterface:           apiInterface,
-			ConnectionType:         fiber.MethodPost, // We use it for the ParseMsg method, which needs to know the connection type to find the method in the spec
-			RefererData:            apil.refererData,
-			RelaySender:            apil.relaySender,
-			WsSubscriptionManager:  apil.wsSubscriptionManager,
-			WebsocketConnectionUID: strconv.FormatUint(utils.GenerateUniqueIdentifier(), 10),
-			headerRateLimit:        uint64(rateLimit),
-		})
-
-		consumerWebsocketManager.ListenToMessages(ctx)
-	})
-	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback)
-	app.Get("/ws", wsUpgradeMiddleware, websocketCallbackWithDappID)
-	app.Get("/websocket", wsUpgradeMiddleware, websocketCallbackWithDappID) // catching http://HOST:PORT/1/websocket requests.
-
-	handlerPost := func(fiberCtx *fiber.Ctx) error {
-		// Set response header content-type to application/json
-		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-		startTime := time.Now()
-		dappID := extractDappIDFromFiberContext(fiberCtx)
-		metricsData := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
-		metricsData.SetProcessingTimestampBeforeRelay(startTime)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		guid := utils.GenerateUniqueIdentifier()
-		ctx = utils.WithUniqueIdentifier(ctx, guid)
-		msgSeed := strconv.FormatUint(guid, 10)
-		if test_mode {
-			apil.logger.LogTestMode(fiberCtx)
-		}
-
-		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := detachedReqHeaders(fiberCtx)
-		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
-		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
-		headers := convertToMetadataMap(metadataValues)
-
-		msg := string(fiberCtx.Body())
-		logFormattedMsg := msg
-		if !cmdFlags.DebugRelays {
-			logFormattedMsg = utils.FormatLongString(logFormattedMsg, relayMsgLogMaxChars)
-		}
-
-		path := "/" + fiberCtx.Params("*")
-		utils.LavaFormatInfo("Consumer received a new JSON-RPC request",
-			utils.LogAttr("GUID", guid),
-			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-			utils.LogAttr(utils.KEY_TASK_ID, ctx),
-			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
-			utils.LogAttr("path", path),
-			utils.LogAttr("seed", msgSeed),
-			utils.LogAttr("body", logFormattedMsg),
-			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("headers", common.RedactMetadata(headers)),
-		)
-
-		relayResult, err := apil.relaySender.SendRelay(ctx, path, msg, http.MethodPost, dappID, userIp, metricsData, headers)
-		reply := relayResult.GetReply()
-		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
-		if err != nil {
-			// Check if batch size limit exceeded - return 429 rate limit error
-			if errors.Is(err, ErrBatchRequestSizeExceeded) {
-				errorResponse, _ := json.Marshal(common.JsonRpcBatchSizeExceededError)
-				return fiberCtx.Status(fiber.StatusTooManyRequests).SendString(string(errorResponse))
+	app.Post("/*", apil.relayHTTP(httpRelaySpec{
+		testMode: common.IsTestMode(ctx),
+		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
+			path := "/" + fiberCtx.Params("*")
+			return httpRelayRequest{
+				path: path, url: path, body: string(fiberCtx.Body()), connectionType: http.MethodPost,
+				logMethod: "POST", logPath: fiberCtx.Request().URI().String(),
 			}
-
-			// A batch the chain cannot take (an XRPL submit inside one). The node itself would refuse it
-			// with a 400, so the caller gets the same verdict, as a JSON-RPC invalid request.
-			if errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused) {
-				refused := common.JsonRpcInvalidRequestError
-				refused.Error.Data = rpcInterfaceMessages.ErrJsonrpcBatchRefused.Error()
-				errorResponse, _ := json.Marshal(refused)
-				return fiberCtx.Status(fiber.StatusBadRequest).SendString(string(errorResponse))
+		},
+		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
+			utils.LavaFormatInfo("Consumer received a new JSON-RPC request", receivedAttrs(ctx, guid,
+				utils.LogAttr("path", req.path),
+				utils.LogAttr("seed", msgSeed),
+				utils.LogAttr("body", truncatedRelayBody(cmdFlags, req.body)),
+				utils.LogAttr("dappID", dappID),
+				utils.LogAttr("headers", common.RedactMetadata(headers)),
+			)...)
+		},
+		logModule: "jsonrpc http",
+		answerError: func(_ context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (bool, error) {
+			if handled, sendErr := answerJsonRpcBatchTooLarge(fiberCtx, err); handled {
+				return true, sendErr
 			}
-
-			if errors.Is(err, common.APINotSupportedError) {
-				// Convert error to JSON string and add headers
-				errorResponse, _ := json.Marshal(common.JsonRpcMethodNotFoundError)
-				return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), errorResponse)
+			if handled, sendErr := answerJsonRpcBatchRefused(fiberCtx, err); handled {
+				return true, sendErr
 			}
-
+			if handled, sendErr := answerJsonRpcMethodNotFound(fiberCtx, err, reply); handled {
+				return true, sendErr
+			}
 			if _, ok := err.(*json.SyntaxError); ok {
-				// Convert error to JSON string and add headers
 				errorResponse, _ := json.Marshal(common.JsonRpcParseError)
-				return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), errorResponse)
+				return true, addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), errorResponse)
 			}
-
-			// Get unique GUID response
-			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-
-			// Log request and response
-			apil.logger.LogRequestAndResponse("jsonrpc http", true, "POST", fiberCtx.Request().URI().String(), msg, errMasking, msgSeed, time.Since(startTime), err)
-
-			// Set status to internal error
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
-			}
-
-			// Construct spec-compliant JSON-RPC 2.0 error envelope (see
-			// convertToJsonRpcError for the rationale — `error` must be an
-			// Object with code/message per §5.1, not a stringified envelope).
-			var response []byte
+			return false, nil
+		},
+		// A spec-compliant JSON-RPC 2.0 error envelope (see convertToJsonRpcError for the
+		// rationale — `error` must be an Object with code/message per §5.1, not a stringified
+		// envelope).
+		errorBody: func(fiberCtx *fiber.Ctx, relayResult *common.RelayResult, errMasking, msgSeed string) []byte {
 			if cf := relayResult.GetClientFacing(); cf != nil && metrics.ReturnMaskedErrors == "false" {
 				// MAG-4218: the upstream's own answer, or one honest sentence + details in data.
-				response = convertUpstreamErrorToJsonRpc(cf, msgSeed, errMasking, fiberCtx.Body())
-			} else {
-				response = convertToJsonRpcError(errMasking, fiberCtx.Body())
+				return convertUpstreamErrorToJsonRpc(cf, msgSeed, errMasking, fiberCtx.Body())
 			}
-			// Return error json response
-			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
-		}
-
-		response := checkUTXOResponseAndFixReply(chainID, reply.Data)
-		// Log request and response — gate the string conversion behind the
-		// debug-level check because LogRequestAndResponse routes the happy path
-		// through LavaFormatDebug. At info/warn+ the value is never emitted,
-		// but Go evaluates arguments eagerly, so a blind string(response) would
-		// still allocate a full copy of every reply body on the hot path.
-		var loggedResponse string
-		if utils.IsDebugEnabled() {
-			loggedResponse = string(response)
-		}
-		apil.logger.LogRequestAndResponse("jsonrpc http",
-			false,
-			"POST",
-			fiberCtx.Request().URI().String(),
-			msg,
-			loggedResponse,
-			msgSeed,
-			time.Since(startTime),
-			nil,
-		)
-		if relayResult.GetStatusCode() != 0 {
-			fiberCtx.Status(relayResult.StatusCode)
-		}
-		// Return json response — send bytes directly so we don't allocate
-		// another string(response) on top of the already-pass-through body.
-		err = addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
-		return err
-	}
-	app.Post("/*", handlerPost)
+			return convertToJsonRpcError(errMasking, fiberCtx.Body())
+		},
+		replyBody: func(data []byte) []byte {
+			return checkUTXOResponseAndFixReply(chainID, data)
+		},
+	}))
 	// A caller that guesses the bare endpoint URL (wss://host/) sends a GET
 	// carrying the upgrade headers — the ws/wss scheme never reaches the server,
 	// so that header is the only signal. Serve any such GET from the handler
@@ -577,15 +419,8 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		}
 		return fiberCtx.Next()
 	}, wsUpgradeMiddleware, websocketCallbackWithDappID)
-	// Go
-	addrChannel := make(chan string)
-	addrChannelSafe := common.NewSafeChannelSender(ctx, addrChannel)
-	go func() {
-		addr := <-addrChannel
-		apil.listeningAddress.Store(&addr)
-	}()
 
-	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
+	apil.listen(ctx, app)
 }
 
 type JrpcChainProxy struct {
@@ -646,13 +481,7 @@ func (cp *JrpcChainProxy) sendBatchMessage(ctx context.Context, nodeMessage *rpc
 		return nil, err
 	}
 	defer cp.conn.ReturnRpc(rpc)
-	if len(nodeMessage.GetHeaders()) > 0 {
-		for _, metadata := range nodeMessage.GetHeaders() {
-			rpc.SetHeader(metadata.Name, metadata.Value)
-			// clear this header upon function completion so it doesn't last in the next usage from the rpc pool
-			defer rpc.SetHeader(metadata.Name, "")
-		}
-	}
+	defer applyRPCHeaders(rpc, nodeMessage.GetHeaders())()
 	// set context with timeout
 	connectCtx, cancel := cp.CapTimeoutForSend(ctx, chainMessage)
 	defer cancel()
@@ -718,59 +547,13 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		return cp.sendBatchMessage(ctx, batchMessage, chainMessage)
 	}
 
-	rpc, err := cp.conn.GetRpc(ctx, true)
+	rpcMessage, err := cp.callNodeRPC(ctx, chainMessage, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, nodeMessage.GetHeaders(), true, nodeMessage.GetDisableErrorHandling(),
+		utils.LogAttr("nodeUrl", cp.NodeUrl.Url))
 	if err != nil {
 		return nil, err
 	}
-	defer cp.conn.ReturnRpc(rpc)
-
-	// appending hashed url
-	grpc.SetTrailer(ctx, metadata.Pairs(RPCProviderNodeAddressHash, cp.conn.GetUrlHash()))
-
-	// Call our node
-	var rpcMessage *rpcclient.JsonrpcMessage
-	// support setting headers
-	if len(nodeMessage.GetHeaders()) > 0 {
-		for _, metadata := range nodeMessage.GetHeaders() {
-			if metadata.Value == "" {
-				rpc.DelHeader(metadata.Name)
-			} else {
-				rpc.SetHeader(metadata.Name, metadata.Value)
-				// clear this header upon function completion so it doesn't last in the next usage from the rpc pool
-				defer rpc.SetHeader(metadata.Name, "")
-			}
-		}
-	}
-	// we use the minimum timeout between the two, spec or context. to prevent the node from hanging
-	// we don't use the context alone so it won't be hanging forever by an attack
-	connectCtx, cancel := cp.CapTimeoutForSend(ctx, chainMessage)
-	defer cancel()
-
-	cp.NodeUrl.SetIpForwardingIfNecessary(ctx, rpc.SetHeader)
-	rpcMessage, nodeErr := rpc.CallContext(connectCtx, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, true, nodeMessage.GetDisableErrorHandling())
-	if nodeErr != nil {
-		// here we are getting an error for every code that is not 200-300
-		if errors.Is(nodeErr, common.StatusCodeError504) || errors.Is(nodeErr, common.StatusCodeError429) || errors.Is(nodeErr, common.StatusCodeErrorStrict) {
-			return nil, utils.LavaFormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
-		}
-		// Validate if the error is related to the connection to the node or it is a valid error
-		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
-		if parsedError := cp.HandleNodeError(ctx, nodeErr); parsedError != nil {
-			return nil, parsedError
-		}
-	}
 
 	var replyMsg *rpcInterfaceMessages.JsonrpcMessage
-	// the error check here would only wrap errors not from the rpc
-	if nodeErr != nil {
-		// try to parse node error as json message
-		rpcMessage = TryRecoverNodeErrorFromClientError(nodeErr)
-		if rpcMessage == nil {
-			utils.LavaFormatDebug("got error from node", utils.LogAttr("GUID", ctx), utils.LogAttr("nodeErr", nodeErr), utils.LogAttr("nodeUrl", cp.NodeUrl.Url))
-			return nil, nodeErr
-		}
-	}
-
 	replyMsg, err = rpcInterfaceMessages.ConvertJsonRPCMsg(rpcMessage)
 	if err != nil {
 		return nil, utils.LavaFormatError("jsonRPC error", err, traceAttrs(ctx)...)

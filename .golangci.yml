@@ -74,9 +74,10 @@ linters:
       - path: (types/relay/grpc_service|protocol/chainlib/chainlib_mock)\.go
         linters:
           - dupl
-      # The WebSocket/gRPC subscription core and pools, the JSON-RPC/Tendermint listener handlers and
-      # the error-classification entry points are MAG-4279's structural merges: the copies drifted,
-      # so unifying them is a behaviour decision, not a mechanical one.
+      # The WebSocket/gRPC subscription core and pools, the JSON-RPC/Tendermint ParseMsg batch walkers
+      # and the error-classification entry points are MAG-4279's structural merges: the copies
+      # drifted, so unifying them is a behaviour decision, not a mechanical one. (The batch walkers
+      # differ on the parse directive a one-element batch gets, which needs an owner decision.)
       - path: protocol/rpcsmartrouter/upstream_(ws|grpc)_pool\.go
         linters:
           - dupl

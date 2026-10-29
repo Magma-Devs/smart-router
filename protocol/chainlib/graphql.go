@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -348,67 +346,23 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, false)
 	apil.app = app
 
-	chainID := apil.endpoint.ChainID
-	apiInterface := apil.endpoint.ApiInterface
-
-	handlerPost := func(fiberCtx *fiber.Ctx) error {
-		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-		startTime := time.Now()
-
-		msgSeed := apil.logger.GetMessageSeed()
-		path := "/" + fiberCtx.Params("*")
-
-		// Detached copies: fiber hands out strings that alias the per-connection buffer, and
-		// the metrics goroutine reads these after the reply (MAG-3881; this listener had the
-		// pre-fix shape).
-		metadataValues := detachedReqHeaders(fiberCtx)
-		graphqlHeaders := convertToMetadataMap(metadataValues)
-		ctx, cancel := context.WithCancel(context.Background())
-		ctx = utils.WithUniqueIdentifier(ctx, utils.GenerateUniqueIdentifier())
-		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
-		defer cancel() // incase there's a problem make sure to cancel the connection
-		guid, found := utils.GetUniqueIdentifier(ctx)
-		if found {
-			msgSeed = strconv.FormatUint(guid, 10)
-		}
-		dappID := extractDappIDFromFiberContext(fiberCtx)
-		analytics := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
-		analytics.SetProcessingTimestampBeforeRelay(startTime)
-		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
-		requestBody := string(fiberCtx.Body())
-		utils.LavaFormatInfo("Consumer received a new GraphQL request",
-			utils.LogAttr("GUID", guid),
-			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-			utils.LogAttr(utils.KEY_TASK_ID, ctx),
-			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
-			utils.LogAttr("path", path),
-			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("msgSeed", msgSeed),
-			utils.LogAttr("body", requestBody),
-			utils.LogAttr("headers", common.RedactMetadata(graphqlHeaders)),
-		)
-
-		// The url argument is the internal path, not a route: a GraphQL endpoint serves every
-		// operation on one path, and the operation is named in the body.
-		relayResult, err := apil.relaySender.SendRelay(ctx, "", requestBody, http.MethodPost, dappID, userIp, analytics, graphqlHeaders)
-		reply := relayResult.GetReply()
-		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
-		if err != nil {
-			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-			apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody, errMasking, msgSeed, time.Since(startTime), err)
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
+	handlerPost := apil.relayHTTP(httpRelaySpec{
+		testMode: common.IsTestMode(ctx),
+		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
+			path := "/" + fiberCtx.Params("*")
+			// The url argument is the internal path, not a route: a GraphQL endpoint serves every
+			// operation on one path, and the operation is named in the body.
+			return httpRelayRequest{
+				path: path, body: string(fiberCtx.Body()), connectionType: http.MethodPost,
+				logMethod: http.MethodPost, logPath: path,
 			}
-			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), convertToJsonError(errMasking))
-		}
-		apil.logger.LogRequestAndResponse("graphql in/out", false, http.MethodPost, path, requestBody, string(reply.Data), msgSeed, time.Since(startTime), nil)
-		if relayResult.GetStatusCode() != 0 {
-			fiberCtx.Status(relayResult.StatusCode)
-		}
-		return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), reply.Data)
-	}
+		},
+		logReceived: logReceivedWithSeedAfterDapp("Consumer received a new GraphQL request"),
+		logModule:   "graphql in/out",
+		errorBody: func(_ *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
+			return convertToJsonError(errMasking)
+		},
+	})
 
 	// GraphQL-over-HTTP is POST only here. A GET carries its query in the URL, which is the very
 	// identity collapse this interface exists to avoid, so it is refused rather than served.
@@ -419,14 +373,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		return addHeadersAndSendBytes(fiberCtx, nil, convertToJsonError("graphql requests must be sent as HTTP POST"))
 	})
 
-	addrChannel := make(chan string)
-	addrChannelSafe := common.NewSafeChannelSender(ctx, addrChannel)
-	go func() {
-		addr := <-addrChannel
-		apil.listeningAddress.Store(&addr)
-	}()
-
-	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
+	apil.listen(ctx, app)
 }
 
 // Shutdown drains in-flight HTTP requests and closes the listener.
@@ -440,7 +387,6 @@ func (apil *GraphQLChainListener) Shutdown(ctx context.Context) error {
 
 type GraphQLChainProxy struct {
 	BaseChainProxy
-	httpClient *http.Client
 }
 
 func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
@@ -469,11 +415,6 @@ func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint 
 // Unlike REST, the URL never varies: the operation is named in the body, so every request on a
 // chain goes to the one endpoint URL the spec configures.
 func (gcp *GraphQLChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
-	if gcp.httpClient == nil {
-		gcp.httpClient = common.OptimizedHttpClient()
-	}
-	httpClient := gcp.httpClient
-
 	// appending hashed url
 	grpc.SetTrailer(ctx, metadata.Pairs(RPCProviderNodeAddressHash, gcp.BaseChainProxy.HashedNodeUrl))
 
@@ -498,57 +439,22 @@ func (gcp *GraphQLChainProxy) SendNodeMsg(ctx context.Context, chainMessage Chai
 	// JSON), so the content type is ours to declare, as it is for JSON-RPC.
 	req.Header.Set("Content-Type", common.JSONContentType)
 
-	for _, header := range nodeMessage.GetHeaders() {
-		if header.Value == "" {
-			req.Header.Del(header.Name)
-		} else {
-			req.Header.Set(header.Name, header.Value)
-		}
-	}
-	gcp.NodeUrl.SetAuthHeaders(ctx, req.Header.Set)
-	gcp.NodeUrl.SetIpForwardingIfNecessary(ctx, req.Header.Set)
-
-	utils.LavaFormatInfo("Sending request to node from provider",
-		utils.LogAttr("_method", nodeMessage.GetMethod()),
-		utils.LogAttr("headers", utils.RedactHeaders(req.Header)),
-		utils.LogAttr("apiInterface", spectypes.APIInterfaceGraphQL),
-	)
-
-	res, err := httpClient.Do(req)
-	if res != nil {
-		// resp can be non nil on error
-		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(res.StatusCode)))
-	}
-	if err != nil {
-		if parsedError := gcp.HandleNodeError(ctx, err); parsedError != nil {
-			return nil, parsedError
-		}
-		return nil, err
-	}
-	if res.Body != nil {
-		defer res.Body.Close()
-	}
-
-	err = gcp.HandleStatusError(res.StatusCode, nodeMessage.GetDisableErrorHandling())
-	if err != nil {
-		err = common.WithRetryAfter(err, res.Header, time.Now())
-		return nil, utils.LavaFormatWarning("Received invalid status code", err,
-			utils.Attribute{Key: "Status Code", Value: res.StatusCode},
-			utils.Attribute{Key: "chainID", Value: gcp.BaseChainProxy.ChainID},
-			utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name},
+	res, err := gcp.doHTTP(ctx, req, nodeMessage.GetHeaders(), nodeMessage.GetDisableErrorHandling(), chainMessage.GetApi().Name, func(header http.Header) {
+		utils.LavaFormatInfo("Sending request to node from provider",
+			utils.LogAttr("_method", nodeMessage.GetMethod()),
+			utils.LogAttr("headers", utils.RedactHeaders(header)),
+			utils.LogAttr("apiInterface", spectypes.APIInterfaceGraphQL),
 		)
-	}
-
-	body, err := io.ReadAll(res.Body)
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	reply := &RelayReplyWrapper{
-		StatusCode: res.StatusCode,
+		StatusCode: res.status,
 		RelayReply: &pairingtypes.RelayReply{
-			Data:     body,
-			Metadata: convertToMetadataMapOfSlices(res.Header),
+			Data:     res.body,
+			Metadata: convertToMetadataMapOfSlices(res.header),
 		},
 	}
 
