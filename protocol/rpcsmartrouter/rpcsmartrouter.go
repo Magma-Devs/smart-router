@@ -1187,13 +1187,6 @@ type routerConfigResponse struct {
 	PerChainOptimizer map[string]routerConfigOptimizerWeights
 }
 
-// buildDebugMux constructs the /debug/time-warp, /debug/time, /debug/reset-scores,
-// and /debug/reset-all HTTP handlers.
-//
-// See rpcconsumer.buildDebugMux for full documentation of time-warp / time / reset-scores
-// — this is the rpcsmartrouter copy, extended with /debug/reset-all (a single endpoint
-// that flushes every router-internal state store so black-box tests can return to a
-// known-clean state without restarting the pod).
 // sharedStickyReason spells out why SharedSticky reads as it does on GET /debug/sticky-claims. False on
 // its own conflates a router that never asked for the claim registry with one that asked and could not
 // get it, and the two call for different fixes: the first is a values change, the second a cache backend
@@ -1209,6 +1202,8 @@ func sharedStickyReason(wired, requested bool) string {
 	}
 }
 
+// buildDebugMux builds every /debug/* route the --debug-address server serves. Each
+// route is documented on its handler.
 func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	optimizers := deps.optimizers
 	currentOffsetNano := deps.offsetNano
@@ -1246,6 +1241,11 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		w.Write(body)
 	})
 
+	// POST /debug/time-warp {"offset_seconds": N} — run every chain optimizer's clock N
+	// seconds ahead of real time (0 to 24 h; 0 returns to real time), so a test can age
+	// QoS scores without waiting. An offset below the previous one also resets the
+	// optimizers' state, for the reason maxDebugOffsetSeconds gives. ChainState has its
+	// own clock, /debug/chain-state-time-warp.
 	mux.HandleFunc("/debug/time-warp", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -1541,6 +1541,26 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// demoted primary. Cold — no re-probing; the simulator controls provider
 	// behaviour in the tests this serves. No-op 200 (empty restored) when the
 	// router is absent (test fixtures) so callers can probe it unconditionally.
+	mux.HandleFunc("/debug/reset-pairing", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		restored := map[string][]string{}
+		if deps.router != nil {
+			restored = deps.router.rebuildPairingFromConfig()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		body, err := json.Marshal(map[string]any{"reset": true, "restored": restored})
+		if err != nil {
+			// restored is map[string][]string — Marshal can't realistically fail;
+			// emit a minimal valid body rather than a half-written response.
+			fmt.Fprint(w, `{"reset":true,"restored":{}}`)
+			return
+		}
+		w.Write(body)
+	})
+
 	// GET /debug/verification — per chain, what each configured provider is failing, with
 	// the start times smartrouter_provider_verification_failed publishes, and when its next
 	// verification retry is due (MAG-3950). Read-only. It is what an automated test reads
@@ -1560,26 +1580,6 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(body)
-	})
-
-	mux.HandleFunc("/debug/reset-pairing", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		restored := map[string][]string{}
-		if deps.router != nil {
-			restored = deps.router.rebuildPairingFromConfig()
-		}
-		w.Header().Set("Content-Type", "application/json")
-		body, err := json.Marshal(map[string]any{"reset": true, "restored": restored})
-		if err != nil {
-			// restored is map[string][]string — Marshal can't realistically fail;
-			// emit a minimal valid body rather than a half-written response.
-			fmt.Fprint(w, `{"reset":true,"restored":{}}`)
-			return
-		}
 		w.Write(body)
 	})
 
