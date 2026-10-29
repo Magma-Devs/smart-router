@@ -8,6 +8,42 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.6.5 — 2026-10-29
+
+### Highlights
+
+Release v1.6.5 refines upstream health verification and router readiness by ensuring each node URL is verified over its own isolated connection and each health-check attempt uses a dedicated relay processor. To improve load balancer integration, the router now correctly transitions to a `NotReady` state when all of its relays fail. Operators can also track exactly which configured providers failed verification—and which specific check triggered the failure—through newly published metrics. Finally, for gRPC traffic, this release corrects how connection failures and timeouts are classified during upstream routing. A call that hits the router's internal deadline is now properly recorded as a timeout, and a refused connection is marked as unreachable, preventing the router from misreporting either event as a valid answer from the upstream node.
+
+### Changes
+
+#### New Features
+- feat(metrics): publish which configured providers failed verification, and which check (MAG-4594) ([#572]) [`316fad1`]
+
+#### Bug fixes
+- fix: verify every node url over its own connection (MAG-4231) ([#463]) [`dc512c7`]
+- fix(readiness): turn NotReady when a router's relays all fail (MAG-4617) ([#581]) [`b6d951c`]
+- fix(grpc): a call that hits the router's own deadline is a timeout, not the node's answer (MAG-4625) ([#583]) [`ec999d5`]
+- fix(grpc): a refused connection is unreachable, not the node's answer (MAG-4355) ([#585]) [`f4dd073`]
+- fix(readiness): give each health-check try its own relay processor (MAG-4639) ([#584]) [`bb43ae9`]
+
+#### Documentation updates
+- docs(changelog): say v1.6.4 drops the two distrusted roots, and correct v1.6.2 (MAG-4596) ([#575]) [`ec7a319`]
+
+[#463]: https://github.com/magma-Devs/smart-router/pull/463
+[#572]: https://github.com/magma-Devs/smart-router/pull/572
+[#575]: https://github.com/magma-Devs/smart-router/pull/575
+[#581]: https://github.com/magma-Devs/smart-router/pull/581
+[#583]: https://github.com/magma-Devs/smart-router/pull/583
+[#584]: https://github.com/magma-Devs/smart-router/pull/584
+[#585]: https://github.com/magma-Devs/smart-router/pull/585
+[`316fad1`]: https://github.com/magma-Devs/smart-router/commit/316fad1e8e9e4af246a97ebf5ca71393de8d6fe6
+[`b6d951c`]: https://github.com/magma-Devs/smart-router/commit/b6d951caf1c28c3e632b915b54cda1ea3d39af0f
+[`bb43ae9`]: https://github.com/magma-Devs/smart-router/commit/bb43ae96b4671a2d13bba2c22f948e486082e495
+[`dc512c7`]: https://github.com/magma-Devs/smart-router/commit/dc512c7aaf617bc07570ba3c246fb4a08277f511
+[`ec7a319`]: https://github.com/magma-Devs/smart-router/commit/ec7a319f20b48915ec28d3c6fea618e5e3f0b725
+[`ec999d5`]: https://github.com/magma-Devs/smart-router/commit/ec999d5045e8525cf2e161c5c6ee7a13244ef564
+[`f4dd073`]: https://github.com/magma-Devs/smart-router/commit/f4dd0733f32a17aaa5334d4bebb981f9df725cd9
+
 ## v1.6.4 — 2026-10-23
 
 ### Highlights
