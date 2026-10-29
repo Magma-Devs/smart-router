@@ -3946,7 +3946,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().Duration(common.WebsocketKeepAliveIntervalFlag, chainlib.DefaultWebSocketKeepAliveInterval, "how often to ping an open websocket connection so proxies in front of the router do not reap it as idle, 0 disables. A duration with a unit (30s, 500ms) — unlike "+common.LimitWebsocketIdleTimeFlag+", a bare number here means nanoseconds and is rejected at startup")
 	cmdRPCSmartRouter.Flags().Duration(common.WebsocketWriteTimeoutFlag, chainlib.DefaultWebSocketWriteTimeout, "how long one websocket frame write may take before the router closes the connection of a client that stopped reading, 0 disables the deadline. A duration with a unit (10s, 500ms) — a bare number here means nanoseconds and is rejected at startup")
 
-	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerificationDefault, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerificationDefault, "skip websocket verification for chains that require ws/wss endpoints")
+	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipWebsocketVerificationDefault, common.SkipWebsocketVerificationFlag, chainlib.SkipWebsocketVerificationDefault, "dial ws(s) node urls without running any check over them")
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipAllVerifications, common.SkipAllVerificationsFlag, chainlib.SkipAllVerifications, "skip ALL spec verifications for every provider this process serves, healthy ones included. An escape hatch for bringing a router up against upstreams that cannot survive being probed; prefer the per-node-url skip-verifications config (which accepts \"*\") for anything ongoing")
 
 	cmdRPCSmartRouter.Flags().DurationVar(&lavasession.ProbeLoopInterval, common.ProbeLoopIntervalFlagName, lavasession.ProbeLoopInterval, "cadence of the proactive health prober (MAG-2161 Topic D); must be > 0, default 5s")
@@ -4329,11 +4329,17 @@ func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inp
 // fails, as the metric publishes them. A provider keeps serving through all of it:
 //   - scope=service: an add-on or extension no node url of the provider serves any more;
 //   - scope=url with a service: a service one url lost while another url still serves it;
-//   - scope=url with no service: a node url refused whole;
+//   - scope=url with no service: an http(s) node url refused whole;
 //   - scope=none: a check whose severity is Warning; nothing was switched off.
+//
+// The websocket is one of the provider's services here (MAG-3950). A ws(s) url carries
+// no relay, only subscriptions (MAG-3477), so a refused one costs the provider its
+// websocket: scope=service when no ws(s) url of it is left, scope=url while another
+// serves. A provider with no ws(s) url on a chain that subscribes is published as the
+// websocket's missing-url.
 func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []metrics.ProviderVerificationFailure {
-	refused, urlChecks := admission.Refused(), admission.RefusedURLChecks()
-	failures := make([]metrics.ProviderVerificationFailure, 0, len(refused)+len(urlChecks))
+	refused, refusedURLs := admission.Refused(), admission.RefusedURLs()
+	failures := make([]metrics.ProviderVerificationFailure, 0, len(refused)+len(refusedURLs)+1)
 	for _, r := range refused {
 		scope := metrics.VerificationScopeService
 		if servedElsewhere(chainParser, provider, admission, r.Service) {
@@ -4341,8 +4347,30 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStati
 		}
 		failures = append(failures, metrics.ProviderVerificationFailure{Scope: scope, Service: r.Service, Check: r.Check})
 	}
-	for _, check := range urlChecks {
-		failures = append(failures, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: check})
+	urlFailures := make([]metrics.ProviderVerificationFailure, 0, len(refusedURLs))
+	for _, index := range refusedURLs {
+		failure := metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: failureCheck(admission.URLRefusal(index))}
+		if index < len(provider.NodeUrls) && isWebsocketURL(provider.NodeUrls[index].Url) {
+			failure.Service = chainlib.WebSocketExtension
+			if !websocketLeft(provider, admission) {
+				failure.Scope = metrics.VerificationScopeService
+			}
+		}
+		if !slices.Contains(urlFailures, failure) {
+			urlFailures = append(urlFailures, failure)
+		}
+	}
+	slices.SortFunc(urlFailures, func(x, y metrics.ProviderVerificationFailure) int {
+		if c := strings.Compare(x.Service, y.Service); c != 0 {
+			return c
+		}
+		return strings.Compare(x.Check, y.Check)
+	})
+	failures = append(failures, urlFailures...)
+	if chainlib.MissingWebsocket(provider.NodeUrls, chainParser) {
+		failures = append(failures, metrics.ProviderVerificationFailure{
+			Scope: metrics.VerificationScopeService, Service: chainlib.WebSocketExtension, Check: chainlib.CheckMissingURL,
+		})
 	}
 	for _, w := range admission.Warnings() {
 		failures = append(failures, metrics.ProviderVerificationFailure{
@@ -4350,6 +4378,22 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStati
 		})
 	}
 	return failures
+}
+
+// isWebsocketURL reports whether a node url is ws(s), as verification reads it.
+func isWebsocketURL(raw string) bool {
+	ws, err := chainlib.IsUrlWebSocket(raw)
+	return err == nil && ws
+}
+
+// websocketLeft reports whether a ws(s) url of the provider is still admitted.
+func websocketLeft(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
+	for index, url := range provider.NodeUrls {
+		if isWebsocketURL(url.Url) && !admission.URLRefused(index) {
+			return true
+		}
+	}
+	return false
 }
 
 // servedElsewhere reports whether a node url of the provider still serves service: a

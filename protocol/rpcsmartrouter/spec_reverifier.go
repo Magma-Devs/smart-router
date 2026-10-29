@@ -181,12 +181,16 @@ func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, e
 }
 
 // countRefusals counts each service and node url this pass refused a provider it
-// admits, and each Warning check it failed, one failed run each.
+// admits, and each Warning check it failed, one failed run each. A missing websocket
+// url is not counted: no check ran, and the gauge already holds it while it lasts.
 func (inputs *chainReverifyInputs) countRefusals(tier reverifyTier, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) {
 	if inputs.countFailedCheck == nil {
 		return
 	}
 	for _, failure := range refusalsOf(inputs.chainParser, provider, admission) {
+		if failure.Check == chainlib.CheckMissingURL {
+			continue
+		}
 		inputs.countFailedCheck(tier, provider.Name, failure)
 	}
 }

@@ -63,15 +63,15 @@ func chainProxyConstructor(apiInterface string) (func(context.Context, uint, lav
 }
 
 // ProviderShapeError is why the router cannot serve from a provider's node urls
-// whatever they answer: no http url (none at all, or none at the root of a spec
-// whose root path is enabled), or no websocket url on a spec that subscribes while
-// websocket verification is on.
-// Nil when the list is servable. It dials nothing.
+// whatever they answer: no http url, none at all or none at the root of a spec whose
+// root path is enabled. Nil when the list is servable. It dials nothing.
+//
+// A missing websocket url is not one of them (MAG-3950): the provider serves over
+// http without subscriptions, and MissingWebsocket says so.
 func ProviderShapeError(endpoint *lavasession.RPCProviderEndpoint, chainParser ChainParser) error {
-	http, httpRoot, websocket := false, false, false
+	http, httpRoot := false, false
 	for _, url := range endpoint.NodeUrls {
 		if isWebSocketUrl(url.Url) {
-			websocket = true
 			continue
 		}
 		http = true
@@ -82,11 +82,34 @@ func ProviderShapeError(endpoint *lavasession.RPCProviderEndpoint, chainParser C
 	if !http || (!httpRoot && chainParser.IsInternalPathEnabled("", endpoint.ApiInterface, "")) {
 		return errors.New("HTTP/HTTPS is mandatory: configure an http(s) node url, and a ws(s) one beside it for subscriptions")
 	}
-	_, collection, subscribes := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SUBSCRIBE)
-	if subscribes && collection != nil && collection.Enabled &&
-		collection.GetCollectionData().ApiInterface != spectypes.APIInterfaceGrpc &&
-		!websocket && !chainParser.SkipWebsocketVerification() {
-		return errors.New("subscriptions are applicable for this chain, but websocket is not provided: add a ws(s) node url, or run with --skip-websocket-verification")
-	}
 	return nil
+}
+
+// MissingWebsocket reports whether a provider serves no subscriptions on a chain that
+// has them: the spec subscribes over a socket and none of the provider's node urls is
+// ws(s). The provider still serves everything else over http.
+//
+// It does not read --skip-websocket-verification. That flag stops the router running
+// checks over a socket; it does not give a provider a socket it lacks, and the helm
+// chart sets it on every router, so honouring it would hide every missing url.
+func MissingWebsocket(nodeUrls []common.NodeUrl, chainParser ChainParser) bool {
+	if chainParser == nil || !subscribesOverSocket(chainParser) {
+		return false
+	}
+	for _, url := range nodeUrls {
+		if isWebSocketUrl(url.Url) {
+			return false
+		}
+	}
+	return true
+}
+
+// subscribesOverSocket reports whether the spec has an enabled collection that
+// subscribes over a websocket. A SUBSCRIBE directive on a gRPC collection describes
+// server streaming, which rides the same HTTP/2 connection as every other gRPC call,
+// so there is no socket to be missing (MAG-2643).
+func subscribesOverSocket(chainParser ChainParser) bool {
+	_, collection, subscribes := chainParser.GetParsingByTag(spectypes.FUNCTION_TAG_SUBSCRIBE)
+	return subscribes && collection != nil && collection.Enabled &&
+		collection.GetCollectionData().ApiInterface != spectypes.APIInterfaceGrpc
 }

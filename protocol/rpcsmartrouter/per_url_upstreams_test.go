@@ -34,6 +34,7 @@ const (
 	upSolana    = "sol"       // Solana node without the token-owner index
 	upTraceRate = "tracerate" // full ETH1 node whose trace_ methods answer 429: a premium method's own limit
 	upDebug     = "debug"     // full ETH1 node that serves the debug add-on too
+	upPolygon   = "polygon"   // ETH1-shaped node of another chain: eth_chainId answers 0x89
 )
 
 const upLatest = 0x1400000
@@ -253,6 +254,9 @@ func reply(p string, request map[string]any) map[string]any {
 	case "eth_chainId":
 		if p == upSlowChain {
 			time.Sleep(10 * time.Second)
+		}
+		if p == upPolygon {
+			return result("0x89")
 		}
 		return result("0x1")
 	case "eth_blockNumber":

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,12 +273,13 @@ func TestApplyReverification_RecordsTheFailedCheck(t *testing.T) {
 // What an admitted provider lost is published by what still serves it. A service no url
 // of the provider serves any more is scope=service. A service one url lost while another
 // still serves it is scope=url with that service: requests needing it still reach the
-// provider. A node url refused whole is scope=url with no service.
+// provider. An http(s) node url refused whole is scope=url with no service.
 func TestRefusalsOf_ScopeFollowsWhatStillServes(t *testing.T) {
 	up := newFakeUpstreams(t)
 	parser := liveParser(t, "ETH1", true)
+	socket := common.NodeUrl{Url: up.wsURL("/rs/" + upArchive)}
 	refusals := func(urls ...common.NodeUrl) []metrics.ProviderVerificationFailure {
-		provider := staticProvider("ETH1", urls...)
+		provider := staticProvider("ETH1", append(urls, socket)...)
 		admission, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
 		require.NoError(t, err)
 		return refusalsOf(parser, provider, admission)
@@ -294,6 +297,58 @@ func TestRefusalsOf_ScopeFollowsWhatStillServes(t *testing.T) {
 		[]metrics.ProviderVerificationFailure{{Scope: metrics.VerificationScopeURL, Check: "chain-id"}},
 		refusals(common.NodeUrl{Url: up.httpURL("/rs/" + upDead)}, common.NodeUrl{Url: up.httpURL("/rs/" + upArchive)}),
 		"a url refused whole")
+}
+
+// The websocket is one of the provider's services (MAG-3950). A ws(s) url carries no
+// relay, only subscriptions, so a refused one costs the provider its websocket:
+// scope=service, PartialFail, when no ws(s) url of it is left, and scope=url while
+// another still serves. A provider with no ws(s) url on a chain that subscribes is
+// published as the websocket's missing-url, with skip-websocket-verification or not.
+// A chain that subscribes nowhere has no websocket to miss.
+func TestRefusalsOf_TheWebsocketIsAService(t *testing.T) {
+	up := newFakeUpstreams(t)
+	gone := httptest.NewServer(nil)
+	deadSocket := common.NodeUrl{Url: "ws" + strings.TrimPrefix(gone.URL, "http") + "/ws"}
+	gone.Close()
+	https := common.NodeUrl{Url: up.httpURL("/ws-svc/" + upArchive)}
+	socket := common.NodeUrl{Url: up.wsURL("/ws-svc/" + upArchive)}
+	refusals := func(parser chainlib.ChainParser, urls ...common.NodeUrl) []metrics.ProviderVerificationFailure {
+		provider := staticProvider("ETH1", urls...)
+		admission, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
+		require.NoError(t, err)
+		return refusalsOf(parser, provider, admission)
+	}
+	websocket := func(scope, check string) []metrics.ProviderVerificationFailure {
+		return []metrics.ProviderVerificationFailure{{Scope: scope, Service: chainlib.WebSocketExtension, Check: check}}
+	}
+
+	for _, skipWebsocket := range []bool{true, false} {
+		parser := liveParser(t, "ETH1", skipWebsocket)
+		require.Equal(t, websocket(metrics.VerificationScopeService, chainlib.CheckMissingURL), refusals(parser, https),
+			"no ws(s) url, skip-websocket-verification=%t", skipWebsocket)
+		require.Equal(t, websocket(metrics.VerificationScopeService, chainlib.CheckConnect), refusals(parser, https, deadSocket),
+			"the only socket is gone: the provider serves no subscriptions, skip-websocket-verification=%t", skipWebsocket)
+		require.Equal(t, websocket(metrics.VerificationScopeURL, chainlib.CheckConnect), refusals(parser, https, deadSocket, socket),
+			"another socket still serves its subscriptions, skip-websocket-verification=%t", skipWebsocket)
+		require.Empty(t, refusals(parser, https, socket))
+	}
+
+	// Published as PartialFail: the provider still serves everything but subscriptions.
+	const spec = "VERIFYNOWEBSOCKET"
+	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
+	parser := liveParser(t, "ETH1", true)
+	inputs := &chainReverifyInputs{
+		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{staticProvider("ETH1", https)},
+		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
+			return refusals(parser, p.NodeUrls...)
+		},
+	}
+	rpsr := newVerificationFailedRouter(t, spec, inputs)
+	rpsr.providerSessions[chainKey] = sessionsFor("p")
+	rpsr.publishServingTierLocked(chainKey)
+	require.Equal(t, []string{"p|static|service|websocket|missing-url|PartialFail"}, failingSeries(t, spec))
+
+	require.False(t, chainlib.MissingWebsocket([]common.NodeUrl{https}, liveParser(t, "BTC", false)), "BTC subscribes nowhere")
 }
 
 func TestPublishServingTier_RefusedURLOfAPairedProvider(t *testing.T) {

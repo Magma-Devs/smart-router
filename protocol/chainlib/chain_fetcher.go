@@ -174,8 +174,11 @@ const (
 	CheckUnsupportedAddon = "unsupported-addon"
 	CheckConnect          = "connect"
 	// CheckConfig is a provider whose configured urls cannot work as given: no
-	// http(s) url, or no websocket url on a chain that subscribes.
+	// http(s) url.
 	CheckConfig = "config"
+	// CheckMissingURL is a part the provider has no node url for: a websocket url on
+	// a chain that subscribes (MissingWebsocket). Nothing ran; no retry can fix it.
+	CheckMissingURL = "missing-url"
 	// CheckNotRun is a check its pass never started, because the provider's
 	// verification deadline had passed. It says nothing about the check itself.
 	CheckNotRun = "not-run"
