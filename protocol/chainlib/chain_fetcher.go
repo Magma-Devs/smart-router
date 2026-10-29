@@ -373,6 +373,11 @@ func (a ProviderAdmission) URLThrottled(index int) bool {
 	return throttled
 }
 
+// URLRateLimit is the rate limit the node url at this position met, nil when it met none.
+func (a ProviderAdmission) URLRateLimit(index int) error {
+	return a.throttledURLs[index]
+}
+
 // URLThrottle is the rate limit a whole node url met, the first by position: nil when
 // only single services were rate-limited, or nothing was.
 func (a ProviderAdmission) URLThrottle() error {
