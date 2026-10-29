@@ -2052,6 +2052,15 @@ func primaryLookupVerdict(cacheError error, cacheReply *pairingtypes.CacheRelayR
 	return hit, unusable, outcome
 }
 
+// classifyRequest sets the request-class flags the smartrouter_requests_* group splits on; each is
+// a pure function of the message.
+func classifyRequest(analytics *metrics.RelayMetrics, chainMessage chainlib.ChainMessage) {
+	analytics.IsWrite = chainlib.GetStateful(chainMessage) != common.NO_STATE
+	analytics.IsArchive = chainqueries.IsArchiveRequest(chainMessage)
+	analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(chainMessage)
+	analytics.IsBatch = chainqueries.IsBatchRequest(chainMessage)
+}
+
 func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlock int64, latestBlockHashRequested int64, protocolMessage chainlib.ProtocolMessage) int64 {
 	if reqBlock == spectypes.LATEST_BLOCK && seenBlock != 0 {
 		// make optimizer select an endpoint that is likely to have the latest seen block
@@ -2641,10 +2650,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// the analytics consumer (AddMetricForHttp). The goroutines only READ analytics from here on
 	// (RecordDirectRelayEnd), and the request-level Success is set once in SendParsedRelay.
 	if analytics != nil {
-		analytics.IsWrite = chainlib.GetStateful(chainMessage) != common.NO_STATE
-		analytics.IsArchive = chainqueries.IsArchiveRequest(chainMessage)
-		analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(chainMessage)
-		analytics.IsBatch = chainqueries.IsBatchRequest(chainMessage)
+		classifyRequest(analytics, chainMessage)
 	}
 
 	// Cross-validation relays are detached from the batch cancel (MAG-2187): ProcessRelaySend cancels
@@ -5190,7 +5196,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 								utils.LogAttr("size", len(reply.Data)),
 							)
 						}
-						// handle cache reply
+						rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
+						// handle cache reply: primaryOutcome is a hit exactly on this branch
 						if cacheError == nil && reply != nil && !unusable {
 							// Cache hit - return cached response
 							utils.LavaFormatDebug("cache hit",
@@ -5239,15 +5246,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							if analytics == nil {
 								analytics = &metrics.RelayMetrics{}
 							}
-							analytics.IsWrite = chainlib.GetStateful(protocolMessage) != 0
-							analytics.IsArchive = chainqueries.IsArchiveRequest(protocolMessage)
-							analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(protocolMessage)
-							analytics.IsBatch = chainqueries.IsBatchRequest(protocolMessage)
+							classifyRequest(analytics, protocolMessage)
 							rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
-							rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.CacheOutcomeHit, cacheLatencyMs)
 							return nil
 						}
-						rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
 						// Cache miss - will relay to endpoint
 						latestBlockHashRequested, earliestBlockHashRequested = rpcss.getEarliestBlockHashRequestedFromCacheReply(cacheReply)
 						utils.LavaFormatTrace("[Archive Debug] Reading block hashes from cache", utils.LogAttr("latestBlockHashRequested", latestBlockHashRequested), utils.LogAttr("earliestBlockHashRequested", earliestBlockHashRequested), utils.LogAttr("GUID", ctx))

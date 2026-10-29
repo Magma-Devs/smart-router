@@ -1,8 +1,6 @@
 package metrics
 
 import (
-	"errors"
-
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -25,18 +23,7 @@ func NewMappedLabelsGaugeVec(opts MappedLabelsMetricOpts) *MappedLabelsGaugeVec 
 	}
 
 	if opts.Registerer != nil {
-		if err := opts.Registerer.Register(metric.GaugeVec); err != nil {
-			are := &prometheus.AlreadyRegisteredError{}
-			if errors.As(err, are) {
-				if existing, ok := are.ExistingCollector.(*prometheus.GaugeVec); ok {
-					metric.GaugeVec = existing
-				} else {
-					panic(are)
-				}
-			} else {
-				panic(err)
-			}
-		}
+		metric.GaugeVec = RegisterOrReuse(opts.Registerer, metric.GaugeVec, PanicOnRegisterFailure)
 	}
 
 	return metric

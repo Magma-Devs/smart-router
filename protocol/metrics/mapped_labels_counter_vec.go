@@ -1,8 +1,6 @@
 package metrics
 
 import (
-	"errors"
-
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -25,18 +23,7 @@ func NewMappedLabelsCounterVec(opts MappedLabelsMetricOpts) *MappedLabelsCounter
 	}
 
 	if opts.Registerer != nil {
-		if err := opts.Registerer.Register(metric.CounterVec); err != nil {
-			are := &prometheus.AlreadyRegisteredError{}
-			if errors.As(err, are) {
-				if existing, ok := are.ExistingCollector.(*prometheus.CounterVec); ok {
-					metric.CounterVec = existing
-				} else {
-					panic(are)
-				}
-			} else {
-				panic(err)
-			}
-		}
+		metric.CounterVec = RegisterOrReuse(opts.Registerer, metric.CounterVec, PanicOnRegisterFailure)
 	}
 
 	return metric
