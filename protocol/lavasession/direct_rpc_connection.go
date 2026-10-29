@@ -768,58 +768,28 @@ func DetectProtocol(urlStr string, apiInterface string) (DirectRPCProtocol, erro
 	}
 }
 
-// SendRequest implements DirectRPCConnection for HTTP/HTTPS
+// SendRequest implements DirectRPCConnection for HTTP/HTTPS: a POST of data to the url, as
+// application/json unless a caller header names another Content-Type. Callers needing another
+// method or path use DoHTTPRequest; both go through do, so they set headers by the same rules.
+// A 4xx/5xx reply comes back as the response and an *HTTPStatusError together.
 func (h *HTTPDirectRPCConnection) SendRequest(
 	ctx context.Context,
 	data []byte,
 	headers map[string]string,
 ) (*DirectRPCResponse, error) {
-	// NOTE: for JSON-RPC we use POST with a JSON body.
-	// For REST-style APIs (e.g. Cosmos LCD), the chain parser must provide the correct URL path and HTTP method
-	// (GET/POST/etc.). This transport layer sends bytes and returns bytes; method selection is driven by chain spec.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, h.nodeUrl.AuthConfig.AddAuthPath(h.nodeUrl.Url), bytes.NewReader(data))
+	callerHeaders := make([]pairingtypes.Metadata, 0, len(headers))
+	for name, value := range headers {
+		callerHeaders = append(callerHeaders, pairingtypes.Metadata{Name: name, Value: value})
+	}
+	resp, err := h.do(ctx, http.MethodPost, h.nodeUrl.Url, data, "application/json", callerHeaders)
 	if err != nil {
-		// NewRequestWithContext only fails on malformed URL / method — a programmer
-		// error, not a transport failure or upstream outage.
-		return nil, fmt.Errorf("failed to build request: %w", err)
-	}
-
-	// Apply auth headers from config + per-request headers from chainMessage/chainParser.
-	for k, v := range h.nodeUrl.GetAuthHeaders() {
-		req.Header.Set(k, v)
-	}
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	// Accept-Encoding is the url's own (NodeUrl.AcceptEncoding): identity unless
-	// the operator opted it in to gzip. Setting any value keeps Go's http client
-	// from adding `gzip` and decoding it on its own. That path cost the eth router
-	// ~30-39% of its CPU (http2gzipReader → compress/flate.decompressor), and
-	// asking for identity took it from 2.47 cores to 1.23 (MAG-1589). This
-	// scoping is smart-router-only: the shared transport still lets provider
-	// chain proxies keep their standard auto-gzip behavior. A gzip reply is
-	// inflated by readHTTPResponseBody instead.
-	// Set *after* caller headers so it cannot be accidentally overridden.
-	req.Header.Set("Accept-Encoding", h.nodeUrl.UpstreamAcceptEncoding())
-	h.markRetireIfDue(req)
-
-	resp, err := h.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	h.observeStatus(resp.StatusCode)
-
-	body, err := readHTTPResponseBody(resp)
-	if err != nil {
-		return nil, fmt.Errorf("failed reading response body: %w", err)
+		return nil, err
 	}
 
 	// Build response with metadata (HTTP headers)
 	response := &DirectRPCResponse{
-		Data:       body,
-		Metadata:   resp.Header, // http.Header is map[string][]string
+		Data:       resp.Body,
+		Metadata:   resp.Headers, // http.Header is map[string][]string
 		StatusCode: resp.StatusCode,
 	}
 
@@ -827,14 +797,7 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	// Note: For JSON-RPC, status 200 with RPC error in body is common and valid
 	// We return the response in both cases - the caller will check for RPC errors
 	if resp.StatusCode >= 400 {
-		// For 4xx/5xx errors, include status code in error but also return the response
-		retryAfter, _ := common.ParseRetryAfter(resp.Header, time.Now())
-		return response, &HTTPStatusError{
-			StatusCode: resp.StatusCode,
-			Status:     resp.Status,
-			Body:       body,
-			RetryAfter: retryAfter,
-		}
+		return response, NewHTTPStatusError(resp.StatusCode, resp.Status, resp.Headers, resp.Body)
 	}
 
 	return response, nil
@@ -916,6 +879,19 @@ func (e *HTTPStatusError) Unwrap() error {
 	return &common.RateLimitedError{RetryAfter: e.RetryAfter}
 }
 
+// NewHTTPStatusError builds the error for a 4xx/5xx reply, with RetryAfter read from the reply's
+// headers. Every producer goes through it, so the error reads the same whichever path saw the
+// status.
+func NewHTTPStatusError(statusCode int, status string, header map[string][]string, body []byte) *HTTPStatusError {
+	retryAfter, _ := common.ParseRetryAfter(header, time.Now())
+	return &HTTPStatusError{
+		StatusCode: statusCode,
+		Status:     status,
+		Body:       body,
+		RetryAfter: retryAfter,
+	}
+}
+
 func (h *HTTPDirectRPCConnection) GetProtocol() DirectRPCProtocol {
 	return h.protocol
 }
@@ -938,53 +914,62 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	ctx context.Context,
 	params HTTPRequestParams,
 ) (*HTTPDirectRPCResponse, error) {
-	// Build request body reader
+	// Don't return error for 4xx/5xx - client needs the response
+	return h.do(ctx, params.Method, params.URL, params.Body, params.ContentType, params.Headers)
+}
+
+// do sends one request to the node and reads the whole reply, inflated if the upstream gzipped
+// it. Both senders use it, so headers are applied in one order for JSON-RPC and REST alike:
+//   - the url's auth headers, then the client's address when the url asks for IP forwarding;
+//   - contentType, for a request with a body, BEFORE the caller's headers, so a spec-supplied
+//     content-type wins over this default instead of being overwritten by it. Stellar's REST
+//     POST collection overrides it to application/x-www-form-urlencoded (Horizon rejects
+//     anything else on /transactions with 415). This matches the chainlib REST proxy;
+//   - the caller's headers, where an empty value deletes the header (the spec's nullify);
+//   - Accept-Encoding last, so no caller header can override it.
+func (h *HTTPDirectRPCConnection) do(
+	ctx context.Context,
+	method, url string,
+	body []byte,
+	contentType string,
+	headers []pairingtypes.Metadata,
+) (*HTTPDirectRPCResponse, error) {
 	var bodyReader io.Reader
-	if params.Body != nil {
-		bodyReader = bytes.NewReader(params.Body)
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
 	}
 
 	// Apply auth path transformation (e.g., prepend /api/v1 if configured)
-	fullURL := h.nodeUrl.AuthConfig.AddAuthPath(params.URL)
-
-	req, err := http.NewRequestWithContext(ctx, params.Method, fullURL, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, h.nodeUrl.AuthConfig.AddAuthPath(url), bodyReader)
 	if err != nil {
+		// NewRequestWithContext only fails on malformed URL / method — a programmer
+		// error, not a transport failure or upstream outage.
 		return nil, fmt.Errorf("failed to build HTTP request: %w", err)
 	}
 
-	// Apply NodeUrl auth headers (API keys, bearer tokens, etc.)
 	h.nodeUrl.SetAuthHeaders(ctx, req.Header.Set)
-
-	// Apply IP forwarding if needed
 	h.nodeUrl.SetIpForwardingIfNecessary(ctx, req.Header.Set)
-
-	// Set the default Content-Type for requests with a body BEFORE applying
-	// per-request headers, so a spec-supplied content-type wins over this default
-	// instead of being overwritten by it. Stellar's REST POST collection overrides
-	// content-type to application/x-www-form-urlencoded (Horizon rejects anything
-	// else on /transactions with 415); with the opposite ordering that override was
-	// computed correctly and then discarded here. This matches the ordering the
-	// chainlib REST proxy has always used.
-	if params.Body != nil && params.ContentType != "" {
-		req.Header.Set("Content-Type", params.ContentType)
+	if body != nil && contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
-
-	// Apply per-request headers with delete semantics
-	for _, header := range params.Headers {
+	for _, header := range headers {
 		if header.Value == "" {
-			req.Header.Del(header.Name) // Empty value = delete header
+			req.Header.Del(header.Name)
 		} else {
 			req.Header.Set(header.Name, header.Value)
 		}
 	}
-
-	// The url's own Accept-Encoding, identity unless it opted in to gzip. See
-	// SendRequest above for the full rationale. Set last so it cannot be
-	// overridden by per-request headers.
+	// Accept-Encoding is the url's own (NodeUrl.AcceptEncoding): identity unless
+	// the operator opted it in to gzip. Setting any value keeps Go's http client
+	// from adding `gzip` and decoding it on its own. That path cost the eth router
+	// ~30-39% of its CPU (http2gzipReader → compress/flate.decompressor), and
+	// asking for identity took it from 2.47 cores to 1.23 (MAG-1589). This
+	// scoping is smart-router-only: the shared transport still lets provider
+	// chain proxies keep their standard auto-gzip behavior. A gzip reply is
+	// inflated by readHTTPResponseBody instead.
 	req.Header.Set("Accept-Encoding", h.nodeUrl.UpstreamAcceptEncoding())
 	h.markRetireIfDue(req)
 
-	// Send request
 	resp, err := h.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %w", err)
@@ -992,19 +977,16 @@ func (h *HTTPDirectRPCConnection) DoHTTPRequest(
 	defer resp.Body.Close()
 	h.observeStatus(resp.StatusCode)
 
-	// Read response body, inflated if the upstream gzipped it
-	body, err := readHTTPResponseBody(resp)
+	respBody, err := readHTTPResponseBody(resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed reading response: %w", err)
 	}
 
-	// Return complete response (status + headers + body)
-	// Don't return error for 4xx/5xx - client needs the response
 	return &HTTPDirectRPCResponse{
 		StatusCode: resp.StatusCode,
 		Status:     resp.Status,
 		Headers:    resp.Header,
-		Body:       body,
+		Body:       respBody,
 	}, nil
 }
 
