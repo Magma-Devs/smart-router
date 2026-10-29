@@ -14,6 +14,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"google.golang.org/grpc/status"
 
 	"github.com/itchyny/gojq"
@@ -30,6 +31,11 @@ func NewSolanaNonRetryableError(err error) error {
 //  1. HTTP-wrapped JSON-RPC body  — extracts .error.code / .error.message
 //  2. gRPC status                 — extracts status code and description
 //  3. Raw HTTP status code        — extracts the HTTP status integer
+//
+// "HTTP-wrapped" means either HTTP error the router produces: rpcclient.HTTPError from the
+// chainlib proxies and *lavasession.HTTPStatusError from the direct senders (see httpErrorParts).
+// The direct one used to reach none of the three steps, so a direct-path 5xx carrying a JSON-RPC
+// error body was classified by its status line alone and its body's code was never read.
 //
 // The priority is strict: each step returns on success so a later step cannot
 // overwrite an earlier extraction. In particular, a JSON-RPC error body inside
@@ -50,8 +56,8 @@ func NewSolanaNonRetryableError(err error) error {
 // authoritative source of the retry/non-retry verdict — but they only fire
 // when the digits "N" appear in the synthesised errorMessage.
 //
-// We therefore prefix "HTTP <status>: " when the wrapped error is an
-// rpcclient.HTTPError with a non-2xx status. The body's JSON-RPC code is
+// We therefore prefix "HTTP <status>: " when the wrapped error is either HTTP
+// error type with a non-2xx status. The body's JSON-RPC code is
 // still returned as errorCode, so Tier-1 CodeEquals matchers (e.g.
 // CodeEquals(-32601)) still win when they're applicable — they're evaluated
 // before HTTPStatusContains. The prefix only changes the outcome for
@@ -72,9 +78,9 @@ func ExtractNodeErrorDetails(nodeError error) (errorCode int, errorMessage strin
 		// HTTPStatusContains, so a real JSON-RPC code like -32601 still
 		// wins; the prefix only affects generic body codes (-1, 0, vendor-
 		// specific) where the HTTP status is the authoritative signal.
-		if httpError, ok := nodeError.(rpcclient.HTTPError); ok {
-			if httpError.StatusCode < 200 || httpError.StatusCode >= 300 {
-				errorMessage = fmt.Sprintf("HTTP %d: %s", httpError.StatusCode, errorMessage)
+		if statusCode, _, ok := httpErrorParts(nodeError); ok {
+			if statusCode < 200 || statusCode >= 300 {
+				errorMessage = fmt.Sprintf("HTTP %d: %s", statusCode, errorMessage)
 			}
 		}
 		return jsonMsg.Error.Code, errorMessage
@@ -89,8 +95,8 @@ func ExtractNodeErrorDetails(nodeError error) (errorCode int, errorMessage strin
 	}
 
 	// 3. Raw HTTP status code — last resort (no structured body recovered).
-	if httpError, ok := nodeError.(rpcclient.HTTPError); ok {
-		return httpError.StatusCode, errorMessage
+	if statusCode, _, ok := httpErrorParts(nodeError); ok {
+		return statusCode, errorMessage
 	}
 
 	return 0, errorMessage
@@ -333,12 +339,28 @@ func (geh *genericErrorHandler) ValidateRequestAndResponseIds(nodeMessageID json
 	return nil
 }
 
+// httpErrorParts returns the status and body of either HTTP error the router produces:
+// rpcclient.HTTPError, from the chainlib proxies, and *lavasession.HTTPStatusError, from the
+// direct senders. Both are matched by type, not through wrapping, as the rpcclient one always
+// was: an error the direct path already classified and wrapped keeps the verdict it was given.
+func httpErrorParts(err error) (statusCode int, body []byte, ok bool) {
+	switch httpError := err.(type) {
+	case rpcclient.HTTPError:
+		return httpError.StatusCode, httpError.Body, true
+	case *lavasession.HTTPStatusError:
+		if httpError != nil {
+			return httpError.StatusCode, httpError.Body, true
+		}
+	}
+	return 0, nil, false
+}
+
 func TryRecoverNodeErrorFromClientError(nodeErr error) *rpcclient.JsonrpcMessage {
 	// try to parse node error as json message
-	httpError, ok := nodeErr.(rpcclient.HTTPError)
+	_, body, ok := httpErrorParts(nodeErr)
 	if ok {
 		jsonMessage := &rpcclient.JsonrpcMessage{}
-		err := json.Unmarshal(httpError.Body, jsonMessage)
+		err := json.Unmarshal(body, jsonMessage)
 		if err == nil {
 			utils.LavaFormatDebug("Successfully recovered HTTPError to node message", utils.LogAttr("jsonMessage", jsonMessage))
 			return jsonMessage
