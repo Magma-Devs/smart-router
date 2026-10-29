@@ -413,6 +413,25 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		reply := relayResult.GetReply()
 		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
+			// A request the router refused by one of its OWN limits: too many root fields, too
+			// deep a document, too deep a chain of fragment spreads. Nothing failed — the router
+			// read the request and declined to serve it, and its own relay_end line says so
+			// (outcome rejected_before_dispatch, status 0). The refusal carries no status, so it
+			// used to fall to the 500 below: the status for "the server failed", which every
+			// alert rule counts as an outage of the router and every retry policy resends a
+			// request that can never succeed. It gets a client-error status and a GraphQL error
+			// document the caller's client can actually read (MAG-4577).
+			//
+			// The refusal's own message is used, not the masked envelope: it is router-authored
+			// and constant apart from the limit's number, so it carries nothing to redact, and
+			// the masking exists for upstream errors that can leak a node url's credentials.
+			if refusal := rpcInterfaceMessages.GraphQLRefusalFrom(err); refusal != nil {
+				apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody,
+					refusal.ClientMessage(), msgSeed, time.Since(startTime), err)
+				fiberCtx.Status(graphQLRefusalStatus)
+				return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(),
+					convertToGraphQLError(refusal.ClientMessage(), msgSeed))
+			}
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody, errMasking, msgSeed, time.Since(startTime), err)
 			if relayResult.GetStatusCode() != 0 {
