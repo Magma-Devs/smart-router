@@ -2039,6 +2039,45 @@ func primaryLookupVerdict(cacheError error, cacheReply *pairingtypes.CacheRelayR
 	return hit, unusable, outcome
 }
 
+// cachedRelayResult is the relay result a cache hit of either tier is served as.
+// isNodeError serves the entry truthfully, so a cached node error carries the
+// lava-identified-node-error header exactly like a live one. The provider address
+// is empty, which renders as "Cached".
+func cachedRelayResult(reply *pairingtypes.RelayReply, relayData *pairingtypes.RelayPrivateData, statusCode int, isNodeError bool, cacheLookup common.CacheLookupReport) common.RelayResult {
+	return common.RelayResult{
+		Reply: reply,
+		Request: &pairingtypes.RelayRequest{
+			RelayData: relayData,
+		},
+		Finalized:    false, // cache responses are not considered finalized
+		StatusCode:   statusCode,
+		IsNodeError:  isNodeError,
+		ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
+		CacheLookup:  cacheLookup,
+	}
+}
+
+// serveCacheHit answers the request with a cache hit of either tier and counts it.
+//
+// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was current
+// when the response was CACHED — it is not a fresh observation of the chain head and
+// is not gated on tip-eligibility, so it must NOT feed tip state (it would plant a
+// long-historical block as the chain head). Tip state is advanced only by
+// tip-eligible live relays (harvestAndUpdateTipFromRelay) and the per-endpoint
+// observation store, never by cache replays; nothing here reads it.
+func (rpcss *RPCSmartRouterServer) serveCacheHit(relayProcessor *relaycore.RelayProcessor, relayResult common.RelayResult, analytics *metrics.RelayMetrics, protocolMessage chainlib.ChainMessage) {
+	relayProcessor.SetResponse(&relaycore.RelayResponse{
+		RelayResult: relayResult,
+		Err:         nil,
+	})
+	if analytics == nil {
+		analytics = &metrics.RelayMetrics{}
+	}
+	classifyRequest(analytics, protocolMessage)
+	chainId, apiInterface := rpcss.GetChainIdAndApiInterface()
+	rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
+}
+
 // classifyRequest sets the request-class flags the smartrouter_requests_* group splits on; each is
 // a pure function of the message.
 func classifyRequest(analytics *metrics.RelayMetrics, chainMessage chainlib.ChainMessage) {
@@ -5202,39 +5241,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							isNodeError, resolvedData := classifyCachedEntry(ctx, protocolMessage, metrics.CacheTierPrimary, cacheReply, reply.Data)
 							reply.Data = resolvedData
 
-							relayResult := common.RelayResult{
-								Reply: reply,
-								Request: &pairingtypes.RelayRequest{
-									RelayData: localRelayData,
-								},
-								Finalized: false, // cache responses are not considered finalized
-								// 200 is correct even for a cached node error: a node error is
-								// delivered inside a 2xx body (that is what IsNodeError marks), so
-								// this matches what a live relay of the same response reports.
-								StatusCode: 200,
-								// Served truthfully, so a cached node error carries the
-								// lava-identified-node-error header exactly like a live one.
-								IsNodeError:  isNodeError,
-								ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
-								// The secondary is only consulted after a primary non-hit, so it
-								// keeps whichever not-consulted value it was seeded with.
-								CacheLookup: cacheReport.ServedBy(common.CacheTierPrimary),
-							}
-							// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was
-							// current when the response was CACHED — it is not a fresh observation of the
-							// chain head and is not gated on tip-eligibility, so it must NOT feed tip
-							// state (it would plant a long-historical block as the chain head). Tip state
-							// is advanced only by tip-eligible live relays (harvestAndUpdateTipFromRelay)
-							// and the per-endpoint observation store, never by cache replays.
-							relayProcessor.SetResponse(&relaycore.RelayResponse{
-								RelayResult: relayResult,
-								Err:         nil,
-							})
-							if analytics == nil {
-								analytics = &metrics.RelayMetrics{}
-							}
-							classifyRequest(analytics, protocolMessage)
-							rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
+							// 200 is correct even for a cached node error: a node error is
+							// delivered inside a 2xx body (that is what IsNodeError marks), so
+							// this matches what a live relay of the same response reports. The
+							// secondary is only consulted after a primary non-hit, so it keeps
+							// whichever not-consulted value it was seeded with.
+							relayResult := cachedRelayResult(reply, localRelayData, http.StatusOK, isNodeError, cacheReport.ServedBy(common.CacheTierPrimary))
+							rpcss.serveCacheHit(relayProcessor, relayResult, analytics, protocolMessage)
 							return nil
 						}
 						// Cache miss - will relay to endpoint

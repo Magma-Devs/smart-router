@@ -470,19 +470,7 @@ func applyReverification(
 	// Pick keys that don't collide with surviving entries.
 	var promoted []string
 	if len(toAdmit) > 0 {
-		nextIdx := uint64(0)
-		for k := range next {
-			if k >= nextIdx {
-				nextIdx = k + 1
-			}
-		}
-		for _, s := range inputs.convertProvidersToSessions(toAdmit) {
-			s.Lock.Lock()
-			s.PairingEpoch = epoch
-			s.Lock.Unlock()
-			next[nextIdx] = s
-			nextIdx++
-		}
+		appendSessions(next, inputs.convertProvidersToSessions(toAdmit), epoch)
 		promoted = make([]string, 0, len(toAdmit))
 		for _, p := range toAdmit {
 			promoted = append(promoted, p.Name)
