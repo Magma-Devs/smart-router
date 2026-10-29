@@ -18,6 +18,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
+	"github.com/magma-Devs/smart-router/utils/backoff"
 )
 
 const (
@@ -714,16 +715,8 @@ func (m *EndpointMonitor) trackerStartRetryDelay(attempt int) time.Duration {
 	if delay < m.retryMinDelay {
 		delay = m.retryMinDelay
 	}
-	if delay > m.retryMaxDelay {
-		delay = m.retryMaxDelay
-	}
-
-	for i := 0; i < attempt && delay < m.retryMaxDelay; i++ {
-		delay *= 2
-		if delay > m.retryMaxDelay {
-			delay = m.retryMaxDelay
-		}
-	}
+	// Delay caps the floored block time at retryMaxDelay too, before any doubling.
+	delay = backoff.Delay(attempt, backoff.Config{Initial: delay, Max: m.retryMaxDelay, Multiplier: 2})
 
 	jitterRange := delay / trackerStartRetryJitterDiv
 	if jitterRange <= 0 {
