@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +20,6 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -635,7 +635,7 @@ func TestNoPairingAvailableFlow(t *testing.T) {
 	validSnapshot := append([]string(nil), csm.validAddresses...)
 	csm.lock.RUnlock()
 	for _, addr := range css3 {
-		require.False(t, lavaslices.Contains(validSnapshot, addr.Session.Parent.PublicLavaAddress))
+		require.False(t, slices.Contains(validSnapshot, addr.Session.Parent.PublicLavaAddress))
 	}
 	require.Equal(t, len(validSnapshot), 2)
 }
@@ -665,7 +665,7 @@ func TestBlockedProviderIsReportedImmediately(t *testing.T) {
 	blocked := func() bool {
 		csm.lock.RLock()
 		defer csm.lock.RUnlock()
-		return lavaslices.Contains(csm.currentlyBlockedProviderAddresses, target)
+		return slices.Contains(csm.currentlyBlockedProviderAddresses, target)
 	}
 	require.True(t, blocked(), "and it must stay blocked; no timer returns it")
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -22,7 +23,6 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	"github.com/stretchr/testify/require"
 )
 
@@ -318,7 +318,7 @@ func TestSmartRouterStateMachineRetryKeepsTheRequestIntact(t *testing.T) {
 			case 1:
 				require.False(t, task.IsDone())
 				require.False(t,
-					lavaslices.ContainsPredicate(
+					slices.ContainsFunc(
 						task.RelayState.GetProtocolMessage().GetExtensions(),
 						func(predicate *spectypes.Extension) bool { return predicate.Name == "archive" }),
 					"the retry must carry the caller's request unchanged, not a speculative archive upgrade",

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1058,7 +1059,8 @@ func (s *Store) Purge(ctx context.Context) error {
 		utils.LavaFormatDebug("resp-cache purge: the read endpoint reports itself a replica, so it is not scanned; the write-side purge reaches it through replication",
 			utils.LogAttr("read-endpoint", s.readEndpoint.current()),
 			utils.LogAttr("replica-of", master),
-			utils.LogAttr("replica-of-write-endpoint", addressListed(master, s.configuredEndpoints.Addresses)))
+			// A textual match: a hostname and the IP it resolves to differ, so this is a hint.
+			utils.LogAttr("replica-of-write-endpoint", slices.Contains(s.configuredEndpoints.Addresses, master)))
 		return nil
 	}
 	if err := purgeClient(ctx, s.read, match); err != nil {
@@ -1144,16 +1146,6 @@ func replicaOfFromInfo(info string) (master string, isReplica bool) {
 		return "", true
 	}
 	return net.JoinHostPort(fields["master_host"], fields["master_port"]), true
-}
-
-// addressListed reports whether addr is one of the configured addresses.
-func addressListed(addr string, addresses []string) bool {
-	for _, candidate := range addresses {
-		if candidate == addr {
-			return true
-		}
-	}
-	return false
 }
 
 // purgeClient scans and unlinks under match on one client — per master when

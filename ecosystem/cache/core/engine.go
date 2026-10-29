@@ -13,7 +13,6 @@ import (
 	relaytypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 )
 
 var (
@@ -273,7 +272,7 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 		waitGroup.Wait()
 
 		if err == nil {
-			if cacheReply.SeenBlock < lavaslices.Min([]int64{relayCacheGet.SeenBlock, relayCacheGet.RequestedBlock}) {
+			if cacheReply.SeenBlock < min(relayCacheGet.SeenBlock, relayCacheGet.RequestedBlock) {
 				err = utils.LavaFormatDebug("reply seen block is smaller than our expectations",
 					utils.LogAttr("cacheReply.SeenBlock", cacheReply.SeenBlock),
 					utils.LogAttr("seenBlock", relayCacheGet.SeenBlock),

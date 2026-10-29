@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -691,5 +692,5 @@ func FormatLongString(msg string, maxCharacters int) string {
 }
 
 func ToHexString(hash string) string {
-	return fmt.Sprintf("%x", hash)
+	return hex.EncodeToString([]byte(hash))
 }

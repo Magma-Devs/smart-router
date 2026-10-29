@@ -542,7 +542,7 @@ func convertRelayMetaDataToMDMetaData(md []pairingtypes.Metadata) metadata.MD {
 func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRequestedBlock, parsedBlock int64) (latestCombinedBlock int64, earliestCombinedBlock int64) {
 	latestCallback := func(currentLatest int64, parsedBlock int64) int64 {
 		if currentLatest < 0 && parsedBlock < 0 {
-			return utils.Max(currentLatest, parsedBlock)
+			return max(currentLatest, parsedBlock)
 		}
 
 		if currentLatest > 0 && parsedBlock < 0 && parsedBlock != spectypes.EARLIEST_BLOCK {
@@ -553,7 +553,7 @@ func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRe
 			return currentLatest
 		}
 
-		return utils.Max(currentLatest, parsedBlock)
+		return max(currentLatest, parsedBlock)
 	}
 
 	return latestCallback(currentLatestRequestedBlock, parsedBlock), CombineEarliestRequestedBlock(currentEarliestRequestedBlock, parsedBlock)
@@ -573,7 +573,7 @@ func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
 	}
 
 	if currentEarliest < 0 && parsedBlock < 0 {
-		return utils.Min(currentEarliest, parsedBlock)
+		return min(currentEarliest, parsedBlock)
 	}
 
 	if currentEarliest > 0 && parsedBlock < 0 {
@@ -584,7 +584,7 @@ func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
 		return parsedBlock
 	}
 
-	return utils.Min(currentEarliest, parsedBlock)
+	return min(currentEarliest, parsedBlock)
 }
 
 // GetRelayTimeout returns the per-attempt WINDOW: how long an endpoint is expected to take, and so

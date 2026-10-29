@@ -3,6 +3,8 @@ package endpointstate
 import (
 	"context"
 	"errors"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1011,11 +1013,7 @@ func (m *EndpointMonitor) GetAllEndpoints() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	endpoints := make([]string, 0, len(m.trackers))
-	for url := range m.trackers {
-		endpoints = append(endpoints, url)
-	}
-	return endpoints
+	return slices.Collect(maps.Keys(m.trackers))
 }
 
 // GetEndpointCount returns the number of active ChainTrackers.

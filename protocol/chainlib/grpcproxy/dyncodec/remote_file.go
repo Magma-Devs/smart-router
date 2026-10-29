@@ -2,7 +2,9 @@ package dyncodec
 
 import (
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -249,11 +251,7 @@ func (f *FileDescriptorSetRegistry) ListFiles() []string {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	files := make([]string, 0, len(f.filesByPath))
-	for path := range f.filesByPath {
-		files = append(files, path)
-	}
-	return files
+	return slices.Collect(maps.Keys(f.filesByPath))
 }
 
 // joinNames joins a package/parent name with a type name

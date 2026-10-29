@@ -14,7 +14,6 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 )
 
 const (
@@ -239,10 +238,10 @@ func ParseBlockHashFromReplyAndDecode(rpcInput RPCInput, resultParser spectypes.
 			}
 
 			return "", utils.LavaFormatLog("failed to parse with legacy block parser", err,
-				lavaslices.Slice(
+				[]utils.Attribute{
 					utils.LogAttr("rpcInput", rpcInput),
 					utils.LogAttr("resultParser", resultParser),
-				),
+				},
 				uint(parseErrorLogLevel),
 			)
 		}
