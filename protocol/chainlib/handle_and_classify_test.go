@@ -146,18 +146,18 @@ func TestExtractNodeErrorDetails_HTTPStatusFallback(t *testing.T) {
 
 func TestUnwrapLavaError_FromWrapped(t *testing.T) {
 	err := common.NewLavaError(common.LavaErrorChainNonceTooLow, "test")
-	le := unwrapLavaError(err)
+	le := common.AsLavaError(err)
 	require.NotNil(t, le)
 	assert.Equal(t, common.LavaErrorChainNonceTooLow, le)
 }
 
 func TestUnwrapLavaError_FromPlainError(t *testing.T) {
-	le := unwrapLavaError(errors.New("plain"))
+	le := common.AsLavaError(errors.New("plain"))
 	assert.Nil(t, le)
 }
 
 func TestUnwrapLavaError_Nil(t *testing.T) {
-	le := unwrapLavaError(nil)
+	le := common.AsLavaError(nil)
 	assert.Nil(t, le)
 }
 
@@ -168,7 +168,7 @@ func TestHandleAndClassify_JsonRPCMethodNotFound(t *testing.T) {
 	err := errors.New("method not found")
 	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
 	require.NotNil(t, result)
-	lavaErr := unwrapLavaError(result)
+	lavaErr := common.AsLavaError(result)
 	require.NotNil(t, lavaErr)
 	assert.True(t, lavaErr.SubCategory.IsNodeCapability())
 	assert.False(t, IsUnsupportedMethodErrorType(result))

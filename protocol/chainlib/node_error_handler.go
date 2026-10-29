@@ -2,7 +2,6 @@ package chainlib
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -142,18 +141,9 @@ func IsUnsupportedMethodError(nodeError error) bool {
 	return false
 }
 
-// unwrapLavaError extracts the *LavaError from a LavaWrappedError, or returns nil.
-func unwrapLavaError(err error) *common.LavaError {
-	var wrapped *common.LavaWrappedError
-	if errors.As(err, &wrapped) {
-		return wrapped.LavaErr
-	}
-	return nil
-}
-
 // IsUnsupportedMethodErrorType checks if an error wraps a LavaError with unsupported method SubCategory.
 func IsUnsupportedMethodErrorType(err error) bool {
-	if le := unwrapLavaError(err); le != nil {
+	if le := common.AsLavaError(err); le != nil {
 		return le.SubCategory.IsUnsupportedMethod()
 	}
 	return false
@@ -176,7 +166,7 @@ func IsSolanaNonRetryableError(nodeError error) bool {
 
 // IsSolanaNonRetryableErrorType checks if an error wraps a non-retryable LavaError.
 func IsSolanaNonRetryableErrorType(err error) bool {
-	if le := unwrapLavaError(err); le != nil {
+	if le := common.AsLavaError(err); le != nil {
 		return !le.Retryable
 	}
 	return false

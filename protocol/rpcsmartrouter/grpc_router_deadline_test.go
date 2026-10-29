@@ -61,12 +61,12 @@ func TestSendGRPCRelay_RouterDeadlineIsATimeout(t *testing.T) {
 
 	require.Nil(t, result, "the router's own timeout is not an answer from the node")
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Equal(t, common.LavaErrorContextDeadline, extractLavaError(err))
+	require.Equal(t, common.LavaErrorContextDeadline, common.AsLavaError(err))
 	require.False(t, common.IsClientCancellation(err, context.Background()), "a slow endpoint is not excused")
-	unhealthy, _ := classifyEndpointHealth(extractLavaError(err), false)
+	unhealthy, _ := classifyEndpointHealth(common.AsLavaError(err), false)
 	require.True(t, unhealthy, "the endpoint is still blamed for the timeout")
 
-	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, LavaError: extractLavaError(err)}, false)
+	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, LavaError: common.AsLavaError(err)}, false)
 	require.Equal(t, attemptOutcomeTimeout, attempt.outcome, "relay_end reads it as a timeout")
 }
 

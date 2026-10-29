@@ -21,15 +21,9 @@ import (
 	"github.com/spf13/viper"
 )
 
-// healthVerification is one spec verification's result, as emitted in the JSON report.
-type healthVerification struct {
-	Name      string `json:"name"`
-	Addon     string `json:"addon"`
-	Extension string `json:"extension"`
-	Severity  string `json:"severity"`
-	Ok        bool   `json:"ok"`
-	Error     string `json:"error,omitempty"`
-}
+// healthVerification is one spec verification's result, as emitted in the JSON report: the
+// fetcher's result as is.
+type healthVerification = chainlib.VerificationResult
 
 // Router verdicts on one node url, as a router with the same flags would reach them.
 const (
@@ -470,14 +464,7 @@ func applyValidation(row *healthEndpointResult, v chainlib.NodeURLValidation) {
 	extensions := map[string]struct{}{}
 	allOk := v.Error == ""
 	for _, vr := range v.Verifications {
-		row.Verifications = append(row.Verifications, healthVerification{
-			Name:      vr.Name,
-			Addon:     vr.Addon,
-			Extension: vr.Extension,
-			Severity:  vr.Severity,
-			Ok:        vr.Ok,
-			Error:     vr.Error,
-		})
+		row.Verifications = append(row.Verifications, vr)
 		if vr.Extension != "" {
 			extensions[vr.Extension] = struct{}{}
 		}

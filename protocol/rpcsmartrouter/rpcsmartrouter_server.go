@@ -978,7 +978,7 @@ func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.C
 				utils.LogAttr("GUID", ctx))
 		}
 		groupCounts := rpcss.sessionManager.GroupCountsForRequest(addon, extensions, ctx)
-		adequateGroups := countAdequateGroups(groupCounts, params.AgreementThreshold)
+		adequateGroups := relaycore.QualifyingGroupCount(groupCounts, params.AgreementThreshold)
 		if adequateGroups < params.MinGroups {
 			return common.CrossValidationReasonInsufficientGroups, utils.LavaFormatError("per-group cross-validation: too few candidate groups have enough providers to each reach the agreement threshold",
 				lavasession.PairingListEmptyError,
@@ -994,19 +994,6 @@ func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.C
 	return "", nil
 }
 
-// countAdequateGroups returns how many groups in the per-group breakdown have at least `threshold`
-// providers/sessions — i.e. how many groups can independently reach their internal quorum. Mirrors
-// relaycore's per-group qualifying-group count for the capacity/post-filter guards.
-func countAdequateGroups(groupCounts map[string]int, threshold int) int {
-	n := 0
-	for _, c := range groupCounts {
-		if c >= threshold {
-			n++
-		}
-	}
-	return n
-}
-
 // crossValidationGroupShortfall evaluates whether a set of per-group counts can still satisfy the group
 // requirement of a cross-validation policy, returning the qualifying-group count and a non-empty structured
 // fail reason when it cannot. For PerGroupQuorum a group qualifies only with >= AgreementThreshold members
@@ -1018,7 +1005,7 @@ func crossValidationGroupShortfall(groupCounts map[string]int, params *common.Cr
 		return len(groupCounts), ""
 	}
 	if params.PerGroupQuorum {
-		qualifying = countAdequateGroups(groupCounts, params.AgreementThreshold)
+		qualifying = relaycore.QualifyingGroupCount(groupCounts, params.AgreementThreshold)
 		if qualifying < params.MinGroups {
 			return qualifying, common.CrossValidationReasonInsufficientGroups
 		}
@@ -5574,7 +5561,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 		// Classify error using the error registry and decide on health tracking
 		// Try to extract LavaError from classifiedError (already classified by classifyAndWrap)
-		classified := extractLavaError(err)
+		classified := common.AsLavaError(err)
 		if classified == nil {
 			// Fallback: derive transport and chain family, classify from scratch
 			errorCode := 0

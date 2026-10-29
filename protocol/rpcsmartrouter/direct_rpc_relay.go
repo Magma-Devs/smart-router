@@ -208,7 +208,7 @@ func extractSolanaContextSlot(data []byte) (int64, bool) {
 func resultIsNotAnObject(obj []byte) bool {
 	i := 1 // past the opening brace
 	for {
-		i = skipJSONSpace(obj, i)
+		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i)
 		if i >= len(obj) || obj[i] != '"' {
 			return false
 		}
@@ -220,11 +220,11 @@ func resultIsNotAnObject(obj []byte) bool {
 		if bytes.IndexByte(name, '\\') >= 0 {
 			return false // an escaped name; leave it to the full read
 		}
-		i = skipJSONSpace(obj, i+nameEnd+2)
+		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i+nameEnd+2)
 		if i >= len(obj) || obj[i] != ':' {
 			return false
 		}
-		i = skipJSONSpace(obj, i+1)
+		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i+1)
 		if i >= len(obj) {
 			return false
 		}
@@ -234,25 +234,12 @@ func resultIsNotAnObject(obj []byte) bool {
 		if i = skipJSONScalar(obj, i); i < 0 {
 			return false
 		}
-		i = skipJSONSpace(obj, i)
+		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i)
 		if i >= len(obj) || obj[i] != ',' {
 			return false // the object ended, or a member was malformed, before result
 		}
 		i++
 	}
-}
-
-// skipJSONSpace returns the index of the first byte at or after i that is not JSON whitespace.
-func skipJSONSpace(b []byte, i int) int {
-	for i < len(b) {
-		switch b[i] {
-		case ' ', '\t', '\r', '\n':
-			i++
-		default:
-			return i
-		}
-	}
-	return i
 }
 
 // skipJSONScalar returns the index just past the string, number, true, false or null that

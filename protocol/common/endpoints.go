@@ -259,7 +259,14 @@ func (nurl NodeUrl) ShouldSkipVerification(name string) bool {
 // collection in addition to whatever its addons name. True for every url that
 // has not opted out — see StandaloneAddons.
 func (nurl NodeUrl) ServesBaseCollection() bool {
-	return !nurl.StandaloneAddons || len(nurl.Addons) == 0
+	return ServesBaseCollection(nurl.StandaloneAddons, len(nurl.Addons))
+}
+
+// ServesBaseCollection is the predicate behind NodeUrl.ServesBaseCollection, shared with
+// the session layer's Endpoint, which carries copies of the same two fields: a url serves
+// the base collection unless it declared standalone add-ons and named at least one.
+func ServesBaseCollection(standaloneAddons bool, addonCount int) bool {
+	return !standaloneAddons || addonCount == 0
 }
 
 func (nurl NodeUrl) String() string {
