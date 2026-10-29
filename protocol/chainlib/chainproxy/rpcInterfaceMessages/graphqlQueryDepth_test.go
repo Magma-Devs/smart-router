@@ -74,8 +74,15 @@ func TestParseGraphQLMsgRefusesNestingPastTheLimit(t *testing.T) {
 	require.Equal(t, "a", message.GetMethod())
 
 	_, err = ParseGraphQLMsg([]byte(`{"query":"` + nestedSelection(MaxGraphQLQueryDepth+1) + `"}`))
-	require.ErrorContains(t, err, "failed parsing graphql query")
 	require.ErrorContains(t, err, fmt.Sprintf("query nests deeper than %d levels", MaxGraphQLQueryDepth))
+	// A refusal the router made, not a document the parser could not read. This row used to
+	// require the "failed parsing graphql query" prefix, which is the misclassification
+	// MAG-4577 names: it reads to the caller as a broken document, and it is the wrong side of
+	// the line MAG-4351 draws, where an unreadable document is forwarded to a node and this one
+	// must not be.
+	require.ErrorIs(t, err, ErrGraphQLRequestRefused)
+	require.NotContains(t, err.Error(), "failed parsing graphql query")
+	require.NotNil(t, GraphQLRefusalFrom(err))
 }
 
 const deepNestingChildEnv = "GRAPHQL_DEEP_NESTING_CHILD"

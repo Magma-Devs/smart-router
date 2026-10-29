@@ -327,6 +327,58 @@ func convertToJsonError(errorMsg string) []byte {
 	return jsonResponse
 }
 
+// graphQLRefusalStatus is the HTTP status the GraphQL listener answers a request it refuses by one
+// of its own limits with (MAG-4577).
+//
+// 400, for three reasons. The request itself is the reason and no retry of it can succeed, which is
+// the 4xx half of the status line and the whole point of the change: a 500 told every alert rule and
+// retry policy between the caller and the router that the router had failed, for a request the
+// router had read and declined. It is the status this router already answers its other
+// "the request itself is the reason" refusal with (a JSON-RPC batch the chain cannot take,
+// jsonRPC.go). And it claims nothing the router has not checked, where 422 asserts the syntax is
+// correct — which the depth limit refuses before the parser can say — and 413 speaks of content
+// length, which is not what these limits measure: a query with 301 root fields can be a few hundred
+// bytes.
+//
+// ONE constant for the three limits, so the owner's answer is one edit. The router owner was asked
+// to confirm 400 against 413 and 422 on MAG-4577; the ticket records the choice as theirs.
+const graphQLRefusalStatus = fiber.StatusBadRequest
+
+// convertToGraphQLError returns a GraphQL response carrying one error, which is what a GraphQL
+// client reads: a JSON object with a null `data` and an `errors` list whose entries have a
+// `message` (GraphQL specification, Response Format).
+//
+// The router's generic error body (convertToJsonError above) is `{"error": "<json text>"}` — a JSON
+// document inside a JSON string, with no errors list at all. A standard GraphQL client looks for
+// the list, finds none, and reports a transport failure instead of the reason; a person has to read
+// a string to find it (MAG-4577).
+//
+// guid goes in `extensions`, which the specification reserves for exactly this. It is the id the
+// router's own log line carries, so support can still join a complaint to the request, which the
+// old body gave up only because it was unreadable.
+func convertToGraphQLError(message, guid string) []byte {
+	type graphQLErrorEntry struct {
+		Message    string            `json:"message"`
+		Extensions map[string]string `json:"extensions,omitempty"`
+	}
+	body := struct {
+		Data   interface{}         `json:"data"`
+		Errors []graphQLErrorEntry `json:"errors"`
+	}{
+		Errors: []graphQLErrorEntry{{Message: message}},
+	}
+	if guid != "" {
+		body.Errors[0].Extensions = map[string]string{"guid": guid}
+	}
+	jsonResponse, err := json.Marshal(body)
+	if err != nil {
+		// Unreachable: every field is a string. Still a GraphQL error document, so a client
+		// that reaches it reads it the same way.
+		return []byte(`{"data":null,"errors":[{"message":"failed to marshal error response to json"}]}`)
+	}
+	return jsonResponse
+}
+
 // convertToJsonRpcError returns a JSON-RPC 2.0 §5.1 compliant error envelope:
 //
 //	{"jsonrpc":"2.0", "id": <reqID>, "error": {"code": -32000, "message": "...", "data": {...}}}

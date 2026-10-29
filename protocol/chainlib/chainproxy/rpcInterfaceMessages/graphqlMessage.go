@@ -123,9 +123,11 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 		return nil, errors.New("graphql request carries no query")
 	}
 
+	// parseGraphQLQuery names its own failures: a parse error carries the "failed parsing" prefix,
+	// and the depth limit is a router refusal that must not (MAG-4577).
 	doc, err := parseGraphQLQuery(envelope.Query)
 	if err != nil {
-		return nil, fmt.Errorf("failed parsing graphql query: %w", err)
+		return nil, err
 	}
 
 	operation, err := selectGraphQLOperation(doc, envelope.OperationName)
@@ -196,13 +198,13 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 	var walk func(selectionSet ast.SelectionSet, nesting int) error
 	walk = func(selectionSet ast.SelectionSet, nesting int) error {
 		if nesting > MaxGraphQLFragmentNesting {
-			return fmt.Errorf("graphql fragments nest more than %d deep", MaxGraphQLFragmentNesting)
+			return RefuseGraphQLRequest("graphql fragments nest more than %d deep", MaxGraphQLFragmentNesting)
 		}
 		for _, selection := range selectionSet {
 			switch typed := selection.(type) {
 			case *ast.Field:
 				if len(rootFields) == MaxGraphQLRootFields {
-					return fmt.Errorf("graphql operation selects more than %d root fields", MaxGraphQLRootFields)
+					return RefuseGraphQLRequest("graphql operation selects more than %d root fields", MaxGraphQLRootFields)
 				}
 				rootFields = append(rootFields, GraphQLRootField{
 					Name: typed.Name,
