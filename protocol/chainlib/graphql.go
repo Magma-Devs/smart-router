@@ -460,11 +460,8 @@ type GraphQLChainProxy struct {
 }
 
 func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
-	if len(rpcProviderEndpoint.NodeUrls) == 0 {
-		return nil, utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil,
-			utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID},
-			utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface},
-		)
+	if err := requireNodeUrl(rpcProviderEndpoint); err != nil {
+		return nil, err
 	}
 
 	validateEndpoints(rpcProviderEndpoint.NodeUrls, spectypes.APIInterfaceGraphQL)
@@ -477,7 +474,7 @@ func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint 
 			averageBlockTime: averageBlockTime,
 			NodeUrl:          nodeUrl,
 			HashedNodeUrl:    chainproxy.HashURL(nodeUrl.Url),
-			ErrorHandler:     &RestErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID},
+			ErrorHandler:     newNodeErrorHandler(common.TransportREST, rpcProviderEndpoint.ChainID),
 			ChainID:          rpcProviderEndpoint.ChainID,
 		},
 	}, nil

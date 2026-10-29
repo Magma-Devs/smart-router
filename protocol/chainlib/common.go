@@ -107,6 +107,15 @@ type BaseChainProxy struct {
 	HashedNodeUrl    string
 }
 
+// requireNodeUrl refuses a provider endpoint configured with no node url; every chain proxy
+// talks to its endpoint's first one.
+func requireNodeUrl(rpcProviderEndpoint lavasession.RPCProviderEndpoint) error {
+	if len(rpcProviderEndpoint.NodeUrls) == 0 {
+		return utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
+	}
+	return nil
+}
+
 // returns the node url and chain id for that proxy.
 func (bcp *BaseChainProxy) GetChainProxyInformation() (common.NodeUrl, string) {
 	return bcp.NodeUrl, bcp.ChainID
