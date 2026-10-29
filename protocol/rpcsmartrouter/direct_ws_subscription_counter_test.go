@@ -98,7 +98,7 @@ func TestDirectWS_PendingCheckJoinsASubscriptionStoredSinceTheActiveCheck(t *tes
 	// its pending entry, so from the joiner's point of view there is neither a pending
 	// nor (as of its check) an active subscription.
 	activeSub := storeCreatedSubscription(t, manager, ctx, cancel, hashedParams, creatorKey)
-	manager.successPendingSubscription(hashedParams)
+	manager.settlePendingSubscription(hashedParams, true)
 
 	// The joiner's pending check must hand it a settled success, not make it a creator.
 	pendingChan, found := manager.checkAndAddPendingSubscription(hashedParams)

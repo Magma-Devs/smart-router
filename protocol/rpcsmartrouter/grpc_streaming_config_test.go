@@ -207,8 +207,8 @@ func TestGRPCClientRateLimiter_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 
-	limiter.lock.Lock()
-	defer limiter.lock.Unlock()
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
 	assert.Empty(t, limiter.subscribeLimiters, "every stream released its own entry")
 	assert.Empty(t, limiter.unsubscribeLimiters)
 }

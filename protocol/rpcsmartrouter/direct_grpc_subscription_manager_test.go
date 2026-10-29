@@ -33,7 +33,7 @@ func TestNewDirectGRPCSubscriptionManager(t *testing.T) {
 	require.NotNil(t, manager)
 	assert.Equal(t, chainID, manager.chainID)
 	assert.Equal(t, apiInterface, manager.apiInterface)
-	assert.Equal(t, 2, len(manager.grpcEndpoints))
+	assert.Equal(t, 2, len(manager.primary))
 	assert.NotNil(t, manager.activeSubscriptions)
 	assert.NotNil(t, manager.pendingSubscriptions)
 	assert.NotNil(t, manager.upstreamPools)
@@ -46,10 +46,12 @@ func TestNewDirectGRPCSubscriptionManager(t *testing.T) {
 
 func TestNewDirectGRPCSubscriptionManager_WithConfig(t *testing.T) {
 	config := &GRPCStreamingConfig{
-		MaxSubscriptionsPerClient: 50,
-		PerClientLimitEnforcement: "reject",
-		MaxTotalSubscriptions:     20000,
-		CleanupInterval:           2 * time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient: 50,
+			PerClientLimitEnforcement: "reject",
+			MaxTotalSubscriptions:     20000,
+			CleanupInterval:           2 * time.Minute,
+		},
 	}
 
 	manager := NewDirectGRPCSubscriptionManager(
@@ -80,7 +82,7 @@ func TestNewDirectGRPCSubscriptionManager_EmptyEndpoints(t *testing.T) {
 	)
 
 	require.NotNil(t, manager)
-	assert.Empty(t, manager.grpcEndpoints)
+	assert.Empty(t, manager.primary)
 	assert.Empty(t, manager.endpointsByURL)
 }
 
@@ -180,8 +182,10 @@ func TestDirectGRPCSubscriptionManager_TotalSubscriptions(t *testing.T) {
 
 func TestDirectGRPCSubscriptionManager_RateLimiter(t *testing.T) {
 	config := &GRPCStreamingConfig{
-		SubscriptionsPerMinutePerClient: 2, // Very low for testing
-		UnsubscribesPerMinutePerClient:  2,
+		SubscriptionLimits: SubscriptionLimits{
+			SubscriptionsPerMinutePerClient: 2, // Very low for testing
+			UnsubscribesPerMinutePerClient:  2,
+		},
 	}
 
 	manager := NewDirectGRPCSubscriptionManager(
