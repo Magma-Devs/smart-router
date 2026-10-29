@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -401,7 +399,6 @@ func (apil *GraphQLChainListener) Shutdown(ctx context.Context) error {
 
 type GraphQLChainProxy struct {
 	BaseChainProxy
-	httpClient *http.Client
 }
 
 func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
@@ -430,11 +427,6 @@ func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint 
 // Unlike REST, the URL never varies: the operation is named in the body, so every request on a
 // chain goes to the one endpoint URL the spec configures.
 func (gcp *GraphQLChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
-	if gcp.httpClient == nil {
-		gcp.httpClient = common.OptimizedHttpClient()
-	}
-	httpClient := gcp.httpClient
-
 	// appending hashed url
 	grpc.SetTrailer(ctx, metadata.Pairs(RPCProviderNodeAddressHash, gcp.BaseChainProxy.HashedNodeUrl))
 
@@ -459,57 +451,22 @@ func (gcp *GraphQLChainProxy) SendNodeMsg(ctx context.Context, chainMessage Chai
 	// JSON), so the content type is ours to declare, as it is for JSON-RPC.
 	req.Header.Set("Content-Type", common.JSONContentType)
 
-	for _, header := range nodeMessage.GetHeaders() {
-		if header.Value == "" {
-			req.Header.Del(header.Name)
-		} else {
-			req.Header.Set(header.Name, header.Value)
-		}
-	}
-	gcp.NodeUrl.SetAuthHeaders(ctx, req.Header.Set)
-	gcp.NodeUrl.SetIpForwardingIfNecessary(ctx, req.Header.Set)
-
-	utils.LavaFormatInfo("Sending request to node from provider",
-		utils.LogAttr("_method", nodeMessage.GetMethod()),
-		utils.LogAttr("headers", utils.RedactHeaders(req.Header)),
-		utils.LogAttr("apiInterface", spectypes.APIInterfaceGraphQL),
-	)
-
-	res, err := httpClient.Do(req)
-	if res != nil {
-		// resp can be non nil on error
-		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(res.StatusCode)))
-	}
-	if err != nil {
-		if parsedError := gcp.HandleNodeError(ctx, err); parsedError != nil {
-			return nil, parsedError
-		}
-		return nil, err
-	}
-	if res.Body != nil {
-		defer res.Body.Close()
-	}
-
-	err = gcp.HandleStatusError(res.StatusCode, nodeMessage.GetDisableErrorHandling())
-	if err != nil {
-		err = common.WithRetryAfter(err, res.Header, time.Now())
-		return nil, utils.LavaFormatWarning("Received invalid status code", err,
-			utils.Attribute{Key: "Status Code", Value: res.StatusCode},
-			utils.Attribute{Key: "chainID", Value: gcp.BaseChainProxy.ChainID},
-			utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name},
+	res, err := gcp.doHTTP(ctx, req, nodeMessage.GetHeaders(), nodeMessage.GetDisableErrorHandling(), chainMessage.GetApi().Name, func(header http.Header) {
+		utils.LavaFormatInfo("Sending request to node from provider",
+			utils.LogAttr("_method", nodeMessage.GetMethod()),
+			utils.LogAttr("headers", utils.RedactHeaders(header)),
+			utils.LogAttr("apiInterface", spectypes.APIInterfaceGraphQL),
 		)
-	}
-
-	body, err := io.ReadAll(res.Body)
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	reply := &RelayReplyWrapper{
-		StatusCode: res.StatusCode,
+		StatusCode: res.status,
 		RelayReply: &pairingtypes.RelayReply{
-			Data:     body,
-			Metadata: convertToMetadataMapOfSlices(res.Header),
+			Data:     res.body,
+			Metadata: convertToMetadataMapOfSlices(res.header),
 		},
 	}
 

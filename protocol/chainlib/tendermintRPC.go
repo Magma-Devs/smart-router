@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +15,6 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -425,7 +422,6 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 type tendermintRpcChainProxy struct {
 	// embedding the jrpc chain proxy because the only diff is on parse message
 	JrpcChainProxy
-	httpClient *http.Client
 }
 
 func NewtendermintRpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
@@ -471,12 +467,6 @@ func (cp *tendermintRpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage
 }
 
 func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpcInterfaceMessages.TendermintrpcMessage, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
-	if cp.httpClient == nil {
-		cp.httpClient = common.OptimizedHttpClient()
-	}
-
-	httpClient := cp.httpClient
-
 	// appending hashed url
 	grpc.SetTrailer(ctx, metadata.Pairs(RPCProviderNodeAddressHash, cp.conn.GetUrlHash()))
 
@@ -499,57 +489,18 @@ func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpc
 		return nil, err
 	}
 
-	if len(nodeMessage.GetHeaders()) > 0 {
-		for _, metadata := range nodeMessage.GetHeaders() {
-			if metadata.Value == "" {
-				req.Header.Del(metadata.Name)
-			} else {
-				req.Header.Set(metadata.Name, metadata.Value)
-			}
-		}
-	}
-
-	cp.NodeUrl.SetAuthHeaders(ctx, req.Header.Set)
-
-	cp.NodeUrl.SetIpForwardingIfNecessary(ctx, req.Header.Set)
-	// send the http request and get the response
-	res, err := httpClient.Do(req)
-	if res != nil {
-		// resp can be non nil on error
-		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(res.StatusCode))) // we ignore this error here since this code can be triggered not from grpc
-	}
-	if err != nil {
-		// Classify the transport error the way the REST and GraphQL proxies do, so the router
-		// gets a coded LavaError (LavaErrorConnectionRefused for a refused dial) instead of the
-		// raw *url.Error. Nothing is masked: like theirs, the classified error keeps the raw
-		// text, node address included, as its context.
-		if parsedError := cp.HandleNodeError(ctx, err); parsedError != nil {
-			return nil, parsedError
-		}
-		return nil, err
-	}
-	// close the response body
-	if res.Body != nil {
-		defer res.Body.Close()
-	}
-
-	err = cp.HandleStatusError(res.StatusCode, nodeMessage.GetDisableErrorHandling())
-	if err != nil {
-		err = common.WithRetryAfter(err, res.Header, time.Now())
-		return nil, utils.LavaFormatWarning("Received invalid status code", err, utils.Attribute{Key: "Status Code", Value: res.StatusCode}, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
-	}
-
-	// read the response body
-	body, err := io.ReadAll(res.Body)
+	res, err := cp.doHTTP(ctx, req, nodeMessage.GetHeaders(), nodeMessage.GetDisableErrorHandling(), chainMessage.GetApi().Name, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// create a new relay reply struct with the response body as the data
+	// The URI path answers like the JSON-RPC path: status 200 and no node headers, where the REST
+	// and GraphQL proxies pass both on. Only verification and health reach a proxy's
+	// SendNodeMsg, and neither reads them.
 	reply := &RelayReplyWrapper{
 		StatusCode: http.StatusOK, // status code is used only for rest at the moment
 		RelayReply: &pairingtypes.RelayReply{
-			Data: body,
+			Data: res.body,
 		},
 	}
 
@@ -564,55 +515,12 @@ func (cp *tendermintRpcChainProxy) SendURI(ctx context.Context, nodeMessage *rpc
 
 // SendRPC sends Tendermint HTTP or WebSockets call
 func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpcInterfaceMessages.TendermintrpcMessage, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
-	// Get rpc connection from the connection pool
-	var rpc *rpcclient.Client
-	rpc, err = cp.conn.GetRpc(ctx, true)
+	rpcMessage, err := cp.callNodeRPC(ctx, chainMessage, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, nodeMessage.GetHeaders(), false, nodeMessage.GetDisableErrorHandling())
 	if err != nil {
 		return nil, err
 	}
-	// return the rpc connection to the websocket pool after the function completes
-	defer cp.conn.ReturnRpc(rpc)
-
-	// appending hashed url
-	grpc.SetTrailer(ctx, metadata.Pairs(RPCProviderNodeAddressHash, cp.conn.GetUrlHash()))
-
-	// create variables for the rpc message and reply message
-	var rpcMessage *rpcclient.JsonrpcMessage
-	if len(nodeMessage.GetHeaders()) > 0 {
-		for _, metadata := range nodeMessage.GetHeaders() {
-			rpc.SetHeader(metadata.Name, metadata.Value)
-			// clear this header upon function completion so it doesn't last in the next usage from the rpc pool
-			defer rpc.SetHeader(metadata.Name, "")
-		}
-	}
-	// set context with timeout
-	connectCtx, cancel := cp.CapTimeoutForSend(ctx, chainMessage)
-	defer cancel()
-
-	cp.NodeUrl.SetIpForwardingIfNecessary(ctx, rpc.SetHeader)
-	// perform the rpc call
-	rpcMessage, nodeErr := rpc.CallContext(connectCtx, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, false, nodeMessage.GetDisableErrorHandling())
-	if nodeErr != nil {
-		if errors.Is(nodeErr, common.StatusCodeError504) || errors.Is(nodeErr, common.StatusCodeError429) || errors.Is(nodeErr, common.StatusCodeErrorStrict) {
-			return nil, utils.LavaFormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
-		}
-		// Validate if the error is related to the connection to the node or it is a valid error
-		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
-		if parsedError := cp.HandleNodeError(ctx, nodeErr); parsedError != nil {
-			return nil, parsedError
-		}
-	}
 
 	var replyMsg *rpcInterfaceMessages.RPCResponse
-	// the error check here would only wrap errors not from the rpc
-	if nodeErr != nil {
-		rpcMessage = TryRecoverNodeErrorFromClientError(nodeErr)
-		if rpcMessage == nil {
-			utils.LavaFormatDebug("got error from node", utils.LogAttr("GUID", ctx), utils.LogAttr("nodeErr", nodeErr))
-			return nil, nodeErr
-		}
-	}
-
 	replyMsg, err = rpcInterfaceMessages.ConvertTendermintMsg(rpcMessage)
 	if err != nil {
 		return nil, utils.LavaFormatError("tendermintRPC error", err)

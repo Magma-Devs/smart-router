@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -348,7 +346,6 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 type RestChainProxy struct {
 	BaseChainProxy
-	httpClient *http.Client
 }
 
 func NewRestChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
@@ -368,11 +365,6 @@ func NewRestChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 }
 
 func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
-	if rcp.httpClient == nil {
-		rcp.httpClient = common.OptimizedHttpClient()
-	}
-	httpClient := rcp.httpClient
-
 	// appending hashed url
 	grpc.SetTrailer(ctx, metadata.Pairs(RPCProviderNodeAddressHash, rcp.BaseChainProxy.HashedNodeUrl))
 
@@ -404,59 +396,22 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 		req.Header.Set("Content-Type", common.JSONContentType)
 	}
 
-	if len(nodeMessage.GetHeaders()) > 0 {
-		for _, metadata := range nodeMessage.GetHeaders() {
-			if metadata.Value == "" {
-				req.Header.Del(metadata.Name)
-			} else {
-				req.Header.Set(metadata.Name, metadata.Value)
-			}
-		}
-	}
-	rcp.NodeUrl.SetAuthHeaders(ctx, req.Header.Set)
-	rcp.NodeUrl.SetIpForwardingIfNecessary(ctx, req.Header.Set)
-
-	utils.LavaFormatInfo("Sending request to node from provider",
-		utils.LogAttr("_method", nodeMessage.Path),
-		utils.LogAttr("headers", utils.RedactHeaders(req.Header)),
-		utils.LogAttr("apiInterface", spectypes.APIInterfaceRest),
-	)
-
-	res, err := httpClient.Do(req)
-	if res != nil {
-		// resp can be non nil on error
-		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(res.StatusCode))) // we ignore this error here since this code can be triggered not from grpc
-	}
-	if err != nil {
-		// Validate if the error is related to the provider connection to the node or it is a valid error
-		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
-		if parsedError := rcp.HandleNodeError(ctx, err); parsedError != nil {
-			return nil, parsedError
-		}
-		// always return a lava error in this case
-		return nil, err
-	}
-	// here we received a response that can be an error response with Code >300 or code < 200
-	if res.Body != nil {
-		defer res.Body.Close()
-	}
-
-	err = rcp.HandleStatusError(res.StatusCode, nodeMessage.GetDisableErrorHandling())
-	if err != nil {
-		err = common.WithRetryAfter(err, res.Header, time.Now())
-		return nil, utils.LavaFormatWarning("Received invalid status code", err, utils.Attribute{Key: "Status Code", Value: res.StatusCode}, utils.Attribute{Key: "chainID", Value: rcp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
-	}
-
-	body, err := io.ReadAll(res.Body)
+	res, err := rcp.doHTTP(ctx, req, nodeMessage.GetHeaders(), nodeMessage.GetDisableErrorHandling(), chainMessage.GetApi().Name, func(header http.Header) {
+		utils.LavaFormatInfo("Sending request to node from provider",
+			utils.LogAttr("_method", nodeMessage.Path),
+			utils.LogAttr("headers", utils.RedactHeaders(header)),
+			utils.LogAttr("apiInterface", spectypes.APIInterfaceRest),
+		)
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	reply := &RelayReplyWrapper{
-		StatusCode: res.StatusCode,
+		StatusCode: res.status,
 		RelayReply: &pairingtypes.RelayReply{
-			Data:     body,
-			Metadata: convertToMetadataMapOfSlices(res.Header),
+			Data:     res.body,
+			Metadata: convertToMetadataMapOfSlices(res.header),
 		},
 	}
 

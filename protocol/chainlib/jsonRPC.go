@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/goccy/go-json"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
@@ -22,7 +20,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/parser"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -488,13 +485,7 @@ func (cp *JrpcChainProxy) sendBatchMessage(ctx context.Context, nodeMessage *rpc
 		return nil, err
 	}
 	defer cp.conn.ReturnRpc(rpc)
-	if len(nodeMessage.GetHeaders()) > 0 {
-		for _, metadata := range nodeMessage.GetHeaders() {
-			rpc.SetHeader(metadata.Name, metadata.Value)
-			// clear this header upon function completion so it doesn't last in the next usage from the rpc pool
-			defer rpc.SetHeader(metadata.Name, "")
-		}
-	}
+	defer applyRPCHeaders(rpc, nodeMessage.GetHeaders())()
 	// set context with timeout
 	connectCtx, cancel := cp.CapTimeoutForSend(ctx, chainMessage)
 	defer cancel()
@@ -560,59 +551,13 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		return cp.sendBatchMessage(ctx, batchMessage, chainMessage)
 	}
 
-	rpc, err := cp.conn.GetRpc(ctx, true)
+	rpcMessage, err := cp.callNodeRPC(ctx, chainMessage, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, nodeMessage.GetHeaders(), true, nodeMessage.GetDisableErrorHandling(),
+		utils.LogAttr("nodeUrl", cp.NodeUrl.Url))
 	if err != nil {
 		return nil, err
 	}
-	defer cp.conn.ReturnRpc(rpc)
-
-	// appending hashed url
-	grpc.SetTrailer(ctx, metadata.Pairs(RPCProviderNodeAddressHash, cp.conn.GetUrlHash()))
-
-	// Call our node
-	var rpcMessage *rpcclient.JsonrpcMessage
-	// support setting headers
-	if len(nodeMessage.GetHeaders()) > 0 {
-		for _, metadata := range nodeMessage.GetHeaders() {
-			if metadata.Value == "" {
-				rpc.DelHeader(metadata.Name)
-			} else {
-				rpc.SetHeader(metadata.Name, metadata.Value)
-				// clear this header upon function completion so it doesn't last in the next usage from the rpc pool
-				defer rpc.SetHeader(metadata.Name, "")
-			}
-		}
-	}
-	// we use the minimum timeout between the two, spec or context. to prevent the node from hanging
-	// we don't use the context alone so it won't be hanging forever by an attack
-	connectCtx, cancel := cp.CapTimeoutForSend(ctx, chainMessage)
-	defer cancel()
-
-	cp.NodeUrl.SetIpForwardingIfNecessary(ctx, rpc.SetHeader)
-	rpcMessage, nodeErr := rpc.CallContext(connectCtx, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, true, nodeMessage.GetDisableErrorHandling())
-	if nodeErr != nil {
-		// here we are getting an error for every code that is not 200-300
-		if errors.Is(nodeErr, common.StatusCodeError504) || errors.Is(nodeErr, common.StatusCodeError429) || errors.Is(nodeErr, common.StatusCodeErrorStrict) {
-			return nil, utils.LavaFormatWarning("Received invalid status code", nodeErr, utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
-		}
-		// Validate if the error is related to the connection to the node or it is a valid error
-		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
-		if parsedError := cp.HandleNodeError(ctx, nodeErr); parsedError != nil {
-			return nil, parsedError
-		}
-	}
 
 	var replyMsg *rpcInterfaceMessages.JsonrpcMessage
-	// the error check here would only wrap errors not from the rpc
-	if nodeErr != nil {
-		// try to parse node error as json message
-		rpcMessage = TryRecoverNodeErrorFromClientError(nodeErr)
-		if rpcMessage == nil {
-			utils.LavaFormatDebug("got error from node", utils.LogAttr("GUID", ctx), utils.LogAttr("nodeErr", nodeErr), utils.LogAttr("nodeUrl", cp.NodeUrl.Url))
-			return nil, nodeErr
-		}
-	}
-
 	replyMsg, err = rpcInterfaceMessages.ConvertJsonRPCMsg(rpcMessage)
 	if err != nil {
 		return nil, utils.LavaFormatError("jsonRPC error", err, traceAttrs(ctx)...)
