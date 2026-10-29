@@ -3,11 +3,8 @@ package chainlib
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
-	"net/url"
 	"regexp"
-	"strings"
 
 	"github.com/goccy/go-json"
 
@@ -220,39 +217,19 @@ func (geh *genericErrorHandler) handleConnectionError(err error) error {
 	// Generic error message
 	genericMsg := "Provider Side Failed Sending Message"
 
+	// Only shapes common.DetectConnectionError does not name get here: handleAndClassify calls this
+	// on its Unknown branch alone, and the timeouts, refusals, EOF, DNS failures and the
+	// http-served-as-https reply are classified there first (MAG-4242), as connection LavaErrors.
 	switch {
 	case err == net.ErrWriteToConnected:
 		return utils.LavaFormatProduction(genericMsg+", Reason: Write to connected connection", nil)
 	case err == net.ErrClosed:
 		return utils.LavaFormatProduction(genericMsg+", Reason: Operation on closed connection", nil)
-	case err == io.EOF:
-		return utils.LavaFormatProduction(genericMsg+", Reason: End of input stream reached", nil)
-	case strings.Contains(err.Error(), "http: server gave HTTP response to HTTPS client"):
-		return utils.LavaFormatProduction(genericMsg+", Reason: misconfigured http endpoint as https", nil)
 	}
 
-	if opErr, ok := err.(*net.OpError); ok {
-		switch {
-		case opErr.Timeout():
-			return utils.LavaFormatProduction(genericMsg+", Reason: Network operation timed out", nil)
-		case strings.Contains(opErr.Error(), "connection refused"):
-			return utils.LavaFormatProduction(genericMsg+", Reason: Connection refused", nil)
-		default:
-			// Handle other OpError cases without exposing specific details
-			return utils.LavaFormatProduction(genericMsg+", Reason: Network operation error", nil)
-		}
-	}
-	if urlErr, ok := err.(*url.Error); ok {
-		switch {
-		case urlErr.Timeout():
-			return utils.LavaFormatProduction(genericMsg+", Reason: url.Error issue", nil)
-		case strings.Contains(urlErr.Error(), "connection refused"):
-			return utils.LavaFormatProduction(genericMsg+", Reason: Connection refused", nil)
-		}
-	}
-
-	if _, ok := err.(*net.DNSError); ok {
-		return utils.LavaFormatProduction(genericMsg+", Reason: DNS resolution failed", nil)
+	if _, ok := err.(*net.OpError); ok {
+		// Handle the OpError cases the detector does not name without exposing specific details
+		return utils.LavaFormatProduction(genericMsg+", Reason: Network operation error", nil)
 	}
 
 	// Mask IP addresses and potential secrets in the error message, and check if any secret was found
