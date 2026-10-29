@@ -110,7 +110,6 @@ const (
 	TimeoutForEstablishingAConnection                       = 1500 * time.Millisecond // 1.5 seconds
 	MaximumNumberOfFailuresAllowedPerConsumerSession        = 15
 	RelayNumberIncrement                                    = 1
-	unixPrefix                                              = "unix:"
 )
 
 func IsSessionSyncLoss(err error) bool {
@@ -126,8 +125,8 @@ func ConnectGRPCClient(ctx context.Context, address string, allowInsecure bool, 
 	nodeUrl := common.NodeUrl{Url: address, AuthConfig: common.AuthConfig{UseTLS: !skipTLS, AllowInsecure: allowInsecure}}
 
 	var dialer func(ctx context.Context, addr string) (net.Conn, error)
-	if strings.HasPrefix(address, unixPrefix) {
-		socketPath := strings.TrimPrefix(address, unixPrefix)
+	if strings.HasPrefix(address, common.UnixSocketPrefix) {
+		socketPath := strings.TrimPrefix(address, common.UnixSocketPrefix)
 		dialer = func(ctx context.Context, addr string) (net.Conn, error) {
 			return net.Dial("unix", socketPath)
 		}

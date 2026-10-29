@@ -40,7 +40,6 @@ const (
 	DefaultExpirationTimeFinalized              = core.DefaultExpirationTimeFinalized
 	DefaultExpirationNodeErrors                 = core.DefaultExpirationNodeErrors
 	CacheNumCounters                            = 100000000 // expect 10M items
-	unixPrefix                                  = "unix:"
 )
 
 type CacheServer struct {
@@ -122,7 +121,7 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 
 	var lis net.Listener
 	var err error
-	if strings.HasPrefix(listenAddr, unixPrefix) {
+	if strings.HasPrefix(listenAddr, common.UnixSocketPrefix) {
 		host, port, err := net.SplitHostPort(listenAddr)
 		if err != nil {
 			utils.LavaFormatFatal("Failed to parse unix socket, provide address in this format unix:/tmp/example.sock", err)
