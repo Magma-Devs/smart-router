@@ -58,50 +58,13 @@ func (f *Fetcher) buildGitLabTarballURL(info *RepoInfo) string {
 // fetchFromGitLabAPI fetches all specs via the GitLab tree API — one
 // rate-limited listing call plus a files-API download per file.
 func (f *Fetcher) fetchFromGitLabAPI(ctx context.Context, info *RepoInfo) (map[string]types.Spec, error) {
-	// Build the API URL for listing directory contents
-	apiURL := f.buildGitLabTreeAPIURL(info)
-
-	utils.LavaFormatInfo("Fetching spec file list from GitLab",
-		utils.LogAttr("api_url", apiURL))
-
-	if f.config.Token != "" {
-		utils.LavaFormatInfo("Using GitLab token authentication",
-			utils.LogAttr("token_prefix", f.config.Token[:min(4, len(f.config.Token))]))
-	} else {
-		utils.LavaFormatInfo("Using unauthenticated GitLab access",
-			utils.LogAttr("note", "private repos require authentication"))
-	}
-
-	// Fetch the directory listing
-	apiCtx, cancel := context.WithTimeout(ctx, f.config.APITimeout)
-	defer cancel()
-
-	resp, err := f.doRequest(apiCtx, apiURL, f.setGitLabHeaders)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch from GitLab API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitLab API error (status: %d, body: %s)", resp.StatusCode, string(body))
-	}
-
-	// Parse directory listing
-	fileURLs, err := f.parseGitLabDirectoryListing(resp.Body, info)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(fileURLs) == 0 {
-		return nil, fmt.Errorf("no .json spec files found in repository")
-	}
-
-	utils.LavaFormatInfo("Found spec files to fetch",
-		utils.LogAttr("file_count", len(fileURLs)))
-
-	// Fetch all spec files in parallel
-	return f.fetchFilesParallel(ctx, fileURLs, f.setGitLabHeaders)
+	return f.fetchFromListingAPI(ctx, info, listingAPI{
+		provider:        "GitLab",
+		listingURL:      f.buildGitLabTreeAPIURL,
+		parseListing:    f.parseGitLabDirectoryListing,
+		setHeaders:      f.setGitLabHeaders,
+		unauthenticated: utils.LogAttr("note", "private repos require authentication"),
+	})
 }
 
 // buildGitLabTreeAPIURL constructs the GitLab API URL for listing directory contents.
