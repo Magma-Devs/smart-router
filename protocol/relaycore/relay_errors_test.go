@@ -201,43 +201,54 @@ func TestRelayError(t *testing.T) {
 			},
 		},
 		{
-			name: "test no majority and no dec",
+			// Six errors put the majority bar at three. test1 repeats twice, which is
+			// short of it, so the best score decides and the repeat must not win.
+			// This case used to be a copy of "test majority of error body", whose
+			// expected error has three of five and is chosen by the majority step.
+			name: "test repeat short of half loses to the best score",
 			relayErrors: RelayErrors{
 				OnFailureMergeAll: true,
 				RelayErrors: []RelayError{
 					{
-						Err: fmt.Errorf("%s", expectedValue),
+						Err: fmt.Errorf("test1"),
 						ProviderInfo: common.ProviderInfo{
 							ProviderReputationSummary: 1.0,
 							ProviderStake:             10,
 						},
 					},
 					{
-						Err: fmt.Errorf("%s", expectedValue),
+						Err: fmt.Errorf("test1"),
 						ProviderInfo: common.ProviderInfo{
 							ProviderReputationSummary: 1.0,
-							ProviderStake:             20,
+							ProviderStake:             10,
 						},
 					},
 					{
-						Err: fmt.Errorf("test3"),
+						Err: fmt.Errorf("test2"),
 						ProviderInfo: common.ProviderInfo{
 							ProviderReputationSummary: 1.0,
 							ProviderStake:             30,
 						},
 					},
 					{
-						Err: fmt.Errorf("test4"),
+						Err: fmt.Errorf("test3"),
 						ProviderInfo: common.ProviderInfo{
 							ProviderReputationSummary: 1.0,
 							ProviderStake:             40,
 						},
 					},
 					{
+						Err: fmt.Errorf("test4"),
+						ProviderInfo: common.ProviderInfo{
+							ProviderReputationSummary: 1.0,
+							ProviderStake:             20,
+						},
+					},
+					{
 						Err: fmt.Errorf("%s", expectedValue),
 						ProviderInfo: common.ProviderInfo{
 							ProviderReputationSummary: 1.0,
-							ProviderStake:             10,
+							ProviderStake:             50,
 						},
 					},
 				},
