@@ -10,9 +10,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/parser"
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/sigs"
 )
 
 const (
@@ -36,14 +33,7 @@ type RestMessage struct {
 
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
 func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
-	headers := rm.GetHeaders()
-	headersByteArray, err := json.Marshal(headers)
-	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", common.RedactMetadata(headers)))
-		return []byte{}, err
-	}
-	pathByteArray := []byte(rm.Path)
-	return sigs.HashMsg(append(append(pathByteArray, rm.Msg...), headersByteArray...)), nil
+	return rawRequestHash("jsonRpc", rm.GetHeaders(), rm.Path, rm.Msg)
 }
 
 // CheckResponseError reports whether a REST reply is a node error and, if so, its message.
@@ -166,13 +156,6 @@ func (rm RestMessage) GetParams() interface{} {
 	return parameters
 }
 
-func (rm *RestMessage) UpdateLatestBlockInMessage(latestBlock uint64, modifyContent bool) (success bool) {
-	// return rm.SetLatestBlockWithHeader(latestBlock, modifyContent)
-	// removed until behavior inconsistency with the cosmos sdk header is solved
-	return false
-	// if !done else we need a different setter
-}
-
 // GetResult will be deprecated after we remove old client
 // Currently needed because of parser.RPCInput interface
 func (rm RestMessage) GetResult() json.RawMessage {
@@ -189,9 +172,4 @@ func (rm RestMessage) GetID() json.RawMessage {
 
 func (rm RestMessage) GetError() *rpcclient.JsonError {
 	return nil
-}
-
-// ParseBlock parses default block number from string to int
-func (rm RestMessage) ParseBlock(inp string) (int64, error) {
-	return parser.ParseDefaultBlockParameter(inp)
 }
