@@ -68,8 +68,8 @@ func TestResolveFlatPollInterval(t *testing.T) {
 
 // TestNewEndpointMonitor_ResolvesFlatPollInterval checks the resolution happens at construction,
 // against the FLOORED block time — a chain whose spec omits average_block_time must divide
-// DefaultAverageBlockTime, not zero, or the divisor would produce a 0 interval and silently switch
-// the tracker back to the legacy adaptive scheduler.
+// DefaultAverageBlockTime, not zero, or the divisor would produce a 0 interval and leave the
+// tracker on NewChainTracker's floor (one poll per block time) rather than the resolved cadence.
 func TestNewEndpointMonitor_ResolvesFlatPollInterval(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

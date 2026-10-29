@@ -102,7 +102,8 @@ func resolvePollDivisor(divisor float64, chainID, apiInterface string) float64 {
 // divisor into the tracker's flat poll interval. averageBlockTime is guaranteed positive by
 // the caller (NewEndpointMonitor floors a zero spec value to DefaultAverageBlockTime), and
 // divisor is guaranteed within [MinPollDivisor, MaxPollDivisor], so the result is always
-// positive — a zero would silently switch the tracker back to the legacy adaptive scheduler.
+// positive. A zero used to switch the tracker to a second, adaptive scheduler (removed in
+// MAG-4398); NewChainTracker now floors it to the average block time instead.
 //
 // The division is done in float64 and only then converted: time.Duration(divisor) would
 // truncate every fractional divisor to an integer, turning 0.25 into 0 and the whole
