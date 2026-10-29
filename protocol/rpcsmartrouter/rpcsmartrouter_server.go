@@ -2930,8 +2930,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			shouldFailSession := shouldFailSessionForResult(err, localRelayResult)
 
 			// Hold-off registry keys for this attempt (docs/RATE-LIMIT-HOLDOFF.md): the
-			// provider name and the node URL actually dialed.
-			holdoffProvider := singleConsumerSession.Parent.PublicLavaAddress
+			// provider on this chain and api-interface, and the node URL actually dialed.
+			holdoffProvider := rpcss.holdoffProviderKey(singleConsumerSession.Parent.PublicLavaAddress)
 			holdoffURL := endpointAddress
 			if targetEndpoint != nil {
 				holdoffURL = targetEndpoint.NetworkAddress
@@ -6730,6 +6730,15 @@ func classifyHTTPStatus(code int) (shouldMarkUnhealthy, needsBackoff bool) {
 // rate-limit hold-off registry (docs/RATE-LIMIT-HOLDOFF.md). A package variable rather
 // than a server field so tests can swap in a clock-pinned registry and restore it.
 var relayHoldoff = holdoff.Shared
+
+// holdoffProviderKey is the hold-off registry key of a provider on this server's chain and
+// api-interface (holdoff.ProviderKey), the key relay selection reads.
+func (rpcss *RPCSmartRouterServer) holdoffProviderKey(provider string) string {
+	if rpcss.listenEndpoint == nil {
+		return holdoff.ProviderKey("", "", provider)
+	}
+	return holdoff.ProviderKey(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, provider)
+}
 
 // isRateLimitedRelayOutcome reports whether the relay attempt was refused for rate, in
 // either shape it arrives: a typed HTTP 429 error, or a 2xx-body / gRPC classification

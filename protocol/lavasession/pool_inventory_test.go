@@ -126,7 +126,7 @@ func TestReleaseBlockedProvidersIfPoolEmpty_ReportsAnEmptyPairing(t *testing.T) 
 	records := captureLogs(t, func() {
 		sessions, ok := csm.releaseBlockedProvidersIfPoolEmpty(context.Background(), 1,
 			&ignoredProviders{providers: map[string]struct{}{}}, 10, spectypes.NOT_APPLICABLE,
-			"", nil, 0, 0, "", "", 0, 0)
+			"", nil, nil, 0, 0, "", "", 0, 0)
 		require.Nil(t, sessions)
 		require.False(t, ok, "nothing can be released from an empty pairing")
 	})
@@ -152,7 +152,7 @@ func TestReleaseBlockedProvidersIfPoolEmpty_ReportsARecoveredPool(t *testing.T) 
 	records := captureLogs(t, func() {
 		csm.releaseBlockedProvidersIfPoolEmpty(context.Background(), 1,
 			&ignoredProviders{providers: map[string]struct{}{}}, 10, spectypes.NOT_APPLICABLE,
-			"", nil, 0, 0, "", "", 0, 0)
+			"", nil, nil, 0, 0, "", "", 0, 0)
 	})
 
 	empty := findLogRecord(records, "provider pool empty")
@@ -308,7 +308,7 @@ func TestReleaseBlockedProvidersIfPoolEmpty_ReportsAnAddonNothingServes(t *testi
 	records := captureLogs(t, func() {
 		_, ok := csm.releaseBlockedProvidersIfPoolEmpty(context.Background(), 1,
 			&ignoredProviders{providers: map[string]struct{}{}}, 10, spectypes.NOT_APPLICABLE,
-			"nonexistent-addon", nil, 0, 0, "", "", 0, 0)
+			"nonexistent-addon", nil, nil, 0, 0, "", "", 0, 0)
 		require.False(t, ok, "no provider serves this addon, so nothing can be released")
 	})
 
@@ -334,7 +334,7 @@ func TestReleaseBlockedProvidersIfPoolEmpty_WarnsOncePerPairing(t *testing.T) {
 		records := captureLogs(t, func() {
 			csm.releaseBlockedProvidersIfPoolEmpty(context.Background(), 1,
 				&ignoredProviders{providers: map[string]struct{}{}}, 10, spectypes.NOT_APPLICABLE,
-				"", nil, 0, 0, "", "", 0, 0)
+				"", nil, nil, 0, 0, "", "", 0, 0)
 		})
 		line = findLogRecord(records, "provider pool empty")
 		require.NotNil(t, line, "the state must still be reported on every pass, at some level")

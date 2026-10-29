@@ -166,13 +166,22 @@ func failureCheck(err error) string {
 	return "unknown"
 }
 
-// holdoffURLKey is the URL tier's key for a probed provider: its first node URL, so two
-// providers sharing a vendor name but hitting different endpoints are held off apart.
-func holdoffURLKey(p *lavasession.RPCStaticProviderEndpoint) string {
-	if len(p.NodeUrls) > 0 && p.NodeUrls[0].Url != "" {
-		return p.NodeUrls[0].Url
+// holdoffURLKeys is the URL tier's key of each of a probed provider's node urls, by position:
+// the url itself, the key the relay path records a 429 under for the endpoint it dialed. A 429
+// is held on the url that answered it, so relay selection, which counts a provider's urls one by
+// one, keeps off that url and not a sibling (MAG-4733).
+func holdoffURLKeys(p *lavasession.RPCStaticProviderEndpoint) []string {
+	if len(p.NodeUrls) == 0 {
+		return []string{p.Name}
 	}
-	return p.Name
+	keys := make([]string, len(p.NodeUrls))
+	for index, url := range p.NodeUrls {
+		keys[index] = url.Url
+		if keys[index] == "" {
+			keys[index] = p.Name
+		}
+	}
+	return keys
 }
 
 // isRateLimitFailure reports whether a failed validation was the upstream refusing us for
@@ -244,12 +253,12 @@ func applyReverification(
 	// Read-only from here on: the probes below read it concurrently.
 	activeNames := byName(fresh)
 
-	// probe returns the validation's error, the rate limit a pass that otherwise
-	// succeeded met on one of the provider's urls, and why the url the hold-off is keyed
-	// by (holdoffURLKey: the first one) got no answer when the provider passed without it.
-	probe := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) (err, throttle, unanswered error) {
+	// probe returns the validation's error and this pass's own admission, which says per url
+	// what it met: a rate limit, a refusal, or neither. The admission is nil when the pass
+	// says nothing per url (validateFn).
+	probe := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) (error, *chainlib.ProviderAdmission) {
 		if inputs.validateFn != nil {
-			return inputs.validateFn(c, p), nil, nil
+			return inputs.validateFn(c, p), nil
 		}
 		// Per-collection here too (MAG-3326). With the all-or-nothing Validate
 		// this path re-probed the UNSTRIPPED config every tick, failed on the
@@ -262,22 +271,16 @@ func applyReverification(
 		// recovers is re-admitted at the next tick instead of staying refused
 		// until the process restarts.
 		admission, err := validateProviderCollections(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
+		pass := admission
 		if err != nil {
-			return err, nil, nil
-		}
-		// A provider now passes on its other urls with its first one refused. That
-		// url's refusal is the pass's verdict on it: a dial or a request that got no
-		// answer leaves its hold-off as it was (MAG-4165).
-		if cause := admission.URLRefusal(0); common.DetectConnectionError(cause) != nil {
-			unanswered = cause
+			return err, &pass
 		}
 		// A url or service that was only rate-limited keeps what the last pass knew.
-		// Only a url that was rate-limited backs the provider off, though: the hold-off
-		// is the provider's, and relay selection skips a held provider for every
-		// request. A 429 on one add-on's own check (a premium method's own limit) says
-		// nothing about the base traffic the provider carries; on main that check
-		// refused the add-on alone, and here it keeps the add-on's last verdict.
-		throttle = admission.URLThrottle()
+		// Only a url that was rate-limited is held off, though (validate below): a 429
+		// on one add-on's own check (a premium method's own limit) says nothing about
+		// the base traffic the url carries; on main that check refused the add-on alone,
+		// and here it keeps the add-on's last verdict.
+		//
 		// Counted before the merge below: what it keeps from the last pass was not
 		// failed by this one.
 		inputs.countRefusals(tier, p, admission)
@@ -297,49 +300,64 @@ func applyReverification(
 			admissionMoved[p.Name] = struct{}{}
 			admissionMovedMu.Unlock()
 		}
-		return nil, throttle, unanswered
+		return nil, &pass
 	}
 	if inputs.rateLimitHoldoff == nil {
 		inputs.rateLimitHoldoff = holdoff.Shared
 	}
 
-	// A provider that answered with a rate-limit is held off rather than re-probed. The
-	// skip returns the rate-limit error itself, so the reconciliation below reaches the
-	// same inconclusive verdict it would have from a fresh 429 — membership unchanged,
-	// streak untouched — without spending a request to learn it. Any other answer clears
-	// the penalty: an upstream that is answering us again, even to report a genuine
-	// capability failure, is no longer refusing us for load. A probe with no answer clears
-	// nothing.
+	// A provider with a url held off after a rate-limit is not re-probed: the pass would ask
+	// that url again. The skip returns the rate-limit error itself, so the reconciliation
+	// below reaches the same inconclusive verdict it would have from a fresh 429 —
+	// membership unchanged, streak untouched — without spending a request to learn it.
+	//
+	// Each url is held or cleared on its own key (MAG-4733): a 429 holds the url that
+	// answered it. Any other answer clears the url: an upstream that is answering us again,
+	// even to report a genuine capability failure, is no longer refusing us for load. A url
+	// that got no answer (timeout, refused or reset connection, DNS) clears nothing: a
+	// gateway enforcing a ban often drops the connection rather than answering, and the
+	// url's entries are shared — RecordAnswer also drops the per-url chain tracker's
+	// hold-off and strikes (MAG-4165).
 	validate := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
-		urlKey := holdoffURLKey(p)
-		if inputs.rateLimitHoldoff.HeldOff(p.Name, urlKey) {
-			utils.LavaFormatDebug("re-verify: provider held off after a rate-limit, skipping probe",
-				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
-				utils.LogAttr("provider", p.Name),
-			)
-			return common.StatusCodeError429
+		// The provider on this chain and api-interface, as relay selection keys it.
+		holdoffKey := holdoff.ProviderKey(inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name)
+		keys := holdoffURLKeys(p)
+		for _, key := range keys {
+			if inputs.rateLimitHoldoff.HeldOff(holdoffKey, key) {
+				utils.LavaFormatDebug("re-verify: provider held off after a rate-limit, skipping probe",
+					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+					utils.LogAttr("provider", p.Name),
+				)
+				return common.StatusCodeError429
+			}
 		}
-		err, throttle, unanswered := probe(c, p)
-		if isRateLimitFailure(err) {
-			throttle = err
-		}
-		if throttle != nil {
-			retryAfter, _ := common.RetryAfterFrom(throttle)
-			delay := inputs.rateLimitHoldoff.RecordRateLimit(p.Name, urlKey, retryAfter)
-			utils.LavaFormatWarning("re-verify: provider rate-limited, backing off", throttle,
-				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
-				utils.LogAttr("provider", p.Name),
-				utils.LogAttr("holdoff", delay.String()),
-			)
-			return err
-		}
-		// A probe that got no answer (timeout, refused or reset connection, DNS) is not one:
-		// it clears nothing. A gateway enforcing a ban often drops the connection rather than
-		// answering, and the url's entries are shared — RecordAnswer also drops the per-url
-		// chain tracker's hold-off and strikes (MAG-4165). The same goes for the keyed url
-		// alone, when the provider passed on its others.
-		if common.DetectConnectionError(err) == nil && unanswered == nil {
-			inputs.rateLimitHoldoff.RecordAnswer(p.Name, urlKey)
+		err, pass := probe(c, p)
+		// A rate limit the pass does not tie to a url holds them all, as it held the
+		// provider before.
+		untied := isRateLimitFailure(err) && (pass == nil || pass.URLThrottle() == nil)
+		for index, key := range keys {
+			var throttle error
+			answered := common.DetectConnectionError(err) == nil && !isRateLimitFailure(err)
+			if pass != nil {
+				throttle = pass.URLRateLimit(index)
+				answered = throttle == nil && common.DetectConnectionError(pass.URLRefusal(index)) == nil
+			}
+			if throttle == nil && untied {
+				throttle = err
+			}
+			switch {
+			case throttle != nil:
+				retryAfter, _ := common.RetryAfterFrom(throttle)
+				delay := inputs.rateLimitHoldoff.RecordRateLimit(holdoffKey, key, retryAfter)
+				utils.LavaFormatWarning("re-verify: provider url rate-limited, backing off", throttle,
+					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+					utils.LogAttr("provider", p.Name),
+					utils.LogAttr("url_index", index),
+					utils.LogAttr("holdoff", delay.String()),
+				)
+			case answered:
+				inputs.rateLimitHoldoff.RecordAnswer(holdoffKey, key)
+			}
 		}
 		return err
 	}

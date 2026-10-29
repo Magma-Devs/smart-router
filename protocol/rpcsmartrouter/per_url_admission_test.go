@@ -229,7 +229,8 @@ func TestAdmittedNodeUrls_KeepsOrderAndIdentityWhenNothingIsRefused(t *testing.T
 }
 
 // An epoch pass that met a rate limit on one url keeps the provider paired as it was,
-// leaves the url's standing alone, and holds the provider off.
+// leaves the url's standing alone, and holds that url off — the one that answered 429,
+// not the provider's first url (MAG-4733).
 func TestApplyReverification_ARateLimitedUrlBacksOffAndChangesNothing(t *testing.T) {
 	up := newFakeUpstreams(t)
 	provider := staticProvider("ETH1",
@@ -255,7 +256,44 @@ func TestApplyReverification_ARateLimitedUrlBacksOffAndChangesNothing(t *testing
 	require.Empty(t, demoted)
 	require.Empty(t, promoted, "nothing moved, so nothing is rebuilt")
 	require.False(t, admissions.admissionFor(provider).Any())
-	require.True(t, holdoffs.HeldOff(provider.Name, holdoffURLKey(provider)), "the vendor's limit is honoured on the next pass")
+	archive, throttled := provider.NodeUrls[0].Url, provider.NodeUrls[1].Url
+	require.True(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), throttled), "the vendor's limit is honoured on the url that answered 429")
+	require.False(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), archive), "the first url answered, so relays keep going to it")
+	_, held := holdoffs.ProviderReadyAt(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), []string{archive, throttled})
+	require.False(t, held, "relay selection still has the archive url")
+}
+
+// A provider whose first url is its websocket door: the re-verifier's 429 from the https url
+// is held on that url. Keyed by the first url it landed on the websocket url, which relay
+// selection never counts, and held nothing for relays (MAG-4733).
+func TestApplyReverification_ARateLimitBehindAWebsocketFirstUrlHoldsTheRelayUrl(t *testing.T) {
+	up := newFakeUpstreams(t)
+	provider := staticProvider("ETH1",
+		commonlib.NodeUrl{Url: up.wsURL("/w/" + upSubOnly)},
+		commonlib.NodeUrl{Url: up.httpURL("/w/" + upThrottled)},
+		commonlib.NodeUrl{Url: up.httpURL("/w2/" + upArchive)},
+	)
+	admissions := newAdmissionRegistry()
+	holdoffs := holdoff.NewRegistry()
+	inputs := &chainReverifyInputs{
+		chainParser:                liveParser(t, "ETH1", true),
+		rpcEndpoint:                &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		convertProvidersToSessions: fakeConvert,
+		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider},
+		recordAdmission:            admissions.record,
+		recordReverifiedAdmission:  admissions.recordReverified,
+		admissionFor:               admissions.admissionFor,
+		rateLimitHoldoff:           holdoffs,
+	}
+	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
+
+	next, demoted, _ := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+	require.Contains(t, collectNames(next), provider.Name)
+	require.Empty(t, demoted)
+	socket, throttled, archive := provider.NodeUrls[0].Url, provider.NodeUrls[1].Url, provider.NodeUrls[2].Url
+	require.True(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), throttled), "the https url that answered 429 is held")
+	require.False(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), socket))
+	require.False(t, holdoffs.HeldOff(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), archive))
 }
 
 // A 429 on one add-on's own check (here trace_block, a premium method with its own limit)
@@ -286,7 +324,7 @@ func TestApplyReverification_AnAddonsOwnRateLimitHoldsNothing(t *testing.T) {
 	require.Contains(t, collectNames(next), provider.Name)
 	require.Empty(t, demoted)
 	require.Contains(t, up.methods("http", "/q/"+upTraceRate), "trace_block", "the add-on's check was asked, or this test proves nothing")
-	_, held := holdoffs.ProviderReadyAt(provider.Name)
+	_, held := holdoffs.ProviderReadyAt(holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name), holdoffURLKeys(provider))
 	require.False(t, held, "relay selection still serves the provider")
 	services, keep := admissions.admissionFor(provider).AdmittedServices(provider.NodeUrls[1])
 	require.True(t, keep)

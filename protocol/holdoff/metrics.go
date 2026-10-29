@@ -62,9 +62,12 @@ func registerHistogramVec(h *prometheus.HistogramVec) *prometheus.HistogramVec {
 // providerLabel makes a registry key safe as a metric label. The ws path keys the
 // registry by node URL, and node URLs can embed API keys in their path or query — those
 // must never become a Prometheus series. URL-shaped keys are reduced to scheme://host;
-// plain provider names pass through unchanged.
+// a ProviderKey is labelled with the provider name alone, as before it was scoped.
 func providerLabel(provider string) string {
 	if !strings.Contains(provider, "://") {
+		if i := strings.LastIndex(provider, providerScopeSeparator); i >= 0 {
+			return provider[i+len(providerScopeSeparator):]
+		}
 		return provider
 	}
 	u, err := url.Parse(provider)
