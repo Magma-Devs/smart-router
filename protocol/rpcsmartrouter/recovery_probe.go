@@ -215,7 +215,8 @@ func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *lavasession.EndpointWi
 			case httpErr.StatusCode == http.StatusNotImplemented:
 				return relayProbeRecovered // capability answer, not a fault
 			default:
-				if unhealthy, _ := classifyHTTPStatus(httpErr.StatusCode); unhealthy {
+				statusClassified := common.ClassifyError(nil, chainFamily, common.TransportJsonRPC, httpErr.StatusCode, "")
+				if unhealthy, _ := classifyHTTPStatus(httpErr.StatusCode, statusClassified); unhealthy {
 					return relayProbeStillFailing
 				}
 				return relayProbeInconclusive
