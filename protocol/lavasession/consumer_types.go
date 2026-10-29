@@ -326,6 +326,19 @@ func (e *Endpoint) ServesInternalPath(internalPath string) bool {
 	return e.InternalPath == internalPath
 }
 
+// servesRequest reports whether this endpoint can take a relay of this collection: it is on the
+// request's internal path when the provider restricts to it (restrictsToPathLocked), it answers
+// relays (ServesDirectRelays), and it serves the add-on and extensions. It is the one rule both the
+// url walk and relayURLs apply, so the rate-limit read and the pick agree on which urls count
+// (MAG-4732). Whether the endpoint is usable right now is left to each caller: the walk relaxes it
+// for the reconnect probe and the last chance.
+func (e *Endpoint) servesRequest(addon string, extensions []string, restrictToPath bool, internalPath *string) bool {
+	if restrictToPath && !e.ServesInternalPath(*internalPath) {
+		return false
+	}
+	return e.ServesDirectRelays() && e.CheckSupportForServices(addon, extensions)
+}
+
 // IsEnabled returns the endpoint's enable bit under the endpoint mutex. Enabled is written under
 // e.mu by MarkUnhealthy / ResetHealth / RecordProbeVerdict; every production READ must go through a
 // synchronized accessor like this to avoid the data race the race detector flagged (F3).
@@ -1281,10 +1294,7 @@ func (cswp *ConsumerSessionsWithProvider) relayURLs(addon string, extensions []s
 	restrictToPath := cswp.restrictsToPathLocked(internalPath)
 	urls := make([]string, 0, len(cswp.Endpoints))
 	for _, endpoint := range cswp.Endpoints {
-		if restrictToPath && !endpoint.ServesInternalPath(*internalPath) {
-			continue
-		}
-		if !endpoint.IsUsable() || !endpoint.ServesDirectRelays() || !endpoint.CheckSupportForServices(addon, extensions) {
+		if !endpoint.servesRequest(addon, extensions, restrictToPath, internalPath) || !endpoint.IsUsable() {
 			continue
 		}
 		urls = append(urls, endpoint.NetworkAddress)
@@ -1335,7 +1345,12 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 		// A url held off after a rate limit goes to the back of the list, so a free sibling is
 		// handed out first; nothing is skipped for it (endpointsByHoldoffLocked).
 		for _, endpoint := range cswp.endpointsByHoldoffLocked(heldOff) {
-			if restrictToPath && !endpoint.ServesInternalPath(*internalPath) {
+			// Another path's url, a websocket-only url (it can never answer a relay, see
+			// ServesDirectRelays) and a url without the add-on cannot take this request. Skipping a
+			// websocket url leaves the provider with no selectable endpoint once its https url is
+			// backed off, so the caller ignores the provider for this request and picks another,
+			// rather than handing out a session that fails on the spot.
+			if !endpoint.servesRequest(addon, extensionNames, restrictToPath, internalPath) {
 				continue
 			}
 			// A disabled endpoint is skipped in normal selection. The reconnect probe retries it
@@ -1358,21 +1373,8 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			if (heldByState && !lastChanceBorrow) || (!enabled && mode != endpointPickReconnectDisabled && !lastChanceBorrow) {
 				continue
 			}
-			// A websocket-only endpoint can never answer a relay — see ServesDirectRelays.
-			// Skipping it leaves the provider with no selectable endpoint once its https url
-			// is backed off, so the caller ignores the provider for this request and picks
-			// another, rather than handing out a session that fails on the spot.
-			if !endpoint.ServesDirectRelays() {
-				continue
-			}
 			if mode == endpointPickReconnectDisabled && !enabled {
 				utils.LavaFormatDebug("retrying to connect to disabled endpoint", utils.LogAttr("endpoint", endpoint.NetworkAddress), utils.LogAttr("provider", cswp.PublicLavaAddress), utils.LogAttr("GUID", ctx))
-			}
-
-			// check endpoint supports the requested addons
-			supported := endpoint.CheckSupportForServices(addon, extensionNames)
-			if !supported {
-				continue
 			}
 			// connectEndpoint tries to get an existing connection or creates a new one.
 			// Uses explicit lock scopes to avoid holding lock during network calls.

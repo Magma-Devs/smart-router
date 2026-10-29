@@ -306,9 +306,11 @@ func (csm *ConsumerSessionManager) blockedProviderInfoLocked(now time.Time) []Bl
 // off, across both the regular pairing and the backup pool, as a base-collection request with no
 // internal path sees them. csm.lock must be held.
 //
-// Lock order: csm.lock then the registry's own lock, which is the order the selection path already
-// takes (getValidProviderAddresses runs under csm.lock and calls straight through to
-// ProviderReadyAt), and protocol/holdoff has no dependency on this package, so there is no cycle.
+// Lock order: csm.lock, then cswp.Lock, then endpoint.mu, with the registry's own lock as a leaf.
+// providerHeldOff builds the url list under cswp.Lock and endpoint.mu (relayURLs), releases them,
+// and only then asks the registry under csm.lock; the url walk asks the registry under cswp.Lock
+// (endpointsByHoldoffLocked). protocol/holdoff has no dependency on this package and takes no
+// other lock while holding its own, so there is no cycle.
 func (csm *ConsumerSessionManager) heldOffProviderInfoLocked(now time.Time) []HeldOffProviderInfo {
 	held := []HeldOffProviderInfo{}
 	if csm.rateLimitHoldoff == nil {
