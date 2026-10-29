@@ -53,7 +53,7 @@ func statefulSelection(csm *ConsumerSessionManager, ignored map[string]struct{})
 	if ignored == nil {
 		ignored = map[string]struct{}{}
 	}
-	return csm.getProvidersForStatefulCalls(context.Background(), csm.validAddresses, ignored, "", nil, false)
+	return csm.getProvidersForStatefulCalls(context.Background(), csm.validAddresses, ignored, "", nil, nil, false)
 }
 
 // The default. A backup tier exists and is healthy, and a stateful relay still does not touch it.
@@ -142,7 +142,7 @@ func TestStatefulToBackup_IncludesHeldOffBackup(t *testing.T) {
 	// A private registry, never holdoff.Shared: the shared one is process-wide, so recording a
 	// strike on it would hold "backup-1" off for every later test in this package.
 	csm.rateLimitHoldoff = holdoff.NewRegistry()
-	csm.rateLimitHoldoff.RecordRateLimit("backup-1", "http://backup-1/url", 0)
+	holdOffProvider(csm, "backup-1", 0)
 
 	require.Equal(t, []string{"primary-a", "backup-1"}, statefulSelection(csm, nil),
 		"a held-off backup was left out of the write broadcast")
@@ -156,10 +156,10 @@ func TestStatefulToBackup_SinglePickSkipsHeldOffBackup(t *testing.T) {
 	csm := setupStatefulCSM(t, []string{"primary-a"}, []string{"backup-1"})
 	csm.SetStatefulToBackup(true)
 	csm.rateLimitHoldoff = holdoff.NewRegistry()
-	csm.rateLimitHoldoff.RecordRateLimit("backup-1", "http://backup-1/url", 0)
+	holdOffProvider(csm, "backup-1", 0)
 
 	csm.lock.RLock()
-	selected := csm.getProvidersForStatefulCalls(context.Background(), csm.validAddresses, map[string]struct{}{}, "", nil, true)
+	selected := csm.getProvidersForStatefulCalls(context.Background(), csm.validAddresses, map[string]struct{}{}, "", nil, nil, true)
 	csm.lock.RUnlock()
 	require.Equal(t, []string{"primary-a"}, selected)
 }
@@ -170,7 +170,7 @@ func TestStatefulToBackup_SkipsBackupMissingAddon(t *testing.T) {
 	csm.SetStatefulToBackup(true)
 
 	csm.lock.RLock()
-	selected := csm.getProvidersForStatefulCalls(context.Background(), csm.validAddresses, map[string]struct{}{}, "archive", nil, false)
+	selected := csm.getProvidersForStatefulCalls(context.Background(), csm.validAddresses, map[string]struct{}{}, "archive", nil, nil, false)
 	csm.lock.RUnlock()
 
 	require.Equal(t, []string{"primary-a"}, selected,
@@ -268,7 +268,7 @@ func TestStatefulSelection_DoesNotMutateTheSharedAddressSlice(t *testing.T) {
 			defer wg.Done()
 			csm.lock.RLock()
 			defer csm.lock.RUnlock()
-			_, _ = csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, cuForFirstRequest, servicedBlockNumber, "", nil, common.CONSISTENCY_SELECT_ALL_PROVIDERS, "", "")
+			_, _ = csm.getValidProviderAddresses(ctx, 1, map[string]struct{}{}, cuForFirstRequest, servicedBlockNumber, "", nil, nil, common.CONSISTENCY_SELECT_ALL_PROVIDERS, "", "")
 		}()
 		go func() {
 			defer wg.Done()

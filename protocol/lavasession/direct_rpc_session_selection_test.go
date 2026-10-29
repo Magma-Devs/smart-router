@@ -170,6 +170,7 @@ func TestFetchEndpointConnection_DirectRPC(t *testing.T) {
 		"",    // addon
 		nil,   // extensionNames
 		nil,   // internalPath
+		nil,   // holdoffs
 	)
 
 	// Verify connection succeeded
@@ -223,7 +224,7 @@ func TestFetchEndpointConnection_DirectRPC_BackoffAndSelfHeal(t *testing.T) {
 	}
 
 	fetch := func() (bool, []*EndpointAndChosenConnection, error) {
-		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, endpointPickSkipDisabled, false, "", nil, nil)
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, endpointPickSkipDisabled, false, "", nil, nil, nil)
 		return connected, endpoints, err
 	}
 
@@ -288,7 +289,7 @@ func TestFetchEndpointConnection_InternalPath(t *testing.T) {
 	}
 	fetchAll := func(cswp *ConsumerSessionsWithProvider, internalPath *string) []*EndpointAndChosenConnection {
 		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(
-			ctx, endpointPickSkipDisabled, true, "", nil, internalPath)
+			ctx, endpointPickSkipDisabled, true, "", nil, internalPath, nil)
 		require.NoError(t, err)
 		require.True(t, connected)
 		return endpoints
@@ -373,7 +374,7 @@ func TestFetchEndpointConnection_DirectRPC_SkipsWebsocketEndpoints(t *testing.T)
 		return &Endpoint{NetworkAddress: url, Enabled: enabled, DirectConnections: []DirectRPCConnection{conn}}
 	}
 	fetch := func(cswp *ConsumerSessionsWithProvider) (bool, []*EndpointAndChosenConnection) {
-		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, endpointPickSkipDisabled, false, "", nil, nil)
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, endpointPickSkipDisabled, false, "", nil, nil, nil)
 		require.NoError(t, err)
 		return connected, endpoints
 	}
@@ -449,7 +450,7 @@ func TestGetConsumerSessionInstanceFromEndpoint_DuplicateNodeUrl(t *testing.T) {
 	failures := uint64(0)
 	var chosen *Endpoint
 	for failures <= 2*MaxConsecutiveConnectionAttempts {
-		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, endpointPickSkipDisabled, false, "", nil, nil)
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, endpointPickSkipDisabled, false, "", nil, nil, nil)
 		require.NoError(t, err)
 		require.True(t, connected)
 		chosen = endpoints[0].endpoint

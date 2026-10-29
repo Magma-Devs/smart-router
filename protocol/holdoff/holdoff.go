@@ -256,12 +256,12 @@ func (r *Registry) ReadyAt(provider, url string) time.Time {
 }
 
 // ProviderReadyAt reports whether provider is held off as a whole, and when it next has
-// a URL worth trying. A provider is held off while its name is escalated, or while every
-// URL the registry has been limited on is still held. The registry only knows URLs that
-// answered 429s — a provider with additional never-limited URLs reads as held until its
-// earliest recorded hold-off expires, which slightly over-holds; selection's
-// soonest-to-expire fallback bounds that cost.
-func (r *Registry) ProviderReadyAt(provider string) (readyAt time.Time, held bool) {
+// a URL worth trying. urls are the provider's URLs that could serve the request being
+// placed: the caller knows them, the registry only knows URLs that answered 429s. A
+// provider is held off while its name is escalated, or while every one of urls is held. A
+// URL with no entry is free — a 429 on one url says nothing about the provider's others,
+// nor about the same name's urls on another api-interface or chain (MAG-4732).
+func (r *Registry) ProviderReadyAt(provider string, urls []string) (readyAt time.Time, held bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ps := r.providers[provider]
@@ -273,8 +273,8 @@ func (r *Registry) ProviderReadyAt(provider string) (readyAt time.Time, held boo
 	anyFree := false
 	minHeld := time.Time{}
 	heldURLs := 0
-	for _, e := range ps.urls {
-		if e.readyAt.After(now) {
+	for _, url := range urls {
+		if e := ps.urls[url]; e != nil && e.readyAt.After(now) {
 			heldURLs++
 			if minHeld.IsZero() || e.readyAt.Before(minHeld) {
 				minHeld = e.readyAt

@@ -204,7 +204,7 @@ func TestNoteFetchOutcome_OwnRateLimitDoesNotHoldTheProviderForRelays(t *testing
 	for range 3 {
 		cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0))
 	}
-	_, providerHeld := registry.ProviderReadyAt(holdoffTestProvider)
+	_, providerHeld := registry.ProviderReadyAt(holdoffTestProvider, []string{holdoffTestURL})
 	require.False(t, providerHeld, "a polled leg's 429 must not take the provider out of relay selection")
 	require.False(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL), "nothing lands under the relay path's key")
 	require.True(t, registry.HeldOff(holdoffTestURL, holdoffTestURL), "the url itself is held, as the ws and gRPC paths key it")

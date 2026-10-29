@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -1244,6 +1245,78 @@ func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos [
 	}
 }
 
+// restrictsToPathLocked reports whether a relay for internalPath is restricted to the endpoints
+// serving that path — only when this provider has any. Every path is expanded at construction
+// (rpcsmartrouter.go), so a provider that CAN serve the path has a matching endpoint and the filter
+// bites. A provider that has none — a provider-relay pool, where the path lives on the provider's
+// side and not in our url, or an endpoint list built some way we haven't modelled — keeps every
+// endpoint it had, rather than losing the whole pool to a filter that was never populated for it.
+//
+// Matching is exact in both directions. On a chain with no internal paths every endpoint is "" and
+// every relay asks for "", so this is a no-op. On a chain that enables a root collection ALONGSIDE
+// versioned ones (STRK: "" carries the whole method set, /rpc/v0_8 … carry it again per version), a
+// root relay must stay on the root url rather than drift onto a versioned door the expansion
+// generated.
+//
+// cswp.Lock must be held.
+func (cswp *ConsumerSessionsWithProvider) restrictsToPathLocked(internalPath *string) bool {
+	if internalPath == nil {
+		return false
+	}
+	for _, endpoint := range cswp.Endpoints {
+		if endpoint.ServesInternalPath(*internalPath) {
+			return true
+		}
+	}
+	return false
+}
+
+// relayURLs lists the url of every endpoint the walk below could hand out in normal selection for
+// a request of this collection: usable, able to answer a relay, serving the add-on, extensions and
+// internal path. These are the urls the rate-limit hold-off asks about when it decides whether the
+// whole provider is held (MAG-4732): a websocket url, a head-stalled url or another path's url
+// cannot take the request, so its being free does not make the provider free.
+func (cswp *ConsumerSessionsWithProvider) relayURLs(addon string, extensions []string, internalPath *string) []string {
+	cswp.Lock.RLock()
+	defer cswp.Lock.RUnlock()
+	restrictToPath := cswp.restrictsToPathLocked(internalPath)
+	urls := make([]string, 0, len(cswp.Endpoints))
+	for _, endpoint := range cswp.Endpoints {
+		if restrictToPath && !endpoint.ServesInternalPath(*internalPath) {
+			continue
+		}
+		if !endpoint.IsUsable() || !endpoint.ServesDirectRelays() || !endpoint.CheckSupportForServices(addon, extensions) {
+			continue
+		}
+		urls = append(urls, endpoint.NetworkAddress)
+	}
+	return urls
+}
+
+// endpointsByHoldoffLocked is cswp.Endpoints with every url held off after a rate limit moved to
+// the back; both groups keep config order. Nothing is dropped: when every url that fits the
+// request is held, one is still handed out, as filterRateLimitedProviders keeps a held provider
+// rather than leave a request with nowhere to go (MAG-4732). The held urls need no order of their
+// own: two held at once escalate to the provider name, which holds them all until the longest
+// ends. A nil registry keeps config order.
+//
+// cswp.Lock must be held.
+func (cswp *ConsumerSessionsWithProvider) endpointsByHoldoffLocked(holdoffs *holdoff.Registry) []*Endpoint {
+	if holdoffs == nil {
+		return cswp.Endpoints
+	}
+	free := make([]*Endpoint, 0, len(cswp.Endpoints))
+	var held []*Endpoint
+	for _, endpoint := range cswp.Endpoints {
+		if holdoffs.HeldOff(cswp.PublicLavaAddress, endpoint.NetworkAddress) {
+			held = append(held, endpoint)
+		} else {
+			free = append(free, endpoint)
+		}
+	}
+	return append(free, held...)
+}
+
 // fetching an endpoint from a ConsumerSessionWithProvider and establishing a connection,
 // can fail without an error if trying to connect once to each endpoint but none of them are active.
 //
@@ -1254,36 +1327,15 @@ func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos [
 // on the root url.
 //
 // mode says what happens to an endpoint whose Enabled flag is off (endpointPickMode).
-func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, mode endpointPickMode, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
+func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, mode endpointPickMode, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string, holdoffs *holdoff.Registry) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
 	getConnectionFromConsumerSessionsWithProvider := func(ctx context.Context) (connected bool, endpointPtr []*EndpointAndChosenConnection, allDisabled bool) {
 		endpoints := make([]*EndpointAndChosenConnection, 0)
 		cswp.Lock.Lock()
 		defer cswp.Lock.Unlock()
-		// Restrict to the endpoints serving the api's internal path — but only
-		// when this provider has any. Every path is expanded at construction
-		// (rpcsmartrouter.go), so a provider that CAN serve the path has a
-		// matching endpoint and the filter bites. A provider that has none — a
-		// provider-relay pool, where the path lives on the provider's side and
-		// not in our url, or an endpoint list built some way we haven't
-		// modelled — keeps every endpoint it had, rather than losing the whole
-		// pool to a filter that was never populated for it.
-		//
-		// Matching is exact in both directions. On a chain with no internal
-		// paths every endpoint is "" and every relay asks for "", so this is a
-		// no-op. On a chain that enables a root collection ALONGSIDE versioned
-		// ones (STRK: "" carries the whole method set, /rpc/v0_8 … carry it
-		// again per version), a root relay must stay on the root url rather
-		// than drift onto a versioned door the expansion generated.
-		restrictToPath := false
-		if internalPath != nil {
-			for _, endpoint := range cswp.Endpoints {
-				if endpoint.ServesInternalPath(*internalPath) {
-					restrictToPath = true
-					break
-				}
-			}
-		}
-		for idx, endpoint := range cswp.Endpoints {
+		restrictToPath := cswp.restrictsToPathLocked(internalPath)
+		// A url held off after a rate limit goes to the back of the list, so a free sibling is
+		// handed out first; nothing is skipped for it (endpointsByHoldoffLocked).
+		for _, endpoint := range cswp.endpointsByHoldoffLocked(holdoffs) {
 			if restrictToPath && !endpoint.ServesInternalPath(*internalPath) {
 				continue
 			}
@@ -1521,10 +1573,10 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			// nothing more than a successful dial.
 			if mode == endpointPickReconnectDisabled && !enabled {
 				endpoint.mu.Lock()
-				if !cswp.Endpoints[idx].Enabled {
-					cswp.Endpoints[idx].Enabled = true // return enabled once we successfully reconnect
+				if !endpoint.Enabled {
+					endpoint.Enabled = true // return enabled once we successfully reconnect
 					// Clear recovery tracking on re-enable so a future disable starts a fresh streak (F1).
-					cswp.Endpoints[idx].clearRecoveryTrackingLocked()
+					endpoint.clearRecoveryTrackingLocked()
 				}
 				endpoint.mu.Unlock()
 			}

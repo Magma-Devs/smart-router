@@ -365,7 +365,7 @@ func TestProviderRoutingSnapshot_ReportsHeldOffSeparatelyFromBlocked(t *testing.
 	csm.rateLimitHoldoff = registry
 
 	address := csm.validAddresses[0]
-	registry.RecordRateLimit(address, "http://"+address+"/rpc", time.Minute)
+	holdOffProvider(csm, address, time.Minute)
 
 	snapshot := csm.ProviderRoutingSnapshot()
 
@@ -377,7 +377,7 @@ func TestProviderRoutingSnapshot_ReportsHeldOffSeparatelyFromBlocked(t *testing.
 	require.False(t, snapshot.HeldOff[0].ReadyAt.IsZero())
 
 	// An upstream that answers us again is no longer refusing us for load.
-	registry.RecordAnswer(address, "http://"+address+"/rpc")
+	registry.RecordAnswer(address, csm.providerByAddress(address).Endpoints[0].NetworkAddress)
 	require.Empty(t, csm.ProviderRoutingSnapshot().HeldOff)
 }
 

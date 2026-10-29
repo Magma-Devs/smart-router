@@ -286,7 +286,7 @@ func TestApplyReverification_AnAddonsOwnRateLimitHoldsNothing(t *testing.T) {
 	require.Contains(t, collectNames(next), provider.Name)
 	require.Empty(t, demoted)
 	require.Contains(t, up.methods("http", "/q/"+upTraceRate), "trace_block", "the add-on's check was asked, or this test proves nothing")
-	_, held := holdoffs.ProviderReadyAt(provider.Name)
+	_, held := holdoffs.ProviderReadyAt(provider.Name, []string{holdoffURLKey(provider)})
 	require.False(t, held, "relay selection still serves the provider")
 	services, keep := admissions.admissionFor(provider).AdmittedServices(provider.NodeUrls[1])
 	require.True(t, keep)
