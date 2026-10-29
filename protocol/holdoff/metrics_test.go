@@ -45,5 +45,6 @@ func TestMetrics_ProviderLabelSanitizesURLs(t *testing.T) {
 	require.Equal(t, "wss://node.example.com", providerLabel("wss://node.example.com/ws/SECRET-API-KEY"))
 	require.Equal(t, "https://rpc.example.com:8545", providerLabel("https://rpc.example.com:8545/v1/KEY?token=x"))
 	require.Equal(t, "tatum", providerLabel("tatum"), "plain provider names pass through")
+	require.Equal(t, "tatum", providerLabel(ProviderKey("ETH1", "jsonrpc", "tatum")), "a scoped key is labelled with its name, as before it was scoped")
 	require.Equal(t, "invalid-url", providerLabel("://not-a-url"))
 }

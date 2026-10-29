@@ -80,7 +80,7 @@ func TestReplayFailingRelay_A5xxWithAJSONRPCBodyIsJudgedLikeTheRelayPath(t *test
 				ProviderAddress:  "provider1",
 			}
 			require.Equal(t, tc.want, replayServer().replayFailingRelay(ep, testEvidence, testEvidenceTimeout))
-			require.Equal(t, tc.wantHeldOff, registry.HeldOff("provider1", "http://fake:8545"))
+			require.Equal(t, tc.wantHeldOff, registry.HeldOff(replayServer().holdoffProviderKey("provider1"), "http://fake:8545"))
 		})
 	}
 }
