@@ -63,7 +63,7 @@ func DefaultGRPCStreamingConfig() *GRPCStreamingConfig {
 		UnsubscribesPerMinutePerClient:  60,
 
 		// Timeouts - gRPC streaming may take longer to establish
-		ConnectionTimeout: 30 * time.Second,
+		ConnectionTimeout: defaultUpstreamDialTimeout,
 
 		// Cleanup
 		CleanupInterval: 1 * time.Minute,

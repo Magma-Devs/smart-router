@@ -101,7 +101,7 @@ func TestSubscribeReservesItsPoolSlot(t *testing.T) {
 	// A second subscription takes its own connection, and the first one's slot keeps the
 	// sweep off it.
 	pool.minConnections = 0
-	pool.subscriptionsPerConn = 1
+	pool.perConn = 1
 	second, err := pool.ReserveConnectionForSubscription(context.Background())
 	require.NoError(t, err)
 	require.NotSame(t, reserved, second)

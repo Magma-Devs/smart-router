@@ -359,7 +359,7 @@ func newManagerAgainstUpstreams(t *testing.T, addrs ...string) *DirectGRPCSubscr
 	for _, endpoint := range endpoints {
 		pool, err := manager.getOrCreatePool(endpoint)
 		require.NoError(t, err)
-		conn, err := pool.GetConnectionForStream(ctx)
+		conn, err := pool.take(ctx, false)
 		require.NoError(t, err)
 		conn.descriptors.cache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", streamingMethodDescriptor(t))
 	}
