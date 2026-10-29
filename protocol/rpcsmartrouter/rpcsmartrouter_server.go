@@ -5563,13 +5563,10 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// Try to extract LavaError from classifiedError (already classified by classifyAndWrap)
 		classified := common.AsLavaError(err)
 		if classified == nil {
-			// Fallback: derive transport and chain family, classify from scratch
-			errorCode := 0
-			if httpErr, ok := err.(*lavasession.HTTPStatusError); ok {
-				errorCode = httpErr.StatusCode
-			}
-			classified = common.ClassifyError(common.DetectConnectionError(err),
-				rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection), errorCode, err.Error())
+			// Fallback: derive transport and chain family, classify from scratch through the same
+			// pipeline the sender uses (an HTTPStatusError's status is its code there too).
+			classified, _, _ = chainlib.ClassifyNodeErrorWithDetails(err,
+				rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection))
 		}
 
 		// PROTOCOL_CONTEXT_CANCELED is expected in two cases:
