@@ -2,6 +2,7 @@ package chainlib
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -33,7 +34,18 @@ var (
 
 type TimeServer int64
 
-func TestChainRouterWithDisabledWebSocketInSpec(t *testing.T) {
+// TestChainRouterWithWebSocketInSpec runs one addon/extension playbook against a spec whose
+// subscribe collection is disabled, served by http URLs only, and against one where it is
+// enabled, served by an http and a ws URL per service. Both must reach the same verdicts.
+func TestChainRouterWithWebSocketInSpec(t *testing.T) {
+	for _, wsEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("websocket enabled %t", wsEnabled), func(t *testing.T) {
+			testChainRouterWithWebSocketInSpec(t, wsEnabled)
+		})
+	}
+}
+
+func testChainRouterWithWebSocketInSpec(t *testing.T, wsEnabled bool) {
 	ctx := context.Background()
 	apiInterface := spectypes.APIInterfaceJsonRPC
 	chainParser, err := NewChainParser(apiInterface)
@@ -45,7 +57,7 @@ func TestChainRouterWithDisabledWebSocketInSpec(t *testing.T) {
 	spec := CreateMockSpec()
 	spec.ApiCollections = []*spectypes.ApiCollection{
 		{
-			Enabled: false,
+			Enabled: wsEnabled,
 			CollectionData: spectypes.CollectionData{
 				ApiInterface: apiInterface,
 				InternalPath: "",
@@ -377,8 +389,11 @@ func TestChainRouterWithDisabledWebSocketInSpec(t *testing.T) {
 				nodeUrl := common.NodeUrl{Url: listenerAddressHttp}
 				nodeUrl.Addons = service.services
 				nodeUrls = append(nodeUrls, nodeUrl)
+				if wsEnabled {
+					nodeUrl.Url = listenerAddressWs
+					nodeUrls = append(nodeUrls, nodeUrl)
+				}
 			}
-
 			endpoint.NodeUrls = nodeUrls
 			_, err := GetChainRouter(ctx, 1, endpoint, chainParser)
 			if play.success {
@@ -452,364 +467,6 @@ func TestSkipWebsocketVerificationIsPerParser(t *testing.T) {
 	require.True(t, skipping.SkipWebsocketVerification())
 	require.False(t, enforcing.SkipWebsocketVerification())
 	require.False(t, SkipWebsocketVerificationDefault, "GetChainRouter must not write the package default")
-}
-
-func TestChainRouterWithEnabledWebSocketInSpec(t *testing.T) {
-	ctx := context.Background()
-	apiInterface := spectypes.APIInterfaceJsonRPC
-	chainParser, err := NewChainParser(apiInterface)
-	require.NoError(t, err)
-
-	addonsOptions := []string{"-addon-", "-addon2-"}
-	extensionsOptions := []string{"-test-", "-test2-", "-test3-"}
-
-	spec := CreateMockSpec()
-	spec.ApiCollections = []*spectypes.ApiCollection{
-		{
-			Enabled: true,
-			CollectionData: spectypes.CollectionData{
-				ApiInterface: apiInterface,
-				InternalPath: "",
-				Type:         "",
-				AddOn:        "",
-			},
-			Extensions: []*spectypes.Extension{
-				{
-					Name:         extensionsOptions[0],
-					CuMultiplier: 1,
-				},
-				{
-					Name:         extensionsOptions[1],
-					CuMultiplier: 1,
-				},
-				{
-					Name:         extensionsOptions[2],
-					CuMultiplier: 1,
-				},
-			},
-			ParseDirectives: []*spectypes.ParseDirective{{
-				FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE,
-			}},
-		},
-		{
-			Enabled: true,
-			CollectionData: spectypes.CollectionData{
-				ApiInterface: apiInterface,
-				InternalPath: "",
-				Type:         "",
-				AddOn:        "",
-			},
-			Extensions: []*spectypes.Extension{
-				{
-					Name:         extensionsOptions[0],
-					CuMultiplier: 1,
-				},
-				{
-					Name:         extensionsOptions[1],
-					CuMultiplier: 1,
-				},
-				{
-					Name:         extensionsOptions[2],
-					CuMultiplier: 1,
-				},
-			},
-		},
-		{
-			Enabled: true,
-			CollectionData: spectypes.CollectionData{
-				ApiInterface: apiInterface,
-				InternalPath: "",
-				Type:         "",
-				AddOn:        addonsOptions[0],
-			},
-			Extensions: []*spectypes.Extension{
-				{
-					Name:         extensionsOptions[0],
-					CuMultiplier: 1,
-				},
-				{
-					Name:         extensionsOptions[1],
-					CuMultiplier: 1,
-				},
-				{
-					Name:         extensionsOptions[2],
-					CuMultiplier: 1,
-				},
-			},
-		},
-		{
-			Enabled: true,
-			CollectionData: spectypes.CollectionData{
-				ApiInterface: apiInterface,
-				InternalPath: "",
-				Type:         "",
-				AddOn:        addonsOptions[1],
-			},
-			Extensions: []*spectypes.Extension{
-				{
-					Name:         extensionsOptions[0],
-					CuMultiplier: 1,
-				},
-				{
-					Name:         extensionsOptions[1],
-					CuMultiplier: 1,
-				},
-				{
-					Name:         extensionsOptions[2],
-					CuMultiplier: 1,
-				},
-			},
-		},
-	}
-	chainParser.SetSpec(spec)
-	endpoint := &lavasession.RPCProviderEndpoint{
-		NetworkAddress: lavasession.NetworkAddressData{},
-		ChainID:        spec.Index,
-		ApiInterface:   apiInterface,
-		NodeUrls:       []common.NodeUrl{},
-	}
-
-	type servicesStruct struct {
-		services []string
-	}
-
-	playBook := []struct {
-		name     string
-		services []servicesStruct
-		success  bool
-	}{
-		{
-			name: "empty services",
-			services: []servicesStruct{{
-				services: []string{},
-			}},
-			success: true,
-		},
-		{
-			name: "one-addon",
-			services: []servicesStruct{{
-				services: []string{addonsOptions[0]},
-			}},
-			success: true,
-		},
-		{
-			name: "one-extension",
-			services: []servicesStruct{{
-				services: []string{extensionsOptions[0]},
-			}},
-			success: false,
-		},
-		{
-			name: "one-extension with empty services",
-			services: []servicesStruct{
-				{
-					services: []string{extensionsOptions[0]},
-				},
-				{
-					services: []string{},
-				},
-			},
-			success: true,
-		},
-		{
-			name: "two-addons together",
-			services: []servicesStruct{{
-				services: addonsOptions,
-			}},
-			success: true,
-		},
-		{
-			name: "two-addons, separated",
-			services: []servicesStruct{{
-				services: []string{addonsOptions[0]},
-			}, {
-				services: []string{addonsOptions[1]},
-			}},
-			success: true,
-		},
-		{
-			name: "addon + extension only",
-			services: []servicesStruct{{
-				services: []string{addonsOptions[0], extensionsOptions[0]},
-			}},
-			success: false,
-		},
-		{
-			name: "addon + extension, addon",
-			services: []servicesStruct{{
-				services: []string{addonsOptions[0], extensionsOptions[0]},
-			}, {
-				services: []string{addonsOptions[0]},
-			}},
-			success: true,
-		},
-		{
-			name: "two addons + extension, addon",
-			services: []servicesStruct{{
-				services: []string{addonsOptions[0], addonsOptions[1], extensionsOptions[0]},
-			}, {
-				services: []string{addonsOptions[0]},
-			}},
-			success: false,
-		},
-		{
-			name: "addons + extension, two addons",
-			services: []servicesStruct{{
-				services: []string{addonsOptions[0], extensionsOptions[0]},
-			}, {
-				services: []string{addonsOptions[0], addonsOptions[1]},
-			}},
-			success: true,
-		},
-		{
-			name: "addons + two extensions, addon extension",
-			services: []servicesStruct{{
-				services: []string{addonsOptions[0], extensionsOptions[0], extensionsOptions[1]},
-			}, {
-				services: []string{addonsOptions[0], extensionsOptions[1]},
-			}},
-			success: false,
-		},
-		{
-			name: "addons + two extensions, addon",
-			services: []servicesStruct{{
-				services: []string{addonsOptions[0], extensionsOptions[0], extensionsOptions[1]},
-			}, {
-				services: []string{addonsOptions[0]},
-			}},
-			success: false,
-		},
-		{
-			name: "addons + two extensions, other addon",
-			services: []servicesStruct{
-				{
-					services: []string{addonsOptions[0], extensionsOptions[0], extensionsOptions[1]},
-				},
-				{
-					services: []string{addonsOptions[1], extensionsOptions[0]},
-				},
-				{
-					services: []string{addonsOptions[0], extensionsOptions[1]},
-				},
-			},
-			success: false,
-		},
-		{
-			name: "addons + two extensions, addon ext1, addon ext2",
-			services: []servicesStruct{
-				{
-					services: []string{addonsOptions[0], extensionsOptions[0], extensionsOptions[1]},
-				},
-				{
-					services: []string{addonsOptions[0], extensionsOptions[0]},
-				},
-				{
-					services: []string{addonsOptions[0], extensionsOptions[1]},
-				},
-			},
-			success: false,
-		},
-		{
-			name: "addons + two extensions, works",
-			services: []servicesStruct{
-				{
-					services: []string{addonsOptions[0], extensionsOptions[0], extensionsOptions[1]},
-				},
-				{
-					services: []string{addonsOptions[0], extensionsOptions[0]},
-				},
-				{
-					services: []string{addonsOptions[0], extensionsOptions[1]},
-				},
-				{
-					services: []string{addonsOptions[0]},
-				},
-			},
-			success: true,
-		},
-		{
-			name: "addons + two extensions, works, addon2",
-			services: []servicesStruct{
-				{
-					services: []string{addonsOptions[0], extensionsOptions[0], extensionsOptions[1]},
-				},
-				{
-					services: []string{addonsOptions[0], extensionsOptions[0]},
-				},
-				{
-					services: []string{addonsOptions[0], extensionsOptions[1]},
-				},
-				{
-					services: []string{addonsOptions[0], addonsOptions[1]},
-				},
-			},
-			success: true,
-		},
-		{
-			name: "addon1 + ext, addon 2 + ext, addon 1",
-			services: []servicesStruct{
-				{
-					services: []string{addonsOptions[0], extensionsOptions[0]},
-				},
-				{
-					services: []string{addonsOptions[1], extensionsOptions[0]},
-				},
-				{
-					services: []string{addonsOptions[0]},
-				},
-			},
-			success: false,
-		},
-		{
-			name: "addon1 + ext, addon 2 + ext, addon 1,addon2",
-			services: []servicesStruct{
-				{
-					services: []string{addonsOptions[0], extensionsOptions[0]},
-				},
-				{
-					services: []string{addonsOptions[1], extensionsOptions[0]},
-				},
-				{
-					services: []string{addonsOptions[0]},
-				},
-				{
-					services: []string{addonsOptions[1]},
-				},
-			},
-			success: true,
-		},
-		{
-			name: "addon, ext",
-			services: []servicesStruct{
-				{
-					services: []string{addonsOptions[0]},
-				},
-				{
-					services: []string{extensionsOptions[0]},
-				},
-			},
-			success: true,
-		},
-	}
-	for _, play := range playBook {
-		t.Run(play.name, func(t *testing.T) {
-			nodeUrls := []common.NodeUrl{}
-			for _, service := range play.services {
-				nodeUrl := common.NodeUrl{Url: listenerAddressHttp}
-				nodeUrl.Addons = service.services
-				nodeUrls = append(nodeUrls, nodeUrl)
-				nodeUrl.Url = listenerAddressWs
-				nodeUrls = append(nodeUrls, nodeUrl)
-			}
-			endpoint.NodeUrls = nodeUrls
-			_, err := GetChainRouter(ctx, 1, endpoint, chainParser)
-			if play.success {
-				require.NoError(t, err)
-			} else {
-				require.Error(t, err)
-			}
-		})
-	}
 }
 
 type chainProxyMock struct {
