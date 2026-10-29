@@ -428,72 +428,67 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 // Shared HTTP status mappings — appended to JSON-RPC and REST at init time
 // ---------------------------------------------------------------------------
 
+// httpStatusRows is the one list of HTTP error statuses the registry knows, with the verdict each
+// row form gives it. byCode is the CodeEquals verdict, appended to the REST table only (see init),
+// where the error code is the HTTP status itself. byMessage is the HTTPStatusContains verdict,
+// for a status that reaches the classifier as digits in the message (e.g. "HTTP status 429"); every
+// transport gets it. The two agree except on 401 and 404, which split on purpose.
+var httpStatusRows = []struct {
+	status    int
+	byCode    *LavaError
+	byMessage *LavaError
+}{
+	// 401: the endpoint rejected the router's credentials. Each provider has its own, so
+	// another provider can serve the request: retryable, and NOT the endpoint's fault — it
+	// answered truthfully about its own configuration (node-capability; see
+	// LavaErrorNodeAccessDenied for what blaming it cost). The message row keeps NODE_UNAUTHORIZED.
+	{401, LavaErrorNodeAccessDenied, LavaErrorNodeUnauthorized},
+	// 404: "not here". Either the data does not exist on this node (yet), or the gateway in
+	// front of it does not route the path. Both mean "try another node", as JSON-RPC's
+	// transaction / block not-found rows already do: retryable, data-scope, not scored.
+	// The message row keeps NODE_ENDPOINT_NOT_FOUND.
+	{404, LavaErrorNodeDataNotHeld, LavaErrorNodeEndpointNotFound},
+	{405, LavaErrorNodeMethodNotAllowed, LavaErrorNodeMethodNotAllowed},
+	{413, LavaErrorUserRequestTooLarge, LavaErrorUserRequestTooLarge},
+	{429, LavaErrorNodeRateLimited, LavaErrorNodeRateLimited},
+	{500, LavaErrorNodeInternalError, LavaErrorNodeInternalError},
+	// 501 Not Implemented: node lacks this method/endpoint (e.g. Cosmos REST
+	// gRPC-gateway). A node refusal, not a transient server failure: retried on
+	// another provider, the endpoint unblamed (MAG-2771).
+	{501, LavaErrorNodeUnimplemented, LavaErrorNodeUnimplemented},
+	{502, LavaErrorNodeBadGateway, LavaErrorNodeBadGateway},
+	{503, LavaErrorNodeServiceUnavailable, LavaErrorNodeServiceUnavailable},
+	{504, LavaErrorNodeGatewayTimeout, LavaErrorNodeGatewayTimeout},
+	// Cloudflare custom 5xx errors
+	{520, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Web server returned unknown error
+	{521, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Web server is down
+	{522, LavaErrorNodeGatewayTimeout, LavaErrorNodeGatewayTimeout}, // Connection timed out
+	{523, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Origin is unreachable
+	{524, LavaErrorNodeGatewayTimeout, LavaErrorNodeGatewayTimeout}, // A timeout occurred
+	{525, LavaErrorNodeServerError, LavaErrorNodeServerError},       // SSL handshake failed
+	{526, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Invalid SSL certificate
+	{527, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Railgun error
+	{530, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Origin DNS error
+}
+
 // httpStatusCodeMappings returns CodeEquals matchers for common HTTP error status codes.
 // These are used for REST transport where the error code is the HTTP status code itself.
 func httpStatusCodeMappings() []errorMapping {
-	return []errorMapping{
-		// These CodeEquals rows are appended to the REST table only (see init); JSON-RPC and
-		// gRPC get the HTTPStatusContains rows below instead, which keep their own verdicts.
-		//
-		// 401: the endpoint rejected the router's credentials. Each provider has its own, so
-		// another provider can serve the request: retryable, and NOT the endpoint's fault — it
-		// answered truthfully about its own configuration (node-capability; see
-		// LavaErrorNodeAccessDenied for what blaming it cost).
-		{CodeEquals(401), LavaErrorNodeAccessDenied},
-		// 404: "not here". Either the data does not exist on this node (yet), or the gateway in
-		// front of it does not route the path. Both mean "try another node", as JSON-RPC's
-		// transaction / block not-found rows already do: retryable, data-scope, not scored.
-		{CodeEquals(404), LavaErrorNodeDataNotHeld},
-		{CodeEquals(405), LavaErrorNodeMethodNotAllowed},
-		{CodeEquals(413), LavaErrorUserRequestTooLarge},
-		{CodeEquals(429), LavaErrorNodeRateLimited},
-		{CodeEquals(500), LavaErrorNodeInternalError},
-		// 501 Not Implemented: node lacks this method/endpoint (e.g. Cosmos REST
-		// gRPC-gateway). A node refusal, not a transient server failure: retried on
-		// another provider, the endpoint unblamed (MAG-2771).
-		{CodeEquals(501), LavaErrorNodeUnimplemented},
-		{CodeEquals(502), LavaErrorNodeBadGateway},
-		{CodeEquals(503), LavaErrorNodeServiceUnavailable},
-		{CodeEquals(504), LavaErrorNodeGatewayTimeout},
-		// Cloudflare custom 5xx errors
-		{CodeEquals(520), LavaErrorNodeServerError},    // Web server returned unknown error
-		{CodeEquals(521), LavaErrorNodeServerError},    // Web server is down
-		{CodeEquals(522), LavaErrorNodeGatewayTimeout}, // Connection timed out
-		{CodeEquals(523), LavaErrorNodeServerError},    // Origin is unreachable
-		{CodeEquals(524), LavaErrorNodeGatewayTimeout}, // A timeout occurred
-		{CodeEquals(525), LavaErrorNodeServerError},    // SSL handshake failed
-		{CodeEquals(526), LavaErrorNodeServerError},    // Invalid SSL certificate
-		{CodeEquals(527), LavaErrorNodeServerError},    // Railgun error
-		{CodeEquals(530), LavaErrorNodeServerError},    // Origin DNS error
+	mappings := make([]errorMapping, 0, len(httpStatusRows))
+	for _, row := range httpStatusRows {
+		mappings = append(mappings, errorMapping{CodeEquals(row.status), row.byCode})
 	}
+	return mappings
 }
 
 // httpStatusMessageMappings returns HTTPStatusContains matchers for common HTTP error status codes.
 // These match status codes appearing as substrings in error messages (e.g., "HTTP status 429").
 func httpStatusMessageMappings() []errorMapping {
-	return []errorMapping{
-		{HTTPStatusContains(401), LavaErrorNodeUnauthorized},
-		{HTTPStatusContains(404), LavaErrorNodeEndpointNotFound},
-		{HTTPStatusContains(405), LavaErrorNodeMethodNotAllowed},
-		{HTTPStatusContains(413), LavaErrorUserRequestTooLarge},
-		{HTTPStatusContains(429), LavaErrorNodeRateLimited},
-		{HTTPStatusContains(500), LavaErrorNodeInternalError},
-		// 501 Not Implemented: node lacks this method/endpoint. Retried on another provider (MAG-2771).
-		{HTTPStatusContains(501), LavaErrorNodeUnimplemented},
-		{HTTPStatusContains(502), LavaErrorNodeBadGateway},
-		{HTTPStatusContains(503), LavaErrorNodeServiceUnavailable},
-		{HTTPStatusContains(504), LavaErrorNodeGatewayTimeout},
-		// Cloudflare custom 5xx errors
-		{HTTPStatusContains(520), LavaErrorNodeServerError},
-		{HTTPStatusContains(521), LavaErrorNodeServerError},
-		{HTTPStatusContains(522), LavaErrorNodeGatewayTimeout},
-		{HTTPStatusContains(523), LavaErrorNodeServerError},
-		{HTTPStatusContains(524), LavaErrorNodeGatewayTimeout},
-		{HTTPStatusContains(525), LavaErrorNodeServerError},
-		{HTTPStatusContains(526), LavaErrorNodeServerError},
-		{HTTPStatusContains(527), LavaErrorNodeServerError},
-		{HTTPStatusContains(530), LavaErrorNodeServerError},
+	mappings := make([]errorMapping, 0, len(httpStatusRows))
+	for _, row := range httpStatusRows {
+		mappings = append(mappings, errorMapping{HTTPStatusContains(row.status), row.byMessage})
 	}
+	return mappings
 }
 
 // init is the ONLY place allowed to mutate genericErrorMappings. It runs before
