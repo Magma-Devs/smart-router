@@ -545,6 +545,14 @@ type debugMuxDeps struct {
 // what it recorded, which is why that case answers Polled=false rather than claiming the poll.
 const debugPollNowTimeout = 25 * time.Second
 
+// maxDebugOffsetSeconds caps the forward warp both time-warp endpoints accept to exactly 24 h
+// (86 400 s). Upper: +24 h crosses a calendar-day boundary; ResetState() — called automatically
+// whenever the offset decreases — purges future-dated ScoreStore entries so real-time samples are
+// accepted immediately after reset. Lower: negative offsets are rejected — a backward shift puts
+// po.now() in the past, so existing ScoreStore entries (from real/forward time) are newer than the
+// new sampleTime, triggering the same TimeConflictingScoresError freeze as an uncleared forward warp.
+const maxDebugOffsetSeconds = float64(24 * 3600) // 86400 s
+
 // cacheFlusher is the minimal surface /debug/reset-all needs from the cache-be
 // client. *performance.Cache satisfies it; tests substitute a fake that
 // records the Flush call.
@@ -553,25 +561,51 @@ type cacheFlusher interface {
 	Flush(ctx context.Context) error
 }
 
+// withRouterLocked runs fn with the router's lock held. Every /debug/* walk over the router's
+// servers and session managers goes through it, so a test fixture without a wired router is a
+// no-op (fn is not called) rather than a nil dereference.
+func withRouterLocked(deps debugMuxDeps, fn func(router *RPCSmartRouter)) {
+	if deps.router == nil {
+		return
+	}
+	deps.router.mu.Lock()
+	defer deps.router.mu.Unlock()
+	fn(deps.router)
+}
+
+// forEachServer calls fn for every non-nil per-chain server, under the router's lock.
+func forEachServer(deps debugMuxDeps, fn func(chainKey string, server *RPCSmartRouterServer)) {
+	withRouterLocked(deps, func(router *RPCSmartRouter) {
+		for chainKey, server := range router.rpcServers {
+			if server != nil {
+				fn(chainKey, server)
+			}
+		}
+	})
+}
+
+// sumOverServers adds up what count returns for every non-nil per-chain server, under the
+// router's lock; the reset handlers report that total.
+func sumOverServers(deps debugMuxDeps, count func(server *RPCSmartRouterServer) int) int {
+	total := 0
+	forEachServer(deps, func(_ string, server *RPCSmartRouterServer) {
+		total += count(server)
+	})
+	return total
+}
+
 // resetAllChainTrackers walks the router's per-server EndpointMonitors
 // and zeroes every cached latest-block, so consistency pre-validation skips the
 // lag check until the next poll repopulates the value. Returns the total number
 // of trackers reset across all servers. Nil-safe at every level so test fixtures
 // without a fully-wired router still get a useful no-op (count == 0).
 func resetAllChainTrackers(deps debugMuxDeps) int {
-	if deps.router == nil {
-		return 0
-	}
-	deps.router.mu.Lock()
-	defer deps.router.mu.Unlock()
-	count := 0
-	for _, server := range deps.router.rpcServers {
-		if server == nil || server.endpointChainTrackerManager == nil {
-			continue
+	return sumOverServers(deps, func(server *RPCSmartRouterServer) int {
+		if server.endpointChainTrackerManager == nil {
+			return 0
 		}
-		count += server.endpointChainTrackerManager.ResetAllLatestBlocks()
-	}
-	return count
+		return server.endpointChainTrackerManager.ResetAllLatestBlocks()
+	})
 }
 
 // resetAllProbeBackoff walks every server's EndpointMonitor and clears the per-endpoint poll
@@ -580,19 +614,12 @@ func resetAllChainTrackers(deps debugMuxDeps) int {
 // /debug/reset-probe-backoff and, since MAG-4278, by /debug/reset-scores and /debug/reset-all.
 // Nil-safe at every level; returns the total number of trackers signalled across all servers.
 func resetAllProbeBackoff(deps debugMuxDeps) int {
-	if deps.router == nil {
-		return 0
-	}
-	deps.router.mu.Lock()
-	defer deps.router.mu.Unlock()
-	count := 0
-	for _, server := range deps.router.rpcServers {
-		if server == nil || server.endpointChainTrackerManager == nil {
-			continue
+	return sumOverServers(deps, func(server *RPCSmartRouterServer) int {
+		if server.endpointChainTrackerManager == nil {
+			return 0
 		}
-		count += server.endpointChainTrackerManager.ResetAllBackoff()
-	}
-	return count
+		return server.endpointChainTrackerManager.ResetAllBackoff()
+	})
 }
 
 // reregisterChainTrackerRows re-registers every currently-configured direct-RPC endpoint that lost
@@ -626,16 +653,18 @@ func resetAllProbeBackoff(deps debugMuxDeps) int {
 // fix — but do not assume the lock provides that exclusion.
 // Returns (ensured, created): endpoints processed, and rows that did not previously exist.
 func reregisterChainTrackerRows(deps debugMuxDeps) (ensured, created int) {
-	if deps.router == nil {
-		return 0, 0
-	}
-	deps.router.mu.Lock()
-	defer deps.router.mu.Unlock()
-	for chainKey, server := range deps.router.rpcServers {
+	withRouterLocked(deps, func(router *RPCSmartRouter) {
+		ensured, created = reregisterChainTrackerRowsLocked(router)
+	})
+	return ensured, created
+}
+
+func reregisterChainTrackerRowsLocked(router *RPCSmartRouter) (ensured, created int) {
+	for chainKey, server := range router.rpcServers {
 		if server == nil || server.endpointChainTrackerManager == nil {
 			continue
 		}
-		csm := deps.router.sessionManagers[chainKey]
+		csm := router.sessionManagers[chainKey]
 		if csm == nil {
 			continue
 		}
@@ -689,30 +718,28 @@ func resolvePollNowTargets(deps debugMuxDeps, networkAddress, chainID, apiInterf
 	if deps.router == nil || networkAddress == "" {
 		return nil
 	}
-	deps.router.mu.Lock()
-	defer deps.router.mu.Unlock()
 	targets := []pollNowTarget{}
-	for _, server := range deps.router.rpcServers {
-		if server == nil || server.endpointChainTrackerManager == nil || server.listenEndpoint == nil {
-			continue
+	forEachServer(deps, func(_ string, server *RPCSmartRouterServer) {
+		if server.endpointChainTrackerManager == nil || server.listenEndpoint == nil {
+			return
 		}
 		if chainID != "" && !strings.EqualFold(chainID, server.listenEndpoint.ChainID) {
-			continue
+			return
 		}
 		if apiInterface != "" && !strings.EqualFold(apiInterface, server.listenEndpoint.ApiInterface) {
-			continue
+			return
 		}
 		// Only servers that actually track this URL — otherwise a multi-chain router would answer
 		// with a row of "no tracker" noise per unrelated chain.
 		if _, ok := server.endpointChainTrackerManager.GetTracker(networkAddress); !ok {
-			continue
+			return
 		}
 		targets = append(targets, pollNowTarget{
 			chainID:      server.listenEndpoint.ChainID,
 			apiInterface: server.listenEndpoint.ApiInterface,
 			monitor:      server.endpointChainTrackerManager,
 		})
-	}
+	})
 	return targets
 }
 
@@ -745,22 +772,19 @@ type providerScoresResponse struct {
 // Nil-safe at every level; returns an empty map when no router or session managers are wired.
 func providerEndpointURLs(deps debugMuxDeps) map[string][]string {
 	urls := map[string][]string{}
-	if deps.router == nil {
-		return urls
-	}
-	deps.router.mu.Lock()
-	defer deps.router.mu.Unlock()
-	for _, csm := range deps.router.sessionManagers {
-		if csm == nil {
-			continue
-		}
-		for _, ep := range csm.GetAllDirectRPCEndpoints() {
-			if ep == nil || ep.Endpoint == nil || ep.ProviderAddress == "" {
+	withRouterLocked(deps, func(router *RPCSmartRouter) {
+		for _, csm := range router.sessionManagers {
+			if csm == nil {
 				continue
 			}
-			urls[ep.ProviderAddress] = append(urls[ep.ProviderAddress], ep.Endpoint.NetworkAddress)
+			for _, ep := range csm.GetAllDirectRPCEndpoints() {
+				if ep == nil || ep.Endpoint == nil || ep.ProviderAddress == "" {
+					continue
+				}
+				urls[ep.ProviderAddress] = append(urls[ep.ProviderAddress], ep.Endpoint.NetworkAddress)
+			}
 		}
-	}
+	})
 	for _, list := range urls {
 		sort.Strings(list) // stable output; the map iteration above is unordered
 	}
@@ -776,20 +800,13 @@ func providerEndpointURLs(deps debugMuxDeps) map[string][]string {
 // at every level (test fixtures without a wired router are a no-op). Returns the number of
 // ChainStates the offset was applied to.
 func setAllChainStateDebugOffset(deps debugMuxDeps, offset time.Duration) int {
-	if deps.router == nil {
-		return 0
-	}
-	deps.router.mu.Lock()
-	defer deps.router.mu.Unlock()
-	count := 0
-	for _, server := range deps.router.rpcServers {
-		if server == nil || server.chainState == nil {
-			continue
+	return sumOverServers(deps, func(server *RPCSmartRouterServer) int {
+		if server.chainState == nil {
+			return 0
 		}
 		server.chainState.SetDebugClockOffset(offset)
-		count++
-	}
-	return count
+		return 1
+	})
 }
 
 // resetAllChainStates clears every server's ChainState tip and consensus baseline back to cold
@@ -799,20 +816,13 @@ func setAllChainStateDebugOffset(deps debugMuxDeps, offset time.Duration) int {
 // within-band value while the liar keeps reporting it, so /debug/reset-* is the only immediate
 // path down. Returns the number of ChainStates reset. Nil-safe at every level.
 func resetAllChainStates(deps debugMuxDeps) int {
-	if deps.router == nil {
-		return 0
-	}
-	deps.router.mu.Lock()
-	defer deps.router.mu.Unlock()
-	count := 0
-	for _, server := range deps.router.rpcServers {
-		if server == nil || server.chainState == nil {
-			continue
+	return sumOverServers(deps, func(server *RPCSmartRouterServer) int {
+		if server.chainState == nil {
+			return 0
 		}
 		server.chainState.Reset()
-		count++
-	}
-	return count
+		return 1
+	})
 }
 
 // resetEndpointHealthAndGauge re-enables every endpoint across all session managers
@@ -825,14 +835,16 @@ func resetAllChainStates(deps debugMuxDeps) int {
 // all-providers-down stress burst) otherwise stay disabled until the next epoch tick, the
 // only other ResetHealth caller — contaminating later tests. Shared by /debug/reset-all
 // and /debug/reset-endpoint-health.
-func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
-	if deps.router == nil {
-		return 0
-	}
-	deps.router.mu.Lock()
-	defer deps.router.mu.Unlock()
+func resetEndpointHealthAndGauge(deps debugMuxDeps) (total int) {
+	withRouterLocked(deps, func(router *RPCSmartRouter) {
+		total = resetEndpointHealthAndGaugeLocked(router)
+	})
+	return total
+}
+
+func resetEndpointHealthAndGaugeLocked(router *RPCSmartRouter) int {
 	total := 0
-	for chainKey, csm := range deps.router.sessionManagers {
+	for chainKey, csm := range router.sessionManagers {
 		if csm == nil {
 			continue
 		}
@@ -846,7 +858,7 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 				ep.Endpoint.ClearStateReasons()
 			}
 		}
-		if server := deps.router.rpcServers[chainKey]; server != nil {
+		if server := router.rpcServers[chainKey]; server != nil {
 			server.headStall.reset()
 			if server.endpointChainTrackerManager != nil {
 				server.endpointChainTrackerManager.ResetStallCounters()
@@ -857,13 +869,13 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 		// providers recover immediately rather than at the next epoch tick — without it
 		// the gauge stays stuck at 0 until a successful relay, one a rarely-used backup
 		// may never receive.
-		server := deps.router.rpcServers[chainKey]
+		server := router.rpcServers[chainKey]
 		if server == nil || server.smartRouterEndpointMetrics == nil || server.listenEndpoint == nil {
 			continue
 		}
 		for _, sessions := range []map[uint64]*lavasession.ConsumerSessionsWithProvider{
-			deps.router.providerSessions[chainKey],
-			deps.router.backupProviderSessions[chainKey],
+			router.providerSessions[chainKey],
+			router.backupProviderSessions[chainKey],
 		} {
 			for _, cswp := range sessions {
 				if cswp != nil {
@@ -1212,15 +1224,6 @@ func sharedStickyReason(wired, requested bool) string {
 func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	optimizers := deps.optimizers
 	currentOffsetNano := deps.offsetNano
-	// maxDebugOffsetSeconds caps the allowed forward warp to exactly 24 h (86 400 s).
-	// Upper: +24 h crosses a calendar-day boundary; ResetState() — called automatically
-	//        whenever the offset decreases — purges future-dated ScoreStore entries so
-	//        real-time samples are accepted immediately after reset.
-	// Lower: negative offsets are rejected — a backward shift puts po.now() in
-	//        the past, so existing ScoreStore entries (from real/forward time) are
-	//        newer than the new sampleTime, triggering the same TimeConflictingScoresError
-	//        freeze as an uncleared forward warp.
-	const maxDebugOffsetSeconds = float64(24 * 3600) // 86400 s
 
 	mux := http.NewServeMux()
 	// GET /debug/cache-state — which cache backend is serving, per tier. Read-only
@@ -1229,57 +1232,18 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// (CacheActive -> getClient spawns a reconnect), so both backends answer through
 	// DebugCacheState, which is contractually side-effect free. A monitoring scrape
 	// must not be able to change the state it is measuring.
-	mux.HandleFunc("/debug/cache-state", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
-		resp := buildCacheStateResponse(deps)
-		w.Header().Set("Content-Type", "application/json")
-		body, err := json.Marshal(resp)
-		if err != nil {
-			// Scalars and fixed structs only — Marshal cannot realistically fail;
-			// surface a 500 rather than a half-written body, as runtime-config does.
-			http.Error(w, "failed to marshal cache state", http.StatusInternalServerError)
-			return
-		}
-		w.Write(body)
-	})
+	mux.HandleFunc("/debug/cache-state", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+		// Scalars and fixed structs only — Marshal cannot realistically fail.
+		writeDebugJSONValue(w, buildCacheStateResponse(deps), "failed to marshal cache state")
+	}))
 
-	mux.HandleFunc("/debug/time-warp", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		// Cap the body at 1 KiB — payload is {"offset_seconds": N}, 1 KiB is
-		// orders of magnitude over the legitimate size and prevents a caller
-		// from streaming an unbounded body into the JSON decoder.
-		r.Body = http.MaxBytesReader(w, r.Body, 1024)
-		var body struct {
-			OffsetSeconds float64 `json:"offset_seconds"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		// Reject NaN / ±Inf — these cast to math.MinInt64 when converted to
-		// time.Duration (int64), producing a huge negative offset.
-		if math.IsNaN(body.OffsetSeconds) || math.IsInf(body.OffsetSeconds, 0) {
-			http.Error(w, "offset_seconds must be a finite number", http.StatusBadRequest)
-			return
-		}
-		// Reject negative offsets — backward shifts freeze the optimizer.
-		if body.OffsetSeconds < 0 {
-			http.Error(w, "offset_seconds must be >= 0 (no travel to the past)", http.StatusBadRequest)
-			return
-		}
-		// Reject values above 24 h.
-		if body.OffsetSeconds > maxDebugOffsetSeconds {
-			http.Error(w, fmt.Sprintf("offset_seconds must be <= %g (24h)", maxDebugOffsetSeconds), http.StatusBadRequest)
+	mux.HandleFunc("/debug/time-warp", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
+		offsetSeconds, ok := decodeDebugOffset(w, r)
+		if !ok {
 			return
 		}
 
-		newNano := int64(body.OffsetSeconds * float64(time.Second))
+		newNano := int64(offsetSeconds * float64(time.Second))
 		prevNano := currentOffsetNano.Swap(newNano)
 		needsReset := newNano < prevNano
 
@@ -1300,9 +1264,8 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// never disturbs ChainState (MAG-2307 review). The per-user seen-block cache this reset used to
 		// flush was retired in T2 (consistency now reads the self-healing tip), so there is nothing to
 		// flush here; /debug/reset-all and /debug/reset-scores reset ChainState instead (T11).
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"offset_seconds":%v,"applied_to_chains":true}`, body.OffsetSeconds)
-	})
+		writeDebugJSONf(w, `{"offset_seconds":%v,"applied_to_chains":true}`, offsetSeconds)
+	}))
 
 	// POST /debug/chain-state-time-warp — ages the per-chain ChainState TTL/staleness/consensus clock
 	// WITHOUT waiting real time, so black-box tests can cross a ~130 s ETH staleness window in seconds.
@@ -1318,44 +1281,22 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// DURING an active >TTL warp reads as already aged — live traffic cannot refresh TipFresh while the
 	// warp is held. That is the intended "age out state while endpoints are quiesced" behavior; for a
 	// clean result, warp with the target endpoints quiesced.
-	mux.HandleFunc("/debug/chain-state-time-warp", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+	mux.HandleFunc("/debug/chain-state-time-warp", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
+		offsetSeconds, ok := decodeDebugOffset(w, r)
+		if !ok {
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 1024)
-		var body struct {
-			OffsetSeconds float64 `json:"offset_seconds"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
-			return
-		}
-		if math.IsNaN(body.OffsetSeconds) || math.IsInf(body.OffsetSeconds, 0) {
-			http.Error(w, "offset_seconds must be a finite number", http.StatusBadRequest)
-			return
-		}
-		if body.OffsetSeconds < 0 {
-			http.Error(w, "offset_seconds must be >= 0 (no travel to the past)", http.StatusBadRequest)
-			return
-		}
-		if body.OffsetSeconds > maxDebugOffsetSeconds {
-			http.Error(w, fmt.Sprintf("offset_seconds must be <= %g (24h)", maxDebugOffsetSeconds), http.StatusBadRequest)
-			return
-		}
-		offset := time.Duration(int64(body.OffsetSeconds * float64(time.Second)))
+		offset := time.Duration(int64(offsetSeconds * float64(time.Second)))
 		applied := setAllChainStateDebugOffset(deps, offset)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"offset_seconds":%v,"chain_states_warped":%d}`, body.OffsetSeconds, applied)
-	})
+		writeDebugJSONf(w, `{"offset_seconds":%v,"chain_states_warped":%d}`, offsetSeconds, applied)
+	}))
 
 	// GET /debug/time — returns real and effective time so callers can verify the clock moved.
 	mux.HandleFunc("/debug/time", func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
 		nano := currentOffsetNano.Load()
 		effective := now.Add(time.Duration(nano))
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"real_time":%q,"effective_time":%q,"offset_seconds":%v}`,
+		writeDebugJSONf(w, `{"real_time":%q,"effective_time":%q,"offset_seconds":%v}`,
 			now.UTC().Format(time.RFC3339),
 			effective.UTC().Format(time.RFC3339),
 			float64(nano)/float64(time.Second))
@@ -1369,11 +1310,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// Topic C C-G, and the ChainState tip that replaced it is what the reset below
 	// now clears.) Gives a recovery path that does not touch session-manager state
 	// — which trips a separate BTC-router regression on /debug/reset-all.
-	mux.HandleFunc("/debug/reset-scores", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/reset-scores", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		count := 0
 		optimizers.Range(func(chainID string, opt *provideroptimizer.ProviderOptimizer) bool {
 			opt.ResetState()
@@ -1383,10 +1320,9 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		trackersReset := resetAllChainTrackers(deps)
 		chainStatesReset := resetAllChainStates(deps)
 		probeBackoffReset := resetAllProbeBackoff(deps)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"reset":true,"chains_reset":%d,"trackers_reset":%d,"chainstates_reset":%d,"probe_backoff_reset":%d}`,
+		writeDebugJSONf(w, `{"reset":true,"chains_reset":%d,"trackers_reset":%d,"chainstates_reset":%d,"probe_backoff_reset":%d}`,
 			count, trackersReset, chainStatesReset, probeBackoffReset)
-	})
+	}))
 
 	// POST /debug/reset-all — flush every state store the test framework
 	// cares about in a single call: in-process Ristretto, optimizer scores,
@@ -1402,11 +1338,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// Returns 500 if cache-be is configured and its flush RPC fails — a
 	// silent failure here would advertise a capability the deployment did
 	// not actually fulfill.
-	mux.HandleFunc("/debug/reset-all", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/reset-all", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		// 1. Optimizers: drop score caches, T-Digests, latest-sync data, and
 		//    the local Ristretto response cache. Also clear any active NowFunc
 		//    and zero the offset so a stale forward-warp doesn't reappear after
@@ -1450,16 +1382,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    providers can only accumulate across test runs unless we mass-
 		//    restore here. ResetBlockedProviders is the explicit escape hatch
 		//    for /debug/* paths; production relay paths never reach it.
-		if deps.router != nil {
-			deps.router.mu.Lock()
-			for _, csm := range deps.router.sessionManagers {
+		withRouterLocked(deps, func(router *RPCSmartRouter) {
+			for _, csm := range router.sessionManagers {
 				if csm != nil {
 					csm.ResetTransientFailureState()
 					csm.ResetBlockedProviders()
 				}
 			}
-			deps.router.mu.Unlock()
-		}
+		})
 
 		// 5. External cache-be pod (MAG-1764). When --cache-be is configured,
 		//    the in-process Ristretto reset above is not the cache callers
@@ -1524,13 +1454,12 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// part of the contract an out-of-repo prober reads. Its postcondition —
 		// "no retry hash bans survive this call" — still holds, vacuously. Drop
 		// the key only together with the prober that requires it.
-		w.Header().Set("Content-Type", "application/json")
 		if cacheBeFlushed {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","chain-trackers","probe-backoff","cache-be"]}`)
+			writeDebugJSONf(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","chain-trackers","probe-backoff","cache-be"]}`)
 		} else {
-			fmt.Fprint(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","chain-trackers","probe-backoff"]}`)
+			writeDebugJSONf(w, `{"reset":true,"cleared":["optimizer","ristretto","retries-manager","session-manager","reported-providers","sticky-sessions","seen-block","chain-state","blocked-providers","endpoint-health","pairing","chain-trackers","probe-backoff"]}`)
 		}
-	})
+	}))
 
 	// POST /debug/reset-pairing — cold-rebuild every chain's pairing table from
 	// the startup provider config, re-admitting providers the per-epoch spec
@@ -1541,16 +1470,12 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// demoted primary. Cold — no re-probing; the simulator controls provider
 	// behaviour in the tests this serves. No-op 200 (empty restored) when the
 	// router is absent (test fixtures) so callers can probe it unconditionally.
-	mux.HandleFunc("/debug/reset-pairing", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/reset-pairing", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		restored := map[string][]string{}
 		if deps.router != nil {
 			restored = deps.router.rebuildPairingFromConfig()
 		}
-		w.Header().Set("Content-Type", "application/json")
+		setDebugJSONHeader(w)
 		body, err := json.Marshal(map[string]any{"reset": true, "restored": restored})
 		if err != nil {
 			// restored is map[string][]string — Marshal can't realistically fail;
@@ -1559,7 +1484,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			return
 		}
 		w.Write(body)
-	})
+	}))
 
 	// GET /debug/logs — return recent in-memory log records, optionally scoped
 	// by request_id and/or a [from,to] time window, so an external test harness
@@ -1568,11 +1493,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// enabled this returns an empty set. Each line is an already-valid JSON
 	// object (zerolog JSON record); we assemble the array by joining the raw
 	// bytes with commas rather than re-marshalling.
-	mux.HandleFunc("/debug/logs", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/logs", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		requestID := q.Get("request_id")
 
@@ -1602,8 +1523,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 		lines := utils.ReadDebugLogBuffer(requestID, from, to, limit)
 
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"count":%d,"lines":[`, len(lines))
+		writeDebugJSONf(w, `{"count":%d,"lines":[`, len(lines))
 		for i, line := range lines {
 			if i > 0 {
 				w.Write([]byte{','})
@@ -1613,19 +1533,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			w.Write([]byte(strings.TrimRight(string(line), "\n")))
 		}
 		fmt.Fprint(w, "]}")
-	})
+	}))
 
 	// POST /debug/logs/clear — drop every buffered log record so a test can
 	// start from a clean slate before exercising a scenario.
-	mux.HandleFunc("/debug/logs/clear", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/logs/clear", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		utils.ClearDebugLogBuffer()
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"cleared":true}`)
-	})
+		writeDebugJSONf(w, `{"cleared":true}`)
+	}))
 
 	// GET /debug/endpoint-state — per-endpoint poll-health + enable/recovery state (MAG-2202 endpoint 1).
 	// Returns a flat array of self-describing records (ChainID + ApiInterface + NetworkAddress identify
@@ -1634,91 +1549,83 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// endpoint's enable/recovery state (Endpoint.HealthSnapshot: Enabled/DisabledAt/
 	// ConsecutiveHealthyProbes). Lets the automation suite verify F1 re-enable, recovery latency, the
 	// relay-vs-poll Source gate, and failure-streak reset from the wire. Read-only; nil-router safe.
-	mux.HandleFunc("/debug/endpoint-state", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/endpoint-state", debugRowsHandler(deps, func(router *RPCSmartRouter) []map[string]any {
 		rows := []map[string]any{}
-		if deps.router != nil {
-			deps.router.mu.Lock()
-			for chainKey, server := range deps.router.rpcServers {
-				if server == nil || server.endpointChainTrackerManager == nil || server.listenEndpoint == nil {
-					continue
-				}
-				csm := deps.router.sessionManagers[chainKey]
-				if csm == nil {
-					continue
-				}
-				observations := server.endpointChainTrackerManager.SnapshotObservations()
-				backoffByURL := server.endpointChainTrackerManager.BackoffSnapshot()
-				idle := server.endpointChainTrackerManager.IdleSnapshot(time.Now())
-				for _, ep := range csm.GetAllDirectRPCEndpoints() {
-					if ep == nil || ep.Endpoint == nil {
-						continue
-					}
-					url := ep.Endpoint.NetworkAddress
-					health := ep.Endpoint.HealthSnapshot()
-					obs := observations[url] // zero value when no observation recorded yet
-					rows = append(rows, map[string]any{
-						"ChainID":        server.listenEndpoint.ChainID,
-						"ApiInterface":   server.listenEndpoint.ApiInterface,
-						"NetworkAddress": url,
-						// The url label of rpc_endpoint_url_latest_block and its siblings, which
-						// carry no part of the url: how an alert's url maps back to this row.
-						"URLFingerprint":           metrics.URLFingerprint(url),
-						"Enabled":                  health.Enabled,
-						"DisabledAt":               debugTimeRFC3339(health.DisabledAt),
-						"DisableReason":            string(health.DisableReason),
-						"ConsecutiveHealthyProbes": health.ConsecutiveHealthyProbes,
-						"ConsecutivePollFailures":  obs.ConsecutivePollFailures,
-						"LastSuccessfulPoll":       debugTimeRFC3339(obs.LastSuccessfulPoll),
-						"LatestBlock":              obs.LatestBlock,
-						"ObservedAt":               debugTimeRFC3339(obs.ObservedAt),
-						"Source":                   obs.Source.String(),
-						// The MAG-2550 replay gate, made visible: a disabled endpoint with a
-						// RelayProbeMethod is held pending a successful replay of that method (or
-						// the attempt-budget fallback) — NOT merely earning its poll streak.
-						"RelayProbeMethod":   health.RelayProbeMethod,
-						"RelayProbeAttempts": health.RelayProbeAttempts,
-						"ReenableProbeFlaps": health.ReenableProbeFlaps,
-						// MAG-3986: Enabled is the event slot only. Usable is what selection
-						// sees — Enabled AND no state reason. StateReasons lists head-stalled
-						// with when it was added and the block it was stuck on; SameBlockCycles
-						// is the evidence that adds it, and a HighestBlockSeen above the stuck
-						// block removes it.
-						"Usable":            health.Usable,
-						"StateReasons":      debugStateReasons(health.StateReasons),
-						"SameBlockCycles":   obs.SameBlockCycles,
-						"LastAnsweredBlock": obs.LastAnsweredBlock,
-						"HighestBlockSeen":  obs.HighestBlockSeen,
-						"Provider":          ep.ProviderAddress,
-						"Backup":            ep.Backup,
-						// PollIntervalMs is the live dedicated-poll cadence: base when healthy,
-						// exponentialBackoff-stretched when the endpoint has been failing. This is the
-						// observable /debug/reset-probe-backoff returns to base (MAG-2395).
-						"PollIntervalMs": backoffByURL[url].Milliseconds(),
-						// HashPolling says whether this chain's tracker does block-hash work
-						// (fork detection) and, when it does not, WHY — "off-operator-choice"
-						// (--enable-fork-detection not set) vs "off-spec-no-block-by-num" (the
-						// chain cannot serve hashes at all, so the flag would not help).
-						"HashPolling": server.endpointChainTrackerManager.HashPollingMode().String(),
-						// Idle mode (endpointstate/idle.go) — chain-level like HashPolling, repeated
-						// per row so a row stands alone: "off" (not configured), "active", or "idle"
-						// (no client relay within --chain-tracker-idle-after; polls paused, so the
-						// poll-health fields above stop moving). WakeInProgress is the burst that
-						// follows the relay ending an idle period, until its first poll lands.
-						"IdleMode":        idleModeString(idle),
-						"LastClientRelay": debugTimeRFC3339(idle.LastClientRelay),
-						"IdleSince":       debugTimeRFC3339(idle.IdleSince),
-						"WakeInProgress":  idle.WakeInProgress,
-					})
-				}
+		for chainKey, server := range router.rpcServers {
+			if server == nil || server.endpointChainTrackerManager == nil || server.listenEndpoint == nil {
+				continue
 			}
-			deps.router.mu.Unlock()
+			csm := router.sessionManagers[chainKey]
+			if csm == nil {
+				continue
+			}
+			observations := server.endpointChainTrackerManager.SnapshotObservations()
+			backoffByURL := server.endpointChainTrackerManager.BackoffSnapshot()
+			idle := server.endpointChainTrackerManager.IdleSnapshot(time.Now())
+			for _, ep := range csm.GetAllDirectRPCEndpoints() {
+				if ep == nil || ep.Endpoint == nil {
+					continue
+				}
+				url := ep.Endpoint.NetworkAddress
+				health := ep.Endpoint.HealthSnapshot()
+				obs := observations[url] // zero value when no observation recorded yet
+				rows = append(rows, map[string]any{
+					"ChainID":        server.listenEndpoint.ChainID,
+					"ApiInterface":   server.listenEndpoint.ApiInterface,
+					"NetworkAddress": url,
+					// The url label of rpc_endpoint_url_latest_block and its siblings, which
+					// carry no part of the url: how an alert's url maps back to this row.
+					"URLFingerprint":           metrics.URLFingerprint(url),
+					"Enabled":                  health.Enabled,
+					"DisabledAt":               debugTimeRFC3339(health.DisabledAt),
+					"DisableReason":            string(health.DisableReason),
+					"ConsecutiveHealthyProbes": health.ConsecutiveHealthyProbes,
+					"ConsecutivePollFailures":  obs.ConsecutivePollFailures,
+					"LastSuccessfulPoll":       debugTimeRFC3339(obs.LastSuccessfulPoll),
+					"LatestBlock":              obs.LatestBlock,
+					"ObservedAt":               debugTimeRFC3339(obs.ObservedAt),
+					"Source":                   obs.Source.String(),
+					// The MAG-2550 replay gate, made visible: a disabled endpoint with a
+					// RelayProbeMethod is held pending a successful replay of that method (or
+					// the attempt-budget fallback) — NOT merely earning its poll streak.
+					"RelayProbeMethod":   health.RelayProbeMethod,
+					"RelayProbeAttempts": health.RelayProbeAttempts,
+					"ReenableProbeFlaps": health.ReenableProbeFlaps,
+					// MAG-3986: Enabled is the event slot only. Usable is what selection
+					// sees — Enabled AND no state reason. StateReasons lists head-stalled
+					// with when it was added and the block it was stuck on; SameBlockCycles
+					// is the evidence that adds it, and a HighestBlockSeen above the stuck
+					// block removes it.
+					"Usable":            health.Usable,
+					"StateReasons":      debugStateReasons(health.StateReasons),
+					"SameBlockCycles":   obs.SameBlockCycles,
+					"LastAnsweredBlock": obs.LastAnsweredBlock,
+					"HighestBlockSeen":  obs.HighestBlockSeen,
+					"Provider":          ep.ProviderAddress,
+					"Backup":            ep.Backup,
+					// PollIntervalMs is the live dedicated-poll cadence: base when healthy,
+					// exponentialBackoff-stretched when the endpoint has been failing. This is the
+					// observable /debug/reset-probe-backoff returns to base (MAG-2395).
+					"PollIntervalMs": backoffByURL[url].Milliseconds(),
+					// HashPolling says whether this chain's tracker does block-hash work
+					// (fork detection) and, when it does not, WHY — "off-operator-choice"
+					// (--enable-fork-detection not set) vs "off-spec-no-block-by-num" (the
+					// chain cannot serve hashes at all, so the flag would not help).
+					"HashPolling": server.endpointChainTrackerManager.HashPollingMode().String(),
+					// Idle mode (endpointstate/idle.go) — chain-level like HashPolling, repeated
+					// per row so a row stands alone: "off" (not configured), "active", or "idle"
+					// (no client relay within --chain-tracker-idle-after; polls paused, so the
+					// poll-health fields above stop moving). WakeInProgress is the burst that
+					// follows the relay ending an idle period, until its first poll lands.
+					"IdleMode":        idleModeString(idle),
+					"LastClientRelay": debugTimeRFC3339(idle.LastClientRelay),
+					"IdleSince":       debugTimeRFC3339(idle.IdleSince),
+					"WakeInProgress":  idle.WakeInProgress,
+				})
+			}
 		}
-		writeDebugRows(w, rows)
-	})
+		return rows
+	}))
 
 	// GET /debug/chain-state — per-chain consensus/tip state (MAG-2202 endpoint 2). Flat array of
 	// self-describing records (ChainID + ApiInterface). Raw, NON-TTL-gated snapshot
@@ -1726,73 +1633,57 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// realignment, TTL expiry, empty-snapshot baseline clearing, and cold-start bootstrap from the raw
 	// (block, timestamp) pairs — a TTL-gated getter would hide exactly those transitions. Read-only;
 	// nil-router safe.
-	mux.HandleFunc("/debug/chain-state", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/chain-state", debugRowsHandler(deps, func(router *RPCSmartRouter) []map[string]any {
 		rows := []map[string]any{}
-		if deps.router != nil {
-			deps.router.mu.Lock()
-			for _, server := range deps.router.rpcServers {
-				if server == nil || server.chainState == nil || server.listenEndpoint == nil {
-					continue
-				}
-				s := server.chainState.DebugSnapshot()
-				rows = append(rows, map[string]any{
-					"ChainID":           server.listenEndpoint.ChainID,
-					"ApiInterface":      server.listenEndpoint.ApiInterface,
-					"ObservedTip":       s.ObservedTip,
-					"LastObservedAt":    debugTimeRFC3339(s.LastObservedAt),
-					"ConsensusBaseline": s.ConsensusBaseline,
-					"HasBaseline":       s.HasBaseline,
-					"BaselineSince":     debugTimeRFC3339(s.BaselineSince),
-					"Initialized":       s.Initialized,
-					"TipFresh":          s.TipFresh,
-					"BaselineFresh":     s.BaselineFresh,
-				})
+		for _, server := range router.rpcServers {
+			if server == nil || server.chainState == nil || server.listenEndpoint == nil {
+				continue
 			}
-			deps.router.mu.Unlock()
+			s := server.chainState.DebugSnapshot()
+			rows = append(rows, map[string]any{
+				"ChainID":           server.listenEndpoint.ChainID,
+				"ApiInterface":      server.listenEndpoint.ApiInterface,
+				"ObservedTip":       s.ObservedTip,
+				"LastObservedAt":    debugTimeRFC3339(s.LastObservedAt),
+				"ConsensusBaseline": s.ConsensusBaseline,
+				"HasBaseline":       s.HasBaseline,
+				"BaselineSince":     debugTimeRFC3339(s.BaselineSince),
+				"Initialized":       s.Initialized,
+				"TipFresh":          s.TipFresh,
+				"BaselineFresh":     s.BaselineFresh,
+			})
 		}
-		writeDebugRows(w, rows)
-	})
+		return rows
+	}))
 
 	// GET /debug/provider-routing — per-CSM routing-pool state (MAG-2202 endpoint 3). Flat array of
 	// self-describing records (ChainID + ApiInterface): ValidAddresses / CurrentlyBlockedProviderAddresses
 	// / BlockedBackupProviders, so the suite can confirm a re-enabled provider is actually back in the
 	// routing pool rather than enabled-but-unroutable (F2). Read-only; nil-router safe.
-	mux.HandleFunc("/debug/provider-routing", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/provider-routing", debugRowsHandler(deps, func(router *RPCSmartRouter) []map[string]any {
 		rows := []map[string]any{}
-		if deps.router != nil {
-			deps.router.mu.Lock()
-			for _, csm := range deps.router.sessionManagers {
-				if csm == nil {
-					continue
-				}
-				ep := csm.RPCEndpoint()
-				s := csm.ProviderRoutingSnapshot()
-				rows = append(rows, map[string]any{
-					"ChainID":                           ep.ChainID,
-					"ApiInterface":                      ep.ApiInterface,
-					"ValidAddresses":                    s.ValidAddresses,
-					"CurrentlyBlockedProviderAddresses": s.CurrentlyBlockedProviderAddresses,
-					"BlockedBackupProviders":            s.BlockedBackupProviders,
-					// Blocked answers WHY each of the above is out (MAG-2599); HeldOff covers the
-					// providers that are eligible and healthy but are not being asked yet because
-					// they rate-limited us. The three original keys are unchanged on purpose — the
-					// MAG-2202 suite reads them by name.
-					"Blocked": s.Blocked,
-					"HeldOff": s.HeldOff,
-				})
+		for _, csm := range router.sessionManagers {
+			if csm == nil {
+				continue
 			}
-			deps.router.mu.Unlock()
+			ep := csm.RPCEndpoint()
+			s := csm.ProviderRoutingSnapshot()
+			rows = append(rows, map[string]any{
+				"ChainID":                           ep.ChainID,
+				"ApiInterface":                      ep.ApiInterface,
+				"ValidAddresses":                    s.ValidAddresses,
+				"CurrentlyBlockedProviderAddresses": s.CurrentlyBlockedProviderAddresses,
+				"BlockedBackupProviders":            s.BlockedBackupProviders,
+				// Blocked answers WHY each of the above is out (MAG-2599); HeldOff covers the
+				// providers that are eligible and healthy but are not being asked yet because
+				// they rate-limited us. The three original keys are unchanged on purpose — the
+				// MAG-2202 suite reads them by name.
+				"Blocked": s.Blocked,
+				"HeldOff": s.HeldOff,
+			})
 		}
-		writeDebugRows(w, rows)
-	})
+		return rows
+	}))
 
 	// GET /debug/sticky-claims — per-endpoint cross-pod sticky-session claim outcomes (MAG-3860). Flat
 	// array of self-describing records (ChainID + ApiInterface). SharedSticky says whether the fleet-wide
@@ -1812,34 +1703,26 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// That reset drops the pins through Clear(), so invalidated does not move on it. Without the registry
 	// every count stays 0, so SharedSticky is what tells "off" from "never fired". Read-only; nil-router
 	// safe.
-	mux.HandleFunc("/debug/sticky-claims", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/sticky-claims", debugRowsHandler(deps, func(router *RPCSmartRouter) []map[string]any {
 		rows := []map[string]any{}
-		if deps.router != nil {
-			podID := endpointstate.LocalPodID()
-			deps.router.mu.Lock()
-			for _, csm := range deps.router.sessionManagers {
-				if csm == nil {
-					continue
-				}
-				ep := csm.RPCEndpoint()
-				shared, outcomes := csm.StickyClaimCounts()
-				rows = append(rows, map[string]any{
-					"ChainID":            ep.ChainID,
-					"ApiInterface":       ep.ApiInterface,
-					"PodID":              podID,
-					"SharedSticky":       shared,
-					"SharedStickyReason": sharedStickyReason(shared, csm.SharedStickyRequested()),
-					"Outcomes":           outcomes,
-				})
+		podID := endpointstate.LocalPodID()
+		for _, csm := range router.sessionManagers {
+			if csm == nil {
+				continue
 			}
-			deps.router.mu.Unlock()
+			ep := csm.RPCEndpoint()
+			shared, outcomes := csm.StickyClaimCounts()
+			rows = append(rows, map[string]any{
+				"ChainID":            ep.ChainID,
+				"ApiInterface":       ep.ApiInterface,
+				"PodID":              podID,
+				"SharedSticky":       shared,
+				"SharedStickyReason": sharedStickyReason(shared, csm.SharedStickyRequested()),
+				"Outcomes":           outcomes,
+			})
 		}
-		writeDebugRows(w, rows)
-	})
+		return rows
+	}))
 
 	// GET /debug/probe-loop — per-chain proactive-prober cycle telemetry (MAG-2202 endpoint 4). Flat
 	// array of self-describing records (ChainID + ApiInterface): the configured --probe-loop-interval
@@ -1847,51 +1730,43 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// endpoints scored, endpoints re-enabled (F1), and providers whose QoS sample fed no sync evidence
 	// (F5). CyclesCompleted is the monotonic liveness counter for verifying the prober ticks on its own
 	// cadence (F6). Read-only; nil-router safe. Timestamps/durations: RFC3339 + integer milliseconds.
-	mux.HandleFunc("/debug/probe-loop", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/probe-loop", debugRowsHandler(deps, func(router *RPCSmartRouter) []map[string]any {
 		rows := []map[string]any{}
-		if deps.router != nil {
-			deps.router.mu.Lock()
-			for _, server := range deps.router.rpcServers {
-				if server == nil || server.listenEndpoint == nil {
-					continue
-				}
-				s := server.probeStats.snapshot()
-				rows = append(rows, map[string]any{
-					"ChainID":             server.listenEndpoint.ChainID,
-					"ApiInterface":        server.listenEndpoint.ApiInterface,
-					"CycleIntervalMs":     s.CycleIntervalMs,
-					"CyclesCompleted":     s.CyclesCompleted,
-					"LastCycleStartedAt":  debugTimeRFC3339(s.LastCycleStartedAt),
-					"LastCycleDurationMs": s.LastCycleDurationMs,
-					"EndpointsScored":     s.EndpointsScored,
-					"ReEnabledCount":      s.ReEnabledCount,
-					"SyncOmittedCount":    s.SyncOmittedCount,
-					// MAG-2550 replay-gate telemetry: how many disabled endpoints are held on
-					// recorded relay evidence, and the cumulative replay outcomes.
-					"EvidenceGatedCount": s.EvidenceGatedCount,
-					// Idle mode: the last cycle withheld its QoS feed / skipped the head-stall step
-					// because the chain was idle or a wake burst was still re-polling.
-					"QoSFeedPausedIdle":   s.QoSFeedPausedIdle,
-					"HeadStallPausedIdle": s.HeadStallPausedIdle,
-					"ReplaysAttempted":    s.ReplaysAttempted,
-					"ReplaysRecovered":    s.ReplaysRecovered,
-					"ReplaysStillFailing": s.ReplaysStillFailing,
-					"ReplaysInconclusive": s.ReplaysInconclusive,
-					// MAG-3986 head-stall transitions, cumulative since process start.
-					"StalledAdded":    s.StalledAdded,
-					"StalledRemoved":  s.StalledRemoved,
-					"StalledKept":     s.StalledKept,
-					"StalledReleased": s.StalledReleased,
-				})
+		for _, server := range router.rpcServers {
+			if server == nil || server.listenEndpoint == nil {
+				continue
 			}
-			deps.router.mu.Unlock()
+			s := server.probeStats.snapshot()
+			rows = append(rows, map[string]any{
+				"ChainID":             server.listenEndpoint.ChainID,
+				"ApiInterface":        server.listenEndpoint.ApiInterface,
+				"CycleIntervalMs":     s.CycleIntervalMs,
+				"CyclesCompleted":     s.CyclesCompleted,
+				"LastCycleStartedAt":  debugTimeRFC3339(s.LastCycleStartedAt),
+				"LastCycleDurationMs": s.LastCycleDurationMs,
+				"EndpointsScored":     s.EndpointsScored,
+				"ReEnabledCount":      s.ReEnabledCount,
+				"SyncOmittedCount":    s.SyncOmittedCount,
+				// MAG-2550 replay-gate telemetry: how many disabled endpoints are held on
+				// recorded relay evidence, and the cumulative replay outcomes.
+				"EvidenceGatedCount": s.EvidenceGatedCount,
+				// Idle mode: the last cycle withheld its QoS feed / skipped the head-stall step
+				// because the chain was idle or a wake burst was still re-polling.
+				"QoSFeedPausedIdle":   s.QoSFeedPausedIdle,
+				"HeadStallPausedIdle": s.HeadStallPausedIdle,
+				"ReplaysAttempted":    s.ReplaysAttempted,
+				"ReplaysRecovered":    s.ReplaysRecovered,
+				"ReplaysStillFailing": s.ReplaysStillFailing,
+				"ReplaysInconclusive": s.ReplaysInconclusive,
+				// MAG-3986 head-stall transitions, cumulative since process start.
+				"StalledAdded":    s.StalledAdded,
+				"StalledRemoved":  s.StalledRemoved,
+				"StalledKept":     s.StalledKept,
+				"StalledReleased": s.StalledReleased,
+			})
 		}
-		writeDebugRows(w, rows)
-	})
+		return rows
+	}))
 
 	// POST /debug/poll-now — force ONE endpoint's ChainTracker to run its dedicated poll right now,
 	// and answer only once that poll's result has been recorded (MAG-2649). Without it a test that
@@ -1945,20 +1820,13 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// either. So a setup that rewinds a simulator's head and then triggers a poll reads back the
 	// previous, higher block. That is the production anti-flap rule faithfully applied, not a failed
 	// trigger.
-	mux.HandleFunc("/debug/poll-now", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
-		// Same 1 KiB cap as the other JSON debug handlers: the body is three short strings.
-		r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	mux.HandleFunc("/debug/poll-now", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			NetworkAddress string `json:"network_address"`
 			ChainID        string `json:"chain_id"`
 			ApiInterface   string `json:"api_interface"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
+		if !decodeDebugBody(w, r, &body) {
 			return
 		}
 		if body.NetworkAddress == "" {
@@ -2025,11 +1893,11 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// budget above, which says nothing about the tracker and everything about the upstream's
 		// latency or the budget being shared across matched targets.
 		if !polledAny {
-			w.Header().Set("Content-Type", "application/json") // must precede WriteHeader
+			setDebugJSONHeader(w) // must precede WriteHeader
 			w.WriteHeader(http.StatusGatewayTimeout)
 		}
 		writeDebugRows(w, rows)
-	})
+	}))
 
 	// GET /debug/provider-scores — the per-provider quality scores the router is holding RIGHT NOW:
 	// the values it uses to decide where the next request goes (MAG-2707). Read-only.
@@ -2064,11 +1932,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// test asserting "this provider was not marked down" should read, while the Selection* values are
 	// those same signals after normalisation, with Composite the number selection actually ranks on.
 	// NetworkAddresses joins the row to /debug/endpoint-state (see providerEndpointURLs).
-	mux.HandleFunc("/debug/provider-scores", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/provider-scores", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
 		chainIDFilter := r.URL.Query().Get("chain_id")
 
 		snapshot := deps.qosClient.SnapshotReports(chainIDFilter) // nil-receiver safe
@@ -2127,14 +1991,11 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}
 		sortDebugRows(rows)
 
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(providerScoresResponse{
+		encodeDebugJSON(w, providerScoresResponse{
 			Rows:              rows,
 			ChainsUnavailable: snapshot.ChainsUnavailable,
-		}); err != nil {
-			utils.LavaFormatWarning("failed encoding provider scores response", err)
-		}
-	})
+		}, "failed encoding provider scores response")
+	}))
 
 	// GET /debug/cross-validation-events — the cross-validation dissent the router actually recorded
 	// (MAG-2772). Read-only.
@@ -2170,11 +2031,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	//
 	// The ring is bounded; X-Cross-Validation-Events-Dropped reports how many events were evicted
 	// since it was installed (or since the last clear), so truncation cannot pass for absence.
-	mux.HandleFunc("/debug/cross-validation-events", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/cross-validation-events", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		limit := 0 // 0 = the whole ring
 		if v := q.Get("limit"); v != "" {
@@ -2200,44 +2057,31 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		// meaningful one — it is what pairs a reply-time dissent with the straggler that followed it.
 		// Seq makes that order explicit for a caller that re-sorts.
 		w.Header().Set("X-Cross-Validation-Events-Dropped", strconv.FormatUint(dropped, 10))
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(rows); err != nil {
-			utils.LavaFormatWarning("failed encoding cross-validation events response", err)
-		}
-	})
+		encodeDebugJSON(w, rows, "failed encoding cross-validation events response")
+	}))
 
 	// POST /debug/cross-validation-events/clear — drop every recorded event so a test can isolate
 	// itself from earlier traffic (MAG-2772). Optional for correctness — the rows are filterable by
 	// request_id, which every test already holds — and provided because it is the same one-liner
 	// /debug/logs/clear already offers. 503 when the recorder is not installed, so a clear that
 	// cleared nothing is never reported as success.
-	mux.HandleFunc("/debug/cross-validation-events/clear", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/cross-validation-events/clear", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		cleared, enabled := clearCrossValidationEvents()
 		if !enabled {
 			http.Error(w, "cross-validation event recording is not enabled on this router", http.StatusServiceUnavailable)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"cleared":true,"events_cleared":%d}`, cleared)
-	})
+		writeDebugJSONf(w, `{"cleared":true,"events_cleared":%d}`, cleared)
+	}))
 
 	// POST /debug/reset-endpoint-health — focused companion to /debug/reset-all (MAG-2186):
 	// re-enable every provider endpoint disabled by MaxConsecutiveConnectionAttempts
 	// (Endpoint.Enabled=false) and mirror the reset onto the Prometheus health gauge,
 	// nothing else. The name mirrors Endpoint.ResetHealth() in the source for discoverability.
-	mux.HandleFunc("/debug/reset-endpoint-health", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/reset-endpoint-health", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		reenabled := resetEndpointHealthAndGauge(deps)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"reset":true,"endpoints_reenabled":%d}`, reenabled)
-	})
+		writeDebugJSONf(w, `{"reset":true,"endpoints_reenabled":%d}`, reenabled)
+	}))
 
 	// POST /debug/reset-probe-backoff — clear the ChainTracker probe back-off on every endpoint so
 	// each provider's poll schedule returns to base cadence (MAG-2395). reset-all and reset-scores
@@ -2246,15 +2090,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// stretched schedule (up to BACKOFF_MAX_TIME = 1m) after it. Cadence only — nothing else is
 	// touched here. The effect is observable as PollIntervalMs returning to base in
 	// /debug/endpoint-state.
-	mux.HandleFunc("/debug/reset-probe-backoff", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/reset-probe-backoff", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		reset := resetAllProbeBackoff(deps)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"reset":true,"endpoints_reset":%d}`, reset)
-	})
+		writeDebugJSONf(w, `{"reset":true,"endpoints_reset":%d}`, reset)
+	}))
 
 	// POST /debug/reset-chaintracker-rows — re-register every configured endpoint that lost its
 	// ChainTracker row (MAG-2395). The epoch cleanup can delete a briefly-unhealthy provider's row
@@ -2262,15 +2101,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// pod restart. This re-adds any missing row from the config/pairing set and is a no-op for rows
 	// that already exist. "rows_ensured" is the number of configured endpoints checked;
 	// "rows_created" is how many rows were actually (re)created.
-	mux.HandleFunc("/debug/reset-chaintracker-rows", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "POST only", http.StatusMethodNotAllowed)
-			return
-		}
+	mux.HandleFunc("/debug/reset-chaintracker-rows", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		ensured, created := reregisterChainTrackerRows(deps)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"reset":true,"rows_ensured":%d,"rows_created":%d}`, ensured, created)
-	})
+		writeDebugJSONf(w, `{"reset":true,"rows_ensured":%d,"rows_created":%d}`, ensured, created)
+	}))
 
 	// GET /debug/runtime-config — expose the router's live tuning values as JSON so the
 	// test suite can read them at runtime instead of hardcoding copies that silently
@@ -2278,12 +2112,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// rest of /debug/*. Values are read straight from their source symbols (and, for the
 	// flag-bound vars, report the live value); the per-chain optimizer section is read
 	// from the same optimizers map /debug/reset-scores uses.
-	mux.HandleFunc("/debug/runtime-config", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "GET only", http.StatusMethodNotAllowed)
-			return
-		}
-
+	mux.HandleFunc("/debug/runtime-config", debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
 		toWeights := func(c provideroptimizer.UpstreamSelectorConfig) routerConfigOptimizerWeights {
 			return routerConfigOptimizerWeights{
 				AvailabilityWeight: c.AvailabilityWeight,
@@ -2351,24 +2180,13 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			PerChainOptimizer: perChain,
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		body, err := json.Marshal(resp)
-		if err != nil {
-			// resp is a flat struct of scalars + a string-keyed map — Marshal can't
-			// realistically fail; surface a 500 rather than a half-written body.
-			http.Error(w, "failed to marshal router config", http.StatusInternalServerError)
-			return
-		}
-		w.Write(body)
-	})
+		// resp is a flat struct of scalars + a string-keyed map — Marshal can't realistically fail.
+		writeDebugJSONValue(w, resp, "failed to marshal router config")
+	}))
 
 	return mux
 }
 
-// debugTimeRFC3339 formats a timestamp for the read-only /debug/* state endpoints, matching the
-// /debug/time convention (UTC RFC3339). A zero time renders as the empty string rather than the
-// Go zero-date ("0001-01-01T00:00:00Z"), so a test can cheaply distinguish "never happened"
-// (e.g. DisabledAt on an enabled endpoint) from a real instant.
 // idleModeString renders a chain's idle-mode state for /debug/endpoint-state: "off" when idle
 // mode is not configured (so a reader cannot mistake an unconfigured chain for an active one),
 // else "idle" or "active".
@@ -2383,11 +2201,12 @@ func idleModeString(snap endpointstate.IdleSnapshot) string {
 	}
 }
 
+// debugTimeRFC3339 formats a timestamp for the read-only /debug/* state endpoints, matching the
+// /debug/time convention (UTC RFC3339). A zero time renders as the empty string rather than the
+// Go zero-date ("0001-01-01T00:00:00Z"), so a test can cheaply distinguish "never happened"
+// (e.g. DisabledAt on an enabled endpoint) from a real instant.
 func debugTimeRFC3339(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format(time.RFC3339)
+	return utils.FormatUTCRFC3339(t, "")
 }
 
 // debugRowKey is the deterministic sort key for a /debug/* state row: ChainID, then ApiInterface,
@@ -2404,9 +2223,6 @@ func debugRowKey(m map[string]any) string {
 	return cid + "\x00" + api + "\x00" + na + "\x00" + pa
 }
 
-// writeDebugRows sorts the records deterministically (so Go map-iteration order never leaks into the
-// response, keeping output stable for test fixtures and humans) and encodes them as a JSON array.
-// rows is always non-nil, so an empty result encodes as [] rather than null.
 // sortDebugRows orders rows by debugRowKey in place, so Go map-iteration order never leaks into a
 // response. Split out of writeDebugRows for the responses that wrap their rows in an envelope
 // (/debug/provider-scores) and so cannot go through it.
@@ -2414,12 +2230,111 @@ func sortDebugRows(rows []map[string]any) {
 	sort.Slice(rows, func(i, j int) bool { return debugRowKey(rows[i]) < debugRowKey(rows[j]) })
 }
 
+// writeDebugRows sorts the records deterministically (so Go map-iteration order never leaks into the
+// response, keeping output stable for test fixtures and humans) and encodes them as a JSON array.
+// rows is always non-nil, so an empty result encodes as [] rather than null.
 func writeDebugRows(w http.ResponseWriter, rows []map[string]any) {
 	sortDebugRows(rows)
+	encodeDebugJSON(w, rows, "failed encoding debug response")
+}
+
+// setDebugJSONHeader marks a /debug/* response as JSON. Every debug body is JSON; the writers
+// below call it, and the two handlers that stream or pick a status first call it directly.
+func setDebugJSONHeader(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(rows); err != nil {
-		utils.LavaFormatWarning("failed encoding debug response", err)
+}
+
+// writeDebugJSONf writes a fixed-shape JSON body. The format is the whole body, so a handler's
+// response shape stays readable at its call site.
+func writeDebugJSONf(w http.ResponseWriter, format string, args ...any) {
+	setDebugJSONHeader(w)
+	fmt.Fprintf(w, format, args...)
+}
+
+// writeDebugJSONValue marshals v and writes it with no trailing newline, answering 500 with
+// failMessage rather than a half-written body if v cannot be marshalled.
+func writeDebugJSONValue(w http.ResponseWriter, v any, failMessage string) {
+	setDebugJSONHeader(w)
+	body, err := json.Marshal(v)
+	if err != nil {
+		http.Error(w, failMessage, http.StatusInternalServerError)
+		return
 	}
+	w.Write(body)
+}
+
+// encodeDebugJSON streams v through a json.Encoder (which ends the body with a newline). The
+// status line is already out by the time an encode can fail, so a failure is only logged, as
+// failMessage.
+func encodeDebugJSON(w http.ResponseWriter, v any, failMessage string) {
+	setDebugJSONHeader(w)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		utils.LavaFormatWarning(failMessage, err)
+	}
+}
+
+// debugMethod answers 405 "<METHOD> only" to any request that is not method, the guard every
+// /debug/* handler but GET /debug/time carries.
+func debugMethod(method string, handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method {
+			http.Error(w, method+" only", http.StatusMethodNotAllowed)
+			return
+		}
+		handler(w, r)
+	}
+}
+
+// debugRowsHandler serves a read-only GET /debug/* state endpoint: collect builds the rows with the
+// router's lock held, and a fixture without a router answers [] without calling it.
+func debugRowsHandler(deps debugMuxDeps, collect func(router *RPCSmartRouter) []map[string]any) http.HandlerFunc {
+	return debugMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+		rows := []map[string]any{}
+		withRouterLocked(deps, func(router *RPCSmartRouter) {
+			rows = append(rows, collect(router)...)
+		})
+		writeDebugRows(w, rows)
+	})
+}
+
+// decodeDebugBody decodes a small JSON request body into v, answering 400 "invalid JSON" when it
+// does not parse. The body is capped at 1 KiB — orders of magnitude over any legitimate debug
+// payload — so a caller cannot stream an unbounded body into the decoder.
+func decodeDebugBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// decodeDebugOffset reads the {"offset_seconds": N} body both time-warp endpoints take and rejects
+// what they cannot apply, answering 400 itself; ok is false once that response is written.
+func decodeDebugOffset(w http.ResponseWriter, r *http.Request) (offsetSeconds float64, ok bool) {
+	var body struct {
+		OffsetSeconds float64 `json:"offset_seconds"`
+	}
+	if !decodeDebugBody(w, r, &body) {
+		return 0, false
+	}
+	// Reject NaN / ±Inf — these cast to math.MinInt64 when converted to
+	// time.Duration (int64), producing a huge negative offset.
+	if math.IsNaN(body.OffsetSeconds) || math.IsInf(body.OffsetSeconds, 0) {
+		http.Error(w, "offset_seconds must be a finite number", http.StatusBadRequest)
+		return 0, false
+	}
+	// Reject negative offsets — backward shifts freeze the optimizer.
+	if body.OffsetSeconds < 0 {
+		http.Error(w, "offset_seconds must be >= 0 (no travel to the past)", http.StatusBadRequest)
+		return 0, false
+	}
+	// Reject values above 24 h.
+	if body.OffsetSeconds > maxDebugOffsetSeconds {
+		http.Error(w, fmt.Sprintf("offset_seconds must be <= %g (24h)", maxDebugOffsetSeconds), http.StatusBadRequest)
+		return 0, false
+	}
+	return body.OffsetSeconds, true
 }
 
 // subscriptionCollectionProbe reports whether the collection at `internalPath`
