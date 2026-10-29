@@ -25,7 +25,8 @@ func TestValidateProviderCollections_AnUnknownAddonIsIgnored(t *testing.T) {
 
 	t.Run("beside a defined name, the url keeps that name", func(t *testing.T) {
 		url := commonlib.NodeUrl{Url: up.httpURL("/u/" + upArchive), Addons: []string{"archiv", "archive"}}
-		admission, err := validate(url)
+		provider := staticProvider("ETH1", url, commonlib.NodeUrl{Url: up.wsURL("/u/" + upArchive)})
+		admission, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
 		require.NoError(t, err)
 		services, keep := admittedServicesFor(parser, admission, url)
 		require.True(t, keep)
@@ -33,7 +34,7 @@ func TestValidateProviderCollections_AnUnknownAddonIsIgnored(t *testing.T) {
 		require.Equal(t, []chainlib.RefusedService{{Service: "archiv", Check: chainlib.CheckUnsupportedAddon}}, admission.Refused())
 		require.Equal(t, []metrics.ProviderVerificationFailure{
 			{Scope: metrics.VerificationScopeService, Service: "archiv", Check: chainlib.CheckUnsupportedAddon},
-		}, refusalsOf(parser, staticProvider("ETH1", url), admission))
+		}, refusalsOf(parser, provider, admission))
 	})
 
 	t.Run("alone, the url serves the base collection", func(t *testing.T) {
@@ -82,7 +83,7 @@ func TestHealth_AnUnknownAddonIsIgnored(t *testing.T) {
 	require.Len(t, rows, 1)
 	require.Equal(t, routerAdmitted, rows[0].Router.Verdict)
 	require.Equal(t, []string{"archiv"}, rows[0].Router.RefusedServices)
-	require.Equal(t, "not defined by this spec, ignored: archiv", rows[0].Router.Reason)
+	require.Equal(t, "not defined by this spec, ignored: archiv; "+noWebsocketReason, rows[0].Router.Reason)
 	require.False(t, rows[0].Ok, "a typo still fails the row, as it did when the router refused the url")
 	require.Equal(t, "addons the spec does not define: archiv", rows[0].Error)
 

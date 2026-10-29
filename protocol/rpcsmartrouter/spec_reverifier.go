@@ -198,13 +198,17 @@ func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, e
 }
 
 // countRefusals counts each service and node url this pass refused a provider it
-// admits, and each Warning check it failed, one failed run each. A retry counts only
-// the checks it ran, not the verdicts it kept from an earlier pass.
+// admits, and each Warning check it failed, one failed run each. A missing websocket
+// url is not counted: no check ran, and the gauge already holds it while it lasts. A
+// retry counts only the checks it ran, not the verdicts it kept from an earlier pass.
 func (inputs *chainReverifyInputs) countRefusals(tier reverifyTier, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) {
 	if inputs.countFailedCheck == nil {
 		return
 	}
 	for _, failure := range refusalsOf(inputs.chainParser, provider, admission.Rerun()) {
+		if failure.Check == chainlib.CheckMissingURL {
+			continue
+		}
 		inputs.countFailedCheck(tier, provider.Name, failure)
 	}
 }

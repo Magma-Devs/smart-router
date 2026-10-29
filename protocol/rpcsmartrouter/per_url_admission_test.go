@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -153,19 +154,37 @@ func TestValidateProviderCollections_NoUrlLeft(t *testing.T) {
 	require.True(t, isRateLimitFailure(err), "no url on the path verified and one was only throttled: inconclusive, %v", err)
 }
 
-// The router refuses these shapes before dialing anything.
+// The router refuses a provider with no http url before dialing anything.
 func TestValidateProviderCollections_ShapeRefusals(t *testing.T) {
 	up := newFakeUpstreams(t)
 	_, err := validateProviderCollections(t.Context(), staticProvider("ETH1",
 		commonlib.NodeUrl{Url: up.wsURL("/k/" + upArchive)},
 	), liveParser(t, "ETH1", true), 20*time.Second)
 	require.ErrorContains(t, err, "HTTP/HTTPS is mandatory")
+	require.Empty(t, up.methods("ws", "/k/"+upArchive), "a refused shape dials nothing")
+}
 
-	_, err = validateProviderCollections(t.Context(), staticProvider("ETH1",
-		commonlib.NodeUrl{Url: up.httpURL("/l/" + upArchive)},
-	), liveParser(t, "ETH1", false), 20*time.Second)
-	require.ErrorContains(t, err, "websocket is not provided")
-	require.Empty(t, up.methods("http", "/l/"+upArchive), "a refused shape dials nothing")
+// A provider with no websocket url on a chain that subscribes serves over http
+// without subscriptions (MAG-3950). It used to be refused unless the router ran with
+// --skip-websocket-verification, which the helm chart sets on every router. Its http
+// url still runs every base check: a wrong chain takes it out, with the flag or not.
+func TestValidateProviderCollections_NoWebsocketURLServesOverHTTP(t *testing.T) {
+	up := newFakeUpstreams(t)
+	for _, skipWebsocket := range []bool{false, true} {
+		parser := liveParser(t, "ETH1", skipWebsocket)
+		path := fmt.Sprintf("/nows-%t/", skipWebsocket)
+		provider := staticProvider("ETH1", commonlib.NodeUrl{Url: up.httpURL(path + upArchive)})
+		admission, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
+		require.NoError(t, err, "skip-websocket-verification=%t", skipWebsocket)
+		require.False(t, admission.Any())
+		require.Contains(t, up.methods("http", path+upArchive), "eth_chainId", "the http url was verified, not waved through")
+		require.True(t, chainlib.MissingWebsocket(provider.NodeUrls, parser), "the flag does not hide the missing url")
+
+		_, err = validateProviderCollections(t.Context(), staticProvider("ETH1",
+			commonlib.NodeUrl{Url: up.httpURL(path + upPolygon)},
+		), parser, 20*time.Second)
+		require.Equal(t, "chain-id", chainlib.FailedCheck(err), "skip-websocket-verification=%t: %v", skipWebsocket, err)
+	}
 }
 
 // An addon and an extension on one url verify together, each check charged to its own.
