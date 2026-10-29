@@ -546,7 +546,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 	utils.LavaFormatInfo("Sending request to node from provider",
 		utils.LogAttr("_method", nodeMessage.Path),
 		utils.LogAttr("headers", utils.RedactHeaders(req.Header)),
-		utils.LogAttr("apiInterface", "rest"),
+		utils.LogAttr("apiInterface", spectypes.APIInterfaceRest),
 	)
 
 	res, err := httpClient.Do(req)

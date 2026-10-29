@@ -883,7 +883,7 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 	utils.LavaFormatTrace("provider sending node message",
 		utils.LogAttr("_method", nodeMessage.Path),
 		utils.LogAttr("headers", utils.RedactHeaderMap(metadataMap)),
-		utils.LogAttr("apiInterface", "grpc"),
+		utils.LogAttr("apiInterface", spectypes.APIInterfaceGrpc),
 	)
 
 	var respHeaders metadata.MD

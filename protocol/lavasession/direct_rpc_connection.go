@@ -26,6 +26,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -717,7 +718,7 @@ func NewDirectRPCConnection(
 		return &WebSocketDirectRPCConnection{
 			nodeUrl:   nodeUrl,
 			protocol:  protocol,
-			isJsonRPC: !strings.EqualFold(apiInterface, "tendermintrpc"),
+			isJsonRPC: !strings.EqualFold(apiInterface, spectypes.APIInterfaceTendermintRPC),
 		}, nil
 
 	case DirectRPCProtocolGRPC:
@@ -740,7 +741,7 @@ func DetectProtocol(urlStr string, apiInterface string) (DirectRPCProtocol, erro
 	// scheme="host.com", opaque="443" — the scheme == "" branch below is never reached.
 	// Checking for "://" is sufficient: all valid scheme URLs contain it.
 	if !strings.Contains(urlStr, "://") {
-		if strings.ToLower(apiInterface) == "grpc" {
+		if strings.ToLower(apiInterface) == spectypes.APIInterfaceGrpc {
 			return DirectRPCProtocolGRPC, nil
 		}
 		return DirectRPCProtocolHTTPS, nil

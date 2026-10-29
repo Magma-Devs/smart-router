@@ -501,16 +501,16 @@ func (d *DirectRPCRelaySender) sendForInterface(
 	attemptBudget time.Duration,
 ) (*common.RelayResult, error) {
 	switch apiCollection.CollectionData.ApiInterface {
-	case "jsonrpc", "tendermintrpc":
+	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
 		return d.sendJSONRPCRelay(ctx, chainMessage, attemptBudget)
 
-	case "rest":
+	case spectypes.APIInterfaceRest:
 		return d.sendRESTRelay(ctx, chainMessage, attemptBudget)
 
-	case "graphql":
+	case spectypes.APIInterfaceGraphQL:
 		return d.sendGraphQLRelay(ctx, chainMessage, attemptBudget)
 
-	case "grpc":
+	case spectypes.APIInterfaceGrpc:
 		return d.sendGRPCRelay(ctx, chainMessage, attemptBudget)
 
 	default:
