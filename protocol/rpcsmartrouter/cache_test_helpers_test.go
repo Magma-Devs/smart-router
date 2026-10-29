@@ -17,8 +17,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Shared by the cache tests (MAG-3461, MAG-3460, MAG-3462). Each of those changes adds this
-// file byte for byte, so whichever lands first carries it and the others merge onto it.
+// The Ethereum JSON-RPC cache scene, shared by the primary and secondary cache tests
+// (MAG-3461, MAG-3460, MAG-3462).
 
 // ethJsonRPCParser builds the real Ethereum JSON-RPC chain parser from the spec file, so
 // these tests read the flags and block parsing a deployed router reads.
