@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/magma-Devs/smart-router/utils"
 	zerolog "github.com/rs/zerolog"
-	zerologlog "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 )
 
@@ -69,6 +69,6 @@ func captureLog(t *testing.T, fn func()) string {
 var logSink = &testLogSink{}
 
 func TestMain(m *testing.M) {
-	zerologlog.Logger = zerolog.New(logSink)
+	utils.SetStdLogger(zerolog.New(logSink))
 	os.Exit(m.Run())
 }
