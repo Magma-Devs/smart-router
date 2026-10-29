@@ -33,30 +33,8 @@ longer DefaultExpirationForNonFinalized will reduce sync QoS for "latest" reques
 			}
 			utils.SetGlobalLoggingLevel(logLevel)
 
-			pyroscopeAddressFlagUsed := cmd.Flags().Lookup(performance.PyroscopeAddressFlagName).Changed
-			if pyroscopeAddressFlagUsed {
-				pyroscopeServerAddress, err := cmd.Flags().GetString(performance.PyroscopeAddressFlagName)
-				if err != nil {
-					utils.LavaFormatFatal("failed to read pyroscope address flag", err)
-				}
-				pyroscopeAppName, err := cmd.Flags().GetString(performance.PyroscopeAppNameFlagName)
-				if err != nil || pyroscopeAppName == "" {
-					pyroscopeAppName = "cache"
-				}
-				mutexProfileFraction, err := cmd.Flags().GetInt(performance.PyroscopeMutexProfileFractionFlagName)
-				if err != nil {
-					mutexProfileFraction = performance.DefaultMutexProfileFraction
-				}
-				blockProfileRate, err := cmd.Flags().GetInt(performance.PyroscopeBlockProfileRateFlagName)
-				if err != nil {
-					blockProfileRate = performance.DefaultBlockProfileRate
-				}
-				tagsStr, _ := cmd.Flags().GetString(performance.PyroscopeTagsFlagName)
-				tags := performance.ParseTags(tagsStr)
-				err = performance.StartPyroscope(pyroscopeAppName, pyroscopeServerAddress, mutexProfileFraction, blockProfileRate, tags)
-				if err != nil {
-					return utils.LavaFormatError("failed to start pyroscope profiler", err)
-				}
+			if err := performance.StartPyroscopeFromFlags(cmd.Flags(), "cache"); err != nil {
+				return err
 			}
 
 			metricsAddress, err := cmd.Flags().GetString(FlagMetricsAddress)
