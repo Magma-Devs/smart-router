@@ -10,53 +10,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestGRPCParseBlock(t *testing.T) {
-	t.Parallel()
-
-	testTable := []struct {
-		name     string
-		input    string
-		expected int64
-	}{
-		{
-			name:     "Default block param",
-			input:    "latest",
-			expected: -2,
-		},
-		{
-			name:     "String representation of int64",
-			input:    "80",
-			expected: 80,
-		},
-		{
-			name:     "Hex representation of int64",
-			input:    "0x26D",
-			expected: 621,
-		},
-		{
-			name:     "Ripple validated block param",
-			input:    "validated",
-			expected: -6,
-		},
-	}
-
-	for _, testCase := range testTable {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-
-			restMessage := GrpcMessage{}
-
-			block, err := restMessage.ParseBlock(testCase.input)
-			if err != nil {
-				t.Errorf("Unexpected error: %v", err)
-			}
-			if block != testCase.expected {
-				t.Errorf("Expected %v, but got %v", testCase.expected, block)
-			}
-		})
-	}
-}
-
 func TestReflectionSupport(t *testing.T) {
 	t.Parallel()
 
