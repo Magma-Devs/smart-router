@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -313,11 +312,8 @@ func (apip *TendermintChainParser) ChainBlockStats() (allowedBlockLagForQosSync 
 
 type TendermintRpcChainListener struct {
 	chainListenerBase
-	refererData                *RefererData
-	wsSubscriptionManager      WSSubscriptionManager
-	websocketConnectionLimiter *WebsocketConnectionLimiter
-	app                        *fiber.App     // captured during Serve so Shutdown can drain HTTP
-	wsWG                       sync.WaitGroup // tracks active downstream WS goroutines for Shutdown drain
+	wsListenerBase
+	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewTendermintRpcChainListener creates a new instance of TendermintRpcChainListener
@@ -327,20 +323,15 @@ func NewTendermintRpcChainListener(ctx context.Context, listenEndpoint *lavasess
 	refererData *RefererData,
 	wsSubscriptionManager WSSubscriptionManager,
 ) (chainListener *TendermintRpcChainListener) {
-	// Create a new instance of TendermintRpcChainListener
-	chainListener = &TendermintRpcChainListener{
+	return &TendermintRpcChainListener{
 		chainListenerBase: chainListenerBase{
 			endpoint:       listenEndpoint,
 			relaySender:    relaySender,
 			healthReporter: healthReporter,
 			logger:         rpcConsumerLogs,
 		},
-		refererData:                refererData,
-		wsSubscriptionManager:      wsSubscriptionManager,
-		websocketConnectionLimiter: &WebsocketConnectionLimiter{ipToNumberOfActiveConnections: make(map[string]int64)},
+		wsListenerBase: newWSListenerBase(refererData, wsSubscriptionManager),
 	}
-
-	return chainListener
 }
 
 // Serve http server for TendermintRpcChainListener
@@ -355,218 +346,66 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 	// route may hand an upgrade on its own path past the health handler.
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, true)
 	apil.app = app
-	chainID := apil.endpoint.ChainID
-	apiInterface := apil.endpoint.ApiInterface
 
-	// wsWG.Add must run synchronously inside the request handler so that
-	// app.ShutdownWithContext (which waits for in-flight handlers but stops
-	// tracking hijacked WS connections) is guaranteed to observe the Add
-	// before wsWG.Wait runs. Doing the Add inside the websocket goroutine
-	// would race: the goroutine is scheduled after the connection is hijacked
-	// and may not have called Add by the time Wait sees counter == 0.
-	//
-	// Registered as per-route middleware (not app.Use) so /ws and /websocket
-	// are covered uniformly without depending on fiber's mount-prefix matching.
-	wsUpgradeMiddleware := func(c *fiber.Ctx) error {
-		apil.websocketConnectionLimiter.HandleFiberRateLimitFlags(c)
-		// IsWebSocketUpgrade returns true if the client
-		// requested upgrade to the WebSocket protocol.
-		if !websocket.IsWebSocketUpgrade(c) {
-			return fiber.ErrUpgradeRequired
-		}
-		apil.wsWG.Add(1)
-		c.Locals("allowed", true)
-		err := c.Next()
-		// If the upgrade did not succeed (anything other than 101 Switching
-		// Protocols), the websocket goroutine will not run, so balance the Add.
-		if c.Response().StatusCode() != fiber.StatusSwitchingProtocols {
-			apil.wsWG.Done()
-		}
-		return err
-	}
-	webSocketCallback := websocket.New(func(websocketConn *websocket.Conn) {
-		defer apil.wsWG.Done()
-		canOpenConnection, decreaseIpConnection := apil.websocketConnectionLimiter.CanOpenConnection(websocketConn)
-		defer decreaseIpConnection()
-		if !canOpenConnection {
-			return
-		}
+	// ConnectionType "": ParseMsg looks a Tendermint subscription method up without one.
+	wsUpgradeMiddleware, websocketCallbackWithDappID := apil.websocketRoutes(ctx, app, &apil.chainListenerBase, cmdFlags, "tendermintrpc", "")
 
-		rateLimitInf := websocketConn.Locals(WebSocketRateLimitHeader)
-		rateLimit, assertionSuccessful := rateLimitInf.(int64)
-		if !assertionSuccessful || rateLimit < 0 {
-			rateLimit = 0
-		}
-
-		utils.LavaFormatDebug("tendermintrpc websocket opened", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
-		defer utils.LavaFormatDebug("tendermintrpc websocket closed", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
-
-		consumerWebsocketManager := NewConsumerWebsocketManager(ConsumerWebsocketManagerOptions{
-			WebsocketConn:          websocketConn,
-			RpcConsumerLogs:        apil.logger,
-			RefererMatchString:     refererMatchString,
-			CmdFlags:               cmdFlags,
-			RelayMsgLogMaxChars:    relayMsgLogMaxChars,
-			ChainID:                chainID,
-			ApiInterface:           apiInterface,
-			ConnectionType:         "", // We use it for the ParseMsg method, which needs to know the connection type to find the method in the spec
-			RefererData:            apil.refererData,
-			RelaySender:            apil.relaySender,
-			WsSubscriptionManager:  apil.wsSubscriptionManager,
-			WebsocketConnectionUID: strconv.FormatUint(utils.GenerateUniqueIdentifier(), 10),
-			headerRateLimit:        uint64(rateLimit),
-		})
-
-		consumerWebsocketManager.ListenToMessages(ctx)
+	testMode := common.IsTestMode(ctx)
+	handlerPost := apil.relayHTTP(httpRelaySpec{
+		testMode: testMode,
+		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
+			return httpRelayRequest{body: string(fiberCtx.Body()), logMethod: "POST", logPath: fiberCtx.Request().URI().String()}
+		},
+		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
+			utils.LavaFormatInfo("in <<<",
+				utils.LogAttr("GUID", ctx),
+				utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+				utils.LogAttr(utils.KEY_TASK_ID, ctx),
+				utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
+				utils.LogAttr("seed", msgSeed),
+				utils.LogAttr("_msg", truncatedRelayBody(cmdFlags, req.body)),
+				utils.LogAttr("dappID", dappID),
+				utils.LogAttr("headers", common.RedactMetadata(headers)),
+			)
+		},
+		logModule: "tendermint http in/out",
+		answerError: func(_ context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (bool, error) {
+			if handled, sendErr := answerJsonRpcBatchTooLarge(fiberCtx, err); handled {
+				return true, sendErr
+			}
+			return answerJsonRpcMethodNotFound(fiberCtx, err, reply)
+		},
+		errorBody: func(fiberCtx *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
+			return []byte(rpcInterfaceMessages.ConvertToTendermintError(errMasking, fiberCtx.Body()))
+		},
 	})
-	websocketCallbackWithDappID := constructFiberCallbackWithHeaderAndParameterExtraction(webSocketCallback)
-	app.Get("/ws", wsUpgradeMiddleware, websocketCallbackWithDappID)
-	app.Get("/websocket", wsUpgradeMiddleware, websocketCallbackWithDappID) // catching http://HOST:PORT/1/websocket requests.
 
-	handlerPost := func(fiberCtx *fiber.Ctx) error {
-		// Set response header content-type to application/json
-		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-		startTime := time.Now()
-		dappID := extractDappIDFromFiberContext(fiberCtx)
-		metricsData := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
-		metricsData.SetProcessingTimestampBeforeRelay(startTime)
-		ctx, cancel := context.WithCancel(context.Background())
-		guid := utils.GenerateUniqueIdentifier()
-		ctx = utils.WithUniqueIdentifier(ctx, guid)
-		defer cancel() // incase there's a problem make sure to cancel the connection
-		msgSeed := strconv.FormatUint(guid, 10)
-		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := detachedReqHeaders(fiberCtx)
-		headers := convertToMetadataMap(metadataValues)
-		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
-		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
-
-		msg := string(fiberCtx.Body())
-		logFormattedMsg := msg
-		if !cmdFlags.DebugRelays {
-			logFormattedMsg = utils.FormatLongString(logFormattedMsg, relayMsgLogMaxChars)
-		}
-
-		utils.LavaFormatInfo("in <<<",
-			utils.LogAttr("GUID", ctx),
-			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-			utils.LogAttr(utils.KEY_TASK_ID, ctx),
-			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
-			utils.LogAttr("seed", msgSeed),
-			utils.LogAttr("_msg", logFormattedMsg),
-			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("headers", common.RedactMetadata(headers)),
-		)
-		relayResult, err := apil.relaySender.SendRelay(ctx, "", msg, "", dappID, userIp, metricsData, headers)
-		reply := relayResult.GetReply()
-		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
-
-		if err != nil {
-			// Check if batch size limit exceeded - return 429 rate limit error
-			if errors.Is(err, ErrBatchRequestSizeExceeded) {
-				errorResponse, _ := json.Marshal(common.JsonRpcBatchSizeExceededError)
-				return fiberCtx.Status(fiber.StatusTooManyRequests).SendString(string(errorResponse))
-			}
-
-			if errors.Is(err, common.APINotSupportedError) {
-				// Convert error to JSON string and add headers
-				errorResponse, _ := json.Marshal(common.JsonRpcMethodNotFoundError)
-				return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), errorResponse)
-			}
-
-			// Get unique GUID response
-			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-
-			// Log request and response
-			apil.logger.LogRequestAndResponse("tendermint http in/out", true, "POST", fiberCtx.Request().URI().String(), msg, errMasking, msgSeed, time.Since(startTime), err)
-
-			// Set status to internal error
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
-			}
-
-			// Construct json response
-			response := rpcInterfaceMessages.ConvertToTendermintError(errMasking, fiberCtx.Body())
-			// Return error json response
-			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), []byte(response))
-		}
-		// Log request and response
-		apil.logger.LogRequestAndResponse("tendermint http in/out", false, "POST", fiberCtx.Request().URI().String(), msg, string(reply.Data), msgSeed, time.Since(startTime), nil)
-		if relayResult.GetStatusCode() != 0 {
-			fiberCtx.Status(relayResult.StatusCode)
-		}
-		// Return json response
-		err = addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), reply.Data)
-		return err
-	}
-
-	handlerGet := func(fiberCtx *fiber.Ctx) error {
-		// Set response header content-type to application/json
-		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-
-		startTime := time.Now()
-		query := "?" + string(fiberCtx.Request().URI().QueryString())
-		path := fiberCtx.Params("*")
-		dappID := extractDappIDFromFiberContext(fiberCtx)
-		ctx, cancel := context.WithCancel(context.Background())
-		guid := utils.GenerateUniqueIdentifier()
-		ctx = utils.WithUniqueIdentifier(ctx, guid)
-		defer cancel() // incase there's a problem make sure to cancel the connection
-		metricsData := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
-		metricsData.SetProcessingTimestampBeforeRelay(startTime)
-		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := detachedReqHeaders(fiberCtx)
-		headers := convertToMetadataMap(metadataValues)
-		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
-		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
-		utils.LavaFormatInfo("urirpc in <<<",
-			utils.LogAttr("GUID", ctx),
-			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-			utils.LogAttr(utils.KEY_TASK_ID, ctx),
-			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
-			utils.LogAttr("_msg", path),
-			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("headers", common.RedactMetadata(headers)),
-		)
-		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, "", "", dappID, userIp, metricsData, headers)
-		msgSeed := strconv.FormatUint(guid, 10)
-		reply := relayResult.GetReply()
-		apil.logger.AddMetricForHttp(metricsData, err, metadataValues)
-		if err != nil {
-			// Get unique GUID response
-			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-
-			// Log request and response
-			apil.logger.LogRequestAndResponse("tendermint http in/out", true, "GET", fiberCtx.Request().URI().String(), "", errMasking, msgSeed, time.Since(startTime), err)
-
-			// Set status to internal error
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
-			}
-
+	handlerGet := apil.relayHTTP(httpRelaySpec{
+		testMode: testMode,
+		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
+			path := fiberCtx.Params("*")
+			query := "?" + string(fiberCtx.Request().URI().QueryString())
+			return httpRelayRequest{path: path, url: path + query, logMethod: "GET", logPath: fiberCtx.Request().URI().String()}
+		},
+		logReceived: func(ctx context.Context, _ uint64, _, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
+			utils.LavaFormatInfo("urirpc in <<<",
+				utils.LogAttr("GUID", ctx),
+				utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
+				utils.LogAttr(utils.KEY_TASK_ID, ctx),
+				utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
+				utils.LogAttr("_msg", req.path),
+				utils.LogAttr("dappID", dappID),
+				utils.LogAttr("headers", common.RedactMetadata(headers)),
+			)
+		},
+		logModule: "tendermint http in/out",
+		errorBody: func(fiberCtx *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
 			if string(fiberCtx.Body()) != "" {
 				errMasking = addAttributeToError("recommendation", "For jsonRPC use POST", errMasking)
 			}
-
-			// Construct json response
-			response := convertToJsonError(errMasking)
-
-			// Return error json response
-			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
-		}
-		// Log request and response
-		apil.logger.LogRequestAndResponse("tendermint http in/out", false, "GET", fiberCtx.Request().URI().String(), "", string(reply.Data), msgSeed, time.Since(startTime), nil)
-		if relayResult.GetStatusCode() != 0 {
-			fiberCtx.Status(relayResult.StatusCode)
-		}
-		// Return json response
-		err = addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), reply.Data)
-		return err
-	}
+			return convertToJsonError(errMasking)
+		},
+	})
 
 	app.Post("/*", handlerPost)
 	// A caller that guesses the bare endpoint URL (wss://host/) sends a GET
@@ -579,16 +418,8 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 		}
 		return fiberCtx.Next()
 	}, wsUpgradeMiddleware, websocketCallbackWithDappID)
-	//
-	// Go
-	addrChannel := make(chan string)
-	addrChannelSafe := common.NewSafeChannelSender(ctx, addrChannel)
-	go func() {
-		addr := <-addrChannel
-		apil.listeningAddress.Store(&addr)
-	}()
 
-	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
+	apil.listen(ctx, app)
 }
 
 type tendermintRpcChainProxy struct {
