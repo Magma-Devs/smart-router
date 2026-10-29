@@ -69,11 +69,11 @@ func TestUpstreamWSPool_RetiresAConnectionMarkedDead(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Close() })
 	ctx := context.Background()
 
-	dead, err := pool.GetConnection(ctx)
+	dead, err := pool.take(ctx, false)
 	require.NoError(t, err)
 	dead.MarkUnhealthy(errors.New("read: connection reset by peer"))
 
-	replacement, err := pool.GetConnection(ctx)
+	replacement, err := pool.take(ctx, false)
 	require.NoError(t, err)
 	require.NotSame(t, dead, replacement, "a connection marked dead must not be handed out again")
 	require.True(t, replacement.IsHealthy())

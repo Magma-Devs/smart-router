@@ -280,7 +280,7 @@ func TestGRPCStartSubscription_ReleasesClientStateOnFailure(t *testing.T) {
 
 	// Same method, described as unary — createNewSubscription refuses it after it has
 	// connected and pinned the client to the endpoint.
-	connectionForUpstream(t, manager).descriptorsCache.Store(
+	connectionForUpstream(t, manager).descriptors.cache.Store(
 		"grpc.reflection.v1.ServerReflection.ServerReflectionInfo", unaryMethodDescriptor(t))
 
 	message := newGrpcSubscriptionMessage(t)
@@ -350,7 +350,7 @@ func TestGRPCSubscription_RecordsUpstreamForRelayEnd(t *testing.T) {
 	// Described as unary, the method is refused after the manager reached the endpoint.
 	refusing := newManagerAgainstUpstream(t, upstream.addr)
 	defer refusing.Stop()
-	connectionForUpstream(t, refusing).descriptorsCache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", unaryMethodDescriptor(t))
+	connectionForUpstream(t, refusing).descriptors.cache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", unaryMethodDescriptor(t))
 	failed := chainlib.WithSubscriptionUpstream(context.Background())
 	_, _, err = refusing.StartSubscription(failed, newGrpcSubscriptionMessage(t), "dapp", "3.3.3.3", "conn-3", nil)
 	require.Error(t, err)
@@ -524,7 +524,7 @@ func startFakeStreamingUpstream(t *testing.T) *fakeStreamingUpstream {
 }
 
 // newManagerAgainstUpstream points a manager at the fake upstream and seeds the method
-// descriptor into the connection cache, so GetMethodDescriptor never calls reflection.
+// descriptor into the endpoint's shared cache, so GetMethodDescriptor never calls reflection.
 func newManagerAgainstUpstream(t *testing.T, addr string) *DirectGRPCSubscriptionManager {
 	t.Helper()
 
@@ -538,16 +538,16 @@ func newManagerAgainstUpstream(t *testing.T, addr string) *DirectGRPCSubscriptio
 	ctx := context.Background()
 	pool, err := manager.getOrCreatePool(endpoint)
 	require.NoError(t, err)
-	conn, err := pool.GetConnectionForStream(ctx)
+	conn, err := pool.take(ctx, false)
 	require.NoError(t, err)
-	conn.descriptorsCache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", streamingMethodDescriptor(t))
+	conn.descriptors.cache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", streamingMethodDescriptor(t))
 
 	return manager
 }
 
 // connectionForUpstream returns the single pooled connection newManagerAgainstUpstream
-// created, so a test can re-seed its descriptor cache. GetConnectionForStream reuses a
-// healthy connection until streamsPerConn is reached, so this is the same one the
+// created, so a test can re-seed its descriptor cache. The pool reuses a
+// healthy connection until perConn is reached, so this is the same one the
 // manager will pick up.
 func connectionForUpstream(t *testing.T, manager *DirectGRPCSubscriptionManager) *UpstreamGRPCStreamConnection {
 	t.Helper()
@@ -560,7 +560,7 @@ func connectionForUpstream(t *testing.T, manager *DirectGRPCSubscriptionManager)
 	}
 	manager.lock.RUnlock()
 
-	conn, err := pool.GetConnectionForStream(context.Background())
+	conn, err := pool.take(context.Background(), false)
 	require.NoError(t, err)
 	return conn
 }

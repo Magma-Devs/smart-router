@@ -26,7 +26,7 @@ func TestNewUpstreamGRPCPool(t *testing.T) {
 	assert.Equal(t, "localhost:9090", pool.sanitizedURL)
 	assert.Equal(t, 1, pool.minConnections)
 	assert.Equal(t, 5, pool.maxConnections)
-	assert.Equal(t, 100, pool.streamsPerConn)
+	assert.Equal(t, 100, pool.perConn)
 	assert.Equal(t, 30*time.Second, pool.connectTimeout)
 	assert.Equal(t, grpcChannelLiveness{
 		idleTimeout:      2 * time.Minute,
@@ -57,7 +57,7 @@ func TestNewUpstreamGRPCPoolWithConfig(t *testing.T) {
 	require.NotNil(t, pool)
 	assert.Equal(t, 2, pool.minConnections)
 	assert.Equal(t, 10, pool.maxConnections)
-	assert.Equal(t, 50, pool.streamsPerConn)
+	assert.Equal(t, 50, pool.perConn)
 	assert.Equal(t, 60*time.Second, pool.connectTimeout)
 	assert.Equal(t, grpcChannelLiveness{
 		idleTimeout:      3 * time.Minute,
@@ -185,7 +185,7 @@ func TestUpstreamGRPCPool_Close_Idempotent(t *testing.T) {
 	assert.NoError(t, err2)
 }
 
-func TestUpstreamGRPCPool_GetConnectionForStream_ClosedPool(t *testing.T) {
+func TestUpstreamGRPCPool_Take_ClosedPool(t *testing.T) {
 	nodeUrl := &common.NodeUrl{
 		Url: "grpc://localhost:9090",
 	}
@@ -194,7 +194,7 @@ func TestUpstreamGRPCPool_GetConnectionForStream_ClosedPool(t *testing.T) {
 	pool.Close()
 
 	ctx := context.Background()
-	conn, err := pool.GetConnectionForStream(ctx)
+	conn, err := pool.take(ctx, false)
 
 	assert.Error(t, err)
 	assert.Nil(t, conn)
@@ -246,7 +246,7 @@ func TestUpstreamGRPCStreamConnection_IsHealthy(t *testing.T) {
 	assert.True(t, conn.IsHealthy())
 
 	// Mark unhealthy
-	conn.MarkUnhealthy(nil)
+	conn.healthy.Store(false)
 	assert.False(t, conn.IsHealthy())
 }
 
@@ -264,24 +264,6 @@ func TestUpstreamGRPCStreamConnection_IsHealthy_WhenClosed(t *testing.T) {
 
 	// Should be unhealthy when closed even if healthy flag is true
 	assert.False(t, conn.IsHealthy())
-}
-
-func TestUpstreamGRPCStreamConnection_MarkUnhealthy_WithError(t *testing.T) {
-	conn := &UpstreamGRPCStreamConnection{
-		endpoint:     "grpc://localhost:9090",
-		sanitizedURL: "grpc://localhost:9090",
-		createdAt:    time.Now(),
-	}
-	conn.healthy.Store(true)
-
-	testErr := context.DeadlineExceeded
-	conn.MarkUnhealthy(testErr)
-
-	assert.False(t, conn.IsHealthy())
-
-	// Check error was stored
-	storedErr := conn.lastError.Load()
-	assert.Equal(t, testErr, storedErr)
 }
 
 func TestUpstreamGRPCStreamConnection_GetEndpoint(t *testing.T) {

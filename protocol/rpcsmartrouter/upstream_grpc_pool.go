@@ -65,54 +65,97 @@ func (l grpcChannelLiveness) dialOptions() []grpc.DialOption {
 	return opts
 }
 
+// grpcEndpointDescriptors is one endpoint's method-descriptor cache and the resolver
+// that fills it, shared by every channel the pool holds for that endpoint.
+//
+// The scope is the endpoint because that is what the data describes: a descriptor
+// describes the SERVER, so every channel of one endpoint resolves the same service to
+// the same descriptor. One cache per channel therefore re-pays a cold service's
+// reflection lookup on every channel the pool adds — on scale-up past streamsPerConn,
+// with PoolMinConnections above 1, and on every reconnect, which dials a fresh channel
+// (MAG-4397). Sharing makes the endpoint's second channel free.
+//
+// lifetime bounds every lookup and ends with the POOL rather than with a channel. A
+// lookup borrows whichever channel is healthy when it runs (borrowAnyChannel), so one
+// channel closing is no longer a reason to abandon it.
+type grpcEndpointDescriptors struct {
+	cache    *common.SafeSyncMap[string, *desc.MethodDescriptor]
+	resolver *lavasession.GRPCDescriptorResolver
+	endLife  context.CancelFunc
+}
+
+// newGRPCEndpointDescriptors builds the shared cache and resolver for one endpoint.
+// borrow must lend a channel to THAT endpoint; the pool lends any healthy one of its own.
+func newGRPCEndpointDescriptors(
+	nodeUrl *common.NodeUrl,
+	borrow func(context.Context) (*grpc.ClientConn, func(), error),
+) *grpcEndpointDescriptors {
+	lifetime, endLife := context.WithCancel(context.Background())
+	cache := &common.SafeSyncMap[string, *desc.MethodDescriptor]{}
+	return &grpcEndpointDescriptors{
+		cache:    cache,
+		resolver: lavasession.NewGRPCDescriptorResolver(lifetime, &nodeUrl.GrpcConfig, nodeUrl.Url, cache, borrow),
+		endLife:  endLife,
+	}
+}
+
+// close aborts every descriptor lookup still running for this endpoint.
+func (d *grpcEndpointDescriptors) close() {
+	if d != nil && d.endLife != nil {
+		d.endLife()
+	}
+}
+
 // UpstreamGRPCStreamConnection wraps a grpc.ClientConn with health tracking and stream count.
 // Unlike the unary GRPCConnector, this is designed for long-lived streaming connections.
 type UpstreamGRPCStreamConnection struct {
-	conn             *grpc.ClientConn
-	endpoint         string
-	sanitizedURL     string // For logging (no auth info)
-	nodeUrl          *common.NodeUrl
-	liveness         grpcChannelLiveness
-	healthy          atomic.Bool
-	lastError        atomic.Value // stores error
-	createdAt        time.Time
-	activeStreams    atomic.Int32                                        // Number of active streams on this connection
-	descriptorsCache *common.SafeSyncMap[string, *desc.MethodDescriptor] // Cached method descriptors
-	// resolver fills descriptorsCache: the same single-flight, whole-service,
-	// reflection-timeout resolver the unary connection uses (MAG-4278 #18), lent
-	// this connection's channel through lendChannel. lifetime bounds its lookups
-	// and ends with Close.
-	resolver    *lavasession.GRPCDescriptorResolver
-	lifetime    context.Context
-	endLifetime context.CancelFunc
+	conn          *grpc.ClientConn
+	endpoint      string
+	sanitizedURL  string // For logging (no auth info)
+	nodeUrl       *common.NodeUrl
+	liveness      grpcChannelLiveness
+	healthy       atomic.Bool
+	lastError     atomic.Value // stores error
+	createdAt     time.Time
+	activeStreams atomic.Int32 // Number of active streams on this connection
+	// descriptors is the ENDPOINT's shared descriptor cache and resolver, owned by the
+	// pool and handed to every channel it holds, so a cold service costs one reflection
+	// stream for the endpoint however many channels and subscriptions ask (MAG-4397).
+	// The resolver is the same single-flight, whole-service, reflection-timeout one the
+	// unary connection runs (MAG-4278 #18), over its own instance: that one borrows from
+	// the unary connector in another package, so the two are not the same object.
+	// Nil only on a connection built as a bare literal in a test.
+	descriptors *grpcEndpointDescriptors
 	lock        sync.RWMutex
 	closed      atomic.Bool
 }
 
-// NewUpstreamGRPCStreamConnection creates a new upstream gRPC connection for streaming
-func NewUpstreamGRPCStreamConnection(ctx context.Context, nodeUrl *common.NodeUrl, timeout time.Duration, liveness grpcChannelLiveness) (*UpstreamGRPCStreamConnection, error) {
+// NewUpstreamGRPCStreamConnection creates a new upstream gRPC connection for streaming.
+//
+// descriptors is the endpoint's shared cache and resolver, which the POOL owns: every
+// channel of one endpoint is given the same one, so the endpoint pays a cold service's
+// reflection lookup once (MAG-4397). The pool always passes its own.
+func NewUpstreamGRPCStreamConnection(ctx context.Context, nodeUrl *common.NodeUrl, timeout time.Duration, liveness grpcChannelLiveness, descriptors *grpcEndpointDescriptors) (*UpstreamGRPCStreamConnection, error) {
 	conn := &UpstreamGRPCStreamConnection{
-		endpoint:         nodeUrl.Url,
-		sanitizedURL:     sanitizeEndpointURL(nodeUrl.Url),
-		nodeUrl:          nodeUrl,
-		liveness:         liveness,
-		createdAt:        time.Now(),
-		descriptorsCache: &common.SafeSyncMap[string, *desc.MethodDescriptor]{},
+		endpoint:     nodeUrl.Url,
+		sanitizedURL: sanitizeEndpointURL(nodeUrl.Url),
+		nodeUrl:      nodeUrl,
+		liveness:     liveness,
+		createdAt:    time.Now(),
+		descriptors:  descriptors,
 	}
 	conn.healthy.Store(true)
-	conn.lifetime, conn.endLifetime = context.WithCancel(context.Background())
-	conn.resolver = lavasession.NewGRPCDescriptorResolver(conn.lifetime, &nodeUrl.GrpcConfig, nodeUrl.Url, conn.descriptorsCache, conn.lendChannel)
 
 	if err := conn.connect(ctx, timeout); err != nil {
-		conn.endLifetime()
 		return nil, err
 	}
 
 	return conn, nil
 }
 
-// lendChannel hands the resolver this connection's one channel; there is nothing to
-// give back, so the release is a no-op. A closed connection answers with
+// lendChannel hands out this connection's one channel; there is nothing to give back, so
+// the release is a no-op. The pool's borrowAnyChannel calls it, trying each channel of
+// the endpoint in turn. A closed connection answers with
 // lavasession.ErrGRPCConnectionClosed, the error the unary connection's borrow gives,
 // which the resolver passes through as it is instead of logging a failed lookup.
 func (c *UpstreamGRPCStreamConnection) lendChannel(context.Context) (*grpc.ClientConn, func(), error) {
@@ -228,22 +271,17 @@ func (c *UpstreamGRPCStreamConnection) IsHealthy() bool {
 	return c.healthy.Load() && !c.closed.Load()
 }
 
-// MarkUnhealthy marks the connection as unhealthy
-func (c *UpstreamGRPCStreamConnection) MarkUnhealthy(err error) {
-	c.healthy.Store(false)
-	if err != nil {
-		c.lastError.Store(err)
-	}
-}
-
 // Close closes the gRPC connection
 func (c *UpstreamGRPCStreamConnection) Close() error {
 	if !c.closed.CompareAndSwap(false, true) {
 		return nil // Already closed
 	}
-	if c.endLifetime != nil { // nil on a connection built as a bare literal (tests)
-		c.endLifetime() // aborts a descriptor lookup still running on this channel
-	}
+	// A descriptor lookup is NOT aborted here. Its lifetime is the pool's, because the
+	// resolver is the endpoint's: a lookup borrows whichever channel is healthy when it
+	// runs, so this channel going away is not a reason to throw the lookup away
+	// (MAG-4397). The pool ends them all in its own Close. A lookup that happens to be
+	// borrowing this channel fails as the channel closes below, drops its in-flight
+	// entry, and the next caller retries on a live channel.
 
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -285,56 +323,107 @@ func (c *UpstreamGRPCStreamConnection) StreamCount() int32 {
 	return c.activeStreams.Load()
 }
 
+func (c *UpstreamGRPCStreamConnection) slots() int32 { return c.activeStreams.Load() }
+
+func (c *UpstreamGRPCStreamConnection) addSlots(delta int32) int32 { return c.activeStreams.Add(delta) }
+
 // GetMethodDescriptor retrieves a method descriptor from cache, or resolves it
 // through the node's configured descriptor source (reflection, file, or hybrid).
 // Streaming methods are exactly the ones a partial reflection service tends to
 // omit, so this path needs the file escape hatch as much as the unary one does
-// (MAG-2350); it is the unary connection's resolver, so a cold service costs one
-// reflection stream however many subscriptions ask, and a lookup outlives the
-// caller that started it (MAG-2860).
+// (MAG-2350). The resolver is the ENDPOINT's, shared by every channel the pool holds,
+// so a cold service costs one reflection stream however many channels and subscriptions
+// ask (MAG-4397), and a lookup outlives the caller that started it (MAG-2860).
 func (c *UpstreamGRPCStreamConnection) GetMethodDescriptor(
 	ctx context.Context,
 	service, methodName string,
 ) (*desc.MethodDescriptor, error) {
-	return c.resolver.MethodDescriptor(ctx, service, methodName)
+	if c.descriptors == nil {
+		// Only reachable from a connection built as a bare literal in a test; the pool
+		// always hands its own. An error rather than a panic, naming the cause.
+		return nil, utils.LavaFormatError("gRPC connection has no descriptor resolver", nil,
+			utils.LogAttr("endpoint", c.sanitizedURL),
+			utils.LogAttr("service", service),
+			utils.LogAttr("method", methodName))
+	}
+	return c.descriptors.resolver.MethodDescriptor(ctx, service, methodName)
 }
 
 // UpstreamGRPCPool manages a pool of gRPC connections for streaming.
 // The pool automatically scales between minConnections and maxConnections based on
-// stream load, targeting approximately streamsPerConn streams per connection.
+// stream load, targeting approximately perConn streams per connection.
 type UpstreamGRPCPool struct {
-	nodeUrl      *common.NodeUrl
-	sanitizedURL string
-	connections  []*UpstreamGRPCStreamConnection
-	backoff      *ExponentialBackoff
-	lock         sync.RWMutex
-	closed       atomic.Bool
-	// reconnectAttempt is the ReconnectWithBackoff attempt in flight, nil when none. The
-	// caller that installs it dials; every other caller waits on it.
-	reconnectAttempt atomic.Pointer[reconnectAttempt]
-	onReconnect      func() // Callback when reconnected (for stream restoration)
-
-	// Pool configuration
-	minConnections int                 // Minimum connections to maintain (default: 1)
-	maxConnections int                 // Maximum connections allowed (default: 5)
-	streamsPerConn int                 // Target streams per connection (default: 100)
+	*connPool[*UpstreamGRPCStreamConnection]
+	nodeUrl        *common.NodeUrl
 	connectTimeout time.Duration       // Connection establishment timeout
 	liveness       grpcChannelLiveness // Idle timeout and keepalive every connection dials with
+
+	// descriptors is this endpoint's one descriptor cache and resolver, handed to every
+	// channel the pool dials (MAG-4397).
+	descriptors *grpcEndpointDescriptors
 }
+
+// grpcReconnectPolicy keeps the gRPC pool's reconnect as it was before the two pools shared
+// one implementation; see reconnectPolicy for what each field does.
+var grpcReconnectPolicy = reconnectPolicy{}
 
 // NewUpstreamGRPCPool creates a new gRPC connection pool for streaming
 func NewUpstreamGRPCPool(nodeUrl *common.NodeUrl) *UpstreamGRPCPool {
-	return &UpstreamGRPCPool{
+	pool := &UpstreamGRPCPool{
 		nodeUrl:        nodeUrl,
-		sanitizedURL:   sanitizeEndpointURL(nodeUrl.Url),
-		connections:    make([]*UpstreamGRPCStreamConnection, 0),
-		backoff:        NewWebSocketBackoff(), // Reuse the same backoff logic
-		minConnections: 1,
-		maxConnections: 5,
-		streamsPerConn: 100,
-		connectTimeout: 30 * time.Second,
+		connectTimeout: defaultUpstreamDialTimeout,
 		liveness:       newGRPCChannelLiveness(DefaultGRPCStreamingConfig()),
 	}
+	pool.connPool = newConnPool(
+		poolVocabulary{name: "gRPC", slotAttr: "existingStreamCount"},
+		nodeUrl.Url, pool.dial, grpcReconnectPolicy,
+		1,   // Default minimum
+		5,   // Default maximum
+		100, // Default target
+	)
+	// Built here, before any channel exists: borrowAnyChannel is a closure over the pool
+	// and is only called when a lookup actually runs, by which time there is a channel.
+	pool.descriptors = newGRPCEndpointDescriptors(nodeUrl, pool.borrowAnyChannel)
+	// Ends every descriptor lookup for this endpoint. The lifetime is the pool's because
+	// the resolver is (MAG-4397), so this is the one place that aborts them.
+	pool.onClose = pool.descriptors.close
+	return pool
+}
+
+// borrowAnyChannel lends a descriptor lookup any channel of this endpoint.
+//
+// The resolver is the endpoint's, so a lookup must not be tied to the channel whose relay
+// triggered it: that channel can be scaled down, closed or replaced by a reconnect while
+// the lookup runs. Any channel to the same endpoint answers reflection identically.
+//
+// The connection slice is snapshotted under the pool lock and the channels are asked
+// outside it, so a lookup can never hold the pool lock — a caller waiting on a lookup
+// while holding that lock would otherwise deadlock.
+func (p *UpstreamGRPCPool) borrowAnyChannel(ctx context.Context) (*grpc.ClientConn, func(), error) {
+	if p.closed.Load() {
+		return nil, nil, lavasession.ErrGRPCConnectionClosed
+	}
+
+	p.lock.RLock()
+	conns := make([]*UpstreamGRPCStreamConnection, len(p.connections))
+	copy(conns, p.connections)
+	p.lock.RUnlock()
+
+	// A healthy channel first. An unhealthy one is still worth asking when it is all
+	// there is: health is the RELAY path's verdict, and a node that fails relays can
+	// still answer reflection.
+	for _, healthyOnly := range []bool{true, false} {
+		for _, conn := range conns {
+			if healthyOnly && !conn.IsHealthy() {
+				continue
+			}
+			if channel, release, err := conn.lendChannel(ctx); err == nil {
+				return channel, release, nil
+			}
+		}
+	}
+
+	return nil, nil, lavasession.ErrGRPCConnectionClosed
 }
 
 // NewUpstreamGRPCPoolWithConfig creates a pool with custom configuration
@@ -343,334 +432,37 @@ func NewUpstreamGRPCPoolWithConfig(nodeUrl *common.NodeUrl, config *GRPCStreamin
 	if config != nil {
 		pool.minConnections = config.PoolMinConnections
 		pool.maxConnections = config.PoolMaxConnections
-		pool.streamsPerConn = config.StreamsPerConnection
+		pool.perConn = config.StreamsPerConnection
 		pool.connectTimeout = config.ConnectionTimeout
 		pool.liveness = newGRPCChannelLiveness(config)
 	}
 	return pool
 }
 
-// SetReconnectCallback sets a callback to be called after successful reconnection
-// This is used to restore streams after reconnection
-func (p *UpstreamGRPCPool) SetReconnectCallback(callback func()) {
-	p.lock.Lock()
-	defer p.lock.Unlock()
-	p.onReconnect = callback
+// dial opens one channel to the endpoint with the pool's timeout, liveness and the
+// endpoint's shared descriptor resolver.
+func (p *UpstreamGRPCPool) dial(ctx context.Context) (*UpstreamGRPCStreamConnection, error) {
+	return NewUpstreamGRPCStreamConnection(ctx, p.nodeUrl, p.connectTimeout, p.liveness, p.descriptors)
 }
 
-// GetConnectionForStream returns the best connection for a new stream.
-// It prefers connections with lower stream counts and will create new connections
-// if all existing ones are near capacity (and we haven't hit maxConnections).
-func (p *UpstreamGRPCPool) GetConnectionForStream(ctx context.Context) (*UpstreamGRPCStreamConnection, error) {
-	return p.connectionForStream(ctx, false)
-}
-
-// ReserveConnectionForStream is GetConnectionForStream that also counts the caller's stream on
-// the connection it returns, under the pool lock. Counted any later, the connection can look
-// unused in the meantime, and maybeScaleDown closes a connection past minConnections that
-// carries no counted stream: the stream opened on it then fails at once. The caller releases
-// the slot with NotifyStreamRemoved, including when opening the stream fails.
+// ReserveConnectionForStream returns the best connection for a new stream and counts the
+// caller's stream on it, under the pool lock. It prefers connections with lower stream counts
+// and creates a new connection when all existing ones are near capacity (and the pool is below
+// maxConnections). Counted any later, the connection can look unused in the meantime, and
+// maybeScaleDown closes a connection past minConnections that carries no counted stream: the
+// stream opened on it then fails at once. The caller releases the slot with
+// NotifyStreamRemoved, including when opening the stream fails.
 func (p *UpstreamGRPCPool) ReserveConnectionForStream(ctx context.Context) (*UpstreamGRPCStreamConnection, error) {
-	return p.connectionForStream(ctx, true)
-}
-
-func (p *UpstreamGRPCPool) connectionForStream(ctx context.Context, reserve bool) (*UpstreamGRPCStreamConnection, error) {
-	if p.closed.Load() {
-		return nil, fmt.Errorf("pool is closed")
-	}
-
-	p.lock.Lock()
-	defer p.lock.Unlock()
-
-	conn, err := p.pickConnectionLocked(ctx)
-	if err == nil && reserve {
-		conn.IncrementStreams()
-	}
-	return conn, err
-}
-
-// pickConnectionLocked chooses or creates the connection for a new stream (caller must hold lock).
-func (p *UpstreamGRPCPool) pickConnectionLocked(ctx context.Context) (*UpstreamGRPCStreamConnection, error) {
-	// Find the best connection (healthy with lowest stream count)
-	var bestConn *UpstreamGRPCStreamConnection
-	var lowestStreams int32 = int32(p.streamsPerConn + 1)
-
-	for _, conn := range p.connections {
-		if conn.IsHealthy() {
-			streams := conn.StreamCount()
-			if streams < lowestStreams {
-				lowestStreams = streams
-				bestConn = conn
-			}
-		}
-	}
-
-	// If we have a connection with capacity, use it
-	if bestConn != nil && lowestStreams < int32(p.streamsPerConn) {
-		return bestConn, nil
-	}
-
-	// Need to scale up if possible
-	if len(p.connections) < p.maxConnections {
-		newConn, err := p.createConnectionLocked(ctx)
-		if err != nil {
-			// If we can't create a new connection but have an existing one, use it
-			if bestConn != nil {
-				utils.LavaFormatWarning("gRPC pool: failed to scale up, using existing connection", err,
-					utils.LogAttr("endpoint", p.sanitizedURL),
-					utils.LogAttr("currentConnections", len(p.connections)),
-					utils.LogAttr("existingStreamCount", lowestStreams),
-				)
-				return bestConn, nil
-			}
-			return nil, fmt.Errorf("failed to create connection: %w", err)
-		}
-
-		utils.LavaFormatInfo("gRPC pool: scaled up",
-			utils.LogAttr("endpoint", p.sanitizedURL),
-			utils.LogAttr("totalConnections", len(p.connections)),
-			utils.LogAttr("reason", "all connections near capacity"),
-		)
-		return newConn, nil
-	}
-
-	// At max connections - use the one with lowest streams even if over target
-	if bestConn != nil {
-		return bestConn, nil
-	}
-
-	// No healthy connections - try to create one
-	return p.createConnectionLocked(ctx)
-}
-
-// createConnectionLocked creates a new connection (caller must hold lock)
-func (p *UpstreamGRPCPool) createConnectionLocked(ctx context.Context) (*UpstreamGRPCStreamConnection, error) {
-	conn, err := NewUpstreamGRPCStreamConnection(ctx, p.nodeUrl, p.connectTimeout, p.liveness)
-	if err != nil {
-		return nil, err
-	}
-
-	p.connections = append(p.connections, conn)
-	p.backoff.Reset()
-
-	utils.LavaFormatDebug("gRPC pool: connection added",
-		utils.LogAttr("endpoint", p.sanitizedURL),
-		utils.LogAttr("totalConnections", len(p.connections)),
-	)
-
-	return conn, nil
+	return p.take(ctx, true)
 }
 
 // NotifyStreamRemoved should be called when a stream is closed on a connection.
 // This allows the pool to potentially scale down if connections are underutilized.
 func (p *UpstreamGRPCPool) NotifyStreamRemoved(conn *UpstreamGRPCStreamConnection) {
-	if conn == nil {
-		return
-	}
-
-	conn.DecrementStreams()
-
-	// Consider scaling down if we have excess connections with no streams
-	p.maybeScaleDown()
-}
-
-// maybeScaleDown removes empty connections if we have more than minConnections
-func (p *UpstreamGRPCPool) maybeScaleDown() {
-	p.lock.Lock()
-	defer p.lock.Unlock()
-
-	if len(p.connections) <= p.minConnections {
-		return
-	}
-
-	// Find connections with no streams (excluding the first minConnections)
-	var toRemove []*UpstreamGRPCStreamConnection
-	kept := make([]*UpstreamGRPCStreamConnection, 0, len(p.connections))
-
-	for i, conn := range p.connections {
-		if i < p.minConnections {
-			// Keep minimum connections
-			kept = append(kept, conn)
-		} else if conn.StreamCount() == 0 && !conn.IsHealthy() {
-			// Remove unhealthy empty connections
-			toRemove = append(toRemove, conn)
-		} else if conn.StreamCount() == 0 {
-			// Mark for potential removal (only if we have excess)
-			if len(kept)+len(p.connections)-i-1 >= p.minConnections {
-				toRemove = append(toRemove, conn)
-			} else {
-				kept = append(kept, conn)
-			}
-		} else {
-			kept = append(kept, conn)
-		}
-	}
-
-	if len(toRemove) > 0 {
-		p.connections = kept
-
-		// Close removed connections asynchronously
-		go func(conns []*UpstreamGRPCStreamConnection) {
-			for _, conn := range conns {
-				conn.Close()
-			}
-			utils.LavaFormatDebug("gRPC pool: scaled down",
-				utils.LogAttr("endpoint", p.sanitizedURL),
-				utils.LogAttr("removedConnections", len(conns)),
-				utils.LogAttr("remainingConnections", len(kept)),
-			)
-		}(toRemove)
-	}
-}
-
-// reconnectAttempt is one ReconnectWithBackoff attempt. done closes once err and abandoned
-// hold its outcome, so every caller waiting on the attempt wakes as it ends.
-type reconnectAttempt struct {
-	done chan struct{}
-	err  error
-	// abandoned is set when the attempt ended because its own caller's context ended, not
-	// because the dial failed. That says nothing about the upstream, so a waiter whose
-	// context is still live tries again rather than giving up on it.
-	abandoned bool
-}
-
-// ReconnectWithBackoff attempts to reconnect the pool with exponential backoff.
-//
-// A connection that dies fails every stream on it at once, and each of their subscriptions
-// restores through here. One caller dials; the others wait for that attempt and get its
-// outcome, as UpstreamWSPool's callers do, then open their streams on what the pool holds.
-// Refusing them instead tore each of those subscriptions down.
-//
-// The attempt runs on the dialing caller's context. When that context ends first (its
-// subscription's last client left), the attempt is abandoned rather than failed, and a
-// waiter that still wants the connection dials itself.
-func (p *UpstreamGRPCPool) ReconnectWithBackoff(ctx context.Context) error {
-	for {
-		if inFlight := p.reconnectAttempt.Load(); inFlight != nil {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-inFlight.done:
-			}
-			if inFlight.abandoned {
-				continue
-			}
-			if inFlight.err != nil {
-				return fmt.Errorf("the reconnect this caller waited for failed: %w", inFlight.err)
-			}
-			return nil
-		}
-
-		attempt := &reconnectAttempt{done: make(chan struct{})}
-		if !p.reconnectAttempt.CompareAndSwap(nil, attempt) {
-			continue // another caller installed its attempt first: wait for that one
-		}
-		err := p.reconnect(ctx)
-		p.endReconnect(attempt, err, err != nil && ctx.Err() != nil)
-		return err
-	}
-}
-
-// endReconnect records attempt's outcome and wakes every caller waiting on it. The attempt
-// is uninstalled before the wake, so a waiter that retries an abandoned attempt finds none
-// in flight and dials itself.
-func (p *UpstreamGRPCPool) endReconnect(attempt *reconnectAttempt, err error, abandoned bool) {
-	attempt.err, attempt.abandoned = err, abandoned
-	p.reconnectAttempt.CompareAndSwap(attempt, nil)
-	close(attempt.done)
-}
-
-// reconnect dials one new connection after the backoff, for the caller whose attempt is
-// installed.
-func (p *UpstreamGRPCPool) reconnect(ctx context.Context) error {
-	// Get backoff duration
-	backoffDuration, _ := p.backoff.NextBackoff()
-	utils.LavaFormatDebug("gRPC pool: waiting before reconnect",
-		utils.LogAttr("endpoint", p.sanitizedURL),
-		utils.LogAttr("backoff", backoffDuration),
-	)
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(backoffDuration):
-	}
-
-	// Dial outside the pool lock: a dial can take up to connectTimeout, and every stream
-	// opened or released on this pool needs that lock meanwhile.
-	newConn, err := NewUpstreamGRPCStreamConnection(ctx, p.nodeUrl, p.connectTimeout, p.liveness)
-	if err != nil {
-		return fmt.Errorf("failed to reconnect: %w", err)
-	}
-
-	// Close marks the pool closed before it takes this lock, so checked under the lock the
-	// new connection is either closed here or among those Close releases.
-	p.lock.Lock()
-	if p.closed.Load() {
-		p.lock.Unlock()
-		newConn.Close()
-		return fmt.Errorf("pool closed while reconnecting")
-	}
-	p.connections = append(p.connections, newConn)
-	p.backoff.Reset()
-	callback := p.onReconnect
-	p.lock.Unlock()
-
-	utils.LavaFormatInfo("gRPC pool: reconnected successfully",
-		utils.LogAttr("endpoint", p.sanitizedURL),
-	)
-
-	// Call reconnect callback if set (for stream restoration)
-	if callback != nil {
-		callback()
-	}
-
-	return nil
-}
-
-// Close closes all connections in the pool
-func (p *UpstreamGRPCPool) Close() error {
-	if !p.closed.CompareAndSwap(false, true) {
-		return nil
-	}
-
-	p.lock.Lock()
-	conns := p.connections
-	p.connections = nil
-	p.lock.Unlock()
-
-	for _, conn := range conns {
-		conn.Close()
-	}
-
-	utils.LavaFormatDebug("gRPC pool: closed",
-		utils.LogAttr("endpoint", p.sanitizedURL),
-		utils.LogAttr("closedConnections", len(conns)),
-	)
-
-	return nil
-}
-
-// GetEndpoint returns the sanitized endpoint URL
-func (p *UpstreamGRPCPool) GetEndpoint() string {
-	return p.sanitizedURL
-}
-
-// ConnectionCount returns the current number of connections in the pool
-func (p *UpstreamGRPCPool) ConnectionCount() int {
-	p.lock.RLock()
-	defer p.lock.RUnlock()
-	return len(p.connections)
+	p.release(conn)
 }
 
 // TotalStreamCount returns the total number of active streams across all connections
 func (p *UpstreamGRPCPool) TotalStreamCount() int32 {
-	p.lock.RLock()
-	defer p.lock.RUnlock()
-
-	var total int32
-	for _, conn := range p.connections {
-		total += conn.StreamCount()
-	}
-	return total
+	return p.totalSlots()
 }
