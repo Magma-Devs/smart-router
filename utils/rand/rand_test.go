@@ -63,3 +63,12 @@ func TestDistribution(t *testing.T) {
 		isUniformlyDistributed(t, rng.Int63n)
 	})
 }
+
+func TestProtocolRandDistribution(t *testing.T) {
+	InitRandomSeed()
+	isUniformlyDistributed(t, func(n int64) int64 { return int64(Intn(int(n))) })
+	isUniformlyDistributed(t, func(n int64) int64 { return Int63() % n })
+	isUniformlyDistributed(t, func(n int64) int64 { return int64(Uint64() % uint64(n)) })
+	isUniformlyDistributed(t, func(n int64) int64 { return int64(Float64() * float64(n)) })
+	require.Panics(t, func() { Intn(0) })
+}
