@@ -12,19 +12,31 @@ links collected at the bottom of each section.
 
 ### Highlights
 
-Release v1.6.5 refines upstream health verification and router readiness by ensuring each node URL is verified over its own isolated connection and each health-check attempt uses a dedicated relay processor. To improve load balancer integration, the router now correctly transitions to a `NotReady` state when all of its relays fail. Operators can also track exactly which configured providers failed verification—and which specific check triggered the failure—through newly published metrics. Finally, for gRPC traffic, this release corrects how connection failures and timeouts are classified during upstream routing. A call that hits the router's internal deadline is now properly recorded as a timeout, and a refused connection is marked as unreachable, preventing the router from misreporting either event as a valid answer from the upstream node.
+**Readiness follows reachability.** A router's `/readyz` and `smartrouter_overall_health` now say whether it reaches its upstreams. Each chain+interface's health check ends in one of three verdicts:
+
+- **No upstream answers:** every try timed out, failed to connect, or had no upstream to go to. The chain turns unhealthy. A client relay that no upstream answered brings the check forward to within `--relays-health-unhealthy-interval` (default `15s`). A chain+interface that turns unhealthy brings forward the checks of the router's other interfaces too. A router that loses its egress no longer waits out the 5-minute healthy cadence, and an idle interface no longer holds it Ready.
+- **An upstream answers with an error, an error status or a rate limit:** nothing changes. Every replica shares its upstreams and gets the same answer, so it is no reason to take one out of rotation. The answer does not prove the chain serves either, so a chain that is already unhealthy stays unhealthy.
+- **An upstream answers with a result:** the chain is healthy. Earlier releases passed the check on any reply, including a gRPC call that hit the router's own deadline, which kept a router without egress Ready indefinitely.
+
+**Who notices:** operators. An upstream outage that every replica shares no longer empties a router's Service, and `smartrouter_overall_health` stays `1` through it, so alert on the error share for that, not on readiness. The `Health Check Interval Check` log line gains `verdict` (`healthy`, `inconclusive` or `unreachable`), and its `health result` is now the chain's health after the check. `docs/METRICS.md` ("When they change") states the rule. This is MAG-4617, MAG-4639 and MAG-4641. MAG-4641 landed inside #584's commit, so its line below was added by hand.
+
+Release v1.6.5 also refines upstream health verification and router readiness by ensuring each node URL is verified over its own isolated connection and each health-check attempt uses a dedicated relay processor. Operators can also track exactly which configured providers failed verification—and which specific check triggered the failure—through newly published metrics. Finally, for gRPC traffic, this release corrects how connection failures and timeouts are classified during upstream routing. A call that hits the router's internal deadline is now properly recorded as a timeout, and a refused connection is marked as unreachable, preventing the router from misreporting either event as a valid answer from the upstream node.
 
 ### Changes
 
 #### New Features
 - feat(metrics): publish which configured providers failed verification, and which check (MAG-4594) ([#572]) [`316fad1`]
+- feat(readiness): readiness follows reachability, three-valued probe (MAG-4641) ([#586]) [`bb43ae9`]
+  - added by hand: #586 merged into #584's branch and reached `main` inside #584's squash commit, so the generator listed no line for it. This is the readiness rule in the Highlights.
 
 #### Bug fixes
 - fix: verify every node url over its own connection (MAG-4231) ([#463]) [`dc512c7`]
 - fix(readiness): turn NotReady when a router's relays all fail (MAG-4617) ([#581]) [`b6d951c`]
+  - its rule, that any reply but a result fails the check, was replaced before this release by MAG-4641: see the Highlights.
 - fix(grpc): a call that hits the router's own deadline is a timeout, not the node's answer (MAG-4625) ([#583]) [`ec999d5`]
 - fix(grpc): a refused connection is unreachable, not the node's answer (MAG-4355) ([#585]) [`f4dd073`]
 - fix(readiness): give each health-check try its own relay processor (MAG-4639) ([#584]) [`bb43ae9`]
+  - this commit also carries MAG-4641 ([#586]).
 
 #### Documentation updates
 - docs(changelog): say v1.6.4 drops the two distrusted roots, and correct v1.6.2 (MAG-4596) ([#575]) [`ec7a319`]
@@ -36,6 +48,7 @@ Release v1.6.5 refines upstream health verification and router readiness by ensu
 [#583]: https://github.com/magma-Devs/smart-router/pull/583
 [#584]: https://github.com/magma-Devs/smart-router/pull/584
 [#585]: https://github.com/magma-Devs/smart-router/pull/585
+[#586]: https://github.com/magma-Devs/smart-router/pull/586
 [`316fad1`]: https://github.com/magma-Devs/smart-router/commit/316fad1e8e9e4af246a97ebf5ca71393de8d6fe6
 [`b6d951c`]: https://github.com/magma-Devs/smart-router/commit/b6d951caf1c28c3e632b915b54cda1ea3d39af0f
 [`bb43ae9`]: https://github.com/magma-Devs/smart-router/commit/bb43ae96b4671a2d13bba2c22f948e486082e495
