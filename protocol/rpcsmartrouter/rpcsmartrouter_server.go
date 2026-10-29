@@ -1493,6 +1493,38 @@ func withUnclearWriteStatus(result *common.RelayResult) *common.RelayResult {
 	return &stamped
 }
 
+// relayFailureLogAttrs adds to a failed attempt's log line its classification and, when an
+// upstream answered, the upstream's own status line and body (MAG-4481). The classification is
+// the one the results manager records for the attempt: the sender's own when it wrapped one,
+// otherwise the same message-based fallback.
+func relayFailureLogAttrs(err error, attrs ...utils.Attribute) []utils.Attribute {
+	classified := extractLavaError(err)
+	if classified == nil {
+		classified = common.ClassifyError(common.DetectConnectionError(err), common.ChainFamilyUnknown, common.TransportGRPC, 0, err.Error())
+	}
+	attrs = append(attrs,
+		utils.LogAttr("error_code", classified.Code),
+		utils.LogAttr("error_name", classified.Name),
+	)
+	return append(attrs, lavasession.UpstreamAnswerLogAttrs(err)...)
+}
+
+// withNoAnswerTimeout names the request's processing timeout in a 504 reply, which the relay
+// processor builds without knowing it. It is the request's budget, not the time the failed attempt
+// took: a connect timeout (1001) that gave up early still reads "within <processing timeout>".
+// Copied rather than mutated, as in withUnclearWriteStatus.
+func (rpcss *RPCSmartRouterServer) withNoAnswerTimeout(result *common.RelayResult, protocolMessage chainlib.ProtocolMessage) *common.RelayResult {
+	cf := result.GetClientFacing()
+	if cf == nil || !cf.TimedOut || cf.Timeout > 0 {
+		return result
+	}
+	named := *cf
+	named.Timeout, _ = rpcss.GetProcessingTimeout(protocolMessage)
+	stamped := *result
+	stamped.ClientFacing = &named
+	return &stamped
+}
+
 // unknownWriteOutcome is the judgement, split out so it can be tested directly. Assumes the caller
 // has established that this is a failed write.
 func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad, cutOffMidDelivery bool) bool {
@@ -1620,6 +1652,22 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			return nil, errUnknownWriteOutcome
 		}
 
+		// A hung upstream: the request was dispatched and the processing budget ran out before any
+		// attempt recorded a result. Nobody answered, so the client gets the router's 504 rather
+		// than a 500 carrying "context deadline exceeded" (MAG-4481).
+		if relayProcessor != nil && errors.Is(err, context.DeadlineExceeded) && relayProcessor.GetUsedProviders().SessionsDispatched() > 0 {
+			processingTimeout, _ := rpcss.GetProcessingTimeout(protocolMessage)
+			return &common.RelayResult{
+				StatusCode: http.StatusGatewayTimeout,
+				ClientFacing: &common.ClientFacingError{
+					TimedOut:        true,
+					Timeout:         processingTimeout,
+					RouterErrorCode: common.LavaErrorContextDeadline.Code,
+					RouterErrorName: common.LavaErrorContextDeadline.Name,
+				},
+			}, err
+		}
+
 		return nil, err
 	}
 
@@ -1692,6 +1740,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		return withUnclearWriteStatus(returnedResult), errUnknownWriteOutcome
 	}
 	if err != nil {
+		returnedResult = rpcss.withNoAnswerTimeout(returnedResult, protocolMessage)
 		// relay_end records this failure; a line beside it would make a reader count it twice.
 		return returnedResult, utils.LavaFormatErrorSilent("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
 	}
@@ -2897,12 +2946,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				if isClientCancel {
 					logRelayFailure = utils.LavaFormatDebug
 				}
-				logRelayFailure("direct RPC relay failed in goroutine",
+				logRelayFailure("direct RPC relay failed in goroutine", relayFailureLogAttrs(err,
 					utils.LogAttr("endpoint", endpointAddress),
 					utils.LogAttr("error", err.Error()),
 					utils.LogAttr("latency", relayLatency),
 					utils.LogAttr("GUID", goroutineCtx),
-				)
+				)...)
 				errResponse = err
 			} else {
 				utils.LavaFormatDebug("direct RPC relay succeeded in goroutine",
@@ -6750,18 +6799,26 @@ func isDataScopeRelayOutcome(err error, relayResult *common.RelayResult) bool {
 }
 
 // httpStatusRelayError is the error relayInnerDirect fails a relay with when the upstream
-// answered a >=500/429 status. A 429 travels as the typed sentinel with the upstream's
-// Retry-After attached, so errors.Is(err, common.StatusCodeError429) and
-// common.RetryAfterFrom read the same on the relay path as on every other transport.
+// answered a >=500/429 status. It carries the upstream's answer (status, body, Content-Type) so
+// the client can be given it as is when the relay fails (MAG-4481); Error() is one canonical text
+// per status, so the classification is the same as for the plain "HTTP <code>" this used to be. A
+// 429 unwraps to the typed sentinel with the upstream's Retry-After attached, so
+// errors.Is(err, common.StatusCodeError429) and common.RetryAfterFrom read the same on the relay
+// path as on every other transport.
 func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error {
-	if statusCode != 429 {
-		return fmt.Errorf("HTTP %d", statusCode)
-	}
 	header := http.Header{}
 	if reply != nil {
 		for _, md := range reply.Metadata {
 			header.Add(md.Name, md.Value)
 		}
 	}
-	return common.WithRetryAfter(fmt.Errorf("HTTP %d: %w", statusCode, common.StatusCodeError429), header, time.Now())
+	httpErr := &lavasession.HTTPStatusError{
+		StatusCode:  statusCode,
+		Body:        reply.GetData(),
+		ContentType: header.Get("Content-Type"),
+	}
+	if statusCode == http.StatusTooManyRequests {
+		httpErr.RetryAfter, _ = common.ParseRetryAfter(header, time.Now())
+	}
+	return httpErr
 }

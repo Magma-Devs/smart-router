@@ -414,13 +414,16 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-			apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody, errMasking, msgSeed, time.Since(startTime), err)
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
+			// MAG-4481: the upstream's own answer as is, or the router's 502/504 when none answered.
+			// The request log records what the client is sent.
+			if failed, ok := buildFailedRelayReply(relayResult, msgSeed, nil, noAnswerJsonError); ok {
+				apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody, loggedReply(failed.body), msgSeed, time.Since(startTime), err)
+				return sendFailedRelayReply(fiberCtx, failed, reply.GetMetadata())
 			}
-			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), convertToJsonError(errMasking))
+			response := convertToJsonError(errMasking)
+			apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody, loggedReply(response), msgSeed, time.Since(startTime), err)
+			fiberCtx.Status(failedRelayStatus(relayResult))
+			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
 		}
 		apil.logger.LogRequestAndResponse("graphql in/out", false, http.MethodPost, path, requestBody, string(reply.Data), msgSeed, time.Since(startTime), nil)
 		if relayResult.GetStatusCode() != 0 {

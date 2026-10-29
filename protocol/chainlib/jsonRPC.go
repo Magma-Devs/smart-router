@@ -535,26 +535,19 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			// Get unique GUID response
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 
-			// Log request and response
-			apil.logger.LogRequestAndResponse("jsonrpc http", true, "POST", fiberCtx.Request().URI().String(), msg, errMasking, msgSeed, time.Since(startTime), err)
-
-			// Set status to internal error
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
+			// MAG-4481: the upstream's own answer as is, or the router's 502/504 when none answered.
+			// The request log records what the client is sent.
+			if failed, ok := buildFailedRelayReply(relayResult, msgSeed, fiberCtx.Body(), noAnswerJsonRpc); ok {
+				apil.logger.LogRequestAndResponse("jsonrpc http", true, "POST", fiberCtx.Request().URI().String(), msg, loggedReply(failed.body), msgSeed, time.Since(startTime), err)
+				return sendFailedRelayReply(fiberCtx, failed, reply.GetMetadata())
 			}
 
 			// Construct spec-compliant JSON-RPC 2.0 error envelope (see
 			// convertToJsonRpcError for the rationale — `error` must be an
 			// Object with code/message per §5.1, not a stringified envelope).
-			var response []byte
-			if cf := relayResult.GetClientFacing(); cf != nil && metrics.ReturnMaskedErrors == "false" {
-				// MAG-4218: the upstream's own answer, or one honest sentence + details in data.
-				response = convertUpstreamErrorToJsonRpc(cf, msgSeed, errMasking, fiberCtx.Body())
-			} else {
-				response = convertToJsonRpcError(errMasking, fiberCtx.Body())
-			}
+			response := convertToJsonRpcError(errMasking, fiberCtx.Body())
+			apil.logger.LogRequestAndResponse("jsonrpc http", true, "POST", fiberCtx.Request().URI().String(), msg, loggedReply(response), msgSeed, time.Since(startTime), err)
+			fiberCtx.Status(failedRelayStatus(relayResult))
 			// Return error json response
 			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
 		}

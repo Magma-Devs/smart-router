@@ -1533,31 +1533,24 @@ func (rp *RelayProcessor) buildFailureResult(
 		if replyErr.Response != nil {
 			returnedResult = &replyErr.Response.RelayResult
 		}
-		// MAG-4218: hand the listener the upstream's own answer (status + body), or
-		// the leaf cause with a 502 when no upstream answered. A copy, as for the 503 stamp below.
+		// MAG-4218, MAG-4481: hand the listener the upstream's own answer (status + body, as is,
+		// a 429 included), or the leaf cause with a 502 (504 for a timeout) when no upstream
+		// answered.
+		//
+		// Copy before stamping: returnedResult aliases the STORED RelayResult (the assignment above
+		// takes its address), and this runs under a read lock holding nothing of rm.lock. Mutating
+		// in place would write shared state without the write lock and make the stamp permanent
+		// for every later ProcessingResult call.
 		if cf := clientFacingFromProtocolError(replyErr.Err, replyErr.LavaError); cf != nil {
 			stamped := *returnedResult
 			stamped.ClientFacing = cf
 			if cf.UpstreamStatus != 0 {
 				stamped.StatusCode = cf.UpstreamStatus
 			} else {
-				stamped.StatusCode = http.StatusBadGateway
+				stamped.StatusCode = NoAnswerStatus(cf)
 			}
 			returnedResult = &stamped
 		}
-	}
-
-	// Every attempt was refused for rate: the chain is temporarily unservable, not broken.
-	// 503 is the honest status and what well-behaved clients back off on; no Retry-After
-	// is surfaced — the hold-off registry owns that, internally.
-	if onlyRateLimited(nodeErrors, protocolErrors) {
-		// Copy before stamping: returnedResult aliases the STORED RelayResult (the two
-		// assignments above take its address), and this runs under a read lock holding
-		// nothing of rm.lock. Mutating in place would write shared state without the write
-		// lock and make the 503 permanent for every later ProcessingResult call.
-		stamped := *returnedResult
-		stamped.StatusCode = http.StatusServiceUnavailable
-		returnedResult = &stamped
 	}
 
 	// Log with classified error code for metrics/observability

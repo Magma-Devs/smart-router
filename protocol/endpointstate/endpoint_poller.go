@@ -455,7 +455,19 @@ func (ecf *EndpointPoller) ObserveLatestBlockPoll(block int64, transportLatency 
 // For REST/GET requests, requestData is a URL path that must be appended to the base URL.
 // For REST/POST requests, requestData is the JSON body and apiName is the URL path.
 // For JSON-RPC/POST requests, requestData is the JSON body.
-func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string, kind string) ([]byte, error) {
+func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string, kind string) (reply []byte, err error) {
+	// Both pollers (JSON-RPC and REST) pass here. An upstream's error answer reaches the caller as
+	// an HTTPStatusError whose Error() is canonical, so its own status line and body are logged
+	// here, as fields (MAG-4481).
+	defer func() {
+		if attrs := lavasession.UpstreamAnswerLogAttrs(err); attrs != nil {
+			utils.LavaFormatDebug("endpoint poll: upstream answered an error status", append(attrs,
+				utils.LogAttr("chainID", ecf.chainID),
+				utils.LogAttr("endpoint", utils.RedactURL(ecf.endpointURL)),
+				utils.LogAttr("api", apiName),
+			)...)
+		}
+	}()
 	if ecf.directConnection == nil {
 		return nil, fmt.Errorf("no direct connection for endpoint %s", utils.RedactURL(ecf.endpointURL))
 	}
@@ -529,10 +541,11 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 	if resp.StatusCode >= 400 {
 		retryAfter, _ := common.ParseRetryAfter(http.Header(resp.Headers), time.Now())
 		return nil, &lavasession.HTTPStatusError{
-			StatusCode: resp.StatusCode,
-			Status:     resp.Status,
-			Body:       resp.Body,
-			RetryAfter: retryAfter,
+			StatusCode:  resp.StatusCode,
+			Status:      resp.Status,
+			Body:        resp.Body,
+			ContentType: http.Header(resp.Headers).Get("Content-Type"),
+			RetryAfter:  retryAfter,
 		}
 	}
 	return resp.Body, nil

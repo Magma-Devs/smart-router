@@ -505,18 +505,17 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			// Get unique GUID response
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 
-			// Log request and response
-			apil.logger.LogRequestAndResponse("tendermint http in/out", true, "POST", fiberCtx.Request().URI().String(), msg, errMasking, msgSeed, time.Since(startTime), err)
-
-			// Set status to internal error
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
+			// MAG-4481: the upstream's own answer as is, or the router's 502/504 when none answered.
+			// The request log records what the client is sent.
+			if failed, ok := buildFailedRelayReply(relayResult, msgSeed, fiberCtx.Body(), noAnswerJsonRpc); ok {
+				apil.logger.LogRequestAndResponse("tendermint http in/out", true, "POST", fiberCtx.Request().URI().String(), msg, loggedReply(failed.body), msgSeed, time.Since(startTime), err)
+				return sendFailedRelayReply(fiberCtx, failed, reply.GetMetadata())
 			}
 
 			// Construct json response
 			response := rpcInterfaceMessages.ConvertToTendermintError(errMasking, fiberCtx.Body())
+			apil.logger.LogRequestAndResponse("tendermint http in/out", true, "POST", fiberCtx.Request().URI().String(), msg, loggedReply([]byte(response)), msgSeed, time.Since(startTime), err)
+			fiberCtx.Status(failedRelayStatus(relayResult))
 			// Return error json response
 			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), []byte(response))
 		}
@@ -566,14 +565,11 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			// Get unique GUID response
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 
-			// Log request and response
-			apil.logger.LogRequestAndResponse("tendermint http in/out", true, "GET", fiberCtx.Request().URI().String(), "", errMasking, msgSeed, time.Since(startTime), err)
-
-			// Set status to internal error
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
+			// MAG-4481: the upstream's own answer as is, or the router's 502/504 when none answered.
+			// The request log records what the client is sent.
+			if failed, ok := buildFailedRelayReply(relayResult, msgSeed, nil, noAnswerJsonError); ok {
+				apil.logger.LogRequestAndResponse("tendermint http in/out", true, "GET", fiberCtx.Request().URI().String(), "", loggedReply(failed.body), msgSeed, time.Since(startTime), err)
+				return sendFailedRelayReply(fiberCtx, failed, reply.GetMetadata())
 			}
 
 			if string(fiberCtx.Body()) != "" {
@@ -582,6 +578,8 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 
 			// Construct json response
 			response := convertToJsonError(errMasking)
+			apil.logger.LogRequestAndResponse("tendermint http in/out", true, "GET", fiberCtx.Request().URI().String(), "", loggedReply(response), msgSeed, time.Since(startTime), err)
+			fiberCtx.Status(failedRelayStatus(relayResult))
 
 			// Return error json response
 			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)

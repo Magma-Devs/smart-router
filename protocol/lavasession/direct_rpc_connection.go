@@ -830,10 +830,11 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 		// For 4xx/5xx errors, include status code in error but also return the response
 		retryAfter, _ := common.ParseRetryAfter(resp.Header, time.Now())
 		return response, &HTTPStatusError{
-			StatusCode: resp.StatusCode,
-			Status:     resp.Status,
-			Body:       body,
-			RetryAfter: retryAfter,
+			StatusCode:  resp.StatusCode,
+			Status:      resp.Status,
+			Body:        body,
+			ContentType: resp.Header.Get("Content-Type"),
+			RetryAfter:  retryAfter,
 		}
 	}
 
@@ -889,6 +890,9 @@ type HTTPStatusError struct {
 	// of Error(), see there. Empty when the producer had no status line.
 	Status string
 	Body   []byte
+	// ContentType is the upstream's Content-Type, so its body reaches the client labelled as the
+	// upstream labelled it (MAG-4481). Empty when the upstream sent none.
+	ContentType string
 	// RetryAfter is what a rate-limiting upstream asked for, or 0 when it sent no usable
 	// Retry-After. Read it through common.RetryAfterFrom rather than the field, so a caller
 	// works the same whichever path produced the error.
@@ -904,6 +908,32 @@ func (e *HTTPStatusError) Error() string {
 		return fmt.Sprintf("HTTP %d %s", e.StatusCode, text)
 	}
 	return fmt.Sprintf("HTTP %d", e.StatusCode)
+}
+
+// upstreamBodyLogCap bounds an upstream body logged as a field (MAG-4481).
+const upstreamBodyLogCap = 256
+
+// UpstreamAnswerLogAttrs returns the upstream's own status line and body as log fields when err
+// carries an upstream answer, and nothing otherwise. Error() is canonical and carries neither
+// (see there), so a log line that wants them asks for them here. The body is cut at 256 bytes and
+// redacted, as any other log field.
+func UpstreamAnswerLogAttrs(err error) []utils.Attribute {
+	var httpErr *HTTPStatusError
+	if !errors.As(err, &httpErr) {
+		return nil
+	}
+	status := httpErr.Status
+	if status == "" {
+		status = strconv.Itoa(httpErr.StatusCode)
+	}
+	body := httpErr.Body
+	if len(body) > upstreamBodyLogCap {
+		body = body[:upstreamBodyLogCap]
+	}
+	return []utils.Attribute{
+		utils.LogAttr("upstream_status", status),
+		utils.LogAttr("upstream_body", utils.RedactSecrets(strings.ToValidUTF8(string(body), ""))),
+	}
 }
 
 // Unwrap presents a 429 as the shared rate-limit error, so errors.Is(err,
