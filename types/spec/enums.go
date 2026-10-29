@@ -1,10 +1,33 @@
 package spec
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 )
+
+// enumString names x from its name table, or renders "<typeName>(<n>)" for an unregistered value.
+func enumString[T ~int32](x T, names map[int32]string, typeName string) string {
+	if name, ok := names[int32(x)]; ok {
+		return name
+	}
+	return fmt.Sprintf("%s(%d)", typeName, int32(x))
+}
+
+// enumMarshal quotes an enum's String() without escaping, as the spec JSON always has.
+func enumMarshal(name string) []byte {
+	return []byte(`"` + name + `"`)
+}
+
+// enumUnmarshal decodes a JSON string into dst through its value table. An unknown name decodes
+// to the zero value without an error.
+func enumUnmarshal[T ~int32](b []byte, dst *T, values map[string]int32) error {
+	var j string
+	if err := json.Unmarshal(b, &j); err != nil {
+		return err
+	}
+	*dst = T(values[j])
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // FUNCTION_TAG
@@ -49,26 +72,15 @@ var FUNCTION_TAG_value = map[string]int32{
 }
 
 func (x FUNCTION_TAG) String() string {
-	if name, ok := FUNCTION_TAG_name[int32(x)]; ok {
-		return name
-	}
-	return fmt.Sprintf("FUNCTION_TAG(%d)", int32(x))
+	return enumString(x, FUNCTION_TAG_name, "FUNCTION_TAG")
 }
 
 func (s FUNCTION_TAG) MarshalJSON() ([]byte, error) {
-	buf := bytes.NewBufferString(`"`)
-	buf.WriteString(s.String())
-	buf.WriteString(`"`)
-	return buf.Bytes(), nil
+	return enumMarshal(s.String()), nil
 }
 
 func (s *FUNCTION_TAG) UnmarshalJSON(b []byte) error {
-	var j string
-	if err := json.Unmarshal(b, &j); err != nil {
-		return err
-	}
-	*s = FUNCTION_TAG(FUNCTION_TAG_value[j])
-	return nil
+	return enumUnmarshal(b, s, FUNCTION_TAG_value)
 }
 
 // ---------------------------------------------------------------------------
@@ -105,26 +117,15 @@ var PARSER_TYPE_value = map[string]int32{
 }
 
 func (x PARSER_TYPE) String() string {
-	if name, ok := PARSER_TYPE_name[int32(x)]; ok {
-		return name
-	}
-	return fmt.Sprintf("PARSER_TYPE(%d)", int32(x))
+	return enumString(x, PARSER_TYPE_name, "PARSER_TYPE")
 }
 
 func (s PARSER_TYPE) MarshalJSON() ([]byte, error) {
-	buf := bytes.NewBufferString(`"`)
-	buf.WriteString(s.String())
-	buf.WriteString(`"`)
-	return buf.Bytes(), nil
+	return enumMarshal(s.String()), nil
 }
 
 func (s *PARSER_TYPE) UnmarshalJSON(b []byte) error {
-	var j string
-	if err := json.Unmarshal(b, &j); err != nil {
-		return err
-	}
-	*s = PARSER_TYPE(PARSER_TYPE_value[j])
-	return nil
+	return enumUnmarshal(b, s, PARSER_TYPE_value)
 }
 
 // ---------------------------------------------------------------------------
@@ -161,26 +162,15 @@ var PARSER_FUNC_value = map[string]int32{
 }
 
 func (x PARSER_FUNC) String() string {
-	if name, ok := PARSER_FUNC_name[int32(x)]; ok {
-		return name
-	}
-	return fmt.Sprintf("PARSER_FUNC(%d)", int32(x))
+	return enumString(x, PARSER_FUNC_name, "PARSER_FUNC")
 }
 
 func (s PARSER_FUNC) MarshalJSON() ([]byte, error) {
-	buf := bytes.NewBufferString(`"`)
-	buf.WriteString(s.String())
-	buf.WriteString(`"`)
-	return buf.Bytes(), nil
+	return enumMarshal(s.String()), nil
 }
 
 func (s *PARSER_FUNC) UnmarshalJSON(b []byte) error {
-	var j string
-	if err := json.Unmarshal(b, &j); err != nil {
-		return err
-	}
-	*s = PARSER_FUNC(PARSER_FUNC_value[j])
-	return nil
+	return enumUnmarshal(b, s, PARSER_FUNC_value)
 }
 
 // ---------------------------------------------------------------------------
@@ -217,26 +207,15 @@ var Header_HeaderType_value = map[string]int32{
 }
 
 func (x Header_HeaderType) String() string {
-	if name, ok := Header_HeaderType_name[int32(x)]; ok {
-		return name
-	}
-	return fmt.Sprintf("Header_HeaderType(%d)", int32(x))
+	return enumString(x, Header_HeaderType_name, "Header_HeaderType")
 }
 
 func (s Header_HeaderType) MarshalJSON() ([]byte, error) {
-	buf := bytes.NewBufferString(`"`)
-	buf.WriteString(s.String())
-	buf.WriteString(`"`)
-	return buf.Bytes(), nil
+	return enumMarshal(s.String()), nil
 }
 
 func (s *Header_HeaderType) UnmarshalJSON(b []byte) error {
-	var j string
-	if err := json.Unmarshal(b, &j); err != nil {
-		return err
-	}
-	*s = Header_HeaderType(Header_HeaderType_value[j])
-	return nil
+	return enumUnmarshal(b, s, Header_HeaderType_value)
 }
 
 // ---------------------------------------------------------------------------
@@ -261,24 +240,13 @@ var ParseValue_VerificationSeverity_value = map[string]int32{
 }
 
 func (x ParseValue_VerificationSeverity) String() string {
-	if name, ok := ParseValue_VerificationSeverity_name[int32(x)]; ok {
-		return name
-	}
-	return fmt.Sprintf("ParseValue_VerificationSeverity(%d)", int32(x))
+	return enumString(x, ParseValue_VerificationSeverity_name, "ParseValue_VerificationSeverity")
 }
 
 func (s ParseValue_VerificationSeverity) MarshalJSON() ([]byte, error) {
-	buf := bytes.NewBufferString(`"`)
-	buf.WriteString(s.String())
-	buf.WriteString(`"`)
-	return buf.Bytes(), nil
+	return enumMarshal(s.String()), nil
 }
 
 func (s *ParseValue_VerificationSeverity) UnmarshalJSON(b []byte) error {
-	var j string
-	if err := json.Unmarshal(b, &j); err != nil {
-		return err
-	}
-	*s = ParseValue_VerificationSeverity(ParseValue_VerificationSeverity_value[j])
-	return nil
+	return enumUnmarshal(b, s, ParseValue_VerificationSeverity_value)
 }
