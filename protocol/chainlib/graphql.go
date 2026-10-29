@@ -529,7 +529,7 @@ func (gcp *GraphQLChainProxy) SendNodeMsg(ctx context.Context, chainMessage Chai
 
 	// The router prints the request body itself (it forwards the caller's document verbatim as
 	// JSON), so the content type is ours to declare, as it is for JSON-RPC.
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", common.JSONContentType)
 
 	for _, header := range nodeMessage.GetHeaders() {
 		if header.Value == "" {

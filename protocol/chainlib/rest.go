@@ -528,7 +528,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 
 	// setting the content-type to be application/json instead of Go's defult http.DefaultClient
 	if connectionTypeSlected == http.MethodPost || connectionTypeSlected == http.MethodPut {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", common.JSONContentType)
 	}
 
 	if len(nodeMessage.GetHeaders()) > 0 {

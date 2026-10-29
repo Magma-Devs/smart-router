@@ -572,7 +572,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		URL:         nodeUrl.Url,
 		Body:        requestData,
 		Headers:     chainMessage.GetRPCMessage().GetHeaders(), // Preserves duplicates, empty value = delete
-		ContentType: "application/json",
+		ContentType: common.JSONContentType,
 	}
 
 	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendJSONRPCRelay)
@@ -817,7 +817,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		URL:         fullURL,
 		Body:        restBody, // As-is for a body method; nil for every other method (above)
 		Headers:     headers,  // Use Metadata (preserves delete semantics)
-		ContentType: "application/json",
+		ContentType: common.JSONContentType,
 	})
 	latency := time.Since(startTime)
 	tracing.RecordHTTPResponse(span, response)
@@ -940,7 +940,7 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		URL:         nodeUrl.Url,
 		Body:        graphqlMessage.Msg,
 		Headers:     graphqlMessage.GetHeaders(), // Preserves duplicates, empty value = delete
-		ContentType: "application/json",
+		ContentType: common.JSONContentType,
 	}
 
 	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendGraphQLRelay)

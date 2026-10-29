@@ -792,7 +792,7 @@ func (h *HTTPDirectRPCConnection) SendRequest(
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", common.JSONContentType)
 	// Accept-Encoding is the url's own (NodeUrl.AcceptEncoding): identity unless
 	// the operator opted it in to gzip. Setting any value keeps Go's http client
 	// from adding `gzip` and decoding it on its own. That path cost the eth router

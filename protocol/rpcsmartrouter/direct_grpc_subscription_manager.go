@@ -1416,7 +1416,7 @@ func (dgm *DirectGRPCSubscriptionManager) createStreamAcknowledgement(routerID, 
 		Data: []byte(fmt.Sprintf(`{"subscription_id":"%s","method":"%s","status":"STREAMING"}`, routerID, methodPath)),
 		Metadata: []pairingtypes.Metadata{
 			{Name: MetadataGRPCSubscriptionID, Value: routerID},
-			{Name: "content-type", Value: "application/json"},
+			{Name: "content-type", Value: common.JSONContentType},
 		},
 	}
 }
