@@ -2,8 +2,6 @@ package metrics
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"slices"
 	"sync"
@@ -950,8 +948,7 @@ func (m *SmartRouterMetricsManager) SetEndpointLatestBlock(spec, apiInterface, e
 // part of it is exported. /debug/endpoint-state shows it beside each endpoint, on a router run
 // with its debug server.
 func URLFingerprint(rawURL string) string {
-	sum := sha256.Sum256([]byte(rawURL))
-	return hex.EncodeToString(sum[:4])
+	return utils.Digest(rawURL, 4)
 }
 
 // RegisterEndpointInternalPath records the spec path a registered url serves ("/v2", or "" for
