@@ -1,6 +1,7 @@
 package rand
 
 import (
+	"math"
 	"strconv"
 	"testing"
 
@@ -64,11 +65,38 @@ func TestDistribution(t *testing.T) {
 	})
 }
 
+// isUniformWithinSigmas is isUniformlyDistributed for a source that differs on every run. A fixed
+// percentage bound is only safe on a seeded source, where it passes or fails the same way each
+// time; here each slot's count is Binomial(iterations, 1/maxValue), so the bound is a number of
+// standard deviations of that distribution. At six sigmas a fair source fails one of the 200 slot
+// checks in TestProtocolRandDistribution about once in 2.5 million runs; the fixed 7% bound is
+// 3.2 sigmas there and failed about one run in four.
+func isUniformWithinSigmas(t *testing.T, f func(n int64) int64) {
+	t.Helper()
+
+	const iterations = 100000
+	const maxValue = 50
+	const sigmas = 6
+
+	numberToCount := make(map[int64]int64, maxValue)
+	for i := 0; i < iterations; i++ {
+		numberToCount[f(maxValue)]++
+	}
+
+	p := 1.0 / maxValue
+	target := iterations * p
+	bound := sigmas * math.Sqrt(iterations*p*(1-p))
+	for i := 0; i < maxValue; i++ {
+		count := float64(numberToCount[int64(i)])
+		require.InDelta(t, target, count, bound, "slot "+strconv.Itoa(i))
+	}
+}
+
 func TestProtocolRandDistribution(t *testing.T) {
 	InitRandomSeed()
-	isUniformlyDistributed(t, func(n int64) int64 { return int64(Intn(int(n))) })
-	isUniformlyDistributed(t, func(n int64) int64 { return Int63() % n })
-	isUniformlyDistributed(t, func(n int64) int64 { return int64(Uint64() % uint64(n)) })
-	isUniformlyDistributed(t, func(n int64) int64 { return int64(Float64() * float64(n)) })
+	isUniformWithinSigmas(t, func(n int64) int64 { return int64(Intn(int(n))) })
+	isUniformWithinSigmas(t, func(n int64) int64 { return Int63() % n })
+	isUniformWithinSigmas(t, func(n int64) int64 { return int64(Uint64() % uint64(n)) })
+	isUniformWithinSigmas(t, func(n int64) int64 { return int64(Float64() * float64(n)) })
 	require.Panics(t, func() { Intn(0) })
 }
