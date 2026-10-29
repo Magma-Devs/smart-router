@@ -187,11 +187,7 @@ func (apip *GrpcChainParser) setupForProvider(reflectionConnection *grpc.ClientC
 
 func (apip *GrpcChainParser) CraftMessage(parsing *spectypes.ParseDirective, connectionType string, craftData *CraftData, metadata []pairingtypes.Metadata) (ChainMessageForSend, error) {
 	if craftData != nil {
-		chainMessage, err := apip.ParseMsg(craftData.Path, craftData.Data, craftData.ConnectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-		if err == nil {
-			chainMessage.AppendHeader(metadata)
-		}
-		return chainMessage, err
+		return parseCraftedMessage(apip, craftData.Path, craftData.Data, craftData.ConnectionType, metadata)
 	}
 
 	grpcMessage := &rpcInterfaceMessages.GrpcMessage{
@@ -209,7 +205,7 @@ func (apip *GrpcChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 	}
 	parsedInput := &parser.ParsedInput{}
 	parsedInput.SetBlock(spectypes.NOT_APPLICABLE)
-	return apip.newChainMessage(apiCont.api, parsedInput, grpcMessage, apiCollection), nil
+	return newParsedChainMessage(apiCont.api, apiCollection, parsedInput, nil, grpcMessage, grpcMessage.CheckResponseError), nil
 }
 
 // HydrateGrpcResponseParsing attaches the protobuf method descriptor (and a JSON formatter built
@@ -301,26 +297,11 @@ func (apip *GrpcChainParser) ParseMsg(url string, data []byte, connectionType st
 		}
 	}
 
-	nodeMsg := apip.newChainMessage(apiCont.api, parsedInput, &grpcMessage, apiCollection)
+	// the grpc message goes in as a pointer so the descriptors set on it later are seen when parsing
+	nodeMsg := newParsedChainMessage(apiCont.api, apiCollection, parsedInput, nil, &grpcMessage, grpcMessage.CheckResponseError)
 	nodeMsg.applyParsedRange(parsedInput)
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
-}
-
-func (*GrpcChainParser) newChainMessage(api *spectypes.Api, parsedInput *parser.ParsedInput, grpcMessage *rpcInterfaceMessages.GrpcMessage, apiCollection *spectypes.ApiCollection) *baseChainMessageContainer {
-	requestedBlock := parsedInput.GetBlock()
-	requestedHashes, _ := parsedInput.GetBlockHashes()
-	nodeMsg := &baseChainMessageContainer{
-		api:                      api,
-		msg:                      grpcMessage, // setting the grpc message as a pointer so we can set descriptors for parsing
-		latestRequestedBlock:     requestedBlock,
-		requestedBlockHashes:     requestedHashes,
-		apiCollection:            apiCollection,
-		resultErrorParsingMethod: grpcMessage.CheckResponseError,
-		parseDirective:           GetParseDirective(api, apiCollection),
-		usedDefaultValue:         parsedInput.UsedDefaultValue,
-	}
-	return nodeMsg
 }
 
 // SetSpec sets the spec for the GrpcChainParser

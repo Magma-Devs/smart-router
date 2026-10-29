@@ -60,25 +60,10 @@ func (apip *TendermintChainParser) getSupportedApi(name, connectionType string) 
 
 func (apip *TendermintChainParser) CraftMessage(parsing *spectypes.ParseDirective, connectionType string, craftData *CraftData, metadata []pairingtypes.Metadata) (ChainMessageForSend, error) {
 	if craftData != nil {
-		path := craftData.Path
-		if craftData.InternalPath != "" {
-			path = craftData.InternalPath
-		}
-
-		chainMessage, err := apip.ParseMsg(path, craftData.Data, craftData.ConnectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-		if err == nil {
-			chainMessage.AppendHeader(metadata)
-		}
-		return chainMessage, err
+		return parseCraftedJsonrpcMessage(apip, craftData, metadata)
 	}
 
-	msg := rpcInterfaceMessages.JsonrpcMessage{
-		Version:     "2.0",
-		ID:          []byte("1"),
-		Method:      parsing.ApiName,
-		Params:      nil,
-		BaseMessage: chainproxy.BaseMessage{Headers: metadata},
-	}
+	msg := newCraftedJsonrpcMessage(parsing.ApiName, metadata)
 
 	apiCont, err := apip.getSupportedApi(parsing.ApiName, connectionType)
 	if err != nil {
@@ -288,17 +273,7 @@ func (*TendermintChainParser) newBatchChainMessage(serviceApi *spectypes.Api, re
 }
 
 func (*TendermintChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedHashes []string, msg *rpcInterfaceMessages.TendermintrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
-	nodeMsg := &baseChainMessageContainer{
-		api:                      serviceApi,
-		apiCollection:            apiCollection,
-		latestRequestedBlock:     requestedBlock,
-		requestedBlockHashes:     requestedHashes,
-		msg:                      msg,
-		resultErrorParsingMethod: msg.CheckResponseError,
-		parseDirective:           GetParseDirective(serviceApi, apiCollection),
-		usedDefaultValue:         usedDefaultValue,
-	}
-	return nodeMsg
+	return newSingleChainMessage(serviceApi, apiCollection, requestedBlock, requestedHashes, msg, msg.CheckResponseError, usedDefaultValue)
 }
 
 // SetSpec sets the spec for the TendermintChainParser

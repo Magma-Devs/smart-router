@@ -68,25 +68,10 @@ func (apip *JsonRPCChainParser) getSupportedApi(name, connectionType string, int
 
 func (apip *JsonRPCChainParser) CraftMessage(parsing *spectypes.ParseDirective, connectionType string, craftData *CraftData, metadata []pairingtypes.Metadata) (ChainMessageForSend, error) {
 	if craftData != nil {
-		path := craftData.Path
-		if craftData.InternalPath != "" {
-			path = craftData.InternalPath
-		}
-
-		chainMessage, err := apip.ParseMsg(path, craftData.Data, craftData.ConnectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-		if err == nil {
-			chainMessage.AppendHeader(metadata)
-		}
-		return chainMessage, err
+		return parseCraftedJsonrpcMessage(apip, craftData, metadata)
 	}
 
-	msg := &rpcInterfaceMessages.JsonrpcMessage{
-		Version:     "2.0",
-		ID:          []byte("1"),
-		Method:      parsing.ApiName,
-		Params:      nil,
-		BaseMessage: chainproxy.BaseMessage{Headers: metadata},
-	}
+	msg := newCraftedJsonrpcMessage(parsing.ApiName, metadata)
 	apiCont, err := apip.getSupportedApi(parsing.ApiName, connectionType, "")
 	if err != nil {
 		return nil, err
@@ -95,7 +80,7 @@ func (apip *JsonRPCChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 	if err != nil {
 		return nil, err
 	}
-	return apip.newChainMessage(apiCont.api, spectypes.NOT_APPLICABLE, nil, msg, apiCollection, false), nil
+	return apip.newChainMessage(apiCont.api, spectypes.NOT_APPLICABLE, nil, &msg, apiCollection, false), nil
 }
 
 // this func parses message data into chain message object
@@ -295,17 +280,7 @@ func (*JsonRPCChainParser) newBatchChainMessage(serviceApi *spectypes.Api, reque
 }
 
 func (apip *JsonRPCChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedBlockHashes []string, msg *rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
-	nodeMsg := &baseChainMessageContainer{
-		api:                      serviceApi,
-		apiCollection:            apiCollection,
-		latestRequestedBlock:     requestedBlock,
-		requestedBlockHashes:     requestedBlockHashes,
-		msg:                      msg,
-		resultErrorParsingMethod: rpcInterfaceMessages.JsonrpcResponseErrorChecker(apip.chainFamily(), msg),
-		parseDirective:           GetParseDirective(serviceApi, apiCollection),
-		usedDefaultValue:         usedDefaultValue,
-	}
-	return nodeMsg
+	return newSingleChainMessage(serviceApi, apiCollection, requestedBlock, requestedBlockHashes, msg, rpcInterfaceMessages.JsonrpcResponseErrorChecker(apip.chainFamily(), msg), usedDefaultValue)
 }
 
 // SetSpec sets the spec for the JsonRPCChainParser

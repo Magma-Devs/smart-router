@@ -50,11 +50,7 @@ func (apip *RestChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 			urlPath = craftData.Path
 		}
 		// chain fetcher sends the replaced request inside data
-		chainMessage, err := apip.ParseMsg(urlPath, data, craftData.ConnectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-		if err == nil {
-			chainMessage.AppendHeader(metadata)
-		}
-		return chainMessage, err
+		return parseCraftedMessage(apip, urlPath, data, craftData.ConnectionType, metadata)
 	}
 
 	restMessage := &rpcInterfaceMessages.RestMessage{
@@ -73,7 +69,7 @@ func (apip *RestChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 	}
 	parsedInput := parser.NewParsedInput()
 	parsedInput.SetBlock(spectypes.NOT_APPLICABLE)
-	return apip.newChainMessage(apiCont.api, parsedInput, restMessage, apiCollection), nil
+	return newParsedChainMessage(apiCont.api, apiCollection, parsedInput, nil, restMessage, restMessage.CheckResponseError), nil
 }
 
 // ParseMsg parses message data into chain message object
@@ -131,26 +127,10 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 		}
 	}
 
-	nodeMsg := apip.newChainMessage(apiCont.api, parsedInput, &restMessage, apiCollection)
+	nodeMsg := newParsedChainMessage(apiCont.api, apiCollection, parsedInput, nil, &restMessage, restMessage.CheckResponseError)
 	nodeMsg.applyParsedRange(parsedInput)
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
-}
-
-func (*RestChainParser) newChainMessage(api *spectypes.Api, parsedInput *parser.ParsedInput, restMessage *rpcInterfaceMessages.RestMessage, apiCollection *spectypes.ApiCollection) *baseChainMessageContainer {
-	requestedBlock := parsedInput.GetBlock()
-	requestedHashes, _ := parsedInput.GetBlockHashes()
-	nodeMsg := &baseChainMessageContainer{
-		api:                      api,
-		msg:                      restMessage,
-		latestRequestedBlock:     requestedBlock,
-		requestedBlockHashes:     requestedHashes,
-		apiCollection:            apiCollection,
-		resultErrorParsingMethod: restMessage.CheckResponseError,
-		parseDirective:           GetParseDirective(api, apiCollection),
-		usedDefaultValue:         parsedInput.UsedDefaultValue,
-	}
-	return nodeMsg
 }
 
 func (apip *RestChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {

@@ -126,7 +126,7 @@ func (apip *GraphQLChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 
 	parsedInput := parser.NewParsedInput()
 	parsedInput.SetBlock(spectypes.NOT_APPLICABLE)
-	return apip.newChainMessage(apiCont.api, parsedInput, nil, graphqlMessage, apiCollection), nil
+	return newParsedChainMessage(apiCont.api, apiCollection, parsedInput, nil, graphqlMessage, graphqlMessage.CheckResponseError), nil
 }
 
 // ParseMsg parses a GraphQL request body into a chain message.
@@ -279,32 +279,16 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 	if len(graphqlMessage.RootFields) > 1 || earliestRequestedBlock != latestRequestedBlock {
 		earliest = &earliestRequestedBlock
 	}
-	nodeMsg := apip.newChainMessage(combinedApi, parsedInput, blockHashes, graphqlMessage, apiCollection)
+	// A multi-root request has a combined api name that matches no parse directive, so
+	// GetParseDirective returns nil for it — which is the safe direction: a request that
+	// merely includes the GET_BLOCKNUM operation alongside others must not be recorded as a
+	// tip observation.
+	nodeMsg := newParsedChainMessage(combinedApi, apiCollection, parsedInput, blockHashes, graphqlMessage, graphqlMessage.CheckResponseError)
 	if earliest != nil {
 		nodeMsg.earliestRequestedBlock = *earliest
 	}
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
-}
-
-func (*GraphQLChainParser) newChainMessage(api *spectypes.Api, parsedInput *parser.ParsedInput, requestedBlockHashes []string, graphqlMessage *rpcInterfaceMessages.GraphQLMessage, apiCollection *spectypes.ApiCollection) *baseChainMessageContainer {
-	if requestedBlockHashes == nil {
-		requestedBlockHashes, _ = parsedInput.GetBlockHashes()
-	}
-	return &baseChainMessageContainer{
-		api:                      api,
-		msg:                      graphqlMessage,
-		latestRequestedBlock:     parsedInput.GetBlock(),
-		requestedBlockHashes:     requestedBlockHashes,
-		apiCollection:            apiCollection,
-		resultErrorParsingMethod: graphqlMessage.CheckResponseError,
-		// A multi-root request has a combined api name that matches no parse directive, so
-		// GetParseDirective returns nil for it — which is the safe direction: a request that
-		// merely includes the GET_BLOCKNUM operation alongside others must not be recorded as a
-		// tip observation.
-		parseDirective:   GetParseDirective(api, apiCollection),
-		usedDefaultValue: parsedInput.UsedDefaultValue,
-	}
 }
 
 // SetSpec sets the spec for the GraphQLChainParser
