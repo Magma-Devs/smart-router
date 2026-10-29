@@ -795,15 +795,11 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 		if replyMsg.Error != nil {
 			responseError = replyMsg.Error.Message
 		}
-		return nil, utils.LavaFormatError("tendermintRPC ID mismatch error", err,
-			utils.Attribute{Key: "GUID", Value: ctx},
-			utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx},
-			utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx},
-			utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx},
+		return nil, utils.LavaFormatError("tendermintRPC ID mismatch error", err, traceAttrs(ctx,
 			utils.Attribute{Key: "requestId", Value: nodeMessage.ID},
 			utils.Attribute{Key: "responseId", Value: rpcMessage.ID},
 			utils.Attribute{Key: "responseError", Value: responseError},
-		)
+		)...)
 	}
 
 	// marshal the jsonrpc message to json

@@ -107,6 +107,17 @@ type BaseChainProxy struct {
 	HashedNodeUrl    string
 }
 
+// traceAttrs are the GUID, request, task and transaction ids a log line reads from ctx, followed
+// by the line's own attributes.
+func traceAttrs(ctx context.Context, attrs ...utils.Attribute) []utils.Attribute {
+	return append([]utils.Attribute{
+		{Key: "GUID", Value: ctx},
+		{Key: utils.KEY_REQUEST_ID, Value: ctx},
+		{Key: utils.KEY_TASK_ID, Value: ctx},
+		{Key: utils.KEY_TRANSACTION_ID, Value: ctx},
+	}, attrs...)
+}
+
 // requireNodeUrl refuses a provider endpoint configured with no node url; every chain proxy
 // talks to its endpoint's first one.
 func requireNodeUrl(rpcProviderEndpoint lavasession.RPCProviderEndpoint) error {
