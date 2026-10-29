@@ -10,8 +10,10 @@ import (
 // MAG-2648. A relay-race loser must balance the in-flight gauge and land in its own
 // counter, without polluting the error counter or the router request-group counters.
 
-func cancelledTestLabels() map[string]string {
-	return map[string]string{"spec": "ETH1", "apiInterface": "jsonrpc", "endpoint_id": "ep1", "function": "eth_sendRawTransaction"}
+// cancelledTestLabels is the series under test, in endpointFunctionLabels order
+// (spec, apiInterface, endpoint_id, function).
+func cancelledTestLabels() []string {
+	return []string{"ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction"}
 }
 
 // The trap this fix had to route around: the in-flight gauge is incremented at relay
@@ -23,7 +25,7 @@ func TestCancelledRelay_InFlightGaugeReturnsToZero(t *testing.T) {
 		m.RecordDirectRelayStart("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction")
 		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeCancelled, &RelayMetrics{IsWrite: true})
 	}
-	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointInFlight.WithLabelValues(cancelledTestLabels())),
+	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointInFlight.WithLabelValues(cancelledTestLabels()...)),
 		"every cancelled relay must still decrement the in-flight gauge")
 }
 
@@ -33,7 +35,7 @@ func TestCancelledRelay_InFlightBalancesAcrossMixedOutcomes(t *testing.T) {
 		m.RecordDirectRelayStart("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction")
 		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, outcome, &RelayMetrics{IsWrite: true})
 	}
-	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointInFlight.WithLabelValues(cancelledTestLabels())))
+	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointInFlight.WithLabelValues(cancelledTestLabels()...)))
 }
 
 // The customer-visible symptom: errored relays were almost all eth_sendRawTransaction.
@@ -45,9 +47,9 @@ func TestCancelledRelay_DoesNotCountAsErrored(t *testing.T) {
 		m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeCancelled, &RelayMetrics{IsWrite: true})
 	}
 
-	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointTotalErrored.WithLabelValues(labels)))
-	require.Equal(t, float64(10), testutil.ToFloat64(m.endpointTotalCancelled.WithLabelValues(labels)))
-	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointTotalRelaysServiced.WithLabelValues(labels)))
+	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointTotalErrored.WithLabelValues(labels...)))
+	require.Equal(t, float64(10), testutil.ToFloat64(m.endpointTotalCancelled.WithLabelValues(labels...)))
+	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointTotalRelaysServiced.WithLabelValues(labels...)))
 }
 
 // COLLATERAL GUARD: a real error must still be counted as errored. If this ever fails the
@@ -58,8 +60,8 @@ func TestErroredRelay_StillCountsAsErrored(t *testing.T) {
 
 	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeError, &RelayMetrics{IsWrite: true})
 
-	require.Equal(t, float64(1), testutil.ToFloat64(m.endpointTotalErrored.WithLabelValues(labels)))
-	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointTotalCancelled.WithLabelValues(labels)))
+	require.Equal(t, float64(1), testutil.ToFloat64(m.endpointTotalErrored.WithLabelValues(labels...)))
+	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointTotalCancelled.WithLabelValues(labels...)))
 }
 
 // COLLATERAL GUARD: success accounting is untouched by the signature change.
@@ -70,8 +72,8 @@ func TestSuccessRelay_StillCountsAsServiced(t *testing.T) {
 
 	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", "eth_sendRawTransaction", 5, RelayOutcomeSuccess, &RelayMetrics{IsWrite: true})
 
-	require.Equal(t, float64(1), testutil.ToFloat64(m.endpointTotalRelaysServiced.WithLabelValues(labels)))
-	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointTotalErrored.WithLabelValues(labels)))
+	require.Equal(t, float64(1), testutil.ToFloat64(m.endpointTotalRelaysServiced.WithLabelValues(labels...)))
+	require.Equal(t, float64(0), testutil.ToFloat64(m.endpointTotalErrored.WithLabelValues(labels...)))
 	require.Equal(t, float64(1), testutil.ToFloat64(m.routerRequestsTotal.WithLabelValues(reqLabels...)))
 	require.Equal(t, float64(1), testutil.ToFloat64(m.routerRequestsSuccess.WithLabelValues(reqLabels...)))
 	require.Equal(t, float64(1), testutil.ToFloat64(m.routerRequestsWrite.WithLabelValues(reqLabels...)))
@@ -126,7 +128,7 @@ func TestCancelledRelay_StillNormalisesBatchLabel(t *testing.T) {
 	raw := "eth_call&eth_call&eth_getBalance"
 	m.RecordDirectRelayEnd("ETH1", "jsonrpc", "ep1", raw, 5, RelayOutcomeCancelled, &RelayMetrics{IsBatch: true})
 
-	collapsed := map[string]string{"spec": "ETH1", "apiInterface": "jsonrpc", "endpoint_id": "ep1", "function": "batch:eth_call+eth_getBalance"}
-	require.Equal(t, float64(1), testutil.ToFloat64(m.endpointTotalCancelled.WithLabelValues(collapsed)),
+	collapsed := []string{"ETH1", "jsonrpc", "ep1", "batch:eth_call+eth_getBalance"}
+	require.Equal(t, float64(1), testutil.ToFloat64(m.endpointTotalCancelled.WithLabelValues(collapsed...)),
 		"the cancelled path must collapse batch labels like every other recorder")
 }
