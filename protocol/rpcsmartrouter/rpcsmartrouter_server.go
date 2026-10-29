@@ -5563,13 +5563,10 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// Try to extract LavaError from classifiedError (already classified by classifyAndWrap)
 		classified := common.AsLavaError(err)
 		if classified == nil {
-			// Fallback: derive transport and chain family, classify from scratch
-			errorCode := 0
-			if httpErr, ok := err.(*lavasession.HTTPStatusError); ok {
-				errorCode = httpErr.StatusCode
-			}
-			classified = common.ClassifyError(common.DetectConnectionError(err),
-				rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection), errorCode, err.Error())
+			// Fallback: derive transport and chain family, classify from scratch through the same
+			// pipeline the sender uses (an HTTPStatusError's status is its code there too).
+			classified, _, _ = chainlib.ClassifyNodeErrorWithDetails(err,
+				rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection))
 		}
 
 		// PROTOCOL_CONTEXT_CANCELED is expected in two cases:
@@ -5646,18 +5643,19 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	statusCode := result.StatusCode
 	carriesNodeReply := result.IsNodeError && rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData())
 	if (statusCode >= 500 && statusCode != http.StatusNotImplemented && !carriesNodeReply) || statusCode == 429 {
-		shouldMarkUnhealthy, _ := classifyHTTPStatus(statusCode)
+		// Classify the status through the registry rather than deciding from the raw code. This
+		// branch is reached when the sender returned (result, nil) with an error status — REST's
+		// shape. The JSON-RPC sender wraps the same status into an HTTPStatusError that reaches the
+		// site above and is classified there, so deciding locally here would label one upstream 5xx
+		// incident two different ways depending only on the customer's api-interface, and a
+		// dashboard grouped by disable_reason would show two half-incidents. The one verdict decides
+		// both the health and the reason.
+		statusClassified := common.ClassifyError(nil,
+			rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection), statusCode, "")
+		shouldMarkUnhealthy, _ := classifyHTTPStatus(statusCode, statusClassified)
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
-			// Classify the status through the registry rather than naming a reason from the raw code.
-			// This branch is reached when the sender returned (result, nil) with an error status —
-			// REST's shape. The JSON-RPC sender wraps the same status into an HTTPStatusError that
-			// reaches the site above and is classified there, so deciding locally here would label one
-			// upstream 5xx incident two different ways depending only on the customer's api-interface,
-			// and a dashboard grouped by disable_reason would show two half-incidents.
-			statusClassified := common.ClassifyError(nil,
-				rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection), statusCode, "")
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(statusClassified))
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 			utils.LavaFormatDebug("endpoint returned error status",
@@ -6703,16 +6701,26 @@ func (rpcss *RPCSmartRouterServer) directRelayChainFamily() common.ChainFamily {
 	return common.ChainFamily(-1)
 }
 
-// classifyHTTPStatus classifies an HTTP status code for endpoint health decisions.
-func classifyHTTPStatus(code int) (shouldMarkUnhealthy, needsBackoff bool) {
+// classifyHTTPStatus decides endpoint health for a bare HTTP status. classified is the registry's
+// verdict for that status, the same one the disable reason is named from, and it decides here too,
+// as it does for every other health decision. Two places where the registry disagrees with the
+// status rule this function used to be are held as overrides, pending the owners' decision
+// (MAG-4278 item 4):
+//   - a 4xx other than 429 never marks the endpoint unhealthy here. The registry blames a 408
+//     (NODE_SERVICE_UNAVAILABLE) and every 4xx it has no row for (UNKNOWN_ERROR).
+//   - a 501 marks it unhealthy here, where the registry reads NODE_UNIMPLEMENTED, a capability
+//     answer. Both callers turn a 501 away before asking.
+//
+// For every other status the registry already gives the rule's answer: a 5xx is unhealthy and
+// backed off, a 429 backed off only (TestClassifyHTTPStatus_GivesTheStatusRulesAnswerForEveryStatus).
+func classifyHTTPStatus(code int, classified *common.LavaError) (shouldMarkUnhealthy, needsBackoff bool) {
 	switch {
-	case code >= 500:
+	case code == http.StatusNotImplemented:
 		return true, true
-	case code == 429:
-		return false, true
-	default:
+	case code < http.StatusInternalServerError && code != http.StatusTooManyRequests:
 		return false, false
 	}
+	return classifyEndpointHealth(classified, false)
 }
 
 // relayHoldoff is the hot path's and recovery probe's handle on the process-wide

@@ -74,9 +74,9 @@ linters:
       - path: (types/relay/grpc_service|protocol/chainlib/chainlib_mock)\.go
         linters:
           - dupl
-      # The WebSocket/gRPC subscription core and pools, the JSON-RPC/Tendermint listener handlers and
-      # the error-classification entry points are MAG-4279's structural merges: the copies drifted,
-      # so unifying them is a behaviour decision, not a mechanical one.
+      # The WebSocket/gRPC subscription core and pools and the JSON-RPC/Tendermint listener handlers
+      # are MAG-4279's structural merges: the copies drifted, so unifying them is a behaviour
+      # decision, not a mechanical one.
       - path: protocol/rpcsmartrouter/upstream_(ws|grpc)_pool\.go
         linters:
           - dupl
@@ -89,10 +89,6 @@ linters:
         linters:
           - dupl
         text: "(jsonRPC|tendermintRPC)\\.go"
-      - path: protocol/common/error_classifier\.go
-        linters:
-          - dupl
-        text: "error_classifier\\.go"
       # Twins whose differences are the point: latency vs sync normalisation (constants, log keys),
       # sticky vs fresh selection (log text), and counter vs gauge vectors (Prometheus types).
       - path: protocol/provideroptimizer/(upstream_selector|provider_optimizer)\.go

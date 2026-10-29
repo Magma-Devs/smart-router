@@ -19,12 +19,9 @@ func classifyDirectRPCError(err error, chainFamily common.ChainFamily, transport
 		return common.LavaErrorUnknown, nil
 	}
 
-	// Connection-level errors — detected before inspecting the message
-	connError := common.DetectConnectionError(err)
-
-	// Extract JSON-RPC/gRPC/HTTP error code and canonical message, then classify
-	errorCode, errorMessage := chainlib.ExtractNodeErrorDetails(err)
-	classified := common.ClassifyError(connError, chainFamily, transport, errorCode, errorMessage)
+	// The one classification pipeline every node-error path uses: connection shape first, then
+	// the JSON-RPC / gRPC / HTTP code and message, then the registry.
+	classified, _, _ := chainlib.ClassifyNodeErrorWithDetails(err, chainFamily, transport)
 
 	// Wrap rather than flatten: the returned error must keep the original reachable so
 	// errors.Is still resolves its sentinel downstream. Flattening to err.Error() here

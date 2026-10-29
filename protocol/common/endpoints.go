@@ -658,7 +658,20 @@ func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transpor
 	if rr == nil {
 		return
 	}
-	classification := ClassifyNodeErrorForRetry(family, transport, errorCode, message)
+	rr.applyClassification(ClassifyNodeErrorForRetry(family, transport, errorCode, message))
+}
+
+// ApplyLavaErrorClassification sets the same flags from a verdict the caller already holds, for a
+// signal the registry cannot see in a code and a message (a gRPC rate limit only its metadata
+// carries).
+func (rr *RelayResult) ApplyLavaErrorClassification(classified *LavaError) {
+	if rr == nil {
+		return
+	}
+	rr.applyClassification(nodeErrorClassificationOf(classified))
+}
+
+func (rr *RelayResult) applyClassification(classification NodeErrorClassification) {
 	rr.IsNonRetryable = classification.IsNonRetryable
 	rr.IsUnsupportedMethod = classification.IsUnsupportedMethod
 	rr.IsRateLimited = classification.IsRateLimited

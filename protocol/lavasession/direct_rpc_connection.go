@@ -2179,12 +2179,6 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 		return nil, utils.LavaFormatError("failed to marshal gRPC error response", marshalErr)
 	}
 
-	// A corroborated rate limit — a known rate-limit text, or RESOURCE_EXHAUSTED with a
-	// retry delay in the metadata — types the error, so errors.Is(err,
-	// common.StatusCodeError429) and common.RetryAfterFrom read the same on gRPC as on
-	// every HTTP transport (see GRPCStatusError.Unwrap).
-	retryAfter, rateLimited := common.RateLimitFromGRPC(errorCode, errorMessage, respHeaders)
-
 	// Return the error response with metadata
 	// The caller can inspect the response to determine if it's an error
 	response := &DirectRPCResponse{
@@ -2192,14 +2186,22 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 		Metadata:   respHeaders, // Include any headers received before the error
 		StatusCode: int(errorCode),
 	}
-	statusErr := &GRPCStatusError{
-		Code:        errorCode,
-		Message:     errorMessage,
-		cause:       err,
+	return response, NewGRPCStatusError(errorCode, errorMessage, err, respHeaders)
+}
+
+// NewGRPCStatusError builds the error for a status a node sent. A corroborated rate limit — a
+// known rate-limit text, or RESOURCE_EXHAUSTED with a retry delay in the metadata — types the
+// error, so errors.Is(err, common.StatusCodeError429) and common.RetryAfterFrom read the same on
+// gRPC as on every HTTP transport (see GRPCStatusError.Unwrap).
+func NewGRPCStatusError(code uint32, message string, cause error, md map[string][]string) *GRPCStatusError {
+	retryAfter, rateLimited := common.RateLimitFromGRPC(code, message, md)
+	return &GRPCStatusError{
+		Code:        code,
+		Message:     message,
+		cause:       cause,
 		rateLimited: rateLimited,
 		retryAfter:  retryAfter,
 	}
-	return response, statusErr
 }
 
 // GRPCStatusError represents a gRPC status error.
@@ -2222,6 +2224,12 @@ type GRPCStatusError struct {
 
 func (e *GRPCStatusError) Error() string {
 	return fmt.Sprintf("gRPC error %d: %s", e.Code, e.Message)
+}
+
+// RateLimited reports whether the node's status was a corroborated rate limit, including the one
+// shape only the metadata shows: RESOURCE_EXHAUSTED with a retry delay and no rate-limit text.
+func (e *GRPCStatusError) RateLimited() bool {
+	return e.rateLimited
 }
 
 // Unwrap exposes the originating error so errors.Is / errors.As see through this

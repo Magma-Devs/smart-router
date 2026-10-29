@@ -1174,6 +1174,14 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			// IsNonRetryable is how both ended up classified but never assigned before.
 			if hasError {
 				result.ApplyNodeErrorClassification(d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage)
+				// RESOURCE_EXHAUSTED with a retry delay and no rate-limit text is a rate limit only
+				// the metadata shows. The transport typed it (GRPCStatusError.RateLimited); the
+				// registry sees a code and a message and has no row for it, so without this it was
+				// UNKNOWN_ERROR and scored against the endpoint (MAG-4278 item 5). A verdict the
+				// registry did give is left alone.
+				if grpcErr.RateLimited() && common.ClassifyError(nil, d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage) == common.LavaErrorUnknown {
+					result.ApplyLavaErrorClassification(common.LavaErrorNodeRateLimited)
+				}
 			}
 			return result, nil
 		}

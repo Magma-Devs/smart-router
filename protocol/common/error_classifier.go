@@ -354,7 +354,12 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// via httpStatusCodeMappings() and httpStatusMessageMappings()
 	},
 
-	TransportGRPC: {
+	TransportGRPC: grpcErrorMappings(),
+}
+
+// grpcErrorMappings is the gRPC transport's generic table, in match order.
+func grpcErrorMappings() []errorMapping {
+	mappings := []errorMapping{
 		// gRPC status code matchers (codes from google.golang.org/grpc/codes)
 		//
 		// A code earns a row here only when its verdict is the SAME at every
@@ -390,15 +395,29 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// is Retryable=true so the pruned-node-to-archive-node retry survives, and
 		// SubCategoryDataScope is what keeps the gate off an endpoint that answered
 		// truthfully about its own data scope.
-		{GRPCCodeEquals(5), LavaErrorNodeDataNotHeld},         // codes.NotFound
-		{GRPCCodeEquals(11), LavaErrorNodeDataNotHeld},        // codes.OutOfRange
-		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented},      // codes.Unimplemented
-		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
+		{GRPCCodeEquals(5), LavaErrorNodeDataNotHeld},    // codes.NotFound
+		{GRPCCodeEquals(11), LavaErrorNodeDataNotHeld},   // codes.OutOfRange
+		{GRPCCodeEquals(12), LavaErrorNodeUnimplemented}, // codes.Unimplemented
 		// codes.Aborted (MAG-3995): on Sui, the one node that sends it, it is the validators'
 		// answer to a submitted transaction, relayed by the fullnode, and Sui's own message calls
 		// it retriable with another submission. Not evidence against the endpoint, and the
 		// resubmission is the client's call, so non-retryable; see LavaErrorNodeAborted.
 		{GRPCCodeEquals(10), LavaErrorNodeAborted}, // codes.Aborted
+	}
+
+	// The rate-limit texts come next, one row per GRPCRateLimitTexts entry, the list
+	// RateLimitFromGRPC reads, so the transport's typed rate limit and this verdict agree. They
+	// precede codes.Unavailable: a vendor's HTTP edge leaves "429 (Too Many Requests)" inside it,
+	// and with the code row first that reply was NODE_SERVICE_UNAVAILABLE and marked the endpoint
+	// unhealthy while the transport held it off as a rate limit (MAG-4278 item 5). They follow the
+	// five code rows above, whose verdicts a rate-limit text does not override; see
+	// TestGRPCRateLimitTexts_TheCodeRowsAboveStillDecide.
+	for _, text := range GRPCRateLimitTexts {
+		mappings = append(mappings, errorMapping{MessageContains(text), LavaErrorNodeRateLimited})
+	}
+
+	return append(mappings, []errorMapping{
+		{GRPCCodeEquals(14), LavaErrorNodeServiceUnavailable}, // codes.Unavailable
 		// Deliberately NOT registered, each for its own reason — do not add them
 		// as a block, which is how `Code >= 13` went wrong in the first place:
 		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
@@ -406,8 +425,8 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		//   7  PermissionDenied  - credentials are configured per endpoint, so one
 		//   16 Unauthenticated     rejecting ours is unusable to us and should demote.
 		//   8  ResourceExhausted - ambiguous in the gRPC spec (per-user quota vs.
-		//                          out of disk). The "rate limit" message row below
-		//                          catches the quota case without asserting the code
+		//                          out of disk). The rate-limit text rows (see above)
+		//                          catch the quota case without asserting the code
 		//                          alone means "healthy but busy".
 		//   1  Canceled          - a LOCAL cancellation never reaches this table;
 		//                          handleGRPCError resolves it structurally. One that
@@ -416,84 +435,77 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		//                          ibc-go, wasmd, Lava, Concordium or Sui (MAG-3995). A row
 		//                          would be a verdict on a status nobody has seen.
 		// Message-based matchers for gRPC errors conveyed without status codes
-		{MessageContains("rate limit"), LavaErrorNodeRateLimited},
-		{MessageContains("enhance_your_calm"), LavaErrorNodeRateLimited}, // HTTP/2 GOAWAY ENHANCE_YOUR_CALM
 		{MessageContains("unimplemented"), LavaErrorNodeUnimplemented},
 		{MessageContains("not implemented"), LavaErrorNodeUnimplemented},
 		{MessageContains("service not found"), LavaErrorNodeUnimplemented},
-	},
+	}...)
 }
 
 // ---------------------------------------------------------------------------
 // Shared HTTP status mappings — appended to JSON-RPC and REST at init time
 // ---------------------------------------------------------------------------
 
+// httpStatusRows is the one list of HTTP error statuses the registry knows, with the verdict each
+// row form gives it. byCode is the CodeEquals verdict, appended to the REST table only (see init),
+// where the error code is the HTTP status itself. byMessage is the HTTPStatusContains verdict,
+// for a status that reaches the classifier as digits in the message (e.g. "HTTP status 429"); every
+// transport gets it. The two agree except on 401 and 404, which split on purpose.
+var httpStatusRows = []struct {
+	status    int
+	byCode    *LavaError
+	byMessage *LavaError
+}{
+	// 401: the endpoint rejected the router's credentials. Each provider has its own, so
+	// another provider can serve the request: retryable, and NOT the endpoint's fault — it
+	// answered truthfully about its own configuration (node-capability; see
+	// LavaErrorNodeAccessDenied for what blaming it cost). The message row keeps NODE_UNAUTHORIZED.
+	{401, LavaErrorNodeAccessDenied, LavaErrorNodeUnauthorized},
+	// 404: "not here". Either the data does not exist on this node (yet), or the gateway in
+	// front of it does not route the path. Both mean "try another node", as JSON-RPC's
+	// transaction / block not-found rows already do: retryable, data-scope, not scored.
+	// The message row keeps NODE_ENDPOINT_NOT_FOUND.
+	{404, LavaErrorNodeDataNotHeld, LavaErrorNodeEndpointNotFound},
+	{405, LavaErrorNodeMethodNotAllowed, LavaErrorNodeMethodNotAllowed},
+	{413, LavaErrorUserRequestTooLarge, LavaErrorUserRequestTooLarge},
+	{429, LavaErrorNodeRateLimited, LavaErrorNodeRateLimited},
+	{500, LavaErrorNodeInternalError, LavaErrorNodeInternalError},
+	// 501 Not Implemented: node lacks this method/endpoint (e.g. Cosmos REST
+	// gRPC-gateway). A node refusal, not a transient server failure: retried on
+	// another provider, the endpoint unblamed (MAG-2771).
+	{501, LavaErrorNodeUnimplemented, LavaErrorNodeUnimplemented},
+	{502, LavaErrorNodeBadGateway, LavaErrorNodeBadGateway},
+	{503, LavaErrorNodeServiceUnavailable, LavaErrorNodeServiceUnavailable},
+	{504, LavaErrorNodeGatewayTimeout, LavaErrorNodeGatewayTimeout},
+	// Cloudflare custom 5xx errors
+	{520, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Web server returned unknown error
+	{521, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Web server is down
+	{522, LavaErrorNodeGatewayTimeout, LavaErrorNodeGatewayTimeout}, // Connection timed out
+	{523, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Origin is unreachable
+	{524, LavaErrorNodeGatewayTimeout, LavaErrorNodeGatewayTimeout}, // A timeout occurred
+	{525, LavaErrorNodeServerError, LavaErrorNodeServerError},       // SSL handshake failed
+	{526, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Invalid SSL certificate
+	{527, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Railgun error
+	{530, LavaErrorNodeServerError, LavaErrorNodeServerError},       // Origin DNS error
+}
+
 // httpStatusCodeMappings returns CodeEquals matchers for common HTTP error status codes.
 // These are used for REST transport where the error code is the HTTP status code itself.
 func httpStatusCodeMappings() []errorMapping {
-	return []errorMapping{
-		// These CodeEquals rows are appended to the REST table only (see init); JSON-RPC and
-		// gRPC get the HTTPStatusContains rows below instead, which keep their own verdicts.
-		//
-		// 401: the endpoint rejected the router's credentials. Each provider has its own, so
-		// another provider can serve the request: retryable, and NOT the endpoint's fault — it
-		// answered truthfully about its own configuration (node-capability; see
-		// LavaErrorNodeAccessDenied for what blaming it cost).
-		{CodeEquals(401), LavaErrorNodeAccessDenied},
-		// 404: "not here". Either the data does not exist on this node (yet), or the gateway in
-		// front of it does not route the path. Both mean "try another node", as JSON-RPC's
-		// transaction / block not-found rows already do: retryable, data-scope, not scored.
-		{CodeEquals(404), LavaErrorNodeDataNotHeld},
-		{CodeEquals(405), LavaErrorNodeMethodNotAllowed},
-		{CodeEquals(413), LavaErrorUserRequestTooLarge},
-		{CodeEquals(429), LavaErrorNodeRateLimited},
-		{CodeEquals(500), LavaErrorNodeInternalError},
-		// 501 Not Implemented: node lacks this method/endpoint (e.g. Cosmos REST
-		// gRPC-gateway). A node refusal, not a transient server failure: retried on
-		// another provider, the endpoint unblamed (MAG-2771).
-		{CodeEquals(501), LavaErrorNodeUnimplemented},
-		{CodeEquals(502), LavaErrorNodeBadGateway},
-		{CodeEquals(503), LavaErrorNodeServiceUnavailable},
-		{CodeEquals(504), LavaErrorNodeGatewayTimeout},
-		// Cloudflare custom 5xx errors
-		{CodeEquals(520), LavaErrorNodeServerError},    // Web server returned unknown error
-		{CodeEquals(521), LavaErrorNodeServerError},    // Web server is down
-		{CodeEquals(522), LavaErrorNodeGatewayTimeout}, // Connection timed out
-		{CodeEquals(523), LavaErrorNodeServerError},    // Origin is unreachable
-		{CodeEquals(524), LavaErrorNodeGatewayTimeout}, // A timeout occurred
-		{CodeEquals(525), LavaErrorNodeServerError},    // SSL handshake failed
-		{CodeEquals(526), LavaErrorNodeServerError},    // Invalid SSL certificate
-		{CodeEquals(527), LavaErrorNodeServerError},    // Railgun error
-		{CodeEquals(530), LavaErrorNodeServerError},    // Origin DNS error
+	mappings := make([]errorMapping, 0, len(httpStatusRows))
+	for _, row := range httpStatusRows {
+		mappings = append(mappings, errorMapping{CodeEquals(row.status), row.byCode})
 	}
+	return mappings
 }
 
 // httpStatusMessageMappings returns HTTPStatusContains matchers for common HTTP error status codes.
 // These match status codes appearing as substrings in error messages (e.g., "HTTP status 429").
 func httpStatusMessageMappings() []errorMapping {
-	return []errorMapping{
-		{HTTPStatusContains(401), LavaErrorNodeUnauthorized},
-		{HTTPStatusContains(404), LavaErrorNodeEndpointNotFound},
-		{HTTPStatusContains(405), LavaErrorNodeMethodNotAllowed},
-		{HTTPStatusContains(413), LavaErrorUserRequestTooLarge},
-		{HTTPStatusContains(429), LavaErrorNodeRateLimited},
-		{HTTPStatusContains(500), LavaErrorNodeInternalError},
-		// 501 Not Implemented: node lacks this method/endpoint. Retried on another provider (MAG-2771).
-		{HTTPStatusContains(501), LavaErrorNodeUnimplemented},
-		{HTTPStatusContains(502), LavaErrorNodeBadGateway},
-		{HTTPStatusContains(503), LavaErrorNodeServiceUnavailable},
-		{HTTPStatusContains(504), LavaErrorNodeGatewayTimeout},
-		// Cloudflare custom 5xx errors
-		{HTTPStatusContains(520), LavaErrorNodeServerError},
-		{HTTPStatusContains(521), LavaErrorNodeServerError},
-		{HTTPStatusContains(522), LavaErrorNodeGatewayTimeout},
-		{HTTPStatusContains(523), LavaErrorNodeServerError},
-		{HTTPStatusContains(524), LavaErrorNodeGatewayTimeout},
-		{HTTPStatusContains(525), LavaErrorNodeServerError},
-		{HTTPStatusContains(526), LavaErrorNodeServerError},
-		{HTTPStatusContains(527), LavaErrorNodeServerError},
-		{HTTPStatusContains(530), LavaErrorNodeServerError},
+	mappings := make([]errorMapping, 0, len(httpStatusRows))
+	for _, row := range httpStatusRows {
+		mappings = append(mappings, errorMapping{HTTPStatusContains(row.status), row.byMessage})
 	}
+	return mappings
 }
 
 // init is the ONLY place allowed to mutate genericErrorMappings. It runs before
@@ -631,7 +643,11 @@ type NodeErrorClassification struct {
 // and callers that treat a false flag as an affirmative classification will
 // misread every novel error body.
 func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, errorCode int, message string) NodeErrorClassification {
-	c := ClassifyError(nil, family, transport, errorCode, message)
+	return nodeErrorClassificationOf(ClassifyError(nil, family, transport, errorCode, message))
+}
+
+// nodeErrorClassificationOf derives the policy flags of one registry verdict.
+func nodeErrorClassificationOf(c *LavaError) NodeErrorClassification {
 	if c == nil || c == LavaErrorUnknown {
 		return NodeErrorClassification{}
 	}

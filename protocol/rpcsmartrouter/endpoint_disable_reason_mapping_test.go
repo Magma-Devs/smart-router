@@ -178,10 +178,13 @@ func TestEndpointDisableReason_FiveHundredAgreesAcrossTransports(t *testing.T) {
 // here because the enclosing status branch matches `>= 500 || == 429`, so the whole carve-out lives
 // in classifyHTTPStatus and nothing else pinned it.
 func TestClassifyHTTPStatus_RateLimitDoesNotDisable(t *testing.T) {
-	shouldMarkUnhealthy, needsBackoff := classifyHTTPStatus(http.StatusTooManyRequests)
+	statusVerdict := func(code int) *common.LavaError {
+		return common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, code, "")
+	}
+	shouldMarkUnhealthy, needsBackoff := classifyHTTPStatus(http.StatusTooManyRequests, statusVerdict(http.StatusTooManyRequests))
 	require.False(t, shouldMarkUnhealthy, "a 429 must not disable the endpoint")
 	require.True(t, needsBackoff, "but it must still back off")
 
-	shouldMarkUnhealthy, _ = classifyHTTPStatus(http.StatusServiceUnavailable)
+	shouldMarkUnhealthy, _ = classifyHTTPStatus(http.StatusServiceUnavailable, statusVerdict(http.StatusServiceUnavailable))
 	require.True(t, shouldMarkUnhealthy, "control: a 5xx does disable")
 }
