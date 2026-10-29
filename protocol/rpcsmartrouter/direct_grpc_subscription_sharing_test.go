@@ -280,7 +280,7 @@ func TestGRPCStartSubscription_ReleasesClientStateOnFailure(t *testing.T) {
 
 	// Same method, described as unary — createNewSubscription refuses it after it has
 	// connected and pinned the client to the endpoint.
-	connectionForUpstream(t, manager).descriptorsCache.Store(
+	connectionForUpstream(t, manager).descriptors.cache.Store(
 		"grpc.reflection.v1.ServerReflection.ServerReflectionInfo", unaryMethodDescriptor(t))
 
 	message := newGrpcSubscriptionMessage(t)
@@ -350,7 +350,7 @@ func TestGRPCSubscription_RecordsUpstreamForRelayEnd(t *testing.T) {
 	// Described as unary, the method is refused after the manager reached the endpoint.
 	refusing := newManagerAgainstUpstream(t, upstream.addr)
 	defer refusing.Stop()
-	connectionForUpstream(t, refusing).descriptorsCache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", unaryMethodDescriptor(t))
+	connectionForUpstream(t, refusing).descriptors.cache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", unaryMethodDescriptor(t))
 	failed := chainlib.WithSubscriptionUpstream(context.Background())
 	_, _, err = refusing.StartSubscription(failed, newGrpcSubscriptionMessage(t), "dapp", "3.3.3.3", "conn-3", nil)
 	require.Error(t, err)
@@ -524,7 +524,7 @@ func startFakeStreamingUpstream(t *testing.T) *fakeStreamingUpstream {
 }
 
 // newManagerAgainstUpstream points a manager at the fake upstream and seeds the method
-// descriptor into the connection cache, so GetMethodDescriptor never calls reflection.
+// descriptor into the endpoint's shared cache, so GetMethodDescriptor never calls reflection.
 func newManagerAgainstUpstream(t *testing.T, addr string) *DirectGRPCSubscriptionManager {
 	t.Helper()
 
@@ -540,7 +540,7 @@ func newManagerAgainstUpstream(t *testing.T, addr string) *DirectGRPCSubscriptio
 	require.NoError(t, err)
 	conn, err := pool.GetConnectionForStream(ctx)
 	require.NoError(t, err)
-	conn.descriptorsCache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", streamingMethodDescriptor(t))
+	conn.descriptors.cache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", streamingMethodDescriptor(t))
 
 	return manager
 }
