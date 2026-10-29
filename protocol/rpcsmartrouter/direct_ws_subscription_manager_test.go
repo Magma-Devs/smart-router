@@ -69,6 +69,10 @@ type mockSubscriptionServer struct {
 	// like to the router; refusedDials counts the dials it turned away.
 	refusing     atomic.Bool
 	refusedDials atomic.Int32
+
+	// unsubscribeUnanswered makes the node apply an unsubscribe and never answer it, as some
+	// gateways do: the router's call runs out its deadline.
+	unsubscribeUnanswered atomic.Bool
 }
 
 // setRefusing turns the node's outage on or off.
@@ -141,6 +145,9 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 		// failing fast.
 		if subID, ok := ms.firstSubscriptionParam(req.Params); ok && ms.hasSubscription(subID) {
 			ms.closeSubscription(subID)
+			if ms.unsubscribeUnanswered.Load() {
+				continue
+			}
 			response := map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      req.ID,

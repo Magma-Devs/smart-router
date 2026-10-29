@@ -64,9 +64,12 @@ func TestRestoreAfterTeardown_LeavesNoUpstreamSubscription(t *testing.T) {
 }
 
 // TestUnsubscribeDuringRestore_TellsTheNodeTheRestoredID: the last client's eth_unsubscribe
-// is waiting on the node when the restore commits. Unsubscribe told the node the id it read
-// before its call; the restore replaced that id while the entry was still mapped, so the
-// teardown must tell the node the restored one or it stays live with nobody reading it.
+// is waiting on the node when the restore reaches its commit point. Unsubscribe told the node
+// the id it read before its call, and the restore has re-opened the subscription under a new
+// id: that one must be ended on the node too, or it stays live with nobody reading it
+// (MAG-2547). Unsubscribe retires the entry before its call (MAG-4345), so the restore finds
+// nothing to commit onto and discards the subscription it re-opened; the test asserts the
+// outcome, not the path: neither id is left on the node.
 //
 // The restore runs on a connection that stays healthy, because rpcclient gave up on the
 // subscription's queue. That is the only restore the unsubscribe can race on the node: after a
@@ -82,16 +85,23 @@ func TestUnsubscribeDuringRestore_TellsTheNodeTheRestoredID(t *testing.T) {
 	}
 	releaseRestore := sync.OnceFunc(func() { close(release) })
 	t.Cleanup(releaseRestore)
-	upstreamIDOf := func(sub *directActiveSubscription) string {
-		h.manager.lock.RLock()
-		defer h.manager.lock.RUnlock()
-		return sub.upstreamID
-	}
 	nodeHas := func(id string) bool {
 		h.srv.lock.RLock()
 		defer h.srv.lock.RUnlock()
 		_, ok := h.srv.subscriptions[id]
 		return ok
+	}
+	// nodeSubscriptionOtherThan is the id the node minted for the restore, read while the
+	// node still holds both.
+	nodeSubscriptionOtherThan := func(id string) string {
+		h.srv.lock.RLock()
+		defer h.srv.lock.RUnlock()
+		for other := range h.srv.subscriptions {
+			if other != id {
+				return other
+			}
+		}
+		return ""
 	}
 
 	sub := h.subscribe("ws-1")
@@ -109,6 +119,8 @@ func TestUnsubscribeDuringRestore_TellsTheNodeTheRestoredID(t *testing.T) {
 		t.Fatal("the restore never re-subscribed on the node")
 	}
 	require.True(t, conn.IsHealthy(), "the restore's connection must still answer the unsubscribe")
+	restoredID := nodeSubscriptionOtherThan(oldID)
+	require.NotEmpty(t, restoredID, "the node holds the restored subscription beside the old one")
 
 	// The node reads and applies the unsubscribe but cannot answer yet.
 	h.srv.writeMu.Lock()
@@ -130,14 +142,9 @@ func TestUnsubscribeDuringRestore_TellsTheNodeTheRestoredID(t *testing.T) {
 	require.Eventually(t, func() bool { return h.upstreamCalls("eth_unsubscribe") == 1 },
 		5*time.Second, 5*time.Millisecond)
 
-	// The restore commits while Unsubscribe waits on the node.
+	// The restore reaches its commit point while Unsubscribe waits on the node.
+	require.Equal(t, 0, h.activeSubscriptionCount(), "the entry left the map before the node was called")
 	releaseRestore()
-	require.Eventually(t, func() bool {
-		id := upstreamIDOf(activeSub)
-		mapped, ok := h.manager.idMapper.GetUpstreamID(sub.routerID)
-		return id != oldID && ok && mapped == id
-	}, 5*time.Second, 5*time.Millisecond)
-	restoredID := upstreamIDOf(activeSub)
 
 	unlockNode()
 	select {
@@ -148,6 +155,11 @@ func TestUnsubscribeDuringRestore_TellsTheNodeTheRestoredID(t *testing.T) {
 	}
 	require.Eventually(t, func() bool { return !nodeHas(restoredID) }, 5*time.Second, 10*time.Millisecond,
 		"the restored upstream subscription was left running on the node after its only client unsubscribed")
+	require.False(t, nodeHas(oldID), "the node dropped the old subscription on the client's unsubscribe")
+	require.Eventually(t, func() bool { return goroutinesIn("handleUpstreamDisconnect") == 0 }, 10*time.Second, 10*time.Millisecond)
 	require.Equal(t, int64(0), h.manager.totalSubscriptions.Load())
 	require.Equal(t, 0, h.activeSubscriptionCount())
+	require.Eventually(t, func() bool { return h.pooledSubscriptionCount() == 0 }, 5*time.Second, 10*time.Millisecond,
+		"a pooled connection still counts a subscription")
+	require.Eventually(t, func() bool { return goroutinesIn("listenForUpstreamMessages") == 0 }, 5*time.Second, 10*time.Millisecond)
 }
