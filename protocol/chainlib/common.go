@@ -523,7 +523,8 @@ func GetHeaderFromCachedMap(headers map[string][]string, key string, defaultValu
 	return defaultValue
 }
 
-// rest request headers are formatted like map[string]string
+// convertToMetadataMap flattens HTTP request headers, joining a repeated header's values with
+// ", ". The HTTP listeners use it for the client headers they relay.
 func convertToMetadataMap(md map[string][]string) []pairingtypes.Metadata {
 	metadata := make([]pairingtypes.Metadata, len(md))
 	indexer := 0
@@ -534,7 +535,8 @@ func convertToMetadataMap(md map[string][]string) []pairingtypes.Metadata {
 	return metadata
 }
 
-// rest response headers / grpc headers are formatted like map[string][]string
+// convertToMetadataMapOfSlices keeps only the first value of each key. It carries node reply
+// headers (REST, GraphQL) and gRPC metadata, both ways.
 func convertToMetadataMapOfSlices(md map[string][]string) []pairingtypes.Metadata {
 	metadata := make([]pairingtypes.Metadata, len(md))
 	indexer := 0
