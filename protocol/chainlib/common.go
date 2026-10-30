@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -18,6 +19,8 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	common "github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -102,6 +105,26 @@ type BaseChainProxy struct {
 	NodeUrl          common.NodeUrl
 	ChainID          string
 	HashedNodeUrl    string
+}
+
+// traceAttrs are the GUID, request, task and transaction ids a log line reads from ctx, followed
+// by the line's own attributes.
+func traceAttrs(ctx context.Context, attrs ...utils.Attribute) []utils.Attribute {
+	return append([]utils.Attribute{
+		{Key: "GUID", Value: ctx},
+		{Key: utils.KEY_REQUEST_ID, Value: ctx},
+		{Key: utils.KEY_TASK_ID, Value: ctx},
+		{Key: utils.KEY_TRANSACTION_ID, Value: ctx},
+	}, attrs...)
+}
+
+// requireNodeUrl refuses a provider endpoint configured with no node url; every chain proxy
+// talks to its endpoint's first one.
+func requireNodeUrl(rpcProviderEndpoint lavasession.RPCProviderEndpoint) error {
+	if len(rpcProviderEndpoint.NodeUrls) == 0 {
+		return utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
+	}
+	return nil
 }
 
 // returns the node url and chain id for that proxy.
@@ -500,7 +523,8 @@ func GetHeaderFromCachedMap(headers map[string][]string, key string, defaultValu
 	return defaultValue
 }
 
-// rest request headers are formatted like map[string]string
+// convertToMetadataMap flattens HTTP request headers, joining a repeated header's values with
+// ", ". The HTTP listeners use it for the client headers they relay.
 func convertToMetadataMap(md map[string][]string) []pairingtypes.Metadata {
 	metadata := make([]pairingtypes.Metadata, len(md))
 	indexer := 0
@@ -511,7 +535,8 @@ func convertToMetadataMap(md map[string][]string) []pairingtypes.Metadata {
 	return metadata
 }
 
-// rest response headers / grpc headers are formatted like map[string][]string
+// convertToMetadataMapOfSlices keeps only the first value of each key. It carries node reply
+// headers (REST, GraphQL) and gRPC metadata, both ways.
 func convertToMetadataMapOfSlices(md map[string][]string) []pairingtypes.Metadata {
 	metadata := make([]pairingtypes.Metadata, len(md))
 	indexer := 0
@@ -542,7 +567,7 @@ func convertRelayMetaDataToMDMetaData(md []pairingtypes.Metadata) metadata.MD {
 func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRequestedBlock, parsedBlock int64) (latestCombinedBlock int64, earliestCombinedBlock int64) {
 	latestCallback := func(currentLatest int64, parsedBlock int64) int64 {
 		if currentLatest < 0 && parsedBlock < 0 {
-			return utils.Max(currentLatest, parsedBlock)
+			return max(currentLatest, parsedBlock)
 		}
 
 		if currentLatest > 0 && parsedBlock < 0 && parsedBlock != spectypes.EARLIEST_BLOCK {
@@ -553,7 +578,7 @@ func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRe
 			return currentLatest
 		}
 
-		return utils.Max(currentLatest, parsedBlock)
+		return max(currentLatest, parsedBlock)
 	}
 
 	return latestCallback(currentLatestRequestedBlock, parsedBlock), CombineEarliestRequestedBlock(currentEarliestRequestedBlock, parsedBlock)
@@ -573,7 +598,7 @@ func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
 	}
 
 	if currentEarliest < 0 && parsedBlock < 0 {
-		return utils.Min(currentEarliest, parsedBlock)
+		return min(currentEarliest, parsedBlock)
 	}
 
 	if currentEarliest > 0 && parsedBlock < 0 {
@@ -584,7 +609,7 @@ func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
 		return parsedBlock
 	}
 
-	return utils.Min(currentEarliest, parsedBlock)
+	return min(currentEarliest, parsedBlock)
 }
 
 // GetRelayTimeout returns the per-attempt WINDOW: how long an endpoint is expected to take, and so
@@ -696,6 +721,23 @@ func stripBrotliAcceptEncoding(c *fiber.Ctx) error {
 // websocket upgrade. Only those listeners may hand an upgrade on the health path
 // past the health handler; see the health route below for why the distinction has
 // to be explicit rather than inferred.
+// chainListenerBase holds what every chain listener is built with, and the address it
+// listens on once Serve has bound it.
+type chainListenerBase struct {
+	endpoint         *lavasession.RPCEndpoint
+	relaySender      RelaySender
+	healthReporter   HealthReporter
+	logger           *metrics.RPCConsumerLogs
+	listeningAddress atomic.Pointer[string]
+}
+
+func (apil *chainListenerBase) GetListeningAddress() string {
+	if p := apil.listeningAddress.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
 func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades bool) *fiber.App {
 	app := fiber.New(fiber.Config{
 		JSONEncoder: json.Marshal,

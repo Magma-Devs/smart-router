@@ -396,10 +396,10 @@ func (e *Endpoint) IsProviderRelay() bool {
 }
 
 // ServesBaseCollection reports whether this endpoint answers for the spec's base
-// collection as well as its add-ons. Mirrors common.NodeUrl.ServesBaseCollection,
-// from which it is populated. See StandaloneAddons.
+// collection as well as its add-ons, by the same rule as the NodeUrl it is populated
+// from. See StandaloneAddons.
 func (e *Endpoint) ServesBaseCollection() bool {
-	return !e.StandaloneAddons || len(e.Addons) == 0
+	return common.ServesBaseCollection(e.StandaloneAddons, len(e.Addons))
 }
 
 func (e *Endpoint) CheckSupportForServices(addon string, extensions []string) (supported bool) {

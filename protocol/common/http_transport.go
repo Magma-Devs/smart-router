@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// JSONContentType is the media type of a JSON request or reply body.
+const JSONContentType = "application/json"
+
 // HTTP Connection Pool Configuration
 // These values are optimized for high-throughput scenarios (1000+ req/s)
 // where providers handle many simultaneous requests to blockchain nodes.

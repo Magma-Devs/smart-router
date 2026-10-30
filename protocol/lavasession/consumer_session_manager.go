@@ -1318,13 +1318,9 @@ func (csm *ConsumerSessionManager) logPoolEmpty(ctx context.Context, inventory p
 }
 
 // formatPairingUpdateTime renders the last pairing rebuild for the log. The zero value means
-// UpdateAllProviders has not run yet, which is a genuinely different state from "rebuilt long ago"
-// and must not render as a zero timestamp that reads like 1 January year 1.
+// UpdateAllProviders has not run yet, which is a genuinely different state from "rebuilt long ago".
 func formatPairingUpdateTime(at time.Time) string {
-	if at.IsZero() {
-		return "never"
-	}
-	return at.UTC().Format(time.RFC3339)
+	return utils.FormatUTCRFC3339(at, "never")
 }
 
 // diffAddressSets reports how membership changed between two provider-address sets. Every result

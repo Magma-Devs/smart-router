@@ -553,59 +553,34 @@ func (c *Client) Subscribe(ctx context.Context, id json.RawMessage, method strin
 	return op.sub, resp, nil
 }
 
+// The three constructors below differ only in the static type of their params, and so in what
+// "no params" means: a nil interface, a nil variadic slice, a nil map. Each decides that against
+// its own type, because a nil slice or map converted to interface{} is no longer nil.
+
 func (c *Client) newMessageArrayWithID(method string, id json.RawMessage, paramsIn interface{}) (*JsonrpcMessage, error) {
-	var msg *JsonrpcMessage
-	if id == nil {
-		msg = &JsonrpcMessage{Version: Vsn, ID: c.nextID(), Method: method}
-	} else {
-		msg = &JsonrpcMessage{Version: Vsn, ID: id, Method: method}
-	}
-	if paramsIn != nil { // prevent sending "params":null
-		var err error
-		if msg.Params, err = json.Marshal(paramsIn); err != nil {
-			return nil, err
-		}
-	}
-	return msg, nil
+	return c.newMessage(method, id, paramsIn, paramsIn != nil)
 }
 
 func (c *Client) newMessageArray(method string, paramsIn ...interface{}) (*JsonrpcMessage, error) {
-	msg := &JsonrpcMessage{Version: Vsn, ID: c.nextID(), Method: method}
-	if paramsIn != nil { // prevent sending "params":null
-		var err error
-		if msg.Params, err = json.Marshal(paramsIn); err != nil {
-			return nil, err
-		}
-	}
-	return msg, nil
+	return c.newMessage(method, nil, paramsIn, paramsIn != nil)
 }
 
 func (c *Client) newMessageMapWithID(method string, id json.RawMessage, paramsIn map[string]interface{}) (*JsonrpcMessage, error) {
-	var msg *JsonrpcMessage
+	return c.newMessage(method, id, paramsIn, paramsIn != nil)
+}
+
+// newMessage builds a request with id, or with the client's next id when id is nil. Without
+// params the request carries no "params" member rather than "params":null.
+func (c *Client) newMessage(method string, id json.RawMessage, paramsIn interface{}, hasParams bool) (*JsonrpcMessage, error) {
 	if id == nil {
-		msg = &JsonrpcMessage{Version: Vsn, ID: c.nextID(), Method: method}
-	} else {
-		msg = &JsonrpcMessage{Version: Vsn, ID: id, Method: method}
+		id = c.nextID()
 	}
-	if paramsIn != nil { // prevent sending "params":null
+	msg := &JsonrpcMessage{Version: Vsn, ID: id, Method: method}
+	if hasParams {
 		var err error
 		if msg.Params, err = json.Marshal(paramsIn); err != nil {
 			return nil, err
 		}
-
-		// test this too:
-		//
-		// var paramsMap = make(map[string]json.RawMessage, len(paramsIn))
-		// for name, value := range paramsIn {
-		// 	valueJSON, err := json.Marshal(value)
-		// 	if err != nil {
-		// 		return nil, err
-		// 	}
-		// 	paramsMap[name] = valueJSON
-		// }
-		// if msg.Params, err = json.Marshal(paramsMap); err != nil {
-		// 	return nil, err
-		// }
 	}
 	return msg, nil
 }

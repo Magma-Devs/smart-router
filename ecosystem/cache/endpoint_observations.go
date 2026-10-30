@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	relaytypes "github.com/magma-Devs/smart-router/types/relay"
@@ -10,37 +9,24 @@ import (
 	emptypb "google.golang.org/protobuf/types/known/emptypb"
 )
 
-const (
-	// endpointObservationSweepEvery bounds how many writes land between expiry sweeps. The
-	// store is tiny (one entry per chain × interface × endpoint across the fleet), so a full
-	// sweep every N writes keeps it bounded without a background goroutine.
-	endpointObservationSweepEvery = 256
-)
-
-// endpointObservation is one pod's published poll result for one upstream endpoint, stamped
-// with the SERVER's receipt time. Readers get an age computed against the same clock, so a
-// writer's clock never enters the freshness decision (the fleet tracker gate, MAG-2981).
+// endpointObservation is one pod's published poll result for one upstream endpoint. The
+// store stamps it with the SERVER's receipt time and readers get an age computed against the
+// same clock, so a writer's clock never enters the freshness decision (the fleet tracker gate,
+// MAG-2981).
 type endpointObservation struct {
-	block     int64
-	podID     string
-	storedAt  time.Time
-	expiresAt time.Time
+	block int64
+	podID string
 }
 
-// endpointObservationStore holds the fleet's per-endpoint poll observations. It is a plain
-// mutex-guarded map rather than a ristretto store on purpose: ristretto's Set is asynchronous
-// and may drop a write under admission pressure, which is acceptable for relay responses but
-// not for a value a peer is about to make a skip-the-poll decision on. The set is small and
-// every entry carries a TTL, so a map with lazy expiry is both simpler and deterministic.
+// endpointObservationStore holds the fleet's per-endpoint poll observations in an
+// expiringMap, so every write is applied deterministically and no peer makes a skip-the-poll
+// decision on a write ristretto silently dropped.
 type endpointObservationStore struct {
-	mu     sync.Mutex
-	byKey  map[string]endpointObservation
-	writes int
-	now    func() time.Time // injectable for tests; time.Now in production
+	*expiringMap[endpointObservation]
 }
 
 func newEndpointObservationStore() *endpointObservationStore {
-	return &endpointObservationStore{byKey: make(map[string]endpointObservation), now: time.Now}
+	return &endpointObservationStore{newExpiringMap[endpointObservation]()}
 }
 
 // set publishes an observation, block-monotonic while the stored one is live: a lower block
@@ -51,53 +37,16 @@ func (s *endpointObservationStore) set(key string, block int64, podID string, tt
 	if block <= 0 {
 		return false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.now()
-	if cur, ok := s.byKey[key]; ok && now.Before(cur.expiresAt) && block < cur.block {
-		return false
-	}
-	s.byKey[key] = endpointObservation{block: block, podID: podID, storedAt: now, expiresAt: now.Add(ttl)}
-	s.writes++
-	if s.writes >= endpointObservationSweepEvery {
-		s.writes = 0
-		for k, v := range s.byKey {
-			if !now.Before(v.expiresAt) {
-				delete(s.byKey, k)
-			}
-		}
-	}
-	return true
+	_, applied := s.put(key, endpointObservation{block: block, podID: podID}, ttl,
+		func(live endpointObservation) bool { return block < live.block })
+	return applied
 }
 
 // get returns the live observation's block, publisher, and age on this clock. Found is false
 // when nothing was published or the entry expired (expired entries are dropped on read).
 func (s *endpointObservationStore) get(key string) (block int64, podID string, age time.Duration, found bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cur, ok := s.byKey[key]
-	if !ok {
-		return 0, "", 0, false
-	}
-	now := s.now()
-	if !now.Before(cur.expiresAt) {
-		delete(s.byKey, key)
-		return 0, "", 0, false
-	}
-	return cur.block, cur.podID, now.Sub(cur.storedAt), true
-}
-
-func (s *endpointObservationStore) clear() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.byKey = make(map[string]endpointObservation)
-	s.writes = 0
-}
-
-func (s *endpointObservationStore) len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.byKey)
+	obs, age, found := s.expiringMap.get(key)
+	return obs.block, obs.podID, age, found
 }
 
 // SetEndpointObservation publishes one pod's successful poll of an endpoint (MAG-2981). The

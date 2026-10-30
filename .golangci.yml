@@ -15,6 +15,9 @@ linters:
     - bodyclose
     - copyloopvar
     - dogsled
+    # dupl was added by MAG-4280 after the 2026-10-13 duplicate-code review's mechanical batch; the
+    # copies it still reports are listed under exclusions below, each with the ticket that owns them.
+    - dupl
     - forcetypeassert
     - gocritic
     - govet
@@ -37,6 +40,8 @@ linters:
   settings:
     dogsled:
       max-blank-identifiers: 5
+    dupl:
+      threshold: 100
     gocritic:
       disabled-checks:
         - elseif
@@ -60,6 +65,48 @@ linters:
           - bodyclose
           - unparam
           - prealloc
+      # dupl baseline (MAG-4280). Each rule names one clone pair by both files, so a new copy in the
+      # same file is still reported. Test code is MAG-4281's; the generated-shape files are not
+      # hand-written.
+      - path: _test\.go
+        linters:
+          - dupl
+      - path: (types/relay/grpc_service|protocol/chainlib/chainlib_mock)\.go
+        linters:
+          - dupl
+      # The WebSocket/gRPC subscription core and pools, the JSON-RPC/Tendermint listener handlers and
+      # the error-classification entry points are MAG-4279's structural merges: the copies drifted,
+      # so unifying them is a behaviour decision, not a mechanical one.
+      - path: protocol/rpcsmartrouter/upstream_(ws|grpc)_pool\.go
+        linters:
+          - dupl
+        text: "upstream_(ws|grpc)_pool\\.go"
+      - path: protocol/rpcsmartrouter/direct_(ws|grpc)_subscription_manager\.go
+        linters:
+          - dupl
+        text: "direct_(ws|grpc)_subscription_manager\\.go"
+      - path: protocol/chainlib/(jsonRPC|tendermintRPC)\.go
+        linters:
+          - dupl
+        text: "(jsonRPC|tendermintRPC)\\.go"
+      - path: protocol/common/error_classifier\.go
+        linters:
+          - dupl
+        text: "error_classifier\\.go"
+      # Twins whose differences are the point: latency vs sync normalisation (constants, log keys),
+      # sticky vs fresh selection (log text), and counter vs gauge vectors (Prometheus types).
+      - path: protocol/provideroptimizer/(upstream_selector|provider_optimizer)\.go
+        linters:
+          - dupl
+        text: "(upstream_selector|provider_optimizer)\\.go"
+      - path: protocol/lavasession/consumer_session_manager\.go
+        linters:
+          - dupl
+        text: "consumer_session_manager\\.go"
+      - path: protocol/metrics/mapped_labels_(counter|gauge)_vec\.go
+        linters:
+          - dupl
+        text: "mapped_labels_(counter|gauge)_vec\\.go"
       - linters:
           - gocritic
         text: "singleCaseSwitch"

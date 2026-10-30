@@ -782,7 +782,7 @@ func TestTendermintSendURI_ClassifiesTransportErrorsLikeTheOtherProxies(t *testi
 	require.NoError(t, err)
 
 	cp := &tendermintRpcChainProxy{JrpcChainProxy: JrpcChainProxy{
-		BaseChainProxy: BaseChainProxy{NodeUrl: common.NodeUrl{Url: "http://127.0.0.1:1"}, ErrorHandler: &TendermintRPCErrorHandler{}},
+		BaseChainProxy: BaseChainProxy{NodeUrl: common.NodeUrl{Url: "http://127.0.0.1:1"}, ErrorHandler: &nodeErrorHandler{transport: common.TransportJsonRPC}},
 		conn:           &chainproxy.Connector{},
 	}}
 	_, err = cp.SendURI(context.Background(), &rpcInterfaceMessages.TendermintrpcMessage{Path: "status"}, chainMessage)

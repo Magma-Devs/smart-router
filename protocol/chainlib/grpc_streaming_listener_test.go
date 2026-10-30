@@ -173,9 +173,11 @@ func newStreamingListener(t *testing.T, sender *stubRelaySender) *GrpcChainListe
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	return &GrpcChainListener{
-		endpoint:    &lavasession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc},
-		relaySender: sender,
-		logger:      logger,
+		chainListenerBase: chainListenerBase{
+			endpoint:    &lavasession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc},
+			relaySender: sender,
+			logger:      logger,
+		},
 		chainParser: sender.parser,
 	}
 }

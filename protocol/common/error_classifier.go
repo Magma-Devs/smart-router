@@ -7,6 +7,8 @@ import (
 	"net"
 	"strings"
 	"syscall"
+
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
 // ---------------------------------------------------------------------------
@@ -647,9 +649,9 @@ func ClassifyNodeErrorForRetry(family ChainFamily, transport TransportType, erro
 // tendermintrpc, rest, grpc) to the TransportType used by the error registry.
 func ApiInterfaceToTransport(apiInterface string) TransportType {
 	switch apiInterface {
-	case "rest", "graphql":
+	case spectypes.APIInterfaceRest, spectypes.APIInterfaceGraphQL:
 		return TransportREST
-	case "grpc":
+	case spectypes.APIInterfaceGrpc:
 		return TransportGRPC
 	default:
 		return TransportJsonRPC

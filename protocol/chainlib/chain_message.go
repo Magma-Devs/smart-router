@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/parser"
@@ -261,11 +262,70 @@ func (bcnc *baseChainMessageContainer) updateCUForApi(extension *spectypes.Exten
 	bcnc.api = &copyApi
 }
 
+// newSingleChainMessage builds the container for one (non-batch) request: its api and collection,
+// the block and hashes it asked about, the parse directive its api carries, and the interface's
+// check for an error inside a reply.
+func newSingleChainMessage(api *spectypes.Api, apiCollection *spectypes.ApiCollection, requestedBlock int64, requestedBlockHashes []string, msg updatableRPCInput, resultErrorParsingMethod func(data []byte, httpStatusCode int) (hasError bool, errorMessage string), usedDefaultValue bool) *baseChainMessageContainer {
+	return &baseChainMessageContainer{
+		api:                      api,
+		apiCollection:            apiCollection,
+		latestRequestedBlock:     requestedBlock,
+		requestedBlockHashes:     requestedBlockHashes,
+		msg:                      msg,
+		resultErrorParsingMethod: resultErrorParsingMethod,
+		parseDirective:           GetParseDirective(api, apiCollection),
+		usedDefaultValue:         usedDefaultValue,
+	}
+}
+
+// newParsedChainMessage is newSingleChainMessage for the interfaces whose parser reads the block
+// and hashes into a ParsedInput (gRPC, REST, GraphQL). requestedBlockHashes, when not nil,
+// replaces the parsed hashes.
+func newParsedChainMessage(api *spectypes.Api, apiCollection *spectypes.ApiCollection, parsedInput *parser.ParsedInput, requestedBlockHashes []string, msg updatableRPCInput, resultErrorParsingMethod func(data []byte, httpStatusCode int) (hasError bool, errorMessage string)) *baseChainMessageContainer {
+	if requestedBlockHashes == nil {
+		requestedBlockHashes, _ = parsedInput.GetBlockHashes()
+	}
+	return newSingleChainMessage(api, apiCollection, parsedInput.GetBlock(), requestedBlockHashes, msg, resultErrorParsingMethod, parsedInput.UsedDefaultValue)
+}
+
 type CraftData struct {
 	Path           string
 	Data           []byte
 	ConnectionType string
 	InternalPath   string
+}
+
+// parseCraftedMessage parses a request its caller crafted in full (a chain fetcher's filled-in
+// template) and stamps the caller's headers on it.
+func parseCraftedMessage(chainParser ChainParser, url string, data []byte, connectionType string, metadata []pairingtypes.Metadata) (ChainMessageForSend, error) {
+	chainMessage, err := chainParser.ParseMsg(url, data, connectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
+	if err == nil {
+		chainMessage.AppendHeader(metadata)
+	}
+	return chainMessage, err
+}
+
+// parseCraftedJsonrpcMessage is parseCraftedMessage for JSON-RPC and Tendermint, which send the
+// request to the internal path it names when it has one. gRPC and REST do not: gRPC has no
+// internal paths and REST carries the path in the api name.
+func parseCraftedJsonrpcMessage(chainParser ChainParser, craftData *CraftData, metadata []pairingtypes.Metadata) (ChainMessageForSend, error) {
+	path := craftData.Path
+	if craftData.InternalPath != "" {
+		path = craftData.InternalPath
+	}
+	return parseCraftedMessage(chainParser, path, craftData.Data, craftData.ConnectionType, metadata)
+}
+
+// newCraftedJsonrpcMessage is the parameterless JSON-RPC request JSON-RPC and Tendermint craft
+// for a parse directive that has no template.
+func newCraftedJsonrpcMessage(apiName string, metadata []pairingtypes.Metadata) rpcInterfaceMessages.JsonrpcMessage {
+	return rpcInterfaceMessages.JsonrpcMessage{
+		Version:     "2.0",
+		ID:          []byte("1"),
+		Method:      apiName,
+		Params:      nil,
+		BaseMessage: chainproxy.BaseMessage{Headers: metadata},
+	}
 }
 
 func CraftChainMessage(parsing *spectypes.ParseDirective, connectionType string, chainParser ChainParser, craftData *CraftData, metadata []pairingtypes.Metadata) (ChainMessageForSend, error) {

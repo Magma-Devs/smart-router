@@ -97,9 +97,9 @@ func (f *Fetcher) FetchAllSpecs(ctx context.Context, repoURL string) (map[string
 
 	switch info.Provider {
 	case ProviderGitHub:
-		return f.fetchFromGitHub(ctx, info)
+		return f.fetchFromRepo(ctx, f.gitHub(), info)
 	case ProviderGitLab:
-		return f.fetchFromGitLab(ctx, info)
+		return f.fetchFromRepo(ctx, f.gitLab(), info)
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", info.Provider)
 	}

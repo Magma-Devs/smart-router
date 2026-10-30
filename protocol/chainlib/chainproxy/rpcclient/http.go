@@ -35,11 +35,6 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-const (
-	maxRequestContentLength = 1024 * 1024 * 5
-	contentType             = "application/json"
-)
-
 type httpConn struct {
 	client    *http.Client
 	url       string
@@ -89,8 +84,8 @@ func DialHTTPWithClient(endpoint string, client *http.Client) (*Client, error) {
 
 	initctx := context.Background()
 	headers := make(http.Header, 2)
-	headers.Set("accept", contentType)
-	headers.Set("content-type", contentType)
+	headers.Set("accept", common.JSONContentType)
+	headers.Set("content-type", common.JSONContentType)
 	return newClient(initctx, func(context.Context) (ServerCodec, error) {
 		hc := &httpConn{
 			client:  client,

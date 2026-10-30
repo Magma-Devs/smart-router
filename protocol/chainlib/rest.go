@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
@@ -51,11 +50,7 @@ func (apip *RestChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 			urlPath = craftData.Path
 		}
 		// chain fetcher sends the replaced request inside data
-		chainMessage, err := apip.ParseMsg(urlPath, data, craftData.ConnectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-		if err == nil {
-			chainMessage.AppendHeader(metadata)
-		}
-		return chainMessage, err
+		return parseCraftedMessage(apip, urlPath, data, craftData.ConnectionType, metadata)
 	}
 
 	restMessage := &rpcInterfaceMessages.RestMessage{
@@ -74,7 +69,7 @@ func (apip *RestChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 	}
 	parsedInput := parser.NewParsedInput()
 	parsedInput.SetBlock(spectypes.NOT_APPLICABLE)
-	return apip.newChainMessage(apiCont.api, parsedInput, restMessage, apiCollection), nil
+	return newParsedChainMessage(apiCont.api, apiCollection, parsedInput, nil, restMessage, restMessage.CheckResponseError), nil
 }
 
 // ParseMsg parses message data into chain message object
@@ -132,26 +127,10 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 		}
 	}
 
-	nodeMsg := apip.newChainMessage(apiCont.api, parsedInput, &restMessage, apiCollection)
+	nodeMsg := newParsedChainMessage(apiCont.api, apiCollection, parsedInput, nil, &restMessage, restMessage.CheckResponseError)
 	nodeMsg.applyParsedRange(parsedInput)
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
-}
-
-func (*RestChainParser) newChainMessage(api *spectypes.Api, parsedInput *parser.ParsedInput, restMessage *rpcInterfaceMessages.RestMessage, apiCollection *spectypes.ApiCollection) *baseChainMessageContainer {
-	requestedBlock := parsedInput.GetBlock()
-	requestedHashes, _ := parsedInput.GetBlockHashes()
-	nodeMsg := &baseChainMessageContainer{
-		api:                      api,
-		msg:                      restMessage,
-		latestRequestedBlock:     requestedBlock,
-		requestedBlockHashes:     requestedHashes,
-		apiCollection:            apiCollection,
-		resultErrorParsingMethod: restMessage.CheckResponseError,
-		parseDirective:           GetParseDirective(api, apiCollection),
-		usedDefaultValue:         parsedInput.UsedDefaultValue,
-	}
-	return nodeMsg
 }
 
 func (apip *RestChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {
@@ -226,12 +205,8 @@ func (apip *RestChainParser) ChainBlockStats() (allowedBlockLagForQosSync int64,
 }
 
 type RestChainListener struct {
-	endpoint         *lavasession.RPCEndpoint
-	relaySender      RelaySender
-	healthReporter   HealthReporter
-	logger           *metrics.RPCConsumerLogs
-	listeningAddress atomic.Pointer[string]
-	app              *fiber.App // captured during Serve so Shutdown can drain HTTP
+	chainListenerBase
+	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // RestMethodCarriesBody reports whether the REST listener relays the request body for
@@ -267,10 +242,12 @@ func NewRestChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEn
 ) (chainListener *RestChainListener) {
 	// Create a new instance of JsonRPCChainListener
 	chainListener = &RestChainListener{
-		endpoint:       listenEndpoint,
-		relaySender:    relaySender,
-		healthReporter: healthReporter,
-		logger:         rpcConsumerLogs,
+		chainListenerBase: chainListenerBase{
+			endpoint:       listenEndpoint,
+			relaySender:    relaySender,
+			healthReporter: healthReporter,
+			logger:         rpcConsumerLogs,
+		},
 	}
 
 	return chainListener
@@ -466,21 +443,14 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
 }
 
-func (apil *RestChainListener) GetListeningAddress() string {
-	if p := apil.listeningAddress.Load(); p != nil {
-		return *p
-	}
-	return ""
-}
-
 type RestChainProxy struct {
 	BaseChainProxy
 	httpClient *http.Client
 }
 
 func NewRestChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
-	if len(rpcProviderEndpoint.NodeUrls) == 0 {
-		return nil, utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
+	if err := requireNodeUrl(rpcProviderEndpoint); err != nil {
+		return nil, err
 	}
 
 	validateEndpoints(rpcProviderEndpoint.NodeUrls, spectypes.APIInterfaceRest)
@@ -489,7 +459,7 @@ func NewRestChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 	nodeUrl := rpcProviderEndpoint.NodeUrls[0]
 	nodeUrl.Url = strings.TrimSuffix(rpcProviderEndpoint.NodeUrls[0].Url, "/")
 	rcp := &RestChainProxy{
-		BaseChainProxy: BaseChainProxy{averageBlockTime: averageBlockTime, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(nodeUrl.Url), ErrorHandler: &RestErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID}, ChainID: rpcProviderEndpoint.ChainID},
+		BaseChainProxy: BaseChainProxy{averageBlockTime: averageBlockTime, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(nodeUrl.Url), ErrorHandler: newNodeErrorHandler(common.TransportREST, rpcProviderEndpoint.ChainID), ChainID: rpcProviderEndpoint.ChainID},
 	}
 	return rcp, nil
 }
@@ -506,7 +476,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.RestMessage)
 	if !ok {
-		return nil, utils.LavaFormatError("invalid message type in rest, failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
+		return nil, utils.LavaFormatError("invalid message type in rest, failed to cast RPCInput from chainMessage", nil, traceAttrs(ctx, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})...)
 	}
 	var connectionTypeSlected string = http.MethodGet
 	// if ConnectionType is default value or empty we will choose http.MethodGet otherwise choosing the header type provided
@@ -528,7 +498,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 
 	// setting the content-type to be application/json instead of Go's defult http.DefaultClient
 	if connectionTypeSlected == http.MethodPost || connectionTypeSlected == http.MethodPut {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", common.JSONContentType)
 	}
 
 	if len(nodeMessage.GetHeaders()) > 0 {
@@ -546,7 +516,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 	utils.LavaFormatInfo("Sending request to node from provider",
 		utils.LogAttr("_method", nodeMessage.Path),
 		utils.LogAttr("headers", utils.RedactHeaders(req.Header)),
-		utils.LogAttr("apiInterface", "rest"),
+		utils.LogAttr("apiInterface", spectypes.APIInterfaceRest),
 	)
 
 	res, err := httpClient.Do(req)

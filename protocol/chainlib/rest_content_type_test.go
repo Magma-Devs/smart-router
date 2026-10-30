@@ -3,6 +3,7 @@ package chainlib
 import (
 	"testing"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
 )
@@ -18,11 +19,11 @@ func TestNormalizeGenericContentType(t *testing.T) {
 		body        string
 		want        string // the Content-Type left in the metadata; empty: none
 	}{
-		{"curl -d default with a JSON object", "application/x-www-form-urlencoded", jsonObject, jsonContentType},
-		{"fetch default with a JSON array", "text/plain;charset=UTF-8", jsonArray, jsonContentType},
-		{"media type matched case-insensitively", "Text/Plain", jsonObject, jsonContentType},
+		{"curl -d default with a JSON object", "application/x-www-form-urlencoded", jsonObject, common.JSONContentType},
+		{"fetch default with a JSON array", "text/plain;charset=UTF-8", jsonArray, common.JSONContentType},
+		{"media type matched case-insensitively", "Text/Plain", jsonObject, common.JSONContentType},
 		{"a real form body keeps its type", "application/x-www-form-urlencoded", "tx=AAAA", "application/x-www-form-urlencoded"},
-		{"a JSON string goes as JSON (Tezos /injection/operation)", "application/x-www-form-urlencoded", `"6c0a1f"`, jsonContentType},
+		{"a JSON string goes as JSON (Tezos /injection/operation)", "application/x-www-form-urlencoded", `"6c0a1f"`, common.JSONContentType},
 		{"a text payload that is a JSON number keeps its type", "text/plain", "42", "text/plain"},
 		{"a text payload that is a JSON literal keeps its type", "text/plain", "true", "text/plain"},
 		{"a quoted text that is not a JSON string keeps its type", "text/plain", `"unterminated`, "text/plain"},

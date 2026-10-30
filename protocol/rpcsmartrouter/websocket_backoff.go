@@ -1,10 +1,11 @@
 package rpcsmartrouter
 
 import (
-	"math"
 	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/magma-Devs/smart-router/utils/backoff"
 )
 
 // WebSocket backoff constants for reconnection
@@ -64,23 +65,21 @@ func (b *ExponentialBackoff) NextBackoff() (time.Duration, bool) {
 		return 0, false // Max retries exceeded
 	}
 
-	// Calculate exponential delay: initial * multiplier^attempt
-	delay := float64(b.InitialInterval) * math.Pow(b.Multiplier, float64(b.currentAttempt))
-
-	// Cap at maximum
-	if delay > float64(b.MaxInterval) {
-		delay = float64(b.MaxInterval)
+	cfg := backoff.Config{
+		Initial:      b.InitialInterval,
+		Max:          b.MaxInterval,
+		Multiplier:   b.Multiplier,
+		JitterFactor: b.JitterFactor,
 	}
-
-	// Add jitter: delay * (1 - jitter + random * 2 * jitter)
-	// This spreads retries in range [delay*(1-jitter), delay*(1+jitter)]
+	var delay time.Duration
 	if b.JitterFactor > 0 && b.rng != nil {
-		jitter := delay * b.JitterFactor
-		delay = delay - jitter + (b.rng.Float64() * 2 * jitter)
+		delay = backoff.Jittered(b.currentAttempt, cfg, b.rng.Float64())
+	} else {
+		delay = backoff.Delay(b.currentAttempt, cfg)
 	}
 
 	b.currentAttempt++
-	return time.Duration(delay), true
+	return delay, true
 }
 
 // Reset resets the backoff to initial state (call after successful connection)

@@ -19,10 +19,10 @@ func NewPolicy(config PolicyConfig) *Policy {
 // Decide makes all post-relay retry decisions. Called from the state machine's
 // gotResults and ticker.C cases. Replaces DP#1, DP#2, DP#3 and DP#5. It never rewrites the
 // request: see step 6 for why the archive mutation that used to live here is gone.
-func (p *Policy) Decide(input DecisionInput) DecisionOutput {
+func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput {
 	// 1. MODE CHECKS
 	if input.Selection == relaycore.CrossValidation {
-		return DecisionOutput{Action: Stop, Reason: "CrossValidation"}
+		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "CrossValidation"}
 	}
 	// A stateful relay is not retried because a possibly-executed write must not run
 	// twice. A rate limit is the one failure that concern does not cover: the upstream
@@ -43,17 +43,17 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	}
 
 	if input.Selection == relaycore.Stateful && !rateLimitRetrySafe {
-		return DecisionOutput{Action: Stop, Reason: "Stateful"}
+		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "Stateful"}
 	}
 
 	// 2. PERMANENT FAILURE CHECKS
 	// HasNonRetryableNodeError is the umbrella flag — covers unsupported method,
 	// user error, and any future non-retryable subcategory from the error registry.
 	if input.Summary.HasNonRetryableNodeError {
-		return DecisionOutput{Action: Stop, Reason: "NonRetryableNodeError"}
+		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "NonRetryableNodeError"}
 	}
 	if input.Summary.HasPermanentProtocolError {
-		return DecisionOutput{Action: Stop, Reason: "PermanentProtocolError"}
+		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "PermanentProtocolError"}
 	}
 	// A node's refusal is retried on a peer because providers really do differ in what they serve
 	// (MAG-2771). That holds for a method the spec lists, not for one it does not: the parser
@@ -61,22 +61,22 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	// cannot rule it out, and every provider is expected to refuse it. Retrying there costs a call
 	// per provider and serves nobody, so the first refusal is the answer.
 	if input.IsDefaultApi && input.Summary.HasNodeCapabilityRefusal {
-		return DecisionOutput{Action: Stop, Reason: "UnlistedMethodRefused"}
+		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "UnlistedMethodRefused"}
 	}
 
 	// 3. LIMIT CHECKS
 	if input.AttemptNumber >= p.config.MaxRetries {
-		return DecisionOutput{Action: Stop, Reason: "MaxRetriesReached"}
+		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "MaxRetriesReached"}
 	}
 	// Same reasoning for batches: a rate-limited batch executed nothing — and the same
 	// in-flight caveat, since a batch can carry an eth_sendRawTransaction.
 	if input.IsBatch && p.config.DisableBatchRetry && !rateLimitRetrySafe {
-		return DecisionOutput{Action: Stop, Reason: "BatchDisabled"}
+		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "BatchDisabled"}
 	}
 
 	// 4. RESULT CHECKS — epoch mismatch always retries
 	if input.Summary.HasEpochMismatch && input.Summary.SuccessCount == 0 {
-		return DecisionOutput{Action: Retry, Reason: "EpochMismatch"}
+		return relaycore.DecisionOutput{Action: relaycore.ActionRetry, Reason: "EpochMismatch"}
 	}
 
 	// Step 5 only applies to post-relay retry decisions (gotResults path).
@@ -93,7 +93,7 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 		// 5. ERROR TOLERANCE
 		totalErrors := input.Summary.NodeErrors + input.Summary.SpecialNodeErrors + input.Summary.ProtocolErrors
 		if totalErrors > p.config.RelayRetryLimit {
-			return DecisionOutput{Action: Stop, Reason: "ErrorToleranceExceeded"}
+			return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "ErrorToleranceExceeded"}
 		}
 	}
 
@@ -128,7 +128,7 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	//
 	// So a misclassified block height is now fixed where it is made — in the spec's rule.block
 	// threshold for that chain — and not compensated for once per request by spending a retry.
-	return DecisionOutput{Action: Retry, Reason: "Default"}
+	return relaycore.DecisionOutput{Action: relaycore.ActionRetry, Reason: "Default"}
 }
 
 // OnSendRelayResult handles pre-relay send decisions. Called from the state machine's
@@ -137,7 +137,7 @@ func (p *Policy) OnSendRelayResult(err error, isPairingListEmpty bool, selection
 	if err == nil {
 		p.consecutiveBatchErrors = 0
 		p.consecutivePairingErrors = 0
-		return SendSuccess
+		return relaycore.SendSuccess
 	}
 
 	// CrossValidation cannot meaningfully retry at the batch level — the
@@ -148,7 +148,7 @@ func (p *Policy) OnSendRelayResult(err error, isPairingListEmpty bool, selection
 	// state machine surfaces, mirroring the CrossValidation short-circuit
 	// at the top of Decide.
 	if selection == relaycore.CrossValidation {
-		return SendStop
+		return relaycore.SendStop
 	}
 
 	p.consecutiveBatchErrors++
@@ -157,7 +157,7 @@ func (p *Policy) OnSendRelayResult(err error, isPairingListEmpty bool, selection
 	if p.config.EnableCircuitBreaker && isPairingListEmpty {
 		p.consecutivePairingErrors++
 		if p.consecutivePairingErrors >= p.config.CircuitBreakerThreshold {
-			return SendStop
+			return relaycore.SendStop
 		}
 	} else if p.config.EnableCircuitBreaker {
 		p.consecutivePairingErrors = 0
@@ -165,10 +165,10 @@ func (p *Policy) OnSendRelayResult(err error, isPairingListEmpty bool, selection
 
 	// Batch send retry limit
 	if p.consecutiveBatchErrors > p.config.SendRelayAttempts {
-		return SendStop
+		return relaycore.SendStop
 	}
 
-	return SendRetry
+	return relaycore.SendRetry
 }
 
 // GetConsecutiveBatchErrors returns the current consecutive batch error count (for logging).

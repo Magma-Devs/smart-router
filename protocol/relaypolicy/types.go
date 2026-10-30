@@ -1,25 +1,5 @@
 package relaypolicy
 
-import "github.com/magma-Devs/smart-router/protocol/relaycore"
-
-// Re-export relaycore types for convenience
-type (
-	Action         = relaycore.Action
-	DecisionOutput = relaycore.DecisionOutput
-	DecisionInput  = relaycore.DecisionInput
-	ResultsSummary = relaycore.ResultsSummary
-)
-
-// Constants re-exported from relaycore
-const (
-	Retry = relaycore.ActionRetry
-	Stop  = relaycore.ActionStop
-
-	SendSuccess = relaycore.SendSuccess
-	SendRetry   = relaycore.SendRetry
-	SendStop    = relaycore.SendStop
-)
-
 // PolicyConfig configures the policy engine. Consumer and SmartRouter may use different values.
 type PolicyConfig struct {
 	MaxRetries              int  // hard ceiling on retry attempts

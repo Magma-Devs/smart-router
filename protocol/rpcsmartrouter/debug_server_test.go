@@ -1114,3 +1114,96 @@ func TestDebugResetAll_SmartRouter_DropsTheEndpointTip(t *testing.T) {
 	observation, _ = monitor.GetObservation(url)
 	require.Zero(t, observation.LatestBlock, "reset-all must drop the endpoint tip it reports as cleared")
 }
+
+// TestDebugMux_MethodGuardOnEveryRoute pins the shared method guard byte for byte: every /debug/*
+// route but GET /debug/time answers any other method with 405 and the plain-text "<METHOD> only".
+func TestDebugMux_MethodGuardOnEveryRoute(t *testing.T) {
+	routes := map[string]string{
+		"/debug/cache-state":                   http.MethodGet,
+		"/debug/time-warp":                     http.MethodPost,
+		"/debug/chain-state-time-warp":         http.MethodPost,
+		"/debug/reset-scores":                  http.MethodPost,
+		"/debug/reset-all":                     http.MethodPost,
+		"/debug/reset-pairing":                 http.MethodPost,
+		"/debug/logs":                          http.MethodGet,
+		"/debug/logs/clear":                    http.MethodPost,
+		"/debug/endpoint-state":                http.MethodGet,
+		"/debug/chain-state":                   http.MethodGet,
+		"/debug/provider-routing":              http.MethodGet,
+		"/debug/sticky-claims":                 http.MethodGet,
+		"/debug/probe-loop":                    http.MethodGet,
+		"/debug/poll-now":                      http.MethodPost,
+		"/debug/provider-scores":               http.MethodGet,
+		"/debug/cross-validation-events":       http.MethodGet,
+		"/debug/cross-validation-events/clear": http.MethodPost,
+		"/debug/reset-endpoint-health":         http.MethodPost,
+		"/debug/reset-probe-backoff":           http.MethodPost,
+		"/debug/reset-chaintracker-rows":       http.MethodPost,
+		"/debug/runtime-config":                http.MethodGet,
+	}
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+	for path, allowed := range routes {
+		for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut} {
+			if method == allowed {
+				continue
+			}
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest(method, path, nil))
+			require.Equal(t, http.StatusMethodNotAllowed, rr.Code, "%s %s", method, path)
+			require.Equal(t, allowed+" only\n", rr.Body.String(), "%s %s", method, path)
+			require.Equal(t, "text/plain; charset=utf-8", rr.Header().Get("Content-Type"), "%s %s", method, path)
+		}
+	}
+}
+
+// TestDebugTimeWarps_ShareOneOffsetValidator pins that both time-warp endpoints reject the same
+// bodies with the same status and the same bytes, and accept a valid offset with their own body.
+func TestDebugTimeWarps_ShareOneOffsetValidator(t *testing.T) {
+	rejected := map[string]string{
+		`{`:                        "invalid JSON\n",
+		`{"offset_seconds":NaN}`:   "invalid JSON\n",
+		`{"offset_seconds":-1}`:    "offset_seconds must be >= 0 (no travel to the past)\n",
+		`{"offset_seconds":86401}`: "offset_seconds must be <= 86400 (24h)\n",
+		strings.Repeat(" ", 2048):  "invalid JSON\n", // over the 1 KiB body cap
+	}
+	accepted := map[string]string{
+		"/debug/time-warp":             `{"offset_seconds":12.5,"applied_to_chains":true}`,
+		"/debug/chain-state-time-warp": `{"offset_seconds":12.5,"chain_states_warped":0}`,
+	}
+	for path, wantOK := range accepted {
+		var offsetNano atomic.Int64
+		mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+		for body, want := range rejected {
+			rr := httptest.NewRecorder()
+			mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
+			require.Equal(t, http.StatusBadRequest, rr.Code, "%s %q", path, body)
+			require.Equal(t, want, rr.Body.String(), "%s %q", path, body)
+		}
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"offset_seconds":12.5}`)))
+		require.Equal(t, http.StatusOK, rr.Code, path)
+		require.Equal(t, wantOK, rr.Body.String(), path)
+		require.Equal(t, "application/json", rr.Header().Get("Content-Type"), path)
+	}
+}
+
+// TestDebugResetCounters_ExactBodies pins the fixed-format bodies of the one-call reset endpoints on a
+// fixture without a router, where every count is 0.
+func TestDebugResetCounters_ExactBodies(t *testing.T) {
+	want := map[string]string{
+		"/debug/reset-endpoint-health":   `{"reset":true,"endpoints_reenabled":0}`,
+		"/debug/reset-probe-backoff":     `{"reset":true,"endpoints_reset":0}`,
+		"/debug/reset-chaintracker-rows": `{"reset":true,"rows_ensured":0,"rows_created":0}`,
+		"/debug/reset-scores":            `{"reset":true,"chains_reset":0,"trackers_reset":0,"chainstates_reset":0,"probe_backoff_reset":0}`,
+	}
+	var offsetNano atomic.Int64
+	mux := buildDebugMux(debugMuxDeps{optimizers: newEmptyOptimizersRouter(), offsetNano: &offsetNano})
+	for path, body := range want {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, path, nil))
+		require.Equal(t, http.StatusOK, rr.Code, path)
+		require.Equal(t, body, rr.Body.String(), path)
+		require.Equal(t, "application/json", rr.Header().Get("Content-Type"), path)
+	}
+}

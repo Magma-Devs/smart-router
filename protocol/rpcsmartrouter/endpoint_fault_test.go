@@ -179,7 +179,7 @@ func TestEndpointFault_UnrecognisedAnswerAndUnrecognisedFailureDiffer(t *testing
 		{"novel transport error", errors.New("some totally novel transport thing")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			classified := extractLavaError(classifyAndWrap(tc.err, common.ChainFamily(-1), common.TransportJsonRPC))
+			classified := common.AsLavaError(classifyAndWrap(tc.err, common.ChainFamily(-1), common.TransportJsonRPC))
 			require.Equal(t, common.LavaErrorUnknown, classified, "precondition: genuinely unclassified")
 
 			atFault, backoff := classifyEndpointHealth(classified, false)

@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -61,25 +60,10 @@ func (apip *TendermintChainParser) getSupportedApi(name, connectionType string) 
 
 func (apip *TendermintChainParser) CraftMessage(parsing *spectypes.ParseDirective, connectionType string, craftData *CraftData, metadata []pairingtypes.Metadata) (ChainMessageForSend, error) {
 	if craftData != nil {
-		path := craftData.Path
-		if craftData.InternalPath != "" {
-			path = craftData.InternalPath
-		}
-
-		chainMessage, err := apip.ParseMsg(path, craftData.Data, craftData.ConnectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-		if err == nil {
-			chainMessage.AppendHeader(metadata)
-		}
-		return chainMessage, err
+		return parseCraftedJsonrpcMessage(apip, craftData, metadata)
 	}
 
-	msg := rpcInterfaceMessages.JsonrpcMessage{
-		Version:     "2.0",
-		ID:          []byte("1"),
-		Method:      parsing.ApiName,
-		Params:      nil,
-		BaseMessage: chainproxy.BaseMessage{Headers: metadata},
-	}
+	msg := newCraftedJsonrpcMessage(parsing.ApiName, metadata)
 
 	apiCont, err := apip.getSupportedApi(parsing.ApiName, connectionType)
 	if err != nil {
@@ -289,17 +273,7 @@ func (*TendermintChainParser) newBatchChainMessage(serviceApi *spectypes.Api, re
 }
 
 func (*TendermintChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedHashes []string, msg *rpcInterfaceMessages.TendermintrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
-	nodeMsg := &baseChainMessageContainer{
-		api:                      serviceApi,
-		apiCollection:            apiCollection,
-		latestRequestedBlock:     requestedBlock,
-		requestedBlockHashes:     requestedHashes,
-		msg:                      msg,
-		resultErrorParsingMethod: msg.CheckResponseError,
-		parseDirective:           GetParseDirective(serviceApi, apiCollection),
-		usedDefaultValue:         usedDefaultValue,
-	}
-	return nodeMsg
+	return newSingleChainMessage(serviceApi, apiCollection, requestedBlock, requestedHashes, msg, msg.CheckResponseError, usedDefaultValue)
 }
 
 // SetSpec sets the spec for the TendermintChainParser
@@ -338,13 +312,9 @@ func (apip *TendermintChainParser) ChainBlockStats() (allowedBlockLagForQosSync 
 }
 
 type TendermintRpcChainListener struct {
-	endpoint                   *lavasession.RPCEndpoint
-	relaySender                RelaySender
-	healthReporter             HealthReporter
-	logger                     *metrics.RPCConsumerLogs
+	chainListenerBase
 	refererData                *RefererData
 	wsSubscriptionManager      WSSubscriptionManager
-	listeningAddress           atomic.Pointer[string]
 	websocketConnectionLimiter *WebsocketConnectionLimiter
 	app                        *fiber.App     // captured during Serve so Shutdown can drain HTTP
 	wsWG                       sync.WaitGroup // tracks active downstream WS goroutines for Shutdown drain
@@ -359,10 +329,12 @@ func NewTendermintRpcChainListener(ctx context.Context, listenEndpoint *lavasess
 ) (chainListener *TendermintRpcChainListener) {
 	// Create a new instance of TendermintRpcChainListener
 	chainListener = &TendermintRpcChainListener{
-		endpoint:                   listenEndpoint,
-		relaySender:                relaySender,
-		healthReporter:             healthReporter,
-		logger:                     rpcConsumerLogs,
+		chainListenerBase: chainListenerBase{
+			endpoint:       listenEndpoint,
+			relaySender:    relaySender,
+			healthReporter: healthReporter,
+			logger:         rpcConsumerLogs,
+		},
 		refererData:                refererData,
 		wsSubscriptionManager:      wsSubscriptionManager,
 		websocketConnectionLimiter: &WebsocketConnectionLimiter{ipToNumberOfActiveConnections: make(map[string]int64)},
@@ -619,13 +591,6 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
 }
 
-func (apil *TendermintRpcChainListener) GetListeningAddress() string {
-	if p := apil.listeningAddress.Load(); p != nil {
-		return *p
-	}
-	return ""
-}
-
 type tendermintRpcChainProxy struct {
 	// embedding the jrpc chain proxy because the only diff is on parse message
 	JrpcChainProxy
@@ -633,8 +598,8 @@ type tendermintRpcChainProxy struct {
 }
 
 func NewtendermintRpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
-	if len(rpcProviderEndpoint.NodeUrls) == 0 {
-		return nil, utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
+	if err := requireNodeUrl(rpcProviderEndpoint); err != nil {
+		return nil, err
 	}
 	_, averageBlockTime, _, _ := chainParser.ChainBlockStats()
 
@@ -646,7 +611,7 @@ func NewtendermintRpcChainProxy(ctx context.Context, nConns uint, rpcProviderEnd
 			BaseChainProxy: BaseChainProxy{
 				averageBlockTime: averageBlockTime,
 				NodeUrl:          nodeUrl,
-				ErrorHandler:     &TendermintRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID},
+				ErrorHandler:     newNodeErrorHandler(common.TransportJsonRPC, rpcProviderEndpoint.ChainID),
 				ChainID:          rpcProviderEndpoint.ChainID,
 			},
 			conn: nil,
@@ -830,15 +795,11 @@ func (cp *tendermintRpcChainProxy) SendRPC(ctx context.Context, nodeMessage *rpc
 		if replyMsg.Error != nil {
 			responseError = replyMsg.Error.Message
 		}
-		return nil, utils.LavaFormatError("tendermintRPC ID mismatch error", err,
-			utils.Attribute{Key: "GUID", Value: ctx},
-			utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx},
-			utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx},
-			utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx},
+		return nil, utils.LavaFormatError("tendermintRPC ID mismatch error", err, traceAttrs(ctx,
 			utils.Attribute{Key: "requestId", Value: nodeMessage.ID},
 			utils.Attribute{Key: "responseId", Value: rpcMessage.ID},
 			utils.Attribute{Key: "responseError", Value: responseError},
-		)
+		)...)
 	}
 
 	// marshal the jsonrpc message to json

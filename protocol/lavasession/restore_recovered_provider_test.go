@@ -2,11 +2,11 @@ package lavasession
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,8 +25,8 @@ func TestRestoreRecoveredProvider_RegularBecomesSelectable(t *testing.T) {
 	require.NoError(t, csm.blockProvider(context.Background(), addr, BlockReasonExplicitSignal, false, firstEpochHeight, 0, 0, nil))
 
 	csm.lock.RLock()
-	require.True(t, lavaslices.Contains(csm.currentlyBlockedProviderAddresses, addr), "precondition: blocked")
-	require.False(t, lavaslices.Contains(csm.validAddresses, addr), "precondition: not in validAddresses")
+	require.True(t, slices.Contains(csm.currentlyBlockedProviderAddresses, addr), "precondition: blocked")
+	require.False(t, slices.Contains(csm.validAddresses, addr), "precondition: not in validAddresses")
 	csm.lock.RUnlock()
 
 	// The probe recovered an endpoint of this provider → restore routing.
@@ -34,8 +34,8 @@ func TestRestoreRecoveredProvider_RegularBecomesSelectable(t *testing.T) {
 
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
-	require.False(t, lavaslices.Contains(csm.currentlyBlockedProviderAddresses, addr), "removed from the blocked list")
-	require.True(t, lavaslices.Contains(csm.validAddresses, addr), "restored to validAddresses → selectable again without an epoch transition")
+	require.False(t, slices.Contains(csm.currentlyBlockedProviderAddresses, addr), "removed from the blocked list")
+	require.True(t, slices.Contains(csm.validAddresses, addr), "restored to validAddresses → selectable again without an epoch transition")
 	// No duplicate even though it was appended back.
 	count := 0
 	for _, a := range csm.validAddresses {
@@ -97,8 +97,8 @@ func TestRestoreRecoveredProvider_OverlapBothPools(t *testing.T) {
 
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
-	require.True(t, lavaslices.Contains(csm.validAddresses, addr), "regular side restored")
-	require.False(t, lavaslices.Contains(csm.currentlyBlockedProviderAddresses, addr), "regular side unblocked")
+	require.True(t, slices.Contains(csm.validAddresses, addr), "regular side restored")
+	require.False(t, slices.Contains(csm.currentlyBlockedProviderAddresses, addr), "regular side unblocked")
 	_, stillBackupBlocked := csm.blockedBackupProviders[addr]
 	require.False(t, stillBackupBlocked, "backup side also restored")
 }

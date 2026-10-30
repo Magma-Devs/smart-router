@@ -40,7 +40,6 @@ const (
 	DefaultExpirationTimeFinalized              = core.DefaultExpirationTimeFinalized
 	DefaultExpirationNodeErrors                 = core.DefaultExpirationNodeErrors
 	CacheNumCounters                            = 100000000 // expect 10M items
-	unixPrefix                                  = "unix:"
 )
 
 type CacheServer struct {
@@ -80,51 +79,35 @@ func (cs *CacheServer) InitCache(
 	cs.ExpirationNodeErrors = expirationNodeErrorsOnFinalized
 	cs.ExpirationBlocksHashesToHeights = time.Duration(float64(expirationBlocksHashesToHeights))
 
-	var err error
 	// initialize prometheus first so we can use it in OnEvict callbacks
 	cs.CacheMetrics = NewCacheMetricsServer(metricsAddr)
 
-	onEvictHandler := func(item *ristretto.Item[any]) {
-		cs.CacheMetrics.AddExpired()
-	}
-
-	cs.tempCache, err = ristretto.NewCache(&ristretto.Config[string, any]{
-		NumCounters: CacheNumCounters,
-		MaxCost:     cs.CacheMaxCost,
-		BufferItems: 64,
-		Metrics:     true,
-		OnEvict:     onEvictHandler,
-	})
-	if err != nil {
-		utils.LavaFormatFatal("could not create cache", err)
-	}
-
-	cs.finalizedCache, err = ristretto.NewCache(&ristretto.Config[string, any]{
-		NumCounters: CacheNumCounters,
-		MaxCost:     cs.CacheMaxCost,
-		BufferItems: 64,
-		Metrics:     true,
-		OnEvict:     onEvictHandler,
-	})
-	if err != nil {
-		utils.LavaFormatFatal("could not create finalized cache", err)
-	}
-
-	cs.blocksHashesToHeightsCache, err = ristretto.NewCache(&ristretto.Config[string, any]{
-		NumCounters: CacheNumCounters,
-		MaxCost:     cs.CacheMaxCost,
-		BufferItems: 64,
-		Metrics:     true,
-		OnEvict:     onEvictHandler,
-	})
-	if err != nil {
-		utils.LavaFormatFatal("could not create blocks hashes to heights cache", err)
-	}
+	cs.tempCache = cs.newRistretto("cache")
+	cs.finalizedCache = cs.newRistretto("finalized cache")
+	cs.blocksHashesToHeightsCache = cs.newRistretto("blocks hashes to heights cache")
 
 	cs.endpointObservations = newEndpointObservationStore()
 	cs.stickyPins = newStickyPinStore()
 
 	go cs.periodicCacheSizeUpdate(ctx)
+}
+
+// newRistretto builds one of the server's three ristretto tiers, each counting its
+// evictions on the cache metrics; a tier that cannot be built is fatal.
+func (cs *CacheServer) newRistretto(name string) *ristretto.Cache[string, any] {
+	tier, err := ristretto.NewCache(&ristretto.Config[string, any]{
+		NumCounters: CacheNumCounters,
+		MaxCost:     cs.CacheMaxCost,
+		BufferItems: 64,
+		Metrics:     true,
+		OnEvict: func(item *ristretto.Item[any]) {
+			cs.CacheMetrics.AddExpired()
+		},
+	})
+	if err != nil {
+		utils.LavaFormatFatal("could not create "+name, err)
+	}
+	return tier
 }
 
 func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
@@ -138,7 +121,7 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 
 	var lis net.Listener
 	var err error
-	if strings.HasPrefix(listenAddr, unixPrefix) {
+	if strings.HasPrefix(listenAddr, common.UnixSocketPrefix) {
 		host, port, err := net.SplitHostPort(listenAddr)
 		if err != nil {
 			utils.LavaFormatFatal("Failed to parse unix socket, provide address in this format unix:/tmp/example.sock", err)
@@ -266,42 +249,24 @@ func Server(
 	metricsAddr string,
 	flags *pflag.FlagSet,
 ) {
-	expiration, err := flags.GetDuration(ExpirationFlagName)
-	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationFlagName})
-	}
-
-	expirationNonFinalized, err := flags.GetDuration(ExpirationNonFinalizedFlagName)
-	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationNonFinalizedFlagName})
-	}
-
-	expirationNodeErrors, err := flags.GetDuration(ExpirationNodeErrorsOnFinalizedFlagName)
-	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationNodeErrorsOnFinalizedFlagName})
-	}
-
-	expirationBlocksHashesToHeights, err := flags.GetDuration(ExpirationBlocksHashesToHeightsFlagName)
-	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationBlocksHashesToHeightsFlagName})
-	}
-
-	expirationFinalizedMultiplier, err := flags.GetFloat64(ExpirationTimeFinalizedMultiplierFlagName)
-	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationTimeFinalizedMultiplierFlagName})
-	}
-
-	expirationNonFinalizedMultiplier, err := flags.GetFloat64(ExpirationTimeNonFinalizedMultiplierFlagName)
-	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: ExpirationTimeNonFinalizedMultiplierFlagName})
-	}
-
-	cacheMaxCost, err := flags.GetInt64(FlagCacheSizeName)
-	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: FlagCacheSizeName})
-	}
+	expiration := mustReadFlag(flags.GetDuration, ExpirationFlagName)
+	expirationNonFinalized := mustReadFlag(flags.GetDuration, ExpirationNonFinalizedFlagName)
+	expirationNodeErrors := mustReadFlag(flags.GetDuration, ExpirationNodeErrorsOnFinalizedFlagName)
+	expirationBlocksHashesToHeights := mustReadFlag(flags.GetDuration, ExpirationBlocksHashesToHeightsFlagName)
+	expirationFinalizedMultiplier := mustReadFlag(flags.GetFloat64, ExpirationTimeFinalizedMultiplierFlagName)
+	expirationNonFinalizedMultiplier := mustReadFlag(flags.GetFloat64, ExpirationTimeNonFinalizedMultiplierFlagName)
+	cacheMaxCost := mustReadFlag(flags.GetInt64, FlagCacheSizeName)
 
 	cs := CacheServer{CacheMaxCost: cacheMaxCost}
 	cs.InitCache(ctx, expiration, expirationNonFinalized, expirationNodeErrors, expirationBlocksHashesToHeights, metricsAddr, expirationFinalizedMultiplier, expirationNonFinalizedMultiplier)
 	cs.Serve(ctx, listenAddr)
+}
+
+// mustReadFlag reads one flag of the cache command, or exits naming it.
+func mustReadFlag[T any](read func(name string) (T, error), name string) T {
+	value, err := read(name)
+	if err != nil {
+		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: name})
+	}
+	return value
 }

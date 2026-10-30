@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -69,25 +68,10 @@ func (apip *JsonRPCChainParser) getSupportedApi(name, connectionType string, int
 
 func (apip *JsonRPCChainParser) CraftMessage(parsing *spectypes.ParseDirective, connectionType string, craftData *CraftData, metadata []pairingtypes.Metadata) (ChainMessageForSend, error) {
 	if craftData != nil {
-		path := craftData.Path
-		if craftData.InternalPath != "" {
-			path = craftData.InternalPath
-		}
-
-		chainMessage, err := apip.ParseMsg(path, craftData.Data, craftData.ConnectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-		if err == nil {
-			chainMessage.AppendHeader(metadata)
-		}
-		return chainMessage, err
+		return parseCraftedJsonrpcMessage(apip, craftData, metadata)
 	}
 
-	msg := &rpcInterfaceMessages.JsonrpcMessage{
-		Version:     "2.0",
-		ID:          []byte("1"),
-		Method:      parsing.ApiName,
-		Params:      nil,
-		BaseMessage: chainproxy.BaseMessage{Headers: metadata},
-	}
+	msg := newCraftedJsonrpcMessage(parsing.ApiName, metadata)
 	apiCont, err := apip.getSupportedApi(parsing.ApiName, connectionType, "")
 	if err != nil {
 		return nil, err
@@ -96,7 +80,7 @@ func (apip *JsonRPCChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 	if err != nil {
 		return nil, err
 	}
-	return apip.newChainMessage(apiCont.api, spectypes.NOT_APPLICABLE, nil, msg, apiCollection, false), nil
+	return apip.newChainMessage(apiCont.api, spectypes.NOT_APPLICABLE, nil, &msg, apiCollection, false), nil
 }
 
 // this func parses message data into chain message object
@@ -296,17 +280,7 @@ func (*JsonRPCChainParser) newBatchChainMessage(serviceApi *spectypes.Api, reque
 }
 
 func (apip *JsonRPCChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedBlockHashes []string, msg *rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
-	nodeMsg := &baseChainMessageContainer{
-		api:                      serviceApi,
-		apiCollection:            apiCollection,
-		latestRequestedBlock:     requestedBlock,
-		requestedBlockHashes:     requestedBlockHashes,
-		msg:                      msg,
-		resultErrorParsingMethod: rpcInterfaceMessages.JsonrpcResponseErrorChecker(apip.chainFamily(), msg),
-		parseDirective:           GetParseDirective(serviceApi, apiCollection),
-		usedDefaultValue:         usedDefaultValue,
-	}
-	return nodeMsg
+	return newSingleChainMessage(serviceApi, apiCollection, requestedBlock, requestedBlockHashes, msg, rpcInterfaceMessages.JsonrpcResponseErrorChecker(apip.chainFamily(), msg), usedDefaultValue)
 }
 
 // SetSpec sets the spec for the JsonRPCChainParser
@@ -345,13 +319,9 @@ func (apip *JsonRPCChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 }
 
 type JsonRPCChainListener struct {
-	endpoint                   *lavasession.RPCEndpoint
-	relaySender                RelaySender
-	healthReporter             HealthReporter
-	logger                     *metrics.RPCConsumerLogs
+	chainListenerBase
 	refererData                *RefererData
 	wsSubscriptionManager      WSSubscriptionManager
-	listeningAddress           atomic.Pointer[string]
 	websocketConnectionLimiter *WebsocketConnectionLimiter
 	app                        *fiber.App     // captured during Serve so Shutdown can drain HTTP
 	wsWG                       sync.WaitGroup // tracks active downstream WS goroutines for Shutdown drain
@@ -366,10 +336,12 @@ func NewJrpcChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEn
 ) (chainListener *JsonRPCChainListener) {
 	// Create a new instance of JsonRPCChainListener
 	chainListener = &JsonRPCChainListener{
-		endpoint:                   listenEndpoint,
-		relaySender:                relaySender,
-		healthReporter:             healthReporter,
-		logger:                     rpcConsumerLogs,
+		chainListenerBase: chainListenerBase{
+			endpoint:       listenEndpoint,
+			relaySender:    relaySender,
+			healthReporter: healthReporter,
+			logger:         rpcConsumerLogs,
+		},
 		refererData:                refererData,
 		wsSubscriptionManager:      wsSubscriptionManager,
 		websocketConnectionLimiter: &WebsocketConnectionLimiter{ipToNumberOfActiveConnections: make(map[string]int64)},
@@ -616,21 +588,14 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
 }
 
-func (apil *JsonRPCChainListener) GetListeningAddress() string {
-	if p := apil.listeningAddress.Load(); p != nil {
-		return *p
-	}
-	return ""
-}
-
 type JrpcChainProxy struct {
 	BaseChainProxy
 	conn *chainproxy.Connector
 }
 
 func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
-	if len(rpcProviderEndpoint.NodeUrls) == 0 {
-		return nil, utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
+	if err := requireNodeUrl(rpcProviderEndpoint); err != nil {
+		return nil, err
 	}
 	_, averageBlockTime, _, _ := chainParser.ChainBlockStats()
 
@@ -641,7 +606,7 @@ func NewJrpcChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 		BaseChainProxy: BaseChainProxy{
 			averageBlockTime: averageBlockTime,
 			NodeUrl:          nodeUrl,
-			ErrorHandler:     &JsonRPCErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID},
+			ErrorHandler:     newNodeErrorHandler(common.TransportJsonRPC, rpcProviderEndpoint.ChainID),
 			ChainID:          rpcProviderEndpoint.ChainID,
 		},
 		conn: nil,
@@ -748,7 +713,7 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		// this could be a batch message
 		batchMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.JsonrpcBatchMessage)
 		if !ok {
-			return nil, utils.LavaFormatError("invalid message type in jsonrpc failed to cast JsonrpcMessage or JsonrpcBatchMessage from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
+			return nil, utils.LavaFormatError("invalid message type in jsonrpc failed to cast JsonrpcMessage or JsonrpcBatchMessage from chainMessage", nil, traceAttrs(ctx, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})...)
 		}
 		return cp.sendBatchMessage(ctx, batchMessage, chainMessage)
 	}
@@ -808,7 +773,7 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 
 	replyMsg, err = rpcInterfaceMessages.ConvertJsonRPCMsg(rpcMessage)
 	if err != nil {
-		return nil, utils.LavaFormatError("jsonRPC error", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx})
+		return nil, utils.LavaFormatError("jsonRPC error", err, traceAttrs(ctx)...)
 	}
 
 	err = cp.ValidateRequestAndResponseIds(nodeMessage.ID, replyMsg.ID)
@@ -819,14 +784,13 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		if replyMsg.Error != nil {
 			responseError = replyMsg.Error.Message
 		}
-		return nil, utils.LavaFormatError("jsonRPC ID mismatch error", err,
-			utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx},
+		return nil, utils.LavaFormatError("jsonRPC ID mismatch error", err, traceAttrs(ctx,
 			utils.Attribute{Key: "nodeMessageRequestId", Value: nodeMessage.ID},
 			utils.Attribute{Key: "responseId", Value: rpcMessage.ID},
 			utils.Attribute{Key: "responseError", Value: responseError},
 			utils.Attribute{Key: "reply", Value: replyMsg},
 			utils.Attribute{Key: "request", Value: nodeMessage},
-		)
+		)...)
 	}
 
 	// Release rpcMessage's Result after all references to it are complete

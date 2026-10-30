@@ -54,15 +54,9 @@ func InitErrorMetrics() {
 		//     scrapable. The callback is still wired up so the counter
 		//     keeps accumulating in-process and can be reached via direct
 		//     introspection, but /metrics will be missing the series.
-		if err := prometheus.Register(counter); err != nil {
-			if existing, ok := err.(prometheus.AlreadyRegisteredError); ok {
-				if reused, ok := existing.ExistingCollector.(*prometheus.CounterVec); ok {
-					counter = reused
-				}
-			} else {
-				utils.LavaFormatWarning("failed to register smartrouter_errors_total Prometheus counter; metric will not appear in /metrics scrapes", err)
-			}
-		}
+		counter = RegisterOrReuse(prometheus.DefaultRegisterer, counter, func(err error) {
+			utils.LavaFormatWarning("failed to register smartrouter_errors_total Prometheus counter; metric will not appear in /metrics scrapes", err)
+		})
 
 		common.SetErrorMetricsCallback(func(_ uint32, errorName string, errorCategory string, retryable bool, chainID string) {
 			retryStr := "false"

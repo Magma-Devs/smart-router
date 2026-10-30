@@ -2,7 +2,6 @@ package chainlib
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -142,18 +141,9 @@ func IsUnsupportedMethodError(nodeError error) bool {
 	return false
 }
 
-// unwrapLavaError extracts the *LavaError from a LavaWrappedError, or returns nil.
-func unwrapLavaError(err error) *common.LavaError {
-	var wrapped *common.LavaWrappedError
-	if errors.As(err, &wrapped) {
-		return wrapped.LavaErr
-	}
-	return nil
-}
-
 // IsUnsupportedMethodErrorType checks if an error wraps a LavaError with unsupported method SubCategory.
 func IsUnsupportedMethodErrorType(err error) bool {
-	if le := unwrapLavaError(err); le != nil {
+	if le := common.AsLavaError(err); le != nil {
 		return le.SubCategory.IsUnsupportedMethod()
 	}
 	return false
@@ -176,7 +166,7 @@ func IsSolanaNonRetryableError(nodeError error) bool {
 
 // IsSolanaNonRetryableErrorType checks if an error wraps a non-retryable LavaError.
 func IsSolanaNonRetryableErrorType(err error) bool {
-	if le := unwrapLavaError(err); le != nil {
+	if le := common.AsLavaError(err); le != nil {
 		return !le.Retryable
 	}
 	return false
@@ -414,44 +404,21 @@ func handleAndClassify(ctx context.Context, nodeError error, transport common.Tr
 	return parsed
 }
 
-type RestErrorHandler struct {
+// nodeErrorHandler classifies a node's error by the transport its proxy speaks: REST and
+// GraphQL classify as REST, JSON-RPC and Tendermint as JSON-RPC, gRPC as gRPC.
+type nodeErrorHandler struct {
 	genericErrorHandler
+	transport   common.TransportType
 	chainFamily common.ChainFamily
 	chainID     string
 }
 
-func (rne *RestErrorHandler) HandleNodeError(ctx context.Context, nodeError error) error {
-	return handleAndClassify(ctx, nodeError, common.TransportREST, rne.chainFamily, rne.chainID, &rne.genericErrorHandler)
+func newNodeErrorHandler(transport common.TransportType, chainID string) *nodeErrorHandler {
+	return &nodeErrorHandler{transport: transport, chainFamily: common.GetChainFamilyOrDefault(chainID), chainID: chainID}
 }
 
-type JsonRPCErrorHandler struct {
-	genericErrorHandler
-	chainFamily common.ChainFamily
-	chainID     string
-}
-
-func (jeh *JsonRPCErrorHandler) HandleNodeError(ctx context.Context, nodeError error) error {
-	return handleAndClassify(ctx, nodeError, common.TransportJsonRPC, jeh.chainFamily, jeh.chainID, &jeh.genericErrorHandler)
-}
-
-type TendermintRPCErrorHandler struct {
-	genericErrorHandler
-	chainFamily common.ChainFamily
-	chainID     string
-}
-
-func (tendermintErrorHandler *TendermintRPCErrorHandler) HandleNodeError(ctx context.Context, nodeError error) error {
-	return handleAndClassify(ctx, nodeError, common.TransportJsonRPC, tendermintErrorHandler.chainFamily, tendermintErrorHandler.chainID, &tendermintErrorHandler.genericErrorHandler)
-}
-
-type GRPCErrorHandler struct {
-	genericErrorHandler
-	chainFamily common.ChainFamily
-	chainID     string
-}
-
-func (geh *GRPCErrorHandler) HandleNodeError(ctx context.Context, nodeError error) error {
-	return handleAndClassify(ctx, nodeError, common.TransportGRPC, geh.chainFamily, geh.chainID, &geh.genericErrorHandler)
+func (neh *nodeErrorHandler) HandleNodeError(ctx context.Context, nodeError error) error {
+	return handleAndClassify(ctx, nodeError, neh.transport, neh.chainFamily, neh.chainID, &neh.genericErrorHandler)
 }
 
 type ErrorHandler interface {

@@ -3,7 +3,6 @@ package endpointstate
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"sync"
@@ -98,12 +97,10 @@ const (
 	peerObservationTTLMultiplier = 2
 )
 
-// EndpointID is the opaque digest a URL is published under. The raw URL carries the provider
-// API key, so it never crosses the cache wire or lands in the cache server's logs; every pod
-// with the same URL string derives the same digest, which is all the fleet needs to agree on.
+// EndpointID is the opaque digest a URL is published under, so the provider API key in it
+// never crosses the cache wire or lands in the cache server's logs.
 func EndpointID(endpointURL string) string {
-	sum := sha256.Sum256([]byte(endpointURL))
-	return hex.EncodeToString(sum[:16])
+	return utils.Digest(endpointURL, 16)
 }
 
 var (

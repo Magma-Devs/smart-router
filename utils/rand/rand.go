@@ -4,9 +4,8 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
-	"math/big"
 	mathrand "math/rand"
-	"sync"
+	mathrandv2 "math/rand/v2"
 	"sync/atomic"
 )
 
@@ -30,68 +29,24 @@ func Seed(rng *mathrand.Rand, data []byte) {
 	rng.Seed(seed)
 }
 
-// threadSafeRand wraps crypto/rand for thread-safe, cryptographically secure random number generation.
-// This is used for the global protocolRand instance where security and uniformity are prioritized
-// over determinism.
-type threadSafeRand struct {
-	lock sync.Mutex // we have no reads, just writes, so using a sync.Mutex.
-}
+// cryptoSource is a math/rand/v2 Source that draws every value from crypto/rand. It holds no
+// state, so the Rand built on it is safe for concurrent use without a lock. The global
+// protocolRand uses it: security and uniformity are prioritized over determinism.
+type cryptoSource struct{}
 
-func (t *threadSafeRand) Intn(n int) int {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	if n <= 0 {
-		panic("invalid argument to Intn")
-	}
-	maxVal := big.NewInt(int64(n))
-	result, err := cryptorand.Int(cryptorand.Reader, maxVal)
-	if err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return int(result.Int64())
-}
-
-func (t *threadSafeRand) Float64() float64 {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	// Generate a random 53-bit integer (mantissa size for float64)
-	// to ensure uniform distribution across [0, 1)
-	maxVal := big.NewInt(1 << 53)
-	n, err := cryptorand.Int(cryptorand.Reader, maxVal)
-	if err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	// Convert to float64 in range [0, 1)
-	return float64(n.Int64()) / float64(int64(1<<53))
-}
-
-func (t *threadSafeRand) Uint64() uint64 {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	// Generate 8 random bytes and convert to uint64
+func (cryptoSource) Uint64() uint64 {
 	var b [8]byte
-	_, err := cryptorand.Read(b[:])
-	if err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
+	cryptorand.Read(b[:]) // never returns an error; crashes the program if the OS source fails
 	return binary.LittleEndian.Uint64(b[:])
 }
 
-func (t *threadSafeRand) Int63() int64 {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	// Int63 returns a non-negative int64, so max is 2^63
-	maxVal := new(big.Int).SetUint64(1 << 63)
-	result, err := cryptorand.Int(cryptorand.Reader, maxVal)
-	if err != nil {
-		panic("crypto/rand failed: " + err.Error())
-	}
-	return result.Int64()
+func newProtocolRand() *mathrandv2.Rand {
+	return mathrandv2.New(cryptoSource{})
 }
 
 // protocolRand is an atomic pointer so InitRandomSeed/SetSpecificSeed (called from test setup, and
 // once at process start) cannot race the Initialized()/PanicIf.../Intn... readers under -race.
-var protocolRand atomic.Pointer[threadSafeRand]
+var protocolRand atomic.Pointer[mathrandv2.Rand]
 
 func Initialized() bool {
 	return protocolRand.Load() != nil
@@ -100,7 +55,7 @@ func Initialized() bool {
 func InitRandomSeed() {
 	// Seed is no longer needed as crypto/rand is self-seeding
 	// This function is kept for API compatibility
-	protocolRand.Store(&threadSafeRand{})
+	protocolRand.Store(newProtocolRand())
 }
 
 func SetSpecificSeed(seed int64) {
@@ -108,7 +63,7 @@ func SetSpecificSeed(seed int64) {
 	// This function is kept for API compatibility but has no effect
 	// For deterministic randomness, use New(data) instead
 	_ = seed
-	protocolRand.Store(&threadSafeRand{})
+	protocolRand.Store(newProtocolRand())
 }
 
 func PanicIfProtocolRandNotInitialized() {
@@ -119,7 +74,10 @@ func PanicIfProtocolRandNotInitialized() {
 
 func Intn(n int) int {
 	PanicIfProtocolRandNotInitialized()
-	return protocolRand.Load().Intn(n)
+	if n <= 0 {
+		panic("invalid argument to Intn")
+	}
+	return protocolRand.Load().IntN(n)
 }
 
 func Float64() float64 {
@@ -134,5 +92,5 @@ func Uint64() uint64 {
 
 func Int63() int64 {
 	PanicIfProtocolRandNotInitialized()
-	return protocolRand.Load().Int63()
+	return protocolRand.Load().Int64()
 }

@@ -2,8 +2,6 @@ package core
 
 import (
 	"time"
-
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 )
 
 const (
@@ -54,7 +52,7 @@ type Policy struct {
 // block time, floored at the configured non-finalized expiration.
 func (p Policy) ForChain(averageBlockTimeForChain time.Duration) time.Duration {
 	eighthBlock := averageBlockTimeForChain / 8
-	return lavaslices.Max([]time.Duration{eighthBlock, p.NonFinalized})
+	return max(eighthBlock, p.NonFinalized)
 }
 
 // SharedStateTip returns the TTL for a pod's published chain tip in shared-state
@@ -69,7 +67,7 @@ func (p Policy) ForChain(averageBlockTimeForChain time.Duration) time.Duration {
 // constant precisely so no flag combination can defeat either guarantee.
 func (p Policy) SharedStateTip(averageBlockTimeForChain time.Duration) time.Duration {
 	ttl := averageBlockTimeForChain * SharedStateTipBlockMultiplier
-	return lavaslices.Max([]time.Duration{ttl, p.NonFinalized, MinSharedStateTipExpiration})
+	return max(ttl, p.NonFinalized, MinSharedStateTipExpiration)
 }
 
 // ForRelayEntry selects the TTL for a relay entry write: finalized node errors
@@ -96,7 +94,7 @@ func (p Policy) ForRelayEntry(finalized, isNodeError bool, averageBlockTime time
 			if averageBlockTime <= 0 {
 				return p.NodeErrors
 			}
-			return lavaslices.Min([]time.Duration{averageBlockTime, p.NodeErrors})
+			return min(averageBlockTime, p.NodeErrors)
 		}
 		return p.Finalized
 	}

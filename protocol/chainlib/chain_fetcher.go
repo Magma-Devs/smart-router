@@ -1654,7 +1654,7 @@ func isDefaultContentType(entry pairingtypes.Metadata) bool {
 		return false
 	}
 	mediaType, _, err := mime.ParseMediaType(entry.Value)
-	return err == nil && mediaType == "application/json"
+	return err == nil && mediaType == common.JSONContentType
 }
 
 // metadataWithoutDefaultContentType returns metadata with an application/json Content-Type

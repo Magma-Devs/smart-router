@@ -42,22 +42,23 @@ func StartServerSpan(ctx context.Context, name string) (context.Context, trace.S
 // non-recording span so call sites can unconditionally defer span.End()
 // without producing orphan root spans.
 func StartClientSpan(ctx context.Context, name string) (context.Context, trace.Span) {
-	parent := trace.SpanFromContext(ctx)
-	if !parent.IsRecording() {
-		return ctx, parent
-	}
-	return tracer().Start(ctx, name, trace.WithSpanKind(trace.SpanKindClient))
+	return startChildSpan(ctx, name, trace.WithSpanKind(trace.SpanKindClient))
 }
 
 // StartInternalSpan starts an INTERNAL-kind child span only when the
 // context already carries a recording parent. Same orphan-root protection
 // as StartClientSpan.
 func StartInternalSpan(ctx context.Context, name string) (context.Context, trace.Span) {
+	return startChildSpan(ctx, name)
+}
+
+// startChildSpan starts a child span only under a recording parent, else returns the parent.
+func startChildSpan(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	parent := trace.SpanFromContext(ctx)
 	if !parent.IsRecording() {
 		return ctx, parent
 	}
-	return tracer().Start(ctx, name)
+	return tracer().Start(ctx, name, opts...)
 }
 
 // --- Relay-span context plumbing ---
@@ -238,13 +239,9 @@ func RecordHTTPRequest(span trace.Span, method, urlStr string) {
 // `http.response_content_length` on a client HTTP span. Skipped when
 // response is nil (transport error before a response was received).
 func RecordHTTPResponse(span trace.Span, response *lavasession.HTTPDirectRPCResponse) {
-	if !span.IsRecording() || response == nil {
-		return
+	if response != nil {
+		recordResponse(span, response.StatusCode, len(response.Body))
 	}
-	span.SetAttributes(
-		semconv.HTTPStatusCode(response.StatusCode),
-		semconv.HTTPResponseContentLength(len(response.Body)),
-	)
 }
 
 // RecordGRPCRequest sets `rpc.system`="grpc", `rpc.service`, `rpc.method`,
@@ -273,12 +270,19 @@ func RecordGRPCRequest(span trace.Span, methodPath, urlStr string) {
 // http.status_code attribute because the SmartRouter's DirectRPCResponse
 // surfaces a unified status field across protocols.
 func RecordGRPCResponse(span trace.Span, response *lavasession.DirectRPCResponse) {
-	if !span.IsRecording() || response == nil {
+	if response != nil {
+		recordResponse(span, response.StatusCode, len(response.Data))
+	}
+}
+
+// recordResponse records `http.status_code` and `http.response_content_length` on a client span.
+func recordResponse(span trace.Span, statusCode, contentLength int) {
+	if !span.IsRecording() {
 		return
 	}
 	span.SetAttributes(
-		semconv.HTTPStatusCode(response.StatusCode),
-		semconv.HTTPResponseContentLength(len(response.Data)),
+		semconv.HTTPStatusCode(statusCode),
+		semconv.HTTPResponseContentLength(contentLength),
 	)
 }
 

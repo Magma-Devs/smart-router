@@ -483,7 +483,7 @@ func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byt
 	}
 
 	// JSON-RPC / Tendermint RPC / gRPC / POST: send requestData as the body.
-	headers := map[string]string{"Content-Type": "application/json"}
+	headers := map[string]string{"Content-Type": common.JSONContentType}
 	// gRPC carries the method PATH in a header, not in the URL or body: the connection dials apiName
 	// (e.g. cosmos.base.tendermint.v1beta1.Service/GetLatestBlock) and sends requestData as the request
 	// payload. Without this header GRPCDirectRPCConnection.SendRequest rejects every call with "gRPC
@@ -519,7 +519,7 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 		Body:   body,
 	}
 	if body != nil {
-		params.ContentType = "application/json"
+		params.ContentType = common.JSONContentType
 	}
 
 	resp, err := httpDoer.DoHTTPRequest(ctx, params)

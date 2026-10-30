@@ -3,6 +3,8 @@ package chaintracker
 import (
 	"context"
 	"time"
+
+	"github.com/magma-Devs/smart-router/utils/backoff"
 )
 
 // sleepCtx waits for d, or returns early if ctx is cancelled. Returns ctx.Err() on
@@ -26,10 +28,5 @@ func exponentialBackoff(baseTime time.Duration, fails uint64) time.Duration {
 	if fails > maxFails {
 		fails = maxFails
 	}
-	maxIncrease := BACKOFF_MAX_TIME
-	backoff := baseTime * (1 << fails)
-	if backoff > maxIncrease {
-		backoff = maxIncrease
-	}
-	return backoff
+	return backoff.Delay(int(fails), backoff.Config{Initial: baseTime, Max: BACKOFF_MAX_TIME, Multiplier: 2})
 }

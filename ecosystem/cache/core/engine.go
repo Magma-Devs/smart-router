@@ -13,7 +13,6 @@ import (
 	relaytypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 )
 
 var (
@@ -273,7 +272,7 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 		waitGroup.Wait()
 
 		if err == nil {
-			if cacheReply.SeenBlock < lavaslices.Min([]int64{relayCacheGet.SeenBlock, relayCacheGet.RequestedBlock}) {
+			if cacheReply.SeenBlock < min(relayCacheGet.SeenBlock, relayCacheGet.RequestedBlock) {
 				err = utils.LavaFormatDebug("reply seen block is smaller than our expectations",
 					utils.LogAttr("cacheReply.SeenBlock", cacheReply.SeenBlock),
 					utils.LogAttr("seenBlock", relayCacheGet.SeenBlock),
@@ -382,13 +381,7 @@ const (
 
 // ClampStickyTTL bounds a requested sticky TTL to [MinStickyTTL, MaxStickyTTL].
 func ClampStickyTTL(requested time.Duration) time.Duration {
-	if requested < MinStickyTTL {
-		return MinStickyTTL
-	}
-	if requested > MaxStickyTTL {
-		return MaxStickyTTL
-	}
-	return requested
+	return min(max(requested, MinStickyTTL), MaxStickyTTL)
 }
 
 // GetSticky reads the fleet's sticky pin for one session id.
@@ -436,13 +429,7 @@ const (
 // ClampEndpointObservationTTL bounds a requested TTL to
 // [MinEndpointObservationTTL, MaxEndpointObservationTTL].
 func ClampEndpointObservationTTL(requested time.Duration) time.Duration {
-	if requested < MinEndpointObservationTTL {
-		return MinEndpointObservationTTL
-	}
-	if requested > MaxEndpointObservationTTL {
-		return MaxEndpointObservationTTL
-	}
-	return requested
+	return min(max(requested, MinEndpointObservationTTL), MaxEndpointObservationTTL)
 }
 
 // PublishEndpointObservation records one pod's successful poll of an upstream endpoint so peer
