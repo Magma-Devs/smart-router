@@ -126,9 +126,12 @@ func TestHandleHeaders_CustomerIDLabelsAndNeverRoutes(t *testing.T) {
 	}
 	// A header the spec does forward, so the comparison below cannot pass on an empty result.
 	forwarded := pairingtypes.Metadata{Name: "x-cosmos-block-height", Value: "1000"}
+	// CARDANO declares project_id (underscore, the Blockfrost key) pass_send. Exact-name matching
+	// must keep that directive from reaching the hyphenated project-id a caller may still send.
 	declare := func(method string) map[ApiKey]*spectypes.Header {
 		return map[ApiKey]*spectypes.Header{
 			{Name: "x-cosmos-block-height", ConnectionType: method}: {Name: "x-cosmos-block-height", Kind: spectypes.Header_pass_send},
+			{Name: "project_id", ConnectionType: method}:            {Name: "project_id", Kind: spectypes.Header_pass_send},
 		}
 	}
 
