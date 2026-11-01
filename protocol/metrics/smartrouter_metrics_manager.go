@@ -605,7 +605,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels)
 	csmProviderBlocked := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_provider_blocked",
-		Help: "Whether this specific provider is currently blocked (1=blocked, 0=serving). Companion to the smartrouter_csm_blocked_providers count, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
+		Help: "Whether this specific provider is out of rotation (1=out: blocked by the router, or none of its urls can take a relay right now; 0=at least one url in rotation), in the regular pairing or the backup pool. Companion to the smartrouter_csm_blocked_providers and smartrouter_csm_blocked_backup_providers counts, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
 	}, []string{"spec", "apiInterface", "provider_address"})
 	csmBlockedProvidersByReason := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_providers_by_reason",
@@ -1964,8 +1964,8 @@ func (m *SmartRouterMetricsManager) ResetSessionRelatedMetrics() {}
 // in the standing block list, and that provider is no longer in it. Over many epochs those
 // phantoms accumulate — a slow cardinality leak that also reads as a permanent outage.
 //
-// Drop every series for this chain first, then seed 0 for each provider in the new pairing, so
-// providers that left are gone rather than frozen. A provider that the re-block pass immediately
+// Drop every series for this chain first, then seed 0 for each provider in the new pairing and
+// backup pool, so providers that left are gone rather than frozen. A provider that the re-block pass immediately
 // re-blocks is corrected by the next publishStateSizes tick, which republishes the full truth.
 func (m *SmartRouterMetricsManager) ResetBlockedProvidersMetrics(chainId, apiInterface string, providerAddressToEndpoint map[string]string) {
 	if m == nil {
