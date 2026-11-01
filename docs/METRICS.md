@@ -382,6 +382,21 @@ node on the router offers it, the request is still served without it and the rep
 | `smartrouter_node_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Node errors returned by endpoints. |
 | `smartrouter_protocol_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Protocol/transport errors (connection/session failures). |
 
+The same two counts are readable without the metrics port at `GET /debug/relay-errors` on the
+debug server (`--debug-address`), one row per chain, interface, provider and method with a count
+above zero: `ChainID`, `ApiInterface`, `ProviderAddress`, `Method`, `NodeErrors`, `ProtocolErrors`
+and `PodID`. They are read from these counters, so the route and the metrics always agree, and
+they stay two numbers because failover treats a node error and a protocol error differently. Both
+are counted per attempt: a retry that answered hides the first attempt from the caller, and this
+is where its classification shows. A node error is not counted on a stateful request (a write).
+`chain_id`, `api_interface` and `provider` narrow the rows; `provider` matches `ProviderAddress`,
+the value `Lava-Provider-Address` carries. The counts are per process and cumulative for its
+lifetime, and no `/debug/reset-*` route clears them: the debug Service balances across a router's
+pods, so compare two readings only when their `PodID` matches. A router run without
+`--metrics-listen-address` keeps neither counter, and the route answers `503` rather than an
+empty list. Until MAG-3536 lands, nothing increments `smartrouter_protocol_errors_total`, so
+`ProtocolErrors` reads 0 and a provider with only protocol errors has no row.
+
 #### Retries
 
 | Metric | Type | Labels | Description |

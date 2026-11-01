@@ -1841,6 +1841,52 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		writeDebugRows(w, rows)
 	})
 
+	// GET /debug/relay-errors — the counts of smartrouter_node_errors_total and
+	// smartrouter_protocol_errors_total, without the metrics port (MAG-4718). One row per chain,
+	// interface, provider and method with a count above zero, read from the counters themselves
+	// so the two surfaces cannot disagree. NodeErrors and ProtocolErrors stay two numbers: a node
+	// error is a reply the router read as the node's fault, a protocol error an attempt with no
+	// proper answer, and failover treats them differently. Both are counted per attempt, so this
+	// is where an attempt the caller never saw (a retry answered) shows its classification.
+	// Cumulative since the process started and cleared by no /debug/reset-* route; PodID names
+	// the process, as on /debug/sticky-claims. Optional chain_id, api_interface and provider
+	// narrow the rows. The counters exist only on a router with --metrics-listen-address set:
+	// without it this answers 503 rather than an empty list that would read as "no errors".
+	mux.HandleFunc("/debug/relay-errors", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		rows := []map[string]any{}
+		if deps.router != nil {
+			mm := deps.router.smartRouterMetricsManager
+			if mm == nil {
+				http.Error(w, "relay error counts are not kept: the router runs without --metrics-listen-address", http.StatusServiceUnavailable)
+				return
+			}
+			q := r.URL.Query()
+			chainID, apiInterface, provider := q.Get("chain_id"), q.Get("api_interface"), q.Get("provider")
+			podID := endpointstate.LocalPodID()
+			for _, count := range mm.RelayErrorCounts() {
+				if (chainID != "" && count.ChainID != chainID) ||
+					(apiInterface != "" && count.ApiInterface != apiInterface) ||
+					(provider != "" && count.ProviderAddress != provider) {
+					continue
+				}
+				rows = append(rows, map[string]any{
+					"ChainID":         count.ChainID,
+					"ApiInterface":    count.ApiInterface,
+					"ProviderAddress": count.ProviderAddress,
+					"Method":          count.Method,
+					"NodeErrors":      count.NodeErrors,
+					"ProtocolErrors":  count.ProtocolErrors,
+					"PodID":           podID,
+				})
+			}
+		}
+		writeDebugRows(w, rows)
+	})
+
 	// GET /debug/probe-loop — per-chain proactive-prober cycle telemetry (MAG-2202 endpoint 4). Flat
 	// array of self-describing records (ChainID + ApiInterface): the configured --probe-loop-interval
 	// cadence (CycleIntervalMs) plus a snapshot of the last completed runProbeCycle — start/duration,
@@ -2401,7 +2447,9 @@ func debugRowKey(m map[string]any) string {
 	// sort.Slice — which is NOT stable — leaves their order to chance. Absent on every other row
 	// type, where comma-ok yields "" and the key is unchanged.
 	pa, _ := m["ProviderAddress"].(string)
-	return cid + "\x00" + api + "\x00" + na + "\x00" + pa
+	// Method splits one provider's rows on /debug/relay-errors (MAG-4718).
+	method, _ := m["Method"].(string)
+	return cid + "\x00" + api + "\x00" + na + "\x00" + pa + "\x00" + method
 }
 
 // writeDebugRows sorts the records deterministically (so Go map-iteration order never leaks into the
