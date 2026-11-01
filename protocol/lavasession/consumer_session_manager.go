@@ -1017,6 +1017,13 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 			)
 			continue
 		}
+		// A ws/wss url is never sent a relay (ServesDirectRelays), so it never fails and stays
+		// usable while every https url is off. Counting it here would release a provider that
+		// fetchEndpointConnectionFromConsumerSessionWithProvider just blocked for having no
+		// relay-capable url left, on the very next reconnect or epoch probe (MAG-4285).
+		if !endpoint.ServesDirectRelays() {
+			continue
+		}
 
 		for _, conn := range endpoint.DirectConnections {
 			if conn == nil {

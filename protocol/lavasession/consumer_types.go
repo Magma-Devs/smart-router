@@ -1542,8 +1542,18 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 
 		// checking disabled endpoints, as we can disable an endpoint mid run of the previous loop, we should re test the current endpoint state
 		// before verifying all are Disabled.
+		relayCapable := 0
 		allDisabled = true
 		for _, endpoint := range cswp.Endpoints {
+			// Only an endpoint a relay can use keeps the provider out of the blocked list. A
+			// ws/wss url (ServesDirectRelays) is never sent a relay, so it never fails and is
+			// never switched off: counting it meant a provider listing https + wss, the
+			// documented ETH1 shape, was never blocked once its https urls were all off, and so
+			// never reached the last chance that lends a blocked provider's url (MAG-4285).
+			if !endpoint.ServesDirectRelays() {
+				continue
+			}
+			relayCapable++
 			// Usable, not merely Enabled: a provider whose every endpoint is held by a state
 			// reason (head-stalled) has nothing to dial, and must be blocked like one whose
 			// endpoints all failed — that block is what moves its traffic to the next primary or
@@ -1552,6 +1562,12 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 				continue
 			}
 			// even one endpoint is enough for us to not purge.
+			allDisabled = false
+		}
+		// A provider with no relay-capable endpoint at all (a websocket-only url list) has
+		// nothing that could have gone dark, so it is passed over for the request, as before,
+		// rather than blocked.
+		if relayCapable == 0 {
 			allDisabled = false
 		}
 		return false, nil, allDisabled

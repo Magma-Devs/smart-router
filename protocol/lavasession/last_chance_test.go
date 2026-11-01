@@ -336,3 +336,77 @@ func TestLastChance_SuccessLiftsTheBlockFailureKeepsItDisabled(t *testing.T) {
 		require.False(t, p.Endpoints[0].IsEnabled(), "rule 3: a failed last chance keeps the endpoint disabled")
 	})
 }
+
+// lcProviderWithWS is a provider listing an https url and a wss url — the documented ETH1
+// jsonrpc shape — with the https url first, as the chart renders it.
+func lcProviderWithWS(t *testing.T, name, httpURL, wsURL string) *ConsumerSessionsWithProvider {
+	t.Helper()
+	p := lcProvider(t, name, httpURL)
+	conn, err := NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: wsURL}, 5, "jsonrpc")
+	require.NoError(t, err)
+	p.Endpoints = append(p.Endpoints, &Endpoint{NetworkAddress: wsURL, Enabled: true, DirectConnections: []DirectRPCConnection{conn}})
+	return p
+}
+
+// lcLentEndpoint is the endpoint a session was handed.
+func lcLentEndpoint(t *testing.T, info *SessionInfo) *Endpoint {
+	t.Helper()
+	drsc, ok := info.Session.Connection.(*DirectRPCSessionConnection)
+	require.True(t, ok, "a direct-RPC provider's session wraps a DirectRPCSessionConnection")
+	return drsc.Endpoint
+}
+
+// MAG-4285: a wss url is never sent a relay, so it never fails and stays enabled. It used to
+// keep its provider out of the blocked list once the https url was off, so the last chance
+// never reached the provider and the request ended in "No pairings available". Now the https
+// url is lent, exactly as for a provider that lists only https.
+func TestLastChance_LendsTheHttpsURLOfAProviderThatAlsoListsAWss(t *testing.T) {
+	p := lcProviderWithWS(t, "primary", "http://127.0.0.1:1", "ws://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+
+	sessions, err := lcGet(csm, NewUsedProviders(nil))
+	require.NoError(t, err, "the last chance must serve instead of No pairings available")
+	require.Equal(t, "primary", lcServedBy(t, sessions))
+	require.Same(t, p.Endpoints[0], lcLentEndpoint(t, sessions["primary"]), "the https url is lent, never the wss one")
+	require.False(t, p.Endpoints[0].IsEnabled(), "rule 2: lending must not mark the endpoint enabled")
+	require.True(t, p.Endpoints[1].IsEnabled(), "the wss url is left as it was")
+}
+
+// MAG-4285, the mix the ticket left open: one https-only provider and two https + wss
+// providers, every https url off. The https-only one was already tried by this request, so only
+// an https + wss provider can take the last chance — before the fix neither was ever blocked,
+// and the request ended in "No pairings available".
+func TestLastChance_ServesAMixOfHttpsOnlyAndHttpsPlusWssProviders(t *testing.T) {
+	plain := lcProvider(t, "plain", "http://127.0.0.1:1")
+	withWS1 := lcProviderWithWS(t, "ws1", "http://127.0.0.1:2", "ws://127.0.0.1:2")
+	withWS2 := lcProviderWithWS(t, "ws2", "http://127.0.0.1:3", "ws://127.0.0.1:3")
+	for _, p := range []*ConsumerSessionsWithProvider{plain, withWS1, withWS2} {
+		disableAt(t, p.Endpoints[0], probeBase)
+	}
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{plain, withWS1, withWS2}, nil)
+
+	used := NewUsedProviders(nil)
+	used.AddUnwantedAddresses("plain", NewRouterKey(nil))
+	sessions, err := lcGet(csm, used)
+	require.NoError(t, err, "an https + wss provider must take the last chance")
+	served := lcServedBy(t, sessions)
+	require.Contains(t, []string{"ws1", "ws2"}, served)
+	require.True(t, lcLentEndpoint(t, sessions[served]).ServesDirectRelays(), "its https url is lent, never its wss one")
+}
+
+// MAG-4285: the provider blocked for having no relay-capable url left must not be released by
+// the reconnect or epoch probe on the strength of its wss url, which a relay can never use.
+// A provider whose https url is back is released as before.
+func TestProbeDirectRPCEndpoints_AWssURLDoesNotReleaseAProviderWhoseHttpsIsOff(t *testing.T) {
+	p := lcProviderWithWS(t, "primary", "http://127.0.0.1:1", "ws://127.0.0.1:1")
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+
+	disableAt(t, p.Endpoints[0], probeBase)
+	_, err := csm.probeDirectRPCEndpoints(p, "primary")
+	require.Error(t, err, "only the wss url is usable, and no relay can use it")
+
+	p.Endpoints[0].ResetHealth()
+	_, err = csm.probeDirectRPCEndpoints(p, "primary")
+	require.NoError(t, err, "control: the https url is back, so the provider is released")
+}
