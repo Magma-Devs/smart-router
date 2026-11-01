@@ -174,9 +174,10 @@ curl -s http://<router>:7779/metrics | grep smartrouter_cache_success_total
 ```
 
 Non-hits are classified in `smartrouter_cache_failed_total` by `outcome`:
-`miss` (not found), `error` (transport/server error), or `timeout` (budget
-exceeded) — so a broken or slow secondary is immediately distinguishable from a
-cold one. Lookup latency is recorded per tier for every attempt. With tracing
+`miss` (not found), `error` (transport/server error, or an entry refused as
+not a usable reply — see "Node errors are labelled the same from either tier"
+above), or `timeout` (budget exceeded) — so a broken or slow secondary is
+immediately distinguishable from a cold one. Lookup latency is recorded per tier for every attempt. With tracing
 enabled, each lookup is a span carrying `cache.tier` and `cache.outcome`, and
 the request's root span records which tier served it. See
 [METRICS.md](METRICS.md#cache) for the full reference and the dashboard
