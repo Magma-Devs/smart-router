@@ -1602,14 +1602,33 @@ func CalcWeightsByStake(providers map[uint64]*ConsumerSessionsWithProvider) (wei
 	return weights
 }
 
-// hasRelayableEndpoint reports whether at least one of the provider's urls can take a relay right
-// now: usable (enabled, no state reason such as head-stalled) and not websocket-only. A provider
-// with none is out of rotation even before a request finds that out and blocks it.
-func (cswp *ConsumerSessionsWithProvider) hasRelayableEndpoint() bool {
+// inRotation reports whether the router can still send this provider traffic: at least one url
+// that can take a relay is usable (enabled, no state reason such as head-stalled). A provider with
+// none is out of rotation even before a request finds that out and blocks it.
+//
+// A websocket url never takes a relay (ServesDirectRelays), so it does not keep a provider in
+// rotation while its https sibling is out. A provider with no relay-capable url at all (a
+// websocket-only entry, there for subscriptions) is never picked for a relay and never blocked for
+// lacking one, so relay rotation says nothing about it; it is judged by the urls it has, and reads
+// out only when none of them is usable.
+func (cswp *ConsumerSessionsWithProvider) inRotation() bool {
 	cswp.Lock.RLock()
 	defer cswp.Lock.RUnlock()
+	relayCapable := false
 	for _, endpoint := range cswp.Endpoints {
-		if endpoint.IsUsable() && endpoint.ServesDirectRelays() {
+		if !endpoint.ServesDirectRelays() {
+			continue
+		}
+		relayCapable = true
+		if endpoint.IsUsable() {
+			return true
+		}
+	}
+	if relayCapable {
+		return false
+	}
+	for _, endpoint := range cswp.Endpoints {
+		if endpoint.IsUsable() {
 			return true
 		}
 	}

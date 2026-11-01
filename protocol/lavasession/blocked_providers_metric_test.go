@@ -2,10 +2,12 @@ package lavasession
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/stretchr/testify/require"
 )
@@ -221,4 +223,54 @@ func TestPerProviderGauge_EpochSeedCoversTheBackupPool(t *testing.T) {
 		_, backup := seed["backup-b"]
 		return regular && backup
 	}, time.Second, 10*time.Millisecond, "the epoch seed must name the backup as well as the regular provider")
+}
+
+// wsOnlyConnection is a websocket DirectRPCConnection that never dials: enough for
+// Endpoint.ServesDirectRelays to say the url takes no relay.
+type wsOnlyConnection struct{}
+
+func (wsOnlyConnection) SendRequest(context.Context, []byte, map[string]string) (*DirectRPCResponse, error) {
+	return nil, errors.New("a websocket-only test connection takes no relay")
+}
+func (wsOnlyConnection) GetProtocol() DirectRPCProtocol { return DirectRPCProtocolWSS }
+func (wsOnlyConnection) Close() error                   { return nil }
+func (wsOnlyConnection) GetURL() string                 { return "wss://ws-only.test" }
+func (wsOnlyConnection) GetNodeUrl() *common.NodeUrl {
+	return &common.NodeUrl{Url: "wss://ws-only.test"}
+}
+
+func wsOnlyEndpoint() *Endpoint {
+	return &Endpoint{DirectConnections: []DirectRPCConnection{wsOnlyConnection{}}, NetworkAddress: "wss://ws-only.test", Enabled: true}
+}
+
+// A websocket url never takes a relay, so it keeps no provider in rotation while the https url is
+// out. A provider with no https url at all is never picked for a relay and never blocked for
+// lacking one, so it is judged by the urls it has: serving while one is usable, out when none is.
+func TestPerProviderGauge_AWebsocketURLCountsOnlyForAProviderWithNothingElse(t *testing.T) {
+	rec := &stateSizeRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+	pairing := createNamedPairingList("https-and-ws", "ws-only")
+	https := pairing[0].Endpoints[0]
+	pairing[0].Endpoints = append(pairing[0].Endpoints, wsOnlyEndpoint())
+	wsOnly := wsOnlyEndpoint()
+	pairing[1].Endpoints = []*Endpoint{wsOnly}
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
+
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"https-and-ws": false, "ws-only": false}, rec.providerBlockedSnapshot(),
+		"a websocket-only provider is never picked for a relay and never blocked for it, so it reads serving")
+
+	https.mu.Lock()
+	https.Enabled = false
+	https.mu.Unlock()
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"https-and-ws": true, "ws-only": false}, rec.providerBlockedSnapshot(),
+		"the websocket url does not keep the provider in rotation once its https url is out")
+
+	wsOnly.mu.Lock()
+	wsOnly.Enabled = false
+	wsOnly.mu.Unlock()
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"https-and-ws": true, "ws-only": true}, rec.providerBlockedSnapshot(),
+		"a websocket-only provider is out when none of its urls is usable")
 }

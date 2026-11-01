@@ -4112,10 +4112,11 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 		blockedSet[address] = struct{}{}
 	}
 	// A provider reads blocked when it is on a block list or when none of its urls can take a
-	// relay right now (MAG-4735). The block lists alone lag: a provider joins one only when a
-	// request picks it and finds nothing usable, so a backup on a healthy chain, never picked,
-	// read serving for as long as its only url stayed head-stalled. The backup pool keeps its own
-	// block set. The urls are read after csm.lock is released, so no provider lock nests in it.
+	// relay right now (MAG-4735; the url rule is ConsumerSessionsWithProvider.inRotation). The
+	// block lists alone lag: a provider joins one only when a request picks it and finds nothing
+	// usable, so a backup on a healthy chain, never picked, read serving for as long as its only
+	// url stayed head-stalled. The backup pool keeps its own block set. The urls are read after
+	// csm.lock is released, so no provider lock nests in it.
 	type providerState struct {
 		listed bool
 		cswp   *ConsumerSessionsWithProvider
@@ -4134,7 +4135,7 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 
 	providerBlocked := make(map[string]bool, len(states))
 	for address, state := range states {
-		providerBlocked[address] = state.listed || (state.cswp != nil && !state.cswp.hasRelayableEndpoint())
+		providerBlocked[address] = state.listed || (state.cswp != nil && !state.cswp.inRotation())
 	}
 
 	var stickyCount, reportedCount int
