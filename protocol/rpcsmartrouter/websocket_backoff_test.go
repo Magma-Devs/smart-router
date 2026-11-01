@@ -200,29 +200,3 @@ func TestExponentialBackoff_ConcurrentAccess(t *testing.T) {
 	}
 	// If we reach here without panic, concurrent access is safe
 }
-
-func TestNewExponentialBackoff_CustomParameters(t *testing.T) {
-	backoff := NewExponentialBackoff(
-		500*time.Millisecond, // initial
-		10*time.Second,       // max
-		3.0,                  // multiplier
-		5,                    // max retries
-	)
-	backoff.JitterFactor = 0
-
-	delay1, ok := backoff.NextBackoff()
-	require.True(t, ok)
-	assert.Equal(t, 500*time.Millisecond, delay1)
-
-	delay2, ok := backoff.NextBackoff()
-	require.True(t, ok)
-	assert.Equal(t, 1500*time.Millisecond, delay2, "should be 3x initial")
-
-	delay3, ok := backoff.NextBackoff()
-	require.True(t, ok)
-	assert.Equal(t, 4500*time.Millisecond, delay3, "should be 9x initial")
-
-	delay4, ok := backoff.NextBackoff()
-	require.True(t, ok)
-	assert.Equal(t, 10*time.Second, delay4, "should be capped at max (13.5s > 10s)")
-}

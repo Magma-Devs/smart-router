@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -143,6 +144,9 @@ type RPCSmartRouterServer struct {
 	// replay, at most one outstanding per endpoint). Initialized once in runProbeLoop; nil until
 	// then, which runProbeCycleCore treats as "no replay wiring" (poll-only fallback).
 	probeReplayer *relayProbeRunner
+	// headStall is the head-stalled step's state (MAG-3986): which urls hold head-stalled, read by
+	// onTipObservation on every tip vote, and which stuck endpoints never-empty is keeping.
+	headStall headStallState
 
 	// Cached API names of the two tip-defining spec methods (GET_BLOCKNUM / GET_BLOCK_BY_NUM), resolved
 	// once on the first relay via tipApiNamesOnce. tipBlockFromRelay runs on every successful relay;
@@ -245,7 +249,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	// monitor's OnTipObservation hook can feed it. Phase 2 wires the writes (relay+poll
 	// observations → SetLatestBlock) and the internal consensus recompute tick; the read sites
 	// still use the legacy sources until phase 3.
-	rpcss.chainState = chainstate.New(listenEndpoint.ChainID, chainstate.DefaultConfig(effectiveBlockTime))
+	rpcss.chainState = rpcss.newChainState(effectiveBlockTime)
 
 	// Topic E (MAG-2160 Finding 2 / F4): point the relay sync dimension at THIS chain+interface's
 	// tip, so relay sync lag is measured against the agreed head rather than
@@ -288,9 +292,16 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		// truncate 0.25 to 0 — which is the "unset" sentinel, so an operator asking for the
 		// largest relief would silently receive the default instead.
 		PollIntervalDivisor: viper.GetFloat64(endpointstate.PollDivisorFlagName),
+		// Idle mode (endpointstate/idle.go): pause this chain+interface's dedicated polls once it
+		// has served no client relay for IdleAfter, optionally keeping a slow heartbeat. Both read
+		// from viper for the same reason as the flags above; 0 (absent) is off, the default.
+		IdleAfter:        viper.GetDuration(endpointstate.IdleAfterFlagName),
+		IdlePollInterval: viper.GetDuration(endpointstate.IdlePollIntervalFlagName),
 		// Feed every positive poll/relay block into the per-chain tip (cheap monotonic write)
 		// and mirror the resulting guarded tip into the router-wide latest-block gauge (MAG-2629).
 		OnTipObservation: rpcss.onTipObservation,
+		// Each url's head on rpc_endpoint_url_latest_block, on every answered poll (MAG-4204).
+		OnPollBlock: rpcss.onEndpointPollBlock,
 		// Fleet tracker gate (MAG-2981): with --shared-state AND a cache backend, pods share
 		// their poll observations so an endpoint is polled about once per interval fleet-wide.
 		// Gated on the same flag as the chain-level shared tip — it is the operator's "this
@@ -362,12 +373,12 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 
 	// we trigger a latest block call to get some more information on our RPC endpoints, using the relays monitor
 	if cmdFlags.RelaysHealthEnableFlag {
-		rpcss.relaysMonitor.SetRelaySender(func() (bool, error) {
-			success, err := rpcss.sendCraftedRelaysWrapper(ctx, initialRelays)
-			if success {
+		rpcss.relaysMonitor.SetRelaySender(func() metrics.ProbeVerdict {
+			verdict, _ := rpcss.sendCraftedRelaysWrapper(ctx, initialRelays)
+			if verdict == metrics.ProbeHealthy {
 				initialRelays = false
 			}
-			return success, err
+			return verdict
 		})
 		rpcss.relaysMonitor.Start(ctx)
 	} else {
@@ -396,16 +407,16 @@ func (rpcss *RPCSmartRouterServer) GetGRPCSubscriptionManager() chainlib.GRPCSub
 	return rpcss.grpcSubscriptionManager
 }
 
-func (rpcss *RPCSmartRouterServer) sendCraftedRelaysWrapper(ctx context.Context, initialRelays bool) (bool, error) {
+func (rpcss *RPCSmartRouterServer) sendCraftedRelaysWrapper(ctx context.Context, initialRelays bool) (metrics.ProbeVerdict, error) {
 	if initialRelays {
 		// Only start after everything is initialized - check consumer session manager
 		rpcss.waitForPairing(ctx)
 	}
-	success, err := rpcss.sendCraftedRelays(MaxRelayRetries, initialRelays)
-	if success {
+	verdict, err := rpcss.sendCraftedRelays(MaxRelayRetries, initialRelays)
+	if verdict == metrics.ProbeHealthy {
 		rpcss.initialized.Store(true)
 	}
-	return success, err
+	return verdict, err
 }
 
 func (rpcss *RPCSmartRouterServer) waitForPairing(ctx context.Context) {
@@ -466,6 +477,17 @@ func (rpcss *RPCSmartRouterServer) craftRelay(ctx context.Context) (ok bool, rel
 
 	path := parsing.ApiName
 	data := []byte(parsing.FunctionTemplate)
+	// A REST template is the request URL, query string included, unless the collection's method
+	// carries a body, whose template is that body — the rule RestChainParser.CraftMessage applies
+	// for the chain fetcher, which also keeps the api name as the URL when the template is empty.
+	// Sent as the body of a GET, the query never reaches the node, and a node that refuses a GET
+	// with a body fails every health check.
+	if rpcss.listenEndpoint.ApiInterface == spectypes.APIInterfaceRest && !chainlib.RestMethodCarriesBody(collectionData.Type) {
+		data = nil
+		if parsing.FunctionTemplate != "" {
+			path = parsing.FunctionTemplate
+		}
+	}
 	chainMessage, err = rpcss.chainParser.ParseMsg(path, data, collectionData.Type, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	if err != nil {
 		return false, nil, nil, utils.LavaFormatError("failed creating chain message in rpc consumer init relays", err,
@@ -633,7 +655,7 @@ func validateCrossValidationFleet(resolver *CrossValidationPolicyResolver, chain
 	requiredProviders, requiredGroups := crossValidationShortfall(resolver, chainID, apiInterface, verifiedSizes)
 	backupOnly := len(configured) == 0 && len(resolver.headerlessParams(chainID, apiInterface)) > 0
 	if requiredProviders == 0 && requiredGroups == 0 && !backupOnly {
-		return nil, nil
+		return nil, nil //nolint:nilnil // nil means there is no shortfall to report for this endpoint; the error is for a malformed layout
 	}
 	configuredProviders, configuredGroups := crossValidationShortfall(resolver, chainID, apiInterface, configuredSizes)
 	return &crossValidationFleetAdvisory{
@@ -1101,18 +1123,21 @@ func (rpcss *RPCSmartRouterServer) internalRelayStateMachine(ctx context.Context
 	)
 }
 
-func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, retries int, initialRelays bool, protocolMessage chainlib.ProtocolMessage) (bool, error) {
-	success := false
+// sendRelayWithRetries is the health probe: up to retries tries of the latest-block request, each at
+// an endpoint the earlier tries did not use. Its verdict is ProbeHealthy once a try gets a result,
+// ProbeInconclusive when an upstream answered but never with a result, and ProbeUnreachable when no
+// upstream answered at all (see upstreamAnswerFrom for what counts as an answer).
+func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, retries int, initialRelays bool, protocolMessage chainlib.ProtocolMessage) (metrics.ProbeVerdict, error) {
+	verdict := metrics.ProbeUnreachable
 	var err error
 	usedProviders := lavasession.NewUsedProviders(nil)
 	usedProviders.SetChainID(rpcss.listenEndpoint.ChainID)
-	usedProviders.SetEligibilityFunc(relaypolicy.DecideEligibility)
 
 	// Selection comes from the method's own category only — see internalRelayStateMachine for why
 	// an operator cross-validation policy must not reach a health check.
 	stateMachine, err := rpcss.internalRelayStateMachine(ctx, usedProviders, protocolMessage)
 	if err != nil {
-		return false, err
+		return metrics.ProbeUnreachable, err
 	}
 
 	// Get cross-validation parameters from the state machine (nil for Stateless/Stateful)
@@ -1124,18 +1149,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	// hole if this path ever gains a selection that does cross-validate. Readiness deliberately
 	// does not attest a policied method's quorum capacity — see internalRelayStateMachine.
 	if _, err := rpcss.validateCrossValidationCapacity(ctx, stateMachine.GetSelection(), crossValidationParams, chainlib.GetAddon(protocolMessage), common.GetExtensionNames(protocolMessage.GetExtensions())); err != nil {
-		return false, err
+		return metrics.ProbeUnreachable, err
 	}
 
-	// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
-	// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
-	relayProcessor := relaycore.NewRelayProcessor(
-		ctx,
-		crossValidationParams,
-		rpcss.rpcSmartRouterLogs,
-		rpcss,
-		stateMachine,
-	)
 	usedEndpointsResets := 1
 	for i := 0; i < retries; i++ {
 		// Check if we even have enough endpoints to communicate with them all.
@@ -1143,18 +1159,34 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 		// Instead of spamming no pairing available on bootstrap
 		if ((i + 1) * usedEndpointsResets) > rpcss.sessionManager.GetNumberOfValidProviders() {
 			usedEndpointsResets++
-			relayProcessor.GetUsedProviders().ClearUnwanted()
+			usedProviders.ClearUnwanted()
 		}
 		// One try, one short deadline. Bounding the try rather than the whole loop keeps the point of
 		// the loop — up to `retries` attempts at different endpoints — while stopping any single hung
 		// endpoint from consuming a client-sized budget. Cancelled on both exits below rather than
 		// deferred, so a hung attempt from this try does not outlive it.
 		tryCtx, cancelTry := context.WithTimeout(ctx, internalRelayTryTimeout)
-		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil, false)
+		// One processor per try, built on the try's context (MAG-4639). An attempt cut off at its
+		// try's deadline still delivers its response, late. A processor shared with the next try
+		// would hand that response to it as its answer, and the next try would then cut off its own
+		// attempt, so one stall would fail every try. On its own processor the late response lands
+		// where nothing reads it. The state machine and its used providers stay shared, so each try
+		// still goes to an endpoint the earlier ones did not use.
+		//
+		// Direct RPC flow: pass nil for availabilityDegrader since there are no Lava protocol sessions.
+		// QoS punishment for node errors is handled by the optimizer via AppendRelayFailure in OnSessionFailure.
+		relayProcessor := relaycore.NewRelayProcessor(
+			tryCtx,
+			crossValidationParams,
+			rpcss.rpcSmartRouterLogs,
+			rpcss,
+			stateMachine,
+		)
+		err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil)
 		if errors.Is(err, lavasession.PairingListEmptyError) {
 			// we don't have pairings anymore, could be related to unwanted endpoints
 			relayProcessor.GetUsedProviders().ClearUnwanted()
-			err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil, false)
+			err = rpcss.sendRelayToEndpoint(tryCtx, 1, relaycore.GetEmptyRelayState(protocolMessage), relayProcessor, nil, nil)
 		}
 		if err != nil {
 			utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
@@ -1164,7 +1196,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 				utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
 			} else {
 				relayResult, err := relayProcessor.ProcessingResult()
-				if err == nil && relayResult != nil && relayResult.Reply != nil {
+				// ProcessingResult hands back a node error with err == nil when nothing succeeded. Only
+				// a result is health; an error answer makes the probe inconclusive, below.
+				if err == nil && relayResult != nil && relayResult.Reply != nil && relayProvesEndpointHealthy(relayResult) {
 					utils.LavaFormatInfo("[+] init relay succeeded",
 						utils.LogAttr("GUID", ctx),
 						utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
@@ -1179,7 +1213,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 					// lying-high health-relay response ChainState rejected still move the router-wide
 					// tip. The gated harvest is the single tip-update path.
 					rpcss.relaysMonitor.LogRelay()
-					success = true
+					verdict = metrics.ProbeHealthy
 					// If this is the first time we send relays, we want to send all of them, instead of break on first successful relay
 					// That way, we populate the endpoints with the latest blocks with successful relays
 					if !initialRelays {
@@ -1188,20 +1222,39 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 					}
 				} else if err != nil {
 					utils.LavaFormatError("[-] failed sending init relay", err, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
+				} else if relayResult != nil && relayResult.Reply != nil {
+					utils.LavaFormatError("[-] init relay answered with an error", nil,
+						utils.LogAttr("GUID", ctx),
+						utils.LogAttr("chainID", rpcss.listenEndpoint.ChainID),
+						utils.LogAttr("APIInterface", rpcss.listenEndpoint.ApiInterface),
+						utils.LogAttr("endpoint", relayResult.ProviderInfo.ProviderAddress),
+						utils.LogAttr("statusCode", relayResult.StatusCode),
+						utils.LogAttr("reply", relayEndText(string(relayResult.Reply.Data))),
+					)
 				} else {
 					utils.LavaFormatError("[-] failed sending init relay - nil result", nil, []utils.Attribute{{Key: "GUID", Value: ctx}, {Key: "chainID", Value: rpcss.listenEndpoint.ChainID}, {Key: "APIInterface", Value: rpcss.listenEndpoint.ApiInterface}, {Key: "relayProcessor", Value: relayProcessor}}...)
 				}
 			}
 		}
+		// Read from this try's processor only: what reached it before the try's deadline. A try
+		// that timed out holds nothing, which is no answer.
+		if verdict == metrics.ProbeUnreachable && upstreamAnswerOf(relayProcessor) != upstreamAnswerNone {
+			verdict = metrics.ProbeInconclusive
+		}
 		cancelTry()
-		time.Sleep(RelayRetryBackoffDuration)
+		select {
+		case <-ctx.Done():
+			// The caller is gone; another attempt would only fail on the dead context.
+			return verdict, ctx.Err()
+		case <-time.After(RelayRetryBackoffDuration):
+		}
 	}
 
-	return success, err
+	return verdict, err
 }
 
 // sending a few latest blocks relays to RPC endpoints in order to have data for endpoint selection when relays start arriving
-func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays bool) (bool, error) {
+func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays bool) (metrics.ProbeVerdict, error) {
 	utils.LavaFormatDebug("Sending crafted relays",
 		utils.LogAttr("chainId", rpcss.listenEndpoint.ChainID),
 		utils.LogAttr("apiInterface", rpcss.listenEndpoint.ApiInterface),
@@ -1214,7 +1267,7 @@ func (rpcss *RPCSmartRouterServer) sendCraftedRelays(retries int, initialRelays 
 	defer cancel()
 	ok, relay, chainMessage, _ := rpcss.craftRelay(ctx)
 	if !ok {
-		return true, nil
+		return metrics.ProbeHealthy, nil
 	}
 	protocolMessage := chainlib.NewProtocolMessage(chainMessage, nil, relay, initRelaysDappId, initRelaysSmartRouterIp)
 	return rpcss.sendRelayWithRetries(ctx, retries, initialRelays, protocolMessage)
@@ -1273,6 +1326,7 @@ func (rpcss *RPCSmartRouterServer) SendRelay(
 	analytics *metrics.RelayMetrics,
 	metadata []pairingtypes.Metadata,
 ) (relayResult *common.RelayResult, errRet error) {
+	start := time.Now()
 	// Inject client IP into context so IP forwarding (X-Forwarded-For) works when using HTTP listener.
 	// GetIpFromGrpcContext reads from gRPC peer or from incoming metadata.
 	if consumerIp != "" {
@@ -1303,6 +1357,8 @@ func (rpcss *RPCSmartRouterServer) SendRelay(
 	protocolMessage, err := rpcss.ParseRelay(ctx, url, req, connectionType, dappID, consumerIp, metadata)
 	if err != nil {
 		tracing.RecordError(span, err)
+		// SendParsedRelay writes the event for every request that parses; this one never reaches it.
+		rpcss.writeRelayEnd(ctx, relayEndInput{err: err, cause: err, start: start, dappID: dappID})
 		return nil, err
 	}
 
@@ -1431,6 +1487,9 @@ func withUnclearWriteStatus(result *common.RelayResult) *common.RelayResult {
 	}
 	stamped := *result
 	stamped.StatusCode = http.StatusInternalServerError
+	// MAG-4218: an unclear write outcome is the one case where the router must speak instead of
+	// the node. Drop the forwarded upstream answer so the listener renders errUnknownWriteOutcome.
+	stamped.ClientFacing = nil
 	return &stamped
 }
 
@@ -1454,6 +1513,44 @@ func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad, cutO
 	return cutOffMidDelivery
 }
 
+// wakeWaitCap bounds how long a client relay that ends an idle period (or arrives while the wake
+// burst it triggered is still in flight) waits for the first endpoint poll to land before it is
+// routed. One upstream round trip is the intent; the cap keeps a slow upstream from turning idle
+// mode into a latency cliff — past it the request routes as on cold start: no fresh chain tip, so
+// consistency pre-validation is skipped, and the burst keeps polling in the background.
+const wakeWaitCap = time.Second
+
+// awaitWakeIfIdle is idle mode's hook on the client relay path (endpointstate/idle.go). It stamps
+// this relay as activity on the chain and, when the relay ends an idle period — or joins a wake
+// burst already running — holds it until the first endpoint poll of that burst has recorded a
+// fresh tip, capped at wakeWaitCap. With idle mode off, or on an active chain, it is one atomic
+// swap and returns at once.
+//
+// It sits on SendParsedRelay, which every client transport reaches (HTTP via SendRelay, websocket
+// unary messages directly) and the crafted health relay does not (sendRelayWithRetries), so the
+// router's own five-minute health probe cannot keep a chain awake or count as the relay that
+// woke it.
+func (rpcss *RPCSmartRouterServer) awaitWakeIfIdle(ctx context.Context, now time.Time) {
+	if rpcss.endpointChainTrackerManager == nil {
+		return
+	}
+	wait := rpcss.endpointChainTrackerManager.NoteClientRelay(now)
+	if wait == nil {
+		return
+	}
+	timer := time.NewTimer(wakeWaitCap)
+	defer timer.Stop()
+	select {
+	case <-wait:
+	case <-timer.C:
+		utils.LavaFormatDebug("idle wake: routing before the first poll landed (wait cap reached)",
+			utils.LogAttr("GUID", ctx),
+			utils.LogAttr("waitCap", wakeWaitCap),
+		)
+	case <-ctx.Done():
+	}
+}
+
 func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	ctx context.Context,
 	analytics *metrics.RelayMetrics,
@@ -1464,8 +1561,36 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	ctx, span := tracing.StartInternalSpan(ctx, tracing.SpanParsedRelay)
 	defer span.End()
 
+	// The method is known once the request is parsed, so it is set before relaying: a failed
+	// request is counted under its method too (SetRelayMetrics, MAG-4081).
+	if analytics != nil {
+		analytics.ApiMethod = protocolMessage.GetApi().GetName()
+	}
+
 	relaySentTime := time.Now()
-	relayProcessor, err := rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
+
+	// Every return below ends the relay, so the event is written once, here, from what it returned.
+	// cause is the error the relay's processing ended with, before the unclear-write substitution.
+	var relayProcessor *relaycore.RelayProcessor
+	var cause error
+	defer func() {
+		rpcss.noteRelayHealth(ctx, relayProcessor, relayResult, errRet)
+		rpcss.writeRelayEnd(ctx, relayEndInput{
+			protocolMessage: protocolMessage,
+			processor:       relayProcessor,
+			result:          relayResult,
+			err:             errRet,
+			cause:           cause,
+			start:           relaySentTime,
+		})
+	}()
+
+	// Idle mode: this is a client relay. Stamp it, and if it ends an idle period hold it (capped)
+	// until the first endpoint poll has landed so it is routed on fresh tips. The wait counts
+	// toward the end-to-end latency below on purpose — the client experienced it.
+	rpcss.awaitWakeIfIdle(ctx, relaySentTime)
+	var err error
+	relayProcessor, err = rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
 
 	// Both failure returns below ask the same question, and the answer cannot differ between them.
 	// Memoised so the results snapshot and its two locks are taken once.
@@ -1478,9 +1603,8 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		return unknownWriteAnswer
 	}
 	if err != nil && (relayProcessor == nil || !relayProcessor.HasResults()) {
-		userData := protocolMessage.GetUserData()
 		// we can't send anymore, and we don't have any responses
-		utils.LavaFormatError("failed getting responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()), utils.LogAttr("userIp", userData.ConsumerIp), utils.LogAttr("relayProcessor", relayProcessor))
+		cause = err
 
 		// A request-time cross-validation fail-fast (capacity/diversity check that aborts before any relay
 		// completes) produces no RelayResult, so the structured failure-reason header would otherwise be
@@ -1493,11 +1617,6 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		}
 
 		if unknownWrite() {
-			utils.LavaFormatWarning("write outcome unknown", err,
-				utils.LogAttr("write_outcome", "unknown"),
-				utils.LogAttr("api", protocolMessage.GetApi().Name),
-				utils.LogAttr("GUID", ctx),
-			)
 			return nil, errUnknownWriteOutcome
 		}
 
@@ -1515,6 +1634,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		}
 		return r, e
 	}()
+	cause = err
 
 	// A request-time cross-validation fail-fast (a capacity/diversity guard that aborted a LATER batch)
 	// may have set a structural reason on the shared processor even though an EARLIER batch produced a
@@ -1528,38 +1648,6 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		preferStructuralFailureReason(returnedResult, relayProcessor.GetCrossValidationFailFastReason())
 	}
 
-	// The one line describing what the caller got. It fires once per request that produced any
-	// result, and is the only place at INFO that names the provider behind a failed-over response.
-	//
-	// served_by is filled only when bytes were served. GetProvider() also returns a provider on a
-	// failed result, and reporting that would make the field lie on exactly the requests an
-	// operator reads most carefully; the per-endpoint line and `error` attribute those.
-	//
-	// stop_reason says why there was no further attempt — a stateful relay is not retried after a
-	// timeout, since a possibly-executed write must not run twice.
-	servedBy := ""
-	statusCode := 0
-	if returnedResult != nil {
-		statusCode = returnedResult.StatusCode
-		if returnedResult.Reply != nil {
-			servedBy = returnedResult.GetProvider()
-		}
-	}
-	utils.LavaFormatInfo("relay finished",
-		utils.LogAttr("served_by", servedBy),
-		utils.LogAttr("stop_reason", relayProcessor.GetStopReason()),
-		utils.LogAttr("status", statusCode),
-		utils.LogAttr("has_reply", returnedResult != nil && returnedResult.Reply != nil),
-		utils.LogAttr("reply_size", func() int {
-			if returnedResult != nil && returnedResult.Reply != nil {
-				return len(returnedResult.Reply.Data)
-			}
-			return 0
-		}()),
-		utils.LogAttr("error", err),
-		utils.LogAttr("GUID", ctx),
-	)
-
 	// smartrouter_backup_tier_served_total (MAG-3536): a request a backup answered. Counted here, once,
 	// from the provider whose bytes the caller got, rather than at session acquisition: at acquisition
 	// the router cannot tell a hedge off a healthy primary that is merely slow from one off a primary
@@ -1567,10 +1655,13 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// the backup wins counts, because the backup did serve. A stateful relay counts the same way: it
 	// reaches a backup only through the fall-over unless --stateful-to-backup is on, and with it on a
 	// broadcast the backup answered first was still served by the backup. Cross-validation is left
-	// out, because its answer is a quorum of providers rather than one provider's bytes.
-	if err == nil && servedBy != "" && relayProcessor != nil && relayProcessor.GetSelection() != relaycore.CrossValidation &&
-		rpcss.sessionManager.IsBackupProvider(servedBy) {
-		rpcss.smartRouterEndpointMetrics.RecordBackupTierServed(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface)
+	// out, because its answer is a quorum of providers rather than one provider's bytes. A failed
+	// result also carries a provider, so only a reply with bytes counts.
+	if err == nil && returnedResult != nil && returnedResult.Reply != nil && relayProcessor != nil &&
+		relayProcessor.GetSelection() != relaycore.CrossValidation {
+		if servedBy := returnedResult.GetProvider(); servedBy != "" && rpcss.sessionManager.IsBackupProvider(servedBy) {
+			rpcss.smartRouterEndpointMetrics.RecordBackupTierServed(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface)
+		}
 	}
 
 	// Set the request-level Success once, on the request goroutine (both the success and failure
@@ -1610,20 +1701,15 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		if analytics != nil {
 			analytics.Success = false
 		}
-		utils.LavaFormatWarning("write outcome unknown", err,
-			utils.LogAttr("write_outcome", "unknown"),
-			utils.LogAttr("api", protocolMessage.GetApi().Name),
-			utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()),
-			utils.LogAttr("GUID", ctx),
-		)
 		// The reply keeps this request's headers; only the status and the message the client reads
-		// are replaced. The underlying error stays in the log line above rather than being
+		// are replaced. The underlying error goes to relay_end's attempts rather than being
 		// concatenated into the reply — "failed relay, insufficient results" in front of "status
 		// unclear" would tell the customer both things at once.
 		return withUnclearWriteStatus(returnedResult), errUnknownWriteOutcome
 	}
 	if err != nil {
-		return returnedResult, utils.LavaFormatError("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
+		// relay_end records this failure; a line beside it would make a reader count it twice.
+		return returnedResult, utils.LavaFormatErrorSilent("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
 	}
 
 	// MAG-4032: pin what a served write names to the upstream that holds it, before the caller can
@@ -1635,7 +1721,6 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		analytics.Latency = currentLatency.Milliseconds()
 		api := protocolMessage.GetApi()
 		analytics.ComputeUnits = api.ComputeUnits
-		analytics.ApiMethod = api.Name
 		if rpcss.smartRouterEndpointMetrics != nil {
 			rpcss.smartRouterEndpointMetrics.RecordRouterEndToEndLatency(
 				rpcss.listenEndpoint.ChainID,
@@ -1645,8 +1730,111 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			)
 		}
 	}
-	rpcss.relaysMonitor.LogRelay()
 	return returnedResult, nil
+}
+
+// upstreamAnswer is what a relay's attempts show about its upstreams: whether any answered, and how.
+type upstreamAnswer int
+
+const (
+	upstreamAnswerNone   upstreamAnswer = iota // no upstream answered: timeouts, transport errors, or nothing sent
+	upstreamAnswerError                        // an upstream answered, but not with a result
+	upstreamAnswerResult                       // an upstream answered with a result
+)
+
+// upstreamAnswerOf reads a relay processor's recorded attempts. A nil processor sent nothing.
+func upstreamAnswerOf(processor *relaycore.RelayProcessor) upstreamAnswer {
+	if processor == nil {
+		return upstreamAnswerNone
+	}
+	successes, nodeErrors, protocolErrors := processor.GetResultsDetail()
+	return upstreamAnswerFrom(successes, nodeErrors, protocolErrors)
+}
+
+// upstreamAnswerFrom is the readiness rule for one relay's attempts (MAG-4641). Readiness asks
+// whether this replica reaches its upstreams: a replica that does not differs from its siblings,
+// while an upstream's own failure reaches every replica alike. So an answer of any kind counts,
+// and it needs positive evidence: a result, a node error, an upstream's HTTP error status, or a
+// rate limit. Anything else is no answer, an uncatalogued failure included, which keeps the rule
+// failing closed: a timeout, a refused or reset connection, a DNS or TLS failure, an attempt the
+// router stopped, or nothing sent at all.
+func upstreamAnswerFrom(successes []common.RelayResult, nodeErrors, protocolErrors []relaycore.RelayError) upstreamAnswer {
+	for i := range successes {
+		if relayProvesEndpointHealthy(&successes[i]) {
+			return upstreamAnswerResult
+		}
+	}
+	if len(successes) > 0 || len(nodeErrors) > 0 {
+		return upstreamAnswerError
+	}
+	for i := range protocolErrors {
+		if protocolErrorIsAnAnswer(protocolErrors[i]) {
+			return upstreamAnswerError
+		}
+	}
+	return upstreamAnswerNone
+}
+
+// protocolErrorIsAnAnswer reports whether a failed attempt ended on something its upstream sent. A
+// rate limit and the JSON-RPC sender's HTTPStatusError are typed. REST fails an attempt on an error
+// status with a plain error, after copying the reply's node-error and rate-limit flags onto the
+// attempt's result, so those flags are the evidence there.
+func protocolErrorIsAnAnswer(protocolError relaycore.RelayError) bool {
+	err := protocolError.GetError()
+	if protocolError.LavaError.IsRateLimited() || errors.Is(err, common.StatusCodeError429) {
+		return true
+	}
+	var status *lavasession.HTTPStatusError
+	if errors.As(err, &status) {
+		return true
+	}
+	if protocolError.Response == nil {
+		return false
+	}
+	result := &protocolError.Response.RelayResult
+	return result.IsNodeError || result.IsRateLimited
+}
+
+// relayHealthSignal is what one client relay tells the chain's readiness monitor.
+type relayHealthSignal int
+
+const (
+	relayHealthNone       relayHealthSignal = iota // nothing about reach: a cache hit, a client that hung up, an upstream's error answer
+	relayHealthServed                              // an upstream answered it with a result
+	relayHealthUnanswered                          // no upstream answered it
+)
+
+// relayHealthSignalOf classifies a finished client relay by the rule the health probe uses. A
+// result proves the chain healthy. No answer at all is reason to probe now. An upstream's error
+// answer says the replica reaches it, which is nothing to act on: it is the caller's mistake (a
+// revert, a bad parameter) as often as the upstream's.
+func relayHealthSignalOf(ctx context.Context, processor *relaycore.RelayProcessor, result *common.RelayResult, err error) relayHealthSignal {
+	if common.IsClientCancellation(err, ctx) {
+		return relayHealthNone
+	}
+	if result != nil && servedFromCache(result) {
+		return relayHealthNone
+	}
+	switch upstreamAnswerOf(processor) {
+	case upstreamAnswerResult:
+		return relayHealthServed
+	case upstreamAnswerError:
+		return relayHealthNone
+	default:
+		return relayHealthUnanswered
+	}
+}
+
+// noteRelayHealth feeds a finished client relay to the readiness monitor: a served relay proves the
+// chain healthy and defers the probe, and one no upstream answered brings the probe forward to
+// decide.
+func (rpcss *RPCSmartRouterServer) noteRelayHealth(ctx context.Context, processor *relaycore.RelayProcessor, result *common.RelayResult, err error) {
+	switch relayHealthSignalOf(ctx, processor, result, err) {
+	case relayHealthServed:
+		rpcss.relaysMonitor.LogRelay()
+	case relayHealthUnanswered:
+		rpcss.relaysMonitor.ProbeSoon()
+	}
 }
 
 func (rpcss *RPCSmartRouterServer) GetChainIdAndApiInterface() (string, string) {
@@ -1662,7 +1850,6 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	defer cancel()
 	usedProviders := lavasession.NewUsedProviders(protocolMessage)
 	usedProviders.SetChainID(rpcss.listenEndpoint.ChainID)
-	usedProviders.SetEligibilityFunc(relaypolicy.DecideEligibility)
 
 	// Record retry count when this span ends. BatchNumber is incremented once per
 	// GetSessions success (one batch may contain N parallel sessions for cross-validation,
@@ -1731,11 +1918,11 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 	if err != nil {
 		tracing.RecordError(span, err)
-		return relayProcessor, err
+		return relayProcessor, routerFault{err}
 	}
 
 	// The loop's per-task scaffolding is DEBUG: it fires once per batch and reports nothing the
-	// terminal "relay finished" line does not already carry once per request.
+	// relay_end event does not already carry once per request.
 	utils.LavaFormatDebug("[RPCSmartRouterServer] task channel loop started",
 		utils.LogAttr("GUID", ctx),
 	)
@@ -1763,7 +1950,7 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 			consistencyFallback,
 			relayProcessor.GetUsedProviders(),
 			func() error {
-				return rpcss.sendRelayToEndpoint(ctx, task.NumOfProviders, task.RelayState, relayProcessor, consistencyFallback, task.Analytics, task.BackupReserve)
+				return rpcss.sendRelayToEndpoint(ctx, task.NumOfProviders, task.RelayState, relayProcessor, consistencyFallback, task.Analytics)
 			},
 		)
 
@@ -1779,11 +1966,7 @@ func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protoco
 	utils.LavaFormatError("CHANNEL CLOSED UNEXPECTEDLY", nil,
 		utils.LogAttr("GUID", ctx),
 	)
-	return relayProcessor, utils.LavaFormatError("ProcessRelaySend channel closed unexpectedly", nil)
-}
-
-func (rpcss *RPCSmartRouterServer) CancelSubscriptionContext(subscriptionKey string) {
-	// Direct RPC subscription managers handle their own lifecycle.
+	return relayProcessor, routerFault{utils.LavaFormatError("ProcessRelaySend channel closed unexpectedly", nil)}
 }
 
 // getEarliestBlockHashRequestedFromCacheReply folds the reply's BlocksHashesToHeights into
@@ -1913,7 +2096,7 @@ func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlo
 // MAG-3807), so the engine finds no h2h: key for any hash. Kept so MAG-3892 has the question in
 // place once a writer exists.
 func (rpcss *RPCSmartRouterServer) newBlocksHashesToHeightsSliceFromRequestedBlockHashes(requestedBlockHashes []string) []*pairingtypes.BlockHashToHeight {
-	var blocksHashesToHeights []*pairingtypes.BlockHashToHeight
+	blocksHashesToHeights := make([]*pairingtypes.BlockHashToHeight, 0, len(requestedBlockHashes))
 	for _, blockHash := range requestedBlockHashes {
 		blocksHashesToHeights = append(blocksHashesToHeights, &pairingtypes.BlockHashToHeight{Hash: blockHash, Height: spectypes.NOT_APPLICABLE})
 	}
@@ -2057,6 +2240,22 @@ func sendRelayTaskWithConsistencyFallback(
 	}
 }
 
+// recordConsistencyOutcome puts what the consistency check did to a batch on the request's record:
+// each provider it still passes over is a skip, with its lag, and each provider the stale fallback
+// sent although it failed the check is flagged on its dispatch.
+func recordConsistencyOutcome(usedProviders *lavasession.UsedProviders, consistent map[string]struct{}, sent, passedOver lavasession.ConsumerSessionsMap, lags map[string]consistencyLag) {
+	for provider := range passedOver {
+		if lag, measured := lags[provider]; measured {
+			usedProviders.RecordConsistencySkip(provider, lag.lag, lag.threshold)
+		}
+	}
+	for provider := range sent {
+		if _, passed := consistent[provider]; !passed {
+			usedProviders.MarkStaleFallback(provider)
+		}
+	}
+}
+
 // promoteConsistencyFallback moves previously consistency-rejected sessions
 // back into the valid set only while the one-shot fallback is active. Unknown
 // stale providers remain failed, so activation cannot broaden eligibility past
@@ -2104,12 +2303,14 @@ func promoteConsistencyFallback(
 // The three carve-outs are load-bearing, not defensive, and they exclude on DIFFERENT axes:
 //
 //   - IsNonRetryable — "retrying elsewhere would not help". Deterministic caller-fault errors
-//     (unsupported method, invalid params, execution reverted) come back from EVERY endpoint for
-//     the same request, so scoring them would drive the whole pairing below
-//     score.MinAcceptableAvailability on a burst of malformed client requests and collapse every
-//     endpoint to the selection floor — punishing healthy nodes for a bad request instead of
-//     identifying a bad node. All four SubCategoryUnsupportedMethod codes are Retryable=false, so
-//     this also preserves that subcategory's "no provider scoring" contract.
+//     (invalid params, execution reverted) come back from EVERY endpoint for the same request,
+//     so scoring them would drive the whole pairing below score.MinAcceptableAvailability on a
+//     burst of malformed client requests and collapse every endpoint to the selection floor —
+//     punishing healthy nodes for a bad request instead of identifying a bad node. Every
+//     SubCategoryUnsupportedMethod code is Retryable=false, so this also preserves that
+//     subcategory's "no provider scoring" contract. Since MAG-2771 no code carries it: a node's
+//     own refusal (method not found, unimplemented, route, verb, credentials) is retryable and
+//     reaches the IsNodeCapability carve-out below instead.
 //   - IsRateLimited — "the endpoint is healthy but busy". SubCategoryRateLimit is contractually
 //     backoff-without-marking-unhealthy (common/error_registry.go), and it does NOT follow from
 //     retryability: NODE_RATE_LIMITED (2005) is Retryable=true, NODE_LIMIT_EXCEEDED (2011) is
@@ -2327,13 +2528,18 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	)
 
 	// Pre-request consistency validation: filter out endpoints that are too far behind
-	validSessions, failedSessions, filterErr := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMessage)
+	validSessions, failedSessions, lags, filterErr := rpcss.filterEndpointsByConsistencyWithLag(ctx, sessions, protocolMessage)
+	consistent := make(map[string]struct{}, len(validSessions))
+	for provider := range validSessions {
+		consistent[provider] = struct{}{}
+	}
 	validSessions, failedSessions, promotedFallbacks, filterErr := promoteConsistencyFallback(
 		validSessions,
 		failedSessions,
 		filterErr,
 		consistencyFallback,
 	)
+	recordConsistencyOutcome(relayProcessor.GetUsedProviders(), consistent, validSessions, failedSessions, lags)
 	if promotedFallbacks > 0 {
 		utils.LavaFormatWarning("consistency fallback accepted stale endpoint batch",
 			nil,
@@ -2622,7 +2828,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 			}
 			var harvestGen uint64
 			if targetEndpoint != nil && directConn != nil {
-				rpcss.ensureEndpointChainTracker(goroutineCtx, targetEndpoint, directConn)
+				rpcss.ensureEndpointChainTracker(singleConsumerSession.Parent.PublicLavaAddress, targetEndpoint, directConn)
 				harvestGen = rpcss.endpointObservationGeneration(targetEndpoint.NetworkAddress)
 			}
 
@@ -2636,7 +2842,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				return lostBroadcastRejection(selection, answeredWithNodeError, accepted)
 			}
 
-			relayLatency, err, _ := rpcss.relayInnerDirect(
+			relayLatency, err := rpcss.relayInnerDirect(
 				spanCtx,
 				singleConsumerSession,
 				localRelayResult,
@@ -2644,10 +2850,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				attemptBudget,
 				chainMessage,
 				originalRequestData,
-				analytics,
 				func() bool { return requestRanOutOfRoad(relayProcessor.GetStopReason()) },
 				lostBroadcast,
 			)
+			localRelayResult.AttemptLatency = relayLatency
 
 			// Did the request run out of road, or did we cut this attempt short? Decides below
 			// whether a relay that produced nothing is a hang or a race loser.
@@ -2688,6 +2894,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 					outcome,
 					analytics,
 				)
+				// Per url too: a provider can have several urls, and the stuck-and-serving page
+				// asks whether customers' requests reach the stuck one (MAG-4204).
+				if outcome == metrics.RelayOutcomeSuccess && targetEndpoint != nil {
+					rpcss.countURLRelayServiced(endpointAddress, targetEndpoint.NetworkAddress)
+				}
 			}
 
 			// Handle response
@@ -2912,7 +3123,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// The state machine already calls it via readResultsFromProcessor
 	// Calling it twice causes a deadlock
 
-	utils.LavaFormatInfo("GOROUTINES LAUNCHED - RETURNING TO LET STATE MACHINE WAIT",
+	utils.LavaFormatDebug("GOROUTINES LAUNCHED - RETURNING TO LET STATE MACHINE WAIT",
 		utils.LogAttr("num_endpoints", len(sessions)),
 		utils.LogAttr("GUID", ctx),
 	)
@@ -2920,15 +3131,29 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	return nil
 }
 
-// filterEndpointsByConsistency filters out endpoints that are too far behind the user's seen block.
-// This is pre-request validation to avoid wasting requests on endpoints that are likely stale.
-// Returns: validSessions (pass validation), failedSessions (too far behind), and error (if ALL failed).
-// Uses per-endpoint ChainTracker for accurate, continuously-polled block data.
+// filterEndpointsByConsistency is filterEndpointsByConsistencyWithLag without each failed endpoint's lag.
 func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 	ctx context.Context,
 	sessions lavasession.ConsumerSessionsMap,
 	protocolMessage chainlib.ProtocolMessage,
 ) (validSessions lavasession.ConsumerSessionsMap, failedSessions lavasession.ConsumerSessionsMap, filterErr error) {
+	validSessions, failedSessions, _, filterErr = rpcss.filterEndpointsByConsistencyWithLag(ctx, sessions, protocolMessage)
+	return validSessions, failedSessions, filterErr
+}
+
+// consistencyLag is how far behind the chain tip an endpoint that failed the consistency check was,
+// and the lag it was allowed.
+type consistencyLag struct{ lag, threshold int64 }
+
+// filterEndpointsByConsistencyWithLag filters out endpoints that are too far behind the chain tip.
+// This is pre-request validation to avoid wasting requests on endpoints that are likely stale.
+// Returns: validSessions (pass validation), failedSessions (too far behind) with each one's lag, and
+// error (if ALL failed). Uses per-endpoint ChainTracker for accurate, continuously-polled block data.
+func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistencyWithLag(
+	ctx context.Context,
+	sessions lavasession.ConsumerSessionsMap,
+	protocolMessage chainlib.ProtocolMessage,
+) (validSessions lavasession.ConsumerSessionsMap, failedSessions lavasession.ConsumerSessionsMap, lags map[string]consistencyLag, filterErr error) {
 	_, span := tracing.StartInternalSpan(ctx, tracing.SpanFilterEndpointsByConsistency)
 	defer func() {
 		tracing.RecordConsistencyStats(span, len(sessions), len(validSessions), len(failedSessions))
@@ -2940,13 +3165,13 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 
 	// Skip if consistency config is not set
 	if rpcss.consistencyConfig == nil {
-		return sessions, nil, nil
+		return sessions, nil, nil, nil
 	}
 
 	// Get requested block and check if we should validate
 	reqBlock, _ := protocolMessage.RequestedBlock()
 	if relaycore.ShouldSkipConsistencyValidation(reqBlock) {
-		return sessions, nil, nil
+		return sessions, nil, nil, nil
 	}
 
 	// The consistency reference is the global chain tip (Topic C C-G), NOT a per-user seen block.
@@ -2961,12 +3186,13 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 	}
 	if chainTip <= 0 {
 		// No fresh tip to measure against - skip validation rather than guess.
-		return sessions, nil, nil
+		return sessions, nil, nil, nil
 	}
 
 	// Validate each endpoint
 	validSessions = make(lavasession.ConsumerSessionsMap, len(sessions))
 	failedSessions = make(lavasession.ConsumerSessionsMap)
+	lags = make(map[string]consistencyLag)
 
 	for endpointAddress, sessionInfo := range sessions {
 		if sessionInfo == nil || sessionInfo.Session == nil {
@@ -2974,7 +3200,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		}
 
 		// Get endpoint's latest block from ChainTracker (if available), fallback to reactive value
-		endpointLatest := int64(0)
+		var endpointLatest int64
 		endpointURL := ""
 
 		// Extract the actual endpoint URL (ChainTrackers are stored by URL, not provider name)
@@ -3049,6 +3275,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 				utils.LogAttr("GUID", ctx),
 			)
 			failedSessions[endpointAddress] = sessionInfo
+			lags[endpointAddress] = consistencyLag{lag: lag, threshold: threshold}
 			continue
 		}
 
@@ -3069,7 +3296,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		// stays at DEBUG rather than WARN — two records of one event made anything counting
 		// the sentinel double-count it. skippedCount and GUID moved onto the error so the
 		// single surviving line still carries them.
-		return nil, failedSessions, utils.LavaFormatError("all endpoints failed consistency pre-validation",
+		return nil, failedSessions, lags, utils.LavaFormatError("all endpoints failed consistency pre-validation",
 			lavasession.ConsistencyPreValidationError,
 			utils.LogAttr("totalEndpoints", len(sessions)),
 			utils.LogAttr("skippedCount", skippedCount),
@@ -3088,7 +3315,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistency(
 		)
 	}
 
-	return validSessions, failedSessions, nil
+	return validSessions, failedSessions, lags, nil
 }
 
 // ensureEndpointChainTracker ensures that a ChainTracker exists for the given endpoint.
@@ -3144,6 +3371,33 @@ func endpointTipPreferStore(pollAtomic, storeTip int64) int64 {
 		return storeTip
 	}
 	return pollAtomic
+}
+
+// newChainState builds this server's per-chain tip with production config and the MAG-4153
+// regression hook wired. One constructor so the tests exercise the exact wiring ServeRPCRequests uses.
+func (rpcss *RPCSmartRouterServer) newChainState(effectiveBlockTime time.Duration) *chainstate.ChainState {
+	cfg := chainstate.DefaultConfig(effectiveBlockTime)
+	cfg.OnRegression = rpcss.onChainBlockRegression
+	return chainstate.New(rpcss.listenEndpoint.ChainID, cfg)
+}
+
+// onChainBlockRegression is ChainState's OnRegression hook: this chain's latest block moved
+// backwards (MAG-4153). Logged at ERROR and counted on smartrouter_latest_block_regressions_total,
+// which is what the fleet alert reads. The gauge is refreshed here too: after a consensus snap-down
+// nothing else rewrites it until the next accepted observation, so it would keep showing the
+// higher block that was just rejected.
+func (rpcss *RPCSmartRouterServer) onChainBlockRegression(from, to int64, reason string) {
+	chainID, apiInterface := rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
+	utils.LavaFormatError("chain latest block went backwards", nil,
+		utils.LogAttr("chainID", chainID),
+		utils.LogAttr("apiInterface", apiInterface),
+		utils.LogAttr("fromBlock", from),
+		utils.LogAttr("toBlock", to),
+		utils.LogAttr("blocksBack", from-to),
+		utils.LogAttr("reason", reason),
+	)
+	rpcss.smartRouterEndpointMetrics.RecordRouterLatestBlockRegression(chainID, apiInterface, reason)
+	rpcss.smartRouterEndpointMetrics.SetRouterLatestBlock(chainID, apiInterface, to)
 }
 
 // endpointTipBlock reads an endpoint's observed tip from the shared single-source-of-truth
@@ -3251,14 +3505,23 @@ func (rpcss *RPCSmartRouterServer) recomputeChainStateConsensus() {
 	// otherwise a pod that has lost all its endpoints keeps anti-lie-guarding against a baseline
 	// no live endpoint still supports. Recompute(empty) is the explicit "no consensus" signal.
 	snap := rpcss.endpointChainTrackerManager.SnapshotObservations()
+	rpcss.chainState.Recompute(consensusObservations(snap, rpcss.headStall.isStalled))
+}
+
+// consensusObservations turns the monitor's snapshot into consensus votes. A url held as
+// head-stalled does not vote (MAG-3986): its repeated block keeps its own tip fresh, so with two
+// frozen urls out of three the frozen pair would form the majority baseline and the healthy url's
+// real head would be rejected as an outlier — the tip lock the onTipObservation filter alone only
+// prevents when there is no majority.
+func consensusObservations(snap map[string]endpointstate.EndpointObservation, isStalled func(url string) bool) []chainstate.BlockObservation {
 	obs := make([]chainstate.BlockObservation, 0, len(snap))
 	for url, o := range snap {
-		if o.LatestBlock <= 0 {
+		if o.LatestBlock <= 0 || (isStalled != nil && isStalled(url)) {
 			continue
 		}
 		obs = append(obs, chainstate.BlockObservation{URL: url, Block: o.LatestBlock, ObservedAt: o.ObservedAt})
 	}
-	rpcss.chainState.Recompute(obs)
+	return obs
 }
 
 // probeQoSAppender is the narrow optimizer capability the prober uses to feed QoS (Topic E's
@@ -3305,6 +3568,12 @@ type probeLoopStats struct {
 	endpointsScored  int       // endpoints scored in the last cycle
 	reEnabledCount   int       // endpoints the probe re-enabled in the last cycle (F1)
 	syncOmittedCount int       // providers whose last-cycle QoS sample fed no sync evidence (F5)
+	// qosFeedPausedIdle is whether the last cycle withheld its QoS feed (qosFeedPaused), and
+	// headStallPausedIdle whether it skipped the head-stall step (headStallPaused). Two fields
+	// because they are two decisions: today both follow idle mode, but either may gain a reason
+	// of its own.
+	qosFeedPausedIdle   bool
+	headStallPausedIdle bool
 	// evidenceGatedCount is how many disabled endpoints held recorded relay evidence in the last
 	// cycle (MAG-2550) — endpoints that will need a successful replay (or the attempt-budget
 	// fallback) before re-enabling. Without this a replay-held endpoint is indistinguishable from
@@ -3317,6 +3586,21 @@ type probeLoopStats struct {
 	replaysRecovered    uint64
 	replaysStillFailing uint64
 	replaysInconclusive uint64
+	// Cumulative MAG-3986 head-stall transitions.
+	stalledAdded    uint64
+	stalledRemoved  uint64
+	stalledKept     uint64
+	stalledReleased uint64
+}
+
+// recordHeadStall adds one cycle's head-stall transitions to the cumulative counters.
+func (s *probeLoopStats) recordHeadStall(r headStallResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stalledAdded += uint64(r.added)
+	s.stalledRemoved += uint64(r.removed)
+	s.stalledKept += uint64(r.kept)
+	s.stalledReleased += uint64(r.released)
 }
 
 // setInterval publishes the effective probe cadence. Called once at loop start.
@@ -3327,7 +3611,7 @@ func (s *probeLoopStats) setInterval(d time.Duration) {
 }
 
 // recordCycle overwrites the last-cycle snapshot and bumps the completed-cycle counter.
-func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, scored, reEnabled, syncOmitted, evidenceGated int) {
+func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, scored, reEnabled, syncOmitted, evidenceGated int, qosFeedPausedIdle, headStallPausedIdle bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cyclesCompleted++
@@ -3337,6 +3621,8 @@ func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, sco
 	s.reEnabledCount = reEnabled
 	s.syncOmittedCount = syncOmitted
 	s.evidenceGatedCount = evidenceGated
+	s.qosFeedPausedIdle = qosFeedPausedIdle
+	s.headStallPausedIdle = headStallPausedIdle
 }
 
 // countReplay records one completed MAG-2550 recovery replay. Called from the replayer's
@@ -3365,10 +3651,16 @@ type probeLoopSnapshot struct {
 	ReEnabledCount      int
 	SyncOmittedCount    int
 	EvidenceGatedCount  int
+	QoSFeedPausedIdle   bool
+	HeadStallPausedIdle bool
 	ReplaysAttempted    uint64
 	ReplaysRecovered    uint64
 	ReplaysStillFailing uint64
 	ReplaysInconclusive uint64
+	StalledAdded        uint64
+	StalledRemoved      uint64
+	StalledKept         uint64
+	StalledReleased     uint64
 }
 
 // snapshot returns a consistent copy of the stats under the lock (no mutex in the returned value).
@@ -3384,10 +3676,16 @@ func (s *probeLoopStats) snapshot() probeLoopSnapshot {
 		ReEnabledCount:      s.reEnabledCount,
 		SyncOmittedCount:    s.syncOmittedCount,
 		EvidenceGatedCount:  s.evidenceGatedCount,
+		QoSFeedPausedIdle:   s.qosFeedPausedIdle,
+		HeadStallPausedIdle: s.headStallPausedIdle,
 		ReplaysAttempted:    s.replaysAttempted,
 		ReplaysRecovered:    s.replaysRecovered,
 		ReplaysStillFailing: s.replaysStillFailing,
 		ReplaysInconclusive: s.replaysInconclusive,
+		StalledAdded:        s.stalledAdded,
+		StalledRemoved:      s.stalledRemoved,
+		StalledKept:         s.stalledKept,
+		StalledReleased:     s.stalledReleased,
 	}
 }
 
@@ -3437,7 +3735,7 @@ func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence tim
 	rpcss.probeReplayer = &relayProbeRunner{
 		async: true,
 		probe: func(ep *lavasession.EndpointWithDirectConnection, method string, payload []byte, relayTimeout time.Duration) relayProbeVerdict {
-			verdict := rpcss.replayFailingRelay(ep, method, payload, relayTimeout)
+			verdict := rpcss.replayFailingRelay(ep, payload, relayTimeout)
 			rpcss.probeStats.countReplay(verdict)
 			return verdict
 		},
@@ -3446,6 +3744,7 @@ func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence tim
 	// re-enable-only if a future optimizer lacks it, rather than failing to start.
 	appender, _ := rpcss.sessionManager.GetProviderOptimizer().(probeQoSAppender)
 
+	rpcss.publishChainIdle(time.Now()) // the series exists from boot whenever idle mode is on
 	ticker := time.NewTicker(cadence)
 	defer ticker.Stop()
 	for {
@@ -3476,14 +3775,74 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 		}
 	}
 	startedAt := time.Now()
+	endpoints := rpcss.sessionManager.GetAllDirectRPCEndpoints()
+	feedPaused := rpcss.qosFeedPaused(startedAt)
+	stallPaused := rpcss.headStallPaused(startedAt)
+	rpcss.publishChainIdle(startedAt)
 	scored, reEnabled, syncOmitted, evidenceGated := runProbeCycleCore(
-		rpcss.sessionManager.GetAllDirectRPCEndpoints(),
+		endpoints,
 		rpcss.endpointChainTrackerManager.GetObservation,
-		baseline, hasBaseline, syncRef, startedAt, cfg, appender,
+		baseline, hasBaseline, syncRef, startedAt, cfg, probeAppenderUnlessIdle(appender, feedPaused),
 		rpcss.sessionManager.RestoreRecoveredProvider,
 		rpcss.probeReplayer,
 	)
-	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, evidenceGated)
+	// MAG-3986: after the re-enable pass, so an endpoint the probe just returned to rotation is
+	// counted as usable by never-empty.
+	if !stallPaused {
+		rpcss.runHeadStall(endpoints, startedAt)
+	}
+	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, evidenceGated, feedPaused, stallPaused)
+}
+
+// qosFeedPaused is the probe loop's decision to withhold its QoS feed this cycle. Idle mode
+// (endpointstate/idle.go): with the trackers paused and no relays, every observation ages past the
+// staleness window and each verdict reads "not alive" — the feed would hand the optimizer
+// Availability=0 for EVERY provider every cycle and decay the whole pod's scores over nothing but
+// silence. That holds until the wake burst has re-polled, hence IdleOrWaking. The pause ends with
+// the burst, so an endpoint whose wake poll failed is scored normally on the next cycle. Relays
+// re-score providers at 4x the probe weight the moment traffic returns.
+//
+// Its own function, not a shared flag: a future reason to pause scoring belongs here and must not
+// pause the head-stall step (headStallPaused).
+func (rpcss *RPCSmartRouterServer) qosFeedPaused(now time.Time) bool {
+	return rpcss.endpointChainTrackerManager.IdleOrWaking(now)
+}
+
+// headStallPaused is the probe loop's decision to skip the head-stall step (MAG-3986) this cycle.
+// Idle mode: while idle and until the wake burst has re-polled, the endpoints' blocks show when
+// each was last polled, not whether it is stuck. During the burst (or idle heartbeats, which poll
+// one url at a time) the first url to answer raises the chain's highest block while the others
+// still hold their pre-idle block, and a url that carried SameBlockCycles >= N into the idle period
+// (every url of a chain that was quiet before it went idle) would be marked head-stalled for not
+// having answered yet. Head-stall resumes on the first cycle after the burst, with fresh evidence:
+// a url that is really frozen answered its wake poll with the same block and is marked then.
+//
+// Its own function, not a shared flag: it must not follow reasons that pause scoring
+// (qosFeedPaused), which have nothing to do with whether an endpoint is stuck.
+func (rpcss *RPCSmartRouterServer) headStallPaused(now time.Time) bool {
+	return rpcss.endpointChainTrackerManager.IdleOrWaking(now)
+}
+
+// publishChainIdle sets smartrouter_chain_idle to this chain+interface's idle state at now. The
+// probe loop is its only writer and publishes every cycle, so the gauge is never more than one
+// cycle behind and cannot stick at a stale value (alerts mute the frozen-tip page on it). Nothing
+// is published while idle mode is off, so the series exists only where the feature is on.
+func (rpcss *RPCSmartRouterServer) publishChainIdle(now time.Time) {
+	monitor := rpcss.endpointChainTrackerManager
+	if monitor == nil || !monitor.IdleModeEnabled() || rpcss.listenEndpoint == nil {
+		return
+	}
+	rpcss.smartRouterEndpointMetrics.SetChainIdle(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, monitor.IsIdle(now))
+}
+
+// probeAppenderUnlessIdle is the one place the idle verdict reaches the QoS feed: nil (no feed)
+// while the chain is idle, the live appender otherwise. runProbeCycleCore already treats a nil
+// appender as "re-enable only", so nothing else changes shape.
+func probeAppenderUnlessIdle(appender probeQoSAppender, idle bool) probeQoSAppender {
+	if idle {
+		return nil
+	}
+	return appender
 }
 
 // runProbeCycleCore is the pure probe-cycle body (no rpcss fields), so it is testable with
@@ -3605,8 +3964,14 @@ func runProbeCycleCore(
 // cannot inflate it through this path either.
 //
 // Nil-guards cover test fixtures that construct the server without metrics or ChainState wired.
-func (rpcss *RPCSmartRouterServer) onTipObservation(block int64) {
+func (rpcss *RPCSmartRouterServer) onTipObservation(endpointURL string, block int64, repeat bool) {
 	if rpcss.chainState == nil {
+		return
+	}
+	// A head-stalled endpoint repeating its block must not keep the tip fresh (MAG-3986): that
+	// repeat vote is what pinned the Plasma tip for 70 minutes. A HIGHER block still counts — it
+	// is real news, and the next probe cycle takes head-stalled off because of it.
+	if repeat && rpcss.headStall.isStalled(endpointURL) {
 		return
 	}
 	rpcss.chainState.SetLatestBlock(block)
@@ -3619,6 +3984,78 @@ func (rpcss *RPCSmartRouterServer) onTipObservation(block int64) {
 			rpcss.listenEndpoint.ApiInterface,
 			accepted,
 		)
+	}
+}
+
+// urlAnswerTimeout is how long a url counts as answering after its last answer (MAG-4249). A url
+// that answers every poll answers again within worstCaseGapBetweenPolls of its last answer, which
+// covers the polls the traffic gate skips, and one pollInterval more covers the round trip of the
+// poll that ends the gap. Never less than metrics.DefaultURLAnswerTimeout.
+//
+// Both come from the interval the trackers actually wait (EndpointMonitor.PollInterval), which the
+// tracker caps at one minute: BTC polls every minute and a dead BTC url reads as down 6 minutes
+// after its last answer, while ETH and TON keep the 2-minute floor.
+func urlAnswerTimeout(worstCaseGapBetweenPolls, pollInterval time.Duration) time.Duration {
+	return max(metrics.DefaultURLAnswerTimeout, worstCaseGapBetweenPolls+pollInterval)
+}
+
+// answerTimeout is urlAnswerTimeout for this server's trackers, passed with every per-url write.
+func (rpcss *RPCSmartRouterServer) answerTimeout() time.Duration {
+	m := rpcss.endpointChainTrackerManager
+	return urlAnswerTimeout(m.WorstCaseGapBetweenPolls(), m.PollInterval())
+}
+
+// onEndpointPollBlock is the EndpointMonitor's OnPollBlock hook. It records the head a url
+// answered with on rpc_endpoint_url_latest_block (MAG-4204), on every answered poll: the tracker's
+// first poll and every repeat of the same block included, which OnNewBlock never reports. So a url
+// that keeps answering with one block stands still on its own series while its answered-until time
+// keeps moving, which is what the stuck alerts look for; a url that stops answering stops both,
+// which they leave alone. rpc_endpoint_latest_block, the provider series, is still written by
+// OnNewBlock and the relay harvest, as before.
+//
+// A ws/wss url is left out. It never serves a relay (Endpoint.ServesDirectRelays), so its head
+// says nothing about the answers customers' relays get.
+//
+// Nil-guards cover test fixtures that construct the server without metrics wired.
+func (rpcss *RPCSmartRouterServer) onEndpointPollBlock(endpointURL string, block int64) {
+	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	if protocol, err := lavasession.DetectProtocol(endpointURL, rpcss.listenEndpoint.ApiInterface); err == nil &&
+		(protocol == lavasession.DirectRPCProtocolWS || protocol == lavasession.DirectRPCProtocolWSS) {
+		return
+	}
+	rpcss.smartRouterEndpointMetrics.SetEndpointURLLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL, block, rpcss.answerTimeout())
+	rpcss.forgetURLLatestBlockIfUntracked(endpointURL)
+}
+
+// countURLRelayServiced counts a successful relay on rpc_endpoint_url_relays_serviced_total for the
+// url it went to. A relay in flight when cleanupStaleTrackers removes the url's tracker completes
+// after the url's series were deleted, and its harvest is dropped by the generation gate, so nothing
+// else would undo the count: without the check after it, the counter would stay for the life of the
+// pod, though a removed url loses its series.
+func (rpcss *RPCSmartRouterServer) countURLRelayServiced(providerName, endpointURL string) {
+	if rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	rpcss.smartRouterEndpointMetrics.AddEndpointURLRelayServiced(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, providerName, endpointURL)
+	rpcss.forgetURLLatestBlockIfUntracked(endpointURL)
+}
+
+// forgetURLLatestBlockIfUntracked undoes a per-url write that raced its url's removal.
+// cleanupStaleTrackers removes the url's tracker and then deletes its per-url series. The poll,
+// harvest and relay-count writes land after that removal can happen (the poll and harvest writes
+// are generation-gated, but run after the gate's lock is released), so one can arrive just after
+// that delete and leave a series behind for the life of the pod. The stuck alerts read such a
+// series as down once its answered-until time passes, so this prevents a leaked series, not a
+// false alert. Checking for the tracker after the write closes every interleaving, because
+// the removal always comes before the delete.
+func (rpcss *RPCSmartRouterServer) forgetURLLatestBlockIfUntracked(endpointURL string) {
+	if rpcss.endpointChainTrackerManager == nil || rpcss.smartRouterEndpointMetrics == nil || rpcss.listenEndpoint == nil {
+		return
+	}
+	if _, tracked := rpcss.endpointChainTrackerManager.ObservationGeneration(endpointURL); !tracked {
+		rpcss.smartRouterEndpointMetrics.ForgetEndpointURLLatestBlock(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointURL)
 	}
 }
 
@@ -3689,6 +4126,16 @@ func (rpcss *RPCSmartRouterServer) harvestAndUpdateTipFromRelay(
 			endpointAddress,
 			tip,
 		)
+		// And the url's own series, for the provider relayed to (MAG-4204).
+		rpcss.smartRouterEndpointMetrics.SetProviderURLLatestBlock(
+			rpcss.listenEndpoint.ChainID,
+			rpcss.listenEndpoint.ApiInterface,
+			endpointAddress,
+			targetEndpoint.NetworkAddress,
+			tip,
+			rpcss.answerTimeout(),
+		)
+		rpcss.forgetURLLatestBlockIfUntracked(targetEndpoint.NetworkAddress)
 	}
 }
 
@@ -3724,7 +4171,9 @@ func (rpcss *RPCSmartRouterServer) endpointObservationGeneration(endpointURL str
 //     cannot discriminate, and neither can GetUsedDefaultValue() (non-deterministic for
 //     eth_blockNumber across runs). The spec tag is the only reliable discriminator. A concrete
 //     eth_getBlockByNumber(N) requests N (not LATEST) and is historical.
-//     Reply.LatestBlock is populated for JSON-RPC and gRPC; REST harvests nothing.
+//     Reply.LatestBlock is populated for JSON-RPC and gRPC; REST and GraphQL harvest nothing (a
+//     GraphQL caller names its reply's fields, so the tip directive's path is the caller's to
+//     fill — see sendGraphQLRelay, MAG-4373).
 //
 // Note: RequestedBlock() is not concretized during the relay flow (the
 // UpdateLatestBlockInMessage call in relaycore/results_manager.go is disabled), so it still
@@ -3795,7 +4244,7 @@ func (rpcss *RPCSmartRouterServer) isGetBlockByNumMethod(chainMessage chainlib.C
 }
 
 func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
-	ctx context.Context,
+	providerName string,
 	endpoint *lavasession.Endpoint,
 	directConnection lavasession.DirectRPCConnection,
 ) {
@@ -3817,7 +4266,7 @@ func (rpcss *RPCSmartRouterServer) ensureEndpointChainTracker(
 	// 0 (no tracker yet), so its harvested tip was recorded against a generation that the real
 	// tracker would never match — silently dropping the first relay's tip. The poll loop stays
 	// async, so dispatch is not blocked on the network.
-	if _, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(endpoint, directConnection); err != nil {
+	if _, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(providerName, endpoint, directConnection); err != nil {
 		utils.LavaFormatWarning("failed to create ChainTracker for endpoint", err,
 			utils.LogAttr("endpoint", endpointURL),
 		)
@@ -3975,7 +4424,7 @@ func (rpcss *RPCSmartRouterServer) reconcileChainTrackers(ctx context.Context, f
 			}
 		}
 
-		_, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(ep.Endpoint, ep.DirectConnection)
+		_, err := rpcss.endpointChainTrackerManager.GetOrCreateTracker(ep.ProviderAddress, ep.Endpoint, ep.DirectConnection)
 		if err != nil {
 			utils.LavaFormatWarning("failed to initialize ChainTracker", err,
 				utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
@@ -4482,13 +4931,21 @@ func (rpcss *RPCSmartRouterServer) filterCachedReplyMetadata(reply *pairingtypes
 	if reply == nil || len(reply.Metadata) == 0 {
 		return
 	}
-	var collectionDirectives []*spectypes.Header
+	interfaceDirectives, collectionDirectives := rpcss.cachedReplyDirectives(protocolMessage)
+	reply.Metadata = common.FilterUpstreamReplyMetadata(reply.Metadata, interfaceDirectives, collectionDirectives)
+}
+
+// cachedReplyDirectives is the pair of directive lists a cached reply is filtered with,
+// whichever tier served it: the API interface's union and the matched collection's own,
+// the same two the live relay passes. A message with no collection (tests) runs on the
+// union alone.
+func (rpcss *RPCSmartRouterServer) cachedReplyDirectives(protocolMessage chainlib.ProtocolMessage) (interfaceDirectives, collectionDirectives []*spectypes.Header) {
 	if protocolMessage != nil {
 		if apiCollection := protocolMessage.GetApiCollection(); apiCollection != nil {
 			collectionDirectives = apiCollection.Headers
 		}
 	}
-	reply.Metadata = filterUpstreamReplyMetadata(reply.Metadata, rpcss.replyHeaderDirectives(), collectionDirectives)
+	return rpcss.replyHeaderDirectives(), collectionDirectives
 }
 
 // resolvePinDirectives returns the lava-select-provider and lava-stickiness directives,
@@ -4543,7 +5000,6 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	relayProcessor *relaycore.RelayProcessor,
 	consistencyFallback *consistencyFallbackState,
 	analytics *metrics.RelayMetrics,
-	backupReserve bool,
 ) (errRet error) {
 	// Send relay to direct RPC endpoints:
 	// - Get sessions from ConsumerSessionManager for the requested endpoints
@@ -4558,7 +5014,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// and goroutines launched in this call aren't affected by future calls.
 	localRelayData := deepCopyRelayPrivateData(protocolMessage.RelayPrivateData())
 	if localRelayData == nil {
-		return utils.LavaFormatError("RelayPrivateData is nil", nil, utils.LogAttr("GUID", ctx))
+		return routerFault{utils.LavaFormatError("RelayPrivateData is nil", nil, utils.LogAttr("GUID", ctx))}
 	}
 
 	userData := protocolMessage.GetUserData()
@@ -4647,11 +5103,15 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				if err != nil {
 					utils.LavaFormatError("sendRelayToEndpoint failed getting hash for cache request", err, utils.LogAttr("GUID", ctx))
 				} else {
-					utils.LavaFormatDebug("Cache lookup hash generated",
-						utils.LogAttr("GUID", ctx),
-						utils.LogAttr("hashKey", fmt.Sprintf("%x", hashKey)),
-						utils.LogAttr("apiUrl", localRelayData.ApiUrl),
-					)
+					// Only the log line is gated: the rest of this branch IS the cache lookup,
+					// and it must run at every log level.
+					if utils.IsDebugEnabled() {
+						utils.LavaFormatDebug("Cache lookup hash generated",
+							utils.LogAttr("GUID", ctx),
+							utils.LogAttr("hashKey", hex.EncodeToString(hashKey)),
+							utils.LogAttr("apiUrl", localRelayData.ApiUrl),
+						)
+					}
 
 					// Resolve the requested block for cache lookup
 					// The cache server doesn't accept negative blocks
@@ -4713,21 +5173,23 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 						}()
 						cacheReport.PrimaryOutcome = primaryOutcome
 
-						// Generate the actual cache key that will be used for lookup
-						actualLookupCacheKey := make([]byte, len(hashKey))
-						copy(actualLookupCacheKey, hashKey)
-						actualLookupCacheKey = binary.LittleEndian.AppendUint64(actualLookupCacheKey, uint64(requestedBlockForCache))
-
-						utils.LavaFormatDebug("Cache lookup result",
-							utils.LogAttr("GUID", ctx),
-							utils.LogAttr("hashKeyHex", fmt.Sprintf("%x", hashKey)),
-							utils.LogAttr("actualLookupCacheKeyHex", fmt.Sprintf("%x", actualLookupCacheKey)),
-							utils.LogAttr("reqBlock", reqBlock),
-							utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
-							utils.LogAttr("seenBlock", localRelayData.SeenBlock),
-							utils.LogAttr("cacheError", cacheError),
-							utils.LogAttr("replyFound", cacheReply != nil && cacheReply.GetReply() != nil),
-						)
+						if utils.IsDebugEnabled() {
+							// The key the engine actually looked up: the hash plus the block it was
+							// resolved to. Built only for this line, so only when it can be emitted.
+							actualLookupCacheKey := make([]byte, len(hashKey), len(hashKey)+8)
+							copy(actualLookupCacheKey, hashKey)
+							actualLookupCacheKey = binary.LittleEndian.AppendUint64(actualLookupCacheKey, uint64(requestedBlockForCache))
+							utils.LavaFormatDebug("Cache lookup result",
+								utils.LogAttr("GUID", ctx),
+								utils.LogAttr("hashKeyHex", hex.EncodeToString(hashKey)),
+								utils.LogAttr("actualLookupCacheKeyHex", hex.EncodeToString(actualLookupCacheKey)),
+								utils.LogAttr("reqBlock", reqBlock),
+								utils.LogAttr("requestedBlockForCache", requestedBlockForCache),
+								utils.LogAttr("seenBlock", localRelayData.SeenBlock),
+								utils.LogAttr("cacheError", cacheError),
+								utils.LogAttr("replyFound", cacheReply != nil && cacheReply.GetReply() != nil),
+							)
+						}
 						reply := cacheReply.GetReply()
 
 						// Cross-pod consistency (T10): peer pods publish their guarded chain tip under
@@ -4797,11 +5259,11 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							analytics.IsArchive = chainqueries.IsArchiveRequest(protocolMessage)
 							analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(protocolMessage)
 							analytics.IsBatch = chainqueries.IsBatchRequest(protocolMessage)
-							go rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
-							go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.CacheOutcomeHit, cacheLatencyMs)
+							rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
+							rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.CacheOutcomeHit, cacheLatencyMs)
 							return nil
 						}
-						go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
+						rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
 						// Cache miss - will relay to endpoint
 						latestBlockHashRequested, earliestBlockHashRequested = rpcss.getEarliestBlockHashRequestedFromCacheReply(cacheReply)
 						utils.LavaFormatTrace("[Archive Debug] Reading block hashes from cache", utils.LogAttr("latestBlockHashRequested", latestBlockHashRequested), utils.LogAttr("earliestBlockHashRequested", earliestBlockHashRequested), utils.LogAttr("GUID", ctx))
@@ -4870,7 +5332,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// least MinGroups distinct provider groups (1.2a). Default 1 leaves selection group-blind. For
 	// per-group quorum (2.3), also front-load AgreementThreshold providers per group so each group can
 	// independently reach its internal quorum — otherwise QoS-skewed selection starves the smaller groups.
-	sessionOpts := lavasession.GetSessionsOptions{MinGroups: 1, PerGroupTarget: 1, PreferBackup: backupReserve}
+	sessionOpts := lavasession.GetSessionsOptions{MinGroups: 1, PerGroupTarget: 1}
 	// Which internal path this api is served under, so selection can pick the
 	// endpoint whose URL is that path's root. In direct mode the path lives in
 	// the upstream url — one node-url per API version — and dialing the wrong
@@ -5023,14 +5485,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	attemptBudget time.Duration,
 	chainMessage chainlib.ChainMessage,
 	originalRequestData []byte,
-	analytics *metrics.RelayMetrics,
 	budgetExpired func() bool,
 	lostBroadcast func(answeredWithNodeError bool) bool,
-) (relayLatency time.Duration, err error, needsBackoff bool) {
+) (relayLatency time.Duration, err error) {
 	// Get direct connection from session
 	directConnection, ok := singleConsumerSession.GetDirectConnection()
 	if !ok {
-		return 0, fmt.Errorf("session does not have direct RPC connection"), false
+		return 0, fmt.Errorf("session does not have direct RPC connection")
 	}
 
 	if rpcss.debugRelays {
@@ -5070,7 +5531,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 				utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
 				utils.LogAttr("GUID", ctx),
 			)
-			return 0, fmt.Errorf("gRPC streaming method %q must be served through the streaming listener, not as a unary relay", methodPath), false
+			return 0, fmt.Errorf("gRPC streaming method %q must be served through the streaming listener, not as a unary relay", methodPath)
 		}
 
 		// Second line of defence for methods the spec does not declare as
@@ -5084,7 +5545,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 					utils.LogAttr("endpoint", singleConsumerSession.Parent.PublicLavaAddress),
 					utils.LogAttr("GUID", ctx),
 				)
-				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID), false
+				return 0, fmt.Errorf("gRPC method %q is server-streaming upstream but the %s spec gives it no SUBSCRIBE parse directive; refusing to invoke it as a unary call", methodPath, rpcss.listenEndpoint.ChainID)
 			}
 		}
 	}
@@ -5177,7 +5638,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// behind a provider with several was never disabled, never probed for recovery, and never moved
 		// the health metric — while the provider's own QoS availability did drop.
 		var shouldMarkUnhealthy bool
-		shouldMarkUnhealthy, needsBackoff = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
+		shouldMarkUnhealthy, _ = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
 
 		// smartrouter_protocol_errors_total (MAG-3536). Stamped here, in the branch where the sender
 		// itself failed, because this is the one place every cut isProtocolFailure makes is
@@ -5197,7 +5658,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 		}
 
-		return relayLatency, err, needsBackoff
+		return relayLatency, err
 	}
 
 	// Check status code even when err == nil (for REST 5xx/429).
@@ -5208,8 +5669,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// would convert it into a synthetic transport error (triggering retry +
 	// backoff) and discard the node's response. Excluding it lets the result
 	// flow through as the NodeError the REST sender already produced
-	// (IsNodeError=true), where it classifies as NODE_UNIMPLEMENTED
-	// (non-retryable) and is returned to the client.
+	// (IsNodeError=true), where it classifies as NODE_UNIMPLEMENTED: retried on
+	// another provider (MAG-2771), and returned to the client when none serves it.
 	//
 	// A 5xx that is the node's own JSON reply (rpcInterfaceMessages.ServerErrorIsNodeReply) is
 	// excluded for the same reason: when every node answers Horizon's
@@ -5221,8 +5682,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	statusCode := result.StatusCode
 	carriesNodeReply := result.IsNodeError && rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData())
 	if (statusCode >= 500 && statusCode != http.StatusNotImplemented && !carriesNodeReply) || statusCode == 429 {
-		shouldMarkUnhealthy, needsBackoffHTTP := classifyHTTPStatus(statusCode)
-		needsBackoff = needsBackoffHTTP
+		shouldMarkUnhealthy, _ := classifyHTTPStatus(statusCode)
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
@@ -5262,7 +5722,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		relayResult.IsNodeAtFault = result.IsNodeAtFault
 		relayResult.ProviderInfo = result.ProviderInfo
 
-		return relayLatency, httpStatusRelayError(statusCode, result.Reply), needsBackoff
+		return relayLatency, httpStatusRelayError(statusCode, result.Reply)
 	}
 
 	// A node error delivered inside a 2xx body reaches here with err == nil and a 200 status, so it
@@ -5342,13 +5802,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		utils.LogAttr("GUID", ctx),
 	)
 
-	return relayLatency, nil, false
-}
-
-// HasBackupTier implements relaycore.BackupTierReporter: the state machine arms its backup-reserve
-// hedge only for an endpoint that has a backup tier to send it to.
-func (rpcss *RPCSmartRouterServer) HasBackupTier() bool {
-	return rpcss.sessionManager != nil && rpcss.sessionManager.HasBackupProviders()
+	return relayLatency, nil
 }
 
 func (rpcss *RPCSmartRouterServer) GetProcessingTimeout(chainMessage chainlib.ChainMessage) (processingTimeout time.Duration, relayTimeout time.Duration) {
@@ -5415,20 +5869,6 @@ func (rpcss *RPCSmartRouterServer) HandleDirectiveHeadersForMessage(chainMessage
 
 	_, ok := directiveHeaders[common.FORCE_CACHE_REFRESH_HEADER_NAME]
 	chainMessage.SetForceCacheRefresh(ok)
-}
-
-// Iterating over metadataHeaders adding each trailer that fits the header if found to relayResult.Relay.Metadata
-func (rpcss *RPCSmartRouterServer) getMetadataFromRelayTrailer(metadataHeaders []string, relayResult *common.RelayResult) {
-	for _, metadataHeader := range metadataHeaders {
-		trailerValue := relayResult.ProviderTrailer.Get(metadataHeader)
-		if len(trailerValue) > 0 {
-			extensionMD := pairingtypes.Metadata{
-				Name:  metadataHeader,
-				Value: trailerValue[0],
-			}
-			relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, extensionMD)
-		}
-	}
 }
 
 // warnUnavailableExtensions logs, once per extension for the life of this endpoint, that callers
@@ -5554,7 +5994,7 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			utils.LogAttr("outcome", straggler.Outcome),
 			utils.LogAttr("delayAfterReply", straggler.Delay),
 			utils.LogAttr("method", apiName),
-			utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", consensusHash[:8])),
+			utils.LogAttr("consensusHashHex", hex.EncodeToString(consensusHash[:8])),
 		)
 		group := straggler.ProviderGroup
 		if group == "" {
@@ -5685,7 +6125,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		// Emit cross-validation metric (even on failure)
 		if cvParams != nil && rpcss.listenEndpoint != nil && rpcss.rpcSmartRouterLogs != nil {
 			chainId, apiInterface := rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
-			go rpcss.rpcSmartRouterLogs.SetCrossValidationMetric(
+			rpcss.rpcSmartRouterLogs.SetCrossValidationMetric(
 				chainId, apiInterface, apiName, cvSuccess,
 				agreeingProvidersList, disagreeingProvidersList,
 			)
@@ -5695,7 +6135,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			// structural fail-fast emits its own reason via crossValidationFailFast (the two paths are
 			// mutually exclusive).
 			if !cvSuccess && relayResult != nil && relayResult.CrossValidationFailureReason != "" {
-				go rpcss.rpcSmartRouterLogs.SetCrossValidationFailureMetric(
+				rpcss.rpcSmartRouterLogs.SetCrossValidationFailureMetric(
 					chainId, apiInterface, apiName, relayResult.CrossValidationFailureReason,
 				)
 			}
@@ -5736,8 +6176,8 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 					utils.LogAttr("group", group),
 					utils.LogAttr("method", apiName),
 					utils.LogAttr("finality", finality),
-					utils.LogAttr("consensusHashHex", fmt.Sprintf("%x", consensusHash[:8])),
-					utils.LogAttr("outlierHashHex", fmt.Sprintf("%x", outlier.ResponseHash[:8])),
+					utils.LogAttr("consensusHashHex", hex.EncodeToString(consensusHash[:8])),
+					utils.LogAttr("outlierHashHex", hex.EncodeToString(outlier.ResponseHash[:8])),
 				)
 				// The debug read surface for the same dissent the log and the counter describe, keyed
 				// by request so the automation can assert per-request facts a counter cannot carry
@@ -5809,6 +6249,24 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				Name:  common.CROSS_VALIDATION_FAILURE_REASON_HEADER,
 				Value: relayResult.CrossValidationFailureReason,
 			})
+		}
+
+		// On failure, also surface the plurality composition (MAG-2192): disagreeing-providers above
+		// names every successful provider, because nothing reached the threshold, so these two headers
+		// are where a client finds who the odd one out was. Computed from the received results, never
+		// the queried set, so a pending provider can never appear in the plurality.
+		if !cvSuccess {
+			pluralitySize, pluralityProviders := relaycore.CrossValidationPlurality(successResults)
+			metadataReply = append(metadataReply,
+				pairingtypes.Metadata{
+					Name:  common.CROSS_VALIDATION_PLURALITY_SIZE_HEADER,
+					Value: strconv.Itoa(pluralitySize),
+				},
+				pairingtypes.Metadata{
+					Name:  common.CROSS_VALIDATION_PLURALITY_PROVIDERS_HEADER,
+					Value: strings.Join(pluralityProviders, ","),
+				},
+			)
 		}
 	} else if relayResult != nil {
 		// For non-cross-validation mode: keep existing single provider behavior
@@ -5895,7 +6353,7 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			if rpcss.listenEndpoint != nil && rpcss.rpcSmartRouterLogs != nil {
 				chainId := rpcss.listenEndpoint.ChainID
 				apiInterface := rpcss.listenEndpoint.ApiInterface
-				go rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
+				rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
 			}
 
 			// When there are retries, show every attempted provider in the order
@@ -5967,11 +6425,11 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 		apiInterface := rpcss.listenEndpoint.ApiInterface
 		// Consistency: triggered when the consumer enforces a minimum seen block height
 		if protocolMessage.RelayPrivateData().SeenBlock > 0 {
-			go rpcss.rpcSmartRouterLogs.RecordIncidentConsistency(chainId, apiInterface, apiName, success)
+			rpcss.rpcSmartRouterLogs.RecordIncidentConsistency(chainId, apiInterface, apiName, success)
 		}
 		// Hedge: triggered when the batch ticker fired during this relay
 		if analytics != nil && analytics.HedgeCount > 0 {
-			go rpcss.rpcSmartRouterLogs.RecordIncidentHedgeResult(chainId, apiInterface, apiName, analytics.HedgeCount, success)
+			rpcss.rpcSmartRouterLogs.RecordIncidentHedgeResult(chainId, apiInterface, apiName, analytics.HedgeCount, success)
 		}
 	}
 
@@ -6092,9 +6550,6 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			})
 	}
 
-	// fetch trailer information from the provider by using the provider trailer field.
-	rpcss.getMetadataFromRelayTrailer(chainlib.TrailersToAddToHeaderResponse, relayResult)
-
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 	_, debugRelays := directiveHeaders[common.LAVA_DEBUG_RELAY]
 	if debugRelays {
@@ -6151,31 +6606,20 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 
 		nodeErrors := relayProcessor.NodeErrors()
 		if len(nodeErrors) > 0 {
-			nodeErrorHeaderString := ""
+			// One buffer for the header: the string concatenation it replaces copied every node
+			// error's body once per provider, and the bodies can be whole error replies.
+			var nodeErrorHeader strings.Builder
 			for _, nodeError := range nodeErrors {
-				nodeErrorHeaderString += fmt.Sprintf("%s: %s,", nodeError.GetProvider(), string(nodeError.Reply.Data))
+				nodeErrorHeader.WriteString(nodeError.GetProvider())
+				nodeErrorHeader.WriteString(": ")
+				nodeErrorHeader.Write(nodeError.Reply.Data)
+				nodeErrorHeader.WriteByte(',')
 			}
 			relayResult.Reply.Metadata = append(relayResult.Reply.Metadata,
 				pairingtypes.Metadata{
 					Name:  common.NODE_ERRORS_PROVIDERS_HEADER_NAME,
-					Value: nodeErrorHeaderString,
+					Value: nodeErrorHeader.String(),
 				})
-		}
-
-		if relayResult.Request != nil && relayResult.Request.RelaySession != nil {
-			currentReportedProviders := rpcss.sessionManager.GetReportedProviders(uint64(relayResult.Request.RelaySession.Epoch))
-			if len(currentReportedProviders) > 0 {
-				reportedProvidersArray := make([]string, len(currentReportedProviders))
-				for idx, providerAddress := range currentReportedProviders {
-					reportedProvidersArray[idx] = providerAddress.Address
-				}
-				reportedProvidersString := fmt.Sprintf("%v", reportedProvidersArray)
-				reportedProvidersMD := pairingtypes.Metadata{
-					Name:  common.REPORTED_PROVIDERS_HEADER_NAME,
-					Value: reportedProvidersString,
-				}
-				relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, reportedProvidersMD)
-			}
 		}
 
 		relayResult.Reply.Metadata = append(relayResult.Reply.Metadata, pairingtypes.Metadata{
@@ -6198,28 +6642,6 @@ func (rpcss *RPCSmartRouterServer) IsInitialized() bool {
 	}
 
 	return rpcss.initialized.Load()
-}
-
-func (rpcss *RPCSmartRouterServer) RoundTrip(req *http.Request) (*http.Response, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	guid := utils.GenerateUniqueIdentifier()
-	ctx = utils.WithUniqueIdentifier(ctx, guid)
-	url, data, connectionType, metadata, err := rpcss.chainParser.ExtractDataFromRequest(req)
-	if err != nil {
-		return nil, err
-	}
-	// Use client IP for IP forwarding when available (Raw HTTP transport has no consumerIp param)
-	consumerIp := req.RemoteAddr
-	if h := req.Header.Get(common.IP_FORWARDING_HEADER_NAME); h != "" {
-		consumerIp = h
-	}
-	relayResult, err := rpcss.SendRelay(ctx, url, data, connectionType, "", consumerIp, nil, metadata)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := rpcss.chainParser.SetResponseFromRelayResult(relayResult)
-	return resp, err
 }
 
 // dedupSortedStrings returns a sorted, deduplicated copy of the input slice.

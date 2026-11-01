@@ -58,8 +58,6 @@ func (s *parsingRelaySender) SendParsedRelay(ctx context.Context, analytics *met
 	return nil, errors.New("not used")
 }
 
-func (s *parsingRelaySender) CancelSubscriptionContext(subscriptionKey string) {}
-
 func (s *parsingRelaySender) only(t *testing.T) chainlib.ProtocolMessage {
 	t.Helper()
 	s.mu.Lock()

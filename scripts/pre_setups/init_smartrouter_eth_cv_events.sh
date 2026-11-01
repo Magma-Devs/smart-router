@@ -43,7 +43,11 @@
 #   SIM_DIR=/path/to/provider_simulator scripts/pre_setups/init_smartrouter_eth_cv_events.sh
 # =============================================================================
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-source "$__dir"/../useful_commands.sh
+# command_exists used to come from scripts/useful_commands.sh, whose other helpers all drove the
+# lavad chain CLI and were removed with it.
+command_exists() {
+	command -v "$1" >/dev/null 2>&1
+}
 
 LOGS_DIR=${__dir}/../../debugging/logs
 mkdir -p "$LOGS_DIR"

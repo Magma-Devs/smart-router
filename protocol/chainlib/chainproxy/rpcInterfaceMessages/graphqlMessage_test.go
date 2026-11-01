@@ -1,6 +1,7 @@
 package rpcInterfaceMessages
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -154,7 +155,9 @@ func TestGraphQLMessageGetParamsResolvesArguments(t *testing.T) {
 	require.True(t, ok)
 	// json.Number, not float64: a Sui checkpoint sequence number past 2^53 must survive
 	// block_parsing without losing its low digits.
-	require.Equal(t, "329083865", params["sequenceNumber"].(interface{ String() string }).String())
+	seq, ok := params["sequenceNumber"].(interface{ String() string })
+	require.True(t, ok)
+	require.Equal(t, "329083865", seq.String())
 }
 
 func TestGraphQLMessageGetParamsResolvesVariables(t *testing.T) {
@@ -180,12 +183,16 @@ func TestGraphQLMessageGetParamsMultiRootIsPerRoot(t *testing.T) {
 	first := message.RootFieldInput(0)
 	require.NotNil(t, first)
 	require.Equal(t, "checkpoint", first.GetMethod())
-	require.Contains(t, first.GetParams().(map[string]interface{}), "sequenceNumber")
+	firstParams, ok := first.GetParams().(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, firstParams, "sequenceNumber")
 
 	second := message.RootFieldInput(1)
 	require.NotNil(t, second)
 	require.Equal(t, "epoch", second.GetMethod())
-	require.Contains(t, second.GetParams().(map[string]interface{}), "epochId")
+	secondParams, ok := second.GetParams().(map[string]interface{})
+	require.True(t, ok)
+	require.Contains(t, secondParams, "epochId")
 
 	require.Nil(t, message.RootFieldInput(2))
 	require.Nil(t, message.RootFieldInput(-1))
@@ -205,9 +212,10 @@ func TestGraphQLMessageCheckResponseError(t *testing.T) {
 			expectedHasError: false,
 		},
 		{
-			name: "null data with no errors is a successful empty read",
+			name: "a null field with no errors is a successful empty read",
 			// Measured on Sui mainnet: a read for a checkpoint that does not exist returns
-			// exactly this, on HTTP 200, and it is the node answering correctly.
+			// exactly this, on HTTP 200, and it is the node answering correctly. data itself is
+			// an object; a top-level null data is TestGraphQLMessageNonResponseIsNodeError's.
 			body:             `{"data":{"chainIdentifier":"4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S","checkpoint":null}}`,
 			httpStatusCode:   200,
 			expectedHasError: false,
@@ -308,6 +316,75 @@ func TestGraphQLMessageCheckResponseError(t *testing.T) {
 			require.Equal(t, test.expectedHasError, hasError)
 		})
 	}
+}
+
+// TestGraphQLMessageNonResponseIsNodeError pins what a 2xx has to carry to be a GraphQL response
+// at all (MAG-4369): a non-empty errors array, or data that is an object. A gateway's own JSON
+// under a 200 (a key rejection, the JSON-RPC envelope of an upstream on the wrong path, an empty
+// object) carries neither. Read as the node's answer, it was served and cached on a read, and on a
+// write it ended the broadcast at once while the other provider executed the transaction.
+func TestGraphQLMessageNonResponseIsNodeError(t *testing.T) {
+	query, err := ParseGraphQLMsg([]byte(`{"query":"{ checkpoint(sequenceNumber: 1) { digest } }"}`))
+	require.NoError(t, err)
+	mutation, err := ParseGraphQLMsg([]byte(`{"query":"mutation { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } }"}`))
+	require.NoError(t, err)
+
+	notResponses := []struct {
+		name string
+		body string
+	}{
+		{name: "an empty object", body: `{}`},
+		{name: "null data and no errors", body: `{"data":null}`},
+		{name: "an empty errors array and no data", body: `{"errors":[]}`},
+		{name: "null data and an empty errors array", body: `{"data":null,"errors":[]}`},
+		{name: "a gateway's key rejection", body: `{"error":"Invalid API key"}`},
+		{name: "a JSON-RPC error envelope", body: `{"jsonrpc":"2.0","id":1,"error":{"code":-32007,"message":"50/second request limit reached"}}`},
+		{name: "a JSON null", body: `null`},
+		{name: "data that is not an object", body: `{"data":"ok"}`},
+		{name: "errors that is not an array", body: `{"errors":"slow down"}`},
+		{name: "an empty body", body: ``},
+	}
+	for _, test := range notResponses {
+		t.Run("not a response: "+test.name, func(t *testing.T) {
+			for _, message := range []*GraphQLMessage{query, mutation} {
+				hasError, errorMessage := message.CheckResponseError([]byte(test.body), http.StatusOK)
+				require.True(t, hasError, "a 2xx with neither data nor errors was read as the node's answer")
+				require.NotEmpty(t, errorMessage)
+				require.Equal(t, http.StatusBadGateway, message.ClassificationStatus([]byte(test.body), http.StatusOK),
+					"classified as anything but a bad gateway, it is not retried or not blamed on the endpoint")
+			}
+		})
+	}
+
+	// What Sui answers for a record it does not hold: the field is null and data is an object.
+	// Probed 2026-10-18 on graphql.mainnet.sui.io and mainnet.sui.rpcpool.com for a checkpoint
+	// that never existed, one past the tip, an unknown transaction digest and an unknown object:
+	// never a top-level null without errors.
+	responses := []struct {
+		name string
+		body string
+	}{
+		{name: "a missing checkpoint", body: `{"data":{"checkpoint":null}}`},
+		{name: "a null field", body: `{"data":{"x":null}}`},
+		{name: "a populated read", body: `{"data":{"checkpoint":{"sequenceNumber":1,"digest":"BGbVv2N"}}}`},
+		{name: "data with an empty errors array", body: `{"data":{"chainIdentifier":"x"},"errors":[]}`},
+	}
+	for _, test := range responses {
+		t.Run("a response: "+test.name, func(t *testing.T) {
+			hasError, _ := query.CheckResponseError([]byte(test.body), http.StatusOK)
+			require.False(t, hasError)
+			require.Equal(t, http.StatusOK, query.ClassificationStatus([]byte(test.body), http.StatusOK))
+		})
+	}
+
+	// Errors without data stay under the existing rules: a code-less error on a read is the
+	// caller's, and on a write it is a node error the registry files as the caller's.
+	codelessNoData := []byte(`{"errors":[{"message":"Invalid user signature"}]}`)
+	hasError, _ := query.CheckResponseError(codelessNoData, http.StatusOK)
+	require.False(t, hasError)
+	hasError, _ = mutation.CheckResponseError(codelessNoData, http.StatusOK)
+	require.True(t, hasError)
+	require.Equal(t, http.StatusBadRequest, mutation.ClassificationStatus(codelessNoData, http.StatusOK))
 }
 
 func TestGraphQLMessageMutationErrors(t *testing.T) {

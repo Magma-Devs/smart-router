@@ -25,8 +25,10 @@ func TestFirstStrikeUsesInitialHoldoff(t *testing.T) {
 	require.Equal(t, t0.Add(InitialHoldoff), r.ReadyAt("vendor", "https://a.example/eth"))
 }
 
+// A strike is a hold-off that ended in another 429, so each 429 here lands just after the
+// previous hold-off ran out (a 429 inside one is no strike: TestBurstWithinOneHoldoffIsOneStrike).
 func TestConsecutiveStrikesDoubleUpToCap(t *testing.T) {
-	r, _ := newTestRegistry(t0)
+	r, now := newTestRegistry(t0)
 	want := []time.Duration{
 		30 * time.Second, time.Minute, 2 * time.Minute, 4 * time.Minute,
 		8 * time.Minute, 16 * time.Minute, 30 * time.Minute, 30 * time.Minute,
@@ -34,11 +36,12 @@ func TestConsecutiveStrikesDoubleUpToCap(t *testing.T) {
 	for i, w := range want {
 		d := r.RecordRateLimit("vendor", "u", 0)
 		require.Equal(t, w, d, "strike %d", i+1)
+		*now = now.Add(d + time.Second)
 	}
 }
 
 func TestRetryAfterIsTheFloor(t *testing.T) {
-	r, _ := newTestRegistry(t0)
+	r, now := newTestRegistry(t0)
 
 	// Larger than the exponential: the vendor's ask wins.
 	d := r.RecordRateLimit("vendor", "u", 10*time.Minute)
@@ -46,6 +49,7 @@ func TestRetryAfterIsTheFloor(t *testing.T) {
 
 	// Smaller than the current exponential: the exponential wins (a vendor asking for
 	// 1s on the second consecutive strike does not shrink the penalty).
+	*now = t0.Add(10*time.Minute + time.Second)
 	d = r.RecordRateLimit("vendor", "u", time.Second)
 	require.Equal(t, time.Minute, d)
 }
@@ -66,9 +70,10 @@ func TestJitterOnlyExtends(t *testing.T) {
 }
 
 func TestAnswerClearsStrikesAndHoldoff(t *testing.T) {
-	r, _ := newTestRegistry(t0)
+	r, now := newTestRegistry(t0)
 	r.RecordRateLimit("vendor", "u", 0)
-	r.RecordRateLimit("vendor", "u", 0)
+	*now = t0.Add(InitialHoldoff + time.Second)
+	r.RecordRateLimit("vendor", "u", 0) // second strike: held off until t0+31s+1m
 	require.True(t, r.HeldOff("vendor", "u"))
 
 	r.RecordAnswer("vendor", "u")
@@ -127,10 +132,11 @@ func TestHoldoffExpires(t *testing.T) {
 func TestStrikeMemoryAgesOut(t *testing.T) {
 	r, now := newTestRegistry(t0)
 	r.RecordRateLimit("vendor", "u", 0)
+	*now = t0.Add(InitialHoldoff + time.Second)
 	r.RecordRateLimit("vendor", "u", 0) // 2 strikes, next would be 2m
 
 	// Past the retention window with no further 429s, the URL starts clean.
-	*now = t0.Add(entryRetention + 2*time.Minute)
+	*now = t0.Add(InitialHoldoff + time.Second + entryRetention + 2*time.Minute)
 	d := r.RecordRateLimit("vendor", "u", 0)
 	require.Equal(t, InitialHoldoff, d)
 }
@@ -183,4 +189,21 @@ func TestProviderReadyAt(t *testing.T) {
 		require.True(t, held)
 		require.Equal(t, t0.Add(3*time.Minute), readyAt)
 	})
+}
+
+// The chain tracker and the WS / gRPC subscription paths record a 429 under the URL alone; the
+// relay path answers under the provider's name. An answer on the URL must clear both, or a URL
+// relays are serving fine keeps its url-only strikes (MAG-4165). Another URL's entry, and another
+// provider's, are untouched.
+func TestRecordAnswer_ClearsTheURLOnlyEntryToo(t *testing.T) {
+	r := NewRegistryWithClock(time.Now)
+	r.RecordRateLimit("https://a", "https://a", 0)
+	r.RecordRateLimit("wss://b", "wss://b", 0)
+	r.RecordRateLimit("other", "https://a", 0)
+
+	r.RecordAnswer("prov", "https://a")
+
+	require.False(t, r.HeldOff("https://a", "https://a"))
+	require.True(t, r.HeldOff("wss://b", "wss://b"), "another url keeps its hold-off")
+	require.True(t, r.HeldOff("other", "https://a"), "another provider's entry is that provider's to clear")
 }

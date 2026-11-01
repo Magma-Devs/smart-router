@@ -38,8 +38,6 @@ func (r *contextKeepingRelay) SendParsedRelay(ctx context.Context, analytics *me
 	return nil, errors.New("not used")
 }
 
-func (r *contextKeepingRelay) CancelSubscriptionContext(subscriptionKey string) {}
-
 // tracingOf reads, now, the ids on the context the i-th relay was handed.
 func (r *contextKeepingRelay) tracingOf(t *testing.T, i int) tracingIds {
 	t.Helper()

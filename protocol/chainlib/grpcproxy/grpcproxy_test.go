@@ -3,6 +3,7 @@ package grpcproxy
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/testproto"
@@ -13,7 +14,7 @@ import (
 )
 
 func TestGRPCProxy(t *testing.T) {
-	proxyGRPCSrv, _, err := NewGRPCProxy(func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
+	proxyGRPCSrv, _, err := newGRPCProxy(func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
 		// the callback function just does echo proxying
 		req := new(testproto.TestRequest)
 		err := req.Unmarshal(reqBody)
@@ -45,7 +46,7 @@ func TestGRPCProxy(t *testing.T) {
 // relay fails. Before the fix the handler returned the error before setting any metadata, so it was dropped.
 func TestGRPCProxy_MetadataOnError(t *testing.T) {
 	t.Run("error with metadata is surfaced as trailers", func(t *testing.T) {
-		proxyGRPCSrv, _, err := NewGRPCProxy(func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
+		proxyGRPCSrv, _, err := newGRPCProxy(func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
 			md := metadata.MD{
 				common.CROSS_VALIDATION_STATUS_HEADER_NAME:    []string{"failed"},
 				common.CROSS_VALIDATION_FAILURE_REASON_HEADER: []string{common.CrossValidationReasonNoAgreement},
@@ -65,7 +66,7 @@ func TestGRPCProxy_MetadataOnError(t *testing.T) {
 
 	t.Run("error without metadata leaves trailers empty (non-CV errors unchanged)", func(t *testing.T) {
 		proxyGRPCSrv, err := func() (*grpc.Server, error) {
-			s, _, e := NewGRPCProxy(func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
+			s, _, e := newGRPCProxy(func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error) {
 				return nil, nil, errors.New("plain failure")
 			}, "", common.ConsumerCmdFlags{HeadersFlag: "*", OriginFlag: "*", MethodsFlag: "GET,POST,OPTIONS", CDNCacheDuration: "86400"}, nil)
 			return s, e
@@ -78,4 +79,10 @@ func TestGRPCProxy_MetadataOnError(t *testing.T) {
 		require.Error(t, callErr)
 		require.Empty(t, trailer.Get(common.CROSS_VALIDATION_FAILURE_REASON_HEADER))
 	})
+}
+
+// newGRPCProxy is the reflection-less constructor the tests use; the listener always passes a
+// reflection source, so the binary has no caller for it.
+func newGRPCProxy(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter) (*grpc.Server, *http.Server, error) {
+	return NewGRPCProxyWithReflection(cb, healthCheckPath, cmdFlags, healthReporter, nil, nil)
 }

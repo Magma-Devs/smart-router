@@ -81,13 +81,6 @@ func (cri *chainRouterImpl) GetChainProxySupporting(ctx context.Context, addon s
 	)
 }
 
-func (cri chainRouterImpl) ExtensionsSupported(internalPath string, extensions []string) bool {
-	routerKey := lavasession.NewRouterKey(extensions)
-	routerKey.ApplyInternalPath(internalPath)
-	_, ok := cri.chainProxyRouter[routerKey.String()]
-	return ok
-}
-
 func (cri chainRouterImpl) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend, extensions []string) (relayReply *RelayReplyWrapper, proxyUrl common.NodeUrl, chainId string, err error) {
 	// add the parsed addon from the apiCollection
 	addon := chainMessage.GetApiCollection().CollectionData.AddOn

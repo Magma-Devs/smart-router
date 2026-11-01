@@ -8,6 +8,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 // TestBuildUnsubscribeSuccessReply verifies that the synthesized reply for a
@@ -235,5 +236,53 @@ func TestWebsocketConnectionLimiter(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Every other local reply echoes the caller's id verbatim; the rate-limit reply coerced it to an
+// int, answering string ids (and numeric strings, through Atoi on the quoted token) with id 0
+// (MAG-4278).
+func TestHandleRateLimitReached_EchoesTheCallersId(t *testing.T) {
+	cwm := &ConsumerWebsocketManager{}
+	for _, tc := range []struct{ request, wantID string }{
+		{`{"jsonrpc":"2.0","id":"client-uuid-1","method":"eth_subscribe","params":["newHeads"]}`, `"client-uuid-1"`},
+		{`{"jsonrpc":"2.0","id":"42","method":"eth_subscribe","params":["newHeads"]}`, `"42"`},
+		{`{"jsonrpc":"2.0","id":42,"method":"eth_subscribe","params":["newHeads"]}`, `42`},
+		{`{"jsonrpc":"2.0","id":null,"method":"eth_subscribe","params":["newHeads"]}`, `null`},
+	} {
+		reply, err := cwm.handleRateLimitReached([]byte(tc.request))
+		require.NoError(t, err)
+		require.Equal(t, tc.wantID, gjson.GetBytes(reply, "id").Raw, "request %s", tc.request)
+		require.Equal(t, int64(common.JsonRpcRateLimitError.Error.Code), gjson.GetBytes(reply, "error.code").Int())
+	}
+}
+
+// A rate-limited frame with no top-level id is a batch or a notification. The template's own id
+// (1) would answer it under an id the client may have given another request, so the reply follows
+// the other local replies (buildLocalReply): one error per batch member that has an id, as an
+// array, and nothing for a notification (MAG-4278).
+func TestHandleRateLimitReached_AnswersABatchPerMemberAndANotificationNotAtAll(t *testing.T) {
+	cwm := &ConsumerWebsocketManager{}
+
+	batch := `[{"jsonrpc":"2.0","id":7,"method":"eth_blockNumber","params":[]},{"jsonrpc":"2.0","method":"eth_chainId","params":[]},{"jsonrpc":"2.0","id":"b","method":"eth_chainId","params":[]}]`
+	reply, err := cwm.handleRateLimitReached([]byte(batch))
+	require.NoError(t, err)
+	parsed := gjson.ParseBytes(reply)
+	require.True(t, parsed.IsArray(), "a batch is answered with an array, got %s", reply)
+	var ids []string
+	parsed.ForEach(func(_, member gjson.Result) bool {
+		ids = append(ids, member.Get("id").Raw)
+		require.Equal(t, int64(common.JsonRpcRateLimitError.Error.Code), member.Get("error.code").Int())
+		return true
+	})
+	require.Equal(t, []string{"7", `"b"`}, ids, "one error per member that has an id, the notification member skipped")
+
+	for _, frame := range []string{
+		`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[]}`,
+		`[{"jsonrpc":"2.0","method":"eth_blockNumber","params":[]}]`,
+	} {
+		reply, err = cwm.handleRateLimitReached([]byte(frame))
+		require.NoError(t, err)
+		require.Empty(t, reply, "a notification gets no reply: %s", frame)
 	}
 }

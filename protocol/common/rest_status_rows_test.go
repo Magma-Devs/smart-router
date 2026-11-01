@@ -29,7 +29,8 @@ func TestRESTStatusRows(t *testing.T) {
 		402: accessDenied,
 		403: accessDenied,
 		404: {LavaErrorNodeDataNotHeld, true, false, true},
-		405: {LavaErrorNodeMethodNotAllowed, false, false, false},
+		// MAG-2771: this front end's refusal, retried on another provider, unblamed.
+		405: {LavaErrorNodeMethodNotAllowed, true, false, false},
 		406: userError,
 		407: accessDenied,
 		408: {LavaErrorNodeServiceUnavailable, true, true, false},
@@ -48,7 +49,7 @@ func TestRESTStatusRows(t *testing.T) {
 		429: {LavaErrorNodeRateLimited, true, false, false},
 		431: userError,
 		451: accessDenied,
-		501: {LavaErrorNodeUnimplemented, false, false, false},
+		501: {LavaErrorNodeUnimplemented, true, false, false},
 		// The 5xx half. Absent before, which is where the interesting behaviour lives: 500 and 503
 		// are what ServerErrorIsNodeReply hands back to the client, and they are the two statuses
 		// whose blame the REST message rows above can override.

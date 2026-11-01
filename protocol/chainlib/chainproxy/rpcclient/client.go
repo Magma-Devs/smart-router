@@ -443,9 +443,8 @@ func (c *Client) BatchCallContext(ctx context.Context, b []BatchElemWithId, stri
 		} else {
 			elem.Error = json.Unmarshal(resp.Result, elem.Result)
 		}
-		// Release resp immediately after use to allow GC of large Result field
+		// Release resp's Result immediately after use to allow GC of a large payload
 		resp.Result = nil
-		resp = nil
 	}
 	// when timing out, return extra data on partial ids support
 	if err != nil && n > 0 && n < len(b) {
@@ -544,7 +543,7 @@ func (c *Client) Subscribe(ctx context.Context, id json.RawMessage, method strin
 	resp, err := op.wait(ctx, c)
 	// In the case of response containing the error message, we want to return it to the user as-is
 	if err != nil && resp != nil && resp.Error != nil {
-		return nil, resp, nil
+		return nil, resp, nil //nolint:nilerr // MAG-2685: the node's JSON-RPC error object is the caller's answer, returned as resp with a nil err
 	}
 
 	if err != nil {

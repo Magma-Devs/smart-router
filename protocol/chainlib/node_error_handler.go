@@ -21,16 +21,6 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-// NewUnsupportedMethodError creates an error wrapping a LavaError with unsupported method classification.
-// The methodName is included in the context for logging.
-func NewUnsupportedMethodError(_ error, methodName string) error {
-	context := "unsupported method"
-	if methodName != "" {
-		context = fmt.Sprintf("unsupported method %q", methodName)
-	}
-	return common.NewLavaError(common.LavaErrorNodeMethodNotFound, context)
-}
-
 // NewSolanaNonRetryableError creates an error wrapping a LavaError with non-retryable classification.
 func NewSolanaNonRetryableError(err error) error {
 	return common.NewLavaError(common.LavaErrorChainSolanaMissingLongTerm, err.Error())
@@ -278,14 +268,18 @@ func (geh *genericErrorHandler) handleConnectionError(err error) error {
 	return nil
 }
 
+// ipAddressPattern masks IPv4 addresses in node errors. Compiled once: maskSensitiveInfo runs on
+// every node error the router formats, and compiling the pattern per call was the costliest part
+// of that path (MAG-4244).
+var ipAddressPattern = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+
 func maskSensitiveInfo(errMsg string) (string, bool) {
 	foundSecret := false
 
 	// Mask IP addresses
-	ipRegex := regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
-	if ipRegex.MatchString(errMsg) {
+	if ipAddressPattern.MatchString(errMsg) {
 		foundSecret = true
-		errMsg = ipRegex.ReplaceAllString(errMsg, "[IP_ADDRESS]")
+		errMsg = ipAddressPattern.ReplaceAllString(errMsg, "[IP_ADDRESS]")
 	}
 
 	return errMsg, foundSecret

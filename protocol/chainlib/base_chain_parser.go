@@ -4,14 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
@@ -26,15 +23,9 @@ import (
 var (
 	// SkipWebsocketVerificationDefault seeds every parser built by NewChainParser and
 	// is bound to --skip-websocket-verification. It is written once during flag parsing,
-	// before any parser or goroutine exists, and is read-only from then on.
-	//
-	// It is deliberately NOT consulted at the point of use. The `health` command probes
-	// each direct-rpc entry concurrently and needs a different answer per entry (ws
-	// augmentation only routes for an entry that actually has a ws:// URL), so it used to
-	// flip a package global under a mutex around ValidateCollect. That missed the second
-	// reader — newChainRouter — which runs outside that mutex, so entries raced each other
-	// into the wrong ws enforcement and healthy legs reported red (MAG-2333). Per-parser
-	// state removes the shared cell entirely.
+	// before any parser or goroutine exists, and is read-only from then on. Nothing reads
+	// it at the point of use: a caller that needs another answer for one parser sets it
+	// there (SetSkipWebsocketVerification), as the `health` command does per provider.
 	SkipWebsocketVerificationDefault = false
 
 	// SkipAllVerifications is the process-wide off switch behind --skip-all-verifications.
@@ -78,7 +69,6 @@ type BaseChainParser struct {
 	allowedAddons     map[string]bool
 	allowedExtensions map[string]struct{}
 	extensionParser   extensionslib.ExtensionParser
-	active            bool
 
 	// skipWebsocketVerification is this parser's own answer to "should verifications be
 	// augmented with the websocket extension, and should the router enforce ws support".
@@ -118,21 +108,6 @@ func (bcp *BaseChainParser) SetSkipWebsocketVerification(skip bool) {
 	bcp.skipWebsocketVerification = skip
 }
 
-func (bcp *BaseChainParser) Activate() {
-	bcp.active = true
-}
-
-func (bcp *BaseChainParser) Active() bool {
-	return bcp.active
-}
-
-func (bcp *BaseChainParser) UpdateBlockTime(newBlockTime time.Duration) {
-	bcp.rwLock.Lock()
-	defer bcp.rwLock.Unlock()
-	utils.LavaFormatInfo("chainParser updated block time", utils.Attribute{Key: "newTime", Value: newBlockTime}, utils.Attribute{Key: "oldTime", Value: time.Duration(bcp.spec.AverageBlockTime) * time.Millisecond}, utils.Attribute{Key: "specID", Value: bcp.spec.Index})
-	bcp.spec.AverageBlockTime = newBlockTime.Milliseconds()
-}
-
 // clientBodyHeaders are the request headers that describe the body the client authored.
 // The REST interface forwards that body to the node byte-for-byte, so the client's own
 // description of it is the correct one and is forwarded without a spec directive
@@ -152,7 +127,7 @@ func forwardsClientBodyHeader(apiCollection *spectypes.ApiCollection, headerName
 	if apiCollection.CollectionData.ApiInterface != spectypes.APIInterfaceRest {
 		return false
 	}
-	if !restMethodCarriesBody(apiCollection.CollectionData.Type) {
+	if !RestMethodCarriesBody(apiCollection.CollectionData.Type) {
 		return false
 	}
 	_, ok := clientBodyHeaders[headerName]
@@ -211,26 +186,6 @@ func (bcp *BaseChainParser) isAddon(addon string) bool {
 func (bcp *BaseChainParser) isExtension(extension string) bool {
 	_, ok := bcp.allowedExtensions[extension]
 	return ok
-}
-
-// ValidateMessage validates the chain message against the consumer's policy (allowed addons).
-// Should be called after ParseMsg by consumers/providers that enforce policy.
-// Smart-router does not call this since it uses static providers without on-chain policy.
-func (bcp *BaseChainParser) ValidateMessage(chainMsg ChainMessage) error {
-	nodeMessage, ok := chainMsg.(*baseChainMessageContainer)
-	if !ok {
-		return nil
-	}
-	bcp.rwLock.RLock()
-	defer bcp.rwLock.RUnlock()
-	if addon := GetAddon(nodeMessage); addon != "" {
-		if allowed := bcp.allowedAddons[addon]; !allowed {
-			return utils.LavaFormatError("consumer policy does not allow addon", nil,
-				utils.LogAttr("addon", addon),
-			)
-		}
-	}
-	return nil
 }
 
 func (bcp *BaseChainParser) BuildMapFromPolicyQuery(policy PolicyInf, chainId string, apiInterface string) (map[string]struct{}, error) {
@@ -323,8 +278,10 @@ func (bcp *BaseChainParser) SeparateAddonsExtensions(ctx context.Context, suppor
 				utils.Attribute{Key: "supported", Value: supportedToCheck})
 		}
 	}
-
-	return addons, extensions, err
+	if err != nil {
+		return addons, extensions, &VerificationFailure{Check: CheckUnsupportedAddon, Err: err}
+	}
+	return addons, extensions, nil
 }
 
 // gets all verifications for an endpoint supporting multiple addons and extensions
@@ -385,15 +342,6 @@ func (bcp *BaseChainParser) Construct(spec spectypes.Spec, internalPaths map[str
 	bcp.extensionParser = extensionslib.NewExtensionParser(bcp.extensionParser.GetConfiguredExtensions())
 }
 
-func (bcp *BaseChainParser) ParseDirectiveEnabled() bool {
-	_, _, ok := bcp.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCK_BY_NUM)
-	if !ok {
-		return false
-	}
-	_, _, ok = bcp.GetParsingByTag(spectypes.FUNCTION_TAG_GET_BLOCKNUM)
-	return ok
-}
-
 func (bcp *BaseChainParser) GetParsingByTag(tag spectypes.FUNCTION_TAG) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool) {
 	bcp.rwLock.RLock()
 	defer bcp.rwLock.RUnlock()
@@ -405,32 +353,49 @@ func (bcp *BaseChainParser) GetParsingByTag(tag spectypes.FUNCTION_TAG) (parsing
 	return val.Parsing, val.ApiCollection, ok
 }
 
-// GetParsingByTagForCollection resolves a tagged parse directive for a node that
-// serves specific add-on collections, falling back to GetParsingByTag's answer
-// when the node declares no add-ons or none of its collections carries the tag.
+// GetParsingByTagForCollection resolves a tagged parse directive for ONE node
+// url — the collections it declares (addons) at the path it serves
+// (internalPath) — instead of GetParsingByTag's single, spec-wide answer.
 //
-// MAG-3296: taggedApis holds exactly ONE directive per tag — the first collection
-// to declare it, which for a spec written base-first is the base collection. So
-// GetParsingByTag answers "the base collection's directive" no matter who is
-// asking. That is wrong for a spec whose add-on is a DISJOINT api surface rather
-// than a superset of the base one: Acala serves Substrate in the base collection
-// and EVM in an `evm` add-on, and an EVM-only node cannot answer the base
-// collection's chain_getHeader at all. Probing it with one gets -32601 and, on
-// the admission path, costs the provider its place outright.
+// Resolution order:
+//
+//  1. If no enabled collection anywhere declares the tag, it is absent: taggedApis
+//     is populated from every enabled collection, so nothing below could find it.
+//  2. The add-on collections the url declares, at the url's path, in the node's
+//     own order (MAG-3296). A spec whose add-on is a DISJOINT api surface rather
+//     than a superset of the base one — Acala serves Substrate in the base
+//     collection and EVM in an `evm` add-on — needs its EVM-only node probed with
+//     the `evm` collection's directive; the base one gets -32601 and, on the
+//     admission path, costs the provider its place outright.
+//  3. A url that serves ONLY its add-ons (allowBaseFallback false, the caller's
+//     ServesBaseCollection()) is refused rather than handed a base directive the
+//     operator said the node cannot answer.
+//  4. The base collection at the url's OWN path. A spec that serves two api
+//     surfaces on two internal paths declares a head directive on each — TON:
+//     /getMasterchainInfo on /v2, /masterchainInfo on /v3 — and the one a url can
+//     answer is the one on its path, not the first one in the file. Before this
+//     step existed a /v3 url with no add-ons fell straight to step 5, its per-url
+//     ChainTracker asked the v3 base for a v2 route, and it never started
+//     (MAG-4105, 2026-10-03): the consistency gate was off on the whole chain.
+//  5. The first collection in spec-file order to declare the tag — GetParsingByTag's
+//     answer — for a path whose own collection does not declare it, and for the
+//     root of a spec written base-first.
 //
 // Add-ons are tried in the order the node declares them, so a node's own
-// preference decides between two collections that both carry the tag. The
-// connection type comes from the base answer, because the tag is served over the
-// same transport whichever collection defines it — this is a keyed lookup rather
-// than a scan of apiCollections, which is a map and would iterate randomly.
+// preference decides between two collections that both carry the tag. Every
+// lookup is keyed on apiCollections rather than a scan of it: the map would
+// iterate randomly, and two polls of one url reading the head from different
+// collections surfaces as an endpoint whose tip flaps.
+//
+// Steps 2 and 4 key the url's collections on the first-declared answer's
+// connection type. Nothing enforces that a tag is served over the same transport
+// on every path: a path that declares the tag only under a different verb is
+// unfindable here and falls through to step 5 silently. No spec in the catalog
+// has that shape today; it is a known gap, not a guarantee.
 //
 // `addons` may contain extension names too (callers pass NodeUrl.Addons, which
 // mixes both). An extension name matches no collection's AddOn, so it is skipped
 // rather than needing to be separated out first.
-//
-// allowBaseFallback is the caller's ServesBaseCollection(): false means the node
-// serves ONLY its add-on collections, and the tagged fallback is then refused
-// rather than handing back a directive that node cannot answer.
 func (bcp *BaseChainParser) GetParsingByTagForCollection(tag spectypes.FUNCTION_TAG, addons []string, internalPath string, allowBaseFallback bool) (parsing *spectypes.ParseDirective, apiCollection *spectypes.ApiCollection, existed bool) {
 	bcp.rwLock.RLock()
 	defer bcp.rwLock.RUnlock()
@@ -439,49 +404,56 @@ func (bcp *BaseChainParser) GetParsingByTagForCollection(tag spectypes.FUNCTION_
 	// spec that lists an add-on collection before the base one this entry is the
 	// add-on's. The name must not assert an invariant the map does not enforce.
 	tagged, taggedExisted := bcp.taggedApis[tag]
-	if taggedExisted {
-		parsing, apiCollection, existed = tagged.Parsing, tagged.ApiCollection, true
+	if !taggedExisted {
+		return nil, nil, false
 	}
-	if len(addons) == 0 || !taggedExisted {
-		// taggedApis is populated from EVERY enabled collection, so a tag missing
-		// from it is declared nowhere and searching the add-on collections cannot
-		// find it either.
-		if !taggedExisted {
-			return nil, nil, false
-		}
-		return parsing, apiCollection, existed
-	}
+	key := CollectionKey{ConnectionType: tagged.ApiCollection.CollectionData.Type, InternalPath: internalPath}
 
 	for _, addon := range addons {
 		if addon == "" {
-			continue // the base collection, which is the fallback below
+			continue // the base collection, resolved below
 		}
-		collection, ok := bcp.apiCollections[CollectionKey{
-			ConnectionType: tagged.ApiCollection.CollectionData.Type,
-			InternalPath:   internalPath,
-			Addon:          addon,
-		}]
-		if !ok || !collection.Enabled {
-			continue
-		}
-		for _, directive := range collection.ParseDirectives {
-			if directive.FunctionTag == tag {
-				return directive, collection, true
-			}
+		key.Addon = addon
+		if directive, collection, ok := bcp.directiveFromCollectionLocked(key, tag); ok {
+			return directive, collection, true
 		}
 	}
 
 	if !allowBaseFallback {
-		// The caller serves only its add-on collections, and none of them declares
-		// this tag. Falling back would hand it the one directive the operator said
-		// the node cannot answer — reinstating the very probe standalone-addons
-		// opted out of, quietly. The keyed lookup above misses whenever a spec
-		// declares the add-on collection only at the root and the url carries an
-		// internal path, so this is reachable the moment a spec combines a disjoint
-		// add-on with internal paths.
+		// The url serves only its add-on collections, and none of them declares
+		// this tag. Every base collection — the one at its own path included — is
+		// the very probe standalone-addons opted out of, so fail loudly rather than
+		// reinstate it quietly. A url with no add-ons never arrives here with
+		// false: both ServesBaseCollection implementations answer true for it, and
+		// the router downgrades standalone-addons on a url that declares no add-on
+		// collection.
 		return nil, nil, false
 	}
-	return parsing, apiCollection, existed
+
+	key.Addon = ""
+	if directive, collection, ok := bcp.directiveFromCollectionLocked(key, tag); ok {
+		return directive, collection, true
+	}
+
+	return tagged.Parsing, tagged.ApiCollection, true
+}
+
+// directiveFromCollectionLocked is the keyed read steps 2 and 4 of
+// GetParsingByTagForCollection share: the directive one exact collection declares
+// for a tag, or false when the collection is absent or declares none. The caller
+// holds rwLock. The Enabled check is defensive — getServiceApis never inserts a
+// disabled collection, so only a hand-built map can reach it — and is kept so the
+// lookup can never hand out a directive the spec switched off.
+func (bcp *BaseChainParser) directiveFromCollectionLocked(key CollectionKey, tag spectypes.FUNCTION_TAG) (*spectypes.ParseDirective, *spectypes.ApiCollection, bool) {
+	collection, ok := bcp.apiCollections[key]
+	if !ok || !collection.Enabled {
+		return nil, nil, false
+	}
+	directive := findParseDirectiveByTag(collection, tag)
+	if directive == nil {
+		return nil, nil, false
+	}
+	return directive, collection, true
 }
 
 func (bcp *BaseChainParser) IsTagInCollection(tag spectypes.FUNCTION_TAG, collectionKey CollectionKey) bool {
@@ -686,55 +658,6 @@ func (apip *BaseChainParser) isValidInternalPath(path string) bool {
 	return ok
 }
 
-// take an http request and direct it through the consumer
-func (apip *BaseChainParser) ExtractDataFromRequest(request *http.Request) (url string, data string, connectionType string, metadata []pairingtypes.Metadata, err error) {
-	// Extract relative URL path
-	url = request.URL.Path
-	// Extract connection type
-	connectionType = request.Method
-
-	// Extract metadata
-	for key, values := range request.Header {
-		for _, value := range values {
-			metadata = append(metadata, pairingtypes.Metadata{
-				Name:  key,
-				Value: value,
-			})
-		}
-	}
-
-	// Extract data
-	if request.Body != nil {
-		bodyBytes, err := io.ReadAll(request.Body)
-		if err != nil {
-			return "", "", "", nil, err
-		}
-		data = string(bodyBytes)
-	}
-
-	return url, data, connectionType, metadata, nil
-}
-
-func (apip *BaseChainParser) SetResponseFromRelayResult(relayResult *common.RelayResult) (*http.Response, error) {
-	if relayResult == nil {
-		return nil, errors.New("relayResult is nil")
-	}
-	response := &http.Response{
-		StatusCode: relayResult.StatusCode,
-		Header:     make(http.Header),
-	}
-
-	for _, values := range relayResult.Reply.Metadata {
-		response.Header.Add(values.Name, values.Value)
-	}
-
-	if relayResult.Reply != nil && relayResult.Reply.Data != nil {
-		response.Body = io.NopCloser(strings.NewReader(string(relayResult.Reply.Data)))
-	}
-
-	return response, nil
-}
-
 // getSupportedApi fetches service api from spec by name
 func (apip *BaseChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {
 	// Guard that the GrpcChainParser instance exists
@@ -768,8 +691,10 @@ func (apip *BaseChainParser) getApiCollection(connectionType, internalPath, addo
 }
 
 // findParseDirectiveByTag returns a collection's own directive for a tag, or nil
-// when it declares none. Used to resolve what a tag-referencing verification
-// borrows, so it borrows from the collection it belongs to.
+// when it declares none. GetParsingByTagForCollection reads a url's add-on and
+// base collections through it, and getServiceApis uses it to resolve what a
+// tag-referencing verification borrows, so it borrows from the collection it
+// belongs to.
 func findParseDirectiveByTag(apiCollection *spectypes.ApiCollection, tag spectypes.FUNCTION_TAG) *spectypes.ParseDirective {
 	for _, directive := range apiCollection.ParseDirectives {
 		if directive.FunctionTag == tag {
@@ -777,20 +702,6 @@ func findParseDirectiveByTag(apiCollection *spectypes.ApiCollection, tag spectyp
 		}
 	}
 	return nil
-}
-
-// HeaderPassesOnReply reports whether a spec header directive of this kind lets the node's
-// header through to the client. pass_reply and pass_both say so by name. pass_ignore does
-// too: the spec type defines it as a header that "allows it to pass around but is not
-// signed", that is, passed, but kept out of the signed and compared payload because its
-// value differs per node (Aptos's x-aptos-ledger-timestampusec). The router signs nothing,
-// so "pass" is all that is left of it.
-func HeaderPassesOnReply(kind spectypes.Header_HeaderType) bool {
-	switch kind {
-	case spectypes.Header_pass_reply, spectypes.Header_pass_both, spectypes.Header_pass_ignore:
-		return true
-	}
-	return false
 }
 
 // replyHeaderDirectives collects the reply-direction header directives of the collections
@@ -812,7 +723,7 @@ func replyHeaderDirectives(spec spectypes.Spec, apiCollections map[CollectionKey
 			continue
 		}
 		for _, header := range apiCollection.Headers {
-			if header == nil || !HeaderPassesOnReply(header.Kind) {
+			if header == nil || !common.HeaderPassesOnReply(header.Kind) {
 				continue
 			}
 			key := strings.ToLower(header.Name)

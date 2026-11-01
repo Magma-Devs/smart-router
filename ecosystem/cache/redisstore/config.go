@@ -281,7 +281,7 @@ func (c TLSConfig) hasMaterial() bool {
 // eagerly so misconfiguration fails at startup, not first dial.
 func (c TLSConfig) build() (*tls.Config, error) {
 	if !c.Enabled {
-		return nil, nil
+		return nil, nil //nolint:nilnil // disabled TLS is a nil *tls.Config by contract; go-redis takes it as "plaintext"
 	}
 	tlsCfg := &tls.Config{
 		MinVersion:         tls.VersionTLS12,
@@ -735,7 +735,7 @@ func (cfg Config) clusterOptions(addrs []string, tlsCfg *tls.Config, provider *S
 
 // buildClient constructs one client for the given address set, from the
 // credentials New resolved once for every client of the store.
-func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, creds clientCredentials, tracker *endpointTracker) (redis.UniversalClient, error) {
+func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, creds clientCredentials, tracker *endpointTracker) redis.UniversalClient {
 	switch cfg.EffectiveTopology() {
 	case TopologySentinel:
 		client := redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, creds.source, creds.sentinelPassword, tracker))
@@ -743,10 +743,10 @@ func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, creds clientCr
 		// other): this hook chain wraps only the returned client's own data-pool
 		// dials, never the internal sentinel clients' — see markDataDialsHook.
 		client.AddHook(markDataDialsHook{})
-		return client, nil
+		return client
 	case TopologyCluster:
-		return redis.NewClusterClient(cfg.clusterOptions(addrs, tlsCfg, creds.provider, tracker)), nil
+		return redis.NewClusterClient(cfg.clusterOptions(addrs, tlsCfg, creds.provider, tracker))
 	default:
-		return redis.NewClient(cfg.standaloneOptions(addrs, tlsCfg, creds.provider, tracker)), nil
+		return redis.NewClient(cfg.standaloneOptions(addrs, tlsCfg, creds.provider, tracker))
 	}
 }

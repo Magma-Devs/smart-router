@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-source "$__dir"/../useful_commands.sh
 
 # Use absolute paths for logs
 LOGS_DIR=${__dir}/../../debugging/logs

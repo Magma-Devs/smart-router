@@ -225,6 +225,7 @@ type cvDispatchStateMachine struct {
 }
 
 func (m *cvDispatchStateMachine) GetSelection() relaycore.Selection { return relaycore.CrossValidation }
+
 func (m *cvDispatchStateMachine) GetCrossValidationParams() *common.CrossValidationParams {
 	return m.cvParams
 }

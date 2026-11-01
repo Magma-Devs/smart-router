@@ -35,8 +35,13 @@ func TestComputePollInterval_RetryAfterFloors(t *testing.T) {
 	cs.noteFetchOutcome(nil)
 	require.Equal(t, 6*time.Second, cs.computePollInterval(0, 0))
 
-	// A non-rate-limit failure clears it too — the upstream answered, its ask is spent.
+	// A non-rate-limit failure the upstream answered with clears it too — its ask is spent.
+	cs.noteFetchOutcome(common.RateLimited(errors.New("HTTP 429"), 5*time.Minute))
+	cs.noteFetchOutcome(errors.New("json-rpc error -32000: header not found"))
+	require.Equal(t, 6*time.Second, cs.computePollInterval(0, 0))
+
+	// A fetch that got no answer at all is not one: the floor stands (MAG-4165).
 	cs.noteFetchOutcome(common.RateLimited(errors.New("HTTP 429"), 5*time.Minute))
 	cs.noteFetchOutcome(errors.New("connection refused"))
-	require.Equal(t, 6*time.Second, cs.computePollInterval(0, 0))
+	require.Greater(t, cs.computePollInterval(0, 0), 4*time.Minute)
 }

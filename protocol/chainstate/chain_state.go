@@ -100,7 +100,24 @@ type Config struct {
 	// TTL: GetLatestBlock (and the internal consensus baseline) report not-found once the value
 	// is older than this (freshness, T4). Defaults to StalenessWindow when zero.
 	TTL time.Duration
+	// OnRegression, if set, is called once each time the tip moves DOWN — the chain's block
+	// number went backwards (MAG-4153). reason is one of the Regression* constants. It runs
+	// AFTER the ChainState lock is released, so it may read this ChainState back; it must not
+	// block, because it runs on the observation and recompute paths. Reset() does not report:
+	// that is an operator clearing state, not the chain moving.
+	OnRegression func(from, to int64, reason string)
 }
+
+// Regression reasons passed to Config.OnRegression: the only two ways the tip moves down.
+const (
+	// RegressionReasonConsensus — Recompute snapped the tip down to the majority baseline
+	// because it led it by more than OutlierThreshold: a poisoned tip, or a chain revert the
+	// majority of endpoints already agree on.
+	RegressionReasonConsensus = "consensus"
+	// RegressionReasonStaleTip — nothing re-confirmed the tip for a TTL, and a fresh lower
+	// observation was re-adopted: every endpoint now reports below what this chain last saw.
+	RegressionReasonStaleTip = "stale_tip"
+)
 
 // outlierThresholdForBlockTime derives the anti-lie / realignment threshold (in blocks) from a
 // chain's average block time: clamp(round(OutlierTimeBudget / avgBlockTime), floor, ceiling).
@@ -322,6 +339,14 @@ func (cs *ChainState) Reset() {
 // positive peer input to determine whether that value was taken; package tests assert guard
 // behaviour through it.
 func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, advanced bool) {
+	// Registered BEFORE the unlock defer, so it runs AFTER it (defers are LIFO): the regression
+	// hook is never called under the lock.
+	var regressedFrom int64
+	defer func() {
+		if regressedFrom > 0 {
+			cs.reportRegression(regressedFrom, latest, RegressionReasonStaleTip)
+		}
+	}()
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -339,6 +364,7 @@ func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, a
 				return cs.latestBlock, cs.lastObservedAt, false
 			}
 			// Stale-tip downward re-adoption (self-heal from a poisoned/frozen tip).
+			regressedFrom = cs.latestBlock
 			cs.latestBlock = block
 			cs.lastObservedAt = nowReal
 			cs.latestSince = nowReal // the tip block CHANGED — re-establish its age
@@ -499,6 +525,13 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 	nowReal := cs.now()
 	baseline, ok := computeMajorityBaseline(snapshots, nowReal.Add(cs.warpOffsetDuration()), cs.cfg)
 
+	// Same ordering as SetLatestBlock: registered before the unlock defer, so the hook runs after it.
+	var regressedFrom int64
+	defer func() {
+		if regressedFrom > 0 {
+			cs.reportRegression(regressedFrom, baseline, RegressionReasonConsensus)
+		}
+	}()
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	prevBaseline := cs.baseline
@@ -525,6 +558,7 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 			// Snap DOWN: the tip leads consensus implausibly far — an outlier or a liar that got
 			// in before a baseline existed (SetLatestBlock's guard cannot fire on the very first
 			// observation). This is the tip's self-heal from poisoning.
+			regressedFrom = cs.latestBlock
 			cs.latestBlock = baseline
 			cs.lastObservedAt = nowReal
 			cs.latestSince = nowReal
@@ -543,6 +577,13 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 			// fallbacks cannot mistake a consensus-seeded tip for "never observed anything".
 			cs.initialized = true
 		}
+	}
+}
+
+// reportRegression calls Config.OnRegression, if set. Callers must NOT hold cs.mu.
+func (cs *ChainState) reportRegression(from, to int64, reason string) {
+	if cs.cfg.OnRegression != nil {
+		cs.cfg.OnRegression(from, to, reason)
 	}
 }
 

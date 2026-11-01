@@ -110,6 +110,17 @@ func (p *blackholeProxy) freeze() {
 	}
 }
 
+// dropFlows closes every flow open at that moment, both ways, the way a middlebox that resets
+// them would. Flows accepted afterwards pass normally.
+func (p *blackholeProxy) dropFlows() {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	for _, flow := range p.flows {
+		_ = flow.client.Close()
+		_ = flow.upstream.Close()
+	}
+}
+
 // flowCount reports how many flows the proxy has carried, frozen or not.
 func (p *blackholeProxy) flowCount() int {
 	p.lock.Lock()

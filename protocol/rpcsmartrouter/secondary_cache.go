@@ -167,7 +167,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	// requests no tier wins. The caller carries this report on to the provider
 	// result, so the pair survives to the reply either way.
 	cacheReport.SecondaryOutcome = outcome
-	go rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierSecondary, outcome, latencyMs)
+	rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierSecondary, outcome, latencyMs)
 	if !hit {
 		// miss, error, and timeout all degrade to a miss; nothing from the reply is
 		// carried forward, so the request proceeds exactly as it would with no
@@ -182,7 +182,10 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 		return false
 	}
 
-	performance.SanitizeForeignCacheReply(copyReply)
+	// Sanitised with the same directive lists a primary hit is filtered with, so a secondary
+	// hit of an entry answers with the headers a primary hit of the same entry does.
+	interfaceDirectives, collectionDirectives := rpcss.cachedReplyDirectives(protocolMessage)
+	performance.SanitizeForeignCacheReply(copyReply, interfaceDirectives, collectionDirectives)
 	// Re-stamp the zeroed LatestBlock from this router's own GATED tip, so the two tiers
 	// serve the same header set. LatestBlock's only serving-side reader is
 	// appendHeadersToRelayResult, which emits Provider-Latest-Block when the value is
@@ -243,8 +246,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	// value: an entry whose writer recorded no status is served as an assumed 200,
 	// matching a primary hit. (The chainlib serving paths would reach the same result
 	// on their own — each guards with `if relayResult.GetStatusCode() != 0` before
-	// setting an explicit status — but RelayResult also feeds RoundTrip, which copies
-	// StatusCode straight into an http.Response where a zero is not a valid status.)
+	// setting an explicit status.)
 	if relayResult.StatusCode == 0 {
 		relayResult.StatusCode = http.StatusOK
 	}
@@ -265,7 +267,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	analytics.IsArchive = chainqueries.IsArchiveRequest(protocolMessage)
 	analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(protocolMessage)
 	analytics.IsBatch = chainqueries.IsBatchRequest(protocolMessage)
-	go rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
+	rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
 
 	utils.LavaFormatDebug("secondary cache hit",
 		utils.LogAttr("chainId", chainId),

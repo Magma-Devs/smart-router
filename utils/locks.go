@@ -15,12 +15,6 @@ var (
 	TimeoutMutexBoolean, _ = strconv.ParseBool(TimeoutMutex)
 )
 
-type Lockable interface {
-	Lock()
-	TryLock() bool
-	Unlock()
-}
-
 type LavaMutex struct {
 	mu          sync.Mutex
 	quit        chan bool
@@ -92,14 +86,3 @@ func (dm *LavaMutex) Unlock() {
 	}
 	dm.mu.Unlock()
 }
-
-// func main() {
-// 	x := LavaMutex{}
-// 	x.Lock()
-
-// 	time.Sleep(6 * time.Second)
-
-// 	x.Unlock()
-
-// 	return
-// }

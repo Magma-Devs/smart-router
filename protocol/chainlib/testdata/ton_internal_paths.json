@@ -1,0 +1,363 @@
+{
+  "proposal": {
+    "specs": [
+      {
+        "index": "TON",
+        "name": "TON Mainnet",
+        "enabled": true,
+        "block_distance_for_finalized_data": 1,
+        "blocks_in_finalization_proof": 1,
+        "average_block_time": 400,
+        "allowed_block_lag_for_qos_sync": 25,
+        "api_collections": [
+          {
+            "enabled": true,
+            "collection_data": {
+              "api_interface": "rest",
+              "internal_path": "/v2",
+              "type": "GET",
+              "add_on": ""
+            },
+            "apis": [
+              {
+                "name": "/getMasterchainInfo",
+                "block_parsing": {
+                  "parser_arg": [
+                    "latest"
+                  ],
+                  "parser_func": "DEFAULT"
+                },
+                "compute_units": 10,
+                "enabled": true,
+                "category": {
+                  "deterministic": true,
+                  "stateful": 0
+                }
+              },
+              {
+                "name": "/getConsensusBlock",
+                "block_parsing": {
+                  "parser_arg": [
+                    "latest"
+                  ],
+                  "parser_func": "DEFAULT"
+                },
+                "compute_units": 10,
+                "enabled": true,
+                "category": {
+                  "deterministic": true,
+                  "stateful": 0
+                }
+              },
+              {
+                "name": "/lookupBlock",
+                "block_parsing": {
+                  "parser_arg": [
+                    "latest"
+                  ],
+                  "parser_func": "DEFAULT"
+                },
+                "compute_units": 10,
+                "enabled": true,
+                "category": {
+                  "deterministic": true,
+                  "stateful": 0
+                },
+                "parsers": [
+                  {
+                    "parse_path": ".params.seqno",
+                    "parse_type": "BLOCK_LATEST"
+                  }
+                ]
+              }
+            ],
+            "headers": [],
+            "inheritance_apis": [],
+            "parse_directives": [
+              {
+                "function_tag": "GET_BLOCKNUM",
+                "function_template": "/getMasterchainInfo",
+                "result_parsing": {
+                  "parser_arg": [
+                    "0",
+                    "result",
+                    "last",
+                    "seqno"
+                  ],
+                  "parser_func": "PARSE_CANONICAL"
+                },
+                "api_name": "/getMasterchainInfo"
+              },
+              {
+                "function_tag": "GET_BLOCK_BY_NUM",
+                "function_template": "/lookupBlock?workchain=-1&shard=-9223372036854775808&seqno=%d",
+                "result_parsing": {
+                  "parser_arg": [
+                    "0",
+                    "result",
+                    "root_hash"
+                  ],
+                  "parser_func": "PARSE_CANONICAL"
+                },
+                "api_name": "/lookupBlock"
+              }
+            ],
+            "verifications": [
+              {
+                "name": "chain-id",
+                "parse_directive": {
+                  "function_template": "/getMasterchainInfo",
+                  "function_tag": "VERIFICATION",
+                  "result_parsing": {
+                    "parser_arg": [
+                      "0",
+                      "result",
+                      "init",
+                      "root_hash"
+                    ],
+                    "parser_func": "PARSE_CANONICAL"
+                  },
+                  "api_name": "/getMasterchainInfo"
+                },
+                "values": [
+                  {
+                    "expected_value": "F6OpKZKqvqeFp6CQmFomXNMfMj2EnaUSOXN+Mh+wVWk="
+                  }
+                ]
+              }
+            ],
+            "extensions": []
+          },
+          {
+            "enabled": true,
+            "collection_data": {
+              "api_interface": "rest",
+              "internal_path": "/v3",
+              "type": "GET",
+              "add_on": ""
+            },
+            "apis": [
+              {
+                "name": "/blocks",
+                "block_parsing": {
+                  "parser_arg": [
+                    "latest"
+                  ],
+                  "parser_func": "DEFAULT"
+                },
+                "compute_units": 10,
+                "enabled": true,
+                "category": {
+                  "deterministic": true,
+                  "stateful": 0
+                }
+              },
+              {
+                "name": "/masterchainInfo",
+                "block_parsing": {
+                  "parser_arg": [
+                    "latest"
+                  ],
+                  "parser_func": "DEFAULT"
+                },
+                "compute_units": 10,
+                "enabled": true,
+                "category": {
+                  "deterministic": true,
+                  "stateful": 0
+                }
+              },
+              {
+                "name": "/transactionsByMasterchainBlock",
+                "block_parsing": {
+                  "parser_arg": [
+                    "latest"
+                  ],
+                  "parser_func": "DEFAULT"
+                },
+                "compute_units": 10,
+                "enabled": true,
+                "category": {
+                  "deterministic": true,
+                  "stateful": 0
+                }
+              }
+            ],
+            "headers": [],
+            "inheritance_apis": [],
+            "parse_directives": [
+              {
+                "function_tag": "GET_BLOCKNUM",
+                "function_template": "/masterchainInfo",
+                "result_parsing": {
+                  "parser_arg": [
+                    "0",
+                    "last",
+                    "seqno"
+                  ],
+                  "parser_func": "PARSE_CANONICAL"
+                },
+                "api_name": "/masterchainInfo"
+              },
+              {
+                "function_tag": "GET_BLOCK_BY_NUM",
+                "function_template": "/blocks?workchain=-1&seqno=%d",
+                "result_parsing": {
+                  "parser_arg": [
+                    "0",
+                    "blocks",
+                    "0",
+                    "root_hash"
+                  ],
+                  "parser_func": "PARSE_CANONICAL"
+                },
+                "api_name": "/blocks"
+              }
+            ],
+            "verifications": [],
+            "extensions": []
+          },
+          {
+            "enabled": true,
+            "collection_data": {
+              "api_interface": "rest",
+              "internal_path": "/v2",
+              "type": "POST",
+              "add_on": ""
+            },
+            "apis": [
+              {
+                "name": "/runGetMethod",
+                "block_parsing": {
+                  "parser_arg": [
+                    "latest"
+                  ],
+                  "parser_func": "DEFAULT"
+                },
+                "compute_units": 10,
+                "enabled": true,
+                "category": {
+                  "deterministic": false,
+                  "stateful": 0
+                }
+              }
+            ],
+            "headers": [],
+            "inheritance_apis": [],
+            "parse_directives": [],
+            "extensions": [],
+            "verifications": []
+          },
+          {
+            "enabled": true,
+            "collection_data": {
+              "api_interface": "rest",
+              "internal_path": "/v3",
+              "type": "POST",
+              "add_on": ""
+            },
+            "apis": [
+              {
+                "name": "/runGetMethod",
+                "block_parsing": {
+                  "parser_arg": [
+                    "latest"
+                  ],
+                  "parser_func": "DEFAULT"
+                },
+                "compute_units": 10,
+                "enabled": true,
+                "category": {
+                  "deterministic": false,
+                  "stateful": 0
+                }
+              }
+            ],
+            "headers": [],
+            "inheritance_apis": [],
+            "parse_directives": [],
+            "extensions": [],
+            "verifications": []
+          }
+        ]
+      },
+      {
+        "index": "TONT",
+        "name": "TON Testnet",
+        "enabled": true,
+        "block_distance_for_finalized_data": 1,
+        "blocks_in_finalization_proof": 1,
+        "average_block_time": 400,
+        "allowed_block_lag_for_qos_sync": 25,
+        "imports": [
+          "TON"
+        ],
+        "api_collections": [
+          {
+            "enabled": true,
+            "collection_data": {
+              "api_interface": "rest",
+              "internal_path": "/v2",
+              "type": "GET",
+              "add_on": ""
+            },
+            "apis": [],
+            "verifications": [
+              {
+                "name": "chain-id",
+                "values": [
+                  {
+                    "expected_value": "gj+B8wb/AmlPk1z1AhVI484rhrUpgSr2oSFIh56VoSg="
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "enabled": true,
+            "collection_data": {
+              "api_interface": "rest",
+              "internal_path": "/v3",
+              "type": "GET",
+              "add_on": ""
+            },
+            "apis": [],
+            "verifications": []
+          },
+          {
+            "enabled": true,
+            "collection_data": {
+              "api_interface": "rest",
+              "internal_path": "/v2",
+              "type": "POST",
+              "add_on": ""
+            },
+            "apis": [],
+            "headers": [],
+            "inheritance_apis": [],
+            "parse_directives": [],
+            "extensions": [],
+            "verifications": []
+          },
+          {
+            "enabled": true,
+            "collection_data": {
+              "api_interface": "rest",
+              "internal_path": "/v3",
+              "type": "POST",
+              "add_on": ""
+            },
+            "apis": [],
+            "headers": [],
+            "inheritance_apis": [],
+            "parse_directives": [],
+            "extensions": [],
+            "verifications": []
+          }
+        ]
+      }
+    ],
+    "title": "TON/TONT trimmed for tests: two internal paths, each with its own head directive",
+    "description": "Trimmed copy of lava-specs ton.json (origin/main, 2026-10-04). Keeps every collection with its parse_directives and verifications and a handful of apis. Do not use as a runtime spec."
+  }
+}

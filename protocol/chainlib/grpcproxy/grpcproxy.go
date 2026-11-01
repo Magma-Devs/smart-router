@@ -19,8 +19,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const MaxCallRecvMsgSize = 1024 * 1024 * 512 // 512MB for large debug responses
-
 type ProxyCallBack = func(ctx context.Context, method string, reqBody []byte) ([]byte, metadata.MD, error)
 
 // StreamProxyCallBack is the server-streaming counterpart of ProxyCallBack. It is
@@ -36,8 +34,14 @@ type StreamProxyCallBack = func(ctx context.Context, method string, reqBody []by
 type StreamResponse struct {
 	// Replies carries already-encoded response messages, each one a marshalled
 	// instance of the method's output type. The producer closes the channel when
-	// the upstream stream ends; the proxy then closes the client stream with OK.
+	// the upstream stream ends; the proxy then closes the client stream with OK,
+	// or with the status Err reports.
 	Replies <-chan []byte
+
+	// Err, when set, is called once after Replies has closed. A non-nil error ends
+	// the client stream with that status instead of OK: the router gave the stream
+	// up rather than seeing it end, and the client should not take it for a normal end.
+	Err func() error
 
 	// Metadata is sent as response headers ahead of the first message. This is
 	// where the router-assigned subscription id belongs: a gRPC stream has no room
@@ -56,10 +60,6 @@ type HealthReporter interface {
 	IsHealthy() bool
 }
 
-func NewGRPCProxy(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter) (*grpc.Server, *http.Server, error) {
-	return NewGRPCProxyWithReflection(cb, healthCheckPath, cmdFlags, healthReporter, nil, nil)
-}
-
 // NewGRPCProxyWithReflection creates a gRPC proxy. A separate gRPC server answers
 // reflection, v1 and v1alpha, from reflectionSource, which is what lets tools like
 // grpcurl work against the router; without a source it answers for the reflection
@@ -69,7 +69,7 @@ func NewGRPCProxy(cb ProxyCallBack, healthCheckPath string, cmdFlags common.Cons
 // first, so server-streaming methods are served as streams instead of being forced
 // through the single-message unary path.
 func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionSource ReflectionSource, streamCallback StreamProxyCallBack) (*grpc.Server, *http.Server, error) {
-	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(MaxCallRecvMsgSize) // setting receive size to 32mb instead of 4mb default
+	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(common.GRPCMaxCallRecvMsgSize) // 512 MB instead of grpc-go's 4 MB default
 	s := grpc.NewServer(grpc.UnknownServiceHandler(makeProxyFunc(cb, streamCallback)), grpc.ForceServerCodec(RawBytesCodec{}), serverReceiveMaxMessageSize)
 	grpc_health_v1.RegisterHealthServer(s, health.NewServer())
 
@@ -188,7 +188,8 @@ func makeProxyFunc(callBack ProxyCallBack, streamCallBack StreamProxyCallBack) g
 // upstream stream and fan it out to per-client channels, but nothing on the serving
 // side kept a client connection alive to read one (MAG-2643).
 //
-// Returns nil on upstream end-of-stream, which closes the client stream with OK.
+// Returns nil on upstream end-of-stream, which closes the client stream with OK, unless
+// response.Err reports why the stream was given up instead.
 func serveServerStream(stream grpc.ServerStream, response *StreamResponse) error {
 	// Runs on every exit path, so a client that disconnects mid-stream is dropped
 	// from the upstream subscription rather than leaving it running unread.
@@ -211,6 +212,9 @@ func serveServerStream(stream grpc.ServerStream, response *StreamResponse) error
 			return status.FromContextError(ctx.Err()).Err()
 		case msg, open := <-response.Replies:
 			if !open {
+				if response.Err != nil {
+					return response.Err()
+				}
 				return nil
 			}
 			if err := stream.SendMsg(msg); err != nil {

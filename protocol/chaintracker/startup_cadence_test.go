@@ -93,6 +93,30 @@ func TestChainTracker_FlatCadence_StartupRespectsInterval(t *testing.T) {
 		"first periodic poll must be ~one interval after init completes, not during/right after init")
 }
 
+// TestChainTracker_FlatCadence_FirstPollWaitsTheCappedInterval: the first periodic poll after init
+// waits what every later successful poll waits, the flat interval capped at BACKOFF_MAX_TIME
+// (MAG-4249). It used to wait the raw flat interval, so a 10-minute chain's tracker first polled 5
+// minutes after init (40 at the slowest divisor) and only then every minute, while the router
+// counts a url's answer for a window sized from the one-minute cadence. The interval is read right
+// after init, through the accessor /debug/endpoint-state reports, so no poll has to fire.
+func TestChainTracker_FlatCadence_FirstPollWaitsTheCappedInterval(t *testing.T) {
+	for _, flat := range []time.Duration{
+		40 * time.Millisecond,
+		chaintracker.BACKOFF_MAX_TIME,
+		75 * time.Second,
+		5 * time.Minute,
+		40 * time.Minute,
+	} {
+		ctx, cancel := context.WithCancel(context.Background())
+		f := &recordingFetcher{MockChainFetcher: NewMockChainFetcher(1000, 1, nil)}
+		ct, err := chaintracker.NewChainTracker(ctx, f, flatTrackerConfig(flat))
+		require.NoError(t, err)
+		require.NoError(t, ct.StartAndServe(ctx))
+		require.Equal(t, min(flat, chaintracker.BACKOFF_MAX_TIME), ct.CurrentPollInterval(), "flat interval %v", flat)
+		cancel()
+	}
+}
+
 // TestChainTracker_FlatCadence_FailedInitRetriesAreSpaced proves failed initialization
 // fetches are spaced by the flat interval (no uncontrolled startup burst) — finding 3.
 func TestChainTracker_FlatCadence_FailedInitRetriesAreSpaced(t *testing.T) {

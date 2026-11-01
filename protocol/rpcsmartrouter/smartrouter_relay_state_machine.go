@@ -15,16 +15,8 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-// Using interfaces from relaycore
-type (
-	RelayStateMachine          = relaycore.RelayStateMachine
-	ResultsCheckerInf          = relaycore.ResultsCheckerInf
-	RelayStateSendInstructions = relaycore.RelayStateSendInstructions
-)
-
-// SmartRouterRelayStateMachine is an alias for the unified state machine type.
-// Kept for backward compatibility with existing tests.
-type SmartRouterRelayStateMachine = relaycore.UnifiedRelayStateMachine
+// RelayStateMachine is the relaycore state machine interface the server drives.
+type RelayStateMachine = relaycore.RelayStateMachine
 
 // SmartRouterRelaySender is kept as a type alias for the unified interface
 // so that existing test mocks continue to compile.
@@ -51,20 +43,6 @@ func SmartRouterPolicyConfig() relaypolicy.PolicyConfig {
 		CircuitBreakerThreshold: 2,
 		SendRelayAttempts:       SendRelayAttempts,
 	}
-}
-
-// NewSmartRouterRelayStateMachine creates a SmartRouter-mode unified state machine with no per-method
-// policy resolver (selection is purely header-driven). Kept for tests and callers that do not wire a
-// policy resolver.
-func NewSmartRouterRelayStateMachine(
-	ctx context.Context,
-	usedProviders *lavasession.UsedProviders,
-	relaySender SmartRouterRelaySender,
-	protocolMessage chainlib.ProtocolMessage,
-	analytics *metrics.RelayMetrics,
-	debugRelays bool,
-) (RelayStateMachine, error) {
-	return NewSmartRouterRelayStateMachineWithPolicy(ctx, usedProviders, relaySender, protocolMessage, analytics, debugRelays, nil, "", "")
 }
 
 // NewSmartRouterRelayStateMachineWithPolicy is the production constructor: it consults the per-method
@@ -99,8 +77,9 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		//
 		// A GraphQL request that selects several root fields is named after all of them, and that
 		// combined name matches no policy. Each root's policy is consulted instead: a forbid on any
-		// root forbids the request, and otherwise the strictest policy that applies wins, so bundling
-		// a governed operation with another can neither escape its policy nor weaken it.
+		// root keeps the caller's headers out of the whole request, an enabled policy on any root
+		// still applies, and the strictest policy that applies wins, so bundling a governed operation
+		// with another can neither escape its policy nor weaken it.
 		policyMethods := crossValidationPolicyMethods(apiInterface, method)
 		for _, policyMethod := range policyMethods {
 			if resolver.ForbidsCallerCV(chainID, apiInterface, policyMethod) {
@@ -126,10 +105,19 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 		// version of this comment claimed: validateCrossValidationStartup only rejects an ENABLED
 		// policy whose own method is stateful, and says nothing about a write with no policy
 		// borrowing the caller's headers. This skip is what keeps it off.
-		if !forbidCallerCV && !routesAsWrite {
-			caller, callerPresent, err := protocolMessage.GetCrossValidationParameters()
-			if callerPresent && err != nil {
-				return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
+		if !routesAsWrite {
+			// A forbid keeps out the caller's headers, never the operator's own policies: an enabled
+			// policy on another root of the same request still applies, resolved as though the caller
+			// sent no headers. The forbid used to skip this lookup too, so an enabled policy did not
+			// apply to a request that also selected a forbidden root (MAG-4361).
+			var caller common.CrossValidationParams
+			var callerPresent bool
+			if !forbidCallerCV {
+				var err error
+				caller, callerPresent, err = protocolMessage.GetCrossValidationParameters()
+				if callerPresent && err != nil {
+					return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
+				}
 			}
 			for _, policyMethod := range policyMethods {
 				if eff, applies := resolver.Resolve(chainID, apiInterface, policyMethod, caller, callerPresent); applies {
@@ -152,7 +140,8 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 						utils.LogAttr("GUID", ctx))
 				}
 			}
-		} else if debugRelays {
+		}
+		if debugRelays && (forbidCallerCV || routesAsWrite) {
 			// Two reasons reach here now, and naming the wrong one sends an operator looking for
 			// a policy nobody wrote: before the write skip above, this branch was reachable only
 			// when a forbid policy existed. Both can hold at once, and then both are named.

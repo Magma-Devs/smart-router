@@ -3,6 +3,7 @@ package keeper
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -34,11 +35,11 @@ func GetSpecFromLocalDirs(specPaths []string, index string) (types.Spec, error) 
 	for _, specPath := range specPaths {
 		_ = filepath.WalkDir(specPath, func(path string, d fs.DirEntry, err error) error {
 			if err != nil || d.IsDir() {
-				return nil
+				return nil //nolint:nilerr // an unreadable entry is skipped, not fatal: this loader pools whatever it can read
 			}
 			proposal, err := decodeProposal(path)
 			if err != nil {
-				return nil // skip unparseable files
+				return nil //nolint:nilerr // skip unparseable files; GetAllSpecsFromLocalDir is the loader that reports them
 			}
 			for _, spec := range proposal.Proposal.Specs {
 				allSpecs[spec.Index] = spec
@@ -108,11 +109,46 @@ func GetAllSpecsFromFile(path string) (map[string]types.Spec, error) {
 // Returns a map of specs keyed by their chain ID (Index).
 // Later files in directory order override earlier ones for the same chain ID.
 func GetAllSpecsFromLocalDir(specPath string) (map[string]types.Spec, error) {
-	specs := make(map[string]types.Spec)
-	var errs []error
+	specs, errs, err := walkLocalSpecDir(specPath)
+	if err != nil {
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 && len(specs) == 0 {
+		// Only return error if we couldn't load any specs
+		return nil, fmt.Errorf("failed to load any specs: %v", errs)
+	}
+	if len(errs) > 0 {
+		// A corrupt file beside good ones used to vanish silently; the remote loaders warn, so
+		// does this one.
+		utils.LavaFormatWarning("Some spec files failed to load from the local directory", nil,
+			utils.LogAttr("directory", specPath),
+			utils.LogAttr("error_count", len(errs)),
+			utils.LogAttr("errors", errors.Join(errs...)))
+	}
+
+	// Log loaded specs for debugging
+	if len(specs) > 0 {
+		specIDs := make([]string, 0, len(specs))
+		for id := range specs {
+			specIDs = append(specIDs, id)
+		}
+		utils.LavaFormatInfo("Loaded specs from local directory",
+			utils.LogAttr("spec_count", len(specs)),
+			utils.LogAttr("directory", specPath),
+			utils.LogAttr("spec_ids", strings.Join(specIDs, ", ")))
+	}
+
+	return specs, nil
+}
+
+// walkLocalSpecDir decodes every .json proposal under specPath. Files that cannot be read or
+// decoded are reported in errs, not returned as err, so one corrupt file does not hide its siblings.
+func walkLocalSpecDir(specPath string) (specs map[string]types.Spec, errs []error, err error) {
+	specs = make(map[string]types.Spec)
 
 	// Walk through all files and subdirectories in the specPath
-	err := filepath.WalkDir(specPath, func(path string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(specPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			errs = append(errs, fmt.Errorf("error accessing path %s: %w", path, err))
 			return nil // Continue walking, but record the error
@@ -140,28 +176,7 @@ func GetAllSpecsFromLocalDir(specPath string) (map[string]types.Spec, error) {
 		}
 		return nil
 	})
-	if err != nil {
-		errs = append(errs, err)
-	}
-
-	if len(errs) > 0 && len(specs) == 0 {
-		// Only return error if we couldn't load any specs
-		return nil, fmt.Errorf("failed to load any specs: %v", errs)
-	}
-
-	// Log loaded specs for debugging
-	if len(specs) > 0 {
-		specIDs := make([]string, 0, len(specs))
-		for id := range specs {
-			specIDs = append(specIDs, id)
-		}
-		utils.LavaFormatInfo("Loaded specs from local directory",
-			utils.LogAttr("spec_count", len(specs)),
-			utils.LogAttr("directory", specPath),
-			utils.LogAttr("spec_ids", strings.Join(specIDs, ", ")))
-	}
-
-	return specs, nil
+	return specs, errs, err
 }
 
 // GetAllSpecsFromPath loads all specs from a local path (file or directory) without expansion.

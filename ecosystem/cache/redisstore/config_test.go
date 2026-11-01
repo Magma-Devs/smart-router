@@ -349,7 +349,9 @@ func TestClusterOptionsMapping(t *testing.T) {
 
 	require.Equal(t, cfg.Addresses, opts.Addrs,
 		"the configuration endpoint is the discovery seed — never a full node list")
-	require.Same(t, provider, opts.StreamingCredentialsProvider.(*StreamingProvider))
+	got, ok := opts.StreamingCredentialsProvider.(*StreamingProvider)
+	require.True(t, ok)
+	require.Same(t, provider, got)
 }
 
 // MAG-3728: the streaming provider is the piece that kept abandoned

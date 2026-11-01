@@ -1,48 +1,35 @@
 package performance
 
 import (
-	"strings"
-
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
-
-// foreignReplyMetadataAllowlist is the set of response headers a foreign cache entry
-// is allowed to carry through the trust boundary. It holds exactly the headers that
-// describe how to decode the payload the entry already delivers — nothing that names,
-// locates, or otherwise identifies whoever produced it.
-//
-// An allowlist rather than a denylist: Metadata is an open set of arbitrary upstream
-// HTTP/gRPC response headers (X-Provider-ID, Via, Server, ...) and no denylist over it
-// can be proven complete. An allowlist inverts that burden — a header this router has
-// never heard of is dropped by default, and the entries below are the two whose absence
-// is a serving regression rather than a privacy win. Compared case-insensitively:
-// HTTP header names are case-insensitive and REST populates Metadata straight from
-// http.Header.
-//
-// Why these two and not more:
-//
-//   - Content-Type: the primary tier passes the upstream value through, and the fiber
-//     serving paths only pre-set application/json as a default that upstream metadata
-//     overrides. Dropping it silently retypes every non-JSON REST body.
-//   - Content-Encoding: the stored Data is encoded exactly as the header says. Keeping
-//     one without the other hands the caller a body it cannot decode.
-//
-// Content-Length is deliberately NOT here: the payload is re-stamped by the request's
-// outputFormatter before it is served, so a replayed length can disagree with the body.
-//
-// The list itself is common.TransportReplyHeaders, shared with the live relay path's
-// filter so the two tiers cannot drift apart on what a client needs to decode a body.
-var foreignReplyMetadataAllowlist = common.TransportReplyHeaders
 
 // SanitizeForeignCacheReply strips identity-bearing data from a cache reply that
 // crossed a trust boundary — the secondary cache (docs/SECONDARY-CACHE.md).
 // Entries in a foreign cache may have been written by other router versions or other
-// software lineages. Provider signatures are zeroed and Metadata is reduced to the
-// transport-decoding allowlist above; everything else in it goes, including names this
-// router has never heard of. Headers the router mints itself — Lava-Provider-Address:
-// Cached, the GUID, the version header — are appended by appendHeadersToRelayResult
-// after sanitization and are unaffected.
+// software lineages. Provider signatures are zeroed and Metadata is reduced by the one
+// reply-header filter every path to the client runs, common.FilterUpstreamReplyMetadata,
+// over the directive lists given: the transport pair a client needs to decode the body,
+// the 429 pair, and the headers the chain spec declares in the reply direction. Nothing
+// else survives, including names this router has never heard of. An allowlist rather
+// than a denylist: Metadata is an open set of arbitrary upstream HTTP/gRPC response
+// headers (X-Provider-ID, Via, Server, ...) and no denylist over it can be proven
+// complete, so a header the filter has never heard of is dropped by default. The filter
+// is shared with the live relay and the primary cache hit so the tiers cannot drift on
+// what a client sees (MAG-4278: the secondary tier used to keep only the transport pair
+// and so dropped the Aptos ledger-state headers a primary hit of the same entry
+// replays). Headers the router mints itself — Lava-Provider-Address: Cached, the GUID,
+// the version header — are appended by appendHeadersToRelayResult after sanitization and
+// are unaffected, and a directive naming one of them is ignored by the filter.
+//
+// Content-Type is load-bearing rather than cosmetic: the fiber serving paths only pre-set
+// application/json as a default that upstream metadata overrides, so dropping it would
+// hand a caller Protobuf or CSV bytes labelled as JSON. Content-Encoding goes with it:
+// the stored Data is encoded exactly as the header says. Content-Length is deliberately
+// not kept: the payload is re-stamped by the request's outputFormatter before it is
+// served, so a replayed length can disagree with the body.
 //
 // LatestBlock is zeroed, and it is the field with teeth. On the serving path it is
 // nearly inert — the MAG-2160 rule already keeps a cached reply's LatestBlock out of tip
@@ -71,29 +58,12 @@ var foreignReplyMetadataAllowlist = common.TransportReplyHeaders
 // The caller must pass a clone it owns: the reply is mutated in place, and the
 // sanitized clone must be the only copy used for both serving the caller and
 // backfilling the primary cache.
-func SanitizeForeignCacheReply(reply *pairingtypes.RelayReply) {
+func SanitizeForeignCacheReply(reply *pairingtypes.RelayReply, directiveLists ...[]*spectypes.Header) {
 	if reply == nil {
 		return
 	}
 	reply.Sig = nil
 	reply.SigBlocks = nil
-	reply.Metadata = filterForeignReplyMetadata(reply.Metadata)
+	reply.Metadata = common.FilterUpstreamReplyMetadata(reply.Metadata, directiveLists...)
 	reply.LatestBlock = 0
-}
-
-// filterForeignReplyMetadata keeps only the allowlisted transport headers, preserving
-// their original order and casing. Returns nil rather than an empty slice when nothing
-// survives, so an entry with no usable headers is indistinguishable from one that
-// carried none.
-func filterForeignReplyMetadata(metadata []pairingtypes.Metadata) []pairingtypes.Metadata {
-	var kept []pairingtypes.Metadata
-	for _, md := range metadata {
-		for _, allowed := range foreignReplyMetadataAllowlist {
-			if strings.EqualFold(md.Name, allowed) {
-				kept = append(kept, md)
-				break
-			}
-		}
-	}
-	return kept
 }

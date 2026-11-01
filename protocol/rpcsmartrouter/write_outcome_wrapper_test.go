@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 	"time"
 
@@ -181,7 +182,7 @@ func TestWriteOutcomeIsUnknown_Wrapper(t *testing.T) {
 		processor.SetStopReason(relaycore.StopReasonProcessingTimeout)
 		// EOF classifies as PROTOCOL_CONNECTION_CLOSED, which carries MayHaveReachedNode: an
 		// established connection died after the request was already on the wire.
-		relaycoretest.SendProtocolError(processor, "lava@a", 0, errors.New("EOF"))
+		relaycoretest.SendProtocolError(processor, "lava@a", 0, io.EOF)
 		drain(t, processor)
 		require.True(t, writeOutcomeIsUnknown(msg, processor),
 			"nobody is silent, but a connection that died mid-delivery settles nothing")
@@ -219,6 +220,18 @@ func TestWithUnclearWriteStatus(t *testing.T) {
 		stamped := withUnclearWriteStatus(stored)
 		require.Equal(t, 503, stored.StatusCode, "the caller's result must be left alone")
 		require.Equal(t, 500, stamped.StatusCode)
+	})
+
+	// An unclear write is the one failure where the router speaks instead of the node: the
+	// upstream's forwarded answer is dropped so the listener renders the unclear-write error
+	// (MAG-4218). The caller's copy keeps it.
+	t.Run("the upstream's forwarded answer is dropped", func(t *testing.T) {
+		upstream := &common.ClientFacingError{UpstreamStatus: 503, UpstreamStatusText: "503 Service Unavailable"}
+		stored := &common.RelayResult{StatusCode: 503, ClientFacing: upstream}
+		stamped := withUnclearWriteStatus(stored)
+		require.Nil(t, stamped.GetClientFacing())
+		require.Equal(t, 500, stamped.StatusCode)
+		require.Same(t, upstream, stored.ClientFacing, "the caller's result must be left alone")
 	})
 }
 

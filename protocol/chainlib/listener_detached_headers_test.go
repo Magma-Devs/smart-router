@@ -42,8 +42,6 @@ func (r *headerKeepingRelay) SendParsedRelay(ctx context.Context, analytics *met
 	return nil, errors.New("not used")
 }
 
-func (r *headerKeepingRelay) CancelSubscriptionContext(subscriptionKey string) {}
-
 // keptValues reads, now, the value each relay was handed for header name.
 func (r *headerKeepingRelay) keptValues(name string) []string {
 	r.mu.Lock()
@@ -79,6 +77,9 @@ func TestListeners_KeepNoHeaderPastTheRequest(t *testing.T) {
 	newTendermint := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewTendermintRpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, nil, nil)
 	}
+	newGraphQL := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+		return NewGraphQLChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger)
+	}
 	for _, tc := range []struct {
 		name, apiInterface, method, path, body string
 		newListener                            func(context.Context, *lavasession.RPCEndpoint, RelaySender, *metrics.RPCConsumerLogs) ChainListener
@@ -88,6 +89,8 @@ func TestListeners_KeepNoHeaderPastTheRequest(t *testing.T) {
 		{"rest GET", spectypes.APIInterfaceRest, http.MethodGet, "/cosmos/base/tendermint/v1beta1/blocks/latest", "", newRest},
 		{"tendermintrpc POST", spectypes.APIInterfaceTendermintRPC, http.MethodPost, "/", jsonBody, newTendermint},
 		{"tendermintrpc GET", spectypes.APIInterfaceTendermintRPC, http.MethodGet, "/status", "", newTendermint},
+		// The GraphQL listener was written after the detached-header fix from the old shape (MAG-4278).
+		{"graphql POST", spectypes.APIInterfaceGraphQL, http.MethodPost, "/", `{"query":"{ chainIdentifier }"}`, newGraphQL},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())

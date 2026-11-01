@@ -91,18 +91,3 @@ func TestReplyHeaderDirectivesAreNilWithoutAny(t *testing.T) {
 	parser.SetSpec(spec)
 	require.Nil(t, parser.ReplyHeaderDirectives())
 }
-
-func TestHeaderPassesOnReply(t *testing.T) {
-	passes := map[spectypes.Header_HeaderType]bool{
-		spectypes.Header_pass_send:     false,
-		spectypes.Header_pass_reply:    true,
-		spectypes.Header_pass_both:     true,
-		spectypes.Header_pass_ignore:   true,
-		spectypes.Header_pass_nullify:  false,
-		spectypes.Header_pass_override: false,
-	}
-	require.Len(t, passes, len(spectypes.Header_HeaderType_name), "every kind has a verdict")
-	for kind, want := range passes {
-		require.Equalf(t, want, HeaderPassesOnReply(kind), "%s", kind)
-	}
-}

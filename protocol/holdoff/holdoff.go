@@ -16,6 +16,11 @@
 //     the point: a fleet held off by one vendor-wide limit must not return in a
 //     synchronized burst.
 //
+//   - One strike per hold-off. A 429 that arrives while the URL is still held off adds no
+//     strike and does not move the hold-off, unless its Retry-After asks for longer than
+//     what is left. A burst refused inside one quota window is one refusal, not one per
+//     request that was in flight.
+//
 //   - Any answer clears. An upstream that answered a request — even with a genuine
 //     failure — is no longer refusing us for load, so the URL's strikes and the
 //     provider escalation are dropped and later failures reach their normal handling
@@ -109,8 +114,15 @@ func NewRegistryWithClock(now func() time.Time) *Registry {
 }
 
 // RecordRateLimit notes a 429 from url, owned by provider. retryAfter is what the
-// upstream asked for (0 when it said nothing) and floors the hold-off. Returns the
-// applied hold-off so callers can log what was decided.
+// upstream asked for (0 when it said nothing) and floors the hold-off. Returns how long
+// url is now held off, so callers can log what was decided and hand it on as a wait.
+//
+// A strike is a hold-off that ended in another 429, not a 429. One that lands while url is
+// still held off is the same refusal again: a vendor's per-second quota answers a burst with
+// a 429 per request already in flight, and counting each as a strike took one second of them
+// to the 30-minute cap (MAG-4386). It adds no strike and leaves the hold-off where it was —
+// the return is what is left of it — unless the upstream asked for longer than that, which
+// extends the hold-off to the ask, still without a strike.
 func (r *Registry) RecordRateLimit(provider, url string, retryAfter time.Duration) time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -128,25 +140,29 @@ func (r *Registry) RecordRateLimit(provider, url string, retryAfter time.Duratio
 		ps.urls[url] = e
 	}
 
-	e.strikes++
-	d := exponentialFor(e.strikes)
-	if retryAfter > d {
-		d = retryAfter
-	}
-	if d > maxUpstreamHoldoff {
-		d = maxUpstreamHoldoff
-	}
-	d += time.Duration(r.randFloat() * JitterFactor * float64(d))
-	if d > maxUpstreamHoldoff {
-		d = maxUpstreamHoldoff
-	}
-	e.readyAt = now.Add(d)
 	e.lastSeen = now
-	metricRecorded(provider, d)
+	if e.readyAt.After(now) {
+		if retryAfter > e.readyAt.Sub(now) {
+			if d := r.boundedWithJitterLocked(retryAfter); now.Add(d).After(e.readyAt) {
+				e.readyAt = now.Add(d)
+				metricRecorded(provider, d)
+			}
+		}
+	} else {
+		e.strikes++
+		d := exponentialFor(e.strikes)
+		if retryAfter > d {
+			d = retryAfter
+		}
+		d = r.boundedWithJitterLocked(d)
+		e.readyAt = now.Add(d)
+		metricRecorded(provider, d)
+	}
 
 	// Escalate when enough distinct URLs of this provider are held off at once. The
 	// provider-wide hold-off ends when its longest-held member does — and any answered
-	// request drops it sooner.
+	// request drops it sooner. Checked on every 429, a repeat included, as before: which
+	// URLs are held is the question, not whether this 429 added a strike.
 	held := 0
 	latest := time.Time{}
 	for _, ue := range ps.urls {
@@ -163,15 +179,40 @@ func (r *Registry) RecordRateLimit(provider, url string, retryAfter time.Duratio
 		}
 		ps.escalatedUntil = latest
 	}
+	return e.readyAt.Sub(now)
+}
+
+// boundedWithJitterLocked bounds a hold-off at maxUpstreamHoldoff and extends it by the
+// jitter, bounded again so the worst case stays within the parser's limit. Called under mu.
+func (r *Registry) boundedWithJitterLocked(d time.Duration) time.Duration {
+	if d > maxUpstreamHoldoff {
+		d = maxUpstreamHoldoff
+	}
+	d += time.Duration(r.randFloat() * JitterFactor * float64(d))
+	if d > maxUpstreamHoldoff {
+		d = maxUpstreamHoldoff
+	}
 	return d
 }
 
 // RecordAnswer notes that url answered a request — with anything at all, success or a
 // genuine failure. The URL starts clean and the provider escalation is dropped: an
 // account that is serving again must not stay locked out by stale strikes.
+//
+// The URL's url-only entry (provider == url: the per-url chain tracker, WS and gRPC
+// subscriptions) is dropped too. Those paths record a 429 under the URL alone, and the
+// relay path answers under the provider's name; without this a relay serving the URL
+// fine would leave the URL's own strikes standing (MAG-4165).
 func (r *Registry) RecordAnswer(provider, url string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if provider != url {
+		r.clearLocked(url, url)
+	}
+	r.clearLocked(provider, url)
+}
+
+func (r *Registry) clearLocked(provider, url string) {
 	ps := r.providers[provider]
 	if ps == nil {
 		return

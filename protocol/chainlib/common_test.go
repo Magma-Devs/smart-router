@@ -17,7 +17,6 @@ import (
 	"github.com/gofiber/websocket/v2"
 	websocket2 "github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
-	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -420,10 +419,6 @@ func TestParsedMessage_GetRPCMessage(t *testing.T) {
 
 type mockRPCInput struct {
 	chainproxy.BaseMessage
-}
-
-func (m *mockRPCInput) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	return ""
 }
 
 func (m *mockRPCInput) GetRawRequestHash() ([]byte, error) {

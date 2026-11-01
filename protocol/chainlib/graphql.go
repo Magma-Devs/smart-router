@@ -55,10 +55,6 @@ func NewGraphQLChainParser() (chainParser *GraphQLChainParser, err error) {
 	return parser, nil
 }
 
-func (apip *GraphQLChainParser) GetUniqueName() string {
-	return "graphql_chain_parser"
-}
-
 func (apip *GraphQLChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {
 	if apip == nil {
 		return nil, errors.New("ChainParser not defined")
@@ -143,10 +139,11 @@ func (apip *GraphQLChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 // policy: a request pairing executeTransaction with a query resolves to a stateful api, so the
 // cross-validation stateful guard still sees the write.
 //
-// A root field the spec does not declare is refused, introspection included: `__schema`,
-// `__type` and a root-level `__typename` are served only if the spec declares them as apis, like
-// any other operation. GraphiQL and schema codegen introspect on connect, so they need either
-// that or a direct connection to a node.
+// A root field the spec does not declare is served the way an undeclared method is on every
+// interface: getSupportedApi falls back to the default api (`Default-<field>`, 20 compute units,
+// deterministic, latest block). Introspection is no exception — `__schema`, `__type` and a
+// root-level `__typename` are relayed to the node, so GraphiQL and schema codegen work through
+// the router. A mutation is still a write whatever its root fields resolve to (see below).
 func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType string, metadata []pairingtypes.Metadata, extensionInfo extensionslib.ExtensionInfo) (ChainMessage, error) {
 	if apip == nil {
 		return nil, errors.New("GraphQLChainParser not defined")
@@ -164,7 +161,7 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 
 	var combinedApi *spectypes.Api
 	var apiCollection *spectypes.ApiCollection
-	var latestRequestedBlock, earliestRequestedBlock int64 = 0, 0
+	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
 
@@ -217,12 +214,13 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 			}
 		}
 
+		// A root field that names no block (chainIdentifier) does not decide the request's
+		// block; see requestedBlockFold (MAG-4381).
 		parsedBlock := parsedInput.GetBlock()
+		blockFold.add(parsedBlock, parsedBlock, parsedInput, overwriteReqBlock == "" && apiNamesNoBlock(apiCont.api))
 		if index == 0 {
 			combinedApi = apiCont.api
 			apiCollection = apiCollectionForRootField
-			latestRequestedBlock = parsedBlock
-			earliestRequestedBlock = parsedBlock
 			continue
 		}
 
@@ -249,8 +247,8 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 				Encoding:     "",
 			},
 		}
-		latestRequestedBlock, earliestRequestedBlock = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
 	}
+	latestRequestedBlock, earliestRequestedBlock := blockFold.blocks()
 
 	// ParseGraphQLMsg rejects an operation that selects no root field, so this is unreachable
 	// today. It is guarded anyway because the loop below it dereferences both values, and the
@@ -277,8 +275,9 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 	parsedInput.SetBlock(latestRequestedBlock)
 	parsedInput.UsedDefaultValue = parsedDefault
 
+	// A single root has no earliest of its own unless its parsers read a range lower bound.
 	var earliest *int64
-	if len(graphqlMessage.RootFields) > 1 {
+	if len(graphqlMessage.RootFields) > 1 || earliestRequestedBlock != latestRequestedBlock {
 		earliest = &earliestRequestedBlock
 	}
 	nodeMsg := apip.newChainMessage(combinedApi, parsedInput, blockHashes, graphqlMessage, apiCollection)
@@ -378,7 +377,10 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		msgSeed := apil.logger.GetMessageSeed()
 		path := "/" + fiberCtx.Params("*")
 
-		metadataValues := fiberCtx.GetReqHeaders()
+		// Detached copies: fiber hands out strings that alias the per-connection buffer, and
+		// the metrics goroutine reads these after the reply (MAG-3881; this listener had the
+		// pre-fix shape).
+		metadataValues := detachedReqHeaders(fiberCtx)
 		graphqlHeaders := convertToMetadataMap(metadataValues)
 		ctx, cancel := context.WithCancel(context.Background())
 		ctx = utils.WithUniqueIdentifier(ctx, utils.GenerateUniqueIdentifier())
@@ -409,7 +411,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// operation on one path, and the operation is named in the body.
 		relayResult, err := apil.relaySender.SendRelay(ctx, "", requestBody, http.MethodPost, dappID, userIp, analytics, graphqlHeaders)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(analytics, err, metadataValues)
+		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 			apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody, errMasking, msgSeed, time.Since(startTime), err)

@@ -83,6 +83,13 @@ const (
 	// consensus asynchronously (straggler watcher) and recorded via log + metric.
 	CROSS_VALIDATION_PENDING_PROVIDERS_HEADER = "lava-cross-validation-pending-providers"
 	CROSS_VALIDATION_FAILURE_REASON_HEADER    = "lava-cross-validation-failure-reason"
+	// On a failed quorum, the largest set of providers that returned the same response, and its size
+	// (MAG-2192). Additive to disagreeing-providers, which keeps listing every successful provider: a
+	// plurality below the client's agreement threshold is NOT a consensus, so it must not turn the
+	// minority into the accused. These say who formed the plurality without claiming it is right.
+	// plurality-providers is empty on a tie, which has no plurality.
+	CROSS_VALIDATION_PLURALITY_SIZE_HEADER      = "lava-cross-validation-plurality-size"
+	CROSS_VALIDATION_PLURALITY_PROVIDERS_HEADER = "lava-cross-validation-plurality-providers"
 	// send http request to /lava/health to see if the process is up - (ret code 200)
 	DEFAULT_HEALTH_PATH                                       = "/lava/health"
 	MAXIMUM_ALLOWED_TIMEOUT_EXTEND_MULTIPLIER_BY_THE_CONSUMER = 4
@@ -253,10 +260,6 @@ func (nurl NodeUrl) ShouldSkipVerification(name string) bool {
 // has not opted out — see StandaloneAddons.
 func (nurl NodeUrl) ServesBaseCollection() bool {
 	return !nurl.StandaloneAddons || len(nurl.Addons) == 0
-}
-
-type ChainMessageGetApiInterface interface {
-	GetApi() *spectypes.Api
 }
 
 func (nurl NodeUrl) String() string {
@@ -563,11 +566,6 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 	}
 }
 
-type ConflictHandlerInterface interface {
-	ConflictAlreadyReported() bool
-	StoreConflictReported()
-}
-
 type ProviderInfo struct {
 	ProviderAddress           string
 	ProviderReputationSummary float64 // the number represents the average qos for this provider session
@@ -587,9 +585,7 @@ type RelayResult struct {
 	Request             *pairingtypes.RelayRequest
 	Reply               *pairingtypes.RelayReply
 	ProviderInfo        ProviderInfo
-	ReplyServer         pairingtypes.Relayer_RelaySubscribeClient
 	Finalized           bool
-	ConflictHandler     ConflictHandlerInterface
 	StatusCode          int
 	CrossValidation     int
 	ProviderTrailer     metadata.MD // the provider trailer attached to the request. used to transfer useful information (which is not signed so shouldn't be trusted completely).
@@ -601,9 +597,10 @@ type RelayResult struct {
 	CrossValidationFailureReason string
 	// IsNonRetryable is the umbrella flag the retry state machine consults:
 	// it's true whenever the matched registry LavaError has Retryable=false,
-	// which covers unsupported method, execution reverted, out of gas,
-	// invalid signature, double spend, etc. Retrying on another provider
-	// would just reproduce the same deterministic failure.
+	// which covers execution reverted, out of gas, invalid signature, double
+	// spend, caller mistakes, etc. Retrying on another provider would just
+	// reproduce the same deterministic failure. A node's refusal of its own
+	// (method, route, credentials) is retryable since MAG-2771.
 	// IsUnsupportedMethod is an independent subset flag derived from the
 	// SubCategory and used to gate the zero-CU carve-out and caching policy.
 	IsNonRetryable bool
@@ -629,12 +626,18 @@ type RelayResult struct {
 	// opposed to answering truthfully about a request it cannot satisfy. This is what the
 	// endpoint-health counter reads; see LavaError.EndpointAtFault for why it is not Retryable.
 	IsNodeAtFault bool
+	// ClientFacing is what the listener shows the caller when the relay ends in a protocol error:
+	// the upstream's own answer when it gave one, else the leaf cause (MAG-4218).
+	ClientFacing *ClientFacingError
 	// CacheLookup is what each cache tier did on the attempt that produced this result,
 	// surfaced to the caller as Lava-Cache-Tier / Lava-Cache-Outcome when the request
 	// carried lava-debug-relay. Same shape as the per-request serving facts above that
 	// headers already read (IsNodeError, StatusCode, CrossValidationFailureReason);
 	// see CacheLookupReport for why the cache_tier counter could not answer this.
 	CacheLookup CacheLookupReport
+	// AttemptLatency is how long the upstream attempt behind this result took; zero when no
+	// upstream was asked (a cache hit, a result the router built itself).
+	AttemptLatency time.Duration
 }
 
 // ApplyNodeErrorClassification stamps every registry-derived policy flag onto a node-error
@@ -655,13 +658,6 @@ func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transpor
 	rr.IsDataScope = classification.IsDataScope
 	rr.IsNodeCapability = classification.IsNodeCapability
 	rr.IsNodeAtFault = classification.IsNodeAtFault
-}
-
-func (rr *RelayResult) GetReplyServer() pairingtypes.Relayer_RelaySubscribeClient {
-	if rr == nil {
-		return nil
-	}
-	return rr.ReplyServer
 }
 
 func (rr *RelayResult) GetReply() *pairingtypes.RelayReply {
@@ -725,8 +721,9 @@ func RedactMetadata(md []pairingtypes.Metadata) string {
 }
 
 // TransportReplyHeaders are the upstream response headers a client needs to decode the
-// body, and so the only ones every reply path keeps regardless of chain: the live relay
-// (rpcsmartrouter's filterUpstreamReplyMetadata) and a reply that crossed in from the
-// secondary cache (performance.SanitizeForeignCacheReply). Content-Length is not here:
-// the body is re-stamped before it is served.
+// body, and so the only ones every reply path keeps regardless of chain. They head
+// UpstreamReplyHeaderAllowlist, which FilterUpstreamReplyMetadata applies on the live
+// relay, on a primary cache hit and, inside performance.SanitizeForeignCacheReply, on a
+// reply that crossed in from the secondary cache. Content-Length is not here: the body
+// is re-stamped before it is served.
 var TransportReplyHeaders = []string{"Content-Type", "Content-Encoding"}

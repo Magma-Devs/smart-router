@@ -11,10 +11,6 @@ var (
 	DefaultSyncFactor     float64 = 0.3
 	DefaultStrategyFactor float64 = 1.0 // balanced
 
-	// strategy factors (multipliers to the sync factor)
-	BalancedStrategyFactor      float64 = 1.0
-	LatencyStrategyFactor       float64 = 1.0 / 3.0
-	SyncFreshnessStrategyFactor float64 = 30.0
 )
 
 // reputationConfig holds parameters for ComputeReputation.

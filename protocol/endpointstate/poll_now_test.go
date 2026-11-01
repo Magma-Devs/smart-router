@@ -25,6 +25,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -115,7 +116,7 @@ func newPollNowMonitor(t *testing.T, ctx context.Context, url string, startBlock
 
 	conn := &pollNowConn{url: url}
 	conn.block.Store(startBlock)
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -264,7 +265,7 @@ func TestEndpointMonitor_PollNow_TrackerNotPolling_NamesTheState(t *testing.T) {
 	const url = "http://eth-pollnow-dead:8545"
 	conn := &pollNowConn{url: url}
 	conn.fail.Store(true) // every fetch fails → init never completes → no poll goroutine
-	_, err := m.GetOrCreateTracker(&lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	triggerCtx, triggerCancel := context.WithTimeout(ctx, 300*time.Millisecond)
@@ -359,4 +360,36 @@ func TestEndpointMonitor_PollNow_ResultNotAwaited_ReportsNotPolled(t *testing.T)
 		latest, found := m.GetObservation(url)
 		return found && latest.LatestBlock == 8080
 	}, 15*time.Second, 20*time.Millisecond, "the poll the caller stopped waiting for still completed")
+}
+
+// While the url is held off after a rate limit, the wake burst's trigger declines (MAG-4165): nothing
+// reaches upstream, so it reports ran=false — the burst counts the url as not polled. The debug
+// trigger is an explicit ask and still polls, so /debug/poll-now's contract is unchanged.
+func TestEndpointMonitor_HeldOff_WakeDeclines_PollNowPolls(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const url = "http://eth-pollnow-held:8545"
+	m, conn := newPollNowMonitor(t, ctx, url, 9000)
+	defer m.Stop()
+
+	// The monitor's trackers record into and read the process-wide registry; this url is unique to
+	// this test, and the entry is dropped when it ends.
+	holdoff.Shared.RecordRateLimit(url, url, 0)
+	t.Cleanup(func() { holdoff.Shared.RecordAnswer(url, url) })
+
+	before, ok := m.GetObservation(url)
+	require.True(t, ok)
+	conn.block.Store(9090)
+
+	ran, err := m.triggerPoll(ctx, url, true)
+	require.False(t, ran, "a declined wake poll must never count as one that ran")
+	require.ErrorIs(t, err, chaintracker.ErrorPollNowHeldOff)
+	obs, _ := m.GetObservation(url)
+	require.Equal(t, before.LatestBlock, obs.LatestBlock, "nothing was polled")
+
+	obs, polled, err := m.PollNow(ctx, url)
+	require.NoError(t, err)
+	require.True(t, polled, "an explicit poll-now goes through a hold-off")
+	require.Equal(t, int64(9090), obs.LatestBlock)
 }

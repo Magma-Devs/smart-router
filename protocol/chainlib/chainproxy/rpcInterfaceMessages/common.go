@@ -11,7 +11,7 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
-var WontCalculateBatchHash = errors.New("wont calculate batch message hash") // on batches we just wont calculate hashes, meaning we wont retry.
+var WontCalculateBatchHash = errors.New("wont calculate batch message hash") // a batch has no single raw hash; whether it is retried is the policy's IsBatch rule, not this error (MAG-4242).
 
 type ParsableRPCInput struct {
 	Result json.RawMessage

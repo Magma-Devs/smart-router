@@ -25,7 +25,7 @@ func (s *stubRelaySender) ParseRelay(
 	_ context.Context, _, _, _, _, _ string, _ []pairingtypes.Metadata,
 ) (chainlib.ProtocolMessage, error) {
 	s.t.Fatal("a retry re-parsed the request; the request must be re-sent unchanged, not rebuilt")
-	return nil, nil
+	return nil, nil //nolint:nilnil // unreachable: t.Fatal above ends the test
 }
 
 func (s *stubRelaySender) GetProcessingTimeout(chainlib.ChainMessage) (time.Duration, time.Duration) {
@@ -71,7 +71,9 @@ func newRetryTestStateMachine(t *testing.T, pm chainlib.ProtocolMessage) (*Unifi
 		false,
 	)
 	require.NoError(t, err)
-	return sm.(*UnifiedRelayStateMachine), usedProviders
+	usm, ok := sm.(*UnifiedRelayStateMachine)
+	require.True(t, ok)
+	return usm, usedProviders
 }
 
 // dispatchBatch advances the request to the next attempt number the way a real relay does.

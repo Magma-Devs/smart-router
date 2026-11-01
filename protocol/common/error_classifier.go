@@ -3,6 +3,7 @@ package common
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"syscall"
@@ -132,10 +133,11 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// --- Message-based matchers (for -32000 catch-all and codeless errors) ---
 
 		// Unsupported methods (message-based fallback for nodes that use -32000).
-		// Matchers here must be tightly scoped: NodeMethodNotFound carries
-		// SubCategoryUnsupportedMethod (zero CU, no retry), so a false positive
-		// silently stops retries and bills nothing. When in doubt, require the
-		// literal word "method" to appear alongside the trigger phrase.
+		// Matchers here must be tightly scoped: NodeMethodNotFound is a node
+		// refusal, retried on another provider and kept off the endpoint's score
+		// (MAG-2771), so a false positive sends a caller's mistake or a revert to a
+		// peer instead of returning it. When in doubt, require the literal word
+		// "method" to appear alongside the trigger phrase.
 		{MessageContains("method not found"), LavaErrorNodeMethodNotFound},
 		{MessageContains("method not supported"), LavaErrorNodeMethodNotSupported},
 		{MessageContains("unknown method"), LavaErrorNodeMethodNotFound},
@@ -149,7 +151,7 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// "invalid method" — match only when the phrase is terminal, quoted, or
 		// followed by "name"/colon. This rejects "invalid method argument",
 		// "invalid method parameters", "invalid method signature", etc., which
-		// would otherwise trip the zero-CU path on a user-input error.
+		// would otherwise send a user-input error to another provider.
 		{MessageRegex(`(?i)invalid method(?:\s*$|\s*[:'"]|\s+name\b)`), LavaErrorNodeMethodNotFound},
 		// Provider-disabled methods (e.g. QuickNode paid tier). Require "method"
 		// or "rpc" near the "blocked" token so unrelated firewall/proxy messages
@@ -181,6 +183,12 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// Rate limiting
 		{MessageContains("rate limit"), LavaErrorNodeRateLimited},
 		{MessageContains("enhance_your_calm"), LavaErrorNodeRateLimited}, // HTTP/2 GOAWAY with ENHANCE_YOUR_CALM — server-side rate limit
+		// A 429 a gateway mirrors into the error body — of a 200, or of a reply on an open
+		// WebSocket connection, where no HTTP status reaches the transport layer. JSON-RPC's
+		// standard codes are negative and no chain this router serves defines 429, so the code
+		// is that mirror; "Too Many Requests" is its reason phrase (MAG-4165).
+		{CodeEquals(429), LavaErrorNodeRateLimited},
+		{MessageContains("too many requests"), LavaErrorNodeRateLimited},
 
 		// Chain transaction errors — matchers cover Geth, Erigon, and Nethermind variants
 		{MessageContains("nonce too low"), LavaErrorChainNonceTooLow},
@@ -273,8 +281,8 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// specific-to-general: what the node SAID, then what status it used. A status code is
 		// the fallback, never the specialisation — the reverse order silently reclassified
 		// anything whose body carried a specific message under a generic status (a 400 saying
-		// "method not allowed" or "route not found" lost its unsupported-method verdict, which
-		// chainlib.IsUnsupportedMethodError reads on the protocol-error path).
+		// "method not allowed" or "route not found" lost its route-refusal verdict and was
+		// returned as the caller's bad request instead of going to another provider).
 		//
 		// Evidence for every row: agent_docs/.../rest-stateful-bug/rest-status-code-map.md and
 		// rest-blockchain-errors-research.md (twelve families probed live 2026-09-27).
@@ -439,7 +447,8 @@ func httpStatusCodeMappings() []errorMapping {
 		{CodeEquals(429), LavaErrorNodeRateLimited},
 		{CodeEquals(500), LavaErrorNodeInternalError},
 		// 501 Not Implemented: node lacks this method/endpoint (e.g. Cosmos REST
-		// gRPC-gateway). Non-retryable node error, not a transient server failure.
+		// gRPC-gateway). A node refusal, not a transient server failure: retried on
+		// another provider, the endpoint unblamed (MAG-2771).
 		{CodeEquals(501), LavaErrorNodeUnimplemented},
 		{CodeEquals(502), LavaErrorNodeBadGateway},
 		{CodeEquals(503), LavaErrorNodeServiceUnavailable},
@@ -467,7 +476,7 @@ func httpStatusMessageMappings() []errorMapping {
 		{HTTPStatusContains(413), LavaErrorUserRequestTooLarge},
 		{HTTPStatusContains(429), LavaErrorNodeRateLimited},
 		{HTTPStatusContains(500), LavaErrorNodeInternalError},
-		// 501 Not Implemented: node lacks this method/endpoint. Non-retryable.
+		// 501 Not Implemented: node lacks this method/endpoint. Retried on another provider (MAG-2771).
 		{HTTPStatusContains(501), LavaErrorNodeUnimplemented},
 		{HTTPStatusContains(502), LavaErrorNodeBadGateway},
 		{HTTPStatusContains(503), LavaErrorNodeServiceUnavailable},
@@ -728,6 +737,17 @@ func DetectConnectionError(err error) *LavaError {
 	if errors.As(err, &netErr) && netErr.Timeout() {
 		return LavaErrorConnectionTimeout
 	}
+	// A DNS failure that is not a timeout (no such host, server misbehaving) is a connect-phase
+	// fault of the endpoint's name, and an EOF is the socket closing under the request. Both used
+	// to fall through to the generic matchers, land on UNKNOWN_ERROR and count as nobody's fault,
+	// while the sibling connection reset was internal and at fault (MAG-4242).
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return LavaErrorDNSFailure
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return LavaErrorConnectionClosed
+	}
 
 	// Layer 2: string fallback for errors wrapped without %w.
 	if le := detectConnectionErrorFromString(strings.ToLower(err.Error())); le != nil {
@@ -749,8 +769,40 @@ func DetectConnectionError(err error) *LavaError {
 			}
 		}
 	}
+
+	// Layer 4: a gRPC call the router's own client never delivered (MAG-4355). The layers
+	// above read its text first, so a refused dial keeps PROTOCOL_CONNECTION_REFUSED and a
+	// name that does not resolve keeps PROTOCOL_DNS_FAILURE; a text no row names (a failed
+	// TLS handshake, a resolver that produced no address) is still a connection fault, never
+	// the node's answer, so it lands on the registry's code for the client's UNAVAILABLE.
+	var undelivered *GRPCCallUndeliveredError
+	if errors.As(err, &undelivered) {
+		return LavaErrorProviderUnavailable
+	}
 	return nil
 }
+
+// GRPCCallUndeliveredError marks a gRPC status the router's own client produced for a call it
+// never delivered: no stream to the node was opened, so no node saw the request and none
+// answered (MAG-4355). grpc-go words every such failure as UNAVAILABLE, the code a node also
+// sends when it is shutting down, so the code alone cannot tell the two apart; the stream can,
+// and lavasession.GRPCDirectRPCConnection wraps the status in this type when there was none
+// (grpc.Peer stays unset on a call that opened no stream).
+//
+// DetectConnectionError reads it as a connection fault, which is what makes a refused gRPC
+// dial disable its endpoint as `unreachable`, as a refused JSON-RPC dial does, rather than as
+// `node-error` through the registry's row for a node-sent UNAVAILABLE.
+type GRPCCallUndeliveredError struct {
+	// Err is the status grpc-go returned, kept for logs and for the text rows above.
+	Err error
+}
+
+func (e *GRPCCallUndeliveredError) Error() string {
+	return "gRPC call not delivered to the node: " + e.Err.Error()
+}
+
+// Unwrap keeps the gRPC status reachable, so status.FromError and errors.Is still see it.
+func (e *GRPCCallUndeliveredError) Unwrap() error { return e.Err }
 
 // stringConnectionFallback is one row of the string-fallback table used by
 // detectConnectionErrorFromString. The first matching row wins, so ordering
@@ -763,6 +815,10 @@ type stringConnectionFallback struct {
 	mustNotContain []string
 	// lava error returned when the row matches.
 	result *LavaError
+	// transportOnly marks a row that only describes how Go's net, net/http and io word a failed
+	// connection. DetectConnectionErrorInReplyText skips it: a node's reply proves the connection
+	// worked, whatever its text says.
+	transportOnly bool
 }
 
 func (r stringConnectionFallback) matches(msg string) bool {
@@ -852,6 +908,18 @@ var stringConnectionFallbacks = []stringConnectionFallback{
 	// upstream stream (distinct from "connection refused" which is a connect
 	// failure before any stream was established).
 	{mustContain: []string{"connection termination"}, result: LavaErrorConnectionReset},
+	// DNS, EOF and the http-served-as-https shapes, as the resolver, io and net/http word them and
+	// as the node error handler rewords them ("Reason: ..."), so the typed checks above have a
+	// string sibling for an error wrapped without %w (MAG-4242). They are transportOnly: a node
+	// answering "unexpected EOF" (a body it could not parse) or "no such host" (a lookup of its
+	// own) is giving its answer, and the reply-text detector must not read that as our transport.
+	{mustContain: []string{"no such host"}, result: LavaErrorDNSFailure, transportOnly: true},
+	{mustContain: []string{"server misbehaving"}, result: LavaErrorDNSFailure, transportOnly: true},
+	{mustContain: []string{"dns resolution failed"}, result: LavaErrorDNSFailure, transportOnly: true},
+	{mustContain: []string{"server gave http response to https client"}, result: LavaErrorTLSMismatch, transportOnly: true},
+	{mustContain: []string{"misconfigured http endpoint as https"}, result: LavaErrorTLSMismatch, transportOnly: true},
+	{mustContain: []string{"unexpected eof"}, result: LavaErrorConnectionClosed, transportOnly: true},
+	{mustContain: []string{"end of input stream reached"}, result: LavaErrorConnectionClosed, transportOnly: true},
 }
 
 // detectConnectionErrorFromString walks stringConnectionFallbacks in order and
@@ -860,6 +928,20 @@ var stringConnectionFallbacks = []stringConnectionFallback{
 func detectConnectionErrorFromString(msg string) *LavaError {
 	for _, row := range stringConnectionFallbacks {
 		if row.matches(msg) {
+			return row.result
+		}
+	}
+	return nil
+}
+
+// DetectConnectionErrorInReplyText reads a node's REPLY text against the string table, without
+// the transportOnly rows. The reply arrived, so the connection to the node worked; a reply is
+// only ever read as a connection fault through the rows that predate MAG-4242 item 5, exactly
+// as the results manager read it before those rows existed.
+func DetectConnectionErrorInReplyText(text string) *LavaError {
+	msg := strings.ToLower(text)
+	for _, row := range stringConnectionFallbacks {
+		if !row.transportOnly && row.matches(msg) {
 			return row.result
 		}
 	}

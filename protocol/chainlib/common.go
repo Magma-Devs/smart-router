@@ -39,12 +39,8 @@ const (
 )
 
 var (
-	TrailersToAddToHeaderResponse      = []string{RPCProviderNodeExtension}
-	InvalidResponses                   = []string{"null", "", "nil", "undefined"}
-	FailedSendingSubscriptionToClients = errors.New("Failed Sending Subscription To Clients connection might have been closed by the user")
-	NoActiveSubscriptionFound          = errors.New("no active subscriptions for hashed params.")
-	MaxBatchRequestSize                = 0 // configured via --max-batch-request-size flag, 0 means unlimited
-	ErrBatchRequestSizeExceeded        = errors.New("batch request size exceeded the configured limit")
+	MaxBatchRequestSize         = 0 // configured via --max-batch-request-size flag, 0 means unlimited
+	ErrBatchRequestSizeExceeded = errors.New("batch request size exceeded the configured limit")
 )
 
 type RelayReplyWrapper struct {
@@ -560,31 +556,35 @@ func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRe
 		return utils.Max(currentLatest, parsedBlock)
 	}
 
-	earliestCallback := func(currentEarliest int64, parsedBlock int64) int64 {
-		if currentEarliest == spectypes.EARLIEST_BLOCK || parsedBlock == spectypes.EARLIEST_BLOCK {
-			return spectypes.EARLIEST_BLOCK
-		}
+	return latestCallback(currentLatestRequestedBlock, parsedBlock), CombineEarliestRequestedBlock(currentEarliestRequestedBlock, parsedBlock)
+}
 
-		if currentEarliest == spectypes.NOT_APPLICABLE || parsedBlock == spectypes.NOT_APPLICABLE {
-			return spectypes.NOT_APPLICABLE
-		}
+// CombineEarliestRequestedBlock folds parsedBlock into the earliest block a request asks for, be
+// it a batch element or the lower bound of a range: the chain's first block wins over anything, an
+// element nobody could parse makes the whole request unjudgeable, a concrete block wins over a
+// "latest"-style sentinel, and between two concrete blocks the lower one wins.
+func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
+	if currentEarliest == spectypes.EARLIEST_BLOCK || parsedBlock == spectypes.EARLIEST_BLOCK {
+		return spectypes.EARLIEST_BLOCK
+	}
 
-		if currentEarliest < 0 && parsedBlock < 0 {
-			return utils.Min(currentEarliest, parsedBlock)
-		}
+	if currentEarliest == spectypes.NOT_APPLICABLE || parsedBlock == spectypes.NOT_APPLICABLE {
+		return spectypes.NOT_APPLICABLE
+	}
 
-		if currentEarliest > 0 && parsedBlock < 0 {
-			return currentEarliest
-		}
-
-		if currentEarliest < 0 && parsedBlock > 0 {
-			return parsedBlock
-		}
-
+	if currentEarliest < 0 && parsedBlock < 0 {
 		return utils.Min(currentEarliest, parsedBlock)
 	}
 
-	return latestCallback(currentLatestRequestedBlock, parsedBlock), earliestCallback(currentEarliestRequestedBlock, parsedBlock)
+	if currentEarliest > 0 && parsedBlock < 0 {
+		return currentEarliest
+	}
+
+	if currentEarliest < 0 && parsedBlock > 0 {
+		return parsedBlock
+	}
+
+	return utils.Min(currentEarliest, parsedBlock)
 }
 
 // GetRelayTimeout returns the per-attempt WINDOW: how long an endpoint is expected to take, and so
@@ -782,19 +782,6 @@ func truncateAndPadString(s string, maxLength int) string {
 	s = fmt.Sprintf("%-*s", maxLength, s)
 
 	return s
-}
-
-// return if response is valid or not - true
-func ValidateNilResponse(responseString string) error {
-	return nil // this feature was disabled in version 0.35.8 due to some nodes request this response.
-	// after the timeout features we can add support for this filtering as it would be parsed and
-	// returned to the user if multiple providers returned the same type of response
-
-	// Removed on 0.35.8
-	// if slices.Contains(InvalidResponses, responseString) {
-	// 	return fmt.Errorf("response returned an empty value: %s", responseString)
-	// }
-	// return nil
 }
 
 func GetTimeoutInfo(chainMessage ChainMessageForSend) common.TimeoutInfo {

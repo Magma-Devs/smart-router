@@ -488,7 +488,7 @@ func (d *DirectRPCRelaySender) SendDirectRelay(
 		// An upstream's headers reach the client only through this filter (MAG-3104). It
 		// runs here, once, for every transport and every arm of the senders, a gRPC error
 		// body returned as a result included; the senders hand it the raw set.
-		result.Reply.Metadata = filterUpstreamReplyMetadata(result.Reply.Metadata, d.replyHeaderDirectives, apiCollection.Headers)
+		result.Reply.Metadata = common.FilterUpstreamReplyMetadata(result.Reply.Metadata, d.replyHeaderDirectives, apiCollection.Headers)
 	}
 	return result, err
 }
@@ -609,7 +609,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		)
 		httpErr := &lavasession.HTTPStatusError{
 			StatusCode: statusCode,
-			Status:     fmt.Sprintf("%d", statusCode),
+			Status:     response.Status, // the upstream's own status line, for the client reply (MAG-4218)
 			Body:       responseData,
 		}
 		return nil, classifyAndWrap(httpErr, d.chainFamily, common.TransportJsonRPC)
@@ -708,10 +708,12 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		// declaration order: code-based matchers first, message-based after.
 		// When the body carries a registered RETRYABLE code (e.g. -32603
 		// NODE_INTERNAL_ERROR, -32000 NODE_SERVER_ERROR) AND the upstream
-		// returned a non-retryable HTTP status (404/405/413), the body-code
-		// matcher fires first and HTTPStatusContains never runs — so the
-		// retryable body code masks the non-retryable HTTP verdict and the
-		// router retries pointlessly.
+		// returned a non-retryable HTTP status (413), the body-code matcher
+		// fires first and HTTPStatusContains never runs — so the retryable
+		// body code masks the non-retryable HTTP verdict and the router retries
+		// pointlessly. 401, 404 and 405 were in that list until MAG-2771 made
+		// them retryable: each is this node's own refusal, which another
+		// provider may not share, so this pass leaves them alone.
 		//
 		// A second classification pass with the raw HTTP statusCode as the
 		// errorCode resolves the conflict: when the HTTP layer says the
@@ -724,12 +726,26 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		// bare-body fallback case where ExtractJSONRPCErrorCode returned 0
 		// and the first pass already ran with errorCode = statusCode.
 		//
-		// Only IsNonRetryable escalates here. The fault-axis flags
-		// (IsUnsupportedMethod, IsRateLimited) keep the first pass's verdict:
-		// the body code is the authoritative statement of *what* went wrong,
-		// and this pass exists solely to override *retryability*.
+		// Only IsNonRetryable escalates here, plus IsNodeCapability when the
+		// status is the node's own refusal. The other fault-axis flags
+		// (IsUnsupportedMethod, IsRateLimited, IsNodeAtFault) keep the first
+		// pass's verdict: the body code is the authoritative statement of
+		// *what* went wrong, and this pass exists to override *retryability*.
+		//
+		// IsNodeCapability is the exception because of what escalating used to
+		// do on the side. A 401, 404 or 405 escalated to non-retryable, and
+		// shouldFailSessionForResult excuses a non-retryable reply, so such a
+		// reply stayed out of the availability score even when its body code
+		// was a retryable one that blames the endpoint. MAG-2771 made those
+		// statuses retryable and so removed that excuse; the capability
+		// carve-out is what keeps the reply out of the score now, so the
+		// endpoint is scored exactly as it was before.
 		if !result.IsNonRetryable && (statusCode < 200 || statusCode >= 300) && statusCode != errorCode {
-			result.IsNonRetryable = common.IsNonRetryableNodeErrorWithContext(d.chainFamily, common.TransportJsonRPC, statusCode, classifierMessage)
+			statusVerdict := common.ClassifyNodeErrorForRetry(d.chainFamily, common.TransportJsonRPC, statusCode, classifierMessage)
+			result.IsNonRetryable = statusVerdict.IsNonRetryable
+			if statusVerdict.IsNodeCapability {
+				result.IsNodeCapability = true
+			}
 		}
 	}
 
@@ -767,6 +783,11 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	if httpMethod == "" {
 		return nil, fmt.Errorf("HTTP method not set by REST parser")
 	}
+	// A method that carries no body sends none, whatever the message holds: some nodes refuse a
+	// GET that carries one. Only POST, PUT and PATCH bodies go out.
+	if !chainlib.RestMethodCarriesBody(httpMethod) {
+		restBody = nil
+	}
 
 	// Extract headers as Metadata (preserves delete semantics)
 	headers := restMessage.GetHeaders()
@@ -794,7 +815,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	response, err := httpDoer.DoHTTPRequest(requestCtx, lavasession.HTTPRequestParams{
 		Method:      httpMethod,
 		URL:         fullURL,
-		Body:        restBody, // Send body as-is (for POST/PUT)
+		Body:        restBody, // As-is for a body method; nil for every other method (above)
 		Headers:     headers,  // Use Metadata (preserves delete semantics)
 		ContentType: "application/json",
 	})
@@ -971,10 +992,18 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	}
 
 	result := &common.RelayResult{
+		// No block is read out of the reply (MAG-4373). A GraphQL caller names the fields of its
+		// own reply, so the path a tip directive reads holds whatever the caller aliased onto it,
+		// and on Sui the tip field (serviceConfig) is an ordinary query field anyone may select:
+		// `last { sequenceNumber: networkTotalTransactions }` answers 6.2 billion against a tip of
+		// ~334 million. Harvested as this endpoint's tip, one such query set its stored tip and
+		// its HighestBlockSeen, which nothing lowers, so head-stall detection could no longer flag
+		// the endpoint until restart. A GraphQL endpoint's tip comes from its tracker's poll only,
+		// which parses the reply to its own request (EndpointPoller.FetchLatestBlockNum); the relay
+		// path stamps that observed tip onto this reply instead (site B, sendRelayToDirectEndpoints).
 		Reply: &pairingtypes.RelayReply{
-			Data:        response.Body,
-			LatestBlock: extractBlockHeightFromJSONResponse(response.Body, chainMessage),
-			Metadata:    convertHTTPHeadersToMetadata(response.Headers),
+			Data:     response.Body,
+			Metadata: convertHTTPHeadersToMetadata(response.Headers),
 		},
 		Finalized:  true,
 		StatusCode: response.StatusCode,
@@ -1303,7 +1332,7 @@ func looksLikeJSONOpening(data []byte) bool {
 // convertHTTPHeadersToMetadata turns an upstream's response headers (http.Header or gRPC
 // metadata, both map[string][]string) into reply metadata, one entry per name with the
 // first value. The set is raw: SendDirectRelay passes it through
-// filterUpstreamReplyMetadata before it leaves the sender (MAG-3104).
+// common.FilterUpstreamReplyMetadata before it leaves the sender (MAG-3104).
 func convertHTTPHeadersToMetadata(headers map[string][]string) []pairingtypes.Metadata {
 	metadata := make([]pairingtypes.Metadata, 0, len(headers))
 	for name, values := range headers {

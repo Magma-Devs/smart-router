@@ -34,10 +34,6 @@ type RestMessage struct {
 	chainproxy.BaseMessage
 }
 
-func (rm *RestMessage) SubscriptionIdExtractor(reply *rpcclient.JsonrpcMessage) string {
-	return ""
-}
-
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
 func (rm *RestMessage) GetRawRequestHash() ([]byte, error) {
 	headers := rm.GetHeaders()

@@ -45,14 +45,15 @@ func setupStatefulCSM(t *testing.T, primaries, backups []string) *ConsumerSessio
 	return csm
 }
 
-// statefulSelection runs the stateful candidate selection the way getValidProviderAddresses does.
+// statefulSelection runs the stateful candidate selection the way getValidProviderAddresses does for
+// a broadcast, which does not apply the rate-limit hold-off.
 func statefulSelection(csm *ConsumerSessionManager, ignored map[string]struct{}) []string {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 	if ignored == nil {
 		ignored = map[string]struct{}{}
 	}
-	return csm.getProvidersForStatefulCalls(context.Background(), csm.validAddresses, ignored, "", nil)
+	return csm.getProvidersForStatefulCalls(context.Background(), csm.validAddresses, ignored, "", nil, false)
 }
 
 // The default. A backup tier exists and is healthy, and a stateful relay still does not touch it.
@@ -130,10 +131,11 @@ func TestStatefulToBackup_SkipsAlreadyTried(t *testing.T) {
 	require.Equal(t, []string{"primary-b"}, statefulSelection(csm, ignored))
 }
 
-// A backup held off after a 429 is excluded outright. filterRateLimitedProviders keeps the
-// soonest-to-expire candidate when a request would otherwise have nowhere to go; that rescue is
-// meaningless here because the backup tier is additive and a primary has already been chosen.
-func TestStatefulToBackup_SkipsHeldOffBackup(t *testing.T) {
+// A backup held off after a 429 still joins the broadcast, as a held-off primary does (MAG-4388).
+// This used to exclude it: the broadcast is the write's redundancy, and the hold-off only chooses
+// which provider a request goes to, which a broadcast does not need. A backup still limiting answers
+// the write with a 429 the broadcast does not wait on.
+func TestStatefulToBackup_IncludesHeldOffBackup(t *testing.T) {
 	csm := setupStatefulCSM(t, []string{"primary-a"}, []string{"backup-1"})
 	csm.SetStatefulToBackup(true)
 
@@ -142,8 +144,24 @@ func TestStatefulToBackup_SkipsHeldOffBackup(t *testing.T) {
 	csm.rateLimitHoldoff = holdoff.NewRegistry()
 	csm.rateLimitHoldoff.RecordRateLimit("backup-1", "http://backup-1/url", 0)
 
-	require.Equal(t, []string{"primary-a"}, statefulSelection(csm, nil),
-		"a rate-limited backup must not be pulled into a broadcast the primaries can serve")
+	require.Equal(t, []string{"primary-a", "backup-1"}, statefulSelection(csm, nil),
+		"a held-off backup was left out of the write broadcast")
+}
+
+// When the stateful selection is a single pick (a sticky write, a claim candidate) the hold-off still
+// applies, and a held-off backup is excluded outright. filterRateLimitedProviders keeps the
+// soonest-to-expire candidate when a request would otherwise have nowhere to go; that rescue is
+// meaningless here because the backup tier is additive.
+func TestStatefulToBackup_SinglePickSkipsHeldOffBackup(t *testing.T) {
+	csm := setupStatefulCSM(t, []string{"primary-a"}, []string{"backup-1"})
+	csm.SetStatefulToBackup(true)
+	csm.rateLimitHoldoff = holdoff.NewRegistry()
+	csm.rateLimitHoldoff.RecordRateLimit("backup-1", "http://backup-1/url", 0)
+
+	csm.lock.RLock()
+	selected := csm.getProvidersForStatefulCalls(context.Background(), csm.validAddresses, map[string]struct{}{}, "", nil, true)
+	csm.lock.RUnlock()
+	require.Equal(t, []string{"primary-a"}, selected)
 }
 
 // A backup that cannot serve the requested addon is not a candidate.
@@ -152,7 +170,7 @@ func TestStatefulToBackup_SkipsBackupMissingAddon(t *testing.T) {
 	csm.SetStatefulToBackup(true)
 
 	csm.lock.RLock()
-	selected := csm.getProvidersForStatefulCalls(context.Background(), csm.validAddresses, map[string]struct{}{}, "archive", nil)
+	selected := csm.getProvidersForStatefulCalls(context.Background(), csm.validAddresses, map[string]struct{}{}, "archive", nil, false)
 	csm.lock.RUnlock()
 
 	require.Equal(t, []string{"primary-a"}, selected,

@@ -28,7 +28,6 @@
 # records the log line count up front and greps only the lines this run produced.
 # =============================================================================
 __dir=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-source "$__dir"/../useful_commands.sh
 
 ROUTER_URL="${ROUTER_URL:-http://127.0.0.1:3360}"
 # Solana subscriptions are served over WebSocket on the same listen-address. Any

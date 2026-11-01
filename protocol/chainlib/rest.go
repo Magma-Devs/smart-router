@@ -40,16 +40,13 @@ func NewRestChainParser() (chainParser *RestChainParser, err error) {
 	return parser, nil
 }
 
-func (bcp *RestChainParser) GetUniqueName() string {
-	return "rest_chain_parser"
-}
-
 func (apip *RestChainParser) CraftMessage(parsing *spectypes.ParseDirective, connectionType string, craftData *CraftData, metadata []pairingtypes.Metadata) (ChainMessageForSend, error) {
 	if craftData != nil {
 		var data []byte = nil
 		urlPath := string(craftData.Data)
-		if craftData.ConnectionType == http.MethodPost {
-			// on post we need to send the data provided in the template with the api as method
+		if RestMethodCarriesBody(craftData.ConnectionType) {
+			// A body method sends the template as its body, to the api name as the path. Any other
+			// method's template is the request URL.
 			data = craftData.Data
 			urlPath = craftData.Path
 		}
@@ -136,6 +133,7 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 	}
 
 	nodeMsg := apip.newChainMessage(apiCont.api, parsedInput, &restMessage, apiCollection)
+	nodeMsg.applyParsedRange(parsedInput)
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
 }
@@ -236,20 +234,30 @@ type RestChainListener struct {
 	app              *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
-// restMethodCarriesBody reports whether the REST listener relays the request body for
+// RestMethodCarriesBody reports whether the REST listener relays the request body for
 // an HTTP method. POST, PUT and PATCH carry one, and the node receives the body as
 // Fiber's Body() returns it: the client's bytes, decoded first when the client set a
 // Content-Encoding (that header is not forwarded). Every other method is relayed
 // without a body. The same set decides which requests forward the client's
 // Content-Type (forwardsClientBodyHeader), so the router never forwards a Content-Type
 // for bytes it did not send.
-func restMethodCarriesBody(method string) bool {
+func RestMethodCarriesBody(method string) bool {
 	switch method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch:
 		return true
 	default:
 		return false
 	}
+}
+
+// restRequestPath is the client's path as the parser and the sender must both read it.
+// The parser matches it against the spec with url.Parse; the sender appends it to the
+// configured node URL. url.Parse reads "//cosmos/tx/v1beta1/txs" (a client whose base
+// URL ends in "/") as host "cosmos" and path "/tx/v1beta1/txs", so a write fell to the
+// Default read API while the node received the whole path (MAG-3970, MAG-3973). Collapsing
+// the leading slashes before either side sees the path keeps the two in agreement.
+func restRequestPath(fiberCtx *fiber.Ctx) string {
+	return "/" + strings.TrimLeft(fiberCtx.Params("*"), "/")
 }
 
 // NewRestChainListener creates a new instance of RestChainListener
@@ -292,7 +300,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 		msgSeed := apil.logger.GetMessageSeed()
 		query := "?" + string(fiberCtx.Request().URI().QueryString())
-		path := "/" + fiberCtx.Params("*")
+		path := restRequestPath(fiberCtx)
 
 		// Cache headers once at the start to avoid repeated lookups
 		metadataValues := detachedReqHeaders(fiberCtx)
@@ -325,8 +333,15 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		)
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, http.MethodPost, dappID, userIp, analytics, restHeaders)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(analytics, err, metadataValues)
+		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
+			// Same answer as the catch-all handler below: a verb the spec does not declare is a
+			// 501, not a masked 500.
+			if errors.Is(err, common.APINotSupportedError) {
+				utils.LavaFormatError("api method is not supported", err, utils.LogAttr("GUID", ctx))
+				return common.CreateRestMethodNotFoundError(fiberCtx, chainID)
+			}
+
 			// Get unique GUID response
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 
@@ -363,7 +378,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		msgSeed := apil.logger.GetMessageSeed()
 
 		query := "?" + string(fiberCtx.Request().URI().QueryString())
-		path := "/" + fiberCtx.Params("*")
+		path := restRequestPath(fiberCtx)
 		dappID := extractDappIDFromFiberContext(fiberCtx)
 		analytics := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		analytics.SetProcessingTimestampBeforeRelay(startTime)
@@ -382,7 +397,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
 		// POST has its own handler above; PUT and PATCH arrive here and carry a body too.
 		requestBody := ""
-		if restMethodCarriesBody(fiberCtx.Method()) {
+		if RestMethodCarriesBody(fiberCtx.Method()) {
 			requestBody = string(fiberCtx.Body())
 		}
 		utils.LavaFormatInfo("Consumer received a new REST non-POST request",
@@ -399,7 +414,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, fiberCtx.Method(), dappID, userIp, analytics, restHeaders)
 		reply := relayResult.GetReply()
-		go apil.logger.AddMetricForHttp(analytics, err, metadataValues)
+		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
 			if errors.Is(err, common.APINotSupportedError) {
 				utils.LavaFormatError("api method is not supported", err, utils.LogAttr("GUID", ctx))

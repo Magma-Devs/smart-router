@@ -10,8 +10,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
-// TestRESTRowsDoNotBreakTheUnsupportedMethodCarveOut guards the reach of the REST status rows
-// beyond ClassifyError.
+// TestRESTRowsDoNotShadowTheRouteRefusalRows guards the reach of the REST status rows beyond
+// ClassifyError.
 //
 // TestRESTStatusRowsDoNotReachOtherTransports only exercises ClassifyError with an explicit
 // transport, and that is not the whole story: IsUnsupportedMethodError here, and
@@ -22,29 +22,33 @@ import (
 //
 // When the status rows were declared ABOVE the REST table's message rows, that is exactly what
 // went wrong: a 400 whose body said "method not allowed" or "route not found" classified as a
-// plain bad request, and the unsupported-method carve-out (zero CU, response caching, the
-// permanent-protocol-error stop) silently stopped applying to it.
-func TestRESTRowsDoNotBreakTheUnsupportedMethodCarveOut(t *testing.T) {
+// plain bad request. Since MAG-2771 that matters more, not less: the route refusal is the node's
+// claim about itself and is retried on another provider, while a bad request is the caller's
+// mistake and ends the request.
+func TestRESTRowsDoNotShadowTheRouteRefusalRows(t *testing.T) {
 	for _, tc := range []struct {
 		status int
 		body   string
+		want   *common.LavaError
 	}{
-		{400, "method not allowed"},
-		{400, "route not found"},
-		{400, `{"message":"endpoint not found"}`},
-		{404, "route not found"},
-		{405, `{"message":"method not allowed","error_code":"web_framework_error"}`},
+		{400, "method not allowed", common.LavaErrorNodeMethodNotAllowed},
+		{400, "route not found", common.LavaErrorNodeEndpointNotFound},
+		{400, `{"message":"endpoint not found"}`, common.LavaErrorNodeEndpointNotFound},
+		{404, "route not found", common.LavaErrorNodeEndpointNotFound},
+		{405, `{"message":"method not allowed","error_code":"web_framework_error"}`, common.LavaErrorNodeMethodNotAllowed},
 	} {
 		t.Run(fmt.Sprintf("%d %.24s", tc.status, tc.body), func(t *testing.T) {
+			require.Equal(t, tc.want, common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, tc.status, tc.body),
+				"a %d saying %q is the route refusal, whatever its status", tc.status, tc.body)
+			require.False(t, common.IsNonRetryableNodeError("", tc.status, tc.body),
+				"and it stays retryable through the transport loop")
 			err := rpcclient.HTTPError{
 				StatusCode: tc.status,
 				Status:     fmt.Sprintf("%d", tc.status),
 				Body:       []byte(tc.body),
 			}
-			require.True(t, IsUnsupportedMethodError(err),
-				"a %d saying %q is the route not existing, whatever its status", tc.status, tc.body)
-			require.True(t, common.IsUnsupportedMethodError("", tc.status, tc.body),
-				"and the common helper must agree")
+			require.False(t, IsUnsupportedMethodError(err), "a node's route refusal is not a router-terminal unsupported method")
+			require.False(t, common.IsUnsupportedMethodError("", tc.status, tc.body), "and the common helper must agree")
 		})
 	}
 }

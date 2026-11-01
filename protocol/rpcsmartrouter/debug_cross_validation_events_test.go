@@ -499,3 +499,9 @@ func TestCrossValidationEvents_StragglerPathRecords(t *testing.T) {
 		require.Equal(t, 1, counted, "while the counter still moves once for the group")
 	})
 }
+
+// crossValidationEventRecordingEnabled reports whether a ring is installed. Only tests ask; the
+// handler decides 503-vs-200 from readCrossValidationEvents' enabled result.
+func crossValidationEventRecordingEnabled() bool {
+	return crossValidationEventRecorder.Load() != nil
+}

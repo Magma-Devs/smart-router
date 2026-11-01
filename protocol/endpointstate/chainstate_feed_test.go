@@ -24,7 +24,7 @@ type tipSink struct {
 	blocks []int64
 }
 
-func (s *tipSink) record(block int64) {
+func (s *tipSink) record(_ string, block int64, _ bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.blocks = append(s.blocks, block)
@@ -141,7 +141,7 @@ func TestEndToEnd_ObservationsFeedChainStateTipAndConsensus(t *testing.T) {
 		ApiInterface:     spectypes.APIInterfaceJsonRPC,
 		AverageBlockTime: 200 * time.Millisecond,
 		BlocksToSave:     1,
-		OnTipObservation: func(block int64) { cs.SetLatestBlock(block) },
+		OnTipObservation: func(_ string, block int64, _ bool) { cs.SetLatestBlock(block) },
 	})
 	t.Cleanup(m.Stop)
 

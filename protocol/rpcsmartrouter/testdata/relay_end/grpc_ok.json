@@ -1,0 +1,23 @@
+{
+  "GUID": "<minted by the listener>",
+  "api_interface": "grpc",
+  "chain": "GRPCTEST",
+  "error": "",
+  "error_code": "",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "test.v1.Node/Call",
+  "outcome": "ok",
+  "reply_bytes": 2,
+  "request_bytes": 2,
+  "schema": 2,
+  "selection": "stateless",
+  "served_by": "grpc-node",
+  "stateful": false,
+  "status": 200,
+  "stop_reason": "Success"
+}

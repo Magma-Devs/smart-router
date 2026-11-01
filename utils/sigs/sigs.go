@@ -8,9 +8,8 @@
 package sigs
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
-
-	tendermintcrypto "github.com/cometbft/cometbft/crypto"
 )
 
 // EncodeUint64 encodes a uint64 value to a byte array
@@ -22,5 +21,6 @@ func EncodeUint64(val uint64) []byte {
 
 // HashMsg hashes msgData using SHA-256
 func HashMsg(msgData []byte) []byte {
-	return tendermintcrypto.Sha256(msgData)
+	sum := sha256.Sum256(msgData)
+	return sum[:]
 }

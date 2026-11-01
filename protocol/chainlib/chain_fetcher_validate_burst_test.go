@@ -74,6 +74,17 @@ func TestValidate_RateLimitStopsTheRetryBurst(t *testing.T) {
 	require.Equal(t, 1, router.maxAttempts(), "a rate-limited attempt must not be retried back-to-back; got %v", router.calls)
 }
 
+// gRPC carries no HTTP status: grpc-go reports codes.Unavailable and the vendor's 429 survives
+// only in the status text. Admission already reads that as a rate limit, so the burst stops on it.
+func TestValidate_GrpcTextRateLimitStopsTheRetryBurst(t *testing.T) {
+	router := &countingChainRouter{calls: map[string]int{}, err: errors.New("rpc error: code = Unavailable desc = unexpected HTTP status code received from server: 429 (Too Many Requests)")}
+	cf := newEthValidateFetcher(t, router)
+
+	_ = cf.Validate(context.Background())
+	require.Positive(t, len(router.calls), "validation must have sent something")
+	require.Equal(t, 1, router.maxAttempts(), "a rate-limited attempt must not be retried back-to-back; got %v", router.calls)
+}
+
 // Any other failure keeps the full budget — the zero-delay retries exist for a node
 // that is still booting, and that behaviour must not change.
 func TestValidate_OtherFailuresKeepThreeAttempts(t *testing.T) {

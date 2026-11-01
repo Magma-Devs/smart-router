@@ -76,6 +76,20 @@ const (
 	// invariant guards so a FUTURE call site cannot introduce a silently empty reason, and both are
 	// pinned by tests rather than left to be rediscovered.
 	EndpointDisableUnspecified EndpointDisableReason = "unspecified"
+
+	// EndpointDisableHeadStalled — the endpoint keeps ANSWERING, but its latest block has stayed the
+	// same for N tracker cycles in a row while it should have moved (MAG-3986). It is the shape no
+	// error-based rule can see: every answer is a 200, so the relay path counts it a success while
+	// the data it serves is stale.
+	//
+	// Unlike the two values above it is a STATE reason, not an event slot: it lives in the
+	// endpoint's stateReasons map, is added and removed only by the probe loop (and cleared by the
+	// operator reset), and no event-slot re-enable — probe re-enable, a successful relay, the epoch
+	// reset — can clear it. It comes off when the endpoint answers with a block higher than the one
+	// it was stuck on.
+	//
+	// Actionable as a node problem: the process answers but is not following the chain.
+	EndpointDisableHeadStalled EndpointDisableReason = "head-stalled"
 )
 
 // allEndpointDisableReasons is the shared backing array — a package-level var rather than a fresh
@@ -84,6 +98,7 @@ var allEndpointDisableReasons = []EndpointDisableReason{
 	EndpointDisableUnreachable,
 	EndpointDisableNodeError,
 	EndpointDisableUnspecified,
+	EndpointDisableHeadStalled,
 }
 
 // AllEndpointDisableReasons lists every reason a disable can carry.

@@ -23,8 +23,11 @@ const (
 )
 
 type RPCConsumerLogs struct {
-	consumerMetricsManager     ConsumerMetricsManagerInf
-	usageSink                  UsageEventSink
+	consumerMetricsManager ConsumerMetricsManagerInf
+	usageSink              UsageEventSink
+	// usageSinkEnabled is false for the NoopUsageSink default, so AddMetricFor* can skip
+	// building a RelayUsageEvent that would only be discarded (MAG-4244).
+	usageSinkEnabled           bool
 	consumerOptimizerQoSClient *ConsumerOptimizerQoSClient
 }
 
@@ -33,9 +36,11 @@ func NewRPCConsumerLogs(consumerMetricsManager ConsumerMetricsManagerInf, usageS
 	if usageSink == nil {
 		usageSink = NoopUsageSink{}
 	}
+	_, noopSink := usageSink.(NoopUsageSink)
 	return &RPCConsumerLogs{
 		consumerMetricsManager:     consumerMetricsManager,
 		usageSink:                  usageSink,
+		usageSinkEnabled:           !noopSink,
 		consumerOptimizerQoSClient: consumerOptimizerQoSClient,
 	}, nil
 }
@@ -168,21 +173,29 @@ func (rpccl *RPCConsumerLogs) RecordProviderLatency(chainId string, apiInterface
 }
 
 func (rpccl *RPCConsumerLogs) AddMetricForHttp(data *RelayMetrics, err error, headers map[string][]string) {
-	// Set OTel-bound fields before Emit. Success matters on the smart-router
-	// path too, where consumerMetricsManager.SetRelayMetrics is a no-op.
+	// Set Success before SetRelayMetrics and Emit: both read it.
 	data.Success = err == nil
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
 	// headers must hold owned strings: this runs in a goroutine after the reply, and strings.Join
 	// of a single value returns that value itself rather than a copy. The HTTP listeners pass
 	// chainlib's detached map (MAG-3881).
 	data.Origin = strings.Join(headers[OriginHeaderKey], ", ")
+	rpccl.emitUsage(data)
+}
+
+// emitUsage hands the relay to the usage sink, unless the sink is the no-op default: then
+// there is nothing to build the event for.
+func (rpccl *RPCConsumerLogs) emitUsage(data *RelayMetrics) {
+	if !rpccl.usageSinkEnabled {
+		return
+	}
 	rpccl.usageSink.Emit(NewRelayUsageEvent(data))
 }
 
 func (rpccl *RPCConsumerLogs) AddMetricForWebSocket(data *RelayMetrics, err error) {
 	data.Success = err == nil
 	rpccl.consumerMetricsManager.SetRelayMetrics(data, err)
-	rpccl.usageSink.Emit(NewRelayUsageEvent(data))
+	rpccl.emitUsage(data)
 }
 
 func (rpccl *RPCConsumerLogs) AddMetricForGrpc(data *RelayMetrics, err error, metadataValues *metadata.MD) {
@@ -201,7 +214,7 @@ func (rpccl *RPCConsumerLogs) AddMetricForGrpc(data *RelayMetrics, err error, me
 	// zero-copy headers, and grpc-go's transport allocates a string for every metadata value it
 	// decodes. The clone stays as a cheap guard at the boundary (MAG-3881).
 	data.Origin = strings.Clone(getMetadataHeaderOrDefault(OriginHeaderKey))
-	rpccl.usageSink.Emit(NewRelayUsageEvent(data))
+	rpccl.emitUsage(data)
 }
 
 func (rpccl *RPCConsumerLogs) LogTestMode(fiberCtx *fiber.Ctx) {

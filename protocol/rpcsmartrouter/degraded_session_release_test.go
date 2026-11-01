@@ -9,7 +9,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
@@ -82,8 +81,7 @@ func rejectEveryDegradedSession(t *testing.T, msg archiveRequest) *relaycore.Rel
 		"setup: the request's key must differ from the key its sessions were taken under, or this measures nothing")
 
 	sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: msg}
-	relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{},
-		lavaprotocol.NewRelayRetriesManager(), sm)
+	relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{}, sm)
 	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
 	rpcss := &RPCSmartRouterServer{

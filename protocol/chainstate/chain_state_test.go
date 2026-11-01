@@ -897,3 +897,79 @@ func TestNew_ZeroStalenessWindowDoesNotDisableExpiry(t *testing.T) {
 	_, ok := cs.GetLatestBlock()
 	require.False(t, ok, "the defaulted window still expires a stale tip")
 }
+
+// --- OnRegression (MAG-4153) ------------------------------------------------------------
+
+type regression struct {
+	from, to int64
+	reason   string
+}
+
+// newRegressionState is newTestState with an OnRegression hook that records every call. The hook
+// reads the tip back through GetLatestBlockAllowStale, so a hook fired under cs.mu deadlocks the
+// test instead of passing.
+func newRegressionState(t *testing.T) (*ChainState, *fakeClock, *[]regression) {
+	t.Helper()
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	var got []regression
+	var cs *ChainState
+	cs = NewWithClock("ETH1", Config{
+		BucketWidth:      2,
+		OutlierThreshold: 100,
+		StalenessWindow:  10 * time.Second,
+		TTL:              10 * time.Second,
+		OnRegression: func(from, to int64, reason string) {
+			require.Equal(t, to, cs.GetLatestBlockAllowStale(), "the hook sees the tip it reports")
+			got = append(got, regression{from, to, reason})
+		},
+	}, clk.now)
+	return cs, clk, &got
+}
+
+func TestOnRegression_StaleTipReAdoption(t *testing.T) {
+	cs, clk, got := newRegressionState(t)
+
+	cs.SetLatestBlock(1000)
+	cs.SetLatestBlock(990) // below a FRESH tip: ignored, the tip did not move
+	require.Empty(t, *got)
+
+	clk.advance(11 * time.Second) // past TTL
+	cs.SetLatestBlock(990)
+	require.Equal(t, []regression{{1000, 990, RegressionReasonStaleTip}}, *got)
+}
+
+func TestOnRegression_ConsensusSnapDown(t *testing.T) {
+	cs, clk, got := newRegressionState(t)
+
+	cs.SetLatestBlock(1_000_000)
+	cs.Recompute([]BlockObservation{
+		{URL: "a", Block: 1000, ObservedAt: clk.now()},
+		{URL: "b", Block: 1001, ObservedAt: clk.now()},
+	})
+	require.Equal(t, []regression{{1_000_000, 1001, RegressionReasonConsensus}}, *got)
+}
+
+// TestOnRegression_NotReportedWhenTipDoesNotGoDown covers every path that leaves the tip where it
+// is or raises it — none of them is a regression — plus Reset, which zeroes the tip on purpose.
+func TestOnRegression_NotReportedWhenTipDoesNotGoDown(t *testing.T) {
+	cs, clk, got := newRegressionState(t)
+
+	cs.SetLatestBlock(1000)
+	cs.SetLatestBlock(1001)          // advance
+	cs.SetLatestBlock(1001)          // equal-block confirmation
+	cs.SetLatestBlock(900)           // lower, but the tip is fresh: ignored
+	cs.SetLatestBlock(1_000_000)     // implausible jump: rejected
+	cs.Recompute([]BlockObservation{ // tip within OutlierThreshold of the baseline: left alone
+		{URL: "a", Block: 950, ObservedAt: clk.now()},
+		{URL: "b", Block: 950, ObservedAt: clk.now()},
+	})
+	cs.Recompute([]BlockObservation{ // baseline ahead of the tip: pulled UP
+		{URL: "a", Block: 1050, ObservedAt: clk.now()},
+		{URL: "b", Block: 1050, ObservedAt: clk.now()},
+	})
+	tip, _ := cs.GetLatestBlock()
+	require.Equal(t, int64(1050), tip)
+	cs.Reset()
+
+	require.Empty(t, *got)
+}

@@ -67,7 +67,9 @@ type CrossValidationPolicy struct {
 	// lava-cross-validation-* headers, the router will NOT cross-validate — the method routes by its normal
 	// stateful/stateless category. This is the explicit "disable cross-validation for specific methods" knob
 	// (PRD UC-1). It is mutually exclusive with Enabled (Enabled mandates CV; ForbidCallerCV forbids it) and
-	// the combination is rejected by Validate. The other knobs are ignored when this is set.
+	// the combination is rejected by Validate. The other knobs are ignored when this is set. It forbids the
+	// caller, not the operator: a GraphQL request that bundles this method with a root whose policy is
+	// enabled is still cross-validated, under that policy and without the caller's headers (MAG-4361).
 	ForbidCallerCV bool `yaml:"forbid-caller-cv,omitempty" json:"forbid-caller-cv,omitempty" mapstructure:"forbid-caller-cv,omitempty"`
 }
 

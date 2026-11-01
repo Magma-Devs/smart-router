@@ -95,8 +95,8 @@ func TestRelayInnerDirect_BinaryCallDoesNotWaitOnStalledReflection(t *testing.T)
 		}
 		relayResult := &common.RelayResult{}
 		start := time.Now()
-		_, err, _ := h.rpcss.relayInnerDirect(context.Background(), h.session, relayResult, 10*time.Second, 30*time.Second,
-			msg, msg.requestData, nil, func() bool { return false }, nil)
+		_, err := h.rpcss.relayInnerDirect(context.Background(), h.session, relayResult, 10*time.Second, 30*time.Second,
+			msg, msg.requestData, func() bool { return false }, nil)
 		took := time.Since(start)
 		require.NoError(t, err, "relay %d", i)
 		require.Equal(t, []byte{0x08, 0x01}, relayResult.GetReply().GetData(), "relay %d", i)
@@ -115,8 +115,8 @@ func TestRelayInnerDirect_RefusesABinaryCallToAServerStreamingMethod(t *testing.
 		rpcMessage:   &rpcInterfaceMessages.GrpcMessage{Path: method, Msg: []byte{0x08, 0x01}},
 	}
 	relayResult := &common.RelayResult{}
-	_, err, _ := h.rpcss.relayInnerDirect(context.Background(), h.session, relayResult, 5*time.Second, 30*time.Second,
-		msg, msg.requestData, nil, func() bool { return false }, nil)
+	_, err := h.rpcss.relayInnerDirect(context.Background(), h.session, relayResult, 5*time.Second, 30*time.Second,
+		msg, msg.requestData, func() bool { return false }, nil)
 	require.ErrorContains(t, err, "is server-streaming upstream")
 	require.Nil(t, relayResult.GetReply(), "a refused call is never sent")
 }

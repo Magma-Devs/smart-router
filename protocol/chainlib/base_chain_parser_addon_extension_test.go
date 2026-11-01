@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,4 +24,19 @@ func TestSeparateAddonsExtensionsArchiveIsExtension(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, addons, "archive must not be classified as an addon")
 	require.Equal(t, []string{"archive"}, extensions, "archive must be classified as an extension so the directive is honored")
+}
+
+// An add-on the spec does not define is charged to unsupported-addon. The router
+// meets this error while building the node's connection, before any verification,
+// and would otherwise publish it as a connection failure.
+func TestSeparateAddonsExtensionsUnknownIsUnsupportedAddon(t *testing.T) {
+	bcp := BaseChainParser{
+		allowedAddons:     map[string]bool{"": true, "debug": true},
+		allowedExtensions: map[string]struct{}{"archive": {}},
+		spec:              spectypes.Spec{Index: "ETH1"},
+	}
+
+	_, _, err := bcp.SeparateAddonsExtensions(context.Background(), []string{"archiv"})
+	require.ErrorContains(t, err, "is neither an addon or an extension")
+	require.Equal(t, CheckUnsupportedAddon, FailedCheck(err))
 }

@@ -214,6 +214,8 @@ without debug mode:
 | `lava-cross-validation-disagreeing-providers` | Providers whose **received** response dissented (node/protocol errors and hash-divergent responses; on a quorum failure, every successful provider, since there is no consensus to agree with). Empty means "everyone we heard from agreed" — a provider the router did not hear from is listed as *pending*, never silently dropped (MAG-2187). |
 | `lava-cross-validation-pending-providers` | Providers queried but whose response had not arrived when the reply was built (the quorum early-exit does not wait for stragglers). Their late responses are still compared against the consensus asynchronously — see [Straggler behavior](#straggler-behavior). |
 | `lava-cross-validation-failure-reason` | On failure only — a stable enum (below). |
+| `lava-cross-validation-plurality-size` | On failure only — how many providers returned the most common response (`0` when no non-empty response arrived). Nil/empty replies never count. Says who came closest, not who was right: a plurality below the agreement threshold is not a consensus, which is why `disagreeing-providers` still lists every successful provider (MAG-2192). |
+| `lava-cross-validation-plurality-providers` | On failure only — those providers (comma-separated, sorted). Empty on a tie, since a tie has no plurality. Drawn only from received responses, so a pending provider never appears. |
 
 A **request-time structural fail-fast** (a capacity/diversity check that aborts *before any
 upstream relay runs* — the `insufficient-capacity` / `insufficient-groups` reasons below) carries
@@ -395,11 +397,8 @@ budget, as it did before these bounds.
 A value at or above the request's own budget turns hedging off for that request. The window is also
 the hedge interval, and the budget is never shorter than the window, so such a value makes the two
 equal and a hedge could only fire as the budget runs out. Retrying after a failed attempt works as
-it does without the header, but an endpoint that goes quiet holds the request for the whole budget.
-Such a request also gets no backup-reserve hedge (MAG-3923). That hedge goes out one window before
-the budget ends, but never before the first window has passed, so when the window equals the budget
-there is no point inside the budget for it and it is not armed: if the primaries go quiet, the
-backup tier is never tried.
+it does without the header, but an endpoint that goes quiet holds the request for the whole budget,
+and no other endpoint, primary or backup, is tried while it does.
 
 `--max-caller-relay-timeout` lets callers extend the budget, up to its value:
 
@@ -408,8 +407,7 @@ backup tier is never tried.
 ```
 
 A request extended this way is one of those: its window is its whole budget, so one quiet endpoint
-can hold it for as long as the caller asked, up to the flag's value, and it gets no backup-reserve
-hedge either.
+can hold it for as long as the caller asked, up to the flag's value.
 
 A reply to a request that carried the header includes `Lava-Relay-Timeout-Applied`: the window the
 router actually used, as a Go duration. Like the router's other reply headers, it is absent when the
@@ -491,19 +489,20 @@ own headers are appended, the reply keeps only:
 
 | Kept | Why |
 | --- | --- |
-| `Content-Type`, `Content-Encoding` | the client needs them to decode the body (`common.TransportReplyHeaders`, the same pair the secondary cache keeps) |
+| `Content-Type`, `Content-Encoding` | the client needs them to decode the body (`common.TransportReplyHeaders`) |
 | `Retry-After`, `Date` | a 429's wait is computed from them: an HTTP-date `Retry-After` is measured against the upstream's own `Date`. `Date` is kept for that reading; the HTTP response the client sees carries fasthttp's own |
 | headers the chain spec declares in the reply direction (`pass_reply`, `pass_both`, `pass_ignore`) | part of that chain's API contract: today the Cosmos block-height header and Aptos's eight ledger-state headers, pagination cursor included. Resolved for the whole API interface, not the matched collection: Aptos declares them on its GET collection, its nodes send them on POST too, and the Aptos Rust SDK fails a call that comes back without all seven |
 
 Everything else the upstream or its CDN sends — server and ray ids, its CORS policy, cookies,
 quota counters, product headers — is dropped, and so is any header an upstream sends under a
 name the router owns (`lava-*`, `Provider-Latest-Block`, `Smart-Router-Version`,
-`status-code`), whether or not a spec lists it. A primary cache hit goes through the same
-filter when it is served, so an entry written by an older router replays the same reduced
-set; a secondary hit keeps only `Content-Type` and `Content-Encoding`
-(`docs/SECONDARY-CACHE.md`). The filter is `filterUpstreamReplyMetadata` in
-`upstream_reply_headers.go`, applied once in `SendDirectRelay`; the spec's directives come
-from `ChainParser.ReplyHeaderDirectives` (MAG-3104).
+`status-code`), whether or not a spec lists it. A cache hit goes through the same filter
+when it is served, from either tier, so an entry written by an older router or read from the
+secondary cache replays the same reduced set (`docs/SECONDARY-CACHE.md`). The filter is
+`common.FilterUpstreamReplyMetadata` in `protocol/common/reply_headers.go`, run once on the live
+path in `SendDirectRelay`, on a primary hit when it is served, and on a secondary hit inside
+`performance.SanitizeForeignCacheReply`; the spec's directives come from
+`ChainParser.ReplyHeaderDirectives` (MAG-3104).
 
 ## Architecture
 
@@ -523,10 +522,7 @@ User Request --> Smart Router --> Provider Selection (QoS-based)
 
 1. **Primary Attempt**: Tries direct-rpc providers first (best QoS selected)
 2. **Failure Detection**: Detects errors, timeouts, or unavailability
-3. **Automatic Failover**: Switches to backup providers transparently. A primary that stops answering
-   (rather than refusing) is still "busy" until the budget ends, so a read with no answer yet is also
-   hedged to a backup one attempt window (`--min-relay-timeout` floor) before the processing budget
-   runs out, so the backup still has a full window to answer. Writes are never hedged.
+3. **Automatic Failover**: Switches to backup providers transparently
 4. **Recovery**: Monitors primary providers and switches back when healthy
 
 ## Monitoring
