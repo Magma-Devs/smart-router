@@ -46,10 +46,6 @@ func newSmartRouterForURLFanoutTest() *SmartRouterMetricsManager {
 			Name:   "t_sr_endpoint_fetch_block_fails",
 			Labels: endpointLabels,
 		}),
-		endpointOverallHealth: NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-			Name:   "t_sr_endpoint_overall_health",
-			Labels: endpointLabels,
-		}),
 		urlToProviderNames: make(map[string][]string),
 	}
 }

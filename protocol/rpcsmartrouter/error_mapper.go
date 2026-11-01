@@ -60,9 +60,8 @@ func classifyAndWrap(err error, chainFamily common.ChainFamily, transport common
 //
 // A relay-race loser and an endpoint still silent when the budget expired both arrive as a cancelled
 // context and are otherwise indistinguishable, so the exemption that protects the first was also
-// swallowing the second: a single bad URL behind a provider with several was never disabled, never
-// probed for recovery, and never moved the health metric, even though the provider's own QoS
-// availability did drop.
+// swallowing the second: a single bad URL behind a provider with several was never disabled and
+// never probed for recovery, even though the provider's own QoS availability did drop.
 //
 // Exactly one condition lifts the exemption — the REQUEST ran out of budget. Every other way an
 // attempt can be cut short stays exempt, unchanged. budgetExpired is a function because the answer is
