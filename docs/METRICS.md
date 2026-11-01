@@ -510,6 +510,12 @@ series above keep firing unchanged regardless of backend; they cannot
 distinguish a backend error or timeout from a clean miss — these can, and they
 are the alerting surface for cache degradation.
 
+They describe the router's own cache only. A RESP **secondary** tier
+(`secondary-resp-cache`, MAG-4778) feeds none of them, so a dead secondary can
+never read as the primary down: watch it through
+`smartrouter_cache_failed_total{cache_tier="secondary"}` (`outcome` = `error` or
+`timeout`) and `GET /debug/cache-state`, as for a gRPC secondary.
+
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `smartrouter_resp_cache_failed_total` | Counter | `op`, `kind` | Backend-level operation failures (never clean misses): `op` = `get` \| `set` \| `sticky_get` \| `sticky_set` \| `observation_get` \| `observation_set` (the fleet tracker gate's fetch and publish); `kind` = `error` (unreachable / protocol error) \| `timeout` (budget exceeded — saturation reads differently from outage). Under `topology: standalone`, `error` is also the reading when the store could not connect to the endpoint at all (refused, no route, no such host), **including when the operation's own budget expired first** — a read's budget is shorter than the backend's first dial retry, so it always does. Until MAG-3653 that made every `op="get"` outage arrive as `kind="timeout"` while `op="set"` on the same incident read `error` correctly. A dial that merely timed out stays `timeout`: a black-holed endpoint and a healthy backend too far away fail identically. **Under `sentinel` and `cluster` an unreachable endpoint still reads `kind="timeout"` on reads** — a dial there cannot be attributed to the one endpoint an operation used — so for outage detection on those topologies alert on `smartrouter_resp_cache_endpoint_connected{role}` / `smartrouter_resp_cache_connected` (the 10s PING probe, which reaches each endpoint under every topology), not on this series' `kind`. |

@@ -90,10 +90,12 @@ request ──► primary cache ──hit──► served ("Cached")
   configured.
 
 Any backend that speaks the Smart Router cache protocol works as either tier —
-the secondary is simply a second `smartrouter cache` address. Run the same cache
-engine on both: pairing *different* engines across the two tiers is not a
-supported configuration (see [Open question, still
-open](#open-question-still-open)).
+the secondary is simply a second `smartrouter cache` address. A router whose own
+cache is a Redis or Valkey (`resp-cache`, [RESP-CACHE.md](RESP-CACHE.md)) reads
+its secondary from one too: see [A RESP (Redis/Valkey)
+secondary](#a-resp-redisvalkey-secondary). Run the same cache engine on both:
+pairing *different* engines across the two tiers is not a supported
+configuration (see [Open question, still open](#open-question-still-open)).
 
 ## What happens in each situation
 
@@ -159,6 +161,53 @@ startup](#bonus--misconfiguration-is-caught-at-startup) for why — when the
 secondary equals the primary address, or when a secondary is configured with no
 primary. When enabled, the startup log prints the full secondary configuration
 on one line.
+
+### A RESP (Redis/Valkey) secondary
+
+A router whose own cache is a RESP backend reads its secondary from a RESP
+backend too, through the `secondary-resp-cache` block — the other zone's store,
+under the other zone's key prefix:
+
+```yaml
+resp-cache:                       # this zone's own cache
+  addresses: ["zone-b-valkey:6379"]
+  key-prefix: zone-b
+secondary-resp-cache:             # the other zone's cache, read-only
+  addresses: ["zone-a-valkey-reader:6379"]
+  key-prefix: zone-a              # the writing zone's resp-cache key-prefix
+  username: zone-b-reader         # ideally an ACL user with read access only
+  password-file: /secrets/zone-a-reader
+  tls:
+    enabled: true
+secondary-cache-timeout: 100ms
+```
+
+- **The same surface as `resp-cache`**: topology (`standalone`, `sentinel`,
+  `cluster`), `addresses`, credentials (`password-file` rotates live), `tls`,
+  `key-prefix`, timeouts and pool size, with the same strict rules (an unknown
+  key fails startup). `--secondary-resp-cache-addresses`,
+  `--secondary-resp-cache-topology` and `--secondary-resp-cache-key-prefix` are
+  the flag forms, and outrank the block.
+- **`key-prefix` is the writing zone's.** Entries are keyed under the prefix of
+  the routers that wrote them, so set it to the other zone's `resp-cache`
+  `key-prefix` (default `sr`). A different prefix on the same backend is a
+  different keyspace and reads as a miss.
+- **Two keys are refused**: `read-addresses` (the tier only reads, so give the
+  reader endpoint as `addresses`) and `expiration` (the writing zone sets the
+  lifetimes).
+- **One secondary.** Setting both `secondary-cache-be` and
+  `secondary-resp-cache` fails startup.
+- **Read-only by construction.** The router reads with `GET`/`MGET` and probes
+  with `PING`; nothing in its secondary path writes, extends or deletes a key.
+  An ACL user restricted to reads on `~<prefix>:*` makes that hold on the
+  backend's side as well.
+- **Observability.** The tier reports through the same per-tier series as a gRPC
+  secondary (`smartrouter_cache_*{cache_tier="secondary"}`), through
+  `GET /debug/cache-state` (`tiers.secondary.engine: "resp"`), and through log
+  lines that open with `secondary-resp-cache`. It does **not** feed the
+  `smartrouter_resp_cache_*` series: those stay the router's own cache's.
+- `secondary-cache-timeout` and `secondary-cache-mode` apply as they do to a
+  gRPC secondary.
 
 Removing the configuration fully reverts the router to single-cache behavior;
 with no secondary configured, behavior is unchanged from previous releases.
@@ -733,12 +782,13 @@ release as reversing it.**
 What the implementation can say is narrower, and only about mechanism: the
 router does not know or ask which storage engine sits behind either address. The
 two tiers are independent connections speaking the Smart Router cache protocol,
-so a mixed pairing needs no special handling in the router. The one mix the
-router can see is a RESP primary (`resp-cache`, [RESP-CACHE.md](RESP-CACHE.md))
-beside a secondary, which is always a gRPC cache: it logs a warning at startup
-and runs both tiers, rather than refusing to start (MAG-4777). A mix behind two
-gRPC addresses is invisible to it. Nothing here tests or supports either
-combination.
+so a mixed pairing needs no special handling in the router. The mix the router
+can see is a RESP tier beside a gRPC one — `resp-cache` with
+`secondary-cache-be`, or `cache-be` with `secondary-resp-cache`: it logs a
+warning at startup and runs both tiers, rather than refusing to start
+(MAG-4777). A mix behind two gRPC addresses is invisible to it. Nothing here
+tests or supports either combination; the supported RESP pairing is
+`resp-cache` with `secondary-resp-cache` (MAG-4778).
 
 ### Where the proof lives
 

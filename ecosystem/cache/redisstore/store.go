@@ -165,7 +165,7 @@ func New(cfg Config) (*Store, error) {
 	// Fail fast on an unreadable credential source (a missing file, one that
 	// is empty once trimmed) before any client exists.
 	if _, _, err := creds.source.Credentials(); err != nil {
-		return nil, fmt.Errorf("resp-cache: reading credentials: %w", err)
+		return nil, fmt.Errorf("%s: reading credentials: %w", cfg.LogName(), err)
 	}
 	provider := creds.provider
 
@@ -212,7 +212,7 @@ func New(cfg Config) (*Store, error) {
 			// logging "connections=0" — which reads as "rotation applied in
 			// place" to an operator, the one thing that did NOT happen. Say
 			// once what actually holds instead of running a loop that cannot act.
-			utils.LavaFormatInfo("resp-cache credential rotation under sentinel applies on the next reconnect or failover, not in place on live connections",
+			utils.LavaFormatInfo(cfg.LogName()+" credential rotation under sentinel applies on the next reconnect or failover, not in place on live connections",
 				utils.LogAttr("password-file", cfg.PasswordFile),
 			)
 		} else {
@@ -336,7 +336,7 @@ func warnIfReadSplitIsDiscoveryScoped(cfg Config) {
 	if cfg.EffectiveTopology() == TopologyStandalone {
 		return
 	}
-	utils.LavaFormatWarning("resp-cache read-addresses under a discovering topology: the read client performs its own discovery and resolves to the master(s) of the topology those addresses front — it yields replica reads only when it points at a separate replicated deployment (e.g. a regional cluster), not at replicas of the write topology", nil,
+	utils.LavaFormatWarning(cfg.LogName()+" read-addresses under a discovering topology: the read client performs its own discovery and resolves to the master(s) of the topology those addresses front — it yields replica reads only when it points at a separate replicated deployment (e.g. a regional cluster), not at replicas of the write topology", nil,
 		utils.LogAttr("topology", cfg.EffectiveTopology()),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 	)
@@ -362,7 +362,7 @@ func warnIfCredentialsCrossPlaintext(cfg Config) {
 	if len(keys) == 0 {
 		return
 	}
-	utils.LavaFormatWarning("resp-cache credentials are configured without tls: they cross the network readable on every new connection to the backend (set tls.enabled: true to protect them in transit; on a loopback or private-network backend this may be intended)", nil,
+	utils.LavaFormatWarning(cfg.LogName()+" credentials are configured without tls: they cross the network readable on every new connection to the backend (set tls.enabled: true to protect them in transit; on a loopback or private-network backend this may be intended)", nil,
 		utils.LogAttr("addresses", cfg.Addresses),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 		utils.LogAttr("credential-keys", keys),
@@ -383,7 +383,7 @@ func warnIfTLSSkipsVerification(cfg Config) {
 	if !cfg.TLS.Enabled || !cfg.TLS.InsecureSkipVerify {
 		return
 	}
-	utils.LavaFormatWarning("resp-cache tls.insecure-skip-verify is set: the connection is encrypted but the backend's certificate is NOT verified, so the store's identity is unchecked — a development setting that must not travel to production", nil,
+	utils.LavaFormatWarning(cfg.LogName()+" tls.insecure-skip-verify is set: the connection is encrypted but the backend's certificate is NOT verified, so the store's identity is unchecked — a development setting that must not travel to production", nil,
 		utils.LogAttr("addresses", cfg.Addresses),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 	)
