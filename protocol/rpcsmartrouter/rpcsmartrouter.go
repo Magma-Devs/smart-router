@@ -839,24 +839,23 @@ func resetAllChainStates(deps debugMuxDeps) int {
 	})
 }
 
-// resetEndpointHealthAndGauge re-enables every endpoint across all session managers
+// resetEndpointHealth re-enables every endpoint across all session managers
 // (ConsumerSessionManager.ResetEndpointHealth — clears ConnectionRefusals, sets
-// Enabled=true) and mirrors the reset onto the per-endpoint Prometheus health gauge for
-// every provider (primary + backup), matching what the epoch tick does in updateEpoch.
-// Returns the number of endpoints actually re-enabled.
+// Enabled=true), matching what the epoch tick does in updateEpoch. Returns the number of
+// endpoints actually re-enabled.
 //
 // Endpoints disabled after MaxConsecutiveConnectionAttempts consecutive failures (e.g. an
 // all-providers-down stress burst) otherwise stay disabled until the next epoch tick, the
 // only other ResetHealth caller — contaminating later tests. Shared by /debug/reset-all
 // and /debug/reset-endpoint-health.
-func resetEndpointHealthAndGauge(deps debugMuxDeps) (total int) {
+func resetEndpointHealth(deps debugMuxDeps) (total int) {
 	withRouterLocked(deps, func(router *RPCSmartRouter) {
-		total = resetEndpointHealthAndGaugeLocked(router)
+		total = resetEndpointHealthLocked(router)
 	})
 	return total
 }
 
-func resetEndpointHealthAndGaugeLocked(router *RPCSmartRouter) int {
+func resetEndpointHealthLocked(router *RPCSmartRouter) int {
 	total := 0
 	for chainKey, csm := range router.sessionManagers {
 		if csm == nil {
@@ -876,26 +875,6 @@ func resetEndpointHealthAndGaugeLocked(router *RPCSmartRouter) int {
 			server.headStall.reset()
 			if server.endpointChainTrackerManager != nil {
 				server.endpointChainTrackerManager.ResetStallCounters()
-			}
-		}
-
-		// Mirror the struct reset onto the Prometheus health gauge so operators see
-		// providers recover immediately rather than at the next epoch tick — without it
-		// the gauge stays stuck at 0 until a successful relay, one a rarely-used backup
-		// may never receive.
-		server := router.rpcServers[chainKey]
-		if server == nil || server.smartRouterEndpointMetrics == nil || server.listenEndpoint == nil {
-			continue
-		}
-		for _, sessions := range []map[uint64]*routersession.ConsumerSessionsWithProvider{
-			router.providerSessions[chainKey],
-			router.backupProviderSessions[chainKey],
-		} {
-			for _, cswp := range sessions {
-				if cswp != nil {
-					server.smartRouterEndpointMetrics.SetEndpointOverallHealth(
-						server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, cswp.PublicAddress, true)
-				}
 			}
 		}
 	}
@@ -1437,7 +1416,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		if deps.router != nil {
 			deps.router.rebuildPairingFromConfig()
 		}
-		resetEndpointHealthAndGauge(deps)
+		resetEndpointHealth(deps)
 
 		// Capability advertisement — hardcoded for in-process stores, plus a
 		// conditional "cache-be" key when the external pod was actually
@@ -2210,10 +2189,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/reset-endpoint-health — focused companion to /debug/reset-all (MAG-2186):
 	// re-enable every provider endpoint disabled by MaxConsecutiveConnectionAttempts
-	// (Endpoint.Enabled=false) and mirror the reset onto the Prometheus health gauge,
-	// nothing else. The name mirrors Endpoint.ResetHealth() in the source for discoverability.
+	// (Endpoint.Enabled=false), nothing else. The name mirrors Endpoint.ResetHealth() in the
+	// source for discoverability.
 	mux.HandleFunc("/debug/reset-endpoint-health", debugMethod(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
-		reenabled := resetEndpointHealthAndGauge(deps)
+		reenabled := resetEndpointHealth(deps)
 		writeDebugJSONf(w, `{"reset":true,"endpoints_reenabled":%d}`, reenabled)
 	}))
 
@@ -4076,29 +4055,6 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			utils.LogAttr("time", time.Now().Format("15:04:05 MST")),
 		)
 
-		// Resolve the per-chain metrics manager once so endpoint health resets below
-		// can also reset the corresponding Prometheus gauge. Without this, #2256's
-		// endpoint.ResetHealth() fixes the in-memory struct but the
-		// rpc_endpoint_overall_health gauge stays stuck at 0 (unhealthy) forever,
-		// since the only path back to 1 is a successful relay that calls
-		// SetEndpointOverallHealth(..., true) — which a backup may never receive.
-		var epochMetrics *metrics.SmartRouterMetricsManager
-		var epochChainID, epochApiInterface string
-		// listenEndpoint is a *routersession.RPCEndpoint — always guard its deref.
-		// Skipping metric reset for a server with a nil listenEndpoint is preferable
-		// to a nil-deref panic that would kill the whole epoch transition and leave
-		// every endpoint.ResetHealth() undone.
-		if server, exists := rpsr.rpcServers[chainKey]; exists && server != nil && server.listenEndpoint != nil {
-			epochMetrics = server.smartRouterEndpointMetrics
-			epochChainID = server.listenEndpoint.ChainID
-			epochApiInterface = server.listenEndpoint.ApiInterface
-		}
-		var epochGauge func(provider string)
-		if epochMetrics != nil {
-			epochGauge = func(provider string) {
-				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, provider, true)
-			}
-		}
 		// Lock for the read → create-fresh → write-back section.
 		// This prevents races with the retry loop, which merges
 		// recovered providers into rpsr.providerSessions under the same lock.
@@ -4110,8 +4066,8 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		// Create FRESH ConsumerSessionsWithProvider objects to avoid session accumulation
 		// This is critical: reusing the same objects causes sessions to accumulate in the Sessions map
 		// until hitting the 1000-session limit, causing "No pairings available" errors
-		freshProviderSessions := freshenTier(oldProviderSessions, epoch, epochGauge, "Created fresh provider session for epoch", chainKeyLog)
-		freshBackupSessions := freshenTier(oldBackupSessions, epoch, epochGauge, "Created fresh backup provider session for epoch", chainKeyLog)
+		freshProviderSessions := freshenTier(oldProviderSessions, epoch, "Created fresh provider session for epoch", chainKeyLog)
+		freshBackupSessions := freshenTier(oldBackupSessions, epoch, "Created fresh backup provider session for epoch", chainKeyLog)
 
 		// Re-verify configured providers and reconcile against the fresh maps:
 		// drop entries whose provider failed validation (demote), and append
@@ -4237,24 +4193,18 @@ func withoutFailed(providers []*routersession.RPCStaticProviderEndpoint, failed 
 //
 // The reset is what gives a disabled endpoint a fresh start each epoch: an endpoint
 // disabled by ConnectionRefusals can never receive the successful relay that would
-// otherwise trigger ResetHealth, and backups rarely receive one at all. resetGauge
-// (nil when the chain has no metrics manager) mirrors the reset onto the
-// rpc_endpoint_overall_health gauge, which would otherwise stay stuck at 0 (#2256).
+// otherwise trigger ResetHealth, and backups rarely receive one at all (#2256).
 // The cross-validation group label, and the internal paths the provider lost at
 // admission (MAG-4214), must survive the refresh.
 func freshenTier(
 	old map[uint64]*routersession.ConsumerSessionsWithProvider,
 	epoch uint64,
-	resetGauge func(provider string),
 	debugMessage, chainKey string,
 ) map[uint64]*routersession.ConsumerSessionsWithProvider {
 	fresh := make(map[uint64]*routersession.ConsumerSessionsWithProvider)
 	for idx, oldSession := range old {
 		for _, endpoint := range oldSession.Endpoints {
 			endpoint.ResetHealth()
-		}
-		if resetGauge != nil {
-			resetGauge(oldSession.PublicAddress)
 		}
 		freshSession := routersession.NewConsumerSessionWithProvider(
 			oldSession.PublicAddress,
