@@ -24,7 +24,7 @@ import (
 // relayEndCaller is what a caller sends that names it: the customer-id header, and the tracing
 // headers a listener stamps on the context. An empty one is a header the caller did not send.
 type relayEndCaller struct {
-	projectID, requestID, taskID, txID string
+	customerID, requestID, taskID, txID string
 }
 
 func (c relayEndCaller) context(ctx context.Context) context.Context {
@@ -53,7 +53,7 @@ func TestRelayEnd_CustomerAndCallerIDs(t *testing.T) {
 		body   string
 	}{
 		{"caller_ids", relayEndCaller{"demo-acme", "req-7f3a9c", "task-42", "tx-0009"}, relayEndRead},
-		{"caller_ids_request_id_only", relayEndCaller{relayEndNoProjectID, "req-7f3a9c", "", ""}, relayEndRead},
+		{"caller_ids_request_id_only", relayEndCaller{relayEndNoCustomerID, "req-7f3a9c", "", ""}, relayEndRead},
 		{"caller_ids_parse_failure", relayEndCaller{"demo-globex", "req-7f3a9c", "task-42", "tx-0009"}, `{"jsonrpc":"2.0","method":`},
 		{"caller_ids_invalid_utf8", relayEndCaller{"demo-globex\xff\xfe-team", "", "task-\xc3", ""}, relayEndRead},
 		{"caller_ids_too_long", relayEndCaller{longest, longest, "", ""}, relayEndRead},
@@ -64,7 +64,7 @@ func TestRelayEnd_CustomerAndCallerIDs(t *testing.T) {
 			guid := relayEndCaseGUID(tc.name)
 			ctx, cancel := context.WithTimeout(tc.caller.context(utils.WithUniqueIdentifier(context.Background(), guid)), relayEndShortWait)
 			defer cancel()
-			_, _ = server.SendRelay(ctx, "", tc.body, http.MethodPost, tc.caller.projectID, "", nil, nil)
+			_, _ = server.SendRelay(ctx, "", tc.body, http.MethodPost, tc.caller.customerID, "", nil, nil)
 			requireRelayEndGolden(t, tc.name, normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false))
 		})
 	}

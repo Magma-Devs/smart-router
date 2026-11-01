@@ -260,8 +260,8 @@ func relayEndProvider(t *testing.T, node relayEndNode) (*lavasession.ConsumerSes
 	return provider, url
 }
 
-// relayEndNoProjectID is the customer id a listener passes for a request without a customer-id header.
-const relayEndNoProjectID = metrics.CustomerNone
+// relayEndNoCustomerID is the customer id a listener passes for a request without a customer-id header.
+const relayEndNoCustomerID = metrics.CustomerNone
 
 // sendRelayEnd sends body the way every HTTP listener does: SendRelay, with the GUID the
 // listener minted on the context, for a request without a customer-id header.
@@ -269,7 +269,7 @@ func sendRelayEnd(t *testing.T, server *RPCSmartRouterServer, guid uint64, timeo
 	t.Helper()
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), timeout)
 	defer cancel()
-	return server.SendRelay(ctx, url, body, http.MethodPost, relayEndNoProjectID, "", nil, metadata)
+	return server.SendRelay(ctx, url, body, http.MethodPost, relayEndNoCustomerID, "", nil, metadata)
 }
 
 const (
@@ -548,7 +548,7 @@ func TestRelayEnd_TendermintTxRefused(t *testing.T) {
 	guid := relayEndCaseGUID("tendermint_tx_refused")
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), relayEndShortWait)
 	defer cancel()
-	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", relayEndNoProjectID, "", nil, nil)
+	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", relayEndNoCustomerID, "", nil, nil)
 	require.NoError(t, err, "the client gets the node's normal reply")
 	requireRelayEndGolden(t, "tendermint_tx_refused", normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false))
 }
@@ -864,7 +864,7 @@ func TestRelayEnd_TendermintUnlistedMethod(t *testing.T) {
 			// query as the url.
 			ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), tc.guid), relayEndShortWait)
 			defer cancel()
-			_, _ = server.SendRelay(ctx, tc.url, tc.body, "", relayEndNoProjectID, "", nil, nil)
+			_, _ = server.SendRelay(ctx, tc.url, tc.body, "", relayEndNoCustomerID, "", nil, nil)
 
 			line := onlyRelayEnd(t, read(), tc.guid)
 			require.Equal(t, tc.method, relayEndField(t, line, "method"))
