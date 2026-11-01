@@ -370,7 +370,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		// and the remote address are per-connection, so this key matches every
 		// subscribe the loop registered.
 		if cwm.wsSubscriptionManager != nil {
-			dappID, _ := websocketConn.Locals(ProjectIDHeader).(string)
+			dappID, _ := websocketConn.Locals(CustomerIDHeader).(string)
 			if err := cwm.wsSubscriptionManager.UnsubscribeAll(webSocketCtx, dappID, websocketConn.RemoteAddr().String(), cwm.WebsocketConnectionUID, nil); err != nil {
 				utils.LavaFormatDebug("error releasing subscriptions on websocket close", utils.LogAttr("err", err), utils.LogAttr("GUID", webSocketCtx))
 			}
@@ -485,7 +485,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			continue
 		}
 
-		dappID, ok := websocketConn.Locals(ProjectIDHeader).(string)
+		dappID, ok := websocketConn.Locals(CustomerIDHeader).(string)
 		if !ok {
 			// Log and remove the analyze
 			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), nil, msgSeed, []byte("Unable to extract dappID"), cwm.apiInterface, time.Since(startTime))

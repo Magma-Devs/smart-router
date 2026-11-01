@@ -284,10 +284,14 @@ cross-validated increments them once per attempt, and the router's own tracker
 traffic is in them too. For what the client experienced, use the per-customer
 family below, summed over `customer`.
 
-#### Per customer — the `project-id` header
+#### Per customer — the `customer-id` header
 
-A caller may label each request with its own customer id in the `project-id`
+A caller may label each request with its own customer id in the `customer-id`
 header (HTTP header or gRPC metadata; on a WebSocket, on the upgrade request).
+This works the same on every interface: JSON-RPC, REST, Tendermint RPC,
+GraphQL, WebSocket and gRPC. Before MAG-4727 the header was named `project-id`;
+that name is no longer read, so a request that sends only `project-id` counts
+as `DefaultDappID`.
 The router counts the request under that label and does nothing else with it:
 the header is never sent to an upstream, and it is not part of the cache key or
 of any routing decision. Requests without it are counted under

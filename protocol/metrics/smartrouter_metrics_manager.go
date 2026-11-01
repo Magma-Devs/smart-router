@@ -175,7 +175,7 @@ type SmartRouterMetricsManager struct {
 	defaultMethods *batchSignatureRegistry
 
 	// Per-customer request group (MAG-4081), recorded once per client request by
-	// SetRelayMetrics. The customer label is the caller's project-id header, bounded by
+	// SetRelayMetrics. The customer label is the caller's customer-id header, bounded by
 	// customers (see customer_label.go); customerOverflow reports when that cap binds.
 	customerRequestsTotal   *prometheus.CounterVec   // smartrouter_customer_requests_total
 	customerRequestsFailed  *prometheus.CounterVec   // smartrouter_customer_requests_failed_total
@@ -713,20 +713,20 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	customerRequestLabels := []string{"spec", "apiInterface", "customer", "method"}
 	customerRequestsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_requests_total",
-		Help: `Client requests, once each with their final outcome, by the caller's project-id header. customer="DefaultDappID": no header. customer="other": past the per-spec customer cap (see smartrouter_customer_overflow_total). Subscription pushes are not counted; the subscribe request is.`,
+		Help: `Client requests, once each with their final outcome, by the caller's customer-id header. customer="DefaultDappID": no header. customer="other": past the per-spec customer cap (see smartrouter_customer_overflow_total). Subscription pushes are not counted; the subscribe request is.`,
 	}, customerRequestLabels)
 	customerRequestsFailed := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_requests_failed_total",
-		Help: "Client requests that ended in an error to the client, by the caller's project-id header. Success rate = 1 - failed / smartrouter_customer_requests_total.",
+		Help: "Client requests that ended in an error to the client, by the caller's customer-id header. Success rate = 1 - failed / smartrouter_customer_requests_total.",
 	}, customerRequestLabels)
 	customerEndToEndLatency := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_customer_end_to_end_latency_milliseconds",
-		Help:    "End-to-end latency of successful client requests in milliseconds, by the caller's project-id header. Use histogram_quantile() for percentiles.",
+		Help:    "End-to-end latency of successful client requests in milliseconds, by the caller's customer-id header. Use histogram_quantile() for percentiles.",
 		Buckets: latencyBuckets,
 	}, []string{"spec", "apiInterface", "customer"})
 	customerOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_overflow_total",
-		Help: `Label normalizations that fell into customer="other": the spec exhausted its distinct-customer budget, or the project-id value was too long to be an id. Non-zero means per-customer numbers are lossy for this spec.`,
+		Help: `Label normalizations that fell into customer="other": the spec exhausted its distinct-customer budget, or the customer-id value was too long to be an id. Non-zero means per-customer numbers are lossy for this spec.`,
 	}, []string{"spec"})
 
 	cacheLabels := []string{"spec", "apiInterface", "method", "cache_tier"}

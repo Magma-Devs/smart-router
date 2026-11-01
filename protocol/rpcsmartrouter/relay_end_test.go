@@ -260,11 +260,11 @@ func relayEndProvider(t *testing.T, node relayEndNode) (*lavasession.ConsumerSes
 	return provider, url
 }
 
-// relayEndNoProjectID is the project id a listener passes for a request without a project-id header.
+// relayEndNoProjectID is the customer id a listener passes for a request without a customer-id header.
 const relayEndNoProjectID = metrics.CustomerNone
 
 // sendRelayEnd sends body the way every HTTP listener does: SendRelay, with the GUID the
-// listener minted on the context, for a request without a project-id header.
+// listener minted on the context, for a request without a customer-id header.
 func sendRelayEnd(t *testing.T, server *RPCSmartRouterServer, guid uint64, timeout time.Duration, url, body string, metadata ...pairingtypes.Metadata) (*common.RelayResult, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), timeout)
