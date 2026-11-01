@@ -1019,8 +1019,8 @@ type debugCacheStateResponse struct {
 	// express that case, and the case is real: the secondary is always a gRPC client
 	// (performance.InitCache is its only constructor) while the primary becomes RESP
 	// whenever the resp-cache block is set. That pairing is documented as
-	// unsupported but nothing validates it, so the endpoint must be able to show it
-	// rather than average it away.
+	// unsupported, and startup only warns about it (MAG-4777) rather than refusing it,
+	// so the endpoint must be able to show it rather than average it away.
 	Engine string          `json:"engine"`
 	Tiers  debugCacheTiers `json:"tiers"`
 }
@@ -3622,11 +3622,17 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			// primary: nothing backfills" would be false there. LoadRespCacheConfig
 			// is a pure read of the same viper the selection above used.
 			primaryAddressForSecondary := viper.GetString(performance.CacheFlagName)
+			primaryEngineForSecondary := ""
+			if primaryAddressForSecondary != "" {
+				primaryEngineForSecondary = performance.CacheEngineGRPC
+			}
 			if respConfig, respEnabled, _ := performance.LoadRespCacheConfig(viper.GetViper()); respEnabled {
 				primaryAddressForSecondary = strings.Join(respConfig.Addresses, ",")
+				primaryEngineForSecondary = performance.CacheEngineRESP
 			}
 			secondaryWarnings, secondaryErr := secondaryCacheConfig.Validate(
 				primaryAddressForSecondary,
+				primaryEngineForSecondary,
 				viper.IsSet(performance.SecondaryCacheTimeoutFlagName),
 				viper.IsSet(performance.SecondaryCacheModeFlagName),
 			)

@@ -730,9 +730,12 @@ release as reversing it.**
 What the implementation can say is narrower, and only about mechanism: the
 router does not know or ask which storage engine sits behind either address. The
 two tiers are independent connections speaking the Smart Router cache protocol,
-so a mixed pairing needs no special handling in the router and would not be
-detected, let alone rejected, if you configured one. Nothing here validates,
-tests, or supports that combination.
+so a mixed pairing needs no special handling in the router. The one mix the
+router can see is a RESP primary (`resp-cache`, [RESP-CACHE.md](RESP-CACHE.md))
+beside a secondary, which is always a gRPC cache: it logs a warning at startup
+and runs both tiers, rather than refusing to start (MAG-4777). A mix behind two
+gRPC addresses is invisible to it. Nothing here tests or supports either
+combination.
 
 ### Where the proof lives
 
