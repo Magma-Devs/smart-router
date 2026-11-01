@@ -131,22 +131,51 @@ func TestPerProviderGauge_CoversTheBackupPool(t *testing.T) {
 		"a released backup must read serving again")
 }
 
-// A provider configured in both pools is out only when both pools hold it out: blocked as a regular
-// provider, it still serves from the backup tier.
-func TestPerProviderGauge_AProviderInBothPoolsIsOutOnlyWhenBothBlockIt(t *testing.T) {
+// A provider joins a block list only when a request picks it and finds no usable url. A backup on a
+// healthy chain is never picked, so with the lists alone a backup whose only url was head-stalled
+// read serving for as long as the stall lasted (MAG-4735). The gauge reads the urls too.
+func TestPerProviderGauge_ABackupWithNoUsableURLReadsBlockedWithoutARequest(t *testing.T) {
 	rec := &stateSizeRecorder{}
 	csm := createConsumerSessionManagerWithMetrics(rec)
-	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("both-c"), createNamedPairingList("both-c")))
+	backups := createNamedPairingList("backup-b")
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("regular-a"), backups))
+	stalled := backups[0].Endpoints[0]
 
-	blockOneProvider(t, csm, "both-c") // leaves validAddresses: the regular block
+	require.True(t, stalled.AddStateReason(EndpointDisableHeadStalled, time.Now(), 1000))
 	csm.publishStateSizes()
-	require.Equal(t, map[string]bool{"both-c": false}, rec.providerBlockedSnapshot(),
-		"blocked as a regular provider, it still serves as a backup")
+	require.Equal(t, map[string]bool{"regular-a": false, "backup-b": true}, rec.providerBlockedSnapshot(),
+		"a backup whose only url is head-stalled is out of rotation, picked by a request or not")
+	csm.lock.RLock()
+	_, listed := csm.blockedBackupProviders["backup-b"]
+	csm.lock.RUnlock()
+	require.False(t, listed, "nothing blocked it: the gauge reads the url, not a block list")
 
-	blockOneProvider(t, csm, "both-c") // no longer in validAddresses: the backup block
+	stalled.ClearStateReasons()
 	csm.publishStateSizes()
-	require.Equal(t, map[string]bool{"both-c": true}, rec.providerBlockedSnapshot(),
-		"out of both pools, it reads blocked")
+	require.Equal(t, map[string]bool{"regular-a": false, "backup-b": false}, rec.providerBlockedSnapshot(),
+		"the url moves again, so the backup reads serving on the next tick")
+}
+
+// A regular provider is out of rotation when every url is disabled or head-stalled, before any
+// request blocks it; one url left usable keeps it serving.
+func TestPerProviderGauge_AProviderIsOutOnlyWhenNoURLIsUsable(t *testing.T) {
+	rec := &stateSizeRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+	pairing := createNamedPairingList("two-urls")
+	first := pairing[0].Endpoints[0]
+	second := &Endpoint{Connections: []*EndpointConnection{}, NetworkAddress: grpcListener + "-2", Enabled: true}
+	pairing[0].Endpoints = append(pairing[0].Endpoints, second)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
+
+	first.mu.Lock()
+	first.Enabled = false // disabled after too many straight failures
+	first.mu.Unlock()
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"two-urls": false}, rec.providerBlockedSnapshot(), "one url left in rotation")
+
+	require.True(t, second.AddStateReason(EndpointDisableHeadStalled, time.Now(), 1000))
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"two-urls": true}, rec.providerBlockedSnapshot(), "no url left in rotation")
 }
 
 // blockedSeedRecorder keeps the provider set each epoch seeds the per-provider gauge with.

@@ -1601,3 +1601,17 @@ func CalcWeightsByStake(providers map[uint64]*ConsumerSessionsWithProvider) (wei
 	}
 	return weights
 }
+
+// hasRelayableEndpoint reports whether at least one of the provider's urls can take a relay right
+// now: usable (enabled, no state reason such as head-stalled) and not websocket-only. A provider
+// with none is out of rotation even before a request finds that out and blocks it.
+func (cswp *ConsumerSessionsWithProvider) hasRelayableEndpoint() bool {
+	cswp.Lock.RLock()
+	defer cswp.Lock.RUnlock()
+	for _, endpoint := range cswp.Endpoints {
+		if endpoint.IsUsable() && endpoint.ServesDirectRelays() {
+			return true
+		}
+	}
+	return false
+}

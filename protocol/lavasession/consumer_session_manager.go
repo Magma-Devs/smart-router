@@ -4111,25 +4111,31 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 	for _, address := range csm.currentlyBlockedProviderAddresses {
 		blockedSet[address] = struct{}{}
 	}
-	providerBlocked := make(map[string]bool, len(csm.pairing)+len(csm.backupProviders))
-	for address := range csm.pairing {
-		_, blocked := blockedSet[address]
-		providerBlocked[address] = blocked
+	// A provider reads blocked when it is on a block list or when none of its urls can take a
+	// relay right now (MAG-4735). The block lists alone lag: a provider joins one only when a
+	// request picks it and finds nothing usable, so a backup on a healthy chain, never picked,
+	// read serving for as long as its only url stayed head-stalled. The backup pool keeps its own
+	// block set. The urls are read after csm.lock is released, so no provider lock nests in it.
+	type providerState struct {
+		listed bool
+		cswp   *ConsumerSessionsWithProvider
 	}
-	// The backup pool keeps its own block set, which the gauge never read: a blocked backup moved
-	// the blocked-backups count and nothing else, so which backup was out was on no series
-	// (MAG-4735). A provider configured in both pools is out only when both pools hold it out: a
-	// regular block alone still leaves it to serve as a backup.
-	for address := range csm.backupProviders {
-		_, blockedAsBackup := csm.blockedBackupProviders[address]
-		if blockedAsRegular, inPairing := providerBlocked[address]; inPairing {
-			providerBlocked[address] = blockedAsRegular && blockedAsBackup
-			continue
-		}
-		providerBlocked[address] = blockedAsBackup
+	states := make(map[string]providerState, len(csm.pairing)+len(csm.backupProviders))
+	for address, cswp := range csm.pairing {
+		_, listed := blockedSet[address]
+		states[address] = providerState{listed: listed, cswp: cswp}
+	}
+	for address, cswp := range csm.backupProviders {
+		_, listed := csm.blockedBackupProviders[address]
+		states[address] = providerState{listed: listed, cswp: cswp}
 	}
 	blockedByReason := csm.blockedCountsByReasonLocked()
 	csm.lock.RUnlock()
+
+	providerBlocked := make(map[string]bool, len(states))
+	for address, state := range states {
+		providerBlocked[address] = state.listed || (state.cswp != nil && !state.cswp.hasRelayableEndpoint())
+	}
 
 	var stickyCount, reportedCount int
 	if csm.stickySessions != nil {
