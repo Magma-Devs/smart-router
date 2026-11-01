@@ -646,6 +646,13 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 		weights[addr] = w
 	}
 	csm.providerOptimizer.UpdateWeights(weights, epoch)
+	// The per-provider blocked gauge covers the backup pool too (MAG-4735), so a backup is seeded
+	// at 0 here like a regular provider; publishStateSizes then keeps both pools current.
+	for _, provider := range backupProviderList {
+		if len(provider.Endpoints) > 0 {
+			providerAddressToEndpoint[provider.PublicLavaAddress] = provider.Endpoints[0].NetworkAddress
+		}
+	}
 	go csm.consumerMetricsManager.ResetBlockedProvidersMetrics(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, providerAddressToEndpoint)
 
 	// Membership of the outgoing backup pool, captured before the map is replaced, for the same
@@ -4093,8 +4100,8 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 	prevEpochBlockedCount := len(csm.previousEpochBlockedProviders)
 	blockedBackupCount := len(csm.blockedBackupProviders)
 
-	// Snapshot the per-provider blocked state for the whole pairing, not just the addresses that
-	// changed. The per-provider gauge MUST be level-triggered: the blocked list is also drained
+	// Snapshot the per-provider blocked state for the whole pairing and the backup pool, not just
+	// the addresses that changed. The per-provider gauge MUST be level-triggered: the blocked list is also drained
 	// wholesale by setValidAddressesToDefaultValue — on every epoch transition, and on the
 	// pool-empty release in releaseBlockedProvidersIfPoolEmpty — and neither drain publishes
 	// anything per provider. Edge-triggered publishing alone therefore left every series it
@@ -4104,10 +4111,22 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 	for _, address := range csm.currentlyBlockedProviderAddresses {
 		blockedSet[address] = struct{}{}
 	}
-	providerBlocked := make(map[string]bool, len(csm.pairing))
+	providerBlocked := make(map[string]bool, len(csm.pairing)+len(csm.backupProviders))
 	for address := range csm.pairing {
 		_, blocked := blockedSet[address]
 		providerBlocked[address] = blocked
+	}
+	// The backup pool keeps its own block set, which the gauge never read: a blocked backup moved
+	// the blocked-backups count and nothing else, so which backup was out was on no series
+	// (MAG-4735). A provider configured in both pools is out only when both pools hold it out: a
+	// regular block alone still leaves it to serve as a backup.
+	for address := range csm.backupProviders {
+		_, blockedAsBackup := csm.blockedBackupProviders[address]
+		if blockedAsRegular, inPairing := providerBlocked[address]; inPairing {
+			providerBlocked[address] = blockedAsRegular && blockedAsBackup
+			continue
+		}
+		providerBlocked[address] = blockedAsBackup
 	}
 	blockedByReason := csm.blockedCountsByReasonLocked()
 	csm.lock.RUnlock()

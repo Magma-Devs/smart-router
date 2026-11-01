@@ -2,8 +2,11 @@ package lavasession
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/stretchr/testify/require"
 )
 
@@ -101,4 +104,92 @@ func TestPerProviderGauge_ClearedByThePoolEmptyRelease(t *testing.T) {
 		require.False(t, isBlocked,
 			"%s is back in rotation and serving, so its per-provider gauge must not still read blocked", address)
 	}
+}
+
+// A backup is blocked in its own store (blockedBackupProviders), which the per-provider gauge never
+// read: a blocked backup moved the smartrouter_csm_blocked_backup_providers count and nothing else,
+// so which backup was out was on no series (MAG-4735). The gauge now covers both pools.
+func TestPerProviderGauge_CoversTheBackupPool(t *testing.T) {
+	rec := &stateSizeRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("regular-a"), createNamedPairingList("backup-b")))
+
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"regular-a": false, "backup-b": false}, rec.providerBlockedSnapshot(),
+		"both pools are published, nothing blocked")
+
+	blockOneProvider(t, csm, "backup-b")
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"regular-a": false, "backup-b": true}, rec.providerBlockedSnapshot(),
+		"a blocked backup must read blocked")
+	require.Equal(t, 0, rec.blockedProvidersCount(), "the regular count does not move for a backup")
+
+	// The recovery probe's release restores a provider in both pools.
+	csm.RestoreRecoveredProvider("backup-b")
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"regular-a": false, "backup-b": false}, rec.providerBlockedSnapshot(),
+		"a released backup must read serving again")
+}
+
+// A provider configured in both pools is out only when both pools hold it out: blocked as a regular
+// provider, it still serves from the backup tier.
+func TestPerProviderGauge_AProviderInBothPoolsIsOutOnlyWhenBothBlockIt(t *testing.T) {
+	rec := &stateSizeRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("both-c"), createNamedPairingList("both-c")))
+
+	blockOneProvider(t, csm, "both-c") // leaves validAddresses: the regular block
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"both-c": false}, rec.providerBlockedSnapshot(),
+		"blocked as a regular provider, it still serves as a backup")
+
+	blockOneProvider(t, csm, "both-c") // no longer in validAddresses: the backup block
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"both-c": true}, rec.providerBlockedSnapshot(),
+		"out of both pools, it reads blocked")
+}
+
+// blockedSeedRecorder keeps the provider set each epoch seeds the per-provider gauge with.
+type blockedSeedRecorder struct {
+	metrics.NoOpConsumerMetrics
+	mu    sync.Mutex
+	seeds []map[string]string
+}
+
+func (r *blockedSeedRecorder) ResetBlockedProvidersMetrics(_, _ string, providers map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seed := make(map[string]string, len(providers))
+	for address, endpoint := range providers {
+		seed[address] = endpoint
+	}
+	r.seeds = append(r.seeds, seed)
+}
+
+func (r *blockedSeedRecorder) lastSeed() (map[string]string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.seeds) == 0 {
+		return nil, false
+	}
+	return r.seeds[len(r.seeds)-1], true
+}
+
+// The epoch reset drops every series of the chain and seeds 0 for the providers that remain. A
+// backup left out of the seed had its series deleted at each epoch and recreated by the next tick,
+// a one-second hole per epoch on a provider that never changed.
+func TestPerProviderGauge_EpochSeedCoversTheBackupPool(t *testing.T) {
+	rec := &blockedSeedRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("regular-a"), createNamedPairingList("backup-b")))
+
+	require.Eventually(t, func() bool {
+		seed, ok := rec.lastSeed()
+		if !ok {
+			return false
+		}
+		_, regular := seed["regular-a"]
+		_, backup := seed["backup-b"]
+		return regular && backup
+	}, time.Second, 10*time.Millisecond, "the epoch seed must name the backup as well as the regular provider")
 }
