@@ -525,9 +525,32 @@ func convertToMetadataMapOfSlices(md map[string][]string) []pairingtypes.Metadat
 func convertRelayMetaDataToMDMetaData(md []pairingtypes.Metadata) metadata.MD {
 	responseMetaData := make(metadata.MD)
 	for _, v := range md {
-		responseMetaData[v.Name] = append(responseMetaData[v.Name], v.Value)
+		responseMetaData[v.Name] = append(responseMetaData[v.Name], sendableGrpcValue(v.Name, v.Value))
 	}
 	return responseMetaData
+}
+
+// sendableGrpcValue percent-encodes the bytes gRPC refuses in a non-binary header value
+// (anything outside printable ASCII, and the % that escapes them). gRPC drops every reply
+// header when one value has such a byte, so one value must not cost the rest.
+func sendableGrpcValue(name, value string) string {
+	if strings.HasSuffix(strings.ToLower(name), "-bin") {
+		return value
+	}
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; c < 0x20 || c > 0x7e {
+			var b strings.Builder
+			for j := 0; j < len(value); j++ {
+				if c := value[j]; c < 0x20 || c > 0x7e || c == '%' {
+					fmt.Fprintf(&b, "%%%02X", c)
+				} else {
+					b.WriteByte(c)
+				}
+			}
+			return b.String()
+		}
+	}
+	return value
 }
 
 // split two requested blocks to the most advanced and most behind
