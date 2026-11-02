@@ -116,6 +116,17 @@ func (bcp *BaseChainProxy) CapTimeoutForSend(ctx context.Context, chainMessage C
 	return connectCtx, cancel
 }
 
+// relayBodyForLog is the form of a client's request body that the listeners' log lines carry: its
+// head and tail, relayMsgLogMaxChars bytes in all, cut on rune boundaries. A body holds what the
+// client sends, signed transactions included, and the request line is written at info, so the whole
+// body is logged only when --debug-relays asks for it.
+func relayBodyForLog(body string, debugRelays bool) string {
+	if debugRelays {
+		return body
+	}
+	return utils.FormatLongString(body, relayMsgLogMaxChars)
+}
+
 func extractDappIDFromFiberContext(c *fiber.Ctx) (dappID string) {
 	// fiber.Ctx.Get returns a string aliased to fasthttp's per-request
 	// header buffer (zero-copy via unsafe). The buffer is recycled when

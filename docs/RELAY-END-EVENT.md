@@ -80,10 +80,12 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | `attempts` | array | when `stateful` is `true`, when `outcome` is not `ok`, when the relay took more than one attempt or its only attempt failed (a retry, a hedge, a recovery on another upstream), or when an upstream was skipped | One entry per upstream attempt; see [attempts](#attempts). `[]` when nothing was sent. A read its first attempt answered leaves it out. |
 
 LogQL's `json` parser renders numbers and booleans as strings (`has_reply="false"`, `status="500"`)
-and skips arrays; `| json attempts="attempts"` extracts the raw array. A field whose name is already a
-stream label is renamed with an `_extracted` suffix: where the collector labels writes `stateful`,
-`| json | stateful="true"` matches nothing, so select writes by that stream label or by the line
-filter `|= "\"stateful\":true"`, which works either way.
+and skips arrays; `| json attempts="attempts"` extracts the raw array. The fleet's log collector puts
+the static stream label `stateful="1"` on every router line that matches `"stateful":("1"|true)`, so
+`{stateful="1"}` selects writes. A field whose name is already a stream label is renamed with an
+`_extracted` suffix: on those streams `| json` extracts the field as `stateful_extracted="true"`, and
+`| json | stateful="true"` matches nothing. The line filter `|= "\"stateful\":true"` selects writes
+on any stream.
 
 `error` and `attempts[].message` are prose for a person. The same failure can read differently on
 routers at different `--log-level`s, because an error built by a log formatter whose level is off
