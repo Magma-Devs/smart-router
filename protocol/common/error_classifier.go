@@ -121,6 +121,11 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// Standard JSON-RPC 2.0 codes
 		{CodeEquals(-32601), LavaErrorNodeMethodNotFound},
 		{CodeEquals(-32700), LavaErrorUserParseError},
+		// Alchemy refuses a method it does not serve with -32600 "Unsupported method: <m> on
+		// <NETWORK>", not -32601. That is the node describing its own surface, not a malformed
+		// request, so it must reach a peer that may serve the method instead of being returned.
+		// Scoped to -32600 so the phrase in a revert or other error body is not read as one.
+		{CodeAndMessage(-32600, "unsupported method"), LavaErrorNodeMethodNotSupported},
 		{CodeEquals(-32600), LavaErrorUserInvalidRequest},
 		{CodeEquals(-32602), LavaErrorUserInvalidParams},
 		{CodeEquals(-32603), LavaErrorNodeInternalError},
