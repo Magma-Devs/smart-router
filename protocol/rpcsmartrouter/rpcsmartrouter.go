@@ -2431,10 +2431,10 @@ func subscriptionCollectionProbe(chainParser chainlib.ChainParser) func(internal
 	return func(internalPath string, declaredAddons []string) bool {
 		addons, _, err := chainParser.SeparateAddonsExtensions(context.Background(), declaredAddons)
 		if err != nil {
-			// The chain router surfaces this as a construction error. Here the
-			// endpoint list is being built for relays, so an unreadable addon
-			// set falls back to "http collection" — the shape all but STRK's
-			// three ws paths have.
+			// Verification refuses a url whose add-ons cannot be read, so this
+			// is reached only outside admission; an unreadable addon set falls
+			// back to "http collection" — the shape all but STRK's three ws
+			// paths have.
 			return false
 		}
 		if len(addons) == 0 {
@@ -2459,14 +2459,10 @@ func subscriptionCollectionProbe(chainParser chainlib.ChainParser) func(internal
 // expandInternalPaths resolves each configured node-url into the set of urls
 // the router will actually dial, one per internal path the spec serves.
 //
-// It mirrors chainRouterImpl.BatchNodeUrlsByServices exactly, because the two
-// have to agree on which url answers a given api collection: the chain router
-// builds the proxies the tracker and the verifications run on, and this builds
-// the direct-RPC endpoints relays run on. They diverged, and the relay path —
-// having no internal path anywhere in its endpoint list — dialed whichever url
-// session selection happened to hand it. A chain serving two API versions over
-// two urls (TON: toncenter v2 and tonindex v3) answered v3 apis out of the v2
-// upstream, which shows up as that vendor's 404 rather than as a routing fault.
+// A relay for an api under an internal path has to reach the url that serves
+// that path: a chain serving two API versions over two urls (TON: toncenter v2
+// and tonindex v3) answers v3 apis out of the v2 upstream otherwise, which shows
+// up as that vendor's 404 rather than as a routing fault.
 //
 //   - a url declaring `internal-path` IS that path's root and is taken as it
 //     stands;
@@ -2528,17 +2524,12 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 			isWs = false
 		}
 		for _, internalPath := range nonRoot {
-			// The transport has to serve the collection. A ws url answers the
-			// spec's subscription collections and an http url answers the rest
-			// — chain_router.go's autoGenerateMissingInternalPaths applies the
-			// same rule to the proxies the tracker and the verifications run
-			// on, and the two lists have to name the same urls. Generating
-			// every path on every scheme would give a STRK config carrying both
-			// `https://` and `wss://` the crossed pair as well
-			// (`https://host/ws/rpc/v0_8`, `wss://host/rpc/v0_9`): urls no
-			// upstream serves, probed on every sweep and registered in the
-			// metrics, and now — with the filter below preferring an exact path
-			// match — half of what a relay for that path can be routed onto.
+			// The transport has to serve the collection: a ws url answers the
+			// spec's subscription collections and an http url the rest. On every
+			// scheme, a STRK config carrying both `https://` and `wss://` would
+			// also get the crossed pair (`https://host/ws/rpc/v0_8`,
+			// `wss://host/rpc/v0_9`) — urls no upstream serves, which relays for
+			// that path would then be routed onto.
 			if isWs != servesSubscriptions(internalPath, nodeUrl.Addons) {
 				continue
 			}
@@ -2811,32 +2802,8 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	rpsr.sessionManagers[sessionManagerKey] = sessionManager
 	rpsr.mu.Unlock()
 
-	// Per-collection admission (MAG-3326). Refreshed by PHASE 1 below AND by every
-	// epoch re-validation, so a service refused once does not stay refused for the
-	// process lifetime — the endpoint builder runs on the retry and promote paths
-	// too, and a boot-time blip would otherwise outlive its cause until restart.
-	//
-	// Guarded because those paths do not all hold the router lock.
-	var admissionMu sync.RWMutex
-	admissionsByProvider := map[*lavasession.RPCStaticProviderEndpoint]chainlib.ProviderAdmission{}
-	admissionFor := func(provider *lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission {
-		admissionMu.RLock()
-		defer admissionMu.RUnlock()
-		return admissionsByProvider[provider]
-	}
-	// Returns whether the admitted set actually moved. applyReverification uses
-	// that to rebuild the provider's session: an active session is refreshed from
-	// its OWN endpoints, so recording a new admission is not by itself enough to
-	// get a recovered service back into the pairing.
-	recordAdmission := func(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
-		admissionMu.Lock()
-		defer admissionMu.Unlock()
-		previous, seen := admissionsByProvider[provider]
-		// Assigned unconditionally, including an empty admission: that is how a
-		// service that has recovered gets un-refused.
-		admissionsByProvider[provider] = admission
-		return seen && !previous.Equal(admission)
-	}
+	admissions := newAdmissionRegistry()
+	admissionFor, recordAdmission := admissions.admissionFor, admissions.record
 
 	// Helper function to convert provider endpoints to sessions
 	convertProvidersToSessions := func(providerList []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
@@ -2851,15 +2818,14 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			}
 
 			endpoints := []*lavasession.Endpoint{}
-			// expandInternalPaths gets the RAW urls. Its subscription probe resolves a
-			// collection from the url's declared add-ons to decide ws-vs-http, and its
-			// doc requires the list it produces to mirror the chain router's, which is
-			// built from the untouched config — so narrowing the input here would move
-			// endpoints in or out per internal path as a side effect of admission
-			// (MAG-3326 review). The admission is applied to each endpoint below instead.
+			// expandInternalPaths gets each admitted url with its declared add-ons. Its
+			// subscription probe resolves a collection from them to decide ws-vs-http,
+			// so narrowing them here would move endpoints in or out per internal path as
+			// a side effect of admission (MAG-3326 review); a refused url goes whole,
+			// its expansions with it. Service admission is applied per endpoint below.
 			admission := admissionFor(provider)
-			for _, url := range expandInternalPaths(provider.NodeUrls, chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
-				admittedServices, keep := admission.AdmittedServices(url)
+			for _, url := range expandInternalPaths(admittedNodeUrls(provider, admission), chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
+				admittedServices, keep := admittedServicesFor(chainParser, admission, url)
 				if !keep {
 					// A url that serves only its add-ons and kept none has nothing left.
 					// Building it anyway would empty its service list, flip
@@ -3067,14 +3033,44 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// separate goroutine — re-validation runs synchronously from the epoch
 	// callback, bounded by SpecReVerifyConcurrency.
 	rpsr.mu.Lock()
-	rpsr.reverifyInputs[sessionManagerKey] = &chainReverifyInputs{
+	inputs := &chainReverifyInputs{
 		chainParser:                chainParser,
 		rpcEndpoint:                rpcEndpoint,
 		convertProvidersToSessions: convertProvidersToSessions,
 		recordAdmission:            recordAdmission,
-		configuredStatic:           relevantStaticProviderList,
-		configuredBackup:           relevantBackupProviderList,
+		recordReverifiedAdmission:  admissions.recordReverified,
+		admissionFor:               admissionFor,
+		countFailedCheck: func(tier reverifyTier, provider string, failure metrics.ProviderVerificationFailure) {
+			rpsr.smartRouterMetricsManager.CountVerificationCheckFailure(rpcEndpoint.ChainID, rpcEndpoint.ApiInterface, provider, tier.String(), failure)
+		},
+		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
+			return refusalsOf(chainParser, p, admissionFor(p))
+		},
+		configuredStatic: relevantStaticProviderList,
+		configuredBackup: relevantBackupProviderList,
 	}
+	for p, err := range failedStaticSet {
+		inputs.noteFailure(reverifyTierStatic, p.Name, err)
+	}
+	for p, err := range failedBackupSet {
+		inputs.noteFailure(reverifyTierBackup, p.Name, err)
+	}
+	// What boot refused a provider it admitted, as recorded unmerged by PHASE 1.
+	for _, tier := range []struct {
+		tier      reverifyTier
+		providers []*lavasession.RPCStaticProviderEndpoint
+		failed    map[*lavasession.RPCStaticProviderEndpoint]error
+	}{
+		{reverifyTierStatic, relevantStaticProviderList, failedStaticSet},
+		{reverifyTierBackup, relevantBackupProviderList, failedBackupSet},
+	} {
+		for _, p := range tier.providers {
+			if _, failed := tier.failed[p]; !failed {
+				inputs.countRefusals(tier.tier, p, admissionFor(p))
+			}
+		}
+	}
+	rpsr.reverifyInputs[sessionManagerKey] = inputs
 	rpsr.mu.Unlock()
 
 	// ============================================================================
@@ -3193,8 +3189,8 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Primary tier serves all selections; backup tier is consulted on primary exhaustion.
 	// Tiers hold only healthy providers — republishSubscriptionEndpointsLocked keeps them
 	// in step with the live pairing from here on.
-	wsEndpoints := collectWSEndpoints(healthyStaticProviders, "primary")
-	wsBackupEndpoints := collectWSEndpoints(healthyBackupProviders, "backup")
+	wsEndpoints := collectWSEndpoints(healthyStaticProviders, admissionFor, "primary")
+	wsBackupEndpoints := collectWSEndpoints(healthyBackupProviders, admissionFor, "backup")
 
 	// Whether a real manager is installed is decided from the CONFIGURED providers, not
 	// the healthy ones. Since MAG-2525 a chain can boot with nothing healthy, and keying
@@ -3203,8 +3199,8 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// recovered and HTTP relays were serving, because nothing re-creates the manager.
 	// A Direct manager with empty tiers returns the same "no endpoint" error today and
 	// can be filled in on recovery.
-	wsConfigured := len(collectWSEndpoints(relevantStaticProviderList, "")) > 0 ||
-		len(collectWSEndpoints(relevantBackupProviderList, "")) > 0
+	wsConfigured := len(collectWSEndpoints(relevantStaticProviderList, nil, "")) > 0 ||
+		len(collectWSEndpoints(relevantBackupProviderList, nil, "")) > 0
 
 	if wsConfigured {
 		directWSManager := NewDirectWSSubscriptionManager(
@@ -3245,12 +3241,12 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	var grpcEndpoints, grpcBackupEndpoints []*common.NodeUrl
 	grpcConfigured := false
 	if rpcEndpoint.ApiInterface == spectypes.APIInterfaceGrpc {
-		grpcEndpoints = collectGRPCEndpoints(healthyStaticProviders, "primary")
-		grpcBackupEndpoints = collectGRPCEndpoints(healthyBackupProviders, "backup")
+		grpcEndpoints = collectGRPCEndpoints(healthyStaticProviders, admissionFor, "primary")
+		grpcBackupEndpoints = collectGRPCEndpoints(healthyBackupProviders, admissionFor, "backup")
 		// Same reasoning as wsConfigured above: keyed off the configured providers so a
 		// dark boot still gets a manager.
-		grpcConfigured = len(collectGRPCEndpoints(relevantStaticProviderList, "")) > 0 ||
-			len(collectGRPCEndpoints(relevantBackupProviderList, "")) > 0
+		grpcConfigured = len(collectGRPCEndpoints(relevantStaticProviderList, nil, "")) > 0 ||
+			len(collectGRPCEndpoints(relevantBackupProviderList, nil, "")) > 0
 	}
 
 	if grpcConfigured {
@@ -3898,7 +3894,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check; when false, /readyz and /metrics/overall-health report 503 unconditionally, so keep it on under a readiness probe")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthIntervalFlag, RelayHealthIntervalFlagDefault, "interval between relay health checks")
-	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthUnhealthyIntervalFlag, RelayHealthUnhealthyIntervalFlagDefault, "probe interval while a chain is unhealthy; bounds how fast /readyz recovers after upstreams come back (clamped to relays-health-interval)")
+	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthUnhealthyIntervalFlag, RelayHealthUnhealthyIntervalFlagDefault, "probe interval while a chain is unhealthy, and the longest a client relay no upstream answered waits for the next probe; bounds how fast /readyz follows upstreams going away and coming back (clamped to relays-health-interval)")
 	// Registered as a flagset-owned Bool (NOT BoolVar bound to the lavasession global): BoolVar writes
 	// the bound global at registration time, which raced probe goroutines reading it. Applied to the
 	// atomic global in RunE via lavasession.SetDebugProbes.
@@ -4236,6 +4232,94 @@ func (rpsr *RPCSmartRouter) publishServingTierLocked(chainKey string) {
 		len(rpsr.providerSessions[chainKey]),
 		len(rpsr.backupProviderSessions[chainKey]),
 	)
+	rpsr.publishVerificationFailedLocked(chainKey, inputs)
+}
+
+// publishVerificationFailedLocked publishes, for every configured provider, the
+// checks it is failing right now. Callers must already hold rpsr.mu.
+//
+// A provider missing from the live pairing gets one scope=provider series, named
+// after the check it last failed. Verification is the only thing that leaves a
+// configured provider out: failing it at boot, or being demoted by the epoch
+// re-verifier. Reading "missing" off the session maps rather than the failed lists
+// covers the demotion path too, which never writes those lists.
+//
+// A provider in the pairing gets one scope=service series per add-on or extension
+// it was refused, so losing archive while still serving the base chain shows too.
+// A provider with neither has no series.
+func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inputs *chainReverifyInputs) {
+	if inputs == nil || inputs.rpcEndpoint == nil {
+		return
+	}
+	for _, tier := range []struct {
+		tier       reverifyTier
+		configured []*lavasession.RPCStaticProviderEndpoint
+		active     map[uint64]*lavasession.ConsumerSessionsWithProvider
+	}{
+		{reverifyTierStatic, inputs.configuredStatic, rpsr.providerSessions[chainKey]},
+		{reverifyTierBackup, inputs.configuredBackup, rpsr.backupProviderSessions[chainKey]},
+	} {
+		admitted := make(map[string]struct{}, len(tier.active))
+		for _, s := range tier.active {
+			admitted[s.PublicLavaAddress] = struct{}{}
+		}
+		for _, p := range tier.configured {
+			var failures []metrics.ProviderVerificationFailure
+			if _, ok := admitted[p.Name]; !ok {
+				check := inputs.lastFailure[tier.tier.String()+"|"+p.Name]
+				if check == "" {
+					check = "unknown"
+				}
+				failures = append(failures, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeProvider, Check: check})
+			} else if inputs.refusedFor != nil {
+				failures = append(failures, inputs.refusedFor(p)...)
+			}
+			rpsr.smartRouterMetricsManager.SetProviderVerificationFailures(
+				inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name, tier.tier.String(), failures)
+		}
+	}
+}
+
+// refusalsOf is what an admitted provider was refused, as the metric publishes it. A
+// provider keeps serving through all of it:
+//   - scope=service: an add-on or extension no node url of the provider serves any more;
+//   - scope=url with a service: a service one url lost while another url still serves it;
+//   - scope=url with no service: a node url refused whole.
+func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []metrics.ProviderVerificationFailure {
+	refused, urlChecks := admission.Refused(), admission.RefusedURLChecks()
+	failures := make([]metrics.ProviderVerificationFailure, 0, len(refused)+len(urlChecks))
+	for _, r := range refused {
+		scope := metrics.VerificationScopeService
+		if servedElsewhere(chainParser, provider, admission, r.Service) {
+			scope = metrics.VerificationScopeURL
+		}
+		failures = append(failures, metrics.ProviderVerificationFailure{Scope: scope, Service: r.Service, Check: r.Check})
+	}
+	for _, check := range urlChecks {
+		failures = append(failures, metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: check})
+	}
+	return failures
+}
+
+// servedElsewhere reports whether a node url of the provider still serves service: a
+// service refused on one url is not lost while another url keeps it.
+func servedElsewhere(chainParser chainlib.ChainParser, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission, service string) bool {
+	for index, url := range provider.NodeUrls {
+		if admission.URLRefused(index) {
+			continue
+		}
+		var services []string
+		var keep bool
+		if chainParser != nil {
+			services, keep = admittedServicesFor(chainParser, admission, url)
+		} else {
+			services, keep = admission.AdmittedServices(url)
+		}
+		if keep && slices.Contains(services, service) {
+			return true
+		}
+	}
+	return false
 }
 
 // subscriptionEndpointSetter is the slice of the Direct WS/gRPC subscription managers
@@ -4275,8 +4359,8 @@ func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string
 	liveBackup := activeProviders(inputs.configuredBackup, rpsr.backupProviderSessions[chainKey])
 
 	if setter, ok := server.wsSubscriptionManager.(subscriptionEndpointSetter); ok {
-		primary := collectWSEndpoints(liveStatic, "")
-		backup := collectWSEndpoints(liveBackup, "")
+		primary := collectWSEndpoints(liveStatic, inputs.admissionFor, "")
+		backup := collectWSEndpoints(liveBackup, inputs.admissionFor, "")
 		if setter.SetEndpoints(primary, backup) {
 			utils.LavaFormatInfo("subscriptions: WebSocket endpoint tiers updated to match live pairing",
 				utils.LogAttr("chainKey", chainKey),
@@ -4287,8 +4371,8 @@ func (rpsr *RPCSmartRouter) republishSubscriptionEndpointsLocked(chainKey string
 	}
 
 	if server.grpcSubscriptionManager != nil {
-		primary := collectGRPCEndpoints(liveStatic, "")
-		backup := collectGRPCEndpoints(liveBackup, "")
+		primary := collectGRPCEndpoints(liveStatic, inputs.admissionFor, "")
+		backup := collectGRPCEndpoints(liveBackup, inputs.admissionFor, "")
 		if server.grpcSubscriptionManager.SetEndpoints(primary, backup) {
 			utils.LavaFormatInfo("subscriptions: gRPC endpoint tiers updated to match live pairing",
 				utils.LogAttr("chainKey", chainKey),
@@ -4390,11 +4474,23 @@ func (rpsr *RPCSmartRouter) retryFailedProviders(
 }
 
 // retryValidateFn is the probe retryFailedProviders runs against a failed
-// provider. A package-level var purely so tests can substitute a fake without
-// standing up upstreams — production never reassigns it. Mirrors the
+// provider: the per-collection admission boot and the epoch pass use, so a
+// provider comes back as soon as a path it serves has a url again. A
+// package-level var purely so tests can substitute a fake without standing up
+// upstreams — production never reassigns it. Mirrors the
 // chainReverifyInputs.validateFn seam applyReverification uses.
-var retryValidateFn = func(ctx context.Context, provider *lavasession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) error {
-	return validateProvider(ctx, provider, chainParser, BootValidateTimeout)
+var retryValidateFn = func(ctx context.Context, provider *lavasession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) (chainlib.ProviderAdmission, error) {
+	return validateProviderCollections(ctx, provider, chainParser, BootValidateTimeout)
+}
+
+// noteVerificationFailure records the check a provider failed on the retry loop,
+// which runs without the router lock.
+func (rpsr *RPCSmartRouter) noteVerificationFailure(chainKey string, tier reverifyTier, name string, err error) {
+	rpsr.mu.Lock()
+	defer rpsr.mu.Unlock()
+	if inputs := rpsr.reverifyInputs[chainKey]; inputs != nil {
+		inputs.noteFailure(tier, name, err)
+	}
 }
 
 // revalidateTier re-runs verification over one tier's failed providers, returning
@@ -4406,9 +4502,19 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 	rpcEndpoint *lavasession.RPCEndpoint,
 	tier reverifyTier,
 ) (recovered, stillFailed []*lavasession.RPCStaticProviderEndpoint) {
+	// The admission is recorded before the provider is readmitted, so the session
+	// it is readmitted with leaves out what this pass refused.
+	var record func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool
+	rpsr.mu.Lock()
+	if inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]; inputs != nil {
+		record = inputs.recordAdmission
+	}
+	rpsr.mu.Unlock()
 	for _, provider := range failed {
-		if err := retryValidateFn(ctx, provider, chainParser); err != nil {
+		admission, err := retryValidateFn(ctx, provider, chainParser)
+		if err != nil {
 			stillFailed = append(stillFailed, provider)
+			rpsr.noteVerificationFailure(rpcEndpoint.Key(), tier, provider.Name, err)
 			utils.LavaFormatWarning("retry: provider verification still failing", err,
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("tier", tier.String()),
@@ -4416,6 +4522,14 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 			)
 			continue
 		}
+		if record != nil {
+			record(provider, admission)
+		}
+		rpsr.mu.Lock()
+		if inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]; inputs != nil {
+			inputs.countRefusals(tier, provider, admission)
+		}
+		rpsr.mu.Unlock()
 		recovered = append(recovered, provider)
 		utils.LavaFormatInfo("[+] provider recovered and passed verification",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
@@ -4448,6 +4562,9 @@ func (rpsr *RPCSmartRouter) readmitRecoveredProviders(
 	rpsr.failedBackupProviders[sessionManagerKey] = stillFailedBackup
 
 	if len(recoveredStatic) == 0 && len(recoveredBackup) == 0 {
+		// Nothing moved in the pairing, but a provider still out may now be
+		// failing a different check than the one published.
+		rpsr.publishVerificationFailedLocked(sessionManagerKey, rpsr.reverifyInputs[sessionManagerKey])
 		rpsr.mu.Unlock()
 		return
 	}
@@ -4756,43 +4873,54 @@ func testModeWarn(desc string) {
 		"------------------------------test mode --------------------------------\n", nil)
 }
 
-// collectWSEndpoints returns every ws://|wss:// NodeUrl from the given providers.
+// collectWSEndpoints returns every ws://|wss:// NodeUrl from the given providers,
+// minus the urls their admission refused (nil admissionFor: every url).
 // tierLabel ("primary" / "backup") is logged so operators can see which tier each
 // endpoint came from; an empty tierLabel suppresses that per-endpoint line. Boot wants
 // the full inventory, but the republish path runs on every pairing change and would
 // otherwise re-log every endpoint of every chain each epoch — it logs deltas instead.
-func collectWSEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, tierLabel string) []*common.NodeUrl {
+func collectWSEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, admissionFor func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission, tierLabel string) []*common.NodeUrl {
 	var endpoints []*common.NodeUrl
 	for _, provider := range providers {
+		refused := urlRefusal(provider, admissionFor)
 		for i := range provider.NodeUrls {
 			url := strings.ToLower(provider.NodeUrls[i].Url)
-			if strings.HasPrefix(url, "ws://") || strings.HasPrefix(url, "wss://") {
-				endpoints = append(endpoints, &provider.NodeUrls[i])
-				if tierLabel == "" {
-					continue
-				}
-				utils.LavaFormatInfo("Found WebSocket endpoint for direct subscriptions",
-					utils.LogAttr("tier", tierLabel),
-					utils.LogAttr("url", provider.NodeUrls[i].Url),
-					utils.LogAttr("provider", provider.Name),
-					utils.LogAttr("chainID", provider.ChainID),
-				)
+			if !strings.HasPrefix(url, "ws://") && !strings.HasPrefix(url, "wss://") {
+				continue
 			}
+			if refused(i) {
+				continue
+			}
+			endpoints = append(endpoints, &provider.NodeUrls[i])
+			if tierLabel == "" {
+				continue
+			}
+			utils.LavaFormatInfo("Found WebSocket endpoint for direct subscriptions",
+				utils.LogAttr("tier", tierLabel),
+				utils.LogAttr("url", provider.NodeUrls[i].Url),
+				utils.LogAttr("provider", provider.Name),
+				utils.LogAttr("chainID", provider.ChainID),
+			)
 		}
 	}
 	return endpoints
 }
 
-// collectGRPCEndpoints returns every NodeUrl from providers whose ApiInterface is gRPC.
+// collectGRPCEndpoints returns every NodeUrl from providers whose ApiInterface is gRPC,
+// minus the urls their admission refused (nil admissionFor: every url).
 // tierLabel ("primary" / "backup") is logged for operator visibility; an empty label
 // suppresses that line — see collectWSEndpoints.
-func collectGRPCEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, tierLabel string) []*common.NodeUrl {
+func collectGRPCEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, admissionFor func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission, tierLabel string) []*common.NodeUrl {
 	var endpoints []*common.NodeUrl
 	for _, provider := range providers {
 		if provider.ApiInterface != spectypes.APIInterfaceGrpc {
 			continue
 		}
+		refused := urlRefusal(provider, admissionFor)
 		for i := range provider.NodeUrls {
+			if refused(i) {
+				continue
+			}
 			endpoints = append(endpoints, &provider.NodeUrls[i])
 			if tierLabel == "" {
 				continue
@@ -4806,6 +4934,46 @@ func collectGRPCEndpoints(providers []*lavasession.RPCStaticProviderEndpoint, ti
 		}
 	}
 	return endpoints
+}
+
+// urlRefusal reports, per node-url position, whether the provider's admission refused it.
+func urlRefusal(provider *lavasession.RPCStaticProviderEndpoint, admissionFor func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission) func(int) bool {
+	if admissionFor == nil {
+		return func(int) bool { return false }
+	}
+	return admissionFor(provider).URLRefused
+}
+
+// admittedServicesFor is what the endpoint built for url may serve, and whether one is
+// built at all. It reads the url's base traffic as verification and the provider's
+// serving check do (chainlib.ServedAs): a standalone-addons url that names only
+// extensions serves the base collection, so a refused extension does not cost it the url.
+func admittedServicesFor(chainParser chainlib.ChainParser, admission chainlib.ProviderAdmission, url common.NodeUrl) ([]string, bool) {
+	served, err := chainlib.ServedAs(chainParser, url)
+	if err != nil {
+		served = url
+	}
+	return admission.AdmittedServices(served)
+}
+
+// admittedNodeUrls is a provider's configured urls minus the ones its admission
+// refused, in configured order.
+func admittedNodeUrls(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []common.NodeUrl {
+	if !admission.Any() {
+		return provider.NodeUrls
+	}
+	kept := make([]common.NodeUrl, 0, len(provider.NodeUrls))
+	for i, url := range provider.NodeUrls {
+		if admission.URLRefused(i) {
+			utils.LavaFormatWarning("dropping node url: it failed verification", nil,
+				utils.LogAttr("url", url.UrlStr()),
+				utils.LogAttr("provider", provider.Name),
+			)
+			continue
+		}
+		kept = append(kept, url)
+	}
+	return kept
 }
 
 // debugStateReasons renders an endpoint's state reasons for /debug/endpoint-state.

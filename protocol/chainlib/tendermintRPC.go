@@ -150,7 +150,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 
 	var api *spectypes.Api
 	var apiCollection *spectypes.ApiCollection
-	var latestRequestedBlock, earliestRequestedBlock int64 = 0, spectypes.LATEST_BLOCK
+	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
 	for idx, msg := range msgs {
@@ -198,14 +198,15 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 			}
 		}
 
+		// An element that names no block (status) does not decide the batch's block; see
+		// requestedBlockFold (MAG-4381).
 		parsedBlock := parsedInput.GetBlock()
+		blockFold.add(parsedBlock, parsedBlock, parsedInput, overwriteReqBlock == "" && apiNamesNoBlock(apiCont.api))
 
 		if idx == 0 {
 			// on the first entry store them
 			api = apiCont.api
 			apiCollection = apiCollectionForMessage
-			latestRequestedBlock = parsedBlock
-			earliestRequestedBlock = foldParsedEarliest(parsedBlock, parsedInput)
 		} else {
 			// on next entries we need to compare to existing data
 			if api == nil {
@@ -240,12 +241,8 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 				},
 			}
 		}
-
-		if msgsLength > 1 {
-			latestRequestedBlock, earliestRequestedBlock = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
-			earliestRequestedBlock = foldParsedEarliest(earliestRequestedBlock, parsedInput)
-		}
 	}
+	latestRequestedBlock, earliestRequestedBlock := blockFold.blocks()
 
 	var nodeMsg *baseChainMessageContainer
 	if msgsLength == 1 && !isBatch {

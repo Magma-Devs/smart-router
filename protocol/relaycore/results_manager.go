@@ -174,9 +174,10 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// Use the HTTP status code for classification; for JSON-RPC, the HTTP status is 200
 		// even on errors, so extract the actual JSON-RPC error code from the response body.
 		errorCode := response.RelayResult.StatusCode
+		jsonRPCErrorCode := 0
 		if transport == common.TransportJsonRPC && response.RelayResult.Reply.Data != nil {
 			if code := common.ExtractJSONRPCErrorCode(response.RelayResult.Reply.Data); code != 0 {
-				errorCode = code
+				errorCode, jsonRPCErrorCode = code, code
 			}
 		}
 		// GraphQL answers its node faults inside a 200 as well, so the status says nothing there
@@ -217,7 +218,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 			utils.LogAttr("requestPayload", parser.CapStringLen(reqPayload)),
 			utils.LogAttr("requestHeaders", reqHeaders),
 		)
-		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, LavaError: nodeClassified})
+		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, LavaError: nodeClassified, JSONRPCErrorCode: jsonRPCErrorCode})
 		return err
 	}
 	rp.successResults = append(rp.successResults, response.RelayResult)

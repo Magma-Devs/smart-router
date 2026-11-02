@@ -769,8 +769,40 @@ func DetectConnectionError(err error) *LavaError {
 			}
 		}
 	}
+
+	// Layer 4: a gRPC call the router's own client never delivered (MAG-4355). The layers
+	// above read its text first, so a refused dial keeps PROTOCOL_CONNECTION_REFUSED and a
+	// name that does not resolve keeps PROTOCOL_DNS_FAILURE; a text no row names (a failed
+	// TLS handshake, a resolver that produced no address) is still a connection fault, never
+	// the node's answer, so it lands on the registry's code for the client's UNAVAILABLE.
+	var undelivered *GRPCCallUndeliveredError
+	if errors.As(err, &undelivered) {
+		return LavaErrorProviderUnavailable
+	}
 	return nil
 }
+
+// GRPCCallUndeliveredError marks a gRPC status the router's own client produced for a call it
+// never delivered: no stream to the node was opened, so no node saw the request and none
+// answered (MAG-4355). grpc-go words every such failure as UNAVAILABLE, the code a node also
+// sends when it is shutting down, so the code alone cannot tell the two apart; the stream can,
+// and lavasession.GRPCDirectRPCConnection wraps the status in this type when there was none
+// (grpc.Peer stays unset on a call that opened no stream).
+//
+// DetectConnectionError reads it as a connection fault, which is what makes a refused gRPC
+// dial disable its endpoint as `unreachable`, as a refused JSON-RPC dial does, rather than as
+// `node-error` through the registry's row for a node-sent UNAVAILABLE.
+type GRPCCallUndeliveredError struct {
+	// Err is the status grpc-go returned, kept for logs and for the text rows above.
+	Err error
+}
+
+func (e *GRPCCallUndeliveredError) Error() string {
+	return "gRPC call not delivered to the node: " + e.Err.Error()
+}
+
+// Unwrap keeps the gRPC status reachable, so status.FromError and errors.Is still see it.
+func (e *GRPCCallUndeliveredError) Unwrap() error { return e.Err }
 
 // stringConnectionFallback is one row of the string-fallback table used by
 // detectConnectionErrorFromString. The first matching row wins, so ordering

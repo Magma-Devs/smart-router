@@ -2,8 +2,10 @@
 #
 # CI-only image: consumes prebuilt binaries from the `build` workflow job.
 # For local "build from source" use docker/Dockerfile instead.
+# Same runtime base as Dockerfile.release; read the note there before
+# changing it.
 
-ARG RUNNER_IMAGE="gcr.io/distroless/static-debian12:debug"
+ARG RUNNER_IMAGE="gcr.io/distroless/static-debian13:debug"
 
 FROM ${RUNNER_IMAGE}
 

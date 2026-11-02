@@ -9,12 +9,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -27,7 +29,7 @@ import (
 // to know about bumps relayEndSchema and the document together.
 const (
 	relayEndEvent  = "relay_end"
-	relayEndSchema = 1
+	relayEndSchema = 2
 )
 
 // What the client got.
@@ -70,6 +72,10 @@ func isRouterFault(err error) bool {
 type relayEnd struct {
 	guid         string
 	connection   string
+	customer     string // the customer id, unless it is the listeners' default
+	requestID    string // the caller's X-Request-Id, X-Task-Id and X-Tx-Id
+	taskID       string
+	txID         string
 	chain        string
 	stateful     bool
 	method       string
@@ -84,11 +90,19 @@ type relayEnd struct {
 	errorText    string
 	latency      time.Duration
 	isBatch      bool
+	txHash       string  // the submitted transaction's id on its chain
+	txStatus     string  // its execution result, when the submit's reply reports one
+	txError      string  // the chain's execution error, when txStatus is a failure
 	txCode       *uint32 // a Cosmos transaction submit's code, read from the reply
 	txCodespace  string
 	txLog        string
 	skipped      relayEndSkips
 	attempts     relayEndAttempts
+
+	requestBytes   int
+	replyBytes     int   // -1 when the event has no reply to measure
+	requestedBlock int64 // the block the request names; a negative spec sentinel when it names none
+	seenBlock      int64 // the chain tip the router knew when it parsed the request; 0 when unknown
 }
 
 type relayEndAttempt struct {
@@ -96,6 +110,7 @@ type relayEndAttempt struct {
 	outcome          string
 	errorCode        string
 	message          string
+	nodeCode         int           // the code of the node's JSON-RPC error reply; 0 when there is none
 	latency          time.Duration // zero when unknown
 	returnedToClient bool
 	sent             bool // went out as a dispatch, so batch and sentAfter are known
@@ -118,6 +133,18 @@ func (e *relayEnd) MarshalZerologObject(event *zerolog.Event) {
 	if e.connection != "" {
 		event.Str("connection", e.connection)
 	}
+	if e.customer != "" {
+		event.Str("customer", e.customer)
+	}
+	if e.requestID != "" {
+		event.Str("request_id", e.requestID)
+	}
+	if e.taskID != "" {
+		event.Str("task_id", e.taskID)
+	}
+	if e.txID != "" {
+		event.Str("tx_id", e.txID)
+	}
 	event.Bool("stateful", e.stateful).
 		Str("method", e.method).
 		Str("chain", e.chain).
@@ -132,6 +159,27 @@ func (e *relayEnd) MarshalZerologObject(event *zerolog.Event) {
 		Str("error", e.errorText).
 		Int64("latency_ms", e.latency.Milliseconds()).
 		Bool("is_batch", e.isBatch)
+	if e.requestBytes > 0 {
+		event.Int("request_bytes", e.requestBytes)
+	}
+	if e.replyBytes >= 0 {
+		event.Int("reply_bytes", e.replyBytes)
+	}
+	if e.requestedBlock >= 0 {
+		event.Int64("requested_block", e.requestedBlock)
+	}
+	if e.seenBlock > 0 {
+		event.Int64("seen_block", e.seenBlock)
+	}
+	if e.txHash != "" {
+		event.Str("tx_hash", e.txHash)
+	}
+	if e.txStatus != "" {
+		event.Str("tx_status", e.txStatus)
+		if e.txError != "" {
+			event.Str("tx_error", e.txError)
+		}
+	}
 	if e.txCode != nil {
 		event.Uint32("tx_code", *e.txCode)
 		if e.txCodespace != "" {
@@ -189,6 +237,9 @@ func (a *relayEndAttempt) MarshalZerologObject(event *zerolog.Event) {
 		Str("outcome", a.outcome).
 		Str("error_code", a.errorCode).
 		Str("message", a.message)
+	if a.nodeCode != 0 {
+		event.Int("node_code", a.nodeCode)
+	}
 	if a.errorCode != "" {
 		event.Bool("retryable", a.retryable())
 	}
@@ -214,6 +265,7 @@ type relayEndInput struct {
 	err             error               // what the listener receives
 	cause           error               // the error the relay's processing ended with
 	start           time.Time
+	dappID          string // the customer id of a request that has no protocol message
 }
 
 // The WebSocket manager finds the reporter by type assertion, so a drifted signature would
@@ -227,14 +279,14 @@ func (rpcss *RPCSmartRouterServer) writeRelayEnd(ctx context.Context, in relayEn
 
 // ReportRejectedRelay writes the relay_end of a request a listener parsed itself and could not hand
 // to SendParsedRelay (chainlib.RelayRejectionReporter).
-func (rpcss *RPCSmartRouterServer) ReportRejectedRelay(ctx context.Context, start time.Time, err error) {
-	rpcss.writeRelayEnd(ctx, relayEndInput{err: err, cause: err, start: start})
+func (rpcss *RPCSmartRouterServer) ReportRejectedRelay(ctx context.Context, start time.Time, dappID string, err error) {
+	rpcss.writeRelayEnd(ctx, relayEndInput{err: err, cause: err, start: start, dappID: dappID})
 }
 
-// newRelayEnd fills what every exit's event shares: the request's identity, its listener, the
-// method and whether it writes, and how long ago it started.
+// newRelayEnd fills what every exit's event shares: the request's identity, its caller's ids, its
+// listener, the method and whether it writes, and how long ago it started.
 func (rpcss *RPCSmartRouterServer) newRelayEnd(ctx context.Context, protocolMessage chainlib.ProtocolMessage, start time.Time, err error) *relayEnd {
-	end := &relayEnd{latency: time.Since(start)}
+	end := &relayEnd{latency: time.Since(start), replyBytes: -1, requestedBlock: spectypes.NOT_APPLICABLE}
 	if rpcss.listenEndpoint != nil {
 		end.chain = rpcss.listenEndpoint.ChainID
 		end.apiInterface = rpcss.listenEndpoint.ApiInterface
@@ -245,13 +297,30 @@ func (rpcss *RPCSmartRouterServer) newRelayEnd(ctx context.Context, protocolMess
 	if connection, found := utils.GetConnectionIdentifier(ctx); found {
 		end.connection = strconv.FormatUint(connection, 10)
 	}
+	// The listeners stamp the caller's tracing headers on the context
+	// (utils.ExtractWantedHeadersFromCachedMap); a header that was absent or empty is not there.
+	if requestID, found := utils.GetRequestId(ctx); found {
+		end.requestID = relayEndID(requestID)
+	}
+	if taskID, found := utils.GetTaskId(ctx); found {
+		end.taskID = relayEndID(taskID)
+	}
+	if txID, found := utils.GetTxId(ctx); found {
+		end.txID = relayEndID(txID)
+	}
 
 	if protocolMessage != nil {
+		end.customer = relayEndCustomer(protocolMessage.GetUserData().DappId)
 		if api := protocolMessage.GetApi(); api != nil {
 			end.stateful = chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS
 			end.method = relayEndMethod(api.Name, relayEndNamedByURL(protocolMessage, end.apiInterface))
 		}
 		end.isBatch = chainqueries.IsBatchRequest(protocolMessage)
+		relayData := protocolMessage.RelayPrivateData()
+		end.requestBytes = len(relayData.GetData())
+		end.seenBlock = relayData.GetSeenBlock()
+		// The block as parsed: for a range, its later end.
+		end.requestedBlock, _ = protocolMessage.RequestedBlock()
 	} else {
 		// The two refusals of a batch happen while it is parsed, before there is a message to ask.
 		end.isBatch = errors.Is(err, chainlib.ErrBatchRequestSizeExceeded) || errors.Is(err, rpcInterfaceMessages.ErrJsonrpcBatchRefused)
@@ -261,6 +330,9 @@ func (rpcss *RPCSmartRouterServer) newRelayEnd(ctx context.Context, protocolMess
 
 func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEndInput) *relayEnd {
 	end := rpcss.newRelayEnd(ctx, in.protocolMessage, in.start, in.err)
+	if in.protocolMessage == nil {
+		end.customer = relayEndCustomer(in.dappID)
+	}
 
 	dispatched := 0
 	if in.processor != nil {
@@ -292,16 +364,12 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 		}
 	}
 	end.hasReply = served
-	// A Cosmos node answers a refused transaction with a normal reply, so the outcome stays ok and the
-	// reply's code says whether the node took it. gRPC's reply is protobuf and is not read.
-	if served && end.stateful && !end.isBatch && (end.apiInterface == spectypes.APIInterfaceTendermintRPC || end.apiInterface == spectypes.APIInterfaceRest) {
-		if tx, found := cosmosTxOutcome(in.result.Reply.Data); found {
-			end.txCode, end.txCodespace = tx.Code, tx.Codespace
-			if *tx.Code != 0 {
-				end.txLog = relayEndText(cmp.Or(tx.Log, tx.RawLog))
-			}
-		}
+	var reply []byte
+	if served {
+		reply = in.result.Reply.Data
+		end.replyBytes = len(reply)
 	}
+	end.readTransaction(in.protocolMessage, reply)
 	end.status = in.result.GetStatusCode()
 
 	switch {
@@ -410,7 +478,7 @@ func (a *relayEndAttempt) retryable() bool {
 }
 
 func relayEndNodeErrorAttempt(nodeError relaycore.RelayError) relayEndAttempt {
-	attempt := relayEndAttempt{outcome: attemptOutcomeNodeError, lavaError: nodeError.LavaError}
+	attempt := relayEndAttempt{outcome: attemptOutcomeNodeError, lavaError: nodeError.LavaError, nodeCode: nodeError.JSONRPCErrorCode}
 	if nodeError.Response != nil {
 		result := &nodeError.Response.RelayResult
 		attempt.upstream = relayEndUpstream(result)
@@ -538,15 +606,20 @@ func servedFromCache(result *common.RelayResult) bool {
 
 // cosmosTxReply is what a Cosmos transaction submit's reply says about the transaction. Tendermint's
 // broadcast_tx_sync and _async answer in result, broadcast_tx_commit in result.check_tx and then
-// result.tx_result (deliver_tx before CometBFT 0.38), and the REST endpoint in tx_response.
+// result.tx_result (deliver_tx before CometBFT 0.38), and the REST endpoint in tx_response. The
+// transaction's hash is result.hash, or tx_response.txhash.
 type cosmosTxReply struct {
 	Result *struct {
 		cosmosTxResult
+		Hash      string          `json:"hash"`
 		CheckTx   *cosmosTxResult `json:"check_tx"`
 		TxResult  *cosmosTxResult `json:"tx_result"`
 		DeliverTx *cosmosTxResult `json:"deliver_tx"`
 	} `json:"result"`
-	TxResponse *cosmosTxResult `json:"tx_response"`
+	TxResponse *struct {
+		cosmosTxResult
+		TxHash string `json:"txhash"`
+	} `json:"tx_response"`
 }
 
 type cosmosTxResult struct {
@@ -556,22 +629,25 @@ type cosmosTxResult struct {
 	RawLog    string  `json:"raw_log"`
 }
 
-// cosmosTxReplyLimit bounds the reply relay_end reads: a submit's answer is small.
-const cosmosTxReplyLimit = 64 << 10
-
 // cosmosTxOutcome reads a Cosmos transaction submit's reply for the transaction's code: the first
-// refusal's, or 0 when every code it names is 0. found is false for a reply that names no code.
-func cosmosTxOutcome(data []byte) (result cosmosTxResult, found bool) {
-	if len(data) == 0 || len(data) > cosmosTxReplyLimit {
-		return cosmosTxResult{}, false
+// refusal's, or 0 when every code it names is 0. found is false for a reply that names no code. hash
+// is the hash the reply names, whether or not it names a code.
+func cosmosTxOutcome(data []byte) (result cosmosTxResult, hash string, found bool) {
+	if len(data) == 0 || len(data) > relayEndTxReplyLimit {
+		return cosmosTxResult{}, "", false
 	}
 	var reply cosmosTxReply
 	if json.Unmarshal(data, &reply) != nil {
-		return cosmosTxResult{}, false
+		return cosmosTxResult{}, "", false
 	}
-	candidates := []*cosmosTxResult{reply.TxResponse}
+	var candidates []*cosmosTxResult
+	if r := reply.TxResponse; r != nil {
+		candidates = append(candidates, &r.cosmosTxResult)
+		hash = r.TxHash
+	}
 	if r := reply.Result; r != nil {
 		candidates = append(candidates, &r.cosmosTxResult, r.CheckTx, r.TxResult, r.DeliverTx)
+		hash = cmp.Or(hash, r.Hash)
 	}
 	var accepted *cosmosTxResult
 	for _, candidate := range candidates {
@@ -579,16 +655,16 @@ func cosmosTxOutcome(data []byte) (result cosmosTxResult, found bool) {
 			continue
 		}
 		if *candidate.Code != 0 {
-			return *candidate, true
+			return *candidate, hash, true
 		}
 		if accepted == nil {
 			accepted = candidate
 		}
 	}
 	if accepted == nil {
-		return cosmosTxResult{}, false
+		return cosmosTxResult{}, hash, false
 	}
-	return *accepted, true
+	return *accepted, hash, true
 }
 
 // relayEndMethodLimit caps method: an unlisted name is whatever the client sent, and a batch joins
@@ -644,4 +720,31 @@ func relayEndSelection(selection relaycore.Selection) string {
 
 func relayEndText(text string) string {
 	return utils.FormatLongString(utils.RedactSecrets(text), relayEndTextLimit)
+}
+
+// relayEndIDLimit caps customer and the caller's ids, which are what the caller sent.
+const relayEndIDLimit = 128
+
+// relayEndCustomer is the customer id as customer: none for the id the listeners default to when the
+// customer-id header is absent.
+func relayEndCustomer(dappID string) string {
+	if dappID == metrics.CustomerNone {
+		return ""
+	}
+	return relayEndID(dappID)
+}
+
+// relayEndID is a caller-sent id as the event writes it: valid UTF-8, each run of invalid bytes
+// replaced with U+FFFD, and cut to relayEndIDLimit bytes at a rune boundary. Unlike the metrics'
+// customer label it has no admission budget: a log field adds no series.
+func relayEndID(id string) string {
+	id = strings.ToValidUTF8(id, string(utf8.RuneError))
+	if len(id) <= relayEndIDLimit {
+		return id
+	}
+	cut := relayEndIDLimit
+	for !utf8.RuneStart(id[cut]) {
+		cut--
+	}
+	return id[:cut]
 }

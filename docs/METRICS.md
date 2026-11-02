@@ -17,11 +17,31 @@ metrics manager.
 | `/metrics/health-overall` | text | Alias of the above (backward-compat path) |
 
 > **What the health readings attest.** `/metrics/overall-health` and `/readyz` (served on this same
-> port) answer whether a chain can serve relays: the router's own health check takes one provider's
-> latest block. That check is exempt from per-method cross-validation policies
+> port) answer whether this router reaches the upstreams of a chain: the router's own health check
+> asks for the latest block, one provider at a time. That check is exempt from per-method cross-validation policies
 > (MAG-3746), and neither reading attests that a policy-governed method currently has quorum
 > capacity — a router reporting healthy and Ready can still refuse such a method with
 > `insufficient-capacity`. Alert on the cross-validation series below for that, not on readiness.
+>
+> **When they change.** Each chain+interface is healthy or unhealthy, and the router is healthy while
+> any one of them is. Its health check sends the latest-block request, moving to another upstream
+> when a try fails, and ends in one of three verdicts:
+>
+> - **A result** from an upstream makes the chain healthy.
+> - **No answer at all** makes it unhealthy: every try timed out, failed to connect, or had no
+>   upstream to go to. This is what differs between replicas, so it is what takes one out of
+>   rotation.
+> - **An error, an error status or a rate limit** from an upstream leaves the chain as it was. The
+>   answer shows this router reaches its upstreams, and every replica sharing them gets the same
+>   one, so it is no reason to take this replica out. It does not show the chain serves either, so
+>   an unhealthy chain stays unhealthy until a check gets a result.
+>
+> The check runs every `--relays-health-interval` (default `5m`), and each client relay an upstream
+> answers with a result pushes it back, so a busy healthy chain is not probed. A client relay no
+> upstream answered brings the check to within `--relays-health-unhealthy-interval` (default
+> `15s`), and so does another chain+interface of the same router turning unhealthy. A client relay
+> an upstream answered with an error, a cache hit and a client that hangs up change nothing. While
+> unhealthy the check repeats at that interval, so recovery shows within it.
 
 ### Configuration
 
@@ -264,10 +284,14 @@ cross-validated increments them once per attempt, and the router's own tracker
 traffic is in them too. For what the client experienced, use the per-customer
 family below, summed over `customer`.
 
-#### Per customer — the `project-id` header
+#### Per customer — the `customer-id` header
 
-A caller may label each request with its own customer id in the `project-id`
+A caller may label each request with its own customer id in the `customer-id`
 header (HTTP header or gRPC metadata; on a WebSocket, on the upgrade request).
+This works the same on every interface: JSON-RPC, REST, Tendermint RPC,
+GraphQL, WebSocket and gRPC. Before MAG-4727 the header was named `project-id`;
+that name is no longer read, so a request that sends only `project-id` counts
+as `DefaultDappID`.
 The router counts the request under that label and does nothing else with it:
 the header is never sent to an upstream, and it is not part of the cache key or
 of any routing decision. Requests without it are counted under
@@ -516,11 +540,11 @@ went out, and which" — so read the alerting note under the table before buildi
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_csm_blocked_providers` | Gauge | `spec`, `apiInterface` | Providers currently blocked. **Non-zero means the chain is degraded** — but zero does not prove it is healthy; see the sampling note below. Previously this reported the previous-epoch store instead and read 0 during outages. |
+| `smartrouter_csm_blocked_providers` | Gauge | `spec`, `apiInterface` | Providers currently blocked. **Non-zero means the chain is degraded** — but zero does not prove it is healthy; see the sampling note below. Counts block-list memberships only: a provider whose urls alone take it out shows in `smartrouter_csm_provider_blocked` and not here. Previously this reported the previous-epoch store instead and read 0 during outages. |
 | `smartrouter_csm_previous_epoch_blocked_providers` | Gauge | `spec`, `apiInterface` | Size of the previous-epoch blocked-providers store (cross-epoch carry-over, briefly populated at an epoch boundary). This is what `smartrouter_csm_blocked_providers` reported before it was corrected. |
-| `smartrouter_csm_provider_blocked` | Gauge | `spec`, `apiInterface`, `provider_address` | Whether one specific provider is blocked (1=blocked, 0=serving) — which provider went out, versus how many. Labelled by provider name only: a node URL can embed an API key and must never reach a series. |
-| `smartrouter_csm_blocked_providers_by_reason` | Gauge | `spec`, `apiInterface`, `reason` | How many providers are blocked, split by **why**: `all-endpoints-disabled`, `explicit-block-signal`, `blocked-in-previous-epoch`, `unspecified`. (`too-many-dead-sessions` and `never-served-successfully` were removed with FAILOVER-TASKS section 2 — both block triggers are gone, so the series no longer exist.) Every reason is republished on every tick including the zeros, so a reason that stops applying returns to 0 rather than sticking. It counts **both pools**, so the identity is `sum()` == `smartrouter_csm_blocked_providers` + `smartrouter_csm_blocked_backup_providers` — not the first alone. One caveat: those two gauges count **memberships** while this one counts **providers**, so a provider configured in both pools and blocked in both is counted twice by the sum of the other two and once here. That is deliberate — the question this gauge answers is *how many providers are out, and why*. Deliberately carries **no provider label** — with one, a provider re-blocked under a different reason would leave the old reason's series stuck at 1. Use `smartrouter_csm_provider_blocked` or `/debug/provider-routing` for *which* provider. |
-| `smartrouter_csm_blocked_backup_providers` | Gauge | `spec`, `apiInterface` | Size of the blocked-backup-providers store. Backups are tracked here only — they never appear in `smartrouter_csm_provider_blocked`. |
+| `smartrouter_csm_provider_blocked` | Gauge | `spec`, `apiInterface`, `provider_address` | Whether one specific provider is out of rotation — which provider went out, versus how many. 1: the router has blocked it, or none of its urls can take a relay right now (each disabled after too many straight failures, or head-stalled; a websocket url never takes a relay, so it counts only for a provider that has no other url), so it gets a request only as the last resort when nothing else can serve one. 0: at least one url is in rotation. A rate-limit hold-off does not show here (see the hold-off metrics). Covers the regular pairing and the backup pool, and is republished every second from the block lists and the urls' state, so it never sticks. A provider whose urls alone take it out reads 1 while no block list holds it, so `count(smartrouter_csm_provider_blocked == 1)` can exceed `smartrouter_csm_blocked_providers` + `smartrouter_csm_blocked_backup_providers`, and `/debug/provider-routing`, which reports the block lists, can still show it as serving. Labelled by provider name only: a node URL can embed an API key and must never reach a series. |
+| `smartrouter_csm_blocked_providers_by_reason` | Gauge | `spec`, `apiInterface`, `reason` | How many providers are blocked, split by **why**: `all-endpoints-disabled`, `explicit-block-signal`, `blocked-in-previous-epoch`, `unspecified`. (`too-many-dead-sessions` and `never-served-successfully` were removed with FAILOVER-TASKS section 2 — both block triggers are gone, so the series no longer exist.) Every reason is republished on every tick including the zeros, so a reason that stops applying returns to 0 rather than sticking. It counts **both pools**, so the identity is `sum()` == `smartrouter_csm_blocked_providers` + `smartrouter_csm_blocked_backup_providers` — not the first alone. A provider cannot sit in both pools (the router refuses that configuration at boot), so the three count the same blocks. Deliberately carries **no provider label** — with one, a provider re-blocked under a different reason would leave the old reason's series stuck at 1. Use `smartrouter_csm_provider_blocked` or `/debug/provider-routing` for *which* provider; a provider that the per-provider gauge reads out on its urls alone, with no block, has no reason here. |
+| `smartrouter_csm_blocked_backup_providers` | Gauge | `spec`, `apiInterface` | Size of the blocked-backup-providers store; `smartrouter_csm_provider_blocked` says which backups. |
 | `smartrouter_csm_sticky_sessions` | Gauge | `spec`, `apiInterface` | Live sticky-session affinities held by THIS pod. With `--shared-state` this is a read-through cache of the fleet's claims, not the fleet total. |
 | `smartrouter_csm_sticky_claims_total` | Counter | `spec`, `apiInterface`, `outcome` | Cross-pod sticky-session claim resolutions. `outcome`: `local_hit` (answered from this pod, no round trip), `adopted` (routed by a live claim read from the registry rather than one held in memory: a peer's claim, or this pod's own read back after it dropped its local copy — see `invalidated`), `claimed` (this pod made the claim), `lost_race` (claimed simultaneously with a peer and adopted its winner), `error` (the registry could not be reached, so the request failed rather than being served off an unverified pin), `no_candidate` (this pod had no upstream to offer at all — a pairing problem, not a registry one), `invalidated` (a local claim was dropped because its upstream could not serve here). **`adopted` staying at zero on a multi-replica fleet means the feature is wired but never firing** — and note that `no_candidate` and `invalidated` are the two series that climb during an incident, so an alert built only on `error` will read healthy while every sticky request for those sessions is failing. The same counts, per endpoint, are readable at `GET /debug/sticky-claims` on the debug server (`--debug-address`; nothing passes that flag by default, so the deployment or the harness has to). There `SharedSticky` tells a router without the claim registry from one where it never fired, `SharedStickyReason` says whether the registry was never requested (`--shared-state` off) or was requested and refused by the cache backend, and `PodID` names the process that answered. The counts are per process and cumulative for its lifetime: the debug Service balances across a router's pods, so pin one pod (a port-forward) or compare two readings only when their `PodID` matches. A rise in `adopted` on a pod whose `invalidated` did not move is a peer's claim; the registry does not say whose claim it holds, so the route cannot split the two further. `/debug/reset-all` does not produce `adopted`: it clears the receiving pod's local pins and flushes the shared claims with them (one cache backs both), so that pod's next request re-claims (`claimed`), while the other pods keep their confirmed local pins and keep serving the old upstream from `local_hit` until those pins age out — the fleet is split until then. The reset drops the pins without counting `invalidated`; the one reset that leaves a claim to read back is a skipped flush (a cache pod predating the `FlushCache` RPC), which the reset's response shows by omitting `cache-be` from its cleared list. |
 | `smartrouter_csm_reported_providers` | Gauge | `spec`, `apiInterface` | Size of the reported-providers register. |
@@ -587,6 +611,38 @@ ceiling, so it typically self-heals in seconds. A chain that booted healthy and 
 later **demoted to dark** has no retry loop — demoted providers are not fed into the
 failed-provider lists — and is only re-checked by the 15m epoch re-verifier. Alert
 windows should assume the 15m case.
+
+| Metric | Type | Labels | Description |
+| --- | --- | --- | --- |
+| `smartrouter_provider_verification_failed` | Gauge | `spec`, `apiInterface`, `provider`, `tier`, `scope`, `service`, `check`, `severity` | While a configured provider is failing a verification: the unix time in seconds the failure started. The series exists only while the failure lasts, and a provider that moves to another check in the same `scope` and `service` keeps its start. `tier` is `static` or `backup`. |
+| `smartrouter_provider_verification_check_failures_total` | Counter | same as above | One per failed check run: at boot, each retry of a provider out at boot, and each 15m epoch pass (a grace run before a demotion included). A rate-limited run is inconclusive and not counted, on any path. `increase(...[$__interval]) > 0` draws one mark per failed run. |
+
+The serving tier only drops when a whole tier is gone, so a single provider that fails
+verification while others serve leaves it at `2` (or `1`). Such a provider also has no
+other per-provider series — it never reaches the session manager — so before this gauge
+it was visible only in the logs (`provider validation failed — excluding from provider
+list`, then `retry: provider verification still failing` on each retry). It is published from
+the same paths as the serving tier, so a provider demoted by the epoch re-verifier shows
+too.
+
+| Label | Values |
+| --- | --- |
+| `scope` | `provider`: the provider is out of the pairing. `service`: the provider still serves, but lost one add-on or extension: no url of it serves that service any more. `url`: the provider still serves, but one of its node urls was refused (MAG-4231 verifies every url on its own): whole when `service` is empty, else for that one service, which another url of the provider still serves. |
+| `service` | The refused add-on or extension (`archive`, `debug`, ...); empty for `scope=provider` and for a url refused whole. |
+| `check` | The spec verification that failed (`chain-id`, `pruning`, ...), or one of: `latest-block` (the head probe before any verification), `unsupported-addon` (the config claims an add-on the spec does not define), `connect` (no connection to the node), `config` (the configured urls cannot work as given: no http(s) url, or no websocket url on a chain that subscribes), `not-run` (the provider's verification deadline passed before this check ran), `rate-limited` (a provider out at boot whose only answer so far is a 429; gauge only, never counted), `unknown`. |
+| `severity` | As MAG-3950 names it: `Fail` when the failure takes a url or the provider out, `PartialFail` when it switches off only `service`. |
+
+A provider out at boot is retried every 3m (from 2s, doubling, while its chain is dark),
+so its series appears and clears within one retry of the change. A demoted provider and
+a refused service are re-checked every 15m epoch.
+
+| Condition | Meaning |
+| --- | --- |
+| `time() - min by (spec, apiInterface, provider, tier) (smartrouter_provider_verification_failed{scope="provider"}) > 1800` | A configured provider has not passed verification for half an hour, on the check `check` names. The pool is smaller than configured. Aggregated by provider, so a provider that moves to another check keeps its start instead of starting a new 30 minutes. |
+| `smartrouter_provider_verification_failed{scope="service"} > 0` | The provider still serves the chain, but not `service`: requests needing it go to other providers. |
+| `smartrouter_provider_verification_failed{scope="url"} > 0` | The provider still serves the chain on its other urls; one was refused, whole or for `service`. |
+
+The same 15m re-check applies to a demoted provider, so keep the window above it.
 
 ---
 

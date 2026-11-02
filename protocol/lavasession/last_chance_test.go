@@ -18,8 +18,8 @@ import (
 //  1. one try per request, never a loop over every disabled endpoint;
 //  2. lending does not mark the endpoint enabled; only a successful answer brings it back;
 //  3. a failure keeps it disabled;
-//  4. a head-stalled URL (MAG-3986) is never lent: a stalled node answers, so it is not what the
-//     last chance is for, and a success could only clear the event slot, never the stall.
+//  4. a head-stalled URL (MAG-3986) is lent like a disabled one — a node behind the chain beats no
+//     answer — and stays head-stalled whatever it answers: only the head-stall step clears it.
 
 var errLastChanceRelay = errors.New("upstream refused the relay")
 
@@ -254,20 +254,56 @@ func TestLastChance_NeverLendsAWebsocketURL(t *testing.T) {
 	require.Error(t, err)
 }
 
-// Rule 4: a URL that is both disabled and head-stalled is never lent. The request gets No pairings
-// available, the claim stays free, and the stall is still in place.
-func TestLastChance_NeverLendsAHeadStalledURL(t *testing.T) {
+// Rule 4: a URL that is both disabled and head-stalled is lent when nothing else can serve. The
+// claim is taken, and the stall is still in place after a successful answer.
+func TestLastChance_LendsAHeadStalledURL(t *testing.T) {
 	p := lcProvider(t, "primary", "http://127.0.0.1:1")
 	disableAt(t, p.Endpoints[0], probeBase)
 	require.True(t, p.Endpoints[0].AddStateReason(EndpointDisableHeadStalled, probeBase, stalledBlock))
 	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
 
 	used := NewUsedProviders(nil)
-	_, err := lcGet(csm, used)
-	require.Error(t, err, "a stalled URL must not be lent")
-	require.True(t, used.TakeLastChance(), "the claim must still be free: nothing was lent")
+	sessions, err := lcGet(csm, used)
+	require.NoError(t, err, "a stalled URL is lent when nothing else can serve")
+	require.Equal(t, "primary", lcServedBy(t, sessions))
+	require.False(t, used.TakeLastChance(), "lending takes the request's one claim")
+	for _, s := range sessions {
+		require.NoError(t, csm.OnSessionDone(s.Session, spectypes.LATEST_BLOCK, 10, time.Millisecond, time.Millisecond, 1, 1, 1, false, nil))
+	}
 	_, stalled := p.Endpoints[0].StateReason(EndpointDisableHeadStalled)
-	require.True(t, stalled, "the last chance must not clear the stall")
+	require.True(t, stalled, "a successful answer must not clear the stall")
+}
+
+// gk8 FTM250, 2026-10-22: the only primary serves the debug add-on, its URL is head-stalled but
+// enabled (one block behind), and the backup does not serve debug. Before, every debug call got
+// "No Providers For Addon" until the stall cleared. Now the debug call is lent the stalled URL,
+// while a plain call still goes to the backup first.
+func TestLastChance_HeadStalledOnlyAddonProvider(t *testing.T) {
+	newCSM := func(t *testing.T) (*ConsumerSessionsWithProvider, *ConsumerSessionManager) {
+		p := lcProvider(t, "primary", "http://127.0.0.1:1")
+		p.Endpoints[0].Addons = map[string]struct{}{"debug": {}}
+		require.True(t, p.Endpoints[0].AddStateReason(EndpointDisableHeadStalled, probeBase, stalledBlock))
+		backup := lcProvider(t, "backup", "http://127.0.0.1:2")
+		return p, lcCSM(t, []*ConsumerSessionsWithProvider{p}, []*ConsumerSessionsWithProvider{backup})
+	}
+
+	t.Run("debug call is lent the stalled primary", func(t *testing.T) {
+		p, csm := newCSM(t)
+		sessions, err := lcGetDebug(csm, NewUsedProviders(nil))
+		require.NoError(t, err)
+		require.Equal(t, "primary", lcServedBy(t, sessions))
+		require.True(t, p.Endpoints[0].IsEnabled(), "lending leaves the event slot as it was")
+		_, stalled := p.Endpoints[0].StateReason(EndpointDisableHeadStalled)
+		require.True(t, stalled)
+	})
+	t.Run("plain call still goes to the backup", func(t *testing.T) {
+		_, csm := newCSM(t)
+		used := NewUsedProviders(nil)
+		sessions, err := lcGet(csm, used)
+		require.NoError(t, err)
+		require.Equal(t, "backup", lcServedBy(t, sessions))
+		require.True(t, used.TakeLastChance(), "the backup served it: no last chance was used")
+	})
 }
 
 // Rule 2 and 3 end to end at this layer: a success lifts the provider's block (the relay path's

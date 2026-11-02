@@ -221,6 +221,18 @@ func TestWithUnclearWriteStatus(t *testing.T) {
 		require.Equal(t, 503, stored.StatusCode, "the caller's result must be left alone")
 		require.Equal(t, 500, stamped.StatusCode)
 	})
+
+	// An unclear write is the one failure where the router speaks instead of the node: the
+	// upstream's forwarded answer is dropped so the listener renders the unclear-write error
+	// (MAG-4218). The caller's copy keeps it.
+	t.Run("the upstream's forwarded answer is dropped", func(t *testing.T) {
+		upstream := &common.ClientFacingError{UpstreamStatus: 503, UpstreamStatusText: "503 Service Unavailable"}
+		stored := &common.RelayResult{StatusCode: 503, ClientFacing: upstream}
+		stamped := withUnclearWriteStatus(stored)
+		require.Nil(t, stamped.GetClientFacing())
+		require.Equal(t, 500, stamped.StatusCode)
+		require.Same(t, upstream, stored.ClientFacing, "the caller's result must be left alone")
+	})
 }
 
 // A write is not always a single batch, and the verdict's two counts must stay comparable when it

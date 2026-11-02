@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 	"time"
 
@@ -138,4 +139,49 @@ func TestReverify_NoAnswerKeepsTheStrikes(t *testing.T) {
 	_, _, _ = applyReverification(context.Background(), inputs, active, reverifyTierStatic, 102)
 	require.Equal(t, 3, probes)
 	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt("tatum", "tatum"))
+}
+
+// The same holds for the url the hold-off is keyed by when the provider passes on its others. Each
+// url is verified on its own connection, so a provider whose first url refuses the connection is
+// admitted on its second, and the pass returns no error: that must not read as the first url
+// answering, or its chain tracker's strikes are wiped as above (MAG-4165).
+func TestReverify_ProviderPassingOnItsOtherUrlKeepsTheDeadUrlsStrikes(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	refusing := "http://" + listener.Addr().String()
+	require.NoError(t, listener.Close())
+
+	up := newFakeUpstreams(t)
+	provider := staticProvider("ETH1",
+		common.NodeUrl{Url: refusing},
+		common.NodeUrl{Url: up.httpURL("/p/" + upArchive)},
+	)
+	start := time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+	now := start
+	reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
+	urlKey := holdoffURLKey(provider)
+	require.Equal(t, refusing, urlKey, "the hold-off is keyed by the refusing url")
+	reg.RecordRateLimit(provider.Name, urlKey, 0)
+
+	admissions := newAdmissionRegistry()
+	inputs := &chainReverifyInputs{
+		chainParser:                liveParser(t, "ETH1", true),
+		rpcEndpoint:                &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		convertProvidersToSessions: fakeConvert,
+		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider},
+		recordAdmission:            admissions.record,
+		recordReverifiedAdmission:  admissions.recordReverified,
+		admissionFor:               admissions.admissionFor,
+		rateLimitHoldoff:           reg,
+	}
+
+	// Past the hold-off the provider is probed: the second url carries it, and the first fails
+	// (it keeps its place for this one pass, the grace a url gets at an epoch).
+	now = start.Add(holdoff.InitialHoldoff + time.Second)
+	next, _, _ := applyReverification(t.Context(), inputs, map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}, reverifyTierStatic, 100)
+	require.Contains(t, collectNames(next), provider.Name, "the provider serves from its second url")
+
+	// The first url's next refusal is a second strike, not a fresh first one.
+	reg.RecordRateLimit(provider.Name, urlKey, 0)
+	require.Equal(t, now.Add(2*holdoff.InitialHoldoff), reg.ReadyAt(provider.Name, urlKey))
 }
