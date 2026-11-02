@@ -23,7 +23,7 @@ is merged; it skips routers whose every pod is idle (`smartrouter_chain_idle`) a
 
 - **The signal.** Each chain + API interface keeps the time of its last *client* request: HTTP,
   REST, gRPC, and unary JSON-RPC over a websocket. The router's own health relay does not count,
-  and neither does a request carrying the `lava-internal-probe` header (any value): that is how
+  and neither does a request carrying the `smartrouter-internal-probe` header (any value): that is how
   our monitoring, such as the hub's serving probes, asks a chain a question without keeping it
   awake. Such a request is routed and answered as usual, on an idle chain from the tips the router
   already has, and the header is never forwarded to the node.

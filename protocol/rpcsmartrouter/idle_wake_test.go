@@ -151,12 +151,12 @@ func TestAwaitWakeUnlessInternalProbe(t *testing.T) {
 	require.False(t, m.IsIdle(idleAt), "a customer request still wakes the chain")
 }
 
-// TestLavaDirectiveHeaders_StripsTheInternalProbeMark: the mark is a directive, not request metadata,
+// TestDirectiveHeaders_StripTheInternalProbeMark: the mark is a directive, not request metadata,
 // so it is never forwarded to the node and never enters the cache key (MAG-4797).
-func TestLavaDirectiveHeaders_StripsTheInternalProbeMark(t *testing.T) {
+func TestDirectiveHeaders_StripTheInternalProbeMark(t *testing.T) {
 	rpcss := &RPCSmartRouterServer{}
 	in := []pairingtypes.Metadata{
-		{Name: "Lava-Internal-Probe", Value: "true"},
+		{Name: "Smartrouter-Internal-Probe", Value: "true"},
 		{Name: "content-type", Value: "application/json"},
 	}
 	forwarded, directives := rpcss.LavaDirectiveHeaders(in)

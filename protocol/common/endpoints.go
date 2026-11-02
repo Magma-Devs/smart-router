@@ -145,7 +145,9 @@ const (
 // routed and answered like any other, but it does not count as activity for idle mode, so a probed
 // chain can still go idle (MAG-4797). It is a directive header: stripped before the request is
 // forwarded upstream and before the cache key is built.
-const INTERNAL_PROBE_HEADER_NAME = "lava-internal-probe"
+// Named smartrouter-*, after Smart-Router-Version: a header minted here does not take the lava-
+// prefix of the older directives.
+const INTERNAL_PROBE_HEADER_NAME = "smartrouter-internal-probe"
 
 var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
 	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME:       {},
