@@ -5,7 +5,7 @@ import "unicode/utf8"
 const (
 	// CustomerOther is the overflow bucket for the customer label: a value past the
 	// per-spec cap, or one that is not an id (too long, or not valid UTF-8). The value
-	// comes from the caller's project-id header, so without a bound one client sending
+	// comes from the caller's customer-id header, so without a bound one client sending
 	// a fresh value per request would mint a new series per request.
 	CustomerOther = "other"
 

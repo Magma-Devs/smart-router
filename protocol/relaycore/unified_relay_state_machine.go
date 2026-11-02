@@ -143,8 +143,10 @@ func NewUnifiedRelayStateMachine(
 	// validated) and the method routes by its normal stateful/stateless category. It is what an operator
 	// reaches for on a STATELESS method, since a write now ignores those headers on its own account
 	// (MAG-3603) and needs no policy written for it. The rpcsmartrouter layer
-	// sets it from a per-method `forbid-caller-cv` policy. It is moot when cvOverride != nil (an operator
-	// that mandates CV cannot also forbid it — Validate rejects that combination upstream).
+	// sets it from a per-method `forbid-caller-cv` policy. It is moot when cvOverride != nil. One method
+	// cannot carry both (Validate rejects that combination upstream), but a GraphQL request can bundle a
+	// root whose policy mandates CV with a root whose policy forbids caller CV. Both arrive set, and the
+	// mandate wins (MAG-4361).
 	forbidCallerCrossValidation bool,
 ) (RelayStateMachine, error) {
 	var selection Selection

@@ -890,7 +890,8 @@ const (
 	// endpointPickLendDisabled picks it for this one request WITHOUT marking it enabled, when it is
 	// a direct-RPC endpoint: the last chance when nothing else can serve. A success re-enables it
 	// through the normal relay-success path (ResetHealth); a failure leaves it disabled, its failure
-	// count already past the threshold, so normal traffic keeps skipping it.
+	// count already past the threshold, so normal traffic keeps skipping it. A head-stalled
+	// direct-RPC endpoint is lent the same way, and stays head-stalled whatever the answer.
 	endpointPickLendDisabled
 )
 
@@ -1292,13 +1293,18 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			// request without a dial. A provider-relay endpoint stays skipped, as before.
 			endpoint.mu.RLock()
 			enabled := endpoint.Enabled
-			// A state reason (head-stalled, MAG-3986) keeps the endpoint out in every pick mode:
-			// reconnect and lend both retry an endpoint the EVENT slot backed off, and neither
-			// proves anything about a node that answers but does not follow the chain.
+			// A state reason (head-stalled, MAG-3986) keeps the endpoint out of normal selection
+			// and of the reconnect probe. The last chance lends it like a disabled one: nothing
+			// else can serve this request, and a node behind the chain beats no answer — the same
+			// rule head-stall's own never-empty step applies chain-wide, applied here per request,
+			// where the request's add-on is known. Lending does not clear the stall; only the
+			// endpoint answering above its stuck block does.
 			heldByState := endpoint.heldByStateLocked()
 			endpoint.mu.RUnlock()
-			lendable := mode == endpointPickLendDisabled && endpoint.IsDirectRPC()
-			if heldByState || (!enabled && mode != endpointPickReconnectDisabled && !lendable) {
+			// lastChanceBorrow: this pick is the request's last chance and the URL is direct RPC, so
+			// it may be borrowed for this one request whatever its health (switched off, stalled).
+			lastChanceBorrow := mode == endpointPickLendDisabled && endpoint.IsDirectRPC()
+			if (heldByState && !lastChanceBorrow) || (!enabled && mode != endpointPickReconnectDisabled && !lastChanceBorrow) {
 				continue
 			}
 			// A websocket-only endpoint can never answer a relay — see ServesDirectRelays.
@@ -1594,4 +1600,37 @@ func CalcWeightsByStake(providers map[uint64]*ConsumerSessionsWithProvider) (wei
 		weights[cswp.PublicLavaAddress] = maxWeight * WeightMultiplierForStaticProviders
 	}
 	return weights
+}
+
+// inRotation reports whether the router can still send this provider traffic: at least one url
+// that can take a relay is usable (enabled, no state reason such as head-stalled). A provider with
+// none is out of rotation even before a request finds that out and blocks it.
+//
+// A websocket url never takes a relay (ServesDirectRelays), so it does not keep a provider in
+// rotation while its https sibling is out. A provider with no relay-capable url at all (a
+// websocket-only entry, there for subscriptions) is never picked for a relay and never blocked for
+// lacking one, so relay rotation says nothing about it; it is judged by the urls it has, and reads
+// out only when none of them is usable.
+func (cswp *ConsumerSessionsWithProvider) inRotation() bool {
+	cswp.Lock.RLock()
+	defer cswp.Lock.RUnlock()
+	relayCapable := false
+	for _, endpoint := range cswp.Endpoints {
+		if !endpoint.ServesDirectRelays() {
+			continue
+		}
+		relayCapable = true
+		if endpoint.IsUsable() {
+			return true
+		}
+	}
+	if relayCapable {
+		return false
+	}
+	for _, endpoint := range cswp.Endpoints {
+		if endpoint.IsUsable() {
+			return true
+		}
+	}
+	return false
 }

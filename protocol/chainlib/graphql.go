@@ -161,7 +161,7 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 
 	var combinedApi *spectypes.Api
 	var apiCollection *spectypes.ApiCollection
-	var latestRequestedBlock, earliestRequestedBlock int64 = 0, 0
+	var blockFold requestedBlockFold
 	blockHashes := []string{}
 	parsedDefault := true
 
@@ -214,12 +214,13 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 			}
 		}
 
+		// A root field that names no block (chainIdentifier) does not decide the request's
+		// block; see requestedBlockFold (MAG-4381).
 		parsedBlock := parsedInput.GetBlock()
+		blockFold.add(parsedBlock, parsedBlock, parsedInput, overwriteReqBlock == "" && apiNamesNoBlock(apiCont.api))
 		if index == 0 {
 			combinedApi = apiCont.api
 			apiCollection = apiCollectionForRootField
-			latestRequestedBlock = parsedBlock
-			earliestRequestedBlock = foldParsedEarliest(parsedBlock, parsedInput)
 			continue
 		}
 
@@ -246,9 +247,8 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 				Encoding:     "",
 			},
 		}
-		latestRequestedBlock, earliestRequestedBlock = CompareRequestedBlockInBatch(latestRequestedBlock, earliestRequestedBlock, parsedBlock)
-		earliestRequestedBlock = foldParsedEarliest(earliestRequestedBlock, parsedInput)
 	}
+	latestRequestedBlock, earliestRequestedBlock := blockFold.blocks()
 
 	// ParseGraphQLMsg rejects an operation that selects no root field, so this is unreachable
 	// today. It is guarded anyway because the loop below it dereferences both values, and the

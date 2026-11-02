@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -130,9 +131,19 @@ type SmartRouterMetricsManager struct {
 	csmBlockedProvidersByReason    *prometheus.GaugeVec   // smartrouter_csm_blocked_providers_by_reason
 	csmBlockedBackupProvidersCount *prometheus.GaugeVec   // smartrouter_csm_blocked_backup_providers
 	endpointServingTier            *prometheus.GaugeVec   // smartrouter_endpoint_serving_tier
+	providerVerificationFailed     *prometheus.GaugeVec   // smartrouter_provider_verification_failed
 	csmStickySessionsCount         *prometheus.GaugeVec   // smartrouter_csm_sticky_sessions
 	csmStickyClaims                *prometheus.CounterVec // smartrouter_csm_sticky_claims_total
 	csmReportedProvidersCount      *prometheus.GaugeVec   // smartrouter_csm_reported_providers
+	// verificationFailuresMu guards verificationFailures, the failing series last
+	// published per provider with when each failure started, so a republish deletes
+	// only the ones that cleared and keeps each start.
+	verificationFailuresMu sync.Mutex
+	verificationFailures   map[string][]publishedVerificationFailure
+	// verificationNow is the clock a failure's start is read from; nil is time.Now.
+	verificationNow func() time.Time
+	// verificationCheckFailures counts failed check runs: smartrouter_provider_verification_check_failures_total
+	verificationCheckFailures *prometheus.CounterVec
 
 	// Router-scoped request group metrics (labels: spec, apiInterface, provider_address, method)
 	routerRequestsTotal      *prometheus.CounterVec
@@ -164,7 +175,7 @@ type SmartRouterMetricsManager struct {
 	defaultMethods *batchSignatureRegistry
 
 	// Per-customer request group (MAG-4081), recorded once per client request by
-	// SetRelayMetrics. The customer label is the caller's project-id header, bounded by
+	// SetRelayMetrics. The customer label is the caller's customer-id header, bounded by
 	// customers (see customer_label.go); customerOverflow reports when that cap binds.
 	customerRequestsTotal   *prometheus.CounterVec   // smartrouter_customer_requests_total
 	customerRequestsFailed  *prometheus.CounterVec   // smartrouter_customer_requests_failed_total
@@ -594,7 +605,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels)
 	csmProviderBlocked := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_provider_blocked",
-		Help: "Whether this specific provider is currently blocked (1=blocked, 0=serving). Companion to the smartrouter_csm_blocked_providers count, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
+		Help: "Whether this specific provider is out of rotation (1=out: blocked by the router, or none of its urls can take a relay right now; 0=at least one url in rotation), in the regular pairing or the backup pool. Companion to the smartrouter_csm_blocked_providers and smartrouter_csm_blocked_backup_providers counts, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
 	}, []string{"spec", "apiInterface", "provider_address"})
 	csmBlockedProvidersByReason := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_providers_by_reason",
@@ -628,6 +639,14 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "smartrouter_endpoint_serving_tier",
 		Help: "Which provider tier an endpoint is serving from: 2=primaries, 1=DEGRADED (backups only), 0=DARK (no healthy providers). Since MAG-2525 a dark chain no longer crash-loops, so this gauge — not pod restarts — is the signal that a chain cannot serve. Expected time at 0 depends on how the chain went dark: dark at boot is retried from ~2s (doubling to a 3m ceiling), but a chain demoted to dark after booting healthy is only re-checked by the 15m epoch re-verifier. Size alert windows for the 15m case.",
 	}, csmStateLabels)
+	providerVerificationFailed := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "smartrouter_provider_verification_failed",
+		Help: "While a configured provider is failing a verification: the unix time in seconds the failure started, labelled with the check it fails. A provider that moves to another check in the same scope and service keeps its start. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves. severity: Fail when the failure takes a url or the provider out, PartialFail when it switches off only that service. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, not-run, rate-limited, unknown. A provider out at boot is retried every 3m (from 2s, doubling, while its chain is dark); one demoted later and every service refusal is re-checked every 15m epoch, so size alert windows above both.",
+	}, verificationFailureLabels)
+	verificationCheckFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "smartrouter_provider_verification_check_failures_total",
+		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service), scope=url when it costs one node url. A provider out at boot is re-run every 3m; an admitted provider and every service are re-run every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted.",
+	}, verificationFailureLabels)
 
 	// =========================================================================
 	// Request group metrics
@@ -694,20 +713,20 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	customerRequestLabels := []string{"spec", "apiInterface", "customer", "method"}
 	customerRequestsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_requests_total",
-		Help: `Client requests, once each with their final outcome, by the caller's project-id header. customer="DefaultDappID": no header. customer="other": past the per-spec customer cap (see smartrouter_customer_overflow_total). Subscription pushes are not counted; the subscribe request is.`,
+		Help: `Client requests, once each with their final outcome, by the caller's customer-id header. customer="DefaultDappID": no header. customer="other": past the per-spec customer cap (see smartrouter_customer_overflow_total). Subscription pushes are not counted; the subscribe request is.`,
 	}, customerRequestLabels)
 	customerRequestsFailed := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_requests_failed_total",
-		Help: "Client requests that ended in an error to the client, by the caller's project-id header. Success rate = 1 - failed / smartrouter_customer_requests_total.",
+		Help: "Client requests that ended in an error to the client, by the caller's customer-id header. Success rate = 1 - failed / smartrouter_customer_requests_total.",
 	}, customerRequestLabels)
 	customerEndToEndLatency := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_customer_end_to_end_latency_milliseconds",
-		Help:    "End-to-end latency of successful client requests in milliseconds, by the caller's project-id header. Use histogram_quantile() for percentiles.",
+		Help:    "End-to-end latency of successful client requests in milliseconds, by the caller's customer-id header. Use histogram_quantile() for percentiles.",
 		Buckets: latencyBuckets,
 	}, []string{"spec", "apiInterface", "customer"})
 	customerOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_overflow_total",
-		Help: `Label normalizations that fell into customer="other": the spec exhausted its distinct-customer budget, or the project-id value was too long to be an id. Non-zero means per-customer numbers are lossy for this spec.`,
+		Help: `Label normalizations that fell into customer="other": the spec exhausted its distinct-customer budget, or the customer-id value was too long to be an id. Non-zero means per-customer numbers are lossy for this spec.`,
 	}, []string{"spec"})
 
 	cacheLabels := []string{"spec", "apiInterface", "method", "cache_tier"}
@@ -806,6 +825,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	csmStickyClaims = registerOrReuse(csmStickyClaims)
 	csmReportedProvidersCount = registerOrReuse(csmReportedProvidersCount)
 	endpointServingTier = registerOrReuse(endpointServingTier)
+	providerVerificationFailed = registerOrReuse(providerVerificationFailed)
+	verificationCheckFailures = registerOrReuse(verificationCheckFailures)
 
 	manager := &SmartRouterMetricsManager{
 		// Endpoint-scoped (with function)
@@ -924,6 +945,8 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		csmStickyClaims:                csmStickyClaims,
 		csmReportedProvidersCount:      csmReportedProvidersCount,
 		endpointServingTier:            endpointServingTier,
+		providerVerificationFailed:     providerVerificationFailed,
+		verificationCheckFailures:      verificationCheckFailures,
 
 		// Internal state
 		// Start fail-closed (0 = not-ready) so /readyz reports 503 until the
@@ -1941,8 +1964,8 @@ func (m *SmartRouterMetricsManager) ResetSessionRelatedMetrics() {}
 // in the standing block list, and that provider is no longer in it. Over many epochs those
 // phantoms accumulate — a slow cardinality leak that also reads as a permanent outage.
 //
-// Drop every series for this chain first, then seed 0 for each provider in the new pairing, so
-// providers that left are gone rather than frozen. A provider that the re-block pass immediately
+// Drop every series for this chain first, then seed 0 for each provider in the new pairing and
+// backup pool, so providers that left are gone rather than frozen. A provider that the re-block pass immediately
 // re-blocks is corrected by the next publishStateSizes tick, which republishes the full truth.
 func (m *SmartRouterMetricsManager) ResetBlockedProvidersMetrics(chainId, apiInterface string, providerAddressToEndpoint map[string]string) {
 	if m == nil {
@@ -2026,6 +2049,131 @@ func (m *SmartRouterMetricsManager) SetEndpointServingTier(chainId, apiInterface
 		return
 	}
 	m.endpointServingTier.WithLabelValues(chainId, apiInterface).Set(float64(ServingTier(healthyStatic, healthyBackup)))
+}
+
+// Scopes of smartrouter_provider_verification_failed.
+const (
+	VerificationScopeProvider = "provider"
+	VerificationScopeService  = "service"
+	VerificationScopeURL      = "url"
+)
+
+// Severities of a failing verification, as MAG-3950 names them: Fail takes a url or the
+// provider out, PartialFail switches off only the service the check covers.
+const (
+	VerificationSeverityFail        = "Fail"
+	VerificationSeverityPartialFail = "PartialFail"
+)
+
+// verificationFailureLabels are the labels of both verification-failure metrics.
+var verificationFailureLabels = []string{"spec", "apiInterface", "provider", "tier", "scope", "service", "check", "severity"}
+
+// ProviderVerificationFailure is one failing check of one provider. Service is
+// empty unless the failure costs one service.
+type ProviderVerificationFailure struct {
+	Scope   string
+	Service string
+	Check   string
+	// Severity is the label as published. Empty reads it from what the failure costs:
+	// PartialFail when it costs one service, Fail when it costs a url or the provider.
+	Severity string
+}
+
+// withSeverity is f with its severity label filled in.
+func (f ProviderVerificationFailure) withSeverity() ProviderVerificationFailure {
+	if f.Severity != "" {
+		return f
+	}
+	f.Severity = VerificationSeverityFail
+	if f.Service != "" {
+		f.Severity = VerificationSeverityPartialFail
+	}
+	return f
+}
+
+// CountVerificationCheckFailure counts one failed run of a verification check.
+// tier is "static" or "backup".
+func (m *SmartRouterMetricsManager) CountVerificationCheckFailure(spec, apiInterface, provider, tier string, failure ProviderVerificationFailure) {
+	if m == nil {
+		return
+	}
+	failure = failure.withSeverity()
+	m.verificationCheckFailures.WithLabelValues(spec, apiInterface, provider, tier, failure.Scope, failure.Service, failure.Check, failure.Severity).Inc()
+}
+
+// publishedVerificationFailure is a failing series as last published, with when its
+// failure started.
+type publishedVerificationFailure struct {
+	ProviderVerificationFailure
+	since time.Time
+}
+
+// SetProviderVerificationFailures publishes the checks a configured provider is
+// failing right now, each valued with the unix time its failure started, and removes
+// the series of checks it no longer fails. An empty list clears the provider. tier is
+// "static" or "backup".
+//
+// Only series that cleared are deleted, never the whole provider first: a scrape
+// landing between a delete and a re-set would read a gap, and a gap resets an
+// alert's pending timer.
+func (m *SmartRouterMetricsManager) SetProviderVerificationFailures(spec, apiInterface, provider, tier string, failures []ProviderVerificationFailure) {
+	if m == nil {
+		return
+	}
+	key := spec + "|" + apiInterface + "|" + provider + "|" + tier
+	m.verificationFailuresMu.Lock()
+	defer m.verificationFailuresMu.Unlock()
+	now := time.Now()
+	if m.verificationNow != nil {
+		now = m.verificationNow()
+	}
+	previous := m.verificationFailures[key]
+	published := func(set []publishedVerificationFailure, f ProviderVerificationFailure) bool {
+		return slices.ContainsFunc(set, func(p publishedVerificationFailure) bool { return p.ProviderVerificationFailure == f })
+	}
+	next := make([]publishedVerificationFailure, 0, len(failures))
+	for _, f := range failures {
+		f = f.withSeverity()
+		if published(next, f) {
+			continue
+		}
+		next = append(next, publishedVerificationFailure{ProviderVerificationFailure: f, since: failureStart(previous, f, now)})
+	}
+	for _, old := range previous {
+		if !published(next, old.ProviderVerificationFailure) {
+			m.providerVerificationFailed.DeleteLabelValues(spec, apiInterface, provider, tier, old.Scope, old.Service, old.Check, old.Severity)
+		}
+	}
+	for _, p := range next {
+		m.providerVerificationFailed.WithLabelValues(spec, apiInterface, provider, tier, p.Scope, p.Service, p.Check, p.Severity).Set(float64(p.since.Unix()))
+	}
+	if m.verificationFailures == nil {
+		m.verificationFailures = map[string][]publishedVerificationFailure{}
+	}
+	if len(next) == 0 {
+		delete(m.verificationFailures, key)
+		return
+	}
+	m.verificationFailures[key] = next
+}
+
+// failureStart is when f started failing: its own series' start when it was already
+// published, else the earliest start in the same scope and service, so a provider
+// that moves to another check keeps the time it started failing, else now.
+func failureStart(previous []publishedVerificationFailure, f ProviderVerificationFailure, now time.Time) time.Time {
+	var earliest time.Time
+	for _, p := range previous {
+		if p.ProviderVerificationFailure == f {
+			return p.since
+		}
+		if p.Scope == f.Scope && p.Service == f.Service && (earliest.IsZero() || p.since.Before(earliest)) {
+			earliest = p.since
+		}
+	}
+	if earliest.IsZero() {
+		return now
+	}
+	return earliest
 }
 
 // SetCSMStickySessionsCount publishes the number of live sticky-session affinities.

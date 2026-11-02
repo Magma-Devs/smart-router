@@ -7,6 +7,7 @@
       "error_code": "CHAIN_NONCE_TOO_LOW",
       "latency_ms": "<ms>",
       "message": "nonce too low: next nonce 7, tx nonce 6",
+      "node_code": -32000,
       "outcome": "node_error",
       "retryable": false,
       "returned_to_client": false,
@@ -35,10 +36,13 @@
   "message": "relay_end",
   "method": "eth_sendRawTransaction",
   "outcome": "ok",
-  "schema": 1,
+  "reply_bytes": 102,
+  "request_bytes": 168,
+  "schema": 2,
   "selection": "stateful",
   "served_by": "node-b",
   "stateful": true,
   "status": 200,
-  "stop_reason": "Success"
+  "stop_reason": "Success",
+  "tx_hash": "0x5c504ed432cb51138bcf09aa5e8a410dd4a1e204ef84bfed1be16dfba1b22060"
 }

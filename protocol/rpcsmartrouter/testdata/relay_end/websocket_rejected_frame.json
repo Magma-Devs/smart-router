@@ -14,7 +14,7 @@
   "message": "relay_end",
   "method": "",
   "outcome": "rejected_before_dispatch",
-  "schema": 1,
+  "schema": 2,
   "selection": "",
   "served_by": "",
   "stateful": false,

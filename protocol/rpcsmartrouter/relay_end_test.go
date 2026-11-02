@@ -260,13 +260,16 @@ func relayEndProvider(t *testing.T, node relayEndNode) (*lavasession.ConsumerSes
 	return provider, url
 }
 
+// relayEndNoCustomerID is the customer id a listener passes for a request without a customer-id header.
+const relayEndNoCustomerID = metrics.CustomerNone
+
 // sendRelayEnd sends body the way every HTTP listener does: SendRelay, with the GUID the
-// listener minted on the context.
+// listener minted on the context, for a request without a customer-id header.
 func sendRelayEnd(t *testing.T, server *RPCSmartRouterServer, guid uint64, timeout time.Duration, url, body string, metadata ...pairingtypes.Metadata) (*common.RelayResult, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), timeout)
 	defer cancel()
-	return server.SendRelay(ctx, url, body, http.MethodPost, "dapp", "", nil, metadata)
+	return server.SendRelay(ctx, url, body, http.MethodPost, relayEndNoCustomerID, "", nil, metadata)
 }
 
 const (
@@ -503,7 +506,7 @@ func TestRelayEnd_CosmosTxOutcome(t *testing.T) {
 		{"not JSON", `<html>bad gateway</html>`, "", "", 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result, found := cosmosTxOutcome([]byte(tc.reply))
+			result, _, found := cosmosTxOutcome([]byte(tc.reply))
 			require.Equal(t, tc.found, found)
 			if !found {
 				return
@@ -513,8 +516,19 @@ func TestRelayEnd_CosmosTxOutcome(t *testing.T) {
 			require.Equal(t, tc.log, result.Log)
 		})
 	}
-	_, found := cosmosTxOutcome([]byte(`{"result":{"code":1,"log":"` + strings.Repeat("x", cosmosTxReplyLimit) + `"}}`))
+	_, _, found := cosmosTxOutcome([]byte(`{"result":{"code":1,"log":"` + strings.Repeat("x", relayEndTxReplyLimit) + `"}}`))
 	require.False(t, found, "a reply too large to be a submit's answer is not parsed")
+
+	// The hash is wherever the submit's answer puts it, whether or not the reply names a code.
+	for _, tc := range []struct{ name, reply string }{
+		{"broadcast_tx_sync", `{"result":{"code":0,"hash":"AB12"}}`},
+		{"broadcast_tx_commit", `{"result":{"check_tx":{"code":0},"tx_result":{"code":11},"hash":"AB12","height":"0"}}`},
+		{"REST", `{"tx_response":{"code":32,"txhash":"AB12"}}`},
+		{"a reply with no code", `{"result":{"hash":"AB12"}}`},
+	} {
+		_, hash, _ := cosmosTxOutcome([]byte(tc.reply))
+		require.Equal(t, "AB12", hash, tc.name)
+	}
 }
 
 // A Cosmos node refuses a transaction with a normal reply that carries the refusal's code, which the
@@ -534,7 +548,7 @@ func TestRelayEnd_TendermintTxRefused(t *testing.T) {
 	guid := relayEndCaseGUID("tendermint_tx_refused")
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), relayEndShortWait)
 	defer cancel()
-	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", "dapp", "", nil, nil)
+	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", relayEndNoCustomerID, "", nil, nil)
 	require.NoError(t, err, "the client gets the node's normal reply")
 	requireRelayEndGolden(t, "tendermint_tx_refused", normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false))
 }
@@ -850,7 +864,7 @@ func TestRelayEnd_TendermintUnlistedMethod(t *testing.T) {
 			// query as the url.
 			ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), tc.guid), relayEndShortWait)
 			defer cancel()
-			_, _ = server.SendRelay(ctx, tc.url, tc.body, "", "dapp", "", nil, nil)
+			_, _ = server.SendRelay(ctx, tc.url, tc.body, "", relayEndNoCustomerID, "", nil, nil)
 
 			line := onlyRelayEnd(t, read(), tc.guid)
 			require.Equal(t, tc.method, relayEndField(t, line, "method"))

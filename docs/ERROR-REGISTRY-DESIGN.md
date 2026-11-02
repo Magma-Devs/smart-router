@@ -28,7 +28,7 @@ Errors raised from within the Lava protocol itself — not from nodes or chains.
 | 1009 | `PROTOCOL_NETWORK_UNREACHABLE` | Network or host unreachable (no route) | Yes |
 | 1010 | `PROTOCOL_NO_PROVIDERS` | No providers/pairings available | No |
 | 1011 | `PROTOCOL_ALL_ENDPOINTS_DISABLED` | All provider endpoints disabled | No |
-| 1012 | `PROTOCOL_PROVIDER_UNAVAILABLE` | Provider service unavailable (gRPC UNAVAILABLE). Not produced by the smart router: a node's gRPC status is a node error (2006) | Yes |
+| 1012 | `PROTOCOL_PROVIDER_UNAVAILABLE` | Provider service unavailable (gRPC UNAVAILABLE). The UNAVAILABLE the router's own gRPC client produces for a call it failed before any stream to the node was open (`GRPCCallUndeliveredError`), when no connection row names the text: a failed TLS handshake, a resolver that produced no address. A refused dial or an unresolved name keeps its own code (1002, 1003). A node's own gRPC UNAVAILABLE is a node error (2006) | Yes |
 | 1013 | `PROTOCOL_PROVIDER_ABORTED` | Provider aborted (gRPC ABORTED). Not produced by the smart router: a node's gRPC status is a node error (2019) | Yes |
 | 1014 | `PROTOCOL_PROVIDER_DATA_LOSS` | Provider data loss (gRPC DATA_LOSS). Not produced by the smart router. No node it routes to sends gRPC DATA_LOSS; if one did, it would classify `UNKNOWN_ERROR` | Yes |
 | 1020 | `PROTOCOL_RATE_LIMITED` | Lava-side rate limit exceeded (SubCategoryRateLimit) | No |
@@ -318,10 +318,15 @@ func DetectConnectionError(err error) *LavaError {
     // net.Error timeout check
     // String fallback for non-%w wrapped errors ("context deadline exceeded", "context canceled")
     // ECONNREFUSED via net.OpError
+    // GRPCCallUndeliveredError: a gRPC call the router's own client failed before any stream
+    // to the node was open; its text is read by the layers above first, and what no row
+    // names lands on PROTOCOL_PROVIDER_UNAVAILABLE (1012)
 }
 ```
 
 `ClassifyError` Step 0 returns `connectionError` immediately if non-nil — so a detected connection error **always** takes precedence and can never produce `UNKNOWN_ERROR`.
+
+A gRPC status needs the wrapper because grpc-go words a connection it could not use as `UNAVAILABLE`, the code a node also sends when it is shutting down; the code alone cannot tell the two apart. `lavasession.GRPCDirectRPCConnection` reads the stream instead (`grpc.Peer` is set only once a stream to the node is open) and wraps the status in `GRPCCallUndeliveredError` when there was none, so a refused gRPC dial disables its endpoint as `unreachable`, as a refused JSON-RPC dial does. A node's own `UNAVAILABLE` arrives on an open stream and stays `NODE_SERVICE_UNAVAILABLE` (2006).
 
 ### Matching Rules
 

@@ -626,6 +626,9 @@ type RelayResult struct {
 	// opposed to answering truthfully about a request it cannot satisfy. This is what the
 	// endpoint-health counter reads; see LavaError.EndpointAtFault for why it is not Retryable.
 	IsNodeAtFault bool
+	// ClientFacing is what the listener shows the caller when the relay ends in a protocol error:
+	// the upstream's own answer when it gave one, else the leaf cause (MAG-4218).
+	ClientFacing *ClientFacingError
 	// CacheLookup is what each cache tier did on the attempt that produced this result,
 	// surfaced to the caller as Lava-Cache-Tier / Lava-Cache-Outcome when the request
 	// carried lava-debug-relay. Same shape as the per-request serving facts above that
