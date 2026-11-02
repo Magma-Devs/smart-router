@@ -328,29 +328,38 @@ func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) Decis
 	}
 }
 
-// PinnedByDirectives reports whether the caller pinned the request to one upstream with
-// lava-select-provider or lava-stickiness. Read from the request's ORIGINAL headers: a message
-// rebuilt for an archive toggle drops the pin headers on purpose (preserveRetrySafeDirectives),
-// and the pin is a property of the request, not of one attempt. Presence is what counts, as in
+// PinnedByDirectives reports whether the request is a strict pin: answered by one upstream or not
+// at all, never retried, hedged or rerouted by the consistency gate onto another one (MAG-2280,
+// MAG-4123). Two ways in (MAG-4826):
+//
+//   - lava-stickiness, always. A sticky session that straddles two nodes is the false gap the
+//     header exists to prevent, and the sticky-sessions docs promise "route to the session's node,
+//     or fail". This holds whatever else the request sends, so adding lava-select-provider to a
+//     sticky request can never make it leak.
+//   - lava-select-provider with lava-select-provider-strict: true (SelectProviderStrict). A plain
+//     lava-select-provider keeps its documented behaviour: the named upstream gets the first
+//     attempt, and failover may use the rest of the pool.
+//
+// Read from the request's ORIGINAL headers: a message rebuilt for an archive toggle drops the pin
+// headers on purpose (preserveRetrySafeDirectives), and the pin is a property of the request, not
+// of one attempt. It must also be read here, from headers, and not from what lavasession selects
+// on: lavasession turns a cross-pod sticky claim into a selected provider, which would otherwise
+// look like a plain, non-strict selection. Presence of a pin header is what counts, as in
 // resolvePinDirectives. A request that cross-validation overrides is not pinned in effect, so
 // callers check the selection first.
-//
-// A pin sent with lava-pin-allow-retry: true is not pinned in this sense: the caller asked for the
-// pinned provider on the first attempt only and allowed retries and hedges elsewhere, so the
-// policy and the consistency gate treat it like an unpinned request (see PinAllowsRetry).
 func PinnedByDirectives(directiveHeaders map[string]string) bool {
+	if _, sticky := directiveHeaders[common.STICKINESS_HEADER_NAME]; sticky {
+		return true
+	}
 	_, selected := directiveHeaders[common.SELECT_PROVIDER_HEADER_NAME]
-	_, sticky := directiveHeaders[common.STICKINESS_HEADER_NAME]
-	return (selected || sticky) && !PinAllowsRetry(directiveHeaders)
+	return selected && SelectProviderStrict(directiveHeaders)
 }
 
-// PinAllowsRetry reports whether the caller sent lava-pin-allow-retry: true. Only the value "true"
-// (any case) turns it on, unlike the presence-only lava-force-cache-refresh: "false" must not
-// silently mean yes. With it, a pin from lava-select-provider or lava-stickiness applies to the
-// first attempt only (the pre-MAG-2280 rule, now opt-in): a retry or a hedge may go to another
-// provider and is counted in Lava-Retries, and the session's pin itself is never moved.
-func PinAllowsRetry(directiveHeaders map[string]string) bool {
-	return strings.EqualFold(strings.TrimSpace(directiveHeaders[common.PIN_ALLOW_RETRY_HEADER_NAME]), "true")
+// SelectProviderStrict reports whether the caller sent lava-select-provider-strict: true. Only the
+// value "true" (any case) turns it on, unlike the presence-only lava-force-cache-refresh: "false"
+// must not silently mean yes. It only matters next to lava-select-provider; alone it pins nothing.
+func SelectProviderStrict(directiveHeaders map[string]string) bool {
+	return strings.EqualFold(strings.TrimSpace(directiveHeaders[common.SELECT_PROVIDER_STRICT_HEADER_NAME]), "true")
 }
 
 // PinnedUpstreamUnservable reports a selection error that names the pin: the pinned upstream is

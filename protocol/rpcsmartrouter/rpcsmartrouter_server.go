@@ -4857,27 +4857,28 @@ func (rpcss *RPCSmartRouterServer) cachedReplyDirectives(protocolMessage chainli
 	return rpcss.replyHeaderDirectives(), collectionDirectives
 }
 
-// resolvePinDirectives returns the lava-select-provider and lava-stickiness directives.
+// resolvePinDirectives returns the lava-select-provider and lava-stickiness directives for one
+// attempt.
 //
-// Honoured on every attempt. A pinned request is answered by the pinned upstream or fails with
-// that upstream's error: the retry policy never retries or hedges it on another one (see
-// Policy.Decide, "Pinned"), so a second batch cannot normally exist. Should one ever be sent,
-// the pin still applies and selection refuses the already-tried upstream loudly
+// A strict pin (relaycore.PinnedByDirectives: lava-stickiness, or lava-select-provider with
+// lava-select-provider-strict: true) is honoured on every attempt. Such a request is answered by
+// the pinned upstream or fails with that upstream's error: the retry policy never retries or
+// hedges it (Policy.Decide, "Pinned"), so a second batch cannot normally exist. Should one ever be
+// sent, the pin still applies and selection refuses the already-tried upstream loudly
 // (SelectedProviderAlreadyFailedError) rather than quietly serving the request elsewhere.
 //
-// MAG-2228 had this drop the pin on retries, so a pinned upstream's retryable error failed over
-// to a peer. That made a sticky session straddle two nodes mid-sequence: for the head-then-fetch
-// pattern the header exists for, the exact false gap it was meant to prevent, since the peer is
-// not checked to have reached the block. And it left the pin on the failing node for the next
-// request. MAG-2280 settled the contract the other way; MAG-4123 is the same rule for the
-// router's own consistency gate.
-//
-// The caller can ask for the old first-attempt-only pin with lava-pin-allow-retry: true
-// (relaycore.PinAllowsRetry). Then a later attempt (firstAttempt false: a batch has already been
-// dispatched) reads no pin, so a retry or hedge is free to reach another provider. firstAttempt
+// A plain lava-select-provider pins the first attempt only, its documented behaviour (MAG-2228):
+// once a batch has been dispatched (firstAttempt false) no pin is read, so a retry or hedge may
+// reach the rest of the pool instead of re-pinning the upstream that just failed. firstAttempt
 // stays true while nothing has been dispatched, so a resend after a selection failure keeps it.
+//
+// MAG-2228 used to apply the first-attempt rule to lava-stickiness too. That made a sticky session
+// straddle two nodes mid-sequence: for the head-then-fetch pattern the header exists for, the
+// exact false gap it was meant to prevent, since the peer is not checked to have reached the
+// block. MAG-2280 made sticky strict, MAG-4123 is the same rule for the router's own consistency
+// gate, and MAG-4826 keeps lava-select-provider's failover with strict selection as an opt-in.
 func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]string, firstAttempt bool) (selectedProvider, stickiness string) {
-	if !firstAttempt && relaycore.PinAllowsRetry(directiveHeaders) {
+	if !firstAttempt && !relaycore.PinnedByDirectives(directiveHeaders) {
 		return "", ""
 	}
 	if id, ok := directiveHeaders[common.STICKINESS_HEADER_NAME]; ok {
@@ -5246,9 +5247,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	usedProviders := relayProcessor.GetUsedProviders()
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 
-	// lava-select-provider / lava-stickiness apply to every attempt: a pinned request is never
-	// served by another provider (MAG-2280, MAG-4123), unless the caller sent
-	// lava-pin-allow-retry: true, which keeps the pin to the first attempt. See resolvePinDirectives.
+	// A strict pin (lava-stickiness, or lava-select-provider with lava-select-provider-strict: true)
+	// applies to every attempt and is never served by another provider (MAG-2280, MAG-4123); a plain
+	// lava-select-provider pins the first attempt only (MAG-4826). See resolvePinDirectives.
 	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders, usedProviders.BatchNumber() == 0)
 
 	// Dropped here rather than inside lavasession so the rest of this call stays coherent: the

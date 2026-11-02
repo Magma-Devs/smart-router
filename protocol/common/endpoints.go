@@ -70,10 +70,11 @@ const (
 	SELECTION_STATS_HEADER_NAME           = "lava-selection-stats"
 	STICKINESS_HEADER_NAME                = "lava-stickiness"
 	SELECT_PROVIDER_HEADER_NAME           = "lava-select-provider"
-	// PIN_ALLOW_RETRY_HEADER_NAME, set to "true" next to lava-select-provider or lava-stickiness,
-	// pins the FIRST attempt only: retries and hedges may go to other providers. Without it a
-	// pinned request is answered by the pinned provider or fails (MAG-2280).
-	PIN_ALLOW_RETRY_HEADER_NAME                   = "lava-pin-allow-retry"
+	// SELECT_PROVIDER_STRICT_HEADER_NAME, set to "true" next to lava-select-provider, makes the
+	// selection a strict pin: the named provider answers or the request fails, with no retry, hedge
+	// or consistency-gate reroute on another provider. Without it lava-select-provider pins the first
+	// attempt only. lava-stickiness is always strict and needs no such header (MAG-4826).
+	SELECT_PROVIDER_STRICT_HEADER_NAME            = "lava-select-provider-strict"
 	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS      = "lava-cross-validation-max-participants"
 	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD   = "lava-cross-validation-agreement-threshold"
 	CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME    = "lava-cross-validation-all-providers"
@@ -152,7 +153,7 @@ var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
 	LAVA_DEBUG_RELAY:                            {},
 	STICKINESS_HEADER_NAME:                      {},
 	SELECT_PROVIDER_HEADER_NAME:                 {},
-	PIN_ALLOW_RETRY_HEADER_NAME:                 {},
+	SELECT_PROVIDER_STRICT_HEADER_NAME:          {},
 	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    {},
 	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: {},
 }

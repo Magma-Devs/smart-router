@@ -44,28 +44,46 @@ func newPinnedHarnessWith(t *testing.T, directives map[string]string) (*relaycor
 	return relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine), usedProviders
 }
 
-// A pinned request whose upstream answers with a retryable node error ends there (MAG-2280): the
-// state machine stops with the policy's reason and never asks for a second batch, so the error the
-// pinned upstream gave is what the caller receives.
-func TestPinnedRequest_NodeErrorEndsTheRequestOnThePinnedUpstream(t *testing.T) {
-	relayProcessor, usedProviders := newPinnedHarness(t)
-	sessions := lavasession.ConsumerSessionsMap{"lava@pinned": &lavasession.SessionInfo{}}
+// strictPinShapes are the header sets that make a request a strict pin (MAG-4826): sticky (D1),
+// select-provider with the strict header (D3), and sticky next to select-provider (D4).
+var strictPinShapes = map[string]map[string]string{
+	"sticky": {common.STICKINESS_HEADER_NAME: "ingest-42"},
+	"select-provider strict": {
+		common.SELECT_PROVIDER_HEADER_NAME:        "lava@pinned",
+		common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true",
+	},
+	"sticky with select-provider": {
+		common.STICKINESS_HEADER_NAME:      "ingest-42",
+		common.SELECT_PROVIDER_HEADER_NAME: "lava@pinned",
+	},
+}
 
-	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
-	require.NoError(t, err)
-	batches := 0
-	for task := range relayTaskChannel {
-		if task.IsDone() {
-			require.Equal(t, "Pinned", task.StopReason)
-			require.Equal(t, 1, batches, "the pinned upstream's error is the answer; no second batch may be dispatched")
-			return
-		}
-		batches++
-		usedProviders.AddUsed(sessions, nil)
-		relayProcessor.UpdateBatch(nil)
-		relaycoretest.SendNodeError(relayProcessor, "lava@pinned", time.Millisecond)
+// A strict-pinned request whose upstream answers with a retryable node error ends there
+// (MAG-2280): the state machine stops with the policy's reason and never asks for a second batch,
+// so the error the pinned upstream gave is what the caller receives.
+func TestPinnedRequest_NodeErrorEndsTheRequestOnThePinnedUpstream(t *testing.T) {
+	for name, directives := range strictPinShapes {
+		t.Run(name, func(t *testing.T) {
+			relayProcessor, usedProviders := newPinnedHarnessWith(t, directives)
+			sessions := lavasession.ConsumerSessionsMap{"lava@pinned": &lavasession.SessionInfo{}}
+
+			relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
+			require.NoError(t, err)
+			batches := 0
+			for task := range relayTaskChannel {
+				if task.IsDone() {
+					require.Equal(t, "Pinned", task.StopReason)
+					require.Equal(t, 1, batches, "the pinned upstream's error is the answer; no second batch may be dispatched")
+					return
+				}
+				batches++
+				usedProviders.AddUsed(sessions, nil)
+				relayProcessor.UpdateBatch(nil)
+				relaycoretest.SendNodeError(relayProcessor, "lava@pinned", time.Millisecond)
+			}
+			t.Fatal("channel closed without a Done instruction")
+		})
 	}
-	t.Fatal("channel closed without a Done instruction")
 }
 
 // A pinned request whose upstream selection refuses, because it is unknown, blocked, busy, or too
@@ -104,31 +122,36 @@ func TestPinnedConsistencyRejection_IsTerminalAndNamesTheLag(t *testing.T) {
 	require.Contains(t, err.Error(), "too far behind the chain tip")
 }
 
-// With lava-pin-allow-retry: true the same node error is retried: the pin covers the first attempt
-// only, so the state machine asks for a second batch instead of stopping on "Pinned".
-func TestPinnedRequest_AllowRetryHeaderRetriesANodeError(t *testing.T) {
-	relayProcessor, usedProviders := newPinnedHarnessWith(t, map[string]string{
-		common.STICKINESS_HEADER_NAME:      "ingest-42",
-		common.PIN_ALLOW_RETRY_HEADER_NAME: "true",
-	})
-	relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
-	require.NoError(t, err)
-	batches := 0
-	for task := range relayTaskChannel {
-		if task.IsDone() {
-			require.Equal(t, "Success", task.StopReason)
-			require.Equal(t, 2, batches, "the node error must be retried on a second batch")
-			return
-		}
-		batches++
-		provider := fmt.Sprintf("lava@%d", batches)
-		usedProviders.AddUsed(lavasession.ConsumerSessionsMap{provider: &lavasession.SessionInfo{}}, nil)
-		relayProcessor.UpdateBatch(nil)
-		if batches == 1 {
-			relaycoretest.SendNodeError(relayProcessor, provider, time.Millisecond)
-		} else {
-			relaycoretest.SendSuccessResp(relayProcessor, provider, time.Millisecond)
-		}
+// A plain lava-select-provider keeps its documented failover (MAG-4826 D2): the same node error
+// is retried, so the state machine asks for a second batch instead of stopping on "Pinned". So is
+// a select-provider whose strict header is anything but "true".
+func TestPinnedRequest_PlainSelectProviderRetriesANodeError(t *testing.T) {
+	for name, directives := range map[string]map[string]string{
+		"plain select-provider": {common.SELECT_PROVIDER_HEADER_NAME: "lava@1"},
+		"strict false":          {common.SELECT_PROVIDER_HEADER_NAME: "lava@1", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "false"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			relayProcessor, usedProviders := newPinnedHarnessWith(t, directives)
+			relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
+			require.NoError(t, err)
+			batches := 0
+			for task := range relayTaskChannel {
+				if task.IsDone() {
+					require.Equal(t, "Success", task.StopReason)
+					require.Equal(t, 2, batches, "the node error must be retried on a second batch")
+					return
+				}
+				batches++
+				provider := fmt.Sprintf("lava@%d", batches)
+				usedProviders.AddUsed(lavasession.ConsumerSessionsMap{provider: &lavasession.SessionInfo{}}, nil)
+				relayProcessor.UpdateBatch(nil)
+				if batches == 1 {
+					relaycoretest.SendNodeError(relayProcessor, provider, time.Millisecond)
+				} else {
+					relaycoretest.SendSuccessResp(relayProcessor, provider, time.Millisecond)
+				}
+			}
+			t.Fatal("channel closed without a Done instruction")
+		})
 	}
-	t.Fatal("channel closed without a Done instruction")
 }

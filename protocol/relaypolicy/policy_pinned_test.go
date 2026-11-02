@@ -61,12 +61,19 @@ func TestOnSendRelayResult_PinnedUpstreamUnservableStopsAtOnce(t *testing.T) {
 	})
 }
 
-// The policy sees Pinned=false for a pin sent with lava-pin-allow-retry: true (relaycore.PinnedByDirectives),
-// so it decides exactly as for an unpinned request: a node error retries, the window hedges.
-func TestDecide_PinWithAllowRetryIsDecidedAsUnpinned(t *testing.T) {
+// A plain lava-select-provider is not a strict pin (MAG-4826 D2): relaycore.PinnedByDirectives
+// reports false, so the policy decides exactly as for an unpinned request: a node error retries,
+// the window hedges, as the released docs promise. With lava-select-provider-strict: true it stops.
+func TestDecide_PlainSelectProviderKeepsFailover(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3})
-	pinned := relaycore.PinnedByDirectives(map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "p1", common.PIN_ALLOW_RETRY_HEADER_NAME: "true"})
-	require.False(t, pinned)
-	require.Equal(t, Retry, policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: pinned, Summary: ResultsSummary{NodeErrors: 1}}).Action)
-	require.Equal(t, Retry, policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: pinned, IsTickerHedge: true}).Action)
+	plain := relaycore.PinnedByDirectives(map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "p1"})
+	require.False(t, plain)
+	require.Equal(t, Retry, policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: plain, Summary: ResultsSummary{NodeErrors: 1}}).Action)
+	require.Equal(t, Retry, policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: plain, IsTickerHedge: true}).Action)
+
+	strict := relaycore.PinnedByDirectives(map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "p1", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true"})
+	require.True(t, strict)
+	out := policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: strict, Summary: ResultsSummary{NodeErrors: 1}})
+	require.Equal(t, Stop, out.Action)
+	require.Equal(t, "Pinned", out.Reason)
 }
