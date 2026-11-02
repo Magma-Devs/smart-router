@@ -116,6 +116,17 @@ func (bcp *BaseChainProxy) CapTimeoutForSend(ctx context.Context, chainMessage C
 	return connectCtx, cancel
 }
 
+// relayBodyForLog is the form of a client's request body that the listeners' log lines carry: its
+// head and tail, relayMsgLogMaxChars bytes in all, cut on rune boundaries. A body holds what the
+// client sends, signed transactions included, and the request line is written at info, so the whole
+// body is logged only when --debug-relays asks for it.
+func relayBodyForLog(body string, debugRelays bool) string {
+	if debugRelays {
+		return body
+	}
+	return utils.FormatLongString(body, relayMsgLogMaxChars)
+}
+
 func extractDappIDFromFiberContext(c *fiber.Ctx) (dappID string) {
 	// fiber.Ctx.Get returns a string aliased to fasthttp's per-request
 	// header buffer (zero-copy via unsafe). The buffer is recycled when
@@ -525,9 +536,32 @@ func convertToMetadataMapOfSlices(md map[string][]string) []pairingtypes.Metadat
 func convertRelayMetaDataToMDMetaData(md []pairingtypes.Metadata) metadata.MD {
 	responseMetaData := make(metadata.MD)
 	for _, v := range md {
-		responseMetaData[v.Name] = append(responseMetaData[v.Name], v.Value)
+		responseMetaData[v.Name] = append(responseMetaData[v.Name], sendableGrpcValue(v.Name, v.Value))
 	}
 	return responseMetaData
+}
+
+// sendableGrpcValue percent-encodes the bytes gRPC refuses in a non-binary header value
+// (anything outside printable ASCII, and the % that escapes them). gRPC drops every reply
+// header when one value has such a byte, so one value must not cost the rest.
+func sendableGrpcValue(name, value string) string {
+	if strings.HasSuffix(strings.ToLower(name), "-bin") {
+		return value
+	}
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; c < 0x20 || c > 0x7e {
+			var b strings.Builder
+			for j := 0; j < len(value); j++ {
+				if c := value[j]; c < 0x20 || c > 0x7e || c == '%' {
+					fmt.Fprintf(&b, "%%%02X", c)
+				} else {
+					b.WriteByte(c)
+				}
+			}
+			return b.String()
+		}
+	}
+	return value
 }
 
 // split two requested blocks to the most advanced and most behind

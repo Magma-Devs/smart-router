@@ -283,11 +283,7 @@ func CreateChainLibMocks(
 	getToTopMostPath string,
 	services []string,
 ) (cpar ChainParser, crout ChainRouter, cfetc chaintracker.ChainFetcher, closeServer func(), endpointRet *lavasession.RPCProviderEndpoint, errRet error) {
-	// SetGlobalLoggingLevel reassigns process-global logger state (defaultGlobalLogLevel,
-	// zerologlog.Logger). Production sets it once at startup; this mock was calling it on EVERY
-	// invocation, so a later test's setup wrote those globals while an earlier test's leaked goroutine
-	// still read them in LavaFormatLog — a data race under -race. It is always "debug", so once is
-	// enough: the sole write happens before any test goroutine exists.
+	// The mocks log at debug. The level is process-wide, so it is set once for the whole binary.
 	UseMockLogLevel()
 	// Create a cancellable context for the connector to prevent leaks
 	connectorCtx, cancelConnector := context.WithCancel(ctx)
