@@ -363,11 +363,12 @@ either lands in `method="batch:other"`. Both are declared in
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
 | `smartrouter_batch_size` | Histogram | `spec`, `apiInterface` | Sub-requests per batch. Single-element batches produce no separator in the api name, so they are indistinguishable from single requests here and are not observed. |
-| `smartrouter_batch_signature_overflow_total` | Counter | `spec`, `reason` | Normalizations that fell into `batch:other`. `reason="cap"`: the spec exhausted its 64-signature budget. `reason="wide"`: one batch spanned more than 8 distinct methods. |
+| `smartrouter_batch_signature_overflow_total` | Counter | `spec`, `reason` | Normalizations that fell into `batch:other`. `reason="cap"`: the spec exhausted its 64-signature budget. `reason="wide"`: one batch spanned more than 8 distinct methods. `reason="invalid"`: the batch's name was not valid UTF-8. |
 
 **Alert on the overflow counter.** While it is zero, batch-type breakdowns are complete.
-Once it is non-zero they are lossy — some batch types are being merged into `batch:other`
-— which is a signal to raise the cap, not to distrust the other series.
+Once it is non-zero they are lossy — some batch types are being merged into `batch:other`.
+Under `reason="cap"` or `reason="wide"` that is a signal to raise the limit, not to distrust
+the other series; `reason="invalid"` counts names that no limit would admit.
 
 #### Extensions no node offers
 
