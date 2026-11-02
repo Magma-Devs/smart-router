@@ -815,17 +815,16 @@ func resetAllChainStates(deps debugMuxDeps) int {
 	return count
 }
 
-// resetEndpointHealthAndGauge re-enables every endpoint across all session managers
+// resetEndpointHealth re-enables every endpoint across all session managers
 // (ConsumerSessionManager.ResetEndpointHealth — clears ConnectionRefusals, sets
-// Enabled=true) and mirrors the reset onto the per-endpoint Prometheus health gauge for
-// every provider (primary + backup), matching what the epoch tick does in updateEpoch.
-// Returns the number of endpoints actually re-enabled.
+// Enabled=true), matching what the epoch tick does in updateEpoch. Returns the number of
+// endpoints actually re-enabled.
 //
 // Endpoints disabled after MaxConsecutiveConnectionAttempts consecutive failures (e.g. an
 // all-providers-down stress burst) otherwise stay disabled until the next epoch tick, the
 // only other ResetHealth caller — contaminating later tests. Shared by /debug/reset-all
 // and /debug/reset-endpoint-health.
-func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
+func resetEndpointHealth(deps debugMuxDeps) int {
 	if deps.router == nil {
 		return 0
 	}
@@ -850,26 +849,6 @@ func resetEndpointHealthAndGauge(deps debugMuxDeps) int {
 			server.headStall.reset()
 			if server.endpointChainTrackerManager != nil {
 				server.endpointChainTrackerManager.ResetStallCounters()
-			}
-		}
-
-		// Mirror the struct reset onto the Prometheus health gauge so operators see
-		// providers recover immediately rather than at the next epoch tick — without it
-		// the gauge stays stuck at 0 until a successful relay, one a rarely-used backup
-		// may never receive.
-		server := deps.router.rpcServers[chainKey]
-		if server == nil || server.smartRouterEndpointMetrics == nil || server.listenEndpoint == nil {
-			continue
-		}
-		for _, sessions := range []map[uint64]*lavasession.ConsumerSessionsWithProvider{
-			deps.router.providerSessions[chainKey],
-			deps.router.backupProviderSessions[chainKey],
-		} {
-			for _, cswp := range sessions {
-				if cswp != nil {
-					server.smartRouterEndpointMetrics.SetEndpointOverallHealth(
-						server.listenEndpoint.ChainID, server.listenEndpoint.ApiInterface, cswp.PublicLavaAddress, true)
-				}
 			}
 		}
 	}
@@ -1504,7 +1483,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		if deps.router != nil {
 			deps.router.rebuildPairingFromConfig()
 		}
-		resetEndpointHealthAndGauge(deps)
+		resetEndpointHealth(deps)
 
 		// Capability advertisement — hardcoded for in-process stores, plus a
 		// conditional "cache-be" key when the external pod was actually
@@ -2227,14 +2206,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 
 	// POST /debug/reset-endpoint-health — focused companion to /debug/reset-all (MAG-2186):
 	// re-enable every provider endpoint disabled by MaxConsecutiveConnectionAttempts
-	// (Endpoint.Enabled=false) and mirror the reset onto the Prometheus health gauge,
-	// nothing else. The name mirrors Endpoint.ResetHealth() in the source for discoverability.
+	// (Endpoint.Enabled=false), nothing else. The name mirrors Endpoint.ResetHealth() in the
+	// source for discoverability.
 	mux.HandleFunc("/debug/reset-endpoint-health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		reenabled := resetEndpointHealthAndGauge(deps)
+		reenabled := resetEndpointHealth(deps)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"reset":true,"endpoints_reenabled":%d}`, reenabled)
 	})
@@ -3992,23 +3971,6 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			utils.LogAttr("time", time.Now().Format("15:04:05 MST")),
 		)
 
-		// Resolve the per-chain metrics manager once so endpoint health resets below
-		// can also reset the corresponding Prometheus gauge. Without this, #2256's
-		// endpoint.ResetHealth() fixes the in-memory struct but the
-		// rpc_endpoint_overall_health gauge stays stuck at 0 (unhealthy) forever,
-		// since the only path back to 1 is a successful relay that calls
-		// SetEndpointOverallHealth(..., true) — which a backup may never receive.
-		var epochMetrics *metrics.SmartRouterMetricsManager
-		var epochChainID, epochApiInterface string
-		// listenEndpoint is a *lavasession.RPCEndpoint — always guard its deref.
-		// Skipping metric reset for a server with a nil listenEndpoint is preferable
-		// to a nil-deref panic that would kill the whole epoch transition and leave
-		// every endpoint.ResetHealth() undone.
-		if server, exists := rpsr.rpcServers[chainKey]; exists && server != nil && server.listenEndpoint != nil {
-			epochMetrics = server.smartRouterEndpointMetrics
-			epochChainID = server.listenEndpoint.ChainID
-			epochApiInterface = server.listenEndpoint.ApiInterface
-		}
 		// Lock for the read → create-fresh → write-back section.
 		// This prevents races with retryFailedProviders, which merges
 		// recovered providers into rpsr.providerSessions under the same lock.
@@ -4028,11 +3990,6 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 			// forever since it can never receive the successful relay needed to trigger ResetHealth.
 			for _, endpoint := range oldSession.Endpoints {
 				endpoint.ResetHealth()
-			}
-			// Mirror the struct reset onto the Prometheus gauge so operators see the
-			// provider recover at the epoch boundary rather than remaining stuck at 0.
-			if epochMetrics != nil {
-				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, oldSession.PublicLavaAddress, true)
 			}
 			freshSession := lavasession.NewConsumerSessionWithProvider(
 				oldSession.PublicLavaAddress,
@@ -4056,12 +4013,6 @@ func (rpsr *RPCSmartRouter) updateEpoch(ctx context.Context, epoch uint64) {
 		for idx, oldSession := range oldBackupSessions {
 			for _, endpoint := range oldSession.Endpoints {
 				endpoint.ResetHealth()
-			}
-			// Same rationale as above: backups are especially susceptible to a stuck
-			// unhealthy gauge because they rarely receive the successful relay that
-			// would otherwise toggle it back to 1.
-			if epochMetrics != nil {
-				epochMetrics.SetEndpointOverallHealth(epochChainID, epochApiInterface, oldSession.PublicLavaAddress, true)
 			}
 			freshSession := lavasession.NewConsumerSessionWithProvider(
 				oldSession.PublicLavaAddress,
