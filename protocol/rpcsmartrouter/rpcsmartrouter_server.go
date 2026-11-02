@@ -1119,6 +1119,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	var err error
 	usedProviders := lavasession.NewUsedProviders(nil)
 	usedProviders.SetChainID(rpcss.listenEndpoint.ChainID)
+	// This is the router's own health check, not a client: when the last chance lends it a disabled
+	// endpoint, its answer must not switch that endpoint back on (MAG-4790, see relayInnerDirect).
+	usedProviders.MarkRouterHealthCheck()
 
 	// Selection comes from the method's own category only — see internalRelayStateMachine for why
 	// an operator cross-validation policy must not reach a health check.
@@ -2937,6 +2940,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				originalRequestData,
 				func() bool { return requestRanOutOfRoad(relayProcessor.GetStopReason()) },
 				lostBroadcast,
+				relayProcessor.GetUsedProviders().IsRouterHealthCheck(),
 			)
 			localRelayResult.AttemptLatency = relayLatency
 
@@ -5574,6 +5578,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	originalRequestData []byte,
 	budgetExpired func() bool,
 	lostBroadcast func(answeredWithNodeError bool) bool,
+	routerHealthCheck bool,
 ) (relayLatency time.Duration, err error) {
 	// Get direct connection from session
 	directConnection, ok := singleConsumerSession.GetDirectConnection()
@@ -5838,7 +5843,25 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	} else if targetEndpoint != nil && relayProvesEndpointHealthy(result) {
 		// Reset only on POSITIVE proof the endpoint served — see relayProvesEndpointHealthy for why
 		// this is no longer the negation of the failure gate.
-		if targetEndpoint.ResetHealth() {
+		//
+		// Except that the router's own health check never switches an endpoint back ON (MAG-4790).
+		// It reaches a switched-off endpoint only through the last chance, and its answer is the
+		// router's own latest-block poll: not the "REAL traffic" ResetHealth is for, and not the
+		// "real customer request" a lent success re-enables on (MAG-4232). On a single-provider
+		// router whose url was off because one method hung, the health check's eth_blockNumber
+		// switched it back on 0.35 s after the MAG-2550 prober had kept it off for that method.
+		//
+		// So the health check is still lent the url — readiness reports whether a node answers, and
+		// it does — but the url stays off until a client request succeeds on it or the prober's
+		// replay of the failed request does. On an endpoint that is already on, its success resets
+		// the counter as any success does, as it did before: failures of the health check count
+		// against an endpoint, so its successes must too, or an idle chain's endpoint would collect
+		// blips that nothing ever cleared.
+		healthCheckOnASwitchedOffEndpoint := routerHealthCheck && !targetEndpoint.IsEnabled()
+		if healthCheckOnASwitchedOffEndpoint {
+			utils.LavaFormatDebug("health check answered on a switched-off endpoint; it stays off until a client request or the prober brings it back",
+				utils.LogAttr("endpoint", endpointName))
+		} else if targetEndpoint.ResetHealth() {
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, true)
 		}
 	}
