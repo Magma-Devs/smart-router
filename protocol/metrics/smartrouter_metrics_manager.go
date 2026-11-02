@@ -175,7 +175,7 @@ type SmartRouterMetricsManager struct {
 	defaultMethods *batchSignatureRegistry
 
 	// Per-customer request group (MAG-4081), recorded once per client request by
-	// SetRelayMetrics. The customer label is the caller's project-id header, bounded by
+	// SetRelayMetrics. The customer label is the caller's customer-id header, bounded by
 	// customers (see customer_label.go); customerOverflow reports when that cap binds.
 	customerRequestsTotal   *prometheus.CounterVec   // smartrouter_customer_requests_total
 	customerRequestsFailed  *prometheus.CounterVec   // smartrouter_customer_requests_failed_total
@@ -605,7 +605,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels)
 	csmProviderBlocked := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_provider_blocked",
-		Help: "Whether this specific provider is currently blocked (1=blocked, 0=serving). Companion to the smartrouter_csm_blocked_providers count, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
+		Help: "Whether this specific provider is out of rotation (1=out: blocked by the router, or none of its urls can take a relay right now; 0=at least one url in rotation), in the regular pairing or the backup pool. Companion to the smartrouter_csm_blocked_providers and smartrouter_csm_blocked_backup_providers counts, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
 	}, []string{"spec", "apiInterface", "provider_address"})
 	csmBlockedProvidersByReason := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_providers_by_reason",
@@ -713,20 +713,20 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	customerRequestLabels := []string{"spec", "apiInterface", "customer", "method"}
 	customerRequestsTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_requests_total",
-		Help: `Client requests, once each with their final outcome, by the caller's project-id header. customer="DefaultDappID": no header. customer="other": past the per-spec customer cap (see smartrouter_customer_overflow_total). Subscription pushes are not counted; the subscribe request is.`,
+		Help: `Client requests, once each with their final outcome, by the caller's customer-id header. customer="DefaultDappID": no header. customer="other": past the per-spec customer cap (see smartrouter_customer_overflow_total). Subscription pushes are not counted; the subscribe request is.`,
 	}, customerRequestLabels)
 	customerRequestsFailed := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_requests_failed_total",
-		Help: "Client requests that ended in an error to the client, by the caller's project-id header. Success rate = 1 - failed / smartrouter_customer_requests_total.",
+		Help: "Client requests that ended in an error to the client, by the caller's customer-id header. Success rate = 1 - failed / smartrouter_customer_requests_total.",
 	}, customerRequestLabels)
 	customerEndToEndLatency := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_customer_end_to_end_latency_milliseconds",
-		Help:    "End-to-end latency of successful client requests in milliseconds, by the caller's project-id header. Use histogram_quantile() for percentiles.",
+		Help:    "End-to-end latency of successful client requests in milliseconds, by the caller's customer-id header. Use histogram_quantile() for percentiles.",
 		Buckets: latencyBuckets,
 	}, []string{"spec", "apiInterface", "customer"})
 	customerOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_customer_overflow_total",
-		Help: `Label normalizations that fell into customer="other": the spec exhausted its distinct-customer budget, or the project-id value was too long to be an id. Non-zero means per-customer numbers are lossy for this spec.`,
+		Help: `Label normalizations that fell into customer="other": the spec exhausted its distinct-customer budget, or the customer-id value was too long to be an id. Non-zero means per-customer numbers are lossy for this spec.`,
 	}, []string{"spec"})
 
 	cacheLabels := []string{"spec", "apiInterface", "method", "cache_tier"}
@@ -1964,8 +1964,8 @@ func (m *SmartRouterMetricsManager) ResetSessionRelatedMetrics() {}
 // in the standing block list, and that provider is no longer in it. Over many epochs those
 // phantoms accumulate — a slow cardinality leak that also reads as a permanent outage.
 //
-// Drop every series for this chain first, then seed 0 for each provider in the new pairing, so
-// providers that left are gone rather than frozen. A provider that the re-block pass immediately
+// Drop every series for this chain first, then seed 0 for each provider in the new pairing and
+// backup pool, so providers that left are gone rather than frozen. A provider that the re-block pass immediately
 // re-blocks is corrected by the next publishStateSizes tick, which republishes the full truth.
 func (m *SmartRouterMetricsManager) ResetBlockedProvidersMetrics(chainId, apiInterface string, providerAddressToEndpoint map[string]string) {
 	if m == nil {
