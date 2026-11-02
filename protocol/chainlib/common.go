@@ -25,12 +25,12 @@ import (
 )
 
 const (
-	// ProjectIDHeader is the canonical wire-level key the consumer reads
-	// to attribute a relay to a project for billing analytics. Used as the
-	// HTTP header name, the gRPC metadata key (lower-cased per gRPC
-	// convention), and the fiber Locals key passing the value from the
+	// CustomerIDHeader is the wire-level key the router reads to count a
+	// relay under the caller's customer (MAG-4727; project-id before it).
+	// Used as the HTTP header name, the gRPC metadata key (lower-cased per
+	// gRPC convention), and the fiber Locals key passing the value from the
 	// HTTP upgrade context to the websocket handler.
-	ProjectIDHeader            = "project-id"
+	CustomerIDHeader           = "customer-id"
 	RetryListeningInterval     = 10 // seconds
 	relayMsgLogMaxChars        = 200
 	RPCProviderNodeAddressHash = "Lava-Provider-Node-Address-Hash"
@@ -134,19 +134,19 @@ func extractDappIDFromFiberContext(c *fiber.Ctx) (dappID string) {
 	// same worker. RelayMetrics.ProjectHash is enqueued asynchronously
 	// into the OTel BatchLogProcessor and serialized after the request
 	// returns — by then the backing array may already hold another
-	// request's headers, prefix-overwriting the project hash. Clone to
+	// request's headers, prefix-overwriting the customer id. Clone to
 	// detach from fasthttp's pool.
-	dappID = strings.Clone(c.Get(ProjectIDHeader))
+	dappID = strings.Clone(c.Get(CustomerIDHeader))
 	if dappID == "" {
 		dappID = generateNewDappID()
 	}
 	return dappID
 }
 
-// extractDappIDFromGrpcHeader extracts the project id from gRPC metadata.
+// extractDappIDFromGrpcHeader extracts the customer id from gRPC metadata.
 func extractDappIDFromGrpcHeader(metadataValues metadata.MD) string {
 	dappId := generateNewDappID()
-	if values, ok := metadataValues[ProjectIDHeader]; ok && len(values) > 0 {
+	if values, ok := metadataValues[CustomerIDHeader]; ok && len(values) > 0 {
 		// Not the HTTP path's hazard: grpc-go decodes every metadata value into
 		// its own string (x/net's hpack decoder allocates, and a -bin value is
 		// base64-decoded into a fresh one), so incoming metadata never points
@@ -167,10 +167,10 @@ func generateNewDappID() string {
 func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled fiber.Handler) fiber.Handler {
 	webSocketCallback := callbackToBeCalled
 	handler := func(c *fiber.Ctx) error {
-		// Extract project id from headers and stash it in the request-scoped
+		// Extract the customer id from headers and stash it in the request-scoped
 		// fiber context for the websocket handler to read after the upgrade.
 		dappID := extractDappIDFromFiberContext(c)
-		c.Locals(ProjectIDHeader, dappID)
+		c.Locals(CustomerIDHeader, dappID)
 		return webSocketCallback(c) // uses external dappID
 	}
 	return handler

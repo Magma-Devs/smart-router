@@ -609,7 +609,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		)
 		httpErr := &lavasession.HTTPStatusError{
 			StatusCode: statusCode,
-			Status:     strconv.Itoa(statusCode),
+			Status:     response.Status, // the upstream's own status line, for the client reply (MAG-4218)
 			Body:       responseData,
 		}
 		return nil, classifyAndWrap(httpErr, d.chainFamily, common.TransportJsonRPC)
@@ -783,6 +783,11 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	if httpMethod == "" {
 		return nil, fmt.Errorf("HTTP method not set by REST parser")
 	}
+	// A method that carries no body sends none, whatever the message holds: some nodes refuse a
+	// GET that carries one. Only POST, PUT and PATCH bodies go out.
+	if !chainlib.RestMethodCarriesBody(httpMethod) {
+		restBody = nil
+	}
 
 	// Extract headers as Metadata (preserves delete semantics)
 	headers := restMessage.GetHeaders()
@@ -810,7 +815,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	response, err := httpDoer.DoHTTPRequest(requestCtx, lavasession.HTTPRequestParams{
 		Method:      httpMethod,
 		URL:         fullURL,
-		Body:        restBody, // Send body as-is (for POST/PUT)
+		Body:        restBody, // As-is for a body method; nil for every other method (above)
 		Headers:     headers,  // Use Metadata (preserves delete semantics)
 		ContentType: "application/json",
 	})
