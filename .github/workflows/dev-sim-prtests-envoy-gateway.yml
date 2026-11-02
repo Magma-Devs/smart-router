@@ -4,6 +4,12 @@ name: dev-sim-prtests Envoy Gateway
 # The gate installs smart-router-helm-chart main, so the cluster's CRDs must
 # declare every field the chart renders. A pull request that edits this file
 # runs the read-only report; `apply` exists only on a manual dispatch.
+#
+# The cluster runs Envoy Gateway from its release install.yaml (no Helm
+# release) and Gateway API CRDs installed on their own, on the standard
+# channel. An upgrade applies the release's Envoy Gateway CRDs and the
+# install.yaml objects without its CRDs: install.yaml also bundles Gateway
+# API CRDs, of an older version and the experimental channel.
 
 on:
   workflow_dispatch:
@@ -54,21 +60,40 @@ jobs:
           server="${SSH_HOST##*@}"
           echo "::add-mask::${server}"
 
-          key_file="$(mktemp)"
-          output="$(mktemp)"
-          trap 'rm -f "$key_file" "$output"' EXIT
+          work="$(mktemp -d)"
+          trap 'rm -rf "$work"' EXIT
+          key_file="${work}/key"
+          output="${work}/output"
           printf '%s\n' "$SSH_KEY" > "$key_file"
           chmod 600 "$key_file"
+          ssh_opts=(-i "$key_file" -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o RequestTTY=no)
+          remote_dir="/tmp/envoy-gateway-${TARGET_VERSION}-${GITHUB_RUN_ID}"
+
+          if [ "$APPLY" = "true" ]; then
+            release_url="https://github.com/envoyproxy/gateway/releases/download/${TARGET_VERSION}"
+            mkdir "${work}/manifests"
+            curl -fsSL -o "${work}/manifests/envoy-gateway-crds.yaml" "${release_url}/envoy-gateway-crds.yaml"
+            curl -fsSL -o "${work}/install.yaml" "${release_url}/install.yaml"
+            yq 'select(.kind != "CustomResourceDefinition" and .metadata.name != "safe-upgrades.gateway.networking.k8s.io")' \
+              "${work}/install.yaml" > "${work}/manifests/controller.yaml"
+            if [ "$(yq -N 'select(.spec.group != "gateway.envoyproxy.io") | .metadata.name' "${work}/manifests/envoy-gateway-crds.yaml")" != "" ]; then
+              echo "::error::envoy-gateway-crds.yaml carries CRDs outside gateway.envoyproxy.io; not applying"
+              exit 1
+            fi
+            echo "Manifests for ${TARGET_VERSION}:"
+            yq -N '.kind + " " + .metadata.name' "${work}/manifests/envoy-gateway-crds.yaml" "${work}/manifests/controller.yaml"
+            ssh "${ssh_opts[@]}" -o RemoteCommand=none "$SSH_HOST" "mkdir -p '${remote_dir}'"
+            scp "${ssh_opts[@]}" "${work}/manifests/envoy-gateway-crds.yaml" "${work}/manifests/controller.yaml" "${SSH_HOST}:${remote_dir}/"
+          fi
 
           remote_script=""
           IFS= read -r -d '' remote_script <<'REMOTE' || true
           set -euo pipefail
-          target="$1"
-          apply="$2"
+          apply="$1"
+          dir="$2"
+          ns=envoy-gateway-system
 
           report() {
-            echo "== Envoy Gateway Helm release"
-            helm list -A -o json | jq -r '.[] | select(.chart | startswith("gateway-helm-")) | "\(.name)  ns=\(.namespace)  chart=\(.chart)  app=\(.app_version)  status=\(.status)"'
             echo "== Controller image"
             kubectl get deploy -A -l control-plane=envoy-gateway \
               -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}  {.spec.template.spec.containers[0].image}{"\n"}{end}'
@@ -93,53 +118,29 @@ jobs:
           fields_ok=true
           report || fields_ok=false
           if [ "$apply" != "true" ]; then
+            echo "== Controller config (replaced by an upgrade)"
+            kubectl get configmap -n "$ns" envoy-gateway-config -o jsonpath='{.data.envoy-gateway\.yaml}'
             echo "Report only. Fields declared: ${fields_ok}"
             exit 0
           fi
+          trap 'rm -rf "$dir"' EXIT
 
-          release_line="$(helm list -A -o json | jq -r '[.[] | select(.chart | startswith("gateway-helm-"))] | if length == 1 then "\(.[0].name) \(.[0].namespace)" else empty end')"
-          if [ -z "$release_line" ]; then
-            echo "ERROR: expected exactly one gateway-helm release; not upgrading" >&2
-            exit 1
-          fi
-          read -r release namespace <<< "$release_line"
-          channel="$(kubectl get crd gateways.gateway.networking.k8s.io -o go-template='{{ index .metadata.annotations "gateway.networking.k8s.io/channel" }}')"
-          case "$channel" in
-            standard|experimental) ;;
-            *) echo "ERROR: unknown Gateway API channel '${channel}'; not upgrading" >&2; exit 1 ;;
-          esac
-
-          echo "== Upgrading CRDs to ${target} (Gateway API channel ${channel})"
-          helm template eg-crds oci://docker.io/envoyproxy/gateway-crds-helm \
-            --version "$target" \
-            --set crds.gatewayAPI.enabled=true \
-            --set crds.gatewayAPI.channel="$channel" \
-            --set crds.envoyGateway.enabled=true \
-            | kubectl apply --server-side --force-conflicts -f -
-
-          echo "== Upgrading ${namespace}/${release} to ${target}"
-          helm upgrade "$release" oci://docker.io/envoyproxy/gateway-helm \
-            --version "$target" \
-            -n "$namespace" \
-            --reset-then-reuse-values \
-            --skip-crds \
-            --wait \
-            --timeout 10m
+          echo "== Applying Envoy Gateway CRDs"
+          kubectl apply --server-side --force-conflicts -f "${dir}/envoy-gateway-crds.yaml"
+          # A Job's pod template is immutable; certgen runs once per install.
+          kubectl delete job -n "$ns" eg-gateway-helm-certgen --ignore-not-found --wait=true
+          echo "== Applying the controller"
+          kubectl apply --server-side --force-conflicts -f "${dir}/controller.yaml"
+          kubectl wait -n "$ns" --for=condition=complete job/eg-gateway-helm-certgen --timeout=180s
+          kubectl rollout status -n "$ns" deploy/envoy-gateway --timeout=300s
 
           echo "== After upgrade"
           report
           REMOTE
 
           rc=0
-          ssh \
-            -i "$key_file" \
-            -o StrictHostKeyChecking=accept-new \
-            -o BatchMode=yes \
-            -o RemoteCommand=none \
-            -o RequestTTY=no \
-            -o ServerAliveInterval=10 \
-            "$SSH_HOST" \
-            bash -s -- "$TARGET_VERSION" "$APPLY" <<< "$remote_script" >"$output" 2>&1 || rc=$?
+          ssh "${ssh_opts[@]}" -o RemoteCommand=none -o ServerAliveInterval=10 "$SSH_HOST" \
+            bash -s -- "$APPLY" "$remote_dir" <<< "$remote_script" >"$output" 2>&1 || rc=$?
 
           {
             echo "### Envoy Gateway on dev-sim-prtests (target ${TARGET_VERSION}, apply ${APPLY})"
