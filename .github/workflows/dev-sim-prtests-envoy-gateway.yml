@@ -1,0 +1,152 @@
+name: dev-sim-prtests Envoy Gateway
+
+# Reports, and on request upgrades, the Envoy Gateway on the PR-gate cluster.
+# The gate installs smart-router-helm-chart main, so the cluster's CRDs must
+# declare every field the chart renders. A pull request that edits this file
+# runs the read-only report; `apply` exists only on a manual dispatch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Envoy Gateway release to install
+        required: true
+        default: v1.8.3
+      apply:
+        description: Upgrade the CRDs and the controller (unchecked = report only)
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - .github/workflows/dev-sim-prtests-envoy-gateway.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  # Shared with the PR gate, so an upgrade never runs under a gate deploy.
+  group: pr-gate-dev-sim-prtests
+  cancel-in-progress: false
+
+jobs:
+  envoy-gateway:
+    name: Envoy Gateway on dev-sim-prtests
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Report and upgrade
+        env:
+          SSH_HOST: ${{ secrets.DEV_SIM_PRTESTS_SSH_HOST }}
+          SSH_KEY: ${{ secrets.DEV_SIM_PRTESTS_SSH_KEY }}
+          TARGET_VERSION: ${{ inputs.version || 'v1.8.3' }}
+          APPLY: ${{ github.event_name == 'workflow_dispatch' && inputs.apply && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SSH_HOST:-}" ] || [ -z "${SSH_KEY:-}" ]; then
+            echo "::error::Missing repository secret DEV_SIM_PRTESTS_SSH_HOST or DEV_SIM_PRTESTS_SSH_KEY"
+            exit 1
+          fi
+          if ! [[ "$TARGET_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must look like v1.8.3, got ${TARGET_VERSION}"
+            exit 1
+          fi
+          server="${SSH_HOST##*@}"
+          echo "::add-mask::${server}"
+
+          key_file="$(mktemp)"
+          output="$(mktemp)"
+          trap 'rm -f "$key_file" "$output"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+
+          remote_script=""
+          IFS= read -r -d '' remote_script <<'REMOTE' || true
+          set -euo pipefail
+          target="$1"
+          apply="$2"
+
+          report() {
+            echo "== Envoy Gateway Helm release"
+            helm list -A -o json | jq -r '.[] | select(.chart | startswith("gateway-helm-")) | "\(.name)  ns=\(.namespace)  chart=\(.chart)  app=\(.app_version)  status=\(.status)"'
+            echo "== Controller image"
+            kubectl get deploy -A -l control-plane=envoy-gateway \
+              -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}  {.spec.template.spec.containers[0].image}{"\n"}{end}'
+            echo "== Gateway API CRDs"
+            kubectl get crd gateways.gateway.networking.k8s.io \
+              -o go-template='version={{ index .metadata.annotations "gateway.networking.k8s.io/bundle-version" }} channel={{ index .metadata.annotations "gateway.networking.k8s.io/channel" }}{{ "\n" }}'
+            echo "== Fields the chart renders"
+            missing=0
+            for field in \
+              backendtrafficpolicies.spec.routingType \
+              envoyproxies.spec.provider.kubernetes.envoyDaemonSet.pod.priorityClassName; do
+              if kubectl explain "$field" --api-version=gateway.envoyproxy.io/v1alpha1 >/dev/null 2>&1; then
+                echo "declared  $field"
+              else
+                echo "MISSING   $field"
+                missing=1
+              fi
+            done
+            return "$missing"
+          }
+
+          fields_ok=true
+          report || fields_ok=false
+          if [ "$apply" != "true" ]; then
+            echo "Report only. Fields declared: ${fields_ok}"
+            exit 0
+          fi
+
+          release_line="$(helm list -A -o json | jq -r '[.[] | select(.chart | startswith("gateway-helm-"))] | if length == 1 then "\(.[0].name) \(.[0].namespace)" else empty end')"
+          if [ -z "$release_line" ]; then
+            echo "ERROR: expected exactly one gateway-helm release; not upgrading" >&2
+            exit 1
+          fi
+          read -r release namespace <<< "$release_line"
+          channel="$(kubectl get crd gateways.gateway.networking.k8s.io -o go-template='{{ index .metadata.annotations "gateway.networking.k8s.io/channel" }}')"
+          case "$channel" in
+            standard|experimental) ;;
+            *) echo "ERROR: unknown Gateway API channel '${channel}'; not upgrading" >&2; exit 1 ;;
+          esac
+
+          echo "== Upgrading CRDs to ${target} (Gateway API channel ${channel})"
+          helm template eg-crds oci://docker.io/envoyproxy/gateway-crds-helm \
+            --version "$target" \
+            --set crds.gatewayAPI.enabled=true \
+            --set crds.gatewayAPI.channel="$channel" \
+            --set crds.envoyGateway.enabled=true \
+            | kubectl apply --server-side --force-conflicts -f -
+
+          echo "== Upgrading ${namespace}/${release} to ${target}"
+          helm upgrade "$release" oci://docker.io/envoyproxy/gateway-helm \
+            --version "$target" \
+            -n "$namespace" \
+            --reset-then-reuse-values \
+            --skip-crds \
+            --wait \
+            --timeout 10m
+
+          echo "== After upgrade"
+          report
+          REMOTE
+
+          rc=0
+          ssh \
+            -i "$key_file" \
+            -o StrictHostKeyChecking=accept-new \
+            -o BatchMode=yes \
+            -o RemoteCommand=none \
+            -o RequestTTY=no \
+            -o ServerAliveInterval=10 \
+            "$SSH_HOST" \
+            bash -s -- "$TARGET_VERSION" "$APPLY" <<< "$remote_script" >"$output" 2>&1 || rc=$?
+
+          {
+            echo "### Envoy Gateway on dev-sim-prtests (target ${TARGET_VERSION}, apply ${APPLY})"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          SSH_HOST_VALUE="$SSH_HOST" SERVER_VALUE="$server" perl -pe '
+            for $v ($ENV{"SSH_HOST_VALUE"}, $ENV{"SERVER_VALUE"}) { s/\Q$v\E/[redacted-host]/g if length $v }
+          ' "$output" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
