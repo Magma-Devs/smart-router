@@ -14,9 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/prometheus/client_golang/prometheus"
@@ -125,6 +127,41 @@ func TestAwaitWakeIfIdle_RespectsRequestContext(t *testing.T) {
 	started := time.Now()
 	rpcss.awaitWakeIfIdle(reqCtx, time.Now().Add(2*endpointstate.MinIdleAfter))
 	require.Less(t, time.Since(started), 100*time.Millisecond)
+}
+
+// TestAwaitWakeUnlessInternalProbe: a request marked as our own monitoring (the hub's serving
+// probes) is routed without stamping the chain, so an idle chain stays idle and no wake burst starts;
+// the same request without the mark wakes it (MAG-4797).
+func TestAwaitWakeUnlessInternalProbe(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := idleWakeMonitor(t, ctx, false)
+	rpcss := &RPCSmartRouterServer{endpointChainTrackerManager: m}
+	idleAt := time.Now().Add(2 * endpointstate.MinIdleAfter)
+	require.True(t, m.IsIdle(idleAt))
+
+	probe := map[string]string{common.INTERNAL_PROBE_HEADER_NAME: ""}
+	for i := 0; i < 3; i++ { // a probe every few minutes, as the hub sends them
+		rpcss.awaitWakeUnlessInternalProbe(ctx, probe, idleAt)
+	}
+	require.True(t, m.IsIdle(idleAt), "probes are not activity: the chain stays idle")
+	require.False(t, m.IdleSnapshot(idleAt).WakeInProgress, "and no wake burst was started")
+
+	rpcss.awaitWakeUnlessInternalProbe(ctx, nil, idleAt)
+	require.False(t, m.IsIdle(idleAt), "a customer request still wakes the chain")
+}
+
+// TestLavaDirectiveHeaders_StripsTheInternalProbeMark: the mark is a directive, not request metadata,
+// so it is never forwarded to the node and never enters the cache key (MAG-4797).
+func TestLavaDirectiveHeaders_StripsTheInternalProbeMark(t *testing.T) {
+	rpcss := &RPCSmartRouterServer{}
+	in := []pairingtypes.Metadata{
+		{Name: "Lava-Internal-Probe", Value: "true"},
+		{Name: "content-type", Value: "application/json"},
+	}
+	forwarded, directives := rpcss.LavaDirectiveHeaders(in)
+	require.Equal(t, []pairingtypes.Metadata{{Name: "content-type", Value: "application/json"}}, forwarded)
+	require.Contains(t, directives, common.INTERNAL_PROBE_HEADER_NAME)
 }
 
 // TestPublishChainIdle_ReportsTheCurrentState: the probe loop is the gauge's only writer and

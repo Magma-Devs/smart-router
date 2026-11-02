@@ -140,6 +140,13 @@ const (
 	CrossValidationStragglerOutcomeNotReceived   = "not-received"   // nothing arrived before the watcher deadline
 )
 
+// INTERNAL_PROBE_HEADER_NAME marks a request sent by our own monitoring (the hub's serving probes)
+// rather than by a customer. Its presence is the signal; the value is ignored. Such a request is
+// routed and answered like any other, but it does not count as activity for idle mode, so a probed
+// chain can still go idle (MAG-4797). It is a directive header: stripped before the request is
+// forwarded upstream and before the cache key is built.
+const INTERNAL_PROBE_HEADER_NAME = "lava-internal-probe"
+
 var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
 	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME:       {},
 	RELAY_TIMEOUT_HEADER_NAME:                   {},
@@ -148,6 +155,7 @@ var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
 	LAVA_DEBUG_RELAY:                            {},
 	STICKINESS_HEADER_NAME:                      {},
 	SELECT_PROVIDER_HEADER_NAME:                 {},
+	INTERNAL_PROBE_HEADER_NAME:                  {},
 	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    {},
 	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: {},
 }
