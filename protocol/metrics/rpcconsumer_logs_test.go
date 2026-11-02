@@ -12,7 +12,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -20,8 +19,6 @@ import (
 	"github.com/gofiber/websocket/v2"
 	websocket2 "github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/rs/zerolog"
-	zerologlog "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,15 +67,10 @@ func TestGetUniqueGuidResponseDeterministic(t *testing.T) {
 // line carries the GUID it is handed under GUID, byte for byte as the request's other lines render
 // it from the request's GUID or its context, and keeps msgSeed.
 func TestGetUniqueGuidResponseForError_LogsTheGUID(t *testing.T) {
-	var mu sync.Mutex
-	var logged strings.Builder
-	prev := zerologlog.Logger
-	zerologlog.Logger = zerolog.New(zerolog.SyncWriter(logWriter(func(p []byte) (int, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		return logged.Write(p)
-	})))
-	defer func() { zerologlog.Logger = prev }()
+	// The debug ring gets the same fields as the stderr sink, and reading it does not
+	// depend on which stderr logger is installed.
+	utils.EnableDebugLogBuffer(100)
+	t.Cleanup(utils.DisableDebugLogBuffer)
 
 	const guid uint64 = 7698754902243305216
 	plog, err := NewRPCConsumerLogs(nil, nil, nil)
@@ -88,14 +80,12 @@ func TestGetUniqueGuidResponseForError_LogsTheGUID(t *testing.T) {
 	utils.LavaFormatError("request line", nil, utils.LogAttr("GUID", guid))
 	utils.LavaFormatError("request line from the context", nil, utils.LogAttr("GUID", utils.WithUniqueIdentifier(context.Background(), guid)))
 
-	mu.Lock()
-	defer mu.Unlock()
 	lines := map[string]string{}
-	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+	for _, line := range utils.ReadDebugLogBuffer("", time.Time{}, time.Time{}, 0) {
 		record := map[string]any{}
-		require.NoError(t, json.Unmarshal([]byte(line), &record))
+		require.NoError(t, json.Unmarshal(line, &record))
 		message, _ := record["message"].(string)
-		lines[message] = line
+		lines[message] = string(line)
 	}
 	filter := `"GUID":"` + strconv.FormatUint(guid, 10) + `"`
 	for _, message := range []string{"UniqueGuidResponseForError", "request line", "request line from the context"} {
