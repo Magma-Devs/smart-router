@@ -148,8 +148,9 @@ func (r *batchSignatureRegistry) admit(spec, signature string) bool {
 	return true
 }
 
-// normalizeMethodLabel collapses a raw batch api name into a bounded signature and
-// returns single-method names untouched.
+// normalizeMethodLabel collapses a raw batch api name into a bounded signature and hands
+// a single-method name to normalizeDefaultMethodLabel. A name that is not valid UTF-8
+// cannot be a label value, so it goes to the overflow bucket of its kind instead.
 //
 // It is idempotent, because a collapsed value carries no batchMethodSeparator. That
 // matters: the public recorders delegate to one another (RecordDirectRelayEnd →
