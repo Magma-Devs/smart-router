@@ -1320,16 +1320,16 @@ func (cswp *ConsumerSessionsWithProvider) relayURLs(addon string, extensions []s
 func (cswp *ConsumerSessionsWithProvider) endpointsInPickOrderLocked(mode endpointPickMode, heldOff func(url string) bool) []*Endpoint {
 	ordered := cswp.Endpoints
 	if heldOff != nil {
-		free := make([]*Endpoint, 0, len(cswp.Endpoints))
+		ordered = make([]*Endpoint, 0, len(cswp.Endpoints))
 		var held []*Endpoint
 		for _, endpoint := range cswp.Endpoints {
 			if heldOff(endpoint.NetworkAddress) {
 				held = append(held, endpoint)
 			} else {
-				free = append(free, endpoint)
+				ordered = append(ordered, endpoint)
 			}
 		}
-		ordered = append(free, held...)
+		ordered = append(ordered, held...)
 	}
 	if mode != endpointPickLendDisabled {
 		return ordered
