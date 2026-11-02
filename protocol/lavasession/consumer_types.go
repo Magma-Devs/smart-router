@@ -1311,10 +1311,13 @@ func (cswp *ConsumerSessionsWithProvider) relayURLs(addon string, extensions []s
 // the provider, which holds them all until the longest ends. A nil heldOff keeps config order.
 //
 // The last chance (endpointPickLendDisabled) then orders by lendRankLocked: a url in rotation, then
-// one held by a state reason, then a switched-off one. The request is lent one url, and config
-// order alone could spend it on a dead url while a sibling would answer (MAG-4734). The sort is
-// stable, so the rate-limit order and config order hold within a rank. It is taken per pick, not
-// kept, because a url's state changes between requests.
+// one held by a state reason, then a switched-off one. The provider is lent one url for this
+// request, and config order alone could spend that lend on a dead url while a sibling would answer
+// (MAG-4734). A lent head-stalled url is still switched on, so it does not take the request's one
+// chance (GetSessions checks Enabled, kept by decision on MAG-4734): ranked first, it lets one
+// request be lent the stalled url of each blocked provider in turn. The sort is stable, so the
+// rate-limit order and config order hold within a rank. It is taken per pick, not kept, because a
+// url's state changes between requests.
 //
 // cswp.Lock must be held; each endpoint's mu is taken after it.
 func (cswp *ConsumerSessionsWithProvider) endpointsInPickOrderLocked(mode endpointPickMode, heldOff func(url string) bool) []*Endpoint {
