@@ -646,6 +646,13 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 		weights[addr] = w
 	}
 	csm.providerOptimizer.UpdateWeights(weights, epoch)
+	// The per-provider blocked gauge covers the backup pool too (MAG-4735), so a backup is seeded
+	// at 0 here like a regular provider; publishStateSizes then keeps both pools current.
+	for _, provider := range backupProviderList {
+		if len(provider.Endpoints) > 0 {
+			providerAddressToEndpoint[provider.PublicLavaAddress] = provider.Endpoints[0].NetworkAddress
+		}
+	}
 	go csm.consumerMetricsManager.ResetBlockedProvidersMetrics(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, providerAddressToEndpoint)
 
 	// Membership of the outgoing backup pool, captured before the map is replaced, for the same
@@ -4100,8 +4107,8 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 	prevEpochBlockedCount := len(csm.previousEpochBlockedProviders)
 	blockedBackupCount := len(csm.blockedBackupProviders)
 
-	// Snapshot the per-provider blocked state for the whole pairing, not just the addresses that
-	// changed. The per-provider gauge MUST be level-triggered: the blocked list is also drained
+	// Snapshot the per-provider blocked state for the whole pairing and the backup pool, not just
+	// the addresses that changed. The per-provider gauge MUST be level-triggered: the blocked list is also drained
 	// wholesale by setValidAddressesToDefaultValue — on every epoch transition, and on the
 	// pool-empty release in releaseBlockedProvidersIfPoolEmpty — and neither drain publishes
 	// anything per provider. Edge-triggered publishing alone therefore left every series it
@@ -4111,13 +4118,32 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 	for _, address := range csm.currentlyBlockedProviderAddresses {
 		blockedSet[address] = struct{}{}
 	}
-	providerBlocked := make(map[string]bool, len(csm.pairing))
-	for address := range csm.pairing {
-		_, blocked := blockedSet[address]
-		providerBlocked[address] = blocked
+	// A provider reads blocked when it is on a block list or when none of its urls can take a
+	// relay right now (MAG-4735; the url rule is ConsumerSessionsWithProvider.inRotation). The
+	// block lists alone lag: a provider joins one only when a request picks it and finds nothing
+	// usable, so a backup on a healthy chain, never picked, read serving for as long as its only
+	// url stayed head-stalled. The backup pool keeps its own block set. The urls are read after
+	// csm.lock is released, so no provider lock nests in it.
+	type providerState struct {
+		listed bool
+		cswp   *ConsumerSessionsWithProvider
+	}
+	states := make(map[string]providerState, len(csm.pairing)+len(csm.backupProviders))
+	for address, cswp := range csm.pairing {
+		_, listed := blockedSet[address]
+		states[address] = providerState{listed: listed, cswp: cswp}
+	}
+	for address, cswp := range csm.backupProviders {
+		_, listed := csm.blockedBackupProviders[address]
+		states[address] = providerState{listed: listed, cswp: cswp}
 	}
 	blockedByReason := csm.blockedCountsByReasonLocked()
 	csm.lock.RUnlock()
+
+	providerBlocked := make(map[string]bool, len(states))
+	for address, state := range states {
+		providerBlocked[address] = state.listed || (state.cswp != nil && !state.cswp.inRotation())
+	}
 
 	var stickyCount, reportedCount int
 	if csm.stickySessions != nil {

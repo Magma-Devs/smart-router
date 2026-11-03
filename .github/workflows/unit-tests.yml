@@ -1,0 +1,122 @@
+name: Unit Tests
+
+# Compiles and runs every Go unit test in both modules: the router at the root
+# and the wizard under tools/wizard. "Build and Test" (smartrouter.yml) only
+# builds the binaries and the image, so without this job a change that breaks
+# an existing test, or stops a test package compiling, merges green.
+#
+# The job uploads no artifacts. The test job removed in bcaff2bc uploaded its
+# JSON stream, junit report and coverage profile on every run and filled the
+# org's artifact storage quota. Read failures from the job log (gotestsum
+# repeats each failed test's output at the end) and from the job summary.
+
+on:
+  push:
+    branches:
+      - main
+  # Every base branch, not only main, so stacked PRs get the signal too. No
+  # paths filter: a required check has to report on every PR, or a PR that
+  # skips the filter waits on it forever.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # As in `make test` and the release build: the shipped binary is built
+      # without cgo, so the tests run without it too.
+      CGO_ENABLED: "0"
+      # tools/wizard's icon test downloads an SVG from the docs site; OFFLINE
+      # skips it so the gate does not depend on the network.
+      OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            tools/wizard/go.sum
+
+      # Version-pinned like govulncheck in lint.yml, so a new release can't
+      # change the gate on an unrelated day. Dependabot does not bump
+      # `go install` pins; bump this one deliberately.
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@v1.13.0
+
+      # -timeout applies to each package's test binary. rpcsmartrouter alone
+      # runs for about 4.5 minutes, on 4 cores or 14 (its tests wait on timers,
+      # not the CPU), which is close to the 300s that `make test` allows.
+      #
+      # A failed test is rerun on its own, at most twice, and fails the gate
+      # only if every run fails. A few timing-based tests fail now and then on
+      # a busy machine, and a gate that goes red on those teaches people to
+      # rerun it until it passes. Each test that needed a rerun is reported as
+      # a warning in the last step, so a flaky test stays visible. gotestsum
+      # does not rerun after a compile error, a panic (an expired -timeout is
+      # a panic) or more than 10 failures: those fail the gate straight away.
+      - name: Test the router module
+        run: >-
+          gotestsum
+          --format pkgname-and-test-fails
+          --format-hide-empty-pkg
+          --hide-summary=skipped
+          --rerun-fails=2
+          --rerun-fails-max-failures=10
+          --rerun-fails-report="$RUNNER_TEMP/reruns-router.txt"
+          --packages=./...
+          -- -count=1 -timeout=15m
+
+      - name: Test the wizard module
+        if: ${{ !cancelled() }}
+        working-directory: tools/wizard
+        run: >-
+          gotestsum
+          --format pkgname-and-test-fails
+          --format-hide-empty-pkg
+          --hide-summary=skipped
+          --rerun-fails=2
+          --rerun-fails-max-failures=10
+          --rerun-fails-report="$RUNNER_TEMP/reruns-wizard.txt"
+          --packages=./...
+          -- -count=1 -timeout=5m
+
+      - name: Report tests that needed a rerun
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          rows=""
+          # gotestsum writes one line per test that failed at least once:
+          # "<package>.<test>: <runs> runs, <failures> failures".
+          for report in "$RUNNER_TEMP"/reruns-*.txt; do
+            while IFS= read -r line; do
+              [[ $line =~ ^(.+):\ ([0-9]+)\ runs,\ ([0-9]+)\ failures$ ]] || continue
+              name="${BASH_REMATCH[1]}" runs="${BASH_REMATCH[2]}" failures="${BASH_REMATCH[3]}"
+              if [ "$runs" -gt "$failures" ]; then
+                verdict="flaky: passed on a rerun"
+              else
+                verdict="failed every run"
+              fi
+              echo "::warning title=Unit test needed a rerun::${name} failed ${failures} of ${runs} runs (${verdict})"
+              rows+="| \`${name}\` | ${runs} | ${failures} | ${verdict} |"$'\n'
+            done < "$report"
+          done
+          [ -n "$rows" ] || exit 0
+          {
+            echo "### Unit tests that needed a rerun"
+            echo
+            echo "| Test | Runs | Failures | Verdict |"
+            echo "| --- | --- | --- | --- |"
+            printf '%s' "$rows"
+          } >> "$GITHUB_STEP_SUMMARY"
