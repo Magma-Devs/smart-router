@@ -352,6 +352,8 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			},
 		},
 		{
+			// node-a answered and node-b never did, so the reason is a node still silent, not that
+			// nobody responded (MAG-4380).
 			name:   "write_unknown",
 			fanOut: true,
 			nodes: func(t *testing.T) []relayEndNode {
@@ -359,7 +361,9 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			},
 			body:    relayEndWrite,
 			timeout: 1500 * time.Millisecond,
-			check:   func(t *testing.T, _ *common.RelayResult, err error) { require.ErrorIs(t, err, errUnknownWriteOutcome) },
+			check: func(t *testing.T, _ *common.RelayResult, err error) {
+				require.ErrorIs(t, err, errUnclearWriteNodeSilent)
+			},
 		},
 		{
 			// Nothing comes back at all: the router returns no result, and the client still gets 500.
