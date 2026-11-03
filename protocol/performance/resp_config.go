@@ -46,11 +46,15 @@ type respBlockKeys struct {
 	// name is the store's log name (redisstore.Config.Name), set before Validate
 	// so the block's own errors name it.
 	name string
+	// refuse, when set, rejects keys the block's tier cannot use. It runs before
+	// Validate, so a refused key is reported as refused rather than through a
+	// validation rule written for the block that does use it.
+	refuse func(redisstore.Config) error
 }
 
 var (
-	primaryRespBlock   = respBlockKeys{RespCacheViperKey, RespCacheAddressesFlagName, RespCacheTopologyFlagName, RespCacheKeyPrefixFlagName, ""}
-	secondaryRespBlock = respBlockKeys{SecondaryRespCacheViperKey, SecondaryRespCacheAddressesFlagName, SecondaryRespCacheTopologyFlagName, SecondaryRespCacheKeyPrefixFlagName, secondaryRespCacheLogName}
+	primaryRespBlock   = respBlockKeys{RespCacheViperKey, RespCacheAddressesFlagName, RespCacheTopologyFlagName, RespCacheKeyPrefixFlagName, "", nil}
+	secondaryRespBlock = respBlockKeys{SecondaryRespCacheViperKey, SecondaryRespCacheAddressesFlagName, SecondaryRespCacheTopologyFlagName, SecondaryRespCacheKeyPrefixFlagName, secondaryRespCacheLogName, refuseReadOnlyTierKeys}
 )
 
 // LoadRespCacheConfig reads the resp-cache configuration: the `resp-cache:`
@@ -69,17 +73,21 @@ func LoadRespCacheConfig(v *viper.Viper) (cfg redisstore.Config, enabled bool, e
 // split reads from; give the reader endpoint as addresses) and expiration (the
 // zone that writes the entries owns their lifetimes).
 func LoadSecondaryRespCacheConfig(v *viper.Viper) (cfg redisstore.Config, enabled bool, err error) {
-	cfg, enabled, err = loadRespBlock(v, secondaryRespBlock)
-	if err != nil || !enabled {
-		return cfg, enabled, err
-	}
+	return loadRespBlock(v, secondaryRespBlock)
+}
+
+// refuseReadOnlyTierKeys rejects the two keys LoadSecondaryRespCacheConfig names.
+// Checked before Validate: a refused read-addresses list used to be reported by
+// the standalone rule, which advised switching topology, and a negative
+// expiration by an error naming resp-cache.
+func refuseReadOnlyTierKeys(cfg redisstore.Config) error {
 	if len(cfg.ReadAddresses) > 0 {
-		return cfg, false, fmt.Errorf("%s.read-addresses is not used by a read-only tier: every operation is a read, so set the reader endpoint as %s.addresses", SecondaryRespCacheViperKey, SecondaryRespCacheViperKey)
+		return fmt.Errorf("%s.read-addresses is not used by a read-only tier: every operation is a read, so set the reader endpoint as %s.addresses", SecondaryRespCacheViperKey, SecondaryRespCacheViperKey)
 	}
 	if cfg.Expiration != (redisstore.ExpirationConfig{}) {
-		return cfg, false, fmt.Errorf("%s.expiration is not used by a read-only tier: the zone that writes the entries sets their lifetimes", SecondaryRespCacheViperKey)
+		return fmt.Errorf("%s.expiration is not used by a read-only tier: the zone that writes the entries sets their lifetimes", SecondaryRespCacheViperKey)
 	}
-	return cfg, true, nil
+	return nil
 }
 
 func loadRespBlock(v *viper.Viper, keys respBlockKeys) (cfg redisstore.Config, enabled bool, err error) {
@@ -127,6 +135,11 @@ func loadRespBlock(v *viper.Viper, keys respBlockKeys) (cfg redisstore.Config, e
 		return cfg, false, nil
 	}
 	cfg.Name = keys.name
+	if keys.refuse != nil {
+		if err := keys.refuse(cfg); err != nil {
+			return cfg, false, err
+		}
+	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, false, err
 	}

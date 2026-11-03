@@ -284,8 +284,9 @@ func (c TLSConfig) hasMaterial() bool {
 }
 
 // build materialises the tls.Config, nil when disabled. Files are read
-// eagerly so misconfiguration fails at startup, not first dial.
-func (c TLSConfig) build() (*tls.Config, error) {
+// eagerly so misconfiguration fails at startup, not first dial. name is the
+// store's log name (Config.LogName), so the error names the block it came from.
+func (c TLSConfig) build(name string) (*tls.Config, error) {
 	if !c.Enabled {
 		return nil, nil //nolint:nilnil // disabled TLS is a nil *tls.Config by contract; go-redis takes it as "plaintext"
 	}
@@ -297,21 +298,21 @@ func (c TLSConfig) build() (*tls.Config, error) {
 	if c.CAFile != "" {
 		pem, err := os.ReadFile(c.CAFile)
 		if err != nil {
-			return nil, fmt.Errorf("resp-cache tls: reading ca-file: %w", err)
+			return nil, fmt.Errorf("%s tls: reading ca-file: %w", name, err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("resp-cache tls: ca-file %q contains no valid certificates", c.CAFile)
+			return nil, fmt.Errorf("%s tls: ca-file %q contains no valid certificates", name, c.CAFile)
 		}
 		tlsCfg.RootCAs = pool
 	}
 	if (c.CertFile == "") != (c.KeyFile == "") {
-		return nil, fmt.Errorf("resp-cache tls: cert-file and key-file must be set together")
+		return nil, fmt.Errorf("%s tls: cert-file and key-file must be set together", name)
 	}
 	if c.CertFile != "" {
 		cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
 		if err != nil {
-			return nil, fmt.Errorf("resp-cache tls: loading client keypair: %w", err)
+			return nil, fmt.Errorf("%s tls: loading client keypair: %w", name, err)
 		}
 		tlsCfg.Certificates = []tls.Certificate{cert}
 	}
@@ -381,6 +382,13 @@ func (cfg Config) Validate() error {
 	// the shape of its siblings; the reasoning lives on TLSConfig.
 	if !cfg.TLS.Enabled && cfg.TLS.hasMaterial() {
 		return fmt.Errorf("%s: tls.* options are set but tls.enabled is not true — dangling configuration (set tls.enabled: true, or remove the other tls.* keys)", cfg.LogName())
+	}
+	// The keyspace is checked again by newStore, for the client-built seams that
+	// see no Config; checked here too so its error names the block like the rest.
+	if cfg.KeyPrefix != "" {
+		if err := core.ValidateKeyPrefix(cfg.KeyPrefix); err != nil {
+			return fmt.Errorf("%s: %w", cfg.LogName(), err)
+		}
 	}
 	return cfg.Expiration.validate()
 }
