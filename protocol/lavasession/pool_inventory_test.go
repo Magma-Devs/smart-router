@@ -267,6 +267,9 @@ func logMessage(record map[string]any) string {
 
 func captureLogs(t *testing.T, fn func()) []map[string]any {
 	t.Helper()
+	// Some of the records under test are debug lines, and the level gates every sink.
+	utils.SetGlobalLoggingLevel("debug")
+	t.Cleanup(func() { utils.SetGlobalLoggingLevel(testLogLevel) })
 	// EnableDebugLogBuffer swaps a process-global sink. Without the cleanup every later test in this
 	// binary keeps paying the copy-and-append on every log call, and the sink's documented
 	// "disabled by default" contract stays broken for the rest of the run.

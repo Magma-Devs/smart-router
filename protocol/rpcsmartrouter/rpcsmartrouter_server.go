@@ -1551,6 +1551,18 @@ func (rpcss *RPCSmartRouterServer) awaitWakeIfIdle(ctx context.Context, now time
 	}
 }
 
+// awaitWakeUnlessInternalProbe is awaitWakeIfIdle for every client relay except one that carries
+// INTERNAL_PROBE_HEADER_NAME. The hub's serving probes ask each published hostname a question every
+// few minutes; counted as activity they would keep every probed chain awake forever and idle mode
+// would never trigger (MAG-4797). Such a request neither stamps the chain nor waits on a wake burst:
+// on an idle chain it is routed on the tips the router already has, as on cold start.
+func (rpcss *RPCSmartRouterServer) awaitWakeUnlessInternalProbe(ctx context.Context, directiveHeaders map[string]string, now time.Time) {
+	if _, probe := directiveHeaders[common.INTERNAL_PROBE_HEADER_NAME]; probe {
+		return
+	}
+	rpcss.awaitWakeIfIdle(ctx, now)
+}
+
 func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	ctx context.Context,
 	analytics *metrics.RelayMetrics,
@@ -1587,8 +1599,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 
 	// Idle mode: this is a client relay. Stamp it, and if it ends an idle period hold it (capped)
 	// until the first endpoint poll has landed so it is routed on fresh tips. The wait counts
-	// toward the end-to-end latency below on purpose — the client experienced it.
-	rpcss.awaitWakeIfIdle(ctx, relaySentTime)
+	// toward the end-to-end latency below on purpose — the client experienced it. A request
+	// marked as our own monitoring is not activity and is routed without stamping.
+	rpcss.awaitWakeUnlessInternalProbe(ctx, protocolMessage.GetDirectiveHeaders(), relaySentTime)
 	var err error
 	relayProcessor, err = rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
 
