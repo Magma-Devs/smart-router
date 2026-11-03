@@ -30,7 +30,9 @@ import (
 var updateListenerGolden = flag.Bool("update-listener-golden", false, "rewrite testdata/listener_handlers.golden.json")
 
 // scriptedRelay answers every relay with one fixed result and error, and records the arguments
-// the listener handed it.
+// the listener handed it: the url, body and connection type, the consumer IP, and the names of the
+// request headers it forwards (the values of most of them vary per connection, so only the golden
+// header's value is kept).
 type scriptedRelay struct {
 	result *common.RelayResult
 	err    error
@@ -42,7 +44,17 @@ type scriptedRelay struct {
 func (r *scriptedRelay) SendRelay(ctx context.Context, url, req, connectionType, dappID, consumerIp string, analytics *metrics.RelayMetrics, metadataValues []pairingtypes.Metadata) (*common.RelayResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, fmt.Sprintf("url=%q req=%q connectionType=%q", url, req, connectionType))
+	names := make([]string, 0, len(metadataValues))
+	goldenHeader := ""
+	for _, md := range metadataValues {
+		names = append(names, md.Name)
+		if md.Name == goldenRequestHeader {
+			goldenHeader = md.Value
+		}
+	}
+	sort.Strings(names)
+	r.calls = append(r.calls, fmt.Sprintf("url=%q req=%q connectionType=%q consumerIp=%q headers=%s %s=%q",
+		url, req, connectionType, consumerIp, strings.Join(names, ","), goldenRequestHeader, goldenHeader))
 	return r.result, r.err
 }
 
@@ -53,6 +65,10 @@ func (r *scriptedRelay) ParseRelay(ctx context.Context, url, req, connectionType
 func (r *scriptedRelay) SendParsedRelay(ctx context.Context, analytics *metrics.RelayMetrics, protocolMessage ProtocolMessage) (*common.RelayResult, error) {
 	return nil, errors.New("not used")
 }
+
+// goldenRequestHeader is a request header every golden request carries, besides the IP-forwarding
+// one, so the record shows which headers each handler hands SendRelay.
+const goldenRequestHeader = "X-Golden-Header"
 
 // guidPattern matches the per-request GUID a masked error carries; it is random, so the golden
 // file holds a placeholder.
@@ -68,6 +84,10 @@ func TestListenerHandlers_Golden(t *testing.T) {
 	}
 	nodeMetadata := []pairingtypes.Metadata{{Name: "X-Node-Header", Value: "node"}}
 	upstreamBody := []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"upstream said no"}}`)
+	// The error the JSON-RPC parser itself returns for a body that is not JSON: the JSON-RPC
+	// handler answers it with a parse error, which encoding/json's SyntaxError never reaches.
+	_, _, parserSyntaxError := rpcInterfaceMessages.ParseJsonRPCMsgWithBatchFlag([]byte("{"))
+	require.Error(t, parserSyntaxError)
 	outcomes := []struct {
 		name   string
 		result *common.RelayResult
@@ -90,6 +110,7 @@ func TestListenerHandlers_Golden(t *testing.T) {
 		{"batch too large", nil, ErrBatchRequestSizeExceeded},
 		{"batch refused", nil, rpcInterfaceMessages.ErrJsonrpcBatchRefused},
 		{"json syntax error", nil, &json.SyntaxError{}},
+		{"json syntax error from the parser", nil, parserSyntaxError},
 	}
 	jsonBody := `{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`
 	requests := []struct {
@@ -129,6 +150,8 @@ func TestListenerHandlers_Golden(t *testing.T) {
 			if req.body != "" {
 				httpReq.Header.Set("Content-Type", "application/json")
 			}
+			httpReq.Header.Set(common.IP_FORWARDING_HEADER_NAME, "203.0.113.7")
+			httpReq.Header.Set(goldenRequestHeader, "golden")
 			resp, err := http.DefaultClient.Do(httpReq)
 			require.NoError(t, err)
 			respBody, err := io.ReadAll(resp.Body)
