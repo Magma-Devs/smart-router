@@ -207,7 +207,9 @@ secondary-cache-timeout: 100ms
   lines that open with `secondary-resp-cache`. It does **not** feed the
   `smartrouter_resp_cache_*` series: those stay the router's own cache's.
 - `secondary-cache-timeout` and `secondary-cache-mode` apply as they do to a
-  gRPC secondary.
+  gRPC secondary. The timeout is also the round trip a health probe must
+  answer within before the tier resumes after a run of failures opened its
+  breaker, so set it above the backend's round trip.
 
 Removing the configuration fully reverts the router to single-cache behavior;
 with no secondary configured, behavior is unchanged from previous releases.

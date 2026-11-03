@@ -152,7 +152,7 @@ func TestSecondaryRespCacheReadsAnotherZonesEntries(t *testing.T) {
 
 	open := func(t *testing.T, keyPrefix string) *RespCache {
 		t.Helper()
-		reader, err := OpenSecondaryRespCache(redisstore.Config{Name: secondaryRespCacheLogName, Addresses: []string{mr.Addr()}, KeyPrefix: keyPrefix})
+		reader, err := OpenSecondaryRespCache(redisstore.Config{Name: secondaryRespCacheLogName, Addresses: []string{mr.Addr()}, KeyPrefix: keyPrefix}, DefaultSecondaryCacheTimeout)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = reader.Close() })
 		return reader
@@ -209,7 +209,7 @@ func TestSecondaryRespCacheLeavesThePrimarysSeriesAlone(t *testing.T) {
 	deadAddress := listener.Addr().String()
 	require.NoError(t, listener.Close())
 
-	reader, err := OpenSecondaryRespCache(redisstore.Config{Name: secondaryRespCacheLogName, Addresses: []string{deadAddress}, KeyPrefix: "zone-a"})
+	reader, err := OpenSecondaryRespCache(redisstore.Config{Name: secondaryRespCacheLogName, Addresses: []string{deadAddress}, KeyPrefix: "zone-a"}, DefaultSecondaryCacheTimeout)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = reader.Close() })
 	require.Eventually(t, func() bool { return reader.DebugCacheState().Reachable != nil }, 10*time.Second, 50*time.Millisecond)
@@ -223,4 +223,47 @@ func TestSecondaryRespCacheLeavesThePrimarysSeriesAlone(t *testing.T) {
 	failedAfter := testutil.ToFloat64(registered.opsFailed.WithLabelValues(respCacheOpGet, "error")) +
 		testutil.ToFloat64(registered.opsFailed.WithLabelValues(respCacheOpGet, "timeout"))
 	require.Equal(t, failedBefore, failedAfter, "nor the primary's failure series")
+}
+
+// A second tier is usually another zone, so its round trip can exceed the primary's 50ms lookup
+// budget; secondary-cache-timeout is raised for exactly that hop. After a failure streak the
+// tier's breaker must close on a probe answered within that budget. Held to the primary's budget,
+// it stayed open while the backend answered every probe in 100ms, and the tier was skipped until
+// the router restarted (MAG-4778).
+func TestSecondaryRespCacheBreakerClosesWithinTheSecondaryBudget(t *testing.T) {
+	mr := miniredis.RunT(t)
+	proxy := newFreezableProxy(t, mr.Addr())
+	const budget = 400 * time.Millisecond
+	reader, err := OpenSecondaryRespCache(redisstore.Config{Name: secondaryRespCacheLogName, Addresses: []string{proxy.listener.Addr().String()}, KeyPrefix: "zone-a"}, budget)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reader.Close() })
+	lookupWithin := func(within time.Duration) error {
+		ctx, cancel := context.WithTimeout(context.Background(), within)
+		defer cancel()
+		_, err := reader.GetEntry(ctx, &pairingtypes.RelayCacheGet{RequestHash: []byte("cross-zone"), ChainId: "ETH1", RequestedBlock: 100, SeenBlock: 100})
+		return err
+	}
+	lookup := func() error { return lookupWithin(budget) }
+	// Establish the connection while the proxy is fast, so the cold handshake through it does not
+	// count against the budget under the race detector.
+	require.NoError(t, lookupWithin(2*time.Second), "sanity: a clean miss while the proxy is fast")
+	require.Eventually(t, func() bool { return reader.DebugCacheState().Reachable != nil }, 5*time.Second, 10*time.Millisecond)
+
+	// Another zone: every reply 100ms away, slower than the primary's budget and well inside this one.
+	proxy.delay.Store(int64(100 * time.Millisecond))
+	require.NoError(t, lookup(), "a lookup inside secondary-cache-timeout is a clean miss")
+
+	// A transient stall opens the breaker.
+	proxy.frozen.Store(true)
+	for i := 0; i < respCacheBreakerThreshold; i++ {
+		require.ErrorIs(t, lookup(), core.StoreError)
+	}
+	require.True(t, reader.readBreaker.open.Load())
+	proxy.frozen.Store(false)
+
+	require.Eventually(t, func() bool { return !reader.readBreaker.open.Load() }, 5*time.Second, 10*time.Millisecond,
+		"a probe answered within secondary-cache-timeout closes the breaker")
+	// The stalled connections were dropped, so this one may dial again: a wider budget than the
+	// tier's keeps the handshake through the proxy from failing it under the race detector.
+	require.NoError(t, lookupWithin(2*time.Second), "lookups resume as clean misses")
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
@@ -223,13 +224,14 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 // LoadSecondaryRespCacheConfig accepted. Like the primary, it does not dial here:
 // an unreachable backend degrades each lookup to a miss and is reported by the
 // health probe, while a configuration the store refuses (an unreadable credential
-// file) fails startup.
-func OpenSecondaryRespCache(cfg redisstore.Config) (*RespCache, error) {
+// file) fails startup. lookupBudget is secondary-cache-timeout (see
+// NewSecondaryRespCache).
+func OpenSecondaryRespCache(cfg redisstore.Config, lookupBudget time.Duration) (*RespCache, error) {
 	store, err := redisstore.New(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return NewSecondaryRespCache(store), nil
+	return NewSecondaryRespCache(store, lookupBudget), nil
 }
 
 // RespKeyPrefixInForce is the keyspace a RESP store occupies: its configured

@@ -3504,7 +3504,9 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			var secondaryCacheReader performance.CacheReader
 			if secondaryCacheConfig.Enabled() {
 				if secondaryRespEnabled {
-					secondaryRespCache, openErr := performance.OpenSecondaryRespCache(secondaryRespConfig)
+					// The lookup budget doubles as the round trip a probe must answer
+					// within for the tier's breaker to close (NewSecondaryRespCache).
+					secondaryRespCache, openErr := performance.OpenSecondaryRespCache(secondaryRespConfig, secondaryCacheConfig.Timeout)
 					if openErr != nil {
 						// A configuration the store refuses (an unreadable credential
 						// file) fails startup, as it does for the primary; an
