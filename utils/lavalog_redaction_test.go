@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	zerolog "github.com/rs/zerolog"
-	zerologlog "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,16 +18,14 @@ import (
 // previous logger and level are restored before returning.
 func captureLog(t *testing.T, level zerolog.Level, fn func()) string {
 	t.Helper()
-	prevLogger := zerologlog.Logger
-	prevLevel := defaultGlobalLogLevel
-	t.Cleanup(func() {
-		zerologlog.Logger = prevLogger
-		defaultGlobalLogLevel = prevLevel
-	})
-
+	prevLevel := currentLogLevel()
 	var buf bytes.Buffer
-	defaultGlobalLogLevel = level
-	zerologlog.Logger = zerolog.New(&buf).Level(level)
+	restore := SetStdLogger(zerolog.New(&buf).Level(level))
+	t.Cleanup(func() {
+		restore()
+		globalLogLevel.Store(int32(prevLevel))
+	})
+	globalLogLevel.Store(int32(level))
 	fn()
 	return buf.String()
 }

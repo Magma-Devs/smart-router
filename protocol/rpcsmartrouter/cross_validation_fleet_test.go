@@ -21,7 +21,6 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/rs/zerolog"
-	zerologlog "github.com/rs/zerolog/log"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
@@ -336,15 +335,14 @@ func TestHeaderlessParams(t *testing.T) {
 // captureFleetLog runs fn with the global logger writing into a buffer and returns what it wrote.
 func captureFleetLog(t *testing.T, fn func()) string {
 	t.Helper()
-	prev := zerologlog.Logger
 	var buf strings.Builder
 	var mu sync.Mutex
-	zerologlog.Logger = zerolog.New(zerolog.SyncWriter(writerFunc(func(p []byte) (int, error) {
+	restore := utils.SetStdLogger(zerolog.New(zerolog.SyncWriter(writerFunc(func(p []byte) (int, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		return buf.Write(p)
-	})))
-	defer func() { zerologlog.Logger = prev }()
+	}))))
+	defer restore()
 	fn()
 	mu.Lock()
 	defer mu.Unlock()

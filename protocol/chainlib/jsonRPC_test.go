@@ -1031,7 +1031,7 @@ func TestJsonRPCChainListener_FailedWebsocketSubscribeIsCounted(t *testing.T) {
 		_ = listener.Shutdown(shutdownCtx)
 	})
 
-	client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws", http.Header{"project-id": {"acme"}})
+	client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws", http.Header{"customer-id": {"acme"}})
 	require.NoError(t, err)
 	defer client.Close()
 

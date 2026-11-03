@@ -48,7 +48,7 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | `schema` | number | always | `2` |
 | `GUID` | string | always | The request's GUID in decimal: the value every narrative line of the request carries under `GUID`, and the `Error_GUID` its client gets in an error reply. Each WebSocket frame is a relay with a GUID of its own. `""` if the context carries none. |
 | `connection` | string | WebSocket relays | The GUID of the WebSocket connection the relay came on, which the connection's own lines carry. Groups a connection's relays. |
-| `customer` | string | when the request names a project | The request's project id: the `project-id` header of an HTTP request, of a WebSocket connection's upgrade request (every frame on the connection carries it, a frame that does not parse too), or of a gRPC call's metadata. Absent when the header is absent or empty, which the listeners pass on as `DefaultDappID`, and when it is `DefaultDappID`. Written as the caller sent it, without the metrics' `customer` label's budget: made valid UTF-8 (each run of invalid bytes becomes U+FFFD) and cut to at most 128 bytes at a character boundary. |
+| `customer` | string | when the request names a customer | The request's customer id: the `customer-id` header of an HTTP request, of a WebSocket connection's upgrade request (every frame on the connection carries it, a frame that does not parse too), or of a gRPC call's metadata. Absent when the header is absent or empty, which the listeners pass on as `DefaultDappID`, and when it is `DefaultDappID`. Written as the caller sent it, without the metrics' `customer` label's budget: made valid UTF-8 (each run of invalid bytes becomes U+FFFD) and cut to at most 128 bytes at a character boundary. |
 | `request_id` | string | when the caller sent `X-Request-Id` | The header's first value, the id the request's narrative lines carry under `request_id`. Read on HTTP requests (`X-Request-Id`) and gRPC calls (`x-request-id` metadata); a WebSocket frame and a WebSocket subscription request carry none, because the WebSocket listener does not read the header. Cleaned like `customer`. |
 | `task_id` | string | when the caller sent `X-Task-Id` | The header's first value, read and cleaned like `request_id`. |
 | `tx_id` | string | when the caller sent `X-Tx-Id` | The header's first value, read and cleaned like `request_id`. The caller's own id for the request, not a chain's: the transaction's id on its chain is `tx_hash`. |
@@ -80,10 +80,12 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | `attempts` | array | when `stateful` is `true`, when `outcome` is not `ok`, when the relay took more than one attempt or its only attempt failed (a retry, a hedge, a recovery on another upstream), or when an upstream was skipped | One entry per upstream attempt; see [attempts](#attempts). `[]` when nothing was sent. A read its first attempt answered leaves it out. |
 
 LogQL's `json` parser renders numbers and booleans as strings (`has_reply="false"`, `status="500"`)
-and skips arrays; `| json attempts="attempts"` extracts the raw array. A field whose name is already a
-stream label is renamed with an `_extracted` suffix: where the collector labels writes `stateful`,
-`| json | stateful="true"` matches nothing, so select writes by that stream label or by the line
-filter `|= "\"stateful\":true"`, which works either way.
+and skips arrays; `| json attempts="attempts"` extracts the raw array. The fleet's log collector puts
+the static stream label `stateful="1"` on every router line that matches `"stateful":("1"|true)`, so
+`{stateful="1"}` selects writes. A field whose name is already a stream label is renamed with an
+`_extracted` suffix: on those streams `| json` extracts the field as `stateful_extracted="true"`, and
+`| json | stateful="true"` matches nothing. The line filter `|= "\"stateful\":true"` selects writes
+on any stream.
 
 `error` and `attempts[].message` are prose for a person. The same failure can read differently on
 routers at different `--log-level`s, because an error built by a log formatter whose level is off
