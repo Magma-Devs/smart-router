@@ -35,25 +35,35 @@ func TestUpstreamAnswerFrom(t *testing.T) {
 	}{
 		{name: "a result", successes: []common.RelayResult{{Reply: reply, StatusCode: 200}}, want: upstreamAnswerResult},
 		{name: "a gRPC result", successes: []common.RelayResult{{Reply: reply}}, want: upstreamAnswerResult},
-		{name: "a result after a timeout", successes: []common.RelayResult{{Reply: reply, StatusCode: 200}},
-			protocolErrors: []relaycore.RelayError{failed(context.DeadlineExceeded, common.RelayResult{})}, want: upstreamAnswerResult},
+		{
+			name: "a result after a timeout", successes: []common.RelayResult{{Reply: reply, StatusCode: 200}},
+			protocolErrors: []relaycore.RelayError{failed(context.DeadlineExceeded, common.RelayResult{})}, want: upstreamAnswerResult,
+		},
 		{name: "a node error", nodeErrors: []relaycore.RelayError{{Err: errors.New("execution reverted")}}, want: upstreamAnswerError},
 		{name: "a JSON-RPC error status", protocolErrors: []relaycore.RelayError{
-			failed(fmt.Errorf("relay failed: %w", &lavasession.HTTPStatusError{StatusCode: 503}), common.RelayResult{})}, want: upstreamAnswerError},
+			failed(fmt.Errorf("relay failed: %w", &lavasession.HTTPStatusError{StatusCode: 503}), common.RelayResult{}),
+		}, want: upstreamAnswerError},
 		{name: "a REST error status", protocolErrors: []relaycore.RelayError{
-			failed(errors.New("HTTP 503"), common.RelayResult{IsNodeError: true})}, want: upstreamAnswerError},
+			failed(errors.New("HTTP 503"), common.RelayResult{IsNodeError: true}),
+		}, want: upstreamAnswerError},
 		{name: "a typed rate limit", protocolErrors: []relaycore.RelayError{
-			failed(fmt.Errorf("HTTP 429: %w", common.StatusCodeError429), common.RelayResult{})}, want: upstreamAnswerError},
+			failed(fmt.Errorf("HTTP 429: %w", common.StatusCodeError429), common.RelayResult{}),
+		}, want: upstreamAnswerError},
 		{name: "a classified rate limit", protocolErrors: []relaycore.RelayError{
-			{Err: errors.New("slow down"), LavaError: common.LavaErrorNodeRateLimited}}, want: upstreamAnswerError},
+			{Err: errors.New("slow down"), LavaError: common.LavaErrorNodeRateLimited},
+		}, want: upstreamAnswerError},
 		{name: "a refused connection", protocolErrors: []relaycore.RelayError{
-			failed(errors.New("dial tcp 10.0.0.1:443: connect: connection refused"), common.RelayResult{})}, want: upstreamAnswerNone},
+			failed(errors.New("dial tcp 10.0.0.1:443: connect: connection refused"), common.RelayResult{}),
+		}, want: upstreamAnswerNone},
 		{name: "a timeout", protocolErrors: []relaycore.RelayError{
-			failed(context.DeadlineExceeded, common.RelayResult{})}, want: upstreamAnswerNone},
+			failed(context.DeadlineExceeded, common.RelayResult{}),
+		}, want: upstreamAnswerNone},
 		{name: "an attempt the router stopped", protocolErrors: []relaycore.RelayError{
-			failed(context.Canceled, common.RelayResult{})}, want: upstreamAnswerNone},
+			failed(context.Canceled, common.RelayResult{}),
+		}, want: upstreamAnswerNone},
 		{name: "a failure nobody has catalogued", protocolErrors: []relaycore.RelayError{
-			{Err: errors.New("something new")}}, want: upstreamAnswerNone},
+			{Err: errors.New("something new")},
+		}, want: upstreamAnswerNone},
 		{name: "nothing sent", want: upstreamAnswerNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -336,3 +336,187 @@ func TestLastChance_SuccessLiftsTheBlockFailureKeepsItDisabled(t *testing.T) {
 		require.False(t, p.Endpoints[0].IsEnabled(), "rule 3: a failed last chance keeps the endpoint disabled")
 	})
 }
+
+// MAG-4829, the interleaving that skipped the lend. This request passed over the provider because
+// every endpoint of it is off, and blocked it. Another request's pool-empty release then emptied the
+// blocked list before this request reached the fallback. The provider is back in rotation for every
+// other request but still ignored by this one, so normal selection cannot hand it over either. The
+// fallback must still lend it: nothing else can serve.
+func TestLastChance_LendsAProviderReleasedByAnotherRequestMidRequest(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+	require.Empty(t, csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "the other request's release left the blocked list empty")
+
+	ignored := &ignoredProviders{
+		providers:          map[string]struct{}{"primary": {}}, // passed over by this attempt
+		triedByThisRequest: map[string]struct{}{},
+		currentEpoch:       csm.atomicReadCurrentEpoch(),
+	}
+	got, err := csm.tryGetConsumerSessionWithProviderFromBlockedProviderList(context.Background(), 1, ignored, 10, spectypes.LATEST_BLOCK, "", nil, common.NO_STATE, 0, NewUsedProviders(nil))
+	require.NoError(t, err, "the last chance must not end in No pairings available")
+	require.Contains(t, got, "primary")
+	require.True(t, got["primary"].lastChance, "the provider must be handed out for a lend, not for normal selection")
+}
+
+// MAG-4829 end to end: many requests at once with the only URL off. Each one lends that URL once
+// and none ends in "No pairings available", however the releases of the blocked list by the other
+// requests interleave with it.
+func TestLastChance_EveryConcurrentRequestIsLent(t *testing.T) {
+	const rounds, concurrent = 20, 50
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+
+	for round := 0; round < rounds; round++ {
+		errs := make(chan error, concurrent)
+		start := make(chan struct{})
+		for i := 0; i < concurrent; i++ {
+			go func() {
+				<-start
+				sessions, err := lcGet(csm, NewUsedProviders(nil))
+				for _, s := range sessions {
+					// The node's error, as in the ticket: the URL stays off.
+					_ = csm.OnSessionFailure(s.Session, errLastChanceRelay)
+				}
+				errs <- err
+			}()
+		}
+		close(start)
+		for i := 0; i < concurrent; i++ {
+			require.NoError(t, <-errs, "round %d: a request missed the last chance", round)
+		}
+		require.False(t, p.Endpoints[0].IsEnabled())
+	}
+}
+
+// lcProviderWithWS is a provider listing an https url and a wss url — the documented ETH1
+// jsonrpc shape — with the https url first, as the chart renders it.
+func lcProviderWithWS(t *testing.T, name, httpURL, wsURL string) *ConsumerSessionsWithProvider {
+	t.Helper()
+	p := lcProvider(t, name, httpURL)
+	conn, err := NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: wsURL}, 5, "jsonrpc")
+	require.NoError(t, err)
+	p.Endpoints = append(p.Endpoints, &Endpoint{NetworkAddress: wsURL, Enabled: true, DirectConnections: []DirectRPCConnection{conn}})
+	return p
+}
+
+// lcLentEndpoint is the endpoint a session was handed.
+func lcLentEndpoint(t *testing.T, info *SessionInfo) *Endpoint {
+	t.Helper()
+	drsc, ok := info.Session.Connection.(*DirectRPCSessionConnection)
+	require.True(t, ok, "a direct-RPC provider's session wraps a DirectRPCSessionConnection")
+	return drsc.Endpoint
+}
+
+// MAG-4285: a wss url is never sent a relay, so it never fails and stays enabled. It used to
+// keep its provider out of the blocked list once the https url was off, so the last chance
+// never reached the provider and the request ended in "No pairings available". Now the https
+// url is lent, exactly as for a provider that lists only https.
+func TestLastChance_LendsTheHttpsURLOfAProviderThatAlsoListsAWss(t *testing.T) {
+	p := lcProviderWithWS(t, "primary", "http://127.0.0.1:1", "ws://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+
+	sessions, err := lcGet(csm, NewUsedProviders(nil))
+	require.NoError(t, err, "the last chance must serve instead of No pairings available")
+	require.Equal(t, "primary", lcServedBy(t, sessions))
+	require.Same(t, p.Endpoints[0], lcLentEndpoint(t, sessions["primary"]), "the https url is lent, never the wss one")
+	require.False(t, p.Endpoints[0].IsEnabled(), "rule 2: lending must not mark the endpoint enabled")
+	require.True(t, p.Endpoints[1].IsEnabled(), "the wss url is left as it was")
+}
+
+// MAG-4285, the mix the ticket left open: one https-only provider and two https + wss
+// providers, every https url off. The https-only one was already tried by this request, so only
+// an https + wss provider can take the last chance — before the fix neither was ever blocked,
+// and the request ended in "No pairings available".
+func TestLastChance_ServesAMixOfHttpsOnlyAndHttpsPlusWssProviders(t *testing.T) {
+	plain := lcProvider(t, "plain", "http://127.0.0.1:1")
+	withWS1 := lcProviderWithWS(t, "ws1", "http://127.0.0.1:2", "ws://127.0.0.1:2")
+	withWS2 := lcProviderWithWS(t, "ws2", "http://127.0.0.1:3", "ws://127.0.0.1:3")
+	for _, p := range []*ConsumerSessionsWithProvider{plain, withWS1, withWS2} {
+		disableAt(t, p.Endpoints[0], probeBase)
+	}
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{plain, withWS1, withWS2}, nil)
+
+	used := NewUsedProviders(nil)
+	used.AddUnwantedAddresses("plain", NewRouterKey(nil))
+	sessions, err := lcGet(csm, used)
+	require.NoError(t, err, "an https + wss provider must take the last chance")
+	served := lcServedBy(t, sessions)
+	require.Contains(t, []string{"ws1", "ws2"}, served)
+	require.True(t, lcLentEndpoint(t, sessions[served]).ServesDirectRelays(), "its https url is lent, never its wss one")
+}
+
+// MAG-4285: the provider blocked for having no relay-capable url left must not be released by
+// the reconnect or epoch probe on the strength of its wss url, which a relay can never use.
+// A provider whose https url is back is released as before.
+func TestProbeDirectRPCEndpoints_AWssURLDoesNotReleaseAProviderWhoseHttpsIsOff(t *testing.T) {
+	p := lcProviderWithWS(t, "primary", "http://127.0.0.1:1", "ws://127.0.0.1:1")
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+
+	disableAt(t, p.Endpoints[0], probeBase)
+	_, err := csm.probeDirectRPCEndpoints(p, "primary")
+	require.Error(t, err, "only the wss url is usable, and no relay can use it")
+
+	p.Endpoints[0].ResetHealth()
+	_, err = csm.probeDirectRPCEndpoints(p, "primary")
+	require.NoError(t, err, "control: the https url is back, so the provider is released")
+}
+
+// lcTendermintProviderWithWS is a provider on tendermintrpc listing an http url and a ws url, both
+// built with the interface the router passes for a Tendermint provider (rpcsmartrouter builds one
+// Endpoint per url, in config order).
+func lcTendermintProviderWithWS(t *testing.T, name, httpURL, wsURL string) *ConsumerSessionsWithProvider {
+	t.Helper()
+	var endpoints []*Endpoint
+	for _, url := range []string{httpURL, wsURL} {
+		conn, err := NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: url}, 5, "tendermintrpc")
+		require.NoError(t, err)
+		endpoints = append(endpoints, &Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []DirectRPCConnection{conn}})
+	}
+	ws, ok := endpoints[1].DirectConnections[0].(*WebSocketDirectRPCConnection)
+	require.True(t, ok, "the ws url is a websocket connection")
+	require.False(t, ws.isJsonRPC, "the ws url was built for tendermintrpc, not jsonrpc")
+	p := NewConsumerSessionWithProvider(name, endpoints, 999999, 1, int64(1))
+	p.StaticProvider = true
+	return p
+}
+
+// MAG-4821: the MAG-4285 fix on the interface tendermintrpc, whose providers also list a ws url and
+// which the automation suite cannot cover (no Tendermint simulator router lists one). Each subtest
+// builds its own provider, so each assertion fails on its own.
+func TestLastChance_TendermintRPCProviderWithAWsURL(t *testing.T) {
+	// The http url is off and the ws url, which no relay uses, is on.
+	setup := func(t *testing.T) (*ConsumerSessionsWithProvider, *ConsumerSessionManager) {
+		p := lcTendermintProviderWithWS(t, "primary", "http://127.0.0.1:1", "ws://127.0.0.1:1")
+		disableAt(t, p.Endpoints[0], probeBase)
+		return p, lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+	}
+
+	t.Run("the provider is blocked and the last chance serves the request", func(t *testing.T) {
+		_, csm := setup(t)
+		sessions, err := lcGet(csm, NewUsedProviders(nil))
+		require.NoError(t, err, "the last chance must serve instead of No pairings available")
+		require.Equal(t, "primary", lcServedBy(t, sessions))
+	})
+
+	t.Run("the http url is lent, never the ws url", func(t *testing.T) {
+		p, csm := setup(t)
+		sessions, err := lcGet(csm, NewUsedProviders(nil))
+		require.NoError(t, err)
+		lent := lcLentEndpoint(t, sessions["primary"])
+		require.NotSame(t, p.Endpoints[1], lent, "the ws url must never receive a relay")
+		require.Same(t, p.Endpoints[0], lent)
+	})
+
+	t.Run("the probe does not release the provider while its http url is off", func(t *testing.T) {
+		p, csm := setup(t)
+		_, err := csm.probeDirectRPCEndpoints(p, "primary")
+		require.Error(t, err, "only the ws url is usable, and no relay can use it")
+
+		p.Endpoints[0].ResetHealth()
+		_, err = csm.probeDirectRPCEndpoints(p, "primary")
+		require.NoError(t, err, "control: the http url is back, so the provider is released")
+	})
+}

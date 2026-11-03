@@ -296,7 +296,11 @@ func TestSendCraftedRelays_VerdictFollowsReachability(t *testing.T) {
 
 // dropConnection closes the connection without an answer.
 func dropConnection(w http.ResponseWriter, _ *http.Request) {
-	conn, _, err := w.(http.Hijacker).Hijack()
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		panic(http.ErrAbortHandler) // the server drops a connection it cannot hand over
+	}
+	conn, _, err := hijacker.Hijack()
 	if err == nil {
 		_ = conn.Close()
 	}
