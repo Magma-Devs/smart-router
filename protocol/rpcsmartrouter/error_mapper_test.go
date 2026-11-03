@@ -196,14 +196,14 @@ func TestExtractLavaError_FromWrappedError(t *testing.T) {
 	_, wrappedErr := classifyDirectRPCError(origErr, -1, common.TransportJsonRPC)
 	require.NotNil(t, wrappedErr)
 
-	lavaErr := extractLavaError(wrappedErr)
+	lavaErr := common.AsLavaError(wrappedErr)
 	require.NotNil(t, lavaErr)
 	assert.Equal(t, common.LavaErrorChainNonceTooLow, lavaErr)
 }
 
 func TestExtractLavaError_FromPlainError(t *testing.T) {
 	plainErr := errors.New("plain error")
-	lavaErr := extractLavaError(plainErr)
+	lavaErr := common.AsLavaError(plainErr)
 	assert.Nil(t, lavaErr)
 }
 

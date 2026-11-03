@@ -6,6 +6,9 @@ import (
 	"strings"
 )
 
+// UnixSocketPrefix marks a listen or dial address as a unix socket path ("unix:/tmp/x.sock").
+const UnixSocketPrefix = "unix:"
+
 // JoinURLPath joins base URL and path robustly (handles slashes and query params correctly).
 // When path is absolute (starts with /), it is appended to the base URL's path so that
 // base paths like /gateway/lava/rest/KEY are preserved (ResolveReference would replace them).

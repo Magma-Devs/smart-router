@@ -19,6 +19,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -816,7 +817,7 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 			// and (historically) responses leaked the upstream id, so being permissive here
 			// is necessary for correctness. Ownership is already enforced by the outer
 			// `clientRouterIDs[clientKey]` check, so accepting the upstream id is safe.
-			if dwsm.apiInterface == "tendermintrpc" {
+			if dwsm.apiInterface == spectypes.APIInterfaceTendermintRPC {
 				if sub.upstreamID == subIDFromRequest {
 					activeSub = sub
 					hashedParams = hp
@@ -1110,7 +1111,7 @@ func (dwsm *DirectWSSubscriptionManager) extractSubscriptionIDFromUnsubscribe(pr
 
 	// For Tendermint: try to extract from object with "query" field
 	// Format: {"query": "tm.event='NewBlock'"}
-	if dwsm.apiInterface == "tendermintrpc" {
+	if dwsm.apiInterface == spectypes.APIInterfaceTendermintRPC {
 		var paramsMap map[string]any
 		if err := gojson.Unmarshal(paramsBytes, &paramsMap); err == nil {
 			if query, ok := paramsMap["query"].(string); ok && query != "" {
@@ -1974,7 +1975,7 @@ func teardownOfLocked(activeSub *directActiveSubscription) upstreamSubscriptionT
 // the decimal string the router canonicalises to internally, and the teardown path sending the
 // string while the explicit path sent the number is half of MAG-4278 item 1.
 func (dwsm *DirectWSSubscriptionManager) unsubscribeParams(upstreamID string, numericIDs bool) interface{} {
-	if dwsm.apiInterface == "tendermintrpc" {
+	if dwsm.apiInterface == spectypes.APIInterfaceTendermintRPC {
 		return map[string]interface{}{"query": upstreamID}
 	}
 	return []interface{}{subscriptionIDValue(upstreamID, numericIDs)}
@@ -2159,7 +2160,7 @@ func extractTendermintSubscriptionID(params []byte) string {
 // For EVM chains: extracts from response result (hex string)
 // For Tendermint: extracts from request params (query field)
 func getSubscriptionID(apiInterface string, responseMsg *rpcclient.JsonrpcMessage, requestParams []byte) string {
-	if apiInterface == "tendermintrpc" {
+	if apiInterface == spectypes.APIInterfaceTendermintRPC {
 		return extractTendermintSubscriptionID(requestParams)
 	}
 	return extractSubscriptionID(responseMsg)
@@ -2180,7 +2181,7 @@ func createSubscriptionReply(routerID string, requestID json.RawMessage, origina
 	// on) and overwrite only the id field with the caller's request id. A naive
 	// hand-built {jsonrpc,id,result} envelope would drop everything else that
 	// the upstream returned.
-	if apiInterface == "tendermintrpc" {
+	if apiInterface == spectypes.APIInterfaceTendermintRPC {
 		raw, err := json.Marshal(originalMsg)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal upstream message: %w", err)
@@ -2212,7 +2213,7 @@ func createSubscriptionReply(routerID string, requestID json.RawMessage, origina
 func createSubscriptionReplyFromRouterID(routerID string, requestID json.RawMessage, apiInterface string, originalResult json.RawMessage, numericIDs bool) ([]byte, error) {
 	// For Tendermint: preserve the original result format {"query":"..."}
 	// Tendermint clients expect the query object back, not a router ID
-	if apiInterface == "tendermintrpc" && originalResult != nil {
+	if apiInterface == spectypes.APIInterfaceTendermintRPC && originalResult != nil {
 		response := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      requestID,

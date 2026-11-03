@@ -46,29 +46,35 @@ type Registry struct {
 	prefTypes *protoregistry.Types
 }
 
-func (r *Registry) FindExtensionByName(field protoreflect.FullName) (protoreflect.ExtensionType, error) {
-	// try in types
+// lookup answers from the registry's own files and types under the read lock and, when they do
+// not hold the answer, resolves it with resolve. Any error other than NotFound is returned as is.
+func lookup[T any](r *Registry, held func() (T, error), resolve func() (T, error)) (T, error) {
 	r.mu.RLock()
-	xt, err := r.prefTypes.FindExtensionByName(field)
+	v, err := held()
 	r.mu.RUnlock()
 	if err == nil {
-		return xt, nil
+		return v, nil
 	}
 	if !errors.Is(err, protoregistry.NotFound) {
-		return nil, err
+		var zero T
+		return zero, err
 	}
-	// not found try in files
-	xd, err := r.FindDescriptorByName(field)
-	if err != nil {
-		return nil, err
-	}
+	return resolve()
+}
 
-	xdExtensionDescriptor, ok := xd.(protoreflect.ExtensionDescriptor)
-	if !ok {
-		return nil, utils.LavaFormatError("Failed converting xd.(protoreflect.ExtensionDescriptor)", nil, utils.Attribute{Key: "xd", Value: xd})
-	}
-
-	return r.registerExtension(dynamicpb.NewExtensionType(xdExtensionDescriptor))
+func (r *Registry) FindExtensionByName(field protoreflect.FullName) (protoreflect.ExtensionType, error) {
+	return lookup(r, func() (protoreflect.ExtensionType, error) { return r.prefTypes.FindExtensionByName(field) },
+		func() (protoreflect.ExtensionType, error) {
+			xd, err := r.FindDescriptorByName(field)
+			if err != nil {
+				return nil, err
+			}
+			xdExtensionDescriptor, ok := xd.(protoreflect.ExtensionDescriptor)
+			if !ok {
+				return nil, utils.LavaFormatError("Failed converting xd.(protoreflect.ExtensionDescriptor)", nil, utils.Attribute{Key: "xd", Value: xd})
+			}
+			return r.registerExtension(dynamicpb.NewExtensionType(xdExtensionDescriptor))
+		})
 }
 
 func (r *Registry) FindExtensionByNumber(message protoreflect.FullName, field protoreflect.FieldNumber) (protoreflect.ExtensionType, error) {
@@ -76,109 +82,64 @@ func (r *Registry) FindExtensionByNumber(message protoreflect.FullName, field pr
 }
 
 func (r *Registry) FindMessageByName(message protoreflect.FullName) (protoreflect.MessageType, error) {
-	r.mu.RLock()
-	mt, err := r.prefTypes.FindMessageByName(message)
-	r.mu.RUnlock()
-	if err == nil {
-		return mt, nil
-	}
-	if !errors.Is(err, protoregistry.NotFound) {
-		return nil, err
-	}
-
-	md, err := r.FindDescriptorByName(message)
-	if err != nil {
-		return nil, err
-	}
-	messageDescriptor, ok := md.(protoreflect.MessageDescriptor)
-	if !ok {
-		return nil, utils.LavaFormatError("Failed converting md.(protoreflect.MessageDescriptor)", nil, utils.Attribute{Key: "md", Value: md})
-	}
-
-	return r.registerMessage(dynamicpb.NewMessageType(messageDescriptor))
+	return lookup(r, func() (protoreflect.MessageType, error) { return r.prefTypes.FindMessageByName(message) },
+		func() (protoreflect.MessageType, error) { return r.resolveMessage(message) })
 }
 
 func (r *Registry) FindMessageByURL(url string) (protoreflect.MessageType, error) {
-	r.mu.RLock()
-	mt, err := r.prefTypes.FindMessageByURL(url)
-	r.mu.RUnlock()
-	if err == nil {
-		return mt, nil
-	}
-	if !errors.Is(err, protoregistry.NotFound) {
-		return nil, err
-	}
+	return lookup(r, func() (protoreflect.MessageType, error) { return r.prefTypes.FindMessageByURL(url) },
+		func() (protoreflect.MessageType, error) { return r.resolveMessage(fullNameFromURL(url)) })
+}
 
-	message := fullNameFromURL(url)
-
+// resolveMessage builds a dynamic message type from message's descriptor and registers it.
+func (r *Registry) resolveMessage(message protoreflect.FullName) (protoreflect.MessageType, error) {
 	md, err := r.FindDescriptorByName(message)
 	if err != nil {
 		return nil, err
 	}
-
 	messageDescriptor, ok := md.(protoreflect.MessageDescriptor)
 	if !ok {
 		return nil, utils.LavaFormatError("Failed converting md.(protoreflect.MessageDescriptor)", nil, utils.Attribute{Key: "md", Value: md})
 	}
-
 	return r.registerMessage(dynamicpb.NewMessageType(messageDescriptor))
 }
 
 func (r *Registry) FindFileByPath(s string) (protoreflect.FileDescriptor, error) {
-	r.mu.RLock()
-	fd, err := r.prefFiles.FindFileByPath(s)
-	r.mu.RUnlock()
-	if err == nil {
-		return fd, nil
-	}
-	if !errors.Is(err, protoregistry.NotFound) {
-		return nil, err
-	}
-
-	dpb, err := r.remote.ProtoFileByPath(s)
-	if err != nil {
-		return nil, err
-	}
-
-	fd, err = protodesc.FileOptions{
-		AllowUnresolvable: true,
-	}.New(dpb, r)
-	if err != nil {
-		return nil, err
-	}
-
-	return r.registerFile(fd)
+	return lookup(r, func() (protoreflect.FileDescriptor, error) { return r.prefFiles.FindFileByPath(s) },
+		func() (protoreflect.FileDescriptor, error) {
+			fd, err := r.newFile(r.remote.ProtoFileByPath(s))
+			if err != nil {
+				return nil, err
+			}
+			return r.registerFile(fd)
+		})
 }
 
 func (r *Registry) FindDescriptorByName(name protoreflect.FullName) (protoreflect.Descriptor, error) {
-	r.mu.RLock()
-	desc, err := r.prefFiles.FindDescriptorByName(name)
-	r.mu.RUnlock()
-	if err == nil {
-		return desc, nil
-	}
-	if !errors.Is(err, protoregistry.NotFound) {
-		return nil, err
-	}
+	return lookup(r, func() (protoreflect.Descriptor, error) { return r.prefFiles.FindDescriptorByName(name) },
+		func() (protoreflect.Descriptor, error) {
+			fd, err := r.newFile(r.remote.ProtoFileContainingSymbol(name))
+			if err != nil {
+				return nil, err
+			}
+			if _, err := r.registerFile(fd); err != nil {
+				return nil, err
+			}
+			r.mu.RLock()
+			defer r.mu.RUnlock()
+			return r.prefFiles.FindDescriptorByName(name)
+		})
+}
 
-	dpb, err := r.remote.ProtoFileContainingSymbol(name)
+// newFile builds a file descriptor from a fetched proto, resolving its imports through the
+// registry. It takes the fetch's own result so a failed fetch passes straight through.
+func (r *Registry) newFile(dpb *descriptorpb.FileDescriptorProto, err error) (protoreflect.FileDescriptor, error) {
 	if err != nil {
 		return nil, err
 	}
-	fd, err := protodesc.FileOptions{
+	return protodesc.FileOptions{
 		AllowUnresolvable: true,
 	}.New(dpb, r)
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := r.registerFile(fd); err != nil {
-		return nil, err
-	}
-
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.prefFiles.FindDescriptorByName(name)
 }
 
 // registerFile registers fd unless a resolution that raced it registered the same

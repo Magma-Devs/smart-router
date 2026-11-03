@@ -8,7 +8,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/cacheformat"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/internal/chainqueries"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
@@ -263,10 +262,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	if analytics == nil {
 		analytics = &metrics.RelayMetrics{}
 	}
-	analytics.IsWrite = chainlib.GetStateful(protocolMessage) != 0
-	analytics.IsArchive = chainqueries.IsArchiveRequest(protocolMessage)
-	analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(protocolMessage)
-	analytics.IsBatch = chainqueries.IsBatchRequest(protocolMessage)
+	classifyRequest(analytics, protocolMessage)
 	rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
 
 	utils.LavaFormatDebug("secondary cache hit",

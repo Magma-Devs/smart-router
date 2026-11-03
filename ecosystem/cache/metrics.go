@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/prometheus/client_golang/prometheus"
@@ -11,10 +12,9 @@ import (
 )
 
 const (
-	DisabledFlagOption = "disabled"
-	totalHitsKey       = "total_hits"
-	totalMissesKey     = "total_misses"
-	totalExpiredKey    = "total_expired"
+	totalHitsKey    = "total_hits"
+	totalMissesKey  = "total_misses"
+	totalExpiredKey = "total_expired"
 )
 
 type CacheMetrics struct {
@@ -27,7 +27,7 @@ type CacheMetrics struct {
 }
 
 func NewCacheMetricsServer(listenAddress string) *CacheMetrics {
-	if listenAddress == DisabledFlagOption {
+	if listenAddress == metrics.DisabledFlagOption {
 		utils.LavaFormatWarning("prometheus endpoint inactive, option is disabled", nil)
 		return nil
 	}
