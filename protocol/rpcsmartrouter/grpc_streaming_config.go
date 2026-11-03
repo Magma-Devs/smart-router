@@ -1,33 +1,21 @@
 package rpcsmartrouter
 
 import (
-	"sync"
 	"time"
-
-	"golang.org/x/time/rate"
 )
 
 // GRPCStreamingConfig holds all configurable parameters for gRPC streaming subscriptions.
 // This follows the same pattern as WebsocketConfig for consistency.
 type GRPCStreamingConfig struct {
-	// Subscription limits
-	MaxSubscriptionsPerClient int    // Max subscriptions per client connection (default: 25)
-	PerClientLimitEnforcement string // "warn" or "reject" (default: "warn")
-	MaxTotalSubscriptions     int    // Global subscription warning/limit threshold (default: 10000)
-	TotalLimitEnforcement     string // "warn" or "reject" (default: "warn")
+	// Subscription limits, rate limits and the cleanup interval (defaults: 25 per client,
+	// 10000 total, 30 subscribes and 60 unsubscribes per minute per client, 1 minute)
+	SubscriptionLimits
 
 	// Subscription sharing (deduplication)
 	SubscriptionSharingEnabled bool // Enable subscription deduplication (default: true)
 
-	// Rate limiting
-	SubscriptionsPerMinutePerClient int // Max subscription creates per minute per client (default: 30)
-	UnsubscribesPerMinutePerClient  int // Max unsubscribe requests per minute per client (default: 60)
-
 	// Timeouts
 	ConnectionTimeout time.Duration // gRPC connection establishment timeout (default: 30s)
-
-	// Cleanup
-	CleanupInterval time.Duration // Interval for stale subscription cleanup (default: 1 minute)
 
 	// Upstream connection pool
 	PoolMinConnections   int // Minimum gRPC connections per endpoint (default: 1)
@@ -49,24 +37,26 @@ type GRPCStreamingConfig struct {
 // DefaultGRPCStreamingConfig returns a GRPCStreamingConfig with sensible defaults
 func DefaultGRPCStreamingConfig() *GRPCStreamingConfig {
 	return &GRPCStreamingConfig{
-		// Subscription limits
-		MaxSubscriptionsPerClient: 25,
-		PerClientLimitEnforcement: "warn",
-		MaxTotalSubscriptions:     10000,
-		TotalLimitEnforcement:     "warn",
+		SubscriptionLimits: SubscriptionLimits{
+			// Subscription limits
+			MaxSubscriptionsPerClient: 25,
+			PerClientLimitEnforcement: "warn",
+			MaxTotalSubscriptions:     10000,
+			TotalLimitEnforcement:     "warn",
+
+			// Rate limiting - gRPC streaming tends to be more efficient, allow higher rates
+			SubscriptionsPerMinutePerClient: 30,
+			UnsubscribesPerMinutePerClient:  60,
+
+			// Cleanup
+			CleanupInterval: 1 * time.Minute,
+		},
 
 		// Subscription sharing
 		SubscriptionSharingEnabled: true,
 
-		// Rate limiting - gRPC streaming tends to be more efficient, allow higher rates
-		SubscriptionsPerMinutePerClient: 30,
-		UnsubscribesPerMinutePerClient:  60,
-
 		// Timeouts - gRPC streaming may take longer to establish
 		ConnectionTimeout: 30 * time.Second,
-
-		// Cleanup
-		CleanupInterval: 1 * time.Minute,
 
 		// Upstream connection pool - gRPC multiplexes streams over fewer connections
 		PoolMinConnections:   1,
@@ -81,91 +71,13 @@ func DefaultGRPCStreamingConfig() *GRPCStreamingConfig {
 	}
 }
 
-// GRPCClientRateLimiter manages per-client rate limiting for gRPC streaming operations.
-// This is similar to ClientRateLimiter but can be extended for gRPC-specific needs.
-//
-// Every method is safe for concurrent use. It has to be: each incoming gRPC stream runs
-// on its own handler goroutine and calls AllowSubscribe there, while stream teardown
-// calls CleanupClient from another. Unsynchronised, that is a concurrent read and write
-// of the same Go map — which is not a caught panic but `fatal error: concurrent map read
-// and map write`, an unrecoverable runtime fault that takes the router down.
-type GRPCClientRateLimiter struct {
-	// Guards the two limiter maps. rate.Limiter is itself goroutine-safe, so this only
-	// covers lookup-and-insert; it is a leaf lock and takes no other lock underneath.
-	lock sync.Mutex
-
-	// subscribeLimiters tracks subscription creation rate per client
-	subscribeLimiters map[string]*rate.Limiter
-	// unsubscribeLimiters tracks unsubscription rate per client
-	unsubscribeLimiters map[string]*rate.Limiter
-
-	subscribeRate    rate.Limit // subscriptions per second
-	unsubscribeRate  rate.Limit // unsubscribes per second
-	subscribeBurst   int        // max burst for subscriptions
-	unsubscribeBurst int        // max burst for unsubscribes
-}
+// GRPCClientRateLimiter is the per-client limiter the gRPC manager uses: the same one as the
+// WebSocket manager's, configured from GRPCStreamingConfig.
+type GRPCClientRateLimiter = ClientRateLimiter
 
 // NewGRPCClientRateLimiter creates a new rate limiter based on gRPC streaming config
 func NewGRPCClientRateLimiter(config *GRPCStreamingConfig) *GRPCClientRateLimiter {
-	// Convert per-minute limits to per-second rate
-	subscribeRate := rate.Limit(float64(config.SubscriptionsPerMinutePerClient) / 60.0)
-	unsubscribeRate := rate.Limit(float64(config.UnsubscribesPerMinutePerClient) / 60.0)
-
-	return &GRPCClientRateLimiter{
-		subscribeLimiters:   make(map[string]*rate.Limiter),
-		unsubscribeLimiters: make(map[string]*rate.Limiter),
-		subscribeRate:       subscribeRate,
-		unsubscribeRate:     unsubscribeRate,
-		subscribeBurst:      config.SubscriptionsPerMinutePerClient,
-		unsubscribeBurst:    config.UnsubscribesPerMinutePerClient,
-	}
-}
-
-// AllowSubscribe checks if the client is allowed to create a gRPC subscription
-func (crl *GRPCClientRateLimiter) AllowSubscribe(clientKey string) bool {
-	crl.lock.Lock()
-	limiter, exists := crl.subscribeLimiters[clientKey]
-	if !exists {
-		limiter = rate.NewLimiter(crl.subscribeRate, crl.subscribeBurst)
-		crl.subscribeLimiters[clientKey] = limiter
-	}
-	crl.lock.Unlock()
-
-	// Allow outside the lock: rate.Limiter has its own, and holding both would serialise
-	// every stream's admission behind one mutex for no gain.
-	return limiter.Allow()
-}
-
-// AllowUnsubscribe checks if the client is allowed to unsubscribe from a gRPC stream
-func (crl *GRPCClientRateLimiter) AllowUnsubscribe(clientKey string) bool {
-	crl.lock.Lock()
-	limiter, exists := crl.unsubscribeLimiters[clientKey]
-	if !exists {
-		limiter = rate.NewLimiter(crl.unsubscribeRate, crl.unsubscribeBurst)
-		crl.unsubscribeLimiters[clientKey] = limiter
-	}
-	crl.lock.Unlock()
-
-	return limiter.Allow()
-}
-
-// CleanupClient removes rate limiters for a disconnected client
-func (crl *GRPCClientRateLimiter) CleanupClient(clientKey string) {
-	crl.lock.Lock()
-	defer crl.lock.Unlock()
-
-	delete(crl.subscribeLimiters, clientKey)
-	delete(crl.unsubscribeLimiters, clientKey)
-}
-
-// ShouldRejectOnClientLimit returns true if the enforcement mode is "reject"
-func (config *GRPCStreamingConfig) ShouldRejectOnClientLimit() bool {
-	return config.PerClientLimitEnforcement == string(EnforcementModeReject)
-}
-
-// ShouldRejectOnTotalLimit returns true if total limit enforcement is "reject"
-func (config *GRPCStreamingConfig) ShouldRejectOnTotalLimit() bool {
-	return config.TotalLimitEnforcement == string(EnforcementModeReject)
+	return newClientRateLimiter(config.SubscriptionLimits)
 }
 
 // gRPC streaming metadata header keys for subscription routing

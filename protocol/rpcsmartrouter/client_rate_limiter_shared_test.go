@@ -10,9 +10,10 @@ import (
 )
 
 // subscriptionRateLimiter is what the WebSocket and gRPC listeners need from their per-client
-// limiter. The two limiters are separate types with the same contract, so every behaviour
-// below runs against both: a test written for one copy alone is how the WebSocket limiter
-// went without a concurrency test while the gRPC one gained it.
+// limiter. Both managers use one limiter type (GRPCClientRateLimiter is an alias of
+// ClientRateLimiter), built from their own config, so every behaviour below runs through both
+// constructors: a test written for one copy alone is how the WebSocket limiter went without a
+// concurrency test while the gRPC one gained it.
 type subscriptionRateLimiter interface {
 	AllowSubscribe(clientKey string) bool
 	AllowUnsubscribe(clientKey string) bool
@@ -45,11 +46,7 @@ func clientRateLimiterCases() []clientRateLimiterCase {
 				config.SubscriptionsPerMinutePerClient = subscribesPerMinute
 				config.UnsubscribesPerMinutePerClient = unsubscribesPerMinute
 				limiter := NewGRPCClientRateLimiter(config)
-				// Counted without the limiter's lock: every test below counts only once the
-				// goroutines that used the limiter have returned.
-				return limiter, func() int {
-					return len(limiter.subscribeLimiters) + len(limiter.unsubscribeLimiters)
-				}
+				return limiter, limiter.ClientCount
 			},
 		},
 	}
