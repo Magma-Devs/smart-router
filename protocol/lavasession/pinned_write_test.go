@@ -53,6 +53,16 @@ func TestPinnedWrite_GoesToThePinnedProviderOnly(t *testing.T) {
 		csm := setupStatefulCSM(t, primaries, nil)
 		first := selectWriteAndRelease(t, csm, "session-1", "")
 		require.Len(t, first, 1, "a sticky write must reach its session's provider only, got %v", first)
+		// Writes pinned to the other primaries give them more served compute units, so the
+		// session's provider is no longer first in the broadcast's ranking. Without this, a
+		// broadcast cut to its first provider would pick the session's provider anyway, and the
+		// check below could not tell the sticky branch from the broadcast.
+		for _, other := range primaries {
+			if other != first[0] {
+				selectWriteAndRelease(t, csm, "", other)
+				selectWriteAndRelease(t, csm, "", other)
+			}
+		}
 		require.Equal(t, first, selectWriteAndRelease(t, csm, "session-1", ""),
 			"the next write in the session must go to the same provider")
 	})
