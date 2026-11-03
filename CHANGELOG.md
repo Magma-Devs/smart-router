@@ -8,6 +8,33 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.6.6 — 2026-11-02
+
+### Highlights
+
+Integrators must update incoming requests to pass the `customer-id` HTTP header, as the router no longer reads the `project-id` header for customer identification. Failing to migrate to the new header name will break customer attribution for all routed RPC traffic. Beyond this breaking API change, version 1.6.6 corrects provider blocking telemetry for edge cases during upstream failover. The `smartrouter_csm_provider_blocked` metric now correctly increments for backup providers and providers that have no usable URL. This ensures operators alerting on this metric will catch routing dead-ends even when a primary upstream fails and the configured fallbacks are unreachable.
+
+### Changes
+
+#### ⚠ Breaking changes
+- feat(chainlib)!: read the customer id from a customer-id header, renamed from project-id (MAG-4727) ([#621]) [`1fb9fc4`]
+
+#### New Features
+- feat(chainlib)!: read the customer id from a customer-id header, renamed from project-id (MAG-4727) ([#621]) [`1fb9fc4`]
+
+#### Bug fixes
+- fix(lavasession): smartrouter_csm_provider_blocked covers backups and providers with no usable url (MAG-4735) ([#624]) [`bb19283`]
+
+#### Documentation updates
+- docs(changelog): v1.6.5 readiness follows reachability; add MAG-4641 (MAG-4720) ([#615]) [`0a97191`]
+
+[#615]: https://github.com/magma-Devs/smart-router/pull/615
+[#621]: https://github.com/magma-Devs/smart-router/pull/621
+[#624]: https://github.com/magma-Devs/smart-router/pull/624
+[`0a97191`]: https://github.com/magma-Devs/smart-router/commit/0a971917d9048e90a8e27bec0cd6d4fc7c4f487b
+[`1fb9fc4`]: https://github.com/magma-Devs/smart-router/commit/1fb9fc4650a25b739a4a64a47051a76b81b0f1af
+[`bb19283`]: https://github.com/magma-Devs/smart-router/commit/bb192831a19e948f4141216345f3cca9cdcc7778
+
 ## v1.6.5 — 2026-10-29
 
 ### Highlights

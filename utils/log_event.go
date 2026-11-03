@@ -2,14 +2,13 @@ package utils
 
 import (
 	zerolog "github.com/rs/zerolog"
-	zerologlog "github.com/rs/zerolog/log"
 )
 
 // LogEvent writes a declared event, a line a reader parses by its fields rather than its text, at
 // INFO on every enabled sink whatever the configured log level: a level filter would make a contract
 // optional. It redacts nothing, so fields must carry only redacted text.
 func LogEvent(message string, fields zerolog.LogObjectMarshaler) {
-	std := zerologlog.Logger.Level(zerolog.TraceLevel)
+	std := stdLogger.Load().Level(zerolog.TraceLevel)
 	std.Info().EmbedObject(fields).Msg(message)
 	if rollingLogLogger.GetLevel() != zerolog.Disabled {
 		rolling := rollingLogLogger.Level(zerolog.TraceLevel)
