@@ -3396,7 +3396,7 @@ drainLoop:
 		}
 	}
 
-	manager.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
+	manager.handleUpstreamDisconnect(ctx, hashedParams, activeSub, nil)
 
 	manager.lock.RLock()
 	upstreamAfter := activeSub.upstreamID
