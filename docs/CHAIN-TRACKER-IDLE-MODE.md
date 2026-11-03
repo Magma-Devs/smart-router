@@ -22,7 +22,11 @@ is merged; it skips routers whose every pod is idle (`smartrouter_chain_idle`) a
 ## How it works
 
 - **The signal.** Each chain + API interface keeps the time of its last *client* request: HTTP,
-  REST, gRPC, and unary JSON-RPC over a websocket. The router's own health relay does not count.
+  REST, gRPC, and unary JSON-RPC over a websocket. The router's own health relay does not count,
+  and neither does a request carrying the `smartrouter-internal-probe` header (any value): that is how
+  our monitoring, such as the hub's serving probes, asks a chain a question without keeping it
+  awake. Such a request is routed and answered as usual, on an idle chain from the tips the router
+  already has, and the header is never forwarded to the node.
   A freshly started process counts as active for one full idle window.
 - **Going idle.** When no client request has arrived for `--chain-tracker-idle-after`, every
   tracker of that chain + interface skips its cycles: no upstream request, no poll-health change,
