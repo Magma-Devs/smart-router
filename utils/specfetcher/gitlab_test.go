@@ -89,6 +89,58 @@ func TestFetchAllSpecs_GitLab_FallbackToTreeAPI(t *testing.T) {
 	require.Contains(t, specs, "ETH1")
 }
 
+func TestFetchAllSpecs_GitLabTarball_SubdirectoryPath(t *testing.T) {
+	tarball := buildTarball(t, "myrepo-main", map[string][]byte{
+		"specs/ethereum.json":    specProposalJSON("ETH1"),
+		"specs/deep/nested.json": specProposalJSON("NESTED"),
+		"other/solana.json":      specProposalJSON("SOLANA"),
+		"root.json":              specProposalJSON("ROOT"),
+	})
+
+	fetcher := newTestFetcher(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/myorg/myrepo/-/archive/main/myrepo-main.tar.gz" {
+			_, _ = w.Write(tarball)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+
+	specs, err := fetcher.FetchAllSpecs(context.Background(), "https://gitlab.com/myorg/myrepo/-/tree/main/specs")
+	require.NoError(t, err)
+	require.Len(t, specs, 1)
+	require.Contains(t, specs, "ETH1")
+}
+
+func TestFetchAllSpecs_GitLab_TarballAndFallbackBothFail(t *testing.T) {
+	fetcher := newTestFetcher(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+
+	_, err := fetcher.FetchAllSpecs(context.Background(), "https://gitlab.com/myorg/myrepo/-/tree/main")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "tarball")
+}
+
+func TestFetchAllSpecs_GitLabTarball_NoSpecsFound(t *testing.T) {
+	tarball := buildTarball(t, "myrepo-main", map[string][]byte{
+		"README.md": []byte("nothing here"),
+	})
+
+	fetcher := newTestFetcher(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/myorg/myrepo/-/archive/main/myrepo-main.tar.gz":
+			_, _ = w.Write(tarball)
+		case "/api/v4/projects/myorg/myrepo/repository/tree":
+			_, _ = w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+
+	_, err := fetcher.FetchAllSpecs(context.Background(), "https://gitlab.com/myorg/myrepo/-/tree/main")
+	require.ErrorContains(t, err, "no .json spec files found")
+}
+
 func TestBuildGitLabTarballURL_SlashedRef(t *testing.T) {
 	fetcher := New(DefaultConfig())
 	info := &RepoInfo{
