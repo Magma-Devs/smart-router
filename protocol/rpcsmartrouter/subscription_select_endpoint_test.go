@@ -19,6 +19,8 @@ type subscriptionManagerCase struct {
 	url func(endpoint string) string
 	// build makes a manager over the given tiers. optimizer is nil for first-available.
 	build func(primary, backup []*common.NodeUrl, optimizer WebSocketEndpointOptimizer) subscriptionCascade
+	// exhausted is the error this manager returns when neither tier has an endpoint to give.
+	exhausted string
 }
 
 // subscriptionCascade is what the table reads off a built manager.
@@ -37,6 +39,7 @@ func subscriptionManagerCases() []subscriptionManagerCase {
 				manager := NewDirectWSSubscriptionManager(getTestMetricsManager(), "jsonrpc", "ETH", "jsonrpc", primary, backup, optimizer, nil)
 				return subscriptionCascade{manager.selectEndpoint, manager.stickyStore, manager.endpointsByURL}
 			},
+			exhausted: "no WebSocket endpoints available (primary and backup both exhausted)",
 		},
 		{
 			name: "grpc",
@@ -45,6 +48,7 @@ func subscriptionManagerCases() []subscriptionManagerCase {
 				manager := NewDirectGRPCSubscriptionManager(nil, "ETH", "grpc", primary, backup, optimizer, nil)
 				return subscriptionCascade{manager.selectEndpoint, manager.stickyStore, manager.endpointsByURL}
 			},
+			exhausted: "no gRPC endpoints available",
 		},
 	}
 }
@@ -70,7 +74,7 @@ func TestSelectEndpoint_Cascade(t *testing.T) {
 		// the chosen ones. Unset means no optimizer.
 		pick func(tier []string) []string
 
-		want string // empty means selectEndpoint must fail
+		want string // empty means selectEndpoint must fail, with the manager's exhausted error
 		// wantOptimizerCalls is how many tiers reached the optimizer.
 		wantOptimizerCalls int
 		// wantStickyAfter is the sticky session left behind; empty means none.
@@ -167,7 +171,7 @@ func TestSelectEndpoint_Cascade(t *testing.T) {
 
 					ep, err := cascade.selectEndpoint(context.Background(), "client-1", ignored)
 					if sc.want == "" {
-						require.Error(t, err)
+						require.EqualError(t, err, manager.exhausted)
 					} else {
 						require.NoError(t, err)
 						assert.Equal(t, manager.url(sc.want), ep.Url)
