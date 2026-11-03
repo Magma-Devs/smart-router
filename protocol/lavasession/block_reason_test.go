@@ -728,18 +728,25 @@ func TestBlockRecord_RepeatBlockRefreshesTheOutcomeButNotTheIdentity(t *testing.
 
 // A record carried from a backup block and re-applied to the REGULAR pool must stop describing the
 // backup pool, or /debug/provider-routing reports a scope the provider is no longer blocked in.
+//
+// The block is reported and the provider's only endpoint is disabled, so the epoch's release pass
+// probes it and keeps it blocked. An unreported regular provider is released by that pass at once,
+// from a goroutine UpdateAllProviders starts as it returns, so its carried block cannot be read
+// reliably.
 func TestBlockRecord_CarriedRecordTakesTheScopeItIsReBlockedIn(t *testing.T) {
 	const address = "moves-pools"
 	csm := CreateConsumerSessionManager()
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight,
-		createNamedPairingList("other"), createNamedPairingList(address)))
+		createNamedPairingList("other"), epochPairing(t, address, false)))
 	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonAllEndpointsDisabled,
-		false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
+		true, csm.atomicReadCurrentEpoch(), 0, 0, nil))
 	require.True(t, blockedRecord(t, csm, address).Backup)
 
 	// Next epoch it is configured as a regular provider, and is not a backup at all.
-	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight,
-		createNamedPairingList("other", address), nil))
+	regular := createNamedPairingList("other")
+	regular[1] = epochPairing(t, address, false)[0]
+	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, regular, nil))
+	awaitEpochReleasePass(t, csm)
 
 	var row BlockedProviderInfo
 	for _, b := range csm.ProviderRoutingSnapshot().Blocked {
