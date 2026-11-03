@@ -22,8 +22,8 @@ import (
 // the raw reply, classifyCachedEntry on the formatted one.
 func TestPrimaryEntryIsJudgedByItsContents(t *testing.T) {
 	primary, rcs := startCacheServerForTest(t)
-	chainParser := secondaryEthParser(t)
-	protocolMessage := secondaryEthMessage(t, chainParser, secondaryEthRequest, 100)
+	chainParser := ethJsonRPCParser(t)
+	protocolMessage := ethProtocolMessage(t, chainParser, secondaryEthRequest, 100)
 	hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("ETH1")
 	require.NoError(t, err)
 
@@ -42,7 +42,7 @@ func TestPrimaryEntryIsJudgedByItsContents(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Eventually(t, func() bool {
-			return directGetETH(rcs, hashKey, block, block).GetReply() != nil
+			return directGetOn(rcs, "ETH1", hashKey, block, block).GetReply() != nil
 		}, 3*time.Second, 25*time.Millisecond, "the staged entry is readable on the server")
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()

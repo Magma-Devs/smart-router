@@ -23,7 +23,12 @@ func (c SecondaryCacheConfig) Enabled() bool {
 // timeoutSet/modeSet distinguish an explicitly provided flag/YAML value from the
 // default. primaryAddress feeds the two advisory warnings: secondary-only is
 // explicitly allowed but warned about (no backfill), and secondary == primary
-// is legal but almost certainly unintended.
+// is legal but almost certainly unintended. primaryEngine (CacheEngineGRPC or
+// CacheEngineRESP, empty with no primary) feeds a third: the secondary is always a
+// gRPC cache (InitCache is its only constructor), so a RESP primary pairs two cache
+// engines, which MAG-2596 does not support. That is a warning and not an error
+// (MAG-4777): both tiers still work, and a router already deployed that way must not
+// stop starting on an upgrade.
 //
 // Tuning options with no address are reported as a warning rather than a startup
 // failure. They are usually a typo worth surfacing, but the same shape occurs
@@ -31,7 +36,7 @@ func (c SecondaryCacheConfig) Enabled() bool {
 // routers run a secondary — and failing startup there turns a harmless unused key
 // into an outage on every router that does not. The warning still names the problem,
 // and the secondary is simply left disabled.
-func (c SecondaryCacheConfig) Validate(primaryAddress string, timeoutSet, modeSet bool) (warnings []string, err error) {
+func (c SecondaryCacheConfig) Validate(primaryAddress, primaryEngine string, timeoutSet, modeSet bool) (warnings []string, err error) {
 	if !c.Enabled() {
 		if timeoutSet || modeSet {
 			warnings = append(warnings, fmt.Sprintf("secondary cache options (%s/%s) are set while %s is empty — dangling configuration, secondary cache disabled (set %s to enable it, or drop the unused options)",
@@ -50,6 +55,10 @@ func (c SecondaryCacheConfig) Validate(primaryAddress string, timeoutSet, modeSe
 		warnings = append(warnings, "secondary cache configured without a primary ("+CacheFlagName+" empty): reads work but nothing backfills, so repeat requests re-query the secondary")
 	} else if c.Address == primaryAddress {
 		warnings = append(warnings, "secondary cache address equals the primary ("+c.Address+"): every miss double-queries the same store, almost certainly a misconfiguration")
+	}
+	if primaryEngine == CacheEngineRESP {
+		warnings = append(warnings, fmt.Sprintf("secondary cache (%s, a %s cache) is paired with a %s primary (resp-cache): mixing cache engines across the two tiers is not a supported configuration (docs/SECONDARY-CACHE.md); both tiers still run",
+			SecondaryCacheFlagName, CacheEngineGRPC, CacheEngineRESP))
 	}
 	return warnings, nil
 }

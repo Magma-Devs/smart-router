@@ -52,50 +52,13 @@ func (f *Fetcher) buildGitHubTarballURL(info *RepoInfo) string {
 // fetchFromGitHubAPI fetches all specs via the GitHub contents API — one
 // rate-limited listing call plus a raw.githubusercontent.com download per file.
 func (f *Fetcher) fetchFromGitHubAPI(ctx context.Context, info *RepoInfo) (map[string]types.Spec, error) {
-	// Build the API URL for listing directory contents
-	apiURL := f.buildGitHubAPIURL(info)
-
-	utils.LavaFormatInfo("Fetching spec file list from GitHub",
-		utils.LogAttr("api_url", apiURL))
-
-	if f.config.Token != "" {
-		utils.LavaFormatInfo("Using GitHub token authentication",
-			utils.LogAttr("token_prefix", f.config.Token[:min(4, len(f.config.Token))]))
-	} else {
-		utils.LavaFormatInfo("Using unauthenticated GitHub access",
-			utils.LogAttr("rate_limit", "60 req/hour"))
-	}
-
-	// Fetch the directory listing
-	apiCtx, cancel := context.WithTimeout(ctx, f.config.APITimeout)
-	defer cancel()
-
-	resp, err := f.doRequest(apiCtx, apiURL, f.setGitHubHeaders)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch from GitHub API: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitHub API error (status: %d, body: %s)", resp.StatusCode, string(body))
-	}
-
-	// Parse directory listing
-	fileURLs, err := f.parseGitHubDirectoryListing(resp.Body, info)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(fileURLs) == 0 {
-		return nil, fmt.Errorf("no .json spec files found in repository")
-	}
-
-	utils.LavaFormatInfo("Found spec files to fetch",
-		utils.LogAttr("file_count", len(fileURLs)))
-
-	// Fetch all spec files in parallel
-	return f.fetchFilesParallel(ctx, fileURLs, f.setGitHubHeaders)
+	return f.fetchFromListingAPI(ctx, info, listingAPI{
+		provider:        "GitHub",
+		listingURL:      f.buildGitHubAPIURL,
+		parseListing:    f.parseGitHubDirectoryListing,
+		setHeaders:      f.setGitHubHeaders,
+		unauthenticated: utils.LogAttr("rate_limit", "60 req/hour"),
+	})
 }
 
 // buildGitHubAPIURL constructs the GitHub API URL for listing directory contents.
