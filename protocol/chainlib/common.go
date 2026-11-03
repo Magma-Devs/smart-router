@@ -28,12 +28,12 @@ import (
 )
 
 const (
-	// ProjectIDHeader is the canonical wire-level key the consumer reads
-	// to attribute a relay to a project for billing analytics. Used as the
-	// HTTP header name, the gRPC metadata key (lower-cased per gRPC
-	// convention), and the fiber Locals key passing the value from the
+	// CustomerIDHeader is the wire-level key the router reads to count a
+	// relay under the caller's customer (MAG-4727; project-id before it).
+	// Used as the HTTP header name, the gRPC metadata key (lower-cased per
+	// gRPC convention), and the fiber Locals key passing the value from the
 	// HTTP upgrade context to the websocket handler.
-	ProjectIDHeader            = "project-id"
+	CustomerIDHeader           = "customer-id"
 	RetryListeningInterval     = 10 // seconds
 	relayMsgLogMaxChars        = 200
 	RPCProviderNodeAddressHash = "Lava-Provider-Node-Address-Hash"
@@ -139,6 +139,17 @@ func (bcp *BaseChainProxy) CapTimeoutForSend(ctx context.Context, chainMessage C
 	return connectCtx, cancel
 }
 
+// relayBodyForLog is the form of a client's request body that the listeners' log lines carry: its
+// head and tail, relayMsgLogMaxChars bytes in all, cut on rune boundaries. A body holds what the
+// client sends, signed transactions included, and the request line is written at info, so the whole
+// body is logged only when --debug-relays asks for it.
+func relayBodyForLog(body string, debugRelays bool) string {
+	if debugRelays {
+		return body
+	}
+	return utils.FormatLongString(body, relayMsgLogMaxChars)
+}
+
 func extractDappIDFromFiberContext(c *fiber.Ctx) (dappID string) {
 	// fiber.Ctx.Get returns a string aliased to fasthttp's per-request
 	// header buffer (zero-copy via unsafe). The buffer is recycled when
@@ -146,19 +157,19 @@ func extractDappIDFromFiberContext(c *fiber.Ctx) (dappID string) {
 	// same worker. RelayMetrics.ProjectHash is enqueued asynchronously
 	// into the OTel BatchLogProcessor and serialized after the request
 	// returns — by then the backing array may already hold another
-	// request's headers, prefix-overwriting the project hash. Clone to
+	// request's headers, prefix-overwriting the customer id. Clone to
 	// detach from fasthttp's pool.
-	dappID = strings.Clone(c.Get(ProjectIDHeader))
+	dappID = strings.Clone(c.Get(CustomerIDHeader))
 	if dappID == "" {
 		dappID = generateNewDappID()
 	}
 	return dappID
 }
 
-// extractDappIDFromGrpcHeader extracts the project id from gRPC metadata.
+// extractDappIDFromGrpcHeader extracts the customer id from gRPC metadata.
 func extractDappIDFromGrpcHeader(metadataValues metadata.MD) string {
 	dappId := generateNewDappID()
-	if values, ok := metadataValues[ProjectIDHeader]; ok && len(values) > 0 {
+	if values, ok := metadataValues[CustomerIDHeader]; ok && len(values) > 0 {
 		// Not the HTTP path's hazard: grpc-go decodes every metadata value into
 		// its own string (x/net's hpack decoder allocates, and a -bin value is
 		// base64-decoded into a fresh one), so incoming metadata never points
@@ -179,10 +190,10 @@ func generateNewDappID() string {
 func constructFiberCallbackWithHeaderAndParameterExtraction(callbackToBeCalled fiber.Handler) fiber.Handler {
 	webSocketCallback := callbackToBeCalled
 	handler := func(c *fiber.Ctx) error {
-		// Extract project id from headers and stash it in the request-scoped
+		// Extract the customer id from headers and stash it in the request-scoped
 		// fiber context for the websocket handler to read after the upgrade.
 		dappID := extractDappIDFromFiberContext(c)
-		c.Locals(ProjectIDHeader, dappID)
+		c.Locals(CustomerIDHeader, dappID)
 		return webSocketCallback(c) // uses external dappID
 	}
 	return handler
@@ -550,9 +561,32 @@ func convertToMetadataMapOfSlices(md map[string][]string) []pairingtypes.Metadat
 func convertRelayMetaDataToMDMetaData(md []pairingtypes.Metadata) metadata.MD {
 	responseMetaData := make(metadata.MD)
 	for _, v := range md {
-		responseMetaData[v.Name] = append(responseMetaData[v.Name], v.Value)
+		responseMetaData[v.Name] = append(responseMetaData[v.Name], sendableGrpcValue(v.Name, v.Value))
 	}
 	return responseMetaData
+}
+
+// sendableGrpcValue percent-encodes the bytes gRPC refuses in a non-binary header value
+// (anything outside printable ASCII, and the % that escapes them). gRPC drops every reply
+// header when one value has such a byte, so one value must not cost the rest.
+func sendableGrpcValue(name, value string) string {
+	if strings.HasSuffix(strings.ToLower(name), "-bin") {
+		return value
+	}
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; c < 0x20 || c > 0x7e {
+			var b strings.Builder
+			for j := 0; j < len(value); j++ {
+				if c := value[j]; c < 0x20 || c > 0x7e || c == '%' {
+					fmt.Fprintf(&b, "%%%02X", c)
+				} else {
+					b.WriteByte(c)
+				}
+			}
+			return b.String()
+		}
+	}
+	return value
 }
 
 // split two requested blocks to the most advanced and most behind

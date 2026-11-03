@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/utils/testnet"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,11 +19,7 @@ import (
 // endpoint's terms, at once, with the caller's budget untouched.
 func refusedAddr(t *testing.T) string {
 	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := lis.Addr().String()
-	require.NoError(t, lis.Close())
-	return addr
+	return testnet.RefusedAddr(t)
 }
 
 // MAG-3653: which failed dials prove an endpoint cannot be reached, and which
