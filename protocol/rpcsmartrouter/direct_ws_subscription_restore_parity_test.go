@@ -68,11 +68,14 @@ func TestRestoreBudget_RefillsAfterASubscriptionStaysUp(t *testing.T) {
 	// longer ago than restoreStableAfter: it was up all that time, which is progress.
 	activeSub.restoresWithoutProgress.Store(maxRestoresWithoutProgress)
 	activeSub.lastRestoredAt.Store(time.Now().Add(-2 * restoreStableAfter).UnixNano())
+	_, oldUpstreamID := h.upstreamOf(activeSub)
 
 	h.srv.dropConnections()
+	// Wait for the restore to commit, not only for the node to see the re-subscribe: a test
+	// that returned with the re-subscribe still in flight would cancel it from its cleanup.
 	require.Eventually(t, func() bool {
 		_, upstreamID := h.upstreamOf(activeSub)
-		return upstreamID != "" && h.upstreamCalls("eth_subscribe") == 2
+		return upstreamID != oldUpstreamID && h.upstreamCalls("eth_subscribe") == 2
 	}, 10*time.Second, 10*time.Millisecond, "the restore must run on a refilled budget")
 	require.Equal(t, 1, h.activeSubscriptionCount())
 	require.True(t, h.attached(sub.clientKey))
