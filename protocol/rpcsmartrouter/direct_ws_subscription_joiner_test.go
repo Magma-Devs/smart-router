@@ -166,3 +166,46 @@ func TestWS_LastClientUnsubscribeFailingUpstreamStillEndsTheSubscription(t *test
 	_, err = h.manager.Unsubscribe(a.ctx, unsubscribeMessage(t, a.routerID), "dapp", "10.0.0.1", a.uid, nil)
 	require.ErrorIs(t, err, common.SubscriptionNotFoundError, "a second unsubscribe finds nothing to end")
 }
+
+// TestWS_UnsubscribeDoesNotTearDownASubscriptionThatEndedUnderIt: a client that is not the last
+// one unsubscribes, and the node ends the subscription with an error while that Unsubscribe is
+// between its two critical sections. The listener's cleanup releases every client, stops counting
+// the subscription and tells the node. Unsubscribe then finds no clients left, and must not tear
+// the subscription down a second time: that counted it off totalSubscriptions and off its pooled
+// connection twice, and told the node again. On main the mapper's last-client answer, false once
+// the cleanup had removed every mapping, kept it from doing so.
+func TestWS_UnsubscribeDoesNotTearDownASubscriptionThatEndedUnderIt(t *testing.T) {
+	h := newReleaseHarness(t)
+	a := h.subscribe("ws-a")
+	t.Cleanup(a.disconnect)
+	b := h.subscribe("ws-b")
+	t.Cleanup(b.disconnect)
+	countReplies(a)
+	countReplies(b)
+	_, upstreamID := onlySubscription(t, h)
+	require.Equal(t, int64(1), h.manager.totalSubscriptions.Load())
+
+	h.manager.beforeUnsubscribeRelease = func() {
+		h.srv.writeToRouter(t, func(write func([]byte)) {
+			frame, err := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"method":  "eth_subscription",
+				"params":  map[string]any{"subscription": upstreamID, "result": nil},
+				"error":   map[string]any{"code": -32000, "message": "subscription ended by the node"},
+			})
+			require.NoError(t, err)
+			write(frame)
+		})
+		require.Eventually(t, func() bool { return h.activeSubscriptionCount() == 0 }, 5*time.Second, 5*time.Millisecond,
+			"the listener's cleanup ends the subscription while the unsubscribe is in its window")
+	}
+	_, err := h.manager.Unsubscribe(a.ctx, unsubscribeMessage(t, a.routerID), "dapp", "10.0.0.1", a.uid, nil)
+	require.NoError(t, err)
+
+	require.Equal(t, int64(0), h.manager.totalSubscriptions.Load(), "the subscription was counted off twice")
+	time.Sleep(300 * time.Millisecond) // room for a second teardown to land
+	require.Equal(t, int32(0), h.pooledSubscriptionCount(), "the pooled connection counted the subscription off twice")
+	require.Equal(t, 1, h.upstreamCalls("eth_unsubscribe"), "the node is told once")
+	require.False(t, h.attached(a.clientKey))
+	require.False(t, h.attached(b.clientKey))
+}
