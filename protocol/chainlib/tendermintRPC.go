@@ -349,14 +349,15 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 
 	testMode := common.IsTestMode(ctx)
 	handlerPost := apil.relayHTTP(httpRelaySpec{
-		testMode: testMode,
+		testMode:    testMode,
+		debugRelays: cmdFlags.DebugRelays,
 		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
 			return httpRelayRequest{body: string(fiberCtx.Body()), logMethod: "POST", logPath: fiberCtx.Request().URI().String()}
 		},
 		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
 			utils.LavaFormatInfo("in <<<", traceAttrs(ctx,
 				utils.LogAttr("seed", msgSeed),
-				utils.LogAttr("_msg", truncatedRelayBody(cmdFlags, req.body)),
+				utils.LogAttr("_msg", req.loggedBody),
 				utils.LogAttr("dappID", dappID),
 				utils.LogAttr("headers", common.RedactMetadata(headers)),
 			)...)
@@ -374,7 +375,8 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 	})
 
 	handlerGet := apil.relayHTTP(httpRelaySpec{
-		testMode: testMode,
+		testMode:    testMode,
+		debugRelays: cmdFlags.DebugRelays,
 		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
 			path := fiberCtx.Params("*")
 			query := "?" + string(fiberCtx.Request().URI().QueryString())

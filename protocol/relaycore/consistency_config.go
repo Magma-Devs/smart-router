@@ -24,24 +24,13 @@ type ConsistencyValidationConfig struct {
 	// the seen block before being deprioritized or skipped (for pre-request validation).
 	// This is typically more lenient than StalenessThreshold.
 	EndpointLagThreshold int64
-
-	// EnableWaitForCatchup determines whether to wait for endpoints to catch up
-	// during pre-request validation. If false, endpoints that are too far behind
-	// are simply skipped.
-	EnableWaitForCatchup bool
-
-	// MaxWaitTime is the maximum time to wait for an endpoint to catch up
-	// when EnableWaitForCatchup is true.
-	MaxWaitTime time.Duration
 }
 
 // DefaultConsistencyValidationConfig returns a default configuration
 // suitable for most chains. Uses conservative defaults.
 func DefaultConsistencyValidationConfig() *ConsistencyValidationConfig {
 	return &ConsistencyValidationConfig{
-		EndpointLagThreshold: 10,                     // Allow endpoints up to 10 blocks behind for pre-request
-		EnableWaitForCatchup: false,                  // Don't wait by default, just skip
-		MaxWaitTime:          500 * time.Millisecond, // Default max wait if enabled
+		EndpointLagThreshold: 10, // Allow endpoints up to 10 blocks behind for pre-request
 	}
 }
 
@@ -50,12 +39,13 @@ func DefaultConsistencyValidationConfig() *ConsistencyValidationConfig {
 //
 // Parameters:
 //   - blockLagForQosSync: The block lag threshold used for QoS sync calculations
-//   - averageBlockTime: The average time between blocks for this chain
+//   - averageBlockTime: The average time between blocks for this chain. Logged for context
+//     only; no threshold derives from it. It used to size MaxWaitTime for a wait-for-catchup
+//     mode that was never enabled, removed with that mode (MAG-4243).
 //   - blockGapFactor: polling-relief multiplier on blockLagForQosSync (0 = default 2)
 //
 // Derivation logic:
 //   - EndpointLagThreshold: max(blockLagForQosSync*blockGapFactor, 10)
-//   - MaxWaitTime: averageBlockTime * 2 - wait up to 2 average block times
 //
 // EndpointLagThreshold bounds how stale an endpoint may be before we stop routing to it, so it
 // derives from blockLagForQosSync alone: this gate only ever sees LATEST_BLOCK requests, since
@@ -79,25 +69,12 @@ func NewConsistencyValidationConfig(
 		endpointLagThreshold = 10
 	}
 
-	// Calculate max wait time: up to 2 average block times
-	maxWaitTime := averageBlockTime * 2
-	// Ensure minimum of 500ms and maximum of 5s
-	if maxWaitTime < 500*time.Millisecond {
-		maxWaitTime = 500 * time.Millisecond
-	}
-	if maxWaitTime > 5*time.Second {
-		maxWaitTime = 5 * time.Second
-	}
-
 	config := &ConsistencyValidationConfig{
 		EndpointLagThreshold: endpointLagThreshold,
-		EnableWaitForCatchup: false, // Disabled by default, can be enabled later
-		MaxWaitTime:          maxWaitTime,
 	}
 
 	utils.LavaFormatInfo("created consistency validation config",
 		utils.LogAttr("endpointLagThreshold", config.EndpointLagThreshold),
-		utils.LogAttr("maxWaitTime", config.MaxWaitTime),
 		utils.LogAttr("blockLagForQosSync", blockLagForQosSync),
 		utils.LogAttr("blockGapFactor", gapFactor),
 		utils.LogAttr("averageBlockTime", averageBlockTime),

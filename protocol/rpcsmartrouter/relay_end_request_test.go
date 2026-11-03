@@ -92,7 +92,7 @@ func TestRelayEnd_NodeCodeOnlyFromAJSONRPCError(t *testing.T) {
 	guid := relayEndCaseGUID("rest_node_error")
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), relayEndShortWait)
 	defer cancel()
-	_, _ = server.SendRelay(ctx, "/cosmos/bank/v1beta1/balances/cosmos1demoacme", "", http.MethodGet, relayEndNoProjectID, "", nil, nil)
+	_, _ = server.SendRelay(ctx, "/cosmos/bank/v1beta1/balances/cosmos1demoacme", "", http.MethodGet, relayEndNoCustomerID, "", nil, nil)
 	event := normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false)
 	require.Equal(t, relayOutcomeNodeError, event["outcome"], "the case under test: a node error")
 	requireRelayEndGolden(t, "rest_node_error", event)

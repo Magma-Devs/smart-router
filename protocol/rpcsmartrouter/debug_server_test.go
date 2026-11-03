@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
-	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -930,8 +929,6 @@ func TestDebugRuntimeConfig_SmartRouter_ReturnsValues(t *testing.T) {
 		"MinAcceptableAvailability",
 		"HighCuThreshold",
 		"MidCuThreshold",
-		"MostFrequentPollingMultiplier",
-		"PollingUpdateLength",
 		"AvailabilityWeight",
 		"LatencyWeight",
 		"SyncWeight",
@@ -975,9 +972,6 @@ func TestDebugRuntimeConfig_SmartRouter_ReturnsValues(t *testing.T) {
 	require.Equal(t, scoreutils.MinAcceptableAvailability, resp.MinAcceptableAvailability)
 	require.Equal(t, scoreutils.HighCuThreshold, resp.HighCuThreshold)
 	require.Equal(t, scoreutils.MidCuThreshold, resp.MidCuThreshold)
-
-	require.Equal(t, chaintracker.MostFrequentPollingMultiplier, resp.MostFrequentPollingMultiplier)
-	require.Equal(t, chaintracker.PollingUpdateLength, resp.PollingUpdateLength)
 
 	// Optimizer defaults are flat top-level keys (the ticket's Phase 2 shape rule),
 	// asserted against DefaultUpstreamSelectorConfig().

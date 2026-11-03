@@ -18,6 +18,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
+	"github.com/magma-Devs/smart-router/utils/testnet"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
@@ -119,10 +120,7 @@ func TestProbeErrorNilIsNotAuthFailure(t *testing.T) {
 // credential. The auth verdict has to win whichever half reports it, and the
 // detail has to name both halves.
 func TestProbeClassificationPromotesAuthFromEitherEndpoint(t *testing.T) {
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	refusedAddr := lis.Addr().String()
-	require.NoError(t, lis.Close())
+	refusedAddr := testnet.RefusedAddr(t)
 	refused := redis.NewClient(&redis.Options{Addr: refusedAddr, DialTimeout: time.Second})
 	t.Cleanup(func() { _ = refused.Close() })
 	connectionErr := pingErr(t, refused)

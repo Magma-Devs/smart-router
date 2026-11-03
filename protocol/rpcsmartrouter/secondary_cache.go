@@ -206,32 +206,21 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	isNodeError, resolvedData := classifyCachedEntry(ctx, protocolMessage, metrics.CacheTierSecondary, cacheReply, copyReply.Data)
 	copyReply.Data = resolvedData
 
-	relayResult := common.RelayResult{
-		Reply: copyReply,
-		Request: &pairingtypes.RelayRequest{
-			RelayData: localRelayData,
-		},
-		Finalized: false, // cache responses are not considered finalized
-		// The status the ENTRY's writer recorded, carried verbatim — including zero,
-		// which means "the writer recorded none" (legacy backend). It is deliberately
-		// NOT fabricated into a 200 here: the backfill below persists this value, and
-		// stamping an assumed 200 would launder "unknown" into "this router observed a
-		// 200" in the primary store, destroying the distinction
-		// CacheRelayReply.StatusCode exists to preserve. A real stored status (429,
-		// 504, non-2xx) flows through so the populator's own checks reject the backfill.
-		// The serving default is applied after the backfill, below.
-		StatusCode: cacheReply.GetStatusCode(),
-		// Served truthfully: a cached node error carries the
-		// lava-identified-node-error header (appendHeadersToRelayResult), and the
-		// populator's node-error check is what rejects its backfill.
-		IsNodeError:  isNodeError,
-		ProviderInfo: common.ProviderInfo{ProviderAddress: ""}, // rendered as "Cached", same as a primary hit
-		// What distinguishes this reply from a primary hit for the caller: both carry
-		// the same locally minted header set and the same bytes, so before MAG-3540
-		// nothing in the response named the tier. It also picks which backend the
-		// debug-gated Lava-Cache-Backend header reports.
-		CacheLookup: cacheReport.ServedBy(common.CacheTierSecondary),
-	}
+	// The status is the one the ENTRY's writer recorded, carried verbatim — including
+	// zero, which means "the writer recorded none" (legacy backend). It is deliberately
+	// NOT fabricated into a 200 here: the backfill below persists this value, and
+	// stamping an assumed 200 would launder "unknown" into "this router observed a
+	// 200" in the primary store, destroying the distinction CacheRelayReply.StatusCode
+	// exists to preserve. A real stored status (429, 504, non-2xx) flows through so the
+	// populator's own checks reject the backfill. The serving default is applied after
+	// the backfill, below. isNodeError is likewise what the populator's node-error check
+	// rejects the backfill on.
+	//
+	// The cache lookup report is what distinguishes this reply from a primary hit for
+	// the caller: both carry the same locally minted header set and the same bytes, so
+	// before MAG-3540 nothing in the response named the tier. It also picks which
+	// backend the debug-gated Lava-Cache-Backend header reports.
+	relayResult := cachedRelayResult(copyReply, localRelayData, cacheReply.GetStatusCode(), isNodeError, cacheReport.ServedBy(common.CacheTierSecondary))
 
 	// Backfill: the populator owns ALL eligibility — node-error, status-code,
 	// stateful, NOT_APPLICABLE, finalization — so this call is unconditional and the
@@ -250,20 +239,9 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 		relayResult.StatusCode = http.StatusOK
 	}
 
-	// Same MAG-2160 rule as primary hits: a cached reply's LatestBlock is the block
-	// that was current when the entry was written, not a fresh chain-head
-	// observation — it never feeds tip state. The reply's SeenBlock is likewise
-	// dropped here, not adopted.
-	relayProcessor.SetResponse(&relaycore.RelayResponse{
-		RelayResult: relayResult,
-		Err:         nil,
-	})
-
-	if analytics == nil {
-		analytics = &metrics.RelayMetrics{}
-	}
-	classifyRequest(analytics, protocolMessage)
-	rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
+	// The reply's SeenBlock is dropped here, not adopted, for the same reason
+	// serveCacheHit keeps LatestBlock out of tip state.
+	rpcss.serveCacheHit(relayProcessor, relayResult, analytics, protocolMessage)
 
 	utils.LavaFormatDebug("secondary cache hit",
 		utils.LogAttr("chainId", chainId),

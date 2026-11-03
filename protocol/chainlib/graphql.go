@@ -347,7 +347,8 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	apil.app = app
 
 	handlerPost := apil.relayHTTP(httpRelaySpec{
-		testMode: common.IsTestMode(ctx),
+		testMode:    common.IsTestMode(ctx),
+		debugRelays: cmdFlags.DebugRelays,
 		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
 			path := "/" + fiberCtx.Params("*")
 			// The url argument is the internal path, not a route: a GraphQL endpoint serves every

@@ -281,7 +281,8 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 
 	// Catch Post
 	app.Post("/*", apil.relayHTTP(httpRelaySpec{
-		testMode: testMode,
+		testMode:    testMode,
+		debugRelays: cmdFlags.DebugRelays,
 		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
 			path := restRequestPath(fiberCtx)
 			query := "?" + string(fiberCtx.Request().URI().QueryString())
@@ -297,7 +298,8 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	}))
 	// Catch the others
 	app.Use("/*", apil.relayHTTP(httpRelaySpec{
-		testMode: testMode,
+		testMode:    testMode,
+		debugRelays: cmdFlags.DebugRelays,
 		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
 			path := restRequestPath(fiberCtx)
 			query := "?" + string(fiberCtx.Request().URI().QueryString())
@@ -316,7 +318,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 				utils.LogAttr("path", req.path),
 				utils.LogAttr("seed", msgSeed),
 				utils.LogAttr("dappID", dappID),
-				utils.LogAttr("body", req.body),
+				utils.LogAttr("body", req.loggedBody),
 				utils.LogAttr("headers", common.RedactMetadata(headers)),
 			)...)
 		},

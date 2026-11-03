@@ -354,7 +354,8 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 
 	chainID := apil.endpoint.ChainID
 	app.Post("/*", apil.relayHTTP(httpRelaySpec{
-		testMode: common.IsTestMode(ctx),
+		testMode:    common.IsTestMode(ctx),
+		debugRelays: cmdFlags.DebugRelays,
 		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
 			path := "/" + fiberCtx.Params("*")
 			return httpRelayRequest{
@@ -366,7 +367,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			utils.LavaFormatInfo("Consumer received a new JSON-RPC request", receivedAttrs(ctx, guid,
 				utils.LogAttr("path", req.path),
 				utils.LogAttr("seed", msgSeed),
-				utils.LogAttr("body", truncatedRelayBody(cmdFlags, req.body)),
+				utils.LogAttr("body", req.loggedBody),
 				utils.LogAttr("dappID", dappID),
 				utils.LogAttr("headers", common.RedactMetadata(headers)),
 			)...)

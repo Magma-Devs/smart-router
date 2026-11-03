@@ -65,8 +65,9 @@ linters:
           - bodyclose
           - unparam
           - prealloc
-      # dupl baseline (MAG-4280). Each rule names one clone pair by both files, so a new copy in the
-      # same file is still reported. Test code is MAG-4281's; the generated-shape files are not
+      # dupl baseline (MAG-4280). Each rule names the files of the clone pairs it excludes, so a copy
+      # of their code in any other file is still reported; a new copy inside a named file, or between
+      # the two files of one rule, is not. Test code is MAG-4281's; the generated-shape files are not
       # hand-written.
       - path: _test\.go
         linters:
@@ -94,8 +95,8 @@ linters:
         linters:
           - dupl
         text: "error_classifier\\.go"
-      # Twins whose differences are the point: latency vs sync normalisation (constants, log keys),
-      # sticky vs fresh selection (log text), and counter vs gauge vectors (Prometheus types).
+      # Twins whose differences are the point: latency vs sync normalisation (constants, log keys)
+      # and sticky vs fresh selection (log text).
       - path: protocol/provideroptimizer/(upstream_selector|provider_optimizer)\.go
         linters:
           - dupl
@@ -104,10 +105,6 @@ linters:
         linters:
           - dupl
         text: "consumer_session_manager\\.go"
-      - path: protocol/metrics/mapped_labels_(counter|gauge)_vec\.go
-        linters:
-          - dupl
-        text: "mapped_labels_(counter|gauge)_vec\\.go"
       - linters:
           - gocritic
         text: "singleCaseSwitch"

@@ -22,7 +22,8 @@ import (
 type httpRelayRequest struct {
 	path           string // the request path, as the handler's received line names it
 	url            string // SendRelay's url argument
-	body           string // the relayed body, also the request on the in/out line
+	body           string // the relayed body, also the request on the debug-level success line
+	loggedBody     string // the body as the received and failure lines print it (relayBodyForLog); relayHTTP sets it
 	connectionType string // SendRelay's connection type
 	logMethod      string // the method on the in/out line
 	logPath        string // the path on the in/out line
@@ -45,6 +46,8 @@ type httpRelaySpec struct {
 	replyBody func(data []byte) []byte
 	// testMode logs every request's URI and headers (common.IsTestMode).
 	testMode bool
+	// debugRelays logs whole request bodies instead of their cut form (--debug-relays).
+	debugRelays bool
 }
 
 // relayHTTP is the handler every HTTP listener route relays through.
@@ -55,6 +58,9 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
 		startTime := time.Now()
 		req := spec.request(fiberCtx)
+		// A body holds what the client sent, a signed transaction included; the received and
+		// failure lines carry its cut form unless --debug-relays (MAG-4454).
+		req.loggedBody = relayBodyForLog(req.body, spec.debugRelays)
 		dappID := extractDappIDFromFiberContext(fiberCtx)
 		analytics := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
 		analytics.SetProcessingTimestampBeforeRelay(startTime)
@@ -85,7 +91,7 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 				}
 			}
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-			apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.body, errMasking, msgSeed, time.Since(startTime), err)
+			apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, errMasking, msgSeed, time.Since(startTime), err)
 			if relayResult.GetStatusCode() != 0 {
 				fiberCtx.Status(relayResult.StatusCode)
 			} else {
@@ -131,7 +137,7 @@ func logReceivedWithSeedAfterDapp(message string) func(context.Context, uint64, 
 			utils.LogAttr("path", req.path),
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("msgSeed", msgSeed),
-			utils.LogAttr("body", req.body),
+			utils.LogAttr("body", req.loggedBody),
 			utils.LogAttr("headers", common.RedactMetadata(headers)),
 		)...)
 	}
@@ -239,7 +245,6 @@ func (wsl *wsListenerBase) websocketRoutes(ctx context.Context, app *fiber.App, 
 			RpcConsumerLogs:        base.logger,
 			RefererMatchString:     refererMatchString,
 			CmdFlags:               cmdFlags,
-			RelayMsgLogMaxChars:    relayMsgLogMaxChars,
 			ChainID:                chainID,
 			ApiInterface:           apiInterface,
 			ConnectionType:         connectionType,
@@ -256,15 +261,6 @@ func (wsl *wsListenerBase) websocketRoutes(ctx context.Context, app *fiber.App, 
 	app.Get("/ws", upgrade, callback)
 	app.Get("/websocket", upgrade, callback) // catching http://HOST:PORT/1/websocket requests.
 	return upgrade, callback
-}
-
-// truncatedRelayBody is the body as the JSON-RPC and Tendermint received lines print it: cut to
-// relayMsgLogMaxChars unless --debug-relays is set.
-func truncatedRelayBody(cmdFlags common.ConsumerCmdFlags, body string) string {
-	if cmdFlags.DebugRelays {
-		return body
-	}
-	return utils.FormatLongString(body, relayMsgLogMaxChars)
 }
 
 // The batch refusal answer is JSON-RPC only: Tendermint batches carry no chain rule that refuses them.
