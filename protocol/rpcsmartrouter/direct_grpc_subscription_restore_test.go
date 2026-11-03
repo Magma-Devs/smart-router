@@ -361,7 +361,7 @@ func newManagerAgainstUpstreams(t *testing.T, addrs ...string) *DirectGRPCSubscr
 		require.NoError(t, err)
 		conn, err := pool.GetConnectionForStream(ctx)
 		require.NoError(t, err)
-		conn.descriptorsCache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", streamingMethodDescriptor(t))
+		conn.descriptors.cache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", streamingMethodDescriptor(t))
 	}
 	return manager
 }
@@ -668,7 +668,7 @@ func dialRestoreListener(t *testing.T, manager *DirectGRPCSubscriptionManager) *
 
 	// The fake upstream serves any method, so the feed reuses the streaming descriptor the
 	// harness has: a server-streaming method over the reflection request and response types.
-	connectionForUpstream(t, manager).descriptorsCache.Store("test.v1.Feed.Subscribe", streamingMethodDescriptor(t))
+	connectionForUpstream(t, manager).descriptors.cache.Store("test.v1.Feed.Subscribe", streamingMethodDescriptor(t))
 
 	endpoint := &lavasession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc}
 	sender := &restoreRelaySender{rpcss: &RPCSmartRouterServer{chainParser: parser, listenEndpoint: endpoint}, manager: manager}
