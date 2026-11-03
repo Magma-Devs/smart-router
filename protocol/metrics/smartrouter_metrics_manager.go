@@ -740,7 +740,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, cacheLabels)
 	cacheFailedTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cache_failed_total",
-		Help: "Total number of cache lookups that did not produce a cached response, per cache tier, split by outcome (miss = clean not-found, error = transport/server error, timeout = lookup budget exceeded).",
+		Help: "Total number of cache lookups that did not produce a cached response, per cache tier, split by outcome (miss = clean not-found, error = transport/server error, or a JSON-RPC/Tendermint entry that is not a usable reply and was refused, timeout = lookup budget exceeded).",
 	}, append(append([]string{}, cacheLabels...), "outcome"))
 	cacheLatencyHistogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_cache_latency_milliseconds",
