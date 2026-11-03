@@ -118,8 +118,9 @@ func (p *Policy) Decide(input DecisionInput) DecisionOutput {
 	//     DEFAULT/latest;
 	//   - EIP-1898 block objects, {"blockHash": ...} AND {"blockNumber": ...}, on eth_call,
 	//     eth_getBalance, eth_getStorageAt, eth_getTransactionCount, eth_getCode and eth_getProof.
-	// A rule.block change cannot fix either. Callers can still send `lava-extension: archive`.
-	// Routing them at attempt 0 is MAG-4142.
+	// A rule.block change cannot fix either. For the forms that name a hash, the caller sends
+	// `lava-extension: archive`: by product decision (MAG-4142) that header is the supported
+	// route and no automatic one is planned. The {"blockNumber": ...} form is a parser fix (MAG-4758).
 	//
 	// Adding it anyway inverted the retry: the extension filter dropped every endpoint without
 	// archive, so one failed attempt narrowed a five-endpoint pool to whichever single endpoint

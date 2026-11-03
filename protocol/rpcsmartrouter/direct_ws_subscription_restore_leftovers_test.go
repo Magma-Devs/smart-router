@@ -56,9 +56,10 @@ func TestOverflowRestore_TellsTheNodeToDropTheOldSubscription(t *testing.T) {
 
 // TestRestoreAfterADroppedSocket_DoesNotCallADeadNode is the other half of the same call: when
 // the restore follows a lost socket, the node lost the subscription with it, so there is nobody
-// to tell. teardownUpstreamSubscription skips a dead connection, which is what makes one call
-// right on both restore paths — without it, telling the node here would make rpcclient dial
-// again just to say goodbye, into the outage the pool is still reconnecting from (MAG-4242).
+// to tell. The restore says goodbye only after a queue overflow (replacedStillOnNode), and
+// teardownUpstreamSubscription skips a dead connection besides — telling the node here would make
+// rpcclient dial again just to say goodbye, into the outage the pool is still reconnecting from
+// (MAG-4242).
 func TestRestoreAfterADroppedSocket_DoesNotCallADeadNode(t *testing.T) {
 	h := newReleaseHarness(t)
 	sub := h.subscribe("ws-1")
@@ -82,11 +83,10 @@ func TestRestoreAfterADroppedSocket_DoesNotCallADeadNode(t *testing.T) {
 }
 
 // endSubscriptionWith drives the real listener's error branch with err, through the
-// upstreamErrSource seam listenForUpstreamMessages takes for exactly this. A client that
-// redialed cannot be produced from the node side: rpcclient mints ErrClientReconnected
-// internally, when a write fails while the old read loop is still running, and a call whose
-// deadline has already passed — the MAG-4037 trigger — fails the redial on the same expired
-// deadline, so no reconnect lands.
+// upstreamErrSource seam listenForUpstreamMessages takes for exactly this. The seam leaves the
+// old socket and its subscription in place, which a real redial does not: a call whose deadline
+// has already passed fails its write and its own redial, and the next call redials for real
+// (redialUnderTheSubscriptions drives that).
 func endSubscriptionWith(t *testing.T, h *releaseHarness, activeSub *directActiveSubscription, err error) {
 	t.Helper()
 	errCh := make(chan error, 1)

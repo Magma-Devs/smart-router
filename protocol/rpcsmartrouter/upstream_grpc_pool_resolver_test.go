@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -286,4 +287,107 @@ func TestUpstreamGRPCPool_AClosedPoolRefusesALookupPromptly(t *testing.T) {
 	require.Error(t, err, "the pool is closed, so its endpoint is no longer resolvable")
 	require.NotErrorIs(t, err, context.DeadlineExceeded,
 		"and it reports the closure rather than hanging until the caller's deadline")
+}
+
+// startStallingProxy forwards the first connection it accepts to target and holds every
+// later one open without forwarding a byte: a node that takes a new connection and never
+// answers on it. held receives as each such connection is accepted.
+func startStallingProxy(t *testing.T, target string) (addr string, held <-chan struct{}) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	heldConns := make(chan struct{}, 1)
+	var mu sync.Mutex
+	var open []net.Conn
+	closed := false
+	track := func(conn net.Conn) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if closed {
+			_ = conn.Close()
+			return false
+		}
+		open = append(open, conn)
+		return true
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		closed = true
+		for _, conn := range open {
+			_ = conn.Close()
+		}
+	})
+
+	go func() {
+		for accepted := 0; ; accepted++ {
+			client, err := listener.Accept()
+			if err != nil || !track(client) {
+				return
+			}
+			if accepted > 0 {
+				select {
+				case heldConns <- struct{}{}:
+				default:
+				}
+				continue
+			}
+			upstream, err := net.Dial("tcp", target)
+			if err != nil || !track(upstream) {
+				return
+			}
+			go func() { _, _ = io.Copy(upstream, client) }()
+			go func() { _, _ = io.Copy(client, upstream) }()
+		}
+	}()
+	return listener.Addr().String(), heldConns
+}
+
+// TestUpstreamGRPCPool_AColdLookupDoesNotWaitForAnotherSubscribersDial pins where a
+// lookup finds a channel to borrow. The pool dials under its lock when it scales up, for
+// up to connectTimeout. A lookup that read the pool's connection list waited behind that
+// dial, so a subscriber that already held a working channel could not resolve a cold
+// service on it until another subscriber's dial ended. With the defaults (connectTimeout
+// 30 s, reflection-timeout 5 s) the lookup also ran out of its own budget while it waited.
+func TestUpstreamGRPCPool_AColdLookupDoesNotWaitForAnotherSubscribersDial(t *testing.T) {
+	server, streams := startCountingReflectionServer(t, 0)
+	proxy, held := startStallingProxy(t, server)
+	pool := NewUpstreamGRPCPoolWithConfig(&common.NodeUrl{
+		Url:        "grpc://" + proxy,
+		GrpcConfig: common.GrpcConfig{AllowInsecure: true},
+	}, &GRPCStreamingConfig{
+		PoolMinConnections:   1,
+		PoolMaxConnections:   2,
+		StreamsPerConnection: 1,
+		ConnectionTimeout:    4 * time.Second,
+	})
+	t.Cleanup(func() { _ = pool.Close() })
+
+	first, err := pool.ReserveConnectionForStream(context.Background())
+	require.NoError(t, err)
+
+	// A second subscriber: the first channel carries its one stream, so the pool scales up
+	// and dials under its lock, and the proxy holds that dial until ConnectionTimeout.
+	scaling := make(chan struct{})
+	go func() {
+		defer close(scaling)
+		if conn, err := pool.ReserveConnectionForStream(context.Background()); err == nil {
+			pool.NotifyStreamRemoved(conn)
+		}
+	}()
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the scale-up dial never reached the node")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	method, err := first.GetMethodDescriptor(ctx, "grpc.health.v1.Health", "Check")
+	require.NoError(t, err, "the first subscriber's channel is up, so its lookup must not wait for the second subscriber's dial")
+	require.NotNil(t, method)
+	require.Equal(t, int32(1), streams.Load())
+	<-scaling
 }

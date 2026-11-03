@@ -16,7 +16,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
@@ -197,6 +196,11 @@ type DirectWSSubscriptionManager struct {
 	// outside tests; tests use it to hold a restore at exactly that point.
 	beforeRestoreCommit func()
 
+	// beforeUnsubscribeRelease, when set, runs in Unsubscribe after its first critical section
+	// has released dwsm.lock and before the node is called and the client released under it
+	// again. Nil outside tests; tests use it to act in the window between the two.
+	beforeUnsubscribeRelease func()
+
 	// Upstream connection pools keyed by endpoint URL
 	upstreamPools map[string]*UpstreamWSPool
 
@@ -209,21 +213,10 @@ type DirectWSSubscriptionManager struct {
 	chainID        string
 	apiInterface   string
 
-	// Upstream endpoint configuration - two-tier separation matches HTTP backup model.
-	// Primary tier serves all selections; backup tier is only consulted when primary is
-	// exhausted (analogous to ConsumerSessionManager's pairing/backupProviders split).
-	//
-	// These three are mutable: SetEndpoints swaps them (copy-on-write) whenever the live
-	// pairing changes, so a provider that was down at boot joins the tier once it
-	// recovers. All three are guarded by `lock` — read them via endpointsSnapshot, never
-	// directly, or selection races the swap.
-	wsEndpoints       []*common.NodeUrl          // Primary tier — selected first
-	wsBackupEndpoints []*common.NodeUrl          // Backup tier — used only when primary exhausted
-	endpointsByURL    map[string]*common.NodeUrl // Quick lookup by URL across both tiers (sticky-session uniformity)
-	optimizer         WebSocketEndpointOptimizer // Optimizer for endpoint selection (can be nil)
-
-	// Sticky sessions for subscription affinity - same client uses same endpoint
-	stickyStore *lavasession.StickySessionStore
+	// Upstream endpoint tiers, the optimizer, sticky sessions and endpoint selection, shared
+	// with the gRPC manager. Two-tier separation matches the HTTP backup model: the backup
+	// tier is only consulted when primary is exhausted.
+	subscriptionEndpoints
 
 	// Configuration - all configurable parameters
 	config *WebsocketConfig
@@ -264,16 +257,6 @@ func NewDirectWSSubscriptionManager(
 	optimizer WebSocketEndpointOptimizer,
 	config *WebsocketConfig,
 ) *DirectWSSubscriptionManager {
-	// Build URL lookup map across both tiers so sticky-session lookups by URL
-	// work uniformly regardless of which tier the endpoint came from.
-	endpointsByURL := make(map[string]*common.NodeUrl, len(wsEndpoints)+len(wsBackupEndpoints))
-	for _, ep := range wsEndpoints {
-		endpointsByURL[ep.Url] = ep
-	}
-	for _, ep := range wsBackupEndpoints {
-		endpointsByURL[ep.Url] = ep
-	}
-
 	// Use default config if none provided
 	if config == nil {
 		config = DefaultWebsocketConfig()
@@ -290,51 +273,14 @@ func NewDirectWSSubscriptionManager(
 		connectionType:       connectionType,
 		chainID:              chainID,
 		apiInterface:         apiInterface,
-		wsEndpoints:          wsEndpoints,
-		wsBackupEndpoints:    wsBackupEndpoints,
-		endpointsByURL:       endpointsByURL,
-		optimizer:            optimizer,
-		stickyStore:          lavasession.NewStickySessionStore(),
-		config:               config,
-		rateLimiter:          NewClientRateLimiter(config),
+		subscriptionEndpoints: newSubscriptionEndpoints("DirectWS",
+			"no WebSocket endpoints available (primary and backup both exhausted)",
+			wsEndpoints, wsBackupEndpoints, optimizer),
+		config:      config,
+		rateLimiter: NewClientRateLimiter(config),
 	}
 }
 
-// wsEndpointsSnapshot is an immutable view of both tiers plus the URL index,
-// taken under the read lock. SetEndpoints replaces the manager's slices and map
-// wholesale rather than mutating them, so a snapshot stays coherent for the
-// duration of a selection — including across the optimizer call, which must not
-// run while the lock is held.
-type wsEndpointsSnapshot struct {
-	primary []*common.NodeUrl
-	backup  []*common.NodeUrl
-	byURL   map[string]*common.NodeUrl
-}
-
-func (dwsm *DirectWSSubscriptionManager) endpointsSnapshot() wsEndpointsSnapshot {
-	dwsm.lock.RLock()
-	defer dwsm.lock.RUnlock()
-	return wsEndpointsSnapshot{
-		primary: dwsm.wsEndpoints,
-		backup:  dwsm.wsBackupEndpoints,
-		byURL:   dwsm.endpointsByURL,
-	}
-}
-
-// SetEndpoints replaces both tiers with the currently-serving WebSocket endpoints
-// and reports whether anything actually changed.
-//
-// The tiers are built once at boot from the providers that passed verification, so
-// without this the set is frozen for the process lifetime: a chain that booted dark
-// would keep the empty tiers forever and every eth_subscribe would fail even after
-// every provider recovered, and a chain that booted on backups alone would never
-// promote a recovered primary back into tier 1 (MAG-2525).
-//
-// Callers pass only endpoints that are live in the pairing. Seeding a tier with
-// configured-but-dead endpoints would be worse than an empty tier: selectEndpoint is
-// called once per subscription with no ignore set and no retry loop, so a dead entry
-// is handed straight to the client, and a non-empty primary tier suppresses the
-// primary→backup cascade entirely.
 // SetEndpointNames gives the manager its endpoints' provider names, by URL, which relay_end writes
 // for the upstream a subscription request went to.
 func (dwsm *DirectWSSubscriptionManager) SetEndpointNames(names map[string]string) {
@@ -357,47 +303,10 @@ func (dwsm *DirectWSSubscriptionManager) subscriptionUpstreamName(hashedParams s
 	return dwsm.upstreamNameOf(activeSub)
 }
 
+// SetEndpoints replaces both tiers with the currently-serving WebSocket endpoints and
+// reports whether anything actually changed. See subscriptionEndpoints.setEndpoints.
 func (dwsm *DirectWSSubscriptionManager) SetEndpoints(wsEndpoints, wsBackupEndpoints []*common.NodeUrl) (changed bool) {
-	byURL := make(map[string]*common.NodeUrl, len(wsEndpoints)+len(wsBackupEndpoints))
-	for _, ep := range wsEndpoints {
-		byURL[ep.Url] = ep
-	}
-	for _, ep := range wsBackupEndpoints {
-		byURL[ep.Url] = ep
-	}
-
-	dwsm.lock.Lock()
-	defer dwsm.lock.Unlock()
-
-	if sameEndpointURLs(dwsm.wsEndpoints, wsEndpoints) && sameEndpointURLs(dwsm.wsBackupEndpoints, wsBackupEndpoints) {
-		return false
-	}
-
-	// Copy-on-write: in-flight selections hold a snapshot of the old slices.
-	dwsm.wsEndpoints = wsEndpoints
-	dwsm.wsBackupEndpoints = wsBackupEndpoints
-	dwsm.endpointsByURL = byURL
-
-	// Existing upstream pools are deliberately left alone. A pool keyed by a URL that
-	// just left the tier still serves its live subscriptions until they close, and
-	// performCleanup reaps it once it is idle; tearing it down here would kill working
-	// subscriptions on a provider that merely failed spec re-verification.
-	return true
-}
-
-// sameEndpointURLs reports whether two tiers hold the same URLs in the same order.
-// Order matters: it is the fallback selection order when the optimizer is absent
-// or returns nothing.
-func sameEndpointURLs(a, b []*common.NodeUrl) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Url != b[i].Url {
-			return false
-		}
-	}
-	return true
+	return dwsm.setEndpoints(wsEndpoints, wsBackupEndpoints)
 }
 
 // Start starts the background cleanup goroutine for the DirectWSSubscriptionManager.
@@ -430,8 +339,9 @@ func (dwsm *DirectWSSubscriptionManager) cleanupStaleSubscriptions(ctx context.C
 }
 
 // performCleanup removes subscriptions with cancelled contexts and cleans up orphaned clients
-// dropSubscriptionLocked releases every client on the subscription, forgets its ids and
-// retires it, telling the node. Used by the periodic sweep. Caller holds dwsm.lock.
+// dropSubscriptionLocked releases every client on the subscription (their reply channels close
+// and their watchers wake), forgets its ids and retires it, telling the node. Used by the
+// periodic sweep and by cleanupSubscription. Caller holds dwsm.lock.
 func (dwsm *DirectWSSubscriptionManager) dropSubscriptionLocked(hashedParams string, activeSub *directActiveSubscription) {
 	for clientKey := range activeSub.connectedClients {
 		activeSub.releaseClientLocked(clientKey)
@@ -518,87 +428,6 @@ func (dwsm *DirectWSSubscriptionManager) performCleanup() {
 	}
 }
 
-// selectEndpoint selects the best WebSocket endpoint for a client.
-// Selection priority:
-//  1. Sticky session (any tier — endpointsByURL spans both)
-//  2. Primary tier (optimizer or first-available)
-//  3. Backup tier (optimizer or first-available) — only when primary is exhausted
-//
-// Backup-tier consultation mirrors ConsumerSessionManager.getSessionWithProviderOrError
-// (see protocol/lavasession/consumer_session_manager.go:820-852).
-func (dwsm *DirectWSSubscriptionManager) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
-	// One snapshot for the whole cascade: SetEndpoints can swap the tiers underneath
-	// us, and re-reading between tiers could see primary from before the swap and
-	// backup from after.
-	snapshot := dwsm.endpointsSnapshot()
-
-	// Tier 0: sticky session for this client (resolves across both tiers).
-	if clientKey != "" {
-		if stickySession, exists := dwsm.stickyStore.Get(clientKey); exists {
-			stickyEndpoint, found := snapshot.byURL[stickySession.Provider]
-			if found {
-				// Check if sticky endpoint is not ignored
-				if ignoredEndpoints == nil {
-					utils.LavaFormatDebug("DirectWS: using sticky session endpoint",
-						utils.LogAttr("clientKey", clientKey),
-						utils.LogAttr("endpoint", sanitizeEndpointURL(stickySession.Provider)),
-					)
-					return stickyEndpoint, nil
-				}
-				if _, ignored := ignoredEndpoints[stickySession.Provider]; !ignored {
-					utils.LavaFormatDebug("DirectWS: using sticky session endpoint",
-						utils.LogAttr("clientKey", clientKey),
-						utils.LogAttr("endpoint", sanitizeEndpointURL(stickySession.Provider)),
-					)
-					return stickyEndpoint, nil
-				}
-				// Sticky endpoint is ignored — clear and continue to cascade.
-				utils.LavaFormatDebug("DirectWS: sticky endpoint ignored, clearing affinity",
-					utils.LogAttr("clientKey", clientKey),
-					utils.LogAttr("ignoredEndpoint", sanitizeEndpointURL(stickySession.Provider)),
-				)
-				dwsm.stickyStore.Delete(clientKey)
-			}
-		}
-	}
-
-	// Tier 1: primary endpoints.
-	ep, primaryErr := dwsm.selectFromTier(ctx, snapshot.primary, snapshot.byURL, ignoredEndpoints)
-	if primaryErr == nil {
-		return ep, nil
-	}
-
-	// Tier 2: backup endpoints (only when primary is exhausted).
-	utils.LavaFormatDebug("DirectWS: primary endpoints exhausted, falling back to backup",
-		utils.LogAttr("primaryReason", primaryErr.Error()),
-		utils.LogAttr("backupCount", len(snapshot.backup)),
-	)
-	ep, backupErr := dwsm.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints)
-	if backupErr == nil {
-		return ep, nil
-	}
-
-	return nil, fmt.Errorf("no WebSocket endpoints available (primary and backup both exhausted)")
-}
-
-// selectFromTier picks one endpoint from the given tier's endpoint slice using
-// the optimizer when available, falling back to first-non-ignored. The caller is
-// responsible for cascade ordering — this helper is tier-agnostic.
-//
-// tier and byURL come from one endpointsSnapshot so the optimizer's chosen URL is
-// resolved against the same generation of the index it was offered from.
-// notHeldOff returns the endpoints of tier that registry is not currently holding off for a
-// rate limit.
-func notHeldOff(registry *holdoff.Registry, tier []*common.NodeUrl) []*common.NodeUrl {
-	ready := make([]*common.NodeUrl, 0, len(tier))
-	for _, ep := range tier {
-		if !registry.HeldOff(ep.Url, ep.Url) {
-			ready = append(ready, ep)
-		}
-	}
-	return ready
-}
-
 // noteSubscribeFailure applies a failed connect/subscribe attempt's consequences. A
 // rate-limited attempt is held off instead of scored — the endpoint is busy, not broken,
 // and an availability sample of 0 is the demotion the rate-limit contract forbids
@@ -608,7 +437,7 @@ func notHeldOff(registry *holdoff.Registry, tier []*common.NodeUrl) []*common.No
 func (dwsm *DirectWSSubscriptionManager) noteSubscribeFailure(url string, err error) {
 	if errors.Is(err, common.StatusCodeError429) {
 		retryAfter, _ := common.RetryAfterFrom(err)
-		heldFor := relayHoldoff.RecordRateLimit(url, url, retryAfter)
+		heldFor := dwsm.holdoffs().RecordRateLimit(url, url, retryAfter)
 		utils.LavaFormatDebug("DirectWS: subscribe rate-limited by upstream, holding endpoint off",
 			utils.LogAttr("endpoint", sanitizeEndpointURL(url)),
 			utils.LogAttr("holdoff", heldFor.String()),
@@ -620,70 +449,9 @@ func (dwsm *DirectWSSubscriptionManager) noteSubscribeFailure(url string, err er
 	}
 }
 
-func (dwsm *DirectWSSubscriptionManager) selectFromTier(ctx context.Context, tier []*common.NodeUrl, byURL map[string]*common.NodeUrl, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
-	if len(tier) == 0 {
-		return nil, fmt.Errorf("tier is empty")
-	}
-
-	// Rate-limit hold-off: prefer endpoints that are not currently held off after a 429.
-	// Only narrows the tier when something ready remains — a subscription must still be
-	// served when every endpoint is held off, so the full tier stays in that case.
-	if ready := notHeldOff(relayHoldoff, tier); len(ready) > 0 && len(ready) < len(tier) {
-		tier = ready
-	}
-
-	// Single endpoint or no optimizer: first-non-ignored.
-	if len(tier) == 1 || dwsm.optimizer == nil {
-		for _, ep := range tier {
-			if ignoredEndpoints == nil {
-				return ep, nil
-			}
-			if _, ignored := ignoredEndpoints[ep.Url]; !ignored {
-				return ep, nil
-			}
-		}
-		return nil, fmt.Errorf("all endpoints in tier are ignored/unavailable")
-	}
-
-	// Optimizer over this tier.
-	allURLs := make([]string, 0, len(tier))
-	for _, ep := range tier {
-		allURLs = append(allURLs, ep.Url)
-	}
-
-	// cu=1 and requestedBlock=LATEST_BLOCK (-2) are sensible defaults for subscriptions.
-	selectedURLs := dwsm.optimizer.ChooseUpstream(ctx, allURLs, ignoredEndpoints, 1, -2)
-
-	if len(selectedURLs) == 0 {
-		// Optimizer returned nothing — fall back to first-non-ignored within tier.
-		for _, ep := range tier {
-			if ignoredEndpoints == nil {
-				return ep, nil
-			}
-			if _, ignored := ignoredEndpoints[ep.Url]; !ignored {
-				return ep, nil
-			}
-		}
-		return nil, fmt.Errorf("optimizer returned no endpoints and all fallbacks in tier are ignored")
-	}
-
-	selectedURL := selectedURLs[0]
-	selectedEndpoint, exists := byURL[selectedURL]
-	if !exists {
-		return nil, fmt.Errorf("optimizer selected unknown endpoint: %s", utils.RedactURL(selectedURL))
-	}
-
-	utils.LavaFormatDebug("DirectWS: selected endpoint via optimizer",
-		utils.LogAttr("endpoint", sanitizeEndpointURL(selectedURL)),
-		utils.LogAttr("tierSize", len(tier)),
-	)
-
-	return selectedEndpoint, nil
-}
-
 // CreateWebSocketConnectionUniqueKey creates a unique key for a WebSocket connection
 func (dwsm *DirectWSSubscriptionManager) CreateWebSocketConnectionUniqueKey(dappID, consumerIp, wsUID string) string {
-	return dappID + ":" + consumerIp + ":" + wsUID
+	return subscriptionClientKey(dappID, consumerIp, wsUID)
 }
 
 // GetOrCreatePool gets or creates an upstream WebSocket pool for the given endpoint.
@@ -849,7 +617,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	startTime := time.Now()
 	selectedEndpoint, err := dwsm.selectEndpoint(ctx, clientKey, nil)
 	if err != nil {
-		dwsm.failPendingSubscription(hashedParams)
+		dwsm.settlePendingSubscription(hashedParams, false)
 		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
 		return nil, nil, fmt.Errorf("failed to select WebSocket endpoint: %w", err)
 	}
@@ -868,7 +636,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	if err != nil {
 		chainlib.SubscriptionUpstreamFrom(ctx).Sent(dwsm.endpointNames.name(selectedEndpoint.Url), startTime, time.Since(startTime), err)
 		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
-		dwsm.failPendingSubscription(hashedParams)
+		dwsm.settlePendingSubscription(hashedParams, false)
 		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
 		return nil, nil, fmt.Errorf("failed to get WebSocket connection: %w", err)
 	}
@@ -879,14 +647,14 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	if err != nil {
 		pool.NotifySubscriptionRemoved(conn)
 		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
-		dwsm.failPendingSubscription(hashedParams)
+		dwsm.settlePendingSubscription(hashedParams, false)
 		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
 		return nil, nil, fmt.Errorf("failed to create upstream subscription: %w", err)
 	}
 
 	// Report success to optimizer. The endpoint answered, so any standing rate-limit
 	// hold-off for it is stale.
-	relayHoldoff.RecordAnswer(selectedEndpoint.Url, selectedEndpoint.Url)
+	dwsm.holdoffs().RecordAnswer(selectedEndpoint.Url, selectedEndpoint.Url)
 	if dwsm.optimizer != nil {
 		latency := time.Since(startTime)
 		dwsm.optimizer.AppendRelayData(selectedEndpoint.Url, latency, 1, 0) // cu=1, syncBlock=0 (unknown)
@@ -930,7 +698,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	if err != nil {
 		upstreamSub.Unsubscribe()
 		pool.NotifySubscriptionRemoved(conn)
-		dwsm.failPendingSubscription(hashedParams)
+		dwsm.settlePendingSubscription(hashedParams, false)
 		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
 		return nil, nil, fmt.Errorf("failed to create subscription reply: %w", err)
 	}
@@ -968,6 +736,8 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		messagesChan:         msgChan, // Use the channel from upstream subscription
 	}
 	activeSub.attachClientLocked(clientKey, routerID, safeChannelSender)
+	// Read while this goroutine still owns activeSub exclusively, for the watcher below.
+	detached := activeSub.detachedSignal(clientKey)
 
 	dwsm.lock.Lock()
 	dwsm.activeSubscriptions[hashedParams] = activeSub
@@ -981,13 +751,13 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	dwsm.totalSubscriptions.Add(1)
 
 	// Notify pending subscriptions of success
-	dwsm.successPendingSubscription(hashedParams)
+	dwsm.settlePendingSubscription(hashedParams, true)
 
 	// Start listening for upstream messages
 	go dwsm.listenForUpstreamMessages(subCtx, hashedParams, activeSub, upstreamSub, msgChan)
 
 	// Handle client disconnect
-	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams)
+	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams, detached)
 
 	utils.LavaFormatInfo("DirectWS: subscription started",
 		utils.LogAttr("routerID", routerID),
@@ -1109,6 +879,10 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 
 	dwsm.lock.Unlock()
 
+	if dwsm.beforeUnsubscribeRelease != nil {
+		dwsm.beforeUnsubscribeRelease()
+	}
+
 	// Call upstream node to unsubscribe only when last client - stream the actual node response
 	var nodeResp []byte
 	var callErr error
@@ -1163,9 +937,12 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 		// upstream side ends without a second call; the map and the counter were settled
 		// in the first critical section.
 		dwsm.endUpstreamSubscriptionLocked(activeSub, false)
-	} else if len(activeSub.connectedClients) == 0 {
+	} else if len(activeSub.connectedClients) == 0 && dwsm.activeSubscriptions[hashedParams] == activeSub {
 		// Not the last client when this started, but the others left while the lock was
-		// released: the node has not been told yet, so this teardown tells it.
+		// released: the node has not been told yet, so this teardown tells it. A subscription
+		// that is no longer the live entry was torn down meanwhile by another path — the node
+		// ended it, or a restore gave it up — which released every client, settled the
+		// counters and told the node; tearing it down again would count it off twice.
 		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, true)
 	}
 
@@ -1417,7 +1194,7 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	// client: its reply channel stayed open and parked the ingress forwarder goroutine,
 	// it kept counting as connected, and the upstream subscription outlived every real
 	// subscriber (MAG-3722).
-	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams)
+	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams, activeSub.detachedSignal(clientKey))
 	if dwsm.connectedClients[clientKey] == nil {
 		dwsm.connectedClients[clientKey] = make(map[string]*common.SafeChannelSender[*pairingtypes.RelayReply])
 	}
@@ -1476,28 +1253,18 @@ func (dwsm *DirectWSSubscriptionManager) checkAndAddPendingSubscription(hashedPa
 	return listenChan, true
 }
 
-// failPendingSubscription notifies waiting clients that subscription failed
-func (dwsm *DirectWSSubscriptionManager) failPendingSubscription(hashedParams string) {
+// settlePendingSubscription reports the creator's outcome to every client waiting on it and
+// retires the entry.
+func (dwsm *DirectWSSubscriptionManager) settlePendingSubscription(hashedParams string, created bool) {
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
 
 	pending, found := dwsm.pendingSubscriptions[hashedParams]
-	if found {
-		pending.broadcastToChannelList(false)
-		delete(dwsm.pendingSubscriptions, hashedParams)
+	if !found {
+		return
 	}
-}
-
-// successPendingSubscription notifies waiting clients that subscription succeeded
-func (dwsm *DirectWSSubscriptionManager) successPendingSubscription(hashedParams string) {
-	dwsm.lock.Lock()
-	defer dwsm.lock.Unlock()
-
-	pending, found := dwsm.pendingSubscriptions[hashedParams]
-	if found {
-		pending.broadcastToChannelList(true)
-		delete(dwsm.pendingSubscriptions, hashedParams)
-	}
+	pending.broadcastToChannelList(created)
+	delete(dwsm.pendingSubscriptions, hashedParams)
 }
 
 // createUpstreamSubscription creates a subscription on the upstream WebSocket
@@ -1628,7 +1395,7 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 				)
 				dwsm.retireConnectionOnUpstreamError(activeSub, err)
 				reconnectInFlight = true
-				go dwsm.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
+				go dwsm.handleUpstreamDisconnect(ctx, hashedParams, activeSub, err)
 			}
 			return
 
@@ -1709,17 +1476,12 @@ func (dwsm *DirectWSSubscriptionManager) dropSlowClient(hashedParams string, act
 	if dwsm.activeSubscriptions[hashedParams] != activeSub {
 		return
 	}
-	clientRouterID, wasAttached := activeSub.releaseClientLocked(clientKey)
-	if !wasAttached {
+	if !dwsm.detachClientLocked(hashedParams, activeSub, clientKey, false) {
 		return
 	}
 	// Under the same lock as the channel's close, so the ingress, which reads the mark once it
 	// sees the close, cannot miss it.
 	dwsm.slowClients[clientKey] = struct{}{}
-	if clientRouterID != "" {
-		dwsm.idMapper.RemoveMapping(clientRouterID)
-	}
-	dwsm.forgetSubscriptionForClientLocked(clientKey, hashedParams, false)
 	if dwsm.metricsManager != nil {
 		dwsm.metricsManager.SetSubscriptionClientDroppedMetric(dwsm.chainID, dwsm.apiInterface)
 	}
@@ -1728,9 +1490,6 @@ func (dwsm *DirectWSSubscriptionManager) dropSlowClient(hashedParams string, act
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		utils.LogAttr("pushesBehind", subscriptionClientReplyBuffer),
 	)
-	if len(activeSub.connectedClients) == 0 {
-		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, true)
-	}
 }
 
 // retireConnectionOnUpstreamError tells the pool that the connection a subscription just failed
@@ -1767,11 +1526,14 @@ func (dwsm *DirectWSSubscriptionManager) retireConnectionOnUpstreamError(activeS
 	)
 }
 
-// handleUpstreamDisconnect handles upstream connection loss and attempts to restore subscriptions
+// handleUpstreamDisconnect handles upstream connection loss and attempts to restore subscriptions.
+// cause is the error that ended the upstream subscription; it decides whether the node still
+// holds the subscription the restore replaces.
 func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	ctx context.Context,
 	hashedParams string,
 	activeSub *directActiveSubscription,
+	cause error,
 ) {
 	// Prevent concurrent restoration attempts
 	if !activeSub.restoring.CompareAndSwap(false, true) {
@@ -1894,16 +1656,9 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	}
 	dwsm.lock.Unlock()
 
-	// Tell the node to drop the subscription that was replaced.
-	//
-	// A restore does not always follow a lost socket. rpcclient ends one subscription on a
-	// connection that stays up when its forward queue overflows, and ends the subscriptions
-	// of a socket it has itself replaced; the restore then re-subscribes over a live
-	// connection the node still holds the old subscription on. Nothing told it to stop, so it
-	// kept publishing frames rpcclient read and dropped, and every overflow left one more of
-	// those behind (MAG-4396). Where the socket did drop, the node lost the subscription with
-	// it and teardownUpstreamSubscription skips a dead connection, so the same call is right
-	// on both paths.
+	// Tell the node to drop the subscription that was replaced, when it still holds it: after a
+	// queue overflow, and never over a socket the old subscription did not live on
+	// (replacedStillOnNode).
 	//
 	// The local rpcclient subscription is deliberately NOT unsubscribed here. Unsubscribe
 	// closes its Err channel, and a listener still parked on that channel reads the close as
@@ -1917,8 +1672,11 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	// restored subscription's listener must start now — its channel holds what the node
 	// pushes in the meantime. The pool notify goes after the node call, so the connection is
 	// still live while it is used.
+	tellNode := replacedStillOnNode(cause, oldUpstream, conn, newUpstreamID)
 	go func() {
-		dwsm.teardownUpstreamSubscription(oldUpstream)
+		if tellNode {
+			dwsm.teardownUpstreamSubscription(oldUpstream)
+		}
 		// Decrements the subscription count on the stale connection — also when the pool
 		// handed back the same connection object, which it counted again for the restored
 		// subscription.
@@ -1950,18 +1708,18 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 // handleClientDisconnect releases one client from one subscription when the client's
 // connection ends, or returns early once the client has already left by another path.
 // It is registered for every attached client, creators and joiners alike.
+//
+// detached is the client's signal from that subscription, read when the client was attached.
+// Looked up here instead, when the goroutine first runs, it could find nothing: Unsubscribe
+// takes the subscription out of the map in its first step (MAG-4345), so a client that
+// unsubscribed before its watcher was scheduled left the watcher with a nil channel, parked
+// until the socket closed — one goroutine per subscribe/unsubscribe on a long-lived socket.
 func (dwsm *DirectWSSubscriptionManager) handleClientDisconnect(
 	ctx context.Context,
 	clientKey string,
 	hashedParams string,
+	detached <-chan struct{},
 ) {
-	dwsm.lock.RLock()
-	var detached <-chan struct{}
-	if activeSub, found := dwsm.activeSubscriptions[hashedParams]; found {
-		detached = activeSub.detachedSignal(clientKey)
-	}
-	dwsm.lock.RUnlock()
-
 	select {
 	case <-ctx.Done():
 	case <-detached:
@@ -1978,26 +1736,29 @@ func (dwsm *DirectWSSubscriptionManager) handleClientDisconnect(
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
 
-	activeSub, found := dwsm.activeSubscriptions[hashedParams]
-	if !found {
-		return
+	if activeSub, found := dwsm.activeSubscriptions[hashedParams]; found {
+		dwsm.detachClientLocked(hashedParams, activeSub, clientKey, true)
 	}
+}
 
+// detachClientLocked releases one client from one subscription: its reply channel closes, its
+// router id is forgotten, and the subscription is torn down, telling the node, when this was
+// its last client. clientGone says the client's connection is over, so its per-client state
+// goes too once it holds no other subscription. Reports false, and does nothing, when the
+// client was no longer attached. Caller holds dwsm.lock.
+func (dwsm *DirectWSSubscriptionManager) detachClientLocked(hashedParams string, activeSub *directActiveSubscription, clientKey string, clientGone bool) bool {
 	clientRouterID, wasAttached := activeSub.releaseClientLocked(clientKey)
 	if !wasAttached {
-		return
+		return false
 	}
 	if clientRouterID != "" {
 		dwsm.idMapper.RemoveMapping(clientRouterID)
 	}
-	dwsm.forgetSubscriptionForClientLocked(clientKey, hashedParams, true)
-
+	dwsm.forgetSubscriptionForClientLocked(clientKey, hashedParams, clientGone)
 	if len(activeSub.connectedClients) == 0 {
-		utils.LavaFormatTrace("DirectWS: no more clients, closing upstream subscription",
-			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
-		)
 		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, true)
 	}
+	return true
 }
 
 // forgetSubscriptionForClientLocked drops hashedParams from the client's subscription set.
@@ -2078,6 +1839,26 @@ func (dwsm *DirectWSSubscriptionManager) endUpstreamSubscriptionLocked(activeSub
 			upstreamPool.NotifySubscriptionRemoved(teardown.conn)
 		}
 	}()
+}
+
+// replacedStillOnNode reports whether the node still holds the upstream subscription a restore
+// replaced, and so has to be told to drop it.
+//
+// Only a queue overflow leaves it there: rpcclient ends that one subscription on a socket that
+// stays up, and the restore re-subscribes beside it. Nothing told the node to stop, so it kept
+// publishing frames rpcclient read and dropped, and every overflow left one more of those behind
+// (MAG-4396). Every other restore follows a socket that is gone, and the node lost the old
+// subscription with it. A dropped socket marks the connection dead. A client that redialed on its
+// own (ErrClientReconnected) has closed the old socket and holds a new one on the same, healthy
+// connection, so a goodbye there would travel over the NEW socket, where the old id names nothing
+// — or names the restored subscription itself, as a Tendermint query always does, and the node
+// would end the subscription the restore just opened. For the same reason the answer is no
+// whenever the old id names the restored subscription on the same connection.
+func replacedStillOnNode(cause error, replaced upstreamSubscriptionTeardown, restoredConn *UpstreamWSConnection, restoredID string) bool {
+	if !errors.Is(cause, rpcclient.ErrSubscriptionQueueOverflow) {
+		return false
+	}
+	return replaced.conn != restoredConn || replaced.upstreamID != restoredID
 }
 
 // upstreamUnsubscribeTimeout bounds the teardown call below. Some gateways never
@@ -2218,31 +1999,10 @@ func (dwsm *DirectWSSubscriptionManager) cleanupSubscription(hashedParams string
 		return
 	}
 
-	// Release every client: closes their reply channels and wakes their watchers.
-	for clientKey := range activeSub.connectedClients {
-		activeSub.releaseClientLocked(clientKey)
-		dwsm.forgetSubscriptionForClientLocked(clientKey, hashedParams, false)
-	}
-
-	// Remove ID mappings
-	dwsm.idMapper.RemoveAllForUpstream(activeSub.upstreamID)
-
-	// Cleanup subscription
+	// Cancelled now, under the lock, as cleanup always has; the teardown below would only
+	// cancel it after the node call.
 	activeSub.cancel()
-	delete(dwsm.activeSubscriptions, hashedParams)
-	dwsm.totalSubscriptions.Add(-1) // Decrement global counter
-
-	// Same omission as the disconnect path: without this the node keeps pushing.
-	// Async because this runs under dwsm.lock and makes a network call, and the
-	// pool notify goes after it so the connection is still live when it is used.
-	teardown := teardownOfLocked(activeSub)
-	upstreamPool := activeSub.upstreamPool
-	go func() {
-		dwsm.teardownUpstreamSubscription(teardown)
-		if teardown.conn != nil {
-			upstreamPool.NotifySubscriptionRemoved(teardown.conn)
-		}
-	}()
+	dwsm.dropSubscriptionLocked(hashedParams, activeSub)
 
 	utils.LavaFormatTrace("DirectWS: subscription cleaned up",
 		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),

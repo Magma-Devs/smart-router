@@ -142,6 +142,9 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 	// the tip store ACCEPTED it — a block behind our own fresh tip is a straggler the fleet store
 	// would reject too, and publishing it would burn a throttle window for nothing.
 	var tipBlock, publishBlock int64
+	// answeredBlock is what the url answered this poll with, whatever the tip store then did
+	// with it. See the onPollBlock call below.
+	var answeredBlock int64
 	var tipRepeat bool
 	defer func() {
 		if tipBlock > 0 && m.onTipObservation != nil {
@@ -150,9 +153,26 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		if publishBlock > 0 {
 			m.publishLocalObservation(endpointURL, publishBlock)
 		}
-		// The same accepted block, with its url, for rpc_endpoint_url_latest_block.
-		if tipBlock > 0 && m.onPollBlock != nil {
-			m.onPollBlock(endpointURL, tipBlock)
+		// The block the url answered with, for rpc_endpoint_url_latest_block — on every
+		// answered poll, including one the tip store rejected.
+		//
+		// This used to report only a block the store accepted, which made the url's series,
+		// and with it the answered-until time the stuck alerts read, depend on what the rest
+		// of the router already knew. A block below a still-fresh stored tip is a straggler
+		// the store drops, and the fleet gate makes that the steady state rather than an
+		// occasional event: each peer skip re-adopts the peer's block, so every forced poll
+		// that answers lower than the peer is a straggler. Solana reaches it by design — the
+		// tracker polls at finalized commitment while relays harvest the slot at the client's,
+		// which is newer — and so does the non-relayed provider of a url two providers share.
+		// Those urls answered every poll and still went silent on their own series two minutes
+		// after init (MAG-4347).
+		//
+		// The block reported is the one the url actually answered, not the stored tip, so a
+		// url stuck on an old block still reads as stuck: its series stands still while its
+		// answered-until time keeps moving, which is the shape the stuck alerts look for. A
+		// failed poll reports nothing, so a url that stops answering stops both.
+		if answeredBlock > 0 && m.onPollBlock != nil {
+			m.onPollBlock(endpointURL, answeredBlock)
 		}
 	}()
 
@@ -177,6 +197,7 @@ func (m *EndpointMonitor) recordPollObservation(endpointURL string, gen uint64, 
 		o.LastPollLatency = latency
 		o.LastPollError = ""
 		o.ConsecutivePollFailures = 0
+		answeredBlock = block // the url answered; the tip store's verdict below is a separate question
 		// Stall evidence: an answer that does not go above the highest block seen is one more
 		// cycle without moving; a new highest block resets the count.
 		o.noteAnsweredBlockLocked(block, true)

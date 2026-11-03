@@ -47,7 +47,7 @@ func dialSubscriptionListener(t *testing.T, manager WSSubscriptionManager) *webs
 		defer cancelShutdown()
 		_ = listener.Shutdown(shutdownCtx)
 	})
-	client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws", http.Header{"project-id": {"acme"}})
+	client, _, err := websocket.DefaultDialer.Dial("ws://"+addr+"/ws", http.Header{"customer-id": {"acme"}})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 	return client

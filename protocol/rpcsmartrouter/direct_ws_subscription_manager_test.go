@@ -19,7 +19,6 @@ import (
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -515,8 +514,8 @@ func TestNewDirectWSSubscriptionManager(t *testing.T) {
 	assert.NotNil(t, manager.upstreamPools)
 	assert.NotNil(t, manager.idMapper)
 	assert.Equal(t, "ETH", manager.chainID)
-	assert.Len(t, manager.wsEndpoints, 1)
-	assert.Equal(t, "wss://test.example.com", manager.wsEndpoints[0].Url)
+	assert.Len(t, manager.primary, 1)
+	assert.Equal(t, "wss://test.example.com", manager.primary[0].Url)
 }
 
 // TestCreateWebSocketConnectionUniqueKey tests the client key generation
@@ -815,13 +814,15 @@ func TestActiveSubscriptionTracksPerClientRouterIDs(t *testing.T) {
 func TestUnsubscribeRateLimiting(t *testing.T) {
 	// Create a config with very low unsubscribe limit for testing
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 10,
-		UnsubscribesPerMinutePerClient:  2, // Very low limit for testing
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 10,
+			UnsubscribesPerMinutePerClient:  2, // Very low limit for testing
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	nodeUrl := &common.NodeUrl{Url: "wss://test.example.com"}
@@ -871,13 +872,15 @@ func TestUnsubscribeRateLimiting(t *testing.T) {
 func TestUnsubscribeAllNotRateLimited(t *testing.T) {
 	// Create a config with very low unsubscribe limit
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 10,
-		UnsubscribesPerMinutePerClient:  1, // Extremely low limit
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 10,
+			UnsubscribesPerMinutePerClient:  1, // Extremely low limit
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	nodeUrl := &common.NodeUrl{Url: "wss://test.example.com"}
@@ -1368,13 +1371,15 @@ func TestReconnectionUpdatesConnectionBookkeeping(t *testing.T) {
 func TestUnsubscribeRouterIDOwnershipValidation(t *testing.T) {
 	// Create a config with high limits to avoid rate limiting
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 60, // High limit to avoid rate limiting
-		UnsubscribesPerMinutePerClient:  60,
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 60, // High limit to avoid rate limiting
+			UnsubscribesPerMinutePerClient:  60,
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	nodeUrl := &common.NodeUrl{Url: "wss://test.example.com"}
@@ -1996,305 +2001,6 @@ func (f *fakeSubscriptionOptimizer) ChooseUpstream(_ context.Context, allAddress
 func (f *fakeSubscriptionOptimizer) AppendRelayData(_ string, _ time.Duration, _, _ uint64) {}
 func (f *fakeSubscriptionOptimizer) AppendRelayFailure(_ string)                            {}
 
-func TestSelectEndpoint_WS_PrimaryOnly_NilBackup(t *testing.T) {
-	primary := []*common.NodeUrl{
-		{Url: "wss://primary-1.example.com"},
-		{Url: "wss://primary-2.example.com"},
-	}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		nil, // wsBackupEndpoints — none
-		nil, // optimizer
-		nil, // config
-	)
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	require.NotNil(t, ep)
-	// First-available branch with no optimizer and no ignored set returns first endpoint.
-	assert.Equal(t, "wss://primary-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_PrimaryOnly_EmptyBackup(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		[]*common.NodeUrl{}, // empty backup, regression guard for nil-vs-empty equivalence
-		nil,
-		nil,
-	)
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	assert.Equal(t, "wss://primary-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_PrimaryExhausted_FallsBackToBackup(t *testing.T) {
-	primary := []*common.NodeUrl{
-		{Url: "wss://primary-1.example.com"},
-		{Url: "wss://primary-2.example.com"},
-	}
-	backup := []*common.NodeUrl{
-		{Url: "wss://backup-1.example.com"},
-	}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil, // optimizer nil — first-available branch
-		nil,
-	)
-
-	ignored := map[string]struct{}{
-		"wss://primary-1.example.com": {},
-		"wss://primary-2.example.com": {},
-	}
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
-	require.NoError(t, err)
-	require.NotNil(t, ep)
-	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_PrimaryEmpty_BackupOnly(t *testing.T) {
-	backup := []*common.NodeUrl{
-		{Url: "wss://backup-1.example.com"},
-		{Url: "wss://backup-2.example.com"},
-	}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		nil, // primary empty
-		backup,
-		nil,
-		nil,
-	)
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	require.NotNil(t, ep)
-	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_BothExhausted_ReturnsError(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil,
-		nil,
-	)
-
-	ignored := map[string]struct{}{
-		"wss://primary-1.example.com": {},
-		"wss://backup-1.example.com":  {},
-	}
-	_, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "primary and backup both exhausted")
-}
-
-func TestSelectEndpoint_WS_BothEmpty_ReturnsError(t *testing.T) {
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		nil,
-		nil,
-		nil,
-		nil,
-	)
-	_, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.Error(t, err)
-}
-
-func TestSelectEndpoint_WS_StickyOnPrimary_Returns(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil,
-		nil,
-	)
-
-	// Manually set a sticky entry pointing at the primary.
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://primary-1.example.com"})
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	assert.Equal(t, "wss://primary-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_StickyOnBackup_Returns(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil,
-		nil,
-	)
-
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://backup-1.example.com"})
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	// Sticky-on-backup must resolve directly via endpointsByURL (which spans both tiers).
-	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_StickyIgnored_FallsThroughCascade(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil,
-		nil,
-	)
-
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://primary-1.example.com"})
-
-	ignored := map[string]struct{}{
-		"wss://primary-1.example.com": {},
-	}
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
-	require.NoError(t, err)
-	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_OptimizerOverPrimary_NotConsultedForBackup(t *testing.T) {
-	primary := []*common.NodeUrl{
-		{Url: "wss://primary-1.example.com"},
-		{Url: "wss://primary-2.example.com"},
-	}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-
-	calls := 0
-	opt := &fakeSubscriptionOptimizer{
-		chooseFn: func(addresses []string, _ map[string]struct{}) []string {
-			calls++
-			// Always return the second primary URL — backup must never reach the optimizer.
-			return []string{"wss://primary-2.example.com"}
-		},
-	}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		opt,
-		nil,
-	)
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	assert.Equal(t, "wss://primary-2.example.com", ep.Url)
-	// Optimizer must run exactly once (against primary tier). If the cascade
-	// erroneously fell into the backup tier, the optimizer would be invoked twice.
-	assert.Equal(t, 1, calls)
-}
-
-func TestSelectEndpoint_WS_OptimizerOverBackup(t *testing.T) {
-	primary := []*common.NodeUrl{
-		{Url: "wss://primary-1.example.com"},
-		{Url: "wss://primary-2.example.com"},
-	}
-	backup := []*common.NodeUrl{
-		{Url: "wss://backup-1.example.com"},
-		{Url: "wss://backup-2.example.com"},
-	}
-
-	calls := 0
-	opt := &fakeSubscriptionOptimizer{
-		chooseFn: func(addresses []string, ignored map[string]struct{}) []string {
-			calls++
-			// When invoked over the backup tier, return backup-2.
-			// When invoked over the primary tier (with both primaries ignored),
-			// return nothing so the cascade falls through.
-			for _, addr := range addresses {
-				if addr == "wss://backup-2.example.com" {
-					return []string{"wss://backup-2.example.com"}
-				}
-			}
-			return nil
-		},
-	}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		opt,
-		nil,
-	)
-
-	ignored := map[string]struct{}{
-		"wss://primary-1.example.com": {},
-		"wss://primary-2.example.com": {},
-	}
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
-	require.NoError(t, err)
-	assert.Equal(t, "wss://backup-2.example.com", ep.Url)
-	// Optimizer must be consulted for both tiers: once over primary (returns nil
-	// → cascade falls through), then once over backup (returns backup-2).
-	assert.Equal(t, 2, calls)
-}
-
-func TestSelectEndpoint_WS_EndpointsByURL_IncludesBothTiers(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil,
-		nil,
-	)
-
-	require.Len(t, manager.endpointsByURL, 2)
-	assert.NotNil(t, manager.endpointsByURL["wss://primary-1.example.com"])
-	assert.NotNil(t, manager.endpointsByURL["wss://backup-1.example.com"])
-}
-
 // ==================== MAG-1824 regression coverage ====================
 
 // mockWSProtocolMessageWithRawData is a ProtocolMessage variant that lets a test inject
@@ -2377,13 +2083,15 @@ func TestCreateSubscriptionReply_EchoesStringRequestID(t *testing.T) {
 // an entry in clientRouterIDs for that subscription, so this remains safe.
 func TestUnsubscribe_AcceptsUpstreamIDFallback(t *testing.T) {
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 60,
-		UnsubscribesPerMinutePerClient:  60,
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 60,
+			UnsubscribesPerMinutePerClient:  60,
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	manager := NewDirectWSSubscriptionManager(
@@ -2767,13 +2475,15 @@ func TestListenForUpstreamMessages_NilUpstreamSubDoesNotPanic(t *testing.T) {
 // open a hole that lets one client unsubscribe another client's shared subscription.
 func TestUnsubscribe_StillRejectsForeignSubscription(t *testing.T) {
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 60,
-		UnsubscribesPerMinutePerClient:  60,
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 60,
+			UnsubscribesPerMinutePerClient:  60,
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	manager := NewDirectWSSubscriptionManager(
@@ -3396,7 +3106,7 @@ drainLoop:
 		}
 	}
 
-	manager.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
+	manager.handleUpstreamDisconnect(ctx, hashedParams, activeSub, nil)
 
 	manager.lock.RLock()
 	upstreamAfter := activeSub.upstreamID

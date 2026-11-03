@@ -49,6 +49,3 @@ func (dct *DummyChainTracker) PollNowWithDeliveryDeadline(deliveryCtx, resultCtx
 func (dct *DummyChainTracker) StartAndServe(ctx context.Context) error {
 	return nil
 }
-
-// AddBlockGap adds a new block gap measurement
-func (dct *DummyChainTracker) AddBlockGap(newData time.Duration, blocks uint64) {}

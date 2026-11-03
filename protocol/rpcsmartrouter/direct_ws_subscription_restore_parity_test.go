@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,11 +68,14 @@ func TestRestoreBudget_RefillsAfterASubscriptionStaysUp(t *testing.T) {
 	// longer ago than restoreStableAfter: it was up all that time, which is progress.
 	activeSub.restoresWithoutProgress.Store(maxRestoresWithoutProgress)
 	activeSub.lastRestoredAt.Store(time.Now().Add(-2 * restoreStableAfter).UnixNano())
+	_, oldUpstreamID := h.upstreamOf(activeSub)
 
 	h.srv.dropConnections()
+	// Wait for the restore to commit, not only for the node to see the re-subscribe: a test
+	// that returned with the re-subscribe still in flight would cancel it from its cleanup.
 	require.Eventually(t, func() bool {
 		_, upstreamID := h.upstreamOf(activeSub)
-		return upstreamID != "" && h.upstreamCalls("eth_subscribe") == 2
+		return upstreamID != oldUpstreamID && h.upstreamCalls("eth_subscribe") == 2
 	}, 10*time.Second, 10*time.Millisecond, "the restore must run on a refilled budget")
 	require.Equal(t, 1, h.activeSubscriptionCount())
 	require.True(t, h.attached(sub.clientKey))
@@ -150,4 +154,74 @@ func TestSubscribeReleasesItsPoolSlotWhenTheSubscribeFails(t *testing.T) {
 		"a failed subscribe left its reserved slot counted on the connection")
 	require.Equal(t, 0, h.activeSubscriptionCount())
 	require.Equal(t, int64(0), manager.totalSubscriptions.Load())
+}
+
+// TestSubscriptionCountsItsPoolSlotWhileTheNodeAnswers pins reserve-on-pick where the manager
+// makes it, which TestSubscribeReservesItsPoolSlot cannot: that one drives the pool method alone,
+// so a manager that went back to GetConnection and counted the slot after the node's answer would
+// leave it green. Here the node holds its answer to the subscribe — first a client's, then the
+// restore's after the socket drops — and the connection must already count the subscription,
+// because maybeScaleDown closes a connection past minConnections that counts none.
+func TestSubscriptionCountsItsPoolSlotWhileTheNodeAnswers(t *testing.T) {
+	h := newReleaseHarness(t)
+
+	// The node reads the subscribe but cannot answer yet.
+	h.srv.writeMu.Lock()
+	unlockNode := sync.OnceFunc(h.srv.writeMu.Unlock)
+	t.Cleanup(unlockNode)
+
+	body, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "method": "eth_subscribe", "params": []interface{}{"newHeads"}, "id": 1,
+	})
+	require.NoError(t, err)
+	msg := &mockWSProtocolMessageWithRawData{
+		mockWSProtocolMessage: mockWSProtocolMessage{method: "eth_subscribe", params: []interface{}{"newHeads"}},
+		rawData:               body,
+	}
+	ctx, disconnect := context.WithCancel(context.Background())
+	t.Cleanup(disconnect)
+	subscribed := make(chan error, 1)
+	go func() {
+		_, replies, err := h.manager.StartSubscription(ctx, msg, "dapp", "10.0.0.1", "ws-1", nil)
+		if err == nil {
+			go func() {
+				for range replies {
+				}
+			}()
+		}
+		subscribed <- err
+	}()
+	require.Eventually(t, func() bool { return h.upstreamCalls("eth_subscribe") == 1 }, 5*time.Second, 5*time.Millisecond)
+	require.Equal(t, int32(1), h.pooledSubscriptionCount(),
+		"the connection must count the subscription while the node answers the subscribe")
+	unlockNode()
+	select {
+	case err := <-subscribed:
+		require.NoError(t, err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the subscribe never returned")
+	}
+	require.Equal(t, int32(1), h.pooledSubscriptionCount())
+	activeSub := h.subscriptionOf(h.manager.CreateWebSocketConnectionUniqueKey("dapp", "10.0.0.1", "ws-1"))
+	require.NotNil(t, activeSub)
+	oldConn, oldID := h.upstreamOf(activeSub)
+
+	// The socket drops, and the node holds its answer to the restore's re-subscribe.
+	h.srv.writeMu.Lock()
+	unlockNode = sync.OnceFunc(h.srv.writeMu.Unlock)
+	t.Cleanup(unlockNode)
+	h.srv.dropConnections()
+	require.Eventually(t, func() bool { return h.upstreamCalls("eth_subscribe") == 2 }, 10*time.Second, 5*time.Millisecond,
+		"the restore re-subscribes on a new connection")
+	require.Equal(t, int32(1), h.pooledSubscriptionCount(),
+		"the restore's new connection must count the subscription while the node answers the re-subscribe")
+	unlockNode()
+	// Wait for the restore to commit: a test that ended with the re-subscribe still in flight
+	// would cancel it from its cleanup.
+	require.Eventually(t, func() bool {
+		conn, id := h.upstreamOf(activeSub)
+		return conn != oldConn && id != oldID
+	}, 10*time.Second, 10*time.Millisecond, "the restore commits")
+	require.Equal(t, 1, h.activeSubscriptionCount())
+	require.Eventually(t, func() bool { return h.pooledSubscriptionCount() == 1 }, 5*time.Second, 10*time.Millisecond)
 }
