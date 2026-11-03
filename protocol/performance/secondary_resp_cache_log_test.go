@@ -22,7 +22,7 @@ func TestSecondaryRespCacheLogsUnderItsOwnName(t *testing.T) {
 	var reader *performance.RespCache
 	logs := captureLog(t, func() {
 		cfg.Name = "secondary-resp-cache"
-		reader, err = performance.OpenSecondaryRespCache(cfg)
+		reader, err = performance.OpenSecondaryRespCache(cfg, performance.DefaultSecondaryCacheTimeout)
 		require.NoError(t, err)
 		require.Eventually(t, func() bool { return reader.DebugCacheState().Reachable != nil }, 10*time.Second, 50*time.Millisecond)
 	})
