@@ -715,12 +715,6 @@ func stripBrotliAcceptEncoding(c *fiber.Ctx) error {
 	return c.Next()
 }
 
-// setup a common preflight and cors configuration allowing wild cards and preflight caching.
-//
-// servesWebSocketUpgrades says whether the caller registers a route that can serve a
-// websocket upgrade. Only those listeners may hand an upgrade on the health path
-// past the health handler; see the health route below for why the distinction has
-// to be explicit rather than inferred.
 // chainListenerBase holds what every chain listener is built with, and the address it
 // listens on once Serve has bound it.
 type chainListenerBase struct {
@@ -738,6 +732,12 @@ func (apil *chainListenerBase) GetListeningAddress() string {
 	return ""
 }
 
+// setup a common preflight and cors configuration allowing wild cards and preflight caching.
+//
+// servesWebSocketUpgrades says whether the caller registers a route that can serve a
+// websocket upgrade. Only those listeners may hand an upgrade on the health path
+// past the health handler; see the health route below for why the distinction has
+// to be explicit rather than inferred.
 func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheckPath string, healthReporter HealthReporter, servesWebSocketUpgrades bool) *fiber.App {
 	app := fiber.New(fiber.Config{
 		JSONEncoder: json.Marshal,
