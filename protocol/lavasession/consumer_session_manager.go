@@ -2580,8 +2580,9 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 
 // lastChanceCandidatesLocked is what the blocked-list fallback walks, in order: the blocked primaries
 // (the list is kept in compute-units-served order by sortBlockedProviderListByCuServed), the other
-// primaries whose endpoints are all out, then the same two groups of backups, the blocked ones by
-// compute units served this epoch, highest first. csm.lock must be held.
+// primaries out of rotation (no url a relay can use is usable, inRotation), then the same two groups
+// of backups, the blocked ones by compute units served this epoch, highest first. csm.lock must be
+// held.
 //
 // The blocked list alone does not name every provider that is out (MAG-4829). Under concurrent
 // traffic a provider whose endpoints are all out flips in and out of that list many times while one
@@ -2598,7 +2599,13 @@ func (csm *ConsumerSessionManager) lastChanceCandidatesLocked() []*ConsumerSessi
 			if provider == nil || len(provider.Endpoints) == 0 || listed(address) {
 				continue
 			}
-			if slices.ContainsFunc(provider.Endpoints, (*Endpoint).IsUsable) {
+			// inRotation, not "any endpoint usable". A ws/wss url is never sent a relay, so it is
+			// never switched off: counting it kept an https + wss provider whose https urls are all
+			// off, the documented ETH1 shape, out of this list, and with MAG-4285 blocking such a
+			// provider it flips in and out of the blocked list like any other. inRotation counts
+			// only the urls a relay can use, the rule the per-provider blocked gauge reads
+			// (MAG-4735), and keeps a websocket-only provider out while its url is up.
+			if provider.inRotation() {
 				continue
 			}
 			found = append(found, provider)
