@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,6 +83,15 @@ type grpcEndpointDescriptors struct {
 	cache    *common.SafeSyncMap[string, *desc.MethodDescriptor]
 	resolver *lavasession.GRPCDescriptorResolver
 	endLife  context.CancelFunc
+
+	// channels is every open channel of the endpoint, in dial order: the ones a lookup may
+	// borrow. It is kept here, under its own lock, rather than read from the pool's
+	// connection list, because the pool holds its lock across a dial when it scales up (up
+	// to connectTimeout). A lookup that waited on that lock ran past its reflection-timeout
+	// and its callers' deadlines while the channel its caller held was up all along. A
+	// channel joins once its dial succeeds and leaves as it closes.
+	channelsMu sync.Mutex
+	channels   []*UpstreamGRPCStreamConnection
 }
 
 // newGRPCEndpointDescriptors builds the shared cache and resolver for one endpoint.
@@ -104,6 +114,28 @@ func (d *grpcEndpointDescriptors) close() {
 	if d != nil && d.endLife != nil {
 		d.endLife()
 	}
+}
+
+// addChannel makes a channel whose dial succeeded lendable to the endpoint's lookups.
+func (d *grpcEndpointDescriptors) addChannel(conn *UpstreamGRPCStreamConnection) {
+	d.channelsMu.Lock()
+	defer d.channelsMu.Unlock()
+	d.channels = append(d.channels, conn)
+}
+
+// removeChannel stops lending a channel that is closing.
+func (d *grpcEndpointDescriptors) removeChannel(conn *UpstreamGRPCStreamConnection) {
+	d.channelsMu.Lock()
+	defer d.channelsMu.Unlock()
+	d.channels = slices.DeleteFunc(d.channels, func(c *UpstreamGRPCStreamConnection) bool { return c == conn })
+}
+
+// openChannels returns a copy of the channels a lookup may borrow, to range over without
+// the lock.
+func (d *grpcEndpointDescriptors) openChannels() []*UpstreamGRPCStreamConnection {
+	d.channelsMu.Lock()
+	defer d.channelsMu.Unlock()
+	return slices.Clone(d.channels)
 }
 
 // UpstreamGRPCStreamConnection wraps a grpc.ClientConn with health tracking and stream count.
@@ -148,6 +180,10 @@ func NewUpstreamGRPCStreamConnection(ctx context.Context, nodeUrl *common.NodeUr
 
 	if err := conn.connect(ctx, timeout); err != nil {
 		return nil, err
+	}
+	// Lendable to the endpoint's descriptor lookups from here until Close.
+	if descriptors != nil {
+		descriptors.addChannel(conn)
 	}
 
 	return conn, nil
@@ -290,6 +326,9 @@ func (c *UpstreamGRPCStreamConnection) Close() error {
 	// (MAG-4397). The pool ends them all in its own Close. A lookup that happens to be
 	// borrowing this channel fails as the channel closes below, drops its in-flight
 	// entry, and the next caller retries on a live channel.
+	if c.descriptors != nil {
+		c.descriptors.removeChannel(c) // no later lookup borrows it
+	}
 
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -405,18 +444,17 @@ func NewUpstreamGRPCPool(nodeUrl *common.NodeUrl) *UpstreamGRPCPool {
 // triggered it: that channel can be scaled down, closed or replaced by a reconnect while
 // the lookup runs. Any channel to the same endpoint answers reflection identically.
 //
-// The connection slice is snapshotted under the pool lock and the channels are asked
-// outside it, so a lookup can never hold the pool lock — a caller waiting on a lookup
-// while holding that lock would otherwise deadlock.
+// The channels come from the endpoint descriptors' own list, never from the pool's, so a
+// lookup neither holds the pool lock nor waits on it. Holding it would deadlock a caller
+// that waits on the lookup under that lock. Waiting on it stalled every lookup behind a
+// scale-up dial, which runs under the pool lock for up to connectTimeout, while the
+// channel the caller already held was up.
 func (p *UpstreamGRPCPool) borrowAnyChannel(ctx context.Context) (*grpc.ClientConn, func(), error) {
 	if p.closed.Load() {
 		return nil, nil, lavasession.ErrGRPCConnectionClosed
 	}
 
-	p.lock.RLock()
-	conns := make([]*UpstreamGRPCStreamConnection, len(p.connections))
-	copy(conns, p.connections)
-	p.lock.RUnlock()
+	conns := p.descriptors.openChannels()
 
 	// A healthy channel first. An unhealthy one is still worth asking when it is all
 	// there is: health is the RELAY path's verdict, and a node that fails relays can
