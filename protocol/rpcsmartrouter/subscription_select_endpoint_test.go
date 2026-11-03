@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// subscriptionManagerCase is one subscription manager as its endpoint cascade sees it. The
-// WebSocket and gRPC managers each carry their own selectEndpoint/selectFromTier, so each
-// needs the whole matrix below; with one test file per manager, each had only part of it.
+// subscriptionManagerCase is one subscription manager as its endpoint cascade sees it. Both
+// managers select through the shared subscriptionEndpoints, each built with its own error text
+// and hold-off registry, so the whole matrix below runs against each manager as constructed.
 type subscriptionManagerCase struct {
 	name string
 	// url turns an endpoint name from the table into this manager's URL form.
