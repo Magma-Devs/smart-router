@@ -168,6 +168,11 @@ type DirectWSSubscriptionManager struct {
 	// outside tests; tests use it to hold a restore at exactly that point.
 	beforeRestoreCommit func()
 
+	// beforeUnsubscribeRelease, when set, runs in Unsubscribe after its first critical section
+	// has released dwsm.lock and before the node is called and the client released under it
+	// again. Nil outside tests; tests use it to act in the window between the two.
+	beforeUnsubscribeRelease func()
+
 	// Upstream connection pools keyed by endpoint URL
 	upstreamPools map[string]*UpstreamWSPool
 
@@ -1074,6 +1079,10 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 
 	dwsm.lock.Unlock()
 
+	if dwsm.beforeUnsubscribeRelease != nil {
+		dwsm.beforeUnsubscribeRelease()
+	}
+
 	// Call upstream node to unsubscribe only when last client - stream the actual node response
 	var nodeResp []byte
 	var callErr error
@@ -1128,9 +1137,12 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 		// upstream side ends without a second call; the map and the counter were settled
 		// in the first critical section.
 		dwsm.endUpstreamSubscriptionLocked(activeSub, false)
-	} else if len(activeSub.connectedClients) == 0 {
+	} else if len(activeSub.connectedClients) == 0 && dwsm.activeSubscriptions[hashedParams] == activeSub {
 		// Not the last client when this started, but the others left while the lock was
-		// released: the node has not been told yet, so this teardown tells it.
+		// released: the node has not been told yet, so this teardown tells it. A subscription
+		// that is no longer the live entry was torn down meanwhile by another path — the node
+		// ended it, or a restore gave it up — which released every client, settled the
+		// counters and told the node; tearing it down again would count it off twice.
 		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, true)
 	}
 
