@@ -146,8 +146,15 @@ func runSecondaryLookup(t *testing.T, rpcss *RPCSmartRouterServer, protocolMessa
 // serve, which is what the resilience cases assert.
 func runSecondaryLookupWithReport(t *testing.T, rpcss *RPCSmartRouterServer, protocolMessage chainlib.ProtocolMessage, requestedBlockForCache int64) (bool, *common.RelayResult, common.CacheLookupReport) {
 	t.Helper()
+	return runSecondaryLookupOn(t, rpcss, "LAVA", protocolMessage, requestedBlockForCache)
+}
+
+// runSecondaryLookupOn is runSecondaryLookupWithReport for a chain other than the REST
+// harness's LAVA.
+func runSecondaryLookupOn(t *testing.T, rpcss *RPCSmartRouterServer, chainID string, protocolMessage chainlib.ProtocolMessage, requestedBlockForCache int64) (bool, *common.RelayResult, common.CacheLookupReport) {
+	t.Helper()
 	ctx := context.Background()
-	hashKey, outputFormatter, err := protocolMessage.HashCacheRequest("LAVA")
+	hashKey, outputFormatter, err := protocolMessage.HashCacheRequest(chainID)
 	require.NoError(t, err)
 
 	usedProviders := lavasession.NewUsedProviders(nil)
@@ -181,14 +188,7 @@ func runSecondaryLookupWithReport(t *testing.T, rpcss *RPCSmartRouterServer, pro
 }
 
 func directGet(rcs *ecocache.RelayerCacheServer, hashKey []byte, block, seenBlock int64) *pairingtypes.CacheRelayReply {
-	reply, _ := rcs.GetRelay(context.Background(), &pairingtypes.RelayCacheGet{
-		RequestHash:    hashKey,
-		ChainId:        "LAVA",
-		RequestedBlock: block,
-		SeenBlock:      seenBlock,
-		Finalized:      false,
-	})
-	return reply
+	return directGetOn(rcs, "LAVA", hashKey, block, seenBlock)
 }
 
 // ---------------------------------------------------------------------------

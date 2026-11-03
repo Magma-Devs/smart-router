@@ -1,0 +1,139 @@
+name: Unit Tests
+
+# Compiles and runs every Go unit test in both modules: the router at the root
+# and the wizard under tools/wizard. "Build and Test" (smartrouter.yml) only
+# builds the binaries and the image, so without this job a change that breaks
+# an existing test, or stops a test package compiling, merges green. The
+# unit-tests-race leg runs the same tests under the race detector.
+#
+# The job uploads no artifacts. The test job removed in bcaff2bc uploaded its
+# JSON stream, junit report and coverage profile on every run and filled the
+# org's artifact storage quota. Read failures from the job log (gotestsum
+# repeats each failed test's output at the end) and from the job summary.
+
+on:
+  push:
+    branches:
+      - main
+  # Every base branch, not only main, so stacked PRs get the signal too. No
+  # paths filter: a required check has to report on every PR, or a PR that
+  # skips the filter waits on it forever.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    # One leg per check. With a matrix value in the name, GitHub adds no
+    # suffix, so the checks are named exactly unit-tests (required on main)
+    # and unit-tests-race.
+    name: ${{ matrix.check }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ matrix.job-timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # As in `make test` and the release build: the shipped binary is
+          # built without cgo, so these tests run without it too.
+          # rpcsmartrouter's tests mostly wait on timers, so four shards of
+          # it share the runner with the other packages and finish first.
+          - check: unit-tests
+            cgo: "0"
+            race: ""
+            shards: 4
+            package-timeout: 15m
+            job-timeout: 30
+          # The race detector needs cgo, and slows the tests down. Under it
+          # they are CPU-bound, so shards on the same runner only slow each
+          # other down (measured: no faster, and timing tests failed); the
+          # leg runs every package in one process.
+          - check: unit-tests-race
+            cgo: "1"
+            race: -race
+            shards: 1
+            package-timeout: 20m
+            job-timeout: 45
+    env:
+      CGO_ENABLED: ${{ matrix.cgo }}
+      # tools/wizard's icon test downloads an SVG from the docs site; OFFLINE
+      # skips it so the gate does not depend on the network.
+      OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            tools/wizard/go.sum
+
+      # Version-pinned like govulncheck in lint.yml, so a new release can't
+      # change the gate on an unrelated day. Dependabot does not bump
+      # `go install` pins; bump this one deliberately.
+      - name: Install gotestsum
+        run: go install gotest.tools/gotestsum@v1.13.0
+
+      # The script runs every package, with protocol/rpcsmartrouter split into
+      # SHARDS concurrent processes, and says how reruns work. -timeout
+      # applies to each test binary.
+      - name: Test the router module
+        env:
+          SHARDS: ${{ matrix.shards }}
+          PACKAGE_TIMEOUT: ${{ matrix.package-timeout }}
+          RACE: ${{ matrix.race }}
+        run: scripts/unit-tests.sh
+
+      - name: Test the wizard module
+        if: ${{ !cancelled() }}
+        working-directory: tools/wizard
+        run: >-
+          gotestsum
+          --format pkgname-and-test-fails
+          --format-hide-empty-pkg
+          --hide-summary=skipped
+          --rerun-fails=2
+          --rerun-fails-max-failures=10
+          --rerun-fails-abort-on-data-race
+          --rerun-fails-report="$RUNNER_TEMP/reruns-wizard.txt"
+          --packages=./...
+          -- -count=1 -timeout=5m ${{ matrix.race }}
+
+      - name: Report tests that needed a rerun
+        if: ${{ !cancelled() }}
+        env:
+          CHECK: ${{ matrix.check }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          rows=""
+          # gotestsum writes one line per test that failed at least once:
+          # "<package>.<test>: <runs> runs, <failures> failures".
+          for report in "$RUNNER_TEMP"/reruns-*.txt; do
+            while IFS= read -r line; do
+              [[ $line =~ ^(.+):\ ([0-9]+)\ runs,\ ([0-9]+)\ failures$ ]] || continue
+              name="${BASH_REMATCH[1]}" runs="${BASH_REMATCH[2]}" failures="${BASH_REMATCH[3]}"
+              if [ "$runs" -gt "$failures" ]; then
+                verdict="flaky: passed on a rerun"
+              else
+                verdict="failed every run"
+              fi
+              echo "::warning title=${CHECK}: unit test needed a rerun::${name} failed ${failures} of ${runs} runs (${verdict})"
+              rows+="| \`${name}\` | ${runs} | ${failures} | ${verdict} |"$'\n'
+            done < "$report"
+          done
+          [ -n "$rows" ] || exit 0
+          {
+            echo "### ${CHECK}: unit tests that needed a rerun"
+            echo
+            echo "| Test | Runs | Failures | Verdict |"
+            echo "| --- | --- | --- | --- |"
+            printf '%s' "$rows"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1538,6 +1538,18 @@ func (rpcss *RPCSmartRouterServer) awaitWakeIfIdle(ctx context.Context, now time
 	}
 }
 
+// awaitWakeUnlessInternalProbe is awaitWakeIfIdle for every client relay except one that carries
+// INTERNAL_PROBE_HEADER_NAME. The hub's serving probes ask each published hostname a question every
+// few minutes; counted as activity they would keep every probed chain awake forever and idle mode
+// would never trigger (MAG-4797). Such a request neither stamps the chain nor waits on a wake burst:
+// on an idle chain it is routed on the tips the router already has, as on cold start.
+func (rpcss *RPCSmartRouterServer) awaitWakeUnlessInternalProbe(ctx context.Context, directiveHeaders map[string]string, now time.Time) {
+	if _, probe := directiveHeaders[common.INTERNAL_PROBE_HEADER_NAME]; probe {
+		return
+	}
+	rpcss.awaitWakeIfIdle(ctx, now)
+}
+
 func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	ctx context.Context,
 	analytics *metrics.RelayMetrics,
@@ -1574,8 +1586,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 
 	// Idle mode: this is a client relay. Stamp it, and if it ends an idle period hold it (capped)
 	// until the first endpoint poll has landed so it is routed on fresh tips. The wait counts
-	// toward the end-to-end latency below on purpose — the client experienced it.
-	rpcss.awaitWakeIfIdle(ctx, relaySentTime)
+	// toward the end-to-end latency below on purpose — the client experienced it. A request
+	// marked as our own monitoring is not activity and is routed without stamping.
+	rpcss.awaitWakeUnlessInternalProbe(ctx, protocolMessage.GetDirectiveHeaders(), relaySentTime)
 	var err error
 	relayProcessor, err = rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
 
@@ -4023,11 +4036,12 @@ func (rpcss *RPCSmartRouterServer) answerTimeout() time.Duration {
 
 // onEndpointPollBlock is the EndpointMonitor's OnPollBlock hook. It records the head a url
 // answered with on rpc_endpoint_url_latest_block (MAG-4204), on every answered poll: the tracker's
-// first poll and every repeat of the same block included, which OnNewBlock never reports. So a url
-// that keeps answering with one block stands still on its own series while its answered-until time
-// keeps moving, which is what the stuck alerts look for; a url that stops answering stops both,
-// which they leave alone. rpc_endpoint_latest_block, the provider series, is still written by
-// OnNewBlock and the relay harvest, as before.
+// first poll, every repeat of the same block, and an answer below a tip the router already holds
+// from a peer or a relay, none of which OnNewBlock reports. So a url that keeps answering with one
+// block stands still on its own series while its answered-until time keeps moving, which is what
+// the stuck alerts look for; a url that stops answering stops both, which they leave alone.
+// rpc_endpoint_latest_block, the provider series, is still written by OnNewBlock and the relay
+// harvest, as before.
 //
 // A ws/wss url is left out. It never serves a relay (Endpoint.ServesDirectRelays), so its head
 // says nothing about the answers customers' relays get.

@@ -415,7 +415,6 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			RpcConsumerLogs:        apil.logger,
 			RefererMatchString:     refererMatchString,
 			CmdFlags:               cmdFlags,
-			RelayMsgLogMaxChars:    relayMsgLogMaxChars,
 			ChainID:                chainID,
 			ApiInterface:           apiInterface,
 			ConnectionType:         fiber.MethodPost, // We use it for the ParseMsg method, which needs to know the connection type to find the method in the spec
@@ -455,10 +454,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		headers := convertToMetadataMap(metadataValues)
 
 		msg := string(fiberCtx.Body())
-		logFormattedMsg := msg
-		if !cmdFlags.DebugRelays {
-			logFormattedMsg = utils.FormatLongString(logFormattedMsg, relayMsgLogMaxChars)
-		}
+		logFormattedMsg := relayBodyForLog(msg, cmdFlags.DebugRelays)
 
 		path := "/" + fiberCtx.Params("*")
 		utils.LavaFormatInfo("Consumer received a new JSON-RPC request",
@@ -508,7 +504,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
 
 			// Log request and response
-			apil.logger.LogRequestAndResponse("jsonrpc http", true, "POST", fiberCtx.Request().URI().String(), msg, errMasking, msgSeed, time.Since(startTime), err)
+			apil.logger.LogRequestAndResponse("jsonrpc http", true, "POST", fiberCtx.Request().URI().String(), logFormattedMsg, errMasking, msgSeed, time.Since(startTime), err)
 
 			// Set status to internal error
 			if relayResult.GetStatusCode() != 0 {

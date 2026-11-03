@@ -1,26 +1,12 @@
 package relaycore
 
 import (
-	"context"
 	"sync"
 	"sync/atomic"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 )
-
-type RelayParserInf interface {
-	ParseRelay(
-		ctx context.Context,
-		url string,
-		req string,
-		connectionType string,
-		dappID string,
-		consumerIp string,
-		metadata []pairingtypes.Metadata,
-	) (protocolMessage chainlib.ProtocolMessage, err error)
-}
 
 // ArchiveStatus is the per-request state that survives a retry. One flag: whether the
 // earliest-block re-parse has already run, which must happen at most once per request.
