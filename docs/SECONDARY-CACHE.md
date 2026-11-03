@@ -45,10 +45,11 @@ request ──► primary cache ──hit──► served ("Cached")
   decides from the entry's contents, not only from the label the writing zone
   attached, so an entry written by an older zone that never labelled it is still
   served as the error it is (on JSON-RPC and Tendermint; a REST or gRPC entry is
-  judged by its recorded status). An entry that is not a usable reply at all —
-  empty, a web page, a truncated envelope, an envelope that carries neither a
-  result nor an error, or a batch with such an element — is never served: it
-  counts as a secondary error and the request proceeds to an upstream.
+  judged by its recorded status). A JSON-RPC or Tendermint entry that is not a
+  usable reply at all — empty, a web page, a truncated envelope, an envelope
+  that carries neither a result nor an error, or a batch with such an element —
+  is never served: it counts as a secondary error and the request proceeds to an
+  upstream. A REST, GraphQL or gRPC entry is not judged this way.
 - **Independent of the primary.** The secondary keeps serving while the primary
   is down, and is even valid with no primary configured at all (reads work;
   nothing backfills — the router logs an advisory warning for this topology).
@@ -174,9 +175,11 @@ curl -s http://<router>:7779/metrics | grep smartrouter_cache_success_total
 ```
 
 Non-hits are classified in `smartrouter_cache_failed_total` by `outcome`:
-`miss` (not found), `error` (transport/server error), or `timeout` (budget
-exceeded) — so a broken or slow secondary is immediately distinguishable from a
-cold one. Lookup latency is recorded per tier for every attempt. With tracing
+`miss` (not found), `error` (transport/server error, or a JSON-RPC or
+Tendermint RPC entry refused as not a usable reply — see "Node errors are
+labelled the same from either tier" above), or `timeout` (budget exceeded) — so
+a broken or slow secondary is immediately distinguishable from a cold one.
+Lookup latency is recorded per tier for every attempt. With tracing
 enabled, each lookup is a span carrying `cache.tier` and `cache.outcome`, and
 the request's root span records which tier served it. See
 [METRICS.md](METRICS.md#cache) for the full reference and the dashboard
@@ -730,9 +733,12 @@ release as reversing it.**
 What the implementation can say is narrower, and only about mechanism: the
 router does not know or ask which storage engine sits behind either address. The
 two tiers are independent connections speaking the Smart Router cache protocol,
-so a mixed pairing needs no special handling in the router and would not be
-detected, let alone rejected, if you configured one. Nothing here validates,
-tests, or supports that combination.
+so a mixed pairing needs no special handling in the router. The one mix the
+router can see is a RESP primary (`resp-cache`, [RESP-CACHE.md](RESP-CACHE.md))
+beside a secondary, which is always a gRPC cache: it logs a warning at startup
+and runs both tiers, rather than refusing to start (MAG-4777). A mix behind two
+gRPC addresses is invisible to it. Nothing here tests or supports either
+combination.
 
 ### Where the proof lives
 
