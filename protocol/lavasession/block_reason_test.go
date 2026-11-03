@@ -197,16 +197,20 @@ func TestRetiredSessionDoesNotStrandTheProvider(t *testing.T) {
 
 // The reason has to outlive the epoch tick. Without carry-over every block would read
 // "blocked-in-previous-epoch" within 15 minutes, which answers nothing.
+//
+// The block is reported and the provider's only endpoint is disabled, so the epoch's release pass
+// keeps it blocked (see TestBlockRecord_CarriedRecordTakesTheScopeItIsReBlockedIn).
 func TestBlockReason_SurvivesTheEpochTransition(t *testing.T) {
+	const address = "provider-carried"
 	csm := CreateConsumerSessionManager()
-	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createPairingList("", true), nil))
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, epochPairing(t, address, false), nil))
 
-	address := csm.validAddresses[0]
-	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonExplicitSignal, false, csm.atomicReadCurrentEpoch(), 0, 0, nil))
+	require.NoError(t, csm.blockProvider(context.Background(), address, BlockReasonExplicitSignal, true, csm.atomicReadCurrentEpoch(), 0, 0, nil))
 	blockedAt := blockedRecord(t, csm, address).Since
 
 	// A new epoch rebuilds the pairing and re-blocks the carried-over providers on top of it.
-	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, createPairingList("", true), nil))
+	require.NoError(t, csm.UpdateAllProviders(secondEpochHeight, epochPairing(t, address, false), nil))
+	awaitEpochReleasePass(t, csm)
 
 	record := blockedRecord(t, csm, address)
 	require.Equal(t, BlockReasonExplicitSignal, record.Reason, "the original reason must survive, not be replaced by the bookkeeping")
