@@ -45,9 +45,9 @@ func clientRateLimiterCases() []clientRateLimiterCase {
 				config.SubscriptionsPerMinutePerClient = subscribesPerMinute
 				config.UnsubscribesPerMinutePerClient = unsubscribesPerMinute
 				limiter := NewGRPCClientRateLimiter(config)
+				// Counted without the limiter's lock: every test below counts only once the
+				// goroutines that used the limiter have returned.
 				return limiter, func() int {
-					limiter.lock.Lock()
-					defer limiter.lock.Unlock()
 					return len(limiter.subscribeLimiters) + len(limiter.unsubscribeLimiters)
 				}
 			},
