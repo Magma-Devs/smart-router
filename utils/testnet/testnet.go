@@ -29,5 +29,9 @@ func RefusedAddr(t testing.TB) string {
 	if err != nil {
 		t.Fatalf("testnet: getsockname: %v", err)
 	}
-	return net.JoinHostPort("127.0.0.1", strconv.Itoa(sa.(*syscall.SockaddrInet4).Port))
+	in4, ok := sa.(*syscall.SockaddrInet4)
+	if !ok {
+		t.Fatalf("testnet: getsockname returned %T, not an IPv4 address", sa)
+	}
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(in4.Port))
 }
