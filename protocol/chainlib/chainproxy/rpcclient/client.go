@@ -35,8 +35,17 @@ import (
 var (
 	ErrClientQuit                = errors.New("client is closed")
 	ErrSubscriptionQueueOverflow = errors.New("subscription queue overflow")
-	errClientReconnected         = errors.New("client reconnected")
-	errDead                      = errors.New("connection lost")
+
+	// ErrClientReconnected ends the subscriptions of a socket this client has already
+	// replaced with a working one of its own: a write failed, the client redialed, and the
+	// old read loop was still alive, so the subscriptions on it are closed with this.
+	//
+	// Exported because it says something a caller cannot read from anywhere else — the
+	// connection is healthy, and a caller that treats every subscription error as a dead
+	// socket would retire a client that has just recovered (MAG-4396).
+	ErrClientReconnected = errors.New("client reconnected")
+
+	errDead = errors.New("connection lost")
 )
 
 const (
@@ -718,7 +727,7 @@ func (c *Client) dispatch(codec ServerCodec) {
 				// In those cases the caller will notice first and reconnect. Closing the
 				// handler terminates all waiting requests (closing op.resp) except for
 				// lastOp, which will be transferred to the new handler.
-				conn.close(errClientReconnected, lastOp)
+				conn.close(ErrClientReconnected, lastOp)
 				c.drainRead()
 			}
 			go c.read(newcodec)

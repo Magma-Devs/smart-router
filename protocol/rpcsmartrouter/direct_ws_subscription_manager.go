@@ -1642,7 +1642,7 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 				)
 				dwsm.retireConnectionOnUpstreamError(activeSub, err)
 				reconnectInFlight = true
-				go dwsm.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
+				go dwsm.handleUpstreamDisconnect(ctx, hashedParams, activeSub, err)
 			}
 			return
 
@@ -1754,8 +1754,18 @@ func (dwsm *DirectWSSubscriptionManager) dropSlowClient(hashedParams string, act
 // leaves the socket alone: the forward queue overflowing says nothing about the connection, and
 // the restore re-subscribes on it. A JSON-RPC error the node pushed on the subscription never
 // gets here: the listener reads that as the node ending the subscription and cleans it up.
+//
+// A client that redialed on its own is the third error that leaves the connection alone.
+// rpcclient replaces a socket itself when a write fails while the old read loop is still
+// running, and ends the old socket's subscriptions with ErrClientReconnected — by which time
+// it already holds a new, working socket. Retiring the connection there closes that client,
+// which is the opposite of a recovery: the pool dials again for no reason, and every OTHER
+// subscription sharing the pooled connection is ended too, including one a restore has just
+// re-created on the new socket. MAG-4037 reaches this through an ordinary call whose deadline
+// has already passed. The restore still runs; it finds the pool healthy and re-subscribes over
+// the socket rpcclient opened (MAG-4396).
 func (dwsm *DirectWSSubscriptionManager) retireConnectionOnUpstreamError(activeSub *directActiveSubscription, err error) {
-	if errors.Is(err, rpcclient.ErrSubscriptionQueueOverflow) {
+	if errors.Is(err, rpcclient.ErrSubscriptionQueueOverflow) || errors.Is(err, rpcclient.ErrClientReconnected) {
 		return
 	}
 	dwsm.lock.RLock()
@@ -1771,11 +1781,14 @@ func (dwsm *DirectWSSubscriptionManager) retireConnectionOnUpstreamError(activeS
 	)
 }
 
-// handleUpstreamDisconnect handles upstream connection loss and attempts to restore subscriptions
+// handleUpstreamDisconnect handles upstream connection loss and attempts to restore subscriptions.
+// cause is the error that ended the upstream subscription; it decides whether the node still
+// holds the subscription the restore replaces.
 func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	ctx context.Context,
 	hashedParams string,
 	activeSub *directActiveSubscription,
+	cause error,
 ) {
 	// Prevent concurrent restoration attempts
 	if !activeSub.restoring.CompareAndSwap(false, true) {
@@ -1881,6 +1894,9 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 		return
 	}
 	oldUpstreamID := activeSub.upstreamID
+	// What the node has to be told to drop the subscription being replaced, snapshotted
+	// under the lock before the fields below are rewritten.
+	oldUpstream := teardownOfLocked(activeSub)
 	oldConnection := activeSub.upstreamConnection // Keep reference to old connection for cleanup
 
 	activeSub.upstreamSubscription = newUpstreamSub
@@ -1895,12 +1911,34 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 	}
 	dwsm.lock.Unlock()
 
-	// Notify the pool that the OLD connection no longer has this subscription. This
-	// decrements the subscription count on the stale connection — also when the pool handed
-	// back the same connection object, which it incremented above for the restored one.
-	if oldConnection != nil {
-		activeSub.upstreamPool.NotifySubscriptionRemoved(oldConnection)
-	}
+	// Tell the node to drop the subscription that was replaced, when it still holds it: after a
+	// queue overflow, and never over a socket the old subscription did not live on
+	// (replacedStillOnNode).
+	//
+	// The local rpcclient subscription is deliberately NOT unsubscribed here. Unsubscribe
+	// closes its Err channel, and a listener still parked on that channel reads the close as
+	// a nil error, ends, and runs its deferred cleanup — tearing down the subscription this
+	// restore has just installed. The listener that handed off has already returned, so
+	// nothing is parked there on the restore path, but the margin is one scheduling decision
+	// wide and the only thing it buys is dropping rpcclient's handler entry for a replaced
+	// subscription, which the connection's own close does anyway.
+	//
+	// On its own goroutine, because the node call can take upstreamUnsubscribeTimeout and the
+	// restored subscription's listener must start now — its channel holds what the node
+	// pushes in the meantime. The pool notify goes after the node call, so the connection is
+	// still live while it is used.
+	tellNode := replacedStillOnNode(cause, oldUpstream, conn, newUpstreamID)
+	go func() {
+		if tellNode {
+			dwsm.teardownUpstreamSubscription(oldUpstream)
+		}
+		// Decrements the subscription count on the stale connection — also when the pool
+		// handed back the same connection object, which it counted again for the restored
+		// subscription.
+		if oldConnection != nil {
+			activeSub.upstreamPool.NotifySubscriptionRemoved(oldConnection)
+		}
+	}()
 
 	// Update the ID mapper - remove old mappings and re-register all client router IDs
 	// to the new upstream ID
@@ -2053,6 +2091,26 @@ func (dwsm *DirectWSSubscriptionManager) endUpstreamSubscriptionLocked(activeSub
 			upstreamPool.NotifySubscriptionRemoved(teardown.conn)
 		}
 	}()
+}
+
+// replacedStillOnNode reports whether the node still holds the upstream subscription a restore
+// replaced, and so has to be told to drop it.
+//
+// Only a queue overflow leaves it there: rpcclient ends that one subscription on a socket that
+// stays up, and the restore re-subscribes beside it. Nothing told the node to stop, so it kept
+// publishing frames rpcclient read and dropped, and every overflow left one more of those behind
+// (MAG-4396). Every other restore follows a socket that is gone, and the node lost the old
+// subscription with it. A dropped socket marks the connection dead. A client that redialed on its
+// own (ErrClientReconnected) has closed the old socket and holds a new one on the same, healthy
+// connection, so a goodbye there would travel over the NEW socket, where the old id names nothing
+// — or names the restored subscription itself, as a Tendermint query always does, and the node
+// would end the subscription the restore just opened. For the same reason the answer is no
+// whenever the old id names the restored subscription on the same connection.
+func replacedStillOnNode(cause error, replaced upstreamSubscriptionTeardown, restoredConn *UpstreamWSConnection, restoredID string) bool {
+	if !errors.Is(cause, rpcclient.ErrSubscriptionQueueOverflow) {
+		return false
+	}
+	return replaced.conn != restoredConn || replaced.upstreamID != restoredID
 }
 
 // upstreamUnsubscribeTimeout bounds the teardown call below. Some gateways never
