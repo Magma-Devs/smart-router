@@ -427,7 +427,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			// and constant apart from the limit's number, so it carries nothing to redact, and
 			// the masking exists for upstream errors that can leak a node url's credentials.
 			if refusal := rpcInterfaceMessages.GraphQLRefusalFrom(err); refusal != nil {
-				apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody,
+				apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, loggedBody,
 					refusal.ClientMessage(), msgSeed, time.Since(startTime), err)
 				fiberCtx.Status(graphQLRefusalStatus)
 				return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(),

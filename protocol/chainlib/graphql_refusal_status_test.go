@@ -17,6 +17,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
+	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 )
@@ -242,4 +243,52 @@ func TestConvertToGraphQLError(t *testing.T) {
 
 	withoutGUID := convertToGraphQLError("refused", "")
 	require.JSONEq(t, `{"data":null,"errors":[{"message":"refused"}]}`, string(withoutGUID))
+}
+
+// A refused request is past one of the router's size limits, so it is the request most likely to be
+// large, and its failure line is written at error level. Like every other listener failure line it
+// carries the body cut to its head and tail, whole only under --debug-relays (MAG-4454).
+func TestGraphQLListener_RefusalLogsTheBodyCutUnlessDebugRelays(t *testing.T) {
+	utils.EnableDebugLogBuffer(1000)
+	t.Cleanup(utils.DisableDebugLogBuffer)
+
+	fields := make([]string, rpcInterfaceMessages.MaxGraphQLRootFields+1)
+	for i := range fields {
+		fields[i] = fmt.Sprintf("a%d: chainIdentifier", i)
+	}
+	body, err := json.Marshal(map[string]string{"query": "{ " + strings.Join(fields, " ") + " }"})
+	require.NoError(t, err)
+	newGraphQL := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+		return NewGraphQLChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger)
+	}
+
+	for _, debugRelays := range []bool{false, true} {
+		t.Run(fmt.Sprintf("debugRelays=%v", debugRelays), func(t *testing.T) {
+			utils.ClearDebugLogBuffer()
+			addr := serveWithFlags(t, newGraphQL, spectypes.APIInterfaceGraphQL, &parsingRelay{}, common.ConsumerCmdFlags{DebugRelays: debugRelays})
+			requestID := fmt.Sprintf("req-refusal-%v", debugRelays)
+			req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/", strings.NewReader(string(body)))
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Request-Id", requestID)
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			_, _ = io.Copy(io.Discard, resp.Body)
+			require.NoError(t, resp.Body.Close())
+			require.Equal(t, graphQLRefusalStatus, resp.StatusCode)
+
+			var guid string
+			for _, line := range utils.ReadDebugLogBuffer(requestID, time.Time{}, time.Time{}, 0) {
+				record := map[string]any{}
+				require.NoError(t, json.Unmarshal(line, &record))
+				if record["message"] == "Consumer received a new GraphQL request" {
+					guid, _ = record["GUID"].(string)
+				}
+			}
+			lines := requireLinesOfGUID(t, guid)
+			require.Contains(t, lines, "graphql in/out", "the refusal's failure line carries the request's GUID")
+			require.Equal(t, "error", lines["graphql in/out"]["level"])
+			require.Equal(t, relayBodyForLog(string(body), debugRelays), lines["graphql in/out"]["request"], "the failure line's body")
+		})
+	}
 }
