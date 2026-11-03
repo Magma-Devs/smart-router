@@ -159,11 +159,13 @@ type ChainTracker struct {
 	// allows us to mock the chain fetcher for different use cases for example: Solana needs slot to block number
 	iChainFetcherWrapper IChainFetcherWrapper
 
-	// currentPollIntervalNanos publishes the interval updateTimer most recently scheduled: base
-	// cadence when healthy, stretched by exponentialBackoff when fetchFails > 0. fetchFails is
-	// goroutine-local, so this atomic is the only lock-free window into the live backoff state,
-	// surfaced by /debug/endpoint-state as PollIntervalMs (MAG-2395). Written only by the poll
-	// goroutine (updateTimer), read by any goroutine.
+	// currentPollIntervalNanos publishes the wait until the next poll as updateTimer last computed
+	// it: base cadence when healthy, stretched by exponentialBackoff when fetchFails > 0, or the
+	// remaining rate-limit hold-off when that is longer (the timer itself wakes at the cadence and
+	// re-reads the hold-off, MAG-4387). fetchFails is goroutine-local, so this atomic is the only
+	// lock-free window into the live backoff state, surfaced by /debug/endpoint-state as
+	// PollIntervalMs (MAG-2395). Written only by the poll goroutine (updateTimer), read by any
+	// goroutine.
 	currentPollIntervalNanos atomic.Int64
 	// rateLimitedUntil (unix nanos, 0 = none) is the instant until which the polled upstream is
 	// held off after a rate-limited fetch: the hold-off the registry applied — the upstream's
@@ -676,6 +678,18 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 		for {
 			select {
 			case <-cs.timer.C:
+				// The timer wakes at the cadence, never at the end of a hold-off (updateTimer), so
+				// the hold-off is read here, as it stands now. While the url is held off nothing is
+				// sent — a poll into a standing limit re-arms a ban-type limit and is one more strike
+				// on the url — and the tracker wakes again one interval later to look again. A
+				// relay or probe answer that lifts the hold-off early therefore resumes the poll
+				// within one interval; a Retry-After the vendor named is still waited out in full,
+				// because the registry entry carries it (MAG-4387). fetchFails is left as it was:
+				// nothing was tried.
+				if cs.rateLimitHeldFor() > 0 {
+					cs.updateTimer(pollingTime, fetchFails)
+					continue
+				}
 				fetchTimeout := FetchTimeout()
 				fetchCtx, cancel := context.WithTimeout(ctx, fetchTimeout) // protect this flow from hanging code
 				skipped, err := cs.fetchAllPreviousBlocksIfNecessary(fetchCtx, false)
@@ -767,10 +781,16 @@ func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) er
 	return nil
 }
 
+// updateTimer schedules the next wake. The timer runs at the cadence alone; a rate-limit hold-off
+// is not folded into it, because the poll goroutine reads the hold-off when the timer fires and
+// skips the poll while it stands. Arming one timer with the whole hold-off is what froze the poll
+// for the hold-off's full length after an answer had already lifted it (MAG-4387). What is
+// published for /debug/endpoint-state is the wait until the next poll as known now: the cadence,
+// or the remaining hold-off when that is longer (MAG-2395).
 func (cs *ChainTracker) updateTimer(tickerBaseTime time.Duration, fetchFails uint64) {
-	interval := cs.computePollInterval(tickerBaseTime, fetchFails)
-	cs.currentPollIntervalNanos.Store(int64(interval)) // publish live cadence for /debug/endpoint-state (MAG-2395)
-	cs.timer = time.NewTimer(interval)
+	cadence := cs.pollCadence(tickerBaseTime, fetchFails)
+	cs.currentPollIntervalNanos.Store(int64(cs.floorWithRetryAfter(cadence)))
+	cs.timer = time.NewTimer(cadence)
 }
 
 // ResetBackoff clears the failure backoff so the next dedicated poll fires at base cadence. It is
@@ -884,9 +904,18 @@ func HealthyPollInterval(flatPollInterval time.Duration) time.Duration {
 //
 // When flatPollInterval == 0 (the global tracker, until Topic C removes it) the legacy
 // adaptive tiers are preserved, since its readers are not yet harvest-fed.
+//
+// The interval is floored with a standing rate-limit hold-off: it is when the next poll can happen.
+// The timer itself runs at pollCadence and re-reads the hold-off on each wake (see updateTimer).
 func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchFails uint64) time.Duration {
+	return cs.floorWithRetryAfter(cs.pollCadence(tickerBaseTime, fetchFails))
+}
+
+// pollCadence is computePollInterval without the rate-limit floor: the cadence and the failure
+// backoff alone.
+func (cs *ChainTracker) pollCadence(tickerBaseTime time.Duration, fetchFails uint64) time.Duration {
 	if cs.flatPollInterval > 0 {
-		return cs.floorWithRetryAfter(exponentialBackoff(cs.flatPollInterval, fetchFails))
+		return exponentialBackoff(cs.flatPollInterval, fetchFails)
 	}
 
 	var newPollingTime time.Duration
@@ -899,7 +928,7 @@ func (cs *ChainTracker) computePollInterval(tickerBaseTime time.Duration, fetchF
 	} else {
 		newPollingTime = tickerBaseTime / cs.pollingTimeMultiplier
 	}
-	return cs.floorWithRetryAfter(exponentialBackoff(newPollingTime, fetchFails))
+	return exponentialBackoff(newPollingTime, fetchFails)
 }
 
 // noteFetchOutcome keeps the rate-limit floor current and the shared hold-off registry
@@ -947,7 +976,9 @@ func (cs *ChainTracker) noteFetchOutcome(err error) time.Duration {
 // re-polled at the backoff's 60s ceiling. The hold-off is rateLimitHeldFor: whatever the
 // registry holds for the url right now — this tracker's own 429s, a relay's, a probe's or a
 // subscription's hold-off, or the provider-wide escalation. The vendor said stop, whoever it
-// said it to. It never shortens an interval.
+// said it to. It never shortens an interval. It answers "when can the next poll happen, as of
+// now"; the poll goroutine enforces it by re-reading the hold-off each time the timer fires, so an
+// answer that lifts the hold-off early is honoured at the next wake (MAG-4387).
 func (cs *ChainTracker) floorWithRetryAfter(interval time.Duration) time.Duration {
 	return max(interval, cs.rateLimitHeldFor())
 }
@@ -973,18 +1004,12 @@ func (cs *ChainTracker) rateLimitHeldFor() time.Duration {
 // holdoffReadyAt is when the registry stops holding this tracker's url off, the zero time when
 // it does not: the later of the url-only entry (this tracker's own 429s, a WS or gRPC
 // subscription's) and the relay path's (provider, url) entry, which also carries the provider
-// escalation.
+// escalation. The probe loop reads the same pair through holdoff.Registry.URLReadyAt.
 func (cs *ChainTracker) holdoffReadyAt() time.Time {
 	if cs.rateLimitHoldoff == nil {
 		return time.Time{}
 	}
-	readyAt := cs.rateLimitHoldoff.ReadyAt(cs.holdoffURL, cs.holdoffURL)
-	if cs.holdoffProvider != cs.holdoffURL {
-		if relayReadyAt := cs.rateLimitHoldoff.ReadyAt(cs.holdoffProvider, cs.holdoffURL); relayReadyAt.After(readyAt) {
-			readyAt = relayReadyAt
-		}
-	}
-	return readyAt
+	return cs.rateLimitHoldoff.URLReadyAt(cs.holdoffProvider, cs.holdoffURL)
 }
 
 // waitOutRateLimitHoldoff blocks until the registry stops holding this endpoint off, or ctx

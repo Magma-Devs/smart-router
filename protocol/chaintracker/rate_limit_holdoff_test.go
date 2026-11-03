@@ -234,3 +234,111 @@ func TestRelayAnswerLiftsTheTrackersHoldoff(t *testing.T) {
 	require.Equal(t, holdoff.InitialHoldoff, cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0)),
 		"and the strikes went with it: the next refusal is a first strike")
 }
+
+// countingFetcher is an advancingFetcher that counts the head fetches the tracker sends, and can be
+// told to refuse the next one for rate with a given Retry-After.
+type countingFetcher struct {
+	advancingFetcher
+	calls      atomic.Int32
+	refuseNext atomic.Int64 // a Retry-After in nanoseconds; 0 answers normally
+	refused    atomic.Int32
+}
+
+func (f *countingFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) {
+	f.calls.Add(1)
+	if retryAfter := f.refuseNext.Swap(0); retryAfter != 0 {
+		f.refused.Add(1)
+		return 0, common.RateLimited(errors.New("HTTP 429: Too Many Requests"), time.Duration(retryAfter))
+	}
+	return f.advancingFetcher.FetchLatestBlockNum(ctx)
+}
+
+func startHoldoffTracker(t *testing.T, fetcher *countingFetcher, config ChainTrackerConfig) *ChainTracker {
+	t.Helper()
+	fetcher.block.Store(1000)
+	config.BlocksToSave = 1
+	config.ServerBlockMemory = 100
+	config.ChainId = "ETH1"
+	config.ParseDirectiveEnabled = true
+	tracker := newCustomChainTracker(fetcher, config)
+	ct, ok := tracker.(*ChainTracker)
+	require.True(t, ok)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	require.NoError(t, ct.StartAndServe(ctx))
+	return ct
+}
+
+// A relay that is answered lifts the url's hold-off in the registry, and the poll must resume within
+// one interval of that. It used to sleep out the timer it had armed while the hold-off stood: the
+// next poll was floored once with the whole remaining hold-off, so a 35-minute strike froze the
+// url's tip for 35 minutes while relays on the same url were answered fine (MAG-4387, part of
+// MAG-4370).
+func TestChainTracker_PollResumesWhenAnAnswerLiftsTheHoldoff(t *testing.T) {
+	registry := holdoff.NewRegistryWithClock(time.Now)
+	fetcher := &countingFetcher{}
+	ct := startHoldoffTracker(t, fetcher, ChainTrackerConfig{
+		AverageBlockTime:  20 * time.Millisecond,
+		FlatPollInterval:  10 * time.Millisecond,
+		RateLimitHoldoff:  registry,
+		RateLimitProvider: holdoffTestProvider,
+		RateLimitURL:      holdoffTestURL,
+	})
+	require.Eventually(t, func() bool { return fetcher.calls.Load() >= 3 }, 2*time.Second, time.Millisecond,
+		"the tracker polls at its cadence")
+
+	registry.RecordRateLimit(holdoffTestProvider, holdoffTestURL, 0) // a relay was refused for rate: 30 s
+	require.Eventually(t, func() bool { return ct.CurrentPollInterval() > time.Second }, 2*time.Second, time.Millisecond,
+		"the next poll waits for the hold-off")
+	held := fetcher.calls.Load()
+	time.Sleep(200 * time.Millisecond) // twenty intervals
+	require.Equal(t, held, fetcher.calls.Load(), "nothing is polled while the url is held off")
+
+	registry.RecordAnswer(holdoffTestProvider, holdoffTestURL) // a relay on the url was answered
+	require.Eventually(t, func() bool { return fetcher.calls.Load() > held }, time.Second, time.Millisecond,
+		"the poll resumes within an interval of the hold-off clearing, not when the timer armed under it runs out")
+	require.Eventually(t, func() bool { return ct.CurrentPollInterval() < time.Second }, time.Second, time.Millisecond,
+		"and the published interval is the cadence again")
+}
+
+// A hold-off recorded while the next poll is already scheduled holds that poll too. The hold-off used
+// to be read only when the timer was armed, so the poll scheduled before it went out into the limit
+// anyway, and a refused poll is one more strike on the url (MAG-4370).
+func TestChainTracker_ScheduledPollWaitsOutAHoldoffRecordedMeanwhile(t *testing.T) {
+	registry := holdoff.NewRegistryWithClock(time.Now)
+	fetcher := &countingFetcher{}
+	startHoldoffTracker(t, fetcher, ChainTrackerConfig{
+		AverageBlockTime:  200 * time.Millisecond,
+		FlatPollInterval:  100 * time.Millisecond,
+		RateLimitHoldoff:  registry,
+		RateLimitProvider: holdoffTestProvider,
+		RateLimitURL:      holdoffTestURL,
+	})
+	require.Eventually(t, func() bool { return fetcher.calls.Load() >= 2 }, 2*time.Second, time.Millisecond,
+		"the init fetch and one timer poll")
+
+	registry.RecordRateLimit(holdoffTestProvider, holdoffTestURL, 0) // the next poll is ~100 ms out
+	scheduled := fetcher.calls.Load()
+	time.Sleep(350 * time.Millisecond) // three intervals
+	require.Equal(t, scheduled, fetcher.calls.Load(), "the poll scheduled before the hold-off does not go out into it")
+}
+
+// A tracker with no url to key a registry entry on floors its poll with its own last refusal. Waking
+// at the cadence to re-check must still wait the upstream's Retry-After out.
+func TestChainTracker_NoRegistryStillWaitsOutRetryAfter(t *testing.T) {
+	fetcher := &countingFetcher{}
+	ct := startHoldoffTracker(t, fetcher, ChainTrackerConfig{
+		AverageBlockTime: 20 * time.Millisecond,
+		FlatPollInterval: 10 * time.Millisecond,
+	})
+	require.Nil(t, ct.rateLimitHoldoff, "advancingFetcher reports no URL")
+	require.Eventually(t, func() bool { return fetcher.calls.Load() >= 3 }, 2*time.Second, time.Millisecond)
+
+	fetcher.refuseNext.Store(int64(300 * time.Millisecond))
+	require.Eventually(t, func() bool { return fetcher.refused.Load() == 1 }, 2*time.Second, time.Millisecond)
+	refusedAt := time.Now()
+	afterRefusal := fetcher.calls.Load()
+	require.Eventually(t, func() bool { return fetcher.calls.Load() > afterRefusal }, 2*time.Second, time.Millisecond,
+		"polling resumes once the Retry-After has passed")
+	require.GreaterOrEqual(t, time.Since(refusedAt), 250*time.Millisecond, "but not before")
+}
