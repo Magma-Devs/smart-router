@@ -94,15 +94,16 @@ func TestTeardownUpstreamSubscription_SkipsADeadConnection(t *testing.T) {
 	for _, sub := range h.manager.activeSubscriptions {
 		active = sub
 	}
-	conn, upstreamID, method := active.upstreamConnection, active.upstreamID, active.subscribeMethod
+	teardown := teardownOfLocked(active)
+	conn := teardown.conn
 	h.manager.lock.RUnlock()
 
-	h.manager.teardownUpstreamSubscription(conn, upstreamID, method)
+	h.manager.teardownUpstreamSubscription(teardown)
 	require.Eventually(t, func() bool { return h.upstreamCalls("eth_unsubscribe") == 1 },
 		5*time.Second, 10*time.Millisecond, "a live connection is told")
 
 	conn.MarkUnhealthy(errors.New("read: connection reset by peer"))
-	h.manager.teardownUpstreamSubscription(conn, upstreamID, method)
+	h.manager.teardownUpstreamSubscription(teardown)
 	time.Sleep(100 * time.Millisecond)
 	require.Equal(t, 1, h.upstreamCalls("eth_unsubscribe"), "a dead connection is not")
 }

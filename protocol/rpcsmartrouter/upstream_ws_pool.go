@@ -200,15 +200,34 @@ func (p *UpstreamWSPool) SetReconnectCallback(callback func()) {
 }
 
 // GetConnection returns a healthy connection, creating one if needed.
-// This is the legacy API - prefer GetConnectionForSubscription for new code.
+// This is the legacy API - prefer ReserveConnectionForSubscription for new code.
 func (p *UpstreamWSPool) GetConnection(ctx context.Context) (*UpstreamWSConnection, error) {
 	return p.GetConnectionForSubscription(ctx)
+}
+
+// ReserveConnectionForSubscription is GetConnectionForSubscription that also counts the
+// caller's subscription on the connection it returns, under the pool lock.
+//
+// Counted any later — as the subscription manager used to, with an IncrementSubscriptions
+// after the node's subscribe reply — the connection looks unused in the meantime, and
+// maybeScaleDown closes a connection past minConnections that carries no counted
+// subscription. The subscription being created on it then dies on a socket the pool closed
+// (MAG-4278 item 11; the gRPC pool reserves on pick for the same reason, MAG-4177).
+//
+// The caller releases the slot with NotifySubscriptionRemoved, including when the subscribe
+// itself fails.
+func (p *UpstreamWSPool) ReserveConnectionForSubscription(ctx context.Context) (*UpstreamWSConnection, error) {
+	return p.connectionForSubscription(ctx, true)
 }
 
 // GetConnectionForSubscription returns the best connection for a new subscription.
 // It prefers connections with lower subscription counts and will create new connections
 // if all existing ones are near capacity (and we haven't hit maxConnections).
 func (p *UpstreamWSPool) GetConnectionForSubscription(ctx context.Context) (*UpstreamWSConnection, error) {
+	return p.connectionForSubscription(ctx, false)
+}
+
+func (p *UpstreamWSPool) connectionForSubscription(ctx context.Context, reserve bool) (*UpstreamWSConnection, error) {
 	if p.closed.Load() {
 		return nil, fmt.Errorf("pool is closed")
 	}
@@ -216,6 +235,18 @@ func (p *UpstreamWSPool) GetConnectionForSubscription(ctx context.Context) (*Ups
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
+	// The reservation is made under this lock, with the pick: a count written after the lock
+	// is released leaves a window in which maybeScaleDown sees the connection as unused.
+	conn, err := p.pickConnectionLocked(ctx)
+	if err == nil && reserve {
+		conn.IncrementSubscriptions()
+	}
+	return conn, err
+}
+
+// pickConnectionLocked chooses or creates the connection for a new subscription.
+// Caller holds p.lock.
+func (p *UpstreamWSPool) pickConnectionLocked(ctx context.Context) (*UpstreamWSConnection, error) {
 	p.pruneDeadConnectionsLocked()
 
 	// Find the best connection (healthy with lowest subscription count)
