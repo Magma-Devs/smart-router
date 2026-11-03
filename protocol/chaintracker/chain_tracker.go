@@ -597,8 +597,7 @@ func nextFetchFails(current uint64, skipped, failed bool) uint64 {
 }
 
 // this function starts the fetching timer periodically checking by polling if updates are necessary
-func (cs *ChainTracker) start(ctx context.Context, pollingTime time.Duration) error {
-	// how often to query latest block.
+func (cs *ChainTracker) start(ctx context.Context) error {
 	cs.setLatestChangeTime(time.Time{}) // we will discard the first change time, so this is uninitialized
 
 	err := cs.fetchInitDataWithRetry(ctx)
@@ -1028,7 +1027,7 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 // server address, so it was dead in this fork (any external gRPC consumer outside this tree was
 // not surveyed). The method name is kept for the IChainTracker interface.
 func (ct *ChainTracker) StartAndServe(ctx context.Context) error {
-	return ct.start(ctx, ct.averageBlockTime)
+	return ct.start(ctx)
 }
 
 func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig) IChainTracker {
@@ -1103,8 +1102,7 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 		pollNowCh:               make(chan pollNowRequest), // unbuffered: handled by the poll goroutine only
 	}
 	// Publish the base cadence up front so /debug/endpoint-state reports a sensible PollIntervalMs
-	// before the first poll reschedules it (0 for the legacy global tracker, which is not a
-	// per-endpoint row). See CurrentPollInterval / updateTimer (MAG-2395).
+	// before the first poll reschedules it. See CurrentPollInterval / updateTimer (MAG-2395).
 	chainTracker.currentPollIntervalNanos.Store(int64(flatPollInterval))
 
 	switch config.ChainId {
