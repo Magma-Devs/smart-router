@@ -34,7 +34,6 @@ import (
 	cachecore "github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
-	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -1166,13 +1165,6 @@ type routerConfigResponse struct {
 	MinAcceptableAvailability float64
 	HighCuThreshold           uint64
 	MidCuThreshold            uint64
-
-	// chain-tracker polling. There is no fixed probe interval — the tracker polls
-	// adaptively at averageBlockTime/multiplier — so the multipliers are what a test
-	// timing assumption actually depends on. Extension beyond the ticket's listed
-	// symbols; bare Go identifiers, no package prefix.
-	MostFrequentPollingMultiplier int
-	PollingUpdateLength           int
 
 	// optimizer selection weights from DefaultUpstreamSelectorConfig(), as flat
 	// top-level keys (the ticket's Phase 2 shape rule).
@@ -2338,9 +2330,6 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 			MinAcceptableAvailability: scoreutils.MinAcceptableAvailability,
 			HighCuThreshold:           scoreutils.HighCuThreshold,
 			MidCuThreshold:            scoreutils.MidCuThreshold,
-
-			MostFrequentPollingMultiplier: chaintracker.MostFrequentPollingMultiplier,
-			PollingUpdateLength:           chaintracker.PollingUpdateLength,
 
 			AvailabilityWeight: optimizerDefaults.AvailabilityWeight,
 			LatencyWeight:      optimizerDefaults.LatencyWeight,

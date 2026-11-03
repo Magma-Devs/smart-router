@@ -16,32 +16,32 @@ func TestComputePollInterval_RetryAfterFloors(t *testing.T) {
 	cs := &ChainTracker{flatPollInterval: 6 * time.Second}
 
 	// Baseline: flat cadence with backoff, no floor.
-	require.Equal(t, 6*time.Second, cs.computePollInterval(0, 0))
-	require.Equal(t, 12*time.Second, cs.computePollInterval(0, 1))
+	require.Equal(t, 6*time.Second, cs.computePollInterval(0))
+	require.Equal(t, 12*time.Second, cs.computePollInterval(1))
 
 	// A rate-limited poll with Retry-After far above the backoff ceiling floors the
 	// interval to (about) the requested wait.
 	cs.noteFetchOutcome(common.RateLimited(errors.New("HTTP 429"), 5*time.Minute))
-	got := cs.computePollInterval(0, 1)
+	got := cs.computePollInterval(1)
 	require.Greater(t, got, 4*time.Minute, "interval must honour the upstream's Retry-After")
 	require.LessOrEqual(t, got, 5*time.Minute)
 
 	// A Retry-After shorter than the computed interval never shortens it.
 	cs.noteFetchOutcome(common.RateLimited(errors.New("HTTP 429"), time.Second))
-	require.Equal(t, 12*time.Second, cs.computePollInterval(0, 1))
+	require.Equal(t, 12*time.Second, cs.computePollInterval(1))
 
 	// Any answered poll clears the floor.
 	cs.noteFetchOutcome(common.RateLimited(errors.New("HTTP 429"), 5*time.Minute))
 	cs.noteFetchOutcome(nil)
-	require.Equal(t, 6*time.Second, cs.computePollInterval(0, 0))
+	require.Equal(t, 6*time.Second, cs.computePollInterval(0))
 
 	// A non-rate-limit failure the upstream answered with clears it too — its ask is spent.
 	cs.noteFetchOutcome(common.RateLimited(errors.New("HTTP 429"), 5*time.Minute))
 	cs.noteFetchOutcome(errors.New("json-rpc error -32000: header not found"))
-	require.Equal(t, 6*time.Second, cs.computePollInterval(0, 0))
+	require.Equal(t, 6*time.Second, cs.computePollInterval(0))
 
 	// A fetch that got no answer at all is not one: the floor stands (MAG-4165).
 	cs.noteFetchOutcome(common.RateLimited(errors.New("HTTP 429"), 5*time.Minute))
 	cs.noteFetchOutcome(errors.New("connection refused"))
-	require.Greater(t, cs.computePollInterval(0, 0), 4*time.Minute)
+	require.Greater(t, cs.computePollInterval(0), 4*time.Minute)
 }
