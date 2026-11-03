@@ -605,7 +605,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels)
 	csmProviderBlocked := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_provider_blocked",
-		Help: "Whether this specific provider is currently blocked (1=blocked, 0=serving). Companion to the smartrouter_csm_blocked_providers count, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
+		Help: "Whether this specific provider is out of rotation (1=out: blocked by the router, or none of its urls can take a relay right now; 0=at least one url in rotation), in the regular pairing or the backup pool. Companion to the smartrouter_csm_blocked_providers and smartrouter_csm_blocked_backup_providers counts, for identifying WHICH provider went out. Republished in full on every state-size tick, so it converges even when the blocked list is drained wholesale.",
 	}, []string{"spec", "apiInterface", "provider_address"})
 	csmBlockedProvidersByReason := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_csm_blocked_providers_by_reason",
@@ -699,11 +699,11 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, []string{"spec", "apiInterface"})
 	batchSignatureOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_batch_signature_overflow_total",
-		Help: `Label normalizations that fell into method="batch:other". reason="cap": the spec exhausted its distinct-signature budget. reason="wide": one batch spanned more distinct methods than a signature may name. Non-zero means per-batch-type breakdowns are lossy — raise the cap or accept the aggregation.`,
+		Help: `Label normalizations that fell into method="batch:other". reason="cap": the spec exhausted its distinct-signature budget. reason="wide": one batch spanned more distinct methods than a signature may name. reason="invalid": the name was not valid UTF-8. Non-zero means per-batch-type breakdowns are lossy — raise the cap or accept the aggregation.`,
 	}, []string{"spec", "reason"})
 	defaultMethodOverflow := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_default_method_overflow_total",
-		Help: `Label normalizations that fell into method="Default-other": the spec exhausted its distinct unmatched-API name budget. Sustained growth means clients are hitting URLs the spec does not match — concrete IDs in the path mint a new name per request — which usually indicates a spec gap (e.g. a path variant the templates miss).`,
+		Help: `Label normalizations that fell into method="Default-other": the spec exhausted its distinct unmatched-API name budget, or a name was not valid UTF-8. Sustained growth means clients are hitting URLs the spec does not match — concrete IDs in the path mint a new name per request — which usually indicates a spec gap (e.g. a path variant the templates miss).`,
 	}, []string{"spec"})
 
 	// Per-customer request group (MAG-4081). Request-level, unlike smartrouter_requests_*,
@@ -740,7 +740,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, cacheLabels)
 	cacheFailedTotalMetric := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_cache_failed_total",
-		Help: "Total number of cache lookups that did not produce a cached response, per cache tier, split by outcome (miss = clean not-found, error = transport/server error, timeout = lookup budget exceeded).",
+		Help: "Total number of cache lookups that did not produce a cached response, per cache tier, split by outcome (miss = clean not-found, error = transport/server error, or a JSON-RPC/Tendermint entry that is not a usable reply and was refused, timeout = lookup budget exceeded).",
 	}, append(append([]string{}, cacheLabels...), "outcome"))
 	cacheLatencyHistogram := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_cache_latency_milliseconds",
@@ -1964,8 +1964,8 @@ func (m *SmartRouterMetricsManager) ResetSessionRelatedMetrics() {}
 // in the standing block list, and that provider is no longer in it. Over many epochs those
 // phantoms accumulate — a slow cardinality leak that also reads as a permanent outage.
 //
-// Drop every series for this chain first, then seed 0 for each provider in the new pairing, so
-// providers that left are gone rather than frozen. A provider that the re-block pass immediately
+// Drop every series for this chain first, then seed 0 for each provider in the new pairing and
+// backup pool, so providers that left are gone rather than frozen. A provider that the re-block pass immediately
 // re-blocks is corrected by the next publishStateSizes tick, which republishes the full truth.
 func (m *SmartRouterMetricsManager) ResetBlockedProvidersMetrics(chainId, apiInterface string, providerAddressToEndpoint map[string]string) {
 	if m == nil {

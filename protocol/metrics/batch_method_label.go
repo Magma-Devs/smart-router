@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 const (
@@ -42,8 +43,9 @@ const (
 
 // Reasons for the smartrouter_batch_signature_overflow_total `reason` label.
 const (
-	batchOverflowReasonCap  = "cap"
-	batchOverflowReasonWide = "wide"
+	batchOverflowReasonCap     = "cap"
+	batchOverflowReasonWide    = "wide"
+	batchOverflowReasonInvalid = "invalid"
 )
 
 // buildBatchSignature turns a raw joined batch api name into an order-invariant and
@@ -146,8 +148,9 @@ func (r *batchSignatureRegistry) admit(spec, signature string) bool {
 	return true
 }
 
-// normalizeMethodLabel collapses a raw batch api name into a bounded signature and
-// returns single-method names untouched.
+// normalizeMethodLabel collapses a raw batch api name into a bounded signature and hands
+// a single-method name to normalizeDefaultMethodLabel. A name that is not valid UTF-8
+// cannot be a label value, so it goes to the overflow bucket of its kind instead.
 //
 // It is idempotent, because a collapsed value carries no batchMethodSeparator. That
 // matters: the public recorders delegate to one another (RecordDirectRelayEnd →
@@ -156,6 +159,16 @@ func (r *batchSignatureRegistry) admit(spec, signature string) bool {
 func (m *SmartRouterMetricsManager) normalizeMethodLabel(spec, method string) string {
 	if m == nil {
 		return method
+	}
+	if !utf8.ValidString(method) {
+		// A label value must be valid UTF-8. The name collapses before admission, so it
+		// spends no budget.
+		if strings.Contains(method, batchMethodSeparator) {
+			m.recordBatchSignatureOverflow(spec, batchOverflowReasonInvalid)
+			return BatchMethodOther
+		}
+		m.recordDefaultMethodOverflow(spec)
+		return DefaultMethodOther
 	}
 	if !strings.Contains(method, batchMethodSeparator) {
 		// Single-method names have their own unbounded case: the synthetic
