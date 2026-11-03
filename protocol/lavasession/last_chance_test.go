@@ -337,6 +337,59 @@ func TestLastChance_SuccessLiftsTheBlockFailureKeepsItDisabled(t *testing.T) {
 	})
 }
 
+// MAG-4829, the interleaving that skipped the lend. This request passed over the provider because
+// every endpoint of it is off, and blocked it. Another request's pool-empty release then emptied the
+// blocked list before this request reached the fallback. The provider is back in rotation for every
+// other request but still ignored by this one, so normal selection cannot hand it over either. The
+// fallback must still lend it: nothing else can serve.
+func TestLastChance_LendsAProviderReleasedByAnotherRequestMidRequest(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+	require.Empty(t, csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "the other request's release left the blocked list empty")
+
+	ignored := &ignoredProviders{
+		providers:          map[string]struct{}{"primary": {}}, // passed over by this attempt
+		triedByThisRequest: map[string]struct{}{},
+		currentEpoch:       csm.atomicReadCurrentEpoch(),
+	}
+	got, err := csm.tryGetConsumerSessionWithProviderFromBlockedProviderList(context.Background(), 1, ignored, 10, spectypes.LATEST_BLOCK, "", nil, common.NO_STATE, 0, NewUsedProviders(nil))
+	require.NoError(t, err, "the last chance must not end in No pairings available")
+	require.Contains(t, got, "primary")
+	require.True(t, got["primary"].lastChance, "the provider must be handed out for a lend, not for normal selection")
+}
+
+// MAG-4829 end to end: many requests at once with the only URL off. Each one lends that URL once
+// and none ends in "No pairings available", however the releases of the blocked list by the other
+// requests interleave with it.
+func TestLastChance_EveryConcurrentRequestIsLent(t *testing.T) {
+	const rounds, concurrent = 20, 50
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+
+	for round := 0; round < rounds; round++ {
+		errs := make(chan error, concurrent)
+		start := make(chan struct{})
+		for i := 0; i < concurrent; i++ {
+			go func() {
+				<-start
+				sessions, err := lcGet(csm, NewUsedProviders(nil))
+				for _, s := range sessions {
+					// The node's error, as in the ticket: the URL stays off.
+					_ = csm.OnSessionFailure(s.Session, errLastChanceRelay)
+				}
+				errs <- err
+			}()
+		}
+		close(start)
+		for i := 0; i < concurrent; i++ {
+			require.NoError(t, <-errs, "round %d: a request missed the last chance", round)
+		}
+		require.False(t, p.Endpoints[0].IsEnabled())
+	}
+}
+
 // lcProviderWithWS is a provider listing an https url and a wss url — the documented ETH1
 // jsonrpc shape — with the https url first, as the chart renders it.
 func lcProviderWithWS(t *testing.T, name, httpURL, wsURL string) *ConsumerSessionsWithProvider {
