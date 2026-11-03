@@ -72,7 +72,7 @@ func isRouterFault(err error) bool {
 type relayEnd struct {
 	guid         string
 	connection   string
-	customer     string // the project id, unless it is the listeners' default
+	customer     string // the customer id, unless it is the listeners' default
 	requestID    string // the caller's X-Request-Id, X-Task-Id and X-Tx-Id
 	taskID       string
 	txID         string
@@ -265,7 +265,7 @@ type relayEndInput struct {
 	err             error               // what the listener receives
 	cause           error               // the error the relay's processing ended with
 	start           time.Time
-	dappID          string // the project id of a request that has no protocol message
+	dappID          string // the customer id of a request that has no protocol message
 }
 
 // The WebSocket manager finds the reporter by type assertion, so a drifted signature would
@@ -725,8 +725,8 @@ func relayEndText(text string) string {
 // relayEndIDLimit caps customer and the caller's ids, which are what the caller sent.
 const relayEndIDLimit = 128
 
-// relayEndCustomer is the project id as customer: none for the id the listeners default to when the
-// project-id header is absent.
+// relayEndCustomer is the customer id as customer: none for the id the listeners default to when the
+// customer-id header is absent.
 func relayEndCustomer(dappID string) string {
 	if dappID == metrics.CustomerNone {
 		return ""

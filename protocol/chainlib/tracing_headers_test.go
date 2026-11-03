@@ -249,7 +249,7 @@ func TestStreamRelayCallback_TracingHeadersReachTheRelay(t *testing.T) {
 		"x-task-id", callerTracingIds.taskId,
 		"x-tx-id", callerTracingIds.txId,
 	))
-	response, err := listener.makeStreamRelayCallback(manager)(ctx, streamingApiName, []byte("{}"))
+	response, err := listener.makeStreamRelayCallback(manager, false)(ctx, streamingApiName, []byte("{}"))
 	require.NoError(t, err)
 	require.NotNil(t, response)
 
@@ -326,7 +326,7 @@ func TestListeners_TracingIdsReachAnInfoLine(t *testing.T) {
 			"x-task-id", ids.taskId,
 			"x-tx-id", ids.txId,
 		))
-		response, err := listener.makeStreamRelayCallback(newStubGRPCSubscriptionManager())(ctx, streamingApiName, []byte("{}"))
+		response, err := listener.makeStreamRelayCallback(newStubGRPCSubscriptionManager(), false)(ctx, streamingApiName, []byte("{}"))
 		require.NoError(t, err)
 		require.NotNil(t, response)
 		requireInfoLine(t, ids)

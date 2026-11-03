@@ -214,7 +214,7 @@ type RelaySender interface {
 // RelayRejectionReporter is implemented by a relay sender that records each request a listener
 // refuses after parsing it itself. The WebSocket manager parses every frame before choosing a path,
 // so a frame that does not parse never reaches SendParsedRelay; it reports here instead, with the
-// project id the frame's connection came with.
+// customer id the frame's connection came with.
 type RelayRejectionReporter interface {
 	ReportRejectedRelay(ctx context.Context, start time.Time, dappID string, err error)
 }
