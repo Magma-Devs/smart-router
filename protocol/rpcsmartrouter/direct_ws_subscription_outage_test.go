@@ -69,11 +69,11 @@ func TestUpstreamWSPool_RetiresAConnectionMarkedDead(t *testing.T) {
 	t.Cleanup(func() { _ = pool.Close() })
 	ctx := context.Background()
 
-	dead, err := pool.GetConnection(ctx)
+	dead, err := pool.take(ctx, false)
 	require.NoError(t, err)
 	dead.MarkUnhealthy(errors.New("read: connection reset by peer"))
 
-	replacement, err := pool.GetConnection(ctx)
+	replacement, err := pool.take(ctx, false)
 	require.NoError(t, err)
 	require.NotSame(t, dead, replacement, "a connection marked dead must not be handed out again")
 	require.True(t, replacement.IsHealthy())
@@ -94,15 +94,16 @@ func TestTeardownUpstreamSubscription_SkipsADeadConnection(t *testing.T) {
 	for _, sub := range h.manager.activeSubscriptions {
 		active = sub
 	}
-	conn, upstreamID, method := active.upstreamConnection, active.upstreamID, active.subscribeMethod
+	teardown := teardownOfLocked(active)
+	conn := teardown.conn
 	h.manager.lock.RUnlock()
 
-	h.manager.teardownUpstreamSubscription(conn, upstreamID, method)
+	h.manager.teardownUpstreamSubscription(teardown)
 	require.Eventually(t, func() bool { return h.upstreamCalls("eth_unsubscribe") == 1 },
 		5*time.Second, 10*time.Millisecond, "a live connection is told")
 
 	conn.MarkUnhealthy(errors.New("read: connection reset by peer"))
-	h.manager.teardownUpstreamSubscription(conn, upstreamID, method)
+	h.manager.teardownUpstreamSubscription(teardown)
 	time.Sleep(100 * time.Millisecond)
 	require.Equal(t, 1, h.upstreamCalls("eth_unsubscribe"), "a dead connection is not")
 }

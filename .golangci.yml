@@ -94,8 +94,8 @@ linters:
         linters:
           - dupl
         text: "error_classifier\\.go"
-      # Twins whose differences are the point: latency vs sync normalisation (constants, log keys),
-      # sticky vs fresh selection (log text), and counter vs gauge vectors (Prometheus types).
+      # Twins whose differences are the point: latency vs sync normalisation (constants, log keys)
+      # and sticky vs fresh selection (log text).
       - path: protocol/provideroptimizer/(upstream_selector|provider_optimizer)\.go
         linters:
           - dupl
@@ -104,10 +104,6 @@ linters:
         linters:
           - dupl
         text: "consumer_session_manager\\.go"
-      - path: protocol/metrics/mapped_labels_(counter|gauge)_vec\.go
-        linters:
-          - dupl
-        text: "mapped_labels_(counter|gauge)_vec\\.go"
       - linters:
           - gocritic
         text: "singleCaseSwitch"

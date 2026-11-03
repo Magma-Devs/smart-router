@@ -547,6 +547,12 @@ Switching backends is a configuration change; the RESP cache starts cold (no dat
 - **`read-addresses` selects an endpoint, not a replica role** — see
   [Multi-region reads](#multi-region-reads-readwrite-split).
 - **Cold start.** No data migrates in either direction when switching backends.
+- **No secondary cache tier beside a RESP primary.** The secondary tier
+  (`secondary-cache-be`, [SECONDARY-CACHE.md](SECONDARY-CACHE.md)) is always a gRPC cache, so
+  pairing it with `resp-cache` mixes cache engines across the two tiers, which is not a
+  supported configuration (MAG-2596). The router logs a warning at startup naming both and
+  still runs both tiers; it does not refuse to start (MAG-4777). A RESP secondary does not
+  exist yet (MAG-4778).
 
 ## Local testing lanes
 

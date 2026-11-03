@@ -33,28 +33,28 @@ var _ ConsumerMetricsManagerInf = (*SmartRouterMetricsManager)(nil)
 // aggregate — no duplicate metrics needed.
 type SmartRouterMetricsManager struct {
 	// Endpoint-scoped metrics (labels: spec, apiInterface, endpoint_id, function)
-	endpointTotalRelaysServiced *MappedLabelsCounterVec  // rpc_endpoint_total_relays_serviced
-	endpointTotalErrored        *MappedLabelsCounterVec  // rpc_endpoint_total_errored
-	endpointTotalCancelled      *MappedLabelsCounterVec  // rpc_endpoint_total_cancelled
+	endpointTotalRelaysServiced *prometheus.CounterVec   // rpc_endpoint_total_relays_serviced
+	endpointTotalErrored        *prometheus.CounterVec   // rpc_endpoint_total_errored
+	endpointTotalCancelled      *prometheus.CounterVec   // rpc_endpoint_total_cancelled
 	endpointEndToEndLatency     *prometheus.HistogramVec // rpc_endpoint_end_to_end_latency_milliseconds
-	endpointInFlight            *MappedLabelsGaugeVec    // rpc_endpoint_requests_in_flight
+	endpointInFlight            *prometheus.GaugeVec     // rpc_endpoint_requests_in_flight
 
 	// Endpoint-scoped metrics (labels: spec, apiInterface, endpoint_id)
-	endpointOverallHealth          *MappedLabelsGaugeVec   // rpc_endpoint_overall_health
-	endpointOverallHealthBreakdown *prometheus.GaugeVec    // rpc_endpoint_overall_health_breakdown {spec, apiInterface}
-	endpointSelectionScore         *prometheus.GaugeVec    // rpc_endpoint_selection_score {spec, apiInterface, endpoint_id, score_type}
-	optimizerSelectionScore        *prometheus.GaugeVec    // rpc_optimizer_selection_score {spec, endpoint_id, score_type}
-	endpointLatestBlock            *MappedLabelsGaugeVec   // rpc_endpoint_latest_block
-	endpointURLLatestBlock         *MappedLabelsGaugeVec   // rpc_endpoint_url_latest_block
-	endpointURLAnsweredUntil       *MappedLabelsGaugeVec   // rpc_endpoint_url_answered_until_seconds
-	endpointURLRelaysServiced      *MappedLabelsCounterVec // rpc_endpoint_url_relays_serviced_total
-	endpointFetchLatestFails       *MappedLabelsCounterVec // rpc_endpoint_fetch_latest_fails
-	endpointFetchBlockFails        *MappedLabelsCounterVec // rpc_endpoint_fetch_block_fails
-	endpointFetchLatestSuccess     *MappedLabelsCounterVec // rpc_endpoint_fetch_latest_success
-	endpointFetchBlockSuccess      *MappedLabelsCounterVec // rpc_endpoint_fetch_block_success
-	endpointTrackerRequests        *MappedLabelsCounterVec // rpc_endpoint_tracker_requests_total
-	endpointTrackerGateSkips       *MappedLabelsCounterVec // rpc_endpoint_tracker_gate_skips_total
-	endpointTrackerGateErrors      *MappedLabelsCounterVec // rpc_endpoint_tracker_gate_errors_total
+	endpointOverallHealth          *prometheus.GaugeVec   // rpc_endpoint_overall_health
+	endpointOverallHealthBreakdown *prometheus.GaugeVec   // rpc_endpoint_overall_health_breakdown {spec, apiInterface}
+	endpointSelectionScore         *prometheus.GaugeVec   // rpc_endpoint_selection_score {spec, apiInterface, endpoint_id, score_type}
+	optimizerSelectionScore        *prometheus.GaugeVec   // rpc_optimizer_selection_score {spec, endpoint_id, score_type}
+	endpointLatestBlock            *prometheus.GaugeVec   // rpc_endpoint_latest_block
+	endpointURLLatestBlock         *prometheus.GaugeVec   // rpc_endpoint_url_latest_block
+	endpointURLAnsweredUntil       *prometheus.GaugeVec   // rpc_endpoint_url_answered_until_seconds
+	endpointURLRelaysServiced      *prometheus.CounterVec // rpc_endpoint_url_relays_serviced_total
+	endpointFetchLatestFails       *prometheus.CounterVec // rpc_endpoint_fetch_latest_fails
+	endpointFetchBlockFails        *prometheus.CounterVec // rpc_endpoint_fetch_block_fails
+	endpointFetchLatestSuccess     *prometheus.CounterVec // rpc_endpoint_fetch_latest_success
+	endpointFetchBlockSuccess      *prometheus.CounterVec // rpc_endpoint_fetch_block_success
+	endpointTrackerRequests        *prometheus.CounterVec // rpc_endpoint_tracker_requests_total
+	endpointTrackerGateSkips       *prometheus.CounterVec // rpc_endpoint_tracker_gate_skips_total
+	endpointTrackerGateErrors      *prometheus.CounterVec // rpc_endpoint_tracker_gate_errors_total
 
 	// Router-scoped metrics (labels: spec, apiInterface, function)
 	routerTotalRelaysServiced *prometheus.CounterVec   // smartrouter_total_relays_serviced
@@ -238,40 +238,30 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	endpointFunctionLabels := []string{"spec", "apiInterface", "endpoint_id", "function"}
 	endpointLabels := []string{"spec", "apiInterface", "endpoint_id"}
 
-	m.endpointTotalRelaysServiced = NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_total_relays_serviced",
-		Help:       "Total relays successfully serviced by this RPC endpoint, by function.",
-		Labels:     endpointFunctionLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointTotalRelaysServiced = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_total_relays_serviced",
+		Help: "Total relays successfully serviced by this RPC endpoint, by function.",
+	}, endpointFunctionLabels))
 
-	m.endpointTotalErrored = NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_total_errored",
-		Help:       "Total errored relays for this RPC endpoint, by function.",
-		Labels:     endpointFunctionLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointTotalErrored = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_total_errored",
+		Help: "Total errored relays for this RPC endpoint, by function.",
+	}, endpointFunctionLabels))
 
-	m.endpointTotalCancelled = NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_total_cancelled",
-		Help:       "Relays cancelled by the router before completion, by function — relay-race losers on stateful broadcasts, and client disconnects. NOT an endpoint fault: these are deliberately excluded from rpc_endpoint_total_errored and from QoS/availability scoring. A high rate here is normal on write-heavy traffic (one winner, N-1 cancelled) and is the signal for tuning broadcast fan-out.",
-		Labels:     endpointFunctionLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointTotalCancelled = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_total_cancelled",
+		Help: "Relays cancelled by the router before completion, by function — relay-race losers on stateful broadcasts, and client disconnects. NOT an endpoint fault: these are deliberately excluded from rpc_endpoint_total_errored and from QoS/availability scoring. A high rate here is normal on write-heavy traffic (one winner, N-1 cancelled) and is the signal for tuning broadcast fan-out.",
+	}, endpointFunctionLabels))
 
-	m.endpointInFlight = NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_requests_in_flight",
-		Help:       "Current number of in-flight relays for this RPC endpoint, by function.",
-		Labels:     endpointFunctionLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointInFlight = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rpc_endpoint_requests_in_flight",
+		Help: "Current number of in-flight relays for this RPC endpoint, by function.",
+	}, endpointFunctionLabels))
 
-	m.endpointOverallHealth = NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_overall_health",
-		Help:       "Health status of this RPC endpoint (1=healthy, 0=unhealthy).",
-		Labels:     endpointLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointOverallHealth = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rpc_endpoint_overall_health",
+		Help: "Health status of this RPC endpoint (1=healthy, 0=unhealthy).",
+	}, endpointLabels))
 
 	m.endpointOverallHealthBreakdown = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_endpoint_overall_health_breakdown",
@@ -288,63 +278,47 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Help: "Periodic optimizer selection score per provider by score type (availability/latency/sync/stake/composite). Chain-level, not scoped to apiInterface.",
 	}, []string{"spec", "endpoint_id", "score_type"}))
 
-	m.endpointLatestBlock = NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_latest_block",
-		Help:       "Latest block known by this RPC endpoint.",
-		Labels:     endpointLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointLatestBlock = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rpc_endpoint_latest_block",
+		Help: "Latest block known by this RPC endpoint.",
+	}, endpointLabels))
 
 	// One series per node url of a provider, for the stuck-provider alerts (MAG-4204). Every url
 	// of a provider writes the provider series above, so that series cannot show a url that
 	// froze while another url of the provider moves on.
 	urlLabels := []string{"spec", "apiInterface", "endpoint_id", "url", "internal_path"}
-	m.endpointURLLatestBlock = NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_url_latest_block",
-		Help:       "Latest block one node url of a provider answered with. url is a fingerprint of the node url: the first 8 hex digits of its sha256.",
-		Labels:     urlLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
-	m.endpointURLAnsweredUntil = NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_url_answered_until_seconds",
-		Help:       "Unix time until which a node url counts as answering: its last answer, a poll or a relay, plus max(2m, 6 x the interval its tracker polls at). A url past it has stopped answering: it is down, not stuck.",
-		Labels:     urlLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
-	m.endpointURLRelaysServiced = NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_url_relays_serviced_total",
-		Help:       "Relays one node url of a provider served successfully.",
-		Labels:     urlLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointURLLatestBlock = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rpc_endpoint_url_latest_block",
+		Help: "Latest block one node url of a provider answered with. url is a fingerprint of the node url: the first 8 hex digits of its sha256.",
+	}, urlLabels))
+	m.endpointURLAnsweredUntil = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rpc_endpoint_url_answered_until_seconds",
+		Help: "Unix time until which a node url counts as answering: its last answer, a poll or a relay, plus max(2m, 6 x the interval its tracker polls at). A url past it has stopped answering: it is down, not stuck.",
+	}, urlLabels))
+	m.endpointURLRelaysServiced = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_url_relays_serviced_total",
+		Help: "Relays one node url of a provider served successfully.",
+	}, urlLabels))
 
-	m.endpointFetchLatestFails = NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_fetch_latest_fails",
-		Help:       "Total failed latest-block fetch operations for this RPC endpoint.",
-		Labels:     endpointLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointFetchLatestFails = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_fetch_latest_fails",
+		Help: "Total failed latest-block fetch operations for this RPC endpoint.",
+	}, endpointLabels))
 
-	m.endpointFetchBlockFails = NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_fetch_block_fails",
-		Help:       "Total failed specific-block fetch operations for this RPC endpoint.",
-		Labels:     endpointLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointFetchBlockFails = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_fetch_block_fails",
+		Help: "Total failed specific-block fetch operations for this RPC endpoint.",
+	}, endpointLabels))
 
-	m.endpointFetchLatestSuccess = NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_fetch_latest_success",
-		Help:       "Total successful latest-block fetch operations for this RPC endpoint.",
-		Labels:     endpointLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointFetchLatestSuccess = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_fetch_latest_success",
+		Help: "Total successful latest-block fetch operations for this RPC endpoint.",
+	}, endpointLabels))
 
-	m.endpointFetchBlockSuccess = NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_fetch_block_success",
-		Help:       "Total successful specific-block fetch operations for this RPC endpoint.",
-		Labels:     endpointLabels,
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointFetchBlockSuccess = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_fetch_block_success",
+		Help: "Total successful specific-block fetch operations for this RPC endpoint.",
+	}, endpointLabels))
 
 	// Counts the actual upstream requests the per-endpoint ChainTracker sends, split by what
 	// the request was for. This is the ONLY metric that tracks tracker REQUEST VOLUME:
@@ -354,12 +328,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	//
 	// kind is bounded to trackerRequestKind* below. Watch kind="block_hash" go to zero when
 	// fork detection is off (--enable-fork-detection), and kind="latest_block" stay flat.
-	m.endpointTrackerRequests = NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_tracker_requests_total",
-		Help:       "Total upstream requests sent by the per-endpoint chain tracker, by kind (latest_block, block_hash).",
-		Labels:     []string{"spec", "apiInterface", "endpoint_id", "kind"},
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointTrackerRequests = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_tracker_requests_total",
+		Help: "Total upstream requests sent by the per-endpoint chain tracker, by kind (latest_block, block_hash).",
+	}, []string{"spec", "apiInterface", "endpoint_id", "kind"}))
 
 	// Counts the poll cycles the tracker's traffic gate suppressed, split by what made the
 	// poll redundant: source="relay" (served traffic kept the tip fresh), source="peer"
@@ -368,22 +340,18 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	// the poll's answer — idle mode).
 	// Together with rpc_endpoint_tracker_requests_total this shows both halves of the
 	// tracker's cadence: requests sent, and ticks that sent nothing and why.
-	m.endpointTrackerGateSkips = NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_tracker_gate_skips_total",
-		Help:       "Total per-endpoint tracker poll cycles suppressed by the traffic gate, by source (relay, peer, idle).",
-		Labels:     []string{"spec", "apiInterface", "endpoint_id", "source"},
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointTrackerGateSkips = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_tracker_gate_skips_total",
+		Help: "Total per-endpoint tracker poll cycles suppressed by the traffic gate, by source (relay, peer, idle).",
+	}, []string{"spec", "apiInterface", "endpoint_id", "source"}))
 
 	// Counts FAILED calls to the fleet observation store, by operation. Without it a broken
 	// cache backend and a fleet with nothing to share are indistinguishable — both leave
 	// rpc_endpoint_tracker_gate_skips_total{source="peer"} at zero.
-	m.endpointTrackerGateErrors = NewMappedLabelsCounterVec(MappedLabelsMetricOpts{
-		Name:       "rpc_endpoint_tracker_gate_errors_total",
-		Help:       "Total failed fleet-observation-store calls made by the per-endpoint tracker gate, by op (fetch, publish).",
-		Labels:     []string{"spec", "apiInterface", "endpoint_id", "op"},
-		Registerer: prometheus.DefaultRegisterer,
-	})
+	m.endpointTrackerGateErrors = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_tracker_gate_errors_total",
+		Help: "Total failed fleet-observation-store calls made by the per-endpoint tracker gate, by op (fetch, publish).",
+	}, []string{"spec", "apiInterface", "endpoint_id", "op"}))
 
 	// =========================================================================
 	// Endpoint-scoped histogram (labels: spec, apiInterface, endpoint_id, function)
@@ -861,21 +829,9 @@ func incOutcome(total, success, failed *prometheus.CounterVec, ok bool, labels .
 	}
 }
 
-func incMapped(vec *MappedLabelsCounterVec, labels map[string]string) {
+func addGauge(vec *prometheus.GaugeVec, delta float64, labels ...string) {
 	if vec != nil {
-		vec.WithLabelValues(labels).Inc()
-	}
-}
-
-func addMapped(vec *MappedLabelsGaugeVec, delta float64, labels map[string]string) {
-	if vec != nil {
-		vec.WithLabelValues(labels).Add(delta)
-	}
-}
-
-func setMapped(vec *MappedLabelsGaugeVec, value float64, labels map[string]string) {
-	if vec != nil {
-		vec.WithLabelValues(labels).Set(value)
+		vec.WithLabelValues(labels...).Add(delta)
 	}
 }
 
@@ -887,26 +843,14 @@ func boolGauge(b bool) float64 {
 	return 0
 }
 
-// endpointSeries names an endpoint-scoped series: {spec, apiInterface, endpoint_id}.
-func endpointSeries(spec, apiInterface, endpointID string) map[string]string {
-	return map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID}
-}
-
-// endpointFunctionSeries names an endpoint-scoped series by function, normalizing the function
-// label: {spec, apiInterface, endpoint_id, function}.
-func (m *SmartRouterMetricsManager) endpointFunctionSeries(spec, apiInterface, endpointID, function string) map[string]string {
-	function = m.normalizeMethodLabel(spec, function)
-	return map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "function": function}
-}
-
 // incForEveryProvider counts one event on vec for every provider configured with endpointID, on
-// the {spec, apiInterface, endpoint_id, key} series.
-func (m *SmartRouterMetricsManager) incForEveryProvider(vec *MappedLabelsCounterVec, spec, apiInterface, endpointID, key, value string) {
+// the {spec, apiInterface, endpoint_id, <vec's fourth label>} series.
+func (m *SmartRouterMetricsManager) incForEveryProvider(vec *prometheus.CounterVec, spec, apiInterface, endpointID, value string) {
 	if vec == nil {
 		return
 	}
 	for _, providerName := range m.resolveProviderNames(endpointID) {
-		incMapped(vec, map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": providerName, key: value})
+		incCounter(vec, spec, apiInterface, providerName, value)
 	}
 }
 
@@ -919,7 +863,7 @@ func (m *SmartRouterMetricsManager) SetEndpointOverallHealth(spec, apiInterface,
 	if m == nil {
 		return
 	}
-	setMapped(m.endpointOverallHealth, boolGauge(healthy), endpointSeries(spec, apiInterface, endpointID))
+	setGauge(m.endpointOverallHealth, boolGauge(healthy), spec, apiInterface, endpointID)
 }
 
 // SetEndpointOverallHealthBreakdown sets the aggregate health for a spec/apiInterface across endpoints
@@ -939,7 +883,7 @@ func (m *SmartRouterMetricsManager) SetEndpointLatestBlock(spec, apiInterface, e
 		return
 	}
 	for _, providerName := range m.resolveProviderNames(endpointID) {
-		setMapped(m.endpointLatestBlock, float64(block), endpointSeries(spec, apiInterface, providerName))
+		setGauge(m.endpointLatestBlock, float64(block), spec, apiInterface, providerName)
 	}
 }
 
@@ -1019,10 +963,10 @@ func answeredUntilFrom(now time.Time, answerTimeout time.Duration) time.Time {
 // setURLLatestBlockLocked writes one url series and its answered-until time. The caller holds lock,
 // for reading.
 func (m *SmartRouterMetricsManager) setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL string, block int64, answeredUntil time.Time) {
-	labels := m.urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL)
-	m.endpointURLLatestBlock.WithLabelValues(labels).Set(float64(block))
+	values := m.urlSeriesLabelValuesLocked(spec, apiInterface, providerName, endpointURL)
+	m.endpointURLLatestBlock.WithLabelValues(values...).Set(float64(block))
 	if m.endpointURLAnsweredUntil != nil {
-		m.endpointURLAnsweredUntil.WithLabelValues(labels).Set(float64(answeredUntil.Unix()))
+		m.endpointURLAnsweredUntil.WithLabelValues(values...).Set(float64(answeredUntil.Unix()))
 	}
 }
 
@@ -1037,7 +981,7 @@ func (m *SmartRouterMetricsManager) AddEndpointURLRelayServiced(spec, apiInterfa
 	if _, registered := m.urlToProviderNames[endpointURL]; !registered {
 		return
 	}
-	m.endpointURLRelaysServiced.WithLabelValues(m.urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL)).Inc()
+	m.endpointURLRelaysServiced.WithLabelValues(m.urlSeriesLabelValuesLocked(spec, apiInterface, providerName, endpointURL)...).Inc()
 }
 
 // ForgetEndpointURLLatestBlock deletes a url's per-url series for every provider configured with
@@ -1050,30 +994,27 @@ func (m *SmartRouterMetricsManager) ForgetEndpointURLLatestBlock(spec, apiInterf
 	m.lock.Lock()
 	defer m.lock.Unlock()
 	for _, providerName := range m.urlToProviderNames[endpointURL] {
-		labels := prometheus.Labels(m.urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL))
-		m.endpointURLLatestBlock.GaugeVec.Delete(labels)
+		values := m.urlSeriesLabelValuesLocked(spec, apiInterface, providerName, endpointURL)
+		m.endpointURLLatestBlock.DeleteLabelValues(values...)
 		if m.endpointURLAnsweredUntil != nil {
-			m.endpointURLAnsweredUntil.GaugeVec.Delete(labels)
+			m.endpointURLAnsweredUntil.DeleteLabelValues(values...)
 		}
 		if m.endpointURLRelaysServiced != nil {
-			m.endpointURLRelaysServiced.CounterVec.Delete(labels)
+			m.endpointURLRelaysServiced.DeleteLabelValues(values...)
 		}
 	}
 }
 
-// urlSeriesLabelsLocked names one url's per-url series. The caller holds lock.
-func (m *SmartRouterMetricsManager) urlSeriesLabelsLocked(spec, apiInterface, providerName, endpointURL string) map[string]string {
+// urlSeriesLabelValuesLocked names one url's per-url series: its label values in urlLabels
+// order (spec, apiInterface, endpoint_id, url, internal_path). They are passed positionally,
+// so this order and urlLabels must change together; TestPositionalLabels_EveryWrappedMetric
+// fails if they drift. The caller holds lock.
+func (m *SmartRouterMetricsManager) urlSeriesLabelValuesLocked(spec, apiInterface, providerName, endpointURL string) []string {
 	fingerprint, ok := m.urlFingerprints[endpointURL]
 	if !ok {
 		fingerprint = URLFingerprint(endpointURL)
 	}
-	return map[string]string{
-		"spec":          spec,
-		"apiInterface":  apiInterface,
-		"endpoint_id":   providerName,
-		"url":           fingerprint,
-		"internal_path": m.urlInternalPaths[endpointURL],
-	}
+	return []string{spec, apiInterface, providerName, fingerprint, m.urlInternalPaths[endpointURL]}
 }
 
 // AddEndpointRelayServiced increments the relay counter for an endpoint and function
@@ -1081,7 +1022,7 @@ func (m *SmartRouterMetricsManager) AddEndpointRelayServiced(spec, apiInterface,
 	if m == nil {
 		return
 	}
-	incMapped(m.endpointTotalRelaysServiced, m.endpointFunctionSeries(spec, apiInterface, endpointID, function))
+	incCounter(m.endpointTotalRelaysServiced, spec, apiInterface, endpointID, m.normalizeMethodLabel(spec, function))
 }
 
 // AddEndpointRelayCancelled increments the cancelled counter for an endpoint and function.
@@ -1091,7 +1032,7 @@ func (m *SmartRouterMetricsManager) AddEndpointRelayCancelled(spec, apiInterface
 	if m == nil {
 		return
 	}
-	incMapped(m.endpointTotalCancelled, m.endpointFunctionSeries(spec, apiInterface, endpointID, function))
+	incCounter(m.endpointTotalCancelled, spec, apiInterface, endpointID, m.normalizeMethodLabel(spec, function))
 }
 
 // AddEndpointRelayErrored increments the error counter for an endpoint and function
@@ -1099,7 +1040,7 @@ func (m *SmartRouterMetricsManager) AddEndpointRelayErrored(spec, apiInterface, 
 	if m == nil {
 		return
 	}
-	incMapped(m.endpointTotalErrored, m.endpointFunctionSeries(spec, apiInterface, endpointID, function))
+	incCounter(m.endpointTotalErrored, spec, apiInterface, endpointID, m.normalizeMethodLabel(spec, function))
 }
 
 // SetEndpointEndToEndLatency observes a latency sample for an endpoint and function
@@ -1115,7 +1056,7 @@ func (m *SmartRouterMetricsManager) AddEndpointInFlightRequest(spec, apiInterfac
 	if m == nil {
 		return
 	}
-	addMapped(m.endpointInFlight, 1, m.endpointFunctionSeries(spec, apiInterface, endpointID, function))
+	addGauge(m.endpointInFlight, 1, spec, apiInterface, endpointID, m.normalizeMethodLabel(spec, function))
 }
 
 // SubEndpointInFlightRequest decrements the in-flight counter for an endpoint and function
@@ -1123,7 +1064,7 @@ func (m *SmartRouterMetricsManager) SubEndpointInFlightRequest(spec, apiInterfac
 	if m == nil {
 		return
 	}
-	addMapped(m.endpointInFlight, -1, m.endpointFunctionSeries(spec, apiInterface, endpointID, function))
+	addGauge(m.endpointInFlight, -1, spec, apiInterface, endpointID, m.normalizeMethodLabel(spec, function))
 }
 
 // AddEndpointFetchLatestFail increments the failed latest-block fetch counter
@@ -1131,7 +1072,7 @@ func (m *SmartRouterMetricsManager) AddEndpointFetchLatestFail(spec, apiInterfac
 	if m == nil {
 		return
 	}
-	incMapped(m.endpointFetchLatestFails, endpointSeries(spec, apiInterface, endpointID))
+	incCounter(m.endpointFetchLatestFails, spec, apiInterface, endpointID)
 }
 
 // AddEndpointFetchBlockFail increments the failed specific-block fetch counter
@@ -1139,7 +1080,7 @@ func (m *SmartRouterMetricsManager) AddEndpointFetchBlockFail(spec, apiInterface
 	if m == nil {
 		return
 	}
-	incMapped(m.endpointFetchBlockFails, endpointSeries(spec, apiInterface, endpointID))
+	incCounter(m.endpointFetchBlockFails, spec, apiInterface, endpointID)
 }
 
 // AddEndpointFetchLatestSuccess increments the successful latest-block fetch counter
@@ -1147,7 +1088,7 @@ func (m *SmartRouterMetricsManager) AddEndpointFetchLatestSuccess(spec, apiInter
 	if m == nil {
 		return
 	}
-	incMapped(m.endpointFetchLatestSuccess, endpointSeries(spec, apiInterface, endpointID))
+	incCounter(m.endpointFetchLatestSuccess, spec, apiInterface, endpointID)
 }
 
 // AddEndpointFetchBlockSuccess increments the successful specific-block fetch counter
@@ -1155,7 +1096,7 @@ func (m *SmartRouterMetricsManager) AddEndpointFetchBlockSuccess(spec, apiInterf
 	if m == nil {
 		return
 	}
-	incMapped(m.endpointFetchBlockSuccess, endpointSeries(spec, apiInterface, endpointID))
+	incCounter(m.endpointFetchBlockSuccess, spec, apiInterface, endpointID)
 }
 
 // =============================================================================
@@ -1447,14 +1388,15 @@ const (
 
 // AddEndpointTrackerRequest increments the tracker upstream-request counter.
 //
-// Guards the counter itself, not just the manager: MappedLabelsCounterVec.WithLabelValues has
-// no nil receiver check, and partially-built managers exist (test fixtures construct only the
-// counters they assert on). A metric must never be the thing that takes the poll goroutine down.
+// Guards the counter itself, not just the manager: prometheus.CounterVec.WithLabelValues
+// dereferences its receiver, so a nil counter panics, and partially-built managers exist (test
+// fixtures construct only the counters they assert on); incCounter carries that guard. A metric
+// must never be the thing that takes the poll goroutine down.
 func (m *SmartRouterMetricsManager) AddEndpointTrackerRequest(spec, apiInterface, endpointID, kind string) {
 	if m == nil {
 		return
 	}
-	incMapped(m.endpointTrackerRequests, map[string]string{"spec": spec, "apiInterface": apiInterface, "endpoint_id": endpointID, "kind": kind})
+	incCounter(m.endpointTrackerRequests, spec, apiInterface, endpointID, kind)
 }
 
 // TrackerGateSkipSource values for RecordTrackerGateSkip. A closed set of three, mirroring the
@@ -1486,7 +1428,7 @@ func (m *SmartRouterMetricsManager) RecordTrackerGateError(spec, apiInterface, e
 	if m == nil {
 		return
 	}
-	m.incForEveryProvider(m.endpointTrackerGateErrors, spec, apiInterface, endpointID, "op", op)
+	m.incForEveryProvider(m.endpointTrackerGateErrors, spec, apiInterface, endpointID, op)
 }
 
 // RecordTrackerGateSkip records ONE poll cycle the traffic gate suppressed for an endpoint,
@@ -1495,7 +1437,7 @@ func (m *SmartRouterMetricsManager) RecordTrackerGateSkip(spec, apiInterface, en
 	if m == nil {
 		return
 	}
-	m.incForEveryProvider(m.endpointTrackerGateSkips, spec, apiInterface, endpointID, "source", source)
+	m.incForEveryProvider(m.endpointTrackerGateSkips, spec, apiInterface, endpointID, source)
 }
 
 // RecordTrackerRequest records ONE upstream request sent by the per-endpoint chain tracker.
@@ -1510,7 +1452,7 @@ func (m *SmartRouterMetricsManager) RecordTrackerRequest(spec, apiInterface, end
 	if m == nil {
 		return
 	}
-	m.incForEveryProvider(m.endpointTrackerRequests, spec, apiInterface, endpointID, "kind", kind)
+	m.incForEveryProvider(m.endpointTrackerRequests, spec, apiInterface, endpointID, kind)
 }
 
 // =============================================================================
