@@ -3,7 +3,8 @@ name: Unit Tests
 # Compiles and runs every Go unit test in both modules: the router at the root
 # and the wizard under tools/wizard. "Build and Test" (smartrouter.yml) only
 # builds the binaries and the image, so without this job a change that breaks
-# an existing test, or stops a test package compiling, merges green.
+# an existing test, or stops a test package compiling, merges green. The
+# unit-tests-race leg runs the same tests under the race detector.
 #
 # The job uploads no artifacts. The test job removed in bcaff2bc uploaded its
 # JSON stream, junit report and coverage profile on every run and filled the
@@ -29,12 +30,31 @@ concurrency:
 
 jobs:
   unit-tests:
+    # One leg per check. With a matrix value in the name, GitHub adds no
+    # suffix, so the checks are named exactly unit-tests (required on main)
+    # and unit-tests-race.
+    name: ${{ matrix.check }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.job-timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # As in `make test` and the release build: the shipped binary is
+          # built without cgo, so these tests run without it too.
+          - check: unit-tests
+            cgo: "0"
+            race: ""
+            package-timeout: 15m
+            job-timeout: 30
+          # The race detector needs cgo, and slows the tests down.
+          - check: unit-tests-race
+            cgo: "1"
+            race: -race
+            package-timeout: 20m
+            job-timeout: 45
     env:
-      # As in `make test` and the release build: the shipped binary is built
-      # without cgo, so the tests run without it too.
-      CGO_ENABLED: "0"
+      CGO_ENABLED: ${{ matrix.cgo }}
       # tools/wizard's icon test downloads an SVG from the docs site; OFFLINE
       # skips it so the gate does not depend on the network.
       OFFLINE: "1"
@@ -64,7 +84,8 @@ jobs:
       # rerun it until it passes. Each test that needed a rerun is reported as
       # a warning in the last step, so a flaky test stays visible. gotestsum
       # does not rerun after a compile error, a panic (an expired -timeout is
-      # a panic) or more than 10 failures: those fail the gate straight away.
+      # a panic), a data race, or more than 10 failures: those fail the gate
+      # straight away.
       - name: Test the router module
         run: >-
           gotestsum
@@ -73,9 +94,10 @@ jobs:
           --hide-summary=skipped
           --rerun-fails=2
           --rerun-fails-max-failures=10
+          --rerun-fails-abort-on-data-race
           --rerun-fails-report="$RUNNER_TEMP/reruns-router.txt"
           --packages=./...
-          -- -count=1 -timeout=15m
+          -- -count=1 -timeout=${{ matrix.package-timeout }} ${{ matrix.race }}
 
       - name: Test the wizard module
         if: ${{ !cancelled() }}
@@ -87,12 +109,15 @@ jobs:
           --hide-summary=skipped
           --rerun-fails=2
           --rerun-fails-max-failures=10
+          --rerun-fails-abort-on-data-race
           --rerun-fails-report="$RUNNER_TEMP/reruns-wizard.txt"
           --packages=./...
-          -- -count=1 -timeout=5m
+          -- -count=1 -timeout=5m ${{ matrix.race }}
 
       - name: Report tests that needed a rerun
         if: ${{ !cancelled() }}
+        env:
+          CHECK: ${{ matrix.check }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -108,13 +133,13 @@ jobs:
               else
                 verdict="failed every run"
               fi
-              echo "::warning title=Unit test needed a rerun::${name} failed ${failures} of ${runs} runs (${verdict})"
+              echo "::warning title=${CHECK}: unit test needed a rerun::${name} failed ${failures} of ${runs} runs (${verdict})"
               rows+="| \`${name}\` | ${runs} | ${failures} | ${verdict} |"$'\n'
             done < "$report"
           done
           [ -n "$rows" ] || exit 0
           {
-            echo "### Unit tests that needed a rerun"
+            echo "### ${CHECK}: unit tests that needed a rerun"
             echo
             echo "| Test | Runs | Failures | Verdict |"
             echo "| --- | --- | --- | --- |"

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -282,26 +283,25 @@ func TestChainTrackerCallbacks(t *testing.T) {
 	mockChainFetcher := NewMockChainFetcher(1000, mockBlocks, nil)
 	currentLatestBlockInMock := mockChainFetcher.AdvanceBlock()
 
+	// The callbacks run on the tracker's poll goroutine, so what they record is atomic.
 	// used to identify if the fork callback was called
-	callbackCalledFork := false
+	var callbackCalledFork atomic.Bool
 	forkCallback := func(arg int64) {
 		utils.LavaFormatDebug("fork callback called")
-		callbackCalledFork = true
+		callbackCalledFork.Store(true)
 	}
 	// used to identify if the newLatest callback was called
-	callbackCalledNewLatest := false
-	callbackCalledTimes := 0
-	callbackBlocksProcessed := int64(0) // Track actual blocks processed
+	var callbackCalledNewLatest atomic.Bool
+	var callbackBlocksProcessed atomic.Int64 // Track actual blocks processed
 	newBlockCallback := func(blockFrom int64, blockTo int64, hash string) {
-		callbackCalledNewLatest = true
+		callbackCalledNewLatest.Store(true)
 		blocksInRange := blockTo - blockFrom
-		callbackCalledTimes++
-		callbackBlocksProcessed += blocksInRange
+		totalProcessed := callbackBlocksProcessed.Add(blocksInRange)
 		utils.LavaFormatDebug("newBlockCallback called",
 			utils.LogAttr("blockFrom", blockFrom),
 			utils.LogAttr("blockTo", blockTo),
 			utils.LogAttr("blocksInRange", blocksInRange),
-			utils.LogAttr("totalProcessed", callbackBlocksProcessed),
+			utils.LogAttr("totalProcessed", totalProcessed),
 		)
 	}
 	chainTrackerConfig := chaintracker.ChainTrackerConfig{BlocksToSave: uint64(fetcherBlocks), AverageBlockTime: TimeForPollingMock, ServerBlockMemory: uint64(mockBlocks), ForkCallback: forkCallback, NewLatestCallback: newBlockCallback, ParseDirectiveEnabled: true}
@@ -313,8 +313,8 @@ func TestChainTrackerCallbacks(t *testing.T) {
 		for _, tt := range tests {
 			totalAdvancement += int(tt.advancement)
 			utils.LavaFormatInfo(startedTestStr + tt.name)
-			callbackCalledFork = false
-			callbackCalledNewLatest = false
+			callbackCalledFork.Store(false)
+			callbackCalledNewLatest.Store(false)
 			for i := 0; i < int(tt.advancement); i++ {
 				currentLatestBlockInMock = mockChainFetcher.AdvanceBlock()
 			}
@@ -342,18 +342,18 @@ func TestChainTrackerCallbacks(t *testing.T) {
 				require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[idx].Hash, requestedHashes[idx].Block))
 			}
 			if tt.shouldFork {
-				require.True(t, callbackCalledFork)
+				require.True(t, callbackCalledFork.Load())
 			} else {
-				require.False(t, callbackCalledFork)
+				require.False(t, callbackCalledFork.Load())
 			}
 			// Fixed: Check that total blocks processed equals total advancement
 			// ChainTracker may batch blocks, so we check blocks processed, not callback count
-			require.Equal(t, int64(totalAdvancement), callbackBlocksProcessed,
+			require.Equal(t, int64(totalAdvancement), callbackBlocksProcessed.Load(),
 				"total blocks processed should equal total advancement (callbacks may be batched)")
 			if tt.advancement > 0 {
-				require.True(t, callbackCalledNewLatest)
+				require.True(t, callbackCalledNewLatest.Load())
 			} else {
-				require.False(t, callbackCalledNewLatest)
+				require.False(t, callbackCalledNewLatest.Load())
 			}
 		}
 	})
@@ -449,11 +449,11 @@ func TestChainTrackerMaintainMemory(t *testing.T) {
 	mockChainFetcher := NewMockChainFetcher(1000, mockBlocks, nil)
 	currentLatestBlockInMock := mockChainFetcher.AdvanceBlock()
 
-	// used to identify if the fork callback was called
-	callbackCalledFork := false
+	// used to identify if the fork callback was called; it runs on the tracker's poll goroutine
+	var callbackCalledFork atomic.Bool
 	forkCallback := func(arg int64) {
 		utils.LavaFormatDebug("fork callback called")
-		callbackCalledFork = true
+		callbackCalledFork.Store(true)
 	}
 	chainTrackerConfig := chaintracker.ChainTrackerConfig{BlocksToSave: uint64(fetcherBlocks), AverageBlockTime: TimeForPollingMock, ServerBlockMemory: uint64(mockBlocks), ForkCallback: forkCallback, ParseDirectiveEnabled: true}
 	chainTracker, err := chaintracker.NewChainTracker(context.Background(), mockChainFetcher, chainTrackerConfig)
@@ -462,7 +462,7 @@ func TestChainTrackerMaintainMemory(t *testing.T) {
 	t.Run("one long test", func(t *testing.T) {
 		for _, tt := range tests {
 			utils.LavaFormatInfo(startedTestStr + tt.name)
-			callbackCalledFork = false
+			callbackCalledFork.Store(false)
 			for i := 0; i < int(tt.advancement); i++ {
 				currentLatestBlockInMock = mockChainFetcher.AdvanceBlock()
 			}
@@ -497,7 +497,7 @@ func TestChainTrackerMaintainMemory(t *testing.T) {
 				require.Equal(t, requestedHashes[idx].Block+1, requestedHashes[idx+1].Block, "latestBlock: %d, blockHashes: %v", latestBlock, requestedHashes)
 				require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[idx].Hash, requestedHashes[idx].Block))
 			}
-			require.False(t, callbackCalledFork)
+			require.False(t, callbackCalledFork.Load())
 		}
 	})
 }
