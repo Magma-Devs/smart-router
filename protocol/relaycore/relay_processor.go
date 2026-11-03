@@ -1550,6 +1550,14 @@ func (rp *RelayProcessor) buildFailureResult(
 				stamped.StatusCode = NoAnswerStatus(cf)
 			}
 			returnedResult = &stamped
+		} else if onlyRateLimited(nodeErrors, protocolErrors) {
+			// Every attempt was refused for rate, but none carried a node status to forward: a 429
+			// on a WebSocket handshake, or a gRPC RESOURCE_EXHAUSTED. Without a status the HTTP
+			// listeners would send 500, so say what the nodes said: 429. A forwarded node answer
+			// never reaches this branch, so its status is never overwritten.
+			stamped := *returnedResult
+			stamped.StatusCode = http.StatusTooManyRequests
+			returnedResult = &stamped
 		}
 	}
 

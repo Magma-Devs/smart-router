@@ -61,7 +61,8 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   for rate, the client gets the upstream's 429 and its body as is, as for any other answer a
   node gave (MAG-4481; it was a router-made 503 before). The node's Retry-After is not passed
   on (that stays internal). Next to another upstream's error status the other status wins: a
-  503 beside two 429s is the 503.
+  503 beside two 429s is the 503. A refusal that carries no node status to forward (a 429 on
+  a WebSocket handshake, a gRPC RESOURCE_EXHAUSTED) is answered with a plain 429.
 - **What counts as a 429.** An HTTP 429 status on any transport, a WebSocket upgrade the
   upstream rejected with 429, a gRPC status whose text names a rate limit (or
   RESOURCE_EXHAUSTED with a retry delay), and a JSON-RPC error body with code 429 or a

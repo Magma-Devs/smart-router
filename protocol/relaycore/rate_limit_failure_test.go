@@ -83,6 +83,51 @@ func TestProcessingResult_AllRateLimitedIsTheNodes429(t *testing.T) {
 	require.Equal(t, `{"error":"quota"}`, string(result.GetClientFacing().UpstreamBody))
 }
 
+// Every attempt refused for rate with no node status to forward — a 429 on a WebSocket handshake,
+// or a gRPC RESOURCE_EXHAUSTED, both of which unwrap to the typed rate-limit error. With no status
+// set the HTTP listeners would answer 500; the client gets 429 instead, with no body invented.
+func TestProcessingResult_AllRateLimitedWithoutNodeStatusIs429(t *testing.T) {
+	rp, _, closer := newTwoProviderProcessor(t)
+	defer closer()
+
+	go SendProtocolError(rp, "lava@a", time.Millisecond, common.RateLimited(errors.New("websocket: bad handshake"), 0))
+	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, common.RateLimited(errors.New("websocket: bad handshake"), 0))
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = rp.WaitForResults(ctx)
+
+	require.True(t, rp.GetResultsSummary().OnlyRateLimited)
+	result, err := rp.ProcessingResult()
+	require.Error(t, err)
+	require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
+	require.Nil(t, result.GetClientFacing(), "no node answer was forwarded")
+}
+
+// A node's own 429 next to a 429 that carries no status: the node's answer is the reply, status
+// and body as is, in either arrival order.
+func TestProcessingResult_ForwardedNode429BeatsStatuslessRateLimit(t *testing.T) {
+	for _, nodeFirst := range []bool{true, false} {
+		rp, _, closer := newTwoProviderProcessor(t)
+		nodeDelay, bareDelay := time.Millisecond, 2*time.Millisecond
+		if !nodeFirst {
+			nodeDelay, bareDelay = bareDelay, nodeDelay
+		}
+		go SendProtocolError(rp, "lava@a", nodeDelay, upstream429Err(`{"error":"quota"}`, 0))
+		go SendProtocolError(rp, "lava@b", bareDelay, common.RateLimited(errors.New("websocket: bad handshake"), 0))
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_ = rp.WaitForResults(ctx)
+		cancel()
+
+		require.True(t, rp.GetResultsSummary().OnlyRateLimited)
+		result, err := rp.ProcessingResult()
+		require.Error(t, err)
+		require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
+		require.NotNil(t, result.GetClientFacing())
+		require.Equal(t, `{"error":"quota"}`, string(result.GetClientFacing().UpstreamBody))
+		closer()
+	}
+}
+
 // Mixed failures keep today's shape — the best error's own result, status untouched (the
 // listener applies its default) — and the summary does not claim only-rate-limited.
 func TestProcessingResult_MixedFailuresUnchanged(t *testing.T) {
