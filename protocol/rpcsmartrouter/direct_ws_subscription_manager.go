@@ -932,6 +932,8 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		messagesChan:         msgChan, // Use the channel from upstream subscription
 	}
 	activeSub.attachClientLocked(clientKey, routerID, safeChannelSender)
+	// Read while this goroutine still owns activeSub exclusively, for the watcher below.
+	detached := activeSub.detachedSignal(clientKey)
 
 	dwsm.lock.Lock()
 	dwsm.activeSubscriptions[hashedParams] = activeSub
@@ -951,7 +953,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	go dwsm.listenForUpstreamMessages(subCtx, hashedParams, activeSub, upstreamSub, msgChan)
 
 	// Handle client disconnect
-	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams)
+	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams, detached)
 
 	utils.LavaFormatInfo("DirectWS: subscription started",
 		utils.LogAttr("routerID", routerID),
@@ -1412,7 +1414,7 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	// client: its reply channel stayed open and parked the ingress forwarder goroutine,
 	// it kept counting as connected, and the upstream subscription outlived every real
 	// subscriber (MAG-3722).
-	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams)
+	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams, activeSub.detachedSignal(clientKey))
 	if dwsm.connectedClients[clientKey] == nil {
 		dwsm.connectedClients[clientKey] = make(map[string]*common.SafeChannelSender[*pairingtypes.RelayReply])
 	}
@@ -1882,18 +1884,18 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 // handleClientDisconnect releases one client from one subscription when the client's
 // connection ends, or returns early once the client has already left by another path.
 // It is registered for every attached client, creators and joiners alike.
+//
+// detached is the client's signal from that subscription, read when the client was attached.
+// Looked up here instead, when the goroutine first runs, it could find nothing: Unsubscribe
+// takes the subscription out of the map in its first step (MAG-4345), so a client that
+// unsubscribed before its watcher was scheduled left the watcher with a nil channel, parked
+// until the socket closed — one goroutine per subscribe/unsubscribe on a long-lived socket.
 func (dwsm *DirectWSSubscriptionManager) handleClientDisconnect(
 	ctx context.Context,
 	clientKey string,
 	hashedParams string,
+	detached <-chan struct{},
 ) {
-	dwsm.lock.RLock()
-	var detached <-chan struct{}
-	if activeSub, found := dwsm.activeSubscriptions[hashedParams]; found {
-		detached = activeSub.detachedSignal(clientKey)
-	}
-	dwsm.lock.RUnlock()
-
 	select {
 	case <-ctx.Done():
 	case <-detached:
