@@ -168,6 +168,11 @@ type DirectWSSubscriptionManager struct {
 	// outside tests; tests use it to hold a restore at exactly that point.
 	beforeRestoreCommit func()
 
+	// beforeUnsubscribeRelease, when set, runs in Unsubscribe after its first critical section
+	// has released dwsm.lock and before the node is called and the client released under it
+	// again. Nil outside tests; tests use it to act in the window between the two.
+	beforeUnsubscribeRelease func()
+
 	// Upstream connection pools keyed by endpoint URL
 	upstreamPools map[string]*UpstreamWSPool
 
@@ -927,6 +932,8 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		messagesChan:         msgChan, // Use the channel from upstream subscription
 	}
 	activeSub.attachClientLocked(clientKey, routerID, safeChannelSender)
+	// Read while this goroutine still owns activeSub exclusively, for the watcher below.
+	detached := activeSub.detachedSignal(clientKey)
 
 	dwsm.lock.Lock()
 	dwsm.activeSubscriptions[hashedParams] = activeSub
@@ -946,7 +953,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	go dwsm.listenForUpstreamMessages(subCtx, hashedParams, activeSub, upstreamSub, msgChan)
 
 	// Handle client disconnect
-	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams)
+	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams, detached)
 
 	utils.LavaFormatInfo("DirectWS: subscription started",
 		utils.LogAttr("routerID", routerID),
@@ -1040,8 +1047,23 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	upstreamID := activeSub.upstreamID
 	numericIDs := activeSub.numericIDs
 	subscribeMethod := activeSub.subscribeMethod
-	// Only call upstream when we're the last client (single client on this subscription)
-	lastClient := len(activeSub.connectedClients) == 1
+
+	// The last client out tells the node. The subscription leaves the active map in this
+	// same critical section, before the node is called: from here on it is one the router
+	// has decided to drop, and a client that arrives for the same params while that call is
+	// in flight creates a subscription of its own instead of joining this one. Joining was
+	// a local step with no node call, so the joiner was handed an entry the node had
+	// already stopped publishing — no pushes, and a channel nobody closed (MAG-4345). With
+	// the entry gone, a restore that reaches its commit point while the call is in flight
+	// finds nothing to commit onto and ends the upstream subscription it re-opened, the
+	// MAG-2547 discard, so no restored id is left running on the node either. This client
+	// stays attached until the local release below, so a push the node queued before it
+	// applied the unsubscribe still reaches it.
+	retired := len(activeSub.connectedClients) == 1
+	if retired {
+		dwsm.retireSubscriptionLocked(hashedParams, activeSub)
+		dwsm.forgetSubscriptionForClientLocked(clientKey, hashedParams, false)
+	}
 
 	// The method to call upstream is the one the client actually invoked, not one
 	// derived from the subscribe method. See resolveUnsubscribeMethod.
@@ -1059,9 +1081,14 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 
 	dwsm.lock.Unlock()
 
+	if dwsm.beforeUnsubscribeRelease != nil {
+		dwsm.beforeUnsubscribeRelease()
+	}
+
 	// Call upstream node to unsubscribe only when last client - stream the actual node response
 	var nodeResp []byte
-	if lastClient && conn != nil {
+	var callErr error
+	if retired && conn != nil {
 		client := conn.GetClient()
 		if client == nil || !conn.IsHealthy() {
 			// The socket this subscription lived on is gone, and the node lost the subscription
@@ -1077,17 +1104,22 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 			// Without timeout, CallContext blocks forever and the client gets no reply.
 			callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			callStart := time.Now()
-			resp, callErr := client.CallContext(callCtx, requestID, unsubscribeMethod, unsubscribeParams, true, false)
+			var resp *rpcclient.JsonrpcMessage
+			resp, callErr = client.CallContext(callCtx, requestID, unsubscribeMethod, unsubscribeParams, true, false)
 			cancel()
 			chainlib.SubscriptionUpstreamFrom(ctx).Sent(upstreamName, callStart, time.Since(callStart), callErr)
 			if callErr != nil {
+				// The client still leaves, and the subscription still ends locally: it was
+				// taken out of the map above, and a gateway that never answers an unsubscribe
+				// has usually applied it. Keeping the client on it would park it on exactly
+				// the dead subscription this function exists to end. The error goes back to
+				// the client with its reply.
 				utils.LavaFormatWarning("DirectWS: upstream unsubscribe call failed", callErr,
 					utils.LogAttr("upstreamID", upstreamID),
 					utils.LogAttr("clientKey", clientKey),
 				)
-				return nil, fmt.Errorf("upstream unsubscribe failed: %w", callErr)
-			}
-			if resp != nil {
+				callErr = fmt.Errorf("upstream unsubscribe failed: %w", callErr)
+			} else if resp != nil {
 				// Forward the node's response directly to the end user - no transformation.
 				nodeResp, _ = json.Marshal(resp)
 			}
@@ -1098,23 +1130,25 @@ func (dwsm *DirectWSSubscriptionManager) Unsubscribe(
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
 
-	_, lastClient = dwsm.idMapper.RemoveMapping(routerSubID)
-
+	dwsm.idMapper.RemoveMapping(routerSubID)
 	activeSub.releaseClientLocked(clientKey)
 	dwsm.forgetSubscriptionForClientLocked(clientKey, hashedParams, false)
 
-	// lastClient is the mapper's view after this client's mapping went, read under the
-	// lock: a client that joined during the unlocked upstream call above registered its
-	// mapping first, so it keeps the subscription. The node was already told, so the
-	// teardown skips the wire call — unless a restore committed while that call was in
-	// flight: the node was told the id read before it, and the restored subscription,
-	// with its new id and connection, was never told (MAG-2547).
-	if lastClient {
-		restoredSinceRead := activeSub.upstreamID != upstreamID || activeSub.upstreamConnection != conn
-		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, restoredSinceRead)
+	if retired {
+		// The node was told above, or lost the subscription with its socket, so the
+		// upstream side ends without a second call; the map and the counter were settled
+		// in the first critical section.
+		dwsm.endUpstreamSubscriptionLocked(activeSub, false)
+	} else if len(activeSub.connectedClients) == 0 && dwsm.activeSubscriptions[hashedParams] == activeSub {
+		// Not the last client when this started, but the others left while the lock was
+		// released: the node has not been told yet, so this teardown tells it. A subscription
+		// that is no longer the live entry was torn down meanwhile by another path — the node
+		// ended it, or a restore gave it up — which released every client, settled the
+		// counters and told the node; tearing it down again would count it off twice.
+		dwsm.teardownSubscriptionLocked(hashedParams, activeSub, true)
 	}
 
-	return nodeResp, nil
+	return nodeResp, callErr
 }
 
 // resolveUnsubscribeMethod returns the method name to call upstream to tear a
@@ -1380,7 +1414,7 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	// client: its reply channel stayed open and parked the ingress forwarder goroutine,
 	// it kept counting as connected, and the upstream subscription outlived every real
 	// subscriber (MAG-3722).
-	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams)
+	go dwsm.handleClientDisconnect(ctx, clientKey, hashedParams, activeSub.detachedSignal(clientKey))
 	if dwsm.connectedClients[clientKey] == nil {
 		dwsm.connectedClients[clientKey] = make(map[string]*common.SafeChannelSender[*pairingtypes.RelayReply])
 	}
@@ -1850,18 +1884,18 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 // handleClientDisconnect releases one client from one subscription when the client's
 // connection ends, or returns early once the client has already left by another path.
 // It is registered for every attached client, creators and joiners alike.
+//
+// detached is the client's signal from that subscription, read when the client was attached.
+// Looked up here instead, when the goroutine first runs, it could find nothing: Unsubscribe
+// takes the subscription out of the map in its first step (MAG-4345), so a client that
+// unsubscribed before its watcher was scheduled left the watcher with a nil channel, parked
+// until the socket closed — one goroutine per subscribe/unsubscribe on a long-lived socket.
 func (dwsm *DirectWSSubscriptionManager) handleClientDisconnect(
 	ctx context.Context,
 	clientKey string,
 	hashedParams string,
+	detached <-chan struct{},
 ) {
-	dwsm.lock.RLock()
-	var detached <-chan struct{}
-	if activeSub, found := dwsm.activeSubscriptions[hashedParams]; found {
-		detached = activeSub.detachedSignal(clientKey)
-	}
-	dwsm.lock.RUnlock()
-
 	select {
 	case <-ctx.Done():
 	case <-detached:
@@ -1937,6 +1971,27 @@ func (dwsm *DirectWSSubscriptionManager) forgetClientLocked(clientKey string) {
 // local subscription ends and the pool may scale the connection down. The network call runs
 // off the lock. Caller holds dwsm.lock.
 func (dwsm *DirectWSSubscriptionManager) teardownSubscriptionLocked(hashedParams string, activeSub *directActiveSubscription, tellNode bool) {
+	dwsm.endUpstreamSubscriptionLocked(activeSub, tellNode)
+	dwsm.retireSubscriptionLocked(hashedParams, activeSub)
+}
+
+// retireSubscriptionLocked takes activeSub out of the active map, so no client can find and
+// join it from here on, and stops counting it. Only the entry that IS activeSub is removed:
+// the map is keyed by params alone, so a successor may already hold the key by the time a
+// caller that read activeSub earlier gets here. Unsubscribe retires its subscription before it
+// calls the node and ends the upstream side afterwards, so the two halves of a teardown are
+// separate. Caller holds dwsm.lock.
+func (dwsm *DirectWSSubscriptionManager) retireSubscriptionLocked(hashedParams string, activeSub *directActiveSubscription) {
+	if dwsm.activeSubscriptions[hashedParams] == activeSub {
+		delete(dwsm.activeSubscriptions, hashedParams)
+	}
+	dwsm.totalSubscriptions.Add(-1)
+}
+
+// endUpstreamSubscriptionLocked ends the upstream half of a subscription: the node is told
+// when tellNode is set, the local rpcclient subscription and listener end, and the pooled
+// connection stops counting it. The network call runs off the lock. Caller holds dwsm.lock.
+func (dwsm *DirectWSSubscriptionManager) endUpstreamSubscriptionLocked(activeSub *directActiveSubscription, tellNode bool) {
 	// Everything the goroutine needs is read here, under the lock. A restore that is
 	// mid-flight rewrites upstreamSubscription, upstreamID and upstreamConnection under
 	// this same lock once the node answers, so reading them off the lock raced that
@@ -1959,8 +2014,6 @@ func (dwsm *DirectWSSubscriptionManager) teardownSubscriptionLocked(hashedParams
 			upstreamPool.NotifySubscriptionRemoved(upstreamConn)
 		}
 	}()
-	delete(dwsm.activeSubscriptions, hashedParams)
-	dwsm.totalSubscriptions.Add(-1)
 }
 
 // upstreamUnsubscribeTimeout bounds the teardown call below. Some gateways never
