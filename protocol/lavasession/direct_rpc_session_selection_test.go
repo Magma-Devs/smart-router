@@ -392,6 +392,10 @@ func TestFetchEndpointConnection_DirectRPC_SkipsWebsocketEndpoints(t *testing.T)
 		assert.Same(t, https, endpoints[0].endpoint)
 	})
 
+	// The wss url cannot serve a relay, so with the https url backed off the provider has nothing
+	// left: it reports every endpoint disabled and is blocked, like a provider listing only https.
+	// That block is what lets the last chance lend its https url (MAG-4285); it used to be passed
+	// over instead, which kept it out of the blocked list for good.
 	t.Run("https backed off leaves the provider unselectable, not on wss", func(t *testing.T) {
 		cswp := &ConsumerSessionsWithProvider{
 			Sessions:          make(map[int64]*SingleConsumerSession),
@@ -399,8 +403,23 @@ func TestFetchEndpointConnection_DirectRPC_SkipsWebsocketEndpoints(t *testing.T)
 			PublicLavaAddress: "dwellir",
 			Endpoints:         []*Endpoint{newEndpoint("https://monad.example.com", false), newEndpoint("wss://monad.example.com", true)},
 		}
-		connected, endpoints := fetch(cswp)
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(ctx, endpointPickSkipDisabled, false, "", nil, nil)
+		assert.ErrorIs(t, err, AllProviderEndpointsDisabledError, "a wss url must not keep the provider out of the blocked list")
 		assert.False(t, connected, "a provider whose only enabled endpoint is wss must not be handed out for a relay")
+		assert.Empty(t, endpoints)
+	})
+
+	// A provider listing only a wss url has no relay-capable url that could have gone dark, so it
+	// is passed over for the request, not blocked.
+	t.Run("a wss-only provider is passed over, not blocked", func(t *testing.T) {
+		cswp := &ConsumerSessionsWithProvider{
+			Sessions:          make(map[int64]*SingleConsumerSession),
+			StaticProvider:    true,
+			PublicLavaAddress: "wsonly",
+			Endpoints:         []*Endpoint{newEndpoint("wss://monad.example.com", true)},
+		}
+		connected, endpoints := fetch(cswp)
+		assert.False(t, connected)
 		assert.Empty(t, endpoints)
 	})
 
