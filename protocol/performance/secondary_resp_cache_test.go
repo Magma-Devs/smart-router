@@ -119,6 +119,54 @@ secondary-resp-cache:
 		require.False(t, enabled)
 	})
 
+	// A refused key is reported as refused, before any rule written for the block that uses it:
+	// two read addresses used to get the standalone rule's advice to switch topology, and a
+	// negative expiration an error naming resp-cache.
+	t.Run("refused keys are refused before validation", func(t *testing.T) {
+		v, _ := newViperWithSecondaryRespFlags(t, `
+secondary-resp-cache:
+  addresses: ["a:6379"]
+  read-addresses: ["b:6379", "c:6379"]
+`)
+		_, _, err := LoadSecondaryRespCacheConfig(v)
+		require.ErrorContains(t, err, "read-addresses is not used by a read-only tier")
+
+		v, _ = newViperWithSecondaryRespFlags(t, `
+secondary-resp-cache:
+  addresses: ["a:6379"]
+  expiration:
+    finalized: -1s
+`)
+		_, _, err = LoadSecondaryRespCacheConfig(v)
+		require.ErrorContains(t, err, "expiration is not used by a read-only tier")
+	})
+
+	t.Run("a bad key prefix names the secondary block", func(t *testing.T) {
+		v, _ := newViperWithSecondaryRespFlags(t, `
+secondary-resp-cache:
+  addresses: ["a:6379"]
+  key-prefix: "zone*a"
+`)
+		_, enabled, err := LoadSecondaryRespCacheConfig(v)
+		require.ErrorContains(t, err, secondaryRespCacheLogName+": invalid cache key prefix")
+		require.False(t, enabled)
+	})
+
+	t.Run("a TLS file error names the secondary block", func(t *testing.T) {
+		v, _ := newViperWithSecondaryRespFlags(t, `
+secondary-resp-cache:
+  addresses: ["a:6379"]
+  tls:
+    enabled: true
+    ca-file: /nonexistent/path/ca.pem
+`)
+		cfg, enabled, err := LoadSecondaryRespCacheConfig(v)
+		require.NoError(t, err)
+		require.True(t, enabled)
+		_, err = OpenSecondaryRespCache(cfg, DefaultSecondaryCacheTimeout)
+		require.ErrorContains(t, err, secondaryRespCacheLogName+" tls: reading ca-file")
+	})
+
 	t.Run("a validation error names the secondary block", func(t *testing.T) {
 		v, _ := newViperWithSecondaryRespFlags(t, `
 secondary-resp-cache:

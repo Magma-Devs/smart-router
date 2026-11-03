@@ -150,7 +150,7 @@ func New(cfg Config) (*Store, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	tlsCfg, err := cfg.TLS.build()
+	tlsCfg, err := cfg.TLS.build(cfg.LogName())
 	if err != nil {
 		return nil, err
 	}

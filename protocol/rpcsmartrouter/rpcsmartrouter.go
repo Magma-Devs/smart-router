@@ -3616,6 +3616,9 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				Address: viper.GetString(performance.SecondaryCacheFlagName),
 				Timeout: viper.GetDuration(performance.SecondaryCacheTimeoutFlagName),
 				Mode:    viper.GetString(performance.SecondaryCacheModeFlagName),
+				// Named rather than left empty, so the startup line below says which
+				// engine a secondary-cache-be tier is.
+				Engine: performance.CacheEngineGRPC,
 			}
 			secondaryRespConfig, secondaryRespEnabled, err := performance.LoadSecondaryRespCacheConfig(viper.GetViper())
 			if err != nil {
