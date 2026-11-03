@@ -42,15 +42,22 @@ jobs:
         include:
           # As in `make test` and the release build: the shipped binary is
           # built without cgo, so these tests run without it too.
+          # rpcsmartrouter's tests mostly wait on timers, so four shards of
+          # it share the runner with the other packages and finish first.
           - check: unit-tests
             cgo: "0"
             race: ""
+            shards: 4
             package-timeout: 15m
             job-timeout: 30
-          # The race detector needs cgo, and slows the tests down.
+          # The race detector needs cgo, and slows the tests down. Under it
+          # they are CPU-bound, so shards on the same runner only slow each
+          # other down (measured: no faster, and timing tests failed); the
+          # leg runs every package in one process.
           - check: unit-tests-race
             cgo: "1"
             race: -race
+            shards: 1
             package-timeout: 20m
             job-timeout: 45
     env:
@@ -74,30 +81,15 @@ jobs:
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@v1.13.0
 
-      # -timeout applies to each package's test binary. rpcsmartrouter alone
-      # runs for about 4.5 minutes, on 4 cores or 14 (its tests wait on timers,
-      # not the CPU), which is close to the 300s that `make test` allows.
-      #
-      # A failed test is rerun on its own, at most twice, and fails the gate
-      # only if every run fails. A few timing-based tests fail now and then on
-      # a busy machine, and a gate that goes red on those teaches people to
-      # rerun it until it passes. Each test that needed a rerun is reported as
-      # a warning in the last step, so a flaky test stays visible. gotestsum
-      # does not rerun after a compile error, a panic (an expired -timeout is
-      # a panic), a data race, or more than 10 failures: those fail the gate
-      # straight away.
+      # The script runs every package, with protocol/rpcsmartrouter split into
+      # SHARDS concurrent processes, and says how reruns work. -timeout
+      # applies to each test binary.
       - name: Test the router module
-        run: >-
-          gotestsum
-          --format pkgname-and-test-fails
-          --format-hide-empty-pkg
-          --hide-summary=skipped
-          --rerun-fails=2
-          --rerun-fails-max-failures=10
-          --rerun-fails-abort-on-data-race
-          --rerun-fails-report="$RUNNER_TEMP/reruns-router.txt"
-          --packages=./...
-          -- -count=1 -timeout=${{ matrix.package-timeout }} ${{ matrix.race }}
+        env:
+          SHARDS: ${{ matrix.shards }}
+          PACKAGE_TIMEOUT: ${{ matrix.package-timeout }}
+          RACE: ${{ matrix.race }}
+        run: scripts/unit-tests.sh
 
       - name: Test the wizard module
         if: ${{ !cancelled() }}
