@@ -410,3 +410,60 @@ func TestProbeDirectRPCEndpoints_AWssURLDoesNotReleaseAProviderWhoseHttpsIsOff(t
 	_, err = csm.probeDirectRPCEndpoints(p, "primary")
 	require.NoError(t, err, "control: the https url is back, so the provider is released")
 }
+
+// lcTendermintProviderWithWS is a provider on tendermintrpc listing an http url and a ws url, both
+// built with the interface the router passes for a Tendermint provider (rpcsmartrouter builds one
+// Endpoint per url, in config order).
+func lcTendermintProviderWithWS(t *testing.T, name, httpURL, wsURL string) *ConsumerSessionsWithProvider {
+	t.Helper()
+	var endpoints []*Endpoint
+	for _, url := range []string{httpURL, wsURL} {
+		conn, err := NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: url}, 5, "tendermintrpc")
+		require.NoError(t, err)
+		endpoints = append(endpoints, &Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []DirectRPCConnection{conn}})
+	}
+	ws, ok := endpoints[1].DirectConnections[0].(*WebSocketDirectRPCConnection)
+	require.True(t, ok, "the ws url is a websocket connection")
+	require.False(t, ws.isJsonRPC, "the ws url was built for tendermintrpc, not jsonrpc")
+	p := NewConsumerSessionWithProvider(name, endpoints, 999999, 1, int64(1))
+	p.StaticProvider = true
+	return p
+}
+
+// MAG-4821: the MAG-4285 fix on the interface tendermintrpc, whose providers also list a ws url and
+// which the automation suite cannot cover (no Tendermint simulator router lists one). Each subtest
+// builds its own provider, so each assertion fails on its own.
+func TestLastChance_TendermintRPCProviderWithAWsURL(t *testing.T) {
+	// The http url is off and the ws url, which no relay uses, is on.
+	setup := func(t *testing.T) (*ConsumerSessionsWithProvider, *ConsumerSessionManager) {
+		p := lcTendermintProviderWithWS(t, "primary", "http://127.0.0.1:1", "ws://127.0.0.1:1")
+		disableAt(t, p.Endpoints[0], probeBase)
+		return p, lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+	}
+
+	t.Run("the provider is blocked and the last chance serves the request", func(t *testing.T) {
+		_, csm := setup(t)
+		sessions, err := lcGet(csm, NewUsedProviders(nil))
+		require.NoError(t, err, "the last chance must serve instead of No pairings available")
+		require.Equal(t, "primary", lcServedBy(t, sessions))
+	})
+
+	t.Run("the http url is lent, never the ws url", func(t *testing.T) {
+		p, csm := setup(t)
+		sessions, err := lcGet(csm, NewUsedProviders(nil))
+		require.NoError(t, err)
+		lent := lcLentEndpoint(t, sessions["primary"])
+		require.NotSame(t, p.Endpoints[1], lent, "the ws url must never receive a relay")
+		require.Same(t, p.Endpoints[0], lent)
+	})
+
+	t.Run("the probe does not release the provider while its http url is off", func(t *testing.T) {
+		p, csm := setup(t)
+		_, err := csm.probeDirectRPCEndpoints(p, "primary")
+		require.Error(t, err, "only the ws url is usable, and no relay can use it")
+
+		p.Endpoints[0].ResetHealth()
+		_, err = csm.probeDirectRPCEndpoints(p, "primary")
+		require.NoError(t, err, "control: the http url is back, so the provider is released")
+	})
+}
