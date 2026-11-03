@@ -547,6 +547,12 @@ Switching backends is a configuration change; the RESP cache starts cold (no dat
 - **`read-addresses` selects an endpoint, not a replica role** — see
   [Multi-region reads](#multi-region-reads-readwrite-split).
 - **Cold start.** No data migrates in either direction when switching backends.
+- **No secondary cache tier beside a RESP primary.** The secondary tier
+  (`secondary-cache-be`, [SECONDARY-CACHE.md](SECONDARY-CACHE.md)) is always a gRPC cache, so
+  pairing it with `resp-cache` mixes cache engines across the two tiers, which is not a
+  supported configuration (MAG-2596). The router logs a warning at startup naming both and
+  still runs both tiers; it does not refuse to start (MAG-4777). A RESP secondary does not
+  exist yet (MAG-4778).
 
 ## Local testing lanes
 
@@ -931,7 +937,7 @@ Router 2 stays up on `:3365`; `--stop` removes both.
 
 Readiness timing note: `/metrics/overall-health` (and the container health that follows it)
 starts **fail-closed** and turns 200 once at least one chain has verified a provider — at
-endpoint-setup completion on a healthy boot. A 503 that persists means no upstream answers the
-health probe; while unhealthy the router re-probes every `--relays-health-unhealthy-interval`
+endpoint-setup completion on a healthy boot. A 503 that persists means the health probe found no
+upstream answering, and none has answered it with a result since; while unhealthy the router re-probes every `--relays-health-unhealthy-interval`
 (default 15s), so recovery shows within seconds. The lanes also shorten `--relays-health-interval`
 so the periodic backstop sweep runs often enough to watch.

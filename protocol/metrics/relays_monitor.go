@@ -9,11 +9,39 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
+// ProbeVerdict is what one health probe found out about a chain's upstreams. Readiness asks
+// whether this replica reaches its upstreams: that differs between replicas, while an upstream's
+// own failure is the same for all of them and is no reason to take one out of rotation.
+type ProbeVerdict int
+
+const (
+	// ProbeUnreachable: no upstream answered. Every try timed out, failed in transport, or had no
+	// upstream to go to. The chain is unhealthy. The zero value, so a probe that fails to say
+	// fails closed.
+	ProbeUnreachable ProbeVerdict = iota
+	// ProbeInconclusive: an upstream answered, but not with a result: an error, an error status or
+	// a rate limit. The chain keeps the health it had.
+	ProbeInconclusive
+	// ProbeHealthy: an upstream answered with a result. The chain is healthy.
+	ProbeHealthy
+)
+
+func (v ProbeVerdict) String() string {
+	switch v {
+	case ProbeHealthy:
+		return "healthy"
+	case ProbeInconclusive:
+		return "inconclusive"
+	default:
+		return "unreachable"
+	}
+}
+
 type RelaysMonitor struct {
 	chainID      string
 	apiInterface string
 
-	relaySender func() (bool, error)
+	relaySender func() ProbeVerdict
 	ticker      *time.Ticker
 	interval    time.Duration
 	// Probe cadence while the chain is unhealthy. Recovery discovery rides the
@@ -83,7 +111,7 @@ func (sem *RelaysMonitor) SeedInitialHealth(healthy bool) {
 	sem.storeHealthStatus(healthy)
 }
 
-func (sem *RelaysMonitor) SetRelaySender(relaySender func() (bool, error)) {
+func (sem *RelaysMonitor) SetRelaySender(relaySender func() ProbeVerdict) {
 	if sem == nil {
 		return
 	}
@@ -106,8 +134,7 @@ func (sem *RelaysMonitor) Start(ctx context.Context) {
 	// One goroutine runs every probe, the first included: the boot probe can take ~30s, and a
 	// ProbeSoon during it must not start a second relaySender beside it.
 	go func() {
-		success, _ := sem.relaySender()
-		sem.recordProbeResult(success)
+		sem.recordProbeResult(sem.relaySender())
 		sem.startInner(ctx)
 	}()
 }
@@ -116,13 +143,14 @@ func (sem *RelaysMonitor) startInner(ctx context.Context) {
 	for {
 		select {
 		case <-sem.ticker.C:
-			success, _ := sem.relaySender()
+			verdict := sem.relaySender()
+			sem.recordProbeResult(verdict)
 			utils.LavaFormatInfo("Health Check Interval Check",
 				utils.LogAttr("chain", sem.chainID),
 				utils.LogAttr("apiInterface", sem.apiInterface),
-				utils.LogAttr("health result", success),
+				utils.LogAttr("verdict", verdict.String()),
+				utils.LogAttr("health result", sem.IsHealthy()),
 			)
-			sem.recordProbeResult(success)
 		case <-ctx.Done():
 			sem.ticker.Stop()
 			return
@@ -130,22 +158,29 @@ func (sem *RelaysMonitor) startInner(ctx context.Context) {
 	}
 }
 
-// recordProbeResult stores a probe verdict and sets the next probe's cadence
-// from it: lazy while healthy, unhealthyInterval while not — the probe is the
-// only recovery path for a pod that readiness has already pulled out of
-// rotation. LogRelay stays on the healthy cadence unconditionally, since a
-// successful real relay is itself proof of health. Verdict and cadence are
-// written under one lock, as LogRelay does, so a relay landing between the two
-// cannot leave a healthy chain on the unhealthy cadence.
-func (sem *RelaysMonitor) recordProbeResult(success bool) {
-	interval := sem.interval
-	if !success {
-		interval = sem.unhealthyInterval
-	}
-
+// recordProbeResult stores a probe's verdict and sets the next probe's cadence
+// from the chain's health: lazy while healthy, unhealthyInterval while not —
+// the probe is the only recovery path for a pod that readiness has already
+// pulled out of rotation. An inconclusive probe leaves the health as it was,
+// and its cadence with it: an unhealthy chain keeps probing at
+// unhealthyInterval until an upstream answers with a result. LogRelay stays on
+// the healthy cadence unconditionally, since a successful real relay is itself
+// proof of health. Health and cadence are written under one lock, as LogRelay
+// does, so a relay landing between the two cannot leave a healthy chain on the
+// unhealthy cadence.
+func (sem *RelaysMonitor) recordProbeResult(verdict ProbeVerdict) {
 	sem.lock.Lock()
 	defer sem.lock.Unlock()
-	sem.storeHealthStatus(success)
+	switch verdict {
+	case ProbeHealthy:
+		sem.storeHealthStatus(true)
+	case ProbeUnreachable:
+		sem.storeHealthStatus(false)
+	}
+	interval := sem.interval
+	if !sem.loadHealthStatus() {
+		interval = sem.unhealthyInterval
+	}
 	sem.resetProbeLocked(interval)
 }
 
@@ -164,7 +199,7 @@ func (sem *RelaysMonitor) LogRelay() {
 }
 
 // ProbeSoon moves the next probe to within unhealthyInterval, when something
-// suggests the upstreams are gone. It is not a verdict: health moves only if
+// suggests the upstreams are out of reach. It is not a verdict: health moves only if
 // that probe fails. It never pushes the probe back, so a dead chain's steady
 // stream of failing relays cannot keep the probe from firing.
 func (sem *RelaysMonitor) ProbeSoon() {

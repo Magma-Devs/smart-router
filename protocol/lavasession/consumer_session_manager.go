@@ -646,6 +646,13 @@ func (csm *ConsumerSessionManager) UpdateAllProviders(epoch uint64, pairingList 
 		weights[addr] = w
 	}
 	csm.providerOptimizer.UpdateWeights(weights, epoch)
+	// The per-provider blocked gauge covers the backup pool too (MAG-4735), so a backup is seeded
+	// at 0 here like a regular provider; publishStateSizes then keeps both pools current.
+	for _, provider := range backupProviderList {
+		if len(provider.Endpoints) > 0 {
+			providerAddressToEndpoint[provider.PublicLavaAddress] = provider.Endpoints[0].NetworkAddress
+		}
+	}
 	go csm.consumerMetricsManager.ResetBlockedProvidersMetrics(csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, providerAddressToEndpoint)
 
 	// Membership of the outgoing backup pool, captured before the map is replaced, for the same
@@ -1015,6 +1022,13 @@ func (csm *ConsumerSessionManager) probeDirectRPCEndpoints(
 				utils.LogAttr("provider", providerAddress),
 				utils.LogAttr("endpoint", endpoint.NetworkAddress),
 			)
+			continue
+		}
+		// A ws/wss url is never sent a relay (ServesDirectRelays), so it never fails and stays
+		// usable while every https url is off. Counting it here would release a provider that
+		// fetchEndpointConnectionFromConsumerSessionWithProvider just blocked for having no
+		// relay-capable url left, on the very next reconnect or epoch probe (MAG-4285).
+		if !endpoint.ServesDirectRelays() {
 			continue
 		}
 
@@ -2596,16 +2610,52 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 	return providers, nil
 }
 
-// blockedProvidersByCuServedLocked lists every blocked provider: the blocked primaries first, then
-// the blocked backups, each group ordered by compute units served this epoch, highest first (the
-// primaries' list is kept in that order by sortBlockedProviderListByCuServed). csm.lock must be held.
-func (csm *ConsumerSessionManager) blockedProvidersByCuServedLocked() []*ConsumerSessionsWithProvider {
-	providers := make([]*ConsumerSessionsWithProvider, 0, csm.blockedTotalLocked())
+// lastChanceCandidatesLocked is what the blocked-list fallback walks, in order: the blocked primaries
+// (the list is kept in compute-units-served order by sortBlockedProviderListByCuServed), the other
+// primaries out of rotation (no url a relay can use is usable, inRotation), then the same two groups
+// of backups, the blocked ones by compute units served this epoch, highest first. csm.lock must be
+// held.
+//
+// The blocked list alone does not name every provider that is out (MAG-4829). Under concurrent
+// traffic a provider whose endpoints are all out flips in and out of that list many times while one
+// request runs: every request that passes over it blocks it again, and every pool-empty release puts
+// it back. One request can then miss it both ways — normal selection saw it blocked, the walk saw it
+// released — and end in "No pairings available" with a provider it could have been lent. Its
+// endpoints do not flip, so they decide here. A provider with a usable endpoint is left to normal
+// selection: one passed over for a failed dial or a session ceiling, or one that already holds a
+// session of this request.
+func (csm *ConsumerSessionManager) lastChanceCandidatesLocked() []*ConsumerSessionsWithProvider {
+	allEndpointsOut := func(pool map[string]*ConsumerSessionsWithProvider, listed func(string) bool) []*ConsumerSessionsWithProvider {
+		var found []*ConsumerSessionsWithProvider
+		for address, provider := range pool {
+			if provider == nil || len(provider.Endpoints) == 0 || listed(address) {
+				continue
+			}
+			// inRotation, not "any endpoint usable". A ws/wss url is never sent a relay, so it is
+			// never switched off: counting it kept an https + wss provider whose https urls are all
+			// off, the documented ETH1 shape, out of this list, and with MAG-4285 blocking such a
+			// provider it flips in and out of the blocked list like any other. inRotation counts
+			// only the urls a relay can use, the rule the per-provider blocked gauge reads
+			// (MAG-4735), and keeps a websocket-only provider out while its url is up.
+			if provider.inRotation() {
+				continue
+			}
+			found = append(found, provider)
+		}
+		sort.Slice(found, func(i, j int) bool { return found[i].PublicLavaAddress < found[j].PublicLavaAddress })
+		return found
+	}
+
+	candidates := make([]*ConsumerSessionsWithProvider, 0, csm.blockedTotalLocked())
 	for _, address := range csm.currentlyBlockedProviderAddresses {
 		if provider := csm.pairing[address]; provider != nil {
-			providers = append(providers, provider)
+			candidates = append(candidates, provider)
 		}
 	}
+	candidates = append(candidates, allEndpointsOut(csm.pairing, func(address string) bool {
+		return slices.Contains(csm.currentlyBlockedProviderAddresses, address)
+	})...)
+
 	backups := make([]*ConsumerSessionsWithProvider, 0, len(csm.blockedBackupProviders))
 	for address := range csm.blockedBackupProviders {
 		if backup := csm.backupProviders[address]; backup != nil {
@@ -2619,7 +2669,11 @@ func (csm *ConsumerSessionManager) blockedProvidersByCuServedLocked() []*Consume
 		}
 		return backups[i].PublicLavaAddress < backups[j].PublicLavaAddress
 	})
-	return append(providers, backups...)
+	candidates = append(candidates, backups...)
+	return append(candidates, allEndpointsOut(csm.backupProviders, func(address string) bool {
+		_, blocked := csm.blockedBackupProviders[address]
+		return blocked
+	})...)
 }
 
 // On cases where the valid provider list is empty, by being already used in this attempt, and we got to a point
@@ -2627,8 +2681,9 @@ func (csm *ConsumerSessionManager) blockedProvidersByCuServedLocked() []*Consume
 // the list will be sorted by most cu served giving the best provider that was blocked a second chance to get back to valid addresses.
 //
 // This is the request's last chance before "No pairings available" (MAG-4232). It walks the
-// blocked primaries, then the blocked backups. A provider is blocked because all of its endpoints
-// are disabled, so the provider handed out here is marked
+// primaries, then the backups, that are blocked or have every endpoint out
+// (lastChanceCandidatesLocked). Such a provider has no endpoint normal selection can use, so the
+// provider handed out here is marked
 // lastChance: GetSessions lends it one of those disabled endpoints for this request instead of
 // skipping them. It skips only the providers this request already tried (triedByThisRequest), not
 // the ones this attempt just passed over — those are the blocked providers this fallback exists
@@ -2648,13 +2703,28 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	// we also enter this case if all validAddresses are inside ignoredProviders
 	if csm.blockedTotalLocked() == 0 || ignoredProviders.currentEpoch < currentEpoch {
 		// epoch changed just now (between the getValidConsumerSessionsWithProvider to tryGetConsumerSessionWithProviderFromBlockedProviderList)
-		if ignoredProviders.currentEpoch < currentEpoch {
+		epochChanged := ignoredProviders.currentEpoch < currentEpoch
+		if epochChanged {
 			utils.LavaFormatDebug("Epoch changed between getValidConsumerSessionsWithProvider to tryGetConsumerSessionWithProviderFromBlockedProviderList getting pairing from new epoch list", utils.LogAttr("GUID", ctx))
 		}
 		csm.lock.RUnlock() // unlock because getValidConsumerSessionsWithProvider is locking.
 		// Emergency blocked-provider fallback: group-blind selection. The diversity / per-group gate still
 		// enforces the requirement, so a non-diverse fallback fails rather than under-validates.
-		return csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, ignoredProviders, cuNeededForSession, requestedBlock, addon, extensions, stateful, virtualEpoch, "", "", groupBlindMinGroups, groupBlindPerGroupTarget)
+		sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, ignoredProviders, cuNeededForSession, requestedBlock, addon, extensions, stateful, virtualEpoch, "", "", groupBlindMinGroups, groupBlindPerGroupTarget)
+		if epochChanged || err == nil || !errors.Is(err, PairingListEmptyError) {
+			return sessionWithProviderMap, err
+		}
+		// An empty blocked list does not always mean a reset this request can use (MAG-4829). Under
+		// concurrent traffic another request's pool-empty release can empty it after this request
+		// passed over a provider whose every endpoint is out, so normal selection ignores that
+		// provider and just failed. Or the provider was blocked again in between. Either way it still
+		// gets the last chance below: lastChanceCandidatesLocked finds it by its endpoints.
+		// With nothing out to lend, normal selection's answer stands as it was.
+		csm.lock.RLock()
+		if csm.atomicReadCurrentEpoch() != currentEpoch || len(csm.lastChanceCandidatesLocked()) == 0 {
+			csm.lock.RUnlock()
+			return nil, err
+		}
 	}
 
 	// if we got here we validated the epoch is still the same epoch as we expected and we need to fetch a session from the blocked provider list.
@@ -2662,7 +2732,7 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 
 	routerKey := NewRouterKey(extensions)
 	// Highest cu used this epoch first: that provider probably has the highest success ratio.
-	for _, consumerSessionsWithProvider := range csm.blockedProvidersByCuServedLocked() {
+	for _, consumerSessionsWithProvider := range csm.lastChanceCandidatesLocked() {
 		providerAddress := consumerSessionsWithProvider.PublicLavaAddress
 		// check if we have this provider already.
 		if _, tried := ignoredProviders.triedByThisRequest[providerAddress]; tried {
@@ -4118,8 +4188,8 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 	prevEpochBlockedCount := len(csm.previousEpochBlockedProviders)
 	blockedBackupCount := len(csm.blockedBackupProviders)
 
-	// Snapshot the per-provider blocked state for the whole pairing, not just the addresses that
-	// changed. The per-provider gauge MUST be level-triggered: the blocked list is also drained
+	// Snapshot the per-provider blocked state for the whole pairing and the backup pool, not just
+	// the addresses that changed. The per-provider gauge MUST be level-triggered: the blocked list is also drained
 	// wholesale by setValidAddressesToDefaultValue — on every epoch transition, and on the
 	// pool-empty release in releaseBlockedProvidersIfPoolEmpty — and neither drain publishes
 	// anything per provider. Edge-triggered publishing alone therefore left every series it
@@ -4129,13 +4199,32 @@ func (csm *ConsumerSessionManager) publishStateSizes() {
 	for _, address := range csm.currentlyBlockedProviderAddresses {
 		blockedSet[address] = struct{}{}
 	}
-	providerBlocked := make(map[string]bool, len(csm.pairing))
-	for address := range csm.pairing {
-		_, blocked := blockedSet[address]
-		providerBlocked[address] = blocked
+	// A provider reads blocked when it is on a block list or when none of its urls can take a
+	// relay right now (MAG-4735; the url rule is ConsumerSessionsWithProvider.inRotation). The
+	// block lists alone lag: a provider joins one only when a request picks it and finds nothing
+	// usable, so a backup on a healthy chain, never picked, read serving for as long as its only
+	// url stayed head-stalled. The backup pool keeps its own block set. The urls are read after
+	// csm.lock is released, so no provider lock nests in it.
+	type providerState struct {
+		listed bool
+		cswp   *ConsumerSessionsWithProvider
+	}
+	states := make(map[string]providerState, len(csm.pairing)+len(csm.backupProviders))
+	for address, cswp := range csm.pairing {
+		_, listed := blockedSet[address]
+		states[address] = providerState{listed: listed, cswp: cswp}
+	}
+	for address, cswp := range csm.backupProviders {
+		_, listed := csm.blockedBackupProviders[address]
+		states[address] = providerState{listed: listed, cswp: cswp}
 	}
 	blockedByReason := csm.blockedCountsByReasonLocked()
 	csm.lock.RUnlock()
+
+	providerBlocked := make(map[string]bool, len(states))
+	for address, state := range states {
+		providerBlocked[address] = state.listed || (state.cswp != nil && !state.cswp.inRotation())
+	}
 
 	var stickyCount, reportedCount int
 	if csm.stickySessions != nil {
