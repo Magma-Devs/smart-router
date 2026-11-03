@@ -2409,33 +2409,42 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 				utils.LogAttr("GUID", ctx),
 			)
 		}
-		// A pinned provider is only usable if it is BOTH still a valid address AND has not
-		// already been set aside during this GetSessions call.
-		//
-		// The ignored-set half is what bounds the caller's refill loop. When a provider is
-		// returned but cannot take the relay — its compute units for the epoch are spent, its
-		// connection is not up, its session cap is reached — the caller adds it to
-		// ignoredProvidersList and calls back here for a replacement. Checking only
-		// validAddresses handed the very same provider back every time: being out of budget
-		// does not make an address invalid. The refill loop above has no counter and no context
-		// check and holds csm.lock.RLock throughout, so that is an unbounded spin which pegs a
-		// core and starves the next UpdateAllProviders writer, wedging the whole chain.
-		//
-		// The lava-select-provider branch above already carries exactly this guard, added for
-		// exactly this reason. It was never mirrored here.
-		_, alreadyTried := ignoredProvidersList[stickysession.Provider]
-		if !alreadyTried && slices.Contains(validAddresses, stickysession.Provider) {
+		if slices.Contains(validAddresses, stickysession.Provider) {
+			// A provider that is still a valid address but was set aside during this GetSessions
+			// call is BUSY, not unhealthy: its compute units for the epoch are spent, its session
+			// cap is reached, or its connection is not up. The session is not moved for that
+			// (MAG-4826): a sticky request is answered by its node or fails, so this one fails
+			// and the session keeps its node for the next request.
+			//
+			// Returning an error here is also what bounds the caller's refill loop. The caller adds
+			// a provider that cannot take the relay to ignoredProvidersList and calls back here for
+			// a replacement; handing the same provider back every time would be an unbounded spin
+			// under csm.lock.RLock that pegs a core and starves the next UpdateAllProviders writer,
+			// wedging the whole chain. The lava-select-provider branch above carries the same guard.
+			// When the caller already holds a session (a refill after a success), it keeps that
+			// session and ignores this error.
+			if _, setAside := ignoredProvidersList[stickysession.Provider]; setAside {
+				return nil, utils.LavaFormatWarning(
+					"Sticky session provider cannot take this request; a sticky request is not served by another provider",
+					SelectedProviderUnavailableError,
+					utils.LogAttr("provider", stickysession.Provider),
+					utils.LogAttr("id", stickiness),
+					utils.LogAttr("addon", addon),
+					utils.LogAttr("extensions", extensions),
+					utils.LogAttr("GUID", ctx),
+				)
+			}
 			addresses = []string{stickysession.Provider}
 			utils.LavaFormatTrace("returning sticky session", utils.LogAttr("provider", stickysession.Provider), utils.LogAttr("id", stickiness), utils.LogAttr("GUID", ctx))
 			return addresses, nil
 		}
-		// Fall through to ordinary selection. Pod-local stickiness is best effort — it has never
-		// promised to fail rather than serve — so one request moving off the pin is the right
-		// trade against wedging the chain. The tail of this function re-pins the session to
-		// whatever is chosen instead.
-		utils.LavaFormatTrace("sticky session provider unusable for this request, re-selecting",
+		// No longer a valid address here: blocked by the health machinery (all endpoints
+		// disabled, consecutive failures), removed from the config, or not serving this request's
+		// addon or extension. That is the one case a sticky session moves (MAG-4826 D1): fall
+		// through to ordinary selection, and the tail of this function re-pins the session to
+		// whatever is chosen.
+		utils.LavaFormatTrace("sticky session provider no longer valid, re-selecting",
 			utils.LogAttr("provider", stickysession.Provider),
-			utils.LogAttr("alreadyTriedThisRequest", alreadyTried),
 			utils.LogAttr("id", stickiness),
 			utils.LogAttr("GUID", ctx))
 		csm.stickySessions.Delete(stickiness)
