@@ -56,7 +56,7 @@ func DefaultGRPCStreamingConfig() *GRPCStreamingConfig {
 		SubscriptionSharingEnabled: true,
 
 		// Timeouts - gRPC streaming may take longer to establish
-		ConnectionTimeout: 30 * time.Second,
+		ConnectionTimeout: defaultUpstreamDialTimeout,
 
 		// Upstream connection pool - gRPC multiplexes streams over fewer connections
 		PoolMinConnections:   1,

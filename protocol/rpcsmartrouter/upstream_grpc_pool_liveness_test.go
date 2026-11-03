@@ -190,7 +190,7 @@ func idleOnlyConfig(idleTimeout time.Duration) *GRPCStreamingConfig {
 // openPooledStream opens StreamingOutputCall on a connection from pool and returns once
 // the first message has arrived.
 func openPooledStream(ctx context.Context, pool *UpstreamGRPCPool) (grpc.ServerStreamingClient[testgrpc.StreamingOutputCallResponse], error) {
-	conn, err := pool.GetConnectionForStream(ctx)
+	conn, err := pool.take(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -263,7 +263,7 @@ func TestUpstreamGRPCPool_OpenStreamHoldsTheChannelOutOfIdle(t *testing.T) {
 
 	time.Sleep(4 * poolIdleTestTimeout)
 
-	conn, err := pool.GetConnectionForStream(ctx)
+	conn, err := pool.take(ctx, false)
 	require.NoError(t, err)
 	require.Equal(t, connectivity.Ready, conn.GetConn().GetState(), "a channel with an open stream must not go idle")
 	require.Equal(t, 1, proxy.flowCount())

@@ -147,37 +147,43 @@ func (c *UpstreamWSConnection) SubscriptionCount() int32 {
 	return c.subscriptionCount.Load()
 }
 
+func (c *UpstreamWSConnection) slots() int32 { return c.subscriptionCount.Load() }
+
+func (c *UpstreamWSConnection) addSlots(delta int32) int32 { return c.subscriptionCount.Add(delta) }
+
 // UpstreamWSPool manages a pool of WebSocket connections to upstream endpoints.
 // The pool automatically scales between minConnections and maxConnections based on
-// subscription load, targeting approximately subscriptionsPerConn subscriptions per connection.
+// subscription load, targeting approximately perConn subscriptions per connection.
 type UpstreamWSPool struct {
-	nodeUrl      *common.NodeUrl
-	sanitizedURL string
-	connections  []*UpstreamWSConnection // Slice of connections for auto-scaling
-	backoff      *ExponentialBackoff
-	reconnectMu  sync.Mutex // Prevents concurrent reconnection attempts
-	lock         sync.RWMutex
-	closed       atomic.Bool
-	reconnecting atomic.Bool
-	onReconnect  func() // Callback when reconnected (for subscription restoration)
+	*connPool[*UpstreamWSConnection]
+	nodeUrl     *common.NodeUrl
+	dialTimeout time.Duration // bounds one dial whatever the caller's context allows
+}
 
-	// Pool configuration (from WebsocketConfig)
-	minConnections       int // Minimum connections to maintain (default: 1)
-	maxConnections       int // Maximum connections allowed (default: 10)
-	subscriptionsPerConn int // Target subscriptions per connection (default: 100)
+// wsReconnectPolicy keeps the WebSocket pool's reconnect as it was before the two pools
+// shared one implementation; see reconnectPolicy for what each field does.
+var wsReconnectPolicy = reconnectPolicy{
+	skipWhenHealthy:          true,
+	retryOnFreshLadder:       true,
+	dropUnhealthyOnReconnect: true,
+	waitersJudgeByHealth:     true,
+	pruneDeadOnPick:          true,
 }
 
 // NewUpstreamWSPool creates a new WebSocket connection pool for an endpoint
 func NewUpstreamWSPool(nodeUrl *common.NodeUrl) *UpstreamWSPool {
-	return &UpstreamWSPool{
-		nodeUrl:              nodeUrl,
-		sanitizedURL:         sanitizeEndpointURL(nodeUrl.Url),
-		connections:          make([]*UpstreamWSConnection, 0),
-		backoff:              NewWebSocketBackoff(),
-		minConnections:       1,   // Default minimum
-		maxConnections:       10,  // Default maximum
-		subscriptionsPerConn: 100, // Default target
+	pool := &UpstreamWSPool{
+		nodeUrl:     nodeUrl,
+		dialTimeout: defaultUpstreamDialTimeout,
 	}
+	pool.connPool = newConnPool(
+		poolVocabulary{name: "WebSocket", slotAttr: "existingSubCount"},
+		nodeUrl.Url, pool.dial, wsReconnectPolicy,
+		1,   // Default minimum
+		10,  // Default maximum
+		100, // Default target
+	)
+	return pool
 }
 
 // NewUpstreamWSPoolWithConfig creates a pool with custom configuration
@@ -186,422 +192,39 @@ func NewUpstreamWSPoolWithConfig(nodeUrl *common.NodeUrl, config *WebsocketConfi
 	if config != nil {
 		pool.minConnections = config.UpstreamPoolMinConnections
 		pool.maxConnections = config.UpstreamPoolMaxConnections
-		pool.subscriptionsPerConn = config.UpstreamPoolSubscriptionsPerConn
+		pool.perConn = config.UpstreamPoolSubscriptionsPerConn
 	}
 	return pool
 }
 
-// SetReconnectCallback sets a callback to be called after successful reconnection
-// This is used to restore subscriptions after reconnection
-func (p *UpstreamWSPool) SetReconnectCallback(callback func()) {
-	p.lock.Lock()
-	defer p.lock.Unlock()
-	p.onReconnect = callback
+// dial opens one connection to the endpoint, bounded by dialTimeout. The context only bounds
+// the handshake; the connection outlives it.
+func (p *UpstreamWSPool) dial(ctx context.Context) (*UpstreamWSConnection, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, p.dialTimeout)
+	defer cancel()
+	return NewUpstreamWSConnection(dialCtx, p.nodeUrl)
 }
 
-// GetConnection returns a healthy connection, creating one if needed.
-// This is the legacy API - prefer ReserveConnectionForSubscription for new code.
-func (p *UpstreamWSPool) GetConnection(ctx context.Context) (*UpstreamWSConnection, error) {
-	return p.GetConnectionForSubscription(ctx)
-}
-
-// ReserveConnectionForSubscription is GetConnectionForSubscription that also counts the
-// caller's subscription on the connection it returns, under the pool lock.
-//
-// Counted any later — as the subscription manager used to, with an IncrementSubscriptions
-// after the node's subscribe reply — the connection looks unused in the meantime, and
-// maybeScaleDown closes a connection past minConnections that carries no counted
-// subscription. The subscription being created on it then dies on a socket the pool closed
-// (MAG-4278 item 11; the gRPC pool reserves on pick for the same reason, MAG-4177).
+// ReserveConnectionForSubscription returns the best connection for a new subscription and
+// counts the caller's subscription on it, under the pool lock. It prefers connections with
+// lower subscription counts and creates a new connection when all existing ones are near
+// capacity (and the pool is below maxConnections).
 //
 // The caller releases the slot with NotifySubscriptionRemoved, including when the subscribe
 // itself fails.
 func (p *UpstreamWSPool) ReserveConnectionForSubscription(ctx context.Context) (*UpstreamWSConnection, error) {
-	return p.connectionForSubscription(ctx, true)
-}
-
-// GetConnectionForSubscription returns the best connection for a new subscription.
-// It prefers connections with lower subscription counts and will create new connections
-// if all existing ones are near capacity (and we haven't hit maxConnections).
-func (p *UpstreamWSPool) GetConnectionForSubscription(ctx context.Context) (*UpstreamWSConnection, error) {
-	return p.connectionForSubscription(ctx, false)
-}
-
-func (p *UpstreamWSPool) connectionForSubscription(ctx context.Context, reserve bool) (*UpstreamWSConnection, error) {
-	if p.closed.Load() {
-		return nil, fmt.Errorf("pool is closed")
-	}
-
-	p.lock.Lock()
-	defer p.lock.Unlock()
-
-	// The reservation is made under this lock, with the pick: a count written after the lock
-	// is released leaves a window in which maybeScaleDown sees the connection as unused.
-	conn, err := p.pickConnectionLocked(ctx)
-	if err == nil && reserve {
-		conn.IncrementSubscriptions()
-	}
-	return conn, err
-}
-
-// pickConnectionLocked chooses or creates the connection for a new subscription.
-// Caller holds p.lock.
-func (p *UpstreamWSPool) pickConnectionLocked(ctx context.Context) (*UpstreamWSConnection, error) {
-	p.pruneDeadConnectionsLocked()
-
-	// Find the best connection (healthy with lowest subscription count)
-	var bestConn *UpstreamWSConnection
-	var lowestSubs int32 = int32(p.subscriptionsPerConn + 1) // Start higher than target
-
-	for _, conn := range p.connections {
-		if conn.IsHealthy() {
-			subs := conn.SubscriptionCount()
-			if subs < lowestSubs {
-				lowestSubs = subs
-				bestConn = conn
-			}
-		}
-	}
-
-	// If we have a connection with capacity, use it
-	if bestConn != nil && lowestSubs < int32(p.subscriptionsPerConn) {
-		return bestConn, nil
-	}
-
-	// Need to scale up if possible
-	if len(p.connections) < p.maxConnections {
-		newConn, err := p.createConnectionLocked(ctx)
-		if err != nil {
-			// If we can't create a new connection but have an existing one, use it
-			if bestConn != nil {
-				utils.LavaFormatWarning("WebSocket pool: failed to scale up, using existing connection", err,
-					utils.LogAttr("endpoint", p.sanitizedURL),
-					utils.LogAttr("currentConnections", len(p.connections)),
-					utils.LogAttr("existingSubCount", lowestSubs),
-				)
-				return bestConn, nil
-			}
-			return nil, fmt.Errorf("failed to create connection: %w", err)
-		}
-
-		utils.LavaFormatInfo("WebSocket pool: scaled up",
-			utils.LogAttr("endpoint", p.sanitizedURL),
-			utils.LogAttr("totalConnections", len(p.connections)),
-			utils.LogAttr("reason", "all connections near capacity"),
-		)
-		return newConn, nil
-	}
-
-	// At max connections - use the one with lowest subs even if over target
-	if bestConn != nil {
-		return bestConn, nil
-	}
-
-	// No healthy connections - try to create one
-	return p.createConnectionLocked(ctx)
-}
-
-// pruneDeadConnectionsLocked closes and drops the connections a subscription listener marked
-// dead (MarkUnhealthy), so the pool neither hands one out again nor keeps it forever when a
-// healthy sibling spared ReconnectWithBackoff the trouble. Caller holds p.lock.
-func (p *UpstreamWSPool) pruneDeadConnectionsLocked() {
-	kept := make([]*UpstreamWSConnection, 0, len(p.connections))
-	for _, conn := range p.connections {
-		if conn.IsHealthy() {
-			kept = append(kept, conn)
-			continue
-		}
-		conn.Close()
-		utils.LavaFormatDebug("WebSocket pool: dropped a dead connection",
-			utils.LogAttr("endpoint", p.sanitizedURL),
-			utils.LogAttr("remainingConnections", len(kept)),
-		)
-	}
-	p.connections = kept
-}
-
-// createConnectionLocked creates a new connection (caller must hold lock)
-func (p *UpstreamWSPool) createConnectionLocked(ctx context.Context) (*UpstreamWSConnection, error) {
-	conn, err := NewUpstreamWSConnection(ctx, p.nodeUrl)
-	if err != nil {
-		return nil, err
-	}
-
-	p.connections = append(p.connections, conn)
-	p.backoff.Reset()
-
-	utils.LavaFormatDebug("WebSocket pool: connection added",
-		utils.LogAttr("endpoint", p.sanitizedURL),
-		utils.LogAttr("totalConnections", len(p.connections)),
-	)
-
-	return conn, nil
+	return p.take(ctx, true)
 }
 
 // NotifySubscriptionRemoved should be called when a subscription is removed from a connection.
 // This allows the pool to potentially scale down if connections are underutilized.
 func (p *UpstreamWSPool) NotifySubscriptionRemoved(conn *UpstreamWSConnection) {
-	if conn == nil {
-		return
-	}
-
-	conn.DecrementSubscriptions()
-
-	// Consider scaling down if we have excess connections with no subscriptions
-	p.maybeScaleDown()
-}
-
-// maybeScaleDown removes empty connections if we have more than minConnections
-func (p *UpstreamWSPool) maybeScaleDown() {
-	p.lock.Lock()
-	defer p.lock.Unlock()
-
-	if len(p.connections) <= p.minConnections {
-		return
-	}
-
-	// Find connections with no subscriptions (excluding the first minConnections)
-	var toRemove []*UpstreamWSConnection
-	kept := make([]*UpstreamWSConnection, 0, len(p.connections))
-
-	for i, conn := range p.connections {
-		if i < p.minConnections {
-			// Keep minimum connections
-			kept = append(kept, conn)
-		} else if conn.SubscriptionCount() == 0 && !conn.IsHealthy() {
-			// Remove unhealthy empty connections
-			toRemove = append(toRemove, conn)
-		} else if conn.SubscriptionCount() == 0 {
-			// Mark for potential removal (only if we have excess)
-			if len(kept)+len(p.connections)-i-1 >= p.minConnections {
-				toRemove = append(toRemove, conn)
-			} else {
-				kept = append(kept, conn)
-			}
-		} else {
-			kept = append(kept, conn)
-		}
-	}
-
-	if len(toRemove) > 0 {
-		p.connections = kept
-
-		// Close removed connections asynchronously
-		go func(conns []*UpstreamWSConnection) {
-			for _, conn := range conns {
-				conn.Close()
-			}
-			utils.LavaFormatDebug("WebSocket pool: scaled down",
-				utils.LogAttr("endpoint", p.sanitizedURL),
-				utils.LogAttr("removedConnections", len(conns)),
-				utils.LogAttr("remainingConnections", len(kept)),
-			)
-		}(toRemove)
-	}
-}
-
-// reconnectDelay floors the backoff ladder's delay with a rate-limited dial's
-// Retry-After: an upstream that named its own wait must not be re-dialed at the
-// 100ms–30s cadence. Any other failure keeps the ladder's delay.
-func reconnectDelay(base time.Duration, err error) time.Duration {
-	if retryAfter, ok := common.RetryAfterFrom(err); ok && retryAfter > base {
-		return retryAfter
-	}
-	return base
-}
-
-// ReconnectWithBackoff attempts to reconnect all unhealthy connections using exponential backoff.
-// This should be called when a connection error is detected.
-// Returns nil on success, or an error if max retries exceeded or context cancelled.
-func (p *UpstreamWSPool) ReconnectWithBackoff(ctx context.Context) error {
-	// Prevent concurrent reconnection attempts
-	if !p.reconnecting.CompareAndSwap(false, true) {
-		// Another goroutine is already reconnecting, wait for it
-		return p.waitForReconnect(ctx)
-	}
-	defer p.reconnecting.Store(false)
-
-	p.reconnectMu.Lock()
-	defer p.reconnectMu.Unlock()
-
-	// Check if we have any healthy connections
-	p.lock.RLock()
-	hasHealthy := false
-	for _, conn := range p.connections {
-		if conn.IsHealthy() {
-			hasHealthy = true
-			break
-		}
-	}
-	p.lock.RUnlock()
-
-	if hasHealthy {
-		return nil // At least one connection is healthy
-	}
-
-	backoff := p.backoff.Clone() // Use fresh backoff for this reconnection attempt
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		// Attempt to connect
-		conn, err := NewUpstreamWSConnection(ctx, p.nodeUrl)
-		if err == nil {
-			p.lock.Lock()
-			// Close all unhealthy connections
-			for _, oldConn := range p.connections {
-				if !oldConn.IsHealthy() {
-					oldConn.Close()
-				}
-			}
-			// Keep healthy connections and add new one
-			healthyConns := make([]*UpstreamWSConnection, 0)
-			for _, oldConn := range p.connections {
-				if oldConn.IsHealthy() {
-					healthyConns = append(healthyConns, oldConn)
-				}
-			}
-			healthyConns = append(healthyConns, conn)
-			p.connections = healthyConns
-
-			callback := p.onReconnect
-			p.lock.Unlock()
-
-			utils.LavaFormatInfo("WebSocket pool: reconnected successfully",
-				utils.LogAttr("endpoint", p.sanitizedURL),
-				utils.LogAttr("attempts", backoff.Attempt()),
-				utils.LogAttr("totalConnections", len(healthyConns)),
-			)
-
-			// Call reconnect callback (e.g., to restore subscriptions)
-			if callback != nil {
-				callback()
-			}
-
-			return nil
-		}
-
-		// Get next backoff delay
-		delay, shouldRetry := backoff.NextBackoff()
-		if !shouldRetry {
-			return fmt.Errorf("max retries (%d) exceeded for endpoint %s: %w",
-				WebSocketMaxRetries, p.sanitizedURL, err)
-		}
-
-		delay = reconnectDelay(delay, err)
-
-		utils.LavaFormatDebug("WebSocket pool: reconnect failed, retrying",
-			utils.LogAttr("endpoint", p.sanitizedURL),
-			utils.LogAttr("attempt", backoff.Attempt()),
-			utils.LogAttr("next_delay", delay),
-			utils.LogAttr("error", err.Error()),
-		)
-
-		// Wait before retry
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(delay):
-			// Continue to next attempt
-		}
-	}
-}
-
-// waitForReconnect waits for an ongoing reconnection to complete
-func (p *UpstreamWSPool) waitForReconnect(ctx context.Context) error {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if !p.reconnecting.Load() {
-				// Reconnection finished, check result
-				p.lock.RLock()
-				hasHealthy := false
-				for _, conn := range p.connections {
-					if conn.IsHealthy() {
-						hasHealthy = true
-						break
-					}
-				}
-				p.lock.RUnlock()
-
-				if hasHealthy {
-					return nil
-				}
-				return fmt.Errorf("reconnection failed")
-			}
-		}
-	}
-}
-
-// Close closes the pool and all connections
-func (p *UpstreamWSPool) Close() error {
-	if !p.closed.CompareAndSwap(false, true) {
-		return nil // Already closed
-	}
-
-	p.lock.Lock()
-	defer p.lock.Unlock()
-
-	for _, conn := range p.connections {
-		conn.Close()
-	}
-	p.connections = nil
-
-	utils.LavaFormatDebug("WebSocket pool closed",
-		utils.LogAttr("endpoint", p.sanitizedURL),
-	)
-
-	return nil
-}
-
-// IsHealthy returns true if the pool has at least one healthy connection
-func (p *UpstreamWSPool) IsHealthy() bool {
-	if p.closed.Load() {
-		return false
-	}
-
-	p.lock.RLock()
-	defer p.lock.RUnlock()
-
-	for _, conn := range p.connections {
-		if conn.IsHealthy() {
-			return true
-		}
-	}
-	return false
-}
-
-// GetEndpoint returns the sanitized endpoint URL
-func (p *UpstreamWSPool) GetEndpoint() string {
-	return p.sanitizedURL
-}
-
-// ConnectionCount returns the current number of connections in the pool
-func (p *UpstreamWSPool) ConnectionCount() int {
-	p.lock.RLock()
-	defer p.lock.RUnlock()
-	return len(p.connections)
+	p.release(conn)
 }
 
 // TotalSubscriptions returns the total number of subscriptions across all connections
 func (p *UpstreamWSPool) TotalSubscriptions() int32 {
-	p.lock.RLock()
-	defer p.lock.RUnlock()
-
-	var total int32
-	for _, conn := range p.connections {
-		total += conn.SubscriptionCount()
-	}
-	return total
+	return p.totalSlots()
 }
 
 // Note: sanitizeEndpointURL is defined in direct_rpc_relay.go

@@ -538,7 +538,7 @@ func newManagerAgainstUpstream(t *testing.T, addr string) *DirectGRPCSubscriptio
 	ctx := context.Background()
 	pool, err := manager.getOrCreatePool(endpoint)
 	require.NoError(t, err)
-	conn, err := pool.GetConnectionForStream(ctx)
+	conn, err := pool.take(ctx, false)
 	require.NoError(t, err)
 	conn.descriptors.cache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", streamingMethodDescriptor(t))
 
@@ -546,8 +546,8 @@ func newManagerAgainstUpstream(t *testing.T, addr string) *DirectGRPCSubscriptio
 }
 
 // connectionForUpstream returns the single pooled connection newManagerAgainstUpstream
-// created, so a test can re-seed its descriptor cache. GetConnectionForStream reuses a
-// healthy connection until streamsPerConn is reached, so this is the same one the
+// created, so a test can re-seed its descriptor cache. The pool reuses a
+// healthy connection until perConn is reached, so this is the same one the
 // manager will pick up.
 func connectionForUpstream(t *testing.T, manager *DirectGRPCSubscriptionManager) *UpstreamGRPCStreamConnection {
 	t.Helper()
@@ -560,7 +560,7 @@ func connectionForUpstream(t *testing.T, manager *DirectGRPCSubscriptionManager)
 	}
 	manager.lock.RUnlock()
 
-	conn, err := pool.GetConnectionForStream(context.Background())
+	conn, err := pool.take(context.Background(), false)
 	require.NoError(t, err)
 	return conn
 }
