@@ -203,7 +203,7 @@ const (
 
 // NewSecondaryRespCache builds the read-only RESP second tier (MAG-4778). The
 // router only ever reads it through CacheReader, and a RESP read path issues no
-// writes (GET/MGET; the health probe is PING), so nothing is written to the
+// writes (GET only; the health probe is PING), so nothing is written to the
 // other zone's store. Its series stay unregistered (newRespCacheMetricsSet).
 //
 // lookupBudget is the tier's secondary-cache-timeout, and its breaker closes on
