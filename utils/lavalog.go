@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	zerolog "github.com/rs/zerolog"
 	zerologlog "github.com/rs/zerolog/log"
@@ -50,10 +51,39 @@ const (
 var (
 	JsonFormat = false
 	// if set to production, this will replace some errors to warning that can be caused by misuse instead of bugs
-	ExtendedLogLevel      = "development"
-	rollingLogLogger      = zerolog.New(os.Stderr).Level(zerolog.Disabled) // this is the singleton rolling logger.
-	defaultGlobalLogLevel = zerolog.DebugLevel
+	ExtendedLogLevel = "development"
+	rollingLogLogger = zerolog.New(os.Stderr).Level(zerolog.Disabled) // this is the singleton rolling logger.
 )
+
+var (
+	// stdLogger is the stderr sink every LavaFormat* call writes to, and globalLogLevel (a
+	// zerolog.Level) gates those calls before any formatting. Atomic, because
+	// SetGlobalLoggingLevel and SetStdLogger replace them while other goroutines log.
+	stdLogger      atomic.Pointer[zerolog.Logger]
+	globalLogLevel atomic.Int32
+)
+
+func currentLogLevel() zerolog.Level {
+	return zerolog.Level(globalLogLevel.Load())
+}
+
+// newStdLogger builds the stderr sink at level, in the format JsonFormat selects.
+func newStdLogger(level zerolog.Level, timeFormat string) *zerolog.Logger {
+	var logger zerolog.Logger
+	if JsonFormat {
+		logger = zerologlog.Output(os.Stderr).Level(level)
+	} else {
+		logger = zerologlog.Output(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: NoColor, TimeFormat: timeFormat}).Level(level)
+	}
+	return &logger
+}
+
+// SetStdLogger replaces the stderr sink and returns a function that puts the previous one back.
+// Tests use it to capture what LavaFormat* writes.
+func SetStdLogger(logger zerolog.Logger) (restore func()) {
+	prev := stdLogger.Swap(&logger)
+	return func() { stdLogger.Store(prev) }
+}
 
 // debugRingWriter is a mutex-guarded fixed-capacity circular buffer of raw log
 // records. It implements io.Writer so a zerolog sink can write JSON records into
@@ -261,11 +291,10 @@ func LogAttr(key string, value interface{}) Attribute {
 
 func init() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnixNano
-	if JsonFormat {
-		zerologlog.Logger = zerologlog.Output(os.Stderr).Level(defaultGlobalLogLevel)
-	} else {
-		zerologlog.Logger = zerologlog.Output(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: NoColor, TimeFormat: time.StampNano}).Level(defaultGlobalLogLevel)
-	}
+	globalLogLevel.Store(int32(zerolog.DebugLevel))
+	logger := newStdLogger(zerolog.DebugLevel, time.StampNano)
+	zerologlog.Logger = *logger
+	stdLogger.Store(logger)
 }
 
 func getLogLevel(logLevel string) zerolog.Level {
@@ -287,15 +316,13 @@ func getLogLevel(logLevel string) zerolog.Level {
 	}
 }
 
+// SetGlobalLoggingLevel sets the level of the stderr sink and rebuilds it in the format JsonFormat
+// selects. zerolog's own global level is left alone: it would also cap the rolling log, which keeps
+// its own level.
 func SetGlobalLoggingLevel(logLevel string) {
-	// setting global level prevents us from having two different levels for example one for stdout and one for rolling log.
-	// zerolog.SetGlobalLevel(getLogLevel(logLevel))
-	defaultGlobalLogLevel = getLogLevel(logLevel)
-	if JsonFormat {
-		zerologlog.Logger = zerologlog.Output(os.Stderr).Level(defaultGlobalLogLevel)
-	} else {
-		zerologlog.Logger = zerologlog.Output(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: NoColor, TimeFormat: time.Stamp}).Level(defaultGlobalLogLevel)
-	}
+	level := getLogLevel(logLevel)
+	globalLogLevel.Store(int32(level))
+	stdLogger.Store(newStdLogger(level, time.Stamp))
 	LavaFormatInfo("setting log level", Attribute{Key: "loglevel", Value: logLevel})
 }
 
@@ -303,7 +330,7 @@ func SetGlobalLoggingLevel(logLevel string) {
 // Use this to guard expensive pre-call computations that are only needed when
 // a debug log will actually be emitted.
 func IsDebugEnabled() bool {
-	return defaultGlobalLogLevel <= zerolog.DebugLevel
+	return currentLogLevel() <= zerolog.DebugLevel
 }
 
 func RollingLoggerSetup(rollingLogLevel string, filePath string, maxSize string, maxBackups string, maxAge string, stdFormat string) func() {
@@ -477,15 +504,16 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 
 	// Check if this log level is enabled before doing expensive work
 	var logLevelEnabled bool
+	level := currentLogLevel()
 	switch severity {
 	case LAVA_LOG_TRACE:
-		logLevelEnabled = defaultGlobalLogLevel <= zerolog.TraceLevel
+		logLevelEnabled = level <= zerolog.TraceLevel
 	case LAVA_LOG_DEBUG:
-		logLevelEnabled = defaultGlobalLogLevel <= zerolog.DebugLevel
+		logLevelEnabled = level <= zerolog.DebugLevel
 	case LAVA_LOG_INFO:
-		logLevelEnabled = defaultGlobalLogLevel <= zerolog.InfoLevel
+		logLevelEnabled = level <= zerolog.InfoLevel
 	case LAVA_LOG_WARN:
-		logLevelEnabled = defaultGlobalLogLevel <= zerolog.WarnLevel
+		logLevelEnabled = level <= zerolog.WarnLevel
 	case LAVA_LOG_ERROR, LAVA_LOG_FATAL, LAVA_LOG_PANIC:
 		logLevelEnabled = true // Always process errors, fatal, and panic
 	default:
@@ -501,21 +529,16 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 		// that LavaFormat* functions always return an error when called
 		return fmt.Errorf("%s", description)
 	}
-	// if JsonFormat {
-	// 	zerologlog.Logger = zerologlog.Output(os.Stderr).Level(defaultGlobalLogLevel)
-	// } else {
-	// 	zerologlog.Logger = zerologlog.Output(zerolog.ConsoleWriter{Out: os.Stderr, NoColor: NoColor, TimeFormat: time.Stamp}).Level(defaultGlobalLogLevel)
-	// }
-
 	var logEvent *zerolog.Event
 	var rollingLoggerEvent *zerolog.Event
 	var debugBufferEvent *zerolog.Event
+	std := stdLogger.Load()
 	rollingLogEnabled := rollingLogLogger.GetLevel() != zerolog.Disabled
 	dbgLogger := debugBufferLogger.Load()
 	debugBufferEnabled := dbgLogger.GetLevel() != zerolog.Disabled
 	switch severity {
 	case LAVA_LOG_PANIC:
-		logEvent = zerologlog.Panic()
+		logEvent = std.Panic()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Panic()
 		}
@@ -523,7 +546,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			debugBufferEvent = dbgLogger.Error()
 		}
 	case LAVA_LOG_FATAL:
-		logEvent = zerologlog.Fatal()
+		logEvent = std.Fatal()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Fatal()
 		}
@@ -531,7 +554,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			debugBufferEvent = dbgLogger.Error()
 		}
 	case LAVA_LOG_ERROR:
-		logEvent = zerologlog.Error()
+		logEvent = std.Error()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Error()
 		}
@@ -539,7 +562,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			debugBufferEvent = dbgLogger.Error()
 		}
 	case LAVA_LOG_WARN:
-		logEvent = zerologlog.Warn()
+		logEvent = std.Warn()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Warn()
 		}
@@ -547,7 +570,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			debugBufferEvent = dbgLogger.Warn()
 		}
 	case LAVA_LOG_INFO:
-		logEvent = zerologlog.Info()
+		logEvent = std.Info()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Info()
 		}
@@ -555,7 +578,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			debugBufferEvent = dbgLogger.Info()
 		}
 	case LAVA_LOG_DEBUG:
-		logEvent = zerologlog.Debug()
+		logEvent = std.Debug()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Debug()
 		}
@@ -563,7 +586,7 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			debugBufferEvent = dbgLogger.Debug()
 		}
 	case LAVA_LOG_TRACE:
-		logEvent = zerologlog.Trace()
+		logEvent = std.Trace()
 		if rollingLogEnabled {
 			rollingLoggerEvent = rollingLogLogger.Trace()
 		}
@@ -681,13 +704,41 @@ func LavaFormatTrace(description string, attributes ...Attribute) error {
 	return LavaFormatLog(description, nil, attributes, LAVA_LOG_TRACE)
 }
 
+// FormatLongString shortens a msg longer than maxCharacters bytes to its first two thirds and its
+// last third of maxCharacters, joined by "...truncated...". Each cut lands on a rune boundary, so a
+// valid UTF-8 msg stays valid UTF-8: a rune the cut would split is left out, and the kept parts may
+// be up to three bytes short of the budget. A maxCharacters of 0 keeps msg whole.
 func FormatLongString(msg string, maxCharacters int) string {
 	if maxCharacters != 0 && len(msg) > maxCharacters {
 		postfixLen := maxCharacters / 3
 		prefixLen := maxCharacters - postfixLen
-		return msg[:prefixLen] + "...truncated..." + msg[len(msg)-postfixLen:]
+		return msg[:runeStartAtOrBefore(msg, prefixLen)] + "...truncated..." + msg[runeStartAtOrAfter(msg, len(msg)-postfixLen):]
 	}
 	return msg
+}
+
+// runeStartAtOrBefore returns the last index at or before at where a rune of s starts, so s[:i]
+// ends on a whole rune. It looks back no further than one rune's length: bytes that are not UTF-8
+// leave at where it is.
+func runeStartAtOrBefore(s string, at int) int {
+	for i := at; i >= 0 && i > at-utf8.UTFMax; i-- {
+		if utf8.RuneStart(s[i]) {
+			return i
+		}
+	}
+	return at
+}
+
+// runeStartAtOrAfter returns the first index at or after at where a rune of s starts, or len(s), so
+// s[i:] begins on a whole rune. It looks ahead no further than one rune's length: bytes that are not
+// UTF-8 leave at where it is.
+func runeStartAtOrAfter(s string, at int) int {
+	for i := at; i < at+utf8.UTFMax; i++ {
+		if i == len(s) || utf8.RuneStart(s[i]) {
+			return i
+		}
+	}
+	return at
 }
 
 func ToHexString(hash string) string {

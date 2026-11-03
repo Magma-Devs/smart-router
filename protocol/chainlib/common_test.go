@@ -22,6 +22,7 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/metadata"
 )
 
 func TestMatchSpecApiByName(t *testing.T) {
@@ -284,8 +285,15 @@ func TestExtractDappIDFromWebsocketConnection(t *testing.T) {
 		{
 			name:     "dappId exists in params",
 			route:    "/ws",
-			headers:  map[string][]string{"project-id": {"DappID123"}},
+			headers:  map[string][]string{"customer-id": {"DappID123"}},
 			expected: "DappID123",
+		},
+		{
+			// MAG-4727 renamed the header; the old name is not read.
+			name:     "project-id alone names no customer",
+			route:    "/ws",
+			headers:  map[string][]string{"project-id": {"DappID123"}},
+			expected: "DefaultDappID",
 		},
 		{
 			name:     "dappId does not exist in params",
@@ -299,7 +307,7 @@ func TestExtractDappIDFromWebsocketConnection(t *testing.T) {
 
 	webSocketCallback := websocket.New(func(websockConn *websocket.Conn) {
 		mt, _, _ := websockConn.ReadMessage()
-		dappID, ok := websockConn.Locals("project-id").(string)
+		dappID, ok := websockConn.Locals("customer-id").(string)
 		if !ok {
 			t.Fatalf("Unable to extract dappID")
 		}
@@ -353,8 +361,14 @@ func TestExtractDappIDFromFiberContext(t *testing.T) {
 	}{
 		{
 			name:     "dappId exists in headers",
-			headers:  map[string]string{"project-id": "DappID123"},
+			headers:  map[string]string{"customer-id": "DappID123"},
 			expected: "DappID123",
+		},
+		{
+			// MAG-4727 renamed the header; the old name is not read.
+			name:     "project-id alone names no customer",
+			headers:  map[string]string{"project-id": "DappID123"},
+			expected: "DefaultDappID",
 		},
 		{
 			name:     "dappId does not exist in headers",
@@ -382,6 +396,26 @@ func TestExtractDappIDFromFiberContext(t *testing.T) {
 			if responseString != testCase.expected {
 				t.Errorf("Expected %s but got %s", testCase.expected, responseString)
 			}
+		})
+	}
+}
+
+func TestExtractDappIDFromGrpcHeader(t *testing.T) {
+	// grpc-go lower-cases incoming metadata keys, so these are the keys a caller's
+	// Customer-Id arrives under.
+	testCases := []struct {
+		name     string
+		md       metadata.MD
+		expected string
+	}{
+		{name: "customer-id", md: metadata.Pairs("Customer-Id", "DappID123"), expected: "DappID123"},
+		{name: "first of several values", md: metadata.MD{"customer-id": {"DappID123", "other"}}, expected: "DappID123"},
+		{name: "no metadata", md: metadata.MD{}, expected: "DefaultDappID"},
+		{name: "project-id alone names no customer", md: metadata.Pairs("project-id", "DappID123"), expected: "DefaultDappID"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.Equal(t, testCase.expected, extractDappIDFromGrpcHeader(testCase.md))
 		})
 	}
 }
