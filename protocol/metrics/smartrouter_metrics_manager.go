@@ -641,11 +641,11 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, csmStateLabels)
 	providerVerificationFailed := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "smartrouter_provider_verification_failed",
-		Help: "While a configured provider is failing a verification: the unix time in seconds the failure started, labelled with the check it fails. A provider that moves to another check in the same scope and service keeps its start. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves. severity: Fail when the failure takes a url or the provider out, PartialFail when it switches off only that service. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, not-run, rate-limited, unknown. A provider out at boot is retried every 3m (from 2s, doubling, while its chain is dark); one demoted later and every service refusal is re-checked every 15m epoch, so size alert windows above both.",
+		Help: "While a configured provider is failing a verification: the unix time in seconds the failure started, labelled with the check it fails. A provider that moves to another check in the same scope and service keeps its start. scope=provider: the provider is out of the pairing (failed at boot, or demoted by the epoch re-verifier). scope=service: the provider still serves but lost one add-on or extension (service) to that check. scope=url: the provider still serves but one of its node urls was refused, whole (no service) or for one service another url still serves. scope=none: a check the spec gives severity Warning is failing, and nothing was switched off. severity: Fail when the failure takes a url or the provider out, PartialFail when it switches off only that service, Warning when it switches off nothing. The series exists only while the failure lasts. check is the spec verification's name, or latest-block, unsupported-addon, connect, config, not-run, rate-limited, unknown. A provider out at boot is retried every 3m (from 2s, doubling, while its chain is dark); one demoted later and every service refusal is re-checked every 15m epoch, so size alert windows above both.",
 	}, verificationFailureLabels)
 	verificationCheckFailures := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_provider_verification_check_failures_total",
-		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service), scope=url when it costs one node url. A provider out at boot is re-run every 3m; an admitted provider and every service are re-run every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted.",
+		Help: "Failed verification check runs, one per run that failed. Labels as smartrouter_provider_verification_failed: scope=provider when the failure costs the whole provider, scope=service when it costs one add-on or extension (service), scope=url when it costs one node url, scope=none when it costs nothing (severity Warning). A provider out at boot is re-run every 3m; an admitted provider and every service are re-run every 15m epoch, so each failure appears at that cadence. A rate-limited run is inconclusive and not counted.",
 	}, verificationFailureLabels)
 
 	// =========================================================================
@@ -2056,13 +2056,18 @@ const (
 	VerificationScopeProvider = "provider"
 	VerificationScopeService  = "service"
 	VerificationScopeURL      = "url"
+	// VerificationScopeNone is a failing check whose severity is Warning: nothing
+	// was switched off.
+	VerificationScopeNone = "none"
 )
 
 // Severities of a failing verification, as MAG-3950 names them: Fail takes a url or the
-// provider out, PartialFail switches off only the service the check covers.
+// provider out, PartialFail switches off only the service the check covers, Warning
+// switches nothing off.
 const (
 	VerificationSeverityFail        = "Fail"
 	VerificationSeverityPartialFail = "PartialFail"
+	VerificationSeverityWarning     = "Warning"
 )
 
 // verificationFailureLabels are the labels of both verification-failure metrics.
@@ -2159,14 +2164,15 @@ func (m *SmartRouterMetricsManager) SetProviderVerificationFailures(spec, apiInt
 
 // failureStart is when f started failing: its own series' start when it was already
 // published, else the earliest start in the same scope and service, so a provider
-// that moves to another check keeps the time it started failing, else now.
+// that moves to another check keeps the time it started failing, else now. Warning
+// checks fail independently of each other, so a new one starts now.
 func failureStart(previous []publishedVerificationFailure, f ProviderVerificationFailure, now time.Time) time.Time {
 	var earliest time.Time
 	for _, p := range previous {
 		if p.ProviderVerificationFailure == f {
 			return p.since
 		}
-		if p.Scope == f.Scope && p.Service == f.Service && (earliest.IsZero() || p.since.Before(earliest)) {
+		if f.Scope != VerificationScopeNone && p.Scope == f.Scope && p.Service == f.Service && (earliest.IsZero() || p.since.Before(earliest)) {
 			earliest = p.since
 		}
 	}

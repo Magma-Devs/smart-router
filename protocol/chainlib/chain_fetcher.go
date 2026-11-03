@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"mime"
 	"slices"
 	"strconv"
@@ -209,6 +210,13 @@ func chargedTo(check string, err error) error {
 	return &VerificationFailure{Check: check, Err: err}
 }
 
+// Warning is one Warning-severity check a provider is failing, and the service it
+// covers ("" for a basic check). It switches nothing off (MAG-3950).
+type Warning struct {
+	Service string
+	Check   string
+}
+
 // RefusedService is one service a provider was refused, and the check that refused it.
 type RefusedService struct {
 	Service string
@@ -244,6 +252,34 @@ type ProviderAdmission struct {
 	throttledServices map[admissionKey]struct{}
 	throttledURLs     map[int]error
 	throttle          error
+	// warned are the failed checks whose severity is Warning, and unsettled the ones
+	// a rate limit or the deadline kept from answering, which keep what the last pass
+	// knew. Neither switches anything off (MAG-3950).
+	warned    map[warningKey]struct{}
+	unsettled map[warningKey]struct{}
+}
+
+// warningKey is one Warning-severity check of one service of one node url.
+type warningKey struct {
+	admissionKey
+	check string
+}
+
+// EffectiveSeverity is what a failed check costs (MAG-3950). A value whose spec sets
+// no severity takes the default for where its check sits, which is what the router
+// has always done: Fail for a basic check, PartialFail for an add-on or extension
+// check. An explicit Fail on an add-on check makes the add-on mandatory: its failure
+// takes the url out. PartialFail on a basic check has no smaller part to switch off,
+// so it acts as Fail.
+func EffectiveSeverity(verification VerificationContainer) spectypes.ParseValue_VerificationSeverity {
+	switch verification.Severity {
+	case spectypes.ParseValue_Warning, spectypes.ParseValue_Fail:
+		return verification.Severity
+	}
+	if refusedServiceFor(verification) == "" {
+		return spectypes.ParseValue_Fail
+	}
+	return spectypes.ParseValue_PartialFail
 }
 
 // refusedServiceFor returns the service a failed verification should be charged
@@ -326,6 +362,47 @@ func (a ProviderAdmission) RefusedURLChecks() []string {
 	return checks
 }
 
+func (a *ProviderAdmission) warn(url common.NodeUrl, service, check string) {
+	if a.warned == nil {
+		a.warned = map[warningKey]struct{}{}
+	}
+	a.warned[warningKey{serviceKey(url, service), check}] = struct{}{}
+}
+
+// unsettle marks a Warning check this pass did not decide, and like a rate limit it
+// makes re-verification keep what the last pass knew (KeepingThrottledFrom).
+func (a *ProviderAdmission) unsettle(url common.NodeUrl, service, check string, cause error) {
+	if a.unsettled == nil {
+		a.unsettled = map[warningKey]struct{}{}
+	}
+	a.unsettled[warningKey{serviceKey(url, service), check}] = struct{}{}
+	if a.throttle == nil {
+		a.throttle = cause
+	}
+}
+
+// Warnings lists each failing Warning-severity check once, sorted for a stable order.
+// A check failing on several urls appears once.
+func (a ProviderAdmission) Warnings() []Warning {
+	if len(a.warned) == 0 {
+		return nil
+	}
+	out := make([]Warning, 0, len(a.warned))
+	for key := range a.warned {
+		w := Warning{Service: key.service, Check: key.check}
+		if !slices.Contains(out, w) {
+			out = append(out, w)
+		}
+	}
+	slices.SortFunc(out, func(x, y Warning) int {
+		if c := strings.Compare(x.Service, y.Service); c != 0 {
+			return c
+		}
+		return strings.Compare(x.Check, y.Check)
+	})
+	return out
+}
+
 func (a *ProviderAdmission) throttleService(url common.NodeUrl, service string, cause error) {
 	if a.throttledServices == nil {
 		a.throttledServices = map[admissionKey]struct{}{}
@@ -398,13 +475,15 @@ func (a ProviderAdmission) RefusedURLs() []int {
 	return indices
 }
 
-// Throttled is the first rate limit this pass met in place of an answer, or nil.
+// Throttled is the first rate limit this pass met in place of an answer, or nil. A
+// Warning check the deadline cut off counts too: it decided nothing either.
 func (a ProviderAdmission) Throttled() error { return a.throttle }
 
 // Any reports whether any service or url was refused.
 func (a ProviderAdmission) Any() bool { return len(a.refused) > 0 || len(a.refusedURLs) > 0 }
 
 // Equal reports whether two admissions refuse exactly the same services and urls.
+// Warnings are not compared: they switch nothing off, so they never move a session.
 // The epoch path uses it to notice that a provider's admitted set has moved, which
 // is the trigger for rebuilding its session — an active session reuses the
 // endpoints it was built with, so a recovered service is not picked up by
@@ -433,6 +512,15 @@ func (a ProviderAdmission) Equal(other ProviderAdmission) bool {
 // url's strike no more than its verdict.
 func (a ProviderAdmission) KeepingThrottledFrom(previous ProviderAdmission) ProviderAdmission {
 	kept := a.refusals()
+	kept.warned = maps.Clone(a.warned)
+	for key := range a.unsettled {
+		if _, warned := previous.warned[key]; warned {
+			if kept.warned == nil {
+				kept.warned = map[warningKey]struct{}{}
+			}
+			kept.warned[key] = struct{}{}
+		}
+	}
 	for index, cause := range a.throttledURLs {
 		if previousCause, refused := previous.refusedURLs[index]; refused {
 			kept.refuseURL(index, previousCause)
@@ -457,6 +545,7 @@ func (a ProviderAdmission) KeepingThrottledFrom(previous ProviderAdmission) Prov
 func (a ProviderAdmission) WithoutURLRefusals(indices []int) ProviderAdmission {
 	kept := a.refusals()
 	kept.throttledURLs, kept.throttledServices, kept.throttle = a.throttledURLs, a.throttledServices, a.throttle
+	kept.warned, kept.unsettled = a.warned, a.unsettled
 	for _, index := range indices {
 		delete(kept.refusedURLs, index)
 	}
@@ -587,14 +676,15 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 	return unknown
 }
 
-// Validate reports the first Fail-severity failure on any node url, or nil.
+// Validate reports the first failure on any node url that costs anything (Fail or
+// PartialFail), or nil.
 func (cf *ChainFetcher) Validate(ctx context.Context) error {
 	for _, outcome := range cf.verifyNodeUrls(ctx, verifyOptions{}) {
 		if outcome.err != nil {
 			return outcome.err
 		}
 		for _, check := range outcome.checks {
-			if check.err != nil && check.verification.Severity == spectypes.ParseValue_Fail {
+			if check.err != nil && EffectiveSeverity(check.verification) != spectypes.ParseValue_Warning {
 				return chargedTo(check.verification.Name, utils.LavaFormatError("invalid Verification on provider startup", check.err,
 					utils.Attribute{Key: "Addons", Value: outcome.url.Addons}, utils.Attribute{Key: "verification", Value: check.verification.Name}))
 			}
@@ -604,9 +694,10 @@ func (cf *ChainFetcher) Validate(ctx context.Context) error {
 }
 
 // ValidateCollections runs the same verifications Validate does, on every node
-// url, and charges each Fail-severity failure to the narrowest thing that owns it:
-// one service (MAG-3326), else the url. The provider is refused only when a path it
-// serves has no url left — see servingError.
+// url, and charges each failure that costs anything to what its severity names
+// (EffectiveSeverity): a PartialFail to its one service (MAG-3326), a Fail to the
+// url. The provider is refused only when a path it serves has no url left — see
+// servingError.
 //
 // Deliberately NOT derived: a base-collection failure does not turn a url into a
 // standalone-addons one. Only an operator can tell "serves only EVM by design"
@@ -646,12 +737,14 @@ type NodeURLValidation struct {
 	// Refused: the router builds nothing for this url, for the reason Refusal
 	// gives. Throttled: its checks were only rate-limited, which decides nothing.
 	// RefusedServices / ThrottledServices: the same, for one service of a url the
-	// router otherwise admits.
+	// router otherwise admits. UnknownServices are the refused ones the spec does
+	// not define at all.
 	Refused           bool
 	Refusal           string
 	Throttled         string
 	RefusedServices   []string
 	ThrottledServices []string
+	UnknownServices   []string
 }
 
 // ValidateReport verifies every node url over its own connection, reads each url's
@@ -693,6 +786,9 @@ type nodeUrlOutcome struct {
 	head    int64
 	headErr error
 	checks  []checkOutcome
+	// unknown are the names in the url's addons the spec does not define. The url is
+	// verified without them, and admission refuses each as a service.
+	unknown []string
 }
 
 func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLValidation {
@@ -712,7 +808,7 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 			Name:      check.verification.Name,
 			Addon:     check.verification.Addon,
 			Extension: check.verification.Extension,
-			Severity:  check.verification.Severity.String(),
+			Severity:  EffectiveSeverity(check.verification).String(),
 			Ok:        check.err == nil,
 		}
 		if check.err != nil {
@@ -733,13 +829,14 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 	}
 	result.RefusedServices = servicesIn(admission.refused, o.url)
 	result.ThrottledServices = servicesIn(admission.throttledServices, o.url)
+	result.UnknownServices = o.unknown
 	return result
 }
 
-// admissionFrom charges every failed Fail-severity check to the narrowest thing
-// that owns it — one service on one url, else the url — setting a rate limit apart
-// from a refusal, and refuses the provider only when a path it serves is left with
-// no url (servingError).
+// admissionFrom charges every failed check that costs anything to what its severity
+// names (EffectiveSeverity) — one service on one url for a PartialFail, the url for a
+// Fail — setting a rate limit apart from a refusal, and refuses the provider only
+// when a path it serves is left with no url (servingError).
 func admissionFrom(outcomes []nodeUrlOutcome) (ProviderAdmission, error) {
 	var admission ProviderAdmission
 	for index, outcome := range outcomes {
@@ -757,13 +854,33 @@ func admissionFrom(outcomes []nodeUrlOutcome) (ProviderAdmission, error) {
 		if outcome.err != nil {
 			charge(outcome.err)
 		}
+		for _, name := range outcome.unknown {
+			admission.fail(outcome.url, name, CheckUnsupportedAddon)
+			utils.LavaFormatWarning("ignoring a node url add-on this spec does not define; the url serves the rest", nil,
+				utils.LogAttr("url", outcome.url.String()),
+				utils.LogAttr("addon", name),
+				utils.LogAttr("hint", "fix the name in the url's addons, or remove it"),
+			)
+		}
 		for _, check := range outcome.checks {
-			if check.err == nil || check.verification.Severity != spectypes.ParseValue_Fail {
+			if check.err == nil {
 				continue
 			}
+			severity := EffectiveSeverity(check.verification)
 			service := refusedServiceFor(check.verification)
+			if severity == spectypes.ParseValue_Warning {
+				// Switches nothing off; published so it is seen (MAG-3950). A rate
+				// limit or the deadline decided nothing, so it is not a failure.
+				if IsRateLimitFailure(check.err) || FailedCheck(check.err) == CheckNotRun {
+					admission.unsettle(outcome.url, service, check.verification.Name, check.err)
+				} else {
+					admission.warn(outcome.url, service, check.verification.Name)
+				}
+				continue
+			}
 			switch {
-			case service == "":
+			case service == "" || severity == spectypes.ParseValue_Fail:
+				// A basic check, or an add-on check the spec made mandatory: the url goes.
 				charge(chargedTo(check.verification.Name, fmt.Errorf("%s verification failed: %w", check.verification.Name, check.err)))
 			case IsRateLimitFailure(check.err):
 				admission.throttleService(outcome.url, service, check.err)
@@ -897,9 +1014,11 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		return outcome
 	}
 	outcome.served = url
+	url.Addons, outcome.unknown = DefinedServices(g.parser, url.Addons)
 	verifications, err := g.cf.nodeUrlVerifications(g.parser, url)
 	if err != nil {
-		// Listing a url's checks fails only on add-ons the spec does not define.
+		// Listing a url's checks fails only on add-ons the spec does not define,
+		// which DefinedServices has just dropped.
 		outcome.err = chargedTo(CheckUnsupportedAddon, err)
 		return outcome
 	}
@@ -1009,18 +1128,52 @@ func (cf *ChainFetcher) nodeUrlVerifications(chainParser ChainParser, url common
 // collections, so a url declaring only extensions serves the base collection.
 // Verification, the provider's serving check and the endpoint builder all read a
 // url's base traffic from it, so they cannot disagree.
+//
+// A name the spec does not define does not count as an add-on (MAG-3950). On a
+// standalone-addons url that defines no add-on, such a name may have been the url's
+// only add-on, and the url takes no base traffic, so it is refused: it keeps nothing.
 func ServedAs(chainParser ChainParser, url common.NodeUrl) (common.NodeUrl, error) {
 	if !url.StandaloneAddons || len(url.Addons) == 0 {
 		return url, nil
 	}
-	addons, _, err := chainParser.SeparateAddonsExtensions(context.Background(), url.Addons)
-	if err != nil {
-		return url, err
-	}
+	addons, extensions, err := chainParser.SeparateAddonsExtensions(context.Background(), url.Addons)
 	if len(addons) == 0 {
+		if err != nil {
+			_, unknown := definedServices(url.Addons, addons, extensions)
+			return url, &VerificationFailure{Check: CheckUnsupportedAddon, Err: fmt.Errorf(
+				"standalone-addons url declares no add-on this spec defines (%s is neither an add-on nor an extension), and serves no base traffic",
+				strings.Join(unknown, ", "))}
+		}
 		url.StandaloneAddons = false
 	}
 	return url, nil
+}
+
+// DefinedServices splits a url's addons into the names the spec defines, as an add-on
+// or an extension, and the ones it does not, each in the url's order. A name the spec
+// does not define is ignored where the url is served (MAG-3950): admission refuses it
+// as a service with check unsupported-addon, and the url serves the rest.
+func DefinedServices(chainParser ChainParser, declared []string) (defined, unknown []string) {
+	if len(declared) == 0 {
+		return declared, nil
+	}
+	addons, extensions, err := chainParser.SeparateAddonsExtensions(context.Background(), declared)
+	if err == nil {
+		return declared, nil
+	}
+	return definedServices(declared, addons, extensions)
+}
+
+func definedServices(declared, addons, extensions []string) (defined, unknown []string) {
+	for _, name := range declared {
+		switch {
+		case name == "" || slices.Contains(addons, name) || slices.Contains(extensions, name):
+			defined = append(defined, name)
+		case !slices.Contains(unknown, name):
+			unknown = append(unknown, name)
+		}
+	}
+	return defined, unknown
 }
 
 // socketVerifications keeps the checks a websocket url answers for: those in a
