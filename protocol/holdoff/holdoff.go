@@ -6,8 +6,11 @@
 //
 //   - Tiered keying. A single 429 holds off the endpoint URL that returned it. When
 //     EscalationDistinctURLs of one provider's URLs are held off at once, the hold-off
-//     escalates to the provider name — a vendor cap is account-wide, and per-URL keying
-//     alone lets a process keep hammering the account through its other chains.
+//     escalates to the provider — a vendor cap is account-wide, and per-URL keying alone
+//     lets a process keep hammering the account through the provider's other URLs. The
+//     provider is one configured entry, its name scoped to the chain and api-interface
+//     it serves (ProviderKey): an escalation holds that entry, not every entry that
+//     shares the name on other chains and interfaces (MAG-4732).
 //
 //   - Retry-After is the floor. When the upstream said how long to wait, the hold-off is
 //     at least that long; otherwise a per-URL exponential (InitialHoldoff doubling per
@@ -76,11 +79,25 @@ type providerState struct {
 	escalatedUntil time.Time
 }
 
+// providerScopeSeparator joins the parts of a ProviderKey.
+const providerScopeSeparator = "|"
+
+// ProviderKey is the registry key of a configured provider entry: its name, scoped to the
+// chain and api-interface the entry serves. A name is unique per chain and api-interface
+// only, so keyed by the name alone two held urls of one entry escalated every entry that
+// shares the name — a 429 storm on jsonrpc held REST too (MAG-4732). An empty name stays
+// empty, so a caller's "no provider" still reads as one.
+func ProviderKey(chainID, apiInterface, name string) string {
+	if name == "" {
+		return ""
+	}
+	return chainID + providerScopeSeparator + apiInterface + providerScopeSeparator + name
+}
+
 // Shared is the process-wide registry every production consumer records into and
-// consults. One instance across chains and paths is what makes the provider-name
-// escalation tier meaningful: a vendor cap is account-wide, and a process probing
-// several chains through one vendor must slow all of them together. Tests build their
-// own via NewRegistry/NewRegistryWithClock instead of touching this one.
+// consults: the relay path, the re-verifier, the recovery probe and the chain trackers
+// of one entry must read each other's hold-offs. Tests build their own via
+// NewRegistry/NewRegistryWithClock instead of touching this one.
 var Shared = NewRegistry()
 
 // Registry is safe for concurrent use. The zero value is not usable; call NewRegistry.
@@ -256,12 +273,12 @@ func (r *Registry) ReadyAt(provider, url string) time.Time {
 }
 
 // ProviderReadyAt reports whether provider is held off as a whole, and when it next has
-// a URL worth trying. A provider is held off while its name is escalated, or while every
-// URL the registry has been limited on is still held. The registry only knows URLs that
-// answered 429s — a provider with additional never-limited URLs reads as held until its
-// earliest recorded hold-off expires, which slightly over-holds; selection's
-// soonest-to-expire fallback bounds that cost.
-func (r *Registry) ProviderReadyAt(provider string) (readyAt time.Time, held bool) {
+// a URL worth trying. urls are the provider's URLs that could serve the request being
+// placed: the caller knows them, the registry only knows URLs that answered 429s. A
+// provider is held off while its name is escalated, or while every one of urls is held. A
+// URL with no entry is free — a 429 on one url says nothing about the provider's others,
+// nor about the same name's urls on another api-interface or chain (MAG-4732).
+func (r *Registry) ProviderReadyAt(provider string, urls []string) (readyAt time.Time, held bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ps := r.providers[provider]
@@ -273,8 +290,8 @@ func (r *Registry) ProviderReadyAt(provider string) (readyAt time.Time, held boo
 	anyFree := false
 	minHeld := time.Time{}
 	heldURLs := 0
-	for _, e := range ps.urls {
-		if e.readyAt.After(now) {
+	for _, url := range urls {
+		if e := ps.urls[url]; e != nil && e.readyAt.After(now) {
 			heldURLs++
 			if minHeld.IsZero() || e.readyAt.Before(minHeld) {
 				minHeld = e.readyAt

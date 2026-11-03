@@ -57,16 +57,16 @@ func TestReplayFailingRelay_RecordsRateLimitIntoHoldoff(t *testing.T) {
 
 	verdict := rpcss.replayFailingRelay(epc, testEvidence, testEvidenceTimeout)
 	require.Equal(t, relayProbeInconclusive, verdict)
-	require.True(t, reg.HeldOff("provider1", "http://fake:8545"))
+	require.True(t, reg.HeldOff(replayServer().holdoffProviderKey("provider1"), "http://fake:8545"))
 	// The floor: at least the vendor's ask (jitter may extend it).
-	require.False(t, reg.ReadyAt("provider1", "http://fake:8545").Before(time.Now().Add(5*time.Minute-time.Second)))
+	require.False(t, reg.ReadyAt(replayServer().holdoffProviderKey("provider1"), "http://fake:8545").Before(time.Now().Add(5*time.Minute-time.Second)))
 }
 
 // While the endpoint is held off, the replay is skipped entirely — inconclusive verdict,
 // no request spent.
 func TestReplayFailingRelay_SkipsWhileHeldOff(t *testing.T) {
 	reg := withFreshRelayHoldoff(t)
-	reg.RecordRateLimit("provider1", "http://fake:8545", time.Minute)
+	reg.RecordRateLimit(replayServer().holdoffProviderKey("provider1"), "http://fake:8545", time.Minute)
 
 	rpcss := replayServer()
 	conn := &fakeDirectConn{resp: &lavasession.DirectRPCResponse{StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}}
@@ -92,11 +92,11 @@ func TestReplayFailingRelay_RecoveredClearsHoldoff(t *testing.T) {
 
 	// Two strikes, then let the hold-off expire. A strike is a hold-off that ended in another
 	// 429, so the second comes after the first ran out (MAG-4386).
-	reg.RecordRateLimit("provider1", "http://fake:8545", 0)
+	reg.RecordRateLimit(replayServer().holdoffProviderKey("provider1"), "http://fake:8545", 0)
 	now = now.Add(holdoff.InitialHoldoff + time.Second)
-	reg.RecordRateLimit("provider1", "http://fake:8545", 0)
+	reg.RecordRateLimit(replayServer().holdoffProviderKey("provider1"), "http://fake:8545", 0)
 	now = now.Add(2 * time.Minute)
-	require.False(t, reg.HeldOff("provider1", "http://fake:8545"))
+	require.False(t, reg.HeldOff(replayServer().holdoffProviderKey("provider1"), "http://fake:8545"))
 
 	rpcss := replayServer()
 	conn := &fakeDirectConn{resp: &lavasession.DirectRPCResponse{StatusCode: 200, Data: []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1"}`)}}
@@ -110,6 +110,6 @@ func TestReplayFailingRelay_RecoveredClearsHoldoff(t *testing.T) {
 	require.Equal(t, relayProbeRecovered, verdict)
 
 	// The recovery cleared the strikes: a fresh 429 starts from the initial penalty.
-	reg.RecordRateLimit("provider1", "http://fake:8545", 0)
-	require.Equal(t, now.Add(holdoff.InitialHoldoff), reg.ReadyAt("provider1", "http://fake:8545"))
+	reg.RecordRateLimit(replayServer().holdoffProviderKey("provider1"), "http://fake:8545", 0)
+	require.Equal(t, now.Add(holdoff.InitialHoldoff), reg.ReadyAt(replayServer().holdoffProviderKey("provider1"), "http://fake:8545"))
 }

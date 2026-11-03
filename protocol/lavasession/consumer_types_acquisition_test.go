@@ -39,7 +39,7 @@ func TestAcquisition_LeavesRecoveryEvidenceAlone(t *testing.T) {
 	endpoint.RecordFailingRelay("eth_getBalance", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0","latest"]}`), time.Second)
 	require.Equal(t, "eth_getBalance", endpoint.HealthSnapshot().RelayProbeMethod)
 
-	connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickSkipDisabled, false, "", nil, nil)
+	connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickSkipDisabled, false, "", nil, nil, nil)
 	require.NoError(t, err)
 	require.True(t, connected)
 	require.Len(t, endpoints, 1)
@@ -92,7 +92,7 @@ func TestAcquisition_NeverReenablesAnEndpointBenchedMidPick(t *testing.T) {
 				benched = endpoint.HealthSnapshot()
 			}}
 
-			connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), tc.mode, false, "", nil, nil)
+			connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), tc.mode, false, "", nil, nil, nil)
 			require.NoError(t, err)
 			require.True(t, connected, "the pick still returns the endpoint it read as enabled")
 			require.Len(t, endpoints, 1)
@@ -114,7 +114,7 @@ func TestReconnectRoutine_StillReenablesADisabledEndpoint(t *testing.T) {
 	}
 	require.False(t, endpoint.HealthSnapshot().Enabled)
 
-	connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickReconnectDisabled, false, "", nil, nil)
+	connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickReconnectDisabled, false, "", nil, nil, nil)
 	require.NoError(t, err)
 	require.True(t, connected)
 	require.Len(t, endpoints, 1)

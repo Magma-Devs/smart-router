@@ -96,8 +96,9 @@ type ChainTrackerConfig struct {
 	// holdoff.Shared; tests inject their own. RateLimitURL is the node URL; the tracker records
 	// its own 429s under the URL alone, the key the WS and gRPC subscription paths use, so a
 	// limited poll steers subscriptions off that URL without touching relay selection, which
-	// holds off whole providers. RateLimitProvider is the provider name the relay path records
-	// under: read only, so a relay's hold-off (and the provider escalation) slows the poll too.
+	// holds off whole providers. RateLimitProvider is the provider key the relay path records
+	// under (holdoff.ProviderKey): read only, so a relay's hold-off (and the provider escalation)
+	// slows the poll too.
 	// An empty provider reads the URL key alone; an empty URL falls back to the fetcher's
 	// endpoint URL (MAG-4165).
 	RateLimitHoldoff  *holdoff.Registry

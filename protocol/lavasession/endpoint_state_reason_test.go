@@ -118,7 +118,7 @@ func TestFetchEndpointConnection_SkipsStalledEndpoint(t *testing.T) {
 	}
 
 	for _, mode := range []endpointPickMode{endpointPickSkipDisabled, endpointPickReconnectDisabled} {
-		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), mode, true, "", nil, nil)
+		connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), mode, true, "", nil, nil, nil)
 		require.NoError(t, err)
 		require.True(t, connected)
 		require.Len(t, endpoints, 1, "mode=%v", mode)
@@ -130,7 +130,7 @@ func TestFetchEndpointConnection_SkipsStalledEndpoint(t *testing.T) {
 		PublicLavaAddress: "vendor",
 		Endpoints:         []*Endpoint{stuck},
 	}
-	connected, endpoints, _, err := lendOnly.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickLendDisabled, false, "", nil, nil)
+	connected, endpoints, _, err := lendOnly.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickLendDisabled, false, "", nil, nil, nil)
 	require.NoError(t, err)
 	require.True(t, connected, "the last chance lends a stalled endpoint")
 	require.Equal(t, "https://stuck.example", endpoints[0].endpoint.NetworkAddress)
@@ -148,7 +148,7 @@ func TestFetchEndpointConnection_AllStalledIsAllDisabled(t *testing.T) {
 		PublicLavaAddress: "vendor",
 		Endpoints:         []*Endpoint{stuck},
 	}
-	connected, _, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickSkipDisabled, false, "", nil, nil)
+	connected, _, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickSkipDisabled, false, "", nil, nil, nil)
 	require.False(t, connected)
 	require.ErrorIs(t, err, AllProviderEndpointsDisabledError)
 }

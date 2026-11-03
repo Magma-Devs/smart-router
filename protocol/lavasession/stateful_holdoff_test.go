@@ -50,7 +50,7 @@ func selectAndRelease(t *testing.T, csm *ConsumerSessionManager, stateful uint32
 // A primary held off after a 429 still receives a write.
 func TestStatefulSelection_BroadcastsToAHeldOffPrimary(t *testing.T) {
 	csm := heldOffStatefulCSM(t, []string{"primary-a", "primary-b"}, nil)
-	csm.rateLimitHoldoff.RecordRateLimit("primary-b", "http://primary-b/url", 5*time.Minute)
+	holdOffProvider(csm, "primary-b", 5*time.Minute)
 
 	require.Equal(t, []string{"primary-a", "primary-b"}, selectAndRelease(t, csm, common.CONSISTENCY_SELECT_ALL_PROVIDERS),
 		"the hold-off single-homed the write: the held-off provider was left out of the broadcast")
@@ -60,9 +60,9 @@ func TestStatefulSelection_BroadcastsToAHeldOffPrimary(t *testing.T) {
 // soonest to expire, which on a write leaves one provider holding the transaction.
 func TestStatefulSelection_BroadcastsWhenEveryPrimaryIsHeldOff(t *testing.T) {
 	csm := heldOffStatefulCSM(t, []string{"primary-a", "primary-b", "primary-c"}, nil)
-	csm.rateLimitHoldoff.RecordRateLimit("primary-a", "http://primary-a/url", 10*time.Minute)
-	csm.rateLimitHoldoff.RecordRateLimit("primary-b", "http://primary-b/url", 2*time.Minute)
-	csm.rateLimitHoldoff.RecordRateLimit("primary-c", "http://primary-c/url", 30*time.Minute)
+	holdOffProvider(csm, "primary-a", 10*time.Minute)
+	holdOffProvider(csm, "primary-b", 2*time.Minute)
+	holdOffProvider(csm, "primary-c", 30*time.Minute)
 
 	require.Equal(t, []string{"primary-a", "primary-b", "primary-c"}, selectAndRelease(t, csm, common.CONSISTENCY_SELECT_ALL_PROVIDERS),
 		"every candidate held off kept only the soonest to expire, so the write reached one provider")
@@ -73,7 +73,7 @@ func TestStatefulSelection_BroadcastsWhenEveryPrimaryIsHeldOff(t *testing.T) {
 func TestStatefulSelection_BroadcastsToAHeldOffBackup(t *testing.T) {
 	csm := heldOffStatefulCSM(t, []string{"primary-a"}, []string{"backup-1"})
 	csm.SetStatefulToBackup(true)
-	csm.rateLimitHoldoff.RecordRateLimit("backup-1", "http://backup-1/url", 5*time.Minute)
+	holdOffProvider(csm, "backup-1", 5*time.Minute)
 
 	require.Equal(t, []string{"backup-1", "primary-a"}, selectAndRelease(t, csm, common.CONSISTENCY_SELECT_ALL_PROVIDERS),
 		"the held-off backup was left out of a broadcast the operator asked the backup tier to join")
@@ -83,7 +83,7 @@ func TestStatefulSelection_BroadcastsToAHeldOffBackup(t *testing.T) {
 // hold-off; a read goes to one provider, and that one should be able to answer.
 func TestStatelessSelection_StillSkipsAHeldOffProvider(t *testing.T) {
 	csm := heldOffStatefulCSM(t, []string{"primary-a", "primary-b"}, nil)
-	csm.rateLimitHoldoff.RecordRateLimit("primary-b", "http://primary-b/url", 5*time.Minute)
+	holdOffProvider(csm, "primary-b", 5*time.Minute)
 
 	// The optimizer's pick is weighted, so ask enough times that a read reaching the held-off
 	// provider would show up.
@@ -99,7 +99,7 @@ func TestStatelessSelection_StillSkipsAHeldOffProvider(t *testing.T) {
 func TestStatefulSelection_CostStrategyStillSkipsAHeldOffProvider(t *testing.T) {
 	csm := heldOffStatefulCSM(t, []string{"primary-a", "primary-b"}, nil)
 	csm.providerOptimizer = provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyCost, 0, 1, nil, "dontcare")
-	csm.rateLimitHoldoff.RecordRateLimit("primary-b", "http://primary-b/url", 5*time.Minute)
+	holdOffProvider(csm, "primary-b", 5*time.Minute)
 
 	for i := 0; i < 20; i++ {
 		require.Equal(t, []string{"primary-a"}, selectAndRelease(t, csm, common.CONSISTENCY_SELECT_ALL_PROVIDERS),
@@ -115,7 +115,7 @@ func TestStatefulSelection_StickyWriteStillSkipsAHeldOffProvider(t *testing.T) {
 	csm := heldOffStatefulCSM(t, []string{"primary-a", "primary-b"}, nil)
 	// primary-a ranks first in a write's selection (equal compute units, ties break on the
 	// address), so holding it off is what would expose a pick that ignored the hold-off.
-	csm.rateLimitHoldoff.RecordRateLimit("primary-a", "http://primary-a/url", 5*time.Minute)
+	holdOffProvider(csm, "primary-a", 5*time.Minute)
 
 	sessions, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil),
 		servicedBlockNumber, "", nil, common.CONSISTENCY_SELECT_ALL_PROVIDERS, 0, "sticky-write", "")
@@ -131,7 +131,7 @@ func TestStatefulSelection_ClaimForAWriteStillSkipsAHeldOffProvider(t *testing.T
 	csm := heldOffStatefulCSM(t, []string{"primary-a", "primary-b"}, nil)
 	store := newFakeSharedSticky()
 	csm.SetSharedStickyStore(store, 15*time.Minute)
-	csm.rateLimitHoldoff.RecordRateLimit("primary-a", "http://primary-a/url", 5*time.Minute)
+	holdOffProvider(csm, "primary-a", 5*time.Minute)
 
 	sessions, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil),
 		servicedBlockNumber, "", nil, common.CONSISTENCY_SELECT_ALL_PROVIDERS, 0, "claimed-write", "")
@@ -154,7 +154,7 @@ func TestStatefulSelection_HeldOffProvidersCountTowardTheCap(t *testing.T) {
 	csm := heldOffStatefulCSM(t, primaries, nil)
 	// Ties break on the address, so these three rank first.
 	for _, address := range primaries[:3] {
-		csm.rateLimitHoldoff.RecordRateLimit(address, "http://"+address+"/url", 5*time.Minute)
+		holdOffProvider(csm, address, 5*time.Minute)
 	}
 
 	require.Equal(t, primaries[:statefulFanoutPerTier], selectAndRelease(t, csm, common.CONSISTENCY_SELECT_ALL_PROVIDERS),

@@ -178,7 +178,7 @@ func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *lavasession.EndpointWi
 	if ep == nil || ep.DirectConnection == nil || len(payload) == 0 {
 		return relayProbeInconclusive
 	}
-	holdoffProvider := ep.ProviderAddress
+	holdoffProvider := rpcss.holdoffProviderKey(ep.ProviderAddress)
 	holdoffURL := ""
 	if ep.Endpoint != nil {
 		holdoffURL = ep.Endpoint.NetworkAddress

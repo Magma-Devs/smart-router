@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -294,7 +295,7 @@ func TestStatefulBroadcastReachesAProviderHeldOffAfterARateLimit(t *testing.T) {
 
 			_, err := sendWrite(t, tc, chainParser, server)
 			require.NoError(t, err, "setup: the healthy provider executed the first write")
-			_, held := holdoff.Shared.ProviderReadyAt(limitedOnce.name)
+			held := slices.ContainsFunc(server.sessionManager.ProviderRoutingSnapshot().HeldOff, func(p lavasession.HeldOffProviderInfo) bool { return p.Address == limitedOnce.name })
 			require.True(t, held, "setup: the 429 must have held the provider off, or this measures nothing")
 
 			_, err = sendWrite(t, tc, chainParser, server)
