@@ -196,10 +196,16 @@ secondary-cache-timeout: 100ms
   lifetimes).
 - **One secondary.** Setting both `secondary-cache-be` and
   `secondary-resp-cache` fails startup.
-- **Read-only by construction.** The router reads with `GET`/`MGET` and probes
+- **Read-only by construction.** The router reads with `GET` and probes
   with `PING`; nothing in its secondary path writes, extends or deletes a key.
   An ACL user restricted to reads on `~<prefix>:*` makes that hold on the
-  backend's side as well.
+  backend's side as well. Grant it `+@read +ping`: the `@read` category does
+  not include `PING`, and without it every health probe fails with `NOPERM`,
+  so the tier is skipped from startup. Add `+select` when `db` is set (the
+  client selects it on every new connection) and `+cluster|slots` under
+  `topology: cluster` (the client reads the slot map with it). Under
+  `topology: sentinel` the discovery commands go to the sentinels, which
+  authenticate with `sentinel-username` and `sentinel-password`.
 - **Observability.** The tier reports through the same per-tier series as a gRPC
   secondary (`smartrouter_cache_*{cache_tier="secondary"}`), through
   `GET /debug/cache-state` (`tiers.secondary.engine: "resp"`), and through log
