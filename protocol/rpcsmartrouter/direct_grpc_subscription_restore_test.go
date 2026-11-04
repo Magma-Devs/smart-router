@@ -339,7 +339,11 @@ func TestGRPCSubscriptionRestore_ACredentialRefusalEndsEveryClientWithoutItsText
 		require.NotContains(t, status.Convert(endErr).Message(), "sk-test", "the upstream's text about the router's key reached a client")
 	}
 	require.Equal(t, len(hosts), upstream.totalOpened(), "a refusal must not be restored")
-	require.Equal(t, int64(0), manager.GetActiveSubscriptionCount())
+	// cleanupSubscription closes the client channels before it decrements the count, so that the
+	// listener finds each client's status recorded when it sees the close. The closes awaited
+	// above therefore run ahead of the count by the rest of that release.
+	require.Eventually(t, func() bool { return manager.GetActiveSubscriptionCount() == 0 },
+		3*time.Second, 10*time.Millisecond, "every ended subscription must be released")
 }
 
 // newManagerAgainstUpstreams is newManagerAgainstUpstream over a primary tier of several
