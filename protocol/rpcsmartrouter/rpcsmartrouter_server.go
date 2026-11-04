@@ -5727,7 +5727,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// FIRST (read-only methods only) so that if this failure crosses the disable threshold,
 		// the disable episode carries its replayable recovery evidence (MAG-2550).
 		if shouldMarkUnhealthy && targetEndpoint != nil {
-			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
+			rpcss.recordRelayEvidence(routerHealthCheck, targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(classified))
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 		}
@@ -5768,7 +5768,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		shouldMarkUnhealthy, _ := classifyHTTPStatus(statusCode, statusClassified)
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
-			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
+			rpcss.recordRelayEvidence(routerHealthCheck, targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(statusClassified))
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 			utils.LavaFormatDebug("endpoint returned error status",
@@ -5822,7 +5822,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// would take BOTH arms, counting up and then resetting to zero in the same relay. No registry
 	// row produces that shape today; the chaining is what keeps it impossible when one is added.
 	if result.IsNodeAtFault && targetEndpoint != nil && (lostBroadcast == nil || !lostBroadcast(result.IsNodeError)) {
-		rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
+		rpcss.recordRelayEvidence(routerHealthCheck, targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 		// EndpointDisableNodeError unconditionally, rather than through endpointDisableReasonFor:
 		// reaching this arm REQUIRES an answer to have arrived (err == nil): a non-2xx the sender
 		// kept as the node's reply — any 4xx, or a 5xx whose JSON body is the node's own answer
@@ -6900,4 +6900,18 @@ func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error 
 		httpErr.RetryAfter, _ = common.ParseRetryAfter(header, time.Now())
 	}
 	return httpErr
+}
+
+// recordRelayEvidence records a failed relay as the endpoint's replay evidence (MAG-2550), except
+// for the router's own health check on an endpoint that is switched off. The health check reaches
+// such an endpoint only through the last chance, and its request is the router's own latest-block
+// poll, not the request that switched the endpoint off. Recording it would make the prober replay
+// the poll, which the node answers, and switch the endpoint back on: the MAG-4790 outcome by the
+// prober's door instead of the health check's (review of #631, 631-2). On an endpoint that is on,
+// its failure is recorded as any failure is.
+func (rpcss *RPCSmartRouterServer) recordRelayEvidence(routerHealthCheck bool, endpoint *lavasession.Endpoint, chainMessage chainlib.ChainMessage, requestData []byte, relayTimeout time.Duration) {
+	if routerHealthCheck && endpoint != nil && !endpoint.IsEnabled() {
+		return
+	}
+	rpcss.recordRelayProbeEvidence(endpoint, chainMessage, requestData, relayTimeout)
 }

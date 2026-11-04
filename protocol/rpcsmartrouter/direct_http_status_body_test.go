@@ -145,7 +145,7 @@ func TestRelayInnerDirect_A5xxWithANonRetryableBodyFailsOverWithoutBlamingTheEnd
 
 	_, err := h.rpcss.relayInnerDirect(
 		context.Background(), h.session, &common.RelayResult{}, 5*time.Second, 30*time.Second,
-		msg, msg.requestData, func() bool { return false }, nil,
+		msg, msg.requestData, func() bool { return false }, nil, false,
 	)
 
 	require.Error(t, err)
