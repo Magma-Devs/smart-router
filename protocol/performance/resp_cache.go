@@ -67,6 +67,12 @@ type RespCache struct {
 	engine  *core.Engine
 	store   *redisstore.Store
 	metrics *respCacheMetricsSet
+	// name opens this store's log lines: "resp-cache" for the router's own
+	// backend, "secondary-resp-cache" for the read-only second tier (MAG-4778).
+	name string
+	// secondary marks the read-only second tier. It owns no TTL policy (the
+	// writing zone does), so /debug/cache-state reports no lifetimes for it.
+	secondary bool
 
 	// writeBreaker and readBreaker guard the two sides of the relay path; on a
 	// store with no read split they are one and the same. probeNow nudges the
@@ -127,9 +133,14 @@ type respCacheBreaker struct {
 	// breaker to close: the relay path's budget on the tightest side it gates.
 	// A backend that answered PING but could not meet the lookup budget used
 	// to close the breaker, fail the next three lookups and open it again,
-	// twice a second (review of #406). Lookups have the relay's cache budget;
-	// writes have theirs, which exceeds the probe deadline, so a write-only
-	// breaker closes on any answered probe, as before.
+	// twice a second (review of #406). Lookups have the relay's cache budget,
+	// --cache-timeout (common.CacheTimeout), read when the breakers are built,
+	// after the flags are parsed. The default 50ms would keep the breaker of a
+	// backend the operator raised the flag for (one 100ms away, say) open
+	// after its first failure streak until the router restarts, although
+	// every lookup it skips would answer in time (MAG-4872). Writes have their
+	// own budget, which exceeds the probe deadline, so a write-only breaker
+	// closes on any answered probe, as before.
 	closeBudget         time.Duration
 	open                atomic.Bool
 	consecutiveFailures atomic.Int64
@@ -146,7 +157,7 @@ func newRespCacheBreakers(store *redisstore.Store) (write, read *respCacheBreake
 			roles:       []string{redisstore.EndpointRoleWrite, redisstore.EndpointRoleRead},
 			subject:     "backend",
 			skips:       "lookups and writes",
-			closeBudget: common.DefaultCacheTimeout,
+			closeBudget: common.CacheTimeout,
 		}
 		return shared, shared
 	}
@@ -160,7 +171,7 @@ func newRespCacheBreakers(store *redisstore.Store) (write, read *respCacheBreake
 		roles:       []string{redisstore.EndpointRoleRead},
 		subject:     "read endpoint",
 		skips:       "lookups",
-		closeBudget: common.DefaultCacheTimeout,
+		closeBudget: common.CacheTimeout,
 	}
 	return write, read
 }
@@ -185,12 +196,47 @@ func NewRespCache(store *redisstore.Store, policy core.Policy) *RespCache {
 }
 
 func newRespCacheWithHealthInterval(store *redisstore.Store, policy core.Policy, healthInterval time.Duration) *RespCache {
+	return startRespCache(store, policy, healthInterval, getRespCacheMetrics(), respCacheLogName, false, 0)
+}
+
+// respCacheLogName and secondaryRespCacheLogName open each store's log lines, and
+// are the redisstore.Config.Name each store is built with.
+const (
+	respCacheLogName          = "resp-cache"
+	secondaryRespCacheLogName = "secondary-resp-cache"
+)
+
+// NewSecondaryRespCache builds the read-only RESP second tier (MAG-4778). The
+// router only ever reads it through CacheReader, and a RESP read path issues no
+// writes (GET only; the health probe is PING), so nothing is written to the
+// other zone's store. Its series stay unregistered (newRespCacheMetricsSet).
+//
+// lookupBudget is the tier's secondary-cache-timeout, and its breaker closes on
+// a probe answered within it. The primary's budget (--cache-timeout,
+// common.CacheTimeout) would not do: a second tier is usually another zone, its
+// own timeout is raised for exactly that hop, and a backend whose round trip
+// exceeds the primary's budget would then keep its breaker open after the first
+// failure streak until the router restarts, although every lookup it skips
+// would have answered in time.
+func NewSecondaryRespCache(store *redisstore.Store, lookupBudget time.Duration) *RespCache {
+	return startRespCache(store, core.Policy{}, respCacheHealthInterval, newRespCacheMetricsSet(), secondaryRespCacheLogName, true, lookupBudget)
+}
+
+// startRespCache builds the cache and starts its health loop. A positive
+// readCloseBudget replaces the read breaker's close budget (the secondary's
+// lookup budget); zero keeps the relay path's, --cache-timeout.
+func startRespCache(store *redisstore.Store, policy core.Policy, healthInterval time.Duration, metrics *respCacheMetricsSet, name string, secondary bool, readCloseBudget time.Duration) *RespCache {
 	healthCtx, healthCancel := context.WithCancel(context.Background())
 	writeBreaker, readBreaker := newRespCacheBreakers(store)
+	if readCloseBudget > 0 {
+		readBreaker.closeBudget = readCloseBudget
+	}
 	cache := &RespCache{
 		engine:       &core.Engine{Store: store, Policy: policy},
 		store:        store,
-		metrics:      getRespCacheMetrics(),
+		metrics:      metrics,
+		name:         name,
+		secondary:    secondary,
 		writeBreaker: writeBreaker,
 		readBreaker:  readBreaker,
 		probeNow:     make(chan struct{}, 1),
@@ -294,11 +340,11 @@ func (cache *RespCache) healthLoop(loopCtx context.Context, interval time.Durati
 			}
 		}
 		if len(opened) > 0 {
-			message := "resp-cache backend became unavailable; " + strings.Join(skips, " and ") + " are skipped until a health probe succeeds"
+			message := cache.name + " backend became unavailable; " + strings.Join(skips, " and ") + " are skipped until a health probe succeeds"
 			if atStartup {
-				message = "resp-cache backend unavailable at startup; " + strings.Join(skips, " and ") + " are skipped until a health probe succeeds"
+				message = cache.name + " backend unavailable at startup; " + strings.Join(skips, " and ") + " are skipped until a health probe succeeds"
 			}
-			logUnavailable(message, opened)
+			logUnavailable(cache.name, message, opened)
 		}
 	}
 
@@ -392,7 +438,7 @@ func (cache *RespCache) closeBreaker(breaker *respCacheBreaker, now time.Time) b
 	}
 	breaker.consecutiveFailures.Store(0)
 	cache.setBreakerGauge(breaker, 0)
-	utils.LavaFormatInfo("resp-cache " + breaker.subject + " reachable again; " + breaker.skips + " resume")
+	utils.LavaFormatInfo(cache.name + " " + breaker.subject + " reachable again; " + breaker.skips + " resume")
 	return true
 }
 
@@ -413,7 +459,7 @@ func (cache *RespCache) noteOperation(breaker *respCacheBreaker, err error) {
 	if failures < respCacheBreakerThreshold || !cache.openBreaker(breaker) {
 		return
 	}
-	utils.LavaFormatWarning("resp-cache "+breaker.subject+" failed consecutive operations; "+breaker.skips+" are skipped until a health probe succeeds", nil,
+	utils.LavaFormatWarning(cache.name+" "+breaker.subject+" failed consecutive operations; "+breaker.skips+" are skipped until a health probe succeeds", nil,
 		utils.Attribute{Key: "failures", Value: failures},
 		utils.Attribute{Key: "detail", Value: safeProbeDetail(err)},
 	)
@@ -525,10 +571,10 @@ func classifyProbeResults(results []redisstore.ProbeResult) string {
 
 // logUnavailable emits a single structured line naming the failure class and
 // the endpoint(s) that failed.
-func logUnavailable(message string, results []redisstore.ProbeResult) {
+func logUnavailable(name, message string, results []redisstore.ProbeResult) {
 	kind := classifyProbeResults(results)
 	if kind == probeFailureAuth {
-		message = "resp-cache backend rejected the configured credentials; relays degrade to cache misses until the credentials are corrected"
+		message = name + " backend rejected the configured credentials; relays degrade to cache misses until the credentials are corrected"
 	}
 	utils.LavaFormatWarning(message, nil,
 		utils.Attribute{Key: "failure", Value: kind},
@@ -601,7 +647,7 @@ func (cache *RespCache) DebugCacheState() DebugCacheState {
 // where a cache-be tier cannot: the policy is a field on the in-process engine,
 // whereas the gRPC client's TTLs are owned by a different pod.
 func (cache *RespCache) lifetimes() *CacheLifetimes {
-	if cache == nil || cache.engine == nil {
+	if cache == nil || cache.engine == nil || cache.secondary {
 		return nil
 	}
 	policy := cache.engine.Policy

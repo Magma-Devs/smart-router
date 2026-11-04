@@ -61,15 +61,20 @@ const (
 	CACHE_TIER_HEADER_NAME    = "Lava-Cache-Tier"
 	CACHE_OUTCOME_HEADER_NAME = "Lava-Cache-Outcome"
 	// these headers need to be lowercase
-	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME         = "lava-providers-block"
-	RELAY_TIMEOUT_HEADER_NAME                     = "lava-relay-timeout"
-	EXTENSION_OVERRIDE_HEADER_NAME                = "lava-extension"
-	FORCE_CACHE_REFRESH_HEADER_NAME               = "lava-force-cache-refresh"
-	LAVA_DEBUG_RELAY                              = "lava-debug-relay"
-	LAVA_LB_UNIQUE_ID_HEADER                      = "lava-lb-unique-id"
-	SELECTION_STATS_HEADER_NAME                   = "lava-selection-stats"
-	STICKINESS_HEADER_NAME                        = "lava-stickiness"
-	SELECT_PROVIDER_HEADER_NAME                   = "lava-select-provider"
+	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME = "lava-providers-block"
+	RELAY_TIMEOUT_HEADER_NAME             = "lava-relay-timeout"
+	EXTENSION_OVERRIDE_HEADER_NAME        = "lava-extension"
+	FORCE_CACHE_REFRESH_HEADER_NAME       = "lava-force-cache-refresh"
+	LAVA_DEBUG_RELAY                      = "lava-debug-relay"
+	LAVA_LB_UNIQUE_ID_HEADER              = "lava-lb-unique-id"
+	SELECTION_STATS_HEADER_NAME           = "lava-selection-stats"
+	STICKINESS_HEADER_NAME                = "lava-stickiness"
+	SELECT_PROVIDER_HEADER_NAME           = "lava-select-provider"
+	// SELECT_PROVIDER_STRICT_HEADER_NAME, set to "true" next to lava-select-provider, makes the
+	// selection a strict pin: the named provider answers or the request fails, with no retry, hedge
+	// or consistency-gate reroute on another provider. Without it lava-select-provider pins the first
+	// attempt only. lava-stickiness is always strict and needs no such header (MAG-4826).
+	SELECT_PROVIDER_STRICT_HEADER_NAME            = "lava-select-provider-strict"
 	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS      = "lava-cross-validation-max-participants"
 	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD   = "lava-cross-validation-agreement-threshold"
 	CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME    = "lava-cross-validation-all-providers"
@@ -157,6 +162,7 @@ var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
 	LAVA_DEBUG_RELAY:                            {},
 	STICKINESS_HEADER_NAME:                      {},
 	SELECT_PROVIDER_HEADER_NAME:                 {},
+	SELECT_PROVIDER_STRICT_HEADER_NAME:          {},
 	INTERNAL_PROBE_HEADER_NAME:                  {},
 	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    {},
 	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: {},
@@ -668,7 +674,20 @@ func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transpor
 	if rr == nil {
 		return
 	}
-	classification := ClassifyNodeErrorForRetry(family, transport, errorCode, message)
+	rr.applyClassification(ClassifyNodeErrorForRetry(family, transport, errorCode, message))
+}
+
+// ApplyLavaErrorClassification sets the same flags from a verdict the caller already holds, for a
+// signal the registry cannot see in a code and a message (a gRPC rate limit only its metadata
+// carries).
+func (rr *RelayResult) ApplyLavaErrorClassification(classified *LavaError) {
+	if rr == nil {
+		return
+	}
+	rr.applyClassification(nodeErrorClassificationOf(classified))
+}
+
+func (rr *RelayResult) applyClassification(classification NodeErrorClassification) {
 	rr.IsNonRetryable = classification.IsNonRetryable
 	rr.IsUnsupportedMethod = classification.IsUnsupportedMethod
 	rr.IsRateLimited = classification.IsRateLimited
