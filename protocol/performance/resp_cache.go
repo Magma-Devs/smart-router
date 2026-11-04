@@ -133,9 +133,14 @@ type respCacheBreaker struct {
 	// breaker to close: the relay path's budget on the tightest side it gates.
 	// A backend that answered PING but could not meet the lookup budget used
 	// to close the breaker, fail the next three lookups and open it again,
-	// twice a second (review of #406). Lookups have the relay's cache budget;
-	// writes have theirs, which exceeds the probe deadline, so a write-only
-	// breaker closes on any answered probe, as before.
+	// twice a second (review of #406). Lookups have the relay's cache budget,
+	// --cache-timeout (common.CacheTimeout), read when the breakers are built,
+	// after the flags are parsed. The default 50ms would keep the breaker of a
+	// backend the operator raised the flag for (one 100ms away, say) open
+	// after its first failure streak until the router restarts, although
+	// every lookup it skips would answer in time (MAG-4872). Writes have their
+	// own budget, which exceeds the probe deadline, so a write-only breaker
+	// closes on any answered probe, as before.
 	closeBudget         time.Duration
 	open                atomic.Bool
 	consecutiveFailures atomic.Int64
@@ -152,7 +157,7 @@ func newRespCacheBreakers(store *redisstore.Store) (write, read *respCacheBreake
 			roles:       []string{redisstore.EndpointRoleWrite, redisstore.EndpointRoleRead},
 			subject:     "backend",
 			skips:       "lookups and writes",
-			closeBudget: common.DefaultCacheTimeout,
+			closeBudget: common.CacheTimeout,
 		}
 		return shared, shared
 	}
@@ -166,7 +171,7 @@ func newRespCacheBreakers(store *redisstore.Store) (write, read *respCacheBreake
 		roles:       []string{redisstore.EndpointRoleRead},
 		subject:     "read endpoint",
 		skips:       "lookups",
-		closeBudget: common.DefaultCacheTimeout,
+		closeBudget: common.CacheTimeout,
 	}
 	return write, read
 }
@@ -207,18 +212,19 @@ const (
 // other zone's store. Its series stay unregistered (newRespCacheMetricsSet).
 //
 // lookupBudget is the tier's secondary-cache-timeout, and its breaker closes on
-// a probe answered within it. The primary's budget (common.DefaultCacheTimeout)
-// would not do: a second tier is usually another zone, the timeout is raised
-// for exactly that hop, and a backend whose round trip exceeds 50ms would then
-// keep its breaker open after the first failure streak until the router
-// restarts, although every lookup it skips would have answered in time.
+// a probe answered within it. The primary's budget (--cache-timeout,
+// common.CacheTimeout) would not do: a second tier is usually another zone, its
+// own timeout is raised for exactly that hop, and a backend whose round trip
+// exceeds the primary's budget would then keep its breaker open after the first
+// failure streak until the router restarts, although every lookup it skips
+// would have answered in time.
 func NewSecondaryRespCache(store *redisstore.Store, lookupBudget time.Duration) *RespCache {
 	return startRespCache(store, core.Policy{}, respCacheHealthInterval, newRespCacheMetricsSet(), secondaryRespCacheLogName, true, lookupBudget)
 }
 
 // startRespCache builds the cache and starts its health loop. A positive
 // readCloseBudget replaces the read breaker's close budget (the secondary's
-// lookup budget); zero keeps the relay path's default.
+// lookup budget); zero keeps the relay path's, --cache-timeout.
 func startRespCache(store *redisstore.Store, policy core.Policy, healthInterval time.Duration, metrics *respCacheMetricsSet, name string, secondary bool, readCloseBudget time.Duration) *RespCache {
 	healthCtx, healthCancel := context.WithCancel(context.Background())
 	writeBreaker, readBreaker := newRespCacheBreakers(store)
