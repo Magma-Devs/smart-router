@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -71,8 +73,10 @@ func TestInternalPathRootWithNoApisIsServedByNothing(t *testing.T) {
 	apiInterface := spectypes.APIInterfaceJsonRPC
 	collections := []*spectypes.ApiCollection{
 		{Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: apiInterface, InternalPath: "", Type: "POST"}},
-		{Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: apiInterface, InternalPath: "/X", Type: "POST"},
-			Apis: []*spectypes.Api{{Name: "x", Enabled: true}}},
+		{
+			Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: apiInterface, InternalPath: "/X", Type: "POST"},
+			Apis: []*spectypes.Api{{Name: "x", Enabled: true}},
+		},
 	}
 	require.False(t, parserFor(t, apiInterface, collections).ServesRootCollection("/X"))
 }
@@ -101,4 +105,22 @@ func TestRealSpecRootEntryIsTheBaseCollection(t *testing.T) {
 	internalPaths, _, _, _, _, _ := getServiceApis(eth1, spectypes.APIInterfaceJsonRPC)
 	require.Equal(t, "", internalPaths[""].Addon)
 	require.True(t, internalPaths[""].Enabled)
+}
+
+// ProviderShapeError, the spec re-verifier's and health's copy of the guard, admits the same
+// pinned url the chain router does, and still refuses a path that does not serve the root.
+func TestProviderShapeErrorAdmitsAPinnedUrlServingTheRoot(t *testing.T) {
+	apiInterface := spectypes.APIInterfaceJsonRPC
+	chainParser := parserFor(t, apiInterface, rootServedByVersionedPathCollections(apiInterface, []string{"a", "b"}))
+	endpoint := func(path string) *lavasession.RPCProviderEndpoint {
+		return &lavasession.RPCProviderEndpoint{
+			ApiInterface: apiInterface,
+			NodeUrls: []common.NodeUrl{
+				{Url: "https://vendor.example/rpc/v1/key", InternalPath: path},
+				{Url: "wss://vendor.example/ws/key"}, // the fixture subscribes; this test is about http
+			},
+		}
+	}
+	require.NoError(t, ProviderShapeError(endpoint("/V1"), chainParser), "/V1 answers every root api")
+	require.Error(t, ProviderShapeError(endpoint("/P"), chainParser), "/P answers none of the root apis")
 }

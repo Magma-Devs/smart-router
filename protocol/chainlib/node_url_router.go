@@ -63,8 +63,8 @@ func chainProxyConstructor(apiInterface string) (func(context.Context, uint, lav
 }
 
 // ProviderShapeError is why the router cannot serve from a provider's node urls
-// whatever they answer: no http url (none at all, or none at the root of a spec
-// whose root path is enabled), or no websocket url on a spec that subscribes while
+// whatever they answer: no http url (none at all, or none serving the root of a
+// spec whose root path is enabled; see ChainParser.ServesRootCollection), or no websocket url on a spec that subscribes while
 // websocket verification is on.
 // Nil when the list is servable. It dials nothing.
 func ProviderShapeError(endpoint *lavasession.RPCProviderEndpoint, chainParser ChainParser) error {
@@ -75,7 +75,9 @@ func ProviderShapeError(endpoint *lavasession.RPCProviderEndpoint, chainParser C
 			continue
 		}
 		http = true
-		if url.InternalPath == "" {
+		// A url pinned to a path that answers every root api serves the root too, as in
+		// BatchNodeUrlsByServices: STRK's vendors bake the version into the url.
+		if url.InternalPath == "" || chainParser.ServesRootCollection(url.InternalPath) {
 			httpRoot = true
 		}
 	}
