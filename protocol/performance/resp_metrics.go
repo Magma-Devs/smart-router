@@ -59,52 +59,62 @@ var (
 
 func getRespCacheMetrics() *respCacheMetricsSet {
 	respCacheMetricsOnce.Do(func() {
-		m := &respCacheMetricsSet{
-			connectionErrors: prometheus.NewCounter(prometheus.CounterOpts{
-				Name: "smartrouter_resp_cache_connection_errors_total",
-				Help: "Health-probe (PING) failures against the RESP cache backend.",
-			}),
-			opsFailed: prometheus.NewCounterVec(prometheus.CounterOpts{
-				Name: "smartrouter_resp_cache_failed_total",
-				Help: "RESP cache operations that failed at the backend (never clean misses), split by op (get|set) and kind (error|timeout).",
-			}, []string{"op", "kind"}),
-			connected: prometheus.NewGauge(prometheus.GaugeOpts{
-				Name: "smartrouter_resp_cache_connected",
-				Help: "1 while the last health probe (PING) against every RESP cache endpoint succeeded, 0 after any endpoint failed its probe.",
-			}),
-			endpointConnected: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-				Name: "smartrouter_resp_cache_endpoint_connected",
-				Help: "Per endpoint: 1 while the last health probe (PING) against it succeeded, 0 after a failed probe. role=write is the write endpoint; role=read is the separate read endpoint when reads are split.",
-			}, []string{"role"}),
-			endpointConnectionErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
-				Name: "smartrouter_resp_cache_endpoint_connection_errors_total",
-				Help: "Per endpoint: health-probe (PING) failures, by role (write | read).",
-			}, []string{"role"}),
-			skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
-				Name: "smartrouter_resp_cache_skipped_total",
-				Help: "RESP cache operations skipped without I/O while the breaker on their side was open (endpoint unreachable or slower than its budget), by op (get|set|sticky_get|sticky_set|observation_get|observation_set). Never counted as failed: the backend never saw them.",
-			}, []string{"op"}),
-			breakerOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-				Name: "smartrouter_resp_cache_breaker_open",
-				Help: "Per side of the relay path: 1 while that side's breaker is open, 0 otherwise. role=write: writes are being skipped (the write endpoint failed writes or its probe); role=read: lookups are being skipped (the read endpoint failed lookups or its probe). Without a read split one breaker stands behind both roles and the two series move together.",
-			}, []string{"role"}),
-			poolTotalConns: prometheus.NewGauge(prometheus.GaugeOpts{
-				Name: "smartrouter_resp_cache_pool_total_conns",
-				Help: "Connections currently held by the RESP client pool(s) (write + read when split).",
-			}),
-			poolIdleConns: prometheus.NewGauge(prometheus.GaugeOpts{
-				Name: "smartrouter_resp_cache_pool_idle_conns",
-				Help: "Idle connections in the RESP client pool(s).",
-			}),
-			poolStaleConns: prometheus.NewGauge(prometheus.GaugeOpts{
-				Name: "smartrouter_resp_cache_pool_stale_conns",
-				Help: "Stale connections removed from the RESP client pool(s).",
-			}),
-		}
+		m := newRespCacheMetricsSet()
 		prometheus.MustRegister(m.connectionErrors, m.opsFailed, m.connected, m.endpointConnected, m.endpointConnectionErrors, m.skipped, m.breakerOpen, m.poolTotalConns, m.poolIdleConns, m.poolStaleConns)
 		respCacheMetrics = m
 	})
 	return respCacheMetrics
+}
+
+// newRespCacheMetricsSet builds the series without registering them. The
+// router's own RESP backend registers them once (getRespCacheMetrics); a RESP
+// secondary tier (MAG-4778) keeps an unregistered set, so its probes and
+// failures never move the series an operator reads as the primary's, and it is
+// observed through smartrouter_cache_*{cache_tier="secondary"} and
+// /debug/cache-state instead.
+func newRespCacheMetricsSet() *respCacheMetricsSet {
+	return &respCacheMetricsSet{
+		connectionErrors: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "smartrouter_resp_cache_connection_errors_total",
+			Help: "Health-probe (PING) failures against the RESP cache backend.",
+		}),
+		opsFailed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "smartrouter_resp_cache_failed_total",
+			Help: "RESP cache operations that failed at the backend (never clean misses), split by op (get|set) and kind (error|timeout).",
+		}, []string{"op", "kind"}),
+		connected: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "smartrouter_resp_cache_connected",
+			Help: "1 while the last health probe (PING) against every RESP cache endpoint succeeded, 0 after any endpoint failed its probe.",
+		}),
+		endpointConnected: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "smartrouter_resp_cache_endpoint_connected",
+			Help: "Per endpoint: 1 while the last health probe (PING) against it succeeded, 0 after a failed probe. role=write is the write endpoint; role=read is the separate read endpoint when reads are split.",
+		}, []string{"role"}),
+		endpointConnectionErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "smartrouter_resp_cache_endpoint_connection_errors_total",
+			Help: "Per endpoint: health-probe (PING) failures, by role (write | read).",
+		}, []string{"role"}),
+		skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "smartrouter_resp_cache_skipped_total",
+			Help: "RESP cache operations skipped without I/O while the breaker on their side was open (endpoint unreachable or slower than its budget), by op (get|set|sticky_get|sticky_set|observation_get|observation_set). Never counted as failed: the backend never saw them.",
+		}, []string{"op"}),
+		breakerOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "smartrouter_resp_cache_breaker_open",
+			Help: "Per side of the relay path: 1 while that side's breaker is open, 0 otherwise. role=write: writes are being skipped (the write endpoint failed writes or its probe); role=read: lookups are being skipped (the read endpoint failed lookups or its probe). Without a read split one breaker stands behind both roles and the two series move together.",
+		}, []string{"role"}),
+		poolTotalConns: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "smartrouter_resp_cache_pool_total_conns",
+			Help: "Connections currently held by the RESP client pool(s) (write + read when split).",
+		}),
+		poolIdleConns: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "smartrouter_resp_cache_pool_idle_conns",
+			Help: "Idle connections in the RESP client pool(s).",
+		}),
+		poolStaleConns: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "smartrouter_resp_cache_pool_stale_conns",
+			Help: "Stale connections removed from the RESP client pool(s).",
+		}),
+	}
 }
 
 // recordOpFailure counts a backend-level operation failure; timeouts are

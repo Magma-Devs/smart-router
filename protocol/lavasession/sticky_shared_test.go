@@ -377,13 +377,10 @@ func TestStickyPodLocal_ExhaustedProviderDoesNotSpinTheRefillLoop(t *testing.T) 
 
 	select {
 	case got := <-done:
-		// Either answer is acceptable; what matters is that it terminates. Serving from another
-		// provider is the expected one, because pod-local stickiness is best effort.
-		if got.err == nil {
-			for provider := range got.sessions {
-				require.NotEqual(t, pinned, provider, "the exhausted provider cannot have served this relay")
-			}
-		}
+		// What this test guards is that it terminates. The answer itself is an error since
+		// MAG-4826: a sticky request is answered by its node or fails, so a busy node fails the
+		// request instead of moving the session (TestStickyPodLocal_BusyProviderFailsRatherThanMoving).
+		require.ErrorIs(t, got.err, SelectedProviderUnavailableError)
 	case <-time.After(15 * time.Second):
 		t.Fatal("GetSessions did not return: the refill loop is spinning on the pinned provider, " +
 			"holding csm.lock.RLock and starving every writer on this chain")

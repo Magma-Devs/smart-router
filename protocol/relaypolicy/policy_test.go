@@ -12,20 +12,20 @@ func TestDecide_ModeChecks(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3})
 
 	t.Run("CrossValidation stops", func(t *testing.T) {
-		output := policy.Decide(DecisionInput{Selection: relaycore.CrossValidation})
-		require.Equal(t, Stop, output.Action)
+		output := policy.Decide(relaycore.DecisionInput{Selection: relaycore.CrossValidation})
+		require.Equal(t, relaycore.ActionStop, output.Action)
 		require.Equal(t, "CrossValidation", output.Reason)
 	})
 
 	t.Run("Stateful stops", func(t *testing.T) {
-		output := policy.Decide(DecisionInput{Selection: relaycore.Stateful})
-		require.Equal(t, Stop, output.Action)
+		output := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful})
+		require.Equal(t, relaycore.ActionStop, output.Action)
 		require.Equal(t, "Stateful", output.Reason)
 	})
 
 	t.Run("Stateless retries by default", func(t *testing.T) {
-		output := policy.Decide(DecisionInput{Selection: relaycore.Stateless, Summary: ResultsSummary{NodeErrors: 1}})
-		require.Equal(t, Retry, output.Action)
+		output := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Summary: relaycore.ResultsSummary{NodeErrors: 1}})
+		require.Equal(t, relaycore.ActionRetry, output.Action)
 	})
 }
 
@@ -33,55 +33,55 @@ func TestDecide_PermanentFailures(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3})
 
 	t.Run("NonRetryableNodeError stops", func(t *testing.T) {
-		output := policy.Decide(DecisionInput{
+		output := policy.Decide(relaycore.DecisionInput{
 			Selection: relaycore.Stateless,
-			Summary:   ResultsSummary{HasNonRetryableNodeError: true},
+			Summary:   relaycore.ResultsSummary{HasNonRetryableNodeError: true},
 		})
-		require.Equal(t, Stop, output.Action)
+		require.Equal(t, relaycore.ActionStop, output.Action)
 		require.Equal(t, "NonRetryableNodeError", output.Reason)
 	})
 
 	t.Run("a refusal of a method the spec does not list stops", func(t *testing.T) {
-		output := policy.Decide(DecisionInput{
+		output := policy.Decide(relaycore.DecisionInput{
 			Selection:    relaycore.Stateless,
-			Summary:      ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
+			Summary:      relaycore.ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
 			IsDefaultApi: true,
 		})
-		require.Equal(t, Stop, output.Action)
+		require.Equal(t, relaycore.ActionStop, output.Action)
 		require.Equal(t, "UnlistedMethodRefused", output.Reason)
 
-		hedge := policy.Decide(DecisionInput{
+		hedge := policy.Decide(relaycore.DecisionInput{
 			Selection:     relaycore.Stateless,
-			Summary:       ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
+			Summary:       relaycore.ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
 			IsDefaultApi:  true,
 			IsTickerHedge: true,
 		})
-		require.Equal(t, Stop, hedge.Action, "a hedge must not ask another provider either")
+		require.Equal(t, relaycore.ActionStop, hedge.Action, "a hedge must not ask another provider either")
 	})
 
 	t.Run("a refusal of a listed method is retried on a peer (MAG-2771)", func(t *testing.T) {
-		output := policy.Decide(DecisionInput{
+		output := policy.Decide(relaycore.DecisionInput{
 			Selection: relaycore.Stateless,
-			Summary:   ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
+			Summary:   relaycore.ResultsSummary{NodeErrors: 1, HasNodeCapabilityRefusal: true},
 		})
-		require.Equal(t, Retry, output.Action)
+		require.Equal(t, relaycore.ActionRetry, output.Action)
 	})
 
 	t.Run("an unlisted method is still retried when nobody refused it", func(t *testing.T) {
-		output := policy.Decide(DecisionInput{
+		output := policy.Decide(relaycore.DecisionInput{
 			Selection:    relaycore.Stateless,
-			Summary:      ResultsSummary{ProtocolErrors: 1},
+			Summary:      relaycore.ResultsSummary{ProtocolErrors: 1},
 			IsDefaultApi: true,
 		})
-		require.Equal(t, Retry, output.Action, "a timeout or a broken node is no answer about the method")
+		require.Equal(t, relaycore.ActionRetry, output.Action, "a timeout or a broken node is no answer about the method")
 	})
 
 	t.Run("PermanentProtocolError stops", func(t *testing.T) {
-		output := policy.Decide(DecisionInput{
+		output := policy.Decide(relaycore.DecisionInput{
 			Selection: relaycore.Stateless,
-			Summary:   ResultsSummary{HasPermanentProtocolError: true},
+			Summary:   relaycore.ResultsSummary{HasPermanentProtocolError: true},
 		})
-		require.Equal(t, Stop, output.Action)
+		require.Equal(t, relaycore.ActionStop, output.Action)
 		require.Equal(t, "PermanentProtocolError", output.Reason)
 	})
 }
@@ -89,23 +89,23 @@ func TestDecide_PermanentFailures(t *testing.T) {
 func TestDecide_LimitChecks(t *testing.T) {
 	t.Run("MaxRetries stops", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{MaxRetries: 5, RelayRetryLimit: 10, SendRelayAttempts: 3})
-		output := policy.Decide(DecisionInput{
+		output := policy.Decide(relaycore.DecisionInput{
 			Selection:     relaycore.Stateless,
 			AttemptNumber: 5,
-			Summary:       ResultsSummary{NodeErrors: 1},
+			Summary:       relaycore.ResultsSummary{NodeErrors: 1},
 		})
-		require.Equal(t, Stop, output.Action)
+		require.Equal(t, relaycore.ActionStop, output.Action)
 		require.Equal(t, "MaxRetriesReached", output.Reason)
 	})
 
 	t.Run("BatchDisabled stops", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, DisableBatchRetry: true, SendRelayAttempts: 3})
-		output := policy.Decide(DecisionInput{
+		output := policy.Decide(relaycore.DecisionInput{
 			Selection: relaycore.Stateless,
 			IsBatch:   true,
-			Summary:   ResultsSummary{NodeErrors: 1},
+			Summary:   relaycore.ResultsSummary{NodeErrors: 1},
 		})
-		require.Equal(t, Stop, output.Action)
+		require.Equal(t, relaycore.ActionStop, output.Action)
 		require.Equal(t, "BatchDisabled", output.Reason)
 	})
 }
@@ -115,28 +115,28 @@ func TestDecide_ErrorTolerance(t *testing.T) {
 		name            string
 		relayRetryLimit int
 		nodeErrors      int
-		expectedAction  Action
+		expectedAction  relaycore.Action
 		expectedReason  string
 	}{
 		{
 			name:            "under limit retries",
 			relayRetryLimit: 3,
 			nodeErrors:      2,
-			expectedAction:  Retry,
+			expectedAction:  relaycore.ActionRetry,
 			expectedReason:  "Default",
 		},
 		{
 			name:            "over limit stops",
 			relayRetryLimit: 2,
 			nodeErrors:      3,
-			expectedAction:  Stop,
+			expectedAction:  relaycore.ActionStop,
 			expectedReason:  "ErrorToleranceExceeded",
 		},
 		{
 			name:            "at exact limit retries",
 			relayRetryLimit: 2,
 			nodeErrors:      2,
-			expectedAction:  Retry,
+			expectedAction:  relaycore.ActionRetry,
 			expectedReason:  "Default",
 		},
 	}
@@ -144,9 +144,9 @@ func TestDecide_ErrorTolerance(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: tc.relayRetryLimit, SendRelayAttempts: 3})
-			output := policy.Decide(DecisionInput{
+			output := policy.Decide(relaycore.DecisionInput{
 				Selection: relaycore.Stateless,
-				Summary:   ResultsSummary{NodeErrors: tc.nodeErrors},
+				Summary:   relaycore.ResultsSummary{NodeErrors: tc.nodeErrors},
 			})
 			require.Equal(t, tc.expectedAction, output.Action, "action mismatch")
 			require.Equal(t, tc.expectedReason, output.Reason, "reason mismatch")
@@ -156,11 +156,11 @@ func TestDecide_ErrorTolerance(t *testing.T) {
 
 func TestDecide_EpochMismatch(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 0, SendRelayAttempts: 3})
-	output := policy.Decide(DecisionInput{
+	output := policy.Decide(relaycore.DecisionInput{
 		Selection: relaycore.Stateless,
-		Summary:   ResultsSummary{HasEpochMismatch: true, SuccessCount: 0, NodeErrors: 5},
+		Summary:   relaycore.ResultsSummary{HasEpochMismatch: true, SuccessCount: 0, NodeErrors: 5},
 	})
-	require.Equal(t, Retry, output.Action)
+	require.Equal(t, relaycore.ActionRetry, output.Action)
 	require.Equal(t, "EpochMismatch", output.Reason)
 }
 
@@ -169,21 +169,21 @@ func TestOnSendRelayResult(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 3, EnableCircuitBreaker: true, CircuitBreakerThreshold: 2})
 		policy.OnSendRelayResult(fmt.Errorf("err"), false, relaycore.Stateless)
 		result := policy.OnSendRelayResult(nil, false, relaycore.Stateless)
-		require.Equal(t, SendSuccess, result)
+		require.Equal(t, relaycore.SendSuccess, result)
 		require.Equal(t, 0, policy.GetConsecutiveBatchErrors())
 	})
 
 	t.Run("batch errors stop after threshold", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 2})
-		require.Equal(t, SendRetry, policy.OnSendRelayResult(fmt.Errorf("err1"), false, relaycore.Stateless))
-		require.Equal(t, SendRetry, policy.OnSendRelayResult(fmt.Errorf("err2"), false, relaycore.Stateless))
-		require.Equal(t, SendStop, policy.OnSendRelayResult(fmt.Errorf("err3"), false, relaycore.Stateless))
+		require.Equal(t, relaycore.SendRetry, policy.OnSendRelayResult(fmt.Errorf("err1"), false, relaycore.Stateless))
+		require.Equal(t, relaycore.SendRetry, policy.OnSendRelayResult(fmt.Errorf("err2"), false, relaycore.Stateless))
+		require.Equal(t, relaycore.SendStop, policy.OnSendRelayResult(fmt.Errorf("err3"), false, relaycore.Stateless))
 	})
 
 	t.Run("circuit breaker trips on pairing errors", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 10, EnableCircuitBreaker: true, CircuitBreakerThreshold: 2})
-		require.Equal(t, SendRetry, policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.Stateless))
-		require.Equal(t, SendStop, policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.Stateless))
+		require.Equal(t, relaycore.SendRetry, policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.Stateless))
+		require.Equal(t, relaycore.SendStop, policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.Stateless))
 	})
 
 	t.Run("non-pairing error resets pairing counter, batch counter independent", func(t *testing.T) {
@@ -201,7 +201,7 @@ func TestOnSendRelayResult(t *testing.T) {
 
 		// Call 3: pairing error again → batch=3, pairing=1 (NOT 2 — pairing was reset)
 		result := policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.Stateless)
-		require.Equal(t, SendRetry, result,
+		require.Equal(t, relaycore.SendRetry, result,
 			"only 1 consecutive pairing after reset; threshold is 2 so still retry")
 		require.Equal(t, 3, policy.GetConsecutiveBatchErrors(),
 			"batch counter unaffected by pairing-counter reset")
@@ -213,10 +213,10 @@ func TestOnSendRelayResult(t *testing.T) {
 		// NumOfProviders=1, which would silently violate the user's quorum
 		// requirement and mask the precise error with a generic
 		// "failed relay, insufficient results" later.
-		require.Equal(t, SendStop, policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.CrossValidation))
-		require.Equal(t, SendStop, policy.OnSendRelayResult(fmt.Errorf("other"), false, relaycore.CrossValidation))
+		require.Equal(t, relaycore.SendStop, policy.OnSendRelayResult(fmt.Errorf("pairing"), true, relaycore.CrossValidation))
+		require.Equal(t, relaycore.SendStop, policy.OnSendRelayResult(fmt.Errorf("other"), false, relaycore.CrossValidation))
 		// And success still resets and returns SendSuccess for CV.
-		require.Equal(t, SendSuccess, policy.OnSendRelayResult(nil, false, relaycore.CrossValidation))
+		require.Equal(t, relaycore.SendSuccess, policy.OnSendRelayResult(nil, false, relaycore.CrossValidation))
 	})
 }
 
@@ -224,42 +224,42 @@ func TestDecide_IsTickerHedge(t *testing.T) {
 	t.Run("ticker hedge skips error tolerance", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3})
 		// 3 errors exceeds limit of 2 — gotResults path would stop
-		input := DecisionInput{
+		input := relaycore.DecisionInput{
 			Selection: relaycore.Stateless,
-			Summary:   ResultsSummary{NodeErrors: 3},
+			Summary:   relaycore.ResultsSummary{NodeErrors: 3},
 		}
 		output := policy.Decide(input)
-		require.Equal(t, Stop, output.Action)
+		require.Equal(t, relaycore.ActionStop, output.Action)
 		require.Equal(t, "ErrorToleranceExceeded", output.Reason)
 
 		// Same input but as ticker hedge — should still retry
 		input.IsTickerHedge = true
 		output = policy.Decide(input)
-		require.Equal(t, Retry, output.Action)
+		require.Equal(t, relaycore.ActionRetry, output.Action)
 		require.Equal(t, "Default", output.Reason)
 	})
 
 	t.Run("ticker hedge still respects mode and limit checks", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{MaxRetries: 5, RelayRetryLimit: 2, SendRelayAttempts: 3})
 		// MaxRetries should still stop ticker hedges
-		input := DecisionInput{
+		input := relaycore.DecisionInput{
 			Selection:     relaycore.Stateless,
 			AttemptNumber: 5,
 			IsTickerHedge: true,
-			Summary:       ResultsSummary{NodeErrors: 1},
+			Summary:       relaycore.ResultsSummary{NodeErrors: 1},
 		}
 		output := policy.Decide(input)
-		require.Equal(t, Stop, output.Action)
+		require.Equal(t, relaycore.ActionStop, output.Action)
 		require.Equal(t, "MaxRetriesReached", output.Reason)
 
 		// Non-retryable node error should still stop ticker hedges
-		input2 := DecisionInput{
+		input2 := relaycore.DecisionInput{
 			Selection:     relaycore.Stateless,
 			IsTickerHedge: true,
-			Summary:       ResultsSummary{HasNonRetryableNodeError: true},
+			Summary:       relaycore.ResultsSummary{HasNonRetryableNodeError: true},
 		}
 		output = policy.Decide(input2)
-		require.Equal(t, Stop, output.Action)
+		require.Equal(t, relaycore.ActionStop, output.Action)
 		require.Equal(t, "NonRetryableNodeError", output.Reason)
 	})
 }
@@ -282,35 +282,35 @@ func TestDecide_RetryNeverRewritesTheRequest(t *testing.T) {
 	}
 
 	t.Run("attempt 1 retries without upgrading to archive", func(t *testing.T) {
-		output := newPolicy().Decide(DecisionInput{
+		output := newPolicy().Decide(relaycore.DecisionInput{
 			Selection:     relaycore.Stateless,
 			AttemptNumber: 1,
-			Summary:       ResultsSummary{NodeErrors: 1},
+			Summary:       relaycore.ResultsSummary{NodeErrors: 1},
 		})
-		require.Equal(t, Retry, output.Action)
+		require.Equal(t, relaycore.ActionRetry, output.Action)
 		require.Equal(t, "Default", output.Reason)
 	})
 
 	t.Run("attempt 2 retries without downgrading from archive", func(t *testing.T) {
-		output := newPolicy().Decide(DecisionInput{
+		output := newPolicy().Decide(relaycore.DecisionInput{
 			Selection:     relaycore.Stateless,
 			AttemptNumber: 2,
-			Summary:       ResultsSummary{NodeErrors: 2},
+			Summary:       relaycore.ResultsSummary{NodeErrors: 2},
 		})
-		require.Equal(t, Retry, output.Action)
+		require.Equal(t, relaycore.ActionRetry, output.Action)
 		require.Equal(t, "Default", output.Reason)
 	})
 
 	t.Run("a ticker hedge does not rewrite the request either", func(t *testing.T) {
 		// The hedge path skips the error-tolerance checks, so before the removal it reached the
 		// mutation step with no error at all: a merely SLOW request was upgraded to archive.
-		output := newPolicy().Decide(DecisionInput{
+		output := newPolicy().Decide(relaycore.DecisionInput{
 			Selection:     relaycore.Stateless,
 			AttemptNumber: 1,
-			Summary:       ResultsSummary{},
+			Summary:       relaycore.ResultsSummary{},
 			IsTickerHedge: true,
 		})
-		require.Equal(t, Retry, output.Action)
+		require.Equal(t, relaycore.ActionRetry, output.Action)
 		require.Equal(t, "Default", output.Reason)
 	})
 }
@@ -373,43 +373,43 @@ func TestDecide_PriorityAndEdgeCases(t *testing.T) {
 	cases := []struct {
 		name           string
 		config         PolicyConfig
-		buildInput     func(PolicyConfig) DecisionInput
-		expectedAction Action
+		buildInput     func(PolicyConfig) relaycore.DecisionInput
+		expectedAction relaycore.Action
 		expectedReason string
 	}{
 		{
 			name:   "MaxRetries takes priority over ErrorToleranceExceeded when both would fire",
 			config: PolicyConfig{MaxRetries: 5, RelayRetryLimit: 2, SendRelayAttempts: 3},
-			buildInput: func(c PolicyConfig) DecisionInput {
-				return DecisionInput{
+			buildInput: func(c PolicyConfig) relaycore.DecisionInput {
+				return relaycore.DecisionInput{
 					Selection:     relaycore.Stateless,
-					AttemptNumber: c.MaxRetries,                                      // exactly hits MaxRetries gate
-					Summary:       ResultsSummary{NodeErrors: c.RelayRetryLimit + 1}, // also exceeds tolerance
+					AttemptNumber: c.MaxRetries,                                                // exactly hits MaxRetries gate
+					Summary:       relaycore.ResultsSummary{NodeErrors: c.RelayRetryLimit + 1}, // also exceeds tolerance
 				}
 			},
-			expectedAction: Stop,
+			expectedAction: relaycore.ActionStop,
 			expectedReason: "MaxRetriesReached",
 		},
 		{
 			name:   "Error tolerance sums NodeErrors + SpecialNodeErrors + ProtocolErrors",
 			config: PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3},
-			buildInput: func(c PolicyConfig) DecisionInput {
+			buildInput: func(c PolicyConfig) relaycore.DecisionInput {
 				// Distribute (limit/3 + 1) errors across each of the three categories.
 				// Sum = 3 * (limit/3 + 1) > limit always; for limit ≥ 2 no single
 				// category exceeds the limit on its own, which is what proves that
 				// the sum is computed across all three. For limit < 2 the sum still
 				// trips the gate but the "no single category" guarantee weakens.
 				each := c.RelayRetryLimit/3 + 1
-				return DecisionInput{
+				return relaycore.DecisionInput{
 					Selection: relaycore.Stateless,
-					Summary: ResultsSummary{
+					Summary: relaycore.ResultsSummary{
 						NodeErrors:        each,
 						SpecialNodeErrors: each,
 						ProtocolErrors:    each,
 					},
 				}
 			},
-			expectedAction: Stop,
+			expectedAction: relaycore.ActionStop,
 			expectedReason: "ErrorToleranceExceeded",
 		},
 		{
@@ -419,13 +419,13 @@ func TestDecide_PriorityAndEdgeCases(t *testing.T) {
 			// (in protocol/rpcsmartrouter/rpcsmartrouter.go) claims "0 disables
 			// retries"; this row locks that behaviour.
 			config: PolicyConfig{MaxRetries: 10, RelayRetryLimit: 0, SendRelayAttempts: 3},
-			buildInput: func(c PolicyConfig) DecisionInput {
-				return DecisionInput{
+			buildInput: func(c PolicyConfig) relaycore.DecisionInput {
+				return relaycore.DecisionInput{
 					Selection: relaycore.Stateless,
-					Summary:   ResultsSummary{NodeErrors: 1}, // any positive count exceeds limit=0
+					Summary:   relaycore.ResultsSummary{NodeErrors: 1}, // any positive count exceeds limit=0
 				}
 			},
-			expectedAction: Stop,
+			expectedAction: relaycore.ActionStop,
 			expectedReason: "ErrorToleranceExceeded",
 		},
 		{
@@ -439,30 +439,30 @@ func TestDecide_PriorityAndEdgeCases(t *testing.T) {
 				DisableBatchRetry: true,
 				SendRelayAttempts: 3,
 			},
-			buildInput: func(c PolicyConfig) DecisionInput {
-				return DecisionInput{
+			buildInput: func(c PolicyConfig) relaycore.DecisionInput {
+				return relaycore.DecisionInput{
 					Selection: relaycore.Stateless,
-					IsBatch:   true,                                                    // pairs with DisableBatchRetry
-					Summary:   ResultsSummary{HasEpochMismatch: true, SuccessCount: 0}, // would trigger EpochMismatch
+					IsBatch:   true,                                                              // pairs with DisableBatchRetry
+					Summary:   relaycore.ResultsSummary{HasEpochMismatch: true, SuccessCount: 0}, // would trigger EpochMismatch
 				}
 			},
-			expectedAction: Stop,
+			expectedAction: relaycore.ActionStop,
 			expectedReason: "BatchDisabled",
 		},
 		{
 			name:   "First attempt with no errors retries by default",
 			config: PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3},
-			buildInput: func(c PolicyConfig) DecisionInput {
+			buildInput: func(c PolicyConfig) relaycore.DecisionInput {
 				// Precondition: c.MaxRetries > 0. If MaxRetries is set to 0 this
 				// row would fail because AttemptNumber=0 ≥ MaxRetries=0 trips the
 				// MaxRetriesReached gate before the default branch is reached.
-				return DecisionInput{
+				return relaycore.DecisionInput{
 					Selection:     relaycore.Stateless,
 					AttemptNumber: 0,
-					Summary:       ResultsSummary{},
+					Summary:       relaycore.ResultsSummary{},
 				}
 			},
-			expectedAction: Retry,
+			expectedAction: relaycore.ActionRetry,
 			expectedReason: "Default",
 		},
 		{
@@ -473,14 +473,14 @@ func TestDecide_PriorityAndEdgeCases(t *testing.T) {
 			// ever runs. Locks current behaviour as documentation; not desired
 			// behaviour.
 			config: PolicyConfig{},
-			buildInput: func(c PolicyConfig) DecisionInput {
-				return DecisionInput{
+			buildInput: func(c PolicyConfig) relaycore.DecisionInput {
+				return relaycore.DecisionInput{
 					Selection:     relaycore.Stateless,
 					AttemptNumber: c.MaxRetries, // zero — hits the zero-MaxRetries gate
-					Summary:       ResultsSummary{},
+					Summary:       relaycore.ResultsSummary{},
 				}
 			},
-			expectedAction: Stop,
+			expectedAction: relaycore.ActionStop,
 			expectedReason: "MaxRetriesReached",
 		},
 	}
@@ -503,13 +503,13 @@ func TestDecide_PriorityAndEdgeCases(t *testing.T) {
 // carve-out.
 func TestDecide_StatefulBatchRateLimitCarveOutNeedsATransportRefusal(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 5, SendRelayAttempts: 3, DisableBatchRetry: true})
-	nodeError := policy.Decide(DecisionInput{Selection: relaycore.Stateful, IsBatch: true, AttemptNumber: 1, Summary: ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}})
-	require.Equal(t, Stop, nodeError.Action)
+	nodeError := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, IsBatch: true, AttemptNumber: 1, Summary: relaycore.ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}})
+	require.Equal(t, relaycore.ActionStop, nodeError.Action)
 	require.Equal(t, "Stateful", nodeError.Reason)
 
-	transport := policy.Decide(DecisionInput{Selection: relaycore.Stateful, IsBatch: true, AttemptNumber: 1, Summary: ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}})
-	require.Equal(t, Retry, transport.Action)
+	transport := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, IsBatch: true, AttemptNumber: 1, Summary: relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}})
+	require.Equal(t, relaycore.ActionRetry, transport.Action)
 
-	single := policy.Decide(DecisionInput{Selection: relaycore.Stateful, AttemptNumber: 1, Summary: ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}})
-	require.Equal(t, Retry, single.Action, "a single stateful relay keeps the carve-out it has on main")
+	single := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, AttemptNumber: 1, Summary: relaycore.ResultsSummary{NodeErrors: 1, OnlyRateLimited: true}})
+	require.Equal(t, relaycore.ActionRetry, single.Action, "a single stateful relay keeps the carve-out it has on main")
 }

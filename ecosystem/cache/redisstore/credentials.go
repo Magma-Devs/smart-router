@@ -48,6 +48,8 @@ func (s StaticCredentials) Credentials() (string, string, error) {
 // path deliberately withholds the server's reply, so nothing points at the
 // cause. warnedCombined below leaves that breadcrumb.
 type FileCredentials struct {
+	// Name is the store's log name (Config.Name); empty logs as "resp-cache".
+	Name     string
 	Username string
 	Path     string
 
@@ -73,7 +75,7 @@ func (f *FileCredentials) Credentials() (string, string, error) {
 		// interpretation for whoever meant it and is the only breadcrumb for
 		// whoever did not.
 		f.warnedCombined.Do(func() {
-			utils.LavaFormatInfo("resp-cache password file contains ':' and is read as \"username:password\"; a password that itself contains a colon cannot be expressed in this file",
+			utils.LavaFormatInfo(logName(f.Name)+" password file contains ':' and is read as \"username:password\"; a password that itself contains a colon cannot be expressed in this file",
 				utils.LogAttr("path", f.Path),
 				utils.LogAttr("parsed-username", username),
 			)
@@ -90,7 +92,7 @@ func (f *FileCredentials) Credentials() (string, string, error) {
 		return "", "", fmt.Errorf("credential file %s holds no password once its whitespace is trimmed", f.Path)
 	}
 	if field, r, ok := invisibleStart(username, password); ok {
-		f.warnedInvisible.Do(func() { warnCredentialBeginsInvisibly(f.Path, field, r) })
+		f.warnedInvisible.Do(func() { warnCredentialBeginsInvisibly(f.Name, f.Path, field, r) })
 	}
 	return username, password, nil
 }
@@ -161,8 +163,8 @@ func invisibleStart(username, password string) (field string, r rune, ok bool) {
 	return "", 0, false
 }
 
-func warnCredentialBeginsInvisibly(path, field string, r rune) {
-	utils.LavaFormatWarning("resp-cache credential file begins with a non-printable rune that no trim removes; it is sent as part of the credential", nil,
+func warnCredentialBeginsInvisibly(name, path, field string, r rune) {
+	utils.LavaFormatWarning(logName(name)+" credential file begins with a non-printable rune that no trim removes; it is sent as part of the credential", nil,
 		utils.LogAttr("path", path),
 		utils.LogAttr("field", field),
 		utils.LogAttr("rune", fmt.Sprintf("U+%04X", r)),
@@ -199,6 +201,8 @@ func (c basicCredentials) RawCredentials() string      { return c.username + ":"
 // the runtime closes its socket when it reclaims it.
 type StreamingProvider struct {
 	source CredentialsSource
+	// name is the store's log name (Config.Name); empty logs as "resp-cache".
+	name string
 
 	mu        sync.Mutex
 	listeners map[int]weak.Pointer[subscription]
@@ -346,7 +350,7 @@ func (p *StreamingProvider) Refresh() {
 	listeners := p.liveListenersLocked()
 	p.mu.Unlock()
 
-	utils.LavaFormatInfo("resp-cache credentials rotated; re-authenticating live connections", utils.LogAttr("connections", len(listeners)))
+	utils.LavaFormatInfo(logName(p.name)+" credentials rotated; re-authenticating live connections", utils.LogAttr("connections", len(listeners)))
 	for _, listener := range listeners {
 		listener.OnNext(creds)
 	}
@@ -397,7 +401,7 @@ func (p *StreamingProvider) noteSourceFailure(err error) {
 	if sameCause {
 		return
 	}
-	utils.LavaFormatWarning("resp-cache credential source unreadable; connections keep the last credentials read until it is readable again (reported once per outage)", err)
+	utils.LavaFormatWarning(logName(p.name)+" credential source unreadable; connections keep the last credentials read until it is readable again (reported once per outage)", err)
 }
 
 // noteSourceRecovered closes an outage with one line, so whoever saw the
@@ -408,7 +412,7 @@ func (p *StreamingProvider) noteSourceRecovered() {
 	p.sourceFailingWith = ""
 	p.mu.Unlock()
 	if wasFailing {
-		utils.LavaFormatInfo("resp-cache credential source readable again; refresh resumed")
+		utils.LavaFormatInfo(logName(p.name) + " credential source readable again; refresh resumed")
 	}
 }
 

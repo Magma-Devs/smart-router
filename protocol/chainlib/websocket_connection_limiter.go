@@ -10,7 +10,6 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/utils"
 )
 
 // WebsocketConnection defines the interface for websocket connections
@@ -68,7 +67,7 @@ func (wcl *WebsocketConnectionLimiter) getConnectionLimit(websocketConn Websocke
 		return MaximumNumberOfParallelWebsocketConnectionsPerIp
 	}
 	// Return the larger of the global limit (if set) or the header value
-	return utils.Max(MaximumNumberOfParallelWebsocketConnectionsPerIp, connectionLimitHeaderValue)
+	return max(MaximumNumberOfParallelWebsocketConnectionsPerIp, connectionLimitHeaderValue)
 }
 
 func (wcl *WebsocketConnectionLimiter) CanOpenConnection(websocketConn WebsocketConnection) (bool, func()) {

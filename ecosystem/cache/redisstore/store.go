@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -150,7 +151,7 @@ func New(cfg Config) (*Store, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	tlsCfg, err := cfg.TLS.build()
+	tlsCfg, err := cfg.TLS.build(cfg.LogName())
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +165,7 @@ func New(cfg Config) (*Store, error) {
 	// Fail fast on an unreadable credential source (a missing file, one that
 	// is empty once trimmed) before any client exists.
 	if _, _, err := creds.source.Credentials(); err != nil {
-		return nil, fmt.Errorf("resp-cache: reading credentials: %w", err)
+		return nil, fmt.Errorf("%s: reading credentials: %w", cfg.LogName(), err)
 	}
 	provider := creds.provider
 
@@ -211,7 +212,7 @@ func New(cfg Config) (*Store, error) {
 			// logging "connections=0" — which reads as "rotation applied in
 			// place" to an operator, the one thing that did NOT happen. Say
 			// once what actually holds instead of running a loop that cannot act.
-			utils.LavaFormatInfo("resp-cache credential rotation under sentinel applies on the next reconnect or failover, not in place on live connections",
+			utils.LavaFormatInfo(cfg.LogName()+" credential rotation under sentinel applies on the next reconnect or failover, not in place on live connections",
 				utils.LogAttr("password-file", cfg.PasswordFile),
 			)
 		} else {
@@ -335,7 +336,7 @@ func warnIfReadSplitIsDiscoveryScoped(cfg Config) {
 	if cfg.EffectiveTopology() == TopologyStandalone {
 		return
 	}
-	utils.LavaFormatWarning("resp-cache read-addresses under a discovering topology: the read client performs its own discovery and resolves to the master(s) of the topology those addresses front — it yields replica reads only when it points at a separate replicated deployment (e.g. a regional cluster), not at replicas of the write topology", nil,
+	utils.LavaFormatWarning(cfg.LogName()+" read-addresses under a discovering topology: the read client performs its own discovery and resolves to the master(s) of the topology those addresses front — it yields replica reads only when it points at a separate replicated deployment (e.g. a regional cluster), not at replicas of the write topology", nil,
 		utils.LogAttr("topology", cfg.EffectiveTopology()),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 	)
@@ -361,7 +362,7 @@ func warnIfCredentialsCrossPlaintext(cfg Config) {
 	if len(keys) == 0 {
 		return
 	}
-	utils.LavaFormatWarning("resp-cache credentials are configured without tls: they cross the network readable on every new connection to the backend (set tls.enabled: true to protect them in transit; on a loopback or private-network backend this may be intended)", nil,
+	utils.LavaFormatWarning(cfg.LogName()+" credentials are configured without tls: they cross the network readable on every new connection to the backend (set tls.enabled: true to protect them in transit; on a loopback or private-network backend this may be intended)", nil,
 		utils.LogAttr("addresses", cfg.Addresses),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 		utils.LogAttr("credential-keys", keys),
@@ -382,7 +383,7 @@ func warnIfTLSSkipsVerification(cfg Config) {
 	if !cfg.TLS.Enabled || !cfg.TLS.InsecureSkipVerify {
 		return
 	}
-	utils.LavaFormatWarning("resp-cache tls.insecure-skip-verify is set: the connection is encrypted but the backend's certificate is NOT verified, so the store's identity is unchecked — a development setting that must not travel to production", nil,
+	utils.LavaFormatWarning(cfg.LogName()+" tls.insecure-skip-verify is set: the connection is encrypted but the backend's certificate is NOT verified, so the store's identity is unchecked — a development setting that must not travel to production", nil,
 		utils.LogAttr("addresses", cfg.Addresses),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 	)
@@ -1058,7 +1059,8 @@ func (s *Store) Purge(ctx context.Context) error {
 		utils.LavaFormatDebug("resp-cache purge: the read endpoint reports itself a replica, so it is not scanned; the write-side purge reaches it through replication",
 			utils.LogAttr("read-endpoint", s.readEndpoint.current()),
 			utils.LogAttr("replica-of", master),
-			utils.LogAttr("replica-of-write-endpoint", addressListed(master, s.configuredEndpoints.Addresses)))
+			// A textual match: a hostname and the IP it resolves to differ, so this is a hint.
+			utils.LogAttr("replica-of-write-endpoint", slices.Contains(s.configuredEndpoints.Addresses, master)))
 		return nil
 	}
 	if err := purgeClient(ctx, s.read, match); err != nil {
@@ -1144,16 +1146,6 @@ func replicaOfFromInfo(info string) (master string, isReplica bool) {
 		return "", true
 	}
 	return net.JoinHostPort(fields["master_host"], fields["master_port"]), true
-}
-
-// addressListed reports whether addr is one of the configured addresses.
-func addressListed(addr string, addresses []string) bool {
-	for _, candidate := range addresses {
-		if candidate == addr {
-			return true
-		}
-	}
-	return false
 }
 
 // purgeClient scans and unlinks under match on one client — per master when

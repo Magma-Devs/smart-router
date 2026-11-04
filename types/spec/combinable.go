@@ -100,118 +100,62 @@ func (v *Verification) Overwrite(other Combinable) (Combinable, bool) {
 // Equal implementations
 // ---------------------------------------------------------------------------
 
-func (api *Api) Equal(that interface{}) bool {
+// equalAs is the shared Equal prologue: that may be a *T or a T, nil equals only a nil receiver,
+// any other type is never equal, and fields compares two non-nil values.
+func equalAs[T any](self *T, that interface{}, fields func(self, other *T) bool) bool {
 	if that == nil {
-		return api == nil
+		return self == nil
 	}
-	var other *Api
+	var other *T
 	switch t := that.(type) {
-	case *Api:
+	case *T:
 		other = t
-	case Api:
+	case T:
 		other = &t
 	default:
 		return false
 	}
 	if other == nil {
-		return api == nil
+		return self == nil
 	}
-	if api == nil {
+	if self == nil {
 		return false
 	}
-	return api.Enabled == other.Enabled &&
-		api.Name == other.Name &&
-		api.ComputeUnits == other.ComputeUnits
+	return fields(self, other)
+}
+
+func (api *Api) Equal(that interface{}) bool {
+	return equalAs(api, that, func(api, other *Api) bool {
+		return api.Enabled == other.Enabled &&
+			api.Name == other.Name &&
+			api.ComputeUnits == other.ComputeUnits
+	})
 }
 
 func (h *Header) Equal(that interface{}) bool {
-	if that == nil {
-		return h == nil
-	}
-	var other *Header
-	switch t := that.(type) {
-	case *Header:
-		other = t
-	case Header:
-		other = &t
-	default:
-		return false
-	}
-	if other == nil {
-		return h == nil
-	}
-	if h == nil {
-		return false
-	}
-	return h.Name == other.Name && h.Kind == other.Kind && h.FunctionTag == other.FunctionTag && h.Value == other.Value
+	return equalAs(h, that, func(h, other *Header) bool {
+		return h.Name == other.Name && h.Kind == other.Kind && h.FunctionTag == other.FunctionTag && h.Value == other.Value
+	})
 }
 
 func (parsing *ParseDirective) Equal(that interface{}) bool {
-	if that == nil {
-		return parsing == nil
-	}
-	var other *ParseDirective
-	switch t := that.(type) {
-	case *ParseDirective:
-		other = t
-	case ParseDirective:
-		other = &t
-	default:
-		return false
-	}
-	if other == nil {
-		return parsing == nil
-	}
-	if parsing == nil {
-		return false
-	}
-	return parsing.FunctionTag == other.FunctionTag &&
-		parsing.FunctionTemplate == other.FunctionTemplate &&
-		parsing.ApiName == other.ApiName
+	return equalAs(parsing, that, func(parsing, other *ParseDirective) bool {
+		return parsing.FunctionTag == other.FunctionTag &&
+			parsing.FunctionTemplate == other.FunctionTemplate &&
+			parsing.ApiName == other.ApiName
+	})
 }
 
 func (e *Extension) Equal(that interface{}) bool {
-	if that == nil {
-		return e == nil
-	}
-	var other *Extension
-	switch t := that.(type) {
-	case *Extension:
-		other = t
-	case Extension:
-		other = &t
-	default:
-		return false
-	}
-	if other == nil {
-		return e == nil
-	}
-	if e == nil {
-		return false
-	}
-	return e.Name == other.Name && e.CuMultiplier == other.CuMultiplier
+	return equalAs(e, that, func(e, other *Extension) bool {
+		return e.Name == other.Name && e.CuMultiplier == other.CuMultiplier
+	})
 }
 
 func (v *Verification) Equal(that interface{}) bool {
-	if that == nil {
-		return v == nil
-	}
-	var other *Verification
-	switch t := that.(type) {
-	case *Verification:
-		other = t
-	case Verification:
-		other = &t
-	default:
-		return false
-	}
-	if other == nil {
-		return v == nil
-	}
-	if v == nil {
-		return false
-	}
-	return v.Name == other.Name
+	return equalAs(v, that, func(v, other *Verification) bool {
+		return v.Name == other.Name
+	})
 }
 
 // ---------------------------------------------------------------------------

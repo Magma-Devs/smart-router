@@ -30,7 +30,7 @@ type jsonrpcScanResult struct {
 // to emit them.
 func scanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
 	var res jsonrpcScanResult
-	pos := skipWhitespace(data, 0)
+	pos := SkipJSONWhitespace(data, 0)
 	if pos >= len(data) {
 		return res, errors.New("empty input")
 	}
@@ -38,7 +38,7 @@ func scanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
 		return res, fmt.Errorf("expected '{' at position %d, got %q", pos, data[pos])
 	}
 	pos++
-	pos = skipWhitespace(data, pos)
+	pos = SkipJSONWhitespace(data, pos)
 	if pos < len(data) && data[pos] == '}' {
 		return res, nil
 	}
@@ -55,12 +55,12 @@ func scanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
 			return res, fmt.Errorf("key: %w", err)
 		}
 		pos = next
-		pos = skipWhitespace(data, pos)
+		pos = SkipJSONWhitespace(data, pos)
 		if pos >= len(data) || data[pos] != ':' {
 			return res, fmt.Errorf("expected ':' at position %d", pos)
 		}
 		pos++
-		pos = skipWhitespace(data, pos)
+		pos = SkipJSONWhitespace(data, pos)
 		valueStart := pos
 		valueEnd, err := skipValue(data, pos)
 		if err != nil {
@@ -76,7 +76,7 @@ func scanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
 			res.hasResult = true
 			res.resultBytes = data[valueStart:valueEnd]
 		}
-		pos = skipWhitespace(data, valueEnd)
+		pos = SkipJSONWhitespace(data, valueEnd)
 		if pos >= len(data) {
 			return res, errors.New("truncated: expected ',' or '}'")
 		}
@@ -87,7 +87,7 @@ func scanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
 			return res, fmt.Errorf("expected ',' or '}' at position %d, got %q", pos, data[pos])
 		}
 		pos++
-		pos = skipWhitespace(data, pos)
+		pos = SkipJSONWhitespace(data, pos)
 	}
 }
 
@@ -98,7 +98,7 @@ func scanJsonrpcEnvelope(data []byte) (jsonrpcScanResult, error) {
 // Returns a non-nil error when data is not a syntactically well-formed
 // JSON array.
 func scanJsonrpcBatchElements(data []byte, fn func(elementBytes []byte) bool) error {
-	pos := skipWhitespace(data, 0)
+	pos := SkipJSONWhitespace(data, 0)
 	if pos >= len(data) {
 		return errors.New("empty input")
 	}
@@ -106,7 +106,7 @@ func scanJsonrpcBatchElements(data []byte, fn func(elementBytes []byte) bool) er
 		return fmt.Errorf("expected '[' at position %d, got %q", pos, data[pos])
 	}
 	pos++
-	pos = skipWhitespace(data, pos)
+	pos = SkipJSONWhitespace(data, pos)
 	if pos < len(data) && data[pos] == ']' {
 		return nil
 	}
@@ -122,7 +122,7 @@ func scanJsonrpcBatchElements(data []byte, fn func(elementBytes []byte) bool) er
 		if !fn(data[elementStart:elementEnd]) {
 			return nil
 		}
-		pos = skipWhitespace(data, elementEnd)
+		pos = SkipJSONWhitespace(data, elementEnd)
 		if pos >= len(data) {
 			return errors.New("truncated: expected ',' or ']'")
 		}
@@ -133,11 +133,13 @@ func scanJsonrpcBatchElements(data []byte, fn func(elementBytes []byte) bool) er
 			return fmt.Errorf("expected ',' or ']' at position %d, got %q", pos, data[pos])
 		}
 		pos++
-		pos = skipWhitespace(data, pos)
+		pos = SkipJSONWhitespace(data, pos)
 	}
 }
 
-func skipWhitespace(data []byte, pos int) int {
+// SkipJSONWhitespace returns the index of the first byte at or after pos that is not JSON
+// whitespace. Shared with the router's own top-level JSON scanners.
+func SkipJSONWhitespace(data []byte, pos int) int {
 	for pos < len(data) {
 		switch data[pos] {
 		case ' ', '\t', '\n', '\r':

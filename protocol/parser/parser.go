@@ -14,7 +14,6 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 )
 
 const (
@@ -239,10 +238,10 @@ func ParseBlockHashFromReplyAndDecode(rpcInput RPCInput, resultParser spectypes.
 			}
 
 			return "", utils.LavaFormatLog("failed to parse with legacy block parser", err,
-				lavaslices.Slice(
+				[]utils.Attribute{
 					utils.LogAttr("rpcInput", rpcInput),
 					utils.LogAttr("resultParser", resultParser),
-				),
+				},
 				uint(parseErrorLogLevel),
 			)
 		}
@@ -660,7 +659,17 @@ func parseByArg(rpcInput RPCInput, input []string, dataSource int) ([]interface{
 			return nil, ValueNotSetError
 		}
 		block := unmarshaledDataTyped[param_index]
-		// TODO: turn this into type assertion instead
+		// EIP-1898 lets eth_call, eth_getBalance and the other state reads name their block as
+		// {"blockNumber": "0x…"} instead of "0x…". It is the same height, so read it out of the
+		// object (MAG-4758). Without this the object fell through to blockInterfaceToString,
+		// which rendered it as "map[blockNumber:0x…]": the request parsed as NOT_APPLICABLE and
+		// the archive rule never saw an old block. {"blockHash": …} names no height and is left
+		// as it was (MAG-4142).
+		if blockObject, ok := block.(map[string]interface{}); ok {
+			if blockNumber, ok := blockObject["blockNumber"].(string); ok {
+				block = blockNumber
+			}
+		}
 
 		return []interface{}{blockInterfaceToString(block)}, nil
 	case nil:

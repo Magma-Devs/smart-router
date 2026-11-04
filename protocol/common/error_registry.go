@@ -1,6 +1,7 @@
 package common
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -729,4 +730,14 @@ func NewLavaErrorWrapping(lavaErr *LavaError, cause error) error {
 		return &LavaWrappedError{LavaErr: lavaErr}
 	}
 	return &LavaWrappedError{LavaErr: lavaErr, Context: cause.Error(), cause: cause}
+}
+
+// AsLavaError extracts the *LavaError from the first LavaWrappedError in err's chain, or
+// returns nil if there is none. A bare *LavaError in the chain does not count.
+func AsLavaError(err error) *LavaError {
+	var wrapped *LavaWrappedError
+	if errors.As(err, &wrapped) {
+		return wrapped.LavaErr
+	}
+	return nil
 }
