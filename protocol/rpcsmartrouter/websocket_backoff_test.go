@@ -237,3 +237,31 @@ func TestExponentialBackoff_PinnedSequence(t *testing.T) {
 		require.Equal(t, want, got, "attempt %d", i)
 	}
 }
+
+// LastBackoff is the wait past the ladder: its last rung, whether or not the ladder has run out,
+// and without moving along it (MAG-4873).
+func TestExponentialBackoff_LastBackoff(t *testing.T) {
+	ladder := &ExponentialBackoff{
+		InitialInterval: 100 * time.Millisecond,
+		MaxInterval:     30 * time.Second,
+		Multiplier:      2.0,
+		MaxRetries:      3,
+	}
+	assert.Equal(t, 400*time.Millisecond, ladder.LastBackoff(), "the third rung")
+
+	for i := 0; i < 3; i++ {
+		_, ok := ladder.NextBackoff()
+		require.True(t, ok)
+	}
+	_, ok := ladder.NextBackoff()
+	require.False(t, ok, "the ladder has run out")
+	assert.Equal(t, 400*time.Millisecond, ladder.LastBackoff(), "still the third rung")
+
+	// The default ladder's tenth rung is the 30s cap, jittered by 30%.
+	last := NewWebSocketBackoff().LastBackoff()
+	assert.GreaterOrEqual(t, last, 21*time.Second)
+	assert.Less(t, last, 39*time.Second)
+
+	unlimited := &ExponentialBackoff{InitialInterval: 100 * time.Millisecond, MaxInterval: time.Second, Multiplier: 2.0}
+	assert.Equal(t, 100*time.Millisecond, unlimited.LastBackoff(), "a ladder that never runs out answers its first rung")
+}
