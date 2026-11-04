@@ -37,6 +37,11 @@ const DefaultCredentialRefreshInterval = 10 * time.Second
 // Config is the full connection surface of the RESP backend. The mapstructure
 // tags are the operator-facing YAML keys of the router's `resp-cache:` block.
 type Config struct {
+	// Name is what this store calls itself in logs and configuration errors:
+	// the router's own block when unset ("resp-cache"), and the secondary tier's
+	// "secondary-resp-cache" (MAG-4778), so a router running both says which
+	// store a line is about. Never read from the YAML block.
+	Name string `mapstructure:"-"`
 	// Topology defaults to standalone when empty.
 	Topology Topology `mapstructure:"topology"`
 	// Addresses: standalone = the node address; sentinel = the sentinel
@@ -279,8 +284,9 @@ func (c TLSConfig) hasMaterial() bool {
 }
 
 // build materialises the tls.Config, nil when disabled. Files are read
-// eagerly so misconfiguration fails at startup, not first dial.
-func (c TLSConfig) build() (*tls.Config, error) {
+// eagerly so misconfiguration fails at startup, not first dial. name is the
+// store's log name (Config.LogName), so the error names the block it came from.
+func (c TLSConfig) build(name string) (*tls.Config, error) {
 	if !c.Enabled {
 		return nil, nil //nolint:nilnil // disabled TLS is a nil *tls.Config by contract; go-redis takes it as "plaintext"
 	}
@@ -292,21 +298,21 @@ func (c TLSConfig) build() (*tls.Config, error) {
 	if c.CAFile != "" {
 		pem, err := os.ReadFile(c.CAFile)
 		if err != nil {
-			return nil, fmt.Errorf("resp-cache tls: reading ca-file: %w", err)
+			return nil, fmt.Errorf("%s tls: reading ca-file: %w", name, err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("resp-cache tls: ca-file %q contains no valid certificates", c.CAFile)
+			return nil, fmt.Errorf("%s tls: ca-file %q contains no valid certificates", name, c.CAFile)
 		}
 		tlsCfg.RootCAs = pool
 	}
 	if (c.CertFile == "") != (c.KeyFile == "") {
-		return nil, fmt.Errorf("resp-cache tls: cert-file and key-file must be set together")
+		return nil, fmt.Errorf("%s tls: cert-file and key-file must be set together", name)
 	}
 	if c.CertFile != "" {
 		cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
 		if err != nil {
-			return nil, fmt.Errorf("resp-cache tls: loading client keypair: %w", err)
+			return nil, fmt.Errorf("%s tls: loading client keypair: %w", name, err)
 		}
 		tlsCfg.Certificates = []tls.Certificate{cert}
 	}
@@ -319,16 +325,16 @@ func (cfg Config) Validate() error {
 	switch cfg.EffectiveTopology() {
 	case TopologyStandalone, TopologySentinel, TopologyCluster:
 	default:
-		return fmt.Errorf("resp-cache: unknown topology %q (want standalone, sentinel, or cluster)", cfg.Topology)
+		return fmt.Errorf("%s: unknown topology %q (want standalone, sentinel, or cluster)", cfg.LogName(), cfg.Topology)
 	}
 	if len(cfg.Addresses) == 0 {
-		return fmt.Errorf("resp-cache: no addresses configured")
+		return fmt.Errorf("%s: no addresses configured", cfg.LogName())
 	}
 	if cfg.EffectiveTopology() == TopologySentinel && cfg.MasterName == "" {
-		return fmt.Errorf("resp-cache: sentinel topology requires master-name")
+		return fmt.Errorf("%s: sentinel topology requires master-name", cfg.LogName())
 	}
 	if cfg.EffectiveTopology() != TopologySentinel && (cfg.SentinelUsername != "" || cfg.SentinelPassword != "" || cfg.SentinelPasswordFile != "") {
-		return fmt.Errorf("resp-cache: sentinel-* credentials are set but topology is %q — dangling configuration", cfg.EffectiveTopology())
+		return fmt.Errorf("%s: sentinel-* credentials are set but topology is %q — dangling configuration", cfg.LogName(), cfg.EffectiveTopology())
 	}
 	// The other half of the check above. A master-name is read by nothing
 	// except the sentinel client, so under any other topology the operator
@@ -338,7 +344,7 @@ func (cfg Config) Validate() error {
 	// topology — byte for byte what a configuration with no master-name at all
 	// produced (MAG-3671).
 	if cfg.EffectiveTopology() != TopologySentinel && cfg.MasterName != "" {
-		return fmt.Errorf("resp-cache: master-name %q is set but topology is %q — dangling configuration: master-name is only read under topology: sentinel (set it, or remove master-name)", cfg.MasterName, cfg.EffectiveTopology())
+		return fmt.Errorf("%s: master-name %q is set but topology is %q — dangling configuration: master-name is only read under topology: sentinel (set it, or remove master-name)", cfg.LogName(), cfg.MasterName, cfg.EffectiveTopology())
 	}
 	// Standalone dials exactly one address (standaloneOptions takes the first
 	// element), where sentinel and cluster take the whole list. A longer list
@@ -352,22 +358,22 @@ func (cfg Config) Validate() error {
 	// the master-name message is the precise diagnosis of that mistake.
 	if cfg.EffectiveTopology() == TopologyStandalone {
 		if len(cfg.Addresses) > 1 {
-			return fmt.Errorf("resp-cache: %d addresses are configured but topology is standalone, which dials exactly one — %s would be ignored (dangling configuration: set topology: sentinel or cluster, or configure a single address)",
+			return fmt.Errorf("%s: %d addresses are configured but topology is standalone, which dials exactly one — %s would be ignored (dangling configuration: set topology: sentinel or cluster, or configure a single address)", cfg.LogName(),
 				len(cfg.Addresses), strings.Join(cfg.Addresses[1:], ", "))
 		}
 		if len(cfg.ReadAddresses) > 1 {
-			return fmt.Errorf("resp-cache: %d read-addresses are configured but topology is standalone, which dials exactly one — %s would be ignored (dangling configuration: set topology: sentinel or cluster, or configure a single read address)",
+			return fmt.Errorf("%s: %d read-addresses are configured but topology is standalone, which dials exactly one — %s would be ignored (dangling configuration: set topology: sentinel or cluster, or configure a single read address)", cfg.LogName(),
 				len(cfg.ReadAddresses), strings.Join(cfg.ReadAddresses[1:], ", "))
 		}
 	}
 	if cfg.EffectiveTopology() == TopologyCluster && cfg.DB != 0 {
-		return fmt.Errorf("resp-cache: db selection is not available in cluster topology")
+		return fmt.Errorf("%s: db selection is not available in cluster topology", cfg.LogName())
 	}
 	if cfg.Password != "" && cfg.PasswordFile != "" {
-		return fmt.Errorf("resp-cache: password and password-file are mutually exclusive")
+		return fmt.Errorf("%s: password and password-file are mutually exclusive", cfg.LogName())
 	}
 	if cfg.SentinelPassword != "" && cfg.SentinelPasswordFile != "" {
-		return fmt.Errorf("resp-cache: sentinel-password and sentinel-password-file are mutually exclusive")
+		return fmt.Errorf("%s: sentinel-password and sentinel-password-file are mutually exclusive", cfg.LogName())
 	}
 	// The same rule as the sentinel-* credentials above: a half-written section
 	// is a deployment mistake, not a configuration. Here the cost of accepting
@@ -375,7 +381,14 @@ func (cfg Config) Validate() error {
 	// combination that must not be able to start quietly. The message keeps to
 	// the shape of its siblings; the reasoning lives on TLSConfig.
 	if !cfg.TLS.Enabled && cfg.TLS.hasMaterial() {
-		return fmt.Errorf("resp-cache: tls.* options are set but tls.enabled is not true — dangling configuration (set tls.enabled: true, or remove the other tls.* keys)")
+		return fmt.Errorf("%s: tls.* options are set but tls.enabled is not true — dangling configuration (set tls.enabled: true, or remove the other tls.* keys)", cfg.LogName())
+	}
+	// The keyspace is checked again by newStore, for the client-built seams that
+	// see no Config; checked here too so its error names the block like the rest.
+	if cfg.KeyPrefix != "" {
+		if err := core.ValidateKeyPrefix(cfg.KeyPrefix); err != nil {
+			return fmt.Errorf("%s: %w", cfg.LogName(), err)
+		}
 	}
 	return cfg.Expiration.validate()
 }
@@ -425,11 +438,25 @@ func (cfg Config) configuredCredentialKeys() []string {
 	return keys
 }
 
+// LogName is Name, or "resp-cache" when unset.
+func (cfg Config) LogName() string {
+	return logName(cfg.Name)
+}
+
+// logName is the store name a log line or error opens with: the router's own
+// block unless a caller named the store otherwise.
+func logName(name string) string {
+	if name == "" {
+		return "resp-cache"
+	}
+	return name
+}
+
 // credentialsSource picks the data-node credential source: file-backed when
 // PasswordFile is set (rotation-capable), static otherwise.
 func (cfg Config) credentialsSource() CredentialsSource {
 	if cfg.PasswordFile != "" {
-		return &FileCredentials{Username: cfg.Username, Path: cfg.PasswordFile}
+		return &FileCredentials{Name: cfg.Name, Username: cfg.Username, Path: cfg.PasswordFile}
 	}
 	return StaticCredentials{Username: cfg.Username, Password: cfg.Password}
 }
@@ -453,10 +480,10 @@ func (cfg Config) sentinelPassword() (string, error) {
 	}
 	pw, err := readCredentialFile(cfg.SentinelPasswordFile)
 	if err != nil {
-		return "", fmt.Errorf("resp-cache: reading sentinel-password-file: %w", err)
+		return "", fmt.Errorf("%s: reading sentinel-password-file: %w", cfg.LogName(), err)
 	}
 	if field, r, ok := invisibleStart("", pw); ok {
-		warnCredentialBeginsInvisibly(cfg.SentinelPasswordFile, "sentinel-"+field, r)
+		warnCredentialBeginsInvisibly(cfg.Name, cfg.SentinelPasswordFile, "sentinel-"+field, r)
 	}
 	return pw, nil
 }
@@ -487,6 +514,7 @@ func (cfg Config) resolveClientCredentials() (clientCredentials, error) {
 	// per connection attempt instead, see failoverOptions).
 	if cfg.PasswordFile != "" && cfg.EffectiveTopology() != TopologySentinel {
 		creds.provider = NewStreamingProvider(creds.source)
+		creds.provider.name = cfg.Name
 	}
 	if cfg.EffectiveTopology() == TopologySentinel {
 		pw, err := cfg.sentinelPassword()
