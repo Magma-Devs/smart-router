@@ -16,10 +16,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	dyncodec "github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/sigs"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -39,14 +37,7 @@ type GrpcMessage struct {
 
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
 func (gm *GrpcMessage) GetRawRequestHash() ([]byte, error) {
-	headers := gm.GetHeaders()
-	headersByteArray, err := json.Marshal(headers)
-	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", common.RedactMetadata(headers)))
-		return []byte{}, err
-	}
-	pathByteArray := []byte(gm.Path)
-	return sigs.HashMsg(append(append(pathByteArray, gm.Msg...), headersByteArray...)), nil
+	return rawRequestHash("jsonRpc", gm.GetHeaders(), gm.Path, gm.Msg)
 }
 
 func (jm GrpcMessage) CheckResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
@@ -77,13 +68,6 @@ func (gm GrpcMessage) GetParams() interface{} {
 		return nil
 	}
 	return parsedData
-}
-
-func (gm *GrpcMessage) UpdateLatestBlockInMessage(latestBlock uint64, modifyContent bool) (success bool) {
-	// return gm.SetLatestBlockWithHeader(latestBlock, modifyContent)
-	// disabled due to cosmos sdk inconsistency with the headers that needs to be handled
-	return false
-	// when !done: we need a different setter
 }
 
 func (gm GrpcMessage) dynamicResolve() (interface{}, error) {
@@ -147,10 +131,6 @@ func (gm GrpcMessage) NewParsableRPCInput(input json.RawMessage) (parser.RPCInpu
 func (gm *GrpcMessage) SetParsingData(methodDesc *desc.MethodDescriptor, formatter grpcurl.Formatter) {
 	gm.formatter = formatter
 	gm.methodDesc = methodDesc
-}
-
-func (gm GrpcMessage) ParseBlock(inp string) (int64, error) {
-	return parser.ParseDefaultBlockParameter(inp)
 }
 
 type ServerSource struct {

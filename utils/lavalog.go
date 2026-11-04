@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -297,23 +298,22 @@ func init() {
 	stdLogger.Store(logger)
 }
 
+// logLevels are the level names the --log-level flags accept.
+var logLevels = map[string]zerolog.Level{
+	"trace": zerolog.TraceLevel,
+	"debug": zerolog.DebugLevel,
+	"info":  zerolog.InfoLevel,
+	"warn":  zerolog.WarnLevel,
+	"error": zerolog.ErrorLevel,
+	"fatal": zerolog.FatalLevel,
+}
+
+// getLogLevel reads a level name; an unknown one is info.
 func getLogLevel(logLevel string) zerolog.Level {
-	switch logLevel {
-	case "trace":
-		return zerolog.TraceLevel
-	case "debug":
-		return zerolog.DebugLevel
-	case "info":
-		return zerolog.InfoLevel
-	case "warn":
-		return zerolog.WarnLevel
-	case "error":
-		return zerolog.ErrorLevel
-	case "fatal":
-		return zerolog.FatalLevel
-	default:
-		return zerolog.InfoLevel
+	if level, ok := logLevels[logLevel]; ok {
+		return level
 	}
+	return zerolog.InfoLevel
 }
 
 // SetGlobalLoggingLevel sets the level of the stderr sink and rebuilds it in the format JsonFormat
@@ -354,23 +354,11 @@ func RollingLoggerSetup(rollingLogLevel string, filePath string, maxSize string,
 		MaxAge:     maxAgeNumber,
 		Compress:   true,
 	}
-	var logLevel zerolog.Level
-	switch rollingLogLevel {
-	case "off":
+	if rollingLogLevel == "off" {
 		return func() {} // default is disabled.
-	case "trace":
-		logLevel = zerolog.TraceLevel
-	case "debug":
-		logLevel = zerolog.DebugLevel
-	case "info":
-		logLevel = zerolog.InfoLevel
-	case "warn":
-		logLevel = zerolog.WarnLevel
-	case "error":
-		logLevel = zerolog.ErrorLevel
-	case "fatal":
-		logLevel = zerolog.FatalLevel
-	default:
+	}
+	logLevel, ok := logLevels[rollingLogLevel]
+	if !ok {
 		LavaFormatFatal("unsupported case for rollingLoggerSetup", nil, LogAttr("rollingLogLevel", rollingLogLevel))
 	}
 	// set the rolling log level.
@@ -529,70 +517,20 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 		// that LavaFormat* functions always return an error when called
 		return fmt.Errorf("%s", description)
 	}
-	var logEvent *zerolog.Event
-	var rollingLoggerEvent *zerolog.Event
-	var debugBufferEvent *zerolog.Event
-	std := stdLogger.Load()
-	rollingLogEnabled := rollingLogLogger.GetLevel() != zerolog.Disabled
-	dbgLogger := debugBufferLogger.Load()
-	debugBufferEnabled := dbgLogger.GetLevel() != zerolog.Disabled
-	switch severity {
-	case LAVA_LOG_PANIC:
-		logEvent = std.Panic()
-		if rollingLogEnabled {
-			rollingLoggerEvent = rollingLogLogger.Panic()
+	// One event per sink: stderr, then the rolling log and the debug buffer when they are on.
+	// stderr comes first because a PANIC or FATAL event ends the process on Msg; the debug
+	// buffer records those two as errors.
+	var events [3]*zerolog.Event
+	events[0] = eventAt(stdLogger.Load(), severity)
+	if rollingLogLogger.GetLevel() != zerolog.Disabled {
+		events[1] = eventAt(&rollingLogLogger, severity)
+	}
+	if dbgLogger := debugBufferLogger.Load(); dbgLogger.GetLevel() != zerolog.Disabled {
+		debugSeverity := severity
+		if severity == LAVA_LOG_PANIC || severity == LAVA_LOG_FATAL {
+			debugSeverity = LAVA_LOG_ERROR
 		}
-		if debugBufferEnabled {
-			debugBufferEvent = dbgLogger.Error()
-		}
-	case LAVA_LOG_FATAL:
-		logEvent = std.Fatal()
-		if rollingLogEnabled {
-			rollingLoggerEvent = rollingLogLogger.Fatal()
-		}
-		if debugBufferEnabled {
-			debugBufferEvent = dbgLogger.Error()
-		}
-	case LAVA_LOG_ERROR:
-		logEvent = std.Error()
-		if rollingLogEnabled {
-			rollingLoggerEvent = rollingLogLogger.Error()
-		}
-		if debugBufferEnabled {
-			debugBufferEvent = dbgLogger.Error()
-		}
-	case LAVA_LOG_WARN:
-		logEvent = std.Warn()
-		if rollingLogEnabled {
-			rollingLoggerEvent = rollingLogLogger.Warn()
-		}
-		if debugBufferEnabled {
-			debugBufferEvent = dbgLogger.Warn()
-		}
-	case LAVA_LOG_INFO:
-		logEvent = std.Info()
-		if rollingLogEnabled {
-			rollingLoggerEvent = rollingLogLogger.Info()
-		}
-		if debugBufferEnabled {
-			debugBufferEvent = dbgLogger.Info()
-		}
-	case LAVA_LOG_DEBUG:
-		logEvent = std.Debug()
-		if rollingLogEnabled {
-			rollingLoggerEvent = rollingLogLogger.Debug()
-		}
-		if debugBufferEnabled {
-			debugBufferEvent = dbgLogger.Debug()
-		}
-	case LAVA_LOG_TRACE:
-		logEvent = std.Trace()
-		if rollingLogEnabled {
-			rollingLoggerEvent = rollingLogLogger.Trace()
-		}
-		if debugBufferEnabled {
-			debugBufferEvent = dbgLogger.Trace()
-		}
+		events[2] = eventAt(dbgLogger, debugSeverity)
 	}
 	// Everything below is written to a log sink or embedded in the returned
 	// error's message, and upstream node-urls carry api keys in their path and
@@ -604,12 +542,8 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 		// The log sinks get the redacted message; the returned error keeps err
 		// itself as its cause, so errors.Is/As are unaffected.
 		logErr := RedactSecretsErr(err)
-		logEvent = logEvent.Err(logErr)
-		if rollingLoggerEvent != nil {
-			rollingLoggerEvent = rollingLoggerEvent.Err(logErr)
-		}
-		if debugBufferEvent != nil {
-			debugBufferEvent = debugBufferEvent.Err(logErr)
+		for i := range events {
+			events[i] = events[i].Err(logErr)
 		}
 		output = fmt.Sprintf("%s ErrMsg: %s", output, logErr.Error())
 	}
@@ -618,24 +552,16 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 			key := attr.Key
 			val := attr.Value
 			st_val := RedactSecrets(StrValueForLog(val, key, idx, attributes))
-			logEvent = logEvent.Str(key, st_val)
-			if rollingLoggerEvent != nil {
-				rollingLoggerEvent = rollingLoggerEvent.Str(key, st_val)
-			}
-			if debugBufferEvent != nil {
-				debugBufferEvent = debugBufferEvent.Str(key, st_val)
+			for i := range events {
+				events[i] = events[i].Str(key, st_val)
 			}
 			attrStrings = append(attrStrings, fmt.Sprintf("%s:%s", attr.Key, st_val))
 		}
 		attributesStr := "{" + strings.Join(attrStrings, ",") + "}"
 		output = fmt.Sprintf("%s %+v", output, attributesStr)
 	}
-	logEvent.Msg(description)
-	if rollingLoggerEvent != nil {
-		rollingLoggerEvent.Msg(description)
-	}
-	if debugBufferEvent != nil {
-		debugBufferEvent.Msg(description)
+	for _, event := range events {
+		event.Msg(description)
 	}
 	// Return a wrappedLavaError that supports both Unwrap() (stdlib) and
 	// Cause() (pkg-errors causer interface), preserving error chain
@@ -644,6 +570,27 @@ func LavaFormatLog(description string, err error, attributes []Attribute, severi
 		return &wrappedLavaError{msg: output, cause: err}
 	}
 	return fmt.Errorf("%s", output)
+}
+
+// eventAt starts an event on logger at a LAVA_LOG_* severity; nil for any other.
+func eventAt(logger *zerolog.Logger, severity uint) *zerolog.Event {
+	switch severity {
+	case LAVA_LOG_PANIC:
+		return logger.Panic()
+	case LAVA_LOG_FATAL:
+		return logger.Fatal()
+	case LAVA_LOG_ERROR:
+		return logger.Error()
+	case LAVA_LOG_WARN:
+		return logger.Warn()
+	case LAVA_LOG_INFO:
+		return logger.Info()
+	case LAVA_LOG_DEBUG:
+		return logger.Debug()
+	case LAVA_LOG_TRACE:
+		return logger.Trace()
+	}
+	return nil
 }
 
 func LavaFormatFatal(description string, err error, attributes ...Attribute) {
@@ -742,5 +689,5 @@ func runeStartAtOrAfter(s string, at int) int {
 }
 
 func ToHexString(hash string) string {
-	return fmt.Sprintf("%x", hash)
+	return hex.EncodeToString([]byte(hash))
 }

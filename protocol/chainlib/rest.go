@@ -4,12 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
@@ -51,11 +48,7 @@ func (apip *RestChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 			urlPath = craftData.Path
 		}
 		// chain fetcher sends the replaced request inside data
-		chainMessage, err := apip.ParseMsg(urlPath, data, craftData.ConnectionType, metadata, extensionslib.ExtensionInfo{LatestBlock: 0})
-		if err == nil {
-			chainMessage.AppendHeader(metadata)
-		}
-		return chainMessage, err
+		return parseCraftedMessage(apip, urlPath, data, craftData.ConnectionType, metadata)
 	}
 
 	restMessage := &rpcInterfaceMessages.RestMessage{
@@ -74,7 +67,7 @@ func (apip *RestChainParser) CraftMessage(parsing *spectypes.ParseDirective, con
 	}
 	parsedInput := parser.NewParsedInput()
 	parsedInput.SetBlock(spectypes.NOT_APPLICABLE)
-	return apip.newChainMessage(apiCont.api, parsedInput, restMessage, apiCollection), nil
+	return newParsedChainMessage(apiCont.api, apiCollection, parsedInput, nil, restMessage, restMessage.CheckResponseError), nil
 }
 
 // ParseMsg parses message data into chain message object
@@ -132,26 +125,10 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 		}
 	}
 
-	nodeMsg := apip.newChainMessage(apiCont.api, parsedInput, &restMessage, apiCollection)
+	nodeMsg := newParsedChainMessage(apiCont.api, apiCollection, parsedInput, nil, &restMessage, restMessage.CheckResponseError)
 	nodeMsg.applyParsedRange(parsedInput)
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
-}
-
-func (*RestChainParser) newChainMessage(api *spectypes.Api, parsedInput *parser.ParsedInput, restMessage *rpcInterfaceMessages.RestMessage, apiCollection *spectypes.ApiCollection) *baseChainMessageContainer {
-	requestedBlock := parsedInput.GetBlock()
-	requestedHashes, _ := parsedInput.GetBlockHashes()
-	nodeMsg := &baseChainMessageContainer{
-		api:                      api,
-		msg:                      restMessage,
-		latestRequestedBlock:     requestedBlock,
-		requestedBlockHashes:     requestedHashes,
-		apiCollection:            apiCollection,
-		resultErrorParsingMethod: restMessage.CheckResponseError,
-		parseDirective:           GetParseDirective(api, apiCollection),
-		usedDefaultValue:         parsedInput.UsedDefaultValue,
-	}
-	return nodeMsg
 }
 
 func (apip *RestChainParser) getApiCollection(connectionType, internalPath, addon string) (*spectypes.ApiCollection, error) {
@@ -226,12 +203,8 @@ func (apip *RestChainParser) ChainBlockStats() (allowedBlockLagForQosSync int64,
 }
 
 type RestChainListener struct {
-	endpoint         *lavasession.RPCEndpoint
-	relaySender      RelaySender
-	healthReporter   HealthReporter
-	logger           *metrics.RPCConsumerLogs
-	listeningAddress atomic.Pointer[string]
-	app              *fiber.App // captured during Serve so Shutdown can drain HTTP
+	chainListenerBase
+	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // RestMethodCarriesBody reports whether the REST listener relays the request body for
@@ -267,10 +240,12 @@ func NewRestChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEn
 ) (chainListener *RestChainListener) {
 	// Create a new instance of JsonRPCChainListener
 	chainListener = &RestChainListener{
-		endpoint:       listenEndpoint,
-		relaySender:    relaySender,
-		healthReporter: healthReporter,
-		logger:         rpcConsumerLogs,
+		chainListenerBase: chainListenerBase{
+			endpoint:       listenEndpoint,
+			relaySender:    relaySender,
+			healthReporter: healthReporter,
+			logger:         rpcConsumerLogs,
+		},
 	}
 
 	return chainListener
@@ -291,196 +266,79 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 	apil.app = app
 
 	chainID := apil.endpoint.ChainID
-	apiInterface := apil.endpoint.ApiInterface
+	// A verb the spec does not declare is a 501, not a masked 500, on both handlers.
+	answerMethodNotFound := func(ctx context.Context, fiberCtx *fiber.Ctx, err error, _ *pairingtypes.RelayReply) (bool, error) {
+		if !errors.Is(err, common.APINotSupportedError) {
+			return false, nil
+		}
+		utils.LavaFormatError("api method is not supported", err, utils.LogAttr("GUID", ctx))
+		return true, common.CreateRestMethodNotFoundError(fiberCtx, chainID)
+	}
+	errorBody := func(_ *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
+		return convertToJsonError(errMasking)
+	}
+	testMode := common.IsTestMode(ctx)
+
 	// Catch Post
-	handlerPost := func(fiberCtx *fiber.Ctx) error {
-		// Set response header content-type to application/json
-		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-		startTime := time.Now()
-
-		msgSeed := apil.logger.GetMessageSeed()
-		query := "?" + string(fiberCtx.Request().URI().QueryString())
-		path := restRequestPath(fiberCtx)
-
-		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := detachedReqHeaders(fiberCtx)
-		restHeaders := convertToMetadataMap(metadataValues)
-		ctx, cancel := context.WithCancel(context.Background())
-		ctx = utils.WithUniqueIdentifier(ctx, utils.GenerateUniqueIdentifier())
-		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
-		defer cancel() // incase there's a problem make sure to cancel the connection
-		guid, found := utils.GetUniqueIdentifier(ctx)
-		if found {
-			msgSeed = strconv.FormatUint(guid, 10)
-		}
-		// TODO: handle contentType, in case its not application/json currently we set it to application/json in the Send() method
-		// contentType := string(c.Context().Request.Header.ContentType())
-		dappID := extractDappIDFromFiberContext(fiberCtx)
-		analytics := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
-		analytics.SetProcessingTimestampBeforeRelay(startTime)
-		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
-		requestBody := string(fiberCtx.Body())
-		loggedBody := relayBodyForLog(requestBody, cmdFlags.DebugRelays)
-		utils.LavaFormatInfo("Consumer received a new REST POST request",
-			utils.LogAttr("GUID", guid),
-			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-			utils.LogAttr(utils.KEY_TASK_ID, ctx),
-			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
-			utils.LogAttr("path", path),
-			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("msgSeed", msgSeed),
-			utils.LogAttr("body", loggedBody),
-			utils.LogAttr("headers", common.RedactMetadata(restHeaders)),
-		)
-		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, http.MethodPost, dappID, userIp, analytics, restHeaders)
-		reply := relayResult.GetReply()
-		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
-		if err != nil {
-			// Same answer as the catch-all handler below: a verb the spec does not declare is a
-			// 501, not a masked 500.
-			if errors.Is(err, common.APINotSupportedError) {
-				utils.LavaFormatError("api method is not supported", err, utils.LogAttr("GUID", ctx))
-				return common.CreateRestMethodNotFoundError(fiberCtx, chainID)
+	app.Post("/*", apil.relayHTTP(httpRelaySpec{
+		testMode:    testMode,
+		debugRelays: cmdFlags.DebugRelays,
+		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
+			path := restRequestPath(fiberCtx)
+			query := "?" + string(fiberCtx.Request().URI().QueryString())
+			return httpRelayRequest{
+				path: path, url: path + query, body: string(fiberCtx.Body()), connectionType: http.MethodPost,
+				logMethod: http.MethodPost, logPath: path,
 			}
-
-			// Get unique GUID response
-			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-
-			// MAG-4481: the upstream's own answer as is, or the router's 502/504 when none answered.
-			// The request log records what the client is sent.
-			if failed, ok := buildFailedRelayReply(relayResult, msgSeed, nil, noAnswerJsonError); ok {
-				apil.logger.LogRequestAndResponse("http in/out", true, http.MethodPost, path, loggedBody, loggedReply(failed.body), msgSeed, time.Since(startTime), err)
-				return sendFailedRelayReply(fiberCtx, failed, reply.GetMetadata())
-			}
-
-			// Construct json response
-			response := convertToJsonError(errMasking)
-			apil.logger.LogRequestAndResponse("http in/out", true, http.MethodPost, path, loggedBody, loggedReply(response), msgSeed, time.Since(startTime), err)
-			fiberCtx.Status(failedRelayStatus(relayResult))
-
-			// Return error json response
-			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
-		}
-		// Log request and response
-		apil.logger.LogRequestAndResponse("http in/out", false, http.MethodPost, path, requestBody, string(reply.Data), msgSeed, time.Since(startTime), nil)
-		if relayResult.GetStatusCode() != 0 {
-			fiberCtx.Status(relayResult.StatusCode)
-		}
-		// Return json response and add metric for after provider processing
-		err = addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), reply.Data)
-		return err
-	}
-
-	handlerUse := func(fiberCtx *fiber.Ctx) error {
-		// Set response header content-type to application/json
-		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-		startTime := time.Now()
-		msgSeed := apil.logger.GetMessageSeed()
-
-		query := "?" + string(fiberCtx.Request().URI().QueryString())
-		path := restRequestPath(fiberCtx)
-		dappID := extractDappIDFromFiberContext(fiberCtx)
-		analytics := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
-		analytics.SetProcessingTimestampBeforeRelay(startTime)
-
-		// Cache headers once at the start to avoid repeated lookups
-		metadataValues := detachedReqHeaders(fiberCtx)
-		restHeaders := convertToMetadataMap(metadataValues)
-		ctx, cancel := context.WithCancel(context.Background())
-		ctx = utils.WithUniqueIdentifier(ctx, utils.GenerateUniqueIdentifier())
-		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
-		guid, found := utils.GetUniqueIdentifier(ctx)
-		if found {
-			msgSeed = strconv.FormatUint(guid, 10)
-		}
-		defer cancel() // incase there's a problem make sure to cancel the connection
-		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
-		// POST has its own handler above; PUT and PATCH arrive here and carry a body too.
-		requestBody := ""
-		if RestMethodCarriesBody(fiberCtx.Method()) {
-			requestBody = string(fiberCtx.Body())
-		}
-		loggedBody := relayBodyForLog(requestBody, cmdFlags.DebugRelays)
-		utils.LavaFormatInfo("Consumer received a new REST non-POST request",
-			utils.LogAttr("GUID", guid),
-			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-			utils.LogAttr(utils.KEY_TASK_ID, ctx),
-			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
-			utils.LogAttr("path", path),
-			utils.LogAttr("seed", msgSeed),
-			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("body", loggedBody),
-			utils.LogAttr("headers", common.RedactMetadata(restHeaders)),
-		)
-
-		relayResult, err := apil.relaySender.SendRelay(ctx, path+query, requestBody, fiberCtx.Method(), dappID, userIp, analytics, restHeaders)
-		reply := relayResult.GetReply()
-		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
-		if err != nil {
-			if errors.Is(err, common.APINotSupportedError) {
-				utils.LavaFormatError("api method is not supported", err, utils.LogAttr("GUID", ctx))
-				return common.CreateRestMethodNotFoundError(fiberCtx, chainID)
-			}
-
-			// Get unique GUID response
-			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-
-			// MAG-4481: the upstream's own answer as is, or the router's 502/504 when none answered.
-			// The request log records what the client is sent.
-			if failed, ok := buildFailedRelayReply(relayResult, msgSeed, nil, noAnswerJsonError); ok {
-				apil.logger.LogRequestAndResponse("http in/out", true, fiberCtx.Method(), path, loggedBody, loggedReply(failed.body), msgSeed, time.Since(startTime), err)
-				return sendFailedRelayReply(fiberCtx, failed, reply.GetMetadata())
-			}
-
-			// Construct json response
-			response := convertToJsonError(errMasking)
-			apil.logger.LogRequestAndResponse("http in/out", true, fiberCtx.Method(), path, loggedBody, loggedReply(response), msgSeed, time.Since(startTime), err)
-			fiberCtx.Status(failedRelayStatus(relayResult))
-
-			// Return error json response
-			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
-		}
-		if relayResult.GetStatusCode() != 0 {
-			fiberCtx.Status(relayResult.StatusCode)
-		}
-		// Log request and response
-		apil.logger.LogRequestAndResponse("http in/out", false, fiberCtx.Method(), path, requestBody, string(reply.Data), msgSeed, time.Since(startTime), nil)
-
-		// Return json response
-		err = addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), reply.Data)
-		return err
-	}
-
-	app.Post("/*", handlerPost)
+		},
+		logReceived: logReceivedWithSeedAfterDapp("Consumer received a new REST POST request"),
+		logModule:   "http in/out",
+		noAnswer:    noAnswerJsonError,
+		answerError: answerMethodNotFound,
+		errorBody:   errorBody,
+	}))
 	// Catch the others
-	app.Use("/*", handlerUse)
+	app.Use("/*", apil.relayHTTP(httpRelaySpec{
+		testMode:    testMode,
+		debugRelays: cmdFlags.DebugRelays,
+		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
+			path := restRequestPath(fiberCtx)
+			query := "?" + string(fiberCtx.Request().URI().QueryString())
+			// POST has its own handler above; PUT and PATCH arrive here and carry a body too.
+			body := ""
+			if RestMethodCarriesBody(fiberCtx.Method()) {
+				body = string(fiberCtx.Body())
+			}
+			return httpRelayRequest{
+				path: path, url: path + query, body: body, connectionType: fiberCtx.Method(),
+				logMethod: fiberCtx.Method(), logPath: path,
+			}
+		},
+		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
+			utils.LavaFormatInfo("Consumer received a new REST non-POST request", receivedAttrs(ctx, guid,
+				utils.LogAttr("path", req.path),
+				utils.LogAttr("seed", msgSeed),
+				utils.LogAttr("dappID", dappID),
+				utils.LogAttr("body", req.loggedBody),
+				utils.LogAttr("headers", common.RedactMetadata(headers)),
+			)...)
+		},
+		logModule:   "http in/out",
+		noAnswer:    noAnswerJsonError,
+		answerError: answerMethodNotFound,
+		errorBody:   errorBody,
+	}))
 
-	// Go
-	addrChannel := make(chan string)
-	addrChannelSafe := common.NewSafeChannelSender(ctx, addrChannel)
-	go func() {
-		addr := <-addrChannel
-		apil.listeningAddress.Store(&addr)
-	}()
-
-	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
-}
-
-func (apil *RestChainListener) GetListeningAddress() string {
-	if p := apil.listeningAddress.Load(); p != nil {
-		return *p
-	}
-	return ""
+	apil.listen(ctx, app)
 }
 
 type RestChainProxy struct {
 	BaseChainProxy
-	httpClient *http.Client
 }
 
 func NewRestChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
-	if len(rpcProviderEndpoint.NodeUrls) == 0 {
-		return nil, utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
+	if err := requireNodeUrl(rpcProviderEndpoint); err != nil {
+		return nil, err
 	}
 
 	validateEndpoints(rpcProviderEndpoint.NodeUrls, spectypes.APIInterfaceRest)
@@ -489,24 +347,19 @@ func NewRestChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lav
 	nodeUrl := rpcProviderEndpoint.NodeUrls[0]
 	nodeUrl.Url = strings.TrimSuffix(rpcProviderEndpoint.NodeUrls[0].Url, "/")
 	rcp := &RestChainProxy{
-		BaseChainProxy: BaseChainProxy{averageBlockTime: averageBlockTime, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(nodeUrl.Url), ErrorHandler: &RestErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID}, ChainID: rpcProviderEndpoint.ChainID},
+		BaseChainProxy: BaseChainProxy{averageBlockTime: averageBlockTime, NodeUrl: rpcProviderEndpoint.NodeUrls[0], HashedNodeUrl: chainproxy.HashURL(nodeUrl.Url), ErrorHandler: newNodeErrorHandler(common.TransportREST, rpcProviderEndpoint.ChainID), ChainID: rpcProviderEndpoint.ChainID},
 	}
 	return rcp, nil
 }
 
 func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
-	if rcp.httpClient == nil {
-		rcp.httpClient = common.OptimizedHttpClient()
-	}
-	httpClient := rcp.httpClient
-
 	// appending hashed url
 	grpc.SetTrailer(ctx, metadata.Pairs(RPCProviderNodeAddressHash, rcp.BaseChainProxy.HashedNodeUrl))
 
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.RestMessage)
 	if !ok {
-		return nil, utils.LavaFormatError("invalid message type in rest, failed to cast RPCInput from chainMessage", nil, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})
+		return nil, utils.LavaFormatError("invalid message type in rest, failed to cast RPCInput from chainMessage", nil, traceAttrs(ctx, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})...)
 	}
 	var connectionTypeSlected string = http.MethodGet
 	// if ConnectionType is default value or empty we will choose http.MethodGet otherwise choosing the header type provided
@@ -528,62 +381,25 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 
 	// setting the content-type to be application/json instead of Go's defult http.DefaultClient
 	if connectionTypeSlected == http.MethodPost || connectionTypeSlected == http.MethodPut {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", common.JSONContentType)
 	}
 
-	if len(nodeMessage.GetHeaders()) > 0 {
-		for _, metadata := range nodeMessage.GetHeaders() {
-			if metadata.Value == "" {
-				req.Header.Del(metadata.Name)
-			} else {
-				req.Header.Set(metadata.Name, metadata.Value)
-			}
-		}
-	}
-	rcp.NodeUrl.SetAuthHeaders(ctx, req.Header.Set)
-	rcp.NodeUrl.SetIpForwardingIfNecessary(ctx, req.Header.Set)
-
-	utils.LavaFormatInfo("Sending request to node from provider",
-		utils.LogAttr("_method", nodeMessage.Path),
-		utils.LogAttr("headers", utils.RedactHeaders(req.Header)),
-		utils.LogAttr("apiInterface", "rest"),
-	)
-
-	res, err := httpClient.Do(req)
-	if res != nil {
-		// resp can be non nil on error
-		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(res.StatusCode))) // we ignore this error here since this code can be triggered not from grpc
-	}
-	if err != nil {
-		// Validate if the error is related to the provider connection to the node or it is a valid error
-		// in case the error is valid (e.g. bad input parameters) the error will return in the form of a valid error reply
-		if parsedError := rcp.HandleNodeError(ctx, err); parsedError != nil {
-			return nil, parsedError
-		}
-		// always return a lava error in this case
-		return nil, err
-	}
-	// here we received a response that can be an error response with Code >300 or code < 200
-	if res.Body != nil {
-		defer res.Body.Close()
-	}
-
-	err = rcp.HandleStatusError(res.StatusCode, nodeMessage.GetDisableErrorHandling())
-	if err != nil {
-		err = common.WithRetryAfter(err, res.Header, time.Now())
-		return nil, utils.LavaFormatWarning("Received invalid status code", err, utils.Attribute{Key: "Status Code", Value: res.StatusCode}, utils.Attribute{Key: "chainID", Value: rcp.BaseChainProxy.ChainID}, utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name})
-	}
-
-	body, err := io.ReadAll(res.Body)
+	res, err := rcp.doHTTP(ctx, req, nodeMessage.GetHeaders(), nodeMessage.GetDisableErrorHandling(), chainMessage.GetApi().Name, func(header http.Header) {
+		utils.LavaFormatInfo("Sending request to node from provider",
+			utils.LogAttr("_method", nodeMessage.Path),
+			utils.LogAttr("headers", utils.RedactHeaders(header)),
+			utils.LogAttr("apiInterface", spectypes.APIInterfaceRest),
+		)
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	reply := &RelayReplyWrapper{
-		StatusCode: res.StatusCode,
+		StatusCode: res.status,
 		RelayReply: &pairingtypes.RelayReply{
-			Data:     body,
-			Metadata: convertToMetadataMapOfSlices(res.Header),
+			Data:     res.body,
+			Metadata: convertToMetadataMapOfSlices(res.header),
 		},
 	}
 

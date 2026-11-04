@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -282,26 +283,25 @@ func TestChainTrackerCallbacks(t *testing.T) {
 	mockChainFetcher := NewMockChainFetcher(1000, mockBlocks, nil)
 	currentLatestBlockInMock := mockChainFetcher.AdvanceBlock()
 
+	// The callbacks run on the tracker's poll goroutine, so what they record is atomic.
 	// used to identify if the fork callback was called
-	callbackCalledFork := false
+	var callbackCalledFork atomic.Bool
 	forkCallback := func(arg int64) {
 		utils.LavaFormatDebug("fork callback called")
-		callbackCalledFork = true
+		callbackCalledFork.Store(true)
 	}
 	// used to identify if the newLatest callback was called
-	callbackCalledNewLatest := false
-	callbackCalledTimes := 0
-	callbackBlocksProcessed := int64(0) // Track actual blocks processed
+	var callbackCalledNewLatest atomic.Bool
+	var callbackBlocksProcessed atomic.Int64 // Track actual blocks processed
 	newBlockCallback := func(blockFrom int64, blockTo int64, hash string) {
-		callbackCalledNewLatest = true
+		callbackCalledNewLatest.Store(true)
 		blocksInRange := blockTo - blockFrom
-		callbackCalledTimes++
-		callbackBlocksProcessed += blocksInRange
+		totalProcessed := callbackBlocksProcessed.Add(blocksInRange)
 		utils.LavaFormatDebug("newBlockCallback called",
 			utils.LogAttr("blockFrom", blockFrom),
 			utils.LogAttr("blockTo", blockTo),
 			utils.LogAttr("blocksInRange", blocksInRange),
-			utils.LogAttr("totalProcessed", callbackBlocksProcessed),
+			utils.LogAttr("totalProcessed", totalProcessed),
 		)
 	}
 	chainTrackerConfig := chaintracker.ChainTrackerConfig{BlocksToSave: uint64(fetcherBlocks), AverageBlockTime: TimeForPollingMock, ServerBlockMemory: uint64(mockBlocks), ForkCallback: forkCallback, NewLatestCallback: newBlockCallback, ParseDirectiveEnabled: true}
@@ -313,8 +313,8 @@ func TestChainTrackerCallbacks(t *testing.T) {
 		for _, tt := range tests {
 			totalAdvancement += int(tt.advancement)
 			utils.LavaFormatInfo(startedTestStr + tt.name)
-			callbackCalledFork = false
-			callbackCalledNewLatest = false
+			callbackCalledFork.Store(false)
+			callbackCalledNewLatest.Store(false)
 			for i := 0; i < int(tt.advancement); i++ {
 				currentLatestBlockInMock = mockChainFetcher.AdvanceBlock()
 			}
@@ -342,65 +342,83 @@ func TestChainTrackerCallbacks(t *testing.T) {
 				require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[idx].Hash, requestedHashes[idx].Block))
 			}
 			if tt.shouldFork {
-				require.True(t, callbackCalledFork)
+				require.True(t, callbackCalledFork.Load())
 			} else {
-				require.False(t, callbackCalledFork)
+				require.False(t, callbackCalledFork.Load())
 			}
 			// Fixed: Check that total blocks processed equals total advancement
 			// ChainTracker may batch blocks, so we check blocks processed, not callback count
-			require.Equal(t, int64(totalAdvancement), callbackBlocksProcessed,
+			require.Equal(t, int64(totalAdvancement), callbackBlocksProcessed.Load(),
 				"total blocks processed should equal total advancement (callbacks may be batched)")
 			if tt.advancement > 0 {
-				require.True(t, callbackCalledNewLatest)
+				require.True(t, callbackCalledNewLatest.Load())
 			} else {
-				require.False(t, callbackCalledNewLatest)
+				require.False(t, callbackCalledNewLatest.Load())
 			}
 		}
 	})
 }
 
-func TestChainTrackerFetchSpreadAcrossPollingTime(t *testing.T) {
-	t.Run("one long test", func(t *testing.T) {
-		mockBlocks := int64(50)
-		fetcherBlocks := 1
-		called := 0
-		lastCall := time.Now()
-		timeDiff := 0 * time.Millisecond
-		localTimeForPollingMock := 500 * time.Millisecond
-		callback := func() {
-			called++
-			timeDiff = time.Since(lastCall)
-			lastCall = time.Now()
-		}
-		mockChainFetcher := NewMockChainFetcher(1000, mockBlocks, callback)
-		mockChainFetcher.AdvanceBlock()
-		chainTrackerConfig := chaintracker.ChainTrackerConfig{BlocksToSave: uint64(fetcherBlocks), AverageBlockTime: localTimeForPollingMock, ServerBlockMemory: uint64(mockBlocks), ParseDirectiveEnabled: true}
-		tracker, err := chaintracker.NewChainTracker(context.Background(), mockChainFetcher, chainTrackerConfig)
-		require.NoError(t, err)
-		tracker.StartAndServe(context.Background())
-		// fool the tracker so it thinks blocks will come every localTimeForPollingMock (ms), and not adjust it's polling timers
-		for i := 0; i < 50; i++ {
-			tracker.AddBlockGap(localTimeForPollingMock, 1)
-		}
-		// initially we start with 1/16 block probing
-		time.Sleep(localTimeForPollingMock)                           // we expect 15+init calls
-		require.GreaterOrEqual(t, called, 15*8/10)                    // 15 to give a gap, give a 20% margin
-		require.Greater(t, timeDiff, localTimeForPollingMock/16*8/10) // give a 20% margin
-		fmt.Println(timeDiff, localTimeForPollingMock/16*8/10, localTimeForPollingMock/8*12/10)
-		require.Less(t, timeDiff, localTimeForPollingMock/8*12/10) // give a 20% margin
-		mockChainFetcher.AdvanceBlock()                            // we advanced a block
-		time.Sleep(localTimeForPollingMock / 2)
-		require.LessOrEqual(t, called, (3+16)*12/10) // init + 2 new + 16 from first block advancement, give 20% margin
-		require.GreaterOrEqual(t, called, 17*8/10)   // give a 20% margin
-		fmt.Println(timeDiff, localTimeForPollingMock/2*12/10, localTimeForPollingMock/8*8/10)
-		require.Less(t, timeDiff, localTimeForPollingMock/2*12/10)   // give a 20% margin
-		require.Greater(t, timeDiff, localTimeForPollingMock/8*8/10) // give a 20% margin
-		time.Sleep(localTimeForPollingMock / 2)
-		require.GreaterOrEqual(t, called, (6+16)*8/10)
-		require.Less(t, timeDiff, localTimeForPollingMock/8*12/10) // give a 20% margin
-		fmt.Println(timeDiff, localTimeForPollingMock/8*12/10, localTimeForPollingMock/16*8/10)
-		require.Greater(t, timeDiff, localTimeForPollingMock/16*8/10) // give a 20% margin
+// TestChainTrackerPollsAtItsFlatInterval is the end-to-end cadence guard, replacing
+// TestChainTrackerFetchSpreadAcrossPollingTime (MAG-4398).
+//
+// That test drove the legacy adaptive scheduler: it fed 50 synthetic block gaps through
+// AddBlockGap to hold the sweep still, then asserted the tiers — base/16 on boot, widening as the
+// block aged. Both the sweep and the tiers are gone, so it was asserting a scheduler that no
+// longer exists. This one asserts the one that does: every poll waits the configured interval,
+// start to finish, through the real poll loop.
+//
+// It is the test the ticket asks for. PR #522 removed the adaptive path's only test along with
+// the block-time registry it watched, and a mutant that never adapted then passed every remaining
+// chaintracker test. With one cadence there is nothing to adapt, and this pins the cadence
+// instead.
+func TestChainTrackerPollsAtItsFlatInterval(t *testing.T) {
+	const (
+		blockTime = 500 * time.Millisecond
+		flat      = 50 * time.Millisecond
+		observe   = 10 * flat
+	)
+	var mu sync.Mutex
+	var gaps []time.Duration
+	lastCall := time.Now()
+	callback := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		gaps = append(gaps, time.Since(lastCall))
+		lastCall = time.Now()
+	}
+	mockChainFetcher := NewMockChainFetcher(1000, 50, callback)
+	mockChainFetcher.AdvanceBlock()
+
+	tracker, err := chaintracker.NewChainTracker(context.Background(), mockChainFetcher, chaintracker.ChainTrackerConfig{
+		BlocksToSave:          1,
+		AverageBlockTime:      blockTime,
+		ServerBlockMemory:     50,
+		ParseDirectiveEnabled: true,
+		FlatPollInterval:      flat,
 	})
+	require.NoError(t, err)
+	require.NoError(t, tracker.StartAndServe(context.Background()))
+	require.Equal(t, flat, tracker.CurrentPollInterval(), "the published cadence is the configured one")
+
+	time.Sleep(observe)
+	mu.Lock()
+	measured := append([]time.Duration(nil), gaps...)
+	mu.Unlock()
+
+	// The init fetch is the first call, so the gaps after it are the periodic ones. A loaded CI
+	// box stretches a timer but never shortens it, so the lower bound is the assertion that can
+	// fail on a regression and the upper bound carries a wide margin.
+	require.GreaterOrEqual(t, len(measured), 4, "the tracker must poll repeatedly: %v", measured)
+	for i, gap := range measured[1:] {
+		require.GreaterOrEqual(t, gap, flat*8/10,
+			"poll %d came %s after the previous one, faster than the configured %s: %v", i+1, gap, flat, measured)
+	}
+	// Nothing adapts any more: the cadence a block advance used to tighten stays put.
+	mockChainFetcher.AdvanceBlock()
+	time.Sleep(observe)
+	require.Equal(t, flat, tracker.CurrentPollInterval(),
+		"a block advance must not move the cadence — the adaptive tiers are gone")
 }
 
 func TestChainTrackerMaintainMemory(t *testing.T) {
@@ -431,11 +449,11 @@ func TestChainTrackerMaintainMemory(t *testing.T) {
 	mockChainFetcher := NewMockChainFetcher(1000, mockBlocks, nil)
 	currentLatestBlockInMock := mockChainFetcher.AdvanceBlock()
 
-	// used to identify if the fork callback was called
-	callbackCalledFork := false
+	// used to identify if the fork callback was called; it runs on the tracker's poll goroutine
+	var callbackCalledFork atomic.Bool
 	forkCallback := func(arg int64) {
 		utils.LavaFormatDebug("fork callback called")
-		callbackCalledFork = true
+		callbackCalledFork.Store(true)
 	}
 	chainTrackerConfig := chaintracker.ChainTrackerConfig{BlocksToSave: uint64(fetcherBlocks), AverageBlockTime: TimeForPollingMock, ServerBlockMemory: uint64(mockBlocks), ForkCallback: forkCallback, ParseDirectiveEnabled: true}
 	chainTracker, err := chaintracker.NewChainTracker(context.Background(), mockChainFetcher, chainTrackerConfig)
@@ -444,7 +462,7 @@ func TestChainTrackerMaintainMemory(t *testing.T) {
 	t.Run("one long test", func(t *testing.T) {
 		for _, tt := range tests {
 			utils.LavaFormatInfo(startedTestStr + tt.name)
-			callbackCalledFork = false
+			callbackCalledFork.Store(false)
 			for i := 0; i < int(tt.advancement); i++ {
 				currentLatestBlockInMock = mockChainFetcher.AdvanceBlock()
 			}
@@ -479,7 +497,7 @@ func TestChainTrackerMaintainMemory(t *testing.T) {
 				require.Equal(t, requestedHashes[idx].Block+1, requestedHashes[idx+1].Block, "latestBlock: %d, blockHashes: %v", latestBlock, requestedHashes)
 				require.True(t, mockChainFetcher.IsCorrectHash(requestedHashes[idx].Hash, requestedHashes[idx].Block))
 			}
-			require.False(t, callbackCalledFork)
+			require.False(t, callbackCalledFork.Load())
 		}
 	})
 }

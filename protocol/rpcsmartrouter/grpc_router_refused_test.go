@@ -47,17 +47,17 @@ func TestSendGRPCRelay_RefusedConnectionIsUnreachable(t *testing.T) {
 	}, 10*time.Second, 50*time.Millisecond, "a call on the closed port must fail")
 
 	require.Nil(t, result, "a refused connection is not an answer from the node")
-	require.Equal(t, common.LavaErrorConnectionRefused, extractLavaError(err))
+	require.Equal(t, common.LavaErrorConnectionRefused, common.AsLavaError(err))
 	var undelivered *common.GRPCCallUndeliveredError
 	require.ErrorAs(t, err, &undelivered)
 	require.False(t, common.IsClientCancellation(err, context.Background()), "the endpoint is not excused")
 
-	unhealthy, _ := classifyEndpointHealth(extractLavaError(err), false)
+	unhealthy, _ := classifyEndpointHealth(common.AsLavaError(err), false)
 	require.True(t, unhealthy, "the endpoint is still blamed, as it was")
-	require.Equal(t, lavasession.EndpointDisableUnreachable, endpointDisableReasonFor(extractLavaError(err)),
+	require.Equal(t, lavasession.EndpointDisableUnreachable, endpointDisableReasonFor(common.AsLavaError(err)),
 		"a closed gRPC port gives the reason a closed JSON-RPC port gives")
 
-	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, LavaError: extractLavaError(err)}, false)
+	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, LavaError: common.AsLavaError(err)}, false)
 	require.Equal(t, attemptOutcomeTransportError, attempt.outcome, "relay_end reads it as a transport error")
 	require.Equal(t, common.LavaErrorConnectionRefused.Name, attempt.errorCode)
 }

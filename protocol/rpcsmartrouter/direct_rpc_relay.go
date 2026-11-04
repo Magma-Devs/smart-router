@@ -209,7 +209,7 @@ func extractSolanaContextSlot(data []byte) (int64, bool) {
 func resultIsNotAnObject(obj []byte) bool {
 	i := 1 // past the opening brace
 	for {
-		i = skipJSONSpace(obj, i)
+		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i)
 		if i >= len(obj) || obj[i] != '"' {
 			return false
 		}
@@ -221,11 +221,11 @@ func resultIsNotAnObject(obj []byte) bool {
 		if bytes.IndexByte(name, '\\') >= 0 {
 			return false // an escaped name; leave it to the full read
 		}
-		i = skipJSONSpace(obj, i+nameEnd+2)
+		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i+nameEnd+2)
 		if i >= len(obj) || obj[i] != ':' {
 			return false
 		}
-		i = skipJSONSpace(obj, i+1)
+		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i+1)
 		if i >= len(obj) {
 			return false
 		}
@@ -235,25 +235,12 @@ func resultIsNotAnObject(obj []byte) bool {
 		if i = skipJSONScalar(obj, i); i < 0 {
 			return false
 		}
-		i = skipJSONSpace(obj, i)
+		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i)
 		if i >= len(obj) || obj[i] != ',' {
 			return false // the object ended, or a member was malformed, before result
 		}
 		i++
 	}
-}
-
-// skipJSONSpace returns the index of the first byte at or after i that is not JSON whitespace.
-func skipJSONSpace(b []byte, i int) int {
-	for i < len(b) {
-		switch b[i] {
-		case ' ', '\t', '\r', '\n':
-			i++
-		default:
-			return i
-		}
-	}
-	return i
 }
 
 // skipJSONScalar returns the index just past the string, number, true, false or null that
@@ -502,16 +489,16 @@ func (d *DirectRPCRelaySender) sendForInterface(
 	attemptBudget time.Duration,
 ) (*common.RelayResult, error) {
 	switch apiCollection.CollectionData.ApiInterface {
-	case "jsonrpc", "tendermintrpc":
+	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
 		return d.sendJSONRPCRelay(ctx, chainMessage, attemptBudget)
 
-	case "rest":
+	case spectypes.APIInterfaceRest:
 		return d.sendRESTRelay(ctx, chainMessage, attemptBudget)
 
-	case "graphql":
+	case spectypes.APIInterfaceGraphQL:
 		return d.sendGraphQLRelay(ctx, chainMessage, attemptBudget)
 
-	case "grpc":
+	case spectypes.APIInterfaceGrpc:
 		return d.sendGRPCRelay(ctx, chainMessage, attemptBudget)
 
 	default:
@@ -573,7 +560,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		URL:         nodeUrl.Url,
 		Body:        requestData,
 		Headers:     chainMessage.GetRPCMessage().GetHeaders(), // Preserves duplicates, empty value = delete
-		ContentType: "application/json",
+		ContentType: common.JSONContentType,
 	}
 
 	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendJSONRPCRelay)
@@ -819,7 +806,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		URL:         fullURL,
 		Body:        restBody, // As-is for a body method; nil for every other method (above)
 		Headers:     headers,  // Use Metadata (preserves delete semantics)
-		ContentType: "application/json",
+		ContentType: common.JSONContentType,
 	})
 	latency := time.Since(startTime)
 	tracing.RecordHTTPResponse(span, response)
@@ -942,7 +929,7 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		URL:         nodeUrl.Url,
 		Body:        graphqlMessage.Msg,
 		Headers:     graphqlMessage.GetHeaders(), // Preserves duplicates, empty value = delete
-		ContentType: "application/json",
+		ContentType: common.JSONContentType,
 	}
 
 	requestCtx, span := tracing.StartClientSpan(requestCtx, tracing.SpanSendGraphQLRelay)

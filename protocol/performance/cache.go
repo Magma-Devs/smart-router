@@ -261,22 +261,33 @@ func InitCacheWithKeyPrefix(ctx context.Context, addr, keyPrefix string) (*Cache
 }
 
 func (cache *Cache) GetEntry(ctx context.Context, relayCacheGet *pairingtypes.RelayCacheGet) (reply *pairingtypes.CacheRelayReply, err error) {
-	if cache == nil {
-		return nil, NotInitializedError
-	}
-
-	client := cache.clientStore.getClient()
-	if client == nil {
-		return nil, NotConnectedError
-	}
-
-	reply, err = client.GetRelay(ctx, cache.scopedGet(relayCacheGet))
+	err = cache.call(func(client pairingtypes.RelayerCacheClient) (err error) {
+		reply, err = client.GetRelay(ctx, cache.scopedGet(relayCacheGet))
+		return err
+	})
 	if err != nil {
-		cache.clientStore.resetOnConnectionError(err)
 		return reply, err
 	}
 	cache.noteKeyspaceEcho(reply.GetKeyPrefix())
 	return reply, nil
+}
+
+// call runs one RPC on the live connection: NotInitializedError without a
+// client, NotConnectedError while the connection is being re-established, and
+// a connection-level failure resets it so the next call redials.
+func (cache *Cache) call(rpc func(client pairingtypes.RelayerCacheClient) error) error {
+	if cache == nil {
+		return NotInitializedError
+	}
+	client := cache.clientStore.getClient()
+	if client == nil {
+		return NotConnectedError
+	}
+	err := rpc(client)
+	if err != nil {
+		cache.clientStore.resetOnConnectionError(err)
+	}
+	return err
 }
 
 // noteKeyspaceEcho reads the keyspace echo off a reply. A cache server from
@@ -434,20 +445,10 @@ func (cache *Cache) DebugCacheState() DebugCacheState {
 }
 
 func (cache *Cache) SetEntry(ctx context.Context, cacheSet *pairingtypes.RelayCacheSet) error {
-	if cache == nil {
-		return NotInitializedError
-	}
-
-	client := cache.clientStore.getClient()
-	if client == nil {
-		return NotConnectedError
-	}
-
-	_, err := client.SetRelay(ctx, cache.scopedSet(cacheSet))
-	if err != nil {
-		cache.clientStore.resetOnConnectionError(err)
-	}
-	return err
+	return cache.call(func(client pairingtypes.RelayerCacheClient) error {
+		_, err := client.SetRelay(ctx, cache.scopedSet(cacheSet))
+		return err
+	})
 }
 
 // Flush asks the cache-be server to drop every entry it holds. Reached only
@@ -456,20 +457,10 @@ func (cache *Cache) SetEntry(ctx context.Context, cacheSet *pairingtypes.RelayCa
 // NotConnectedError while the gRPC client is reconnecting; callers can treat
 // both as "no external cache to flush" and proceed.
 func (cache *Cache) Flush(ctx context.Context) error {
-	if cache == nil {
-		return NotInitializedError
-	}
-
-	client := cache.clientStore.getClient()
-	if client == nil {
-		return NotConnectedError
-	}
-
-	_, err := client.FlushCache(ctx, &emptypb.Empty{})
-	if err != nil {
-		cache.clientStore.resetOnConnectionError(err)
-	}
-	return err
+	return cache.call(func(client pairingtypes.RelayerCacheClient) error {
+		_, err := client.FlushCache(ctx, &emptypb.Empty{})
+		return err
+	})
 }
 
 // BackendEndpoint returns the cache-be address this client is configured
@@ -497,38 +488,19 @@ func (cache *Cache) Close() error {
 // backend so peer pods can borrow it (the fleet tracker gate, MAG-2981). Fire-and-forget at the
 // call site: a failed publish only costs a peer one real poll.
 func (cache *Cache) SetEndpointObservation(ctx context.Context, set *pairingtypes.EndpointObservationSet) error {
-	if cache == nil {
-		return NotInitializedError
-	}
-
-	client := cache.clientStore.getClient()
-	if client == nil {
-		return NotConnectedError
-	}
-
-	_, err := client.SetEndpointObservation(ctx, set)
-	if err != nil {
-		cache.clientStore.resetOnConnectionError(err)
-	}
-	return err
+	return cache.call(func(client pairingtypes.RelayerCacheClient) error {
+		_, err := client.SetEndpointObservation(ctx, set)
+		return err
+	})
 }
 
 // GetEndpointObservation reads the freshest peer observation of an upstream endpoint. A miss
 // is a reply with Found=false, not an error.
-func (cache *Cache) GetEndpointObservation(ctx context.Context, get *pairingtypes.EndpointObservationGet) (*pairingtypes.EndpointObservationReply, error) {
-	if cache == nil {
-		return nil, NotInitializedError
-	}
-
-	client := cache.clientStore.getClient()
-	if client == nil {
-		return nil, NotConnectedError
-	}
-
-	reply, err := client.GetEndpointObservation(ctx, get)
-	if err != nil {
-		cache.clientStore.resetOnConnectionError(err)
-	}
+func (cache *Cache) GetEndpointObservation(ctx context.Context, get *pairingtypes.EndpointObservationGet) (reply *pairingtypes.EndpointObservationReply, err error) {
+	err = cache.call(func(client pairingtypes.RelayerCacheClient) (err error) {
+		reply, err = client.GetEndpointObservation(ctx, get)
+		return err
+	})
 	return reply, err
 }
 
@@ -537,24 +509,18 @@ func (cache *Cache) GetEndpointObservation(ctx context.Context, get *pairingtype
 // must not treat as "unclaimed" — inventing a claim there is exactly the cross-pod split that
 // sticky sessions exist to prevent.
 func (cache *Cache) GetStickySession(ctx context.Context, chainId, apiInterface, service, stickyId string) (core.StickyPin, bool, error) {
-	if cache == nil {
-		return core.StickyPin{}, false, NotInitializedError
-	}
-
-	client := cache.clientStore.getClient()
-	if client == nil {
-		return core.StickyPin{}, false, NotConnectedError
-	}
-
-	reply, err := client.GetStickySession(ctx, &pairingtypes.StickySessionGet{
-		ChainId:      chainId,
-		ApiInterface: apiInterface,
-		Service:      service,
-		StickyId:     stickyId,
-		KeyPrefix:    cache.keyPrefix,
+	var reply *pairingtypes.StickySessionReply
+	err := cache.call(func(client pairingtypes.RelayerCacheClient) (err error) {
+		reply, err = client.GetStickySession(ctx, &pairingtypes.StickySessionGet{
+			ChainId:      chainId,
+			ApiInterface: apiInterface,
+			Service:      service,
+			StickyId:     stickyId,
+			KeyPrefix:    cache.keyPrefix,
+		})
+		return err
 	})
 	if err != nil {
-		cache.clientStore.resetOnConnectionError(err)
 		return core.StickyPin{}, false, err
 	}
 	cache.noteKeyspaceEcho(reply.GetKeyPrefix())
@@ -569,27 +535,21 @@ func (cache *Cache) GetStickySession(ctx context.Context, chainId, apiInterface,
 // endpoint-observation publish this is NOT fire-and-forget — a lost publish would leave this pod
 // routing on a claim no peer knows about, which is the split the guarantee rules out.
 func (cache *Cache) SetStickySessionIfAbsent(ctx context.Context, chainId, apiInterface, service, stickyId string, pin core.StickyPin, ttl time.Duration) (core.StickyPin, error) {
-	if cache == nil {
-		return core.StickyPin{}, NotInitializedError
-	}
-
-	client := cache.clientStore.getClient()
-	if client == nil {
-		return core.StickyPin{}, NotConnectedError
-	}
-
-	reply, err := client.SetStickySession(ctx, &pairingtypes.StickySessionSet{
-		ChainId:      chainId,
-		ApiInterface: apiInterface,
-		Service:      service,
-		StickyId:     stickyId,
-		Provider:     pin.Provider,
-		Epoch:        pin.Epoch,
-		TtlMs:        ttl.Milliseconds(),
-		KeyPrefix:    cache.keyPrefix,
+	var reply *pairingtypes.StickySessionReply
+	err := cache.call(func(client pairingtypes.RelayerCacheClient) (err error) {
+		reply, err = client.SetStickySession(ctx, &pairingtypes.StickySessionSet{
+			ChainId:      chainId,
+			ApiInterface: apiInterface,
+			Service:      service,
+			StickyId:     stickyId,
+			Provider:     pin.Provider,
+			Epoch:        pin.Epoch,
+			TtlMs:        ttl.Milliseconds(),
+			KeyPrefix:    cache.keyPrefix,
+		})
+		return err
 	})
 	if err != nil {
-		cache.clientStore.resetOnConnectionError(err)
 		return core.StickyPin{}, err
 	}
 	cache.noteKeyspaceEcho(reply.GetKeyPrefix())

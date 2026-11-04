@@ -195,10 +195,11 @@ func (rp *RelayProcessor) perGroupQuorum() bool {
 	return rp.crossValidationParams != nil && rp.crossValidationParams.PerGroupQuorum
 }
 
-// qualifyingGroupCount returns how many groups in the per-group breakdown independently reached the
+// QualifyingGroupCount returns how many groups in the per-group breakdown independently reached the
 // agreement threshold for a single hash — i.e. the number of groups that "corroborate" that hash. This is
-// the per-group-quorum analogue of "distinct groups" (len(groupCounts)).
-func qualifyingGroupCount(groupCounts map[string]int, threshold int) int {
+// the per-group-quorum analogue of "distinct groups" (len(groupCounts)). The router's capacity and
+// post-filter guards count groups of providers/sessions with it the same way.
+func QualifyingGroupCount(groupCounts map[string]int, threshold int) int {
 	n := 0
 	for _, c := range groupCounts {
 		if c >= threshold {
@@ -222,7 +223,7 @@ func qualifyingGroupCount(groupCounts map[string]int, threshold int) int {
 // where that diversity rests on groups too small to corroborate a value on their own.
 func (rp *RelayProcessor) hashQuorumReached(count int, groupCounts map[string]int, threshold, minGroups int) bool {
 	if rp.perGroupQuorum() {
-		return qualifyingGroupCount(groupCounts, threshold) >= minGroups
+		return QualifyingGroupCount(groupCounts, threshold) >= minGroups
 	}
 	return count >= threshold && len(groupCounts) >= minGroups
 }
@@ -1103,7 +1104,7 @@ func selectQuorumWinner(guid uint64, countMap map[[32]byte]*resultCount, results
 			w.maxCount = count.count
 		}
 		if perGroup {
-			qualGroups := qualifyingGroupCount(count.groupCounts, crossValidationSize)
+			qualGroups := QualifyingGroupCount(count.groupCounts, crossValidationSize)
 			if qualGroups > 0 {
 				w.anyGroupReachedQuorum = true
 			}

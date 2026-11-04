@@ -154,7 +154,7 @@ func (r *batchSignatureRegistry) admit(spec, signature string) bool {
 //
 // It is idempotent, because a collapsed value carries no batchMethodSeparator. That
 // matters: the public recorders delegate to one another (RecordDirectRelayEnd →
-// RecordRelaySuccess → AddEndpointRelayServiced), and each normalizes at its own
+// recordRelayOutcome → AddEndpointRelayServiced), and each normalizes at its own
 // boundary so that calling any of them directly is still safe.
 func (m *SmartRouterMetricsManager) normalizeMethodLabel(spec, method string) string {
 	if m == nil {

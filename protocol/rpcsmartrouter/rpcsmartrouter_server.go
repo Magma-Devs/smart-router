@@ -978,7 +978,7 @@ func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.C
 				utils.LogAttr("GUID", ctx))
 		}
 		groupCounts := rpcss.sessionManager.GroupCountsForRequest(addon, extensions, ctx)
-		adequateGroups := countAdequateGroups(groupCounts, params.AgreementThreshold)
+		adequateGroups := relaycore.QualifyingGroupCount(groupCounts, params.AgreementThreshold)
 		if adequateGroups < params.MinGroups {
 			return common.CrossValidationReasonInsufficientGroups, utils.LavaFormatError("per-group cross-validation: too few candidate groups have enough providers to each reach the agreement threshold",
 				lavasession.PairingListEmptyError,
@@ -994,19 +994,6 @@ func (rpcss *RPCSmartRouterServer) validateCrossValidationCapacity(ctx context.C
 	return "", nil
 }
 
-// countAdequateGroups returns how many groups in the per-group breakdown have at least `threshold`
-// providers/sessions — i.e. how many groups can independently reach their internal quorum. Mirrors
-// relaycore's per-group qualifying-group count for the capacity/post-filter guards.
-func countAdequateGroups(groupCounts map[string]int, threshold int) int {
-	n := 0
-	for _, c := range groupCounts {
-		if c >= threshold {
-			n++
-		}
-	}
-	return n
-}
-
 // crossValidationGroupShortfall evaluates whether a set of per-group counts can still satisfy the group
 // requirement of a cross-validation policy, returning the qualifying-group count and a non-empty structured
 // fail reason when it cannot. For PerGroupQuorum a group qualifies only with >= AgreementThreshold members
@@ -1018,7 +1005,7 @@ func crossValidationGroupShortfall(groupCounts map[string]int, params *common.Cr
 		return len(groupCounts), ""
 	}
 	if params.PerGroupQuorum {
-		qualifying = countAdequateGroups(groupCounts, params.AgreementThreshold)
+		qualifying = relaycore.QualifyingGroupCount(groupCounts, params.AgreementThreshold)
 		if qualifying < params.MinGroups {
 			return qualifying, common.CrossValidationReasonInsufficientGroups
 		}
@@ -1498,7 +1485,7 @@ func withUnclearWriteStatus(result *common.RelayResult) *common.RelayResult {
 // the one the results manager records for the attempt: the sender's own when it wrapped one,
 // otherwise the same message-based fallback.
 func relayFailureLogAttrs(err error, attrs ...utils.Attribute) []utils.Attribute {
-	classified := extractLavaError(err)
+	classified := common.AsLavaError(err)
 	if classified == nil {
 		classified = common.ClassifyError(common.DetectConnectionError(err), common.ChainFamilyUnknown, common.TransportGRPC, 0, err.Error())
 	}
@@ -2114,6 +2101,54 @@ func primaryLookupVerdict(cacheError error, cacheReply *pairingtypes.CacheRelayR
 	return hit, unusable, outcome
 }
 
+// cachedRelayResult is the relay result a cache hit of either tier is served as.
+// isNodeError serves the entry truthfully, so a cached node error carries the
+// lava-identified-node-error header exactly like a live one. The provider address
+// is empty, which renders as "Cached".
+func cachedRelayResult(reply *pairingtypes.RelayReply, relayData *pairingtypes.RelayPrivateData, statusCode int, isNodeError bool, cacheLookup common.CacheLookupReport) common.RelayResult {
+	return common.RelayResult{
+		Reply: reply,
+		Request: &pairingtypes.RelayRequest{
+			RelayData: relayData,
+		},
+		Finalized:    false, // cache responses are not considered finalized
+		StatusCode:   statusCode,
+		IsNodeError:  isNodeError,
+		ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
+		CacheLookup:  cacheLookup,
+	}
+}
+
+// serveCacheHit answers the request with a cache hit of either tier and counts it.
+//
+// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was current
+// when the response was CACHED — it is not a fresh observation of the chain head and
+// is not gated on tip-eligibility, so it must NOT feed tip state (it would plant a
+// long-historical block as the chain head). Tip state is advanced only by
+// tip-eligible live relays (harvestAndUpdateTipFromRelay) and the per-endpoint
+// observation store, never by cache replays; nothing here reads it.
+func (rpcss *RPCSmartRouterServer) serveCacheHit(relayProcessor *relaycore.RelayProcessor, relayResult common.RelayResult, analytics *metrics.RelayMetrics, protocolMessage chainlib.ChainMessage) {
+	relayProcessor.SetResponse(&relaycore.RelayResponse{
+		RelayResult: relayResult,
+		Err:         nil,
+	})
+	if analytics == nil {
+		analytics = &metrics.RelayMetrics{}
+	}
+	classifyRequest(analytics, protocolMessage)
+	chainId, apiInterface := rpcss.GetChainIdAndApiInterface()
+	rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
+}
+
+// classifyRequest sets the request-class flags the smartrouter_requests_* group splits on; each is
+// a pure function of the message.
+func classifyRequest(analytics *metrics.RelayMetrics, chainMessage chainlib.ChainMessage) {
+	analytics.IsWrite = chainlib.GetStateful(chainMessage) != common.NO_STATE
+	analytics.IsArchive = chainqueries.IsArchiveRequest(chainMessage)
+	analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(chainMessage)
+	analytics.IsBatch = chainqueries.IsBatchRequest(chainMessage)
+}
+
 func (rpcss *RPCSmartRouterServer) resolveRequestedBlock(reqBlock int64, seenBlock int64, latestBlockHashRequested int64, protocolMessage chainlib.ProtocolMessage) int64 {
 	if reqBlock == spectypes.LATEST_BLOCK && seenBlock != 0 {
 		// make optimizer select an endpoint that is likely to have the latest seen block
@@ -2703,10 +2738,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 	// the analytics consumer (AddMetricForHttp). The goroutines only READ analytics from here on
 	// (RecordDirectRelayEnd), and the request-level Success is set once in SendParsedRelay.
 	if analytics != nil {
-		analytics.IsWrite = chainlib.GetStateful(chainMessage) != common.NO_STATE
-		analytics.IsArchive = chainqueries.IsArchiveRequest(chainMessage)
-		analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(chainMessage)
-		analytics.IsBatch = chainqueries.IsBatchRequest(chainMessage)
+		classifyRequest(analytics, chainMessage)
 	}
 
 	// Cross-validation relays are detached from the batch cancel (MAG-2187): ProcessRelaySend cancels
@@ -5253,7 +5285,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 								utils.LogAttr("size", len(reply.Data)),
 							)
 						}
-						// handle cache reply
+						rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
+						// handle cache reply: primaryOutcome is a hit exactly on this branch
 						if cacheError == nil && reply != nil && !unusable {
 							// Cache hit - return cached response
 							utils.LavaFormatDebug("cache hit",
@@ -5271,46 +5304,15 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							isNodeError, resolvedData := classifyCachedEntry(ctx, protocolMessage, metrics.CacheTierPrimary, cacheReply, reply.Data)
 							reply.Data = resolvedData
 
-							relayResult := common.RelayResult{
-								Reply: reply,
-								Request: &pairingtypes.RelayRequest{
-									RelayData: localRelayData,
-								},
-								Finalized: false, // cache responses are not considered finalized
-								// 200 is correct even for a cached node error: a node error is
-								// delivered inside a 2xx body (that is what IsNodeError marks), so
-								// this matches what a live relay of the same response reports.
-								StatusCode: 200,
-								// Served truthfully, so a cached node error carries the
-								// lava-identified-node-error header exactly like a live one.
-								IsNodeError:  isNodeError,
-								ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
-								// The secondary is only consulted after a primary non-hit, so it
-								// keeps whichever not-consulted value it was seeded with.
-								CacheLookup: cacheReport.ServedBy(common.CacheTierPrimary),
-							}
-							// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was
-							// current when the response was CACHED — it is not a fresh observation of the
-							// chain head and is not gated on tip-eligibility, so it must NOT feed tip
-							// state (it would plant a long-historical block as the chain head). Tip state
-							// is advanced only by tip-eligible live relays (harvestAndUpdateTipFromRelay)
-							// and the per-endpoint observation store, never by cache replays.
-							relayProcessor.SetResponse(&relaycore.RelayResponse{
-								RelayResult: relayResult,
-								Err:         nil,
-							})
-							if analytics == nil {
-								analytics = &metrics.RelayMetrics{}
-							}
-							analytics.IsWrite = chainlib.GetStateful(protocolMessage) != 0
-							analytics.IsArchive = chainqueries.IsArchiveRequest(protocolMessage)
-							analytics.IsDebugTrace = chainqueries.IsDebugOrTraceRequest(protocolMessage)
-							analytics.IsBatch = chainqueries.IsBatchRequest(protocolMessage)
-							rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
-							rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, metrics.CacheOutcomeHit, cacheLatencyMs)
+							// 200 is correct even for a cached node error: a node error is
+							// delivered inside a 2xx body (that is what IsNodeError marks), so
+							// this matches what a live relay of the same response reports. The
+							// secondary is only consulted after a primary non-hit, so it keeps
+							// whichever not-consulted value it was seeded with.
+							relayResult := cachedRelayResult(reply, localRelayData, http.StatusOK, isNodeError, cacheReport.ServedBy(common.CacheTierPrimary))
+							rpcss.serveCacheHit(relayProcessor, relayResult, analytics, protocolMessage)
 							return nil
 						}
-						rpcss.smartRouterEndpointMetrics.RecordCacheResult(chainId, apiInterface, protocolMessage.GetApi().GetName(), metrics.CacheTierPrimary, primaryOutcome, cacheLatencyMs)
 						// Cache miss - will relay to endpoint
 						latestBlockHashRequested, earliestBlockHashRequested = rpcss.getEarliestBlockHashRequestedFromCacheReply(cacheReply)
 						utils.LavaFormatTrace("[Archive Debug] Reading block hashes from cache", utils.LogAttr("latestBlockHashRequested", latestBlockHashRequested), utils.LogAttr("earliestBlockHashRequested", earliestBlockHashRequested), utils.LogAttr("GUID", ctx))
@@ -5635,7 +5637,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 
 		// Classify error using the error registry and decide on health tracking
 		// Try to extract LavaError from classifiedError (already classified by classifyAndWrap)
-		classified := extractLavaError(err)
+		classified := common.AsLavaError(err)
 		if classified == nil {
 			// Fallback: derive transport and chain family, classify from scratch
 			errorCode := 0

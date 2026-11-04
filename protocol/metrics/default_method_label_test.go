@@ -244,8 +244,8 @@ func TestMethodRecordersTakeANameThatIsNotUTF8(t *testing.T) {
 	name := defaultName("/x/\xff")
 	require.NotPanics(t, func() {
 		m.RecordDirectRelayStart("LAV1", "rest", "ep-utf8", name)
-		m.RecordRelaySuccess("LAV1", "rest", "ep-utf8", name, 12)
-		m.RecordRelayError("LAV1", "rest", "ep-utf8", name)
+		m.recordRelayOutcome("LAV1", "rest", "ep-utf8", name, true, 12)
+		m.recordRelayOutcome("LAV1", "rest", "ep-utf8", name, false, 0)
 		m.RecordRouterEndToEndLatency("LAV1", "rest", name, 12)
 		m.SetEndpointEndToEndLatency("LAV1", "rest", "ep-utf8", name, 12)
 		m.RecordCacheResult("LAV1", "rest", name, "hot", "hit", 1)

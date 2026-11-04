@@ -962,6 +962,8 @@ func TestClassifyError_GenericJsonRPCMappings(t *testing.T) {
 		{"method not found code", -32601, "", LavaErrorNodeMethodNotFound},
 		{"parse error code", -32700, "", LavaErrorUserParseError},
 		{"invalid request code", -32600, "", LavaErrorUserInvalidRequest},
+		{"invalid request with message", -32600, "Invalid request", LavaErrorUserInvalidRequest},
+		{"alchemy unsupported method", -32600, "Unsupported method: bb_getaddress on BITCOIN_TESTNET4", LavaErrorNodeMethodNotSupported},
 		{"invalid params code", -32602, "", LavaErrorUserInvalidParams},
 		{"internal error code", -32603, "", LavaErrorNodeInternalError},
 		{"server error code", -32000, "some error", LavaErrorNodeServerError},

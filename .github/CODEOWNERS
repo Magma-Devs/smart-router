@@ -1,9 +1,8 @@
 # Code owners for smart-router.
 #
 # GitHub auto-requests a review from the matching owner on every PR that
-# touches a path below, and (when "Require review from Code Owners" is on
-# in branch protection) that review is required to satisfy the PR gate in
-# .github/workflows/pr-gate-on-approval.yml.
+# touches a path below. When "Require review from Code Owners" is on in the
+# main branch ruleset, that review is required to merge.
 #
 # Order matters: the LAST matching pattern wins. The catch-all comes first
 # so more specific rules below can override it.
