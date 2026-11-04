@@ -61,15 +61,20 @@ const (
 	CACHE_TIER_HEADER_NAME    = "Lava-Cache-Tier"
 	CACHE_OUTCOME_HEADER_NAME = "Lava-Cache-Outcome"
 	// these headers need to be lowercase
-	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME         = "lava-providers-block"
-	RELAY_TIMEOUT_HEADER_NAME                     = "lava-relay-timeout"
-	EXTENSION_OVERRIDE_HEADER_NAME                = "lava-extension"
-	FORCE_CACHE_REFRESH_HEADER_NAME               = "lava-force-cache-refresh"
-	LAVA_DEBUG_RELAY                              = "lava-debug-relay"
-	LAVA_LB_UNIQUE_ID_HEADER                      = "lava-lb-unique-id"
-	SELECTION_STATS_HEADER_NAME                   = "lava-selection-stats"
-	STICKINESS_HEADER_NAME                        = "lava-stickiness"
-	SELECT_PROVIDER_HEADER_NAME                   = "lava-select-provider"
+	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME = "lava-providers-block"
+	RELAY_TIMEOUT_HEADER_NAME             = "lava-relay-timeout"
+	EXTENSION_OVERRIDE_HEADER_NAME        = "lava-extension"
+	FORCE_CACHE_REFRESH_HEADER_NAME       = "lava-force-cache-refresh"
+	LAVA_DEBUG_RELAY                      = "lava-debug-relay"
+	LAVA_LB_UNIQUE_ID_HEADER              = "lava-lb-unique-id"
+	SELECTION_STATS_HEADER_NAME           = "lava-selection-stats"
+	STICKINESS_HEADER_NAME                = "lava-stickiness"
+	SELECT_PROVIDER_HEADER_NAME           = "lava-select-provider"
+	// SELECT_PROVIDER_STRICT_HEADER_NAME, set to "true" next to lava-select-provider, makes the
+	// selection a strict pin: the named provider answers or the request fails, with no retry, hedge
+	// or consistency-gate reroute on another provider. Without it lava-select-provider pins the first
+	// attempt only. lava-stickiness is always strict and needs no such header (MAG-4826).
+	SELECT_PROVIDER_STRICT_HEADER_NAME            = "lava-select-provider-strict"
 	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS      = "lava-cross-validation-max-participants"
 	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD   = "lava-cross-validation-agreement-threshold"
 	CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME    = "lava-cross-validation-all-providers"
@@ -140,6 +145,15 @@ const (
 	CrossValidationStragglerOutcomeNotReceived   = "not-received"   // nothing arrived before the watcher deadline
 )
 
+// INTERNAL_PROBE_HEADER_NAME marks a request sent by our own monitoring (the hub's serving probes)
+// rather than by a customer. Its presence is the signal; the value is ignored. Such a request is
+// routed and answered like any other, but it does not count as activity for idle mode, so a probed
+// chain can still go idle (MAG-4797). It is a directive header: stripped before the request is
+// forwarded upstream and before the cache key is built.
+// Named smartrouter-*, after Smart-Router-Version: a header minted here does not take the lava-
+// prefix of the older directives.
+const INTERNAL_PROBE_HEADER_NAME = "smartrouter-internal-probe"
+
 var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
 	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME:       {},
 	RELAY_TIMEOUT_HEADER_NAME:                   {},
@@ -148,6 +162,8 @@ var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
 	LAVA_DEBUG_RELAY:                            {},
 	STICKINESS_HEADER_NAME:                      {},
 	SELECT_PROVIDER_HEADER_NAME:                 {},
+	SELECT_PROVIDER_STRICT_HEADER_NAME:          {},
+	INTERNAL_PROBE_HEADER_NAME:                  {},
 	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    {},
 	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: {},
 }
@@ -259,7 +275,14 @@ func (nurl NodeUrl) ShouldSkipVerification(name string) bool {
 // collection in addition to whatever its addons name. True for every url that
 // has not opted out — see StandaloneAddons.
 func (nurl NodeUrl) ServesBaseCollection() bool {
-	return !nurl.StandaloneAddons || len(nurl.Addons) == 0
+	return ServesBaseCollection(nurl.StandaloneAddons, len(nurl.Addons))
+}
+
+// ServesBaseCollection is the predicate behind NodeUrl.ServesBaseCollection, shared with
+// the session layer's Endpoint, which carries copies of the same two fields: a url serves
+// the base collection unless it declared standalone add-ons and named at least one.
+func ServesBaseCollection(standaloneAddons bool, addonCount int) bool {
+	return !standaloneAddons || addonCount == 0
 }
 
 func (nurl NodeUrl) String() string {

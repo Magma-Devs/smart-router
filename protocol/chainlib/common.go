@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
@@ -18,6 +19,8 @@ import (
 	"github.com/gofiber/websocket/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	common "github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -104,6 +107,26 @@ type BaseChainProxy struct {
 	HashedNodeUrl    string
 }
 
+// traceAttrs are the GUID, request, task and transaction ids a log line reads from ctx, followed
+// by the line's own attributes.
+func traceAttrs(ctx context.Context, attrs ...utils.Attribute) []utils.Attribute {
+	return append([]utils.Attribute{
+		{Key: "GUID", Value: ctx},
+		{Key: utils.KEY_REQUEST_ID, Value: ctx},
+		{Key: utils.KEY_TASK_ID, Value: ctx},
+		{Key: utils.KEY_TRANSACTION_ID, Value: ctx},
+	}, attrs...)
+}
+
+// requireNodeUrl refuses a provider endpoint configured with no node url; every chain proxy
+// talks to its endpoint's first one.
+func requireNodeUrl(rpcProviderEndpoint lavasession.RPCProviderEndpoint) error {
+	if len(rpcProviderEndpoint.NodeUrls) == 0 {
+		return utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil, utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID}, utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface})
+	}
+	return nil
+}
+
 // returns the node url and chain id for that proxy.
 func (bcp *BaseChainProxy) GetChainProxyInformation() (common.NodeUrl, string) {
 	return bcp.NodeUrl, bcp.ChainID
@@ -114,6 +137,17 @@ func (bcp *BaseChainProxy) CapTimeoutForSend(ctx context.Context, chainMessage C
 	processingTimeout := common.GetTimeoutForProcessing(relayTimeout, GetTimeoutInfo(chainMessage))
 	connectCtx, cancel := bcp.NodeUrl.LowerContextTimeout(ctx, processingTimeout)
 	return connectCtx, cancel
+}
+
+// relayBodyForLog is the form of a client's request body that the listeners' log lines carry: its
+// head and tail, relayMsgLogMaxChars bytes in all, cut on rune boundaries. A body holds what the
+// client sends, signed transactions included, and the request line is written at info, so the whole
+// body is logged only when --debug-relays asks for it.
+func relayBodyForLog(body string, debugRelays bool) string {
+	if debugRelays {
+		return body
+	}
+	return utils.FormatLongString(body, relayMsgLogMaxChars)
 }
 
 func extractDappIDFromFiberContext(c *fiber.Ctx) (dappID string) {
@@ -500,7 +534,8 @@ func GetHeaderFromCachedMap(headers map[string][]string, key string, defaultValu
 	return defaultValue
 }
 
-// rest request headers are formatted like map[string]string
+// convertToMetadataMap flattens HTTP request headers, joining a repeated header's values with
+// ", ". The HTTP listeners use it for the client headers they relay.
 func convertToMetadataMap(md map[string][]string) []pairingtypes.Metadata {
 	metadata := make([]pairingtypes.Metadata, len(md))
 	indexer := 0
@@ -511,7 +546,8 @@ func convertToMetadataMap(md map[string][]string) []pairingtypes.Metadata {
 	return metadata
 }
 
-// rest response headers / grpc headers are formatted like map[string][]string
+// convertToMetadataMapOfSlices keeps only the first value of each key. It carries node reply
+// headers (REST, GraphQL) and gRPC metadata, both ways.
 func convertToMetadataMapOfSlices(md map[string][]string) []pairingtypes.Metadata {
 	metadata := make([]pairingtypes.Metadata, len(md))
 	indexer := 0
@@ -525,9 +561,32 @@ func convertToMetadataMapOfSlices(md map[string][]string) []pairingtypes.Metadat
 func convertRelayMetaDataToMDMetaData(md []pairingtypes.Metadata) metadata.MD {
 	responseMetaData := make(metadata.MD)
 	for _, v := range md {
-		responseMetaData[v.Name] = append(responseMetaData[v.Name], v.Value)
+		responseMetaData[v.Name] = append(responseMetaData[v.Name], sendableGrpcValue(v.Name, v.Value))
 	}
 	return responseMetaData
+}
+
+// sendableGrpcValue percent-encodes the bytes gRPC refuses in a non-binary header value
+// (anything outside printable ASCII, and the % that escapes them). gRPC drops every reply
+// header when one value has such a byte, so one value must not cost the rest.
+func sendableGrpcValue(name, value string) string {
+	if strings.HasSuffix(strings.ToLower(name), "-bin") {
+		return value
+	}
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; c < 0x20 || c > 0x7e {
+			var b strings.Builder
+			for j := 0; j < len(value); j++ {
+				if c := value[j]; c < 0x20 || c > 0x7e || c == '%' {
+					fmt.Fprintf(&b, "%%%02X", c)
+				} else {
+					b.WriteByte(c)
+				}
+			}
+			return b.String()
+		}
+	}
+	return value
 }
 
 // split two requested blocks to the most advanced and most behind
@@ -542,18 +601,21 @@ func convertRelayMetaDataToMDMetaData(md []pairingtypes.Metadata) metadata.MD {
 func CompareRequestedBlockInBatch(currentLatestRequestedBlock, currentEarliestRequestedBlock, parsedBlock int64) (latestCombinedBlock int64, earliestCombinedBlock int64) {
 	latestCallback := func(currentLatest int64, parsedBlock int64) int64 {
 		if currentLatest < 0 && parsedBlock < 0 {
-			return utils.Max(currentLatest, parsedBlock)
+			return max(currentLatest, parsedBlock)
 		}
 
-		if currentLatest > 0 && parsedBlock < 0 && parsedBlock != spectypes.EARLIEST_BLOCK {
+		// Block 0 is a numeric block like any other on this side: a "latest"-style sentinel is
+		// newer than it, so a batch mixing "latest" with block 0 asks about "latest", not about
+		// block 0 (which the cache would file as finalized).
+		if currentLatest >= 0 && parsedBlock < 0 && parsedBlock != spectypes.EARLIEST_BLOCK {
 			return parsedBlock
 		}
 
-		if currentLatest < 0 && parsedBlock > 0 && currentLatest != spectypes.EARLIEST_BLOCK {
+		if currentLatest < 0 && parsedBlock >= 0 && currentLatest != spectypes.EARLIEST_BLOCK {
 			return currentLatest
 		}
 
-		return utils.Max(currentLatest, parsedBlock)
+		return max(currentLatest, parsedBlock)
 	}
 
 	return latestCallback(currentLatestRequestedBlock, parsedBlock), CombineEarliestRequestedBlock(currentEarliestRequestedBlock, parsedBlock)
@@ -573,7 +635,7 @@ func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
 	}
 
 	if currentEarliest < 0 && parsedBlock < 0 {
-		return utils.Min(currentEarliest, parsedBlock)
+		return min(currentEarliest, parsedBlock)
 	}
 
 	if currentEarliest > 0 && parsedBlock < 0 {
@@ -584,7 +646,7 @@ func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
 		return parsedBlock
 	}
 
-	return utils.Min(currentEarliest, parsedBlock)
+	return min(currentEarliest, parsedBlock)
 }
 
 // GetRelayTimeout returns the per-attempt WINDOW: how long an endpoint is expected to take, and so
@@ -688,6 +750,23 @@ func stripBrotliAcceptEncoding(c *fiber.Ctx) error {
 		}
 	}
 	return c.Next()
+}
+
+// chainListenerBase holds what every chain listener is built with, and the address it
+// listens on once Serve has bound it.
+type chainListenerBase struct {
+	endpoint         *lavasession.RPCEndpoint
+	relaySender      RelaySender
+	healthReporter   HealthReporter
+	logger           *metrics.RPCConsumerLogs
+	listeningAddress atomic.Pointer[string]
+}
+
+func (apil *chainListenerBase) GetListeningAddress() string {
+	if p := apil.listeningAddress.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // setup a common preflight and cors configuration allowing wild cards and preflight caching.

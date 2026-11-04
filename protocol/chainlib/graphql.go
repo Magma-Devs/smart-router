@@ -4,11 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
-	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
@@ -127,7 +124,7 @@ func (apip *GraphQLChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 
 	parsedInput := parser.NewParsedInput()
 	parsedInput.SetBlock(spectypes.NOT_APPLICABLE)
-	return apip.newChainMessage(apiCont.api, parsedInput, nil, graphqlMessage, apiCollection), nil
+	return newParsedChainMessage(apiCont.api, apiCollection, parsedInput, nil, graphqlMessage, graphqlMessage.CheckResponseError), nil
 }
 
 // ParseMsg parses a GraphQL request body into a chain message.
@@ -280,32 +277,16 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 	if len(graphqlMessage.RootFields) > 1 || earliestRequestedBlock != latestRequestedBlock {
 		earliest = &earliestRequestedBlock
 	}
-	nodeMsg := apip.newChainMessage(combinedApi, parsedInput, blockHashes, graphqlMessage, apiCollection)
+	// A multi-root request has a combined api name that matches no parse directive, so
+	// GetParseDirective returns nil for it — which is the safe direction: a request that
+	// merely includes the GET_BLOCKNUM operation alongside others must not be recorded as a
+	// tip observation.
+	nodeMsg := newParsedChainMessage(combinedApi, apiCollection, parsedInput, blockHashes, graphqlMessage, graphqlMessage.CheckResponseError)
 	if earliest != nil {
 		nodeMsg.earliestRequestedBlock = *earliest
 	}
 	apip.BaseChainParser.ExtensionParsing(apiCollection.CollectionData.AddOn, nodeMsg, extensionInfo)
 	return nodeMsg, nil
-}
-
-func (*GraphQLChainParser) newChainMessage(api *spectypes.Api, parsedInput *parser.ParsedInput, requestedBlockHashes []string, graphqlMessage *rpcInterfaceMessages.GraphQLMessage, apiCollection *spectypes.ApiCollection) *baseChainMessageContainer {
-	if requestedBlockHashes == nil {
-		requestedBlockHashes, _ = parsedInput.GetBlockHashes()
-	}
-	return &baseChainMessageContainer{
-		api:                      api,
-		msg:                      graphqlMessage,
-		latestRequestedBlock:     parsedInput.GetBlock(),
-		requestedBlockHashes:     requestedBlockHashes,
-		apiCollection:            apiCollection,
-		resultErrorParsingMethod: graphqlMessage.CheckResponseError,
-		// A multi-root request has a combined api name that matches no parse directive, so
-		// GetParseDirective returns nil for it — which is the safe direction: a request that
-		// merely includes the GET_BLOCKNUM operation alongside others must not be recorded as a
-		// tip observation.
-		parseDirective:   GetParseDirective(api, apiCollection),
-		usedDefaultValue: parsedInput.UsedDefaultValue,
-	}
 }
 
 // SetSpec sets the spec for the GraphQLChainParser
@@ -334,12 +315,8 @@ func (apip *GraphQLChainParser) ChainBlockStats() (allowedBlockLagForQosSync int
 }
 
 type GraphQLChainListener struct {
-	endpoint         *lavasession.RPCEndpoint
-	relaySender      RelaySender
-	healthReporter   HealthReporter
-	logger           *metrics.RPCConsumerLogs
-	listeningAddress atomic.Pointer[string]
-	app              *fiber.App // captured during Serve so Shutdown can drain HTTP
+	chainListenerBase
+	app *fiber.App // captured during Serve so Shutdown can drain HTTP
 }
 
 // NewGraphQLChainListener creates a new instance of GraphQLChainListener
@@ -348,10 +325,12 @@ func NewGraphQLChainListener(ctx context.Context, listenEndpoint *lavasession.RP
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
 ) (chainListener *GraphQLChainListener) {
 	return &GraphQLChainListener{
-		endpoint:       listenEndpoint,
-		relaySender:    relaySender,
-		healthReporter: healthReporter,
-		logger:         rpcConsumerLogs,
+		chainListenerBase: chainListenerBase{
+			endpoint:       listenEndpoint,
+			relaySender:    relaySender,
+			healthReporter: healthReporter,
+			logger:         rpcConsumerLogs,
+		},
 	}
 }
 
@@ -367,67 +346,25 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 	app := createAndSetupBaseAppListener(cmdFlags, apil.endpoint.HealthCheckPath, apil.healthReporter, false)
 	apil.app = app
 
-	chainID := apil.endpoint.ChainID
-	apiInterface := apil.endpoint.ApiInterface
-
-	handlerPost := func(fiberCtx *fiber.Ctx) error {
-		fiberCtx.Set(fiber.HeaderContentType, fiber.MIMEApplicationJSONCharsetUTF8)
-		startTime := time.Now()
-
-		msgSeed := apil.logger.GetMessageSeed()
-		path := "/" + fiberCtx.Params("*")
-
-		// Detached copies: fiber hands out strings that alias the per-connection buffer, and
-		// the metrics goroutine reads these after the reply (MAG-3881; this listener had the
-		// pre-fix shape).
-		metadataValues := detachedReqHeaders(fiberCtx)
-		graphqlHeaders := convertToMetadataMap(metadataValues)
-		ctx, cancel := context.WithCancel(context.Background())
-		ctx = utils.WithUniqueIdentifier(ctx, utils.GenerateUniqueIdentifier())
-		ctx = utils.ExtractWantedHeadersFromCachedMap(metadataValues, ctx)
-		defer cancel() // incase there's a problem make sure to cancel the connection
-		guid, found := utils.GetUniqueIdentifier(ctx)
-		if found {
-			msgSeed = strconv.FormatUint(guid, 10)
-		}
-		dappID := extractDappIDFromFiberContext(fiberCtx)
-		analytics := metrics.NewRelayAnalytics(dappID, chainID, apiInterface)
-		analytics.SetProcessingTimestampBeforeRelay(startTime)
-		userIp := GetHeaderFromCachedMap(metadataValues, common.IP_FORWARDING_HEADER_NAME, fiberCtx.IP())
-		requestBody := string(fiberCtx.Body())
-		utils.LavaFormatInfo("Consumer received a new GraphQL request",
-			utils.LogAttr("GUID", guid),
-			utils.LogAttr(utils.KEY_REQUEST_ID, ctx),
-			utils.LogAttr(utils.KEY_TASK_ID, ctx),
-			utils.LogAttr(utils.KEY_TRANSACTION_ID, ctx),
-			utils.LogAttr("path", path),
-			utils.LogAttr("dappID", dappID),
-			utils.LogAttr("msgSeed", msgSeed),
-			utils.LogAttr("body", requestBody),
-			utils.LogAttr("headers", common.RedactMetadata(graphqlHeaders)),
-		)
-
-		// The url argument is the internal path, not a route: a GraphQL endpoint serves every
-		// operation on one path, and the operation is named in the body.
-		relayResult, err := apil.relaySender.SendRelay(ctx, "", requestBody, http.MethodPost, dappID, userIp, analytics, graphqlHeaders)
-		reply := relayResult.GetReply()
-		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
-		if err != nil {
-			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-			apil.logger.LogRequestAndResponse("graphql in/out", true, http.MethodPost, path, requestBody, errMasking, msgSeed, time.Since(startTime), err)
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
+	handlerPost := apil.relayHTTP(httpRelaySpec{
+		testMode:    common.IsTestMode(ctx),
+		debugRelays: cmdFlags.DebugRelays,
+		request: func(fiberCtx *fiber.Ctx) httpRelayRequest {
+			path := "/" + fiberCtx.Params("*")
+			// The url argument is the internal path, not a route: a GraphQL endpoint serves every
+			// operation on one path, and the operation is named in the body.
+			return httpRelayRequest{
+				path: path, body: string(fiberCtx.Body()), connectionType: http.MethodPost,
+				logMethod: http.MethodPost, logPath: path,
 			}
-			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), convertToJsonError(errMasking))
-		}
-		apil.logger.LogRequestAndResponse("graphql in/out", false, http.MethodPost, path, requestBody, string(reply.Data), msgSeed, time.Since(startTime), nil)
-		if relayResult.GetStatusCode() != 0 {
-			fiberCtx.Status(relayResult.StatusCode)
-		}
-		return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), reply.Data)
-	}
+		},
+		logReceived: logReceivedWithSeedAfterDapp("Consumer received a new GraphQL request"),
+		logModule:   "graphql in/out",
+		noAnswer:    noAnswerJsonError,
+		errorBody: func(_ *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
+			return convertToJsonError(errMasking)
+		},
+	})
 
 	// GraphQL-over-HTTP is POST only here. A GET carries its query in the URL, which is the very
 	// identity collapse this interface exists to avoid, so it is refused rather than served.
@@ -438,21 +375,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		return addHeadersAndSendBytes(fiberCtx, nil, convertToJsonError("graphql requests must be sent as HTTP POST"))
 	})
 
-	addrChannel := make(chan string)
-	addrChannelSafe := common.NewSafeChannelSender(ctx, addrChannel)
-	go func() {
-		addr := <-addrChannel
-		apil.listeningAddress.Store(&addr)
-	}()
-
-	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
-}
-
-func (apil *GraphQLChainListener) GetListeningAddress() string {
-	if p := apil.listeningAddress.Load(); p != nil {
-		return *p
-	}
-	return ""
+	apil.listen(ctx, app)
 }
 
 // Shutdown drains in-flight HTTP requests and closes the listener.
@@ -466,15 +389,11 @@ func (apil *GraphQLChainListener) Shutdown(ctx context.Context) error {
 
 type GraphQLChainProxy struct {
 	BaseChainProxy
-	httpClient *http.Client
 }
 
 func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
-	if len(rpcProviderEndpoint.NodeUrls) == 0 {
-		return nil, utils.LavaFormatError("rpcProviderEndpoint.NodeUrl list is empty missing node url", nil,
-			utils.Attribute{Key: "chainID", Value: rpcProviderEndpoint.ChainID},
-			utils.Attribute{Key: "ApiInterface", Value: rpcProviderEndpoint.ApiInterface},
-		)
+	if err := requireNodeUrl(rpcProviderEndpoint); err != nil {
+		return nil, err
 	}
 
 	validateEndpoints(rpcProviderEndpoint.NodeUrls, spectypes.APIInterfaceGraphQL)
@@ -487,7 +406,7 @@ func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint 
 			averageBlockTime: averageBlockTime,
 			NodeUrl:          nodeUrl,
 			HashedNodeUrl:    chainproxy.HashURL(nodeUrl.Url),
-			ErrorHandler:     &RestErrorHandler{chainFamily: common.GetChainFamilyOrDefault(rpcProviderEndpoint.ChainID), chainID: rpcProviderEndpoint.ChainID},
+			ErrorHandler:     newNodeErrorHandler(common.TransportREST, rpcProviderEndpoint.ChainID),
 			ChainID:          rpcProviderEndpoint.ChainID,
 		},
 	}, nil
@@ -498,24 +417,15 @@ func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint 
 // Unlike REST, the URL never varies: the operation is named in the body, so every request on a
 // chain goes to the one endpoint URL the spec configures.
 func (gcp *GraphQLChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMessageForSend) (relayReply *RelayReplyWrapper, err error) {
-	if gcp.httpClient == nil {
-		gcp.httpClient = common.OptimizedHttpClient()
-	}
-	httpClient := gcp.httpClient
-
 	// appending hashed url
 	grpc.SetTrailer(ctx, metadata.Pairs(RPCProviderNodeAddressHash, gcp.BaseChainProxy.HashedNodeUrl))
 
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.GraphQLMessage)
 	if !ok {
-		return nil, utils.LavaFormatError("invalid message type in graphql, failed to cast RPCInput from chainMessage", nil,
-			utils.Attribute{Key: "GUID", Value: ctx},
-			utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx},
-			utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx},
-			utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx},
+		return nil, utils.LavaFormatError("invalid message type in graphql, failed to cast RPCInput from chainMessage", nil, traceAttrs(ctx,
 			utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage},
-		)
+		)...)
 	}
 
 	connectCtx, cancel := gcp.CapTimeoutForSend(ctx, chainMessage)
@@ -529,59 +439,24 @@ func (gcp *GraphQLChainProxy) SendNodeMsg(ctx context.Context, chainMessage Chai
 
 	// The router prints the request body itself (it forwards the caller's document verbatim as
 	// JSON), so the content type is ours to declare, as it is for JSON-RPC.
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", common.JSONContentType)
 
-	for _, header := range nodeMessage.GetHeaders() {
-		if header.Value == "" {
-			req.Header.Del(header.Name)
-		} else {
-			req.Header.Set(header.Name, header.Value)
-		}
-	}
-	gcp.NodeUrl.SetAuthHeaders(ctx, req.Header.Set)
-	gcp.NodeUrl.SetIpForwardingIfNecessary(ctx, req.Header.Set)
-
-	utils.LavaFormatInfo("Sending request to node from provider",
-		utils.LogAttr("_method", nodeMessage.GetMethod()),
-		utils.LogAttr("headers", utils.RedactHeaders(req.Header)),
-		utils.LogAttr("apiInterface", spectypes.APIInterfaceGraphQL),
-	)
-
-	res, err := httpClient.Do(req)
-	if res != nil {
-		// resp can be non nil on error
-		grpc.SetTrailer(ctx, metadata.Pairs(common.StatusCodeMetadataKey, strconv.Itoa(res.StatusCode)))
-	}
-	if err != nil {
-		if parsedError := gcp.HandleNodeError(ctx, err); parsedError != nil {
-			return nil, parsedError
-		}
-		return nil, err
-	}
-	if res.Body != nil {
-		defer res.Body.Close()
-	}
-
-	err = gcp.HandleStatusError(res.StatusCode, nodeMessage.GetDisableErrorHandling())
-	if err != nil {
-		err = common.WithRetryAfter(err, res.Header, time.Now())
-		return nil, utils.LavaFormatWarning("Received invalid status code", err,
-			utils.Attribute{Key: "Status Code", Value: res.StatusCode},
-			utils.Attribute{Key: "chainID", Value: gcp.BaseChainProxy.ChainID},
-			utils.Attribute{Key: "apiName", Value: chainMessage.GetApi().Name},
+	res, err := gcp.doHTTP(ctx, req, nodeMessage.GetHeaders(), nodeMessage.GetDisableErrorHandling(), chainMessage.GetApi().Name, func(header http.Header) {
+		utils.LavaFormatInfo("Sending request to node from provider",
+			utils.LogAttr("_method", nodeMessage.GetMethod()),
+			utils.LogAttr("headers", utils.RedactHeaders(header)),
+			utils.LogAttr("apiInterface", spectypes.APIInterfaceGraphQL),
 		)
-	}
-
-	body, err := io.ReadAll(res.Body)
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	reply := &RelayReplyWrapper{
-		StatusCode: res.StatusCode,
+		StatusCode: res.status,
 		RelayReply: &pairingtypes.RelayReply{
-			Data:     body,
-			Metadata: convertToMetadataMapOfSlices(res.Header),
+			Data:     res.body,
+			Metadata: convertToMetadataMapOfSlices(res.header),
 		},
 	}
 

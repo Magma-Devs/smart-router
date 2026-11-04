@@ -26,21 +26,24 @@ type descriptorResolution struct {
 }
 
 // GRPCDescriptorResolver resolves a node's gRPC method descriptors through its
-// configured descriptor source (reflection, file, or hybrid) and caches them for
-// the life of one upstream connection. It is the one resolver behind both the unary
-// GRPCDirectRPCConnection and the subscription stream pool's connection, so the
-// MAG-2860 rules hold on every path: a cold service is resolved once however many
-// callers ask for it (claimServiceResolution), one lookup caches the whole service
-// (cacheServiceMethods), and the lookup runs on grpc-config's reflection-timeout
-// rooted at the connection's lifetime rather than at the caller's deadline
-// (lookupService). The stream pool used to carry a copy of the pre-MAG-2860 shape:
-// one reflection client per call, one method cached, the caller's context as the
-// only bound, so N cold subscriptions opened N reflection streams against a slow
-// node with no deadline of their own (MAG-4278 #18).
+// configured descriptor source (reflection, file, or hybrid) and caches them for the
+// life of its owner. The MAG-2860 rules live here, so every owner gets them: a cold
+// service is resolved once however many callers ask for it (claimServiceResolution),
+// one lookup caches the whole service (cacheServiceMethods), and the lookup runs on
+// grpc-config's reflection-timeout rooted at the owner's lifetime rather than at the
+// caller's deadline (lookupService). The stream path used to carry a copy of the
+// pre-MAG-2860 shape: one reflection client per call, one method cached, the caller's
+// context as the only bound, so N cold subscriptions opened N reflection streams
+// against a slow node with no deadline of their own (MAG-4278 #18).
+//
+// There are TWO instances per endpoint, not one, and they do not share a cache: the
+// unary GRPCDirectRPCConnection owns one, and the subscription stream pool owns the
+// other for all of its channels (MAG-4397). They are separate because their borrow
+// sources are — a resolver can only run reflection on a channel its owner holds.
 //
 // borrow hands out a client to run reflection on and the way to give it back: the
-// unary connection borrows from its pooled connector, the stream connection lends
-// its single channel.
+// unary connection borrows from its pooled connector, the stream pool lends any
+// healthy channel of its endpoint.
 type GRPCDescriptorResolver struct {
 	grpcConfig *common.GrpcConfig
 	url        string
@@ -73,14 +76,6 @@ func NewGRPCDescriptorResolver(
 		cache:      cache,
 		inflight:   map[string]*descriptorResolution{},
 	}
-}
-
-// Cached returns the descriptor cached under service.method, or nil.
-func (r *GRPCDescriptorResolver) Cached(fullMethodName string) *desc.MethodDescriptor {
-	if methodDesc, found, _ := r.cache.Load(fullMethodName); found {
-		return methodDesc
-	}
-	return nil
 }
 
 // MethodDescriptor retrieves the method descriptor from cache, or waits on a

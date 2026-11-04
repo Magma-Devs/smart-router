@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
@@ -11,87 +10,30 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const (
-	// stickySweepEvery bounds how many writes land between expiry sweeps. One entry per live
-	// sticky id is small, and every entry carries a TTL, so a full sweep every N writes keeps
-	// the map bounded without a background goroutine.
-	stickySweepEvery = 256
-)
-
-// stickyPinEntry is one claim plus its expiry on the SERVER's clock. Readers never see a
-// writer's timestamp, so pods with skewed clocks cannot disagree about whether a pin is live.
-type stickyPinEntry struct {
-	pin       core.StickyPin
-	expiresAt time.Time
-}
-
-// stickyPinStore is the in-process backing for sticky pins. Like the endpoint-observation
-// store it is a plain mutex-guarded map rather than a ristretto store, and for a stronger
-// reason: ristretto's Set is asynchronous and may be dropped under admission pressure, which
-// the monotonic int64 ops work around with a confirm-and-retry loop. That workaround is sound
-// for a counter that only ever moves one way, and wrong for a first-writer-wins claim — a
-// dropped write there means two pods both believe they won, which is the exact split this
-// feature removes. Claim resolution has to be genuinely atomic, so it is a mutex.
+// stickyPinStore is the in-process backing for sticky pins. Claim resolution has to be
+// genuinely atomic — ristretto's dropped-write workaround (confirm and retry) is sound for a
+// counter that only ever moves one way and wrong for a first-writer-wins claim — so it is an
+// expiringMap.
 type stickyPinStore struct {
-	mu     sync.Mutex
-	byKey  map[string]stickyPinEntry
-	writes int
-	now    func() time.Time // injectable for tests; time.Now in production
+	*expiringMap[core.StickyPin]
 }
 
 func newStickyPinStore() *stickyPinStore {
-	return &stickyPinStore{byKey: make(map[string]stickyPinEntry), now: time.Now}
+	return &stickyPinStore{newExpiringMap[core.StickyPin]()}
 }
 
 // setIfAbsent claims key for pin unless a live claim already exists, and returns the effective
 // claim either way. An expired entry is always replaced.
 func (s *stickyPinStore) setIfAbsent(key string, pin core.StickyPin, ttl time.Duration) core.StickyPin {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.now()
-	if cur, ok := s.byKey[key]; ok && now.Before(cur.expiresAt) {
-		return cur.pin
-	}
-	s.byKey[key] = stickyPinEntry{pin: pin, expiresAt: now.Add(ttl)}
-	s.writes++
-	if s.writes >= stickySweepEvery {
-		s.writes = 0
-		for k, v := range s.byKey {
-			if !now.Before(v.expiresAt) {
-				delete(s.byKey, k)
-			}
-		}
-	}
-	return pin
+	effective, _ := s.put(key, pin, ttl, func(core.StickyPin) bool { return true })
+	return effective
 }
 
 // get returns the live claim for key. Found is false when nothing was claimed or the claim
 // expired; expired entries are dropped on read.
 func (s *stickyPinStore) get(key string) (core.StickyPin, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cur, ok := s.byKey[key]
-	if !ok {
-		return core.StickyPin{}, false
-	}
-	if !s.now().Before(cur.expiresAt) {
-		delete(s.byKey, key)
-		return core.StickyPin{}, false
-	}
-	return cur.pin, true
-}
-
-func (s *stickyPinStore) clear() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.byKey = make(map[string]stickyPinEntry)
-	s.writes = 0
-}
-
-func (s *stickyPinStore) len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.byKey)
+	pin, _, found := s.expiringMap.get(key)
+	return pin, found
 }
 
 // SetStickySession claims an upstream for one sticky session id, first-writer-wins, and replies

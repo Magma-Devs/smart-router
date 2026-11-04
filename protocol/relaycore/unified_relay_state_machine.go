@@ -4,6 +4,7 @@ import (
 	context "context"
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -323,7 +324,51 @@ func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) Decis
 		Summary:       sm.getResultsSummary(),
 		IsTickerHedge: isTickerHedge,
 		IsDefaultApi:  sm.protocolMessage.IsDefaultApi(),
+		Pinned:        PinnedByDirectives(sm.protocolMessage.GetDirectiveHeaders()),
 	}
+}
+
+// PinnedByDirectives reports whether the request is a strict pin: answered by one upstream or not
+// at all, never retried, hedged or rerouted by the consistency gate onto another one (MAG-2280,
+// MAG-4123). Two ways in (MAG-4826):
+//
+//   - lava-stickiness, always. A sticky session that straddles two nodes is the false gap the
+//     header exists to prevent, and the sticky-sessions docs promise "route to the session's node,
+//     or fail". This holds whatever else the request sends, so adding lava-select-provider to a
+//     sticky request can never make it leak.
+//   - lava-select-provider with lava-select-provider-strict: true (SelectProviderStrict). A plain
+//     lava-select-provider keeps its documented behaviour: the named upstream gets the first
+//     attempt, and failover may use the rest of the pool.
+//
+// Read from the request's ORIGINAL headers: the pin is a property of the request, not of one
+// attempt, and a message rebuilt for an archive toggle carries every directive header over
+// (metadataFromDirectiveHeaders). It must also be read here, from headers, and not from what
+// lavasession selects on: lavasession turns a cross-pod sticky claim into a selected provider,
+// which would otherwise look like a plain, non-strict selection. Presence of a pin header is what counts, as in
+// resolvePinDirectives. A request that cross-validation overrides is not pinned in effect, so
+// callers check the selection first.
+func PinnedByDirectives(directiveHeaders map[string]string) bool {
+	if _, sticky := directiveHeaders[common.STICKINESS_HEADER_NAME]; sticky {
+		return true
+	}
+	_, selected := directiveHeaders[common.SELECT_PROVIDER_HEADER_NAME]
+	return selected && SelectProviderStrict(directiveHeaders)
+}
+
+// SelectProviderStrict reports whether the caller sent lava-select-provider-strict: true. Only the
+// value "true" (any case) turns it on, unlike the presence-only lava-force-cache-refresh: "false"
+// must not silently mean yes. It only matters next to lava-select-provider; alone it pins nothing.
+func SelectProviderStrict(directiveHeaders map[string]string) bool {
+	return strings.EqualFold(strings.TrimSpace(directiveHeaders[common.SELECT_PROVIDER_STRICT_HEADER_NAME]), "true")
+}
+
+// PinnedUpstreamUnservable reports a selection error that names the pin: the pinned upstream is
+// unknown, blocked, busy, or too far behind the chain tip (MAG-4123). Resending the same pinned
+// request changes none of that, so the policy stops on it at once instead of after
+// SendRelayAttempts identical refusals, and, for the consistency case, before a resend could run
+// selection without the pin.
+func PinnedUpstreamUnservable(err error) bool {
+	return errors.Is(err, lavasession.SelectedProviderUnavailableError) || errors.Is(err, lavasession.SelectedProviderAlreadyFailedError)
 }
 
 func (sm *UnifiedRelayStateMachine) GetDebugState() bool {
@@ -506,6 +551,10 @@ func (sm *UnifiedRelayStateMachine) GetRelayTaskChannel() (chan RelayStateSendIn
 								utils.LogAttr("stillInFlight", stillInFlight),
 							)
 						}
+					} else if PinnedUpstreamUnservable(err) {
+						// A pinned request whose upstream cannot take it: unknown, blocked, busy, or too far
+						// behind the chain tip (MAG-4123). The policy stops at once; nothing was sent.
+						sm.recordStopReason("PinnedProviderUnavailable")
 					} else if sm.usedProviders.BatchNumber() == 0 && sm.policy.GetConsecutiveBatchErrors() == sm.config.SendRelayAttempts+1 {
 						sm.recordStopReason("FirstMessageFailed")
 						utils.LavaFormatWarning("Failed Sending First Message", err, utils.LogAttr("consecutive errors", sm.policy.GetConsecutiveBatchErrors()), utils.LogAttr("GUID", sm.ctx))

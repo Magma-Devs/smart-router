@@ -2,14 +2,14 @@ package lavaprotocol
 
 import (
 	"context"
+	"encoding/binary"
 
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/sigs"
 )
 
 func setSalt(requestData *pairingtypes.RelayPrivateData, value uint64) {
-	requestData.Salt = sigs.EncodeUint64(value)
+	requestData.Salt = binary.LittleEndian.AppendUint64(nil, value)
 }
 
 func setRequestId(requestData *pairingtypes.RelayPrivateData, value string) {

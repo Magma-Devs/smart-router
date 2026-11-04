@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/performance"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/rs/zerolog"
@@ -32,30 +33,8 @@ longer DefaultExpirationForNonFinalized will reduce sync QoS for "latest" reques
 			}
 			utils.SetGlobalLoggingLevel(logLevel)
 
-			pyroscopeAddressFlagUsed := cmd.Flags().Lookup(performance.PyroscopeAddressFlagName).Changed
-			if pyroscopeAddressFlagUsed {
-				pyroscopeServerAddress, err := cmd.Flags().GetString(performance.PyroscopeAddressFlagName)
-				if err != nil {
-					utils.LavaFormatFatal("failed to read pyroscope address flag", err)
-				}
-				pyroscopeAppName, err := cmd.Flags().GetString(performance.PyroscopeAppNameFlagName)
-				if err != nil || pyroscopeAppName == "" {
-					pyroscopeAppName = "cache"
-				}
-				mutexProfileFraction, err := cmd.Flags().GetInt(performance.PyroscopeMutexProfileFractionFlagName)
-				if err != nil {
-					mutexProfileFraction = performance.DefaultMutexProfileFraction
-				}
-				blockProfileRate, err := cmd.Flags().GetInt(performance.PyroscopeBlockProfileRateFlagName)
-				if err != nil {
-					blockProfileRate = performance.DefaultBlockProfileRate
-				}
-				tagsStr, _ := cmd.Flags().GetString(performance.PyroscopeTagsFlagName)
-				tags := performance.ParseTags(tagsStr)
-				err = performance.StartPyroscope(pyroscopeAppName, pyroscopeServerAddress, mutexProfileFraction, blockProfileRate, tags)
-				if err != nil {
-					return utils.LavaFormatError("failed to start pyroscope profiler", err)
-				}
+			if err := performance.StartPyroscopeFromFlags(cmd.Flags(), "cache"); err != nil {
+				return err
 			}
 
 			metricsAddress, err := cmd.Flags().GetString(FlagMetricsAddress)
@@ -73,7 +52,7 @@ longer DefaultExpirationForNonFinalized will reduce sync QoS for "latest" reques
 	cacheCmd.Flags().Float64(ExpirationTimeNonFinalizedMultiplierFlagName, DefaultExpirationTimeNonFinalizedMultiplier, "Multiplier for non-finalized cache entry expiration. 1 means no change (default), 1.2 means 20% longer.")
 	cacheCmd.Flags().Duration(ExpirationBlocksHashesToHeightsFlagName, DefaultExpirationBlocksHashesToHeights, "how long does the cache entry lasts in the cache for a block hash to height entry")
 	cacheCmd.Flags().Duration(ExpirationNodeErrorsOnFinalizedFlagName, DefaultExpirationNodeErrors, "how long does a cache entry lasts in the cache for a finalized node error entry")
-	cacheCmd.Flags().String(FlagMetricsAddress, DisabledFlagOption, "address to listen to prometheus metrics 127.0.0.1:5555, later you can curl http://127.0.0.1:5555/metrics")
+	cacheCmd.Flags().String(FlagMetricsAddress, metrics.DisabledFlagOption, "address to listen to prometheus metrics 127.0.0.1:5555, later you can curl http://127.0.0.1:5555/metrics")
 	cacheCmd.Flags().Int64(FlagCacheSizeName, 2*1024*1024*1024, "the maximal amount of entries to save")
 	cacheCmd.Flags().String(performance.PyroscopeAddressFlagName, "", "pyroscope server address for continuous profiling (e.g., http://pyroscope:4040)")
 	cacheCmd.Flags().String(performance.PyroscopeAppNameFlagName, "cache", "pyroscope application name for identifying this service")

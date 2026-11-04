@@ -1,22 +1,10 @@
 package rpcsmartrouter
 
 import (
-	"errors"
-
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 )
-
-// extractLavaError extracts the *common.LavaError from a LavaWrappedError,
-// or returns nil if the error is not (or does not wrap) a LavaWrappedError.
-func extractLavaError(err error) *common.LavaError {
-	var wrapped *common.LavaWrappedError
-	if errors.As(err, &wrapped) {
-		return wrapped.LavaErr
-	}
-	return nil
-}
 
 // ---------------------------------------------------------------------------
 // Classification helpers
@@ -171,7 +159,7 @@ func classifyEndpointHealth(classified *common.LavaError, isClientCancellation b
 func endpointDisableReasonFor(classified *common.LavaError) lavasession.EndpointDisableReason {
 	if classified == nil {
 		// Unreachable today: ClassifyError never returns nil (its Step 3 falls back to
-		// LavaErrorUnknown) and extractLavaError's nil result is replaced before reaching here. Kept
+		// LavaErrorUnknown) and common.AsLavaError's nil result is replaced before reaching here. Kept
 		// as a guard so a future caller cannot silently record an empty reason, which would read as
 		// "enabled" in /debug/endpoint-state. Pinned by
 		// TestEndpointDisableReasonFor_MapsRegistryCategory.

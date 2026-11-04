@@ -81,14 +81,14 @@ func TestURLLatestBlock_OneSeriesPerURL(t *testing.T) {
 		m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000, DefaultURLAnswerTimeout) // frozen, still answering
 		m.SetEndpointURLLatestBlock("TON", "rest", tonV3URL, v3, DefaultURLAnswerTimeout)
 		require.Equal(t, map[string]float64{"/v2": 1000, "/v3": float64(v3)},
-			byPath(t, urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack")))
+			byPath(t, urlPoints(t, m.endpointURLLatestBlock, "TON", "chainstack")))
 	}
-	points := urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack")
+	points := urlPoints(t, m.endpointURLLatestBlock, "TON", "chainstack")
 	require.NotEqual(t, points[0].url, points[1].url, "/v2 and /v3 share a host; the url label still tells them apart")
 	for _, p := range points {
 		require.Equal(t, map[string]string{"/v2": URLFingerprint(tonV2URL), "/v3": URLFingerprint(tonV3URL)}[p.internalPath], p.url)
 	}
-	require.Empty(t, urlPoints(t, m.endpointLatestBlock.GaugeVec, "TON", "chainstack"), "the provider series is written elsewhere")
+	require.Empty(t, urlPoints(t, m.endpointLatestBlock, "TON", "chainstack"), "the provider series is written elsewhere")
 }
 
 // Every write moves the url's answered-until time to now plus the answer timeout its caller
@@ -108,10 +108,10 @@ func TestURLLatestBlock_AnsweredUntilIsTheLastAnswerPlusTheTimeout(t *testing.T)
 		require.GreaterOrEqual(t, got, float64(before.Add(timeout).Unix()))
 		require.LessOrEqual(t, got, float64(after.Add(timeout).Unix()))
 	}
-	ton := byPath(t, urlPoints(t, m.endpointURLAnsweredUntil.GaugeVec, "TON", "chainstack"))
+	ton := byPath(t, urlPoints(t, m.endpointURLAnsweredUntil, "TON", "chainstack"))
 	within(ton["/v2"], 10*time.Minute)
 	within(ton["/v3"], 20*time.Minute)
-	within(byPath(t, urlPoints(t, m.endpointURLAnsweredUntil.GaugeVec, "ETH1", "solo"))[""], DefaultURLAnswerTimeout)
+	within(byPath(t, urlPoints(t, m.endpointURLAnsweredUntil, "ETH1", "solo"))[""], DefaultURLAnswerTimeout)
 }
 
 // A shared url is one series per provider configured with it; the relay harvest moves only the
@@ -122,8 +122,8 @@ func TestURLLatestBlock_SharedURLIsASeriesPerProvider(t *testing.T) {
 	m.SetEndpointURLLatestBlock("TON", "rest", tonV2URL, 1000, DefaultURLAnswerTimeout)
 	m.SetProviderURLLatestBlock("TON", "rest", "chainstack", tonV2URL, 1001, DefaultURLAnswerTimeout)
 
-	require.Equal(t, map[string]float64{"/v2": 1001}, byPath(t, urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack")))
-	require.Equal(t, map[string]float64{"/v2": 1000}, byPath(t, urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack-backup")))
+	require.Equal(t, map[string]float64{"/v2": 1001}, byPath(t, urlPoints(t, m.endpointURLLatestBlock, "TON", "chainstack")))
+	require.Equal(t, map[string]float64{"/v2": 1000}, byPath(t, urlPoints(t, m.endpointURLLatestBlock, "TON", "chainstack-backup")))
 }
 
 // An unregistered url would name itself as its provider, and no part of a url is safe to export.
@@ -133,7 +133,7 @@ func TestURLLatestBlock_UnregisteredURLGetsNoSeries(t *testing.T) {
 	m.SetEndpointURLLatestBlock("ETH1", "jsonrpc", url, 10, DefaultURLAnswerTimeout)
 	m.SetProviderURLLatestBlock("ETH1", "jsonrpc", "p", url, 10, DefaultURLAnswerTimeout)
 	m.AddEndpointURLRelayServiced("ETH1", "jsonrpc", "p", url)
-	for _, c := range []prometheus.Collector{m.endpointURLLatestBlock.GaugeVec, m.endpointURLAnsweredUntil.GaugeVec, m.endpointURLRelaysServiced.CounterVec} {
+	for _, c := range []prometheus.Collector{m.endpointURLLatestBlock, m.endpointURLAnsweredUntil, m.endpointURLRelaysServiced} {
 		ch := make(chan prometheus.Metric, 4)
 		c.Collect(ch)
 		close(ch)
@@ -148,7 +148,7 @@ func TestURLRelaysServiced_CountsPerURL(t *testing.T) {
 		m.AddEndpointURLRelayServiced("TON", "rest", "chainstack", tonV2URL)
 	}
 	m.AddEndpointURLRelayServiced("TON", "rest", "chainstack", tonV3URL)
-	require.Equal(t, map[string]float64{"/v2": 3, "/v3": 1}, byPath(t, urlPoints(t, m.endpointURLRelaysServiced.CounterVec, "TON", "chainstack")))
+	require.Equal(t, map[string]float64{"/v2": 3, "/v3": 1}, byPath(t, urlPoints(t, m.endpointURLRelaysServiced, "TON", "chainstack")))
 }
 
 // A removed url loses every per-url series, and nothing else: a series left behind stands still
@@ -161,9 +161,9 @@ func TestURLLatestBlock_ForgetDeletesTheURLsSeries(t *testing.T) {
 	m.AddEndpointURLRelayServiced("TON", "rest", "chainstack", tonV3URL)
 
 	m.ForgetEndpointURLLatestBlock("TON", "rest", tonV2URL)
-	require.Equal(t, map[string]float64{"/v3": 1200}, byPath(t, urlPoints(t, m.endpointURLLatestBlock.GaugeVec, "TON", "chainstack")))
-	require.Len(t, urlPoints(t, m.endpointURLAnsweredUntil.GaugeVec, "TON", "chainstack"), 1)
-	require.Equal(t, map[string]float64{"/v3": 1}, byPath(t, urlPoints(t, m.endpointURLRelaysServiced.CounterVec, "TON", "chainstack")))
+	require.Equal(t, map[string]float64{"/v3": 1200}, byPath(t, urlPoints(t, m.endpointURLLatestBlock, "TON", "chainstack")))
+	require.Len(t, urlPoints(t, m.endpointURLAnsweredUntil, "TON", "chainstack"), 1)
+	require.Equal(t, map[string]float64{"/v3": 1}, byPath(t, urlPoints(t, m.endpointURLRelaysServiced, "TON", "chainstack")))
 
 	m.ForgetEndpointURLLatestBlock("TON", "rest", "https://never.registered.example")
 	var nilManager *SmartRouterMetricsManager
