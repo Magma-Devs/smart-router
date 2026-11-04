@@ -340,11 +340,11 @@ func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) Decis
 //     lava-select-provider keeps its documented behaviour: the named upstream gets the first
 //     attempt, and failover may use the rest of the pool.
 //
-// Read from the request's ORIGINAL headers: a message rebuilt for an archive toggle drops the pin
-// headers on purpose (preserveRetrySafeDirectives), and the pin is a property of the request, not
-// of one attempt. It must also be read here, from headers, and not from what lavasession selects
-// on: lavasession turns a cross-pod sticky claim into a selected provider, which would otherwise
-// look like a plain, non-strict selection. Presence of a pin header is what counts, as in
+// Read from the request's ORIGINAL headers: the pin is a property of the request, not of one
+// attempt, and a message rebuilt for an archive toggle carries every directive header over
+// (metadataFromDirectiveHeaders). It must also be read here, from headers, and not from what
+// lavasession selects on: lavasession turns a cross-pod sticky claim into a selected provider,
+// which would otherwise look like a plain, non-strict selection. Presence of a pin header is what counts, as in
 // resolvePinDirectives. A request that cross-validation overrides is not pinned in effect, so
 // callers check the selection first.
 func PinnedByDirectives(directiveHeaders map[string]string) bool {

@@ -18,27 +18,27 @@ func TestDecide_PinnedNeverLeavesThePinnedUpstream(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3})
 
 	t.Run("a retryable node error stops instead of retrying elsewhere", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: true, Summary: ResultsSummary{NodeErrors: 1}})
-		require.Equal(t, Stop, out.Action)
+		out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Pinned: true, Summary: relaycore.ResultsSummary{NodeErrors: 1}})
+		require.Equal(t, relaycore.ActionStop, out.Action)
 		require.Equal(t, "Pinned", out.Reason)
 	})
 	t.Run("the attempt window does not hedge a pinned request", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: true, IsTickerHedge: true})
-		require.Equal(t, Stop, out.Action)
+		out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Pinned: true, IsTickerHedge: true})
+		require.Equal(t, relaycore.ActionStop, out.Action)
 		require.Equal(t, "Pinned", out.Reason)
 	})
 	t.Run("a pinned write refused for rate is not broadcast elsewhere", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{Selection: relaycore.Stateful, Pinned: true, Summary: ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}})
-		require.Equal(t, Stop, out.Action)
+		out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, Pinned: true, Summary: relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}})
+		require.Equal(t, relaycore.ActionStop, out.Action)
 		require.Equal(t, "Pinned", out.Reason)
 	})
 	t.Run("the same request unpinned still retries", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{Selection: relaycore.Stateless, Summary: ResultsSummary{NodeErrors: 1}})
-		require.Equal(t, Retry, out.Action)
+		out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Summary: relaycore.ResultsSummary{NodeErrors: 1}})
+		require.Equal(t, relaycore.ActionRetry, out.Action)
 	})
 	t.Run("cross-validation keeps its own reason, it overrides the pin", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{Selection: relaycore.CrossValidation, Pinned: true, Summary: ResultsSummary{NodeErrors: 1}})
-		require.Equal(t, Stop, out.Action)
+		out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.CrossValidation, Pinned: true, Summary: relaycore.ResultsSummary{NodeErrors: 1}})
+		require.Equal(t, relaycore.ActionStop, out.Action)
 		require.Equal(t, "CrossValidation", out.Reason)
 	})
 }
@@ -51,13 +51,13 @@ func TestOnSendRelayResult_PinnedUpstreamUnservableStopsAtOnce(t *testing.T) {
 		t.Run(sentinel.Error(), func(t *testing.T) {
 			policy := NewPolicy(PolicyConfig{SendRelayAttempts: 3})
 			wrapped := fmt.Errorf("pinned provider is 15 blocks behind the chain tip: %w", sentinel)
-			require.Equal(t, SendStop, policy.OnSendRelayResult(wrapped, false, relaycore.Stateless))
+			require.Equal(t, relaycore.SendStop, policy.OnSendRelayResult(wrapped, false, relaycore.Stateless))
 			require.Equal(t, 0, policy.GetConsecutiveBatchErrors(), "nothing was sent, so nothing is counted")
 		})
 	}
 	t.Run("an ordinary send error still gets its resends", func(t *testing.T) {
 		policy := NewPolicy(PolicyConfig{SendRelayAttempts: 3})
-		require.Equal(t, SendRetry, policy.OnSendRelayResult(fmt.Errorf("dial failed"), false, relaycore.Stateless))
+		require.Equal(t, relaycore.SendRetry, policy.OnSendRelayResult(fmt.Errorf("dial failed"), false, relaycore.Stateless))
 	})
 }
 
@@ -68,12 +68,12 @@ func TestDecide_PlainSelectProviderKeepsFailover(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3})
 	plain := relaycore.PinnedByDirectives(map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "p1"})
 	require.False(t, plain)
-	require.Equal(t, Retry, policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: plain, Summary: ResultsSummary{NodeErrors: 1}}).Action)
-	require.Equal(t, Retry, policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: plain, IsTickerHedge: true}).Action)
+	require.Equal(t, relaycore.ActionRetry, policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Pinned: plain, Summary: relaycore.ResultsSummary{NodeErrors: 1}}).Action)
+	require.Equal(t, relaycore.ActionRetry, policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Pinned: plain, IsTickerHedge: true}).Action)
 
 	strict := relaycore.PinnedByDirectives(map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "p1", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true"})
 	require.True(t, strict)
-	out := policy.Decide(DecisionInput{Selection: relaycore.Stateless, Pinned: strict, Summary: ResultsSummary{NodeErrors: 1}})
-	require.Equal(t, Stop, out.Action)
+	out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, Pinned: strict, Summary: relaycore.ResultsSummary{NodeErrors: 1}})
+	require.Equal(t, relaycore.ActionStop, out.Action)
 	require.Equal(t, "Pinned", out.Reason)
 }

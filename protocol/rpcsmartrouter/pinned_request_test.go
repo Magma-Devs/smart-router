@@ -122,6 +122,42 @@ func TestPinnedConsistencyRejection_IsTerminalAndNamesTheLag(t *testing.T) {
 	require.Contains(t, err.Error(), "too far behind the chain tip")
 }
 
+// The gate in sendRelayToDirectEndpoints returns that terminal error only for a strict pin
+// (MAG-4123, MAG-4826). Every session is far behind the chain tip, so the gate rejects them all: a
+// strict pin fails there, naming the lag, while a plain selection and an unpinned request keep
+// the error that starts a retry on a fresher node.
+func TestConsistencyGate_RejectsAStrictPinAndRetriesTheRest(t *testing.T) {
+	type gateCase struct {
+		directives map[string]string
+		strict     bool
+	}
+	cases := map[string]gateCase{
+		"plain select-provider": {map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "lava@pinned"}, false},
+		"unpinned":              {nil, false},
+	}
+	for name, directives := range strictPinShapes {
+		cases[name] = gateCase{directives, true}
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := sendToEveryEndpointStale(t, archiveRequest{&MockProtocolMessage{
+				api:              &spectypes.Api{Name: "/cosmos/base/tendermint/v1beta1/blocks/latest"},
+				requestedBlock:   spectypes.LATEST_BLOCK,
+				userData:         common.UserData{DappId: "test", ConsumerIp: "1.2.3.4"},
+				directiveHeaders: tc.directives,
+			}})
+			if tc.strict {
+				require.True(t, relaycore.PinnedUpstreamUnservable(err), "a strict pin must stop here, not retry: %v", err)
+				require.NotErrorIs(t, err, lavasession.ConsistencyPreValidationError)
+				require.Contains(t, err.Error(), "too far behind the chain tip")
+				return
+			}
+			require.ErrorIs(t, err, lavasession.ConsistencyPreValidationError, "the gate must keep its retry")
+			require.False(t, relaycore.PinnedUpstreamUnservable(err))
+		})
+	}
+}
+
 // A plain lava-select-provider keeps its documented failover (MAG-4826 D2): the same node error
 // is retried, so the state machine asks for a second batch instead of stopping on "Pinned". So is
 // a select-provider whose strict header is anything but "true".
