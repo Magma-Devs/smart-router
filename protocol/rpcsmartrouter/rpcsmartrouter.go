@@ -3171,7 +3171,9 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 func ParseEndpoints(viper_endpoints *viper.Viper) (endpoints []*lavasession.RPCEndpoint, err error) {
 	err = viper_endpoints.UnmarshalKey(common.EndpointsConfigName, &endpoints)
 	if err != nil {
-		utils.LavaFormatFatal("could not unmarshal endpoints", err, utils.Attribute{Key: "viper_endpoints", Value: viper_endpoints.AllSettings()})
+		// The key, not the settings: they hold every node-url and auth header in the file, and
+		// none of them is registered for redaction yet (MAG-4863).
+		utils.LavaFormatFatal("could not unmarshal endpoints", err, utils.Attribute{Key: "config_key", Value: common.EndpointsConfigName})
 	}
 	for _, endpoint := range endpoints {
 		if endpoint.HealthCheckPath == "" {
