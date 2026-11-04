@@ -31,6 +31,15 @@ func (archiveRequest) GetExtensions() []*spectypes.Extension {
 // request's dispatch history.
 func rejectEveryDegradedSession(t *testing.T, msg archiveRequest) *relaycore.RelayProcessor {
 	t.Helper()
+	relayProcessor, err := sendToEveryEndpointStale(t, msg)
+	require.ErrorIs(t, err, lavasession.ConsistencyPreValidationError, "setup: both sessions must have been rejected as stale")
+	return relayProcessor
+}
+
+// sendToEveryEndpointStale is rejectEveryDegradedSession without the verdict: it returns what
+// sendRelayToDirectEndpoints returned once the consistency gate rejected both sessions.
+func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.RelayProcessor, error) {
+	t.Helper()
 	ctx := context.Background()
 
 	noopHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -96,8 +105,7 @@ func rejectEveryDegradedSession(t *testing.T, msg archiveRequest) *relaycore.Rel
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	err = rpcss.sendRelayToDirectEndpoints(callCtx, sessionsMap, msg, relayProcessor, nil, nil, common.CacheLookupReport{})
-	require.ErrorIs(t, err, lavasession.ConsistencyPreValidationError, "setup: both sessions must have been rejected as stale")
-	return relayProcessor
+	return relayProcessor, err
 }
 
 // A session the consistency filter rejects was never asked, so it must leave the request's
