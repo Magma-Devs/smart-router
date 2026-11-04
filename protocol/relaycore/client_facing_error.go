@@ -6,6 +6,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // transportFailureCodes are the registry codes that mean "no answer from the upstream": the
@@ -39,7 +40,9 @@ func clientFacingFromProtocolError(err error, lavaErr *common.LavaError) *common
 	if errors.As(err, &httpErr) && httpErr.StatusCode >= 400 {
 		cf.UpstreamStatus = httpErr.StatusCode
 		cf.UpstreamStatusText = httpErr.Status
-		cf.UpstreamBody = httpErr.Body
+		// Redacted here, once: the reply forwards this body as is (MAG-4481), so the secrets
+		// are withheld before it is kept (MAG-4863).
+		cf.UpstreamBody = utils.RedactSecretsBytes(httpErr.Body)
 		cf.UpstreamContentType = httpErr.ContentType
 		return cf
 	}

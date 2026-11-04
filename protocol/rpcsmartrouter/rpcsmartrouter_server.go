@@ -5835,6 +5835,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		}
 	}
 
+	// A node's error goes back to the caller as the reply, so it is redacted like every error the
+	// router writes itself, before it is returned, cached or compared: a node that repeats the
+	// url it was called on, or the key, must not hand the operator's key to the caller (MAG-4863).
+	if result.IsNodeError {
+		redactNodeReply(result.Reply)
+	}
+
 	// Update relayResult with the response
 	relayResult.Reply = result.Reply
 	relayResult.Finalized = result.Finalized
@@ -6877,4 +6884,12 @@ func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error 
 		httpErr.RetryAfter, _ = common.ParseRetryAfter(header, time.Now())
 	}
 	return httpErr
+}
+
+// redactNodeReply withholds the secrets in a node's error reply (utils.RedactSecrets). A reply
+// that holds none is left as it is.
+func redactNodeReply(reply *pairingtypes.RelayReply) {
+	if reply != nil {
+		reply.Data = utils.RedactSecretsBytes(reply.Data)
+	}
 }

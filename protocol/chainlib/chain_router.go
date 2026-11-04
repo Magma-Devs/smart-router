@@ -143,7 +143,7 @@ func (cri *chainRouterImpl) autoGenerateMissingInternalPaths(isWs bool, nodeUrl 
 		}
 
 		utils.LavaFormatDebug("auto generated internal path",
-			utils.LogAttr("nodeUrl", nodeUrl.Url),
+			utils.LogAttr("nodeUrl", nodeUrl.UrlStr()),
 			utils.LogAttr("internalPath", internalPath),
 			utils.LogAttr("routerKey", routerKey.String()),
 		)
