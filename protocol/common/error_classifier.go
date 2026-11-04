@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -97,10 +98,78 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		{MessageContains("INVALID_SHARD_ID"), LavaErrorChainNEARInvalidShardID},
 		{MessageContains("NOT_SYNCED_YET"), LavaErrorChainNEARNotSyncedYet},
 	},
-	// Source: rippled's transaction results and API errors, the verdicts a submit reply carries
-	// inside an ordinary result. Built from the same definitions the XRPL classifier flags by;
-	// see error_xrpl.go.
-	ChainFamilyXRP: xrplErrorMappings(),
+	// Source: rippled (src/libxrpl/protocol/ErrorCodes.cpp, transaction results in TER.cpp).
+	// rippled reports a failed call inside an ordinary HTTP 200 result, as an API error in
+	// result.error beside "status":"error", on every method; a submit also says what happened to
+	// the transaction in result.engine_result. rpcInterfaceMessages.CheckXRPLResponseError flags
+	// both and starts the message with the name or the code; the direct-RPC sender adds an
+	// "HTTP <status>: " prefix to a non-2xx reply. Matched as the message's first token,
+	// case-sensitive, as rippled writes them. An API error not listed here is UNKNOWN_ERROR.
+	ChainFamilyXRP: {
+		// Engine results (submit, submit_multisigned): what happened to the transaction, never that
+		// the node is broken, so each is a non-retryable chain error that keeps the availability gate
+		// off the node. The catch-all row also matches terQUEUED, which IsXRPLRejection carves out so
+		// the classifier never flags it; one reaching here some other way (a lava-identified-node-error
+		// hint, a provider-supplied body) is better labelled a rejection, non-retryable and not at
+		// fault, than left UNKNOWN_ERROR, which is retryable and scored
+		// (TestXRPLTerQueuedRowKeepsTheGateOff).
+		{xrplMessageStartsWith("tefPAST_SEQ"), LavaErrorChainNonceTooLow},   // sequence used, often by this very transaction arriving by gossip
+		{xrplMessageStartsWith("tefALREADY"), LavaErrorChainTxAlreadyKnown}, // this exact transaction is already in the ledger
+		{xrplMessageStartsWith("terPRE_SEQ"), LavaErrorChainNonceTooHigh},   // an earlier sequence has not been applied yet
+		{xrplMessageStartsWith(xrplRejectionCode), LavaErrorChainTxRejected},
+		// API errors, by what each says about the node.
+		// The node cannot serve yet; another can. That is the node's own state.
+		{xrplMessageStartsWith("noNetwork", "noCurrent", "noClosed", "notSynced", "notReady"), LavaErrorNodeSyncing},
+		// The node runs a version the network has amended past.
+		{xrplMessageStartsWith("amendmentBlocked"), LavaErrorNodeServiceUnavailable},
+		// Healthy but busy, and nothing was executed: the hold-off applies and the score does not move.
+		{xrplMessageStartsWith("tooBusy", "slowDown"), LavaErrorNodeRateLimited},
+		{xrplMessageStartsWith("internal", "internalJson", "internalSubmit", "internalTransaction"), LavaErrorNodeInternalError},
+		// This node does not hold the ledger or the transaction; another may (MAG-4817). lgrNotFound
+		// is a ledger outside the node's history, one it is still acquiring, or one not closed yet;
+		// lgrNotValidated is account_tx asking for a ledger the node has not validated; txnNotFound is
+		// a transaction outside the node's stored history. Retried, and the node keeps its score.
+		{xrplMessageStartsWith("lgrNotFound", "lgrNotValidated"), LavaErrorChainBlockNotFound},
+		{xrplMessageStartsWith("txnNotFound"), LavaErrorChainTxNotFound},
+		// The node holds the ledger, and the account or object is not in it. rippled resolves the
+		// ledger first (lgrNotFound when it cannot), so every node holding that ledger answers the
+		// same: the chain's answer, not retried and not the node's fault.
+		{xrplMessageStartsWith("actNotFound", "srcActNotFound", "dstActNotFound", "delegateActNotFound", "entryNotFound", "objectNotFound"), LavaErrorChainAccountNotFound},
+		// The node does not know the command; another may serve it.
+		{xrplMessageStartsWith("unknownCmd"), LavaErrorNodeMethodNotFound},
+		// The request itself, which every node answers the same way. notSupported is how a public
+		// node answers a sign-and-submit.
+		{xrplMessageStartsWith(
+			"invalidParams", "invalidTransaction", "badSyntax", "notSupported", "highFee", "badSecret",
+			"actMalformed", "badIssuer", "badKeyType", "channelAmtMalformed", "channelMalformed", "commandMissing",
+			"domainMalformed", "dstActMalformed", "dstActMissing", "dstAmtMalformed", "dstAmtMissing", "dstIsrMalformed",
+			"excessiveLgrRange", "invalidLgrRange", "issueMalformed", "lgrIdxMalformed", "lgrIdxsInvalid",
+			"malformedStream", "oracleMalformed", "publicMalformed", "sendMaxMalformed", "signingMalformed",
+			"srcActMalformed", "srcActMissing", "srcCurMalformed", "srcIsrMalformed", "transactionSigned",
+			"unexpectedLedgerType",
+		), LavaErrorUserInvalidParams},
+	},
+}
+
+// xrplRejectionCode is the shape of an XRPL engine result that refuses the transaction: tef
+// (failed), tem (malformed), tel (refused locally) or ter (not applied now).
+const xrplRejectionCode = `te[fmlr][A-Z][A-Z0-9_]*`
+
+var xrplRejectionCodeExact = regexp.MustCompile(`^` + xrplRejectionCode + `$`)
+
+// IsXRPLRejection reports whether an XRPL engine result refuses the transaction. terQUEUED is the
+// one code of that shape that does not: the node queued the transaction for a later ledger.
+// tesSUCCESS and tec* (applied, with the fee claimed) are outside the shape, and so is anything
+// that is not a ledger code at all. rpcInterfaceMessages.CheckXRPLResponseError flags a submit by
+// it, and the XRP rows above classify every code it accepts.
+func IsXRPLRejection(engineResult string) bool {
+	return engineResult != "terQUEUED" && xrplRejectionCodeExact.MatchString(engineResult)
+}
+
+// xrplMessageStartsWith matches a message whose first token is one of the given XRPL names or
+// codes, with or without the direct-RPC sender's "HTTP <status>: " prefix.
+func xrplMessageStartsWith(alternatives ...string) ErrorMatcher {
+	return MessageRegex(`^(?:HTTP \d+: )?(?:` + strings.Join(alternatives, "|") + `)\b`)
 }
 
 // ---------------------------------------------------------------------------
