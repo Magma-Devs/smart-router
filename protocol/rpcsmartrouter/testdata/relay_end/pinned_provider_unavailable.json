@@ -19,5 +19,5 @@
   "served_by": "",
   "stateful": false,
   "status": 0,
-  "stop_reason": "FirstMessageFailed"
+  "stop_reason": "PinnedProviderUnavailable"
 }

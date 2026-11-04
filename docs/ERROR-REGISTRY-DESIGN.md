@@ -733,7 +733,8 @@ router-made 500. It now skips a 5xx whose body is JSON and whose status the regi
 `MayHaveReachedNode` (`rpcInterfaceMessages.ServerErrorIsNodeReply`). `502`/`504`/`522`/`524` keep
 the old path: a gateway that failed may already have forwarded the request, so a write's outcome
 stays "unclear". Blame and retry are unchanged by this step — the status rows above still decide
-them.
+them. Since MAG-4481 a read that fails on that old path still reaches the client as the node's own
+status and body; only a write whose outcome is unclear gets the router's 500.
 
 ### 9.3 Decisions taken in review
 
