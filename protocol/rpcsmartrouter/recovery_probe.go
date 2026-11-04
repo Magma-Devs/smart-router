@@ -158,6 +158,18 @@ func isBatchPayload(data []byte) bool {
 	return false
 }
 
+// judgedByItsBody reports a 5xx the relay path classifies by the node's JSON-RPC error in its body
+// rather than by its status: the JSON-RPC sender wraps every 5xx in an HTTPStatusError and
+// classifies it through classifyDirectRPCError, which reads that body first. 501 keeps its
+// capability rule here, and the sender never builds an HTTPStatusError below 500.
+func judgedByItsBody(httpErr *lavasession.HTTPStatusError) bool {
+	if httpErr.StatusCode < http.StatusInternalServerError || httpErr.StatusCode == http.StatusNotImplemented {
+		return false
+	}
+	nodeMessage := chainlib.TryRecoverNodeErrorFromClientError(httpErr)
+	return nodeMessage != nil && nodeMessage.Error != nil
+}
+
 // replayFailingRelay sends the recorded failing request through the endpoint's own direct
 // connection and judges the outcome by the SAME classification rules the relay path uses to mark
 // endpoints unhealthy. The budget mirrors the relay path too: the recorded relay timeout (floored
@@ -204,8 +216,9 @@ func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *lavasession.EndpointWi
 		// HTTP-status errors mirror the relay path's status rule (5xx unhealthy except 501,
 		// which is a capability answer, not a fault). Statuses the relay path would NOT disable
 		// on (unrecognized 4xx: auth drift, a proxy in the way) prove nothing about the recorded
-		// failure — inconclusive, never "recovered".
-		if httpErr, ok := err.(*lavasession.HTTPStatusError); ok {
+		// failure — inconclusive, never "recovered". A 5xx carrying the node's JSON-RPC error is
+		// read by that error, below, as the relay path reads it.
+		if httpErr, ok := err.(*lavasession.HTTPStatusError); ok && !judgedByItsBody(httpErr) {
 			switch {
 			case httpErr.StatusCode == http.StatusTooManyRequests:
 				// busy: the failing handler was never exercised. Hold the endpoint off so
@@ -215,7 +228,8 @@ func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *lavasession.EndpointWi
 			case httpErr.StatusCode == http.StatusNotImplemented:
 				return relayProbeRecovered // capability answer, not a fault
 			default:
-				if unhealthy, _ := classifyHTTPStatus(httpErr.StatusCode); unhealthy {
+				statusClassified := common.ClassifyError(nil, chainFamily, common.TransportJsonRPC, httpErr.StatusCode, "")
+				if unhealthy, _ := classifyHTTPStatus(httpErr.StatusCode, statusClassified); unhealthy {
 					return relayProbeStillFailing
 				}
 				return relayProbeInconclusive

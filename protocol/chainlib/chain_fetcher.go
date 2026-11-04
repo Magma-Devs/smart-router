@@ -1227,7 +1227,7 @@ func (cf *ChainFetcher) verifyVia(ctx context.Context, router ChainRouter, chain
 	if parsedInput.GetRawParsedData() == "" {
 		return utils.LavaFormatWarning("[-] verify failed to parse result", nil,
 			utils.LogAttr("chainId", chainId),
-			utils.LogAttr("nodeUrl", proxyUrl.Url),
+			utils.LogAttr("nodeUrl", proxyUrl.UrlStr()),
 			utils.LogAttr("Method", parsing.GetApiName()),
 			utils.LogAttr("Response", parser.CapStringLen(string(reply.RelayReply.Data))),
 		)
@@ -1238,7 +1238,7 @@ func (cf *ChainFetcher) verifyVia(ctx context.Context, router ChainRouter, chain
 		return utils.LavaFormatWarning("[-] parser returned an error", nil,
 			utils.LogAttr("error", parserError),
 			utils.LogAttr("chainId", chainId),
-			utils.LogAttr("nodeUrl", proxyUrl.Url),
+			utils.LogAttr("nodeUrl", proxyUrl.UrlStr()),
 			utils.LogAttr("Method", parsing.GetApiName()),
 			utils.LogAttr("Response", parser.CapStringLen(string(reply.RelayReply.Data))),
 		)
@@ -1248,7 +1248,7 @@ func (cf *ChainFetcher) verifyVia(ctx context.Context, router ChainRouter, chain
 		if parsedResultAsNumber == spectypes.NOT_APPLICABLE {
 			return utils.LavaFormatWarning("[-] verify failed to parse result as number", nil,
 				utils.LogAttr("chainId", chainId),
-				utils.LogAttr("nodeUrl", proxyUrl.Url),
+				utils.LogAttr("nodeUrl", proxyUrl.UrlStr()),
 				utils.LogAttr("Method", parsing.GetApiName()),
 				utils.LogAttr("Response", parser.CapStringLen(string(reply.RelayReply.Data))),
 				utils.LogAttr("rawParsedData", parsedInput.GetRawParsedData()),
@@ -1258,7 +1258,7 @@ func (cf *ChainFetcher) verifyVia(ctx context.Context, router ChainRouter, chain
 		if uint64ParsedResultAsNumber > latestBlock {
 			return utils.LavaFormatWarning("[-] verify failed parsed result is greater than latestBlock", nil,
 				utils.LogAttr("chainId", chainId),
-				utils.LogAttr("nodeUrl", proxyUrl.Url),
+				utils.LogAttr("nodeUrl", proxyUrl.UrlStr()),
 				utils.LogAttr("Method", parsing.GetApiName()),
 				utils.LogAttr("latestBlock", latestBlock),
 				utils.LogAttr("parsedResult", uint64ParsedResultAsNumber),
@@ -1267,7 +1267,7 @@ func (cf *ChainFetcher) verifyVia(ctx context.Context, router ChainRouter, chain
 		if latestBlock-uint64ParsedResultAsNumber < verification.LatestDistance {
 			return utils.LavaFormatWarning("[-] verify failed expected block distance is not sufficient", nil,
 				utils.LogAttr("chainId", chainId),
-				utils.LogAttr("nodeUrl", proxyUrl.Url),
+				utils.LogAttr("nodeUrl", proxyUrl.UrlStr()),
 				utils.LogAttr("Method", parsing.GetApiName()),
 				utils.LogAttr("latestBlock", latestBlock),
 				utils.LogAttr("parsedResult", uint64ParsedResultAsNumber),
@@ -1281,7 +1281,7 @@ func (cf *ChainFetcher) verifyVia(ctx context.Context, router ChainRouter, chain
 		if rawData != verification.Value {
 			return utils.LavaFormatWarning("[-] verify failed expected and received are different", nil,
 				utils.LogAttr("chainId", chainId),
-				utils.LogAttr("nodeUrl", proxyUrl.Url),
+				utils.LogAttr("nodeUrl", proxyUrl.UrlStr()),
 				utils.LogAttr("rawParsedBlock", rawData),
 				utils.LogAttr("verification.Value", verification.Value),
 				utils.LogAttr("Method", parsing.GetApiName()),
@@ -1294,7 +1294,7 @@ func (cf *ChainFetcher) verifyVia(ctx context.Context, router ChainRouter, chain
 
 	utils.LavaFormatInfo("[+] verified successfully",
 		utils.LogAttr("chainId", chainId),
-		utils.LogAttr("nodeUrl", proxyUrl.Url),
+		utils.LogAttr("nodeUrl", proxyUrl.UrlStr()),
 		utils.LogAttr("verification", verification.Name),
 		utils.LogAttr("block", parsedInput.GetBlock()),
 		utils.LogAttr("rawData", parsedInput.GetRawParsedData()),

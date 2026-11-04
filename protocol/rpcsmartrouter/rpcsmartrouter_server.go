@@ -1480,6 +1480,38 @@ func withUnclearWriteStatus(result *common.RelayResult) *common.RelayResult {
 	return &stamped
 }
 
+// relayFailureLogAttrs adds to a failed attempt's log line its classification and, when an
+// upstream answered, the upstream's own status line and body (MAG-4481). The classification is
+// the one the results manager records for the attempt: the sender's own when it wrapped one,
+// otherwise the same message-based fallback.
+func relayFailureLogAttrs(err error, attrs ...utils.Attribute) []utils.Attribute {
+	classified := common.AsLavaError(err)
+	if classified == nil {
+		classified = common.ClassifyError(common.DetectConnectionError(err), common.ChainFamilyUnknown, common.TransportGRPC, 0, err.Error())
+	}
+	attrs = append(attrs,
+		utils.LogAttr("error_code", classified.Code),
+		utils.LogAttr("error_name", classified.Name),
+	)
+	return append(attrs, lavasession.UpstreamAnswerLogAttrs(err)...)
+}
+
+// withNoAnswerTimeout names the request's processing timeout in a 504 reply, which the relay
+// processor builds without knowing it. It is the request's budget, not the time the failed attempt
+// took: a connect timeout (1001) that gave up early still reads "within <processing timeout>".
+// Copied rather than mutated, as in withUnclearWriteStatus.
+func (rpcss *RPCSmartRouterServer) withNoAnswerTimeout(result *common.RelayResult, protocolMessage chainlib.ProtocolMessage) *common.RelayResult {
+	cf := result.GetClientFacing()
+	if cf == nil || !cf.TimedOut || cf.Timeout > 0 {
+		return result
+	}
+	named := *cf
+	named.Timeout, _ = rpcss.GetProcessingTimeout(protocolMessage)
+	stamped := *result
+	stamped.ClientFacing = &named
+	return &stamped
+}
+
 // unknownWriteOutcome is the judgement, split out so it can be tested directly. Assumes the caller
 // has established that this is a failed write.
 func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad, cutOffMidDelivery bool) bool {
@@ -1620,6 +1652,22 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			return nil, errUnknownWriteOutcome
 		}
 
+		// A hung upstream: the request was dispatched and the processing budget ran out before any
+		// attempt recorded a result. Nobody answered, so the client gets the router's 504 rather
+		// than a 500 carrying "context deadline exceeded" (MAG-4481).
+		if relayProcessor != nil && errors.Is(err, context.DeadlineExceeded) && relayProcessor.GetUsedProviders().SessionsDispatched() > 0 {
+			processingTimeout, _ := rpcss.GetProcessingTimeout(protocolMessage)
+			return &common.RelayResult{
+				StatusCode: http.StatusGatewayTimeout,
+				ClientFacing: &common.ClientFacingError{
+					TimedOut:        true,
+					Timeout:         processingTimeout,
+					RouterErrorCode: common.LavaErrorContextDeadline.Code,
+					RouterErrorName: common.LavaErrorContextDeadline.Name,
+				},
+			}, err
+		}
+
 		return nil, err
 	}
 
@@ -1692,6 +1740,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		return withUnclearWriteStatus(returnedResult), errUnknownWriteOutcome
 	}
 	if err != nil {
+		returnedResult = rpcss.withNoAnswerTimeout(returnedResult, protocolMessage)
 		// relay_end records this failure; a line beside it would make a reader count it twice.
 		return returnedResult, utils.LavaFormatErrorSilent("failed processing responses from RPC endpoints", err, utils.Attribute{Key: "GUID", Value: ctx}, utils.Attribute{Key: utils.KEY_REQUEST_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TASK_ID, Value: ctx}, utils.Attribute{Key: utils.KEY_TRANSACTION_ID, Value: ctx}, utils.LogAttr("endpoint", rpcss.listenEndpoint.Key()))
 	}
@@ -2606,6 +2655,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 
 	// If ALL sessions failed consistency validation, return error to trigger retry with different providers
 	if filterErr != nil {
+		// Unless the request is pinned: then there is no different provider it may go to, and the
+		// retry this error starts used to drop the pin and serve the request from a fresher node
+		// with Lava-Retries 0, silently (MAG-4123). The request fails instead, naming the lag.
+		// Cross-validation overrides pins, so it keeps the retry.
+		if relayProcessor.GetSelection() != relaycore.CrossValidation && relaycore.PinnedByDirectives(protocolMessage.GetDirectiveHeaders()) {
+			return pinnedConsistencyRejection(ctx, failedSessions, lags)
+		}
 		// This is a request-time candidate-set failure (the whole batch was filtered out before any relay
 		// ran), so carry the structured reason on the shared processor for the failure-reason header — same
 		// as the other fail-fast sites. The error itself is left unchanged. If a later retry batch succeeds,
@@ -2942,12 +2998,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				if isClientCancel {
 					logRelayFailure = utils.LavaFormatDebug
 				}
-				logRelayFailure("direct RPC relay failed in goroutine",
+				logRelayFailure("direct RPC relay failed in goroutine", relayFailureLogAttrs(err,
 					utils.LogAttr("endpoint", endpointAddress),
 					utils.LogAttr("error", err.Error()),
 					utils.LogAttr("latency", relayLatency),
 					utils.LogAttr("GUID", goroutineCtx),
-				)
+				)...)
 				errResponse = err
 			} else {
 				utils.LavaFormatDebug("direct RPC relay succeeded in goroutine",
@@ -4978,15 +5034,28 @@ func (rpcss *RPCSmartRouterServer) cachedReplyDirectives(protocolMessage chainli
 	return rpcss.replyHeaderDirectives(), collectionDirectives
 }
 
-// resolvePinDirectives returns the lava-select-provider and lava-stickiness directives,
-// honored only on the first attempt. On a retry (firstAttempt == false) both are returned
-// empty so the relay falls through to a different provider instead of re-pinning the one
-// that just failed — otherwise a pinned provider that returned a retryable node error gets
-// re-selected, or the retry dead-ends on "Selected provider cannot be retried"
-// (MAG-2228). firstAttempt is BatchNumber()==0, which stays 0 when attempt 1 never reached a
-// provider (e.g. PairingListEmpty), so the pin is correctly re-honored in that case.
+// resolvePinDirectives returns the lava-select-provider and lava-stickiness directives for one
+// attempt.
+//
+// A strict pin (relaycore.PinnedByDirectives: lava-stickiness, or lava-select-provider with
+// lava-select-provider-strict: true) is honoured on every attempt. Such a request is answered by
+// the pinned upstream or fails with that upstream's error: the retry policy never retries or
+// hedges it (Policy.Decide, "Pinned"), so a second batch cannot normally exist. Should one ever be
+// sent, the pin still applies and selection refuses the already-tried upstream loudly
+// (SelectedProviderAlreadyFailedError) rather than quietly serving the request elsewhere.
+//
+// A plain lava-select-provider pins the first attempt only, its documented behaviour (MAG-2228):
+// once a batch has been dispatched (firstAttempt false) no pin is read, so a retry or hedge may
+// reach the rest of the pool instead of re-pinning the upstream that just failed. firstAttempt
+// stays true while nothing has been dispatched, so a resend after a selection failure keeps it.
+//
+// MAG-2228 used to apply the first-attempt rule to lava-stickiness too. That made a sticky session
+// straddle two nodes mid-sequence: for the head-then-fetch pattern the header exists for, the
+// exact false gap it was meant to prevent, since the peer is not checked to have reached the
+// block. MAG-2280 made sticky strict, MAG-4123 is the same rule for the router's own consistency
+// gate, and MAG-4826 keeps lava-select-provider's failover with strict selection as an opt-in.
 func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]string, firstAttempt bool) (selectedProvider, stickiness string) {
-	if !firstAttempt {
+	if !firstAttempt && !relaycore.PinnedByDirectives(directiveHeaders) {
 		return "", ""
 	}
 	if id, ok := directiveHeaders[common.STICKINESS_HEADER_NAME]; ok {
@@ -4998,6 +5067,24 @@ func resolvePinDirectives(ctx context.Context, directiveHeaders map[string]strin
 		utils.LavaFormatTrace("found provider selection header", utils.LogAttr("provider", selectedProvider), utils.LogAttr("GUID", ctx))
 	}
 	return selectedProvider, stickiness
+}
+
+// pinnedConsistencyRejection is the terminal error for a pinned request whose upstream the
+// consistency gate judged too far behind the chain tip (MAG-4123). It wraps
+// SelectedProviderUnavailableError, "cannot serve this request", which the policy stops on at
+// once (relaycore.PinnedUpstreamUnservable), so no resend runs selection without the pin. The
+// client gets an error rather than another node's answer. The session keeps its choice: a
+// lagging upstream is not a dead one, and the health machinery, not this gate, decides when a
+// stalled upstream leaves the pool and with it the pin.
+func pinnedConsistencyRejection(ctx context.Context, failed lavasession.ConsumerSessionsMap, lags map[string]consistencyLag) error {
+	attrs := []utils.Attribute{utils.LogAttr("GUID", ctx)}
+	for provider := range failed {
+		attrs = append(attrs, utils.LogAttr("provider", provider))
+		if lag, ok := lags[provider]; ok {
+			attrs = append(attrs, utils.LogAttr("lag", lag.lag), utils.LogAttr("threshold", lag.threshold))
+		}
+	}
+	return utils.LavaFormatWarning("pinned provider is too far behind the chain tip; a pinned request is not served by another provider", lavasession.SelectedProviderUnavailableError, attrs...)
 }
 
 // crossValidationOverridesPin reports whether cross-validation displaces the caller's
@@ -5307,9 +5394,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	usedProviders := relayProcessor.GetUsedProviders()
 	directiveHeaders := protocolMessage.GetDirectiveHeaders()
 
-	// MAG-2228: honor lava-select-provider / lava-stickiness only on the FIRST attempt.
-	// On a retry (a provider batch has already been dispatched, so BatchNumber > 0) the
-	// relay must be free to fall through to a different provider. See resolvePinDirectives.
+	// A strict pin (lava-stickiness, or lava-select-provider with lava-select-provider-strict: true)
+	// applies to every attempt and is never served by another provider (MAG-2280, MAG-4123); a plain
+	// lava-select-provider pins the first attempt only (MAG-4826). See resolvePinDirectives.
 	selectedProvider, stickiness := resolvePinDirectives(ctx, directiveHeaders, usedProviders.BatchNumber() == 0)
 
 	// Dropped here rather than inside lavasession so the rest of this call stays coherent: the
@@ -5586,18 +5673,9 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			utils.LogAttr("GUID", ctx),
 		)
 
-		// Classify error using the error registry and decide on health tracking
-		// Try to extract LavaError from classifiedError (already classified by classifyAndWrap)
-		classified := common.AsLavaError(err)
-		if classified == nil {
-			// Fallback: derive transport and chain family, classify from scratch
-			errorCode := 0
-			if httpErr, ok := err.(*lavasession.HTTPStatusError); ok {
-				errorCode = httpErr.StatusCode
-			}
-			classified = common.ClassifyError(common.DetectConnectionError(err),
-				rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection), errorCode, err.Error())
-		}
+		// Classify error using the error registry and decide on health tracking. A status error
+		// is judged by its body here, while the verdict it carries decides retry (healthVerdict).
+		classified := healthVerdict(err, rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection))
 
 		// PROTOCOL_CONTEXT_CANCELED is expected in two cases:
 		// 1. Relay race: multiple goroutines race in parallel; when one wins, ProcessRelaySend
@@ -5673,18 +5751,19 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	statusCode := result.StatusCode
 	carriesNodeReply := result.IsNodeError && rpcInterfaceMessages.ServerErrorIsNodeReply(statusCode, result.Reply.GetData())
 	if (statusCode >= 500 && statusCode != http.StatusNotImplemented && !carriesNodeReply) || statusCode == 429 {
-		shouldMarkUnhealthy, _ := classifyHTTPStatus(statusCode)
+		// Classify the status through the registry rather than deciding from the raw code. This
+		// branch is reached when the sender returned (result, nil) with an error status — REST's
+		// shape. The JSON-RPC sender wraps the same status into an HTTPStatusError that reaches the
+		// site above and is classified there, so deciding locally here would label one upstream 5xx
+		// incident two different ways depending only on the customer's api-interface, and a
+		// dashboard grouped by disable_reason would show two half-incidents. The one verdict decides
+		// both the health and the reason.
+		statusClassified := common.ClassifyError(nil,
+			rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection), statusCode, "")
+		shouldMarkUnhealthy, _ := classifyHTTPStatus(statusCode, statusClassified)
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
 			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
-			// Classify the status through the registry rather than naming a reason from the raw code.
-			// This branch is reached when the sender returned (result, nil) with an error status —
-			// REST's shape. The JSON-RPC sender wraps the same status into an HTTPStatusError that
-			// reaches the site above and is classified there, so deciding locally here would label one
-			// upstream 5xx incident two different ways depending only on the customer's api-interface,
-			// and a dashboard grouped by disable_reason would show two half-incidents.
-			statusClassified := common.ClassifyError(nil,
-				rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection), statusCode, "")
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(statusClassified))
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 			utils.LavaFormatDebug("endpoint returned error status",
@@ -5754,6 +5833,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		if targetEndpoint.ResetHealth() {
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, true)
 		}
+	}
+
+	// A node's error goes back to the caller as the reply, so it is redacted like every error the
+	// router writes itself, before it is returned, cached or compared: a node that repeats the
+	// url it was called on, or the key, must not hand the operator's key to the caller (MAG-4863).
+	if result.IsNodeError {
+		redactNodeReply(result.Reply)
 	}
 
 	// Update relayResult with the response
@@ -6730,16 +6816,26 @@ func (rpcss *RPCSmartRouterServer) directRelayChainFamily() common.ChainFamily {
 	return common.ChainFamily(-1)
 }
 
-// classifyHTTPStatus classifies an HTTP status code for endpoint health decisions.
-func classifyHTTPStatus(code int) (shouldMarkUnhealthy, needsBackoff bool) {
+// classifyHTTPStatus decides endpoint health for a bare HTTP status. classified is the registry's
+// verdict for that status, the same one the disable reason is named from, and it decides here too,
+// as it does for every other health decision. Two places where the registry disagrees with the
+// status rule this function used to be are held as overrides, pending the owners' decision
+// (MAG-4278 item 4):
+//   - a 4xx other than 429 never marks the endpoint unhealthy here. The registry blames a 408
+//     (NODE_SERVICE_UNAVAILABLE) and every 4xx it has no row for (UNKNOWN_ERROR).
+//   - a 501 marks it unhealthy here, where the registry reads NODE_UNIMPLEMENTED, a capability
+//     answer. Both callers turn a 501 away before asking.
+//
+// For every other status the registry already gives the rule's answer: a 5xx is unhealthy and
+// backed off, a 429 backed off only (TestClassifyHTTPStatus_GivesTheStatusRulesAnswerForEveryStatus).
+func classifyHTTPStatus(code int, classified *common.LavaError) (shouldMarkUnhealthy, needsBackoff bool) {
 	switch {
-	case code >= 500:
+	case code == http.StatusNotImplemented:
 		return true, true
-	case code == 429:
-		return false, true
-	default:
+	case code < http.StatusInternalServerError && code != http.StatusTooManyRequests:
 		return false, false
 	}
+	return classifyEndpointHealth(classified, false)
 }
 
 // relayHoldoff is the hot path's and recovery probe's handle on the process-wide
@@ -6766,18 +6862,34 @@ func isDataScopeRelayOutcome(err error, relayResult *common.RelayResult) bool {
 }
 
 // httpStatusRelayError is the error relayInnerDirect fails a relay with when the upstream
-// answered a >=500/429 status. A 429 travels as the typed sentinel with the upstream's
-// Retry-After attached, so errors.Is(err, common.StatusCodeError429) and
-// common.RetryAfterFrom read the same on the relay path as on every other transport.
+// answered a >=500/429 status. It carries the upstream's answer (status, body, Content-Type) so
+// the client can be given it as is when the relay fails (MAG-4481); Error() is one canonical text
+// per status, so the classification is the same as for the plain "HTTP <code>" this used to be. A
+// 429 unwraps to the typed sentinel with the upstream's Retry-After attached, so
+// errors.Is(err, common.StatusCodeError429) and common.RetryAfterFrom read the same on the relay
+// path as on every other transport.
 func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error {
-	if statusCode != 429 {
-		return fmt.Errorf("HTTP %d", statusCode)
-	}
 	header := http.Header{}
 	if reply != nil {
 		for _, md := range reply.Metadata {
 			header.Add(md.Name, md.Value)
 		}
 	}
-	return common.WithRetryAfter(fmt.Errorf("HTTP %d: %w", statusCode, common.StatusCodeError429), header, time.Now())
+	httpErr := &lavasession.HTTPStatusError{
+		StatusCode:  statusCode,
+		Body:        reply.GetData(),
+		ContentType: header.Get("Content-Type"),
+	}
+	if statusCode == http.StatusTooManyRequests {
+		httpErr.RetryAfter, _ = common.ParseRetryAfter(header, time.Now())
+	}
+	return httpErr
+}
+
+// redactNodeReply withholds the secrets in a node's error reply (utils.RedactSecrets). A reply
+// that holds none is left as it is.
+func redactNodeReply(reply *pairingtypes.RelayReply) {
+	if reply != nil {
+		reply.Data = utils.RedactSecretsBytes(reply.Data)
+	}
 }
