@@ -39,6 +39,8 @@ type directRelayHarness struct {
 	endpoint *lavasession.Endpoint
 	// lostBroadcast is handed to relayInnerDirect as is; nil is a relay outside a broadcast.
 	lostBroadcast func(answeredWithNodeError bool) bool
+	// upstream is the endpoint's server; closing it makes the next dial refused.
+	upstream *httptest.Server
 }
 
 // relay runs one relay and reports the endpoint's refusal count and enabled bit afterwards.
@@ -103,6 +105,7 @@ func newDirectRelayHarness(t *testing.T, status int, body string) *directRelayHa
 			},
 		},
 		endpoint: endpoint,
+		upstream: upstream,
 	}
 }
 

@@ -204,6 +204,10 @@ type RPCSmartRouter struct {
 	// Server references for per-endpoint ChainTracker cleanup on epoch updates
 	rpcServers map[string]*RPCSmartRouterServer // key: chainID-apiInterface
 
+	// relayErrors is the router's own count of node and protocol errors, shared by every endpoint
+	// server and read by GET /debug/relay-errors (MAG-4718). Kept whether or not metrics are on.
+	relayErrors *relaycore.RelayErrorTally
+
 	// smartRouterMetricsManager is held here, not just passed down, because the
 	// serving-tier gauge has to be republished from every path that mutates the
 	// session maps — including the epoch tick and the retry loop, which run long
@@ -271,6 +275,7 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 	rpsr.failedStaticProviders = make(map[string][]*lavasession.RPCStaticProviderEndpoint)
 	rpsr.failedBackupProviders = make(map[string][]*lavasession.RPCStaticProviderEndpoint)
 	rpsr.rpcServers = make(map[string]*RPCSmartRouterServer)
+	rpsr.relayErrors = relaycore.NewRelayErrorTally()
 	rpsr.cacheBackend = options.cache
 	rpsr.reverifyInputs = make(map[string]*chainReverifyInputs)
 
@@ -1718,17 +1723,16 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		return rows
 	}))
 
-	// GET /debug/relay-errors — the counts of smartrouter_node_errors_total and
-	// smartrouter_protocol_errors_total, without the metrics port (MAG-4718). One row per chain,
-	// interface, provider and method with a count above zero, read from the counters themselves
-	// so the two surfaces cannot disagree. NodeErrors and ProtocolErrors stay two numbers: a node
-	// error is a reply the router read as the node's fault, a protocol error an attempt with no
-	// proper answer, and failover treats them differently. Both are counted per attempt, so this
-	// is where an attempt the caller never saw (a retry answered) shows its classification.
-	// Cumulative since the process started and cleared by no /debug/reset-* route; PodID names
-	// the process, as on /debug/sticky-claims. Optional chain_id, api_interface and provider
-	// narrow the rows. The counters exist only on a router with --metrics-listen-address set:
-	// without it this answers 503 rather than an empty list that would read as "no errors".
+	// GET /debug/relay-errors — the router's own count of node errors and protocol errors (MAG-4718).
+	// One row per chain, interface, provider and method with a count above zero. The counts are the
+	// router's record of each attempt it classified (relaycore.RelayErrorTally), kept beside the
+	// Prometheus counters rather than read from them, so the route works on a router run without
+	// --metrics-listen-address and its Method is the API name as relayed. NodeErrors and
+	// ProtocolErrors stay two numbers: failover treats a node error and a protocol error
+	// differently. Both are per attempt, so this is where an attempt the caller never saw (a retry
+	// answered) shows its classification. Cumulative since the process started and cleared by no
+	// /debug/reset-* route; PodID names the process, as on /debug/sticky-claims. Optional chain_id,
+	// api_interface and provider narrow the rows.
 	mux.HandleFunc("/debug/relay-errors", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "GET only", http.StatusMethodNotAllowed)
@@ -1736,15 +1740,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		}
 		rows := []map[string]any{}
 		if deps.router != nil {
-			mm := deps.router.smartRouterMetricsManager
-			if mm == nil {
-				http.Error(w, "relay error counts are not kept: the router runs without --metrics-listen-address", http.StatusServiceUnavailable)
-				return
-			}
 			q := r.URL.Query()
 			chainID, apiInterface, provider := q.Get("chain_id"), q.Get("api_interface"), q.Get("provider")
 			podID := endpointstate.LocalPodID()
-			for _, count := range mm.RelayErrorCounts() {
+			for _, count := range deps.router.relayErrors.Counts() {
 				if (chainID != "" && count.ChainID != chainID) ||
 					(apiInterface != "" && count.ApiInterface != apiInterface) ||
 					(provider != "" && count.ProviderAddress != provider) {
@@ -3089,7 +3088,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		relaysMonitorAggregator.RegisterRelaysMonitor(rpcEndpoint.String(), relaysMonitor)
 	}
 
-	rpcSmartRouterServer := &RPCSmartRouterServer{}
+	rpcSmartRouterServer := &RPCSmartRouterServer{relayErrors: rpsr.relayErrors}
 
 	// Create WebSocket subscription manager. Interface-typed so a chain with no
 	// WebSocket endpoint gets the NoOp implementation instead of a real one.

@@ -76,6 +76,9 @@ const (
 
 // implements Relay Sender interfaced and uses an ChainListener to get it called
 type RPCSmartRouterServer struct {
+	// relayErrors is the router's own count of node and protocol errors for GET
+	// /debug/relay-errors (MAG-4718), shared by every endpoint of the router. Nil records nothing.
+	relayErrors *relaycore.RelayErrorTally
 	// warnedUnavailableExtensions holds the extension names already logged as "requested but no
 	// node offers it", so the WARN fires once per extension per endpoint rather than per request.
 	warnedUnavailableExtensions sync.Map
@@ -1872,6 +1875,12 @@ func (rpcss *RPCSmartRouterServer) noteRelayHealth(ctx context.Context, processo
 
 func (rpcss *RPCSmartRouterServer) GetChainIdAndApiInterface() (string, string) {
 	return rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
+}
+
+// RecordNodeError is relaycore.NodeErrorRecorder: the relay processor counts each node error it
+// meters into the router's own tally (MAG-4718).
+func (rpcss *RPCSmartRouterServer) RecordNodeError(chainID, apiInterface, providerAddress, method string) {
+	rpcss.relayErrors.RecordNodeError(chainID, apiInterface, providerAddress, method)
 }
 
 func (rpcss *RPCSmartRouterServer) ProcessRelaySend(ctx context.Context, protocolMessage chainlib.ProtocolMessage, analytics *metrics.RelayMetrics) (*relaycore.RelayProcessor, error) {
@@ -5717,6 +5726,15 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// the health metric — while the provider's own QoS availability did drop.
 		var shouldMarkUnhealthy bool
 		shouldMarkUnhealthy, _ = classifyEndpointHealth(classified, endpointCancellationIsExempt(isClientCancel, budgetExpired))
+
+		// The router's own protocol-error count (MAG-4718). Recorded here, in the branch where the
+		// sender itself failed, because this is the one place every cut isProtocolFailure makes is
+		// structural: an upstream status reaches this branch only as the JSON-RPC sender's
+		// HTTPStatusError (REST statuses take the status branch below), and the refusals above return
+		// before any sender runs.
+		if isProtocolFailure(rpcss.directRelayTransport(directConnection), err, isClientCancel, budgetExpired) {
+			rpcss.relayErrors.RecordProtocolError(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, chainMessage.GetApi().Name)
+		}
 
 		// Apply health tracking based on error classification. The failing request is recorded
 		// FIRST (read-only methods only) so that if this failure crosses the disable threshold,

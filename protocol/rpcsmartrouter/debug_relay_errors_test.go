@@ -1,15 +1,16 @@
 package rpcsmartrouter
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -38,52 +39,58 @@ func readRelayErrors(t *testing.T, mux http.Handler, path string) []relayErrorsR
 	return rows
 }
 
-// The counters are process-global (registerOrReuse), so each run counts on chain ids no other test
-// or earlier run (-count) has used.
-var relayErrorsRun atomic.Int64
-
-func relayErrorsChainIDs() (sui, eth string) {
-	run := relayErrorsRun.Add(1)
-	return fmt.Sprintf("MAG4718SUI%d", run), fmt.Sprintf("MAG4718ETH%d", run)
-}
-
+// The route reads the router's own tally. No metrics manager is set: the route answers on a router
+// run without --metrics-listen-address, and reads no Prometheus counter.
 func TestDebugRelayErrors_ReportsBothCountsPerProviderAndMethod(t *testing.T) {
-	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
-	require.NotNil(t, mm)
-	mux := relayErrorsMux(&RPCSmartRouter{smartRouterMetricsManager: mm})
-	sui, eth := relayErrorsChainIDs()
+	router := &RPCSmartRouter{relayErrors: relaycore.NewRelayErrorTally()}
+	require.Nil(t, router.smartRouterMetricsManager)
+	mux := relayErrorsMux(router)
 
 	// The GraphQL failover shape: the first provider's attempt is read as a node error, the
 	// provider that answered the retry is never counted, and a quiet provider is a protocol error.
-	mm.SetRelayNodeErrorMetric(sui, "graphql", "http://primary1:18711", "checkpoint")
-	mm.SetProtocolError(sui, "graphql", "http://primary2:18711", "checkpoint")
-	mm.SetRelayNodeErrorMetric(sui, "graphql", "http://primary1:18711", "epoch")
-	mm.SetRelayNodeErrorMetric(eth, "jsonrpc", "http://eth1:8545", "eth_call")
+	// A two-root-field operation keeps its name as relayed, not the metric's batch label.
+	router.relayErrors.RecordNodeError("SUI", "graphql", "primary1", "checkpoint")
+	router.relayErrors.RecordProtocolError("SUI", "graphql", "primary2", "checkpoint")
+	router.relayErrors.RecordNodeError("SUI", "graphql", "primary1", "chainIdentifier&checkpoint")
+	router.relayErrors.RecordNodeError("ETH1", "jsonrpc", "eth1", "eth_call")
 
 	podID := endpointstate.LocalPodID()
 	require.Equal(t, []relayErrorsRow{
-		{ChainID: sui, ApiInterface: "graphql", ProviderAddress: "http://primary1:18711", Method: "checkpoint", NodeErrors: 1, PodID: podID},
-		{ChainID: sui, ApiInterface: "graphql", ProviderAddress: "http://primary1:18711", Method: "epoch", NodeErrors: 1, PodID: podID},
-		{ChainID: sui, ApiInterface: "graphql", ProviderAddress: "http://primary2:18711", Method: "checkpoint", ProtocolErrors: 1, PodID: podID},
-	}, readRelayErrors(t, mux, "/debug/relay-errors?chain_id="+sui+"&api_interface=graphql"))
+		{ChainID: "SUI", ApiInterface: "graphql", ProviderAddress: "primary1", Method: "chainIdentifier&checkpoint", NodeErrors: 1, PodID: podID},
+		{ChainID: "SUI", ApiInterface: "graphql", ProviderAddress: "primary1", Method: "checkpoint", NodeErrors: 1, PodID: podID},
+		{ChainID: "SUI", ApiInterface: "graphql", ProviderAddress: "primary2", Method: "checkpoint", ProtocolErrors: 1, PodID: podID},
+	}, readRelayErrors(t, mux, "/debug/relay-errors?chain_id=SUI&api_interface=graphql"))
 
 	require.Equal(t, []relayErrorsRow{
-		{ChainID: sui, ApiInterface: "graphql", ProviderAddress: "http://primary2:18711", Method: "checkpoint", ProtocolErrors: 1, PodID: podID},
-	}, readRelayErrors(t, mux, "/debug/relay-errors?chain_id="+sui+"&provider=http://primary2:18711"))
+		{ChainID: "SUI", ApiInterface: "graphql", ProviderAddress: "primary2", Method: "checkpoint", ProtocolErrors: 1, PodID: podID},
+	}, readRelayErrors(t, mux, "/debug/relay-errors?chain_id=SUI&provider=primary2"))
 
-	require.Empty(t, readRelayErrors(t, mux, "/debug/relay-errors?chain_id="+sui+"&api_interface=jsonrpc"))
-
-	all := readRelayErrors(t, mux, "/debug/relay-errors")
-	require.Contains(t, all, relayErrorsRow{ChainID: eth, ApiInterface: "jsonrpc", ProviderAddress: "http://eth1:8545", Method: "eth_call", NodeErrors: 1, PodID: podID})
+	require.Empty(t, readRelayErrors(t, mux, "/debug/relay-errors?chain_id=SUI&api_interface=jsonrpc"))
+	require.Len(t, readRelayErrors(t, mux, "/debug/relay-errors"), 4)
 }
 
-// TestDebugRelayErrors_UnavailableWithoutMetrics: a router run without --metrics-listen-address has
-// no counters, and an empty list there would read as "no errors".
-func TestDebugRelayErrors_UnavailableWithoutMetrics(t *testing.T) {
-	mux := relayErrorsMux(&RPCSmartRouter{})
-	req := httptest.NewRequest(http.MethodGet, "/debug/relay-errors", nil)
-	rr := httptest.NewRecorder()
-	mux.ServeHTTP(rr, req)
-	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
-	require.Contains(t, rr.Body.String(), "--metrics-listen-address")
+// A router that has counted nothing, or was built without a tally, answers an empty list.
+func TestDebugRelayErrors_NothingCountedIsAnEmptyList(t *testing.T) {
+	require.Empty(t, readRelayErrors(t, relayErrorsMux(&RPCSmartRouter{relayErrors: relaycore.NewRelayErrorTally()}), "/debug/relay-errors"))
+	require.Empty(t, readRelayErrors(t, relayErrorsMux(&RPCSmartRouter{}), "/debug/relay-errors"))
+}
+
+// End to end through relayInnerDirect: an attempt whose upstream refuses the connection is counted
+// as a protocol error in the server's tally, under the provider and the API name.
+func TestRelayInnerDirect_ARefusedAttemptIsCountedAsAProtocolError(t *testing.T) {
+	h := newDirectRelayHarness(t, http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":"0x1"}`)
+	h.rpcss.relayErrors = relaycore.NewRelayErrorTally()
+	h.upstream.Close()
+
+	msg := &mockChainMessage{requestData: []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`)}
+	_, err := h.rpcss.relayInnerDirect(
+		context.Background(), h.session, &common.RelayResult{}, 5*time.Second, 30*time.Second,
+		msg, msg.requestData, func() bool { return false }, nil,
+	)
+	require.Error(t, err)
+
+	require.Equal(t, []relaycore.RelayErrorCount{{
+		ChainID: "ETH1", ApiInterface: "jsonrpc", ProviderAddress: "upstream-under-test",
+		Method: msg.GetApi().Name, ProtocolErrors: 1,
+	}}, h.rpcss.relayErrors.Counts())
 }
