@@ -373,6 +373,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 			)...)
 		},
 		logModule: "jsonrpc http",
+		noAnswer:  noAnswerJsonRpc,
 		answerError: func(_ context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (bool, error) {
 			if handled, sendErr := answerJsonRpcBatchTooLarge(fiberCtx, err); handled {
 				return true, sendErr
@@ -392,11 +393,7 @@ func (apil *JsonRPCChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// A spec-compliant JSON-RPC 2.0 error envelope (see convertToJsonRpcError for the
 		// rationale — `error` must be an Object with code/message per §5.1, not a stringified
 		// envelope).
-		errorBody: func(fiberCtx *fiber.Ctx, relayResult *common.RelayResult, errMasking, msgSeed string) []byte {
-			if cf := relayResult.GetClientFacing(); cf != nil && metrics.ReturnMaskedErrors == "false" {
-				// MAG-4218: the upstream's own answer, or one honest sentence + details in data.
-				return convertUpstreamErrorToJsonRpc(cf, msgSeed, errMasking, fiberCtx.Body())
-			}
+		errorBody: func(fiberCtx *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
 			return convertToJsonRpcError(errMasking, fiberCtx.Body())
 		},
 		replyBody: func(data []byte) []byte {

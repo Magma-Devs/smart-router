@@ -363,6 +363,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			)...)
 		},
 		logModule: "tendermint http in/out",
+		noAnswer:  noAnswerJsonRpc,
 		answerError: func(_ context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (bool, error) {
 			if handled, sendErr := answerJsonRpcBatchTooLarge(fiberCtx, err); handled {
 				return true, sendErr
@@ -390,6 +391,7 @@ func (apil *TendermintRpcChainListener) Serve(ctx context.Context, cmdFlags comm
 			)...)
 		},
 		logModule: "tendermint http in/out",
+		noAnswer:  noAnswerJsonError,
 		errorBody: func(fiberCtx *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
 			if string(fiberCtx.Body()) != "" {
 				errMasking = addAttributeToError("recommendation", "For jsonRPC use POST", errMasking)
