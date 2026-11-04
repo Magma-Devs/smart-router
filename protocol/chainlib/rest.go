@@ -293,6 +293,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		},
 		logReceived: logReceivedWithSeedAfterDapp("Consumer received a new REST POST request"),
 		logModule:   "http in/out",
+		noAnswer:    noAnswerJsonError,
 		answerError: answerMethodNotFound,
 		errorBody:   errorBody,
 	}))
@@ -323,6 +324,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			)...)
 		},
 		logModule:   "http in/out",
+		noAnswer:    noAnswerJsonError,
 		answerError: answerMethodNotFound,
 		errorBody:   errorBody,
 	}))

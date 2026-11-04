@@ -141,7 +141,7 @@ func TestBestModeYieldsDescendingQueue(t *testing.T) {
 	csm, _, ranked := newBestModeCSM(t)
 
 	const wanted = 3
-	got, err := csm.getValidProviderAddresses(context.Background(), wanted, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "")
+	got, err := csm.getValidProviderAddresses(context.Background(), wanted, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", "")
 	require.NoError(t, err)
 	require.Len(t, got, wanted)
 
@@ -163,7 +163,7 @@ func TestBestModeYieldsDescendingQueue(t *testing.T) {
 func TestBestModeQueueCoversEveryCandidate(t *testing.T) {
 	csm, candidates, ranked := newBestModeCSM(t)
 
-	got, err := csm.getValidProviderAddresses(context.Background(), len(candidates), map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "")
+	got, err := csm.getValidProviderAddresses(context.Background(), len(candidates), map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", "")
 	require.NoError(t, err)
 	require.Equal(t, ranked, got, "the full queue must be every candidate, in descending score order")
 }
@@ -174,12 +174,12 @@ func TestBestModeQueueCoversEveryCandidate(t *testing.T) {
 func TestBestModeQueueIsStableAcrossCalls(t *testing.T) {
 	csm, _, _ := newBestModeCSM(t)
 
-	first, err := csm.getValidProviderAddresses(context.Background(), 3, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "")
+	first, err := csm.getValidProviderAddresses(context.Background(), 3, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", "")
 	require.NoError(t, err)
 	require.Len(t, first, 3)
 
 	for i := 0; i < 20; i++ {
-		again, err := csm.getValidProviderAddresses(context.Background(), 3, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "")
+		again, err := csm.getValidProviderAddresses(context.Background(), 3, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", "")
 		require.NoError(t, err)
 		require.Equal(t, first, again, "identical requests must produce an identical queue (call %d)", i)
 	}
@@ -193,7 +193,7 @@ func TestBestModeQueueSkipsIgnoredProviders(t *testing.T) {
 	csm, _, ranked := newBestModeCSM(t)
 
 	leader := ranked[0]
-	got, err := csm.getValidProviderAddresses(context.Background(), 2, map[string]struct{}{leader: {}}, 10, 100, "", nil, common.NO_STATE, "", "")
+	got, err := csm.getValidProviderAddresses(context.Background(), 2, map[string]struct{}{leader: {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "")
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 
