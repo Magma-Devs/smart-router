@@ -24,6 +24,19 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	if input.Selection == relaycore.CrossValidation {
 		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "CrossValidation"}
 	}
+	// A pinned request (a strict pin: lava-stickiness, or lava-select-provider with
+	// lava-select-provider-strict: true; see relaycore.PinnedByDirectives) is served by the pinned
+	// upstream or not at all (MAG-2280, MAG-4123, MAG-4826). The caller chose the node; a retry or
+	// a hedge on another one would be the silent substitution the pin exists to prevent. For the
+	// sequence a sticky session protects, read the head then
+	// fetch that block, it is exactly how a false gap is produced: nothing here checks that the
+	// other node has reached the block. The pinned node's own answer, error included, goes back
+	// to the caller with Lava-Retries 0. Checked before the stateful rate-limit carve-out, so a
+	// pinned write refused for rate is not broadcast elsewhere either. Cross-validation overrides
+	// pins and stopped above.
+	if input.Pinned {
+		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "Pinned"}
+	}
 	// A stateful relay is not retried because a possibly-executed write must not run
 	// twice. A rate limit is the one failure that concern does not cover: the upstream
 	// refused before executing anything, so the retry lands on a different endpoint
@@ -149,6 +162,15 @@ func (p *Policy) OnSendRelayResult(err error, isPairingListEmpty bool, selection
 	// state machine surfaces, mirroring the CrossValidation short-circuit
 	// at the top of Decide.
 	if selection == relaycore.CrossValidation {
+		return relaycore.SendStop
+	}
+	// A selection error that names the pin is terminal within this request (MAG-4123): the pinned
+	// upstream is unknown, blocked, busy, or too far behind the chain tip, and a resend of the same
+	// pinned request changes none of that. Stop now, before a resend could run selection without
+	// the pin, and without SendRelayAttempts identical refusals first. This also covers a plain
+	// lava-select-provider: nothing has been dispatched, so its resend would keep the pin and be
+	// refused again; the outcome is the same, only sooner.
+	if relaycore.PinnedUpstreamUnservable(err) {
 		return relaycore.SendStop
 	}
 
