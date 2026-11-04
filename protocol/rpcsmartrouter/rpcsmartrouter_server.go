@@ -5586,15 +5586,9 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			utils.LogAttr("GUID", ctx),
 		)
 
-		// Classify error using the error registry and decide on health tracking
-		// Try to extract LavaError from classifiedError (already classified by classifyAndWrap)
-		classified := common.AsLavaError(err)
-		if classified == nil {
-			// Fallback: derive transport and chain family, classify from scratch through the same
-			// pipeline the sender uses (an HTTPStatusError's status is its code there too).
-			classified, _, _ = chainlib.ClassifyNodeErrorWithDetails(err,
-				rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection))
-		}
+		// Classify error using the error registry and decide on health tracking. A status error
+		// is judged by its body here, while the verdict it carries decides retry (healthVerdict).
+		classified := healthVerdict(err, rpcss.directRelayChainFamily(), rpcss.directRelayTransport(directConnection))
 
 		// PROTOCOL_CONTEXT_CANCELED is expected in two cases:
 		// 1. Relay race: multiple goroutines race in parallel; when one wins, ProcessRelaySend
