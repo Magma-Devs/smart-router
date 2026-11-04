@@ -4777,7 +4777,7 @@ func collectEndpoints(transport subscriptionTransport, providers []*lavasession.
 			}
 			utils.LavaFormatInfo(transport.foundMessage,
 				utils.LogAttr("tier", tierLabel),
-				utils.LogAttr("url", provider.NodeUrls[i].Url),
+				utils.LogAttr("url", provider.NodeUrls[i].UrlStr()),
 				utils.LogAttr("provider", provider.Name),
 				utils.LogAttr("chainID", provider.ChainID),
 			)

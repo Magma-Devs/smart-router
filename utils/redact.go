@@ -13,20 +13,31 @@ const RedactedMark = "[redacted]"
 // segment so a redacted url still reads as a url in logs and error text.
 const RedactedURLMark = "/" + RedactedMark
 
+// urlStop and queryStop are the characters that end a url inside text. The match
+// stops at ",;)" as well as at quotes and brackets so a url embedded in a log
+// attribute list ("{url:https://host/p,method:eth_call}") does not swallow what
+// follows it, and the host — all this needs to identify — always precedes them.
+// A query is the exception for ";": Go's HTTP client sends "?a=1;apikey=<key>"
+// as is, so inside a query ";" is part of the url (MAG-4863).
+const (
+	urlStop   = `\s"'` + "`" + `<>\\^{}|\[\],;)`
+	queryStop = `\s"'` + "`" + `<>\\^{}|\[\],)`
+)
+
 // urlInText matches a scheme-qualified url inside arbitrary text. Anchoring on
 // "://" keeps prose and scheme-less identifiers — a host:port listen address, a
 // provider name, a "dial tcp 10.0.0.1:443" — untouched.
-//
-// The match stops at ",;)" as well as at quotes and brackets so a url embedded in
-// a log attribute list ("{url:https://host/p,method:eth_call}") does not swallow
-// what follows it. No credential charset uses those, and the host — all this
-// needs to identify — always precedes them.
-var urlInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s"'` + "`" + `<>\\^{}|\[\],;)]+`)
+var urlInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^` + urlStop + `?]+(?:\?[^` + queryStop + `]*)?`)
+
+// escapedURLInText matches a url whose slashes are escaped, as JSON allows
+// ("https:\/\/host\/v2\/<key>"). A backslash is part of the match only in "\/",
+// so the one that escapes a closing quote ends it and the JSON stays valid.
+var escapedURLInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*:\\/\\/(?:[^` + queryStop + `]|\\/)+`)
 
 // schemeLessURLInText matches a credential-bearing scheme-less node url while
 // requiring a recognizable host. That keeps ordinary prose, provider names,
 // lava addresses and bare host:port values untouched.
-var schemeLessURLInText = regexp.MustCompile(`\b(?:(?:localhost|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]+)(?::[0-9]+)?|[a-zA-Z0-9-]+:[0-9]+)[/?#][^\s"'` + "`" + `<>\\^{}|\[\],;)]+`)
+var schemeLessURLInText = regexp.MustCompile(`\b(?:(?:localhost|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]+)(?::[0-9]+)?|[a-zA-Z0-9-]+:[0-9]+)(?:[/#][^` + urlStop + `?]*(?:\?[^` + queryStop + `]*)?|\?[^` + queryStop + `]+)`)
 
 // RedactURL reduces one url to scheme://host[:port]. Upstream vendors carry the
 // api key in the userinfo, the path (".../v2/<key>") or the query
@@ -78,19 +89,30 @@ func RedactIfURL(s string) string {
 	return s
 }
 
-// RedactSecrets rewrites every url in s with RedactURL. Use it on any text that
-// may have picked up a url indirectly — an error from net/http, whose *url.Error
-// message embeds the full request url (Go masks only the userinfo password), or
-// a message that interpolated a node-url.
+// RedactSecrets withholds every secret in s: each value the configuration
+// registered (RegisterSecrets), in any form, and then every url, rewritten with
+// RedactURL. Use it on any text that may have picked up a secret indirectly — an
+// error from net/http, whose *url.Error message embeds the full request url (Go
+// masks only the userinfo password), a message that interpolated a node-url, or
+// a body a node sent back.
 //
-// The delimiter check keeps this near-free for the log lines that hold no url,
-// which is nearly all of them.
+// The delimiter check keeps the url pass near-free for the log lines that hold
+// no url, which is nearly all of them.
 func RedactSecrets(s string) string {
+	s = redactConfiguredSecrets(s)
 	if !strings.Contains(s, "://") && !strings.ContainsAny(s, "/?#") {
 		return s
 	}
+	if strings.Contains(s, `:\/\/`) {
+		s = escapedURLInText.ReplaceAllStringFunc(s, redactEscapedURL)
+	}
 	redacted := urlInText.ReplaceAllStringFunc(s, RedactURL)
 	return schemeLessURLInText.ReplaceAllStringFunc(redacted, RedactURL)
+}
+
+// redactEscapedURL is RedactURL for a url whose slashes are escaped.
+func redactEscapedURL(escaped string) string {
+	return strings.ReplaceAll(RedactURL(strings.ReplaceAll(escaped, `\/`, "/")), "/", `\/`)
 }
 
 // RedactSecretsErr returns err with its message redacted, preserving the cause
@@ -186,4 +208,17 @@ func RedactHeaderMap(h map[string]string) string {
 	}
 	b.WriteByte('}')
 	return b.String()
+}
+
+// RedactSecretsBytes is RedactSecrets for a body. It returns b itself when there is nothing to
+// withhold, so a body without secrets is not copied.
+func RedactSecretsBytes(b []byte) []byte {
+	if len(b) == 0 {
+		return b
+	}
+	text := string(b)
+	if redacted := RedactSecrets(text); redacted != text {
+		return []byte(redacted)
+	}
+	return b
 }

@@ -2,6 +2,7 @@ package relaycore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -47,6 +48,17 @@ func TestClientFacingFromProtocolError_UpstreamAnswered(t *testing.T) {
 }
 
 // Every code that means "the upstream never answered" yields the leaf cause and no status.
+// MAG-4863: a node's error body goes back to the caller, forwarded as the node's own JSON-RPC
+// error or quoted as upstream_body. It is redacted where it is taken, so both replies are.
+func TestClientFacingFromProtocolError_RedactsTheUpstreamBody(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"rejected by https://node.example.com/v2/KEY123SECRET"}}`
+	cf := clientFacingFromProtocolError(upstream503Err(body), common.LavaErrorNodeServiceUnavailable)
+	require.NotNil(t, cf)
+	require.NotContains(t, string(cf.UpstreamBody), "KEY123SECRET")
+	require.Contains(t, string(cf.UpstreamBody), "https://node.example.com/[redacted]", "the host stays")
+	require.True(t, json.Valid(cf.UpstreamBody), "the forwarded body is still JSON")
+}
+
 func TestClientFacingFromProtocolError_TransportFailures(t *testing.T) {
 	leaf := errors.New("dial tcp 10.0.0.1:443: connect: connection refused")
 	for _, lavaErr := range []*common.LavaError{

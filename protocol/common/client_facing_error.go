@@ -6,7 +6,7 @@ package common
 type ClientFacingError struct {
 	UpstreamStatus     int    // 0 when the upstream never answered
 	UpstreamStatusText string // the status line, e.g. "503 Service Unavailable"
-	UpstreamBody       []byte // the upstream's body, unmodified
+	UpstreamBody       []byte // the upstream's body, with its secrets withheld (utils.RedactSecrets)
 	Cause              string // leaf cause text for a transport failure (no upstream answer)
 	RouterErrorCode    uint32 // the registry classification, as metadata
 	RouterErrorName    string
