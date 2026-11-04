@@ -107,8 +107,17 @@ func RedactSecrets(s string) string {
 		s = escapedURLInText.ReplaceAllStringFunc(s, redactEscapedURL)
 	}
 	redacted := urlInText.ReplaceAllStringFunc(s, RedactURL)
-	return schemeLessURLInText.ReplaceAllStringFunc(redacted, RedactURL)
+	redacted = schemeLessURLInText.ReplaceAllStringFunc(redacted, RedactURL)
+	if strings.Contains(redacted, RedactedURLMark+RedactedMark) {
+		redacted = repeatedURLMark.ReplaceAllString(redacted, RedactedURLMark)
+	}
+	return redacted
 }
+
+// repeatedURLMark is a url mark followed by more marks. A registered secret inside a url is
+// replaced first, and the url pass stops at the "[" of that mark, so it cuts the url just before
+// the mark and leaves it standing after its own: "https://host/[redacted][redacted]".
+var repeatedURLMark = regexp.MustCompile(regexp.QuoteMeta(RedactedURLMark) + `(?:` + regexp.QuoteMeta(RedactedMark) + `)+`)
 
 // redactEscapedURL is RedactURL for a url whose slashes are escaped.
 func redactEscapedURL(escaped string) string {

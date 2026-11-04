@@ -77,6 +77,21 @@ func TestRedactSecrets_ARegisteredKeyIsWithheldInAnyShape(t *testing.T) {
 	}
 }
 
+// A registered key inside a url leaves one mark after the host, as an unregistered one does: the
+// url pass stops at the mark the value pass left, and must not add its own beside it.
+func TestRedactSecrets_ARegisteredKeyInAURLLeavesOneMark(t *testing.T) {
+	withConfiguredSecrets(t)
+	RegisterSecrets(testKey)
+	for in, want := range map[string]string{
+		`Post "https://eth.example.com/v2/KEY123SECRET": EOF`:        `Post "https://eth.example.com/[redacted]": EOF`,
+		`Get "https://eth.example.com/rpc?apikey=KEY123SECRET": EOF`: `Get "https://eth.example.com/[redacted]": EOF`,
+		`dial eth.example.com/v2/KEY123SECRET failed`:                `dial eth.example.com/[redacted] failed`,
+		`{"m":"https:\/\/eth.example.com\/v2\/KEY123SECRET"}`:        `{"m":"https:\/\/eth.example.com\/[redacted]"}`,
+	} {
+		require.Equal(t, want, RedactSecrets(in), in)
+	}
+}
+
 // A secret is withheld in the forms it takes in a url and in a JSON string, whatever it contains.
 func TestRedactSecrets_ARegisteredKeyIsWithheldInEveryEncoding(t *testing.T) {
 	withConfiguredSecrets(t)
