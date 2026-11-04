@@ -65,21 +65,32 @@ func (b *ExponentialBackoff) NextBackoff() (time.Duration, bool) {
 		return 0, false // Max retries exceeded
 	}
 
+	delay := b.rung(b.currentAttempt)
+	b.currentAttempt++
+	return delay, true
+}
+
+// LastBackoff returns the ladder's last rung, jittered like the others, without moving along the
+// ladder: the wait for a caller that keeps retrying once NextBackoff has run out. A ladder with no
+// MaxRetries never runs out, and answers its first rung.
+func (b *ExponentialBackoff) LastBackoff() time.Duration {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	return b.rung(max(b.MaxRetries-1, 0))
+}
+
+// rung is the delay for attempt, jittered when the ladder has jitter. Called with b.lock held.
+func (b *ExponentialBackoff) rung(attempt int) time.Duration {
 	cfg := backoff.Config{
 		Initial:      b.InitialInterval,
 		Max:          b.MaxInterval,
 		Multiplier:   b.Multiplier,
 		JitterFactor: b.JitterFactor,
 	}
-	var delay time.Duration
 	if b.JitterFactor > 0 && b.rng != nil {
-		delay = backoff.Jittered(b.currentAttempt, cfg, b.rng.Float64())
-	} else {
-		delay = backoff.Delay(b.currentAttempt, cfg)
+		return backoff.Jittered(attempt, cfg, b.rng.Float64())
 	}
-
-	b.currentAttempt++
-	return delay, true
+	return backoff.Delay(attempt, cfg)
 }
 
 // Reset resets the backoff to initial state (call after successful connection)
