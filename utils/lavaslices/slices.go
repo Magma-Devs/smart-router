@@ -9,34 +9,6 @@ type Number interface {
 	~float32 | ~float64 | ~int | ~int8 | ~int16 | ~int32 | ~int64 | ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64
 }
 
-func Slice[T any](v ...T) []T {
-	return v
-}
-
-func Min[T cmp.Ordered](s []T) (m T) {
-	if len(s) > 0 {
-		m = s[0]
-		for _, v := range s[1:] {
-			if m > v {
-				m = v
-			}
-		}
-	}
-	return m
-}
-
-func Max[T cmp.Ordered](s []T) (m T) {
-	if len(s) > 0 {
-		m = s[0]
-		for _, v := range s[1:] {
-			if m < v {
-				m = v
-			}
-		}
-	}
-	return m
-}
-
 // Percentile returns the value at the given rank in the slice.
 // If reverse is true, the slice is sorted in descending order.
 // If reverse is false, the slice is sorted in ascending order.
@@ -77,24 +49,6 @@ func Stability[T Number](slice []T, compare T) float64 {
 		stabilitySum += float64(diff) / float64(compare)
 	}
 	return stabilitySum / float64(len(slice))
-}
-
-func Contains[T comparable](slice []T, elem T) bool {
-	for _, e := range slice {
-		if e == elem {
-			return true
-		}
-	}
-	return false
-}
-
-func ContainsPredicate[T comparable](slice []T, predicate func(elem T) bool) bool {
-	for _, e := range slice {
-		if predicate(e) {
-			return true
-		}
-	}
-	return false
 }
 
 func Map[T, V any](slice []T, filter func(T) V) []V {

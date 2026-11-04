@@ -9,15 +9,7 @@ package sigs
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 )
-
-// EncodeUint64 encodes a uint64 value to a byte array
-func EncodeUint64(val uint64) []byte {
-	encodedVal := make([]byte, 8)
-	binary.LittleEndian.PutUint64(encodedVal, val)
-	return encodedVal
-}
 
 // HashMsg hashes msgData using SHA-256
 func HashMsg(msgData []byte) []byte {

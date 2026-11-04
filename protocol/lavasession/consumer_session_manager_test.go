@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,7 +20,6 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
@@ -635,7 +635,7 @@ func TestNoPairingAvailableFlow(t *testing.T) {
 	validSnapshot := append([]string(nil), csm.validAddresses...)
 	csm.lock.RUnlock()
 	for _, addr := range css3 {
-		require.False(t, lavaslices.Contains(validSnapshot, addr.Session.Parent.PublicLavaAddress))
+		require.False(t, slices.Contains(validSnapshot, addr.Session.Parent.PublicLavaAddress))
 	}
 	require.Equal(t, len(validSnapshot), 2)
 }
@@ -665,7 +665,7 @@ func TestBlockedProviderIsReportedImmediately(t *testing.T) {
 	blocked := func() bool {
 		csm.lock.RLock()
 		defer csm.lock.RUnlock()
-		return lavaslices.Contains(csm.currentlyBlockedProviderAddresses, target)
+		return slices.Contains(csm.currentlyBlockedProviderAddresses, target)
 	}
 	require.True(t, blocked(), "and it must stay blocked; no timer returns it")
 
@@ -1331,7 +1331,7 @@ func TestNoPairingsError(t *testing.T) {
 	err := csm.UpdateAllProviders(firstEpochHeight, pairingList, nil) // update the providers.
 	require.NoError(t, err)
 	time.Sleep(5 * time.Millisecond) // let probes finish
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "invalid", nil, common.NO_STATE, "", "")
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "invalid", nil, common.NO_STATE, "", "")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, PairingListEmptyError))
 }
@@ -1353,7 +1353,7 @@ func TestSelectedProviderAlreadyFailedReturnsError(t *testing.T) {
 	pinned := validAddresses[0]
 
 	// Sanity: when not ignored, the pinned address is returned successfully.
-	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", pinned)
+	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", pinned)
 	require.NoError(t, err)
 	require.Equal(t, []string{pinned}, got)
 
@@ -1361,7 +1361,7 @@ func TestSelectedProviderAlreadyFailedReturnsError(t *testing.T) {
 	// (simulating a prior failed connect attempt in the same GetSessions call),
 	// the helper must return an error instead of re-selecting the same address.
 	ignored := map[string]struct{}{pinned: {}}
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, 10, 100, "", nil, common.NO_STATE, "", pinned)
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, nil, 10, 100, "", nil, common.NO_STATE, "", pinned)
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
 		"expected SelectedProviderAlreadyFailedError, got: %v", err)
@@ -1378,7 +1378,7 @@ func TestSelectedProviderUnknownNameIsNotReportedAsAFailure(t *testing.T) {
 	require.NoError(t, err)
 	time.Sleep(5 * time.Millisecond) // let probes finish
 
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "no-such-provider")
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", "no-such-provider")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
 		"expected SelectedProviderUnavailableError, got: %v", err)
@@ -1405,7 +1405,7 @@ func TestSelectedProviderMatchesCaseInsensitively(t *testing.T) {
 		strings.ToLower(pinned),
 		strings.ToUpper(pinned[:1]) + pinned[1:], // "Provider0"
 	} {
-		got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", requested)
+		got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", requested)
 		require.NoError(t, err, "header %q should resolve to %q", requested, pinned)
 		// The canonical address comes back, not the caller's spelling.
 		require.Equal(t, []string{pinned}, got, "header %q must resolve to the registered address", requested)
@@ -1426,7 +1426,7 @@ func TestSelectedProviderAlreadyFailedIsCaseInsensitive(t *testing.T) {
 	pinned := validAddresses[0]
 
 	ignored := map[string]struct{}{pinned: {}}
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, 10, 100, "", nil, common.NO_STATE, "", strings.ToUpper(pinned))
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, ignored, nil, 10, 100, "", nil, common.NO_STATE, "", strings.ToUpper(pinned))
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
 		"expected SelectedProviderAlreadyFailedError, got: %v", err)
@@ -1445,17 +1445,17 @@ func TestSelectedProviderIgnoredSetDoesNotFoldOntoACaseTwin(t *testing.T) {
 	require.ElementsMatch(t, []string{"Lava", "lava"}, csm.getValidAddresses("", nil, context.Background()))
 
 	// `lava` failed earlier in this request; the header pins `Lava`, which did not.
-	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"lava": {}}, 10, 100, "", nil, common.NO_STATE, "", "Lava")
+	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"lava": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "Lava")
 	require.NoError(t, err, "Lava never failed — its case-twin's failure must not reject it")
 	require.Equal(t, []string{"Lava"}, got)
 
 	// ...and the reverse, so neither spelling is privileged.
-	got, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, 10, 100, "", nil, common.NO_STATE, "", "lava")
+	got, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "lava")
 	require.NoError(t, err)
 	require.Equal(t, []string{"lava"}, got)
 
 	// The spin bound still holds when it is the pinned provider itself that failed.
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, 10, 100, "", nil, common.NO_STATE, "", "Lava")
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "Lava")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
 		"expected SelectedProviderAlreadyFailedError, got: %v", err)
@@ -1470,7 +1470,7 @@ func TestSelectedProviderAmbiguousCaseIsRejected(t *testing.T) {
 	require.NoError(t, err)
 	time.Sleep(5 * time.Millisecond) // let probes finish
 
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, 10, 100, "", nil, common.NO_STATE, "", "LAVA")
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", "LAVA")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
 		"expected SelectedProviderUnavailableError, got: %v", err)

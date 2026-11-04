@@ -5,13 +5,10 @@ import (
 	"reflect"
 
 	"github.com/goccy/go-json"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/utils"
-
-	"github.com/magma-Devs/smart-router/utils/sigs"
 )
 
 type TendermintrpcMessage struct {
@@ -21,24 +18,7 @@ type TendermintrpcMessage struct {
 
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
 func (tm *TendermintrpcMessage) GetRawRequestHash() ([]byte, error) {
-	headers := tm.GetHeaders()
-	headersByteArray, err := json.Marshal(headers)
-	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", common.RedactMetadata(headers)))
-		return []byte{}, err
-	}
-	methodByteArray := []byte(tm.Method + tm.Path)
-
-	paramsByteArray, err := json.Marshal(tm.Params)
-	if err != nil {
-		utils.LavaFormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("headers", tm.Params))
-		return []byte{}, err
-	}
-	return sigs.HashMsg(append(append(methodByteArray, paramsByteArray...), headersByteArray...)), nil
-}
-
-func (cp TendermintrpcMessage) GetParams() interface{} {
-	return cp.Params
+	return tm.rawRequestHashWithParams(tm.Method + tm.Path)
 }
 
 type TendermintMessageResponseBody struct {
@@ -68,17 +48,6 @@ func (jm TendermintrpcMessage) CheckResponseError(data []byte, httpStatusCode in
 		}
 	}
 	return false, ""
-}
-
-func (tm TendermintrpcMessage) GetResult() json.RawMessage {
-	if tm.Error != nil {
-		utils.LavaFormatWarning("GetResult() Request got an error from the node", nil, utils.Attribute{Key: "error", Value: tm.Error})
-	}
-	return tm.Result
-}
-
-func (tm TendermintrpcMessage) ParseBlock(inp string) (int64, error) {
-	return parser.ParseDefaultBlockParameter(inp)
 }
 
 // RPCError is the error object of a Tendermint JSON-RPC response, in the shape CometBFT's

@@ -21,10 +21,10 @@ import (
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
 
-// relayEndCaller is what a caller sends that names it: the project-id header, and the tracing
+// relayEndCaller is what a caller sends that names it: the customer-id header, and the tracing
 // headers a listener stamps on the context. An empty one is a header the caller did not send.
 type relayEndCaller struct {
-	projectID, requestID, taskID, txID string
+	customerID, requestID, taskID, txID string
 }
 
 func (c relayEndCaller) context(ctx context.Context) context.Context {
@@ -53,7 +53,7 @@ func TestRelayEnd_CustomerAndCallerIDs(t *testing.T) {
 		body   string
 	}{
 		{"caller_ids", relayEndCaller{"demo-acme", "req-7f3a9c", "task-42", "tx-0009"}, relayEndRead},
-		{"caller_ids_request_id_only", relayEndCaller{relayEndNoProjectID, "req-7f3a9c", "", ""}, relayEndRead},
+		{"caller_ids_request_id_only", relayEndCaller{relayEndNoCustomerID, "req-7f3a9c", "", ""}, relayEndRead},
 		{"caller_ids_parse_failure", relayEndCaller{"demo-globex", "req-7f3a9c", "task-42", "tx-0009"}, `{"jsonrpc":"2.0","method":`},
 		{"caller_ids_invalid_utf8", relayEndCaller{"demo-globex\xff\xfe-team", "", "task-\xc3", ""}, relayEndRead},
 		{"caller_ids_too_long", relayEndCaller{longest, longest, "", ""}, relayEndRead},
@@ -64,7 +64,7 @@ func TestRelayEnd_CustomerAndCallerIDs(t *testing.T) {
 			guid := relayEndCaseGUID(tc.name)
 			ctx, cancel := context.WithTimeout(tc.caller.context(utils.WithUniqueIdentifier(context.Background(), guid)), relayEndShortWait)
 			defer cancel()
-			_, _ = server.SendRelay(ctx, "", tc.body, http.MethodPost, tc.caller.projectID, "", nil, nil)
+			_, _ = server.SendRelay(ctx, "", tc.body, http.MethodPost, tc.caller.customerID, "", nil, nil)
 			requireRelayEndGolden(t, tc.name, normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false))
 		})
 	}
@@ -87,8 +87,8 @@ func TestRelayEnd_CallerIDCleaning(t *testing.T) {
 	}
 }
 
-// The listeners put the headers where the event reads them: an HTTP request's project-id and tracing
-// headers, and a WebSocket connection's project-id, which a frame that does not parse is reported
+// The listeners put the headers where the event reads them: an HTTP request's customer-id and tracing
+// headers, and a WebSocket connection's customer-id, which a frame that does not parse is reported
 // with too.
 func TestRelayEnd_CallerIDsFromTheListener(t *testing.T) {
 	if !rand.Initialized() {
@@ -116,7 +116,7 @@ func TestRelayEnd_CallerIDsFromTheListener(t *testing.T) {
 		request, err := http.NewRequest(http.MethodPost, "http://"+address+"/", bytes.NewBufferString(relayEndRead))
 		require.NoError(t, err)
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set(chainlib.ProjectIDHeader, "demo-acme")
+		request.Header.Set(chainlib.CustomerIDHeader, "demo-acme")
 		request.Header.Set("X-Request-Id", "req-7f3a9c")
 		request.Header.Set("X-Task-Id", "task-42")
 		request.Header.Set("X-Tx-Id", "tx-0009")
@@ -132,7 +132,7 @@ func TestRelayEnd_CallerIDsFromTheListener(t *testing.T) {
 	})
 
 	t.Run("WebSocket", func(t *testing.T) {
-		client, _, err := websocket.DefaultDialer.Dial("ws://"+address+"/ws", http.Header{chainlib.ProjectIDHeader: []string{"demo-globex"}})
+		client, _, err := websocket.DefaultDialer.Dial("ws://"+address+"/ws", http.Header{chainlib.CustomerIDHeader: []string{"demo-globex"}})
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = client.Close() })
 
