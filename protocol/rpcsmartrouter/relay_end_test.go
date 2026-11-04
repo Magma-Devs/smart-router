@@ -602,7 +602,7 @@ func TestRelayEnd_CacheHit(t *testing.T) {
 				AverageBlockTime: int64(15 * time.Second), StatusCode: http.StatusOK,
 			})
 			require.NoError(t, err)
-			require.Eventually(t, func() bool { return directGetETH(rcs, hashKey, 100, 100).GetReply() != nil }, 3*time.Second, 25*time.Millisecond)
+			require.Eventually(t, func() bool { return directGetOn(rcs, "ETH1", hashKey, 100, 100).GetReply() != nil }, 3*time.Second, 25*time.Millisecond)
 
 			read := captureRelayEnds(t)
 			// The only upstream refuses connections, so an answer can only have come from the cache.

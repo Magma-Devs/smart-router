@@ -77,9 +77,9 @@ func TestValidateProviderCollections_DeadSocketCostsOnlyTheSocket(t *testing.T) 
 	require.True(t, admission.URLRefused(1))
 
 	admissionFor := func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission { return admission }
-	require.Empty(t, collectWSEndpoints([]*lavasession.RPCStaticProviderEndpoint{provider}, admissionFor, ""),
+	require.Empty(t, collectEndpoints(wsSubscriptions, []*lavasession.RPCStaticProviderEndpoint{provider}, admissionFor, ""),
 		"a refused socket gets no subscription")
-	require.Len(t, collectWSEndpoints([]*lavasession.RPCStaticProviderEndpoint{provider}, nil, ""), 1,
+	require.Len(t, collectEndpoints(wsSubscriptions, []*lavasession.RPCStaticProviderEndpoint{provider}, nil, ""), 1,
 		"configured-ness is not admission")
 	require.Equal(t, []commonlib.NodeUrl{provider.NodeUrls[0]}, admittedNodeUrls(provider, admission))
 }

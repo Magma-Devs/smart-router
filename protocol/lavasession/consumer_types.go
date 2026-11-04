@@ -298,7 +298,7 @@ func (e *Endpoint) IsDirectRPC() bool {
 // relay can use it: the JSON-RPC and REST relay paths require an HTTPDirectRPCDoer and
 // refuse a websocket connection outright, and the gRPC path needs a gRPC one. The url is
 // there for subscriptions, which never come through endpoint selection — they are served
-// by DirectWSSubscriptionManager from its own ws url list (collectWSEndpoints).
+// by DirectWSSubscriptionManager from its own ws url list (collectEndpoints).
 //
 // While the https sibling is enabled this never shows, because selection returns the first
 // enabled endpoint and the https url is listed first. Once that sibling is backed off for
@@ -396,10 +396,10 @@ func (e *Endpoint) IsProviderRelay() bool {
 }
 
 // ServesBaseCollection reports whether this endpoint answers for the spec's base
-// collection as well as its add-ons. Mirrors common.NodeUrl.ServesBaseCollection,
-// from which it is populated. See StandaloneAddons.
+// collection as well as its add-ons, by the same rule as the NodeUrl it is populated
+// from. See StandaloneAddons.
 func (e *Endpoint) ServesBaseCollection() bool {
-	return !e.StandaloneAddons || len(e.Addons) == 0
+	return common.ServesBaseCollection(e.StandaloneAddons, len(e.Addons))
 }
 
 func (e *Endpoint) CheckSupportForServices(addon string, extensions []string) (supported bool) {

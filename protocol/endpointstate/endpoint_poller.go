@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -483,7 +482,7 @@ func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byt
 	}
 
 	// JSON-RPC / Tendermint RPC / gRPC / POST: send requestData as the body.
-	headers := map[string]string{"Content-Type": "application/json"}
+	headers := map[string]string{"Content-Type": common.JSONContentType}
 	// gRPC carries the method PATH in a header, not in the URL or body: the connection dials apiName
 	// (e.g. cosmos.base.tendermint.v1beta1.Service/GetLatestBlock) and sends requestData as the request
 	// payload. Without this header GRPCDirectRPCConnection.SendRequest rejects every call with "gRPC
@@ -519,7 +518,7 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 		Body:   body,
 	}
 	if body != nil {
-		params.ContentType = "application/json"
+		params.ContentType = common.JSONContentType
 	}
 
 	resp, err := httpDoer.DoHTTPRequest(ctx, params)
@@ -527,13 +526,7 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		retryAfter, _ := common.ParseRetryAfter(http.Header(resp.Headers), time.Now())
-		return nil, &lavasession.HTTPStatusError{
-			StatusCode: resp.StatusCode,
-			Status:     resp.Status,
-			Body:       resp.Body,
-			RetryAfter: retryAfter,
-		}
+		return nil, lavasession.NewHTTPStatusError(resp.StatusCode, resp.Status, resp.Headers, resp.Body)
 	}
 	return resp.Body, nil
 }
