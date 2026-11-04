@@ -12,7 +12,7 @@ func TestSecondaryCacheConfigValidate(t *testing.T) {
 	valid := SecondaryCacheConfig{Address: "cache-shared:20100", Timeout: 75 * time.Millisecond, Mode: SecondaryCacheModeReadOnly}
 
 	t.Run("disabled with no options is valid", func(t *testing.T) {
-		warnings, err := SecondaryCacheConfig{Timeout: DefaultSecondaryCacheTimeout, Mode: SecondaryCacheModeReadOnly}.Validate("cache:20100", false, false)
+		warnings, err := SecondaryCacheConfig{Timeout: DefaultSecondaryCacheTimeout, Mode: SecondaryCacheModeReadOnly}.Validate("cache:20100", CacheEngineGRPC, false, false)
 		require.NoError(t, err)
 		require.Empty(t, warnings)
 	})
@@ -22,14 +22,14 @@ func TestSecondaryCacheConfigValidate(t *testing.T) {
 	// where only some routers run a secondary. Failing there would turn an unused key
 	// into an outage on every router that does not.
 	t.Run("dangling timeout without address warns and starts", func(t *testing.T) {
-		warnings, err := SecondaryCacheConfig{Timeout: time.Second, Mode: SecondaryCacheModeReadOnly}.Validate("cache:20100", true, false)
+		warnings, err := SecondaryCacheConfig{Timeout: time.Second, Mode: SecondaryCacheModeReadOnly}.Validate("cache:20100", CacheEngineGRPC, true, false)
 		require.NoError(t, err)
 		require.Len(t, warnings, 1)
 		require.Contains(t, warnings[0], "dangling")
 	})
 
 	t.Run("dangling mode without address warns and starts", func(t *testing.T) {
-		warnings, err := SecondaryCacheConfig{Timeout: DefaultSecondaryCacheTimeout, Mode: SecondaryCacheModeReadOnly}.Validate("cache:20100", false, true)
+		warnings, err := SecondaryCacheConfig{Timeout: DefaultSecondaryCacheTimeout, Mode: SecondaryCacheModeReadOnly}.Validate("cache:20100", CacheEngineGRPC, false, true)
 		require.NoError(t, err)
 		require.Len(t, warnings, 1)
 		require.Contains(t, warnings[0], "dangling")
@@ -38,40 +38,56 @@ func TestSecondaryCacheConfigValidate(t *testing.T) {
 	t.Run("zero timeout fails", func(t *testing.T) {
 		cfg := valid
 		cfg.Timeout = 0
-		_, err := cfg.Validate("cache:20100", true, false)
+		_, err := cfg.Validate("cache:20100", CacheEngineGRPC, true, false)
 		require.ErrorContains(t, err, SecondaryCacheTimeoutFlagName)
 	})
 
 	t.Run("negative timeout fails", func(t *testing.T) {
 		cfg := valid
 		cfg.Timeout = -time.Millisecond
-		_, err := cfg.Validate("cache:20100", true, false)
+		_, err := cfg.Validate("cache:20100", CacheEngineGRPC, true, false)
 		require.ErrorContains(t, err, SecondaryCacheTimeoutFlagName)
 	})
 
 	t.Run("read-write mode is rejected in v1", func(t *testing.T) {
 		cfg := valid
 		cfg.Mode = "read-write"
-		_, err := cfg.Validate("cache:20100", false, true)
+		_, err := cfg.Validate("cache:20100", CacheEngineGRPC, false, true)
 		require.ErrorContains(t, err, "reserved")
 	})
 
 	t.Run("secondary without primary is allowed with warning", func(t *testing.T) {
-		warnings, err := valid.Validate("", false, false)
+		warnings, err := valid.Validate("", "", false, false)
 		require.NoError(t, err)
 		require.Len(t, warnings, 1)
 		require.Contains(t, warnings[0], "without a primary")
 	})
 
 	t.Run("same address as primary warns", func(t *testing.T) {
-		warnings, err := valid.Validate(valid.Address, false, false)
+		warnings, err := valid.Validate(valid.Address, CacheEngineGRPC, false, false)
 		require.NoError(t, err)
 		require.Len(t, warnings, 1)
 		require.Contains(t, warnings[0], "equals the primary")
 	})
 
 	t.Run("happy path with distinct primary", func(t *testing.T) {
-		warnings, err := valid.Validate("cache-internal:20100", true, true)
+		warnings, err := valid.Validate("cache-internal:20100", CacheEngineGRPC, true, true)
+		require.NoError(t, err)
+		require.Empty(t, warnings)
+	})
+
+	// MAG-4777: the secondary is always a gRPC cache, so a RESP primary mixes engines.
+	// Warned, never refused — both tiers still run.
+	t.Run("RESP primary with a secondary warns and does not fail", func(t *testing.T) {
+		warnings, err := valid.Validate("valkey:6379", CacheEngineRESP, false, false)
+		require.NoError(t, err)
+		require.Len(t, warnings, 1)
+		require.Contains(t, warnings[0], "mixing cache engines")
+		require.Contains(t, warnings[0], SecondaryCacheFlagName)
+	})
+
+	t.Run("RESP primary without a secondary does not warn", func(t *testing.T) {
+		warnings, err := SecondaryCacheConfig{}.Validate("valkey:6379", CacheEngineRESP, false, false)
 		require.NoError(t, err)
 		require.Empty(t, warnings)
 	})

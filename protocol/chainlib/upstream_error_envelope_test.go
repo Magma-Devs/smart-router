@@ -175,18 +175,26 @@ func TestRouterDetail(t *testing.T) {
 	cases := []struct {
 		name, raw, want string
 	}{
-		{"guid envelope from the listener", rawRouterMsg503,
-			"failed processing responses from RPC endpoints: failed relay, insufficient results"},
-		{"bare text, not an envelope",
+		{
+			"guid envelope from the listener", rawRouterMsg503,
+			"failed processing responses from RPC endpoints: failed relay, insufficient results",
+		},
+		{
+			"bare text, not an envelope",
 			"failed relay ErrMsg: leaf cause {GUID:1}",
-			"failed relay"},
-		{"no ErrMsg separator keeps the whole text",
+			"failed relay",
+		},
+		{
+			"no ErrMsg separator keeps the whole text",
 			"failed relay {GUID:1}",
-			"failed relay"},
+			"failed relay",
+		},
 		{"empty", "", ""},
-		{"url in the chain is redacted",
+		{
+			"url in the chain is redacted",
 			`{"Error_GUID":"1","Error":"dial https://node.example.com/KEY failed ErrMsg: leaf"}`,
-			"dial https://node.example.com/[redacted] failed"},
+			"dial https://node.example.com/[redacted] failed",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

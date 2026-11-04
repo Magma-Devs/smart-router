@@ -1538,6 +1538,18 @@ func (rpcss *RPCSmartRouterServer) awaitWakeIfIdle(ctx context.Context, now time
 	}
 }
 
+// awaitWakeUnlessInternalProbe is awaitWakeIfIdle for every client relay except one that carries
+// INTERNAL_PROBE_HEADER_NAME. The hub's serving probes ask each published hostname a question every
+// few minutes; counted as activity they would keep every probed chain awake forever and idle mode
+// would never trigger (MAG-4797). Such a request neither stamps the chain nor waits on a wake burst:
+// on an idle chain it is routed on the tips the router already has, as on cold start.
+func (rpcss *RPCSmartRouterServer) awaitWakeUnlessInternalProbe(ctx context.Context, directiveHeaders map[string]string, now time.Time) {
+	if _, probe := directiveHeaders[common.INTERNAL_PROBE_HEADER_NAME]; probe {
+		return
+	}
+	rpcss.awaitWakeIfIdle(ctx, now)
+}
+
 func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	ctx context.Context,
 	analytics *metrics.RelayMetrics,
@@ -1574,8 +1586,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 
 	// Idle mode: this is a client relay. Stamp it, and if it ends an idle period hold it (capped)
 	// until the first endpoint poll has landed so it is routed on fresh tips. The wait counts
-	// toward the end-to-end latency below on purpose — the client experienced it.
-	rpcss.awaitWakeIfIdle(ctx, relaySentTime)
+	// toward the end-to-end latency below on purpose — the client experienced it. A request
+	// marked as our own monitoring is not activity and is routed without stamping.
+	rpcss.awaitWakeUnlessInternalProbe(ctx, protocolMessage.GetDirectiveHeaders(), relaySentTime)
 	var err error
 	relayProcessor, err = rpcss.ProcessRelaySend(ctx, protocolMessage, analytics)
 
@@ -2037,6 +2050,45 @@ func primaryLookupVerdict(cacheError error, cacheReply *pairingtypes.CacheRelayR
 		outcome = metrics.CacheOutcomeError
 	}
 	return hit, unusable, outcome
+}
+
+// cachedRelayResult is the relay result a cache hit of either tier is served as.
+// isNodeError serves the entry truthfully, so a cached node error carries the
+// lava-identified-node-error header exactly like a live one. The provider address
+// is empty, which renders as "Cached".
+func cachedRelayResult(reply *pairingtypes.RelayReply, relayData *pairingtypes.RelayPrivateData, statusCode int, isNodeError bool, cacheLookup common.CacheLookupReport) common.RelayResult {
+	return common.RelayResult{
+		Reply: reply,
+		Request: &pairingtypes.RelayRequest{
+			RelayData: relayData,
+		},
+		Finalized:    false, // cache responses are not considered finalized
+		StatusCode:   statusCode,
+		IsNodeError:  isNodeError,
+		ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
+		CacheLookup:  cacheLookup,
+	}
+}
+
+// serveCacheHit answers the request with a cache hit of either tier and counts it.
+//
+// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was current
+// when the response was CACHED — it is not a fresh observation of the chain head and
+// is not gated on tip-eligibility, so it must NOT feed tip state (it would plant a
+// long-historical block as the chain head). Tip state is advanced only by
+// tip-eligible live relays (harvestAndUpdateTipFromRelay) and the per-endpoint
+// observation store, never by cache replays; nothing here reads it.
+func (rpcss *RPCSmartRouterServer) serveCacheHit(relayProcessor *relaycore.RelayProcessor, relayResult common.RelayResult, analytics *metrics.RelayMetrics, protocolMessage chainlib.ChainMessage) {
+	relayProcessor.SetResponse(&relaycore.RelayResponse{
+		RelayResult: relayResult,
+		Err:         nil,
+	})
+	if analytics == nil {
+		analytics = &metrics.RelayMetrics{}
+	}
+	classifyRequest(analytics, protocolMessage)
+	chainId, apiInterface := rpcss.GetChainIdAndApiInterface()
+	rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
 }
 
 // classifyRequest sets the request-class flags the smartrouter_requests_* group splits on; each is
@@ -3984,11 +4036,12 @@ func (rpcss *RPCSmartRouterServer) answerTimeout() time.Duration {
 
 // onEndpointPollBlock is the EndpointMonitor's OnPollBlock hook. It records the head a url
 // answered with on rpc_endpoint_url_latest_block (MAG-4204), on every answered poll: the tracker's
-// first poll and every repeat of the same block included, which OnNewBlock never reports. So a url
-// that keeps answering with one block stands still on its own series while its answered-until time
-// keeps moving, which is what the stuck alerts look for; a url that stops answering stops both,
-// which they leave alone. rpc_endpoint_latest_block, the provider series, is still written by
-// OnNewBlock and the relay harvest, as before.
+// first poll, every repeat of the same block, and an answer below a tip the router already holds
+// from a peer or a relay, none of which OnNewBlock reports. So a url that keeps answering with one
+// block stands still on its own series while its answered-until time keeps moving, which is what
+// the stuck alerts look for; a url that stops answering stops both, which they leave alone.
+// rpc_endpoint_latest_block, the provider series, is still written by OnNewBlock and the relay
+// harvest, as before.
 //
 // A ws/wss url is left out. It never serves a relay (Endpoint.ServesDirectRelays), so its head
 // says nothing about the answers customers' relays get.
@@ -5202,39 +5255,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							isNodeError, resolvedData := classifyCachedEntry(ctx, protocolMessage, metrics.CacheTierPrimary, cacheReply, reply.Data)
 							reply.Data = resolvedData
 
-							relayResult := common.RelayResult{
-								Reply: reply,
-								Request: &pairingtypes.RelayRequest{
-									RelayData: localRelayData,
-								},
-								Finalized: false, // cache responses are not considered finalized
-								// 200 is correct even for a cached node error: a node error is
-								// delivered inside a 2xx body (that is what IsNodeError marks), so
-								// this matches what a live relay of the same response reports.
-								StatusCode: 200,
-								// Served truthfully, so a cached node error carries the
-								// lava-identified-node-error header exactly like a live one.
-								IsNodeError:  isNodeError,
-								ProviderInfo: common.ProviderInfo{ProviderAddress: ""},
-								// The secondary is only consulted after a primary non-hit, so it
-								// keeps whichever not-consulted value it was seeded with.
-								CacheLookup: cacheReport.ServedBy(common.CacheTierPrimary),
-							}
-							// MAG-2160 Finding 1: a cache hit's reply.LatestBlock is the block that was
-							// current when the response was CACHED — it is not a fresh observation of the
-							// chain head and is not gated on tip-eligibility, so it must NOT feed tip
-							// state (it would plant a long-historical block as the chain head). Tip state
-							// is advanced only by tip-eligible live relays (harvestAndUpdateTipFromRelay)
-							// and the per-endpoint observation store, never by cache replays.
-							relayProcessor.SetResponse(&relaycore.RelayResponse{
-								RelayResult: relayResult,
-								Err:         nil,
-							})
-							if analytics == nil {
-								analytics = &metrics.RelayMetrics{}
-							}
-							classifyRequest(analytics, protocolMessage)
-							rpcss.smartRouterEndpointMetrics.RecordCacheHitRequest(chainId, apiInterface, protocolMessage.GetApi().GetName(), analytics)
+							// 200 is correct even for a cached node error: a node error is
+							// delivered inside a 2xx body (that is what IsNodeError marks), so
+							// this matches what a live relay of the same response reports. The
+							// secondary is only consulted after a primary non-hit, so it keeps
+							// whichever not-consulted value it was seeded with.
+							relayResult := cachedRelayResult(reply, localRelayData, http.StatusOK, isNodeError, cacheReport.ServedBy(common.CacheTierPrimary))
+							rpcss.serveCacheHit(relayProcessor, relayResult, analytics, protocolMessage)
 							return nil
 						}
 						// Cache miss - will relay to endpoint
