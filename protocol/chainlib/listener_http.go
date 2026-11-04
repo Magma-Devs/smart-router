@@ -40,6 +40,8 @@ type httpRelaySpec struct {
 	logModule string
 	// answerError may answer a relay error before the masked envelope; handled false falls through.
 	answerError func(ctx context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (handled bool, sendErr error)
+	// noAnswer is the shape of the router's own 502/504 when no node answered (MAG-4481).
+	noAnswer noAnswerShape
 	// errorBody builds the masked error envelope.
 	errorBody func(fiberCtx *fiber.Ctx, relayResult *common.RelayResult, errMasking, msgSeed string) []byte
 	// replyBody rewrites a successful reply's body; nil sends it as the relay returned it.
@@ -91,13 +93,16 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 				}
 			}
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
-			apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, errMasking, msgSeed, time.Since(startTime), err)
-			if relayResult.GetStatusCode() != 0 {
-				fiberCtx.Status(relayResult.StatusCode)
-			} else {
-				fiberCtx.Status(fiber.StatusInternalServerError)
+			// MAG-4481: the upstream's own answer as is, or the router's 502/504 when none answered.
+			// The request log records what the client is sent.
+			if failed, ok := buildFailedRelayReply(relayResult, msgSeed, fiberCtx.Body(), spec.noAnswer); ok {
+				apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply(failed.body), msgSeed, time.Since(startTime), err)
+				return sendFailedRelayReply(fiberCtx, failed, reply.GetMetadata())
 			}
-			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), spec.errorBody(fiberCtx, relayResult, errMasking, msgSeed))
+			response := spec.errorBody(fiberCtx, relayResult, errMasking, msgSeed)
+			apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply(response), msgSeed, time.Since(startTime), err)
+			fiberCtx.Status(failedRelayStatus(relayResult))
+			return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), response)
 		}
 
 		response := reply.Data

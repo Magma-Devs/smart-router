@@ -858,6 +858,9 @@ type HTTPStatusError struct {
 	// of Error(), see there. Empty when the producer had no status line.
 	Status string
 	Body   []byte
+	// ContentType is the upstream's Content-Type, so its body reaches the client labelled as the
+	// upstream labelled it (MAG-4481). Empty when the upstream sent none.
+	ContentType string
 	// RetryAfter is what a rate-limiting upstream asked for, or 0 when it sent no usable
 	// Retry-After. Read it through common.RetryAfterFrom rather than the field, so a caller
 	// works the same whichever path produced the error.
@@ -875,6 +878,32 @@ func (e *HTTPStatusError) Error() string {
 	return fmt.Sprintf("HTTP %d", e.StatusCode)
 }
 
+// upstreamBodyLogCap bounds an upstream body logged as a field (MAG-4481).
+const upstreamBodyLogCap = 256
+
+// UpstreamAnswerLogAttrs returns the upstream's own status line and body as log fields when err
+// carries an upstream answer, and nothing otherwise. Error() is canonical and carries neither
+// (see there), so a log line that wants them asks for them here. The body is cut at 256 bytes and
+// redacted, as any other log field.
+func UpstreamAnswerLogAttrs(err error) []utils.Attribute {
+	var httpErr *HTTPStatusError
+	if !errors.As(err, &httpErr) {
+		return nil
+	}
+	status := httpErr.Status
+	if status == "" {
+		status = strconv.Itoa(httpErr.StatusCode)
+	}
+	body := httpErr.Body
+	if len(body) > upstreamBodyLogCap {
+		body = body[:upstreamBodyLogCap]
+	}
+	return []utils.Attribute{
+		utils.LogAttr("upstream_status", status),
+		utils.LogAttr("upstream_body", utils.RedactSecrets(strings.ToValidUTF8(string(body), ""))),
+	}
+}
+
 // Unwrap presents a 429 as the shared rate-limit error, so errors.Is(err,
 // common.StatusCodeError429) and common.RetryAfterFrom read the same on the direct path as
 // on the chainlib proxies. Any other status has nothing to unwrap to.
@@ -885,16 +914,17 @@ func (e *HTTPStatusError) Unwrap() error {
 	return &common.RateLimitedError{RetryAfter: e.RetryAfter}
 }
 
-// NewHTTPStatusError builds the error for a 4xx/5xx reply, with RetryAfter read from the reply's
-// headers. Every producer goes through it, so the error reads the same whichever path saw the
-// status.
+// NewHTTPStatusError builds the error for a 4xx/5xx reply, with ContentType and RetryAfter read
+// from the reply's headers. Every producer goes through it, so the error reads the same whichever
+// path saw the status.
 func NewHTTPStatusError(statusCode int, status string, header map[string][]string, body []byte) *HTTPStatusError {
 	retryAfter, _ := common.ParseRetryAfter(header, time.Now())
 	return &HTTPStatusError{
-		StatusCode: statusCode,
-		Status:     status,
-		Body:       body,
-		RetryAfter: retryAfter,
+		StatusCode:  statusCode,
+		Status:      status,
+		Body:        body,
+		ContentType: http.Header(header).Get("Content-Type"),
+		RetryAfter:  retryAfter,
 	}
 }
 

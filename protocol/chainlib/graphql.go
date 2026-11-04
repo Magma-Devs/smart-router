@@ -360,6 +360,7 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		},
 		logReceived: logReceivedWithSeedAfterDapp("Consumer received a new GraphQL request"),
 		logModule:   "graphql in/out",
+		noAnswer:    noAnswerJsonError,
 		errorBody: func(_ *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
 			return convertToJsonError(errMasking)
 		},

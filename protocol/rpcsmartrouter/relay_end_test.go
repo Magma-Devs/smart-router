@@ -279,6 +279,8 @@ const (
 	relayEndTxHash    = `{"jsonrpc":"2.0","id":1,"result":"0x5c504ed432cb51138bcf09aa5e8a410dd4a1e204ef84bfed1be16dfba1b22060"}`
 	relayEndReverted  = `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`
 	relayEndNonceLow  = `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nonce too low: next nonce 7, tx nonce 6"}}`
+	relayEndNodeDown  = `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"node is down"}}`
+	relayEndThrottled = `{"jsonrpc":"2.0","id":1,"error":{"code":429,"message":"Too many requests"}}`
 	relayEndShortWait = 5 * time.Second
 )
 
@@ -391,6 +393,43 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			nodes: func(*testing.T) []relayEndNode { return []relayEndNode{{"node-a", nil}} },
 			body:  relayEndRead,
 			check: func(t *testing.T, _ *common.RelayResult, err error) { require.Error(t, err) },
+		},
+		{
+			// The only node answers 503: the client gets the node's own status (MAG-4481).
+			name: "read_upstream_error_status",
+			nodes: func(*testing.T) []relayEndNode {
+				return []relayEndNode{{"node-a", relayEndReply(503, relayEndNodeDown, 0)}}
+			},
+			body: relayEndRead,
+			check: func(t *testing.T, result *common.RelayResult, err error) {
+				require.Error(t, err)
+				require.Equal(t, http.StatusServiceUnavailable, result.StatusCode)
+			},
+		},
+		{
+			// Every attempt is throttled: the client gets the node's own 429, no longer a router 503
+			// (MAG-4481).
+			name: "read_rate_limited",
+			nodes: func(*testing.T) []relayEndNode {
+				return []relayEndNode{{"node-a", relayEndReply(429, relayEndThrottled, 0)}}
+			},
+			body: relayEndRead,
+			check: func(t *testing.T, result *common.RelayResult, err error) {
+				require.Error(t, err)
+				require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
+			},
+		},
+		{
+			// The only node takes the request and never answers: 504, no longer a 500 carrying
+			// "context deadline exceeded" (MAG-4481).
+			name:    "read_no_answer_in_time",
+			nodes:   func(*testing.T) []relayEndNode { return []relayEndNode{{"node-a", relayEndSilent}} },
+			body:    relayEndRead,
+			timeout: 1500 * time.Millisecond,
+			check: func(t *testing.T, result *common.RelayResult, err error) {
+				require.Error(t, err)
+				require.Equal(t, http.StatusGatewayTimeout, result.StatusCode)
+			},
 		},
 		{
 			name:   "pinned_write",
