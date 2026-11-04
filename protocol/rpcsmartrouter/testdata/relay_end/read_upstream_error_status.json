@@ -6,7 +6,7 @@
       "batch": 0,
       "error_code": "NODE_SERVICE_UNAVAILABLE",
       "latency_ms": "<ms>",
-      "message": "HTTP 503 Service Unavailable: Node temporarily unavailable",
+      "message": "HTTP 503 Service Unavailable: Internal node error",
       "outcome": "transport_error",
       "retryable": true,
       "returned_to_client": false,
@@ -15,7 +15,7 @@
     }
   ],
   "chain": "ETH1",
-  "error": "failed relay, insufficient results ErrMsg: HTTP 503 Service Unavailable: Node temporarily unavailable {GUID:<GUID>}",
+  "error": "failed relay, insufficient results ErrMsg: HTTP 503 Service Unavailable: Internal node error {GUID:<GUID>}",
   "error_code": "NODE_SERVICE_UNAVAILABLE",
   "event": "relay_end",
   "has_reply": false,
