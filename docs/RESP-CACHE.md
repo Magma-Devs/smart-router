@@ -339,8 +339,10 @@ connection opened per operation. An outage now costs the relay path the handful 
 that opened the breaker, and recovery is noticed within about a second.
 
 The budget matters for a backend that is **slow rather than dead**: one that answers `PING`
-but cannot answer a lookup within the relay's 50 ms budget keeps its read breaker open, in one
-transition, instead of closing it on every probe and reopening it on the next three lookups.
+but cannot answer a lookup within the relay's lookup budget (`--cache-timeout`, 50 ms by default)
+keeps its read breaker open, in one transition, instead of closing it on every probe and
+reopening it on the next three lookups. Raise `--cache-timeout` for a remote backend and the read
+breaker closes within the raised budget too.
 `smartrouter_resp_cache_connected` can therefore read 1 while `smartrouter_resp_cache_breaker_open{role="read"}`
 reads 1: the endpoint answers, and is too slow to serve lookups. The write side's budget is the
 5 s write budget, beyond the probe's own deadline, so a write breaker closes on any answered
