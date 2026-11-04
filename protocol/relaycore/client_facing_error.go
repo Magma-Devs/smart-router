@@ -40,8 +40,8 @@ func clientFacingFromProtocolError(err error, lavaErr *common.LavaError) *common
 	if errors.As(err, &httpErr) && httpErr.StatusCode >= 400 {
 		cf.UpstreamStatus = httpErr.StatusCode
 		cf.UpstreamStatusText = httpErr.Status
-		// Redacted here, once, for every reply built from it: the forwarded JSON-RPC error and
-		// the upstream_body snippet (MAG-4863).
+		// Redacted here, once: the reply forwards this body as is (MAG-4481), so the secrets
+		// are withheld before it is kept (MAG-4863).
 		cf.UpstreamBody = utils.RedactSecretsBytes(httpErr.Body)
 		cf.UpstreamContentType = httpErr.ContentType
 		return cf

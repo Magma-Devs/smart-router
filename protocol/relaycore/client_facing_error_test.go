@@ -47,9 +47,8 @@ func TestClientFacingFromProtocolError_UpstreamAnswered(t *testing.T) {
 	require.Equal(t, common.LavaErrorNodeServiceUnavailable.Name, cf.RouterErrorName)
 }
 
-// Every code that means "the upstream never answered" yields the leaf cause and no status.
-// MAG-4863: a node's error body goes back to the caller, forwarded as the node's own JSON-RPC
-// error or quoted as upstream_body. It is redacted where it is taken, so both replies are.
+// MAG-4863: a node's error body goes back to the caller as is (MAG-4481). It is redacted where
+// it is taken, so the reply built from it is too.
 func TestClientFacingFromProtocolError_RedactsTheUpstreamBody(t *testing.T) {
 	body := `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"rejected by https://node.example.com/v2/KEY123SECRET"}}`
 	cf := clientFacingFromProtocolError(upstream503Err(body), common.LavaErrorNodeServiceUnavailable)
@@ -59,6 +58,7 @@ func TestClientFacingFromProtocolError_RedactsTheUpstreamBody(t *testing.T) {
 	require.True(t, json.Valid(cf.UpstreamBody), "the forwarded body is still JSON")
 }
 
+// Every code that means "the upstream never answered" yields the leaf cause and no status.
 func TestClientFacingFromProtocolError_TransportFailures(t *testing.T) {
 	leaf := errors.New("dial tcp 10.0.0.1:443: connect: connection refused")
 	for _, tc := range []struct {
