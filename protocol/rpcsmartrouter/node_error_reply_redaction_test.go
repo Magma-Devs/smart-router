@@ -28,6 +28,7 @@ func relayNodeError(t *testing.T, body string) []byte {
 	_, err := h.rpcss.relayInnerDirect(
 		context.Background(), h.session, relayResult, 5*time.Second, 30*time.Second,
 		msg, msg.requestData, func() bool { return false }, nil,
+		false, // not the router's health check
 	)
 	require.NoError(t, err)
 	require.True(t, relayResult.IsNodeError, "the upstream's answer is a node error")
