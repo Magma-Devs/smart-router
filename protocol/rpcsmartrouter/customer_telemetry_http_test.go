@@ -97,6 +97,7 @@ func TestCustomerTelemetryHTTPReconciles(t *testing.T) {
 				require.NoError(t, listener.Shutdown(shutdown))
 			})
 			require.Eventually(t, func() bool { return listener.GetListeningAddress() != "" }, time.Second, time.Millisecond)
+			utils.SetGlobalLoggingLevel("warn")
 			seen := len(read())
 			req, err := http.NewRequest(http.MethodPost, "http://"+listener.GetListeningAddress()+"/", bytes.NewBufferString(tc.body))
 			require.NoError(t, err)

@@ -3,6 +3,7 @@ package chainlib
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/metadata"
 )
 
 type listenerCustomerRecorder struct {
@@ -125,6 +127,48 @@ func TestCustomerHTTPListenersCountBeforeParseAndExcludeHealth(t *testing.T) {
 			_ = healthResponse.Body.Close()
 			after, _ := recorder.snapshot()
 			require.Equal(t, received, after, "readiness probe must never be a customer request")
+		})
+	}
+}
+
+func TestGRPCCustomerAdmissionSurvivesStreamingProbeAndUnaryFallback(t *testing.T) {
+	for _, malformed := range []bool{false, true} {
+		t.Run(fmt.Sprint(malformed), func(t *testing.T) {
+			sender := &stubRelaySender{parser: grpcParserWithSubscription()}
+			if malformed {
+				sender.parseErr = errors.New("malformed chain request")
+			}
+			listener := newStreamingListener(t, sender)
+			recorder := &listenerCustomerRecorder{}
+			logger, err := metrics.NewRPCConsumerLogs(recorder, nil, nil)
+			require.NoError(t, err)
+			listener.logger = logger
+			ctx, finish := listener.beginGRPCCustomerRequest(context.Background(), unaryApiName)
+			received, _ := recorder.snapshot()
+			require.Equal(t, 1, received, "receipt precedes the exploratory parse")
+			data := grpcCustomerMetrics(ctx)
+			require.NotNil(t, data)
+			require.NotNil(t, data.Customer)
+			response, err := listener.makeStreamRelayCallback(newStubGRPCSubscriptionManager(), false)(ctx, unaryApiName, []byte("{}"))
+			require.NoError(t, err)
+			require.Nil(t, response)
+			// The unary listener completes the same lifecycle; the proxy's finalizer
+			// cannot count it again when its dispatch returns.
+			md := metadata.MD{}
+			var finalErr error
+			if malformed {
+				finalErr = common.LavaErrorUserParseError
+			}
+			logger.AddMetricForGrpc(data, finalErr, &md)
+			finish(finalErr)
+			received, terminal := recorder.snapshot()
+			require.Equal(t, 1, received)
+			require.Len(t, terminal, 1)
+			if malformed {
+				require.Equal(t, "failure", terminal[0].Outcome)
+			} else {
+				require.Equal(t, "success", terminal[0].Outcome)
+			}
 		})
 	}
 }

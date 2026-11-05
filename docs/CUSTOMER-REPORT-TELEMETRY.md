@@ -10,7 +10,8 @@ listener, before parsing or provider selection. JSON-RPC batch envelopes count
 once. Each incoming WebSocket application message counts once, including
 subscribe/unsubscribe and a frame the connection's rate limit refuses. WebSocket
 upgrade, ping/pong and server-pushed notifications do not count. gRPC unary calls
-count once; a subscription or reflection stream counts its establishment once. A
+count once; admission starts before decoding and the exploratory streaming parse,
+and unary fallback keeps the same lifecycle; a subscription or reflection stream counts its establishment once. A
 stream's later deliveries, cancellation, restoration and upstream termination do
 not retroactively revise its establishment outcome.
 
@@ -22,7 +23,7 @@ still counts. Dedicated listener health endpoints and CORS preflight are outside
 the chain-request contract, and so is an HTTP request a listener refuses before
 parsing because it does not serve the method (answered 405): nothing in it is a
 chain request, and `relay_end` writes nothing for it either. Gateway rejections
-and gRPC transport failures before callback dispatch require ingress telemetry;
+and gRPC transport failures before server-handler dispatch require ingress telemetry;
 they are not router relay outcomes.
 
 Receipt is recorded synchronously. Completion is the listener's final relay
