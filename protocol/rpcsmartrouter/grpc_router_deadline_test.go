@@ -3,6 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,4 +85,72 @@ func TestSendGRPCRelay_NodeSentDeadlineIsANodeError(t *testing.T) {
 	require.True(t, result.IsNodeError)
 	require.Equal(t, int(codes.DeadlineExceeded), result.StatusCode)
 	require.Contains(t, string(result.Reply.Data), "query timed out on the node")
+}
+
+// sendGRPCRelayOnItsOwnConnection is sendGRPCRelayTo for a goroutine: it returns its errors
+// instead of failing the test, and closes its connection itself.
+func sendGRPCRelayOnItsOwnConnection(addr string, attemptBudget time.Duration) (*common.RelayResult, error) {
+	nodeUrl := common.NodeUrl{Url: "grpc://" + addr, GrpcConfig: common.GrpcConfig{AllowInsecure: true}}
+	conn, err := lavasession.NewDirectRPCConnection(context.Background(), nodeUrl, 1, "")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = conn.Close() }()
+
+	sender := &DirectRPCRelaySender{directConnection: conn, endpointName: "grpc-node", chainFamily: common.ChainFamily(-1)}
+	chainMessage := &grpcStatusChainMessage{mockChainMessage: &mockChainMessage{
+		apiInterface: "grpc",
+		rpcMessage:   &rpcInterfaceMessages.GrpcMessage{Path: "cosmos.bank.v1beta1.Query/Balance", Msg: []byte{0x0a, 0x01, 0x61}},
+	}}
+	return sender.sendGRPCRelay(context.Background(), chainMessage, attemptBudget)
+}
+
+// MAG-4925: the node's gRPC server enforces the router's deadline too (it travels in the
+// grpc-timeout header) and reports it back as a DEADLINE_EXCEEDED of its own, so a call that runs
+// out the router's deadline is ended from two sides at the same instant. grpc-go hands back
+// whichever arrives first, and a deadline context reports no error until the runtime has run its
+// timer. A node status read in that gap used to be taken for the node's answer: a node error,
+// which nothing counts against the endpoint, with DEADLINE_EXCEEDED served to the caller as the
+// node's reply. Under a burst of 55 such requests one of three quiet providers was left on, short
+// of the disable threshold.
+//
+// The node here does what the provider simulator's server does: it waits for the deadline the
+// router sent and reports it. Every attempt must end as the router's own timeout, like
+// TestSendGRPCRelay_RouterDeadlineIsATimeout. The attempts run at once because the gap is a
+// scheduling race: before the fix, 200 attempts at once took it a handful of times in most runs.
+func TestSendGRPCRelay_DeadlineEchoedByTheNodeIsATimeout(t *testing.T) {
+	node := startGRPCNode(t, func(stream grpc.ServerStream) error {
+		<-stream.Context().Done()
+		return status.Error(codes.DeadlineExceeded, "Deadline Exceeded")
+	})
+
+	const attempts = 200
+	type outcome struct {
+		result *common.RelayResult
+		err    error
+	}
+	outcomes := make([]outcome, attempts)
+	var wg sync.WaitGroup
+	for i := range outcomes {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			outcomes[i].result, outcomes[i].err = sendGRPCRelayOnItsOwnConnection(node, time.Second)
+		}()
+	}
+	wg.Wait()
+
+	nodeAnswers := 0
+	for _, got := range outcomes {
+		if got.err == nil {
+			nodeAnswers++
+			continue
+		}
+		require.Nil(t, got.result, "the router's own timeout is not an answer from the node")
+		require.ErrorIs(t, got.err, context.DeadlineExceeded)
+		require.Equal(t, common.LavaErrorContextDeadline, common.AsLavaError(got.err))
+	}
+	require.Zero(t, nodeAnswers,
+		"%d of %d attempts took the node's DEADLINE_EXCEEDED for its answer; each is an attempt the endpoint is not blamed for",
+		nodeAnswers, attempts)
 }
