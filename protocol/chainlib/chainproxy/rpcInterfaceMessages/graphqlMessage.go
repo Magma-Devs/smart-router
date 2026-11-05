@@ -64,6 +64,78 @@ type graphQLRequestEnvelope struct {
 	Variables     map[string]interface{} `json:"variables"`
 }
 
+// graphQLRequestKeys are the members of a GraphQL-over-HTTP request body (GraphQL over HTTP
+// specification, "Request Parameters"): the three the router reads, and extensions, which the node
+// reads and the router does not.
+var graphQLRequestKeys = []string{"query", "operationName", "variables", "extensions"}
+
+// checkGraphQLRequestKeys refuses a body the router and the node would read as two different
+// requests.
+//
+// Go's JSON decoders (encoding/json, and goccy/go-json, which this file uses) match an object key to
+// a struct field case-insensitively and keep the LAST match, so `{"query": A, "QUERY": B}` and
+// `{"query": A, "query": B}` both decode to query B. A GraphQL server built on serde, Sui's
+// included, reads the exact key only: `QUERY` is an unknown member it ignores, and a repeated
+// `query` is a decode error. One body, two requests: the router classifies B, a read that is
+// cached, retried and cross-validated like one, and forwards the body verbatim, and the node runs
+// A, a mutation, with no write handling at all (MAG-4908).
+//
+// The keys are read off the raw body before any value is decoded, and matched with
+// strings.EqualFold, the test encoding/json makes, so the check refuses exactly the keys a Go
+// decoder could take for one of ours and nothing else: a key that matches none of them is read by
+// nobody on either side and is left alone, as the node leaves it alone.
+func checkGraphQLRequestKeys(data []byte) error {
+	keys, isObject := graphQLTopLevelKeys(data)
+	if !isObject {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for _, key := range keys {
+		for _, known := range graphQLRequestKeys {
+			switch {
+			case key == known:
+				if _, repeated := seen[key]; repeated {
+					return RefuseGraphQLRequest("graphql request repeats the %q member, which the router and the node would read differently", known)
+				}
+				seen[key] = struct{}{}
+			case strings.EqualFold(key, known):
+				return RefuseGraphQLRequest("graphql request member %q differs from %q only by letter case, which the router and the node would read differently", key, known)
+			}
+		}
+	}
+	return nil
+}
+
+// graphQLTopLevelKeys returns a body's top-level object keys in document order, repeats included.
+// isObject is false for a body that is not a JSON object the decoder can walk; that body is left
+// for the envelope decoder to report, with the error ParseGraphQLMsg already returns for it.
+func graphQLTopLevelKeys(data []byte) (keys []string, isObject bool) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, false
+	}
+	if delim, isDelim := token.(json.Delim); !isDelim || delim != '{' {
+		return nil, false
+	}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, false
+		}
+		key, isString := keyToken.(string)
+		if !isString {
+			return nil, false
+		}
+		keys = append(keys, key)
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, false
+		}
+	}
+	return keys, true
+}
+
 // graphQLResponseEnvelope is the GraphQL-over-HTTP response body. `data` is decoded as a raw
 // message so a populated-but-null `data` is distinguishable from an absent one.
 type graphQLResponseEnvelope struct {
@@ -112,6 +184,10 @@ type GraphQLMessage struct {
 // comments and root-level fragment spreads. A scanner gets those wrong in the direction that
 // silently files traffic under the wrong api name.
 func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
+	// Before any value is decoded: the decoder's own key matching is what the check guards against.
+	if err := checkGraphQLRequestKeys(data); err != nil {
+		return nil, err
+	}
 	envelope := graphQLRequestEnvelope{}
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return nil, fmt.Errorf("failed unmarshalling graphql request body: %w", err)

@@ -15,6 +15,10 @@ import (
 // from a request the router cannot READ — an unparsable document, a batch, a missing operation —
 // which MAG-4351 decided to forward to a node and answer with the node's own reply.
 //
+// A fourth refusal is of the same family: a request body whose top-level keys the router and the
+// node would read as two different requests (checkGraphQLRequestKeys, MAG-4908). The router cannot
+// forward that one either, because the node would run a request the router never classified.
+//
 // The listener matches on it to answer with a client-error status and a GraphQL error document
 // instead of the generic 500 a status-less error used to get (MAG-4577). Match with errors.As on
 // *GraphQLRefusal rather than reading the message: the text is the client's, not an identity.
