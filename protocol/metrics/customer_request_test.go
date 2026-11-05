@@ -422,3 +422,22 @@ func TestCustomerAdmissionMethodDoesNotCreateAParsedLegacyRequest(t *testing.T) 
 		}
 	}
 }
+
+func TestCustomerProviderFaultRequiresFailedUpstreamEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		attempts []CustomerAttempt
+		fault    bool
+	}{
+		{name: "admission before any upstream"},
+		{name: "router failure after a healthy upstream", attempts: []CustomerAttempt{{Provider: "A", Outcome: "success"}}},
+		{name: "observed connection failure", attempts: []CustomerAttempt{{Provider: "A", Outcome: "failure", ErrorName: common.LavaErrorConnectionRefused.Name}}, fault: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logger, recorder, _, data, _ := customerFixture(t)
+			data.CaptureCustomerResult(nil, "", tc.attempts, common.LavaErrorConnectionRefused, false)
+			logger.AddMetricForWebSocket(data, common.LavaErrorConnectionRefused)
+			require.Equal(t, tc.fault, recorder.outcomes[0].ProviderFault)
+		})
+	}
+}

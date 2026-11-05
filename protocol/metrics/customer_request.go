@@ -346,7 +346,16 @@ func (rpccl *RPCConsumerLogs) finishCustomer(data *RelayMetrics, err error) bool
 		}
 		terminal.ErrorName, terminal.ErrorCode = classified.Name, classified.Code
 		terminal.ErrorCategory, terminal.Retryable = classified.Category.String(), classified.Retryable
-		terminal.ProviderFault = terminal.Outcome == "failure" && !result.WriteOutcomeUnknown && classified.EndpointAtFault()
+		// An admission/decoder/router failure has no provider to blame. Require
+		// an actual node-error answer or a classified failed upstream attempt.
+		if terminal.Outcome == "failure" && !terminal.CacheHit && !result.WriteOutcomeUnknown && classified.EndpointAtFault() {
+			terminal.ProviderFault = result.NodeError && terminal.Provider != ""
+			for _, attempt := range terminal.Attempts {
+				if attempt.Outcome == "failure" && common.LookupLavaErrorByName(attempt.ErrorName).EndpointAtFault() {
+					terminal.ProviderFault = true
+				}
+			}
+		}
 		// Registry descriptions are bounded and contain no payload, URL, credentials
 		// or caller text. Detailed incidents join attempt logs using GUID/request_id.
 		terminal.ErrorMessage = classified.Description
