@@ -2,7 +2,7 @@
 
 The router writes one `relay_end` line when a relay ends. It is a declared event: readers select it
 by `"event":"relay_end"` and parse it by `schema`, never by message text. This document is the
-contract for `schema` 1.
+contract for `schema` 2.
 
 - **Every level.** The line is written at INFO on every enabled sink (stderr, the rolling log file,
   the debug buffer) whatever `--log-level` is: `utils.LogEvent` writes through a copy of each
@@ -15,7 +15,7 @@ contract for `schema` 1.
   replaces the middle of a longer text.
 
 ```json
-{"level":"info","event":"relay_end","schema":1,"GUID":"7003","stateful":true,"method":"eth_sendRawTransaction","api_interface":"jsonrpc","selection":"stateful","outcome":"ok","stop_reason":"Success","served_by":"node-b","status":200,"has_reply":true,"error_code":"","error":"","latency_ms":305,"is_batch":false,"attempts":[{"upstream":"node-a","outcome":"node_error","error_code":"CHAIN_NONCE_TOO_LOW","message":"nonce too low: next nonce 7, tx nonce 6","latency_ms":2,"returned_to_client":false},{"upstream":"node-b","outcome":"ok","error_code":"","message":"","latency_ms":304,"returned_to_client":true}],"time":1792323767487910421,"message":"relay_end"}
+{"level":"info","event":"relay_end","schema":2,"GUID":"7003","stateful":true,"method":"eth_sendRawTransaction","api_interface":"jsonrpc","selection":"stateful","outcome":"ok","stop_reason":"Success","served_by":"node-b","status":200,"has_reply":true,"error_code":"","error":"","latency_ms":305,"is_batch":false,"request_bytes":304,"reply_bytes":102,"tx_hash":"0x2620d49b3fa2ff073b49bce2b5f0382521afd075691e695251929cd67be4f460","attempts":[{"upstream":"node-a","outcome":"node_error","error_code":"CHAIN_NONCE_TOO_LOW","message":"nonce too low: next nonce 7, tx nonce 6","node_code":-32000,"latency_ms":2,"returned_to_client":false},{"upstream":"node-b","outcome":"ok","error_code":"","message":"","latency_ms":304,"returned_to_client":true}],"time":1792323767487910421,"message":"relay_end"}
 ```
 
 `protocol/rpcsmartrouter/testdata/relay_end/` holds one event per exit path, checked by
@@ -45,9 +45,13 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | Field | Type | Present | Value |
 | --- | --- | --- | --- |
 | `event` | string | always | `"relay_end"` |
-| `schema` | number | always | `1` |
+| `schema` | number | always | `2` |
 | `GUID` | string | always | The request's GUID in decimal: the value every narrative line of the request carries under `GUID`, and the `Error_GUID` its client gets in an error reply. Each WebSocket frame is a relay with a GUID of its own. `""` if the context carries none. |
 | `connection` | string | WebSocket relays | The GUID of the WebSocket connection the relay came on, which the connection's own lines carry. Groups a connection's relays. |
+| `customer` | string | when the request names a customer | The request's customer id: the `customer-id` header of an HTTP request, of a WebSocket connection's upgrade request (every frame on the connection carries it, a frame that does not parse too), or of a gRPC call's metadata. Absent when the header is absent or empty, which the listeners pass on as `DefaultDappID`, and when it is `DefaultDappID`. Written as the caller sent it, without the metrics' `customer` label's budget: made valid UTF-8 (each run of invalid bytes becomes U+FFFD) and cut to at most 128 bytes at a character boundary. |
+| `request_id` | string | when the caller sent `X-Request-Id` | The header's first value, the id the request's narrative lines carry under `request_id`. Read on HTTP requests (`X-Request-Id`) and gRPC calls (`x-request-id` metadata); a WebSocket frame and a WebSocket subscription request carry none, because the WebSocket listener does not read the header. Cleaned like `customer`. |
+| `task_id` | string | when the caller sent `X-Task-Id` | The header's first value, read and cleaned like `request_id`. |
+| `tx_id` | string | when the caller sent `X-Tx-Id` | The header's first value, read and cleaned like `request_id`. The caller's own id for the request, not a chain's: the transaction's id on its chain is `tx_hash`. |
 | `stateful` | boolean | always | `true` when the parsed api's category is stateful (`chainlib.GetStateful(protocolMessage) == common.CONSISTENCY_SELECT_ALL_PROVIDERS`), whichever selection path served it (chosen, pinned or sticky); `false` otherwise, and for a request that did not parse. |
 | `method` | string | always | The parsed api name with any leading `/` removed: `cosmos/tx/v1beta1/txs`, `eth_sendRawTransaction`, `cosmos.bank.v1beta1.Query/Balance`. A batch joins its methods with `&`. A method the spec does not list carries the parser's default name, `Default-` and what the client sent. It is kept where the request names the method itself: `jsonrpc`, `graphql` (a root field), `grpc` (a service method), and a `tendermintrpc` JSON-RPC body over POST or WebSocket. It is written `Default-REDACTED` where the name is the client's URL path and query, which may carry a credential: every `rest` request and a `tendermintrpc` URI request. A REST api named the root path is written `/`, which the collector leaves alone. Capped at 256 bytes plus the `...truncated...` marker. `""` only for a request that did not parse. |
 | `chain` | string | always | The listener's chain, as the spec names it: `ETH1`, `COSMOSHUB`. A router serves one chain per listener, so this places a request that never reached an upstream too. |
@@ -56,12 +60,19 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | `outcome` | string | always | What the client got; see [outcome](#outcome). |
 | `stop_reason` | string | always | Why there was no further attempt: `Success`, `Stateful`, `CrossValidation`, `NonRetryableNodeError`, `PermanentProtocolError`, `UnlistedMethodRefused`, `MaxRetriesReached`, `BatchDisabled`, `ErrorToleranceExceeded`, `AllProvidersExhausted`, `FirstMessageFailed`, `BatchSendFailed`, `ProcessingTimeout` (the budget ran out), `CallerGone` (a WebSocket or gRPC client hung up), `CrossValidationGroupsQuiet`. `""` when the relay ended before its state machine named a reason: `selection` is `""`, the cross-validation capacity check refused the request, or a `router_error` stopped it; always `""` for a subscription request. |
 | `served_by` | string | always | The upstream whose reply reached the client; `"Cached"` for a cache hit, as the provider-address reply header says. For a subscription request, the upstream its subscription lives on. `""` when the client got an error, and for a subscription request the router answered itself. |
-| `status` | number | always | The HTTP status on the router's result. `0` when the router returned no result or one without a status (every attempt failed in transport); the listener then answers with its own status. A `write_unknown` is always `500`, the status the client gets. `0` for a subscription request. |
-| `has_reply` | boolean | always | `true` exactly when `outcome` is `ok` or `node_error`: the client got an upstream's or the cache's reply, or, to a subscription request, the router's own answer. |
+| `status` | number | always | The HTTP status on the router's result. When every attempt failed with a protocol error, it is the status the client gets: the upstream's own status when an upstream answered (a `429` included), `504` when no upstream answered in time (a connect timeout, the request's deadline, or a hung upstream that never answered), and `502` when every attempt failed in transport otherwise (MAG-4218, MAG-4481). `0` when the router returned no result or one without a status; the listener then answers with its own status. A router built with masked errors answers a no-answer failure with `500` while this field keeps `502` or `504`. A `write_unknown` is always `500`, the status the client gets. `0` for a subscription request. |
+| `has_reply` | boolean | always | `true` exactly when `outcome` is `ok` or `node_error`: the client got an upstream's or the cache's reply, or, to a subscription request, the router's own answer. `false` on a `no_answer` whose client was sent an upstream's error status and body as is (a `503`, a `429`): the relay failed, and `status` is that upstream's status (MAG-4481). |
 | `error_code` | string | always | The error registry name (`protocol/common/error_codes.go`) of why the relay did not end `ok`; see [error_code](#error_code). `""` on `ok`. |
 | `error` | string | always | `node_error`: the node's error message. `write_unknown`: the message the client gets ("transaction status unclear: …"). Any other failure: the error the relay ended with. `""` on `ok`. |
 | `latency_ms` | number | always | Milliseconds from the router taking the request to the event. A request that parses is timed from `SendParsedRelay` (the parse is not counted); one that does not, from `SendRelay`; a WebSocket frame that does not parse, from its parse. |
 | `is_batch` | boolean | always | A JSON-RPC batch. A batch refused while it is parsed (too large, or not accepted by the chain) is `true` too. |
+| `request_bytes` | number | when the request has a body | The length in bytes of the request data the router relays: a JSON-RPC, Tendermint or GraphQL body (a batch's whole body), a REST request's body, a gRPC call's message. Absent for a request without one (a REST `GET`, a Tendermint URI request) and for a request that did not parse. |
+| `reply_bytes` | number | when `has_reply` is `true`, except on a subscription request | The length in bytes of the upstream's or the cache's reply, the body the router returns to its listener for the client. `0` for an empty reply. Absent when the client got an error (`write_unknown` included), and on a subscription request, whose answer the subscription manager writes. |
+| `requested_block` | number | when the request names a block | The block number the request names, as the spec's block parsing reads it at parse time: `100` for `eth_getBlockByNumber("0x64")`, `0` for the genesis block. For a range, its later end (`toBlock`). Absent when the request names a tag (`latest`, `earliest`, `pending`, `safe`, `finalized`) or a range that ends at one, when its api names no block, and for a request that did not parse. |
+| `seen_block` | number | when the router knew a fresh chain tip | The chain tip the router knew when it parsed the request, from its own chain state (`RelayPrivateData.SeenBlock`): the height the router resolves the request's `latest` against and reads its cache with. Not a value the client sends. Absent when the router had no fresh tip, and for a request that did not parse. |
+| `tx_hash` | string | on a transaction submit whose reply names the transaction, and on every `eth_sendRawTransaction` whose request carries a signed transaction | The transaction's id on its chain, written as the chain writes it: `0x` and 64 lowercase hex digits on EVM chains, base58 on Solana and Sui, 64 hex digits in the node's case on Cosmos. Read from the reply the client got. For `eth_sendRawTransaction` it is computed from the signed transaction in the request when the reply returns none, so a refused write, a `write_unknown` or a `no_answer` still names a hash to look up. Not read on a batch, or from a reply over 64 KiB. Where each chain's comes from: [Transaction fields by chain](#transaction-fields-by-chain). |
+| `tx_status` | string | when the submit's reply reports the transaction's execution | `success` or `failure`: the chain's execution result, as the send reply reports it, and only that. Sui's submits report it; EVM, Solana and Cosmos submits answer before the transaction executes, so their events never carry it (a Cosmos node's acceptance is `tx_code`). An event without `tx_status` says nothing about whether the transaction executed. |
+| `tx_error` | string | when `tx_status` is `failure` and the reply names the error | The chain's execution error, redacted and capped like `error`. |
 | `tx_code` | number | on a write over `tendermintrpc` or `rest` whose reply names a transaction code | A Cosmos node answers a refused transaction with a normal reply, so `outcome` stays `ok`; this is the code inside it: `0` when the node took the transaction, the refusal's code otherwise. Read from `result.code` (`broadcast_tx_sync`, `broadcast_tx_async`), `result.check_tx` then `result.tx_result` or `result.deliver_tx` (`broadcast_tx_commit`), or `tx_response.code` (`POST /cosmos/tx/v1beta1/txs`); the first non-zero code wins. `broadcast_tx_async` answers before checking, so its `0` means only that the node received the transaction. Not read over `grpc`, whose reply is protobuf. |
 | `tx_codespace` | string | with `tx_code`, when the reply names one | The module the code belongs to, such as `sdk`: a code means something only within its codespace. |
 | `tx_log` | string | when `tx_code` is not `0` | The node's reason for the refusal, redacted and capped like `error`. |
@@ -69,14 +80,37 @@ the router (an HTTP 405, for one); the router's own health and probe relays.
 | `attempts` | array | when `stateful` is `true`, when `outcome` is not `ok`, when the relay took more than one attempt or its only attempt failed (a retry, a hedge, a recovery on another upstream), or when an upstream was skipped | One entry per upstream attempt; see [attempts](#attempts). `[]` when nothing was sent. A read its first attempt answered leaves it out. |
 
 LogQL's `json` parser renders numbers and booleans as strings (`has_reply="false"`, `status="500"`)
-and skips arrays; `| json attempts="attempts"` extracts the raw array. A field whose name is already a
-stream label is renamed with an `_extracted` suffix: where the collector labels writes `stateful`,
-`| json | stateful="true"` matches nothing, so select writes by that stream label or by the line
-filter `|= "\"stateful\":true"`, which works either way.
+and skips arrays; `| json attempts="attempts"` extracts the raw array. The fleet's log collector puts
+the static stream label `stateful="1"` on every router line that matches `"stateful":("1"|true)`, so
+`{stateful="1"}` selects writes. A field whose name is already a stream label is renamed with an
+`_extracted` suffix: on those streams `| json` extracts the field as `stateful_extracted="true"`, and
+`| json | stateful="true"` matches nothing. The line filter `|= "\"stateful\":true"` selects writes
+on any stream.
 
 `error` and `attempts[].message` are prose for a person. The same failure can read differently on
 routers at different `--log-level`s, because an error built by a log formatter whose level is off
 skips the formatting. Match failures on `outcome` and `error_code`, never on that text.
+
+## Transaction fields by chain
+
+`tx_hash`, `tx_status` and `tx_error` are read for the methods below, and only on a request that is
+not a batch. A reply over 64 KiB is not read. A value whose shape is not the chain's (a hash of the
+wrong length, a digest that is not base58) is not written.
+
+| Chain family | `api_interface` | `method` | `tx_hash` from | `tx_status` and `tx_error` from |
+| --- | --- | --- | --- | --- |
+| EVM | `jsonrpc` | `eth_sendRawTransaction` | The reply's `result` when it is `0x` and 32 bytes of hex; otherwise computed from the signed transaction in `params[0]`, the hash the chain gives it. A transaction that does not decode, or whose signature does not verify, gives none. | Not read: the send reply does not report execution. |
+| Solana | `jsonrpc` | `sendTransaction` | The reply's `result`, the transaction's signature (64 bytes in base58). Stellar's `sendTransaction`, which answers with an object, is not read. | Not read: the send reply does not report execution. |
+| Sui | `jsonrpc` | `sui_executeTransactionBlock` | `result.digest`. | `result.effects.status.status` (`success`, `failure`) and `result.effects.status.error`, present when the request asked for `showEffects`. |
+| Sui | `graphql` | `executeTransaction`, as the operation's only root field | `effects.transaction.digest`, else `effects.digest` (the same digest), in `data`'s one entry: the root field's name, or the client's alias for it. | `effects.status` (`SUCCESS` is `success`, `FAILURE` is `failure`) and `effects.executionError.message`. Only what the mutation selected is in the reply, and what it did not select is not written. |
+| Sui | `grpc` | `sui.rpc.v2.TransactionExecutionService/ExecuteTransaction` | Not read: the reply is protobuf. | Not read. |
+| Cosmos SDK | `tendermintrpc` | `broadcast_tx_sync`, `broadcast_tx_async`, `broadcast_tx_commit` | `result.hash`. | Not read; `tx_code` says whether the node took the transaction. |
+| Cosmos SDK | `rest` | `cosmos/tx/v1beta1/txs` (`POST`) | `tx_response.txhash`. | Not read; see `tx_code`. |
+| Cosmos SDK | `grpc` | `cosmos.tx.v1beta1.Service/BroadcastTx` | Not read: the reply is protobuf. | Not read. |
+| Any other chain or method | | | Not read. | Not read. |
+
+On Cosmos the fields are read, as `tx_code` is, only on a write the spec marks stateful: a `GET` of
+`cosmos/tx/v1beta1/txs` is the transaction query by events, a read under the same path.
 
 ## outcome
 
@@ -85,7 +119,7 @@ skips the formatting. Match failures on `outcome` and `error_code`, never on tha
 | `ok` | An upstream's or the cache's reply that is not a node error | `SendParsedRelay` returns a reply and no error: the first success (stateless, stateful), the quorum winner (cross-validation), or a cache hit |
 | `node_error` | A node's error reply, passed through | `SendParsedRelay` returns a node error with no error: `processNonCrossValidationResult` when nothing succeeded, or a cached node error. A node's rate-limit reply is one too. |
 | `write_unknown` | "transaction status unclear", HTTP 500 | `SendParsedRelay` returns `errUnknownWriteOutcome` (`writeOutcomeIsUnknown`): a stateful relay where no upstream accepted, and one was still silent when the budget ran out or its connection died after the request went out |
-| `no_answer` | An error, after at least one upstream was asked | `SendParsedRelay` returns an error with a dispatched attempt: every attempt failed in transport, timed out or was rate limited, or cross-validation found no quorum |
+| `no_answer` | An error, after at least one upstream was asked | `SendParsedRelay` returns an error with a dispatched attempt: every attempt failed in transport, timed out, was rate limited or answered an HTTP error status, or cross-validation found no quorum. When an upstream answered, the client gets its status and body as is, and `status` says which (MAG-4481) |
 | `rejected_before_dispatch` | An error; no upstream was asked | `SendRelay` or the WebSocket manager: the request does not parse (unsupported shape, refused batch). `SendParsedRelay` with nothing dispatched: invalid cross-validation headers, the cross-validation capacity check, an empty provider pool, an unavailable pinned provider (the select-provider directive), every endpoint failing consistency pre-validation, or the deadline expiring before dispatch |
 | `router_error` | An error, or nothing usable | The router's own machinery failed (`routerFault`): its task loop could not start, the task channel closed without a final instruction, or a relay had no request data. Also `SendParsedRelay` returning neither a reply nor an error, which includes a panic inside it |
 
@@ -103,6 +137,7 @@ errors, successes, not by time.
 | `outcome` | string | See below. |
 | `error_code` | string | The error registry name of the attempt's error, the value the narrative lines call `error_name`; `UNKNOWN_ERROR` when it was not classified. `""` for `ok` and for an attempt with no result. |
 | `message` | string | The attempt's error: the node's message for a node error, the transport error otherwise. Redacted and capped. `""` for `ok` and for an attempt with no result. |
+| `node_code` | number | The code of the node's JSON-RPC error reply (`error.code`), the code the error registry classified the attempt by: `-32000`, `3`. Present when the attempt's reply is a JSON-RPC error with a non-zero code: over `jsonrpc` and `tendermintrpc`, and a node's refusal of a subscription request. Absent otherwise: a REST, GraphQL or gRPC node error, a transport failure, an attempt with no result. |
 | `retryable` | boolean | The router's verdict on the attempt's error, the registry's `Retryable` flag that the narrative lines print as `retryable`: `true` when another upstream may succeed where this one failed. Present when `error_code` is set. |
 | `batch` | number | The batch the attempt went out in, counted from 0. A write's broadcast sends every upstream in one batch; each retry or hedge is the next batch, so a relay with more than one batch was retried. A batch that was taken and then not sent, such as one the consistency check emptied, leaves its number unused. Absent on an attempt that was not sent: a cache hit. |
 | `sent_ms` | number | Milliseconds from the relay's start, the origin of the event's `latency_ms`, to when the attempt was taken for sending. The attempt ended at `sent_ms` plus its `latency_ms`. Absent on an attempt that was not sent. |
@@ -175,5 +210,24 @@ as `/REDACTED`, so `method` never starts with `/`; slashes inside it survive. `e
 
 ## Versioning
 
-Adding a field leaves `schema` at 1. Removing a field, changing a field's type or meaning, or adding
+Adding a field leaves `schema` as it is. Removing a field, changing a field's type or meaning, or adding
 a value to `outcome` or to an attempt's `outcome` bumps it.
+
+| `schema` | Change |
+| --- | --- |
+| 1 | First version (MAG-4400). |
+| 2 | `status` on a failed relay is the status the client gets: the upstream's own status when an upstream answered, `502` when every attempt failed in transport. Schema 1 wrote `0` when every attempt failed in transport (MAG-4218). |
+
+
+## Customer lifecycle extension
+
+A request accepted by a customer listener carries a nested `customer_request`
+object on this same event. Its independent `schema_version=1` is described in
+[CUSTOMER-REPORT-TELEMETRY.md](CUSTOMER-REPORT-TELEMETRY.md). The listener publishes
+it once, after its final protocol verdict; the relay's existing outer schema,
+outcome and latency retain their definitions. Internal relays have no such
+object. A listener admission/reflection operation without a relay event writes
+`event="customer_request"` instead, never a second relay line. Customer reports
+select the nested schema, terminal marker, request kind and event type, excluding
+the optional usage-export copy. Existing relay-count readers select `relay_end`
+as before.

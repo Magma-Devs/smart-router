@@ -173,9 +173,11 @@ func newStreamingListener(t *testing.T, sender *stubRelaySender) *GrpcChainListe
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	return &GrpcChainListener{
-		endpoint:    &lavasession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc},
-		relaySender: sender,
-		logger:      logger,
+		chainListenerBase: chainListenerBase{
+			endpoint:    &lavasession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc},
+			relaySender: sender,
+			logger:      logger,
+		},
 		chainParser: sender.parser,
 	}
 }
@@ -259,7 +261,7 @@ func TestStreamRelayCallback_StreamsSubscription(t *testing.T) {
 	listener := newStreamingListener(t, sender)
 	manager := newStubGRPCSubscriptionManager()
 
-	callback := listener.makeStreamRelayCallback(manager)
+	callback := listener.makeStreamRelayCallback(manager, false)
 	response, err := callback(context.Background(), streamingApiName, []byte("{}"))
 	require.NoError(t, err)
 	require.NotNil(t, response, "a spec-declared subscription must be served as a stream")
@@ -301,7 +303,7 @@ func TestStreamRelayCallback_DropsTransportOwnedHeaders(t *testing.T) {
 		},
 	}
 
-	response, err := listener.makeStreamRelayCallback(manager)(context.Background(), streamingApiName, []byte("{}"))
+	response, err := listener.makeStreamRelayCallback(manager, false)(context.Background(), streamingApiName, []byte("{}"))
 	require.NoError(t, err)
 	require.NotNil(t, response)
 
@@ -339,7 +341,7 @@ func TestStreamRelayCallback_UnaryFallsThrough(t *testing.T) {
 	listener := newStreamingListener(t, sender)
 	manager := newStubGRPCSubscriptionManager()
 
-	response, err := listener.makeStreamRelayCallback(manager)(context.Background(), unaryApiName, []byte("{}"))
+	response, err := listener.makeStreamRelayCallback(manager, false)(context.Background(), unaryApiName, []byte("{}"))
 	require.NoError(t, err)
 	require.Nil(t, response, "a unary method must fall through to the unary callback")
 	require.Zero(t, manager.startCalls, "no upstream subscription may be opened for a unary method")
@@ -352,7 +354,7 @@ func TestStreamRelayCallback_UnparseableFallsThrough(t *testing.T) {
 	listener := newStreamingListener(t, sender)
 	manager := newStubGRPCSubscriptionManager()
 
-	response, err := listener.makeStreamRelayCallback(manager)(context.Background(), "unknown.Service/Method", []byte("{}"))
+	response, err := listener.makeStreamRelayCallback(manager, false)(context.Background(), "unknown.Service/Method", []byte("{}"))
 	require.NoError(t, err, "the streaming callback must not claim an error it does not own")
 	require.Nil(t, response)
 	require.Zero(t, manager.startCalls)
@@ -365,7 +367,7 @@ func TestStreamRelayCallback_ReleasesClientOnClose(t *testing.T) {
 	listener := newStreamingListener(t, sender)
 	manager := newStubGRPCSubscriptionManager()
 
-	response, err := listener.makeStreamRelayCallback(manager)(context.Background(), streamingApiName, []byte("{}"))
+	response, err := listener.makeStreamRelayCallback(manager, false)(context.Background(), streamingApiName, []byte("{}"))
 	require.NoError(t, err)
 	require.NotNil(t, response.Close)
 
@@ -387,7 +389,7 @@ func TestStreamRelayCallback_StartFailurePropagates(t *testing.T) {
 	manager := newStubGRPCSubscriptionManager()
 	manager.startErr = errors.New("no gRPC endpoints available")
 
-	response, err := listener.makeStreamRelayCallback(manager)(context.Background(), streamingApiName, []byte("{}"))
+	response, err := listener.makeStreamRelayCallback(manager, false)(context.Background(), streamingApiName, []byte("{}"))
 	require.Error(t, err)
 	require.Nil(t, response)
 	require.Contains(t, err.Error(), "no gRPC endpoints available")
@@ -438,7 +440,7 @@ func TestStreamRelayCallback_ReportsEachStreamOpen(t *testing.T) {
 			manager := newStubGRPCSubscriptionManager()
 			manager.startErr = tc.startErr
 
-			_, _ = listener.makeStreamRelayCallback(manager)(context.Background(), tc.method, []byte("{}"))
+			_, _ = listener.makeStreamRelayCallback(manager, false)(context.Background(), tc.method, []byte("{}"))
 
 			sender.mu.Lock()
 			defer sender.mu.Unlock()

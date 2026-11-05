@@ -1,6 +1,7 @@
 package rpcsmartrouter
 
 import (
+	"math/rand"
 	"testing"
 	"time"
 
@@ -199,4 +200,68 @@ func TestExponentialBackoff_ConcurrentAccess(t *testing.T) {
 		<-done
 	}
 	// If we reach here without panic, concurrent access is safe
+}
+
+// TestExponentialBackoff_PinnedSequence pins the exact jittered ladder for a seeded source:
+// initial × multiplier^attempt, capped, then spread over delay × (1 ± jitter).
+func TestExponentialBackoff_PinnedSequence(t *testing.T) {
+	ws := NewWebSocketBackoff()
+	ws.rng = rand.New(rand.NewSource(42))
+	wantWS := []time.Duration{
+		92381701, 147920059, 424982524, 660232977, 1162065720,
+		2975731135, 7601448201, 11912544127, 23803565870, 32634774310,
+	}
+	for i, want := range wantWS {
+		got, ok := ws.NextBackoff()
+		require.True(t, ok)
+		require.Equal(t, want, got, "attempt %d", i)
+	}
+	_, ok := ws.NextBackoff()
+	require.False(t, ok)
+
+	// A non-power-of-two multiplier keeps its fractional nanoseconds until the final truncation.
+	custom := &ExponentialBackoff{
+		InitialInterval: 100 * time.Millisecond,
+		MaxInterval:     7 * time.Second,
+		Multiplier:      1.5,
+		JitterFactor:    0.25,
+		rng:             rand.New(rand.NewSource(7)),
+	}
+	wantCustom := []time.Duration{
+		120944607, 129863038, 195906101, 406951116, 556428372, 625024836,
+		1056033214, 1574197518, 1950696501, 4154895996, 5647784777, 6611356807,
+	}
+	for i, want := range wantCustom {
+		got, ok := custom.NextBackoff()
+		require.True(t, ok)
+		require.Equal(t, want, got, "attempt %d", i)
+	}
+}
+
+// LastBackoff is the wait past the ladder: its last rung, whether or not the ladder has run out,
+// and without moving along it (MAG-4873).
+func TestExponentialBackoff_LastBackoff(t *testing.T) {
+	ladder := &ExponentialBackoff{
+		InitialInterval: 100 * time.Millisecond,
+		MaxInterval:     30 * time.Second,
+		Multiplier:      2.0,
+		MaxRetries:      3,
+	}
+	assert.Equal(t, 400*time.Millisecond, ladder.LastBackoff(), "the third rung")
+
+	for i := 0; i < 3; i++ {
+		_, ok := ladder.NextBackoff()
+		require.True(t, ok)
+	}
+	_, ok := ladder.NextBackoff()
+	require.False(t, ok, "the ladder has run out")
+	assert.Equal(t, 400*time.Millisecond, ladder.LastBackoff(), "still the third rung")
+
+	// The default ladder's tenth rung is the 30s cap, jittered by 30%.
+	last := NewWebSocketBackoff().LastBackoff()
+	assert.GreaterOrEqual(t, last, 21*time.Second)
+	assert.Less(t, last, 39*time.Second)
+
+	unlimited := &ExponentialBackoff{InitialInterval: 100 * time.Millisecond, MaxInterval: time.Second, Multiplier: 2.0}
+	assert.Equal(t, 100*time.Millisecond, unlimited.LastBackoff(), "a ladder that never runs out answers its first rung")
 }

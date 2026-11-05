@@ -25,10 +25,11 @@
   "message": "relay_end",
   "method": "eth_getBalance",
   "outcome": "no_answer",
-  "schema": 1,
+  "request_bytes": 115,
+  "schema": 2,
   "selection": "stateless",
   "served_by": "",
   "stateful": false,
-  "status": 0,
+  "status": 502,
   "stop_reason": "AllProvidersExhausted"
 }

@@ -13,10 +13,11 @@
   "message": "relay_end",
   "method": "eth_getBalance",
   "outcome": "rejected_before_dispatch",
-  "schema": 1,
+  "request_bytes": 115,
+  "schema": 2,
   "selection": "stateless",
   "served_by": "",
   "stateful": false,
   "status": 0,
-  "stop_reason": "FirstMessageFailed"
+  "stop_reason": "PinnedProviderUnavailable"
 }

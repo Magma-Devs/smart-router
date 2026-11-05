@@ -15,12 +15,12 @@ func TestChainTracker_CurrentPollInterval_ReflectsBackoff(t *testing.T) {
 	flat := 6 * time.Second
 	ct := &ChainTracker{flatPollInterval: flat}
 
-	// Healthy → base cadence. computePollInterval ignores the tickerBaseTime arg for flat trackers.
-	ct.updateTimer(flat, 0)
+	// Healthy → base cadence.
+	ct.updateTimer(0)
 	require.Equal(t, flat, ct.CurrentPollInterval())
 
 	// Backed off → base * 2^fetchFails.
-	ct.updateTimer(flat, 3)
+	ct.updateTimer(3)
 	require.Equal(t, flat*8, ct.CurrentPollInterval())
 
 	ct.timer.Stop()

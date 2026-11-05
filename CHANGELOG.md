@@ -8,6 +8,150 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.6.6 — 2026-11-02
+
+### Highlights
+
+Integrators must update incoming requests to pass the `customer-id` HTTP header, as the router no longer reads the `project-id` header for customer identification. Failing to migrate to the new header name will break customer attribution for all routed RPC traffic. Beyond this breaking API change, version 1.6.6 corrects provider blocking telemetry for edge cases during upstream failover. The `smartrouter_csm_provider_blocked` metric now correctly increments for backup providers and providers that have no usable URL. This ensures operators alerting on this metric will catch routing dead-ends even when a primary upstream fails and the configured fallbacks are unreachable.
+
+### Changes
+
+#### ⚠ Breaking changes
+- feat(chainlib)!: read the customer id from a customer-id header, renamed from project-id (MAG-4727) ([#621]) [`1fb9fc4`]
+
+#### New Features
+- feat(chainlib)!: read the customer id from a customer-id header, renamed from project-id (MAG-4727) ([#621]) [`1fb9fc4`]
+
+#### Bug fixes
+- fix(lavasession): smartrouter_csm_provider_blocked covers backups and providers with no usable url (MAG-4735) ([#624]) [`bb19283`]
+
+#### Documentation updates
+- docs(changelog): v1.6.5 readiness follows reachability; add MAG-4641 (MAG-4720) ([#615]) [`0a97191`]
+
+[#615]: https://github.com/magma-Devs/smart-router/pull/615
+[#621]: https://github.com/magma-Devs/smart-router/pull/621
+[#624]: https://github.com/magma-Devs/smart-router/pull/624
+[`0a97191`]: https://github.com/magma-Devs/smart-router/commit/0a971917d9048e90a8e27bec0cd6d4fc7c4f487b
+[`1fb9fc4`]: https://github.com/magma-Devs/smart-router/commit/1fb9fc4650a25b739a4a64a47051a76b81b0f1af
+[`bb19283`]: https://github.com/magma-Devs/smart-router/commit/bb192831a19e948f4141216345f3cca9cdcc7778
+
+## v1.6.5 — 2026-10-29
+
+### Highlights
+
+**Readiness follows reachability.** A router's `/readyz` and `smartrouter_overall_health` now say whether it reaches its upstreams. Each chain+interface's health check ends in one of three verdicts:
+
+- **No upstream answers:** every try timed out, failed to connect, or had no upstream to go to. The chain turns unhealthy. A client relay that no upstream answered brings the check forward to within `--relays-health-unhealthy-interval` (default `15s`). A chain+interface that turns unhealthy brings forward the checks of the router's other interfaces too. A router that loses its egress no longer waits out the 5-minute healthy cadence, and an idle interface no longer holds it Ready.
+- **An upstream answers with an error, an error status or a rate limit:** nothing changes. Every replica shares its upstreams and gets the same answer, so it is no reason to take one out of rotation. The answer does not prove the chain serves either, so a chain that is already unhealthy stays unhealthy.
+- **An upstream answers with a result:** the chain is healthy. Earlier releases passed the check on any reply, including a gRPC call that hit the router's own deadline, which kept a router without egress Ready indefinitely.
+
+**Who notices:** operators. An upstream outage that every replica shares no longer empties a router's Service, and `smartrouter_overall_health` stays `1` through it, so alert on the error share for that, not on readiness. The `Health Check Interval Check` log line gains `verdict` (`healthy`, `inconclusive` or `unreachable`), and its `health result` is now the chain's health after the check. `docs/METRICS.md` ("When they change") states the rule. This is MAG-4617, MAG-4639 and MAG-4641. MAG-4641 landed inside #584's commit, so its line below was added by hand.
+
+Release v1.6.5 also refines upstream health verification and router readiness by ensuring each node URL is verified over its own isolated connection and each health-check attempt uses a dedicated relay processor. Operators can also track exactly which configured providers failed verification—and which specific check triggered the failure—through newly published metrics. Finally, for gRPC traffic, this release corrects how connection failures and timeouts are classified during upstream routing. A call that hits the router's internal deadline is now properly recorded as a timeout, and a refused connection is marked as unreachable, preventing the router from misreporting either event as a valid answer from the upstream node.
+
+### Changes
+
+#### New Features
+- feat(metrics): publish which configured providers failed verification, and which check (MAG-4594) ([#572]) [`316fad1`]
+- feat(readiness): readiness follows reachability, three-valued probe (MAG-4641) ([#586]) [`bb43ae9`]
+  - added by hand: #586 merged into #584's branch and reached `main` inside #584's squash commit, so the generator listed no line for it. This is the readiness rule in the Highlights.
+
+#### Bug fixes
+- fix: verify every node url over its own connection (MAG-4231) ([#463]) [`dc512c7`]
+- fix(readiness): turn NotReady when a router's relays all fail (MAG-4617) ([#581]) [`b6d951c`]
+  - its rule, that any reply but a result fails the check, was replaced before this release by MAG-4641: see the Highlights.
+- fix(grpc): a call that hits the router's own deadline is a timeout, not the node's answer (MAG-4625) ([#583]) [`ec999d5`]
+- fix(grpc): a refused connection is unreachable, not the node's answer (MAG-4355) ([#585]) [`f4dd073`]
+- fix(readiness): give each health-check try its own relay processor (MAG-4639) ([#584]) [`bb43ae9`]
+  - this commit also carries MAG-4641 ([#586]).
+
+#### Documentation updates
+- docs(changelog): say v1.6.4 drops the two distrusted roots, and correct v1.6.2 (MAG-4596) ([#575]) [`ec7a319`]
+
+[#463]: https://github.com/magma-Devs/smart-router/pull/463
+[#572]: https://github.com/magma-Devs/smart-router/pull/572
+[#575]: https://github.com/magma-Devs/smart-router/pull/575
+[#581]: https://github.com/magma-Devs/smart-router/pull/581
+[#583]: https://github.com/magma-Devs/smart-router/pull/583
+[#584]: https://github.com/magma-Devs/smart-router/pull/584
+[#585]: https://github.com/magma-Devs/smart-router/pull/585
+[#586]: https://github.com/magma-Devs/smart-router/pull/586
+[`316fad1`]: https://github.com/magma-Devs/smart-router/commit/316fad1e8e9e4af246a97ebf5ca71393de8d6fe6
+[`b6d951c`]: https://github.com/magma-Devs/smart-router/commit/b6d951caf1c28c3e632b915b54cda1ea3d39af0f
+[`bb43ae9`]: https://github.com/magma-Devs/smart-router/commit/bb43ae96b4671a2d13bba2c22f948e486082e495
+[`dc512c7`]: https://github.com/magma-Devs/smart-router/commit/dc512c7aaf617bc07570ba3c246fb4a08277f511
+[`ec7a319`]: https://github.com/magma-Devs/smart-router/commit/ec7a319f20b48915ec28d3c6fea618e5e3f0b725
+[`ec999d5`]: https://github.com/magma-Devs/smart-router/commit/ec999d5045e8525cf2e161c5c6ee7a13244ef564
+[`f4dd073`]: https://github.com/magma-Devs/smart-router/commit/f4dd0733f32a17aaa5334d4bebb981f9df725cd9
+
+## v1.6.4 — 2026-10-23
+
+### Highlights
+
+**Security: the image no longer trusts the two roots removed over the eMudhra compromise.** v1.6.4 builds on `gcr.io/distroless/static-debian13:debug`, whose trust store (`ca-certificates 20250419+deb13u1`) no longer contains *emSign ECC Root CA - G3* or *AAA Certificate Services*, the two roots Debian and Mozilla removed over the eMudhra intermediate compromise. The previous base, `static-debian12`, is no longer updated by distroless, so v1.6.3 and every earlier image still trust both. **Correction to the v1.6.2 notes:** they say the fix is a rebuild "not a change to the image's CA bundle". The root removals had already been published, and this release carries them. The Go 1.26.10 check from v1.6.2 still rejects any chain through the eight compromised intermediates; the trust store now refuses chains through those two roots as well, including chains through eMudhra CAs outside Go's list. A host whose certificate chain ends only at one of the two roots now fails TLS verification, as it already does in Mozilla, Chrome and Debian. The same fix for the v1.5 line is v1.5.10.
+
+The release also introduces a breaking change to error handling and event logging that requires operators to update their telemetry pipelines to `relay_end` schema 2. The `status` field for a failed relay no longer writes `0`; it now records the upstream's actual HTTP status code, or `502` when all transport attempts fail. Additionally, the router no longer intercepts errors to return a generic HTTP 500 text response, meaning client applications will now receive the upstream node's exact status code and response body. Integrators must consult `docs/RELAY-END-EVENT.md` to verify the schema 2 contract and update clients to parse upstream-native error payloads. Beyond these protocol corrections, this release adjusts the failover routing logic to include a `lastChanceBorrow` condition, which permits the router to lend a head-stalled upstream URL when no other healthy nodes are available to serve the request.
+
+### Changes
+
+#### ⚠ Breaking changes
+- fix(protocol)!: return the upstream's own error to the client instead of the router's text (MAG-4218) ([#551]) [`8645963`]
+  - relay_end is schema 2. status on a failed relay is the status the client gets: the upstream's own status when an upstream answered, 502 when every attempt failed in transport, where schema 1 wrote 0. docs/RELAY-END-EVENT.md is the contract for schema 2 and lists the versions. The reply the client reads on this path changes too: the node's status and body instead of HTTP 500 with the router's text.
+
+#### Bug fixes
+- fix(protocol)!: return the upstream's own error to the client instead of the router's text (MAG-4218) ([#551]) [`8645963`]
+- fix(lavasession): the last chance lends a head-stalled URL when nothing else can serve (MAG-4589) ([#570]) [`9eda1ae`]
+- refactor(lavasession): name the last-chance condition lastChanceBorrow (MAG-4589) ([#570]) [`926b0c1`]
+- fix(docker): move the runtime base to distroless static-debian13 (MAG-4596) ([#573]) [`1a74447`]
+  - this is the security fix above: the image's trust store no longer contains emSign ECC Root CA - G3 or AAA Certificate Services.
+
+[#551]: https://github.com/magma-Devs/smart-router/pull/551
+[#570]: https://github.com/magma-Devs/smart-router/pull/570
+[#573]: https://github.com/magma-Devs/smart-router/pull/573
+[`1a74447`]: https://github.com/magma-Devs/smart-router/commit/1a744477d55b53922d49a5a44ef10c0c350d494e
+[`8645963`]: https://github.com/magma-Devs/smart-router/commit/8645963eaa9d3c21ceb1d8d7033526434879de96
+[`926b0c1`]: https://github.com/magma-Devs/smart-router/commit/926b0c1be737cf4bbfaaeefdbbb13d59d85b3d1d
+[`9eda1ae`]: https://github.com/magma-Devs/smart-router/commit/9eda1ae4b974a1632ec9a5771f4e25d47ca851b1
+
+## v1.6.3 — 2026-10-22
+
+### Highlights
+
+Smart Router v1.6.3 expands the `relay-end` event payload with deeper transaction and caller telemetry for production observability. Integrators can now track submitted transactions directly via the new `tx_hash`, `tx_status`, and `tx_error` fields, while identity fields like `customer`, `request_id`, `task_id`, and `tx_id` map upstream requests back to the originating client. The event payload also introduces request and reply sizes, block heights, and the upstream `node_code`, complemented by two new narrative log lines written per relay when the router operates at the `Debug` log level. Finally, this release resolves REST routing bugs by ensuring REST health checks correctly send their GET template as the URL without a body, and by applying a unified body-method rule for REST relays that preserves the original API name when given an empty template.
+
+### Changes
+
+#### New Features
+- feat(relay-end): name the transaction a submit sends (MAG-4455) ([#556]) [`07bf136`]
+- feat(relay-end): name the customer and the caller's ids (MAG-4456) ([#556]) [`2d42393`]
+- feat(relay-end): add request and reply sizes, blocks and node codes (MAG-4457) ([#556]) [`10f1ae0`]
+- feat(logs): write two per-relay narrative lines at Debug (MAG-4054) ([#569]) [`5144af3`]
+
+#### Bug fixes
+- fix(rpcsmartrouter): a REST health check sends its GET template as the URL, with no body (MAG-4516) ([#561]) [`d44e0f6`]
+- fix(rpcsmartrouter): one body-method rule for REST relays, and an empty template keeps the api name (MAG-4516) ([#561]) [`7373514`]
+
+#### Documentation updates
+- docs(changelog): say v1.6.2 distrusts the compromised eMudhra intermediates (MAG-4522) ([#564]) [`c3a120f`]
+- docs(relay-end): document tx_hash, tx_status and tx_error by chain (MAG-4455) ([#556]) [`8095142`]
+- docs(relay-end): document customer, request_id, task_id and tx_id (MAG-4456) ([#556]) [`f8b606f`]
+- docs(relay-end): document sizes, blocks and node_code (MAG-4457) ([#556]) [`4d7d9bf`]
+
+[#556]: https://github.com/magma-Devs/smart-router/pull/556
+[#561]: https://github.com/magma-Devs/smart-router/pull/561
+[#564]: https://github.com/magma-Devs/smart-router/pull/564
+[#569]: https://github.com/magma-Devs/smart-router/pull/569
+[`07bf136`]: https://github.com/magma-Devs/smart-router/commit/07bf136ef06e9e192a56a2f1739ce93440e04e2a
+[`10f1ae0`]: https://github.com/magma-Devs/smart-router/commit/10f1ae0d18c70b7ee5f45a755aef5b13414bc05c
+[`2d42393`]: https://github.com/magma-Devs/smart-router/commit/2d4239333b9b28833da99c79a28132d216b8f787
+[`4d7d9bf`]: https://github.com/magma-Devs/smart-router/commit/4d7d9bf8b41ff30ac468945969bb175d1b3d677e
+[`5144af3`]: https://github.com/magma-Devs/smart-router/commit/5144af32b829d145338f635e1765f7a09df104ca
+[`7373514`]: https://github.com/magma-Devs/smart-router/commit/7373514c19f6e9c9057fc116ef44375aa09a753a
+[`8095142`]: https://github.com/magma-Devs/smart-router/commit/8095142a85bca67e3e95d250667f1639c2de5a14
+[`c3a120f`]: https://github.com/magma-Devs/smart-router/commit/c3a120f0d6b79e991cb2cf8a954a774221fc6616
+[`d44e0f6`]: https://github.com/magma-Devs/smart-router/commit/d44e0f69e18abbd10c81cf9101d09d79f5361c43
+[`f8b606f`]: https://github.com/magma-Devs/smart-router/commit/f8b606f2c63cd77a3a508596e86cd6029547b1d0
+
 ## v1.6.2 — 2026-10-21
 
 ### Highlights

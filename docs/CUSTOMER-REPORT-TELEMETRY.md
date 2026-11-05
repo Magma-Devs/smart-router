@@ -144,12 +144,13 @@ collection gaps. No historical backfill is created by deploying this schema.
 
 ## Terminal snapshot, relay_end and OTel
 
-The router writes one log event per relay, `relay_end`
-([RELAY-END-EVENT.md](RELAY-END-EVENT.md)), at every log level, and the customer
-lifecycle adds no line of its own: the Loki recording rules and the customer
-alert that count relays select `relay_end`, and a second line would be counted
-twice. The customer request's terminal snapshot travels on the usage event
-instead.
+The router enriches the existing `relay_end` event
+([RELAY-END-EVENT.md](RELAY-END-EVENT.md)) with the final `customer_request`
+object after the listener resolves the protocol verdict. It writes no second
+per-relay line. Admission and reflection operations that never enter the relay
+server write `event="customer_request"` with the same nested object instead.
+Both forms are structured INFO events at every configured log level, independent
+of the optional usage/OTel sink. Internal relays have no customer object.
 
 The snapshot, `customer_request`, is resolved at the listener, after the
 unknown-write and API-level verdicts, for parse and admission failures as well. It
@@ -172,23 +173,30 @@ the snapshot as the `customer_request` attribute beside flattened `terminal`,
 `outcome`, `recovery`, `error_name`, `request_id`, `GUID` and `completed_at_ns`.
 Prometheus counting does not depend on OTel being enabled.
 
-Loki drill-down reads `relay_end`. Its `outcome` is the relay's, not the
-customer's: `ok` is a success; every other value is a failure for this report.
-The two sets differ at the edges, on purpose: `relay_end` has no `cancelled`
-outcome, and a WebSocket frame the rate limit refuses is a counted customer
-failure with no `relay_end`. Final failures (adapt the stream selector to the
-deployed labels):
+Loki drill-down reads the nested customer outcome, which includes cancellations,
+partial batches, subscription setup and listener admission failures. The existing
+outer `relay_end.outcome` keeps its relay semantics for existing readers.
+`provider_fault` mirrors the registry's `EndpointAtFault` axis; client/domain
+errors are customer failures without provider fault. Rate-limit and capability
+identities remain available separately. Cancellations and unknown writes do not
+claim a provider fault. This flag does not establish a root cause.
+
+Final failures (adapt the stream selector to the deployed labels):
 
 ```logql
-{cluster="$cluster"} |= "\"event\":\"relay_end\"" | json | outcome!="ok" | selection!="subscription"
+{cluster="$cluster",component="router"}
+| json event="event", schema="customer_request.schema_version", terminal="customer_request.terminal", kind="customer_request.request_kind", customer_outcome="customer_request.outcome"
+| __error__=""
+| event=~"relay_end|customer_request"
+| schema="1" | terminal="true" | kind="customer" | customer_outcome="failure"
 ```
 
-Top error families, counting relays rather than attempt lines. `error_code` on
-`relay_end` is the registry name the Prometheus `error_name` label carries:
-
-```logql
-topk(5, sum by (error_code) (count_over_time({cluster="$cluster"} |= "\"event\":\"relay_end\"" | json | outcome!="ok" [7d])))
-```
+Extract the entire object with `| json customer_request="customer_request"` to
+retain attempts and reroute arrays. Exclude `relay_usage` copies from counts.
+The companion Loki `smartrouter_customer_outcomes:count1m` recording rule groups
+customer outcomes by chain, API interface, recovery, cache, error and provider
+fault. Legacy final-relay rules retain their definitions and are not substituted
+for this series. No schema marker means incomplete coverage, not zero failures.
 
 Use the GUID and the propagated request id to join a failure to the request's
 classified attempt lines and to the disabled-provider, hold-off and pool-state
@@ -201,9 +209,10 @@ incident counts.
 
 1. Scrape and retain all three new metrics in Alloy/Prometheus/Mimir. Preserve
    native `spec` and `apiInterface` and the customer/deployment identity.
-2. `relay_end` is already collected, and the Loki recording rules
-   (devops-magmadevs) and the customer server-errors alert
-   (smart-router-infrastructure) already read it. This schema changes neither.
+2. Preserve the nested customer object in Loki without sampling. Install the
+   companion customer-outcome recording rules in devops-magmadevs. The legacy
+   final-relay rules and customer server-errors alert keep their meanings;
+   they do not replace logical customer outcomes.
 3. If OTel usage is enabled, verify collector routing and schema preservation,
    including the `customer_request` attribute's size against the collector's
    attribute limits. Export is best-effort with bounded queues; delivery is not
@@ -212,9 +221,26 @@ incident counts.
 4. Deploy and verify new-schema coverage across all customer pods before switching
    weekly dashboards. Keep old-version periods explicitly incomplete.
 5. Verify a drained known workload end to end: ingress -> router -> metric scrape
-   -> Mimir, and `relay_end`/OTel -> Loki; reconcile by chain and unique customer
+   -> Mimir, and the terminal event -> Loki; reconcile by chain and unique customer
    GUID. Gateway-only rejections remain an explicitly separate ingress metric.
 
 Infrastructure configuration, deployed recording rules and customer dashboards
 are changed in their owning repositories. This router change does not put new
 telemetry in production Grafana or Loki by itself.
+
+
+## Verification
+
+On 2026-11-05 an isolated Compose build on current main passed metrics health,
+listener health, the in-container health command and a public Ethereum block
+read. Three requests (success, a node error inside HTTP 200, and malformed JSON)
+reconciled as 3 received = 1 success + 2 failures at the router, in Mimir through
+Alloy, and as three unique terminal records in Loki. OTel was disabled.
+Controlled real HTTP tests also reconcile retry, unavailable-primary reroute,
+partial batches and client versus provider errors across Prometheus, logs and
+usage export. The companion real-Loki test rejects legacy records and OTel
+copies and detects five independently removed selection filters.
+
+A read-only pre-rollout fleet check found 119 discovered router targets and no
+new-schema markers. Production coverage and a deployed known-workload
+reconciliation remain acceptance gates; local collection is not fleet deployment.

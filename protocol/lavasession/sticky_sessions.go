@@ -2,8 +2,6 @@ package lavasession
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"sort"
 	"strings"
@@ -70,12 +68,9 @@ func StickyLocalKey(scope, stickyID string) string {
 }
 
 // StickyIDDigest is the opaque key a session id travels under. The raw id is chosen by the
-// client and may identify an end user; the fleet only needs a stable string to agree on, so the
-// plaintext never leaves the process. Every pod derives the same digest from the same id, which
-// is all the agreement requires.
+// client and may identify an end user, so it never leaves the process.
 func StickyIDDigest(stickyID string) string {
-	sum := sha256.Sum256([]byte(stickyID))
-	return hex.EncodeToString(sum[:16])
+	return utils.Digest(stickyID, 16)
 }
 
 type StickySessionStore struct {

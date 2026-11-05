@@ -14,6 +14,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type customerRecorder struct {
@@ -376,4 +378,15 @@ func TestCustomerExistingParsedCountersShareFinalVerdict(t *testing.T) {
 	notification.ApiMethod = SubscriptionDeliveryMethod
 	logger.AddMetricForWebSocket(notification, nil)
 	require.Equal(t, beforeTotal+2, testutil.ToFloat64(oldTotal))
+}
+
+func TestCustomerGRPCCancellationIsNotAProviderFailure(t *testing.T) {
+	logger, recorder, _, data, _ := customerFixture(t)
+	data.APIType = "grpc"
+	data.CaptureCustomerResult(nil, "", nil, common.LavaErrorConnectionRefused, false)
+	logger.AddMetricForWebSocket(data, status.Error(codes.Canceled, "client closed stream"))
+	require.Len(t, recorder.outcomes, 1)
+	require.Equal(t, "cancelled", recorder.outcomes[0].Outcome)
+	require.Equal(t, common.LavaErrorContextCanceled.Name, recorder.outcomes[0].ErrorName)
+	require.False(t, recorder.outcomes[0].ProviderFault)
 }

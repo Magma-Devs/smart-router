@@ -13,6 +13,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // The reason recorded on a disable is only worth having if it is right, and nothing else pins the
@@ -108,6 +110,17 @@ func TestEndpointDisableReasonFor_RealTransportFaults(t *testing.T) {
 			err:       io.EOF,
 			transport: common.TransportJsonRPC, want: lavasession.EndpointDisableUnreachable,
 		},
+		// ---- gRPC: a status the router's own client made for a call no node saw (MAG-4355) ----
+		{
+			name:      "gRPC: refused dial",
+			err:       &common.GRPCCallUndeliveredError{Err: status.Error(codes.Unavailable, `connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:9090: connect: connection refused"`)},
+			transport: common.TransportGRPC, want: lavasession.EndpointDisableUnreachable,
+		},
+		{
+			name:      "gRPC: failed TLS handshake",
+			err:       &common.GRPCCallUndeliveredError{Err: status.Error(codes.Unavailable, `connection error: desc = "transport: authentication handshake failed: tls: failed to verify certificate"`)},
+			transport: common.TransportGRPC, want: lavasession.EndpointDisableUnreachable,
+		},
 	}
 
 	for _, tc := range cases {
@@ -165,10 +178,13 @@ func TestEndpointDisableReason_FiveHundredAgreesAcrossTransports(t *testing.T) {
 // here because the enclosing status branch matches `>= 500 || == 429`, so the whole carve-out lives
 // in classifyHTTPStatus and nothing else pinned it.
 func TestClassifyHTTPStatus_RateLimitDoesNotDisable(t *testing.T) {
-	shouldMarkUnhealthy, needsBackoff := classifyHTTPStatus(http.StatusTooManyRequests)
+	statusVerdict := func(code int) *common.LavaError {
+		return common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, code, "")
+	}
+	shouldMarkUnhealthy, needsBackoff := classifyHTTPStatus(http.StatusTooManyRequests, statusVerdict(http.StatusTooManyRequests))
 	require.False(t, shouldMarkUnhealthy, "a 429 must not disable the endpoint")
 	require.True(t, needsBackoff, "but it must still back off")
 
-	shouldMarkUnhealthy, _ = classifyHTTPStatus(http.StatusServiceUnavailable)
+	shouldMarkUnhealthy, _ = classifyHTTPStatus(http.StatusServiceUnavailable, statusVerdict(http.StatusServiceUnavailable))
 	require.True(t, shouldMarkUnhealthy, "control: a 5xx does disable")
 }

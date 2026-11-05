@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
@@ -28,6 +29,32 @@ const (
 	// (a chart rendering a global flag list) had no way to set it — so every
 	// such router landed on the shared default (MAG-3687).
 	RespCacheKeyPrefixFlagName = "resp-cache-key-prefix"
+
+	// SecondaryRespCacheViperKey is the read-only second tier's RESP block
+	// (MAG-4778): the same surface as resp-cache, minus what a tier that only
+	// reads cannot use (read-addresses, expiration). Its flags mirror the
+	// resp-cache ones for the same reason those exist.
+	SecondaryRespCacheViperKey          = "secondary-resp-cache"
+	SecondaryRespCacheAddressesFlagName = "secondary-resp-cache-addresses"
+	SecondaryRespCacheTopologyFlagName  = "secondary-resp-cache-topology"
+	SecondaryRespCacheKeyPrefixFlagName = "secondary-resp-cache-key-prefix"
+)
+
+// respBlockKeys names one RESP configuration block and its three flags.
+type respBlockKeys struct {
+	block, addressesFlag, topologyFlag, keyPrefixFlag string
+	// name is the store's log name (redisstore.Config.Name), set before Validate
+	// so the block's own errors name it.
+	name string
+	// refuse, when set, rejects keys the block's tier cannot use. It runs before
+	// Validate, so a refused key is reported as refused rather than through a
+	// validation rule written for the block that does use it.
+	refuse func(redisstore.Config) error
+}
+
+var (
+	primaryRespBlock   = respBlockKeys{RespCacheViperKey, RespCacheAddressesFlagName, RespCacheTopologyFlagName, RespCacheKeyPrefixFlagName, "", nil}
+	secondaryRespBlock = respBlockKeys{SecondaryRespCacheViperKey, SecondaryRespCacheAddressesFlagName, SecondaryRespCacheTopologyFlagName, SecondaryRespCacheKeyPrefixFlagName, secondaryRespCacheLogName, refuseReadOnlyTierKeys}
 )
 
 // LoadRespCacheConfig reads the resp-cache configuration: the `resp-cache:`
@@ -36,7 +63,35 @@ const (
 // options WITHOUT addresses is a deployment mistake, not a configuration —
 // fail-fast, mirroring the repo's cache-config validation style.
 func LoadRespCacheConfig(v *viper.Viper) (cfg redisstore.Config, enabled bool, err error) {
-	blockPresent := v.IsSet(RespCacheViperKey)
+	return loadRespBlock(v, primaryRespBlock)
+}
+
+// LoadSecondaryRespCacheConfig reads the secondary-resp-cache block and flags, the
+// read-only second tier on a RESP backend (MAG-4778), under the same rules as
+// LoadRespCacheConfig. Two keys that block would accept are refused here because a
+// tier that only reads cannot use them: read-addresses (there are no writes to
+// split reads from; give the reader endpoint as addresses) and expiration (the
+// zone that writes the entries owns their lifetimes).
+func LoadSecondaryRespCacheConfig(v *viper.Viper) (cfg redisstore.Config, enabled bool, err error) {
+	return loadRespBlock(v, secondaryRespBlock)
+}
+
+// refuseReadOnlyTierKeys rejects the two keys LoadSecondaryRespCacheConfig names.
+// Checked before Validate: a refused read-addresses list used to be reported by
+// the standalone rule, which advised switching topology, and a negative
+// expiration by an error naming resp-cache.
+func refuseReadOnlyTierKeys(cfg redisstore.Config) error {
+	if len(cfg.ReadAddresses) > 0 {
+		return fmt.Errorf("%s.read-addresses is not used by a read-only tier: every operation is a read, so set the reader endpoint as %s.addresses", SecondaryRespCacheViperKey, SecondaryRespCacheViperKey)
+	}
+	if cfg.Expiration != (redisstore.ExpirationConfig{}) {
+		return fmt.Errorf("%s.expiration is not used by a read-only tier: the zone that writes the entries sets their lifetimes", SecondaryRespCacheViperKey)
+	}
+	return nil
+}
+
+func loadRespBlock(v *viper.Viper, keys respBlockKeys) (cfg redisstore.Config, enabled bool, err error) {
+	blockPresent := v.IsSet(keys.block)
 	if blockPresent {
 		// Strict: a key the block does not define is an error, not a line
 		// silently ignored. What lives here decides which keyspace the router
@@ -45,15 +100,15 @@ func LoadRespCacheConfig(v *viper.Viper) (cfg redisstore.Config, enabled bool, e
 		// another deployment's keyspace (MAG-3677). Nested blocks (tls) are
 		// held to the same rule.
 		strict := func(dc *mapstructure.DecoderConfig) { dc.ErrorUnused = true }
-		if unmarshalErr := v.UnmarshalKey(RespCacheViperKey, &cfg, strict); unmarshalErr != nil {
-			return cfg, false, fmt.Errorf("invalid %s block (unknown keys are rejected so a misspelled setting cannot fall back to a default unnoticed): %w", RespCacheViperKey, unmarshalErr)
+		if unmarshalErr := v.UnmarshalKey(keys.block, &cfg, strict); unmarshalErr != nil {
+			return cfg, false, fmt.Errorf("invalid %s block (unknown keys are rejected so a misspelled setting cannot fall back to a default unnoticed): %w", keys.block, unmarshalErr)
 		}
 	}
 
 	// Flag overlay. BindPFlags places flag values at flat keys, which viper's
 	// nested UnmarshalKey does not merge — overlay explicitly, flags first.
 	flagged := false
-	if addresses := strings.TrimSpace(v.GetString(RespCacheAddressesFlagName)); addresses != "" {
+	if addresses := strings.TrimSpace(v.GetString(keys.addressesFlag)); addresses != "" {
 		cfg.Addresses = nil
 		for _, address := range strings.Split(addresses, ",") {
 			if address = strings.TrimSpace(address); address != "" {
@@ -62,11 +117,11 @@ func LoadRespCacheConfig(v *viper.Viper) (cfg redisstore.Config, enabled bool, e
 		}
 		flagged = true
 	}
-	if topology := strings.TrimSpace(v.GetString(RespCacheTopologyFlagName)); topology != "" {
+	if topology := strings.TrimSpace(v.GetString(keys.topologyFlag)); topology != "" {
 		cfg.Topology = redisstore.Topology(topology)
 		flagged = true
 	}
-	if keyPrefix := strings.TrimSpace(v.GetString(RespCacheKeyPrefixFlagName)); keyPrefix != "" {
+	if keyPrefix := strings.TrimSpace(v.GetString(keys.keyPrefixFlag)); keyPrefix != "" {
 		cfg.KeyPrefix = keyPrefix
 		flagged = true
 	}
@@ -75,9 +130,15 @@ func LoadRespCacheConfig(v *viper.Viper) (cfg redisstore.Config, enabled bool, e
 	if !enabled {
 		if blockPresent || flagged {
 			return cfg, false, fmt.Errorf("%s options are set without addresses — dangling configuration (set %s.addresses or --%s, or remove the block)",
-				RespCacheViperKey, RespCacheViperKey, RespCacheAddressesFlagName)
+				keys.block, keys.block, keys.addressesFlag)
 		}
 		return cfg, false, nil
+	}
+	cfg.Name = keys.name
+	if keys.refuse != nil {
+		if err := keys.refuse(cfg); err != nil {
+			return cfg, false, err
+		}
 	}
 	if err := cfg.Validate(); err != nil {
 		return cfg, false, err
@@ -170,4 +231,27 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 		cache = grpcCache
 	}
 	return cache, nil
+}
+
+// OpenSecondaryRespCache builds the read-only RESP second tier from a configuration
+// LoadSecondaryRespCacheConfig accepted. Like the primary, it does not dial here:
+// an unreachable backend degrades each lookup to a miss and is reported by the
+// health probe, while a configuration the store refuses (an unreadable credential
+// file) fails startup. lookupBudget is secondary-cache-timeout (see
+// NewSecondaryRespCache).
+func OpenSecondaryRespCache(cfg redisstore.Config, lookupBudget time.Duration) (*RespCache, error) {
+	store, err := redisstore.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return NewSecondaryRespCache(store, lookupBudget), nil
+}
+
+// RespKeyPrefixInForce is the keyspace a RESP store occupies: its configured
+// prefix, or the store's default when none is set.
+func RespKeyPrefixInForce(configured string) string {
+	if configured == "" {
+		return redisstore.DefaultKeyPrefix
+	}
+	return configured
 }

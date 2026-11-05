@@ -72,8 +72,10 @@ func relayEndSubscriptionID(t *testing.T, ack string) string {
 }
 
 // requireSubscriptionGoldens compares a socket's events, in order, with their golden files.
-func requireSubscriptionGoldens(t *testing.T, events []string, names ...string) {
+func requireSubscriptionGoldens(t *testing.T, read func() []string, seen int, names ...string) {
 	t.Helper()
+	require.Eventually(t, func() bool { return len(newRelayEndsSince(read, seen)) >= len(names) }, time.Second, time.Millisecond)
+	events := newRelayEndsSince(read, seen)
 	require.Len(t, events, len(names), "one relay_end per subscription request")
 	for i, name := range names {
 		t.Logf("relay_end: %s", events[i])
@@ -116,7 +118,7 @@ func TestRelayEnd_WebSocketSubscriptions(t *testing.T) {
 	relayEndExchange(t, second, unsubscribe(secondID))
 	relayEndExchange(t, first, unsubscribe(firstID))
 
-	requireSubscriptionGoldens(t, newRelayEndsSince(read, seen),
+	requireSubscriptionGoldens(t, read, seen,
 		"ws_subscribe", "ws_subscribe_joined", "ws_unsubscribe_answered_by_router", "ws_unsubscribe_last_client")
 	require.Equal(t, []string{"eth_subscribe", "eth_unsubscribe"}, node.ObservedMethods(),
 		"the join and the router's own answer sent the node nothing")
@@ -159,7 +161,7 @@ func TestRelayEnd_SubmitAndWatchIsAWrite(t *testing.T) {
 
 	seen := len(read())
 	relayEndSubscriptionID(t, relayEndExchange(t, client, `{"jsonrpc":"2.0","id":1,"method":"author_submitAndWatchExtrinsic","params":["0x2d0284d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"]}`))
-	requireSubscriptionGoldens(t, newRelayEndsSince(read, seen), "ws_submit_and_watch")
+	requireSubscriptionGoldens(t, read, seen, "ws_submit_and_watch")
 }
 
 // A chain with no WebSocket upstream refuses every subscribe, and each refusal is a relay too.
@@ -171,7 +173,7 @@ func TestRelayEnd_SubscriptionWithoutEndpoints(t *testing.T) {
 
 	seen := len(read())
 	relayEndExchange(t, client, `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`)
-	requireSubscriptionGoldens(t, newRelayEndsSince(read, seen), "ws_subscribe_no_endpoints")
+	requireSubscriptionGoldens(t, read, seen, "ws_subscribe_no_endpoints")
 }
 
 // What a subscription manager records decides the outcome: nothing sent is a refusal before
@@ -179,7 +181,7 @@ func TestRelayEnd_SubscriptionWithoutEndpoints(t *testing.T) {
 // have failed, and a node's JSON-RPC error is its refusal.
 func TestRelayEnd_SubscriptionOutcomes(t *testing.T) {
 	server := newRelayEndServer(t, "ETH1", spectypes.APIInterfaceJsonRPC, ethJsonRPCParser(t))
-	subscribe, err := server.ParseRelay(context.Background(), "", `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`, http.MethodPost, "dapp", "", nil)
+	subscribe, err := server.ParseRelay(context.Background(), "", `{"jsonrpc":"2.0","id":1,"method":"eth_subscribe","params":["newHeads"]}`, http.MethodPost, relayEndNoCustomerID, "", nil)
 	require.NoError(t, err)
 	start := time.Now()
 	build := func(protocolMessage chainlib.ProtocolMessage, record func(*chainlib.SubscriptionUpstream), err error) *relayEnd {
@@ -207,6 +209,7 @@ func TestRelayEnd_SubscriptionOutcomes(t *testing.T) {
 		require.Len(t, end.attempts, 1)
 		require.Equal(t, attemptOutcomeNodeError, end.attempts[0].outcome)
 		require.Equal(t, "the method eth_subscribe does not exist/is not available", end.attempts[0].message)
+		require.Equal(t, -32601, end.attempts[0].nodeCode, "the node's JSON-RPC error code")
 		require.Equal(t, end.attempts[0].errorCode, end.errorCode)
 	})
 	t.Run("the connection failed", func(t *testing.T) {
@@ -215,6 +218,7 @@ func TestRelayEnd_SubscriptionOutcomes(t *testing.T) {
 			fmt.Errorf("failed to get WebSocket connection: %w", dial))
 		require.Equal(t, relayOutcomeNoAnswer, end.outcome)
 		require.Equal(t, attemptOutcomeTransportError, end.attempts[0].outcome)
+		require.Zero(t, end.attempts[0].nodeCode, "no node reply, so no node code")
 		require.Equal(t, common.LavaErrorConnectionRefused.Name, end.attempts[0].errorCode)
 		require.True(t, end.attempts[0].retryable())
 	})

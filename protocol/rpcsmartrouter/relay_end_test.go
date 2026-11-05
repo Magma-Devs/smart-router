@@ -112,6 +112,17 @@ func normalizeRelayEnd(t *testing.T, line string, sortAttempts bool) map[string]
 		return text
 	}
 	event["error"] = stable(requireRelayEndString(t, event, "error"))
+	if customer, ok := event["customer_request"].(map[string]any); ok {
+		require.Equal(t, event["GUID"], customer["GUID"])
+		require.Equal(t, true, customer["terminal"])
+		require.Equal(t, "customer", customer["request_kind"])
+		require.GreaterOrEqual(t, customer["completed_at_ns"], customer["started_at_ns"])
+		customer["GUID"] = "<customer request>"
+		customer["started_at_ns"], customer["completed_at_ns"], customer["duration_ms"] = "<ns>", "<ns>", "<ms>"
+		if diagnostic, ok := customer["error_message"].(string); ok {
+			customer["error_message"] = stable(diagnostic)
+		}
+	}
 
 	raw, present := event["attempts"]
 	if !present {
@@ -260,13 +271,16 @@ func relayEndProvider(t *testing.T, node relayEndNode) (*lavasession.ConsumerSes
 	return provider, url
 }
 
+// relayEndNoCustomerID is the customer id a listener passes for a request without a customer-id header.
+const relayEndNoCustomerID = metrics.CustomerNone
+
 // sendRelayEnd sends body the way every HTTP listener does: SendRelay, with the GUID the
-// listener minted on the context.
+// listener minted on the context, for a request without a customer-id header.
 func sendRelayEnd(t *testing.T, server *RPCSmartRouterServer, guid uint64, timeout time.Duration, url, body string, metadata ...pairingtypes.Metadata) (*common.RelayResult, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), timeout)
 	defer cancel()
-	return server.SendRelay(ctx, url, body, http.MethodPost, "dapp", "", nil, metadata)
+	return server.SendRelay(ctx, url, body, http.MethodPost, relayEndNoCustomerID, "", nil, metadata)
 }
 
 const (
@@ -276,6 +290,8 @@ const (
 	relayEndTxHash    = `{"jsonrpc":"2.0","id":1,"result":"0x5c504ed432cb51138bcf09aa5e8a410dd4a1e204ef84bfed1be16dfba1b22060"}`
 	relayEndReverted  = `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`
 	relayEndNonceLow  = `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nonce too low: next nonce 7, tx nonce 6"}}`
+	relayEndNodeDown  = `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"node is down"}}`
+	relayEndThrottled = `{"jsonrpc":"2.0","id":1,"error":{"code":429,"message":"Too many requests"}}`
 	relayEndShortWait = 5 * time.Second
 )
 
@@ -388,6 +404,43 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			nodes: func(*testing.T) []relayEndNode { return []relayEndNode{{"node-a", nil}} },
 			body:  relayEndRead,
 			check: func(t *testing.T, _ *common.RelayResult, err error) { require.Error(t, err) },
+		},
+		{
+			// The only node answers 503: the client gets the node's own status (MAG-4481).
+			name: "read_upstream_error_status",
+			nodes: func(*testing.T) []relayEndNode {
+				return []relayEndNode{{"node-a", relayEndReply(503, relayEndNodeDown, 0)}}
+			},
+			body: relayEndRead,
+			check: func(t *testing.T, result *common.RelayResult, err error) {
+				require.Error(t, err)
+				require.Equal(t, http.StatusServiceUnavailable, result.StatusCode)
+			},
+		},
+		{
+			// Every attempt is throttled: the client gets the node's own 429, no longer a router 503
+			// (MAG-4481).
+			name: "read_rate_limited",
+			nodes: func(*testing.T) []relayEndNode {
+				return []relayEndNode{{"node-a", relayEndReply(429, relayEndThrottled, 0)}}
+			},
+			body: relayEndRead,
+			check: func(t *testing.T, result *common.RelayResult, err error) {
+				require.Error(t, err)
+				require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
+			},
+		},
+		{
+			// The only node takes the request and never answers: 504, no longer a 500 carrying
+			// "context deadline exceeded" (MAG-4481).
+			name:    "read_no_answer_in_time",
+			nodes:   func(*testing.T) []relayEndNode { return []relayEndNode{{"node-a", relayEndSilent}} },
+			body:    relayEndRead,
+			timeout: 1500 * time.Millisecond,
+			check: func(t *testing.T, result *common.RelayResult, err error) {
+				require.Error(t, err)
+				require.Equal(t, http.StatusGatewayTimeout, result.StatusCode)
+			},
 		},
 		{
 			name:   "pinned_write",
@@ -503,7 +556,7 @@ func TestRelayEnd_CosmosTxOutcome(t *testing.T) {
 		{"not JSON", `<html>bad gateway</html>`, "", "", 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result, found := cosmosTxOutcome([]byte(tc.reply))
+			result, _, found := cosmosTxOutcome([]byte(tc.reply))
 			require.Equal(t, tc.found, found)
 			if !found {
 				return
@@ -513,8 +566,19 @@ func TestRelayEnd_CosmosTxOutcome(t *testing.T) {
 			require.Equal(t, tc.log, result.Log)
 		})
 	}
-	_, found := cosmosTxOutcome([]byte(`{"result":{"code":1,"log":"` + strings.Repeat("x", cosmosTxReplyLimit) + `"}}`))
+	_, _, found := cosmosTxOutcome([]byte(`{"result":{"code":1,"log":"` + strings.Repeat("x", relayEndTxReplyLimit) + `"}}`))
 	require.False(t, found, "a reply too large to be a submit's answer is not parsed")
+
+	// The hash is wherever the submit's answer puts it, whether or not the reply names a code.
+	for _, tc := range []struct{ name, reply string }{
+		{"broadcast_tx_sync", `{"result":{"code":0,"hash":"AB12"}}`},
+		{"broadcast_tx_commit", `{"result":{"check_tx":{"code":0},"tx_result":{"code":11},"hash":"AB12","height":"0"}}`},
+		{"REST", `{"tx_response":{"code":32,"txhash":"AB12"}}`},
+		{"a reply with no code", `{"result":{"hash":"AB12"}}`},
+	} {
+		_, hash, _ := cosmosTxOutcome([]byte(tc.reply))
+		require.Equal(t, "AB12", hash, tc.name)
+	}
 }
 
 // A Cosmos node refuses a transaction with a normal reply that carries the refusal's code, which the
@@ -534,7 +598,7 @@ func TestRelayEnd_TendermintTxRefused(t *testing.T) {
 	guid := relayEndCaseGUID("tendermint_tx_refused")
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), relayEndShortWait)
 	defer cancel()
-	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", "dapp", "", nil, nil)
+	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", relayEndNoCustomerID, "", nil, nil)
 	require.NoError(t, err, "the client gets the node's normal reply")
 	requireRelayEndGolden(t, "tendermint_tx_refused", normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false))
 }
@@ -588,7 +652,7 @@ func TestRelayEnd_CacheHit(t *testing.T) {
 				AverageBlockTime: int64(15 * time.Second), StatusCode: http.StatusOK,
 			})
 			require.NoError(t, err)
-			require.Eventually(t, func() bool { return directGetETH(rcs, hashKey, 100, 100).GetReply() != nil }, 3*time.Second, 25*time.Millisecond)
+			require.Eventually(t, func() bool { return directGetOn(rcs, "ETH1", hashKey, 100, 100).GetReply() != nil }, 3*time.Second, 25*time.Millisecond)
 
 			read := captureRelayEnds(t)
 			// The only upstream refuses connections, so an answer can only have come from the cache.
@@ -850,7 +914,7 @@ func TestRelayEnd_TendermintUnlistedMethod(t *testing.T) {
 			// query as the url.
 			ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), tc.guid), relayEndShortWait)
 			defer cancel()
-			_, _ = server.SendRelay(ctx, tc.url, tc.body, "", "dapp", "", nil, nil)
+			_, _ = server.SendRelay(ctx, tc.url, tc.body, "", relayEndNoCustomerID, "", nil, nil)
 
 			line := onlyRelayEnd(t, read(), tc.guid)
 			require.Equal(t, tc.method, relayEndField(t, line, "method"))

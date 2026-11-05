@@ -1,6 +1,7 @@
 package common
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -608,6 +609,15 @@ var (
 	errorRegistryName = map[string]*LavaError{LavaErrorUnknown.Name: LavaErrorUnknown}
 )
 
+// LookupLavaErrorByName resolves a recorded identity without reclassifying its
+// diagnostic text. Unknown names always map to the bounded registry fallback.
+func LookupLavaErrorByName(name string) *LavaError {
+	if registered := errorRegistryName[name]; registered != nil {
+		return registered
+	}
+	return LavaErrorUnknown
+}
+
 func registerError(le *LavaError) *LavaError {
 	// Code 0 is reserved for LavaErrorUnknown, which is wired into the registry
 	// directly (not via registerError). Rejecting Code 0 here with an explicit
@@ -729,4 +739,14 @@ func NewLavaErrorWrapping(lavaErr *LavaError, cause error) error {
 		return &LavaWrappedError{LavaErr: lavaErr}
 	}
 	return &LavaWrappedError{LavaErr: lavaErr, Context: cause.Error(), cause: cause}
+}
+
+// AsLavaError extracts the *LavaError from the first LavaWrappedError in err's chain, or
+// returns nil if there is none. A bare *LavaError in the chain does not count.
+func AsLavaError(err error) *LavaError {
+	var wrapped *LavaWrappedError
+	if errors.As(err, &wrapped) {
+		return wrapped.LavaErr
+	}
+	return nil
 }

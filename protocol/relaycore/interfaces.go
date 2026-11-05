@@ -26,7 +26,6 @@ type RelayStateMachine interface {
 type ResultsCheckerInf interface {
 	WaitForResults(ctx context.Context) error
 	HasRequiredNodeResults(tries int) (bool, int)
-	GetCrossValidationParams() *common.CrossValidationParams // nil for Stateless/Stateful, non-nil for CrossValidation
 	GetResultsSummary() ResultsSummary
 	// CrossValidationMissingOnlyGroups reports whether a cross-validation request should stop at its attempt
 	// window: some response hash has reached the agreement threshold without satisfying the quorum rule, and
@@ -61,12 +60,16 @@ func (rssi *RelayStateSendInstructions) IsDone() bool {
 	return rssi.Done || rssi.Err != nil
 }
 
-// RelaySenderInf is the unified interface for relay senders (Consumer and SmartRouter).
-// Both ConsumerRelaySender and SmartRouterRelaySender have identical signatures.
+// RelaySenderInf is what the relay state machine needs from the router that owns it: the
+// processing timeout for a message. It is all the state machine calls through this type.
+//
+// It used to also embed RelayParserInf (ParseRelay) and declare GetChainIdAndApiInterface.
+// Neither was ever called through RelaySenderInf: the router calls ParseRelay on its concrete
+// type, chainlib calls it through its own chainlib.RelaySender, and the relay processor reads
+// the chain id through ChainIdAndApiInterfaceGetter (MAG-4243). Every sender mock implemented
+// both for nothing. Implementations keep the methods; only the requirement is gone.
 type RelaySenderInf interface {
-	RelayParserInf
 	GetProcessingTimeout(chainMessage chainlib.ChainMessage) (processingTimeout time.Duration, relayTimeout time.Duration)
-	GetChainIdAndApiInterface() (string, string)
 }
 
 // ResultsSummary is pure data reported by the RelayProcessor for the policy engine.
@@ -135,6 +138,11 @@ type DecisionInput struct {
 	// IsDefaultApi is true when the request names a method the spec does not list: the parser
 	// forwarded it as a Default- API only because the spec cannot rule it out.
 	IsDefaultApi bool
+	// Pinned is true when the request is a strict pin (PinnedByDirectives): lava-stickiness, or
+	// lava-select-provider with lava-select-provider-strict: true. A pinned request is answered by
+	// that upstream or not at all: Decide never retries or hedges it on another one (MAG-2280,
+	// MAG-4123). A plain lava-select-provider is not Pinned and keeps its failover (MAG-4826).
+	Pinned bool
 }
 
 // RelayPolicyInf is the interface that the policy engine must implement.

@@ -45,10 +45,16 @@ request ──► primary cache ──hit──► served ("Cached")
   decides from the entry's contents, not only from the label the writing zone
   attached, so an entry written by an older zone that never labelled it is still
   served as the error it is (on JSON-RPC and Tendermint; a REST or gRPC entry is
-  judged by its recorded status). An entry that is not a usable reply at all —
-  empty, a web page, a truncated envelope, an envelope that carries neither a
-  result nor an error, or a batch with such an element — is never served: it
-  counts as a secondary error and the request proceeds to an upstream.
+  judged by its recorded status). A JSON-RPC or Tendermint entry that is not a
+  usable reply at all — empty, a web page, a truncated envelope, an envelope
+  that carries neither a result nor an error, or a batch with such an element —
+  is never served: it counts as a secondary error and the request proceeds to an
+  upstream. A REST, GraphQL or gRPC entry is not judged this way.
+  A retry after a cached node error goes to an upstream, and neither cache is
+  asked again for that request. On JSON-RPC and Tendermint the cached error first
+  gets the retry verdict a live one gets, so an error every node gives, such as
+  `execution reverted`, ends the request with the cached answer and is not
+  retried.
 - **Independent of the primary.** The secondary keeps serving while the primary
   is down, and is even valid with no primary configured at all (reads work;
   nothing backfills — the router logs an advisory warning for this topology).
@@ -89,10 +95,12 @@ request ──► primary cache ──hit──► served ("Cached")
   configured.
 
 Any backend that speaks the Smart Router cache protocol works as either tier —
-the secondary is simply a second `smartrouter cache` address. Run the same cache
-engine on both: pairing *different* engines across the two tiers is not a
-supported configuration (see [Open question, still
-open](#open-question-still-open)).
+the secondary is simply a second `smartrouter cache` address. A router whose own
+cache is a Redis or Valkey (`resp-cache`, [RESP-CACHE.md](RESP-CACHE.md)) reads
+its secondary from one too: see [A RESP (Redis/Valkey)
+secondary](#a-resp-redisvalkey-secondary). Run the same cache engine on both:
+pairing *different* engines across the two tiers is not a supported
+configuration (see [Open question, still open](#open-question-still-open)).
 
 ## What happens in each situation
 
@@ -159,6 +167,61 @@ secondary equals the primary address, or when a secondary is configured with no
 primary. When enabled, the startup log prints the full secondary configuration
 on one line.
 
+### A RESP (Redis/Valkey) secondary
+
+A router whose own cache is a RESP backend reads its secondary from a RESP
+backend too, through the `secondary-resp-cache` block — the other zone's store,
+under the other zone's key prefix:
+
+```yaml
+resp-cache:                       # this zone's own cache
+  addresses: ["zone-b-valkey:6379"]
+  key-prefix: zone-b
+secondary-resp-cache:             # the other zone's cache, read-only
+  addresses: ["zone-a-valkey-reader:6379"]
+  key-prefix: zone-a              # the writing zone's resp-cache key-prefix
+  username: zone-b-reader         # ideally an ACL user with read access only
+  password-file: /secrets/zone-a-reader
+  tls:
+    enabled: true
+secondary-cache-timeout: 100ms
+```
+
+- **The same surface as `resp-cache`**: topology (`standalone`, `sentinel`,
+  `cluster`), `addresses`, credentials (`password-file` rotates live), `tls`,
+  `key-prefix`, timeouts and pool size, with the same strict rules (an unknown
+  key fails startup). `--secondary-resp-cache-addresses`,
+  `--secondary-resp-cache-topology` and `--secondary-resp-cache-key-prefix` are
+  the flag forms, and outrank the block.
+- **`key-prefix` is the writing zone's.** Entries are keyed under the prefix of
+  the routers that wrote them, so set it to the other zone's `resp-cache`
+  `key-prefix` (default `sr`). A different prefix on the same backend is a
+  different keyspace and reads as a miss.
+- **Two keys are refused**: `read-addresses` (the tier only reads, so give the
+  reader endpoint as `addresses`) and `expiration` (the writing zone sets the
+  lifetimes).
+- **One secondary.** Setting both `secondary-cache-be` and
+  `secondary-resp-cache` fails startup.
+- **Read-only by construction.** The router reads with `GET` and probes
+  with `PING`; nothing in its secondary path writes, extends or deletes a key.
+  An ACL user restricted to reads on `~<prefix>:*` makes that hold on the
+  backend's side as well. Grant it `+@read +ping`: the `@read` category does
+  not include `PING`, and without it every health probe fails with `NOPERM`,
+  so the tier is skipped from startup. Add `+select` when `db` is set (the
+  client selects it on every new connection) and `+cluster|slots` under
+  `topology: cluster` (the client reads the slot map with it). Under
+  `topology: sentinel` the discovery commands go to the sentinels, which
+  authenticate with `sentinel-username` and `sentinel-password`.
+- **Observability.** The tier reports through the same per-tier series as a gRPC
+  secondary (`smartrouter_cache_*{cache_tier="secondary"}`), through
+  `GET /debug/cache-state` (`tiers.secondary.engine: "resp"`), and through log
+  lines that open with `secondary-resp-cache`. It does **not** feed the
+  `smartrouter_resp_cache_*` series: those stay the router's own cache's.
+- `secondary-cache-timeout` and `secondary-cache-mode` apply as they do to a
+  gRPC secondary. The timeout is also the round trip a health probe must
+  answer within before the tier resumes after a run of failures opened its
+  breaker, so set it above the backend's round trip.
+
 Removing the configuration fully reverts the router to single-cache behavior;
 with no secondary configured, behavior is unchanged from previous releases.
 
@@ -174,9 +237,11 @@ curl -s http://<router>:7779/metrics | grep smartrouter_cache_success_total
 ```
 
 Non-hits are classified in `smartrouter_cache_failed_total` by `outcome`:
-`miss` (not found), `error` (transport/server error), or `timeout` (budget
-exceeded) — so a broken or slow secondary is immediately distinguishable from a
-cold one. Lookup latency is recorded per tier for every attempt. With tracing
+`miss` (not found), `error` (transport/server error, or a JSON-RPC or
+Tendermint RPC entry refused as not a usable reply — see "Node errors are
+labelled the same from either tier" above), or `timeout` (budget exceeded) — so
+a broken or slow secondary is immediately distinguishable from a cold one.
+Lookup latency is recorded per tier for every attempt. With tracing
 enabled, each lookup is a span carrying `cache.tier` and `cache.outcome`, and
 the request's root span records which tier served it. See
 [METRICS.md](METRICS.md#cache) for the full reference and the dashboard
@@ -212,7 +277,7 @@ order, so a caller can match the whole string:
 | --- | --- |
 | `hit` / `miss` / `error` / `timeout` | consulted; same four values the `outcome` metric label uses |
 | `off` | not consulted — unconfigured, or its client has marked itself disconnected |
-| `skipped` | active but not asked: a bypass rule applied (cross-validation, stateful, `lava-force-cache-refresh`, a non-cacheable block), or the primary hit first and the secondary is only consulted after a primary non-hit |
+| `skipped` | active but not asked: a bypass rule applied (cross-validation, stateful, `lava-force-cache-refresh`, a non-cacheable block, a retry after a cached node error), or the primary hit first and the secondary is only consulted after a primary non-hit |
 | `unknown` | not observed at all — this reply was built on a path that performs no cache lookup |
 
 Both headers are emitted on every reply that carries the directive, including
@@ -222,8 +287,9 @@ Both headers are emitted on every reply that carries the directive, including
 Two limits worth knowing:
 
 - **They describe the winning attempt.** Retries and hedges each run their own
-  cache lookup; the reply reports the lookups made on the attempt whose response
-  you received.
+  cache lookup, except a retry after a cached node error, which asks neither
+  tier. The reply reports the lookups made on the attempt whose response you
+  received.
 - **WebSocket has no per-message response headers**, so a cache hit delivered
   over a subscription cannot carry them — the same limitation
   `Lava-Provider-Address` already has there. Use the counters for WebSocket.
@@ -730,9 +796,13 @@ release as reversing it.**
 What the implementation can say is narrower, and only about mechanism: the
 router does not know or ask which storage engine sits behind either address. The
 two tiers are independent connections speaking the Smart Router cache protocol,
-so a mixed pairing needs no special handling in the router and would not be
-detected, let alone rejected, if you configured one. Nothing here validates,
-tests, or supports that combination.
+so a mixed pairing needs no special handling in the router. The mix the router
+can see is a RESP tier beside a gRPC one — `resp-cache` with
+`secondary-cache-be`, or `cache-be` with `secondary-resp-cache`: it logs a
+warning at startup and runs both tiers, rather than refusing to start
+(MAG-4777). A mix behind two gRPC addresses is invisible to it. Nothing here
+tests or supports either combination; the supported RESP pairing is
+`resp-cache` with `secondary-resp-cache` (MAG-4778).
 
 ### Where the proof lives
 

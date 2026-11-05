@@ -186,3 +186,25 @@ func TestParameterFormatIntent(t *testing.T) {
 		assert.Contains(t, nonCompliantFormat, `"params":null`, "This is the format we want to avoid")
 	})
 }
+
+// The three message constructors share one builder but decide "no params" against their own
+// static type: a nil map or an empty variadic list omits the member, while a nil slice handed to
+// newMessageArrayWithID is a non-nil interface and is sent as null, as it always was. A nil id
+// draws the client's next one.
+func TestNewMessageConstructors_NilParamsPerType(t *testing.T) {
+	c := &Client{}
+	marshal := func(msg *JsonrpcMessage, err error) string {
+		require.NoError(t, err)
+		raw, err := json.Marshal(msg)
+		require.NoError(t, err)
+		return string(raw)
+	}
+	id := json.RawMessage(`7`)
+
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":7,"method":"m"}`, marshal(c.newMessageMapWithID("m", id, nil)))
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":7,"method":"m","params":{"a":1}}`, marshal(c.newMessageMapWithID("m", id, map[string]interface{}{"a": 1})))
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":1,"method":"m"}`, marshal(c.newMessageArray("m")))
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":2,"method":"m","params":["x"]}`, marshal(c.newMessageArray("m", "x")))
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":7,"method":"m","params":null}`, marshal(c.newMessageArrayWithID("m", id, []interface{}(nil))))
+	require.JSONEq(t, `{"jsonrpc":"2.0","id":3,"method":"m","params":[1]}`, marshal(c.newMessageArrayWithID("m", nil, []interface{}{1})))
+}

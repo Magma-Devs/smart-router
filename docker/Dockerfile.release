@@ -11,8 +11,15 @@
 # The standalone binary attached to the GitHub Release and the binary
 # inside this image are produced by the same `go build` invocation —
 # same toolchain, same flags, byte-identical.
+#
+# The runtime base is the distroless image for the current Debian release.
+# distroless publishes and updates only those; every other tag is frozen,
+# trust store included, and never receives Debian's ca-certificates security
+# updates. Move this when distroless moves. The router is a static netgo
+# binary, so the Debian release itself does not matter to it.
+# Dockerfile.ci and Dockerfile use the same base.
 
-ARG RUNNER_IMAGE="gcr.io/distroless/static-debian12:debug"
+ARG RUNNER_IMAGE="gcr.io/distroless/static-debian13:debug"
 FROM ${RUNNER_IMAGE}
 
 ARG TARGETARCH

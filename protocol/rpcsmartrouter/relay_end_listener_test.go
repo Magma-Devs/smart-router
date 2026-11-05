@@ -93,6 +93,7 @@ func TestRelayEnd_JSONRPCListener_HTTPAndWebSocket(t *testing.T) {
 			replies = append(replies, string(reply))
 		}
 
+		require.Eventually(t, func() bool { return len(newRelayEndsSince(read, seen)) == 2 }, time.Second, time.Millisecond)
 		events := newRelayEndsSince(read, seen)
 		require.Len(t, events, 2, "one relay_end per frame, the refused one included")
 		connection := relayEndField(t, events[0], "connection")

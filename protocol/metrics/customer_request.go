@@ -14,6 +14,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
+	"github.com/rs/zerolog"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // CustomerRequest is created exclusively by a client-facing listener. Internal
@@ -24,13 +27,70 @@ type CustomerRequest struct {
 	mu              sync.Mutex
 	finished        bool
 	guid, requestID string
+	method          string
 	reroutes        []CustomerReroute
 	attempts        []CustomerAttempt
 	result          CustomerResult
 	terminal        CustomerTerminal
+	terminalLog     func(CustomerTerminal)
 }
 
 type customerRequestKey struct{}
+
+// DeferCustomerTerminalLog lets the existing relay event carry the listener's
+// final snapshot. Internal relays have no lifecycle and are logged immediately.
+func DeferCustomerTerminalLog(ctx context.Context, emit func(CustomerTerminal)) bool {
+	state, _ := ctx.Value(customerRequestKey{}).(*CustomerRequest)
+	if state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.finished || state.terminalLog != nil {
+		return true
+	}
+	state.terminalLog = emit
+	return true
+}
+
+// ObserveCustomerError retains the existing relay event's registry classification
+// for final failures that never produced a provider result.
+func ObserveCustomerError(ctx context.Context, classified *common.LavaError) {
+	state, _ := ctx.Value(customerRequestKey{}).(*CustomerRequest)
+	if state == nil || classified == nil || classified == common.LavaErrorUnknown {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.finished && (state.result.Error == nil || state.result.Error == common.LavaErrorUnknown) {
+		state.result.Error = classified
+	}
+}
+
+// ObserveCustomerRelay fills subscription/admission details from the existing
+// relay event. Normal relay decision evidence takes precedence when present.
+func ObserveCustomerRelay(ctx context.Context, method string, result CustomerResult, attempts []CustomerAttempt) {
+	state, _ := ctx.Value(customerRequestKey{}).(*CustomerRequest)
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.finished {
+		return
+	}
+	state.method = method
+	if state.result.Provider == "" {
+		state.result.Provider = result.Provider
+	}
+	state.result.HasReply = state.result.HasReply || result.HasReply
+	if state.result.StatusCode == 0 {
+		state.result.StatusCode = result.StatusCode
+	}
+	if len(state.attempts) == 0 {
+		state.attempts = append([]CustomerAttempt(nil), attempts...)
+	}
+}
 
 type CustomerReroute struct {
 	Provider     string   `json:"provider,omitempty"`
@@ -82,6 +142,7 @@ type CustomerTerminal struct {
 	ErrorCode     uint32            `json:"error_code"`
 	ErrorCategory string            `json:"error_category,omitempty"`
 	Retryable     bool              `json:"retryable"`
+	ProviderFault bool              `json:"provider_fault"`
 	PartialBatch  bool              `json:"partial_batch"`
 	WriteOutcome  string            `json:"write_outcome,omitempty"`
 	ErrorMessage  string            `json:"error_message,omitempty"`
@@ -179,6 +240,15 @@ func customerError(err error, apiInterface string) *common.LavaError {
 	if errors.As(err, &classified) && classified != nil {
 		return classified
 	}
+	if errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled {
+		return common.LavaErrorContextCanceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) || status.Code(err) == codes.DeadlineExceeded {
+		return common.LavaErrorContextDeadline
+	}
+	if grpcStatus, ok := status.FromError(err); ok {
+		return common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportGRPC, int(grpcStatus.Code()), grpcStatus.Message())
+	}
 	var syntax *json.SyntaxError
 	var fastSyntax *gojson.SyntaxError
 	if errors.As(err, &syntax) || errors.As(err, &fastSyntax) {
@@ -245,6 +315,9 @@ func (rpccl *RPCConsumerLogs) finishCustomer(data *RelayMetrics, err error) bool
 	result := state.result
 	terminal := CustomerTerminal{SchemaVersion: 1, Terminal: true, RequestKind: "customer", GUID: state.guid, RequestID: state.requestID, Chain: data.ChainID, APIInterface: data.APIType, APIMethod: data.ApiMethod, StartedAtNs: data.Timestamp.UnixNano(), CompletedAtNs: time.Now().UnixNano(), Outcome: "success", Recovery: "none", CacheTier: result.CacheTier, Provider: result.Provider, StopReason: result.StopReason, ErrorName: "none", Attempts: state.attempts, Reroutes: state.reroutes}
 	terminal.DurationMs = (terminal.CompletedAtNs - terminal.StartedAtNs) / int64(time.Millisecond)
+	if state.method != "" {
+		terminal.APIMethod = state.method
+	}
 	terminal.PartialBatch = result.PartialBatch
 	terminal.StatusCode, terminal.HasReply, terminal.ReplySize = result.StatusCode, result.HasReply, result.ReplySize
 	if result.WriteOutcomeUnknown {
@@ -258,19 +331,20 @@ func (rpccl *RPCConsumerLogs) finishCustomer(data *RelayMetrics, err error) bool
 	if terminal.CacheHit {
 		terminal.Provider = "Cached"
 	}
-	if err != nil || result.NodeError {
+	if err != nil || result.NodeError || result.WriteOutcomeUnknown {
 		terminal.Outcome = "failure"
 		// Only the customer's cancellation is terminal here. Cancelled hedge losers
 		// are observations and cannot turn a successful request into a cancellation.
-		if errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.Canceled) || status.Code(err) == codes.Canceled {
 			terminal.Outcome = "cancelled"
 		}
 		classified := result.Error
-		if classified == nil {
+		if classified == nil || terminal.Outcome == "cancelled" {
 			classified = customerError(err, data.APIType)
 		}
 		terminal.ErrorName, terminal.ErrorCode = classified.Name, classified.Code
 		terminal.ErrorCategory, terminal.Retryable = classified.Category.String(), classified.Retryable
+		terminal.ProviderFault = terminal.Outcome == "failure" && !result.WriteOutcomeUnknown && classified.EndpointAtFault()
 		// Registry descriptions are bounded and contain no payload, URL, credentials
 		// or caller text. Detailed incidents join attempt logs using GUID/request_id.
 		terminal.ErrorMessage = classified.Description
@@ -305,15 +379,22 @@ func (rpccl *RPCConsumerLogs) finishCustomer(data *RelayMetrics, err error) bool
 		}
 	}
 	state.terminal, state.finished = terminal, true
+	emit := state.terminalLog
+	state.terminalLog = nil
 	state.mu.Unlock()
+	data.ApiMethod = terminal.APIMethod
 	data.Success = terminal.Outcome == "success"
 	data.CacheHit, data.ProviderAddress, data.Latency = terminal.CacheHit, terminal.Provider, terminal.DurationMs
 	if recorder, ok := rpccl.consumerMetricsManager.(CustomerMetricsRecorder); ok {
 		recorder.RecordCustomerOutcome(terminal)
 	}
-	// No log line of its own: relay_end (docs/RELAY-END-EVENT.md) is the one per-relay event, and
-	// the Loki readers that count relays select it, so a second line would be counted twice. The
-	// snapshot reaches the collector on the usage event (relay_usage, OTel) instead.
+	if emit != nil {
+		emit(terminal)
+	} else {
+		// Reflection and listener admission may complete without entering the relay
+		// server. They still need a durable terminal record, even with OTel disabled.
+		utils.LogEvent("customer_request", customerTerminalEvent{terminal})
+	}
 	return true
 }
 
@@ -327,4 +408,12 @@ func (state *CustomerRequest) Snapshot() CustomerTerminal {
 		snapshot.Reroutes[i].Alternatives = append([]string(nil), snapshot.Reroutes[i].Alternatives...)
 	}
 	return snapshot
+}
+
+// customerTerminalEvent is used only when there is no relay_end to enrich.
+type customerTerminalEvent struct{ terminal CustomerTerminal }
+
+func (e customerTerminalEvent) MarshalZerologObject(event *zerolog.Event) {
+	payload, _ := json.Marshal(e.terminal)
+	event.Str("event", "customer_request").Str("chain", e.terminal.Chain).Str("api_interface", e.terminal.APIInterface).Str("GUID", e.terminal.GUID).RawJSON("customer_request", payload)
 }
