@@ -116,6 +116,7 @@ func NewRelayUsageEvent(rm *RelayMetrics) RelayUsageEvent {
 		snapshot.RequestID = validUTF8(snapshot.RequestID)
 		snapshot.APIMethod = validUTF8(snapshot.APIMethod)
 		event.Customer = &snapshot
+		event.APIMethod = snapshot.APIMethod
 		event.RequestKind = snapshot.RequestKind
 		event.Success = snapshot.Outcome == "success"
 		event.CacheHit = snapshot.CacheHit

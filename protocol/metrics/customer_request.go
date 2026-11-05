@@ -79,7 +79,9 @@ func ObserveCustomerRelay(ctx context.Context, method string, result CustomerRes
 	if state.finished {
 		return
 	}
-	state.method = method
+	if method != "" {
+		state.method = method
+	}
 	if state.result.Provider == "" {
 		state.result.Provider = result.Provider
 	}
@@ -382,7 +384,6 @@ func (rpccl *RPCConsumerLogs) finishCustomer(data *RelayMetrics, err error) bool
 	emit := state.terminalLog
 	state.terminalLog = nil
 	state.mu.Unlock()
-	data.ApiMethod = terminal.APIMethod
 	data.Success = terminal.Outcome == "success"
 	data.CacheHit, data.ProviderAddress, data.Latency = terminal.CacheHit, terminal.Provider, terminal.DurationMs
 	if recorder, ok := rpccl.consumerMetricsManager.(CustomerMetricsRecorder); ok {

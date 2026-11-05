@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -389,4 +390,35 @@ func TestCustomerGRPCCancellationIsNotAProviderFailure(t *testing.T) {
 	require.Equal(t, "cancelled", recorder.outcomes[0].Outcome)
 	require.Equal(t, common.LavaErrorContextCanceled.Name, recorder.outcomes[0].ErrorName)
 	require.False(t, recorder.outcomes[0].ProviderFault)
+}
+
+func TestCustomerAdmissionMethodDoesNotCreateAParsedLegacyRequest(t *testing.T) {
+	manager := NewSmartRouterMetricsManager(SmartRouterMetricsManagerOptions{})
+	sink := &customerSink{}
+	logger, err := NewRPCConsumerLogs(manager, sink, nil)
+	require.NoError(t, err)
+	data := NewRelayAnalytics("tenant", "ADMISSION-ONLY", "grpc")
+	ctx := logger.BeginCustomerRequest(context.Background(), data)
+	ObserveCustomerRelay(ctx, "test.v1.Node/Call", CustomerResult{}, nil)
+	ObserveCustomerRelay(ctx, "", CustomerResult{}, nil)
+	md := metadata.MD{}
+	logger.AddMetricForGrpc(data, common.LavaErrorUserParseError, &md)
+	require.Empty(t, data.ApiMethod, "the legacy family counts parsed methods only")
+	require.Equal(t, "test.v1.Node/Call", data.Customer.Snapshot().APIMethod)
+	require.Len(t, sink.events, 1)
+	require.Equal(t, "test.v1.Node/Call", sink.events[0].APIMethod)
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() != "smartrouter_customer_requests_total" {
+			continue
+		}
+		for _, metric := range family.Metric {
+			for _, label := range metric.Label {
+				if label.GetName() == "spec" {
+					require.NotEqual(t, "ADMISSION-ONLY", label.GetValue(), "unparsed admission must not increment the parsed family")
+				}
+			}
+		}
+	}
 }

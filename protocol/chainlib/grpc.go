@@ -1021,9 +1021,9 @@ func (apil *GrpcChainListener) beginGRPCCustomerRequest(ctx context.Context, met
 	md, _ := metadata.FromIncomingContext(ctx)
 	ctx = utils.ExtractWantedHeadersFromCachedMap(md, ctx)
 	data := metrics.NewRelayAnalytics(extractDappIDFromGrpcHeader(md), apil.endpoint.ChainID, apil.endpoint.ApiInterface)
-	data.ApiMethod = method
 	data.SetProcessingTimestampBeforeRelay(data.Timestamp)
 	ctx = apil.logger.BeginCustomerRequest(ctx, data)
+	metrics.ObserveCustomerRelay(ctx, method, metrics.CustomerResult{}, nil)
 	ctx = context.WithValue(ctx, grpcCustomerMetricsKey{}, data)
 	return ctx, func(err error) { apil.logger.AddMetricForGrpc(data, err, &md) }
 }
