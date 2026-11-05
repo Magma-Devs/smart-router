@@ -75,18 +75,8 @@ linters:
       - path: (types/relay/grpc_service|protocol/chainlib/chainlib_mock)\.go
         linters:
           - dupl
-      # The WebSocket/gRPC subscription core and pools and the JSON-RPC/Tendermint ParseMsg batch
-      # walkers are MAG-4279's structural merges: the copies drifted, so unifying them is a behaviour
-      # decision, not a mechanical one. (The batch walkers differ on the parse directive a
-      # one-element batch gets, which needs an owner decision.)
-      - path: protocol/rpcsmartrouter/upstream_(ws|grpc)_pool\.go
-        linters:
-          - dupl
-        text: "upstream_(ws|grpc)_pool\\.go"
-      - path: protocol/rpcsmartrouter/direct_(ws|grpc)_subscription_manager\.go
-        linters:
-          - dupl
-        text: "direct_(ws|grpc)_subscription_manager\\.go"
+      # The JSON-RPC/Tendermint ParseMsg batch walkers are the last of MAG-4279's structural merges:
+      # they differ on the parse directive a one-element batch gets, which needs an owner decision.
       - path: protocol/chainlib/(jsonRPC|tendermintRPC)\.go
         linters:
           - dupl

@@ -2084,6 +2084,37 @@ func classifyCachedEntry(ctx context.Context, protocolMessage chainlib.ProtocolM
 	return false, resolvedData
 }
 
+// classifyCachedNodeError gives a node error served from either cache tier the retry verdict a
+// node's reply with the same bytes gets: the JSON-RPC sender's classifyJSONRPCNodeError, on the
+// same chain family. A deterministic error such as a revert then ends the relay with the cached
+// answer, and a retryable one is retried on an upstream (cacheAnsweredEarlierAttempt) (MAG-4416).
+// recordedStatus is the status the entry's writer recorded; zero means it recorded none, read as
+// 200. An entry on another interface, or one CheckResponseError does not judge an error, gets no
+// verdict and is retried like any unclassified node error.
+func (rpcss *RPCSmartRouterServer) classifyCachedNodeError(protocolMessage chainlib.ProtocolMessage, result *common.RelayResult, recordedStatus int) {
+	if !result.IsNodeError || result.Reply == nil {
+		return
+	}
+	apiCollection := protocolMessage.GetApiCollection()
+	if apiCollection == nil {
+		return
+	}
+	switch apiCollection.CollectionData.ApiInterface {
+	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
+	default:
+		return
+	}
+	statusCode := recordedStatus
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	hasError, errorMessage := protocolMessage.CheckResponseError(result.Reply.Data, statusCode)
+	if !hasError {
+		return
+	}
+	classifyJSONRPCNodeError(result, rpcss.directRelayChainFamily(), statusCode, result.Reply.Data, errorMessage)
+}
+
 // primaryLookupVerdict classifies the primary tier's answer the way the secondary tier
 // classifies its own: a hit whose bytes are not a reply this router can serve on the
 // interface (usableCachedReply) is no hit, and is recorded as an error rather than a
@@ -3282,6 +3313,9 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistencyWithLag(
 	validSessions = make(lavasession.ConsumerSessionsMap, len(sessions))
 	failedSessions = make(lavasession.ConsumerSessionsMap)
 	lags = make(map[string]consistencyLag)
+	threshold := rpcss.consistencyConfig.EndpointLagThreshold
+	// One "<endpoint> latest=<block> lag=<blocks>" entry per rejected endpoint, for the batch line.
+	rejected := make([]string, 0, len(sessions))
 
 	for endpointAddress, sessionInfo := range sessions {
 		if sessionInfo == nil || sessionInfo.Session == nil {
@@ -3343,10 +3377,7 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistencyWithLag(
 			// its err. Recompute them rather than promote the inner line as well — one INFO
 			// line per rejected endpoint, carrying the endpoint identity the inner line lacks.
 			lag := chainTip - endpointLatest
-			threshold := int64(0)
-			if rpcss.consistencyConfig != nil {
-				threshold = rpcss.consistencyConfig.EndpointLagThreshold
-			}
+			rejected = append(rejected, fmt.Sprintf("%s latest=%d lag=%d", endpointAddress, endpointLatest, lag))
 			utils.LavaFormatInfo("skipping endpoint due to consistency check",
 				utils.LogAttr("endpoint", endpointAddress),
 				utils.LogAttr("endpointLatest", endpointLatest),
@@ -3372,34 +3403,32 @@ func (rpcss *RPCSmartRouterServer) filterEndpointsByConsistencyWithLag(
 	}
 
 	skippedCount := len(failedSessions)
+	sort.Strings(rejected)
 
-	// If ALL endpoints failed validation, return error to trigger retry
+	// Every endpoint picked for this attempt is behind. The caller picks again without them, so this
+	// is not a failed request: WARN, not ERROR, and one record of it — the returned error is not
+	// logged again, so anything counting the sentinel counts each rejection once. `selected` counts
+	// this attempt's pick, not the pool. Log and response-body checks match on this message; keep it.
 	if len(validSessions) == 0 && skippedCount > 0 {
-		utils.LavaFormatDebug("all endpoints failed consistency pre-validation, triggering retry",
-			utils.LogAttr("totalEndpoints", len(sessions)),
-			utils.LogAttr("skippedCount", skippedCount),
+		const rejectedAll = "all endpoints failed consistency pre-validation"
+		utils.LavaFormatWarning(rejectedAll, lavasession.ConsistencyPreValidationError,
+			utils.LogAttr("selected", len(sessions)),
+			utils.LogAttr("rejected", strings.Join(rejected, "; ")),
 			utils.LogAttr("chainTip", chainTip),
+			utils.LogAttr("threshold", threshold),
 			utils.LogAttr("GUID", ctx),
 		)
-		// The error below carries the same sentinel and is visible at every level, so this
-		// stays at DEBUG rather than WARN — two records of one event made anything counting
-		// the sentinel double-count it. skippedCount and GUID moved onto the error so the
-		// single surviving line still carries them.
-		return nil, failedSessions, lags, utils.LavaFormatError("all endpoints failed consistency pre-validation",
-			lavasession.ConsistencyPreValidationError,
-			utils.LogAttr("totalEndpoints", len(sessions)),
-			utils.LogAttr("skippedCount", skippedCount),
-			utils.LogAttr("chainTip", chainTip),
-			utils.LogAttr("GUID", ctx),
-		)
+		// Cross-validation fails fast with this error and a client can read it, so it names no endpoint.
+		return nil, failedSessions, lags, fmt.Errorf("%s: %w", rejectedAll, lavasession.ConsistencyPreValidationError)
 	}
 
 	if skippedCount > 0 {
 		utils.LavaFormatInfo("filtered endpoints by consistency",
-			utils.LogAttr("totalEndpoints", len(sessions)),
+			utils.LogAttr("selected", len(sessions)),
 			utils.LogAttr("validEndpoints", len(validSessions)),
-			utils.LogAttr("skippedCount", skippedCount),
+			utils.LogAttr("rejected", strings.Join(rejected, "; ")),
 			utils.LogAttr("chainTip", chainTip),
+			utils.LogAttr("threshold", threshold),
 			utils.LogAttr("GUID", ctx),
 		)
 	}
@@ -4670,6 +4699,22 @@ func cacheExclusionReason(protocolMessage chainlib.ProtocolMessage) string {
 	return ""
 }
 
+// cacheAnsweredEarlierAttempt reports whether the cache answered an earlier attempt of this relay.
+// Only node errors are checked, because a cached success ends the relay, and so does a cached error
+// that is not retryable (classifyCachedNodeError). A retry after a retryable one goes to an upstream.
+// Another lookup would find the same entry for as long as it lives, so every retry would get the
+// cached error again until the error budget ran out, and no upstream would be asked (MAG-4416). The
+// cached error still answers the first attempt.
+func cacheAnsweredEarlierAttempt(relayProcessor *relaycore.RelayProcessor) bool {
+	_, nodeErrors, _ := relayProcessor.GetResultsData()
+	for _, result := range nodeErrors {
+		if tier := result.CacheLookup.ServedTier; tier == common.CacheTierPrimary || tier == common.CacheTierSecondary {
+			return true
+		}
+	}
+	return false
+}
+
 // tryCacheWrite attempts to write a successful relay response to the cache.
 // It runs in a separate goroutine to avoid blocking the relay response.
 // Cache writes are skipped when:
@@ -5207,6 +5252,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				utils.LogAttr("GUID", ctx),
 				utils.LogAttr("cacheActive", true),
 			)
+		} else if cacheAnsweredEarlierAttempt(relayProcessor) {
+			// This is a retry of a node error the cache answered. Asking the cache again would
+			// return the same entry, so this attempt goes to an upstream (MAG-4416).
+			utils.LavaFormatDebug("Cache bypassed due to a retry after a cached node error",
+				utils.LogAttr("GUID", ctx),
+				utils.LogAttr("cacheActive", true),
+			)
 		} else {
 			// Proceed with cache lookup
 			utils.LavaFormatDebug("Cache lookup attempt",
@@ -5352,6 +5404,8 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 							// secondary is only consulted after a primary non-hit, so it keeps
 							// whichever not-consulted value it was seeded with.
 							relayResult := cachedRelayResult(reply, localRelayData, http.StatusOK, isNodeError, cacheReport.ServedBy(common.CacheTierPrimary))
+							// A cached node error is retried, or not, exactly like a live one.
+							rpcss.classifyCachedNodeError(protocolMessage, &relayResult, cacheReply.GetStatusCode())
 							rpcss.serveCacheHit(relayProcessor, relayResult, analytics, protocolMessage)
 							return nil
 						}
@@ -5856,6 +5910,13 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		} else if targetEndpoint.ResetHealth() {
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, true)
 		}
+	}
+
+	// A node's error goes back to the caller as the reply, so it is redacted like every error the
+	// router writes itself, before it is returned, cached or compared: a node that repeats the
+	// url it was called on, or the key, must not hand the operator's key to the caller (MAG-4863).
+	if result.IsNodeError {
+		redactNodeReply(result.Reply)
 	}
 
 	// Update relayResult with the response
@@ -6914,4 +6975,12 @@ func (rpcss *RPCSmartRouterServer) recordRelayEvidence(routerHealthCheck bool, e
 		return
 	}
 	rpcss.recordRelayProbeEvidence(endpoint, chainMessage, requestData, relayTimeout)
+}
+
+// redactNodeReply withholds the secrets in a node's error reply (utils.RedactSecrets). A reply
+// that holds none is left as it is.
+func redactNodeReply(reply *pairingtypes.RelayReply) {
+	if reply != nil {
+		reply.Data = utils.RedactSecretsBytes(reply.Data)
+	}
 }

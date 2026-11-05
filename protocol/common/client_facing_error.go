@@ -10,7 +10,7 @@ import "time"
 type ClientFacingError struct {
 	UpstreamStatus      int    // 0 when the upstream never answered
 	UpstreamStatusText  string // the status line, e.g. "503 Service Unavailable"
-	UpstreamBody        []byte // the upstream's body, unmodified
+	UpstreamBody        []byte // the upstream's body, with its secrets withheld (utils.RedactSecrets)
 	UpstreamContentType string // the upstream's Content-Type, empty when it sent none
 	Cause               string // leaf cause text for a transport failure (no upstream answer)
 	// TimedOut marks a no-answer that is a timeout: the reply is 504 and names Timeout.
