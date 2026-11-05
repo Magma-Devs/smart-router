@@ -387,6 +387,29 @@ node on the router offers it, the request is still served without it and the rep
 | `smartrouter_node_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Node errors returned by endpoints. |
 | `smartrouter_protocol_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Protocol/transport errors (connection/session failures). |
 
+`GET /debug/relay-errors` on the debug server (`--debug-address`) reports the router's own count of
+the same two kinds of error, one row per chain, interface, provider and method with a count above
+zero: `ChainID`, `ApiInterface`, `ProviderAddress`, `Method`, `NodeErrors`, `ProtocolErrors` and
+`PodID`. The router keeps these counts itself, beside the counters above, and the route reads no
+Prometheus counter, so it answers on a router run without `--metrics-listen-address` too.
+
+* **Node errors** are counted where the router meters `smartrouter_node_errors_total`, under the
+  same rule: never on a stateful request (a write).
+* **Protocol errors** are counted where a direct attempt went out on the wire and got no answer
+  from the upstream: a refused or dropped connection, a body cut off or not JSON, or a hang past
+  the request's budget. These are not counted: an HTTP status (an answer), a request the router
+  could not build, a race loser or a client that hung up, and anything on gRPC.
+* `Method` is the API name the request was relayed as. A GraphQL operation with two root fields
+  is `chainIdentifier&checkpoint`, not the metric's `batch:` label, so a row does not depend on
+  which names earlier traffic used.
+
+Both counts are per attempt: a retry that answered hides the first attempt from the caller, and
+this is where its classification shows. `chain_id`, `api_interface` and `provider` narrow the
+rows; `provider` matches `ProviderAddress`, the value `Lava-Provider-Address` carries. The counts
+are per process and cumulative for its lifetime, and no `/debug/reset-*` route clears them: the
+debug Service balances across a router's pods, so compare two readings only when their `PodID`
+matches.
+
 #### Retries
 
 | Metric | Type | Labels | Description |
