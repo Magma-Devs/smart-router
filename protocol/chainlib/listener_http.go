@@ -40,6 +40,10 @@ type httpRelaySpec struct {
 	logModule string
 	// answerError may answer a relay error before the masked envelope; handled false falls through.
 	answerError func(ctx context.Context, fiberCtx *fiber.Ctx, err error, reply *pairingtypes.RelayReply) (handled bool, sendErr error)
+	// refusal answers a request the router declined by one of its own limits (MAG-4577): the
+	// status, the body, and the reply text for the failure line; ok false falls through. Unlike
+	// answerError, relayHTTP writes the failure line for it, with the cut body (MAG-4454).
+	refusal func(err error, msgSeed string) (status int, body []byte, loggedReply string, ok bool)
 	// noAnswer is the shape of the router's own 502/504 when no node answered (MAG-4481).
 	noAnswer noAnswerShape
 	// errorBody builds the masked error envelope.
@@ -90,6 +94,13 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 			if spec.answerError != nil {
 				if handled, sendErr := spec.answerError(ctx, fiberCtx, err, reply); handled {
 					return sendErr
+				}
+			}
+			if spec.refusal != nil {
+				if status, body, loggedReply, ok := spec.refusal(err, msgSeed); ok {
+					apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply, msgSeed, time.Since(startTime), err)
+					fiberCtx.Status(status)
+					return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), body)
 				}
 			}
 			errMasking := apil.logger.GetUniqueGuidResponseForError(err, msgSeed)
