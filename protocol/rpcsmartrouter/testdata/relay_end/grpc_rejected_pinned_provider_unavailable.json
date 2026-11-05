@@ -19,7 +19,7 @@
     "has_reply": false,
     "outcome": "failure",
     "partial_batch": false,
-    "provider_fault": true,
+    "provider_fault": false,
     "recovery": "none",
     "reply_size": 0,
     "request_kind": "customer",
