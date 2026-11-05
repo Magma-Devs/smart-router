@@ -181,9 +181,6 @@ type DirectWSSubscriptionManager struct {
 	// Active subscriptions keyed by hashedParams
 	activeSubscriptions map[string]*directActiveSubscription
 
-	// endpointNames names each endpoint's provider for relay_end (SetEndpointNames).
-	endpointNames subscriptionEndpointNames
-
 	// Pending subscriptions for deduplication
 	pendingSubscriptions map[string]*pendingSubscriptionsBroadcastManager
 
@@ -1163,6 +1160,9 @@ func (dwsm *DirectWSSubscriptionManager) checkForActiveSubscriptionAndConnect(
 	defer dwsm.lock.Unlock()
 
 	activeSub, found := dwsm.activeSubscriptions[hashedParams]
+	if found && activeSub.upstreamPool != nil {
+		metrics.ObserveCustomerProvider(ctx, dwsm.endpointNames.name(activeSub.upstreamPool.nodeUrl.Url))
+	}
 	if !found {
 		return nil, false
 	}

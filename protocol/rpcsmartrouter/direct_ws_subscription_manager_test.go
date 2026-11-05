@@ -2913,13 +2913,32 @@ func newSolanaMockServer() *mockSubscriptionServer {
 	return ms
 }
 
-func newSolanaManager(nodeUrl *common.NodeUrl) *DirectWSSubscriptionManager {
-	return NewDirectWSSubscriptionManager(
+func newSolanaManager(t *testing.T, nodeUrl *common.NodeUrl) *DirectWSSubscriptionManager {
+	t.Helper()
+	manager := NewDirectWSSubscriptionManager(
 		getTestMetricsManager(),
 		"jsonrpc", "SOLANA", "jsonrpc",
 		[]*common.NodeUrl{nodeUrl},
 		nil, nil, nil,
 	)
+	// The mock server's Close does not join hijacked WebSocket clients. Stop
+	// subscriptions and close the router's pools before the next test changes
+	// CLI logging configuration; Client.Close joins its dispatch goroutine.
+	t.Cleanup(func() {
+		manager.lock.Lock()
+		for _, sub := range manager.activeSubscriptions {
+			sub.cancel()
+		}
+		pools := make([]*UpstreamWSPool, 0, len(manager.upstreamPools))
+		for _, pool := range manager.upstreamPools {
+			pools = append(pools, pool)
+		}
+		manager.lock.Unlock()
+		for _, pool := range pools {
+			require.NoError(t, pool.Close())
+		}
+	})
+	return manager
 }
 
 // numericSubscriptionID reads the id out of a subscribe reply, failing the test unless it is
@@ -2950,7 +2969,7 @@ func TestEndToEnd_SolanaNumericSubscriptionRoundTrip(t *testing.T) {
 	mockSrv := newSolanaMockServer()
 	defer mockSrv.Close()
 
-	manager := newSolanaManager(&common.NodeUrl{Url: mockSrv.URL()})
+	manager := newSolanaManager(t, &common.NodeUrl{Url: mockSrv.URL()})
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -3019,7 +3038,7 @@ func TestEndToEnd_SolanaJoiningClientGetsItsOwnNumericID(t *testing.T) {
 	mockSrv := newSolanaMockServer()
 	defer mockSrv.Close()
 
-	manager := newSolanaManager(&common.NodeUrl{Url: mockSrv.URL()})
+	manager := newSolanaManager(t, &common.NodeUrl{Url: mockSrv.URL()})
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -3071,7 +3090,7 @@ func TestSolanaRouterIDSurvivesUpstreamReconnect(t *testing.T) {
 	mockSrv := newSolanaMockServer()
 	defer mockSrv.Close()
 
-	manager := newSolanaManager(&common.NodeUrl{Url: mockSrv.URL()})
+	manager := newSolanaManager(t, &common.NodeUrl{Url: mockSrv.URL()})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 

@@ -609,6 +609,15 @@ var (
 	errorRegistryName = map[string]*LavaError{LavaErrorUnknown.Name: LavaErrorUnknown}
 )
 
+// LookupLavaErrorByName resolves a recorded identity without reclassifying its
+// diagnostic text. Unknown names always map to the bounded registry fallback.
+func LookupLavaErrorByName(name string) *LavaError {
+	if registered := errorRegistryName[name]; registered != nil {
+		return registered
+	}
+	return LavaErrorUnknown
+}
+
 func registerError(le *LavaError) *LavaError {
 	// Code 0 is reserved for LavaErrorUnknown, which is wired into the registry
 	// directly (not via registerError). Rejecting Code 0 here with an explicit

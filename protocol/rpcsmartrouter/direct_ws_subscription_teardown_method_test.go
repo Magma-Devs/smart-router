@@ -74,7 +74,7 @@ func holdRestoreAtCommit(manager *DirectWSSubscriptionManager) (reached chan str
 func TestWS_TeardownOnSolanaSendsTheSpecUnsubscribeMethod(t *testing.T) {
 	srv := newSolanaMockServer()
 	t.Cleanup(srv.Close)
-	manager := newSolanaManager(&common.NodeUrl{Url: srv.URL()})
+	manager := newSolanaManager(t, &common.NodeUrl{Url: srv.URL()})
 	t.Cleanup(manager.Close)
 	h := &releaseHarness{t: t, srv: srv, manager: manager}
 	reached, release := holdRestoreAtCommit(manager)
@@ -243,7 +243,7 @@ func TestWS_TeardownTellsTheNodeNothingWhenTheSpecDeclaresNoUnsubscribe(t *testi
 func TestWS_ExplicitUnsubscribeStillSendsTheClientsMethod(t *testing.T) {
 	srv := newSolanaMockServer()
 	t.Cleanup(srv.Close)
-	manager := newSolanaManager(&common.NodeUrl{Url: srv.URL()})
+	manager := newSolanaManager(t, &common.NodeUrl{Url: srv.URL()})
 	t.Cleanup(manager.Close)
 	h := &releaseHarness{t: t, srv: srv, manager: manager}
 

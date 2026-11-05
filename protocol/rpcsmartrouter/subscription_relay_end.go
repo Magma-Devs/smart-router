@@ -11,7 +11,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
-	"github.com/magma-Devs/smart-router/utils"
 )
 
 // relayEndSelectionSubscription is the selection of a subscription request, which a subscription
@@ -26,7 +25,7 @@ var _ chainlib.SubscriptionRelayReporter = (*RPCSmartRouterServer)(nil)
 // unsubscribe or unsubscribe-all frame, or a gRPC stream's open (chainlib.SubscriptionRelayReporter).
 // A subscription can carry a transaction (Substrate's submit-and-watch), so these are relays too.
 func (rpcss *RPCSmartRouterServer) ReportSubscriptionRelay(ctx context.Context, protocolMessage chainlib.ProtocolMessage, start time.Time, err error) {
-	utils.LogEvent(relayEndEvent, rpcss.buildSubscriptionRelayEnd(ctx, protocolMessage, start, err))
+	rpcss.emitRelayEnd(ctx, rpcss.buildSubscriptionRelayEnd(ctx, protocolMessage, start, err))
 }
 
 // buildSubscriptionRelayEnd reads the manager's record of what it did upstream: a request it sent is

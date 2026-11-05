@@ -2651,6 +2651,13 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	// Create active subscription provider storage for each unique chain
 	activeSubscriptionProvidersStorage := lavasession.NewActiveSubscriptionProvidersStorage()
 	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, smartRouterMetricsManager, smartRouterIdentifier, activeSubscriptionProvidersStorage)
+	for _, primary := range relevantStaticProviderList {
+		for _, endpoint := range primary.NodeUrls {
+			if endpoint.ServesBaseCollection() && !strings.HasPrefix(endpoint.Url, "ws://") && !strings.HasPrefix(endpoint.Url, "wss://") {
+				sessionManager.SetCustomerPrimaryBaseConfigured(true)
+			}
+		}
+	}
 	// Cross-pod sticky sessions. Gated on --shared-state, the same operator signal the chain-tip
 	// and tracker-gate sharing use: "this chain runs on several replicas behind one cache". A
 	// single-replica router needs no registry, and its absence leaves stickiness pod-local.
@@ -3075,6 +3082,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			optimizer, // Pass optimizer for endpoint selection
 			nil,       // Use default WebSocket config (configurable via CLI flags later)
 		)
+		directWSManager.SetCustomerPrimaryConfigured(len(collectEndpoints(wsSubscriptions, relevantStaticProviderList, nil, "")) > 0)
 		// Start background cleanup goroutine
 		directWSManager.SetEndpointNames(providerNamesByURL(relevantStaticProviderList, relevantBackupProviderList))
 		directWSManager.Start(ctx)
@@ -3121,6 +3129,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			optimizer, // Pass optimizer for endpoint selection (same as WS manager)
 			nil,       // Use default GRPCStreamingConfig
 		)
+		grpcSubManager.SetCustomerPrimaryConfigured(len(collectEndpoints(grpcSubscriptions, relevantStaticProviderList, nil, "")) > 0)
 		// Start background cleanup goroutine
 		grpcSubManager.SetEndpointNames(providerNamesByURL(relevantStaticProviderList, relevantBackupProviderList))
 		grpcSubManager.Start(ctx)

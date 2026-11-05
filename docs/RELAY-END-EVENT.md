@@ -217,3 +217,17 @@ a value to `outcome` or to an attempt's `outcome` bumps it.
 | --- | --- |
 | 1 | First version (MAG-4400). |
 | 2 | `status` on a failed relay is the status the client gets: the upstream's own status when an upstream answered, `502` when every attempt failed in transport. Schema 1 wrote `0` when every attempt failed in transport (MAG-4218). |
+
+
+## Customer lifecycle extension
+
+A request accepted by a customer listener carries a nested `customer_request`
+object on this same event. Its independent `schema_version=1` is described in
+[CUSTOMER-REPORT-TELEMETRY.md](CUSTOMER-REPORT-TELEMETRY.md). The listener publishes
+it once, after its final protocol verdict; the relay's existing outer schema,
+outcome and latency retain their definitions. Internal relays have no such
+object. A listener admission/reflection operation without a relay event writes
+`event="customer_request"` instead, never a second relay line. Customer reports
+select the nested schema, terminal marker, request kind and event type, excluding
+the optional usage-export copy. Existing relay-count readers select `relay_end`
+as before.

@@ -70,34 +70,35 @@ func isRouterFault(err error) bool {
 }
 
 type relayEnd struct {
-	guid         string
-	connection   string
-	customer     string // the customer id, unless it is the listeners' default
-	requestID    string // the caller's X-Request-Id, X-Task-Id and X-Tx-Id
-	taskID       string
-	txID         string
-	chain        string
-	stateful     bool
-	method       string
-	apiInterface string
-	selection    string
-	outcome      string
-	stopReason   string
-	servedBy     string
-	status       int
-	hasReply     bool
-	errorCode    string
-	errorText    string
-	latency      time.Duration
-	isBatch      bool
-	txHash       string  // the submitted transaction's id on its chain
-	txStatus     string  // its execution result, when the submit's reply reports one
-	txError      string  // the chain's execution error, when txStatus is a failure
-	txCode       *uint32 // a Cosmos transaction submit's code, read from the reply
-	txCodespace  string
-	txLog        string
-	skipped      relayEndSkips
-	attempts     relayEndAttempts
+	customerRequest *metrics.CustomerTerminal
+	guid            string
+	connection      string
+	customer        string // the customer id, unless it is the listeners' default
+	requestID       string // the caller's X-Request-Id, X-Task-Id and X-Tx-Id
+	taskID          string
+	txID            string
+	chain           string
+	stateful        bool
+	method          string
+	apiInterface    string
+	selection       string
+	outcome         string
+	stopReason      string
+	servedBy        string
+	status          int
+	hasReply        bool
+	errorCode       string
+	errorText       string
+	latency         time.Duration
+	isBatch         bool
+	txHash          string  // the submitted transaction's id on its chain
+	txStatus        string  // its execution result, when the submit's reply reports one
+	txError         string  // the chain's execution error, when txStatus is a failure
+	txCode          *uint32 // a Cosmos transaction submit's code, read from the reply
+	txCodespace     string
+	txLog           string
+	skipped         relayEndSkips
+	attempts        relayEndAttempts
 
 	requestBytes   int
 	replyBytes     int   // -1 when the event has no reply to measure
@@ -127,6 +128,10 @@ type relayEndAttempt struct {
 type relayEndAttempts []relayEndAttempt
 
 func (e *relayEnd) MarshalZerologObject(event *zerolog.Event) {
+	if e.customerRequest != nil {
+		payload, _ := json.Marshal(e.customerRequest)
+		event.RawJSON("customer_request", payload)
+	}
 	event.Str("event", relayEndEvent).
 		Int("schema", relayEndSchema).
 		Str("GUID", e.guid)
@@ -274,7 +279,31 @@ var _ chainlib.RelayRejectionReporter = (*RPCSmartRouterServer)(nil)
 
 // writeRelayEnd writes the relay's relay_end event. Each exit calls it once.
 func (rpcss *RPCSmartRouterServer) writeRelayEnd(ctx context.Context, in relayEndInput) {
-	utils.LogEvent(relayEndEvent, rpcss.buildRelayEnd(ctx, in))
+	rpcss.emitRelayEnd(ctx, rpcss.buildRelayEnd(ctx, in))
+}
+
+func (rpcss *RPCSmartRouterServer) emitRelayEnd(ctx context.Context, end *relayEnd) {
+	metrics.ObserveCustomerError(ctx, common.LookupLavaErrorByName(end.errorCode))
+	var attempts []metrics.CustomerAttempt
+	if end.selection == relayEndSelectionSubscription {
+		for _, attempt := range end.attempts {
+			outcome := "failure"
+			if attempt.outcome == attemptOutcomeOK {
+				outcome = "success"
+			} else if attempt.outcome == attemptOutcomeCancelled {
+				outcome = "cancelled"
+			}
+			attempts = append(attempts, metrics.CustomerAttempt{Provider: attempt.upstream, Outcome: outcome, ErrorName: attempt.errorCode})
+		}
+	}
+	metrics.ObserveCustomerRelay(ctx, end.method, metrics.CustomerResult{Provider: end.servedBy, HasReply: end.hasReply, StatusCode: end.status}, attempts)
+	if metrics.DeferCustomerTerminalLog(ctx, func(terminal metrics.CustomerTerminal) {
+		end.customerRequest = &terminal
+		utils.LogEvent(relayEndEvent, end)
+	}) {
+		return
+	}
+	utils.LogEvent(relayEndEvent, end)
 }
 
 // ReportRejectedRelay writes the relay_end of a request a listener parsed itself and could not hand
