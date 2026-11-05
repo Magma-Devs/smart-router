@@ -546,7 +546,7 @@ func (cp *JrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 	}
 
 	rpcMessage, err := cp.callNodeRPC(ctx, chainMessage, nodeMessage.ID, nodeMessage.Method, nodeMessage.Params, nodeMessage.GetHeaders(), true, nodeMessage.GetDisableErrorHandling(),
-		utils.LogAttr("nodeUrl", cp.NodeUrl.Url))
+		utils.LogAttr("nodeUrl", cp.NodeUrl.UrlStr()))
 	if err != nil {
 		return nil, err
 	}

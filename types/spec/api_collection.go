@@ -662,6 +662,7 @@ func (apic *ApiCollection) CombineWithOthers(others []*ApiCollection, combineWit
 	if err != nil {
 		return fmt.Errorf("error %w in apis combination in collection %#v", err, apic)
 	}
+	apic.Apis = appendInheritedDisabledApis(apic.Apis, others, combineWithDisabled)
 
 	apic.Headers, err = CombineUnique(mergedHeadersList, apic.Headers, currentHeaders, allowOverwrite)
 	if err != nil {
@@ -684,4 +685,32 @@ func (apic *ApiCollection) CombineWithOthers(others []*ApiCollection, combineWit
 	}
 
 	return nil
+}
+
+// appendInheritedDisabledApis carries an api a parent collection disables down to apis, unless
+// apis already names it. CombineFields skips disabled entries, so without this a method a spec
+// disables reached a spec importing it as undeclared, and the router relayed it as a Default- api
+// instead of refusing it (MAG-4185). The name check keeps every enabled definition, the
+// collection's own or an inherited one, ahead of the marker.
+func appendInheritedDisabledApis(apis []*Api, others []*ApiCollection, combineWithDisabled bool) []*Api {
+	named := make(map[string]struct{}, len(apis))
+	for _, api := range apis {
+		named[api.Name] = struct{}{}
+	}
+	for _, collection := range others {
+		if !collection.Enabled && !combineWithDisabled {
+			continue
+		}
+		for _, api := range collection.Apis {
+			if api.Enabled {
+				continue
+			}
+			if _, ok := named[api.Name]; ok {
+				continue
+			}
+			named[api.Name] = struct{}{}
+			apis = append(apis, api)
+		}
+	}
+	return apis
 }

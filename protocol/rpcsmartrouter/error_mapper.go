@@ -1,6 +1,8 @@
 package rpcsmartrouter
 
 import (
+	"errors"
+
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -14,23 +16,70 @@ import (
 // internal use (logging, metrics, endpoint health). The original error is never
 // modified — the router is a transparent hop for the user.
 // Returns both the classification and a classifiedError that wraps the original.
+//
+// The two can differ for a status error whose body is the node's JSON-RPC error: the
+// classification is the body's, for endpoint health, and the wrapped error carries the retry
+// verdict (see retryVerdict).
 func classifyDirectRPCError(err error, chainFamily common.ChainFamily, transport common.TransportType) (*common.LavaError, error) {
 	if err == nil {
 		return common.LavaErrorUnknown, nil
 	}
 
-	// Connection-level errors — detected before inspecting the message
-	connError := common.DetectConnectionError(err)
-
-	// Extract JSON-RPC/gRPC/HTTP error code and canonical message, then classify
-	errorCode, errorMessage := chainlib.ExtractNodeErrorDetails(err)
-	classified := common.ClassifyError(connError, chainFamily, transport, errorCode, errorMessage)
+	// The one classification pipeline every node-error path uses: connection shape first, then
+	// the JSON-RPC / gRPC / HTTP code and message, then the registry.
+	classified, _, _ := chainlib.ClassifyNodeErrorWithDetails(err, chainFamily, transport)
 
 	// Wrap rather than flatten: the returned error must keep the original reachable so
 	// errors.Is still resolves its sentinel downstream. Flattening to err.Error() here
 	// is what severed context.Canceled and left the relay-race carve-out at the endpoint
 	// health decision permanently false (MAG-2648).
-	return classified, common.NewLavaErrorWrapping(classified, err)
+	return classified, common.NewLavaErrorWrapping(retryVerdict(err, classified, chainFamily, transport), err)
+}
+
+// retryVerdict is the verdict an attempt's error carries into retry, failover and the client
+// reply. It is the classification, except for one case: a status error whose body is a JSON-RPC
+// error that would end the relay (invalid params, execution reverted, nonce too low, ...) where
+// its status alone would not. Such an attempt keeps its status's verdict, so the relay still fails
+// over to the next provider as it did before the body was read; the body decides only the
+// endpoint's health (healthVerdict). Whether a non-retryable body inside a 5xx should end the
+// relay instead is a retry-semantics decision left to its owners (review of #613, 613-1).
+func retryVerdict(err error, classified *common.LavaError, chainFamily common.ChainFamily, transport common.TransportType) *common.LavaError {
+	httpErr, ok := err.(*lavasession.HTTPStatusError)
+	if !ok || httpErr == nil || len(httpErr.Body) == 0 || !endsRelay(classified, err) {
+		return classified
+	}
+	statusOnly, _, _ := chainlib.ClassifyNodeErrorWithDetails(
+		&lavasession.HTTPStatusError{StatusCode: httpErr.StatusCode, Status: httpErr.Status}, chainFamily, transport)
+	if endsRelay(statusOnly, err) {
+		return classified
+	}
+	return statusOnly
+}
+
+// endsRelay reports whether an attempt failing with err under verdict stops the relay: the
+// relay processor's own test for a permanent protocol error (GetResultsSummary).
+func endsRelay(verdict *common.LavaError, err error) bool {
+	wrapped := common.NewLavaErrorWrapping(verdict, err)
+	return chainlib.IsUnsupportedMethodError(wrapped) || !chainlib.ShouldRetryError(wrapped)
+}
+
+// healthVerdict is the classification endpoint health uses for a direct attempt's error. An error
+// that wraps a status error is judged by that status error's body, as the recovery probe judges
+// it, since the verdict the wrapper carries may be the retry verdict instead (retryVerdict). Only
+// the JSON-RPC sender produces a status error, and it classifies one on the JSON-RPC table, so
+// that table is used here too, whatever the endpoint's transport.
+func healthVerdict(err error, chainFamily common.ChainFamily, transport common.TransportType) *common.LavaError {
+	var httpErr *lavasession.HTTPStatusError
+	if errors.As(err, &httpErr) && httpErr != nil {
+		classified, _ := classifyDirectRPCError(httpErr, chainFamily, common.TransportJsonRPC)
+		return classified
+	}
+	if classified := common.AsLavaError(err); classified != nil {
+		return classified
+	}
+	// Not classified by the sender: classify from scratch through the same pipeline.
+	classified, _, _ := chainlib.ClassifyNodeErrorWithDetails(err, chainFamily, transport)
+	return classified
 }
 
 // classifyAndWrap is a convenience that calls classifyDirectRPCError and returns

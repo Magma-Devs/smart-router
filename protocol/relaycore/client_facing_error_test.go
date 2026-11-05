@@ -2,6 +2,7 @@ package relaycore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -44,6 +45,17 @@ func TestClientFacingFromProtocolError_UpstreamAnswered(t *testing.T) {
 	require.Empty(t, cf.Cause, "the upstream answered, so there is no transport cause")
 	require.Equal(t, common.LavaErrorNodeServiceUnavailable.Code, cf.RouterErrorCode)
 	require.Equal(t, common.LavaErrorNodeServiceUnavailable.Name, cf.RouterErrorName)
+}
+
+// MAG-4863: a node's error body goes back to the caller as is (MAG-4481). It is redacted where
+// it is taken, so the reply built from it is too.
+func TestClientFacingFromProtocolError_RedactsTheUpstreamBody(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"rejected by https://node.example.com/v2/KEY123SECRET"}}`
+	cf := clientFacingFromProtocolError(upstream503Err(body), common.LavaErrorNodeServiceUnavailable)
+	require.NotNil(t, cf)
+	require.NotContains(t, string(cf.UpstreamBody), "KEY123SECRET")
+	require.Contains(t, string(cf.UpstreamBody), "https://node.example.com/[redacted]", "the host stays")
+	require.True(t, json.Valid(cf.UpstreamBody), "the forwarded body is still JSON")
 }
 
 // Every code that means "the upstream never answered" yields the leaf cause and no status.
