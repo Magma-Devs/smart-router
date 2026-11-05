@@ -84,6 +84,9 @@ type UsedProviders struct {
 	// lastChanceTaken records that this request was already lent a disabled endpoint
 	// (TakeLastChance), so a retrying request is lent at most one.
 	lastChanceTaken bool
+	// routerHealthCheck marks the request as the router's own health check (MarkRouterHealthCheck),
+	// not a client's. Its answer is a poll, so it must not switch an endpoint back on (MAG-4790).
+	routerHealthCheck bool
 }
 
 // Dispatch is one session a request sent: its provider, the batch it went out in, counted from 0
@@ -133,6 +136,30 @@ func (up *UsedProviders) TakeLastChance() bool {
 	}
 	up.lastChanceTaken = true
 	return true
+}
+
+// MarkRouterHealthCheck records that this request is the router's own health check rather than a
+// client's. The relay path reads it with IsRouterHealthCheck: the health check may still be lent a
+// disabled endpoint by the last chance, so readiness can report whether a node answers, but its
+// success does not switch that endpoint back on (MAG-4790).
+func (up *UsedProviders) MarkRouterHealthCheck() {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	up.routerHealthCheck = true
+}
+
+// IsRouterHealthCheck reports whether MarkRouterHealthCheck was called: whether this request is the
+// router's own health check.
+func (up *UsedProviders) IsRouterHealthCheck() bool {
+	if up == nil {
+		return false
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return up.routerHealthCheck
 }
 
 func (up *UsedProviders) CurrentlyUsed() int {
