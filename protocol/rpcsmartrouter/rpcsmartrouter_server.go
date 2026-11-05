@@ -1119,6 +1119,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayWithRetries(ctx context.Context, ret
 	var err error
 	usedProviders := lavasession.NewUsedProviders(nil)
 	usedProviders.SetChainID(rpcss.listenEndpoint.ChainID)
+	// This is the router's own health check, not a client: when the last chance lends it a disabled
+	// endpoint, its answer must not switch that endpoint back on (MAG-4790, see relayInnerDirect).
+	usedProviders.MarkRouterHealthCheck()
 
 	// Selection comes from the method's own category only — see internalRelayStateMachine for why
 	// an operator cross-validation policy must not reach a health check.
@@ -2968,6 +2971,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				originalRequestData,
 				func() bool { return requestRanOutOfRoad(relayProcessor.GetStopReason()) },
 				lostBroadcast,
+				relayProcessor.GetUsedProviders().IsRouterHealthCheck(),
 			)
 			localRelayResult.AttemptLatency = relayLatency
 
@@ -5628,6 +5632,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	originalRequestData []byte,
 	budgetExpired func() bool,
 	lostBroadcast func(answeredWithNodeError bool) bool,
+	routerHealthCheck bool,
 ) (relayLatency time.Duration, err error) {
 	// Get direct connection from session
 	directConnection, ok := singleConsumerSession.GetDirectConnection()
@@ -5776,7 +5781,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// FIRST (read-only methods only) so that if this failure crosses the disable threshold,
 		// the disable episode carries its replayable recovery evidence (MAG-2550).
 		if shouldMarkUnhealthy && targetEndpoint != nil {
-			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
+			rpcss.recordRelayEvidence(routerHealthCheck, targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(classified))
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 		}
@@ -5817,7 +5822,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		shouldMarkUnhealthy, _ := classifyHTTPStatus(statusCode, statusClassified)
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
-			rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
+			rpcss.recordRelayEvidence(routerHealthCheck, targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(statusClassified))
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 			utils.LavaFormatDebug("endpoint returned error status",
@@ -5871,7 +5876,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// would take BOTH arms, counting up and then resetting to zero in the same relay. No registry
 	// row produces that shape today; the chaining is what keeps it impossible when one is added.
 	if result.IsNodeAtFault && targetEndpoint != nil && (lostBroadcast == nil || !lostBroadcast(result.IsNodeError)) {
-		rpcss.recordRelayProbeEvidence(targetEndpoint, chainMessage, originalRequestData, relayTimeout)
+		rpcss.recordRelayEvidence(routerHealthCheck, targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 		// EndpointDisableNodeError unconditionally, rather than through endpointDisableReasonFor:
 		// reaching this arm REQUIRES an answer to have arrived (err == nil): a non-2xx the sender
 		// kept as the node's reply — any 4xx, or a 5xx whose JSON body is the node's own answer
@@ -5884,7 +5889,25 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	} else if targetEndpoint != nil && relayProvesEndpointHealthy(result) {
 		// Reset only on POSITIVE proof the endpoint served — see relayProvesEndpointHealthy for why
 		// this is no longer the negation of the failure gate.
-		if targetEndpoint.ResetHealth() {
+		//
+		// Except that the router's own health check never switches an endpoint back ON (MAG-4790).
+		// It reaches a switched-off endpoint only through the last chance, and its answer is the
+		// router's own latest-block poll: not the "REAL traffic" ResetHealth is for, and not the
+		// "real customer request" a lent success re-enables on (MAG-4232). On a single-provider
+		// router whose url was off because one method hung, the health check's eth_blockNumber
+		// switched it back on 0.35 s after the MAG-2550 prober had kept it off for that method.
+		//
+		// So the health check is still lent the url — readiness reports whether a node answers, and
+		// it does — but the url stays off until a client request succeeds on it or the prober's
+		// replay of the failed request does. On an endpoint that is already on, its success resets
+		// the counter as any success does, as it did before: failures of the health check count
+		// against an endpoint, so its successes must too, or an idle chain's endpoint would collect
+		// blips that nothing ever cleared.
+		healthCheckOnASwitchedOffEndpoint := routerHealthCheck && !targetEndpoint.IsEnabled()
+		if healthCheckOnASwitchedOffEndpoint {
+			utils.LavaFormatDebug("health check answered on a switched-off endpoint; it stays off until a client request or the prober brings it back",
+				utils.LogAttr("endpoint", endpointName))
+		} else if targetEndpoint.ResetHealth() {
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, true)
 		}
 	}
@@ -6938,6 +6961,20 @@ func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error 
 		httpErr.RetryAfter, _ = common.ParseRetryAfter(header, time.Now())
 	}
 	return httpErr
+}
+
+// recordRelayEvidence records a failed relay as the endpoint's replay evidence (MAG-2550), except
+// for the router's own health check on an endpoint that is switched off. The health check reaches
+// such an endpoint only through the last chance, and its request is the router's own latest-block
+// poll, not the request that switched the endpoint off. Recording it would make the prober replay
+// the poll, which the node answers, and switch the endpoint back on: the MAG-4790 outcome by the
+// prober's door instead of the health check's (review of #631, 631-2). On an endpoint that is on,
+// its failure is recorded as any failure is.
+func (rpcss *RPCSmartRouterServer) recordRelayEvidence(routerHealthCheck bool, endpoint *lavasession.Endpoint, chainMessage chainlib.ChainMessage, requestData []byte, relayTimeout time.Duration) {
+	if routerHealthCheck && endpoint != nil && !endpoint.IsEnabled() {
+		return
+	}
+	rpcss.recordRelayProbeEvidence(endpoint, chainMessage, requestData, relayTimeout)
 }
 
 // redactNodeReply withholds the secrets in a node's error reply (utils.RedactSecrets). A reply
