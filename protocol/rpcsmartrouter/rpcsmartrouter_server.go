@@ -5827,6 +5827,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		// unconditionally rather than nested under the MinGroups > 1 branch above.
 		sessionOpts.IncludeBackups = cvp.IncludeBackups
 	}
+	// A cross-validated request is never served from a provider the router has blocked, however dry
+	// the pool runs (MAG-2785): see GetSessionsOptions.CrossValidation.
+	sessionOpts.CrossValidation = crossValidationEnabled
 
 	// MAG-4032: a pending-nonce read or a transaction lookup that names a write this router just
 	// served prefers the upstream that accepted the write. A preference, not a pin: selection falls
@@ -5852,14 +5855,24 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	}
 	sessSpan.End()
 
+	// A cross-validated request that runs out of providers fails on capacity, the reason the
+	// session-count guard below gives one that got too few. The guard never sees a request that got
+	// none, so that one failed with a bare error and no cross-validation status at all. Since
+	// MAG-2785 it is how a cross-validated request ends whenever no trusted provider is left.
+	outOfProviders := func(err error) error {
+		if selection == relaycore.CrossValidation && errors.Is(err, routersession.PairingListEmptyError) {
+			relayProcessor.SetCrossValidationFailFastReason(common.CrossValidationReasonInsufficientCapacity)
+		}
+		return err
+	}
 	if err != nil {
 		if errors.Is(err, routersession.PairingListEmptyError) {
 			if addon != "" {
-				return utils.FormatError("No Providers For Addon", err, utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("userIp", userData.ConsumerIp), utils.LogAttr("GUID", ctx))
+				return outOfProviders(utils.FormatError("No Providers For Addon", err, utils.LogAttr("addon", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("userIp", userData.ConsumerIp), utils.LogAttr("GUID", ctx)))
 			} else if len(extensions) > 0 && relayProcessor.GetAllowSessionDegradation() { // if we have no providers for that extension, use a regular provider, otherwise return the extension results
 				sessions, err = rpcss.sessionManager.GetSessions(ctx, numOfEndpoints, chainlib.GetComputeUnits(protocolMessage), usedProviders, reqBlock, addon, []*spectypes.Extension{}, chainlib.GetStateful(protocolMessage), virtualEpoch, stickiness, selectedProvider, sessionOpts)
 				if err != nil {
-					return err
+					return outOfProviders(err)
 				}
 				// This attempt goes out without its extensions. One can parse as offered and still
 				// have no node to take it here: the policy is built from the add-ons both tiers
@@ -5871,7 +5884,7 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				localRelayData.Extensions = []string{} // reset request data extensions in our local copy
 				extensions = []*spectypes.Extension{}  // reset extensions too so we wont hit SetDisallowDegradation
 			} else {
-				return err
+				return outOfProviders(err)
 			}
 		} else {
 			return err

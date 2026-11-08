@@ -133,6 +133,9 @@ type ignoredProviders struct {
 	// because this is the one piece of per-request state every level of selection receives. It
 	// survives the epoch reset that clears providers: it names a choice, not a failure.
 	preferredProvider string
+	// crossValidation is this request's GetSessionsOptions.CrossValidation, carried here for the
+	// same reason as preferredProvider.
+	crossValidation bool
 }
 
 // markTried adds a provider to triedByThisRequest.
