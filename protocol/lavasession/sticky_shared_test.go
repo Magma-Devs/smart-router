@@ -3,6 +3,7 @@ package lavasession
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -414,4 +415,99 @@ func TestSharedSticky_NoPrimaryToClaimServesFromBackupUnpinned(t *testing.T) {
 	for provider := range sessions {
 		require.Equal(t, "backupA", provider)
 	}
+}
+
+// --- a request holding a fleet claim during an outage of every primary (MAG-4731) -------------
+
+var (
+	claimOutagePrimaries = []string{"primaryA", "primaryB"}
+	claimOutageBackups   = []string{"backupA", "backupB"}
+)
+
+// sharedClaimPrimaryOutage builds the state MAG-4731 was found in. Two primaries and two backups sit
+// behind one fleet registry, and s1 is claimed to a primary while both are up. Then both go down the
+// way production takes them down: the relay path's failure counter disables each one's endpoint, and
+// each provider is blocked by the call GetSessions makes when it finds nothing left to dial. Plain
+// traffic has to be on backup by the time this returns, or the outage was never established.
+func sharedClaimPrimaryOutage(t *testing.T) (csm *ConsumerSessionManager, store *fakeSharedSticky, claimed string) {
+	t.Helper()
+	store = newFakeSharedSticky()
+	csm = CreateConsumerSessionManager()
+	csm.SetSharedStickyStore(store, common.StandaloneEpochDuration)
+	primaries := createNamedPairingList(claimOutagePrimaries...)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, primaries, createNamedPairingList(claimOutageBackups...)))
+
+	claimed = resolvedProvider(t, csm, "s1")
+	require.Contains(t, claimOutagePrimaries, claimed, "claims only ever name primaries")
+
+	for _, primary := range primaries {
+		for _, endpoint := range primary.Endpoints {
+			for i := uint64(0); i < MaxConsecutiveConnectionAttempts; i++ {
+				endpoint.MarkUnhealthy(EndpointDisableNodeError)
+			}
+		}
+		require.NoError(t, csm.blockProvider(context.Background(), primary.PublicLavaAddress, BlockReasonAllEndpointsDisabled, true,
+			csm.atomicReadCurrentEpoch(), MaxConsecutiveConnectionAttempts, 0, nil))
+	}
+
+	require.Contains(t, claimOutageBackups, resolvedProvider(t, csm, ""),
+		"with every primary down, a request without a sticky id is served by backup")
+	return csm, store, claimed
+}
+
+// requireNewSessionServedByBackupUnclaimed sends the first request of a sticky session the fleet has
+// never seen, during that outage. With no primary up there is nothing to claim, so the request is
+// served by backup, unpinned, and the registry gains nothing a later request could be held to
+// (TestSharedSticky_NoPrimaryToClaimServesFromBackupUnpinned).
+func requireNewSessionServedByBackupUnclaimed(t *testing.T, csm *ConsumerSessionManager, store *fakeSharedSticky, stickyID string) {
+	t.Helper()
+	sessions, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, stickyID, "")
+	require.NoError(t, err, "a new sticky session must ride out the primary outage on backup, as plain traffic does")
+	require.Len(t, sessions, 1)
+	for provider := range sessions {
+		require.Contains(t, claimOutageBackups, provider)
+	}
+
+	scope := StickyServiceScope("", nil)
+	_, _, claimedFleetWide, fetchErr := store.Fetch(context.Background(), csm.rpcEndpoint.ChainID, csm.rpcEndpoint.ApiInterface, scope, StickyIDDigest(stickyID))
+	require.NoError(t, fetchErr)
+	require.False(t, claimedFleetWide, "a new session must not be claimed fleet-wide while no primary can serve it")
+	_, pinned := csm.stickySessions.Get(StickyLocalKey(scope, stickyID))
+	require.False(t, pinned, "nor pinned on this pod")
+}
+
+// TestVerify_B_SharedClaimAllPrimariesBlocked: with every primary down, a request holding a fleet
+// claim on one of them fails — the sticky contract is "route to the session's node, or fail" — and
+// it must fail without undoing the outage for every other relay (MAG-4731).
+//
+// It used to undo it. The claim is enforced as a pin, and the pinned path answered the empty pool by
+// releasing the whole blocked list. The claimed primary was blocked again by the same request, but
+// the other dead primary stayed in the pool, so the next new sticky session was claimed to it
+// fleet-wide and failed on it until the claim expired, two epochs later. The control below is the
+// same new session arriving one request earlier.
+func TestVerify_B_SharedClaimAllPrimariesBlocked(t *testing.T) {
+	csm, store, claimed := sharedClaimPrimaryOutage(t)
+	blockBefore := blockedRecord(t, csm, claimed)
+
+	_, err := csm.GetSessions(context.Background(), 1, cuForFirstRequest, NewUsedProviders(nil), servicedBlockNumber, "", nil, common.NO_STATE, 0, "s1", "")
+	require.ErrorIs(t, err, SelectedProviderUnavailableError, "s1's node is down, and a sticky request is answered by its node or fails")
+
+	csm.lock.RLock()
+	valid := slices.Clone(csm.validAddresses)
+	blocked := slices.Clone(csm.currentlyBlockedProviderAddresses)
+	csm.lock.RUnlock()
+	require.Empty(t, valid, "the request holding the claim put a dead primary back in front of every other relay")
+	require.ElementsMatch(t, claimOutagePrimaries, blocked)
+	require.Equal(t, blockBefore, blockedRecord(t, csm, claimed),
+		"its node's block must be left as it was, not released and re-applied by every request the session sends")
+
+	requireNewSessionServedByBackupUnclaimed(t, csm, store, "s-new")
+}
+
+// TestVerify_B_SharedNewIdDuringOutage_Clean is the control: the same new session, arriving before any
+// request that holds a claim, is served by backup with nothing claimed. It passes with and without the
+// MAG-4731 fix, which is what pins the failure above on the request holding the claim.
+func TestVerify_B_SharedNewIdDuringOutage_Clean(t *testing.T) {
+	csm, store, _ := sharedClaimPrimaryOutage(t)
+	requireNewSessionServedByBackupUnclaimed(t, csm, store, "s-new")
 }
