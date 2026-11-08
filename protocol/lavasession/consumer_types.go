@@ -115,6 +115,7 @@ type ProviderOptimizer interface {
 	AppendSyncData(providerAddress string, syncBlock uint64, syncRef provideroptimizer.SyncReference)
 	ChooseUpstream(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string)
 	ChooseUpstreamWithStats(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) (addresses []string, stats *provideroptimizer.SelectionStats)
+	KnownBelowBlock(providerAddress string, block int64) bool
 	GetReputationReportForProvider(string) (*pairingtypes.QualityOfServiceReport, time.Time)
 	Strategy() provideroptimizer.Strategy
 	UpdateWeights(map[string]int64, uint64)
@@ -136,6 +137,9 @@ type ignoredProviders struct {
 	// crossValidation is this request's GetSessionsOptions.CrossValidation, carried here for the
 	// same reason as preferredProvider.
 	crossValidation bool
+	// requiredBlock is this request's GetSessionsOptions.RequiredBlock, carried here for the same
+	// reason as preferredProvider.
+	requiredBlock int64
 }
 
 // markTried adds a provider to triedByThisRequest.
