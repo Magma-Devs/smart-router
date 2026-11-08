@@ -833,7 +833,7 @@ func revalidateProviderCollections(
 		NetworkAddress: provider.NetworkAddress,
 		ChainID:        provider.ChainID,
 		ApiInterface:   provider.ApiInterface,
-		NodeUrls:       dialedNodeUrls(provider.NodeUrls, chainParser),
+		NodeUrls:       dialedNodeUrls(provider.NodeUrls, chainParser, provider.ApiInterface),
 	}
 
 	attemptCtx, attemptCancel := context.WithTimeout(ctx, timeout)

@@ -92,22 +92,21 @@ func TestPathAdmission_EachGeneratedUrlIsCheckedOnItsOwnPath(t *testing.T) {
 
 	t.Run("a wrong-chain /v2 is refused alone", func(t *testing.T) {
 		node := newFakeTon(t, "XXXXwrongchainXXXXXXXXXXXXXXXXXXXXXXXXXXXXX=")
-		base := commonlib.NodeUrl{Url: node.srv.URL}
-		provider := tontProvider(base)
+		provider := tontProvider(commonlib.NodeUrl{Url: node.srv.URL})
 
 		admission, err := validateProviderCollections(t.Context(), provider, parser, 10*time.Second)
 		require.NoError(t, err, "/v3 is still served")
 
 		v2 := commonlib.NodeUrl{Url: node.srv.URL + "/v2", InternalPath: "/v2"}
 		v3 := commonlib.NodeUrl{Url: node.srv.URL + "/v3", InternalPath: "/v3"}
-		dialed := dialedNodeUrls(provider.NodeUrls, parser)
-		require.Equal(t, []commonlib.NodeUrl{base, v2, v3}, dialed)
+		dialed := dialedNodeUrls(provider.NodeUrls, parser, spectypes.APIInterfaceRest)
+		require.Equal(t, []commonlib.NodeUrl{v2, v3}, dialed,
+			"TONT has no root collection: the bare base url is not dialed, only the urls generated from it")
 		require.True(t, admission.RefusesURL(v2), "the generated /v2 url failed chain-id")
 		require.False(t, admission.RefusesURL(v3))
-		require.False(t, admission.RefusesURL(base))
 
 		kept := admittedNodeUrls(provider, dialed, admission)
-		require.Equal(t, []commonlib.NodeUrl{base, v3}, kept)
+		require.Equal(t, []commonlib.NodeUrl{v3}, kept)
 		require.Equal(t, map[string]struct{}{"/v2": {}}, unservedInternalPaths(dialed, endpointsFor(kept)),
 			"the provider is passed over for v2 apis instead of sending them to its other urls")
 	})
@@ -121,7 +120,7 @@ func TestPathAdmission_EachGeneratedUrlIsCheckedOnItsOwnPath(t *testing.T) {
 		require.False(t, admission.Any())
 		require.Positive(t, node.asked("/v2/getMasterchainInfo"), "chain-id ran on the generated /v2 url")
 
-		dialed := dialedNodeUrls(provider.NodeUrls, parser)
+		dialed := dialedNodeUrls(provider.NodeUrls, parser, spectypes.APIInterfaceRest)
 		require.Nil(t, unservedInternalPaths(dialed, endpointsFor(admittedNodeUrls(provider, dialed, admission))))
 	})
 }
@@ -141,7 +140,7 @@ func TestPathAdmission_AFailedPathKeepsTheProvider(t *testing.T) {
 		require.True(t, admission.RefusesURL(v2))
 		require.False(t, admission.RefusesURL(v3))
 
-		dialed := dialedNodeUrls(provider.NodeUrls, parser)
+		dialed := dialedNodeUrls(provider.NodeUrls, parser, spectypes.APIInterfaceRest)
 		kept := admittedNodeUrls(provider, dialed, admission)
 		require.Equal(t, []commonlib.NodeUrl{v3}, kept)
 		require.Equal(t, map[string]struct{}{"/v2": {}}, unservedInternalPaths(dialed, endpointsFor(kept)))
@@ -151,4 +150,15 @@ func TestPathAdmission_AFailedPathKeepsTheProvider(t *testing.T) {
 		_, err := validateProviderCollections(t.Context(), tontProvider(v2), parser, 10*time.Second)
 		require.ErrorContains(t, err, "no node url left serving internal path /v2")
 	})
+}
+
+// dialedNodeUrls keeps the bare base url only on a spec that serves a root
+// collection. The check must read the real specs right: ETH1 serves its whole
+// method set at the root, TONT serves nothing there.
+func TestDialedNodeUrls_RootCollectionCheckOnRealSpecs(t *testing.T) {
+	require.True(t, liveParser(t, "ETH1", true).IsInternalPathEnabled("", spectypes.APIInterfaceJsonRPC, ""))
+	require.False(t, tontParser(t).IsInternalPathEnabled("", spectypes.APIInterfaceRest, ""))
+
+	eth := []commonlib.NodeUrl{{Url: "https://eth.example"}}
+	require.Equal(t, eth, dialedNodeUrls(eth, liveParser(t, "ETH1", true), spectypes.APIInterfaceJsonRPC))
 }

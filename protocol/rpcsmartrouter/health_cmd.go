@@ -424,7 +424,7 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 	endpoint := &lavasession.RPCProviderEndpoint{
 		ChainID:      provider.chainID,
 		ApiInterface: provider.apiInterface,
-		NodeUrls:     dialedNodeUrls(provider.nodeUrls, chainParser),
+		NodeUrls:     dialedNodeUrls(provider.nodeUrls, chainParser, provider.apiInterface),
 	}
 	nodeUrlRouter, err := chainlib.NewNodeUrlRouterFactory(1, endpoint)
 	if err != nil {
