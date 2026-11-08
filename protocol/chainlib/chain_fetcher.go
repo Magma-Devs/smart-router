@@ -903,21 +903,35 @@ func (cf *ChainFetcher) ValidateCollections(ctx context.Context) (ProviderAdmiss
 	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{}))
 }
 
+// ErrNotAskedHeldOff stands in for the checks of a node url a pass left out because the
+// url is held off after a rate limit. It is a rate limit, so the pass reads the url as
+// only rate-limited: it decides nothing, and re-verification keeps the url's last verdict
+// (KeepingThrottledFrom) without sending it a request (MAG-4733).
+var ErrNotAskedHeldOff = fmt.Errorf("not asked: held off after a rate limit: %w", common.StatusCodeError429)
+
+// ValidateCollectionsExcept is ValidateCollections that does not ask the node urls at the
+// positions in skip. Each reads as rate-limited with ErrNotAskedHeldOff, and a connection
+// whose every url is skipped is not dialed.
+func (cf *ChainFetcher) ValidateCollectionsExcept(ctx context.Context, skip map[int]struct{}) (ProviderAdmission, error) {
+	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{skip: skip}))
+}
+
 // ValidateCollectionsAgain re-runs only the checks in only, on each node url that has
 // them, keeps every other verdict from previous, and admits from the result as
 // ValidateCollections does (MAG-3950). A url with none of them is not dialed. A url
 // previous could not dial or list has no verdicts to keep, so it is verified whole, and
 // so is every url when previous is no pass of this provider's urls or only names the
-// whole pass.
-func (cf *ChainFetcher) ValidateCollectionsAgain(ctx context.Context, previous ProviderAdmission, only []CheckID) (ProviderAdmission, error) {
+// whole pass. The node urls at the positions in skip are not asked, as in
+// ValidateCollectionsExcept.
+func (cf *ChainFetcher) ValidateCollectionsAgain(ctx context.Context, previous ProviderAdmission, only []CheckID, skip map[int]struct{}) (ProviderAdmission, error) {
 	if len(previous.pass) != len(cf.endpoint.NodeUrls) || len(only) == 0 || slices.ContainsFunc(only, CheckID.WholePass) {
-		return cf.ValidateCollections(ctx)
+		return cf.ValidateCollectionsExcept(ctx, skip)
 	}
 	set := make(map[CheckID]struct{}, len(only))
 	for _, id := range only {
 		set[id] = struct{}{}
 	}
-	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{only: set, previous: previous.pass}))
+	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{only: set, previous: previous.pass, skip: skip}))
 }
 
 // VerificationResult is the outcome of running a single spec verification against one node URL.
@@ -987,6 +1001,8 @@ type verifyOptions struct {
 	// verdicts it keeps for the rest, per node url by position.
 	only     map[CheckID]struct{}
 	previous []nodeUrlOutcome
+	// skip are the positions of urls not to ask (ValidateCollectionsExcept).
+	skip map[int]struct{}
 }
 
 // kept is the outcome previous gave the url at index, when this pass keeps verdicts
@@ -1152,7 +1168,7 @@ func admit(outcomes []nodeUrlOutcome, logRefusals bool) (ProviderAdmission, erro
 			}
 		case throttled != nil:
 			admission.throttleURL(index, throttled)
-			if logRefusals {
+			if logRefusals && !errors.Is(throttled, ErrNotAskedHeldOff) {
 				utils.FormatWarning("node url rate-limited its checks; not refusing it", throttled, utils.LogAttr("url", outcome.url.String()))
 			}
 		}
@@ -1184,6 +1200,10 @@ func (cf *ChainFetcher) verifyNodeUrls(ctx context.Context, opts verifyOptions) 
 			defer wg.Done()
 			group := cf.newConnectionGroup(cf.endpoint.NodeUrls[positions[0]])
 			for _, index := range positions {
+				if _, skipped := opts.skip[index]; skipped {
+					outcomes[index] = group.notAsked(cf.endpoint.NodeUrls[index])
+					continue
+				}
 				outcomes[index] = group.verify(ctx, cf.endpoint.NodeUrls[index], opts, opts.kept(index))
 			}
 		}()
@@ -1259,6 +1279,16 @@ func (g *connectionGroup) dial(ctx context.Context) (ChainRouter, error) {
 		}
 	}
 	return g.router, g.dialErr
+}
+
+// notAsked is the share of a pass of a url the pass leaves out: rate-limited, with nothing
+// sent (ErrNotAskedHeldOff).
+func (g *connectionGroup) notAsked(url common.NodeUrl) nodeUrlOutcome {
+	outcome := nodeUrlOutcome{url: url, served: url, err: ErrNotAskedHeldOff, head: spectypes.NOT_APPLICABLE}
+	if served, err := ServedAs(g.parser, url); err == nil {
+		outcome.served = served
+	}
+	return outcome
 }
 
 // verify is one url's share of a pass. A websocket url answers only for the checks
