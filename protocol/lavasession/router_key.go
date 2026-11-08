@@ -1,6 +1,7 @@
 package lavasession
 
 import (
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -69,7 +70,7 @@ func (rk *RouterKey) ApplyInternalPath(internalPath string) {
 }
 
 func (rk RouterKey) HasExtension(extension string) bool {
-	return lavaslices.Contains(rk.uniqueExtensions, extension)
+	return slices.Contains(rk.uniqueExtensions, extension)
 }
 
 func (rk RouterKey) String() string {

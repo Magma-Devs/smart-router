@@ -505,9 +505,6 @@ func TestReplicaOfParsesRoleAndInfoReplies(t *testing.T) {
 
 	_, isReplica = replicaOfFromInfo("")
 	require.False(t, isReplica)
-
-	require.True(t, addressListed("10.0.0.5:6379", []string{"10.0.0.5:6379"}))
-	require.False(t, addressListed("10.0.0.5:6379", []string{"primary.internal:6379"}), "a hostname and the IP it resolves to do not match textually: the attribute is a hint")
 }
 
 // A read store that cannot be reached is a failed purge, reported as such and

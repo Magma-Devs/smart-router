@@ -2,8 +2,13 @@ package lavasession
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/stretchr/testify/require"
 )
 
@@ -101,4 +106,171 @@ func TestPerProviderGauge_ClearedByThePoolEmptyRelease(t *testing.T) {
 		require.False(t, isBlocked,
 			"%s is back in rotation and serving, so its per-provider gauge must not still read blocked", address)
 	}
+}
+
+// A backup is blocked in its own store (blockedBackupProviders), which the per-provider gauge never
+// read: a blocked backup moved the smartrouter_csm_blocked_backup_providers count and nothing else,
+// so which backup was out was on no series (MAG-4735). The gauge now covers both pools.
+func TestPerProviderGauge_CoversTheBackupPool(t *testing.T) {
+	rec := &stateSizeRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("regular-a"), createNamedPairingList("backup-b")))
+
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"regular-a": false, "backup-b": false}, rec.providerBlockedSnapshot(),
+		"both pools are published, nothing blocked")
+
+	blockOneProvider(t, csm, "backup-b")
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"regular-a": false, "backup-b": true}, rec.providerBlockedSnapshot(),
+		"a blocked backup must read blocked")
+	require.Equal(t, 0, rec.blockedProvidersCount(), "the regular count does not move for a backup")
+
+	// The recovery probe's release restores a provider in both pools.
+	csm.RestoreRecoveredProvider("backup-b")
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"regular-a": false, "backup-b": false}, rec.providerBlockedSnapshot(),
+		"a released backup must read serving again")
+}
+
+// A provider joins a block list only when a request picks it and finds no usable url. A backup on a
+// healthy chain is never picked, so with the lists alone a backup whose only url was head-stalled
+// read serving for as long as the stall lasted (MAG-4735). The gauge reads the urls too.
+func TestPerProviderGauge_ABackupWithNoUsableURLReadsBlockedWithoutARequest(t *testing.T) {
+	rec := &stateSizeRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+	backups := createNamedPairingList("backup-b")
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("regular-a"), backups))
+	stalled := backups[0].Endpoints[0]
+
+	require.True(t, stalled.AddStateReason(EndpointDisableHeadStalled, time.Now(), 1000))
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"regular-a": false, "backup-b": true}, rec.providerBlockedSnapshot(),
+		"a backup whose only url is head-stalled is out of rotation, picked by a request or not")
+	csm.lock.RLock()
+	_, listed := csm.blockedBackupProviders["backup-b"]
+	csm.lock.RUnlock()
+	require.False(t, listed, "nothing blocked it: the gauge reads the url, not a block list")
+
+	stalled.ClearStateReasons()
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"regular-a": false, "backup-b": false}, rec.providerBlockedSnapshot(),
+		"the url moves again, so the backup reads serving on the next tick")
+}
+
+// A regular provider is out of rotation when every url is disabled or head-stalled, before any
+// request blocks it; one url left usable keeps it serving.
+func TestPerProviderGauge_AProviderIsOutOnlyWhenNoURLIsUsable(t *testing.T) {
+	rec := &stateSizeRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+	pairing := createNamedPairingList("two-urls")
+	first := pairing[0].Endpoints[0]
+	second := &Endpoint{Connections: []*EndpointConnection{}, NetworkAddress: grpcListener + "-2", Enabled: true}
+	pairing[0].Endpoints = append(pairing[0].Endpoints, second)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
+
+	first.mu.Lock()
+	first.Enabled = false // disabled after too many straight failures
+	first.mu.Unlock()
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"two-urls": false}, rec.providerBlockedSnapshot(), "one url left in rotation")
+
+	require.True(t, second.AddStateReason(EndpointDisableHeadStalled, time.Now(), 1000))
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"two-urls": true}, rec.providerBlockedSnapshot(), "no url left in rotation")
+}
+
+// blockedSeedRecorder keeps the provider set each epoch seeds the per-provider gauge with.
+type blockedSeedRecorder struct {
+	metrics.NoOpConsumerMetrics
+	mu    sync.Mutex
+	seeds []map[string]string
+}
+
+func (r *blockedSeedRecorder) ResetBlockedProvidersMetrics(_, _ string, providers map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seed := make(map[string]string, len(providers))
+	for address, endpoint := range providers {
+		seed[address] = endpoint
+	}
+	r.seeds = append(r.seeds, seed)
+}
+
+func (r *blockedSeedRecorder) lastSeed() (map[string]string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.seeds) == 0 {
+		return nil, false
+	}
+	return r.seeds[len(r.seeds)-1], true
+}
+
+// The epoch reset drops every series of the chain and seeds 0 for the providers that remain. A
+// backup left out of the seed had its series deleted at each epoch and recreated by the next tick,
+// a one-second hole per epoch on a provider that never changed.
+func TestPerProviderGauge_EpochSeedCoversTheBackupPool(t *testing.T) {
+	rec := &blockedSeedRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("regular-a"), createNamedPairingList("backup-b")))
+
+	require.Eventually(t, func() bool {
+		seed, ok := rec.lastSeed()
+		if !ok {
+			return false
+		}
+		_, regular := seed["regular-a"]
+		_, backup := seed["backup-b"]
+		return regular && backup
+	}, time.Second, 10*time.Millisecond, "the epoch seed must name the backup as well as the regular provider")
+}
+
+// wsOnlyConnection is a websocket DirectRPCConnection that never dials: enough for
+// Endpoint.ServesDirectRelays to say the url takes no relay.
+type wsOnlyConnection struct{}
+
+func (wsOnlyConnection) SendRequest(context.Context, []byte, map[string]string) (*DirectRPCResponse, error) {
+	return nil, errors.New("a websocket-only test connection takes no relay")
+}
+func (wsOnlyConnection) GetProtocol() DirectRPCProtocol { return DirectRPCProtocolWSS }
+func (wsOnlyConnection) Close() error                   { return nil }
+func (wsOnlyConnection) GetURL() string                 { return "wss://ws-only.test" }
+func (wsOnlyConnection) GetNodeUrl() *common.NodeUrl {
+	return &common.NodeUrl{Url: "wss://ws-only.test"}
+}
+
+func wsOnlyEndpoint() *Endpoint {
+	return &Endpoint{DirectConnections: []DirectRPCConnection{wsOnlyConnection{}}, NetworkAddress: "wss://ws-only.test", Enabled: true}
+}
+
+// A websocket url never takes a relay, so it keeps no provider in rotation while the https url is
+// out. A provider with no https url at all is never picked for a relay and never blocked for
+// lacking one, so it is judged by the urls it has: serving while one is usable, out when none is.
+func TestPerProviderGauge_AWebsocketURLCountsOnlyForAProviderWithNothingElse(t *testing.T) {
+	rec := &stateSizeRecorder{}
+	csm := createConsumerSessionManagerWithMetrics(rec)
+	pairing := createNamedPairingList("https-and-ws", "ws-only")
+	https := pairing[0].Endpoints[0]
+	pairing[0].Endpoints = append(pairing[0].Endpoints, wsOnlyEndpoint())
+	wsOnly := wsOnlyEndpoint()
+	pairing[1].Endpoints = []*Endpoint{wsOnly}
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
+
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"https-and-ws": false, "ws-only": false}, rec.providerBlockedSnapshot(),
+		"a websocket-only provider is never picked for a relay and never blocked for it, so it reads serving")
+
+	https.mu.Lock()
+	https.Enabled = false
+	https.mu.Unlock()
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"https-and-ws": true, "ws-only": false}, rec.providerBlockedSnapshot(),
+		"the websocket url does not keep the provider in rotation once its https url is out")
+
+	wsOnly.mu.Lock()
+	wsOnly.Enabled = false
+	wsOnly.mu.Unlock()
+	csm.publishStateSizes()
+	require.Equal(t, map[string]bool{"https-and-ws": true, "ws-only": true}, rec.providerBlockedSnapshot(),
+		"a websocket-only provider is out when none of its urls is usable")
 }

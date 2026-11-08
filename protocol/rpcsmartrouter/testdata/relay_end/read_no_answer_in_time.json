@@ -1,0 +1,33 @@
+{
+  "GUID": "7734770",
+  "api_interface": "jsonrpc",
+  "attempts": [
+    {
+      "batch": 0,
+      "error_code": "",
+      "message": "",
+      "outcome": "timeout",
+      "returned_to_client": false,
+      "sent_ms": "<ms>",
+      "upstream": "node-a"
+    }
+  ],
+  "chain": "ETH1",
+  "error": "context deadline exceeded",
+  "error_code": "PROTOCOL_CONTEXT_DEADLINE",
+  "event": "relay_end",
+  "has_reply": false,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "eth_getBalance",
+  "outcome": "no_answer",
+  "request_bytes": 115,
+  "schema": 2,
+  "selection": "stateless",
+  "served_by": "",
+  "stateful": false,
+  "status": 504,
+  "stop_reason": "ProcessingTimeout"
+}

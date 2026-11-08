@@ -115,19 +115,19 @@ func TestHandleHeaders_RestContentTypeIsForwardedWithoutDirective(t *testing.T) 
 	})
 }
 
-// TestHandleHeaders_ProjectIDLabelsAndNeverRoutes pins MAG-4081: the caller's project-id header
-// names the customer a request is counted under, and nothing else. Every relay input downstream
-// of the listener — the upstream request's headers and the cache key, both built from this
-// function's output — must come out identical whatever project-id says, so two customers sending
+// TestHandleHeaders_CustomerIDLabelsAndNeverRoutes pins MAG-4081 and MAG-4727: the caller's
+// customer-id header names the customer a request is counted under, and nothing else. Every relay
+// input downstream of the listener — the upstream request's headers and the cache key, both built from this
+// function's output — must come out identical whatever customer-id says, so two customers sending
 // the same call share one cache entry and one routing decision, and a provider never sees the id.
-func TestHandleHeaders_ProjectIDLabelsAndNeverRoutes(t *testing.T) {
-	projectID := func(value string) pairingtypes.Metadata {
-		return pairingtypes.Metadata{Name: ProjectIDHeader, Value: value}
+func TestHandleHeaders_CustomerIDLabelsAndNeverRoutes(t *testing.T) {
+	customerID := func(value string) pairingtypes.Metadata {
+		return pairingtypes.Metadata{Name: CustomerIDHeader, Value: value}
 	}
 	// A header the spec does forward, so the comparison below cannot pass on an empty result.
 	forwarded := pairingtypes.Metadata{Name: "x-cosmos-block-height", Value: "1000"}
 	// CARDANO declares project_id (underscore, the Blockfrost key) pass_send. Exact-name matching
-	// must keep that directive from reaching the hyphenated label header.
+	// must keep that directive from reaching the hyphenated project-id a caller may still send.
 	declare := func(method string) map[ApiKey]*spectypes.Header {
 		return map[ApiKey]*spectypes.Header{
 			{Name: "x-cosmos-block-height", ConnectionType: method}: {Name: "x-cosmos-block-height", Kind: spectypes.Header_pass_send},
@@ -147,9 +147,12 @@ func TestHandleHeaders_ProjectIDLabelsAndNeverRoutes(t *testing.T) {
 			without := filter(forwarded)
 			require.Equal(t, []pairingtypes.Metadata{forwarded}, without, "%s %s: control — the declared header is forwarded", apiInterface, method)
 			for _, customer := range []string{"acme", "globex"} {
-				require.Equal(t, without, filter(forwarded, projectID(customer)),
-					"%s %s: project-id must leave the forwarded headers, and so the upstream request and the cache key, unchanged", apiInterface, method)
-				require.Equal(t, without, filter(projectID(customer), forwarded), "%s %s: whatever its position", apiInterface, method)
+				require.Equal(t, without, filter(forwarded, customerID(customer)),
+					"%s %s: customer-id must leave the forwarded headers, and so the upstream request and the cache key, unchanged", apiInterface, method)
+				require.Equal(t, without, filter(customerID(customer), forwarded), "%s %s: whatever its position", apiInterface, method)
+				// The header's name before MAG-4727. It names no customer now, and still never reaches a provider.
+				require.Equal(t, without, filter(forwarded, pairingtypes.Metadata{Name: "project-id", Value: customer}),
+					"%s %s: project-id must not be forwarded either", apiInterface, method)
 			}
 		}
 	}

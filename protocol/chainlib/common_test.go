@@ -22,6 +22,7 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/metadata"
 )
 
 func TestMatchSpecApiByName(t *testing.T) {
@@ -284,8 +285,15 @@ func TestExtractDappIDFromWebsocketConnection(t *testing.T) {
 		{
 			name:     "dappId exists in params",
 			route:    "/ws",
-			headers:  map[string][]string{"project-id": {"DappID123"}},
+			headers:  map[string][]string{"customer-id": {"DappID123"}},
 			expected: "DappID123",
+		},
+		{
+			// MAG-4727 renamed the header; the old name is not read.
+			name:     "project-id alone names no customer",
+			route:    "/ws",
+			headers:  map[string][]string{"project-id": {"DappID123"}},
+			expected: "DefaultDappID",
 		},
 		{
 			name:     "dappId does not exist in params",
@@ -299,7 +307,7 @@ func TestExtractDappIDFromWebsocketConnection(t *testing.T) {
 
 	webSocketCallback := websocket.New(func(websockConn *websocket.Conn) {
 		mt, _, _ := websockConn.ReadMessage()
-		dappID, ok := websockConn.Locals("project-id").(string)
+		dappID, ok := websockConn.Locals("customer-id").(string)
 		if !ok {
 			t.Fatalf("Unable to extract dappID")
 		}
@@ -353,8 +361,14 @@ func TestExtractDappIDFromFiberContext(t *testing.T) {
 	}{
 		{
 			name:     "dappId exists in headers",
-			headers:  map[string]string{"project-id": "DappID123"},
+			headers:  map[string]string{"customer-id": "DappID123"},
 			expected: "DappID123",
+		},
+		{
+			// MAG-4727 renamed the header; the old name is not read.
+			name:     "project-id alone names no customer",
+			headers:  map[string]string{"project-id": "DappID123"},
+			expected: "DefaultDappID",
 		},
 		{
 			name:     "dappId does not exist in headers",
@@ -382,6 +396,26 @@ func TestExtractDappIDFromFiberContext(t *testing.T) {
 			if responseString != testCase.expected {
 				t.Errorf("Expected %s but got %s", testCase.expected, responseString)
 			}
+		})
+	}
+}
+
+func TestExtractDappIDFromGrpcHeader(t *testing.T) {
+	// grpc-go lower-cases incoming metadata keys, so these are the keys a caller's
+	// Customer-Id arrives under.
+	testCases := []struct {
+		name     string
+		md       metadata.MD
+		expected string
+	}{
+		{name: "customer-id", md: metadata.Pairs("Customer-Id", "DappID123"), expected: "DappID123"},
+		{name: "first of several values", md: metadata.MD{"customer-id": {"DappID123", "other"}}, expected: "DappID123"},
+		{name: "no metadata", md: metadata.MD{}, expected: "DefaultDappID"},
+		{name: "project-id alone names no customer", md: metadata.Pairs("project-id", "DappID123"), expected: "DefaultDappID"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			require.Equal(t, testCase.expected, extractDappIDFromGrpcHeader(testCase.md))
 		})
 	}
 }
@@ -499,10 +533,18 @@ func TestGetServiceApis(t *testing.T) {
 	rpcInterface := spectypes.APIInterfaceRest
 	_, serverApis, _, _, _, _ := getServiceApis(spec, rpcInterface)
 
-	// Test serverApis
-	if len(serverApis) != 3 {
-		t.Errorf("Expected serverApis length to be 3, but got %d", len(serverApis))
+	// The disabled api is kept, as a disabled entry, so a lookup refuses it rather than missing
+	// it and relaying it as a Default- api (MAG-4185).
+	require.Len(t, serverApis, 4)
+	enabled := 0
+	for _, apiCont := range serverApis {
+		if apiCont.api.Enabled {
+			enabled++
+			continue
+		}
+		require.Equal(t, "test-api-disabled", apiCont.api.Name)
 	}
+	require.Equal(t, 3, enabled)
 }
 
 // utxoFamilyChainIDsForTest lists every chain id isUTXOFamily accepts. Derived from the
@@ -927,6 +969,101 @@ func TestCompareRequestedBlockInBatch(t *testing.T) {
 			parsed:           spectypes.NOT_APPLICABLE,
 			expectedLatest:   spectypes.NOT_APPLICABLE,
 			expectedEarliest: spectypes.NOT_APPLICABLE,
+		},
+		// Block 0 is a numeric block on the latest side, like any other: a "latest"-style
+		// sentinel is newer than it, so a batch mixing one with block 0 asks about the tag.
+		// The two mixed-sign branches tested `> 0`, so 0 fell through to Max and every
+		// sentinel, being negative, lost to it — and the cache filed the batch under
+		// finalized block 0, which lives for the finalized lifetime (MAG-4346). Both orders
+		// for each, because a batch's elements arrive in either.
+		//
+		// The earliest values below are this function's own, and are NOT what a batch's
+		// earliest block comes out as: requestedBlockFold discards this return and folds
+		// earliest itself, and the JSON-RPC batch path maps an element at block 0 to
+		// EARLIEST_BLOCK before it does (jsonRPC.go). So block 0 does not reach the earliest
+		// fold as 0 from a batch, which is why only the latest side is changed here.
+		{
+			latest:           spectypes.LATEST_BLOCK,
+			earliest:         spectypes.LATEST_BLOCK,
+			parsed:           0,
+			expectedLatest:   spectypes.LATEST_BLOCK,
+			expectedEarliest: spectypes.LATEST_BLOCK,
+		},
+		{
+			latest:           0,
+			earliest:         spectypes.EARLIEST_BLOCK,
+			parsed:           spectypes.LATEST_BLOCK,
+			expectedLatest:   spectypes.LATEST_BLOCK,
+			expectedEarliest: spectypes.EARLIEST_BLOCK,
+		},
+		{
+			latest:           spectypes.PENDING_BLOCK,
+			earliest:         spectypes.PENDING_BLOCK,
+			parsed:           0,
+			expectedLatest:   spectypes.PENDING_BLOCK,
+			expectedEarliest: spectypes.PENDING_BLOCK,
+		},
+		{
+			latest:           0,
+			earliest:         0,
+			parsed:           spectypes.PENDING_BLOCK,
+			expectedLatest:   spectypes.PENDING_BLOCK,
+			expectedEarliest: spectypes.PENDING_BLOCK,
+		},
+		{
+			latest:           spectypes.SAFE_BLOCK,
+			earliest:         spectypes.SAFE_BLOCK,
+			parsed:           0,
+			expectedLatest:   spectypes.SAFE_BLOCK,
+			expectedEarliest: spectypes.SAFE_BLOCK,
+		},
+		{
+			latest:           0,
+			earliest:         0,
+			parsed:           spectypes.SAFE_BLOCK,
+			expectedLatest:   spectypes.SAFE_BLOCK,
+			expectedEarliest: spectypes.SAFE_BLOCK,
+		},
+		{
+			latest:           spectypes.FINALIZED_BLOCK,
+			earliest:         spectypes.FINALIZED_BLOCK,
+			parsed:           0,
+			expectedLatest:   spectypes.FINALIZED_BLOCK,
+			expectedEarliest: spectypes.FINALIZED_BLOCK,
+		},
+		{
+			latest:           0,
+			earliest:         0,
+			parsed:           spectypes.FINALIZED_BLOCK,
+			expectedLatest:   spectypes.FINALIZED_BLOCK,
+			expectedEarliest: spectypes.FINALIZED_BLOCK,
+		},
+		// A block that failed to parse still makes the whole request unjudgeable, block 0
+		// beside it included: an element nobody could read must not be cached or routed as
+		// anything. (An element whose api names no block never reaches here — the fold drops
+		// it, MAG-4381.)
+		{
+			latest:           spectypes.NOT_APPLICABLE,
+			earliest:         spectypes.NOT_APPLICABLE,
+			parsed:           0,
+			expectedLatest:   spectypes.NOT_APPLICABLE,
+			expectedEarliest: spectypes.NOT_APPLICABLE,
+		},
+		{
+			latest:           0,
+			earliest:         0,
+			parsed:           spectypes.NOT_APPLICABLE,
+			expectedLatest:   spectypes.NOT_APPLICABLE,
+			expectedEarliest: spectypes.NOT_APPLICABLE,
+		},
+		// The chain's first block is the one sentinel block 0 does not lose to on the latest
+		// side: EARLIEST_BLOCK asks about block 0, so the two agree.
+		{
+			latest:           spectypes.EARLIEST_BLOCK,
+			earliest:         spectypes.EARLIEST_BLOCK,
+			parsed:           0,
+			expectedLatest:   0,
+			expectedEarliest: spectypes.EARLIEST_BLOCK,
 		},
 	}
 

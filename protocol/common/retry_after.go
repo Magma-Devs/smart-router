@@ -122,6 +122,12 @@ func RateLimited(err error, retryAfter time.Duration) error {
 	return &RateLimitedError{RetryAfter: retryAfter, cause: cause}
 }
 
+// GRPCRateLimitTexts are the status-message texts that make a gRPC failure a rate refusal,
+// whatever its code, lowercase. RateLimitFromGRPC and the registry's gRPC rows both read this
+// list, so the error the transport types as rate-limited and the verdict the classifier gives the
+// same reply cannot disagree (MAG-4278 item 5).
+var GRPCRateLimitTexts = []string{"too many requests", "rate limit", "ratelimit", "enhance_your_calm"}
+
 // RateLimitFromGRPC reports whether a gRPC failure is the upstream refusing us for rate,
 // and the wait it asked for (0 when it said nothing usable). md is the response metadata
 // (gRPC keys are lowercase).
@@ -134,7 +140,7 @@ func RateLimited(err error, retryAfter time.Duration) error {
 func RateLimitFromGRPC(code uint32, message string, md map[string][]string) (time.Duration, bool) {
 	retryAfter := grpcRetryDelayFromMD(md)
 	msg := strings.ToLower(message)
-	for _, sig := range []string{"too many requests", "rate limit", "ratelimit", "enhance_your_calm"} {
+	for _, sig := range GRPCRateLimitTexts {
 		if strings.Contains(msg, sig) {
 			return retryAfter, true
 		}

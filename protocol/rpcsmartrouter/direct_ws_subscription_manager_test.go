@@ -19,7 +19,6 @@ import (
 	rpcclient "github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -33,6 +32,10 @@ type mockSubscriptionServer struct {
 	upgrader        websocket.Upgrader
 	subscriptions   map[string]chan struct{} // subscription ID -> close channel
 	observedMethods []string                 // every JSON-RPC method the server was actually asked for
+	// observedFrames is every request frame verbatim, so a test can read a call's params as
+	// well as its method: the id shape the router puts on an unsubscribe is half of what
+	// MAG-4278 item 1 got wrong, and a method-only record cannot show it.
+	observedFrames  [][]byte
 	lock            sync.RWMutex
 	writeMu         sync.Mutex // serializes conn.WriteMessage — gorilla requires a single concurrent writer
 	messageInterval time.Duration
@@ -69,6 +72,14 @@ type mockSubscriptionServer struct {
 	// like to the router; refusedDials counts the dials it turned away.
 	refusing     atomic.Bool
 	refusedDials atomic.Int32
+
+	// unsubscribeUnanswered makes the node apply an unsubscribe and never answer it, as some
+	// gateways do: the router's call runs out its deadline.
+	unsubscribeUnanswered atomic.Bool
+
+	// rejectSubscribes makes the node answer every subscribe with a JSON-RPC error, which is
+	// a failed subscribe rather than a subscription that ends later (MAG-2685).
+	rejectSubscribes atomic.Bool
 }
 
 // setRefusing turns the node's outage on or off.
@@ -128,7 +139,7 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 
-		ms.recordMethod(req.Method)
+		ms.recordMethod(req.Method, message)
 
 		// Classify by whether the caller handed us a LIVE subscription id, never by
 		// the method name. This harness used to gate on "_subscribe"/"_unsubscribe"
@@ -141,10 +152,24 @@ func (ms *mockSubscriptionServer) handleWS(w http.ResponseWriter, r *http.Reques
 		// failing fast.
 		if subID, ok := ms.firstSubscriptionParam(req.Params); ok && ms.hasSubscription(subID) {
 			ms.closeSubscription(subID)
+			if ms.unsubscribeUnanswered.Load() {
+				continue
+			}
 			response := map[string]interface{}{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
 				"result":  true,
+			}
+			respBytes, _ := json.Marshal(response)
+			ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)
+			continue
+		}
+
+		if ms.rejectSubscribes.Load() {
+			response := map[string]interface{}{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"error":   map[string]interface{}{"code": -32601, "message": "the method " + req.Method + " does not exist"},
 			}
 			respBytes, _ := json.Marshal(response)
 			ms.safeWriteMessage(conn, websocket.TextMessage, respBytes)
@@ -191,10 +216,11 @@ func (ms *mockSubscriptionServer) firstSubscriptionParam(params interface{}) (st
 	return "", false
 }
 
-func (ms *mockSubscriptionServer) recordMethod(method string) {
+func (ms *mockSubscriptionServer) recordMethod(method string, frame []byte) {
 	ms.lock.Lock()
 	defer ms.lock.Unlock()
 	ms.observedMethods = append(ms.observedMethods, method)
+	ms.observedFrames = append(ms.observedFrames, append([]byte(nil), frame...))
 }
 
 // ObservedMethods returns the JSON-RPC methods the upstream was actually asked
@@ -343,6 +369,12 @@ func (ms *mockSubscriptionServer) URL() string {
 type mockWSProtocolMessage struct {
 	method string
 	params interface{}
+
+	// parseDirectives are the spec directives of the collection this message resolved to.
+	// The manager reads them to pair a subscribe method with the unsubscribe method the node
+	// is told on teardown (MAG-4278 item 1), so a test that exercises a teardown has to carry
+	// the pairs its chain declares. Nil leaves the collection with none, as before.
+	parseDirectives []*spectypes.ParseDirective
 }
 
 func (m *mockWSProtocolMessage) GetApi() *spectypes.Api {
@@ -356,7 +388,29 @@ func (m *mockWSProtocolMessage) GetApiCollection() *spectypes.ApiCollection {
 		CollectionData: spectypes.CollectionData{
 			ApiInterface: "jsonrpc",
 		},
+		ParseDirectives: m.parseDirectives,
 	}
+}
+
+// subscriptionDirectives builds the SUBSCRIBE/UNSUBSCRIBE parse directives of a collection
+// from subscribe/unsubscribe api-name pairs, in the order a spec lists them: all the
+// subscribes, then all the unsubscribes, which is what every Substrate spec does.
+func subscriptionDirectives(pairs ...[2]string) []*spectypes.ParseDirective {
+	directives := make([]*spectypes.ParseDirective, 0, 2*len(pairs))
+	for _, pair := range pairs {
+		directives = append(directives, &spectypes.ParseDirective{
+			FunctionTag: spectypes.FUNCTION_TAG_SUBSCRIBE, ApiName: pair[0],
+		})
+	}
+	for _, pair := range pairs {
+		if pair[1] == "" {
+			continue
+		}
+		directives = append(directives, &spectypes.ParseDirective{
+			FunctionTag: spectypes.FUNCTION_TAG_UNSUBSCRIBE, ApiName: pair[1],
+		})
+	}
+	return directives
 }
 
 func (m *mockWSProtocolMessage) GetRPCMessage() rpcInterfaceMessages.GenericMessage {
@@ -460,8 +514,8 @@ func TestNewDirectWSSubscriptionManager(t *testing.T) {
 	assert.NotNil(t, manager.upstreamPools)
 	assert.NotNil(t, manager.idMapper)
 	assert.Equal(t, "ETH", manager.chainID)
-	assert.Len(t, manager.wsEndpoints, 1)
-	assert.Equal(t, "wss://test.example.com", manager.wsEndpoints[0].Url)
+	assert.Len(t, manager.primary, 1)
+	assert.Equal(t, "wss://test.example.com", manager.primary[0].Url)
 }
 
 // TestCreateWebSocketConnectionUniqueKey tests the client key generation
@@ -760,13 +814,15 @@ func TestActiveSubscriptionTracksPerClientRouterIDs(t *testing.T) {
 func TestUnsubscribeRateLimiting(t *testing.T) {
 	// Create a config with very low unsubscribe limit for testing
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 10,
-		UnsubscribesPerMinutePerClient:  2, // Very low limit for testing
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 10,
+			UnsubscribesPerMinutePerClient:  2, // Very low limit for testing
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	nodeUrl := &common.NodeUrl{Url: "wss://test.example.com"}
@@ -816,13 +872,15 @@ func TestUnsubscribeRateLimiting(t *testing.T) {
 func TestUnsubscribeAllNotRateLimited(t *testing.T) {
 	// Create a config with very low unsubscribe limit
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 10,
-		UnsubscribesPerMinutePerClient:  1, // Extremely low limit
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 10,
+			UnsubscribesPerMinutePerClient:  1, // Extremely low limit
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	nodeUrl := &common.NodeUrl{Url: "wss://test.example.com"}
@@ -1313,13 +1371,15 @@ func TestReconnectionUpdatesConnectionBookkeeping(t *testing.T) {
 func TestUnsubscribeRouterIDOwnershipValidation(t *testing.T) {
 	// Create a config with high limits to avoid rate limiting
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 60, // High limit to avoid rate limiting
-		UnsubscribesPerMinutePerClient:  60,
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 60, // High limit to avoid rate limiting
+			UnsubscribesPerMinutePerClient:  60,
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	nodeUrl := &common.NodeUrl{Url: "wss://test.example.com"}
@@ -1941,305 +2001,6 @@ func (f *fakeSubscriptionOptimizer) ChooseUpstream(_ context.Context, allAddress
 func (f *fakeSubscriptionOptimizer) AppendRelayData(_ string, _ time.Duration, _, _ uint64) {}
 func (f *fakeSubscriptionOptimizer) AppendRelayFailure(_ string)                            {}
 
-func TestSelectEndpoint_WS_PrimaryOnly_NilBackup(t *testing.T) {
-	primary := []*common.NodeUrl{
-		{Url: "wss://primary-1.example.com"},
-		{Url: "wss://primary-2.example.com"},
-	}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		nil, // wsBackupEndpoints — none
-		nil, // optimizer
-		nil, // config
-	)
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	require.NotNil(t, ep)
-	// First-available branch with no optimizer and no ignored set returns first endpoint.
-	assert.Equal(t, "wss://primary-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_PrimaryOnly_EmptyBackup(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		[]*common.NodeUrl{}, // empty backup, regression guard for nil-vs-empty equivalence
-		nil,
-		nil,
-	)
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	assert.Equal(t, "wss://primary-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_PrimaryExhausted_FallsBackToBackup(t *testing.T) {
-	primary := []*common.NodeUrl{
-		{Url: "wss://primary-1.example.com"},
-		{Url: "wss://primary-2.example.com"},
-	}
-	backup := []*common.NodeUrl{
-		{Url: "wss://backup-1.example.com"},
-	}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil, // optimizer nil — first-available branch
-		nil,
-	)
-
-	ignored := map[string]struct{}{
-		"wss://primary-1.example.com": {},
-		"wss://primary-2.example.com": {},
-	}
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
-	require.NoError(t, err)
-	require.NotNil(t, ep)
-	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_PrimaryEmpty_BackupOnly(t *testing.T) {
-	backup := []*common.NodeUrl{
-		{Url: "wss://backup-1.example.com"},
-		{Url: "wss://backup-2.example.com"},
-	}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		nil, // primary empty
-		backup,
-		nil,
-		nil,
-	)
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	require.NotNil(t, ep)
-	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_BothExhausted_ReturnsError(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil,
-		nil,
-	)
-
-	ignored := map[string]struct{}{
-		"wss://primary-1.example.com": {},
-		"wss://backup-1.example.com":  {},
-	}
-	_, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "primary and backup both exhausted")
-}
-
-func TestSelectEndpoint_WS_BothEmpty_ReturnsError(t *testing.T) {
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		nil,
-		nil,
-		nil,
-		nil,
-	)
-	_, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.Error(t, err)
-}
-
-func TestSelectEndpoint_WS_StickyOnPrimary_Returns(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil,
-		nil,
-	)
-
-	// Manually set a sticky entry pointing at the primary.
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://primary-1.example.com"})
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	assert.Equal(t, "wss://primary-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_StickyOnBackup_Returns(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil,
-		nil,
-	)
-
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://backup-1.example.com"})
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	// Sticky-on-backup must resolve directly via endpointsByURL (which spans both tiers).
-	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_StickyIgnored_FallsThroughCascade(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil,
-		nil,
-	)
-
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "wss://primary-1.example.com"})
-
-	ignored := map[string]struct{}{
-		"wss://primary-1.example.com": {},
-	}
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
-	require.NoError(t, err)
-	assert.Equal(t, "wss://backup-1.example.com", ep.Url)
-}
-
-func TestSelectEndpoint_WS_OptimizerOverPrimary_NotConsultedForBackup(t *testing.T) {
-	primary := []*common.NodeUrl{
-		{Url: "wss://primary-1.example.com"},
-		{Url: "wss://primary-2.example.com"},
-	}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-
-	calls := 0
-	opt := &fakeSubscriptionOptimizer{
-		chooseFn: func(addresses []string, _ map[string]struct{}) []string {
-			calls++
-			// Always return the second primary URL — backup must never reach the optimizer.
-			return []string{"wss://primary-2.example.com"}
-		},
-	}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		opt,
-		nil,
-	)
-
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", nil)
-	require.NoError(t, err)
-	assert.Equal(t, "wss://primary-2.example.com", ep.Url)
-	// Optimizer must run exactly once (against primary tier). If the cascade
-	// erroneously fell into the backup tier, the optimizer would be invoked twice.
-	assert.Equal(t, 1, calls)
-}
-
-func TestSelectEndpoint_WS_OptimizerOverBackup(t *testing.T) {
-	primary := []*common.NodeUrl{
-		{Url: "wss://primary-1.example.com"},
-		{Url: "wss://primary-2.example.com"},
-	}
-	backup := []*common.NodeUrl{
-		{Url: "wss://backup-1.example.com"},
-		{Url: "wss://backup-2.example.com"},
-	}
-
-	calls := 0
-	opt := &fakeSubscriptionOptimizer{
-		chooseFn: func(addresses []string, ignored map[string]struct{}) []string {
-			calls++
-			// When invoked over the backup tier, return backup-2.
-			// When invoked over the primary tier (with both primaries ignored),
-			// return nothing so the cascade falls through.
-			for _, addr := range addresses {
-				if addr == "wss://backup-2.example.com" {
-					return []string{"wss://backup-2.example.com"}
-				}
-			}
-			return nil
-		},
-	}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		opt,
-		nil,
-	)
-
-	ignored := map[string]struct{}{
-		"wss://primary-1.example.com": {},
-		"wss://primary-2.example.com": {},
-	}
-	ep, err := manager.selectEndpoint(context.Background(), "client-1", ignored)
-	require.NoError(t, err)
-	assert.Equal(t, "wss://backup-2.example.com", ep.Url)
-	// Optimizer must be consulted for both tiers: once over primary (returns nil
-	// → cascade falls through), then once over backup (returns backup-2).
-	assert.Equal(t, 2, calls)
-}
-
-func TestSelectEndpoint_WS_EndpointsByURL_IncludesBothTiers(t *testing.T) {
-	primary := []*common.NodeUrl{{Url: "wss://primary-1.example.com"}}
-	backup := []*common.NodeUrl{{Url: "wss://backup-1.example.com"}}
-	manager := NewDirectWSSubscriptionManager(
-		getTestMetricsManager(),
-		"jsonrpc",
-		"ETH",
-		"jsonrpc",
-		primary,
-		backup,
-		nil,
-		nil,
-	)
-
-	require.Len(t, manager.endpointsByURL, 2)
-	assert.NotNil(t, manager.endpointsByURL["wss://primary-1.example.com"])
-	assert.NotNil(t, manager.endpointsByURL["wss://backup-1.example.com"])
-}
-
 // ==================== MAG-1824 regression coverage ====================
 
 // mockWSProtocolMessageWithRawData is a ProtocolMessage variant that lets a test inject
@@ -2322,13 +2083,15 @@ func TestCreateSubscriptionReply_EchoesStringRequestID(t *testing.T) {
 // an entry in clientRouterIDs for that subscription, so this remains safe.
 func TestUnsubscribe_AcceptsUpstreamIDFallback(t *testing.T) {
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 60,
-		UnsubscribesPerMinutePerClient:  60,
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 60,
+			UnsubscribesPerMinutePerClient:  60,
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	manager := NewDirectWSSubscriptionManager(
@@ -2712,13 +2475,15 @@ func TestListenForUpstreamMessages_NilUpstreamSubDoesNotPanic(t *testing.T) {
 // open a hole that lets one client unsubscribe another client's shared subscription.
 func TestUnsubscribe_StillRejectsForeignSubscription(t *testing.T) {
 	config := &WebsocketConfig{
-		MaxSubscriptionsPerClient:       25,
-		PerClientLimitEnforcement:       "warn",
-		MaxTotalSubscriptions:           5000,
-		TotalLimitEnforcement:           "warn",
-		SubscriptionsPerMinutePerClient: 60,
-		UnsubscribesPerMinutePerClient:  60,
-		CleanupInterval:                 time.Minute,
+		SubscriptionLimits: SubscriptionLimits{
+			MaxSubscriptionsPerClient:       25,
+			PerClientLimitEnforcement:       "warn",
+			MaxTotalSubscriptions:           5000,
+			TotalLimitEnforcement:           "warn",
+			SubscriptionsPerMinutePerClient: 60,
+			UnsubscribesPerMinutePerClient:  60,
+			CleanupInterval:                 time.Minute,
+		},
 	}
 
 	manager := NewDirectWSSubscriptionManager(
@@ -2800,14 +2565,17 @@ func TestResolveUnsubscribeMethod_UsesClientMethodName(t *testing.T) {
 			// the spec by name is what lands on the protocol message.
 			pm := &mockWSProtocolMessage{method: pair.unsubscribe}
 
-			got := resolveUnsubscribeMethod(pm, pair.subscribe)
+			got := resolveUnsubscribeMethod(pm, pair.unsubscribe)
 			assert.Equal(t, pair.unsubscribe, got,
 				"router must call upstream with the method the client invoked")
 
 			// MAG-3297 regression guard: deriving from the subscribe method cannot
 			// produce this name. If someone reinstates derivation here, the assertion
-			// above stops holding and this one says why.
-			assert.NotEqual(t, pair.unsubscribe, getUnsubscribeMethod(pair.subscribe),
+			// above stops holding and this one says why. The spec-backed resolution the
+			// teardown paths use does produce it (MAG-4278 item 1) — see
+			// TestResolveTeardownUnsubscribeMethod.
+			derived, _ := derivedUnsubscribeMethod(pair.subscribe)
+			assert.NotEqual(t, pair.unsubscribe, derived,
 				"derivation is expected to be wrong for Substrate — it is why this fix exists")
 		})
 	}
@@ -2827,9 +2595,11 @@ func TestResolveUnsubscribeMethod_EthAndTendermintUnchanged(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pm := &mockWSProtocolMessage{method: tc.unsubscribe}
-			assert.Equal(t, tc.unsubscribe, resolveUnsubscribeMethod(pm, tc.subscribe))
-			// These are the cases the old derivation hardcoded, so it agrees.
-			assert.Equal(t, tc.unsubscribe, getUnsubscribeMethod(tc.subscribe))
+			assert.Equal(t, tc.unsubscribe, resolveUnsubscribeMethod(pm, tc.unsubscribe))
+			// These are the two cases the legacy derivation names outright, so it agrees.
+			derived, ok := derivedUnsubscribeMethod(tc.subscribe)
+			assert.True(t, ok)
+			assert.Equal(t, tc.unsubscribe, derived)
 		})
 	}
 }
@@ -2845,17 +2615,17 @@ func (m *mockWSProtocolMessageNoApi) GetApi() *spectypes.Api { return nil }
 func TestResolveUnsubscribeMethod_FallsBackWithoutApi(t *testing.T) {
 	t.Run("nil api", func(t *testing.T) {
 		pm := &mockWSProtocolMessageNoApi{mockWSProtocolMessage{method: "chain_unsubscribeNewHeads"}}
-		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_subscribe"),
-			"with no api to read, fall back to derivation rather than sending an empty method")
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_unsubscribe"),
+			"with no api to read, fall back to the subscription's resolved method rather than sending an empty one")
 	})
 
 	t.Run("empty api name", func(t *testing.T) {
 		pm := &mockWSProtocolMessage{method: ""}
-		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_subscribe"))
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_unsubscribe"))
 	})
 
 	t.Run("nil message", func(t *testing.T) {
-		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(nil, "eth_subscribe"))
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(nil, "eth_unsubscribe"))
 	})
 
 	// The one row here whose input the parser can actually hand you. A method the
@@ -2868,7 +2638,7 @@ func TestResolveUnsubscribeMethod_FallsBackWithoutApi(t *testing.T) {
 	// the guard belongs to this function, not to its caller's invariant.
 	t.Run("synthesised default api name", func(t *testing.T) {
 		pm := &mockWSProtocolMessage{method: chainlib.DefaultApiName + "chain_unsubscribeNewHeads"}
-		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_subscribe"),
+		assert.Equal(t, "eth_unsubscribe", resolveUnsubscribeMethod(pm, "eth_unsubscribe"),
 			"a Default-prefixed name is not a wire method")
 	})
 }
@@ -3098,6 +2868,22 @@ func TestCreateSubscriptionReply_SolanaNumeric(t *testing.T) {
 		"result must be the router id as a JSON number, not the upstream id and not a string")
 }
 
+// solanaSubscriptionDirectives are the SUBSCRIBE/UNSUBSCRIBE pairs the SOLANA spec declares
+// in its WS-ONLY collection, which is what the manager pairs a teardown method from.
+func solanaSubscriptionDirectives() []*spectypes.ParseDirective {
+	return subscriptionDirectives(
+		[2]string{"accountSubscribe", "accountUnsubscribe"},
+		[2]string{"blockSubscribe", "blockUnsubscribe"},
+		[2]string{"logsSubscribe", "logsUnsubscribe"},
+		[2]string{"programSubscribe", "programUnsubscribe"},
+		[2]string{"rootSubscribe", "rootUnsubscribe"},
+		[2]string{"signatureSubscribe", "signatureUnsubscribe"},
+		[2]string{"slotSubscribe", "slotUnsubscribe"},
+		[2]string{"slotsUpdatesSubscribe", "slotsUpdatesUnsubscribe"},
+		[2]string{"voteSubscribe", "voteUnsubscribe"},
+	)
+}
+
 // solanaSubscribeMessage builds the accountSubscribe the tests below drive the manager with.
 func solanaSubscribeMessage(t *testing.T, requestID int) *mockWSProtocolMessageWithRawData {
 	t.Helper()
@@ -3109,8 +2895,9 @@ func solanaSubscribeMessage(t *testing.T, requestID int) *mockWSProtocolMessageW
 	require.NoError(t, err)
 	return &mockWSProtocolMessageWithRawData{
 		mockWSProtocolMessage: mockWSProtocolMessage{
-			method: "accountSubscribe",
-			params: []interface{}{account},
+			method:          "accountSubscribe",
+			params:          []interface{}{account},
+			parseDirectives: solanaSubscriptionDirectives(),
 		},
 		rawData: body,
 	}
@@ -3319,7 +3106,7 @@ drainLoop:
 		}
 	}
 
-	manager.handleUpstreamDisconnect(ctx, hashedParams, activeSub)
+	manager.handleUpstreamDisconnect(ctx, hashedParams, activeSub, nil)
 
 	manager.lock.RLock()
 	upstreamAfter := activeSub.upstreamID

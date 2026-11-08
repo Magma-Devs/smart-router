@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/utils/backoff"
 )
 
 const (
@@ -299,14 +300,7 @@ func (r *Registry) ProviderReadyAt(provider string) (readyAt time.Time, held boo
 
 // exponentialFor is InitialHoldoff doubled per consecutive strike, capped at MaxHoldoff.
 func exponentialFor(strikes int) time.Duration {
-	d := InitialHoldoff
-	for i := 1; i < strikes; i++ {
-		d *= 2
-		if d >= MaxHoldoff {
-			return MaxHoldoff
-		}
-	}
-	return d
+	return backoff.Delay(strikes-1, backoff.Config{Initial: InitialHoldoff, Max: MaxHoldoff, Multiplier: 2})
 }
 
 // gcLocked forgets entries whose hold-off expired and that saw no 429 for

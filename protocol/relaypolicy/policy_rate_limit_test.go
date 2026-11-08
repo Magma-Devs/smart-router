@@ -13,26 +13,26 @@ func TestDecide_OnlyRateLimitedRetriesStatefulAndBatch(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3, DisableBatchRetry: true})
 
 	t.Run("stateful retries when every failure was a rate limit", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{Selection: relaycore.Stateful, Summary: ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}})
-		require.Equal(t, Retry, out.Action)
+		out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, Summary: relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}})
+		require.Equal(t, relaycore.ActionRetry, out.Action)
 	})
 	t.Run("stateful still stops on any other failure", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{Selection: relaycore.Stateful, Summary: ResultsSummary{ProtocolErrors: 1}})
-		require.Equal(t, Stop, out.Action)
+		out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, Summary: relaycore.ResultsSummary{ProtocolErrors: 1}})
+		require.Equal(t, relaycore.ActionStop, out.Action)
 		require.Equal(t, "Stateful", out.Reason)
 	})
 	t.Run("batch retries when every failure was a rate limit", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{Selection: relaycore.Stateless, IsBatch: true, Summary: ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}})
-		require.Equal(t, Retry, out.Action)
+		out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, IsBatch: true, Summary: relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true}})
+		require.Equal(t, relaycore.ActionRetry, out.Action)
 	})
 	t.Run("batch still stops on any other failure", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{Selection: relaycore.Stateless, IsBatch: true, Summary: ResultsSummary{NodeErrors: 1}})
-		require.Equal(t, Stop, out.Action)
+		out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateless, IsBatch: true, Summary: relaycore.ResultsSummary{NodeErrors: 1}})
+		require.Equal(t, relaycore.ActionStop, out.Action)
 		require.Equal(t, "BatchDisabled", out.Reason)
 	})
 	t.Run("the limit checks still bound a rate-limited stateful relay", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{Selection: relaycore.Stateful, Summary: ResultsSummary{ProtocolErrors: 3, OnlyRateLimited: true}})
-		require.Equal(t, Stop, out.Action)
+		out := policy.Decide(relaycore.DecisionInput{Selection: relaycore.Stateful, Summary: relaycore.ResultsSummary{ProtocolErrors: 3, OnlyRateLimited: true}})
+		require.Equal(t, relaycore.ActionStop, out.Action)
 		require.Equal(t, "ErrorToleranceExceeded", out.Reason)
 	})
 }
@@ -44,30 +44,30 @@ func TestDecide_TickerHedgeKeepsTheStatefulAndBatchStops(t *testing.T) {
 	policy := NewPolicy(PolicyConfig{MaxRetries: 10, RelayRetryLimit: 2, SendRelayAttempts: 3, DisableBatchRetry: true})
 
 	t.Run("stateful stops on a hedge even when every failure was a rate limit", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{
+		out := policy.Decide(relaycore.DecisionInput{
 			Selection:     relaycore.Stateful,
 			IsTickerHedge: true,
-			Summary:       ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
+			Summary:       relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
 		})
-		require.Equal(t, Stop, out.Action)
+		require.Equal(t, relaycore.ActionStop, out.Action)
 		require.Equal(t, "Stateful", out.Reason)
 	})
 	t.Run("batch stops on a hedge even when every failure was a rate limit", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{
+		out := policy.Decide(relaycore.DecisionInput{
 			Selection:     relaycore.Stateless,
 			IsBatch:       true,
 			IsTickerHedge: true,
-			Summary:       ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
+			Summary:       relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
 		})
-		require.Equal(t, Stop, out.Action)
+		require.Equal(t, relaycore.ActionStop, out.Action)
 		require.Equal(t, "BatchDisabled", out.Reason)
 	})
 	t.Run("a stateless non-batch hedge is unaffected", func(t *testing.T) {
-		out := policy.Decide(DecisionInput{
+		out := policy.Decide(relaycore.DecisionInput{
 			Selection:     relaycore.Stateless,
 			IsTickerHedge: true,
-			Summary:       ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
+			Summary:       relaycore.ResultsSummary{ProtocolErrors: 1, OnlyRateLimited: true},
 		})
-		require.Equal(t, Retry, out.Action)
+		require.Equal(t, relaycore.ActionRetry, out.Action)
 	})
 }

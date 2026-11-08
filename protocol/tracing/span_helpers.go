@@ -2,9 +2,11 @@ package tracing
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -42,22 +44,23 @@ func StartServerSpan(ctx context.Context, name string) (context.Context, trace.S
 // non-recording span so call sites can unconditionally defer span.End()
 // without producing orphan root spans.
 func StartClientSpan(ctx context.Context, name string) (context.Context, trace.Span) {
-	parent := trace.SpanFromContext(ctx)
-	if !parent.IsRecording() {
-		return ctx, parent
-	}
-	return tracer().Start(ctx, name, trace.WithSpanKind(trace.SpanKindClient))
+	return startChildSpan(ctx, name, trace.WithSpanKind(trace.SpanKindClient))
 }
 
 // StartInternalSpan starts an INTERNAL-kind child span only when the
 // context already carries a recording parent. Same orphan-root protection
 // as StartClientSpan.
 func StartInternalSpan(ctx context.Context, name string) (context.Context, trace.Span) {
+	return startChildSpan(ctx, name)
+}
+
+// startChildSpan starts a child span only under a recording parent, else returns the parent.
+func startChildSpan(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	parent := trace.SpanFromContext(ctx)
 	if !parent.IsRecording() {
 		return ctx, parent
 	}
-	return tracer().Start(ctx, name)
+	return tracer().Start(ctx, name, opts...)
 }
 
 // --- Relay-span context plumbing ---
@@ -88,6 +91,9 @@ func RecordError(span trace.Span, err error) {
 	// Redacted before export: a transport failure's *url.Error carries the full
 	// upstream url, whose path and query hold the vendor api key.
 	err = utils.RedactSecretsErr(err)
+	if msg := err.Error(); !utf8.ValidString(msg) {
+		err = errors.New(validUTF8(msg))
+	}
 	span.RecordError(err)
 	span.SetStatus(otelcodes.Error, err.Error())
 }
@@ -104,9 +110,14 @@ func RecordBody(span trace.Span, attrKey string, body []byte) {
 		return
 	}
 	if bodyAttrLimit > 0 && len(body) > bodyAttrLimit {
-		body = body[:bodyAttrLimit]
+		// Cut at a character boundary: a multi-byte character split here is invalid UTF-8.
+		cut := bodyAttrLimit
+		for cut > 0 && bodyAttrLimit-cut < utf8.UTFMax && !utf8.RuneStart(body[cut]) {
+			cut--
+		}
+		body = body[:cut]
 	}
-	span.SetAttributes(attribute.String(attrKey, string(body)))
+	span.SetAttributes(attribute.String(attrKey, validUTF8(string(body))))
 }
 
 // RecordRelayAttributes records the standard relay identification attributes
@@ -127,7 +138,7 @@ func RecordRelayMethod(span trace.Span, methodName string) {
 	if !span.IsRecording() {
 		return
 	}
-	span.SetAttributes(attribute.String(attrRelayMethod, methodName))
+	span.SetAttributes(attribute.String(attrRelayMethod, validUTF8(methodName)))
 }
 
 // RecordProviderAttributes records per-provider identification attributes
@@ -225,7 +236,7 @@ func RecordHTTPRequest(span trace.Span, method, urlStr string) {
 		return
 	}
 	attrs := []attribute.KeyValue{
-		semconv.HTTPMethod(method),
+		semconv.HTTPMethod(validUTF8(method)),
 		// scheme://host only — the path and query carry the vendor api key, and
 		// spans leave the process for a collector.
 		semconv.HTTPURL(utils.RedactURL(urlStr)),
@@ -238,13 +249,9 @@ func RecordHTTPRequest(span trace.Span, method, urlStr string) {
 // `http.response_content_length` on a client HTTP span. Skipped when
 // response is nil (transport error before a response was received).
 func RecordHTTPResponse(span trace.Span, response *lavasession.HTTPDirectRPCResponse) {
-	if !span.IsRecording() || response == nil {
-		return
+	if response != nil {
+		recordResponse(span, response.StatusCode, len(response.Body))
 	}
-	span.SetAttributes(
-		semconv.HTTPStatusCode(response.StatusCode),
-		semconv.HTTPResponseContentLength(len(response.Body)),
-	)
 }
 
 // RecordGRPCRequest sets `rpc.system`="grpc", `rpc.service`, `rpc.method`,
@@ -256,7 +263,7 @@ func RecordGRPCRequest(span trace.Span, methodPath, urlStr string) {
 	if !span.IsRecording() {
 		return
 	}
-	service, method := splitGRPCMethod(methodPath)
+	service, method := splitGRPCMethod(validUTF8(methodPath))
 	attrs := []attribute.KeyValue{
 		semconv.RPCSystemGRPC,
 		semconv.RPCMethod(method),
@@ -273,12 +280,19 @@ func RecordGRPCRequest(span trace.Span, methodPath, urlStr string) {
 // http.status_code attribute because the SmartRouter's DirectRPCResponse
 // surfaces a unified status field across protocols.
 func RecordGRPCResponse(span trace.Span, response *lavasession.DirectRPCResponse) {
-	if !span.IsRecording() || response == nil {
+	if response != nil {
+		recordResponse(span, response.StatusCode, len(response.Data))
+	}
+}
+
+// recordResponse records `http.status_code` and `http.response_content_length` on a client span.
+func recordResponse(span trace.Span, statusCode, contentLength int) {
+	if !span.IsRecording() {
 		return
 	}
 	span.SetAttributes(
-		semconv.HTTPStatusCode(response.StatusCode),
-		semconv.HTTPResponseContentLength(len(response.Data)),
+		semconv.HTTPStatusCode(statusCode),
+		semconv.HTTPResponseContentLength(contentLength),
 	)
 }
 
@@ -310,4 +324,14 @@ func splitGRPCMethod(methodPath string) (service, method string) {
 		return strings.TrimPrefix(methodPath[:i], "/"), methodPath[i+1:]
 	}
 	return "", methodPath
+}
+
+// validUTF8 keeps a string that came with the request exportable: OTLP sends span
+// attributes, events and status as protobuf strings, which must be valid UTF-8, and one
+// invalid value drops the whole export batch.
+func validUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "\uFFFD")
 }

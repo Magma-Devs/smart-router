@@ -298,7 +298,7 @@ func (e *Endpoint) IsDirectRPC() bool {
 // relay can use it: the JSON-RPC and REST relay paths require an HTTPDirectRPCDoer and
 // refuse a websocket connection outright, and the gRPC path needs a gRPC one. The url is
 // there for subscriptions, which never come through endpoint selection — they are served
-// by DirectWSSubscriptionManager from its own ws url list (collectWSEndpoints).
+// by DirectWSSubscriptionManager from its own ws url list (collectEndpoints).
 //
 // While the https sibling is enabled this never shows, because selection returns the first
 // enabled endpoint and the https url is listed first. Once that sibling is backed off for
@@ -396,10 +396,10 @@ func (e *Endpoint) IsProviderRelay() bool {
 }
 
 // ServesBaseCollection reports whether this endpoint answers for the spec's base
-// collection as well as its add-ons. Mirrors common.NodeUrl.ServesBaseCollection,
-// from which it is populated. See StandaloneAddons.
+// collection as well as its add-ons, by the same rule as the NodeUrl it is populated
+// from. See StandaloneAddons.
 func (e *Endpoint) ServesBaseCollection() bool {
-	return !e.StandaloneAddons || len(e.Addons) == 0
+	return common.ServesBaseCollection(e.StandaloneAddons, len(e.Addons))
 }
 
 func (e *Endpoint) CheckSupportForServices(addon string, extensions []string) (supported bool) {
@@ -1542,8 +1542,18 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 
 		// checking disabled endpoints, as we can disable an endpoint mid run of the previous loop, we should re test the current endpoint state
 		// before verifying all are Disabled.
+		relayCapable := 0
 		allDisabled = true
 		for _, endpoint := range cswp.Endpoints {
+			// Only an endpoint a relay can use keeps the provider out of the blocked list. A
+			// ws/wss url (ServesDirectRelays) is never sent a relay, so it never fails and is
+			// never switched off: counting it meant a provider listing https + wss, the
+			// documented ETH1 shape, was never blocked once its https urls were all off, and so
+			// never reached the last chance that lends a blocked provider's url (MAG-4285).
+			if !endpoint.ServesDirectRelays() {
+				continue
+			}
+			relayCapable++
 			// Usable, not merely Enabled: a provider whose every endpoint is held by a state
 			// reason (head-stalled) has nothing to dial, and must be blocked like one whose
 			// endpoints all failed — that block is what moves its traffic to the next primary or
@@ -1552,6 +1562,12 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 				continue
 			}
 			// even one endpoint is enough for us to not purge.
+			allDisabled = false
+		}
+		// A provider with no relay-capable endpoint at all (a websocket-only url list) has
+		// nothing that could have gone dark, so it is passed over for the request, as before,
+		// rather than blocked.
+		if relayCapable == 0 {
 			allDisabled = false
 		}
 		return false, nil, allDisabled
@@ -1600,4 +1616,37 @@ func CalcWeightsByStake(providers map[uint64]*ConsumerSessionsWithProvider) (wei
 		weights[cswp.PublicLavaAddress] = maxWeight * WeightMultiplierForStaticProviders
 	}
 	return weights
+}
+
+// inRotation reports whether the router can still send this provider traffic: at least one url
+// that can take a relay is usable (enabled, no state reason such as head-stalled). A provider with
+// none is out of rotation even before a request finds that out and blocks it.
+//
+// A websocket url never takes a relay (ServesDirectRelays), so it does not keep a provider in
+// rotation while its https sibling is out. A provider with no relay-capable url at all (a
+// websocket-only entry, there for subscriptions) is never picked for a relay and never blocked for
+// lacking one, so relay rotation says nothing about it; it is judged by the urls it has, and reads
+// out only when none of them is usable.
+func (cswp *ConsumerSessionsWithProvider) inRotation() bool {
+	cswp.Lock.RLock()
+	defer cswp.Lock.RUnlock()
+	relayCapable := false
+	for _, endpoint := range cswp.Endpoints {
+		if !endpoint.ServesDirectRelays() {
+			continue
+		}
+		relayCapable = true
+		if endpoint.IsUsable() {
+			return true
+		}
+	}
+	if relayCapable {
+		return false
+	}
+	for _, endpoint := range cswp.Endpoints {
+		if endpoint.IsUsable() {
+			return true
+		}
+	}
+	return false
 }
