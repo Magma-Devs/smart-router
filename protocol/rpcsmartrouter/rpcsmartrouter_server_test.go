@@ -83,6 +83,10 @@ func (m *MockRelayProcessorForHeaders) NodeErrors() (ret []common.RelayResult) {
 	return m.nodeErrors
 }
 
+func (m *MockRelayProcessorForHeaders) GetDegradedExtensions() []string {
+	return nil
+}
+
 // Integration tests that actually call appendHeadersToRelayResult
 func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 	ctx := context.Background()
