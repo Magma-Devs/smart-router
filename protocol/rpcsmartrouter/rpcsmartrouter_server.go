@@ -4649,12 +4649,22 @@ func (rpcss *RPCSmartRouterServer) peerObservationStore() endpointstate.PeerObse
 
 // adoptSharedStateTip feeds a peer pod's chain tip — read from the shared cache under the
 // chain-level key, so it is the fleet-max of every pod's guarded tip — into this pod's
-// ChainState, but only when it is ahead of our local view. SetLatestBlock applies the same
-// anti-lie guards as a local observation (outlier threshold against the clustered baseline, or
-// against the fresh tip before a baseline exists), so a poisoned peer value is snapped down
-// rather than trusted (T10). No-op when shared state is off or ChainState is not yet wired.
+// ChainState, but only when it is ahead of our local view and is not our own tip read back
+// (MAG-4964, see below). SetLatestBlock applies the same anti-lie guards as a local observation
+// (outlier threshold against the clustered baseline, or against the fresh tip before a baseline
+// exists), so a poisoned peer value is snapped down rather than trusted (T10). No-op when shared
+// state is off or ChainState is not yet wired.
 func (rpcss *RPCSmartRouterServer) adoptSharedStateTip(ctx context.Context, peerTip, localSeenBlock int64) {
 	if !rpcss.sharedState || rpcss.chainState == nil || peerTip <= localSeenBlock {
+		return
+	}
+	// An echo of our own tip is not a confirmation (MAG-4964). A relay's block reaches the cache
+	// clamped to the publishing router's tip (replyLatestBlockForCacheWrite, MAG-3755), so the fleet
+	// value a lookup returns is often this router's own tip read back. SetLatestBlock would take it as
+	// an equal-block confirmation and refresh the tip's TTL although no endpoint reported the block,
+	// so a tip the outlier guard held below the head never went stale and the head never got in
+	// (bitcoin-testnet rest, 28 hours). A peer value above or below our tip still goes through.
+	if peerTip == rpcss.chainState.GetLatestBlockAllowStale() {
 		return
 	}
 	// SetLatestBlock re-guards. Its `advanced` return means "the tip moved UP" — it is false both
