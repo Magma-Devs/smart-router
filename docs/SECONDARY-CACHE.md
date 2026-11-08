@@ -277,7 +277,7 @@ order, so a caller can match the whole string:
 | --- | --- |
 | `hit` / `miss` / `error` / `timeout` | consulted; same four values the `outcome` metric label uses |
 | `off` | not consulted — unconfigured, or its client has marked itself disconnected |
-| `skipped` | active but not asked: a bypass rule applied (cross-validation, stateful, `lava-force-cache-refresh`, a non-cacheable block, a retry after a cached node error), or the primary hit first and the secondary is only consulted after a primary non-hit |
+| `skipped` | active but not asked: a bypass rule applied (cross-validation, a stateful or node-bound method, `lava-force-cache-refresh`, a `lava-select-provider`, `lava-stickiness` or `lava-providers-block` directive, a non-cacheable block, a retry after a cached node error), or the primary hit first and the secondary is only consulted after a primary non-hit |
 | `unknown` | not observed at all — this reply was built on a path that performs no cache lookup |
 
 Both headers are emitted on every reply that carries the directive, including
@@ -288,7 +288,9 @@ Two limits worth knowing:
 
 - **They describe the winning attempt.** Retries and hedges each run their own
   cache lookup, except a retry after a cached node error, which asks neither
-  tier. The reply reports the lookups made on the attempt whose response you
+  tier. A request that chooses its node (`lava-select-provider`,
+  `lava-stickiness`, `lava-providers-block`) asks neither tier on any attempt.
+  The reply reports the lookups made on the attempt whose response you
   received.
 - **WebSocket has no per-message response headers**, so a cache hit delivered
   over a subscription cannot carry them — the same limitation
