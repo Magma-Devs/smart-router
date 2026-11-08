@@ -118,6 +118,7 @@ const (
 	RateLimitWebSocketFlag                       = "rate-limit-websocket-requests-per-connection"
 	BanDurationForWebsocketRateLimitExceededFlag = "ban-duration-for-websocket-rate-limit-exceeded"
 	LimitParallelWebsocketConnectionsPerIpFlag   = "limit-parallel-websocket-connections-per-ip"
+	WebsocketTrustedProxiesFlag                  = "websocket-trusted-proxies"
 	LimitWebsocketIdleTimeFlag                   = "limit-websocket-connection-idle-time"
 	WebsocketKeepAliveIntervalFlag               = "websocket-keep-alive-interval"
 	WebsocketWriteTimeoutFlag                    = "websocket-write-timeout"
