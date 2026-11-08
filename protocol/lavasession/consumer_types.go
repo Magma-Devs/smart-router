@@ -932,6 +932,12 @@ type ConsumerSessionsWithProvider struct {
 	// It rides on the provider record so it can be read off a session's Parent without an address-keyed lookup.
 	// Empty string means the implicit common.DefaultProviderGroup.
 	GroupLabel string
+	// UnservedInternalPaths are internal paths the provider is configured to serve
+	// but has no endpoint for: every url there was refused at admission, or could
+	// not be connected. Set at construction, read-only after. Selection passes the
+	// provider over for an api under one of these paths, rather than sending it to
+	// an endpoint of another path, which no node serves (MAG-4214).
+	UnservedInternalPaths map[string]struct{}
 }
 
 func NewConsumerSessionWithProvider(publicLavaAddress string, pairingEndpoints []*Endpoint, maxCu uint64, epoch uint64, stakeSize int64) *ConsumerSessionsWithProvider {
@@ -1274,13 +1280,17 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 		// ones (STRK: "" carries the whole method set, /rpc/v0_8 … carry it
 		// again per version), a root relay must stay on the root url rather
 		// than drift onto a versioned door the expansion generated.
+		//
+		// A path the provider was configured for but lost (UnservedInternalPaths)
+		// restricts too, and so matches nothing: the provider is passed over for
+		// this request, as one that lacks a requested add-on is.
 		restrictToPath := false
 		if internalPath != nil {
-			for _, endpoint := range cswp.Endpoints {
-				if endpoint.ServesInternalPath(*internalPath) {
-					restrictToPath = true
-					break
-				}
+			_, restrictToPath = cswp.UnservedInternalPaths[*internalPath]
+			if !restrictToPath {
+				restrictToPath = slices.ContainsFunc(cswp.Endpoints, func(endpoint *Endpoint) bool {
+					return endpoint.ServesInternalPath(*internalPath)
+				})
 			}
 		}
 		for idx, endpoint := range cswp.Endpoints {

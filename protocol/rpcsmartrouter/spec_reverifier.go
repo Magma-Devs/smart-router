@@ -827,11 +827,13 @@ func revalidateProviderCollections(
 	previous chainlib.ProviderAdmission,
 	only []chainlib.CheckID,
 ) (chainlib.ProviderAdmission, error) {
+	// The urls the router dials, generated per-path ones included, each verified on
+	// its own path (MAG-4214).
 	endpoint := &lavasession.RPCProviderEndpoint{
 		NetworkAddress: provider.NetworkAddress,
 		ChainID:        provider.ChainID,
 		ApiInterface:   provider.ApiInterface,
-		NodeUrls:       provider.NodeUrls,
+		NodeUrls:       dialedNodeUrls(provider.NodeUrls, chainParser),
 	}
 
 	attemptCtx, attemptCancel := context.WithTimeout(ctx, timeout)

@@ -419,10 +419,12 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 		return rowsFromError(cvErr)
 	}
 
+	// The urls the router dials, generated per-path ones included, so health reports
+	// each one on its own path's checks, as admission judges it (MAG-4214).
 	endpoint := &lavasession.RPCProviderEndpoint{
 		ChainID:      provider.chainID,
 		ApiInterface: provider.apiInterface,
-		NodeUrls:     provider.nodeUrls,
+		NodeUrls:     dialedNodeUrls(provider.nodeUrls, chainParser),
 	}
 	nodeUrlRouter, err := chainlib.NewNodeUrlRouterFactory(1, endpoint)
 	if err != nil {
@@ -442,8 +444,8 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 		excluded = admissionErr
 	}
 
-	rows := make([]healthEndpointResult, 0, len(provider.nodeUrls))
-	for i, url := range provider.nodeUrls {
+	rows := make([]healthEndpointResult, 0, len(endpoint.NodeUrls))
+	for i, url := range endpoint.NodeUrls {
 		row := baseRow(provider, url)
 		row.SpecValid = true
 		applyValidation(&row, validations[i])

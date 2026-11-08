@@ -2411,6 +2411,16 @@ func subscriptionCollectionProbe(chainParser chainlib.ChainParser) func(internal
 	}
 }
 
+// dialedNodeUrls is every url the router dials for these configured node urls:
+// expandInternalPaths over the spec's internal paths. Verification, admission and
+// the session build all read this one list, so a generated per-path url is checked
+// with its own path's verifications rather than riding on the configured url's —
+// on TON a bare base url has no root collection and so no checks at all, while the
+// `/v2` url generated from it carries the chain-id check (MAG-4214).
+func dialedNodeUrls(nodeUrls []common.NodeUrl, chainParser chainlib.ChainParser) []common.NodeUrl {
+	return expandInternalPaths(nodeUrls, chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser))
+}
+
 // expandInternalPaths resolves each configured node-url into the set of urls
 // the router will actually dial, one per internal path the spec serves.
 //
@@ -2749,13 +2759,16 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			}
 
 			endpoints := []*lavasession.Endpoint{}
-			// expandInternalPaths gets each admitted url with its declared add-ons. Its
-			// subscription probe resolves a collection from them to decide ws-vs-http,
-			// so narrowing them here would move endpoints in or out per internal path as
-			// a side effect of admission (MAG-3326 review); a refused url goes whole,
-			// its expansions with it. Service admission is applied per endpoint below.
+			// The dialed list is the one admission verified (dialedNodeUrls), expanded
+			// with each url's declared add-ons: its subscription probe resolves a
+			// collection from them to decide ws-vs-http, so narrowing them first would
+			// move endpoints in or out per internal path as a side effect of admission
+			// (MAG-3326 review). Each url, generated ones included, was verified on its
+			// own path and is dropped alone when refused (MAG-4214). Service admission
+			// is applied per endpoint below.
 			admission := admissionFor(provider)
-			for _, url := range expandInternalPaths(admittedNodeUrls(provider, admission), chainParser.GetAllInternalPaths(), subscriptionCollectionProbe(chainParser)) {
+			dialed := dialedNodeUrls(provider.NodeUrls, chainParser)
+			for _, url := range admittedNodeUrls(provider, dialed, admission) {
 				admittedServices, keep := admittedServicesFor(chainParser, admission, url)
 				if !keep {
 					// A url that serves only its add-ons and kept none has nothing left.
@@ -2877,6 +2890,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 			)
 			providerEntry.StaticProvider = true
 			providerEntry.GroupLabel = provider.GroupLabel // cross-validation group-diversity label (may be empty)
+			providerEntry.UnservedInternalPaths = unservedInternalPaths(dialed, endpoints)
 			sessions[uint64(idx)] = providerEntry
 		}
 
@@ -4107,7 +4121,8 @@ func withoutFailed(providers []*lavasession.RPCStaticProviderEndpoint, failed ma
 // otherwise trigger ResetHealth, and backups rarely receive one at all. resetGauge
 // (nil when the chain has no metrics manager) mirrors the reset onto the
 // rpc_endpoint_overall_health gauge, which would otherwise stay stuck at 0 (#2256).
-// The cross-validation group label must survive the refresh.
+// The cross-validation group label, and the internal paths the provider lost at
+// admission (MAG-4214), must survive the refresh.
 func freshenTier(
 	old map[uint64]*lavasession.ConsumerSessionsWithProvider,
 	epoch uint64,
@@ -4131,6 +4146,7 @@ func freshenTier(
 		)
 		freshSession.StaticProvider = oldSession.StaticProvider
 		freshSession.GroupLabel = oldSession.GroupLabel
+		freshSession.UnservedInternalPaths = oldSession.UnservedInternalPaths
 		fresh[idx] = freshSession
 
 		utils.LavaFormatDebug(debugMessage,
@@ -4317,8 +4333,12 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *lavasession.RPCStati
 // servedElsewhere reports whether a node url of the provider still serves service: a
 // service refused on one url is not lost while another url keeps it.
 func servedElsewhere(chainParser chainlib.ChainParser, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission, service string) bool {
-	for index, url := range provider.NodeUrls {
-		if admission.URLRefused(index) {
+	urls := provider.NodeUrls
+	if chainParser != nil {
+		urls = dialedNodeUrls(urls, chainParser)
+	}
+	for _, url := range urls {
+		if admission.RefusesURL(url) {
 			continue
 		}
 		var services []string
@@ -4927,12 +4947,15 @@ func collectEndpoints(transport subscriptionTransport, providers []*lavasession.
 	return endpoints
 }
 
-// urlRefusal reports, per node-url position, whether the provider's admission refused it.
+// urlRefusal reports, per configured node-url position, whether the provider's
+// admission refused it. Admission positions are into the dialed list, so the url
+// is looked up by value.
 func urlRefusal(provider *lavasession.RPCStaticProviderEndpoint, admissionFor func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission) func(int) bool {
 	if admissionFor == nil {
 		return func(int) bool { return false }
 	}
-	return admissionFor(provider).URLRefused
+	admission := admissionFor(provider)
+	return func(i int) bool { return admission.RefusesURL(provider.NodeUrls[i]) }
 }
 
 // admittedServicesFor is what the endpoint built for url may serve, and whether one is
@@ -4949,15 +4972,15 @@ func admittedServicesFor(chainParser chainlib.ChainParser, admission chainlib.Pr
 	return admission.AdmittedServices(served)
 }
 
-// admittedNodeUrls is a provider's configured urls minus the ones its admission
-// refused, in configured order.
-func admittedNodeUrls(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []common.NodeUrl {
+// admittedNodeUrls is urls, the provider's dialed urls, minus the ones its
+// admission refused, in order.
+func admittedNodeUrls(provider *lavasession.RPCStaticProviderEndpoint, urls []common.NodeUrl, admission chainlib.ProviderAdmission) []common.NodeUrl {
 	if !admission.Any() {
-		return provider.NodeUrls
+		return urls
 	}
-	kept := make([]common.NodeUrl, 0, len(provider.NodeUrls))
-	for i, url := range provider.NodeUrls {
-		if admission.URLRefused(i) {
+	kept := make([]common.NodeUrl, 0, len(urls))
+	for _, url := range urls {
+		if admission.RefusesURL(url) {
 			utils.LavaFormatWarning("dropping node url: it failed verification", nil,
 				utils.LogAttr("url", url.UrlStr()),
 				utils.LogAttr("provider", provider.Name),
@@ -4967,6 +4990,25 @@ func admittedNodeUrls(provider *lavasession.RPCStaticProviderEndpoint, admission
 		kept = append(kept, url)
 	}
 	return kept
+}
+
+// unservedInternalPaths lists the internal paths a provider dials a url for but
+// built no endpoint on — every url there was refused, or could not be connected.
+// Session selection passes the provider over for those paths' apis instead of
+// sending them to a url of another path, where no node serves them (MAG-4214).
+// Nil when every path has an endpoint.
+func unservedInternalPaths(dialed []common.NodeUrl, endpoints []*lavasession.Endpoint) map[string]struct{} {
+	var unserved map[string]struct{}
+	for _, url := range dialed {
+		if slices.ContainsFunc(endpoints, func(e *lavasession.Endpoint) bool { return e.InternalPath == url.InternalPath }) {
+			continue
+		}
+		if unserved == nil {
+			unserved = map[string]struct{}{}
+		}
+		unserved[url.InternalPath] = struct{}{}
+	}
+	return unserved
 }
 
 // debugStateReasons renders an endpoint's state reasons for /debug/endpoint-state.

@@ -81,7 +81,7 @@ func TestValidateProviderCollections_DeadSocketCostsOnlyTheSocket(t *testing.T) 
 		"a refused socket gets no subscription")
 	require.Len(t, collectEndpoints(wsSubscriptions, []*lavasession.RPCStaticProviderEndpoint{provider}, nil, ""), 1,
 		"configured-ness is not admission")
-	require.Equal(t, []commonlib.NodeUrl{provider.NodeUrls[0]}, admittedNodeUrls(provider, admission))
+	require.Equal(t, []commonlib.NodeUrl{provider.NodeUrls[0]}, admittedNodeUrls(provider, provider.NodeUrls, admission))
 }
 
 // A socket's own checks run over the socket; with websocket verification on, one that
@@ -224,7 +224,7 @@ func TestValidateProviderCollections_StandaloneExtensionOnly(t *testing.T) {
 
 func TestAdmittedNodeUrls_KeepsOrderAndIdentityWhenNothingIsRefused(t *testing.T) {
 	provider := staticProvider("ETH1", commonlib.NodeUrl{Url: "https://a"}, commonlib.NodeUrl{Url: "https://b"})
-	kept := admittedNodeUrls(provider, chainlib.ProviderAdmission{})
+	kept := admittedNodeUrls(provider, provider.NodeUrls, chainlib.ProviderAdmission{})
 	require.True(t, &kept[0] == &provider.NodeUrls[0], "no allocation when nothing was refused")
 }
 

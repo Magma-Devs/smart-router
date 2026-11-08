@@ -357,6 +357,28 @@ func TestFetchEndpointConnection_InternalPath(t *testing.T) {
 		require.Len(t, got, 1)
 		assert.Equal(t, "https://avax.example/ext/bc/P", got[0].endpoint.NetworkAddress)
 	})
+
+	t.Run("a path the provider lost passes it over instead of falling back", func(t *testing.T) {
+		// MAG-4214: the provider's /v2 url failed chain-id and was refused, its /v3
+		// url was kept. A v2 api must not fall back onto the /v3 url, where no node
+		// serves it: the provider is passed over for the request, with no error, so
+		// selection moves on to another provider. Its v3 apis are unaffected.
+		lost := newProvider(newEndpoint(t, "https://ton.example/api/v3", "/v3"))
+		lost.UnservedInternalPaths = map[string]struct{}{"/v2": {}}
+
+		connected, endpoints, _, err := lost.fetchEndpointConnectionFromConsumerSessionWithProvider(
+			ctx, endpointPickSkipDisabled, true, "", nil, path("/v2"))
+		require.NoError(t, err, "passed over, not blocked: its /v3 endpoint is healthy")
+		require.False(t, connected)
+		require.Empty(t, endpoints)
+
+		got := fetchAll(lost, path("/v3"))
+		require.Len(t, got, 1)
+		assert.Equal(t, "https://ton.example/api/v3", got[0].endpoint.NetworkAddress)
+
+		// A path the provider was never configured for keeps today's fallback.
+		assert.Len(t, fetchAll(lost, path("/v4")), 1)
+	})
 }
 
 // TestFetchEndpointConnection_DirectRPC_SkipsWebsocketEndpoints is the regression guard for
