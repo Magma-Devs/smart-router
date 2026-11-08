@@ -475,6 +475,10 @@ the head, is never listed, and `lava-extension: none` never produces it. The hea
 HTTP response header on JSON-RPC, REST and Tendermint RPC, and as response metadata on gRPC;
 messages over a WebSocket carry no headers.
 
+A node configured with an extension offers it only while it serves it. When the only nodes
+declaring one were refused it at startup, were unreachable then, or cannot take the request, the
+request is served from a node without it and the reply says so the same way.
+
 On the operator side the router logs a WARN once per extension per endpoint, the first time a
 reply reports it, naming the extension, chain and interface, and counts every such request in
 `smartrouter_extension_unavailable_total{spec, apiInterface, extension}`

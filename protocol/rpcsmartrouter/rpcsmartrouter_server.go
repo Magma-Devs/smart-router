@@ -1723,8 +1723,10 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// appendHeadersToRelayResult appends this request's cross-validation response headers to
 	// returnedResult.Reply.Metadata, so the cached entry (a snapshot of the reply taken here, see
 	// cacheWriteReplySnapshot) does not carry per-request CV/GUID headers that would then be
-	// replayed verbatim to unrelated stateless requests on a cache hit.
-	if err == nil && relayProcessor.GetSelection() == relaycore.CrossValidation && returnedResult != nil && returnedResult.Reply != nil {
+	// replayed verbatim to unrelated stateless requests on a cache hit. A winner served after
+	// the request degraded is not written either (skipCacheWriteAfterDegrade, MAG-4729).
+	if err == nil && relayProcessor.GetSelection() == relaycore.CrossValidation && returnedResult != nil && returnedResult.Reply != nil &&
+		!skipCacheWriteAfterDegrade(ctx, relayProcessor) {
 		rpcss.tryCacheWrite(ctx, protocolMessage, returnedResult)
 	}
 
@@ -3063,8 +3065,9 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				// stragglers a dissenter's late response would land LAST, overwriting the cache
 				// with the exact data the quorum just outvoted — served to subsequent stateless
 				// requests until TTL (CV requests themselves never read the cache). The consensus
-				// winner is cache-written once, post-quorum, in SendParsedRelay.
-				if selection != relaycore.CrossValidation {
+				// winner is cache-written once, post-quorum, in SendParsedRelay. Nor is a reply
+				// written once the request degraded (skipCacheWriteAfterDegrade, MAG-4729).
+				if selection != relaycore.CrossValidation && !skipCacheWriteAfterDegrade(goroutineCtx, relayProcessor) {
 					rpcss.tryCacheWrite(goroutineCtx, protocolMessage, localRelayResult)
 				}
 			}
@@ -4736,6 +4739,25 @@ func cacheAnsweredEarlierAttempt(relayProcessor *relaycore.RelayProcessor) bool 
 	return false
 }
 
+// skipCacheWriteAfterDegrade reports whether the request's reply must stay out of the cache
+// because an attempt went out without an extension the caller asked for, and logs the skip
+// (MAG-4729). The entry would sit under a key that names the caller's lava-extension, so every
+// repeat request would be answered from it: data from a node without the extension, with no
+// Lava-Extension-Unavailable, since a cache hit never reaches the degrade path that records it,
+// and still after a node serving the extension is back. Not caching costs only the hits the
+// request would have had while degraded.
+func skipCacheWriteAfterDegrade(ctx context.Context, relayProcessor *relaycore.RelayProcessor) bool {
+	degraded := relayProcessor.GetDegradedExtensions()
+	if len(degraded) == 0 {
+		return false
+	}
+	utils.LavaFormatDebug("cache write skipped: served without an extension the caller asked for",
+		utils.LogAttr("extensions", degraded),
+		utils.LogAttr("GUID", ctx),
+	)
+	return true
+}
+
 // tryCacheWrite attempts to write a successful relay response to the cache.
 // It runs in a separate goroutine to avoid blocking the relay response.
 // Cache writes are skipped when:
@@ -5562,6 +5584,13 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				if err != nil {
 					return err
 				}
+				// This attempt goes out without its extensions. One can parse as offered and still
+				// have no node to take it here: the policy is built from the add-ons both tiers
+				// declare, before verification, so an extension whose only node was refused it at
+				// boot, or was unreachable then, is still in it. Record the ones the caller asked
+				// for, so the reply names them as it does when no node declares them (MAG-4729);
+				// otherwise a non-archive answer to an archive request reads as a real one.
+				relayProcessor.AddDegradedExtensions(rpcss.callerRequestedExtensions(protocolMessage, extensions))
 				localRelayData.Extensions = []string{} // reset request data extensions in our local copy
 				extensions = []*spectypes.Extension{}  // reset extensions too so we wont hit SetDisallowDegradation
 			} else {
@@ -6036,6 +6065,22 @@ func (rpcss *RPCSmartRouterServer) getExtensionsFromDirectiveHeaders(directiveHe
 	return extensionslib.ExtensionInfo{LatestBlock: rpcss.getLatestBlockAllowStale()}
 }
 
+// callerRequestedExtensions returns the names among extensions that the request's lava-extension
+// directive asked for, read as ParseRelay reads it. The router also adds extensions on its own,
+// such as archive for an eth_call deep behind the head, and never reports those back (MAG-3935),
+// so they are left out. The names returned are the spec's, not the header's, so the warn-once
+// register can keep them past the request (MAG-3881).
+func (rpcss *RPCSmartRouterServer) callerRequestedExtensions(protocolMessage chainlib.ProtocolMessage, extensions []*spectypes.Extension) []string {
+	requested := rpcss.getExtensionsFromDirectiveHeaders(protocolMessage.GetDirectiveHeaders()).AdditionalExtensions
+	var named []string
+	for _, extension := range extensions {
+		if slices.Contains(requested, extension.Name) {
+			named = append(named, extension.Name)
+		}
+	}
+	return named
+}
+
 func (rpcss *RPCSmartRouterServer) HandleDirectiveHeadersForMessage(chainMessage chainlib.ChainMessage, directiveHeaders map[string]string) {
 	if timeoutStr, ok := directiveHeaders[common.RELAY_TIMEOUT_HEADER_NAME]; ok {
 		// Any caller can send this, unauthenticated. A value that is not a positive duration is
@@ -6247,6 +6292,7 @@ type RelayProcessorForHeaders interface {
 	GetCrossValidationQueriedProviders() []string // all providers queried (even if response not received)
 	GetUsedProviders() *lavasession.UsedProviders
 	NodeErrors() (ret []common.RelayResult)
+	GetDegradedExtensions() []string // the caller's extensions an attempt was sent without (MAG-4729)
 }
 
 // appendHeadersToRelayResult returns the cross-validation pending-providers list it computed for
@@ -6654,8 +6700,11 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	}
 
 	// The caller asked for an extension no node here offers, so the request was served without it
-	// (MAG-3935). Say so, or a non-archive answer to an archive request reads as a real one.
-	if unavailable := protocolMessage.GetUnavailableExtensions(); len(unavailable) > 0 {
+	// (MAG-3935). Say so, or a non-archive answer to an archive request reads as a real one. Parsing
+	// finds the ones no node declares; the degrade path records the ones a node declares but none
+	// could take this request (MAG-4729). The two never share a name: parsing never applies the
+	// first, so no attempt can have dropped them.
+	if unavailable := slices.Concat(protocolMessage.GetUnavailableExtensions(), relayProcessor.GetDegradedExtensions()); len(unavailable) > 0 {
 		metadataReply = append(metadataReply, pairingtypes.Metadata{
 			Name:  common.EXTENSION_UNAVAILABLE_HEADER_NAME,
 			Value: strings.Join(unavailable, ","),
