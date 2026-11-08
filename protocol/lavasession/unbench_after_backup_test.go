@@ -210,7 +210,10 @@ func TestPinnedProvider_EmptyPoolStillReleasesTheBlock(t *testing.T) {
 	for providerAddress := range css {
 		require.Equal(t, "lava@primary0", providerAddress, "the pin must be honoured, not replaced")
 	}
-	require.Equal(t, uint64(1), csm.numberOfResets)
+	// The pinned provider is the only one a release can hand this request, so it is the only one
+	// released: the other primary's block stands for every other relay (MAG-4731).
+	require.Zero(t, csm.numberOfResets, "a pinned request releases its provider, not the pool")
+	require.ElementsMatch(t, []string{"lava@primary1"}, csm.currentlyBlockedProviderAddresses)
 }
 
 // The pinned path must not fall through to another provider: a pin exists precisely so the request
@@ -346,7 +349,8 @@ func TestPinnedProvider_CaseFoldedNameStillReleasesTheBlock(t *testing.T) {
 	for providerAddress := range css {
 		require.Equal(t, "lava@primary0", providerAddress, "the router's own spelling must win downstream")
 	}
-	require.Equal(t, uint64(1), csm.numberOfResets)
+	require.Zero(t, csm.numberOfResets, "a pinned request releases its provider, not the pool")
+	require.ElementsMatch(t, []string{"lava@primary1"}, csm.currentlyBlockedProviderAddresses)
 }
 
 // Why the caller must drop the pin itself, rather than leaving it to selection to sort out.
@@ -407,7 +411,9 @@ func TestPinnedProvider_ExactSpellingAmongCaseTwinsStillReleases(t *testing.T) {
 	for providerAddress := range css {
 		require.Equal(t, "lava@Node-A", providerAddress, "the exact spelling must win over its case-twin")
 	}
-	require.Equal(t, uint64(1), csm.numberOfResets)
+	require.Zero(t, csm.numberOfResets, "a pinned request releases its provider, not the pool")
+	require.ElementsMatch(t, []string{"lava@node-a"}, csm.currentlyBlockedProviderAddresses,
+		"the case-twin the pin does not spell exactly stays blocked")
 }
 
 // A pin this request already tried cannot be served after a release: selection looks it up by its
@@ -418,8 +424,9 @@ func TestPinnedProvider_TriedPinIsNotAnsweredForByItsCaseTwin(t *testing.T) {
 	ctx := context.Background()
 
 	tried := map[string]struct{}{"lava@Node-A": {}}
-	require.False(t, csm.releaseCouldServeThisRequest(tried, "", nil, "lava@Node-A", ctx),
-		"a release for a pin that already failed in this request only destroys state")
-	require.True(t, csm.releaseCouldServeThisRequest(map[string]struct{}{}, "", nil, "lava@Node-A", ctx),
-		"control: the same pin, not yet tried, is a release that can help")
+	_, couldServe := csm.releaseCouldServeThisRequest(tried, "", nil, "lava@Node-A", ctx)
+	require.False(t, couldServe, "a release for a pin that already failed in this request only destroys state")
+	pinned, couldServe := csm.releaseCouldServeThisRequest(map[string]struct{}{}, "", nil, "lava@Node-A", ctx)
+	require.True(t, couldServe, "control: the same pin, not yet tried, is a release that can help")
+	require.Equal(t, "lava@Node-A", pinned, "and the provider it may release is the twin the pin spells exactly")
 }
