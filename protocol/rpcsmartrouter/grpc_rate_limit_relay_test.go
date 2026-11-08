@@ -183,8 +183,11 @@ func relayGRPCCall(t *testing.T, server *RPCSmartRouterServer) {
 // A gRPC upstream that rate-limits the router and says how long to wait is held off for that long,
 // as an HTTP one is: "Retry-After is the floor" (docs/RATE-LIMIT-HOLDOFF.md). Its refusal completes
 // the relay as a node error, so the wait used to die with the GRPCStatusError that carried it, and
-// the endpoint was held off for the default first hold-off whatever it asked for (MAG-4914). Driven
-// through the whole relay path: the hold-off is recorded where the attempt's session is released.
+// the endpoint was held off for the default first hold-off whatever it asked for (MAG-4914). The wait
+// counts in either block of the reply: a status-only reply has no header block, and grpc-go's own
+// retry reads grpc-retry-pushback-ms from the trailer, where the request path never looked
+// (MAG-4915). Driven through the whole relay path: the hold-off is recorded where the attempt's
+// session is released.
 func TestRelay_GRPCRateLimitIsHeldOffForTheWaitItAskedFor(t *testing.T) {
 	// Twice the default first hold-off, so a hold-off of the asked length cannot be the default.
 	asked := 2 * holdoff.InitialHoldoff
@@ -200,6 +203,8 @@ func TestRelay_GRPCRateLimitIsHeldOffForTheWaitItAskedFor(t *testing.T) {
 	}{
 		{"grpc-retry-pushback-ms in the header", "RESOURCE_EXHAUSTED", metadata.Pairs("grpc-retry-pushback-ms", pushback), nil, asked},
 		{"retry-after in the header", "RESOURCE_EXHAUSTED", metadata.Pairs("retry-after", retryAfter), nil, asked},
+		{"grpc-retry-pushback-ms in the trailer", "RESOURCE_EXHAUSTED", nil, metadata.Pairs("grpc-retry-pushback-ms", pushback), asked},
+		{"retry-after in the trailer", "RESOURCE_EXHAUSTED", nil, metadata.Pairs("retry-after", retryAfter), asked},
 		// The automation test's two controls: a rate limit that asks for nothing gets the default,
 		// and a bare RESOURCE_EXHAUSTED is no rate limit at all (grpc-go mints it for an oversized
 		// message too).
