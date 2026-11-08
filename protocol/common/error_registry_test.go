@@ -1285,13 +1285,15 @@ func TestIsXRPLRejection(t *testing.T) {
 func TestXRPLAPIErrorRows(t *testing.T) {
 	rows := map[*LavaError][]string{
 		LavaErrorNodeSyncing:            {"noNetwork", "noCurrent", "noClosed", "notSynced", "notReady"},
-		LavaErrorNodeServiceUnavailable: {"amendmentBlocked"},
+		LavaErrorNodeServiceUnavailable: {"amendmentBlocked", "unlBlocked"},
 		LavaErrorNodeRateLimited:        {"tooBusy", "slowDown"},
-		LavaErrorNodeInternalError:      {"internal", "internalJson", "internalSubmit", "internalTransaction"},
+		LavaErrorNodeInternalError:      {"internal", "internalJson", "internalSubmit", "internalTransaction", "dbDeserialization", "json_rpc"},
 		LavaErrorChainBlockNotFound:     {"lgrNotFound", "lgrNotValidated"},
 		LavaErrorChainTxNotFound:        {"txnNotFound"},
-		LavaErrorChainAccountNotFound:   {"actNotFound", "srcActNotFound", "dstActNotFound", "delegateActNotFound", "entryNotFound", "objectNotFound"},
+		LavaErrorNodeResourceNotFound:   {"actNotFound", "srcActNotFound", "dstActNotFound", "delegateActNotFound", "entryNotFound", "objectNotFound", "badCredentials"},
 		LavaErrorNodeMethodNotFound:     {"unknownCmd"},
+		LavaErrorNodeUnimplemented:      {"notEnabled", "notImpl"},
+		LavaErrorNodeAccessDenied:       {"noPermission", "forbidden"},
 		LavaErrorUserInvalidParams: {
 			"invalidParams", "invalidTransaction", "badSyntax", "notSupported", "highFee", "badSecret",
 			"actMalformed", "badIssuer", "badKeyType", "channelAmtMalformed", "channelMalformed", "commandMissing",
@@ -1300,6 +1302,8 @@ func TestXRPLAPIErrorRows(t *testing.T) {
 			"malformedStream", "oracleMalformed", "publicMalformed", "sendMaxMalformed", "signingMalformed",
 			"srcActMalformed", "srcActMissing", "srcCurMalformed", "srcIsrMalformed", "transactionSigned",
 			"unexpectedLedgerType",
+			"wrongNetwork", "badFeature", "noEvents", "badMarket", "noPathRequest", "deprecated", "invalidHotWallet",
+			"badSeed", "masterDisabled", "alreadyMultisig", "alreadySingleSig",
 		},
 	}
 	for lavaError, names := range rows {
@@ -1348,15 +1352,37 @@ func TestXRPLTerQueuedRowKeepsTheGateOff(t *testing.T) {
 // ledger or the transaction is retried elsewhere without losing its score; an account or object
 // missing from a ledger the node holds is the chain's answer, neither retried nor blamed.
 func TestXRPLNotFoundRows(t *testing.T) {
-	for _, name := range []string{"lgrNotFound", "lgrNotValidated", "txnNotFound"} {
+	// Every "not found" is this node's answer, not the chain's: retried on another node, and the
+	// node keeps its score (MAG-4817 rule 2).
+	for _, name := range []string{
+		"lgrNotFound", "lgrNotValidated", "txnNotFound",
+		"actNotFound", "srcActNotFound", "dstActNotFound", "delegateActNotFound", "entryNotFound", "objectNotFound", "badCredentials",
+	} {
 		c := ClassifyNodeErrorForRetry(ChainFamilyXRP, TransportJsonRPC, 200, name+": detail")
 		require.False(t, c.IsNonRetryable, name)
 		require.True(t, c.IsDataScope, name)
 		require.False(t, c.IsNodeAtFault, name)
 	}
-	for _, name := range []string{"actNotFound", "srcActNotFound", "dstActNotFound", "delegateActNotFound", "entryNotFound", "objectNotFound"} {
-		c := ClassifyNodeErrorForRetry(ChainFamilyXRP, TransportJsonRPC, 200, name+": detail")
-		require.True(t, c.IsNonRetryable, name)
-		require.False(t, c.IsNodeAtFault, name)
+}
+
+// A client that asks for ripplerpc 3.0 gets rippled's real HTTP status instead of 200. The XRP row
+// still decides, ahead of the generic status rows.
+func TestXRPLRowsWinOverARealHTTPStatus(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		name   string
+		want   *LavaError
+	}{
+		{404, "lgrNotFound", LavaErrorChainBlockNotFound},
+		{404, "txnNotFound", LavaErrorChainTxNotFound},
+		{404, "actNotFound", LavaErrorNodeResourceNotFound},
+		{429, "tooBusy", LavaErrorNodeRateLimited},
+		{503, "noNetwork", LavaErrorNodeSyncing},
+		{503, "wrongNetwork", LavaErrorUserInvalidParams},
+		{400, "actMalformed", LavaErrorUserInvalidParams},
+		{500, "badFeature", LavaErrorUserInvalidParams},
+	} {
+		msg := fmt.Sprintf("HTTP %d: %s: detail", tc.status, tc.name)
+		require.Equal(t, tc.want.Name, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, tc.status, msg).Name, msg)
 	}
 }
