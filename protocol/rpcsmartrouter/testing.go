@@ -196,7 +196,7 @@ func CreateTestRPCSmartRouterCobraCommand() *cobra.Command {
 				}
 			}
 			_ = networkChainId // chain-id flag kept for CLI compatibility but unused in static-spec mode
-			utils.LavaFormatInfo("smart-router Binary Version: " + version.Version)
+			utils.LavaFormatInfo("smart-router Binary Version: " + version.Version + " commit " + version.Commit)
 			rand.InitRandomSeed()
 			numberOfNodeParallelConnections, err := cmd.Flags().GetUint(chainproxy.ParallelConnectionsFlag)
 			if err != nil {
