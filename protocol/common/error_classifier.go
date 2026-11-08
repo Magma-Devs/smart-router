@@ -147,6 +147,14 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// "method" to appear alongside the trigger phrase.
 		{MessageContains("method not found"), LavaErrorNodeMethodNotFound},
 		{MessageContains("method not supported"), LavaErrorNodeMethodNotSupported},
+		// A node that does not serve pending state answers a call tagged "pending" with this (Tatum on
+		// GK8 Hoodi, eth_call; MAG-5021). The method is on its surface and the block tag is not, so
+		// it is "can't serve here", the verdict Sui's FEATURE_UNAVAILABLE gets: a peer is asked and
+		// the endpoint is not blamed. Under the -32000 catch-all it was NODE_SERVER_ERROR, at fault,
+		// and those calls alone switched the URL off for every method. Matched on the text because
+		// the code says nothing here; the whole phrase is the scope, so no "method" word is needed.
+		// Not geth's "pending state is not available": that node serves pending and has none yet.
+		{MessageContains("pending state is not supported"), LavaErrorNodeMethodNotSupported},
 		{MessageContains("unknown method"), LavaErrorNodeMethodNotFound},
 		{MessageContains("method does not exist"), LavaErrorNodeMethodNotFound},
 		{MessageRegex(`(?i)method .* does not exist`), LavaErrorNodeMethodNotFound},
