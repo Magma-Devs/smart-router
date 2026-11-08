@@ -1192,6 +1192,10 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 				if grpcErr.RateLimited() && common.ClassifyError(nil, d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage) == common.LavaErrorUnknown {
 					result.ApplyLavaErrorClassification(common.LavaErrorNodeRateLimited)
 				}
+				// The wait the node asked for rides on err, which this branch does not return, so the
+				// hold-off read 0 and held the endpoint off for its default whatever was asked: a vendor
+				// that asked for ten minutes was asked again after about 30 s (MAG-4914).
+				result.RetryAfter, _ = common.RetryAfterFrom(err)
 			}
 			return result, nil
 		}

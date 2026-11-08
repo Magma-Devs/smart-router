@@ -14,11 +14,12 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   keep hammering the account through its other chains. The provider-wide hold-off ends
   when its longest-held member does.
 - **Retry-After is the floor.** When the upstream said how long to wait
-  (`common.RetryAfterFrom` on the typed error), the hold-off is at least that long,
-  bounded at 1h including jitter. Otherwise a per-URL exponential: 30s doubling per
-  consecutive strike, capped at 30m before jitter. Jitter extends each hold-off by up to
-  +20% and never shortens it, so a fleet held off by one vendor-wide limit does not return
-  in a synchronized burst.
+  (`common.RetryAfterFrom` on the typed error, or `RelayResult.RetryAfter` for a gRPC
+  status, whose refusal completes the relay and so returns no error), the hold-off is at
+  least that long, bounded at 1h including jitter. Otherwise a per-URL exponential: 30s
+  doubling per consecutive strike, capped at 30m before jitter. Jitter extends each
+  hold-off by up to +20% and never shortens it, so a fleet held off by one vendor-wide
+  limit does not return in a synchronized burst.
 - **One strike per hold-off.** A strike is a hold-off that ended in another 429, not a
   429. A 429 that arrives while the URL is still held off adds no strike and leaves the
   hold-off where it is — `RecordRateLimit` returns what is left of it — unless its
