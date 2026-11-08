@@ -82,6 +82,7 @@ type failedReplyClientRead struct {
 	contentType string
 	guid        string
 	header      http.Header
+	nodeError   string // lava-identified-node-error
 }
 
 // failedReplyRelayTimeout is the attempt window every request here asks for in lava-relay-timeout.
@@ -149,6 +150,7 @@ func startFailedReplyRouter(t *testing.T, iface failedReplyInterface, upstreamUR
 			contentType: response.Header.Get("Content-Type"),
 			guid:        response.Header.Get(common.GUID_HEADER_NAME),
 			header:      response.Header,
+			nodeError:   response.Header.Get(common.LAVA_IDENTIFIED_NODE_ERROR_HEADER),
 		}
 	}
 }
@@ -258,6 +260,19 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 				read := startFailedReplyRouter(t, iface, answeringUpstream(t, http.StatusTooManyRequests, quota, "application/json"))()
 				require.Equal(t, http.StatusTooManyRequests, read.status, "not a router-made 503")
 				require.Equal(t, quota, read.body)
+				require.Empty(t, read.nodeError, "the upstream refused for rate; no node answered (MAG-3030)")
+			})
+
+			// The shape a vendor's rate limiter answers with, and the simulator since MAG-3030 was
+			// filed: an HTTP 429 whose body is prose, which the JSON-RPC body check reads as a
+			// malformed node reply. The relay still fails on the status, and the client was told a
+			// node had answered with an error (MAG-3030).
+			t.Run("429 with a prose body is not a node error", func(t *testing.T) {
+				const refusal = "Too Many Requests"
+				read := startFailedReplyRouter(t, iface, answeringUpstream(t, http.StatusTooManyRequests, refusal, "text/plain; charset=utf-8"))()
+				require.Equal(t, http.StatusTooManyRequests, read.status)
+				require.Equal(t, refusal, read.body)
+				require.Empty(t, read.nodeError, "the upstream refused for rate; no node answered")
 			})
 
 			t.Run("refused connection is the router's 502", func(t *testing.T) {
