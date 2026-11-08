@@ -425,9 +425,14 @@ func (p *connPool[C]) reconnectOnFreshLadder(ctx context.Context) error {
 }
 
 // reconnectOnSharedLadder waits on the pool's ladder, floored by the Retry-After the previous
-// failed dial carried, and dials once.
+// failed dial carried, and dials once. Past the ladder's last rung it keeps waiting that rung:
+// NextBackoff answers no wait there, and a restore after the tenth failure in a row used to redial
+// at once (MAG-4873).
 func (p *connPool[C]) reconnectOnSharedLadder(ctx context.Context) error {
-	delay, _ := p.backoff.NextBackoff()
+	delay, onLadder := p.backoff.NextBackoff()
+	if !onLadder {
+		delay = p.backoff.LastBackoff()
+	}
 	p.lock.RLock()
 	delay = reconnectDelay(delay, p.lastReconnectErr)
 	p.lock.RUnlock()

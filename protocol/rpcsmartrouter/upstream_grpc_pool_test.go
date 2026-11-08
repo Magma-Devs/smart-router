@@ -498,6 +498,28 @@ func TestUpstreamGRPCPool_ReconnectWithBackoff_ContextCanceled(t *testing.T) {
 	assert.Nil(t, pool.reconnectAttempt.Load())
 }
 
+// MAG-4873: past the ladder's last rung a reconnect keeps waiting that rung. The ladder answers
+// no wait there, and from the eleventh failed reconnect in a row the pool redialed at once. The
+// dial fails at once (grpc:// without allow-insecure), so each call's time is its wait.
+func TestUpstreamGRPCPool_ReconnectWithBackoff_KeepsTheLastRungPastTheLadder(t *testing.T) {
+	pool := NewUpstreamGRPCPool(&common.NodeUrl{Url: "grpc://127.0.0.1:1"})
+	const lastRung = 20 * time.Millisecond
+	pool.backoff = &ExponentialBackoff{
+		InitialInterval: 10 * time.Millisecond,
+		MaxInterval:     time.Second,
+		Multiplier:      2.0,
+		MaxRetries:      2,
+	}
+
+	for i := 1; i <= 4; i++ {
+		start := time.Now()
+		require.Error(t, pool.ReconnectWithBackoff(context.Background()), "reconnect %d", i)
+		if i > 2 {
+			assert.GreaterOrEqual(t, time.Since(start), lastRung, "reconnect %d is past the ladder and waits its last rung", i)
+		}
+	}
+}
+
 // startSilentListener accepts TCP connections and never answers on them, so a gRPC dial to
 // it waits out its whole timeout.
 func startSilentListener(t *testing.T) string {

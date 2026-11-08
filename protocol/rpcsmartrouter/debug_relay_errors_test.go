@@ -85,7 +85,7 @@ func TestRelayInnerDirect_ARefusedAttemptIsCountedAsAProtocolError(t *testing.T)
 	msg := &mockChainMessage{requestData: []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`)}
 	_, err := h.rpcss.relayInnerDirect(
 		context.Background(), h.session, &common.RelayResult{}, 5*time.Second, 30*time.Second,
-		msg, msg.requestData, func() bool { return false }, nil,
+		msg, msg.requestData, func() bool { return false }, nil, false,
 	)
 	require.Error(t, err)
 
