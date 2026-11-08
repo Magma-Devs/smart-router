@@ -1651,6 +1651,18 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 				utils.LavaFormatDebug("Backup providers failed, releasing the blocked provider list", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 			}
 
+			// A cross-validated request ends the cascade here (MAG-2785). Both steps below serve
+			// it from providers the router has blocked: the release returns the whole blocked list
+			// to the pool and selects from it, and the last chance hands the request a blocked
+			// provider outright, group-blind. Either way that provider's answer is counted as a
+			// vote, so the quorum would vouch for an answer from a provider the router has stopped
+			// trusting. The request comes back short instead, and the caller fails it as
+			// insufficient-capacity. It returns PairingListEmptyError whatever the backup tier
+			// answered, because that is what the caller reads as running out of providers.
+			if tempIgnoredProviders.crossValidation {
+				return nil, utils.LavaFormatDebugErr("cross-validation is never served from a blocked provider, selection ends short", PairingListEmptyError, utils.LogAttr("GUID", ctx))
+			}
+
 			// Every primary is blocked and backup could not serve either, so release the standing
 			// blocked list and give the primaries one more chance. This used to run at the top of
 			// every GetSessions, which refilled validAddresses before the backup tier was ever
@@ -1729,6 +1741,13 @@ type GetSessionsOptions struct {
 	// enables a root collection alongside versioned ones (STRK) must keep its
 	// root traffic on the root url.
 	InternalPath *string
+	// CrossValidation marks a cross-validated request (MAG-2785). A quorum is only as good as the
+	// providers it is drawn from, so when selection runs out of providers such a request does not
+	// end the failover cascade the way every other request does: it neither releases the blocked
+	// list nor takes the last chance on a blocked provider. It comes back short instead, and the
+	// caller fails it as insufficient-capacity. The backup tier is not part of this: it is
+	// consulted as for any request.
+	CrossValidation bool
 }
 
 func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProviderNumber int, cuNeededForSession uint64, usedProviders UsedProvidersInf, requestedBlock int64, addon string, extensions []*spectypes.Extension, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, opts ...GetSessionsOptions) (
@@ -1857,6 +1876,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		providers:          initUnwantedProviders,
 		triedByThisRequest: maps.Clone(initUnwantedProviders),
 		currentEpoch:       csm.atomicReadCurrentEpoch(),
+		crossValidation:    len(opts) > 0 && opts[0].CrossValidation,
 	}
 	// Read here, after the fleet sticky claim has been resolved into selectedProvider above: any
 	// directive of the caller's outranks the router's own preference.
