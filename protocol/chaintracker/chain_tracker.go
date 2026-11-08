@@ -934,47 +934,77 @@ func (cs *ChainTracker) waitOutRateLimitHoldoff(ctx context.Context) error {
 	return sleepCtx(ctx, wait)
 }
 
-func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) {
-	var newLatestBlock int64
-	for idx := 0; idx < initRetriesCount+1; idx++ {
+// retryInitFetch runs one init step, fetch, until it answers or its attempts are spent: the
+// first attempt and initRetriesCount retries. Both init steps (the head, then the previous
+// blocks) go through here, so they get the same attempts and the same spacing; they used to be
+// two loops that had drifted one attempt apart (MAG-5022).
+//
+// MAG-2159 finding 3: failed attempts on a per-endpoint (flat) tracker are spaced
+// flatPollInterval apart so a failing endpoint cannot burst the upstream at startup.
+// Cancellation stays prompt (sleepCtx returns at once on ctx.Done), and there is no delay after
+// the last attempt. Every outcome informs the rate-limit floor and the hold-off registry, as a
+// poll's does, and a rate-limited attempt ends the burst at once: another attempt now would re-arm
+// a ban-type limit. The applied hold-off rides the error as its Retry-After, so the caller retrying
+// the start (endpointstate.startTrackerWithRetry) waits it out with the tracker in retrying_start
+// naming the 429, not sleeping inside StartAndServe where the state would read "starting" with no
+// error for the whole wait.
+//
+// The spent-attempts failure is returned, not logged at ERROR. The one production caller
+// retries the start for as long as the endpoint is down and warns once per attempt with this
+// error (startTrackerWithRetry), so an ERROR here described a dead endpoint, a non-fatal
+// condition the router handles, as "critical" every 30 s or less for the whole outage.
+func (cs *ChainTracker) retryInitFetch(ctx context.Context, step string, fetch func(context.Context) error) error {
+	var err error
+	for attempt := 0; attempt <= initRetriesCount; attempt++ {
 		if err = cs.waitOutRateLimitHoldoff(ctx); err != nil {
 			return err
 		}
-		newLatestBlock, err = cs.iChainFetcherWrapper.FetchLatestBlockNum(ctx)
-		// Every init outcome informs the rate-limit floor and the registry, as a poll's does.
+		err = fetch(ctx)
 		heldFor := cs.noteFetchOutcome(err)
 		if err == nil {
-			break
+			return nil
 		}
 		if errors.Is(err, common.StatusCodeError429) {
-			// The upstream refused for rate: the burst ends here. Another attempt now would
-			// re-arm a ban-type limit. The applied hold-off rides the error as its Retry-After, so
-			// the caller retrying the start (endpointstate.startTrackerWithRetry) waits it out with
-			// the tracker in retrying_start naming the 429 — not sleeping inside StartAndServe,
-			// where the state would read "starting" with no error for the whole wait.
-			return utils.LavaFormatWarning("chain tracker init: upstream rate-limited the first fetch, backing off", common.RateLimited(err, heldFor), utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
+			return utils.LavaFormatWarning("chain tracker init: upstream rate-limited the "+step+", backing off", common.RateLimited(err, heldFor), utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
 		}
-		utils.LavaFormatDebug("failed fetching block num data on chain tracker init, retry", utils.Attribute{Key: "retry Num", Value: idx}, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
-		// MAG-2159 finding 3: space out failed init retries for per-endpoint (flat) trackers
-		// so a failing endpoint cannot burst the upstream at startup. Cancellation stays
-		// prompt (sleepCtx returns immediately on ctx.Done). No delay after the last attempt.
-		if cs.flatPollInterval > 0 && idx < initRetriesCount {
+		if attempt == initRetriesCount {
+			break
+		}
+		utils.LavaFormatDebug("chain tracker init: "+step+" failed, retrying",
+			utils.Attribute{Key: "attempt", Value: attempt + 1},
+			utils.Attribute{Key: "error", Value: err},
+			utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()},
+		)
+		if cs.flatPollInterval > 0 {
 			if ctxErr := sleepCtx(ctx, cs.flatPollInterval); ctxErr != nil {
 				return ctxErr
 			}
 		}
 	}
+	attributes := []utils.Attribute{
+		{Key: "step", Value: step},
+		{Key: "attempts", Value: initRetriesCount + 1},
+		{Key: "endpoint", Value: cs.endpoint.String()},
+	}
+	if errors.Is(err, common.ContextDeadlineExceededError) {
+		attributes = append(attributes, utils.Attribute{Key: "suggestion", Value: "If you encounter a 'context deadline exceeded' error, consider increasing the timeout configuration in the 'node-url' config option. Sometimes, the initial HTTPS/WSS communication takes a long time to establish a connection."})
+	}
+	return utils.LavaFormatDebugErr("chain tracker init: failed fetching data from the node", err, attributes...)
+}
+
+func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) error {
+	var newLatestBlock int64
+	err := cs.retryInitFetch(ctx, "head fetch", func(ctx context.Context) (err error) {
+		newLatestBlock, err = cs.iChainFetcherWrapper.FetchLatestBlockNum(ctx)
+		return err
+	})
 	if err != nil {
-		// Add suggestion if error is due to context deadline exceeded
-		if errors.Is(err, common.ContextDeadlineExceededError) {
-			utils.LavaFormatError("suggestion -- If you encounter a 'context deadline exceeded' error, consider increasing the timeout configuration in the 'node-url' config option. Sometimes, the initial HTTPS/WSS communication takes a long time to establish a connection.", nil)
-		}
-		return utils.LavaFormatError("critical -- failed fetching data from the node, chain tracker creation error", err, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
+		return err
 	}
 	// Head-only (MAG-2218): there is no hash to seed a block queue with, and retrying
-	// fetchAllPreviousBlocks would exhaust its attempts and return the "chain tracker creation
-	// error" below — which start() propagates, leaving startTrackerWithRetry looping forever on a
-	// chain that is in fact healthy. Publish the head we just fetched and finish init.
+	// fetchAllPreviousBlocks would exhaust its attempts and return the init failure below, which
+	// start() propagates, leaving startTrackerWithRetry looping forever on a chain that is in fact
+	// healthy. Publish the head we just fetched and finish init.
 	if cs.headOnly {
 		// A reply can parse cleanly and still carry no usable height: an SVM result object with
 		// no context.slot unmarshals to slot 0 with a nil error. Nothing below this branch would
@@ -991,31 +1021,12 @@ func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) (err error) 
 		return nil
 	}
 
-	for idx := 0; idx < initRetriesCount; idx++ {
-		_, err = cs.fetchAllPreviousBlocks(ctx, newLatestBlock)
-		if err == nil {
-			break
-		}
-		if errors.Is(err, common.StatusCodeError429) {
-			// Same rule as the head fetch: a rate limit ends the burst, and the applied hold-off
-			// rides the error for the start retry to wait out.
-			heldFor := cs.noteFetchOutcome(err)
-			return utils.LavaFormatWarning("chain tracker init: upstream rate-limited the block fetch, backing off", common.RateLimited(err, heldFor), utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
-		}
-		utils.LavaFormatDebug("failed fetching data on chain tracker init, retry", utils.Attribute{Key: "retry Num", Value: idx}, utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
-		// MAG-2159 finding 3: same startup spacing for the previous-blocks init retries.
-		if cs.flatPollInterval > 0 && idx < initRetriesCount-1 {
-			if ctxErr := sleepCtx(ctx, cs.flatPollInterval); ctxErr != nil {
-				return ctxErr
-			}
-		}
-	}
+	err = cs.retryInitFetch(ctx, "block fetch", func(ctx context.Context) error {
+		_, err := cs.fetchAllPreviousBlocks(ctx, newLatestBlock)
+		return err
+	})
 	if err != nil {
-		// Add suggestion if error is due to context deadline exceeded
-		if errors.Is(err, common.ContextDeadlineExceededError) {
-			utils.LavaFormatError("suggestion -- If you encounter a 'context deadline exceeded' error, consider increasing the timeout configuration in the 'node-url' config option. Sometimes, the initial HTTPS/WSS communication takes a long time to establish a connection.", nil)
-		}
-		return utils.LavaFormatError("critical -- failed fetching data from the node, chain tracker creation error", err, utils.Attribute{Key: "endpoint", Value: cs.endpoint})
+		return err
 	}
 	cs.lastRealPoll = time.Now() // the init fetch is this tracker's first real poll
 	return nil
