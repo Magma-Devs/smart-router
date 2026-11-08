@@ -394,11 +394,16 @@ zero: `ChainID`, `ApiInterface`, `ProviderAddress`, `Method`, `NodeErrors`, `Pro
 Prometheus counter, so it answers on a router run without `--metrics-listen-address` too.
 
 * **Node errors** are counted where the router meters `smartrouter_node_errors_total`, under the
-  same rule: never on a stateful request (a write).
+  same rule: never on a stateful request (a write). The router's own health check is not counted
+  here either, although the metric counts it.
 * **Protocol errors** are counted where a direct attempt went out on the wire and got no answer
-  from the upstream: a refused or dropped connection, a body cut off or not JSON, or a hang past
-  the request's budget. These are not counted: an HTTP status (an answer), a request the router
-  could not build, a race loser or a client that hung up, and anything on gRPC.
+  from the upstream: a refused or dropped connection, a body cut off or not JSON, a hang past the
+  request's budget, or an attempt still silent when its window ran out. The last one counts even
+  when a retry then answers and the attempt is cancelled, because the silence came first: a
+  provider in simulator mode `hang` behind a `lava-relay-timeout: 300ms` window gets its row
+  although another provider answers the retry. These are not counted: an HTTP status (an answer),
+  a request the router could not build, an attempt cancelled inside its window (a race it lost, or
+  a client that hung up), anything on gRPC, a write, and the router's own health check.
 * `Method` is the API name the request was relayed as. A GraphQL operation with two root fields
   is `chainIdentifier&checkpoint`, not the metric's `batch:` label. Two kinds of name are the
   request's own text: a `Default-...` name for an api the spec does not declare, and a batch's or

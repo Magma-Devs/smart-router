@@ -132,15 +132,23 @@ func endpointCancellationIsExempt(isClientCancel bool, budgetExpired func() bool
 //   - The upstream did not answer. An HTTP status the JSON-RPC sender turned into an error is an
 //     answer, so it is a node or gateway fault, not a protocol one. REST statuses never reach this
 //     test: relayInnerDirect handles them in its status branch.
-//   - The router did not stop it. A race loser or a client that hung up is exempt, the same rule
-//     endpoint health follows, unless the request ran out of budget, which makes the silence a hang.
-func isProtocolFailure(transport common.TransportType, err error, isClientCancel bool, budgetExpired func() bool) bool {
+//   - The router did not cut it short inside its window. An attempt cancelled before its window
+//     (relayTimeout) ran out, by a race it lost or by a client that hung up, is exempt, the same
+//     rule endpoint health follows. Two things lift that: the request ran out of budget, which makes
+//     the silence a hang, or the attempt was still silent when its own window ran out
+//     (silentThroughWindow). Then the silence came first, and a retry answering afterwards only cut
+//     it short, so the attempt counts however it ended (MAG-4718 criterion 2, review 626-4).
+//     Endpoint health keeps its own rule, endpointCancellationIsExempt, unchanged.
+func isProtocolFailure(transport common.TransportType, err error, isClientCancel bool, budgetExpired func() bool, silentThroughWindow bool) bool {
 	if transport == common.TransportGRPC || err == nil || common.AsLavaError(err) == nil || errors.Is(err, lavasession.ErrBuildHTTPRequest) {
 		return false
 	}
 	var statusErr *lavasession.HTTPStatusError
 	if errors.As(err, &statusErr) {
 		return false
+	}
+	if isClientCancel && silentThroughWindow {
+		return true
 	}
 	return !endpointCancellationIsExempt(isClientCancel, budgetExpired)
 }

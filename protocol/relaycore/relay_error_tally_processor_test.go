@@ -20,15 +20,18 @@ type tallyingGetter struct{ *RelayErrorTally }
 func (tallyingGetter) GetChainIdAndApiInterface() (string, string) { return "testId", "testInterface" }
 
 // MAG-4718: each node error the relay processor meters is also counted in the router's own tally,
-// under the same rule as the metric: not on a stateful request, where X-1 of X errors is normal.
+// under the same rule as the metric: not on a stateful request, where X-1 of X errors is normal. The
+// router's own health check is not a client request and stays out of the tally (review 626-5).
 func TestRelayProcessor_CountsEachNodeErrorInTheRoutersOwnTally(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		selection Selection
-		counted   bool
+		name        string
+		selection   Selection
+		healthCheck bool
+		counted     bool
 	}{
-		{"stateless", Stateless, true},
-		{"stateful is not counted", Stateful, false},
+		{"stateless", Stateless, false, true},
+		{"stateful is not counted", Stateful, false, false},
+		{"the router's own health check is not counted", Stateless, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -42,6 +45,9 @@ func TestRelayProcessor_CountsEachNodeErrorInTheRoutersOwnTally(t *testing.T) {
 			require.NoError(t, err)
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
 			usedProviders := lavasession.NewUsedProviders(nil)
+			if tc.healthCheck {
+				usedProviders.MarkRouterHealthCheck()
+			}
 			tally := NewRelayErrorTally()
 
 			relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, tallyingGetter{tally},

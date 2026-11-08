@@ -32,26 +32,34 @@ func TestIsProtocolFailure(t *testing.T) {
 		err            error
 		isClientCancel bool
 		budgetExpired  func() bool
+		silent         bool // silentThroughWindow: still no answer when the attempt's window ran out
 		want           bool
 	}{
-		{"connection refused", jsonrpc, wire(fmt.Errorf("http request failed: %w", refused)), false, notExpired, true},
-		{"body cut off mid-read", jsonrpc, wire(fmt.Errorf("failed reading response: %w", io.ErrUnexpectedEOF)), false, notExpired, true},
-		{"REST body cut off mid-read", rest, wire(fmt.Errorf("failed reading response: %w", io.ErrUnexpectedEOF)), false, notExpired, true},
-		{"attempt timed out", jsonrpc, wire(fmt.Errorf("http request failed: %w", context.DeadlineExceeded)), false, notExpired, true},
-		{"body is not valid JSON", jsonrpc, wire(errors.New("malformed JSON-RPC response: body is not valid JSON")), false, notExpired, true},
-		{"a JSON-RPC 503 is an answer", jsonrpc, wire(&lavasession.HTTPStatusError{StatusCode: 503, Status: "503"}), false, notExpired, false},
-		{"a JSON-RPC 501 is an answer", jsonrpc, wire(&lavasession.HTTPStatusError{StatusCode: 501, Status: "501"}), false, notExpired, false},
-		{"refused before dialling", jsonrpc, fmt.Errorf("failed to build REST URL: %w", errors.New("bad path")), false, notExpired, false},
-		{"an HTTP request the client could not build, though the sender wraps it", jsonrpc, wire(fmt.Errorf("%w: %w", lavasession.ErrBuildHTTPRequest, errors.New("invalid method"))), false, notExpired, false},
-		{"race loser or client hang-up", jsonrpc, wire(context.Canceled), true, notExpired, false},
-		{"hang past the request budget", jsonrpc, wire(context.Canceled), true, expired, true},
-		{"no error", jsonrpc, nil, false, notExpired, false},
+		{"connection refused", jsonrpc, wire(fmt.Errorf("http request failed: %w", refused)), false, notExpired, false, true},
+		{"body cut off mid-read", jsonrpc, wire(fmt.Errorf("failed reading response: %w", io.ErrUnexpectedEOF)), false, notExpired, false, true},
+		{"REST body cut off mid-read", rest, wire(fmt.Errorf("failed reading response: %w", io.ErrUnexpectedEOF)), false, notExpired, false, true},
+		{"attempt timed out", jsonrpc, wire(fmt.Errorf("http request failed: %w", context.DeadlineExceeded)), false, notExpired, false, true},
+		{"body is not valid JSON", jsonrpc, wire(errors.New("malformed JSON-RPC response: body is not valid JSON")), false, notExpired, false, true},
+		{"a JSON-RPC 503 is an answer", jsonrpc, wire(&lavasession.HTTPStatusError{StatusCode: 503, Status: "503"}), false, notExpired, false, false},
+		{"a JSON-RPC 501 is an answer", jsonrpc, wire(&lavasession.HTTPStatusError{StatusCode: 501, Status: "501"}), false, notExpired, false, false},
+		{"refused before dialling", jsonrpc, fmt.Errorf("failed to build REST URL: %w", errors.New("bad path")), false, notExpired, false, false},
+		{"an HTTP request the client could not build, though the sender wraps it", jsonrpc, wire(fmt.Errorf("%w: %w", lavasession.ErrBuildHTTPRequest, errors.New("invalid method"))), false, notExpired, false, false},
+		{"race loser or client hang-up", jsonrpc, wire(context.Canceled), true, notExpired, false, false},
+		{"hang past the request budget", jsonrpc, wire(context.Canceled), true, expired, false, true},
+		{"no error", jsonrpc, nil, false, notExpired, false, false},
 		// The gRPC sender wraps its connection's pre-invoke refusals like wire errors, so gRPC is out.
-		{"gRPC: a body the connection could not parse", grpc, grpcWire(errors.New("failed to parse gRPC request body")), false, notExpired, false},
-		{"gRPC: even a real transport failure", grpc, grpcWire(fmt.Errorf("dial: %w", refused)), false, notExpired, false},
+		{"gRPC: a body the connection could not parse", grpc, grpcWire(errors.New("failed to parse gRPC request body")), false, notExpired, false, false},
+		{"gRPC: even a real transport failure", grpc, grpcWire(fmt.Errorf("dial: %w", refused)), false, notExpired, false, false},
+		// MAG-4718 criterion 2 (review 626-4): an attempt still silent when its own window ran out is
+		// a protocol error even though a retry then answered and the race cancelled it. Cancelled
+		// inside its window it stays exempt (the "race loser or client hang-up" row above).
+		{"a race loser still silent when its window ran out", jsonrpc, wire(context.Canceled), true, notExpired, true, true},
+		{"a timed-out attempt past its window counts as it always did", jsonrpc, wire(fmt.Errorf("http request failed: %w", context.DeadlineExceeded)), false, notExpired, true, true},
+		{"past its window, a JSON-RPC 503 is still an answer", jsonrpc, wire(&lavasession.HTTPStatusError{StatusCode: 503, Status: "503"}), false, notExpired, true, false},
+		{"past its window, gRPC is still out", grpc, grpcWire(context.Canceled), true, notExpired, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, isProtocolFailure(tc.transport, tc.err, tc.isClientCancel, tc.budgetExpired))
+			require.Equal(t, tc.want, isProtocolFailure(tc.transport, tc.err, tc.isClientCancel, tc.budgetExpired, tc.silent))
 		})
 	}
 }

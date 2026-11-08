@@ -5790,8 +5790,12 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// sender itself failed, because this is the one place every cut isProtocolFailure makes is
 		// structural: an upstream status reaches this branch only as the JSON-RPC sender's
 		// HTTPStatusError (REST statuses take the status branch below), and the refusals above return
-		// before any sender runs.
-		if isProtocolFailure(rpcss.directRelayTransport(directConnection), err, isClientCancel, budgetExpired) {
+		// before any sender runs. Two kinds of attempt stay out, as they do for node errors (review
+		// 626-5): the router's own health check, which is not a client request, and a write (the
+		// stateful category, the same test the relay state machine selects Stateful by).
+		silentThroughWindow := relayTimeout > 0 && relayLatency >= relayTimeout
+		if !routerHealthCheck && chainlib.GetStateful(chainMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS &&
+			isProtocolFailure(rpcss.directRelayTransport(directConnection), err, isClientCancel, budgetExpired, silentThroughWindow) {
 			rpcss.relayErrors.RecordProtocolError(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, chainMessage.GetApi().Name)
 		}
 

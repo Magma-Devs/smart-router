@@ -11,6 +11,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -93,4 +94,88 @@ func TestRelayInnerDirect_ARefusedAttemptIsCountedAsAProtocolError(t *testing.T)
 		ChainID: "ETH1", ApiInterface: "jsonrpc", ProviderAddress: "upstream-under-test",
 		Method: msg.GetApi().Name, ProtocolErrors: 1,
 	}}, h.rpcss.relayErrors.Counts())
+}
+
+// hangUpstream makes the harness's upstream behave like simulator mode "hang": it takes the request
+// and never answers, until the request is abandoned.
+func hangUpstream(t *testing.T, h *directRelayHarness) {
+	t.Helper()
+	stop := make(chan struct{})
+	h.upstream.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-stop:
+		}
+	})
+	t.Cleanup(func() { close(stop) }) // runs before the harness closes the upstream
+}
+
+// Review 626-4, MAG-4718 criterion 2: a quiet provider whose attempt is still silent when its window
+// runs out is a protocol error, although the race then cancels it because a retry answered. The
+// cancel here stands in for the race. In the review's probe the window was 300 ms and the retry's
+// answer came at 303 ms; here the window is 100 ms. Cancelled inside the window, the attempt stays
+// exempt, as a race loser always was.
+func TestRelayInnerDirect_AQuietAttemptCancelledAfterItsWindowIsAProtocolError(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		cancelAt time.Duration
+		counted  bool
+	}{
+		{"cancelled after its window ran out", 250 * time.Millisecond, true},
+		{"cancelled inside its window stays exempt", 20 * time.Millisecond, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newDirectRelayHarness(t, http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":"0x1"}`)
+			h.rpcss.relayErrors = relaycore.NewRelayErrorTally()
+			hangUpstream(t, h)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			time.AfterFunc(tc.cancelAt, cancel)
+			msg := &mockChainMessage{requestData: []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`)}
+			_, err := h.rpcss.relayInnerDirect(
+				ctx, h.session, &common.RelayResult{}, 100*time.Millisecond, 5*time.Second,
+				msg, msg.requestData, func() bool { return false }, nil, false,
+			)
+			require.ErrorIs(t, err, context.Canceled, "the attempt must end by the cancel, as a race loser does")
+
+			if !tc.counted {
+				require.Empty(t, h.rpcss.relayErrors.Counts())
+				return
+			}
+			require.Equal(t, []relaycore.RelayErrorCount{{
+				ChainID: "ETH1", ApiInterface: "jsonrpc", ProviderAddress: "upstream-under-test",
+				Method: "eth_blockNumber", ProtocolErrors: 1,
+			}}, h.rpcss.relayErrors.Counts())
+		})
+	}
+}
+
+// Review 626-5: the router's own health check and a write stay out of the protocol count, as they
+// stay out of the node-error count. Both attempts are refused, which counts for a client's read
+// (TestRelayInnerDirect_ARefusedAttemptIsCountedAsAProtocolError).
+func TestRelayInnerDirect_TheHealthCheckAndAWriteAreNotCountedAsProtocolErrors(t *testing.T) {
+	write := &spectypes.Api{Name: "eth_sendRawTransaction", Category: spectypes.SpecCategory{Stateful: common.CONSISTENCY_SELECT_ALL_PROVIDERS}}
+	for _, tc := range []struct {
+		name        string
+		api         *spectypes.Api
+		healthCheck bool
+	}{
+		{"the router's own health check", nil, true},
+		{"a write (the stateful category)", write, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newDirectRelayHarness(t, http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":"0x1"}`)
+			h.rpcss.relayErrors = relaycore.NewRelayErrorTally()
+			h.upstream.Close()
+
+			msg := &mockChainMessage{requestData: []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`), api: tc.api}
+			_, err := h.rpcss.relayInnerDirect(
+				context.Background(), h.session, &common.RelayResult{}, 5*time.Second, 30*time.Second,
+				msg, msg.requestData, func() bool { return false }, nil, tc.healthCheck,
+			)
+			require.Error(t, err)
+			require.Empty(t, h.rpcss.relayErrors.Counts())
+		})
+	}
 }
