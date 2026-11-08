@@ -197,6 +197,12 @@ type ChainState struct {
 	// measures "how long ago did this become the tip" from here — using lastObservedAt instead
 	// would report ~0 lag forever, since every confirming observation refreshes it.
 	latestSince time.Time
+	// rejectedSince is when SetLatestBlock's no-baseline guard first rejected a block more than
+	// OutlierThreshold above the CURRENT tip (MAG-4964). Read it through rejectedSinceLocked, which
+	// drops a stamp older than latestSince: that rejection was against a tip that has since moved.
+	// Recompute compares it with a sole voter's endpointtip stamp to tell a head the endpoint keeps
+	// answering (a block storm) from one it answered once (a glitch).
+	rejectedSince time.Time
 	// initialized is a STICKY flag: true once any positive observation has ever been accepted.
 	// SetLatestBlock reads it to know whether a REFERENCE exists to guard the next observation
 	// against — the very first observation has none, which is why no anti-lie check can fire on it.
@@ -295,6 +301,7 @@ func (cs *ChainState) Reset() {
 	cs.latestBlock = 0
 	cs.lastObservedAt = time.Time{}
 	cs.latestSince = time.Time{}
+	cs.rejectedSince = time.Time{}
 	cs.initialized = false
 	cs.baseline = 0
 	cs.hasBaseline = false
@@ -322,7 +329,11 @@ func (cs *ChainState) Reset() {
 //     after an idle gap the real head may legitimately be far ahead. A PERSISTENT liar walking
 //     the tip up in sub-threshold steps remains undetectable without peers; the guard defends
 //     against transient lies/glitches, and the stale-tip re-adoption above bounds a successful
-//     poisoning of THIS tip to ~one TTL instead of the process lifetime.
+//     poisoning of THIS tip to ~one TTL instead of the process lifetime. The plausibility premise
+//     fails in a block storm (a bitcoin testnet made 80 blocks in five minutes), so on an interface
+//     with ONE voter Recompute pulls the tip up to a rejected head once that endpoint has answered
+//     it again (MAG-4964); with two or more voters the head waits for a majority, or for the tip
+//     to go a TTL unconfirmed.
 //
 // Caveat: the guard cannot fire on the VERY FIRST observation (no reference exists yet), so a
 // cold-start lie is accepted here. It is bounded, not permanent: the stale-tip re-adoption above
@@ -381,7 +392,11 @@ func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, a
 			return cs.latestBlock, cs.lastObservedAt, false
 		}
 	} else if cs.initialized && tipFresh && block > cs.latestBlock+cs.cfg.OutlierThreshold {
-		// No-baseline anti-lie guard, anchored on the fresh tip (see doc block above).
+		// No-baseline anti-lie guard, anchored on the fresh tip (see doc block above). Stamp the first
+		// rejection against this tip: Recompute follows a sole endpoint that answers past it (MAG-4964).
+		if cs.rejectedSinceLocked().IsZero() {
+			cs.rejectedSince = nowReal
+		}
 		return cs.latestBlock, cs.lastObservedAt, false
 	}
 	cs.latestBlock = block
@@ -503,10 +518,24 @@ func (cs *ChainState) freshLatestLocked(now time.Time) (int64, bool) {
 	return cs.latestBlock, true
 }
 
+// rejectedSinceLocked returns when the no-baseline guard first rejected an over-threshold block
+// against the CURRENT tip, or the zero time if it has not. A stamp older than latestSince was taken
+// against an earlier tip, so it says nothing about this one. Comparing with latestSince, rather than
+// clearing the stamp at each site that moves the tip, covers every such site, including future ones,
+// because each of them re-establishes latestSince. The caller holds cs.mu.
+func (cs *ChainState) rejectedSinceLocked() time.Time {
+	if cs.rejectedSince.Before(cs.latestSince) {
+		return time.Time{}
+	}
+	return cs.rejectedSince
+}
+
 // Recompute pulls a snapshot of per-endpoint observations, recomputes the strict-majority
 // consensus baseline, and applies the EDGE CORRECTION to the tip (D3): snap it down when it leads
 // the majority by more than OutlierThreshold (a poisoned tip, or a chain revert), pull it up when
-// it trails the majority, and otherwise leave the optimistic lead untouched. This is the windowed,
+// it trails the majority, and otherwise leave the optimistic lead untouched. A single fresh voter
+// never forms a majority; for it, Recompute pulls the tip up to a head the outlier guard rejected
+// once that voter has answered it again (MAG-4964, the sole-voter case below). This is the windowed,
 // off-hot-path consensus step (T2): the caller (Topic B/C wiring) provides the snapshots by
 // pulling EndpointMonitor.SnapshotObservations; ChainState computes consensus itself — nothing
 // external sets the baseline.
@@ -523,7 +552,17 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 	// warped, possibly-future value that would distort freshness / sync-lag once the warp is cleared
 	// (MAG-2307 review).
 	nowReal := cs.now()
-	baseline, ok := computeMajorityBaseline(snapshots, nowReal.Add(cs.warpOffsetDuration()), cs.cfg)
+	evalNow := nowReal.Add(cs.warpOffsetDuration())
+	baseline, ok := computeMajorityBaseline(snapshots, evalNow, cs.cfg)
+	// A sole voter never forms a baseline (min-2), so only the sole-voter case below can act on it.
+	var sole BlockObservation
+	if !ok {
+		if votes := freshVotes(snapshots, evalNow, cs.cfg); len(votes) == 1 {
+			for _, v := range votes {
+				sole = v
+			}
+		}
+	}
 
 	// Same ordering as SetLatestBlock: registered before the unlock defer, so the hook runs after it.
 	var regressedFrom int64
@@ -577,6 +616,25 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 			// fallbacks cannot mistake a consensus-seeded tip for "never observed anything".
 			cs.initialized = true
 		}
+	} else if since := cs.rejectedSinceLocked(); !since.IsZero() && sole.ObservedAt.After(since) && sole.Block > cs.latestBlock {
+		// Sole-voter pull-up (MAG-4964). With one fresh voter there is no majority to lift the tip past
+		// a head SetLatestBlock's no-baseline guard rejected, and the guard's premise (the chain cannot
+		// outrun OutlierThreshold within a TTL) fails in a block storm: such a tip froze for 28 hours.
+		// The guard is there for transient lies and glitches, and a glitch is ONE answer. The voter's
+		// endpointtip entry keeps that answer's stamp, since later, lower answers are stragglers that
+		// refresh nothing, so a stamp newer than the guard's first rejection means the endpoint has
+		// answered its head again since: the min-2 rule applied across time instead of across
+		// endpoints. One repeat is the fewest that separates a glitch from a storm; more would only
+		// delay a real head, since no count tells a persistent liar from a sole honest endpoint. The
+		// repeat is read from the endpoint's own record, so a copy of a tip (a peer pod's, or a cache
+		// echo) never counts as one. Dropping the guard for a sole voter, or making its block a
+		// one-endpoint baseline, would follow that same stored glitch and hold the tip there for a TTL.
+		// Following a voter that has a peer would let one endpoint's repeated absurd block drag a
+		// multi-endpoint tip (MAG-4632), so two or more voters still need a majority.
+		cs.latestBlock = sole.Block
+		cs.lastObservedAt = nowReal
+		cs.latestSince = nowReal
+		cs.initialized = true
 	}
 }
 
@@ -631,11 +689,12 @@ func (cs *ChainState) DebugSnapshot() ChainStateSnapshot {
 }
 
 // computeMajorityBaseline implements the locked consensus rules over a snapshot:
-//   - fresh-only: drop observations older than StalenessWindow and non-positive blocks;
-//   - dedup by URL: each endpoint votes once, with its most recent observation;
+//   - fresh-only: drop observations older than StalenessWindow and non-positive blocks (freshVotes);
+//   - dedup by URL: each endpoint votes once, with its most recent observation (freshVotes);
 //   - min-2: fewer than 2 distinct fresh endpoints → no consensus (a sole endpoint cannot
 //     self-certify; its tip is still trusted monotonically + TTL, with only the weaker
-//     fresh-tip-anchored anti-lie guard in SetLatestBlock instead of a consensus-anchored one);
+//     fresh-tip-anchored anti-lie guard in SetLatestBlock instead of a consensus-anchored one, and
+//     Recompute's sole-voter pull-up for a head the guard rejected but the endpoint kept answering);
 //   - strict majority > 50%: find the widest cluster of votes that all lie within BucketWidth of
 //     each other (distance-aware sliding window over sorted blocks, NOT fixed bucket boundaries —
 //     so two endpoints one block apart still agree, Finding 3). A cluster wins only if it holds
@@ -648,19 +707,7 @@ func (cs *ChainState) DebugSnapshot() ChainStateSnapshot {
 //
 // Returns (baseline, true) only when a cluster wins; otherwise (0, false).
 func computeMajorityBaseline(obs []BlockObservation, now time.Time, cfg Config) (int64, bool) {
-	latestByURL := make(map[string]BlockObservation, len(obs))
-	for _, o := range obs {
-		if o.Block <= 0 {
-			continue
-		}
-		if cfg.StalenessWindow > 0 && now.Sub(o.ObservedAt) > cfg.StalenessWindow {
-			continue
-		}
-		if prev, ok := latestByURL[o.URL]; !ok || o.ObservedAt.After(prev.ObservedAt) {
-			latestByURL[o.URL] = o
-		}
-	}
-
+	latestByURL := freshVotes(obs, now, cfg)
 	total := len(latestByURL)
 	if total < 2 {
 		return 0, false
@@ -693,4 +740,24 @@ func computeMajorityBaseline(obs []BlockObservation, now time.Time, cfg Config) 
 		return bestMax, true
 	}
 	return 0, false
+}
+
+// freshVotes is the voter filter of the consensus rules, keyed by URL: fresh-only (observations
+// older than StalenessWindow and non-positive blocks are dropped) and dedup by URL (each endpoint
+// votes once, with its most recent observation). computeMajorityBaseline counts these votes and
+// Recompute reads a sole voter from them, so the two cannot disagree about who voted.
+func freshVotes(obs []BlockObservation, now time.Time, cfg Config) map[string]BlockObservation {
+	latestByURL := make(map[string]BlockObservation, len(obs))
+	for _, o := range obs {
+		if o.Block <= 0 {
+			continue
+		}
+		if cfg.StalenessWindow > 0 && now.Sub(o.ObservedAt) > cfg.StalenessWindow {
+			continue
+		}
+		if prev, ok := latestByURL[o.URL]; !ok || o.ObservedAt.After(prev.ObservedAt) {
+			latestByURL[o.URL] = o
+		}
+	}
+	return latestByURL
 }
