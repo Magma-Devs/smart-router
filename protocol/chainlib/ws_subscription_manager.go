@@ -61,6 +61,13 @@ type WSSubscriptionManager interface {
 // reason in the close frame the client gets.
 var ErrSubscriptionClientTooSlow = errors.New("subscription client did not keep up")
 
+// ErrSubscriptionUpstreamLost is what a WSSubscriptionEndReporter reports for a connection whose
+// subscription the router gave up: the upstream subscription was lost and could not be restored
+// (the reconnect or the re-subscribe failed, or the restores without progress ran out). Nothing
+// will push on it again. Its text is the reason in the close frame the client gets, the same words
+// the gRPC manager ends such a stream with (codes.Unavailable) (MAG-5022).
+var ErrSubscriptionUpstreamLost = errors.New("upstream subscription lost")
+
 // WSSubscriptionEndReporter is an optional interface on WSSubscriptionManager, the WebSocket
 // counterpart of GRPCSubscriptionEndReporter. A WebSocket subscription has no end of its own to
 // carry a reason: its reply channel just closes. A manager that ends a client's subscription for
@@ -68,7 +75,7 @@ var ErrSubscriptionClientTooSlow = errors.New("subscription client did not keep 
 // socket. Any other end leaves the socket open, as before.
 type WSSubscriptionEndReporter interface {
 	// SubscriptionEndError returns why the manager ended a subscription of this connection
-	// (ErrSubscriptionClientTooSlow), or nil for an ordinary end. The ingress reads it after a
-	// reply channel has closed; a reason is read once.
+	// (ErrSubscriptionClientTooSlow, ErrSubscriptionUpstreamLost), or nil for an ordinary end. The
+	// ingress reads it after a reply channel has closed; a reason is read once.
 	SubscriptionEndError(dappID string, consumerIp string, webSocketConnectionUniqueId string) error
 }

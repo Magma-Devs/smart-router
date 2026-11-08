@@ -135,4 +135,7 @@ func TestUnsubscribeDuringOutage_ReleasesTheClient(t *testing.T) {
 	h.srv.setRefusing(false)
 	time.Sleep(300 * time.Millisecond)
 	require.Equal(t, 1, h.upstreamCalls("eth_subscribe"), "a subscription the client left was restored")
+	// The client asked to leave, so nothing tells it the subscription was given up: its socket
+	// stays open for the next subscribe (MAG-5022).
+	require.NoError(t, h.manager.SubscriptionEndError("dapp", "10.0.0.1", sub.uid))
 }

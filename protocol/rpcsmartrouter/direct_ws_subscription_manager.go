@@ -187,10 +187,13 @@ type DirectWSSubscriptionManager struct {
 	// Pending subscriptions for deduplication
 	pendingSubscriptions map[string]*pendingSubscriptionsBroadcastManager
 
-	// slowClients holds the connections dropSlowClient dropped a subscription of, keyed by
-	// client key, until the ingress reads the drop (SubscriptionEndError) and closes the client's
-	// socket, or the connection ends (forgetClientLocked). Guarded by lock.
-	slowClients map[string]struct{}
+	// endErrors holds why the manager ended a subscription of a connection, keyed by client key:
+	// chainlib.ErrSubscriptionClientTooSlow when dropSlowClient dropped the client, and
+	// chainlib.ErrSubscriptionUpstreamLost when the router gave the subscription up
+	// (giveUpSubscription). An entry stays until the ingress reads it (SubscriptionEndError) and
+	// closes the client's socket, or the connection ends (forgetClientLocked). The gRPC manager
+	// keeps its end reasons the same way (DirectGRPCSubscriptionManager.endErrors). Guarded by lock.
+	endErrors map[string]error
 
 	// beforeRestoreCommit, when set, runs in handleUpstreamDisconnect after the node has
 	// answered the re-subscribe and before the result is committed under dwsm.lock. Nil
@@ -267,7 +270,7 @@ func NewDirectWSSubscriptionManager(
 		connectedClients:     make(map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply]),
 		activeSubscriptions:  make(map[string]*directActiveSubscription),
 		pendingSubscriptions: make(map[string]*pendingSubscriptionsBroadcastManager),
-		slowClients:          make(map[string]struct{}),
+		endErrors:            make(map[string]error),
 		upstreamPools:        make(map[string]*UpstreamWSPool),
 		idMapper:             NewSubscriptionIDMapper(),
 		metricsManager:       metrics.SafeMetrics(metricsManager),
@@ -1340,9 +1343,10 @@ type upstreamErrSource interface {
 // found". reconnectInFlight is true when ownership has been handed off to that goroutine.
 //
 // Cleanup ownership: once reconnectInFlight is set, handleUpstreamDisconnect is responsible
-// for calling cleanupSubscription on every failure path (reconnect timeout, GetConnection
-// failure post-reconnect, re-subscribe failure) so a failed restoration does not leak the
-// subscription. See handleUpstreamDisconnect for the corresponding cleanup-on-failure calls.
+// for calling giveUpSubscription on every failure path (restore budget spent, reconnect timeout,
+// GetConnection failure post-reconnect, re-subscribe failure) so a failed restoration does not
+// leak the subscription and its clients hear why it ended. See handleUpstreamDisconnect for the
+// corresponding give-up calls.
 //
 // messagesChan is the channel of the upstream subscription this listener serves,
 // handed in rather than read off activeSub on every loop: a reconnect replaces the
@@ -1482,7 +1486,7 @@ func (dwsm *DirectWSSubscriptionManager) dropSlowClient(hashedParams string, act
 	}
 	// Under the same lock as the channel's close, so the ingress, which reads the mark once it
 	// sees the close, cannot miss it.
-	dwsm.slowClients[clientKey] = struct{}{}
+	dwsm.markEndLocked(clientKey, chainlib.ErrSubscriptionClientTooSlow)
 	if dwsm.metricsManager != nil {
 		dwsm.metricsManager.SetSubscriptionClientDroppedMetric(dwsm.chainID, dwsm.apiInterface)
 	}
@@ -1566,7 +1570,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 			utils.LogAttr("restoresWithoutProgress", attempt-1),
 			utils.LogAttr("connectedClients", connectedClients),
 		)
-		dwsm.cleanupSubscription(hashedParams, activeSub)
+		dwsm.giveUpSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -1576,7 +1580,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 		utils.LavaFormatError("DirectWS: reconnection failed, cleaning up subscription", err,
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
-		dwsm.cleanupSubscription(hashedParams, activeSub)
+		dwsm.giveUpSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -1592,7 +1596,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 		utils.LavaFormatError("DirectWS: failed to get connection after reconnect", err,
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
-		dwsm.cleanupSubscription(hashedParams, activeSub)
+		dwsm.giveUpSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -1603,7 +1607,7 @@ func (dwsm *DirectWSSubscriptionManager) handleUpstreamDisconnect(
 		utils.LavaFormatError("DirectWS: failed to restore subscription", err,
 			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
 		)
-		dwsm.cleanupSubscription(hashedParams, activeSub)
+		dwsm.giveUpSubscription(hashedParams, activeSub)
 		return
 	}
 
@@ -1788,7 +1792,7 @@ func (dwsm *DirectWSSubscriptionManager) forgetSubscriptionForClientLocked(clien
 func (dwsm *DirectWSSubscriptionManager) forgetClientLocked(clientKey string) {
 	dwsm.stickyStore.Delete(clientKey)
 	dwsm.rateLimiter.CleanupClient(clientKey)
-	delete(dwsm.slowClients, clientKey)
+	delete(dwsm.endErrors, clientKey)
 	utils.LavaFormatTrace("DirectWS: cleared sticky session and rate limiter for a gone client",
 		utils.LogAttr("clientKey", clientKey),
 	)
@@ -1986,6 +1990,35 @@ func (dwsm *DirectWSSubscriptionManager) unsubscribeParams(upstreamID string, nu
 // fresh subscription under the same key; a late caller (a listener ending, a restore
 // failing) that cleaned up by key would then destroy that newer subscription.
 func (dwsm *DirectWSSubscriptionManager) cleanupSubscription(hashedParams string, owner *directActiveSubscription) {
+	dwsm.endSubscription(hashedParams, owner, nil)
+}
+
+// giveUpSubscription is cleanupSubscription for a subscription the router gives up: it was lost
+// and the restore failed or ran out of attempts. Its clients are told why: each connection is
+// marked with chainlib.ErrSubscriptionUpstreamLost, and the ingress closes the client's socket with
+// 1013 (try again later) so the client resubscribes, instead of keeping a socket nothing will push
+// on again. The gRPC manager ends a stream whose restore failed with Unavailable for the same
+// reason (errSubscriptionLost; MAG-5022, the rest of MAG-4278 item 11).
+//
+// A subscription the node itself ends with an error is not given up this way: the node answered,
+// a resubscribe would only be ended again, and closing the socket would end the client's other
+// subscriptions on it, so the socket stays open (TestWebSocketSubscriptionTheNodeEndsKeepsTheSocket).
+func (dwsm *DirectWSSubscriptionManager) giveUpSubscription(hashedParams string, owner *directActiveSubscription) {
+	dwsm.endSubscription(hashedParams, owner, chainlib.ErrSubscriptionUpstreamLost)
+}
+
+// markEndLocked records why a subscription of clientKey's connection ended, for the ingress to read
+// once (SubscriptionEndError). A reason already waiting is kept: either one closes the socket.
+// Caller holds dwsm.lock, and marks before the client's reply channel closes, so the ingress, which
+// reads the mark once it sees the close, cannot miss it.
+func (dwsm *DirectWSSubscriptionManager) markEndLocked(clientKey string, reason error) {
+	if _, waiting := dwsm.endErrors[clientKey]; !waiting {
+		dwsm.endErrors[clientKey] = reason
+	}
+}
+
+// endSubscription is cleanupSubscription with the reason its clients are told, nil for none.
+func (dwsm *DirectWSSubscriptionManager) endSubscription(hashedParams string, owner *directActiveSubscription, reason error) {
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
 
@@ -2000,6 +2033,11 @@ func (dwsm *DirectWSSubscriptionManager) cleanupSubscription(hashedParams string
 		return
 	}
 
+	if reason != nil {
+		for clientKey := range activeSub.connectedClients {
+			dwsm.markEndLocked(clientKey, reason)
+		}
+	}
 	// Cancelled now, under the lock, as cleanup always has; the teardown below would only
 	// cancel it after the node call.
 	activeSub.cancel()
@@ -2014,17 +2052,19 @@ var _ chainlib.WSSubscriptionEndReporter = (*DirectWSSubscriptionManager)(nil)
 
 // SubscriptionEndError implements chainlib.WSSubscriptionEndReporter:
 // chainlib.ErrSubscriptionClientTooSlow when dropSlowClient dropped a subscription of this
-// connection, nil for every other end of a subscription. Read once: the mark is removed, and the
-// ingress closes the connection, which ends the rest of its subscriptions anyway.
+// connection, chainlib.ErrSubscriptionUpstreamLost when the router gave one of its subscriptions
+// up, nil for every other end of a subscription. Read once: the mark is removed, and the ingress
+// closes the connection, which ends the rest of its subscriptions anyway.
 func (dwsm *DirectWSSubscriptionManager) SubscriptionEndError(dappID, consumerIp, webSocketConnectionUniqueId string) error {
 	clientKey := dwsm.CreateWebSocketConnectionUniqueKey(dappID, consumerIp, webSocketConnectionUniqueId)
 	dwsm.lock.Lock()
 	defer dwsm.lock.Unlock()
-	if _, dropped := dwsm.slowClients[clientKey]; !dropped {
+	endErr, marked := dwsm.endErrors[clientKey]
+	if !marked {
 		return nil
 	}
-	delete(dwsm.slowClients, clientKey)
-	return chainlib.ErrSubscriptionClientTooSlow
+	delete(dwsm.endErrors, clientKey)
+	return endErr
 }
 
 // Close closes the subscription manager and all connections
@@ -2045,7 +2085,7 @@ func (dwsm *DirectWSSubscriptionManager) Close() {
 	}
 	dwsm.activeSubscriptions = make(map[string]*directActiveSubscription)
 	dwsm.connectedClients = make(map[string]map[string]*common.SafeChannelSender[*pairingtypes.RelayReply])
-	dwsm.slowClients = make(map[string]struct{})
+	dwsm.endErrors = make(map[string]error)
 
 	// Close all pools
 	for _, pool := range dwsm.upstreamPools {

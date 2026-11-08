@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -40,6 +41,10 @@ func TestRestoreBudget_GivesUpOnceTheBudgetIsSpent(t *testing.T) {
 
 	require.True(t, channelClosed(sub.replies, 20*time.Second),
 		"a subscription out of restores must be given up, not restored again")
+	// The client is told why, so the ingress closes its socket and it resubscribes, instead of
+	// keeping a socket nothing will push on again (MAG-5022). The reason is read once.
+	require.ErrorIs(t, h.manager.SubscriptionEndError("dapp", "10.0.0.1", sub.uid), chainlib.ErrSubscriptionUpstreamLost)
+	require.NoError(t, h.manager.SubscriptionEndError("dapp", "10.0.0.1", sub.uid), "a reason is read once")
 	require.Eventually(t, func() bool { return h.activeSubscriptionCount() == 0 }, 10*time.Second, 10*time.Millisecond)
 	require.Equal(t, 1, h.upstreamCalls("eth_subscribe"), "the node was asked to re-subscribe past the budget")
 	require.False(t, h.attached(sub.clientKey))
@@ -81,6 +86,25 @@ func TestRestoreBudget_RefillsAfterASubscriptionStaysUp(t *testing.T) {
 	require.True(t, h.attached(sub.clientKey))
 	require.Equal(t, int32(1), activeSub.restoresWithoutProgress.Load(),
 		"progress resets the count, and this restore is the first against it")
+	require.NoError(t, h.manager.SubscriptionEndError("dapp", "10.0.0.1", sub.uid), "a restored subscription ended nothing")
+}
+
+// TestRestoreGivesUpWhenTheNodeRefusesTheResubscribe: the socket drops, the reconnect lands, and
+// the node answers the restore's subscribe with an error. The subscription is given up, and its
+// client is told so, as on every other exit of a failed restore (MAG-5022).
+func TestRestoreGivesUpWhenTheNodeRefusesTheResubscribe(t *testing.T) {
+	h := newReleaseHarness(t)
+	sub := h.subscribe("ws-1")
+	t.Cleanup(sub.disconnect)
+	countReplies(sub)
+
+	h.srv.rejectSubscribes.Store(true)
+	h.srv.dropConnections()
+
+	require.True(t, channelClosed(sub.replies, 20*time.Second), "a restore the node refused must give the subscription up")
+	require.Equal(t, 2, h.upstreamCalls("eth_subscribe"), "the restore asked the node once")
+	require.ErrorIs(t, h.manager.SubscriptionEndError("dapp", "10.0.0.1", sub.uid), chainlib.ErrSubscriptionUpstreamLost)
+	require.Eventually(t, func() bool { return h.activeSubscriptionCount() == 0 }, 10*time.Second, 10*time.Millisecond)
 }
 
 // TestSubscribeReservesItsPoolSlot is MAG-4278 item 11's reserve-on-pick.

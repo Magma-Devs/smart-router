@@ -59,7 +59,19 @@ const subscribeFrame = `{"jsonrpc":"2.0","method":"eth_subscribe","params":["new
 // client's socket with 1013 (try again later), through the connection's writer, so the client
 // reconnects instead of waiting on a socket nothing will push to again.
 func TestConsumerWebsocketManager_SlowSubscriberIsClosedWithTryAgainLater(t *testing.T) {
-	client := dialSubscriptionListener(t, endingSubscriptions{endErr: ErrSubscriptionClientTooSlow})
+	requireClosedWithTryAgainLater(t, ErrSubscriptionClientTooSlow)
+}
+
+// MAG-5022: a subscription the router gave up (it was lost and could not be restored) closes the
+// client's socket the same way, with the reason the gRPC manager ends such a stream with. Before,
+// the client kept a socket nothing would ever push on again.
+func TestConsumerWebsocketManager_GivenUpSubscriptionIsClosedWithTryAgainLater(t *testing.T) {
+	requireClosedWithTryAgainLater(t, ErrSubscriptionUpstreamLost)
+}
+
+func requireClosedWithTryAgainLater(t *testing.T, endErr error) {
+	t.Helper()
+	client := dialSubscriptionListener(t, endingSubscriptions{endErr: endErr})
 	require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(subscribeFrame)))
 
 	for frames := 0; ; frames++ {
@@ -72,7 +84,7 @@ func TestConsumerWebsocketManager_SlowSubscriberIsClosedWithTryAgainLater(t *tes
 		var closeErr *websocket.CloseError
 		require.ErrorAs(t, err, &closeErr, "the client got %v instead of a close frame", err)
 		require.Equal(t, websocket.CloseTryAgainLater, closeErr.Code)
-		require.Equal(t, ErrSubscriptionClientTooSlow.Error(), closeErr.Text)
+		require.Equal(t, endErr.Error(), closeErr.Text)
 		return
 	}
 }
