@@ -1780,6 +1780,13 @@ type GetSessionsOptions struct {
 	// caller fails it as insufficient-capacity. The backup tier is not part of this: it is
 	// consulted as for any request.
 	CrossValidation bool
+	// RequiredBlock, when positive, is a block every provider the request goes to must hold
+	// (MAG-2786). Selection sets aside, for this request, every primary and backup whose last known
+	// block is below it (ProviderOptimizer.KnownBelowBlock), so a provider that holds it is chosen
+	// instead, and selection runs out of providers rather than settle for one that does not. A
+	// provider whose block is unknown stays eligible. Cross-validation sets it; the blocked-provider
+	// fallback does not read it, and a cross-validated request never reaches that fallback.
+	RequiredBlock int64
 }
 
 func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProviderNumber int, cuNeededForSession uint64, usedProviders UsedProvidersInf, requestedBlock int64, addon string, extensions []*spectypes.Extension, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, opts ...GetSessionsOptions) (
@@ -1909,6 +1916,9 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		triedByThisRequest: maps.Clone(initUnwantedProviders),
 		currentEpoch:       csm.atomicReadCurrentEpoch(),
 		crossValidation:    len(opts) > 0 && opts[0].CrossValidation,
+	}
+	if len(opts) > 0 {
+		tempIgnoredProviders.requiredBlock = opts[0].RequiredBlock
 	}
 	// Read here, after the fleet sticky claim has been resolved into selectedProvider above: any
 	// directive of the caller's outranks the router's own preference.
@@ -2837,6 +2847,8 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 		ignoredProviders.providers = make(map[string]struct{}) // reset the old providers as epochs changed so we have a new pairing list.
 		ignoredProviders.currentEpoch = currentEpoch
 	}
+	// After the reset, which forgets every provider set aside: see GetSessionsOptions.RequiredBlock.
+	csm.ignoreProvidersBelowRequiredBlock(ctx, ignoredProviders)
 
 	// Check if backup providers exist
 	if len(csm.backupProviders) == 0 {
@@ -2924,6 +2936,35 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 	return sessionWithProviderMap, nil
 }
 
+// ignoreProvidersBelowRequiredBlock sets aside, for this request, every primary and backup the
+// optimizer knows to be below the block the request requires (GetSessionsOptions.RequiredBlock).
+// Backups too: a request whose primaries run out is offered the backup tier. A request that
+// requires no block is left alone. csm.lock must be held.
+func (csm *ConsumerSessionManager) ignoreProvidersBelowRequiredBlock(ctx context.Context, ignoredProviders *ignoredProviders) {
+	if ignoredProviders.requiredBlock <= 0 {
+		return
+	}
+	var setAside []string
+	for _, pool := range []map[string]*ConsumerSessionsWithProvider{csm.pairing, csm.backupProviders} {
+		for address := range pool {
+			if _, ignored := ignoredProviders.providers[address]; ignored {
+				continue
+			}
+			if csm.providerOptimizer.KnownBelowBlock(address, ignoredProviders.requiredBlock) {
+				ignoredProviders.providers[address] = struct{}{}
+				setAside = append(setAside, address)
+			}
+		}
+	}
+	if len(setAside) > 0 {
+		utils.LavaFormatDebug("not selecting providers known to be below the requested block",
+			utils.LogAttr("requiredBlock", ignoredProviders.requiredBlock),
+			utils.LogAttr("providers", setAside),
+			utils.LogAttr("GUID", ctx),
+		)
+	}
+}
+
 func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx context.Context, wantedProviderNumber int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int) (sessionWithProviderMap SessionWithProviderMap, err error) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
@@ -2936,6 +2977,10 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 		ignoredProviders.providers = make(map[string]struct{}) // reset the old providers as epochs changed so we have a new pairing list.
 		ignoredProviders.currentEpoch = currentEpoch
 	}
+	// After the reset, which forgets every provider set aside, and before anything below ranks a
+	// candidate: every path below (the group-diverse ranking, plain selection and the refill) reads
+	// the ignored set, so this one call keeps all of them off a provider below the required block.
+	csm.ignoreProvidersBelowRequiredBlock(ctx, ignoredProviders)
 
 	// Fetch provider addresses. When a cross-validation policy requires group diversity (minGroups > 1)
 	// we over-fetch the full QoS-ranked pool and reorder it so the front spans at least minGroups distinct

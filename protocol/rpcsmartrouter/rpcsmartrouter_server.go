@@ -5553,6 +5553,15 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// A cross-validated request is never served from a provider the router has blocked, however dry
 	// the pool runs (MAG-2785): see GetSessionsOptions.CrossValidation.
 	sessionOpts.CrossValidation = crossValidationEnabled
+	// A cross-validated request for a block height goes only to providers that hold it (MAG-2786): a
+	// node asked for a block it does not have answers as if the block did not exist, with no error,
+	// so two lagging nodes agree on "not found" and carry the quorum. The height is the one the
+	// caller named, not reqBlock. By now a latest request has been resolved to the chain tip, and
+	// holding it to the tip would turn away every provider a block behind; latest stays with the
+	// consistency filter's lag threshold. Any other sentinel names no height to hold.
+	if namedBlock, _ := protocolMessage.RequestedBlock(); crossValidationEnabled && namedBlock > 0 {
+		sessionOpts.RequiredBlock = namedBlock
+	}
 
 	// MAG-4032: a pending-nonce read or a transaction lookup that names a write this router just
 	// served prefers the upstream that accepted the write. A preference, not a pin: selection falls
