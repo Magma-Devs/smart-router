@@ -400,8 +400,12 @@ Prometheus counter, so it answers on a router run without `--metrics-listen-addr
   the request's budget. These are not counted: an HTTP status (an answer), a request the router
   could not build, a race loser or a client that hung up, and anything on gRPC.
 * `Method` is the API name the request was relayed as. A GraphQL operation with two root fields
-  is `chainIdentifier&checkpoint`, not the metric's `batch:` label, so a row does not depend on
-  which names earlier traffic used.
+  is `chainIdentifier&checkpoint`, not the metric's `batch:` label. Two kinds of name are the
+  request's own text: a `Default-...` name for an api the spec does not declare, and a batch's or
+  operation's `&`-joined names. Each kind keeps its own rows only within a budget per chain and
+  interface, the same as the method label's (32 `Default-` names, 64 joined names), and only up to
+  512 bytes. Past that the attempt is counted on the `Default-other` or `batch:other` row, so the
+  tally stays bounded whatever a client sends. An admitted name keeps its row.
 
 Both counts are per attempt: a retry that answered hides the first attempt from the caller, and
 this is where its classification shows. `chain_id`, `api_interface` and `provider` narrow the

@@ -2,7 +2,11 @@ package relaycore
 
 import (
 	"sort"
+	"strings"
 	"sync"
+
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 )
 
 // RelayErrorTally is the router's own count of the relay attempts it classified as a node error or
@@ -16,14 +20,32 @@ import (
 // protocol error an attempt that got no proper answer, and failover treats them differently. Both
 // are per attempt and cumulative for the process. Safe for concurrent use; a nil tally records
 // nothing and reads as empty.
+//
+// The rows are bounded (see boundedMethodLocked): two kinds of method name are the request's own
+// text, and each kind gets the method label's budget per chain and interface.
 type RelayErrorTally struct {
 	mu   sync.Mutex
 	rows map[relayErrorKey]*RelayErrorCount
+	// admitted holds, per chain and interface, the unbounded names that have their own row.
+	admitted map[tallyScope]*admittedNames
 }
 
 type relayErrorKey struct {
 	chainID, apiInterface, providerAddress, method string
 }
+
+type tallyScope struct {
+	chainID, apiInterface string
+}
+
+type admittedNames struct {
+	defaults, batches map[string]struct{}
+}
+
+// maxTallyMethodNameBytes bounds the size of an unbounded name that may keep its own row. A batch
+// names every element, so one large batch would otherwise pin a name as long as its element list
+// for the life of the process. Declared methods are spec names and never come near it.
+const maxTallyMethodNameBytes = 512
 
 // RelayErrorCount is one row of the tally.
 type RelayErrorCount struct {
@@ -36,7 +58,7 @@ type RelayErrorCount struct {
 }
 
 func NewRelayErrorTally() *RelayErrorTally {
-	return &RelayErrorTally{rows: map[relayErrorKey]*RelayErrorCount{}}
+	return &RelayErrorTally{rows: map[relayErrorKey]*RelayErrorCount{}, admitted: map[tallyScope]*admittedNames{}}
 }
 
 // RecordNodeError counts one attempt the router read as a node error.
@@ -55,12 +77,58 @@ func (t *RelayErrorTally) add(key relayErrorKey, count func(*RelayErrorCount)) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	key.method = t.boundedMethodLocked(key.chainID, key.apiInterface, key.method)
 	row, ok := t.rows[key]
 	if !ok {
 		row = &RelayErrorCount{ChainID: key.chainID, ApiInterface: key.apiInterface, ProviderAddress: key.providerAddress, Method: key.method}
 		t.rows[key] = row
 	}
 	count(row)
+}
+
+// boundedMethodLocked returns the method a row is kept under. That is the API name as relayed, and
+// for two kinds of name it is the request's own text: a "Default-<...>" name the parser mints for an
+// api the spec does not declare, and a name joined with chainlib.SEP (a batch's elements, or a
+// GraphQL operation's root fields). Left alone, every distinct one adds a row for the life of the
+// process (review 626-3: 200 unknown REST paths gave 200 rows). So each kind gets the method label's
+// own budget per chain and interface (metrics.MaxDefaultMethodsPerSpec, MaxBatchSignaturesPerSpec),
+// and past it, or past maxTallyMethodNameBytes, the attempt is counted on that kind's overflow row,
+// under the label's overflow name. Admission is monotone, as the label's is: an admitted name keeps
+// its row, and a full budget stays full. Declared methods are a spec-sized set and keep their names.
+// The caller holds t.mu.
+func (t *RelayErrorTally) boundedMethodLocked(chainID, apiInterface, method string) string {
+	batch := strings.Contains(method, chainlib.SEP)
+	if !batch && !strings.HasPrefix(method, chainlib.DefaultApiName) {
+		return method
+	}
+	budget, overflow := metrics.MaxDefaultMethodsPerSpec, metrics.DefaultMethodOther
+	if batch {
+		budget, overflow = metrics.MaxBatchSignaturesPerSpec, metrics.BatchMethodOther
+	}
+	if method == overflow || len(method) > maxTallyMethodNameBytes {
+		return overflow
+	}
+	if t.admitted == nil {
+		t.admitted = map[tallyScope]*admittedNames{}
+	}
+	scope := tallyScope{chainID, apiInterface}
+	names := t.admitted[scope]
+	if names == nil {
+		names = &admittedNames{defaults: map[string]struct{}{}, batches: map[string]struct{}{}}
+		t.admitted[scope] = names
+	}
+	set := names.defaults
+	if batch {
+		set = names.batches
+	}
+	if _, ok := set[method]; ok {
+		return method
+	}
+	if len(set) >= budget {
+		return overflow
+	}
+	set[method] = struct{}{}
+	return method
 }
 
 // Counts returns a copy of every row, sorted by chain, interface, provider and method.
