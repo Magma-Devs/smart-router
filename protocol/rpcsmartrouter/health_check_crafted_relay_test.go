@@ -34,6 +34,8 @@ type healthRelayFleet struct {
 	resolver *CrossValidationPolicyResolver
 	// stopUpstream closes the upstream's listener, so later requests are refused.
 	stopUpstream func()
+	// endpoints are the fleet's endpoints, one per provider, so a test can switch them off.
+	endpoints []*lavasession.Endpoint
 }
 
 // newHealthRelayFleet wires the fleet under the given policy, written for the latest-block method.
@@ -78,17 +80,20 @@ func newHealthRelayFleetServing(t *testing.T, policy *CrossValidationPolicy, han
 	// Three providers, one upstream. Each holds its own connection, so session selection has a real
 	// choice to make and the relay it picks reaches a real node.
 	pairingList := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	var endpoints []*lavasession.Endpoint
 	for i, group := range []string{"group-a", "group-a", "group-b"} {
 		conn, connErr := lavasession.NewDirectRPCConnection(ctx, providerEndpoint.NodeUrls[0], 5, spectypes.APIInterfaceJsonRPC)
 		require.NoError(t, connErr)
 		t.Cleanup(func() { _ = conn.Close() })
+		endpoint := &lavasession.Endpoint{
+			NetworkAddress:    providerEndpoint.NodeUrls[0].Url,
+			Enabled:           true,
+			DirectConnections: []lavasession.DirectRPCConnection{conn},
+		}
+		endpoints = append(endpoints, endpoint)
 		provider := lavasession.NewConsumerSessionWithProvider(
 			"upstream-"+string(rune('a'+i)),
-			[]*lavasession.Endpoint{{
-				NetworkAddress:    providerEndpoint.NodeUrls[0].Url,
-				Enabled:           true,
-				DirectConnections: []lavasession.DirectRPCConnection{conn},
-			}},
+			[]*lavasession.Endpoint{endpoint},
 			100000, 1, 1)
 		provider.StaticProvider = true
 		provider.GroupLabel = group
@@ -115,6 +120,7 @@ func newHealthRelayFleetServing(t *testing.T, policy *CrossValidationPolicy, han
 		served:       &served,
 		resolver:     resolver,
 		stopUpstream: stopUpstream,
+		endpoints:    endpoints,
 		server: &RPCSmartRouterServer{
 			chainParser:             chainParser,
 			sessionManager:          sessionManager,

@@ -58,6 +58,7 @@ func (h *directRelayHarness) relay(t *testing.T, hasNodeError bool, message stri
 	_, _ = h.rpcss.relayInnerDirect(
 		context.Background(), h.session, relayResult, 5*time.Second, 30*time.Second,
 		msg, msg.requestData, func() bool { return false }, h.lostBroadcast,
+		false, // not the router's health check
 	)
 	// Read directly: the relay above ran synchronously on this goroutine, so there is no
 	// concurrent writer. IsEnabled takes the lock; ConnectionRefusals has no exported accessor.
