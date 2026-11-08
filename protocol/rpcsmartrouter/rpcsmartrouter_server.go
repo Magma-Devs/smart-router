@@ -1651,8 +1651,17 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			}
 		}
 
+		// The two replies below are the router's own, made when the budget ran out before any
+		// attempt it dispatched came back. They carry this request's headers all the same, as a
+		// reply some upstream produced does (MAG-3980). Returning before appendHeadersToRelayResult
+		// sent them with no lava-* header at all: no Lava-Guid for the customer to quote on the
+		// failure hardest to diagnose, a silent upstream, and no Lava-Retries or
+		// Lava-Provider-Address to say what was tried. unknownWrite is true only for a processor
+		// that dispatched, so the processor is never nil there.
 		if unknownWrite() {
-			return nil, errUnknownWriteOutcome
+			unclear := withUnclearWriteStatus(&common.RelayResult{})
+			rpcss.appendHeadersToRelayResult(ctx, unclear, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			return unclear, errUnknownWriteOutcome
 		}
 
 		// A hung upstream: the request was dispatched and the processing budget ran out before any
@@ -1660,7 +1669,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// than a 500 carrying "context deadline exceeded" (MAG-4481).
 		if relayProcessor != nil && errors.Is(err, context.DeadlineExceeded) && relayProcessor.GetUsedProviders().SessionsDispatched() > 0 {
 			processingTimeout, _ := rpcss.GetProcessingTimeout(protocolMessage)
-			return &common.RelayResult{
+			timedOut := &common.RelayResult{
 				StatusCode: http.StatusGatewayTimeout,
 				ClientFacing: &common.ClientFacingError{
 					TimedOut:        true,
@@ -1668,7 +1677,9 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 					RouterErrorCode: common.LavaErrorContextDeadline.Code,
 					RouterErrorName: common.LavaErrorContextDeadline.Name,
 				},
-			}, err
+			}
+			rpcss.appendHeadersToRelayResult(ctx, timedOut, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			return timedOut, err
 		}
 
 		return nil, err
@@ -6450,13 +6461,20 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	} else if relayResult != nil {
 		// For non-cross-validation mode: keep existing single provider behavior
 		providerAddress := relayResult.GetProvider()
-		if providerAddress == "" {
+		// No provider and no reply: nothing answered, and this is the router's own reply, made when
+		// the budget ran out before any attempt came back (MAG-3980). It has no resolver, so it is
+		// named by the attempts that went out, below, and by nothing after them. "Cached" would
+		// name a cache that never answered: a cache hit is a result with a reply.
+		nothingAnswered := providerAddress == "" && relayResult.Reply == nil
+		if providerAddress == "" && !nothingAnswered {
 			providerAddress = "Cached"
 		}
-		metadataReply = append(metadataReply, pairingtypes.Metadata{
-			Name:  common.PROVIDER_ADDRESS_HEADER_NAME,
-			Value: providerAddress,
-		})
+		if !nothingAnswered {
+			metadataReply = append(metadataReply, pairingtypes.Metadata{
+				Name:  common.PROVIDER_ADDRESS_HEADER_NAME,
+				Value: providerAddress,
+			})
+		}
 
 		// On a cache hit, name the backend that served it. Debug-gated: the
 		// value is an internal infrastructure address (a Redis node, a cache-be
@@ -6534,7 +6552,9 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				apiInterface := rpcss.listenEndpoint.ApiInterface
 				rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
 			}
+		}
 
+		if totalRetries > 0 || nothingAnswered {
 			// When there are retries, show every attempted provider in the order
 			// the router asked them, the resolver last. "Cached" stays in the
 			// list so the entry count matches Lava-Retries — without it,
@@ -6560,6 +6580,10 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			// violating "last entry == response source" (MAG-1871). Walking
 			// slices makes the value deterministic across runs; the explicit
 			// final append makes the contract structurally true.
+			//
+			// A reply nothing answered has no response source, so nothing is
+			// appended after its attempts, and it names them even when there
+			// was a single one: no provider was named above (MAG-3980).
 			seen := make(map[string]struct{})
 			allProvidersList := make([]string, 0)
 			addEarlierAttempt := func(addr string) {
@@ -6584,15 +6608,25 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			for _, r := range successResults {
 				addEarlierAttempt(r.ProviderInfo.ProviderAddress)
 			}
-			allProvidersList = append(allProvidersList, providerAddress) // resolver — "Cached" or the winning real provider, always last
+			if !nothingAnswered {
+				allProvidersList = append(allProvidersList, providerAddress) // resolver — "Cached" or the winning real provider, always last
+			}
 
 			if len(allProvidersList) > 0 {
 				allProvidersString := strings.Join(allProvidersList, ",")
+				named := false
 				for i, metadata := range metadataReply {
 					if metadata.Name == common.PROVIDER_ADDRESS_HEADER_NAME {
 						metadataReply[i].Value = allProvidersString
+						named = true
 						break
 					}
+				}
+				if !named {
+					metadataReply = append(metadataReply, pairingtypes.Metadata{
+						Name:  common.PROVIDER_ADDRESS_HEADER_NAME,
+						Value: allProvidersString,
+					})
 				}
 			}
 		}
