@@ -459,7 +459,7 @@ func TestVerificationRetries_ChainsAreIsolated(t *testing.T) {
 // fake takes the shorter signature.
 func swapBootValidate(fn func(context.Context, *lavasession.RPCStaticProviderEndpoint) error) func() {
 	prev := retryValidateFn
-	retryValidateFn = func(ctx context.Context, p *lavasession.RPCStaticProviderEndpoint, _ chainlib.ChainParser) (chainlib.ProviderAdmission, error) {
+	retryValidateFn = func(ctx context.Context, p *lavasession.RPCStaticProviderEndpoint, _ chainlib.ChainParser, _ chainlib.ProviderAdmission, _ []chainlib.CheckID) (chainlib.ProviderAdmission, error) {
 		return chainlib.ProviderAdmission{}, fn(ctx, p)
 	}
 	return func() { retryValidateFn = prev }

@@ -78,7 +78,7 @@ func TestTrackFailures_LogsEachTransitionOnce(t *testing.T) {
 }
 
 // GET /debug/verification shows, per configured provider, what it is failing with the
-// start the gauge publishes, whether it is in the pairing, and its next retry.
+// start the gauge publishes, whether it is in the pairing, and each check's next retry.
 func TestDebugVerification_ShowsFailingChecksAndRetries(t *testing.T) {
 	const spec = "VERIFYDEBUG"
 	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
@@ -96,7 +96,9 @@ func TestDebugVerification_ShowsFailingChecksAndRetries(t *testing.T) {
 	rpsr := newVerificationFailedRouter(t, spec, inputs)
 	rpsr.providerSessions[chainKey] = sessionsFor("served")
 	inputs.noteFailure(reverifyTierStatic, "out", &chainlib.VerificationFailure{Check: "chain-id", Err: errors.New("0x89")})
-	inputs.retries.failing(reverifyTierStatic, "out", time.Time{})
+	chainID := chainlib.CheckID{Name: "chain-id"}
+	inputs.retries.reconcile(reverifyTierStatic, "out", nil, []chainlib.CheckID{chainID}, time.Time{}, true)
+	inputs.retries.reconcile(reverifyTierStatic, "served", nil, []chainlib.CheckID{{Name: "pruning", Extension: "archive"}, {}}, time.Time{}, true)
 	rpsr.publishServingTierLocked(chainKey)
 
 	state := getVerificationDebugState(t, rpsr)
@@ -110,13 +112,22 @@ func TestDebugVerification_ShowsFailingChecksAndRetries(t *testing.T) {
 	require.Len(t, providers[0].Failing, 1)
 	require.Equal(t, "chain-id", providers[0].Failing[0].Check)
 	require.Equal(t, metrics.VerificationSeverityFail, providers[0].Failing[0].Severity)
-	require.NotNil(t, providers[0].Retry)
-	require.Equal(t, 1, providers[0].Retry.Attempts)
+	require.Len(t, providers[0].Retries, 1)
+	require.Equal(t, "chain-id", providers[0].Retries[0].Check)
+	require.Equal(t, 1, providers[0].Retries[0].Attempts)
+	require.False(t, providers[0].Retries[0].WholePass)
 
 	require.Equal(t, "served", providers[1].Provider)
 	require.True(t, providers[1].InPairing)
 	require.Equal(t, "archive", providers[1].Failing[0].Service)
-	require.Nil(t, providers[1].Retry)
+	require.Len(t, providers[1].Retries, 2, "each check on its own schedule")
+	var archive, whole bool
+	for _, retry := range providers[1].Retries {
+		archive = archive || (retry.Check == "pruning" && retry.Extension == "archive" && retry.Addon == "")
+		whole = whole || (retry.WholePass && retry.Check == "")
+	}
+	require.True(t, archive, "the archive check, named by its verification and extension")
+	require.True(t, whole, "a failure no check owns retries the whole pass")
 
 	gauge := verificationFailedSeries(t, spec)
 	require.Equal(t, float64(providers[0].Failing[0].Since.Unix()), gauge["out|static|provider||chain-id|Fail"], "the debug endpoint and the gauge agree on the start")

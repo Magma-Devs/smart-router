@@ -637,16 +637,23 @@ too.
 | `check` | The spec verification that failed (`chain-id`, `pruning`, ...), or one of: `latest-block` (the head probe before any verification), `unsupported-addon` (a node url's addons name something the spec does not define: `scope=service` with that name as `service`, while the url serves the rest; only a `standalone-addons` url that names no add-on the spec defines is refused whole), `connect` (no connection to the node), `config` (the configured urls cannot work as given: no http(s) url, or no websocket url on a chain that subscribes), `not-run` (the provider's verification deadline passed before this check ran), `rate-limited` (a provider out at boot whose only answer so far is a 429; gauge only, never counted), `unknown`. |
 | `severity` | As MAG-3950 names it: `Fail` when the failure takes a url or the provider out, `PartialFail` when it switches off only `service`, `Warning` when it switches off nothing (`scope=none`). A spec value that sets no severity takes the default for where its check sits: `Fail` for a basic check (the base collection's own, no add-on or extension), `PartialFail` for an add-on or extension check. An explicit `Fail` on an add-on check makes the add-on mandatory: its failure takes the url out. A rate-limited `Warning` check, or one the deadline never ran, is not counted: one that failed the last pass keeps its series, and a new one gets none. |
 
-A provider failing anything that costs something (MAG-3950) is retried on its own
+Each check a provider is failing that costs something (MAG-3950) is retried on its own
 backoff: `--verification-retry-delay` (30s) after the pass that found it failing,
 doubling for every pass in a row that still does, up to `--verification-retry-max-delay`
-(15m), plus up to 20% jitter, and never before its rate-limit hold-off ends. That covers
-a provider out of the pairing (failed at boot, or demoted), a refused service or url,
-and a url on its first strike. While its chain is dark, a provider out of the pairing is
-retried from 2s instead, doubling to 3m. The epoch pass counts as an attempt, so at the
-cap a provider is re-checked about once an epoch. A provider failing only a `Warning`
-check is re-checked by the epoch alone. So a series appears and clears within one retry
-of the change: 30s at first, at most 15m into a long outage.
+(15m), plus up to 20% jitter, and never before the provider's rate-limit hold-off ends.
+That covers a provider out of the pairing (failed at boot, or demoted), a refused service
+or url, and a url on its first strike. A retry re-runs only the provider's checks that are
+due, on each node url that has them, and keeps every other verdict from the pass before:
+with `debug` and `archive` both failing, each has its own schedule, and the checks that
+pass (`chain-id` and the rest) are re-run by the epoch alone. A url that could not be
+dialed is retried whole. Checks that failed in the same pass stay due together until
+their attempts part. While its chain is dark, every provider out of the pairing is
+verified whole from 2s instead, doubling to 3m, and those passes do not push a check's
+own retry back. The epoch pass counts as an attempt for every check it finds failing, so
+at the cap a check is re-run about once an epoch. A `Warning` check and an add-on name
+the spec does not define are re-checked by the epoch alone. So a series appears and
+clears within one retry of the change: 30s at first, at most 15m into a long outage.
+A retry counts a failed run only for the checks it ran.
 
 | Condition | Meaning |
 | --- | --- |

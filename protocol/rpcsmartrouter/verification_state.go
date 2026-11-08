@@ -2,6 +2,7 @@ package rpcsmartrouter
 
 import (
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -98,8 +99,14 @@ type verificationDebugCheck struct {
 	Since    time.Time `json:"since"`
 }
 
-// verificationDebugRetry is a provider's place on the retry schedule.
+// verificationDebugRetry is one check of a provider on the retry schedule: the spec
+// verification's name and the add-on and extension its value covers, or wholePass for a
+// failure no single check owns (a url that could not be dialed), which re-runs them all.
 type verificationDebugRetry struct {
+	Check        string    `json:"check,omitempty"`
+	Addon        string    `json:"addon,omitempty"`
+	Extension    string    `json:"extension,omitempty"`
+	WholePass    bool      `json:"wholePass,omitempty"`
 	Attempts     int       `json:"attempts"`
 	PendingSince time.Time `json:"pendingSince"`
 	NextRetryAt  time.Time `json:"nextRetryAt"`
@@ -110,7 +117,8 @@ type verificationDebugProvider struct {
 	Tier      string                   `json:"tier"`
 	InPairing bool                     `json:"inPairing"`
 	Failing   []verificationDebugCheck `json:"failing"`
-	Retry     *verificationDebugRetry  `json:"retry,omitempty"`
+	// Retries is each check of the provider on the retry schedule, the earliest due first.
+	Retries []verificationDebugRetry `json:"retries"`
 }
 
 type verificationDebugChain struct {
@@ -121,8 +129,8 @@ type verificationDebugChain struct {
 
 // verificationDebugState is GET /debug/verification (MAG-3950): per chain, what each
 // configured provider is failing, with the start times the gauge publishes, and when
-// its next verification retry is due. It reads what the router tracks whether or not
-// metrics are published.
+// each check it is failing is next retried. It reads what the router tracks whether or
+// not metrics are published.
 func (rpsr *RPCSmartRouter) verificationDebugState() map[string]any {
 	rpsr.mu.Lock()
 	defer rpsr.mu.Unlock()
@@ -137,9 +145,10 @@ func (rpsr *RPCSmartRouter) verificationDebugState() map[string]any {
 		if inputs == nil || inputs.rpcEndpoint == nil {
 			continue
 		}
-		scheduled := map[string]retryEntry{}
+		scheduled := map[string][]retryEntry{}
 		for _, entry := range inputs.retries.snapshot() {
-			scheduled[retryKey(entry.tier, entry.name)] = entry
+			key := retryKey(entry.tier, entry.name)
+			scheduled[key] = append(scheduled[key], entry)
 		}
 		chain := verificationDebugChain{Chain: inputs.rpcEndpoint.ChainID, ApiInterface: inputs.rpcEndpoint.ApiInterface, Providers: []verificationDebugProvider{}}
 		for _, tier := range []struct {
@@ -152,13 +161,23 @@ func (rpsr *RPCSmartRouter) verificationDebugState() map[string]any {
 			active := byName(tier.sessions)
 			for _, p := range inputs.configuredFor(tier.tier) {
 				key := retryKey(tier.tier, p.Name)
-				row := verificationDebugProvider{Provider: p.Name, Tier: tier.tier.String(), Failing: []verificationDebugCheck{}}
+				row := verificationDebugProvider{Provider: p.Name, Tier: tier.tier.String(), Failing: []verificationDebugCheck{}, Retries: []verificationDebugRetry{}}
 				_, row.InPairing = active[p.Name]
 				for _, f := range inputs.failing[key] {
 					row.Failing = append(row.Failing, verificationDebugCheck{Scope: f.Scope, Service: f.Service, Check: f.Check, Severity: f.Severity, Since: f.Since})
 				}
-				if entry, ok := scheduled[key]; ok {
-					row.Retry = &verificationDebugRetry{Attempts: entry.attempts, PendingSince: entry.since, NextRetryAt: entry.due}
+				entries := scheduled[key]
+				slices.SortFunc(entries, func(a, b retryEntry) int {
+					if c := a.due.Compare(b.due); c != 0 {
+						return c
+					}
+					return strings.Compare(a.check.Name+"\x00"+a.check.Addon+"\x00"+a.check.Extension, b.check.Name+"\x00"+b.check.Addon+"\x00"+b.check.Extension)
+				})
+				for _, entry := range entries {
+					row.Retries = append(row.Retries, verificationDebugRetry{
+						Check: entry.check.Name, Addon: entry.check.Addon, Extension: entry.check.Extension, WholePass: entry.check.WholePass(),
+						Attempts: entry.attempts, PendingSince: entry.since, NextRetryAt: entry.due,
+					})
 				}
 				chain.Providers = append(chain.Providers, row)
 			}

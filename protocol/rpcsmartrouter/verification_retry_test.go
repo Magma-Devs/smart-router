@@ -34,13 +34,32 @@ func TestVerificationRetryDelayFor(t *testing.T) {
 	require.Equal(t, 30*time.Second, verificationRetryDelayFor(1, 0), "a delay of zero falls back to the default")
 }
 
+// failingWhole puts a provider on the schedule for its whole pass, as a pass with no
+// verdicts to read does (a fake probe's), and counts the attempt.
+func failingWhole(schedule *retrySchedule, tier reverifyTier, name string, notBefore time.Time) {
+	schedule.reconcile(tier, name, nil, []chainlib.CheckID{{}}, notBefore, true)
+}
+
+// Each check a provider is failing waits on its own backoff (MAG-4505 C4): a retry that
+// re-ran one check moves only that one, a check that passes leaves the schedule, and a
+// failing check the retry did not run keeps its place.
 func TestRetrySchedule(t *testing.T) {
 	now := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
 	schedule := newRetrySchedule()
 	schedule.now = func() time.Time { return now }
 	schedule.jitter = func() float64 { return 0 }
+	debug := chainlib.CheckID{Name: "enabled", Addon: "debug"}
+	archive := chainlib.CheckID{Name: "pruning", Extension: "archive"}
+	nextOf := func(check chainlib.CheckID) time.Time {
+		for _, entry := range schedule.snapshot() {
+			if entry.tier == reverifyTierStatic && entry.name == "lava" && entry.check == check {
+				return entry.due
+			}
+		}
+		return time.Time{}
+	}
 
-	schedule.failing(reverifyTierStatic, "lava", time.Time{})
+	schedule.reconcile(reverifyTierStatic, "lava", nil, []chainlib.CheckID{archive, debug}, time.Time{}, true)
 	select {
 	case <-schedule.wake:
 	default:
@@ -52,32 +71,58 @@ func TestRetrySchedule(t *testing.T) {
 	require.Empty(t, schedule.due())
 
 	now = now.Add(30 * time.Second)
-	require.Equal(t, map[reverifyTier]map[string]struct{}{reverifyTierStatic: {"lava": {}}}, schedule.due())
+	require.ElementsMatch(t, []chainlib.CheckID{archive, debug}, schedule.due()[reverifyTierStatic]["lava"], "both checks failed in one pass, so both are due together")
 
-	schedule.failing(reverifyTierStatic, "lava", time.Time{})
-	wait, _ = schedule.next()
-	require.Equal(t, time.Minute, wait, "a pass that still finds it failing doubles the wait")
+	schedule.reconcile(reverifyTierStatic, "lava", []chainlib.CheckID{debug}, []chainlib.CheckID{archive, debug}, time.Time{}, true)
+	require.Equal(t, now.Add(time.Minute), nextOf(debug), "the check the retry re-ran and found failing waits twice as long")
+	require.Equal(t, now, nextOf(archive), "the check it did not run keeps its place")
 
-	schedule.failing(reverifyTierStatic, "lava", now.Add(10*time.Minute))
-	wait, _ = schedule.next()
-	require.Equal(t, 10*time.Minute, wait, "never before its rate-limit hold-off ends")
+	schedule.reconcile(reverifyTierStatic, "lava", []chainlib.CheckID{archive}, []chainlib.CheckID{debug}, time.Time{}, true)
+	require.True(t, nextOf(archive).IsZero(), "a check that passes leaves the schedule")
+	require.Equal(t, now.Add(time.Minute), nextOf(debug), "and the other check's schedule is its own")
+
+	schedule.reconcile(reverifyTierStatic, "lava", []chainlib.CheckID{debug}, []chainlib.CheckID{debug}, now.Add(10*time.Minute), true)
+	require.Equal(t, now.Add(10*time.Minute), nextOf(debug), "never before its rate-limit hold-off ends")
+
+	schedule.reconcile(reverifyTierStatic, "lava", nil, []chainlib.CheckID{debug, archive}, time.Time{}, false)
+	require.Equal(t, now.Add(10*time.Minute), nextOf(debug), "a whole pass that does not count leaves a waiting check in its place")
+	require.Equal(t, now.Add(30*time.Second), nextOf(archive), "and puts a newly failing one on the schedule")
 
 	schedule.ensure(reverifyTierStatic, "lava")
-	wait, _ = schedule.next()
-	require.Equal(t, 10*time.Minute, wait, "ensure leaves an entry already there in its place")
+	require.Len(t, schedule.snapshot(), 2, "ensure leaves a provider with checks on the schedule as it is")
 	schedule.ensure(reverifyTierBackup, "lava")
-	require.Contains(t, schedule.due(), reverifyTierBackup, "a provider ensure puts on the schedule is due now")
+	require.Equal(t, []chainlib.CheckID{{}}, schedule.due()[reverifyTierBackup]["lava"], "a provider ensure puts on the schedule is due now, for its whole pass")
+	schedule.postpone(reverifyTierBackup, "lava", nil, now.Add(time.Hour))
+	require.Empty(t, schedule.due()[reverifyTierBackup], "a rate-limited pass pushes the provider's checks past the hold-off")
 
-	schedule.passed(reverifyTierStatic, "lava")
-	schedule.passed(reverifyTierBackup, "lava")
+	schedule.reconcile(reverifyTierStatic, "lava", nil, nil, time.Time{}, true)
+	schedule.forget(reverifyTierBackup, "lava")
 	_, pending = schedule.next()
-	require.False(t, pending)
+	require.False(t, pending, "a whole pass that finds nothing failing clears the provider")
 	require.Empty(t, schedule.snapshot())
 
 	var none *retrySchedule
-	none.failing(reverifyTierStatic, "lava", time.Time{})
+	none.reconcile(reverifyTierStatic, "lava", nil, []chainlib.CheckID{debug}, time.Time{}, true)
 	_, pending = none.next()
 	require.False(t, pending, "a chain without inputs has a nil schedule, and nothing on it")
+}
+
+// The checks one pass reschedules share a jitter, so the checks that failed together are
+// retried in one pass: two draws apart would split them into two passes seconds apart.
+func TestRetrySchedule_ChecksThatFailTogetherStayDueTogether(t *testing.T) {
+	now := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
+	schedule := newRetrySchedule()
+	schedule.now = func() time.Time { return now }
+	draws := []float64{0.1, 0.9}
+	schedule.jitter = func() float64 {
+		draw := draws[0]
+		draws = draws[1:]
+		return draw
+	}
+	schedule.reconcile(reverifyTierStatic, "lava", nil, []chainlib.CheckID{{Name: "enabled", Addon: "debug"}, {Name: "pruning", Extension: "archive"}}, time.Time{}, true)
+	entries := schedule.snapshot()
+	require.Len(t, entries, 2)
+	require.Equal(t, entries[0].due, entries[1].due)
 }
 
 // A chain that still serves retries each failed provider on that provider's backoff: 30s,
@@ -99,8 +144,8 @@ func TestVerificationRetries_ADegradedChainRetriesEachProviderOnItsBackoff(t *te
 	start := time.Now()
 	// As boot schedules them: one due after the first delay, one rate-limited for longer
 	// than this test runs.
-	inputs.retries.failing(reverifyTierStatic, "flaky", time.Time{})
-	inputs.retries.failing(reverifyTierStatic, "held", start.Add(time.Hour))
+	failingWhole(inputs.retries, reverifyTierStatic, "flaky", time.Time{})
+	failingWhole(inputs.retries, reverifyTierStatic, "held", start.Add(time.Hour))
 
 	var mu sync.Mutex
 	probed := map[string][]time.Time{}
@@ -191,7 +236,7 @@ func TestRevalidateTier_ProbesInParallel(t *testing.T) {
 	defer restore()
 
 	start := time.Now()
-	_, stillFailed := rpsr.revalidateTier(context.Background(), bootTestProviders("a", "b", "c", "d", "e"), nil, rpcEndpoint, reverifyTierStatic)
+	_, stillFailed := rpsr.revalidateTier(context.Background(), bootTestProviders("a", "b", "c", "d", "e"), nil, rpcEndpoint, reverifyTierStatic, nil, true)
 	require.Equal(t, []string{"a", "b", "c", "d", "e"}, providerNames(stillFailed), "in configured order")
 	require.Less(t, time.Since(start), 900*time.Millisecond, "five hanging providers cost one timeout, not five")
 }
@@ -213,7 +258,7 @@ func TestRevalidateTier_DropsAVerdictAnotherPassOvertook(t *testing.T) {
 	})
 	defer restore()
 
-	recovered, stillFailed := rpsr.revalidateTier(context.Background(), bootTestProviders("flaky"), nil, rpcEndpoint, reverifyTierStatic)
+	recovered, stillFailed := rpsr.revalidateTier(context.Background(), bootTestProviders("flaky"), nil, rpcEndpoint, reverifyTierStatic, nil, true)
 	require.Empty(t, recovered)
 	require.Empty(t, stillFailed)
 }

@@ -2937,11 +2937,11 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 	}
 	for p, err := range failedStaticSet {
 		inputs.noteFailure(reverifyTierStatic, p.Name, err)
-		inputs.retries.failing(reverifyTierStatic, p.Name, heldOffUntil(nil, p))
+		inputs.rescheduleFailed(reverifyTierStatic, p, nil, chainlib.ProviderAdmission{}, err, true)
 	}
 	for p, err := range failedBackupSet {
 		inputs.noteFailure(reverifyTierBackup, p.Name, err)
-		inputs.retries.failing(reverifyTierBackup, p.Name, heldOffUntil(nil, p))
+		inputs.rescheduleFailed(reverifyTierBackup, p, nil, chainlib.ProviderAdmission{}, err, true)
 	}
 	// What boot refused a provider it admitted, as recorded unmerged by PHASE 1.
 	for _, tier := range []struct {
@@ -2955,9 +2955,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		for _, p := range tier.providers {
 			if _, failed := tier.failed[p]; !failed {
 				inputs.countRefusals(tier.tier, p, admissionFor(p))
-				if inputs.degraded(p, admissionFor(p)) {
-					inputs.retries.failing(tier.tier, p.Name, heldOffUntil(nil, p))
-				}
+				inputs.retries.reconcile(tier.tier, p.Name, nil, inputs.retriesOf(p, admissionFor(p), nil), heldOffUntil(nil, p), true)
 			}
 		}
 	}
@@ -3824,8 +3822,8 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().BoolVar(&chainlib.SkipAllVerifications, common.SkipAllVerificationsFlag, chainlib.SkipAllVerifications, "skip ALL spec verifications for every provider this process serves, healthy ones included. An escape hatch for bringing a router up against upstreams that cannot survive being probed; prefer the per-node-url skip-verifications config (which accepts \"*\") for anything ongoing")
 
 	cmdRPCSmartRouter.Flags().DurationVar(&lavasession.ProbeLoopInterval, common.ProbeLoopIntervalFlagName, lavasession.ProbeLoopInterval, "cadence of the proactive health prober (MAG-2161 Topic D); must be > 0, default 5s")
-	cmdRPCSmartRouter.Flags().DurationVar(&VerificationRetryDelay, common.VerificationRetryDelayFlag, VerificationRetryDelay, "how long a provider failing a spec verification waits for its first retry; each retry that still finds it failing doubles the wait, up to --"+common.VerificationRetryMaxDelayFlag+" (MAG-3950)")
-	cmdRPCSmartRouter.Flags().DurationVar(&VerificationRetryMaxDelay, common.VerificationRetryMaxDelayFlag, VerificationRetryMaxDelay, "the longest a provider failing a spec verification waits between retries (MAG-3950)")
+	cmdRPCSmartRouter.Flags().DurationVar(&VerificationRetryDelay, common.VerificationRetryDelayFlag, VerificationRetryDelay, "how long a spec verification a provider is failing waits for its first retry; each check has its own wait, and each retry that still finds it failing doubles it, up to --"+common.VerificationRetryMaxDelayFlag+" (MAG-3950)")
+	cmdRPCSmartRouter.Flags().DurationVar(&VerificationRetryMaxDelay, common.VerificationRetryMaxDelayFlag, VerificationRetryMaxDelay, "the longest a spec verification a provider is failing waits between retries (MAG-3950)")
 	cmdRPCSmartRouter.Flags().Float64(common.ProbeUpdateWeightFlagName, scoreutils.DefaultProbeUpdateWeight, "weight multiplier for provider-optimizer probe updates (liveness/latency); must be > 0")
 	if err := viper.BindPFlag(common.ProbeUpdateWeightFlagName, cmdRPCSmartRouter.Flags().Lookup(common.ProbeUpdateWeightFlagName)); err != nil {
 		utils.LavaFormatFatal("failed binding probe update weight flag", err)
@@ -4374,23 +4372,19 @@ func activeProviders(
 // provider comes back as soon as a path it serves has a url again. A
 // package-level var purely so tests can substitute a fake without standing up
 // upstreams — production never reassigns it. Mirrors the
-// chainReverifyInputs.validateFn seam applyReverification uses.
-var retryValidateFn = func(ctx context.Context, provider *lavasession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) (chainlib.ProviderAdmission, error) {
-	return validateProviderCollections(ctx, provider, chainParser, BootValidateTimeout)
-}
-
-// noteVerificationFailure records the check a provider failed on the retry loop,
-// which runs without the router lock.
-func (rpsr *RPCSmartRouter) noteVerificationFailure(chainKey string, tier reverifyTier, name string, err error) {
-	rpsr.mu.Lock()
-	defer rpsr.mu.Unlock()
-	if inputs := rpsr.reverifyInputs[chainKey]; inputs != nil {
-		inputs.noteFailure(tier, name, err)
-	}
+// chainReverifyInputs.validateFn seam applyReverification uses. With only, it re-runs
+// only those checks and keeps the other verdicts from previous, the pass that refused
+// the provider (MAG-3950).
+var retryValidateFn = func(ctx context.Context, provider *lavasession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser, previous chainlib.ProviderAdmission, only []chainlib.CheckID) (chainlib.ProviderAdmission, error) {
+	return revalidateProviderCollections(ctx, provider, chainParser, BootValidateTimeout, previous, only)
 }
 
 // revalidateTier re-runs verification over one tier's failed providers, returning
-// the recovered and still-failing partitions in configured order.
+// the recovered and still-failing partitions in configured order. A provider named in
+// only re-runs only those checks, keeping its other verdicts from the pass that refused
+// it (chainReverifyInputs.lastPass); one not named in it is verified whole. Each
+// verdict moves the provider's checks on the retry schedule; with countAttempt false,
+// a whole pass does not push back the checks already waiting.
 //
 // The probes run in parallel, capped by SpecReVerifyConcurrency, so one provider that
 // hangs does not hold every other provider's retry back by its timeout. Their verdicts
@@ -4403,12 +4397,23 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 	chainParser chainlib.ChainParser,
 	rpcEndpoint *lavasession.RPCEndpoint,
 	tier reverifyTier,
+	only map[string][]chainlib.CheckID,
+	countAttempt bool,
 ) (recovered, stillFailed []*lavasession.RPCStaticProviderEndpoint) {
 	type probe struct {
 		admission chainlib.ProviderAdmission
 		err       error
 		started   time.Time
+		ran       []chainlib.CheckID
 	}
+	previous := make([]chainlib.ProviderAdmission, len(failed))
+	rpsr.mu.Lock()
+	if inputs := rpsr.reverifyInputs[rpcEndpoint.Key()]; inputs != nil {
+		for i, provider := range failed {
+			previous[i] = inputs.lastPass[retryKey(tier, provider.Name)]
+		}
+	}
+	rpsr.mu.Unlock()
 	probes := make([]probe, len(failed))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, SpecReVerifyConcurrency)
@@ -4419,8 +4424,9 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 			defer wg.Done()
 			defer func() { <-sem }()
 			started := time.Now()
-			admission, err := retryValidateFn(ctx, provider, chainParser)
-			probes[i] = probe{admission: admission, err: err, started: started}
+			ran := only[provider.Name]
+			admission, err := retryValidateFn(ctx, provider, chainParser, previous[i], ran)
+			probes[i] = probe{admission: admission, err: err, started: started, ran: ran}
 		}()
 	}
 	wg.Wait()
@@ -4442,6 +4448,7 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 			stillFailed = append(stillFailed, provider)
 			if inputs != nil {
 				inputs.noteFailure(tier, provider.Name, result.err)
+				inputs.rescheduleFailed(tier, provider, result.ran, result.admission, result.err, countAttempt)
 			}
 			utils.LavaFormatWarning("retry: provider verification still failing", result.err,
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
@@ -4455,6 +4462,11 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 				inputs.recordAdmission(provider, result.admission)
 			}
 			inputs.countRefusals(tier, provider, result.admission)
+			delete(inputs.lastPass, retryKey(tier, provider.Name))
+			// One back with something still failing, a url still refused, stays on the
+			// schedule for what still fails.
+			inputs.retries.reconcile(tier, provider.Name, result.ran, inputs.retriesOf(provider, result.admission, nil),
+				heldOffUntil(inputs.rateLimitHoldoff, provider), countAttempt)
 		}
 		recovered = append(recovered, provider)
 		utils.LavaFormatInfo("[+] provider recovered and passed verification",

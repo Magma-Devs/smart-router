@@ -455,7 +455,7 @@ For tests that only need the endpoint-health reset, **`POST /debug/reset-endpoin
 
 `/debug/reset-pairing` and `/debug/reset-scores` remain available for targeted cleanup.
 
-**`GET /debug/verification`** shows, per chain and configured provider, what it is failing (`scope`, `service`, `check`, `severity`, and `since`, the start `smartrouter_provider_verification_failed` publishes), whether it is in the pairing, and when its next verification retry is due (`retry.attempts`, `retry.pendingSince`, `retry.nextRetryAt`), with the retry delays in force (MAG-3950). A test can shorten those with `--verification-retry-delay` and `--verification-retry-max-delay` instead of waiting 30s to 15m between retries.
+**`GET /debug/verification`** shows, per chain and configured provider, what it is failing (`scope`, `service`, `check`, `severity`, and `since`, the start `smartrouter_provider_verification_failed` publishes), whether it is in the pairing, and when each check it is failing is next retried (`retries`, one entry per check, earliest due first: `check`, `addon`, `extension`, or `wholePass` for a url that could not be dialed, with `attempts`, `pendingSince` and `nextRetryAt`), with the retry delays in force (MAG-3950). A test can shorten those with `--verification-retry-delay` and `--verification-retry-max-delay` instead of waiting 30s to 15m between retries.
 
 ## Releases
 

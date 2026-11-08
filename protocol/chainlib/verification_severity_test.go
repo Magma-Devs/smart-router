@@ -169,3 +169,39 @@ func TestAdmissionFrom_AWarningIsKeptApartFromRefusals(t *testing.T) {
 	}
 	require.Empty(t, ProviderAdmission{}.KeepingThrottledFrom(failed).Warnings(), "a check that passed clears it")
 }
+
+// What a retry of a pass re-runs (MAG-3950): every check that failed or that a rate
+// limit kept from answering, once, by verification and the add-on and extension its
+// value covers; the whole pass for a url it could not dial. Not a Warning check, which
+// switches nothing off, nor an add-on name the spec does not define, which only a
+// restart reads again. The verdicts a retry kept are not counted as runs (Rerun, Ran).
+func TestRetries_AreTheChecksThatFailed(t *testing.T) {
+	a, b := common.NodeUrl{Url: "https://a", Addons: []string{"debug", "archive"}}, common.NodeUrl{Url: "https://b"}
+	chainID, archive, debug := baseCollectionOnly("chain-id"), archiveOnBaseCollection(), addonScoped("enabled", "debug")
+	warning := baseCollectionOnly("tokens-owner-indexed")
+	warning.Severity = spectypes.ParseValue_Warning
+	admission, _ := admissionFrom([]nodeUrlOutcome{
+		{url: a, served: a, unknown: []string{"debugg"}, checks: []checkOutcome{
+			{verification: chainID},
+			{verification: archive, err: errors.New("pruned")},
+			{verification: debug, err: throttledErr()},
+			{verification: warning, err: errors.New("no owner index")},
+		}},
+		{url: b, served: b, err: &VerificationFailure{Check: CheckConnect, Err: errors.New("refused")}},
+	})
+	require.True(t, admission.Verified())
+	require.Equal(t, []CheckID{{}, {Name: "enabled", Addon: "debug"}, {Name: archive.Name, Extension: "archive"}}, admission.Retries())
+	require.False(t, ProviderAdmission{}.Verified(), "no pass, no verdicts to keep")
+	require.Empty(t, ProviderAdmission{}.Retries())
+
+	kept, _ := admissionFrom([]nodeUrlOutcome{{url: a, served: a, checks: []checkOutcome{
+		{verification: chainID},
+		{verification: archive, err: errors.New("pruned"), kept: true},
+		{verification: debug, err: errors.New("method not found")},
+	}}})
+	require.Equal(t, []RefusedService{{Service: "archive", Check: archive.Name}, {Service: "debug", Check: "enabled"}}, kept.Refused(), "a kept verdict still refuses")
+	require.Equal(t, []RefusedService{{Service: "debug", Check: "enabled"}}, kept.Rerun().Refused(), "but only the checks this pass ran count as failed runs")
+	require.True(t, kept.Ran("enabled"))
+	require.False(t, kept.Ran(archive.Name))
+	require.True(t, kept.Ran(CheckConnect), "a check no verification owns always ran")
+}

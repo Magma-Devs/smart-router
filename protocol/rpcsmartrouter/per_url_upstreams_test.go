@@ -34,6 +34,12 @@ const (
 	upSolana    = "sol"       // Solana node without the token-owner index
 	upTraceRate = "tracerate" // full ETH1 node whose trace_ methods answer 429: a premium method's own limit
 	upDebug     = "debug"     // full ETH1 node that serves the debug add-on too
+	// pruned ETH1 node that serves the debug add-on: fails only the archive check
+	upPrunedDebug = "pruneddebug"
+	// ETH1 node that answers another chain's id: fails chain-id
+	upWrongChain = "wrongchain"
+	// pruned ETH1 node that answers another chain's id: fails chain-id and archive
+	upPrunedWrongChain = "prunedwrongchain"
 )
 
 const upLatest = 0x1400000
@@ -244,7 +250,7 @@ func reply(p string, request map[string]any) map[string]any {
 	if p == upSubOnly && method != "eth_subscribe" {
 		return failure(-32601, "Method not found")
 	}
-	if p == upDebug && method == "debug_getRawHeader" {
+	if (p == upDebug || p == upPrunedDebug) && method == "debug_getRawHeader" {
 		return result("0xf90211")
 	}
 	switch method {
@@ -253,6 +259,9 @@ func reply(p string, request map[string]any) map[string]any {
 	case "eth_chainId":
 		if p == upSlowChain {
 			time.Sleep(10 * time.Second)
+		}
+		if p == upWrongChain || p == upPrunedWrongChain {
+			return result("0x89")
 		}
 		return result("0x1")
 	case "eth_blockNumber":
@@ -264,7 +273,7 @@ func reply(p string, request map[string]any) map[string]any {
 		block := upLatest
 		if len(params) > 0 && params[0] == "earliest" {
 			block = 0
-			if p == upPruned {
+			if p == upPruned || p == upPrunedDebug || p == upPrunedWrongChain {
 				block = upLatest - 1000
 			}
 		}
