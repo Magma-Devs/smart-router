@@ -17,10 +17,10 @@ func newSmartRouterForRequestGroupTest() *SmartRouterMetricsManager {
 	funcLabels := []string{"spec", "apiInterface", "endpoint_id", "function"}
 	return &SmartRouterMetricsManager{
 		// Fields touched by RecordDirectRelayEnd before the request-group block
-		endpointInFlight:            NewMappedLabelsGaugeVec(MappedLabelsMetricOpts{Name: "t_sr_inflight", Labels: funcLabels}),
-		endpointTotalRelaysServiced: NewMappedLabelsCounterVec(MappedLabelsMetricOpts{Name: "t_sr_relays", Labels: funcLabels}),
-		endpointTotalErrored:        NewMappedLabelsCounterVec(MappedLabelsMetricOpts{Name: "t_sr_errored", Labels: funcLabels}),
-		endpointTotalCancelled:      NewMappedLabelsCounterVec(MappedLabelsMetricOpts{Name: "t_sr_cancelled", Labels: funcLabels}),
+		endpointInFlight:            prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "t_sr_inflight"}, funcLabels),
+		endpointTotalRelaysServiced: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_relays"}, funcLabels),
+		endpointTotalErrored:        prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_errored"}, funcLabels),
+		endpointTotalCancelled:      prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_cancelled"}, funcLabels),
 		endpointEndToEndLatency:     prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "t_sr_latency"}, endpointLabels),
 		// Request-group counters under test
 		routerRequestsTotal:      prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t_sr_req_total"}, reqLabels),

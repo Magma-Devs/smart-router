@@ -65,7 +65,7 @@ func TestReadDebugLogBuffer_RequestIDFilter(t *testing.T) {
 	defer resetDebugBuffer()
 
 	EnableDebugLogBuffer(100)
-	// defaultGlobalLogLevel is DebugLevel by default → Info passes the gate.
+	// The level is DebugLevel by default → Info passes the gate.
 	LavaFormatInfo("hello target", LogAttr(KEY_REQUEST_ID, "req-123"))
 	LavaFormatInfo("hello other", LogAttr(KEY_REQUEST_ID, "req-999"))
 

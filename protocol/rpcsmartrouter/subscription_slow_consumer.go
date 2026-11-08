@@ -26,7 +26,11 @@ const subscriptionClientReplyBuffer = 100
 // that frees nothing for the whole grace. The bound is the ~10 ms those retries allowed every push,
 // so the other clients of a subscription never wait longer than they did before, and only while a
 // client is a full buffer behind rather than on every push. Zero restores drop-at-once.
-const subscriptionClientSendGrace = 10 * time.Millisecond
+//
+// A variable so that a test can raise it: TestBurstyClientThatReadsIsNotDropped pins that a
+// reading client is paced rather than dropped, and on a loaded machine its reader goroutine can go
+// unscheduled for longer than 10 ms, which the fan-out would rightly call a slow consumer.
+var subscriptionClientSendGrace = 10 * time.Millisecond
 
 // errSlowConsumer is the status a gRPC client's stream ends with when it was dropped for not
 // keeping up with the subscription.

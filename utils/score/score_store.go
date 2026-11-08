@@ -39,8 +39,6 @@ type ScoreStore struct {
 type ScoreStorer interface {
 	Update(sample float64, sampleTime time.Time) error
 	Resolve() (float64, error)
-	Validate() error
-	String() string
 	UpdateConfig(opts ...Option) error
 
 	GetName() string

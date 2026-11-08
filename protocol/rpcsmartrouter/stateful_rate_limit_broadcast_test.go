@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
@@ -266,8 +267,8 @@ func TestStatefulBroadcastWaitsThroughARateLimit(t *testing.T) {
 				result, err := sendWrite(t, tc, chainParser, server)
 				require.Error(t, err, "no provider executed the write")
 				require.NotNil(t, result)
-				require.Equal(t, http.StatusServiceUnavailable, result.StatusCode,
-					"every provider refused for rate: the chain is temporarily unservable, and 503 says so")
+				require.Equal(t, http.StatusTooManyRequests, result.StatusCode,
+					"every provider refused for rate: the client gets the node's own 429, not a router-made 503 (MAG-4481)")
 				require.Equal(t, int64(1), atomic.LoadInt64(&hits[0]))
 				require.Equal(t, int64(1), atomic.LoadInt64(&hits[1]))
 			})
@@ -299,9 +300,15 @@ func TestStatefulBroadcastReachesAProviderHeldOffAfterARateLimit(t *testing.T) {
 
 			_, err = sendWrite(t, tc, chainParser, server)
 			require.NoError(t, err)
-			require.Equal(t, int64(2), atomic.LoadInt64(&hits[1]), "the healthy provider received both writes")
-			require.Equal(t, int64(2), atomic.LoadInt64(&hits[0]),
-				"the second write was not broadcast to the held-off provider: the hold-off single-homed it")
+			// The write returns on the first answer. The other delivery keeps running detached for
+			// up to statefulDeliveryLinger after it (MAG-4032), and an upstream counts a hit only
+			// once the request reaches its handler, so either count can still be one here. Past
+			// the linger the delivery is cancelled, so a hit not landed by then never lands.
+			require.EventuallyWithT(t, func(c *assert.CollectT) {
+				assert.Equal(c, int64(2), atomic.LoadInt64(&hits[1]), "the healthy provider received both writes")
+				assert.Equal(c, int64(2), atomic.LoadInt64(&hits[0]),
+					"the second write was not broadcast to the held-off provider: the hold-off single-homed it")
+			}, statefulDeliveryLinger, 10*time.Millisecond)
 		})
 	}
 }

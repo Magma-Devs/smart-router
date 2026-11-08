@@ -19,7 +19,7 @@ func TestHandleGRPCError_CorroboratedRateLimitIsTyped(t *testing.T) {
 	g := &GRPCDirectRPCConnection{}
 	md := metadata.MD{"retry-after": []string{"30"}}
 
-	resp, err := g.handleGRPCError(context.Background(), status.Error(codes.ResourceExhausted, "rate limit exceeded"), md)
+	resp, err := g.handleGRPCError(context.Background(), status.Error(codes.ResourceExhausted, "rate limit exceeded"), md, true)
 	require.NotNil(t, resp, "the error response is still returned for the caller to inspect")
 	require.Error(t, err)
 	require.ErrorIs(t, err, common.StatusCodeError429)
@@ -33,7 +33,7 @@ func TestHandleGRPCError_CorroboratedRateLimitIsTyped(t *testing.T) {
 func TestHandleGRPCError_ResourceExhaustedAloneIsNotRateLimit(t *testing.T) {
 	g := &GRPCDirectRPCConnection{}
 
-	_, err := g.handleGRPCError(context.Background(), status.Error(codes.ResourceExhausted, "grpc: received message larger than max (5000000 vs. 4194304)"), nil)
+	_, err := g.handleGRPCError(context.Background(), status.Error(codes.ResourceExhausted, "grpc: received message larger than max (5000000 vs. 4194304)"), nil, true)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, common.StatusCodeError429)
 	// The original cause stays reachable when no rate limit re-scopes Unwrap.
@@ -45,7 +45,7 @@ func TestHandleGRPCError_ResourceExhaustedAloneIsNotRateLimit(t *testing.T) {
 func TestHandleGRPCError_UnavailableWith429TextIsTyped(t *testing.T) {
 	g := &GRPCDirectRPCConnection{}
 
-	_, err := g.handleGRPCError(context.Background(), status.Error(codes.Unavailable, "unexpected HTTP status code received from server: 429 (Too Many Requests)"), nil)
+	_, err := g.handleGRPCError(context.Background(), status.Error(codes.Unavailable, "unexpected HTTP status code received from server: 429 (Too Many Requests)"), nil, true)
 	require.Error(t, err)
 	require.ErrorIs(t, err, common.StatusCodeError429)
 	_, ok := common.RetryAfterFrom(err)

@@ -73,6 +73,20 @@ func (bm BaseMessage) GetHeaders() []pairingtypes.Metadata {
 	return bm.Headers
 }
 
+// ParseBlock parses a default block parameter ("latest", "earliest", a number) to a block
+// number. Every message type shares this parser.
+func (bm BaseMessage) ParseBlock(inp string) (int64, error) {
+	return parser.ParseDefaultBlockParameter(inp)
+}
+
+// UpdateLatestBlockInMessage never rewrites a request: no message type pins "latest" to a
+// concrete block. Setting it by header (SetLatestBlockWithHeader) stays off until the Cosmos SDK
+// header behaves consistently, and a GraphQL document is forwarded as written, so pinning a block
+// would mean changing the caller's query text.
+func (bm *BaseMessage) UpdateLatestBlockInMessage(latestBlock uint64, modifyContent bool) (success bool) {
+	return false
+}
+
 type DefaultRPCInput struct {
 	Result json.RawMessage
 	BaseMessage
@@ -96,10 +110,6 @@ func (dri DefaultRPCInput) GetID() json.RawMessage {
 
 func (dri DefaultRPCInput) GetError() *rpcclient.JsonError {
 	return nil
-}
-
-func (dri DefaultRPCInput) ParseBlock(inp string) (int64, error) {
-	return parser.ParseDefaultBlockParameter(inp)
 }
 
 func DefaultParsableRPCInput(input json.RawMessage) parser.RPCInput {

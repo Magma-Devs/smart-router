@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
@@ -17,10 +18,6 @@ var genericClientContentTypes = map[string]struct{}{
 	"application/x-www-form-urlencoded": {},
 	"text/plain":                        {},
 }
-
-// jsonContentType is what the router sends for a REST body whose client made no real
-// claim about it.
-const jsonContentType = "application/json"
 
 // normalizeGenericContentType returns metadata with a generic client Content-Type
 // replaced by application/json when the body is a JSON object, array or string.
@@ -49,7 +46,7 @@ func normalizeGenericContentType(metadata []pairingtypes.Metadata, body []byte) 
 		return metadata
 	}
 	normalized := slices.Clone(metadata)
-	normalized[index].Value = jsonContentType
+	normalized[index].Value = common.JSONContentType
 	return normalized
 }
 

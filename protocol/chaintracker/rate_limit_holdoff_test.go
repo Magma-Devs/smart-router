@@ -62,19 +62,19 @@ func TestNoteFetchOutcome_RecordsIntoRegistryAndFloors(t *testing.T) {
 	heldFor := cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0))
 	require.Equal(t, holdoff.InitialHoldoff, heldFor, "the applied hold-off is reported back")
 	require.True(t, registry.HeldOff(holdoffTestURL, holdoffTestURL), "the 429 must land in the shared registry under the url alone")
-	got := cs.computePollInterval(0, 0)
+	got := cs.computePollInterval(0)
 	require.Greater(t, got, holdoff.InitialHoldoff-time.Second, "the next poll waits the applied hold-off out")
 	require.LessOrEqual(t, got, holdoff.InitialHoldoff)
 
 	// An upstream that said how long to wait is honoured over the strike schedule.
 	cs.noteFetchOutcome(common.RateLimited(errors.New("HTTP 429"), 5*time.Minute))
-	got = cs.computePollInterval(0, 0)
+	got = cs.computePollInterval(0)
 	require.Greater(t, got, 4*time.Minute)
 
 	// The first answer after the tracker's own 429 clears its floor and its registry entry.
 	cs.noteFetchOutcome(nil)
 	require.False(t, registry.HeldOff(holdoffTestURL, holdoffTestURL))
-	require.Equal(t, 6*time.Second, cs.computePollInterval(0, 0))
+	require.Equal(t, 6*time.Second, cs.computePollInterval(0))
 }
 
 // A hold-off the relay path recorded for the endpoint floors the poll too, and a poll that
@@ -89,7 +89,7 @@ func TestNoteFetchOutcome_LeavesRelayPathHoldoffInPlace(t *testing.T) {
 	}
 	registry.RecordRateLimit(holdoffTestProvider, holdoffTestURL, 0) // as relayInnerDirect would
 
-	got := cs.computePollInterval(0, 0)
+	got := cs.computePollInterval(0)
 	require.Greater(t, got, holdoff.InitialHoldoff-time.Second, "the poll honours a hold-off recorded elsewhere")
 
 	cs.noteFetchOutcome(nil)
@@ -208,7 +208,7 @@ func TestNoteFetchOutcome_OwnRateLimitDoesNotHoldTheProviderForRelays(t *testing
 	require.False(t, providerHeld, "a polled leg's 429 must not take the provider out of relay selection")
 	require.False(t, registry.HeldOff(holdoffTestProvider, holdoffTestURL), "nothing lands under the relay path's key")
 	require.True(t, registry.HeldOff(holdoffTestURL, holdoffTestURL), "the url itself is held, as the ws and gRPC paths key it")
-	got := cs.computePollInterval(0, 0)
+	got := cs.computePollInterval(0)
 	require.Greater(t, got, holdoff.InitialHoldoff-time.Second, "and the poll still waits its own hold-off out")
 	require.LessOrEqual(t, got, holdoff.InitialHoldoff, "three refusals inside one hold-off are one strike (MAG-4386)")
 }
@@ -225,12 +225,12 @@ func TestRelayAnswerLiftsTheTrackersHoldoff(t *testing.T) {
 		holdoffURL:       holdoffTestURL,
 	}
 	cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 5*time.Minute))
-	require.Greater(t, cs.computePollInterval(0, 0), 4*time.Minute)
+	require.Greater(t, cs.computePollInterval(0), 4*time.Minute)
 
 	registry.RecordAnswer(holdoffTestProvider, holdoffTestURL) // as relayInnerDirect does on an answer
 
 	require.False(t, registry.HeldOff(holdoffTestURL, holdoffTestURL))
-	require.Equal(t, 6*time.Second, cs.computePollInterval(0, 0), "the poll floor lifts with the registry entry")
+	require.Equal(t, 6*time.Second, cs.computePollInterval(0), "the poll floor lifts with the registry entry")
 	require.Equal(t, holdoff.InitialHoldoff, cs.noteFetchOutcome(common.RateLimited(errors.New("json-rpc error 429"), 0)),
 		"and the strikes went with it: the next refusal is a first strike")
 }

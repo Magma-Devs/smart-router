@@ -14,6 +14,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -348,9 +349,9 @@ func TestRetryCountHeader_CountsAttemptsWithoutResult(t *testing.T) {
 }
 
 // The same race end to end: REST listener, parser, session selection, the state machine's hedge
-// ticker, the dispatcher, and the header path. The first attempt is pinned to an upstream that
-// never answers, and the relay timeout is short, so the ticker hedges to the other upstream, which
-// answers at once. Before the fix the reply said a hedge fired and, in the same reply, that
+// ticker, the dispatcher, and the header path. Selection is fixed to try an upstream that never
+// answers first (a pin cannot be used for that: a pinned request no longer hedges, MAG-2280), and
+// the relay timeout is short, so the ticker hedges to the other upstream, which answers at once. Before the fix the reply said a hedge fired and, in the same reply, that
 // nothing was retried, and it named only the upstream that answered.
 func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 	rand.InitRandomSeed()
@@ -400,8 +401,12 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 		provider.StaticProvider = true
 		return provider
 	}
-	sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
-	rpcEndpoint.NetworkAddress = "127.0.0.1:0"
+	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest, NetworkAddress: "127.0.0.1:0"}
+	optimizer := &fixedOrderOptimizer{
+		ProviderOptimizer: provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA"),
+		order:             []string{"slow-upstream", "fast-upstream"},
+	}
+	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
 	require.NoError(t, sessionManager.UpdateAllProviders(1, map[uint64]*lavasession.ConsumerSessionsWithProvider{
 		0: upstream("slow-upstream", slowNode.NodeUrls[0]),
 		1: upstream("fast-upstream", common.NodeUrl{Url: fastNode.URL}),
@@ -433,7 +438,6 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listener.GetListeningAddress()+path, nil)
 	require.NoError(t, err)
-	req.Header.Set(common.SELECT_PROVIDER_HEADER_NAME, "slow-upstream")
 	req.Header.Set(common.RELAY_TIMEOUT_HEADER_NAME, "300ms")
 	response, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -444,7 +448,7 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.StatusCode, "body=%s", body)
 	require.Equal(t, "true", response.Header.Get(common.LAVA_HEDGE_TRIGGERED_HEADER),
 		"setup: the ticker must have hedged, or this measures nothing")
-	require.EqualValues(t, 1, slowRelays.Load(), "setup: the pinned upstream must have been asked first")
+	require.EqualValues(t, 1, slowRelays.Load(), "setup: the slow upstream must have been asked first")
 	require.EqualValues(t, 1, fastRelays.Load(), "setup: the hedge must have gone to the other upstream")
 
 	require.Equal(t, "1", response.Header.Get(common.RETRY_COUNT_HEADER_NAME),
@@ -460,4 +464,32 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("the router never cancelled the losing attempt")
 	}
+}
+
+// fixedOrderOptimizer picks upstreams in a fixed order, skipping the ones a request already
+// used, so a test can say which upstream a first attempt goes to and which one a hedge reaches
+// without pinning: a pinned request is answered by its upstream or fails, and never hedges
+// (MAG-2280). Everything else is the real optimizer.
+type fixedOrderOptimizer struct {
+	lavasession.ProviderOptimizer
+	order []string
+}
+
+func (o *fixedOrderOptimizer) ChooseUpstream(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) []string {
+	addresses, _ := o.ChooseUpstreamWithStats(ctx, allAddresses, ignoredProviders, cu, requestedBlock)
+	return addresses
+}
+
+func (o *fixedOrderOptimizer) ChooseUpstreamWithStats(ctx context.Context, allAddresses []string, ignoredProviders map[string]struct{}, cu uint64, requestedBlock int64) ([]string, *provideroptimizer.SelectionStats) {
+	for _, candidate := range o.order {
+		if _, ignored := ignoredProviders[candidate]; ignored {
+			continue
+		}
+		for _, address := range allAddresses {
+			if address == candidate {
+				return []string{candidate}, &provideroptimizer.SelectionStats{SelectedProvider: candidate}
+			}
+		}
+	}
+	return nil, nil
 }

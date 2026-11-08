@@ -260,16 +260,16 @@ func relayEndProvider(t *testing.T, node relayEndNode) (*lavasession.ConsumerSes
 	return provider, url
 }
 
-// relayEndNoProjectID is the project id a listener passes for a request without a project-id header.
-const relayEndNoProjectID = metrics.CustomerNone
+// relayEndNoCustomerID is the customer id a listener passes for a request without a customer-id header.
+const relayEndNoCustomerID = metrics.CustomerNone
 
 // sendRelayEnd sends body the way every HTTP listener does: SendRelay, with the GUID the
-// listener minted on the context, for a request without a project-id header.
+// listener minted on the context, for a request without a customer-id header.
 func sendRelayEnd(t *testing.T, server *RPCSmartRouterServer, guid uint64, timeout time.Duration, url, body string, metadata ...pairingtypes.Metadata) (*common.RelayResult, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), timeout)
 	defer cancel()
-	return server.SendRelay(ctx, url, body, http.MethodPost, relayEndNoProjectID, "", nil, metadata)
+	return server.SendRelay(ctx, url, body, http.MethodPost, relayEndNoCustomerID, "", nil, metadata)
 }
 
 const (
@@ -279,6 +279,8 @@ const (
 	relayEndTxHash    = `{"jsonrpc":"2.0","id":1,"result":"0x5c504ed432cb51138bcf09aa5e8a410dd4a1e204ef84bfed1be16dfba1b22060"}`
 	relayEndReverted  = `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`
 	relayEndNonceLow  = `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"nonce too low: next nonce 7, tx nonce 6"}}`
+	relayEndNodeDown  = `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"node is down"}}`
+	relayEndThrottled = `{"jsonrpc":"2.0","id":1,"error":{"code":429,"message":"Too many requests"}}`
 	relayEndShortWait = 5 * time.Second
 )
 
@@ -391,6 +393,43 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			nodes: func(*testing.T) []relayEndNode { return []relayEndNode{{"node-a", nil}} },
 			body:  relayEndRead,
 			check: func(t *testing.T, _ *common.RelayResult, err error) { require.Error(t, err) },
+		},
+		{
+			// The only node answers 503: the client gets the node's own status (MAG-4481).
+			name: "read_upstream_error_status",
+			nodes: func(*testing.T) []relayEndNode {
+				return []relayEndNode{{"node-a", relayEndReply(503, relayEndNodeDown, 0)}}
+			},
+			body: relayEndRead,
+			check: func(t *testing.T, result *common.RelayResult, err error) {
+				require.Error(t, err)
+				require.Equal(t, http.StatusServiceUnavailable, result.StatusCode)
+			},
+		},
+		{
+			// Every attempt is throttled: the client gets the node's own 429, no longer a router 503
+			// (MAG-4481).
+			name: "read_rate_limited",
+			nodes: func(*testing.T) []relayEndNode {
+				return []relayEndNode{{"node-a", relayEndReply(429, relayEndThrottled, 0)}}
+			},
+			body: relayEndRead,
+			check: func(t *testing.T, result *common.RelayResult, err error) {
+				require.Error(t, err)
+				require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
+			},
+		},
+		{
+			// The only node takes the request and never answers: 504, no longer a 500 carrying
+			// "context deadline exceeded" (MAG-4481).
+			name:    "read_no_answer_in_time",
+			nodes:   func(*testing.T) []relayEndNode { return []relayEndNode{{"node-a", relayEndSilent}} },
+			body:    relayEndRead,
+			timeout: 1500 * time.Millisecond,
+			check: func(t *testing.T, result *common.RelayResult, err error) {
+				require.Error(t, err)
+				require.Equal(t, http.StatusGatewayTimeout, result.StatusCode)
+			},
 		},
 		{
 			name:   "pinned_write",
@@ -548,7 +587,7 @@ func TestRelayEnd_TendermintTxRefused(t *testing.T) {
 	guid := relayEndCaseGUID("tendermint_tx_refused")
 	ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), guid), relayEndShortWait)
 	defer cancel()
-	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", relayEndNoProjectID, "", nil, nil)
+	_, err = server.SendRelay(ctx, "", `{"jsonrpc":"2.0","method":"broadcast_tx_sync","params":{"tx":"CpIBCo8B"},"id":1}`, "", relayEndNoCustomerID, "", nil, nil)
 	require.NoError(t, err, "the client gets the node's normal reply")
 	requireRelayEndGolden(t, "tendermint_tx_refused", normalizeRelayEnd(t, onlyRelayEnd(t, read(), guid), false))
 }
@@ -602,7 +641,7 @@ func TestRelayEnd_CacheHit(t *testing.T) {
 				AverageBlockTime: int64(15 * time.Second), StatusCode: http.StatusOK,
 			})
 			require.NoError(t, err)
-			require.Eventually(t, func() bool { return directGetETH(rcs, hashKey, 100, 100).GetReply() != nil }, 3*time.Second, 25*time.Millisecond)
+			require.Eventually(t, func() bool { return directGetOn(rcs, "ETH1", hashKey, 100, 100).GetReply() != nil }, 3*time.Second, 25*time.Millisecond)
 
 			read := captureRelayEnds(t)
 			// The only upstream refuses connections, so an answer can only have come from the cache.
@@ -864,7 +903,7 @@ func TestRelayEnd_TendermintUnlistedMethod(t *testing.T) {
 			// query as the url.
 			ctx, cancel := context.WithTimeout(utils.WithUniqueIdentifier(context.Background(), tc.guid), relayEndShortWait)
 			defer cancel()
-			_, _ = server.SendRelay(ctx, tc.url, tc.body, "", relayEndNoProjectID, "", nil, nil)
+			_, _ = server.SendRelay(ctx, tc.url, tc.body, "", relayEndNoCustomerID, "", nil, nil)
 
 			line := onlyRelayEnd(t, read(), tc.guid)
 			require.Equal(t, tc.method, relayEndField(t, line, "method"))

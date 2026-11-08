@@ -70,6 +70,10 @@ var (
 		Code: 1011, Name: "PROTOCOL_ALL_ENDPOINTS_DISABLED", Category: CategoryInternal,
 		Description: "All provider endpoints disabled", Retryable: false,
 	})
+	// The UNAVAILABLE the router's own gRPC client produces for a call it could not deliver
+	// (DetectConnectionError on a GRPCCallUndeliveredError), when no more specific row names the
+	// text. No node saw the call, so MayHaveReachedNode stays false. A node that sends
+	// UNAVAILABLE itself is NODE_SERVICE_UNAVAILABLE.
 	LavaErrorProviderUnavailable = registerError(&LavaError{
 		Code: 1012, Name: "PROTOCOL_PROVIDER_UNAVAILABLE", Category: CategoryInternal,
 		Description: "Provider service unavailable (gRPC UNAVAILABLE)", Retryable: true,

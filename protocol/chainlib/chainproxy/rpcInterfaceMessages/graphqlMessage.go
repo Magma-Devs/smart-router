@@ -12,11 +12,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
-	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/sigs"
 )
 
 // GraphQLMethodSeparator joins the root field names of a multi-root operation into a single
@@ -123,9 +120,11 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 		return nil, errors.New("graphql request carries no query")
 	}
 
+	// parseGraphQLQuery names its own failures: a parse error carries the "failed parsing" prefix,
+	// and the depth limit is a router refusal that must not (MAG-4577).
 	doc, err := parseGraphQLQuery(envelope.Query)
 	if err != nil {
-		return nil, fmt.Errorf("failed parsing graphql query: %w", err)
+		return nil, err
 	}
 
 	operation, err := selectGraphQLOperation(doc, envelope.OperationName)
@@ -196,13 +195,13 @@ func graphQLRootFields(doc *ast.QueryDocument, operation *ast.OperationDefinitio
 	var walk func(selectionSet ast.SelectionSet, nesting int) error
 	walk = func(selectionSet ast.SelectionSet, nesting int) error {
 		if nesting > MaxGraphQLFragmentNesting {
-			return fmt.Errorf("graphql fragments nest more than %d deep", MaxGraphQLFragmentNesting)
+			return RefuseGraphQLRequest("graphql fragments nest more than %d deep", MaxGraphQLFragmentNesting)
 		}
 		for _, selection := range selectionSet {
 			switch typed := selection.(type) {
 			case *ast.Field:
 				if len(rootFields) == MaxGraphQLRootFields {
-					return fmt.Errorf("graphql operation selects more than %d root fields", MaxGraphQLRootFields)
+					return RefuseGraphQLRequest("graphql operation selects more than %d root fields", MaxGraphQLRootFields)
 				}
 				rootFields = append(rootFields, GraphQLRootField{
 					Name: typed.Name,
@@ -315,14 +314,7 @@ func (gm *GraphQLMessage) RootFieldNames() []string {
 // never returns a wrong answer; canonicalizing to recover that hit would mean re-printing the
 // document and taking on the risk of two different requests colliding on one key.
 func (gm *GraphQLMessage) GetRawRequestHash() ([]byte, error) {
-	headers := gm.GetHeaders()
-	headersByteArray, err := json.Marshal(headers)
-	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on graphql message", err, utils.LogAttr("headers", common.RedactMetadata(headers)))
-		return []byte{}, err
-	}
-	methodByteArray := []byte(gm.GetMethod())
-	return sigs.HashMsg(append(append(methodByteArray, gm.Msg...), headersByteArray...)), nil
+	return rawRequestHash("graphql", gm.GetHeaders(), gm.GetMethod(), gm.Msg)
 }
 
 // CheckResponseError classifies a GraphQL reply.
@@ -495,12 +487,6 @@ func (in graphQLRootFieldInput) GetMethod() string { return in.rootField.Name }
 
 func (in graphQLRootFieldInput) GetID() json.RawMessage { return nil }
 
-func (gm *GraphQLMessage) UpdateLatestBlockInMessage(latestBlock uint64, modifyContent bool) (success bool) {
-	// A GraphQL document is forwarded as written, so there is nothing to rewrite here: pinning a
-	// block means changing the query text, which would make the request no longer the caller's.
-	return false
-}
-
 func (gm *GraphQLMessage) GetResult() json.RawMessage { return nil }
 
 // GetMethod returns the request's method identity: the root field name, or the root field names
@@ -512,8 +498,3 @@ func (gm *GraphQLMessage) GetMethod() string {
 func (gm *GraphQLMessage) GetID() json.RawMessage { return nil }
 
 func (gm *GraphQLMessage) GetError() *rpcclient.JsonError { return nil }
-
-// ParseBlock parses a default block number from string to int.
-func (gm *GraphQLMessage) ParseBlock(inp string) (int64, error) {
-	return parser.ParseDefaultBlockParameter(inp)
-}

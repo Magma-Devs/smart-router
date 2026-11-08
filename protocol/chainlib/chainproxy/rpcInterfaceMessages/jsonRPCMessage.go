@@ -9,10 +9,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
-	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/sigs"
 )
 
 var ErrFailedToConvertMessage = errors.New("failed to convert a message")
@@ -34,21 +32,18 @@ type JsonrpcMessage struct {
 
 // get msg hash byte array containing all the relevant information for a unique request. (headers / api / params)
 func (jm *JsonrpcMessage) GetRawRequestHash() ([]byte, error) {
-	headers := jm.GetHeaders()
-	headersByteArray, err := json.Marshal(headers)
-	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on jsonRpc message", err, utils.LogAttr("headers", common.RedactMetadata(headers)))
-		return []byte{}, err
-	}
+	return jm.rawRequestHashWithParams(jm.Method)
+}
 
-	methodByteArray := []byte(jm.Method)
-
+// rawRequestHashWithParams hashes a request whose body is its params; Tendermint adds its path to
+// the identity.
+func (jm *JsonrpcMessage) rawRequestHashWithParams(identity string) ([]byte, error) {
 	paramsByteArray, err := json.Marshal(jm.Params)
 	if err != nil {
 		utils.LavaFormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("headers", jm.Params))
 		return []byte{}, err
 	}
-	return sigs.HashMsg(append(append(methodByteArray, paramsByteArray...), headersByteArray...)), nil
+	return rawRequestHash("jsonRpc", jm.GetHeaders(), identity, paramsByteArray)
 }
 
 // isJSONNull reports whether data is the JSON literal `null`. Scanner output
@@ -198,10 +193,6 @@ func ConvertBatchElement(batchElement rpcclient.BatchElemWithId) (JsonrpcMessage
 	return msg, nil
 }
 
-func (jm *JsonrpcMessage) UpdateLatestBlockInMessage(latestBlock uint64, modifyContent bool) (success bool) {
-	return false
-}
-
 func (jm JsonrpcMessage) NewParsableRPCInput(input json.RawMessage) (parser.RPCInput, error) {
 	msg := &JsonrpcMessage{}
 	err := json.Unmarshal(input, msg)
@@ -233,10 +224,6 @@ func (jm JsonrpcMessage) GetID() json.RawMessage {
 
 func (jm JsonrpcMessage) GetError() *rpcclient.JsonError {
 	return jm.Error
-}
-
-func (jm JsonrpcMessage) ParseBlock(inp string) (int64, error) {
-	return parser.ParseDefaultBlockParameter(inp)
 }
 
 // ParseJsonRPCMsgWithBatchFlag parses JSON-RPC message(s) and returns whether the input
@@ -304,10 +291,6 @@ type JsonrpcBatchMessage struct {
 // we will just return false so retry wont trigger.
 func (jbm JsonrpcBatchMessage) GetRawRequestHash() ([]byte, error) {
 	return nil, WontCalculateBatchHash
-}
-
-func (jbm *JsonrpcBatchMessage) UpdateLatestBlockInMessage(latestBlock uint64, modifyContent bool) (success bool) {
-	return false
 }
 
 func (jbm *JsonrpcBatchMessage) GetBatch() []rpcclient.BatchElemWithId {

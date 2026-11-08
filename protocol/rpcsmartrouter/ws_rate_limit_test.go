@@ -35,7 +35,7 @@ func (r *recordingOptimizer) AppendRelayFailure(providerAddress string) {
 func TestWSNoteSubscribeFailure_RateLimitHoldsOffInsteadOfScoring(t *testing.T) {
 	reg := withFreshRelayHoldoff(t)
 	opt := &recordingOptimizer{}
-	dwsm := &DirectWSSubscriptionManager{optimizer: opt}
+	dwsm := &DirectWSSubscriptionManager{subscriptionEndpoints: subscriptionEndpoints{optimizer: opt}}
 
 	dwsm.noteSubscribeFailure("wss://busy.example/ws", common.RateLimited(errors.New("handshake refused"), 2*time.Minute))
 
@@ -47,7 +47,7 @@ func TestWSNoteSubscribeFailure_RateLimitHoldsOffInsteadOfScoring(t *testing.T) 
 func TestWSNoteSubscribeFailure_GenuineFailureStillScores(t *testing.T) {
 	reg := withFreshRelayHoldoff(t)
 	opt := &recordingOptimizer{}
-	dwsm := &DirectWSSubscriptionManager{optimizer: opt}
+	dwsm := &DirectWSSubscriptionManager{subscriptionEndpoints: subscriptionEndpoints{optimizer: opt}}
 
 	dwsm.noteSubscribeFailure("wss://broken.example/ws", errors.New("connection refused"))
 

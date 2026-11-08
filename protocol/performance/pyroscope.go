@@ -6,6 +6,7 @@ import (
 
 	"github.com/grafana/pyroscope-go"
 	"github.com/magma-Devs/smart-router/utils"
+	"github.com/spf13/pflag"
 )
 
 const (
@@ -41,6 +42,37 @@ func ParseTags(tagsStr string) map[string]string {
 		}
 	}
 	return tags
+}
+
+// StartPyroscopeFromFlags starts Pyroscope when --pyroscope-address was given, reading the other
+// pyroscope flags from the command's flag set. defaultAppName is used when --pyroscope-app-name is
+// empty. It returns nil without starting anything when the address flag was not set.
+func StartPyroscopeFromFlags(flags *pflag.FlagSet, defaultAppName string) error {
+	if !flags.Lookup(PyroscopeAddressFlagName).Changed {
+		return nil
+	}
+	pyroscopeServerAddress, err := flags.GetString(PyroscopeAddressFlagName)
+	if err != nil {
+		utils.LavaFormatFatal("failed to read pyroscope address flag", err)
+	}
+	pyroscopeAppName, err := flags.GetString(PyroscopeAppNameFlagName)
+	if err != nil || pyroscopeAppName == "" {
+		pyroscopeAppName = defaultAppName
+	}
+	mutexProfileFraction, err := flags.GetInt(PyroscopeMutexProfileFractionFlagName)
+	if err != nil {
+		mutexProfileFraction = DefaultMutexProfileFraction
+	}
+	blockProfileRate, err := flags.GetInt(PyroscopeBlockProfileRateFlagName)
+	if err != nil {
+		blockProfileRate = DefaultBlockProfileRate
+	}
+	tagsStr, _ := flags.GetString(PyroscopeTagsFlagName)
+	err = StartPyroscope(pyroscopeAppName, pyroscopeServerAddress, mutexProfileFraction, blockProfileRate, ParseTags(tagsStr))
+	if err != nil {
+		return utils.LavaFormatError("failed to start pyroscope profiler", err)
+	}
+	return nil
 }
 
 // StartPyroscope initializes continuous profiling with Pyroscope

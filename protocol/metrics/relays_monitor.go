@@ -9,11 +9,39 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
+// ProbeVerdict is what one health probe found out about a chain's upstreams. Readiness asks
+// whether this replica reaches its upstreams: that differs between replicas, while an upstream's
+// own failure is the same for all of them and is no reason to take one out of rotation.
+type ProbeVerdict int
+
+const (
+	// ProbeUnreachable: no upstream answered. Every try timed out, failed in transport, or had no
+	// upstream to go to. The chain is unhealthy. The zero value, so a probe that fails to say
+	// fails closed.
+	ProbeUnreachable ProbeVerdict = iota
+	// ProbeInconclusive: an upstream answered, but not with a result: an error, an error status or
+	// a rate limit. The chain keeps the health it had.
+	ProbeInconclusive
+	// ProbeHealthy: an upstream answered with a result. The chain is healthy.
+	ProbeHealthy
+)
+
+func (v ProbeVerdict) String() string {
+	switch v {
+	case ProbeHealthy:
+		return "healthy"
+	case ProbeInconclusive:
+		return "inconclusive"
+	default:
+		return "unreachable"
+	}
+}
+
 type RelaysMonitor struct {
 	chainID      string
 	apiInterface string
 
-	relaySender func() (bool, error)
+	relaySender func() ProbeVerdict
 	ticker      *time.Ticker
 	interval    time.Duration
 	// Probe cadence while the chain is unhealthy. Recovery discovery rides the
@@ -21,8 +49,10 @@ type RelaysMonitor struct {
 	// will arrive to flip health via LogRelay — waiting a full healthy-cadence
 	// interval (5 minutes by default) to re-probe means up to that long of
 	// refusing traffic the chain could already serve. While healthy the probe
-	// stays lazy (and LogRelay defers it entirely under real traffic).
+	// stays lazy (and LogRelay defers it entirely under real traffic). It is
+	// also how soon ProbeSoon makes the next probe.
 	unhealthyInterval time.Duration
+	nextProbe         time.Time // when the ticker fires next; written with every Reset, under lock
 	lock              sync.RWMutex
 
 	isHealthy uint32
@@ -44,6 +74,7 @@ func NewRelaysMonitor(interval, unhealthyInterval time.Duration, chainID, apiInt
 		ticker:            time.NewTicker(interval),
 		interval:          interval,
 		unhealthyInterval: unhealthyInterval,
+		nextProbe:         time.Now().Add(interval),
 		isHealthy:         1, // setting process to healthy by default, after init relays we know if its truly healthy or not.
 	}
 }
@@ -80,7 +111,7 @@ func (sem *RelaysMonitor) SeedInitialHealth(healthy bool) {
 	sem.storeHealthStatus(healthy)
 }
 
-func (sem *RelaysMonitor) SetRelaySender(relaySender func() (bool, error)) {
+func (sem *RelaysMonitor) SetRelaySender(relaySender func() ProbeVerdict) {
 	if sem == nil {
 		return
 	}
@@ -100,24 +131,26 @@ func (sem *RelaysMonitor) Start(ctx context.Context) {
 	// There is a difference between the first call to relaySender and the subsequent calls.
 	// To see the difference, please refer to the call to NewRelaysMonitor in RPCConsumerServer.
 
+	// One goroutine runs every probe, the first included: the boot probe can take ~30s, and a
+	// ProbeSoon during it must not start a second relaySender beside it.
 	go func() {
-		success, _ := sem.relaySender()
-		sem.recordProbeResult(success)
+		sem.recordProbeResult(sem.relaySender())
+		sem.startInner(ctx)
 	}()
-	go sem.startInner(ctx)
 }
 
 func (sem *RelaysMonitor) startInner(ctx context.Context) {
 	for {
 		select {
 		case <-sem.ticker.C:
-			success, _ := sem.relaySender()
+			verdict := sem.relaySender()
+			sem.recordProbeResult(verdict)
 			utils.LavaFormatInfo("Health Check Interval Check",
 				utils.LogAttr("chain", sem.chainID),
 				utils.LogAttr("apiInterface", sem.apiInterface),
-				utils.LogAttr("health result", success),
+				utils.LogAttr("verdict", verdict.String()),
+				utils.LogAttr("health result", sem.IsHealthy()),
 			)
-			sem.recordProbeResult(success)
 		case <-ctx.Done():
 			sem.ticker.Stop()
 			return
@@ -125,25 +158,34 @@ func (sem *RelaysMonitor) startInner(ctx context.Context) {
 	}
 }
 
-// recordProbeResult stores a probe verdict and sets the next probe's cadence
-// from it: lazy while healthy, unhealthyInterval while not — the probe is the
-// only recovery path for a pod that readiness has already pulled out of
-// rotation. LogRelay stays on the healthy cadence unconditionally, since a
-// successful real relay is itself proof of health. Verdict and cadence are
-// written under one lock, as LogRelay does, so a relay landing between the two
-// cannot leave a healthy chain on the unhealthy cadence.
-func (sem *RelaysMonitor) recordProbeResult(success bool) {
-	interval := sem.interval
-	if !success {
-		interval = sem.unhealthyInterval
-	}
-
+// recordProbeResult stores a probe's verdict and sets the next probe's cadence
+// from the chain's health: lazy while healthy, unhealthyInterval while not —
+// the probe is the only recovery path for a pod that readiness has already
+// pulled out of rotation. An inconclusive probe leaves the health as it was,
+// and its cadence with it: an unhealthy chain keeps probing at
+// unhealthyInterval until an upstream answers with a result. LogRelay stays on
+// the healthy cadence unconditionally, since a successful real relay is itself
+// proof of health. Health and cadence are written under one lock, as LogRelay
+// does, so a relay landing between the two cannot leave a healthy chain on the
+// unhealthy cadence.
+func (sem *RelaysMonitor) recordProbeResult(verdict ProbeVerdict) {
 	sem.lock.Lock()
 	defer sem.lock.Unlock()
-	sem.storeHealthStatus(success)
-	sem.ticker.Reset(interval)
+	switch verdict {
+	case ProbeHealthy:
+		sem.storeHealthStatus(true)
+	case ProbeUnreachable:
+		sem.storeHealthStatus(false)
+	}
+	interval := sem.interval
+	if !sem.loadHealthStatus() {
+		interval = sem.unhealthyInterval
+	}
+	sem.resetProbeLocked(interval)
 }
 
+// LogRelay records a real relay an upstream served: proof of health, so the
+// chain is healthy and the next probe moves a full healthy interval away.
 func (sem *RelaysMonitor) LogRelay() {
 	if sem == nil {
 		return
@@ -153,7 +195,32 @@ func (sem *RelaysMonitor) LogRelay() {
 	defer sem.lock.Unlock()
 
 	sem.storeHealthStatus(true)
-	sem.ticker.Reset(sem.interval)
+	sem.resetProbeLocked(sem.interval)
+}
+
+// ProbeSoon moves the next probe to within unhealthyInterval, when something
+// suggests the upstreams are out of reach. It is not a verdict: health moves only if
+// that probe fails. It never pushes the probe back, so a dead chain's steady
+// stream of failing relays cannot keep the probe from firing.
+func (sem *RelaysMonitor) ProbeSoon() {
+	if sem == nil {
+		return
+	}
+
+	sem.lock.Lock()
+	defer sem.lock.Unlock()
+
+	// Already due by then, or running now (its result sets the next cadence).
+	if sem.nextProbe.Before(time.Now().Add(sem.unhealthyInterval)) {
+		return
+	}
+	sem.resetProbeLocked(sem.unhealthyInterval)
+}
+
+// resetProbeLocked makes the next probe fire after d. Callers hold sem.lock.
+func (sem *RelaysMonitor) resetProbeLocked(d time.Duration) {
+	sem.ticker.Reset(d)
+	sem.nextProbe = time.Now().Add(d)
 }
 
 func (sem *RelaysMonitor) IsHealthy() bool {
