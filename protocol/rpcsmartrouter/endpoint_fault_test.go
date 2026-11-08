@@ -52,6 +52,13 @@ func TestEndpointFault_AnswerShapes(t *testing.T) {
 			why:    "a full node is not broken for being a full node; the retry reaches the archive tier",
 		},
 		{
+			// MAG-5021: Tatum on GK8 Hoodi, eth_call tagged "pending", answered
+			// {"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"pending state is not supported"}}.
+			name:   "pending state not served by this node",
+			result: jsonrpcNodeError(-32000, "pending state is not supported"),
+			why:    "can't serve here, as Sui's FEATURE_UNAVAILABLE; blaming it switched the URL off for every method",
+		},
+		{
 			name:   "nonce too low",
 			result: jsonrpcNodeError(-32000, "nonce too low"),
 			why:    "the caller's fault — a customer retry loop must not walk the fleet out of rotation",

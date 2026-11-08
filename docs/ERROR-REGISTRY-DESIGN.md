@@ -56,7 +56,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 |------|------|-------------|-----------|---------------|
 | **Generic Node Errors (2000-2099)** |||||
 | 2001 | `NODE_METHOD_NOT_FOUND` | Node reports the method is not on its surface; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | JSON-RPC -32601 |
-| 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider (SubCategoryNodeCapability) | Yes | JSON-RPC -32004 |
+| 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config), or a part of it is, such as the pending block tag (MAG-5021). Retryable on a different provider (SubCategoryNodeCapability) | Yes | JSON-RPC -32004 / MessageContains("method not supported" / "pending state is not supported") |
 | 2003 | `NODE_INTERNAL_ERROR` | Internal node error | Yes | JSON-RPC -32603 |
 | 2004 | `NODE_SERVER_ERROR` | Generic server error | Yes | JSON-RPC -32000 |
 | 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / JSON-RPC code 429 / MessageContains("rate limit", "too many requests") |

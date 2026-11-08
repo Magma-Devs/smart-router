@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -1053,6 +1054,37 @@ func TestClassifyError_UnsupportedMethodMatchersAreNarrow(t *testing.T) {
 			result := ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, 0, tt.message)
 			assert.Equal(t, tt.expected, result, "expected %s but got %s", tt.expected.Name, result.Name)
 		})
+	}
+}
+
+// TestClassifyError_PendingStateNotSupportedIsANodeCapability pins MAG-5021. On GK8 Hoodi, Tatum
+// answers eth_call with the "pending" block tag with exactly this reply. The node serves eth_call;
+// what it does not offer is pending state, so the answer is "can't serve here" — the verdict the
+// Sui FEATURE_UNAVAILABLE ruling gets: retried on another provider, not evidence against the
+// endpoint. Read as a bare -32000 it was NODE_SERVER_ERROR, at fault, and each such call walked
+// the refusal counter until the URL was switched off for every method. Clients differ on the code
+// (-32000, -32601), so the row matches the text and the verdict must hold whatever the code.
+func TestClassifyError_PendingStateNotSupportedIsANodeCapability(t *testing.T) {
+	const reply = `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"pending state is not supported"}}`
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(reply), &body))
+	require.Equal(t, -32000, ExtractJSONRPCErrorCode([]byte(reply)), "the code classifyJSONRPCNodeError hands the classifier")
+
+	for _, code := range []int{-32000, -32601, 0} {
+		t.Run(fmt.Sprintf("code %d", code), func(t *testing.T) {
+			verdict := ClassifyNodeErrorForRetry(ChainFamilyEVM, TransportJsonRPC, code, body.Error.Message)
+			require.False(t, verdict.IsNodeAtFault, "a node that cannot serve pending state is not broken; blaming it is what switched the URL off")
+			require.True(t, verdict.IsNodeCapability, "the availability gate's carve-out, so the answer is not scored either")
+			require.False(t, verdict.IsNonRetryable, "another provider may serve pending state")
+		})
+	}
+	// Under the -32000 catch-all, and with no code at all, the text alone decides.
+	for _, code := range []int{-32000, 0} {
+		require.Same(t, LavaErrorNodeMethodNotSupported, ClassifyError(nil, ChainFamilyEVM, TransportJsonRPC, code, body.Error.Message), "code %d", code)
 	}
 }
 
