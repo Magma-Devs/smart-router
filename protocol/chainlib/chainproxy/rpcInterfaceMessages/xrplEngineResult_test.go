@@ -221,7 +221,7 @@ func TestCheckXRPLResponseError(t *testing.T) {
 		{
 			name: "account_not_found", method: "account_info",
 			body:        `{"result":{"account":"rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe","error":"actNotFound","error_code":19,"error_message":"Account not found.","ledger_index":108018956,"status":"error","validated":true}}`,
-			wantMessage: "actNotFound: Account not found.", lavaError: "CHAIN_ACCOUNT_NOT_FOUND",
+			wantMessage: "actNotFound: Account not found.", lavaError: "NODE_RESOURCE_NOT_FOUND",
 		},
 		{
 			name: "syncing_on_a_read", method: "account_info", body: xrplAPIErrorReply("noNetwork", 17, "Not synced to the network."),

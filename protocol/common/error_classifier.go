@@ -120,25 +120,38 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// API errors, by what each says about the node.
 		// The node cannot serve yet; another can. That is the node's own state.
 		{xrplMessageStartsWith("noNetwork", "noCurrent", "noClosed", "notSynced", "notReady"), LavaErrorNodeSyncing},
-		// The node runs a version the network has amended past.
-		{xrplMessageStartsWith("amendmentBlocked"), LavaErrorNodeServiceUnavailable},
+		// The node runs a version the network has amended past, or holds an expired validator list
+		// (unlBlocked): this node cannot serve now; another can.
+		{xrplMessageStartsWith("amendmentBlocked", "unlBlocked"), LavaErrorNodeServiceUnavailable},
 		// Healthy but busy, and nothing was executed: the hold-off applies and the score does not move.
 		{xrplMessageStartsWith("tooBusy", "slowDown"), LavaErrorNodeRateLimited},
-		{xrplMessageStartsWith("internal", "internalJson", "internalSubmit", "internalTransaction"), LavaErrorNodeInternalError},
+		// The node failed on its side: dbDeserialization is tx unable to read its own stored copy;
+		// json_rpc is rippled's transport error.
+		{xrplMessageStartsWith("internal", "internalJson", "internalSubmit", "internalTransaction", "dbDeserialization", "json_rpc"), LavaErrorNodeInternalError},
 		// This node does not hold the ledger or the transaction; another may (MAG-4817). lgrNotFound
 		// is a ledger outside the node's history, one it is still acquiring, or one not closed yet;
 		// lgrNotValidated is account_tx asking for a ledger the node has not validated; txnNotFound is
 		// a transaction outside the node's stored history. Retried, and the node keeps its score.
 		{xrplMessageStartsWith("lgrNotFound", "lgrNotValidated"), LavaErrorChainBlockNotFound},
 		{xrplMessageStartsWith("txnNotFound"), LavaErrorChainTxNotFound},
-		// The node holds the ledger, and the account or object is not in it. rippled resolves the
-		// ledger first (lgrNotFound when it cannot), so every node holding that ledger answers the
-		// same: the chain's answer, not retried and not the node's fault.
-		{xrplMessageStartsWith("actNotFound", "srcActNotFound", "dstActNotFound", "delegateActNotFound", "entryNotFound", "objectNotFound"), LavaErrorChainAccountNotFound},
+		// The account, ledger object or credential is not in the ledger this node read (MAG-4817).
+		// A request without a ledger number is answered from the node's own current ledger, so a node
+		// a ledger behind says not found for what a synced node already holds. Retried like the rows
+		// above, and the node keeps its score. badCredentials is deposit_authorized finding the
+		// on-ledger Credential missing, unaccepted or expired, a ledger read like the others.
+		{xrplMessageStartsWith("actNotFound", "srcActNotFound", "dstActNotFound", "delegateActNotFound", "entryNotFound", "objectNotFound", "badCredentials"), LavaErrorNodeResourceNotFound},
 		// The node does not know the command; another may serve it.
 		{xrplMessageStartsWith("unknownCmd"), LavaErrorNodeMethodNotFound},
+		// The node has the command switched off (notEnabled: no transaction tables) or its version
+		// does not implement the request (notImpl: simulate of a Batch); another node may serve it.
+		{xrplMessageStartsWith("notEnabled", "notImpl"), LavaErrorNodeUnimplemented},
+		// This node refuses the caller: an admin-only command or option (noPermission), or the
+		// router's address is barred (forbidden). Another node may allow it; it says nothing about
+		// this node's health.
+		{xrplMessageStartsWith("noPermission", "forbidden"), LavaErrorNodeAccessDenied},
 		// The request itself, which every node answers the same way. notSupported is how a public
-		// node answers a sign-and-submit.
+		// node answers a sign-and-submit; wrongNetwork is tx given a CTID from another network;
+		// badFeature is feature given an unknown amendment name.
 		{xrplMessageStartsWith(
 			"invalidParams", "invalidTransaction", "badSyntax", "notSupported", "highFee", "badSecret",
 			"actMalformed", "badIssuer", "badKeyType", "channelAmtMalformed", "channelMalformed", "commandMissing",
@@ -147,6 +160,8 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 			"malformedStream", "oracleMalformed", "publicMalformed", "sendMaxMalformed", "signingMalformed",
 			"srcActMalformed", "srcActMissing", "srcCurMalformed", "srcIsrMalformed", "transactionSigned",
 			"unexpectedLedgerType",
+			"wrongNetwork", "badFeature", "noEvents", "badMarket", "noPathRequest", "deprecated", "invalidHotWallet",
+			"badSeed", "masterDisabled", "alreadyMultisig", "alreadySingleSig",
 		), LavaErrorUserInvalidParams},
 	},
 }
