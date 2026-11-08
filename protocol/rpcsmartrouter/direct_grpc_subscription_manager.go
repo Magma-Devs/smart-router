@@ -224,7 +224,7 @@ func NewDirectGRPCSubscriptionManager(
 		metricsManager:       metrics.SafeMetrics(metricsManager),
 		chainID:              chainID,
 		apiInterface:         apiInterface,
-		subscriptionEndpoints: newSubscriptionEndpoints("DirectGRPC", "no gRPC endpoints available",
+		subscriptionEndpoints: newSubscriptionEndpoints("DirectGRPC", "no gRPC endpoints available", chainID,
 			grpcEndpoints, grpcBackupEndpoints, optimizer),
 		config:              config,
 		rateLimiter:         NewGRPCClientRateLimiter(config),
@@ -606,64 +606,81 @@ func (dgm *DirectGRPCSubscriptionManager) createNewSubscription(
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to select endpoint: %w", err)
 	}
-	// From here on the request goes to the endpoint: its pool dials it, reflection asks it for the
-	// method, and the stream opens on it.
-	sentAt := time.Now()
-	defer func() {
-		chainlib.SubscriptionUpstreamFrom(ctx).Sent(dgm.endpointNames.name(endpoint.Url), sentAt, time.Since(sentAt), err)
-	}()
 
-	// Get or create pool
-	pool, err := dgm.getOrCreatePool(endpoint)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get pool: %w", err)
-	}
+	// Open the stream there, or on the next endpoint while one cannot take it
+	// (subscribeWithFailover). Each attempt reports its outcome against its own endpoint.
+	var (
+		pool       *UpstreamGRPCPool
+		conn       *UpstreamGRPCStreamConnection
+		methodDesc *desc.MethodDescriptor
+		stream     grpc.ClientStream
+		subCtx     context.Context
+		subCancel  context.CancelFunc
+	)
+	endpoint, err = dgm.subscribeWithFailover(ctx, clientKey, endpoint, func(endpoint *common.NodeUrl) (err error) {
+		// From here on the request goes to the endpoint: its pool dials it, reflection asks it for the
+		// method, and the stream opens on it.
+		sentAt := time.Now()
+		defer func() {
+			chainlib.SubscriptionUpstreamFrom(ctx).Sent(dgm.endpointNames.name(endpoint.Url), sentAt, time.Since(sentAt), err)
+		}()
 
-	// Get a connection, with this stream's slot counted on it already (see
-	// ReserveConnectionForStream); every failure below releases the slot.
-	conn, err := pool.ReserveConnectionForStream(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get connection: %w", err)
-	}
+		// Get or create pool
+		pool, err = dgm.getOrCreatePool(endpoint)
+		if err != nil {
+			return fmt.Errorf("failed to get pool: %w", err)
+		}
 
-	// Connection established — pin client to this endpoint for future
-	// subscriptions. Mirrors DirectWSSubscriptionManager.startUpstreamSubscription
-	// (Epoch is unused for direct RPC — there's no provider rotation).
-	dgm.stickyStore.Set(clientKey, &lavasession.StickySession{
-		Provider: endpoint.Url,
-		Epoch:    0,
+		// Get a connection, with this stream's slot counted on it already (see
+		// ReserveConnectionForStream); every failure below releases the slot.
+		conn, err = pool.ReserveConnectionForStream(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get connection: %w", err)
+		}
+
+		// Connection established — pin client to this endpoint for future
+		// subscriptions. Mirrors DirectWSSubscriptionManager.startUpstreamSubscription
+		// (Epoch is unused for direct RPC — there's no provider rotation).
+		dgm.stickyStore.Set(clientKey, &lavasession.StickySession{
+			Provider: endpoint.Url,
+			Epoch:    0,
+		})
+
+		// Parse service and method
+		svc, methodName := rpcInterfaceMessages.ParseSymbol(methodPath)
+
+		// Get method descriptor
+		methodDesc, err = conn.GetMethodDescriptor(ctx, svc, methodName)
+		if err != nil {
+			pool.NotifyStreamRemoved(conn)
+			return fmt.Errorf("failed to get method descriptor: %w", err)
+		}
+
+		// Verify it's a server-streaming method
+		if !methodDesc.IsServerStreaming() {
+			pool.NotifyStreamRemoved(conn)
+			return fmt.Errorf("method %s is not a server-streaming method", methodPath)
+		}
+
+		// The subscription context is rooted in the manager, NOT in ctx. conn.NewStream
+		// binds the upstream stream's whole life to the context it was created with, and
+		// with sharing enabled later clients join this same stream — so rooting it in the
+		// creating client's request context meant the first client to disconnect killed
+		// the stream for every joiner. Rooted here, only the subscription's own teardown
+		// ends it: the last client leaving (removeClientFromSubscription) or Stop.
+		subCtx, subCancel = context.WithCancel(dgm.ctx)
+
+		// Create the upstream stream
+		stream, err = dgm.createUpstreamStream(subCtx, conn.GetConn(), methodPath, requestData, methodDesc)
+		if err != nil {
+			subCancel()
+			pool.NotifyStreamRemoved(conn)
+			return fmt.Errorf("failed to create stream: %w", err)
+		}
+		return nil
 	})
-
-	// Parse service and method
-	svc, methodName := rpcInterfaceMessages.ParseSymbol(methodPath)
-
-	// Get method descriptor
-	methodDesc, err := conn.GetMethodDescriptor(ctx, svc, methodName)
 	if err != nil {
-		pool.NotifyStreamRemoved(conn)
-		return nil, nil, fmt.Errorf("failed to get method descriptor: %w", err)
-	}
-
-	// Verify it's a server-streaming method
-	if !methodDesc.IsServerStreaming() {
-		pool.NotifyStreamRemoved(conn)
-		return nil, nil, fmt.Errorf("method %s is not a server-streaming method", methodPath)
-	}
-
-	// The subscription context is rooted in the manager, NOT in ctx. conn.NewStream
-	// binds the upstream stream's whole life to the context it was created with, and
-	// with sharing enabled later clients join this same stream — so rooting it in the
-	// creating client's request context meant the first client to disconnect killed
-	// the stream for every joiner. Rooted here, only the subscription's own teardown
-	// ends it: the last client leaving (removeClientFromSubscription) or Stop.
-	subCtx, subCancel := context.WithCancel(dgm.ctx)
-
-	// Create the upstream stream
-	stream, err := dgm.createUpstreamStream(subCtx, conn.GetConn(), methodPath, requestData, methodDesc)
-	if err != nil {
-		subCancel()
-		pool.NotifyStreamRemoved(conn)
-		return nil, nil, fmt.Errorf("failed to create stream: %w", err)
+		return nil, nil, err
 	}
 
 	// Generate IDs

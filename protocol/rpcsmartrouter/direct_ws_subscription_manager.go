@@ -275,7 +275,7 @@ func NewDirectWSSubscriptionManager(
 		chainID:              chainID,
 		apiInterface:         apiInterface,
 		subscriptionEndpoints: newSubscriptionEndpoints("DirectWS",
-			"no WebSocket endpoints available (primary and backup both exhausted)",
+			"no WebSocket endpoints available (primary and backup both exhausted)", chainID,
 			wsEndpoints, wsBackupEndpoints, optimizer),
 		config:      config,
 		rateLimiter: NewClientRateLimiter(config),
@@ -615,7 +615,6 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 
 	// No active subscription found, create new one
 	// Select best endpoint using sticky session, optimizer, or first available
-	startTime := time.Now()
 	selectedEndpoint, err := dwsm.selectEndpoint(ctx, clientKey, nil)
 	if err != nil {
 		dwsm.settlePendingSubscription(hashedParams, false)
@@ -623,42 +622,57 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 		return nil, nil, fmt.Errorf("failed to select WebSocket endpoint: %w", err)
 	}
 
-	utils.LavaFormatTrace("DirectWS: creating new upstream subscription",
-		utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
-		utils.LogAttr("endpoint", sanitizeEndpointURL(selectedEndpoint.Url)),
+	// Subscribe upstream there, or on the next endpoint while one cannot take the
+	// subscription (subscribeWithFailover). Each attempt reports its outcome against its own
+	// endpoint, to the relay record, the optimizer and the hold-off.
+	var (
+		pool        *UpstreamWSPool
+		conn        *UpstreamWSConnection
+		upstreamSub *rpcclient.ClientSubscription
+		firstMsg    *rpcclient.JsonrpcMessage
+		msgChan     chan *rpcclient.JsonrpcMessage
 	)
+	selectedEndpoint, err = dwsm.subscribeWithFailover(ctx, clientKey, selectedEndpoint, func(endpoint *common.NodeUrl) (err error) {
+		utils.LavaFormatTrace("DirectWS: creating new upstream subscription",
+			utils.LogAttr("hashedParams", utils.ToHexString(hashedParams)),
+			utils.LogAttr("endpoint", sanitizeEndpointURL(endpoint.Url)),
+		)
+		startTime := time.Now()
 
-	// Get or create upstream pool for selected endpoint
-	pool := dwsm.GetOrCreatePool(selectedEndpoint)
+		// Get or create upstream pool for the endpoint
+		pool = dwsm.GetOrCreatePool(endpoint)
 
-	// Get a connection, with this subscription's slot counted on it already (see
-	// ReserveConnectionForSubscription); every failure below releases the slot.
-	conn, err := pool.ReserveConnectionForSubscription(ctx)
+		// Get a connection, with this subscription's slot counted on it already (see
+		// ReserveConnectionForSubscription); every failure below releases the slot.
+		conn, err = pool.ReserveConnectionForSubscription(ctx)
+		if err != nil {
+			chainlib.SubscriptionUpstreamFrom(ctx).Sent(dwsm.endpointNames.name(endpoint.Url), startTime, time.Since(startTime), err)
+			dwsm.noteSubscribeFailure(endpoint.Url, err)
+			return fmt.Errorf("failed to get WebSocket connection: %w", err)
+		}
+
+		// Create upstream subscription
+		upstreamSub, firstMsg, msgChan, err = dwsm.createUpstreamSubscription(ctx, conn, subscriptionParams, subscribeMethod)
+		chainlib.SubscriptionUpstreamFrom(ctx).Sent(dwsm.endpointNames.name(endpoint.Url), startTime, time.Since(startTime), err)
+		if err != nil {
+			pool.NotifySubscriptionRemoved(conn)
+			dwsm.noteSubscribeFailure(endpoint.Url, err)
+			return fmt.Errorf("failed to create upstream subscription: %w", err)
+		}
+
+		// Report success to optimizer. The endpoint answered, so any standing rate-limit
+		// hold-off for it is stale.
+		dwsm.holdoffs().RecordAnswer(endpoint.Url, endpoint.Url)
+		if dwsm.optimizer != nil {
+			latency := time.Since(startTime)
+			dwsm.optimizer.AppendRelayData(endpoint.Url, latency, 1, 0) // cu=1, syncBlock=0 (unknown)
+		}
+		return nil
+	})
 	if err != nil {
-		chainlib.SubscriptionUpstreamFrom(ctx).Sent(dwsm.endpointNames.name(selectedEndpoint.Url), startTime, time.Since(startTime), err)
-		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
 		dwsm.settlePendingSubscription(hashedParams, false)
 		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
-		return nil, nil, fmt.Errorf("failed to get WebSocket connection: %w", err)
-	}
-
-	// Create upstream subscription
-	upstreamSub, firstMsg, msgChan, err := dwsm.createUpstreamSubscription(ctx, conn, subscriptionParams, subscribeMethod)
-	chainlib.SubscriptionUpstreamFrom(ctx).Sent(dwsm.endpointNames.name(selectedEndpoint.Url), startTime, time.Since(startTime), err)
-	if err != nil {
-		pool.NotifySubscriptionRemoved(conn)
-		dwsm.noteSubscribeFailure(selectedEndpoint.Url, err)
-		dwsm.settlePendingSubscription(hashedParams, false)
-		dwsm.metricsManager.SetFailedWsSubscriptionRequestMetric(dwsm.chainID, dwsm.apiInterface)
-		return nil, nil, fmt.Errorf("failed to create upstream subscription: %w", err)
-	}
-
-	// Report success to optimizer. The endpoint answered, so any standing rate-limit
-	// hold-off for it is stale.
-	dwsm.holdoffs().RecordAnswer(selectedEndpoint.Url, selectedEndpoint.Url)
-	if dwsm.optimizer != nil {
-		latency := time.Since(startTime)
-		dwsm.optimizer.AppendRelayData(selectedEndpoint.Url, latency, 1, 0) // cu=1, syncBlock=0 (unknown)
+		return nil, nil, err
 	}
 
 	// Store sticky session for client affinity
