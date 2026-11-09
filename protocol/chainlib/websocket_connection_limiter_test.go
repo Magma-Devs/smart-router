@@ -185,6 +185,11 @@ func TestParseTrustedProxies(t *testing.T) {
 		netip.MustParsePrefix("192.168.0.0/16"),
 	}, parsed)
 
+	mapped, err := ParseTrustedProxies("::ffff:10.0.0.0/104")
+	require.NoError(t, err)
+	require.Equal(t, []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, mapped, "an IPv4-mapped range names its IPv4 range")
+	require.Equal(t, "203.0.113.7", websocketClientAddress(tcpPeer("10.0.0.5"), "203.0.113.7", mapped), "and matches an IPv4 proxy in it")
+
 	none, err := ParseTrustedProxies("")
 	require.NoError(t, err)
 	require.Empty(t, none, "an empty list trusts no proxy")

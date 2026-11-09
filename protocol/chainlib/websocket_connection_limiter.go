@@ -147,8 +147,9 @@ func GetWebSocketTrustedProxies() []netip.Prefix {
 }
 
 // ParseTrustedProxies reads a comma-separated list of IP addresses and CIDR ranges. An empty list
-// trusts no proxy. An IPv4-mapped IPv6 address names its IPv4 address, as the addresses it is
-// matched against do.
+// trusts no proxy. An IPv4-mapped IPv6 address or range names its IPv4 address or range, as the
+// addresses it is matched against do: they are unmapped, and an IPv6 range never contains an IPv4
+// address.
 func ParseTrustedProxies(value string) ([]netip.Prefix, error) {
 	prefixes := []netip.Prefix{}
 	for _, entry := range strings.Split(value, ",") {
@@ -157,6 +158,9 @@ func ParseTrustedProxies(value string) ([]netip.Prefix, error) {
 			continue
 		}
 		if prefix, err := netip.ParsePrefix(entry); err == nil {
+			if prefix.Addr().Is4In6() && prefix.Bits() >= 96 {
+				prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
+			}
 			prefixes = append(prefixes, prefix.Masked())
 			continue
 		}
