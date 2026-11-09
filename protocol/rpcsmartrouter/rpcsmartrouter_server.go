@@ -1651,8 +1651,17 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 			}
 		}
 
+		// The two replies below are the router's own, made when the budget ran out before any
+		// attempt it dispatched came back. They carry this request's headers all the same, as a
+		// reply some upstream produced does (MAG-3980). Returning before appendHeadersToRelayResult
+		// sent them with no lava-* header at all: no Lava-Guid for the customer to quote on the
+		// failure hardest to diagnose, a silent upstream, and no Lava-Retries or
+		// Lava-Provider-Address to say what was tried. unknownWrite is true only for a processor
+		// that dispatched, so the processor is never nil there.
 		if unknownWrite() {
-			return nil, errUnknownWriteOutcome
+			unclear := withUnclearWriteStatus(&common.RelayResult{})
+			rpcss.appendHeadersToRelayResult(ctx, unclear, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			return unclear, errUnknownWriteOutcome
 		}
 
 		// A hung upstream: the request was dispatched and the processing budget ran out before any
@@ -1660,7 +1669,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// than a 500 carrying "context deadline exceeded" (MAG-4481).
 		if relayProcessor != nil && errors.Is(err, context.DeadlineExceeded) && relayProcessor.GetUsedProviders().SessionsDispatched() > 0 {
 			processingTimeout, _ := rpcss.GetProcessingTimeout(protocolMessage)
-			return &common.RelayResult{
+			timedOut := &common.RelayResult{
 				StatusCode: http.StatusGatewayTimeout,
 				ClientFacing: &common.ClientFacingError{
 					TimedOut:        true,
@@ -1668,7 +1677,16 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 					RouterErrorCode: common.LavaErrorContextDeadline.Code,
 					RouterErrorName: common.LavaErrorContextDeadline.Name,
 				},
-			}, err
+			}
+			// A cross-validated request that ran out of time with nothing back has fewer successful
+			// responses than its threshold: insufficient-responses, the reason the processor gives
+			// when too few came back. Without it the reply said failed with no reason, and
+			// cross_validation_failed_total counted a failure its by-reason breakdown never saw.
+			if relayProcessor.GetSelection() == relaycore.CrossValidation {
+				timedOut.CrossValidationFailureReason = common.CrossValidationReasonInsufficientResponses
+			}
+			rpcss.appendHeadersToRelayResult(ctx, timedOut, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			return timedOut, err
 		}
 
 		return nil, err
@@ -3966,7 +3984,9 @@ func probeAppenderUnlessIdle(appender probeQoSAppender, idle bool) probeQoSAppen
 // runProbeCycleCore is the pure probe-cycle body (no rpcss fields), so it is testable with
 // constructed endpoints + a fake observation getter + a fake appender. For every endpoint it renders
 // a verdict, applies the proactive re-enable, then feeds ONE aggregated QoS sample per provider
-// (rule E2). A nil appender still performs the re-enable (QoS feed simply skipped).
+// (rule E2). A nil appender still performs the re-enable (QoS feed simply skipped). The one shared
+// state it reads is the rate-limit hold-off registry (relayHoldoff, which tests swap): a stale
+// endpoint whose url is held off is left out of its provider's sample rather than scored dead.
 //
 // Returns the per-cycle telemetry for /debug/probe-loop (MAG-2202 endpoint 4): scored = endpoints
 // that received a verdict; reEnabled = endpoints the probe re-enabled SYNCHRONOUSLY this cycle
@@ -4038,6 +4058,24 @@ func runProbeCycleCore(
 						target.Endpoint.RelayProbeInconclusive()
 					}
 				})
+			}
+		}
+		// Busy is not dead (MAG-4387). A rate-limit hold-off stops the url's poll on purpose — and on
+		// an interface whose user relays carry no tip, nothing else refreshes the observation — so a
+		// held-off url goes stale for that reason alone. Scored, it fed its provider availability 0
+		// every cycle for the length of the hold-off, and a healthy vendor that only asked us to slow
+		// down was routed away from. Left out instead, under either key the url is held off by: it
+		// counts as neither healthy nor unhealthy, and a provider whose every endpoint is in this state
+		// sends no sample this cycle. A fresh observation is judged as usual, held off or not; the
+		// re-enable pass above is unaffected.
+		if !verdict.Alive {
+			if readyAt := relayHoldoff.URLReadyAt(ep.ProviderAddress, ep.Endpoint.NetworkAddress); !readyAt.IsZero() {
+				utils.LavaFormatDebug("probe leaves a rate-limited endpoint out of its provider's sample",
+					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
+					utils.LogAttr("provider", ep.ProviderAddress),
+					utils.LogAttr("held_off_until", readyAt),
+				)
+				continue
 			}
 		}
 		verdictsByProvider[ep.ProviderAddress] = append(verdictsByProvider[ep.ProviderAddress], verdict)
@@ -6425,13 +6463,20 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 	} else if relayResult != nil {
 		// For non-cross-validation mode: keep existing single provider behavior
 		providerAddress := relayResult.GetProvider()
-		if providerAddress == "" {
+		// No provider and no reply: nothing answered, and this is the router's own reply, made when
+		// the budget ran out before any attempt came back (MAG-3980). It has no resolver, so it is
+		// named by the attempts that went out, below, and by nothing after them. "Cached" would
+		// name a cache that never answered: a cache hit is a result with a reply.
+		nothingAnswered := providerAddress == "" && relayResult.Reply == nil
+		if providerAddress == "" && !nothingAnswered {
 			providerAddress = "Cached"
 		}
-		metadataReply = append(metadataReply, pairingtypes.Metadata{
-			Name:  common.PROVIDER_ADDRESS_HEADER_NAME,
-			Value: providerAddress,
-		})
+		if !nothingAnswered {
+			metadataReply = append(metadataReply, pairingtypes.Metadata{
+				Name:  common.PROVIDER_ADDRESS_HEADER_NAME,
+				Value: providerAddress,
+			})
+		}
 
 		// On a cache hit, name the backend that served it. Debug-gated: the
 		// value is an internal infrastructure address (a Redis node, a cache-be
@@ -6509,7 +6554,9 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 				apiInterface := rpcss.listenEndpoint.ApiInterface
 				rpcss.rpcSmartRouterLogs.RecordIncidentRetry(chainId, apiInterface, apiName, totalRetries, success)
 			}
+		}
 
+		if totalRetries > 0 || nothingAnswered {
 			// When there are retries, show every attempted provider in the order
 			// the router asked them, the resolver last. "Cached" stays in the
 			// list so the entry count matches Lava-Retries — without it,
@@ -6535,6 +6582,10 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			// violating "last entry == response source" (MAG-1871). Walking
 			// slices makes the value deterministic across runs; the explicit
 			// final append makes the contract structurally true.
+			//
+			// A reply nothing answered has no response source, so nothing is
+			// appended after its attempts, and it names them even when there
+			// was a single one: no provider was named above (MAG-3980).
 			seen := make(map[string]struct{})
 			allProvidersList := make([]string, 0)
 			addEarlierAttempt := func(addr string) {
@@ -6559,15 +6610,25 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 			for _, r := range successResults {
 				addEarlierAttempt(r.ProviderInfo.ProviderAddress)
 			}
-			allProvidersList = append(allProvidersList, providerAddress) // resolver — "Cached" or the winning real provider, always last
+			if !nothingAnswered {
+				allProvidersList = append(allProvidersList, providerAddress) // resolver — "Cached" or the winning real provider, always last
+			}
 
 			if len(allProvidersList) > 0 {
 				allProvidersString := strings.Join(allProvidersList, ",")
+				named := false
 				for i, metadata := range metadataReply {
 					if metadata.Name == common.PROVIDER_ADDRESS_HEADER_NAME {
 						metadataReply[i].Value = allProvidersString
+						named = true
 						break
 					}
+				}
+				if !named {
+					metadataReply = append(metadataReply, pairingtypes.Metadata{
+						Name:  common.PROVIDER_ADDRESS_HEADER_NAME,
+						Value: allProvidersString,
+					})
 				}
 			}
 		}
