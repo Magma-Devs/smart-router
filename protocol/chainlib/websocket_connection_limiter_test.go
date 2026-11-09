@@ -1,0 +1,248 @@
+package chainlib
+
+import (
+	"io"
+	"net"
+	"net/http/httptest"
+	"net/netip"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"github.com/gofiber/fiber/v2"
+	"github.com/golang/mock/gomock"
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/stretchr/testify/require"
+)
+
+func tcpPeer(ip string) net.Addr {
+	return &net.TCPAddr{IP: net.ParseIP(ip), Port: 41000}
+}
+
+// TestWebsocketClientAddress pins how the per-client websocket connection limit names a client
+// (MAG-3083): the connection's own address, or, behind trusted proxies, the first address read from
+// the right of X-Forwarded-For that is not a trusted proxy. 203.0.113.0/24 and 198.51.100.0/24 are
+// documentation ranges standing in for public clients; 173.245.48.0/20 is one of Cloudflare's.
+func TestWebsocketClientAddress(t *testing.T) {
+	defaults, err := ParseTrustedProxies(DefaultWebSocketTrustedProxies)
+	require.NoError(t, err)
+	withCDN, err := ParseTrustedProxies(DefaultWebSocketTrustedProxies + ",173.245.48.0/20")
+	require.NoError(t, err)
+
+	cases := []struct {
+		name         string
+		remote       net.Addr
+		forwardedFor string
+		trusted      []netip.Prefix
+		want         string
+	}{
+		{name: "a client that connects directly is its own address, whatever it forwards", remote: tcpPeer("203.0.113.7"), forwardedFor: "198.51.100.1", trusted: defaults, want: "203.0.113.7"},
+		{name: "behind a trusted proxy, the address the proxy appended", remote: tcpPeer("10.0.0.5"), forwardedFor: "203.0.113.7", trusted: defaults, want: "203.0.113.7"},
+		{name: "what the client wrote before the proxy's entry is never read", remote: tcpPeer("10.0.0.5"), forwardedFor: "198.51.100.1, 203.0.113.7", trusted: defaults, want: "203.0.113.7"},
+		{name: "a chain of trusted proxies is read through", remote: tcpPeer("10.0.0.5"), forwardedFor: "203.0.113.7, 10.0.0.9", trusted: defaults, want: "203.0.113.7"},
+		{name: "a CDN that is not trusted is the client the router can see", remote: tcpPeer("10.0.0.5"), forwardedFor: "203.0.113.7, 173.245.48.10", trusted: defaults, want: "173.245.48.10"},
+		{name: "a trusted CDN is read through", remote: tcpPeer("10.0.0.5"), forwardedFor: "198.51.100.1, 203.0.113.7, 173.245.48.10", trusted: withCDN, want: "203.0.113.7"},
+		{name: "a trusted proxy that forwards nothing is its own client", remote: tcpPeer("10.0.0.5"), forwardedFor: "", trusted: defaults, want: "10.0.0.5"},
+		{name: "an entry no proxy writes stops the walk at the last trusted hop", remote: tcpPeer("10.0.0.5"), forwardedFor: "203.0.113.7, unknown", trusted: defaults, want: "10.0.0.5"},
+		{name: "every hop trusted: the leftmost", remote: tcpPeer("127.0.0.1"), forwardedFor: "10.0.0.9", trusted: defaults, want: "10.0.0.9"},
+		{name: "no trusted proxy: the connection's own address", remote: tcpPeer("10.0.0.5"), forwardedFor: "203.0.113.7", trusted: nil, want: "10.0.0.5"},
+		{name: "a port and an IPv4-mapped address name the same client", remote: tcpPeer("::ffff:10.0.0.5"), forwardedFor: "203.0.113.7:5555", trusted: defaults, want: "203.0.113.7"},
+		{name: "IPv6", remote: tcpPeer("fd00::1"), forwardedFor: "[2001:db8::7]:443", trusted: defaults, want: "2001:db8::7"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, websocketClientAddress(tc.remote, tc.forwardedFor, tc.trusted))
+		})
+	}
+}
+
+// TestWebsocketConnectionLimiter_AClientCannotRaiseItsOwnLimit pins MAG-3083 through
+// CanOpenConnection, with the default trusted proxies: the limit was counted per address,
+// X-Forwarded-For and User-Agent, so a client that changed either header got a fresh allowance.
+func TestWebsocketConnectionLimiter_AClientCannotRaiseItsOwnLimit(t *testing.T) {
+	previousLimit := MaximumNumberOfParallelWebsocketConnectionsPerIp
+	MaximumNumberOfParallelWebsocketConnectionsPerIp = 2
+	t.Cleanup(func() { MaximumNumberOfParallelWebsocketConnectionsPerIp = previousLimit })
+
+	ctrl := gomock.NewController(t)
+	open := func(wcl *WebsocketConnectionLimiter, remote, forwardedFor, userAgent string) bool {
+		t.Helper()
+		conn := NewMockWebsocketConnection(ctrl)
+		conn.EXPECT().Locals(WebSocketOpenConnectionsLimitHeader).Return(int64(0)).AnyTimes()
+		conn.EXPECT().Locals(common.IP_FORWARDING_HEADER_NAME).Return(forwardedFor).AnyTimes()
+		conn.EXPECT().Locals("User-Agent").Return(userAgent).AnyTimes()
+		conn.EXPECT().RemoteAddr().Return(tcpPeer(remote)).AnyTimes()
+		conn.EXPECT().WriteMessage(gomock.Any(), gomock.Any()).AnyTimes()
+		allowed, _ := wcl.CanOpenConnection(conn)
+		return allowed
+	}
+	newLimiter := func() *WebsocketConnectionLimiter {
+		return &WebsocketConnectionLimiter{ipToNumberOfActiveConnections: map[string]int64{}}
+	}
+
+	t.Run("a new User-Agent is the same client", func(t *testing.T) {
+		wcl := newLimiter()
+		got := []bool{
+			open(wcl, "203.0.113.7", "", "agent-a"),
+			open(wcl, "203.0.113.7", "", "agent-b"),
+			open(wcl, "203.0.113.7", "", "agent-c"),
+		}
+		require.Equal(t, []bool{true, true, false}, got)
+	})
+
+	t.Run("X-Forwarded-For from a client that is not a trusted proxy is not read", func(t *testing.T) {
+		wcl := newLimiter()
+		got := []bool{
+			open(wcl, "203.0.113.7", "198.51.100.1", "agent"),
+			open(wcl, "203.0.113.7", "198.51.100.2", "agent"),
+			open(wcl, "203.0.113.7", "198.51.100.3", "agent"),
+		}
+		require.Equal(t, []bool{true, true, false}, got)
+	})
+
+	t.Run("clients behind a trusted proxy each have their own allowance", func(t *testing.T) {
+		wcl := newLimiter()
+		got := []bool{
+			open(wcl, "10.0.0.5", "203.0.113.20", "agent"),
+			open(wcl, "10.0.0.5", "203.0.113.20", "agent"),
+			open(wcl, "10.0.0.5", "203.0.113.21", "agent"),
+			open(wcl, "10.0.0.5", "203.0.113.20", "agent"),
+		}
+		require.Equal(t, []bool{true, true, true, false}, got)
+	})
+
+	t.Run("a client cannot spend another client's allowance by claiming its address", func(t *testing.T) {
+		wcl := newLimiter()
+		got := []bool{
+			open(wcl, "198.51.100.66", "203.0.113.30", "agent"),
+			open(wcl, "198.51.100.66", "203.0.113.30", "agent"),
+			open(wcl, "10.0.0.5", "203.0.113.30", "agent"),
+		}
+		require.Equal(t, []bool{true, true, true}, got, "the claimed client's own connection through the proxy is still allowed")
+	})
+}
+
+// TestWebsocketForwardedForIsEveryHeaderLine pins that the limit reads X-Forwarded-For as one list
+// made of every line of the header, in order (MAG-3083). A proxy may add its own line instead of
+// appending to the one it received, so what it wrote can be in the last line, not the first.
+func TestWebsocketForwardedForIsEveryHeaderLine(t *testing.T) {
+	stored := func(t *testing.T, lines ...string) string {
+		t.Helper()
+		app := fiber.New()
+		app.Get("/ws", func(c *fiber.Ctx) error {
+			(&WebsocketConnectionLimiter{}).HandleFiberRateLimitFlags(c)
+			forwardedFor, _ := c.Locals(common.IP_FORWARDING_HEADER_NAME).(string)
+			return c.SendString(forwardedFor)
+		})
+		req := httptest.NewRequest("GET", "/ws", nil)
+		for _, line := range lines {
+			req.Header.Add(common.IP_FORWARDING_HEADER_NAME, line)
+		}
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return string(body)
+	}
+
+	require.Equal(t, "", stored(t), "no header")
+	require.Equal(t, "198.51.100.1, 203.0.113.7", stored(t, "198.51.100.1, 203.0.113.7"), "one line is kept as it is")
+	twoLines := stored(t, "198.51.100.1", "203.0.113.7")
+	require.Equal(t, "198.51.100.1,203.0.113.7", twoLines, "every line, in order")
+
+	defaults, err := ParseTrustedProxies(DefaultWebSocketTrustedProxies)
+	require.NoError(t, err)
+	require.Equal(t, "203.0.113.7", websocketClientAddress(tcpPeer("10.0.0.5"), twoLines, defaults),
+		"behind a trusted proxy that added its own line, the address in that line")
+
+	previousLimit := MaximumNumberOfParallelWebsocketConnectionsPerIp
+	MaximumNumberOfParallelWebsocketConnectionsPerIp = 2
+	t.Cleanup(func() { MaximumNumberOfParallelWebsocketConnectionsPerIp = previousLimit })
+	ctrl := gomock.NewController(t)
+	wcl := &WebsocketConnectionLimiter{ipToNumberOfActiveConnections: map[string]int64{}}
+	open := func(clientLine string) bool {
+		conn := NewMockWebsocketConnection(ctrl)
+		conn.EXPECT().Locals(WebSocketOpenConnectionsLimitHeader).Return(int64(0)).AnyTimes()
+		conn.EXPECT().Locals(common.IP_FORWARDING_HEADER_NAME).Return(stored(t, clientLine, "203.0.113.7")).AnyTimes()
+		conn.EXPECT().RemoteAddr().Return(tcpPeer("10.0.0.5")).AnyTimes()
+		conn.EXPECT().WriteMessage(gomock.Any(), gomock.Any()).AnyTimes()
+		allowed, _ := wcl.CanOpenConnection(conn)
+		return allowed
+	}
+	require.Equal(t, []bool{true, true, false}, []bool{open("198.51.100.1"), open("198.51.100.2"), open("198.51.100.3")},
+		"one client behind the proxy is counted once, whatever the earlier lines say")
+}
+
+func TestParseTrustedProxies(t *testing.T) {
+	defaults, err := ParseTrustedProxies(DefaultWebSocketTrustedProxies)
+	require.NoError(t, err)
+	require.Len(t, defaults, 6)
+
+	parsed, err := ParseTrustedProxies(" 10.1.2.3 , 2001:db8::1,::ffff:10.0.0.1, 192.168.7.9/16 ,")
+	require.NoError(t, err)
+	require.Equal(t, []netip.Prefix{
+		netip.MustParsePrefix("10.1.2.3/32"),
+		netip.MustParsePrefix("2001:db8::1/128"),
+		netip.MustParsePrefix("10.0.0.1/32"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+	}, parsed)
+
+	mapped, err := ParseTrustedProxies("::ffff:10.0.0.0/104")
+	require.NoError(t, err)
+	require.Equal(t, []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}, mapped, "an IPv4-mapped range names its IPv4 range")
+	require.Equal(t, "203.0.113.7", websocketClientAddress(tcpPeer("10.0.0.5"), "203.0.113.7", mapped), "and matches an IPv4 proxy in it")
+
+	none, err := ParseTrustedProxies("")
+	require.NoError(t, err)
+	require.Empty(t, none, "an empty list trusts no proxy")
+
+	for _, invalid := range []string{"not-an-address", "10.0.0.0/33", "10.0.0.1:80"} {
+		_, err := ParseTrustedProxies(invalid)
+		require.Error(t, err, invalid)
+	}
+}
+
+// fakeWebsocketConnection is a goroutine-safe WebsocketConnection for the concurrency test below.
+type fakeWebsocketConnection struct{ remote net.Addr }
+
+func (f fakeWebsocketConnection) RemoteAddr() net.Addr { return f.remote }
+
+func (f fakeWebsocketConnection) Locals(key string) interface{} {
+	if key == WebSocketOpenConnectionsLimitHeader {
+		return int64(0)
+	}
+	return ""
+}
+
+func (f fakeWebsocketConnection) WriteMessage(int, []byte) error { return nil }
+
+// TestWebsocketConnectionLimiter_SimultaneousOpensStayWithinTheLimit pins that the check and the
+// count are one step (MAG-3083 review). With the count read under the read lock and raised under the
+// write lock, opens from one client that arrived together could all pass the check.
+func TestWebsocketConnectionLimiter_SimultaneousOpensStayWithinTheLimit(t *testing.T) {
+	previousLimit := MaximumNumberOfParallelWebsocketConnectionsPerIp
+	MaximumNumberOfParallelWebsocketConnectionsPerIp = 2
+	t.Cleanup(func() { MaximumNumberOfParallelWebsocketConnectionsPerIp = previousLimit })
+
+	const opens = 50
+	for round := 0; round < 200; round++ {
+		wcl := &WebsocketConnectionLimiter{ipToNumberOfActiveConnections: map[string]int64{}}
+		conn := fakeWebsocketConnection{remote: tcpPeer("203.0.113.7")}
+		start := make(chan struct{})
+		var allowed atomic.Int64
+		var wg sync.WaitGroup
+		for i := 0; i < opens; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if ok, _ := wcl.CanOpenConnection(conn); ok {
+					allowed.Add(1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		require.Equal(t, int64(2), allowed.Load(), "round %d: opens allowed at a limit of 2", round)
+	}
+}

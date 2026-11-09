@@ -225,7 +225,8 @@ var (
 		Description: "Node reports the method is not on its surface; another provider may serve it", Retryable: true,
 	})
 	// NODE_METHOD_NOT_SUPPORTED: the node says the method exists but is disabled on it (provider
-	// tier, policy, admin config). Retryable on another provider, as NODE_METHOD_NOT_FOUND now is
+	// tier, policy, admin config), or that a part of it is, such as the pending block tag
+	// (MAG-5021). Retryable on another provider, as NODE_METHOD_NOT_FOUND now is
 	// too: the two differ in what the node said, not in what the router does with it. The Name
 	// field is a Prometheus label so keep it stable.
 	LavaErrorNodeMethodNotSupported = registerError(&LavaError{
@@ -391,8 +392,8 @@ var (
 	// transaction answered with ABORTED can be on chain. It does not decide a write's verdict
 	// here. A gRPC status error comes back as a node error carrying the node's own message, and
 	// writeOutcomeIsUnknown reads this flag only from protocol errors, so the caller gets Sui's
-	// ABORTED answer, with its "retriable with another submission" text, rather than
-	// errUnknownWriteOutcome.
+	// ABORTED answer, with its "retriable with another submission" text, rather than a "transaction
+	// status unclear" error (unclearWriteError).
 	//
 	// A node error, not PROTOCOL_PROVIDER_ABORTED (1013). That code is CategoryInternal, which
 	// would report the endpoint as unreachable and rank the node's own message below internal

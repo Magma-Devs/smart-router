@@ -21,10 +21,21 @@ func isXRPLSubmission(method string) bool {
 }
 
 // CheckXRPLResponseError classifies a reply from an XRP Ledger node: the JSON-RPC envelope rule,
-// plus the verdict inside the result of a transaction submission.
+// plus the errors rippled reports inside an ordinary result.
 //
-// An XRPL node reports a rejected transaction inside an ordinary result, with HTTP 200 and no
-// error object:
+// rippled answers a JSON-RPC call with HTTP 200 whatever happened, and reports a failed call
+// inside result, beside "status":"error" (it only picks an HTTP status from the error when the
+// client asks for ripplerpc 3.0 or later):
+//
+//	{"result":{"error":"lgrNotFound","error_code":21,"error_message":"ledgerNotFound","status":"error",...}}
+//
+// That is a node error on every method. Read as a success, it was the answer: on a concrete ledger
+// it was cached as final, so a node that did not hold ledger 108018956 yet answered every retry of
+// it for the whole cache lifetime (MAG-4817). The registry's XRP rows decide what each error means
+// (retry, blame); an error they do not list is UNKNOWN_ERROR, as on every other chain.
+//
+// A transaction submission (submit, submit_multisigned) also says what happened to the transaction
+// in result.engine_result, beside "status":"success":
 //
 //	{"result":{"engine_result":"tefPAST_SEQ","engine_result_message":"This sequence number has already passed.","status":"success",...}}
 //
@@ -42,28 +53,24 @@ func isXRPLSubmission(method string) bool {
 //     outcome, not a refusal, and it is final. Flagged, it would lose to a gossiped tefPAST_SEQ
 //     that arrived first — the same wrong answer this rule exists to prevent.
 //
-// A node error:
-//   - any other ledger code: tef*, tem*, tel*, and every ter* but terQUEUED (common.IsXRPLRejection);
-//   - an API error the registry catalogues (common.IsXRPLAPIError), which an XRPL node reports the
-//     same way, inside result with "status":"error". A catalogued one must not stay a success: it
-//     would outrank a real rejection, telling the client noNetwork for a payment on the ledger.
+// A node error: any other ledger code — tef*, tem*, tel*, and every ter* but terQUEUED
+// (common.IsXRPLRejection).
 //
-// The message starts with the code or the API error name, which is what the registry's XRP rows
-// match. Everything else keeps the envelope's verdict: an engine result that is not a ledger code,
-// an API error outside the catalog, and every method that is not a submission.
+// The engine result is read on a submission only. Elsewhere it is the answer the caller asked
+// for: simulate's verdict on a dry run, or a transaction's recorded outcome on tx and account_tx.
+//
+// The message starts with the API error name or the ledger code, which is what the registry's XRP
+// rows match.
 func (jm JsonrpcMessage) CheckXRPLResponseError(data []byte, httpStatusCode int) (hasError bool, errorMessage string) {
 	hasErr, msg, resultBytes := checkJsonrpcEnvelope(data, "JSON-RPC")
 	if hasErr || resultBytes == nil {
 		return hasErr, msg
 	}
-	if !isXRPLSubmission(jm.Method) {
-		return false, ""
-	}
-	return checkXRPLSubmitResult(resultBytes)
+	return checkXRPLResult(resultBytes, isXRPLSubmission(jm.Method))
 }
 
-// checkXRPLSubmitResult reads the verdict inside a submit's result. See CheckXRPLResponseError.
-func checkXRPLSubmitResult(resultBytes []byte) (hasError bool, errorMessage string) {
+// checkXRPLResult reads the verdict inside a result. See CheckXRPLResponseError.
+func checkXRPLResult(resultBytes []byte, isSubmission bool) (hasError bool, errorMessage string) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(resultBytes, &fields); err != nil {
 		return false, ""
@@ -74,18 +81,25 @@ func checkXRPLSubmitResult(resultBytes []byte) (hasError bool, errorMessage stri
 		return value
 	}
 
-	if engineResult := text("engine_result"); engineResult != "" {
-		if !common.IsXRPLRejection(engineResult) {
-			return false, ""
-		}
-		return true, joinXRPLVerdict(engineResult, text("engine_result_message"))
-	}
-	if apiError := text("error"); text("status") == "error" && common.IsXRPLAPIError(apiError) {
+	if text("status") == "error" {
 		detail := text("error_message")
 		if detail == "" {
 			detail = text("error_exception") // invalidTransaction carries its reason here, beside error_message:null
 		}
-		return true, joinXRPLVerdict(apiError, detail)
+		name := text("error")
+		if name == "" {
+			if detail == "" {
+				return true, "XRPL error with an empty message"
+			}
+			return true, detail
+		}
+		return true, joinXRPLVerdict(name, detail)
+	}
+	if !isSubmission {
+		return false, ""
+	}
+	if engineResult := text("engine_result"); common.IsXRPLRejection(engineResult) {
+		return true, joinXRPLVerdict(engineResult, text("engine_result_message"))
 	}
 	return false, ""
 }

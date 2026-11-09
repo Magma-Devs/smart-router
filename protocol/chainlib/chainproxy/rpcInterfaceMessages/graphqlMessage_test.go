@@ -1,6 +1,7 @@
 package rpcInterfaceMessages
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 
@@ -490,4 +491,127 @@ func TestParseGraphQLMsgSiblingFragmentsAreNotCyclic(t *testing.T) {
 	message, err := ParseGraphQLMsg([]byte(body))
 	require.NoError(t, err)
 	require.Equal(t, []string{"chainIdentifier", "chainIdentifier"}, message.RootFieldNames())
+}
+
+// TestParseGraphQLMsgRefusesKeysTheNodeWouldReadDifferently is MAG-4908.
+//
+// Go's JSON decoders match an object key to a struct field case-insensitively and keep the last
+// match; a GraphQL server built on serde (Sui's) reads the exact key only. So one body carried two
+// requests, and the router classified one while the node ran the other. Every refused body here is
+// decoded by the router as the harmless read and by the node as the mutation. Every served body is
+// read the same way by both.
+func TestParseGraphQLMsgRefusesKeysTheNodeWouldReadDifferently(t *testing.T) {
+	const mutation = `mutation { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { effects { status } } }`
+	const both = `mutation M { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } } query Q { chainIdentifier }`
+	const read = `{ chainIdentifier }`
+
+	for _, tc := range []struct{ name, body, wantMessage string }{
+		{
+			name:        "query repeated in another letter case",
+			body:        `{"query":"` + mutation + `","QUERY":"` + read + `"}`,
+			wantMessage: `"QUERY" differs from "query" only by letter case`,
+		},
+		{
+			name:        "operationName repeated in another letter case",
+			body:        `{"query":"` + both + `","operationName":"M","OPERATIONNAME":"Q"}`,
+			wantMessage: `"OPERATIONNAME" differs from "operationName" only by letter case`,
+		},
+		{
+			name:        "query repeated exactly",
+			body:        `{"query":"` + mutation + `","query":"` + read + `"}`,
+			wantMessage: `repeats the "query" member`,
+		},
+		{
+			name: "variables repeated in another letter case",
+			// The router would pin the read to one checkpoint and the node would answer another.
+			body:        `{"query":"query ($n: UInt53) { checkpoint(sequenceNumber: $n) { digest } }","variables":{"n":1},"Variables":{"n":2}}`,
+			wantMessage: `"Variables" differs from "variables" only by letter case`,
+		},
+		{
+			name: "a key that only Unicode case folding equates",
+			// encoding/json matches with strings.EqualFold, which folds the long s (U+017F) to s.
+			body:        `{"query":"` + read + `","variableſ":{}}`,
+			wantMessage: `"variableſ" differs from "variables" only by letter case`,
+		},
+		{
+			name:        "extensions repeated exactly",
+			body:        `{"query":"` + read + `","extensions":{},"extensions":{}}`,
+			wantMessage: `repeats the "extensions" member`,
+		},
+	} {
+		t.Run("refused: "+tc.name, func(t *testing.T) {
+			_, err := ParseGraphQLMsg([]byte(tc.body))
+			require.ErrorIs(t, err, ErrGraphQLRequestRefused)
+			require.ErrorContains(t, err, tc.wantMessage)
+		})
+	}
+
+	for _, tc := range []struct {
+		name, body string
+		wantRoots  []string
+	}{
+		{
+			name:      "exact keys, every member present",
+			body:      `{"query":"query Q ($n: UInt53) { checkpoint(sequenceNumber: $n) { digest } }","operationName":"Q","variables":{"n":1},"extensions":{"trace":true}}`,
+			wantRoots: []string{"checkpoint"},
+		},
+		{
+			// Read by nobody on either side, so there is nothing to disagree on.
+			name:      "a member nobody reads, repeated",
+			body:      `{"query":"` + read + `","trace":1,"trace":2}`,
+			wantRoots: []string{"chainIdentifier"},
+		},
+		{
+			name:      "a member nobody reads, in another letter case",
+			body:      `{"query":"` + read + `","Trace":1}`,
+			wantRoots: []string{"chainIdentifier"},
+		},
+	} {
+		t.Run("served: "+tc.name, func(t *testing.T) {
+			message, err := ParseGraphQLMsg([]byte(tc.body))
+			require.NoError(t, err)
+			require.Equal(t, tc.wantRoots, message.RootFieldNames())
+			require.Equal(t, []byte(tc.body), message.Msg, "the body is forwarded exactly as the router read it")
+		})
+	}
+
+	// A body the check cannot read as an object is the decoder's to report, as before.
+	for _, body := range []string{`["query"]`, `{"query":`} {
+		_, err := ParseGraphQLMsg([]byte(body))
+		require.Error(t, err, body)
+		require.False(t, errors.Is(err, ErrGraphQLRequestRefused), "not a refusal: %s", body)
+		require.ErrorContains(t, err, "failed unmarshalling graphql request body")
+	}
+}
+
+// TestParseGraphQLMsgADocumentHoldingAMutationIsAWrite pins MAG-4908's second item, as the owner
+// ruled on 2026-11-09: a document that holds a mutation is a write. When every operation in it is
+// a mutation, the one operationName selects is handled as a write. A document that also holds a
+// query or a subscription is refused, whatever operationName names or when it names none.
+func TestParseGraphQLMsgADocumentHoldingAMutationIsAWrite(t *testing.T) {
+	const mixed = `mutation Write { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { effects { status } } } query Read { chainIdentifier }`
+	for _, body := range []string{
+		`{"query":"` + mixed + `","operationName":"Write"}`,
+		`{"query":"` + mixed + `","operationName":"Read"}`,
+		`{"query":"` + mixed + `"}`,
+		`{"query":"mutation Write { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } } subscription Events { events { digest } }","operationName":"Write"}`,
+	} {
+		_, err := ParseGraphQLMsg([]byte(body))
+		require.ErrorIs(t, err, ErrGraphQLRequestRefused, body)
+		require.ErrorContains(t, err, "holds a mutation beside another operation", body)
+	}
+
+	const mutations = `mutation First { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } } mutation Second { executeTransaction(transactionDataBcs: \"z\", signatures: [\"w\"]) { digest } }`
+	for _, name := range []string{"First", "Second"} {
+		write, err := ParseGraphQLMsg([]byte(`{"query":"` + mutations + `","operationName":"` + name + `"}`))
+		require.NoError(t, err, name)
+		require.True(t, write.IsMutation(), name)
+		require.Equal(t, []string{"executeTransaction"}, write.RootFieldNames(), name)
+	}
+
+	const queries = `query First { chainIdentifier } query Second { checkpoint { digest } }`
+	read, err := ParseGraphQLMsg([]byte(`{"query":"` + queries + `","operationName":"Second"}`))
+	require.NoError(t, err, "a document of queries only is not affected")
+	require.False(t, read.IsMutation())
+	require.Equal(t, []string{"checkpoint"}, read.RootFieldNames())
 }

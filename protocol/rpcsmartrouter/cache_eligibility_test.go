@@ -10,8 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
+	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
@@ -88,6 +91,45 @@ func TestTryCacheWriteNeverStoresANodeBoundAnswer(t *testing.T) {
 		"a filter id created on one node must never be handed to another caller from the cache")
 }
 
+// A REST api reaches the node-bound list under the name its spec declares, placeholders and
+// all: the parser resolves the path as sent to the spec's api, and cacheExclusionReason reads
+// that api's name. So a walletd read of one address's unconfirmed events finds the templated
+// entry, and every walletd mempool and peer read is refused by both cache gates (MAG-4793).
+// The router bundles no Siacoin spec, so the paths are declared here as lava-specs' sc.json
+// declares them, with /api/consensus/network, which belongs to the chain, as the control.
+func TestCacheExclusionReasonRefusesWalletdMempoolAndPeerReads(t *testing.T) {
+	declared := []string{
+		"/api/txpool/transactions", "/api/txpool/events", "/api/txpool/fee",
+		"/api/addresses/{addr}/events/unconfirmed", "/api/syncer/peers", "/api/consensus/network",
+	}
+	apis := make([]*spectypes.Api, 0, len(declared))
+	for _, name := range declared {
+		apis = append(apis, &spectypes.Api{Name: name, Enabled: true})
+	}
+	spec := chainlib.CreateMockSpec()
+	spec.ApiCollections = []*spectypes.ApiCollection{{
+		Enabled:        true,
+		CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceRest, Type: http.MethodGet},
+		Apis:           apis,
+	}}
+	chainParser, err := chainlib.NewChainParser(spectypes.APIInterfaceRest)
+	require.NoError(t, err)
+	chainParser.SetSpec(spec)
+
+	for path, want := range map[string]string{
+		"/api/txpool/transactions":                   "node-bound",
+		"/api/txpool/events":                         "node-bound",
+		"/api/txpool/fee":                            "node-bound",
+		"/api/addresses/0a1b2c3d/events/unconfirmed": "node-bound",
+		"/api/syncer/peers":                          "node-bound",
+		"/api/consensus/network":                     "",
+	} {
+		chainMsg, err := chainParser.ParseMsg(path, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{})
+		require.NoError(t, err, path)
+		require.Equal(t, want, cacheExclusionReason(chainlib.NewProtocolMessage(chainMsg, nil, nil, "test-dapp", "127.0.0.1")), path)
+	}
+}
+
 // bundledSpecAPINames walks the spec files the router ships with and returns, per file,
 // every API name it declares (imports are not resolved: a name is listed where it is
 // written, so ethereum.json carries the EVM family for the chains that import it).
@@ -150,6 +192,24 @@ func TestNodeBoundMethodsInTheBundledSpecs(t *testing.T) {
 		"solana.json":       {"accountSubscribe", "accountUnsubscribe", "blockSubscribe", "blockUnsubscribe", "getClusterNodes", "getHealth", "getIdentity", "getVersion", "logsSubscribe", "logsUnsubscribe", "programSubscribe", "programUnsubscribe", "rootSubscribe", "rootUnsubscribe", "signatureSubscribe", "signatureUnsubscribe", "slotSubscribe", "slotUnsubscribe", "slotsUpdatesSubscribe", "slotsUpdatesUnsubscribe", "voteSubscribe", "voteUnsubscribe"},
 		"tendermint.json":   {"abci_info", "consensus_state", "dump_consensus_state", "health", "net_info", "num_unconfirmed_txs", "status", "subscribe", "unconfirmed_txs", "unsubscribe", "unsubscribe_all"},
 	}, refused)
+
+	// Specs the router does not bundle declare node-bound names of their own, nearly all
+	// parsed as LATEST (DEFAULT ["latest"]), so off the list each is cached under the tip
+	// for the non-finalized TTL and one node's mempool, peers or software reaches every
+	// caller. The Bitcoin family's JSON-RPC methods in zcash.json, qtum.json and dcr.json on
+	// lava-specs main (MAG-4207), getaddressmempool also in dash.json; Siacoin's walletd
+	// REST paths in sc.json, under the name the spec declares (MAG-4793). dcr.json parses
+	// version as EMPTY, which already keeps it out of the cache; the entry covers a spec
+	// that parses it as LATEST.
+	for _, name := range []string{
+		"existsmempooltxs", "getaddressmempool", "gettxspendingprevout", "getmixpairrequests", "getmixmessage",
+		"getpeerinfo", "getnettotals", "getnetworkinfo", "getinfo", "version",
+		"getblocktemplate", "getgenerate", "getlocalsolps",
+		"/api/txpool/transactions", "/api/txpool/events", "/api/txpool/fee",
+		"/api/addresses/{addr}/events/unconfirmed", "/api/txpool/parents", "/api/syncer/peers",
+	} {
+		require.NotEmpty(t, nodeBoundReason(name), "%s answers about one node", name)
+	}
 
 	// The other direction: answers that belong to the chain keep caching, however the
 	// spec's deterministic flag reads for them.
