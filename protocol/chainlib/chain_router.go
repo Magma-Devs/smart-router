@@ -164,7 +164,9 @@ func (cri *chainRouterImpl) BatchNodeUrlsByServices(ctx context.Context, rpcProv
 		routerKey := lavasession.NewRouterKey(nodeUrl.Addons)
 		if len(nodeUrl.Methods) > 0 {
 			// all methods defined here will go to the same batch: urls given the same list share
-			// its route number, so the last of them serves the list, as for any repeated key
+			// its route number, so the last of them serves the list on its own path, as for any
+			// repeated key. The internal paths generated for the list keep the first url, since
+			// autoGenerateMissingInternalPaths never overrides an entry.
 			methodRoutesUnique := strings.Join(nodeUrl.Methods, ",")
 			var existing int
 			var ok bool
