@@ -10,19 +10,26 @@ import (
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
-// InjectHTTP injects W3C trace context headers (traceparent/tracestate)
-// into a Metadata slice. Existing entries with matching (case-insensitive)
-// names are replaced in place; remaining propagator keys are appended.
-// Replacing rather than blindly appending avoids producing two
-// `traceparent` headers downstream when an inbound traceparent has been
-// passed through by the chain spec — receivers cannot reliably pick the
-// correct one in that case.
+// InjectHTTP returns headers with W3C trace context headers
+// (traceparent/tracestate) injected. Existing entries with matching
+// (case-insensitive) names are replaced at their position; remaining
+// propagator keys are appended. Replacing rather than blindly appending
+// avoids producing two `traceparent` headers downstream when an inbound
+// traceparent has been passed through by the chain spec — receivers cannot
+// reliably pick the correct one in that case.
+//
+// It never writes through headers: it works on a copy. The slice is a chain
+// message's own, which every attempt of one relay shares and sends at the
+// same time (one goroutine per endpoint), so replacing an entry in place or
+// appending into the slice's spare capacity raced between those attempts and
+// could put one attempt's traceparent on another's request.
 func InjectHTTP(ctx context.Context, headers []pairingtypes.Metadata) []pairingtypes.Metadata {
 	carrier := propagation.MapCarrier{}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
 	if len(carrier) == 0 {
 		return headers
 	}
+	headers = append(make([]pairingtypes.Metadata, 0, len(headers)+len(carrier)), headers...)
 	// The W3C TraceContext / Baggage propagators emit canonical lowercase
 	// keys ("traceparent", "tracestate", "baggage"), so we can index the
 	// carrier with a lowercased header name directly.
