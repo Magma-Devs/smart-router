@@ -945,6 +945,11 @@ func (h *HTTPDirectRPCConnection) GetNodeUrl() *common.NodeUrl {
 	return &h.nodeUrl
 }
 
+// ErrBuildHTTPRequest marks a request DoHTTPRequest could not even build, so nothing was sent.
+// The senders wrap it like any error from the wire, so the router's protocol-error count needs this
+// mark to leave the router's own failure out (MAG-3536, MAG-4718). The message is unchanged.
+var ErrBuildHTTPRequest = errors.New("failed to build HTTP request")
+
 // DoHTTPRequest implements HTTPDirectRPCDoer for REST support (Phase 4)
 // Executes HTTP request with variable method (GET/POST/PUT/DELETE)
 func (h *HTTPDirectRPCConnection) DoHTTPRequest(
@@ -981,7 +986,7 @@ func (h *HTTPDirectRPCConnection) do(
 	if err != nil {
 		// NewRequestWithContext only fails on malformed URL / method — a programmer
 		// error, not a transport failure or upstream outage.
-		return nil, fmt.Errorf("failed to build HTTP request: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrBuildHTTPRequest, err)
 	}
 
 	h.nodeUrl.SetAuthHeaders(ctx, req.Header.Set)

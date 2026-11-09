@@ -43,6 +43,13 @@ type ChainIdAndApiInterfaceGetter interface {
 	GetChainIdAndApiInterface() (string, string)
 }
 
+// NodeErrorRecorder is implemented by a ChainIdAndApiInterfaceGetter that keeps the router's own
+// count of node errors (RelayErrorTally, MAG-4718). handleResponse records each node error it
+// meters through it, beside the metric rather than inside it.
+type NodeErrorRecorder interface {
+	RecordNodeError(chainID, apiInterface, providerAddress, method string)
+}
+
 // RelayStateSendInstructions struct for relay instructions
 type RelayStateSendInstructions struct {
 	Analytics      *metrics.RelayMetrics

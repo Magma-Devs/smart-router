@@ -387,6 +387,42 @@ node on the router offers it, the request is still served without it and the rep
 | `smartrouter_node_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Node errors returned by endpoints. |
 | `smartrouter_protocol_errors_total` | Counter | `spec`, `apiInterface`, `provider_address`, `method` | Protocol/transport errors (connection/session failures). |
 
+`GET /debug/relay-errors` on the debug server (`--debug-address`) reports the router's own count of
+the same two kinds of error, one row per chain, interface, provider and method with a count above
+zero: `ChainID`, `ApiInterface`, `ProviderAddress`, `Method`, `NodeErrors`, `ProtocolErrors` and
+`PodID`. The router keeps these counts itself, beside the counters above, and the route reads no
+Prometheus counter, so it answers on a router run without `--metrics-listen-address` too.
+
+* **Node errors** are counted where the router meters `smartrouter_node_errors_total`, under the
+  same rule: never on a stateful request (a write). The router's own health check is not counted
+  here either, although the metric counts it.
+* **Protocol errors** are counted where a direct attempt went out on the wire and got no answer
+  from the upstream: a refused or dropped connection, a body cut off or not JSON, a hang past the
+  request's budget, or an attempt still silent when its window ran out. The last one counts even
+  when a retry then answers and the attempt is cancelled, because the silence came first: a
+  provider in simulator mode `hang` behind a `lava-relay-timeout: 300ms` window gets its row
+  although another provider answers the retry. These are not counted: an HTTP status (an answer),
+  a request the router could not build, an attempt the router cancelled inside its window (a race
+  it lost), anything on gRPC, a write, and the router's own health check. A client that hangs up
+  does not end an attempt on the HTTP or WebSocket listeners: the attempt runs on, and the same
+  rules decide its row.
+* `Method` is the API name the request was relayed as. A GraphQL operation with two root fields
+  is `chainIdentifier&checkpoint`, not the metric's `batch:` label. Two kinds of name are the
+  request's own text: a `Default-...` name for an api the spec does not declare, and a batch's or
+  operation's `&`-joined names. Each kind keeps its own rows only within a budget per chain and
+  interface, with the method label's numbers (32 `Default-` names, 64 joined names), and only up
+  to 512 bytes. Past that the attempt is counted on the `Default-other` or `batch:other` row, so the
+  tally stays bounded whatever a client sends. An admitted name keeps its row. The label's own
+  budget is per chain, and it counts a path's shape and a batch's set of methods rather than the
+  name, so the label and these rows can differ for the same traffic.
+
+Both counts are per attempt: a retry that answered hides the first attempt from the caller, and
+this is where its classification shows. `chain_id`, `api_interface` and `provider` narrow the
+rows; `provider` matches `ProviderAddress`, the value `Lava-Provider-Address` carries. The counts
+are per process and cumulative for its lifetime, and no `/debug/reset-*` route clears them: the
+debug Service balances across a router's pods, so compare two readings only when their `PodID`
+matches.
+
 #### Retries
 
 | Metric | Type | Labels | Description |
