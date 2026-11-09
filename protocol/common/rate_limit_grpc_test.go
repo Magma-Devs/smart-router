@@ -54,6 +54,17 @@ func TestRateLimitFromGRPC(t *testing.T) {
 		require.True(t, limited)
 		require.Equal(t, MaxRetryAfter, d)
 	})
+	t.Run("pushback too large for a Duration still clamps", func(t *testing.T) {
+		// Past about 292 years in milliseconds, converting to a Duration overflows int64. The
+		// wrapped wait was negative or tiny, so RESOURCE_EXHAUSTED with it was not a rate limit
+		// at all and was scored against the endpoint, or was held off for the default only.
+		for _, raw := range []string{"9223372036855", "10000000000000", "18446744073710", "9223372036854775807"} {
+			md := map[string][]string{"grpc-retry-pushback-ms": {raw}}
+			d, limited := RateLimitFromGRPC(8, "resource exhausted", md)
+			require.True(t, limited, raw)
+			require.Equal(t, MaxRetryAfter, d, raw)
+		}
+	})
 }
 
 func TestRateLimitedConstructor(t *testing.T) {

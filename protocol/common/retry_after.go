@@ -165,11 +165,12 @@ func grpcRetryDelayFromMD(md map[string][]string) time.Duration {
 	}
 	if raw := first("grpc-retry-pushback-ms"); raw != "" {
 		if ms, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && ms > 0 {
-			d := time.Duration(ms) * time.Millisecond
-			if d > MaxRetryAfter {
+			// Clamp before converting: past about 292 years in milliseconds the product
+			// overflows int64, and the wrapped value is negative or tiny, never the clamp.
+			if int64(ms) > MaxRetryAfter.Milliseconds() {
 				return MaxRetryAfter
 			}
-			return d
+			return time.Duration(ms) * time.Millisecond
 		}
 	}
 	if raw := first("retry-after"); raw != "" {
