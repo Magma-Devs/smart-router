@@ -1,0 +1,1 @@
+Temporary MAG-5054 Jira automation verification. This branch is never to be merged and will be removed after verification.
