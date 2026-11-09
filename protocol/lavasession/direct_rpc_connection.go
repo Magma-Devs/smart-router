@@ -1235,14 +1235,15 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	// Create output message
 	outputMsg := msgFactory.NewMessage(methodDescriptor.GetOutputType())
 
-	// Invoke gRPC method - capture response headers/metadata. The peer is set only once a
-	// stream to the node is open; a call that failed with none never reached a node.
-	var respHeaders metadata.MD
+	// Invoke gRPC method - capture response headers/metadata, and the trailer a failed call's
+	// rate-limit wait may ride in (handleGRPCError). The peer is set only once a stream to the
+	// node is open; a call that failed with none never reached a node.
+	var respHeaders, respTrailers metadata.MD
 	var nodePeer peer.Peer
-	err = conn.Invoke(ctx, "/"+methodPath, inputMsg, outputMsg, grpc.Header(&respHeaders), grpc.Peer(&nodePeer))
+	err = conn.Invoke(ctx, "/"+methodPath, inputMsg, outputMsg, grpc.Header(&respHeaders), grpc.Trailer(&respTrailers), grpc.Peer(&nodePeer))
 	if err != nil {
 		// Handle gRPC error - pass respHeaders for metadata in error response
-		return g.handleGRPCError(ctx, err, respHeaders, nodePeer.Addr != nil)
+		return g.handleGRPCError(ctx, err, respHeaders, respTrailers, nodePeer.Addr != nil)
 	}
 
 	// Marshal response to binary proto
@@ -2081,11 +2082,11 @@ func GRPCRequestNeedsDescriptor(data []byte) bool {
 // whether or not the node serves reflection.
 func (g *GRPCDirectRPCConnection) invokeRaw(ctx context.Context, conn *grpc.ClientConn, methodPath string, data []byte) (*DirectRPCResponse, error) {
 	var reply []byte
-	var respHeaders metadata.MD
+	var respHeaders, respTrailers metadata.MD
 	var nodePeer peer.Peer
-	err := conn.Invoke(ctx, "/"+methodPath, data, &reply, grpc.ForceCodec(rawProtoCodec{}), grpc.Header(&respHeaders), grpc.Peer(&nodePeer))
+	err := conn.Invoke(ctx, "/"+methodPath, data, &reply, grpc.ForceCodec(rawProtoCodec{}), grpc.Header(&respHeaders), grpc.Trailer(&respTrailers), grpc.Peer(&nodePeer))
 	if err != nil {
-		return g.handleGRPCError(ctx, err, respHeaders, nodePeer.Addr != nil)
+		return g.handleGRPCError(ctx, err, respHeaders, respTrailers, nodePeer.Addr != nil)
 	}
 	return &DirectRPCResponse{
 		Data:       reply,
@@ -2124,7 +2125,10 @@ func (rawProtoCodec) Name() string { return "proto" }
 // nodeReached reports whether a stream to the node was open when the call failed: grpc-go sets
 // the grpc.Peer call option only then. It is false for a call grpc-go refused itself, before
 // any node saw it.
-func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error, respHeaders metadata.MD, nodeReached bool) (*DirectRPCResponse, error) {
+//
+// respHeaders and respTrailers are the reply's header and trailer metadata. Both are read to
+// recognise a rate limit; only the header block goes back in the response.
+func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error, respHeaders, respTrailers metadata.MD, nodeReached bool) (*DirectRPCResponse, error) {
 	// A relay the router itself cancelled — a loser of a stateful fan-out race,
 	// or a client that disconnected — is not a node failure and must not be
 	// scored as one. grpc-go reports this as status.Error(codes.Canceled, ...),
@@ -2209,7 +2213,12 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 		Metadata:   respHeaders, // Include any headers received before the error
 		StatusCode: int(errorCode),
 	}
-	return response, NewGRPCStatusError(errorCode, errorMessage, err, respHeaders)
+	// A node's rate-limit wait may arrive in either block. A reply that is only a status has no
+	// header block at all, and grpc-go's own retry reads grpc-retry-pushback-ms from the trailer;
+	// read in the header alone, a wait sent there was never seen, and the refusal was scored as a
+	// node failure (MAG-4915). The trailer is read here only: the response keeps the header block,
+	// so the wait stays the router's own, as an HTTP Retry-After does.
+	return response, NewGRPCStatusError(errorCode, errorMessage, err, metadata.Join(respHeaders, respTrailers))
 }
 
 // NewGRPCStatusError builds the error for a status a node sent. A corroborated rate limit — a

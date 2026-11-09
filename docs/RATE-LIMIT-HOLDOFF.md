@@ -14,11 +14,12 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   keep hammering the account through its other chains. The provider-wide hold-off ends
   when its longest-held member does.
 - **Retry-After is the floor.** When the upstream said how long to wait
-  (`common.RetryAfterFrom` on the typed error), the hold-off is at least that long,
-  bounded at 1h including jitter. Otherwise a per-URL exponential: 30s doubling per
-  consecutive strike, capped at 30m before jitter. Jitter extends each hold-off by up to
-  +20% and never shortens it, so a fleet held off by one vendor-wide limit does not return
-  in a synchronized burst.
+  (`common.RetryAfterFrom` on the typed error, or `RelayResult.RetryAfter` for a gRPC
+  status, whose refusal completes the relay and so returns no error), the hold-off is at
+  least that long, bounded at 1h including jitter. Otherwise a per-URL exponential: 30s
+  doubling per consecutive strike, capped at 30m before jitter. Jitter extends each
+  hold-off by up to +20% and never shortens it, so a fleet held off by one vendor-wide
+  limit does not return in a synchronized burst.
 - **One strike per hold-off.** A strike is a hold-off that ended in another 429, not a
   429. A 429 that arrives while the URL is still held off adds no strike and leaves the
   hold-off where it is — `RecordRateLimit` returns what is left of it — unless its
@@ -65,7 +66,9 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   a WebSocket handshake, a gRPC RESOURCE_EXHAUSTED) is answered with a plain 429.
 - **What counts as a 429.** An HTTP 429 status on any transport, a WebSocket upgrade the
   upstream rejected with 429, a gRPC status whose text names a rate limit (or
-  RESOURCE_EXHAUSTED with a retry delay), and a JSON-RPC error body with code 429 or a
+  RESOURCE_EXHAUSTED with a retry delay: on the request path read from the reply's header or
+  trailer metadata, since a status-only reply has no header block; on a streaming
+  subscription from the stream's trailer only), and a JSON-RPC error body with code 429 or a
   "too many requests" / "rate limit" message — the shape a gateway answers with on an open
   WebSocket connection or inside a 200, where no status reaches the transport layer
   (`common/error_classifier.go`, JSON-RPC table). On GraphQL, an error coded

@@ -32,7 +32,7 @@ func TestHandleGRPCError_DeadlineEchoedByTheNodeIsTheRoutersTimeout(t *testing.T
 	echoed := status.Error(codes.DeadlineExceeded, "Deadline Exceeded")
 
 	g := &GRPCDirectRPCConnection{}
-	resp, err := g.handleGRPCError(ctx, echoed, nil, true)
+	resp, err := g.handleGRPCError(ctx, echoed, nil, nil, true)
 
 	require.Nil(t, resp, "the router's own deadline is not an answer from the node")
 	require.ErrorIs(t, err, context.DeadlineExceeded, "the sentinel every timeout carries")
@@ -48,7 +48,7 @@ func TestHandleGRPCError_NodeOwnDeadlineBeforeTheRoutersStaysANodeError(t *testi
 	defer cancel()
 
 	g := &GRPCDirectRPCConnection{}
-	resp, err := g.handleGRPCError(ctx, status.Error(codes.DeadlineExceeded, "query timed out on the node"), nil, true)
+	resp, err := g.handleGRPCError(ctx, status.Error(codes.DeadlineExceeded, "query timed out on the node"), nil, nil, true)
 
 	require.NotNil(t, resp, "the node answered")
 	require.Equal(t, int(codes.DeadlineExceeded), resp.StatusCode)
@@ -63,7 +63,7 @@ func TestHandleGRPCError_OtherStatusAfterTheDeadlineStaysANodeError(t *testing.T
 	ctx := deadlinePassedCtx{Context: context.Background(), deadline: time.Now().Add(-time.Millisecond)}
 
 	g := &GRPCDirectRPCConnection{}
-	resp, err := g.handleGRPCError(ctx, status.Error(codes.Internal, "boom"), nil, true)
+	resp, err := g.handleGRPCError(ctx, status.Error(codes.Internal, "boom"), nil, nil, true)
 
 	require.NotNil(t, resp)
 	require.Equal(t, int(codes.Internal), resp.StatusCode)

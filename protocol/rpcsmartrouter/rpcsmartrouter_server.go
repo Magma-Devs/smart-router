@@ -3234,7 +3234,12 @@ func (rpcss *RPCSmartRouterServer) sendRelayToDirectEndpoints(
 				// the limiter above endpoints doing real work. Release without a QoS sample
 				// either way, and hold the endpoint off so the in-request retry and
 				// subsequent requests prefer somewhere else (docs/RATE-LIMIT-HOLDOFF.md).
-				retryAfter, _ := common.RetryAfterFrom(err)
+				retryAfter, ok := common.RetryAfterFrom(err)
+				if !ok {
+					// A refusal that completed the relay (a gRPC status) has no error to carry its
+					// wait; the result carries it instead (MAG-4914).
+					retryAfter = localRelayResult.RetryAfter
+				}
 				heldFor := relayHoldoff.RecordRateLimit(holdoffProvider, holdoffURL, retryAfter)
 				releaseErr := err
 				if releaseErr == nil {
@@ -6063,6 +6068,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// them on the direct path; IsDataScope would have the same fate if it were not copied too.
 	relayResult.IsUnsupportedMethod = result.IsUnsupportedMethod
 	relayResult.IsRateLimited = result.IsRateLimited
+	relayResult.RetryAfter = result.RetryAfter
 	relayResult.IsDataScope = result.IsDataScope
 	relayResult.IsNodeCapability = result.IsNodeCapability
 	relayResult.IsNodeAtFault = result.IsNodeAtFault
