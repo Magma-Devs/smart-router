@@ -225,7 +225,8 @@ var (
 		Description: "Node reports the method is not on its surface; another provider may serve it", Retryable: true,
 	})
 	// NODE_METHOD_NOT_SUPPORTED: the node says the method exists but is disabled on it (provider
-	// tier, policy, admin config). Retryable on another provider, as NODE_METHOD_NOT_FOUND now is
+	// tier, policy, admin config), or that a part of it is, such as the pending block tag
+	// (MAG-5021). Retryable on another provider, as NODE_METHOD_NOT_FOUND now is
 	// too: the two differ in what the node said, not in what the router does with it. The Name
 	// field is a Prometheus label so keep it stable.
 	LavaErrorNodeMethodNotSupported = registerError(&LavaError{

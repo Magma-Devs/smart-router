@@ -213,3 +213,65 @@ func TestEndpointMonitor_RealPoll_SVM_FailureRecordsFailure(t *testing.T) {
 	require.True(t, o.LastSuccessfulPoll.IsZero(), "a failed SVM poll does not stamp LastSuccessfulPoll")
 	require.NotEmpty(t, o.LastPollError, "the SVM poll error is recorded")
 }
+
+// TestEndpointMonitor_RealPoll_SVM_ErrorReplyCountsAsFetchFailure guards MAG-4613 through a
+// real Solana ChainTracker. Once the node answers the poll with a JSON-RPC error, served as
+// HTTP 200 the way nodes do, each poll must count as a failed fetch: the fetch-error callback
+// fires, the cadence backs off, and the node's message reaches the observation. Before the
+// fix the reply read as a successful poll at slot 0, with no fetch error and no backoff.
+func TestEndpointMonitor_RealPoll_SVM_ErrorReplyCountsAsFetchFailure(t *testing.T) {
+	ensureRandSeeded()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	url := "https://solana-behind:443/"
+	conn := &svmTurnsErrorConnection{
+		mockDirectRPCConnection: mockDirectRPCConnection{url: url},
+		good:                    []byte(`{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":123456789},"value":{"blockhash":"solhash"}}}`),
+		errReply:                []byte(`{"jsonrpc":"2.0","error":{"code":-32005,"message":"Node is behind by 42 slots"},"id":1}`),
+	}
+
+	var fetchErrors atomic.Int32
+	m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
+		ChainParser:      newRealChainParser(t, "SOLANA", spectypes.APIInterfaceJsonRPC),
+		ChainID:          "SOLANA",
+		ApiInterface:     spectypes.APIInterfaceJsonRPC,
+		AverageBlockTime: 100 * time.Millisecond,
+		BlocksToSave:     1,
+		OnFetchError:     func(string) { fetchErrors.Add(1) },
+	})
+	require.NotNil(t, m)
+	defer m.Stop()
+
+	tracker, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	require.NoError(t, err)
+	healthyInterval := tracker.CurrentPollInterval()
+
+	require.Eventually(t, func() bool { return fetchErrors.Load() > 0 }, 5*time.Second, 20*time.Millisecond,
+		"an error reply must count as a failed fetch")
+	require.Eventually(t, func() bool { return tracker.CurrentPollInterval() > healthyInterval }, 5*time.Second, 20*time.Millisecond,
+		"failed polls must back the cadence off")
+
+	o, ok := m.GetObservation(url)
+	require.True(t, ok)
+	require.Contains(t, o.LastPollError, "Node is behind by 42 slots", "the node's own message reaches the observation")
+}
+
+// svmTurnsErrorConnection answers the first Solana latest-block poll with a slot, so the
+// tracker starts, and every later one with errReply.
+type svmTurnsErrorConnection struct {
+	mockDirectRPCConnection
+	good, errReply []byte
+	polls          atomic.Int32
+}
+
+func (c *svmTurnsErrorConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*lavasession.DirectRPCResponse, error) {
+	if string(data) != svmLatestBlockRequest {
+		return c.mockDirectRPCConnection.SendRequest(ctx, data, headers)
+	}
+	reply := c.errReply
+	if c.polls.Add(1) == 1 {
+		reply = c.good
+	}
+	return &lavasession.DirectRPCResponse{Data: reply, StatusCode: 200}, nil
+}
