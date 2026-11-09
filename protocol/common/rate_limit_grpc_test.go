@@ -65,6 +65,21 @@ func TestRateLimitFromGRPC(t *testing.T) {
 			require.Equal(t, MaxRetryAfter, d, raw)
 		}
 	})
+	t.Run("an unusable first value does not hide a valid one after it", func(t *testing.T) {
+		// The request path joins the header block and the trailer, header first. A malformed or
+		// non-positive wait in the header used to end the read, so the trailer's valid wait was
+		// never seen and RESOURCE_EXHAUSTED was not a rate limit.
+		for _, header := range []string{"abc", "-1", "0"} {
+			md := map[string][]string{"grpc-retry-pushback-ms": {header, "60000"}}
+			d, limited := RateLimitFromGRPC(8, "resource exhausted", md)
+			require.True(t, limited, header)
+			require.Equal(t, time.Minute, d, header)
+		}
+		md := map[string][]string{"retry-after": {"soon", "60"}}
+		d, limited := RateLimitFromGRPC(8, "resource exhausted", md)
+		require.True(t, limited)
+		require.Equal(t, time.Minute, d)
+	})
 }
 
 func TestRateLimitedConstructor(t *testing.T) {

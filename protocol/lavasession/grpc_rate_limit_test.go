@@ -33,6 +33,24 @@ func TestHandleGRPCError_CorroboratedRateLimitIsTyped(t *testing.T) {
 	require.Equal(t, 30*time.Second, d)
 }
 
+// The header block and the trailer are read together, header first. A wait in the header that is
+// malformed or not positive must not hide a valid one in the trailer: the refusal is still a rate
+// limit, and the trailer's wait is the one the hold-off gets.
+func TestHandleGRPCError_UnusableHeaderWaitDoesNotHideTheTrailers(t *testing.T) {
+	g := &GRPCDirectRPCConnection{}
+	trailer := metadata.Pairs("grpc-retry-pushback-ms", "60000")
+	for _, value := range []string{"abc", "-1", "0"} {
+		header := metadata.Pairs("grpc-retry-pushback-ms", value)
+		resp, err := g.handleGRPCError(context.Background(), status.Error(codes.ResourceExhausted, "RESOURCE_EXHAUSTED"), header, trailer, true)
+		require.NotNil(t, resp, value)
+		require.ErrorIs(t, err, common.StatusCodeError429, "header %q", value)
+		wait, ok := common.RetryAfterFrom(err)
+		require.True(t, ok, "header %q", value)
+		require.Equal(t, time.Minute, wait, "header %q", value)
+		require.Equal(t, []string{value}, resp.Metadata["grpc-retry-pushback-ms"], "the reply carries the header block only")
+	}
+}
+
 // RESOURCE_EXHAUSTED without corroboration is how grpc-go reports an oversized message —
 // it must not read as a rate limit.
 func TestHandleGRPCError_ResourceExhaustedAloneIsNotRateLimit(t *testing.T) {
