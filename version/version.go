@@ -18,6 +18,12 @@
 //
 // Only a build with neither stamp (for example one made with -buildvcs=false,
 // or from a source tree without .git) still reports "dev" / "none".
+//
+// A git worktree is the exception to "inside a git checkout": its .git is a
+// file, which the toolchain does not take for a checkout. A worktree outside
+// any checkout gets no record; one nested inside another checkout gets that
+// checkout's record, and so names a commit it was not built from. Stamp a
+// worktree build with -X (make build does).
 package version
 
 import "runtime/debug"
