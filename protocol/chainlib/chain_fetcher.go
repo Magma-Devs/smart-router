@@ -816,6 +816,9 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 		}
 		result.Verifications = append(result.Verifications, verification)
 	}
+	// Named whatever else the url's verdict is: a url refused for another check
+	// still carries the typo, and health should say both at once.
+	result.UnknownServices = o.unknown
 	if cause, refused := admission.refusedURLs[index]; refused {
 		result.Refused, result.Refusal = true, cause.Error()
 		return result
@@ -829,7 +832,6 @@ func (o nodeUrlOutcome) report(index int, admission ProviderAdmission) NodeURLVa
 	}
 	result.RefusedServices = servicesIn(admission.refused, o.url)
 	result.ThrottledServices = servicesIn(admission.throttledServices, o.url)
-	result.UnknownServices = o.unknown
 	return result
 }
 
