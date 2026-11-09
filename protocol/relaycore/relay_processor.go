@@ -69,6 +69,12 @@ type RelayProcessor struct {
 	// no further attempt. Guarded by rp.lock.
 	stopReason string
 
+	// degradedExtensions are the extensions the caller asked for (lava-extension) that an attempt
+	// of this request was sent without: no node serving them could take it, so the attempt went to
+	// a regular node instead (see GetAllowSessionDegradation). The reply names them as it names an
+	// extension no node offers (MAG-4729). Guarded by rp.lock.
+	degradedExtensions []string
+
 	// ctx is the request's context, kept so SetResponse can tell "the buffer is momentarily full"
 	// from "the request is over and nothing will ever read this". Read-only after construction, so
 	// it needs no lock. See SetResponse.
@@ -364,6 +370,26 @@ func (rp *RelayProcessor) GetAllowSessionDegradation() bool {
 // in case we had an extension and managed to get a session successfully, we prevent session degradation.
 func (rp *RelayProcessor) SetDisallowDegradation() {
 	atomic.StoreUint32(&rp.allowSessionDegradation, 1)
+}
+
+// AddDegradedExtensions records extensions the caller asked for that an attempt of this request
+// was sent without. Every attempt that degrades drops the same ones, so each is kept once.
+func (rp *RelayProcessor) AddDegradedExtensions(extensions []string) {
+	rp.lock.Lock()
+	defer rp.lock.Unlock()
+	for _, extension := range extensions {
+		if !slices.Contains(rp.degradedExtensions, extension) {
+			rp.degradedExtensions = append(rp.degradedExtensions, extension)
+		}
+	}
+}
+
+// GetDegradedExtensions returns the extensions AddDegradedExtensions recorded, in the order they
+// were first dropped.
+func (rp *RelayProcessor) GetDegradedExtensions() []string {
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	return slices.Clone(rp.degradedExtensions)
 }
 
 // SetStatefulRelayTargets stores the list of providers that received a stateful relay
@@ -792,6 +818,11 @@ func (rp *RelayProcessor) handleResponse(response *RelayResponse) {
 	if nodeError != nil && rp.selection != Stateful {
 		chainId, apiInterface := rp.chainIdAndApiInterfaceGetter.GetChainIdAndApiInterface()
 		rp.metricsInf.SetRelayNodeErrorMetric(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage().GetApi().Name)
+		// The router's own health check is not a client request, so its attempts stay out of the
+		// tally a test reads (review 626-5); the metric above keeps counting them, as before.
+		if recorder, ok := rp.chainIdAndApiInterfaceGetter.(NodeErrorRecorder); ok && !rp.GetUsedProviders().IsRouterHealthCheck() {
+			recorder.RecordNodeError(chainId, apiInterface, response.RelayResult.ProviderInfo.ProviderAddress, rp.RelayStateMachine.GetProtocolMessage().GetApi().Name)
+		}
 		utils.LavaFormatInfo("Relay received a node error", utils.LogAttr("GUID", rp.guid), utils.LogAttr("Error", nodeError), utils.LogAttr("provider", response.RelayResult.ProviderInfo), utils.LogAttr("Request", rp.RelayStateMachine.GetProtocolMessage().GetApi().Name))
 	}
 

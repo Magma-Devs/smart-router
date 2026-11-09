@@ -26,13 +26,16 @@ import (
 // this family (node_bound, in the style of hanging_api) is the durable home; until the
 // specs carry it, this list is the gate, and the spec's flag stays with the code that owns
 // it. Keyed by API name, which for JSON-RPC and Tendermint is the method and for REST and
-// gRPC the path or service method; a batch carries its members' names joined by
-// chainlib.SEP and is held to its least cacheable member (nodeBoundReason).
+// gRPC the path or service method; a REST path is keyed as its spec declares it,
+// placeholders and all, because the parser hands over the matched spec api rather than the
+// path as sent. A batch carries its members' names joined by chainlib.SEP and is held to
+// its least cacheable member (nodeBoundReason).
 //
 // Deliberately NOT here: answers that differ across nodes without belonging to one of
 // them (eth_getLogs from a partially indexed node, a trace from a different client
 // implementation, a fee estimate), which are reproducibility questions for a flag that
-// says that, and every submission the spec already marks stateful.
+// says that, and every submission the spec already marks stateful. A fee read off one
+// node's own mempool, as walletd's /api/txpool/fee is, is the mempool family and is here.
 var nodeBoundMethods = map[string]string{
 	// State a node holds for one caller.
 	"eth_newFilter":                   "creates a filter on one node and returns an id only that node knows",
@@ -83,8 +86,20 @@ var nodeBoundMethods = map[string]string{
 	"getmempoolancestors":     "one node's view of its mempool",
 	"getmempooldescendants":   "one node's view of its mempool",
 	"testmempoolaccept":       "asks one node's mempool whether it would accept a transaction",
+	"existsmempooltxs":        "asks one node's mempool whether it holds transactions",
+	"getaddressmempool":       "one node's view of its mempool, for one address",
+	"gettxspendingprevout":    "asks one node's mempool which transactions spend the given outputs",
+	"getmixpairrequests":      "one node's view of its mix pool",
+	"getmixmessage":           "a message from one node's mix pool",
 	"unconfirmed_txs":         "one node's view of its mempool",
 	"num_unconfirmed_txs":     "one node's view of its mempool",
+
+	// Siacoin's walletd mempool, by REST path.
+	"/api/txpool/transactions":                 "one node's view of its mempool",
+	"/api/txpool/events":                       "one node's view of its mempool",
+	"/api/txpool/fee":                          "the fee one node sets from its own mempool's weight",
+	"/api/addresses/{addr}/events/unconfirmed": "one node's view of its mempool, for one address",
+	"/api/txpool/parents":                      "which of one node's unconfirmed transactions a transaction depends on",
 
 	// The node's own status.
 	"eth_syncing":              "whether one node is syncing",
@@ -121,6 +136,15 @@ var nodeBoundMethods = map[string]string{
 	"/spec":              "the API specification one node serves",
 	"getconnectioncount": "how many peers one node has",
 	"getmemoryinfo":      "one node's memory usage",
+	"getpeerinfo":        "whom one node peers with",
+	"getnettotals":       "one node's traffic counters",
+	"getnetworkinfo":     "one node's software, connections and local addresses",
+	"getinfo":            "one node's status: its software, connections and errors",
+	"version":            "the software one node runs",
+	"/api/syncer/peers":  "whom one node peers with",
+	"getblocktemplate":   "the block one node would mine from its own mempool",
+	"getgenerate":        "whether one node is mining",
+	"getlocalsolps":      "one node's own solution rate",
 }
 
 // nodeBoundReason says why a request's answer belongs to the node that produced it, or

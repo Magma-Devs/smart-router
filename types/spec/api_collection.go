@@ -529,7 +529,7 @@ func (m *ParseValue) GetSeverity() ParseValue_VerificationSeverity {
 	if m != nil {
 		return m.Severity
 	}
-	return ParseValue_Fail
+	return ParseValue_Default
 }
 
 // ---------------------------------------------------------------------------
