@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -35,6 +36,22 @@ import (
 // and returns the server once it listens.
 func bootArchiveBackupEndpoint(t *testing.T, primaryURL, backupURL string, backupAddons []string, cache performance.CacheBackend) *RPCSmartRouterServer {
 	t.Helper()
+	return bootETH1Endpoint(t,
+		[]*lavasession.RPCStaticProviderEndpoint{{
+			Name: "primary-1", ChainID: "ETH1", ApiInterface: "jsonrpc",
+			NodeUrls: []common.NodeUrl{{Url: primaryURL}},
+		}},
+		[]*lavasession.RPCStaticProviderEndpoint{{
+			Name: "backup-1", ChainID: "ETH1", ApiInterface: "jsonrpc",
+			NodeUrls: []common.NodeUrl{{Url: backupURL, Addons: backupAddons}},
+		}},
+		cache)
+}
+
+// bootETH1Endpoint runs the real CreateSmartRouterEndpoint for ETH1 JSON-RPC with primaries and
+// backups, behind cache when it is not nil, and returns the server once it listens.
+func bootETH1Endpoint(t *testing.T, primaries, backups []*lavasession.RPCStaticProviderEndpoint, cache performance.CacheBackend) *RPCSmartRouterServer {
+	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
@@ -52,18 +69,12 @@ func bootArchiveBackupEndpoint(t *testing.T, primaryURL, backupURL string, backu
 	logs, err := metrics.NewRPCConsumerLogs(metricsManager, nil, nil)
 	require.NoError(t, err)
 	options := &rpcSmartRouterStartOptions{
-		rpcEndpoints: []*lavasession.RPCEndpoint{endpoint},
-		cache:        cache,
-		strategy:     provideroptimizer.StrategyBalanced,
-		cmdFlags:     common.ConsumerCmdFlags{StaticSpecPaths: []string{"../../specs/ethereum.json"}},
-		staticProvidersList: []*lavasession.RPCStaticProviderEndpoint{{
-			Name: "primary-1", ChainID: "ETH1", ApiInterface: "jsonrpc",
-			NodeUrls: []common.NodeUrl{{Url: primaryURL}},
-		}},
-		backupProvidersList: []*lavasession.RPCStaticProviderEndpoint{{
-			Name: "backup-1", ChainID: "ETH1", ApiInterface: "jsonrpc",
-			NodeUrls: []common.NodeUrl{{Url: backupURL, Addons: backupAddons}},
-		}},
+		rpcEndpoints:        []*lavasession.RPCEndpoint{endpoint},
+		cache:               cache,
+		strategy:            provideroptimizer.StrategyBalanced,
+		cmdFlags:            common.ConsumerCmdFlags{StaticSpecPaths: []string{"../../specs/ethereum.json"}},
+		staticProvidersList: primaries,
+		backupProvidersList: backups,
 	}
 	err = rpsr.CreateSmartRouterEndpoint(ctx, endpoint, make(chan error, 1), &common.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]{},
 		map[string]*sync.Mutex{"ETH1": {}}, options, "test-router", logs, nil, metricsManager, nil)
@@ -78,14 +89,24 @@ func bootArchiveBackupEndpoint(t *testing.T, primaryURL, backupURL string, backu
 // extension in lava-extension unless it is empty.
 func relayGetCode(t *testing.T, server *RPCSmartRouterServer, block, extension string) *http.Response {
 	t.Helper()
+	headers := map[string]string{}
+	if extension != "" {
+		headers[common.EXTENSION_OVERRIDE_HEADER_NAME] = extension
+	}
+	return relayGetCodeWithHeaders(t, server, block, headers)
+}
+
+// relayGetCodeWithHeaders is relayGetCode with the request headers given.
+func relayGetCodeWithHeaders(t *testing.T, server *RPCSmartRouterServer, block string, headers map[string]string) *http.Response {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"eth_getCode","params":["0x1111111111111111111111111111111111111111",%q]}`, block)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+server.GetListeningAddress()+"/", strings.NewReader(body))
 	require.NoError(t, err)
 	request.Header.Set("Content-Type", "application/json")
-	if extension != "" {
-		request.Header.Set(common.EXTENSION_OVERRIDE_HEADER_NAME, extension)
+	for name, value := range headers {
+		request.Header.Set(name, value)
 	}
 	response, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
@@ -242,5 +263,63 @@ func TestArchiveOnUnadmittedBackupIsNotCached(t *testing.T) {
 		require.Empty(t, response.Header.Get(common.EXTENSION_UNAVAILABLE_HEADER_NAME))
 		require.Eventually(t, func() bool { return cache.emptyCodeWrites() == 1 }, 3*time.Second, 20*time.Millisecond,
 			"the reply is written to the cache")
+	})
+}
+
+// The winner of a cross-validated request that degraded is not cached either (MAG-4729). It is
+// written once, after the quorum, by SendParsedRelay rather than by a relay goroutine, so it has
+// a skip of its own. The caller names archive and blocks both archive nodes with
+// lava-providers-block: the request degrades to the two pruned primaries, which agree.
+func TestArchiveDegradedCrossValidationWinnerIsNotCached(t *testing.T) {
+	archive := extensionslib.ArchiveExtension
+	crossValidated := map[string]string{
+		common.EXTENSION_OVERRIDE_HEADER_NAME:              archive,
+		common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "2",
+		common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+	}
+	boot := func(t *testing.T) (*writeRecordingCache, *RPCSmartRouterServer) {
+		t.Helper()
+		primaryCache, _ := startCacheServerForTest(t)
+		cache := &writeRecordingCache{CacheBackend: primaryCache}
+		u := newFakeUpstreams(t)
+		primary := func(name, path string, addons ...string) *lavasession.RPCStaticProviderEndpoint {
+			return &lavasession.RPCStaticProviderEndpoint{
+				Name: name, ChainID: "ETH1", ApiInterface: "jsonrpc",
+				NodeUrls: []common.NodeUrl{{Url: u.httpURL(path), Addons: addons}},
+			}
+		}
+		server := bootETH1Endpoint(t, []*lavasession.RPCStaticProviderEndpoint{
+			primary("archive-1", "/archive-1/"+upArchive, archive),
+			primary("archive-2", "/archive-2/"+upArchive, archive),
+			primary("pruned-1", "/pruned-1/"+upPruned),
+			primary("pruned-2", "/pruned-2/"+upPruned),
+		}, nil, cache)
+		return cache, server
+	}
+
+	t.Run("archive nodes blocked: the pruned winner is not written", func(t *testing.T) {
+		cache, server := boot(t)
+		headers := maps.Clone(crossValidated)
+		headers[common.BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME] = "archive-1,archive-2"
+		response := relayGetCodeWithHeaders(t, server, "latest", headers)
+
+		require.Equal(t, "success", response.Header.Get(common.CROSS_VALIDATION_STATUS_HEADER_NAME))
+		require.Equal(t, "pruned-1,pruned-2", response.Header.Get(common.CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER))
+		require.Equal(t, archive, response.Header.Get(common.EXTENSION_UNAVAILABLE_HEADER_NAME))
+		assert.Never(t, func() bool { return cache.emptyCodeWrites() > 0 }, capTestNoWriteWindow, 20*time.Millisecond,
+			"the winner of a request served without archive is not written to the cache")
+	})
+
+	// The same request with the archive nodes free to take it is written, so the case above is the
+	// degrade's doing and not a cross-validation winner this harness never caches.
+	t.Run("control: served by the archive nodes, the winner is written", func(t *testing.T) {
+		cache, server := boot(t)
+		response := relayGetCodeWithHeaders(t, server, "latest", crossValidated)
+
+		require.Equal(t, "success", response.Header.Get(common.CROSS_VALIDATION_STATUS_HEADER_NAME))
+		require.Equal(t, "archive-1,archive-2", response.Header.Get(common.CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER))
+		require.Empty(t, response.Header.Get(common.EXTENSION_UNAVAILABLE_HEADER_NAME))
+		require.Eventually(t, func() bool { return cache.emptyCodeWrites() == 1 }, 3*time.Second, 20*time.Millisecond,
+			"the winner is written to the cache")
 	})
 }
