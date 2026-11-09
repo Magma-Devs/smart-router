@@ -23,6 +23,7 @@ import (
 	"math"
 	"net/http"
 	"os/signal"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -2436,10 +2437,15 @@ func dialedNodeUrls(nodeUrls []common.NodeUrl, chainParser chainlib.ChainParser,
 //     internal path, with the path appended — the same
 //     `nodeUrl.Url = baseUrl + internalPath` the chain router does — and stays
 //     itself only when the spec serves a root collection (servesRoot). On a
-//     spec with none (TON, AVAX) no relay is ever routed to it, while its
-//     tracker polled the spec-wide head request at the bare base, got a 404
-//     every poll, and pulled the provider's availability down (MAG-4214). A
-//     websocket url, and a url no path could be generated from, stay as before;
+//     spec with none (TON) no relay is ever routed to it, while its tracker
+//     polled the spec-wide head request at the bare base, got a 404 every
+//     poll, and pulled the provider's availability down (MAG-4214). It also
+//     stays when the transport filter below skipped a path for it: that path
+//     gets no url of its own, so its relays fall back to this one, as on main.
+//     AVAX `/C/rpc` is such a path — it inherits ETH1's eth_subscribe, so an
+//     https url never generates it, and a bare `.../ext/bc/C/rpc` url is the
+//     only endpoint C-chain traffic reaches. A websocket url, and a url no path
+//     could be generated from, stay as before;
 //   - a path is generated only on the transport that serves it. A ws url
 //     yields the spec's subscription collections and an http url yields the
 //     rest, so STRK's `/ws/rpc/v0_8` is a wss endpoint and its `/rpc/v0_8` an
@@ -2471,15 +2477,15 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 
 	expanded := make([]common.NodeUrl, 0, len(nodeUrls))
 	// An operator can declare the base url AND a pinned url that happens to
-	// equal base+path. Both are legitimate; emitting the same (url, path) twice
-	// would just probe it twice and register it twice in the metrics.
-	seen := make(map[string]struct{}, len(nodeUrls))
+	// equal base+path. Both are legitimate; emitting the same entry twice would
+	// just probe it twice and register it twice in the metrics. Only an entry
+	// equal in full is a duplicate: two entries on one url that differ in their
+	// key, timeout or add-ons are verified and dialed each on its own, as they
+	// are configured (MAG-4214 review).
 	add := func(nodeUrl common.NodeUrl) {
-		key := nodeUrl.Url + "\x00" + nodeUrl.InternalPath
-		if _, dup := seen[key]; dup {
+		if slices.ContainsFunc(expanded, func(e common.NodeUrl) bool { return reflect.DeepEqual(e, nodeUrl) }) {
 			return
 		}
-		seen[key] = struct{}{}
 		expanded = append(expanded, nodeUrl)
 	}
 	for _, nodeUrl := range nodeUrls {
@@ -2494,6 +2500,7 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 			isWs = false
 		}
 		var generatedUrls []common.NodeUrl
+		skippedPath := false
 		for _, internalPath := range nonRoot {
 			// The transport has to serve the collection: a ws url answers the
 			// spec's subscription collections and an http url the rest. On every
@@ -2502,6 +2509,7 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 			// `wss://host/rpc/v0_9`) — urls no upstream serves, which relays for
 			// that path would then be routed onto.
 			if isWs != servesSubscriptions(internalPath, nodeUrl.Addons) {
+				skippedPath = true
 				continue
 			}
 			generated := nodeUrl
@@ -2510,8 +2518,9 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 				// version into the url instead of declaring `internal-path`
 				// (`https://vendor/rpc/v0_8`, no field). It is the endpoint for
 				// that path as it stands; appending would ask the vendor for
-				// `/rpc/v0_8/rpc/v0_8`. It also stays the root endpoint, added
-				// above, which is what that config serves today.
+				// `/rpc/v0_8/rpc/v0_8`. On a spec with a root collection it also
+				// stays the root endpoint, added below, which is what that config
+				// serves today.
 				generated.InternalPath = internalPath
 				generatedUrls = append(generatedUrls, generated)
 				continue
@@ -2520,7 +2529,7 @@ func expandInternalPaths(nodeUrls []common.NodeUrl, internalPaths []string, serv
 			generated.InternalPath = internalPath
 			generatedUrls = append(generatedUrls, generated)
 		}
-		if servesRoot || isWs || len(generatedUrls) == 0 {
+		if servesRoot || isWs || skippedPath || len(generatedUrls) == 0 {
 			add(nodeUrl)
 		}
 		for _, generated := range generatedUrls {

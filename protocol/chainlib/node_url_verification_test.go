@@ -95,6 +95,20 @@ func TestProviderAdmission_RefusesURL(t *testing.T) {
 
 	require.False(t, admission.WithoutURLRefusals([]int{1}).RefusesURL(v2), "the url grace admits it again")
 	require.True(t, admission.KeepingThrottledFrom(ProviderAdmission{}).RefusesURL(v2), "a copy keeps the verified list")
+
+	keyed := func(key string) common.NodeUrl {
+		url := v2
+		url.AuthConfig.AuthHeaders = map[string]string{"X-Api-Key": key}
+		return url
+	}
+	revoked, good := keyed("revoked"), keyed("good")
+	twoKeys, err := admissionFrom([]nodeUrlOutcome{
+		{url: revoked, served: revoked, err: errNotServed},
+		{url: good, served: good},
+	})
+	require.NoError(t, err)
+	require.True(t, twoKeys.RefusesURL(revoked))
+	require.False(t, twoKeys.RefusesURL(good), "same url and path, other key: verified apart (MAG-4214 review)")
 }
 
 // A path that declares a url serving the base collection needs one of those left: a standalone-

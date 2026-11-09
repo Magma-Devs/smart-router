@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"mime"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -599,10 +600,12 @@ func (a ProviderAdmission) URLRefused(index int) bool {
 }
 
 // RefusesURL reports whether this node url was refused, found by value in the list
-// the pass verified. A url the pass did not verify is not refused.
+// the pass verified. A url the pass did not verify is not refused. The match is on
+// the whole entry: two entries on one url that differ in their key or timeout are
+// verified apart, and one's verdict says nothing about the other.
 func (a ProviderAdmission) RefusesURL(url common.NodeUrl) bool {
 	for index, verified := range a.urls {
-		if verified.Url == url.Url && verified.InternalPath == url.InternalPath && slices.Equal(verified.Addons, url.Addons) {
+		if reflect.DeepEqual(verified, url) {
 			return a.URLRefused(index)
 		}
 	}
