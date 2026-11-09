@@ -87,6 +87,8 @@ var nodeBoundMethods = map[string]string{
 	"getmempooldescendants":   "one node's view of its mempool",
 	"testmempoolaccept":       "asks one node's mempool whether it would accept a transaction",
 	"existsmempooltxs":        "asks one node's mempool whether it holds transactions",
+	"getaddressmempool":       "one node's view of its mempool, for one address",
+	"gettxspendingprevout":    "asks one node's mempool which transactions spend the given outputs",
 	"getmixpairrequests":      "one node's view of its mix pool",
 	"getmixmessage":           "a message from one node's mix pool",
 	"unconfirmed_txs":         "one node's view of its mempool",
@@ -140,6 +142,9 @@ var nodeBoundMethods = map[string]string{
 	"getinfo":            "one node's status: its software, connections and errors",
 	"version":            "the software one node runs",
 	"/api/syncer/peers":  "whom one node peers with",
+	"getblocktemplate":   "the block one node would mine from its own mempool",
+	"getgenerate":        "whether one node is mining",
+	"getlocalsolps":      "one node's own solution rate",
 }
 
 // nodeBoundReason says why a request's answer belongs to the node that produced it, or

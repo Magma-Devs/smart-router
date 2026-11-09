@@ -193,15 +193,18 @@ func TestNodeBoundMethodsInTheBundledSpecs(t *testing.T) {
 		"tendermint.json":   {"abci_info", "consensus_state", "dump_consensus_state", "health", "net_info", "num_unconfirmed_txs", "status", "subscribe", "unconfirmed_txs", "unsubscribe", "unsubscribe_all"},
 	}, refused)
 
-	// Specs the router does not bundle declare node-bound names of their own, all parsed as
-	// LATEST (DEFAULT ["latest"]), so off the list each is cached under the tip for the
-	// non-finalized TTL and one node's mempool, peers or software reaches every caller. The
-	// Bitcoin family's JSON-RPC methods in zcash.json and qtum.json on lava-specs main and in
-	// dcr.json (lava-specs PR #186) (MAG-4207); Siacoin's walletd REST paths in sc.json,
-	// under the name the spec declares (MAG-4793).
+	// Specs the router does not bundle declare node-bound names of their own, nearly all
+	// parsed as LATEST (DEFAULT ["latest"]), so off the list each is cached under the tip
+	// for the non-finalized TTL and one node's mempool, peers or software reaches every
+	// caller. The Bitcoin family's JSON-RPC methods in zcash.json, qtum.json and dcr.json on
+	// lava-specs main (MAG-4207), getaddressmempool also in dash.json; Siacoin's walletd
+	// REST paths in sc.json, under the name the spec declares (MAG-4793). dcr.json parses
+	// version as EMPTY, which already keeps it out of the cache; the entry covers a spec
+	// that parses it as LATEST.
 	for _, name := range []string{
-		"existsmempooltxs", "getmixpairrequests", "getmixmessage",
+		"existsmempooltxs", "getaddressmempool", "gettxspendingprevout", "getmixpairrequests", "getmixmessage",
 		"getpeerinfo", "getnettotals", "getnetworkinfo", "getinfo", "version",
+		"getblocktemplate", "getgenerate", "getlocalsolps",
 		"/api/txpool/transactions", "/api/txpool/events", "/api/txpool/fee",
 		"/api/addresses/{addr}/events/unconfirmed", "/api/txpool/parents", "/api/syncer/peers",
 	} {
