@@ -29,6 +29,7 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
@@ -1239,14 +1240,15 @@ func (g *GRPCDirectRPCConnection) SendRequest(
 	// Create output message
 	outputMsg := msgFactory.NewMessage(methodDescriptor.GetOutputType())
 
-	// Invoke gRPC method - capture response headers/metadata. The peer is set only once a
-	// stream to the node is open; a call that failed with none never reached a node.
-	var respHeaders metadata.MD
+	// Invoke gRPC method - capture response headers/metadata, and the trailer a failed call's
+	// rate-limit wait may ride in (handleGRPCError). The peer is set only once a stream to the
+	// node is open; a call that failed with none never reached a node.
+	var respHeaders, respTrailers metadata.MD
 	var nodePeer peer.Peer
-	err = conn.Invoke(ctx, "/"+methodPath, inputMsg, outputMsg, grpc.Header(&respHeaders), grpc.Peer(&nodePeer))
+	err = conn.Invoke(ctx, "/"+methodPath, inputMsg, outputMsg, grpc.Header(&respHeaders), grpc.Trailer(&respTrailers), grpc.Peer(&nodePeer))
 	if err != nil {
 		// Handle gRPC error - pass respHeaders for metadata in error response
-		return g.handleGRPCError(ctx, err, respHeaders, nodePeer.Addr != nil)
+		return g.handleGRPCError(ctx, err, respHeaders, respTrailers, nodePeer.Addr != nil)
 	}
 
 	// Marshal response to binary proto
@@ -2085,11 +2087,11 @@ func GRPCRequestNeedsDescriptor(data []byte) bool {
 // whether or not the node serves reflection.
 func (g *GRPCDirectRPCConnection) invokeRaw(ctx context.Context, conn *grpc.ClientConn, methodPath string, data []byte) (*DirectRPCResponse, error) {
 	var reply []byte
-	var respHeaders metadata.MD
+	var respHeaders, respTrailers metadata.MD
 	var nodePeer peer.Peer
-	err := conn.Invoke(ctx, "/"+methodPath, data, &reply, grpc.ForceCodec(rawProtoCodec{}), grpc.Header(&respHeaders), grpc.Peer(&nodePeer))
+	err := conn.Invoke(ctx, "/"+methodPath, data, &reply, grpc.ForceCodec(rawProtoCodec{}), grpc.Header(&respHeaders), grpc.Trailer(&respTrailers), grpc.Peer(&nodePeer))
 	if err != nil {
-		return g.handleGRPCError(ctx, err, respHeaders, nodePeer.Addr != nil)
+		return g.handleGRPCError(ctx, err, respHeaders, respTrailers, nodePeer.Addr != nil)
 	}
 	return &DirectRPCResponse{
 		Data:       reply,
@@ -2128,7 +2130,10 @@ func (rawProtoCodec) Name() string { return "proto" }
 // nodeReached reports whether a stream to the node was open when the call failed: grpc-go sets
 // the grpc.Peer call option only then. It is false for a call grpc-go refused itself, before
 // any node saw it.
-func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error, respHeaders metadata.MD, nodeReached bool) (*DirectRPCResponse, error) {
+//
+// respHeaders and respTrailers are the reply's header and trailer metadata. Both are read to
+// recognise a rate limit; only the header block goes back in the response.
+func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error, respHeaders, respTrailers metadata.MD, nodeReached bool) (*DirectRPCResponse, error) {
 	// A relay the router itself cancelled — a loser of a stateful fan-out race,
 	// or a client that disconnected — is not a node failure and must not be
 	// scored as one. grpc-go reports this as status.Error(codes.Canceled, ...),
@@ -2164,8 +2169,13 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 
 	// The router's own deadline passed: a timeout, as on every HTTP transport, and the
 	// endpoint is still blamed for it. It is not the node's answer, so no response. A node
-	// that sends DEADLINE_EXCEEDED itself leaves this context live and stays a node error.
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	// that sends DEADLINE_EXCEEDED itself, while the router's deadline is still open, did
+	// answer, and stays a node error below.
+	//
+	// The deadline is read from the clock as well as from ctx.Err(): the node's server
+	// enforces the router's deadline too, and reports it back as a status of its own. See
+	// routerDeadlineEchoed.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || routerDeadlineEchoed(ctx, err, time.Now()) {
 		return nil, fmt.Errorf("gRPC relay timed out: %w: %w", context.DeadlineExceeded, err)
 	}
 
@@ -2208,7 +2218,12 @@ func (g *GRPCDirectRPCConnection) handleGRPCError(ctx context.Context, err error
 		Metadata:   respHeaders, // Include any headers received before the error
 		StatusCode: int(errorCode),
 	}
-	return response, NewGRPCStatusError(errorCode, errorMessage, err, respHeaders)
+	// A node's rate-limit wait may arrive in either block. A reply that is only a status has no
+	// header block at all, and grpc-go's own retry reads grpc-retry-pushback-ms from the trailer;
+	// read in the header alone, a wait sent there was never seen, and the refusal was scored as a
+	// node failure (MAG-4915). The trailer is read here only: the response keeps the header block,
+	// so the wait stays the router's own, as an HTTP Retry-After does.
+	return response, NewGRPCStatusError(errorCode, errorMessage, err, metadata.Join(respHeaders, respTrailers))
 }
 
 // NewGRPCStatusError builds the error for a status a node sent. A corroborated rate limit — a
@@ -2224,6 +2239,35 @@ func NewGRPCStatusError(code uint32, message string, cause error, md map[string]
 		rateLimited: rateLimited,
 		retryAfter:  retryAfter,
 	}
+}
+
+// routerDeadlineEchoed reports whether a status from the node is the router's own deadline coming
+// back: a DEADLINE_EXCEEDED read once the clock has passed the deadline of the call's context.
+//
+// gRPC sends the router's deadline to the node in the grpc-timeout header, and the node's server
+// ends the call at that deadline with a DEADLINE_EXCEEDED status of its own (grpc-go words it
+// "context deadline exceeded"; the provider simulator's Python server, "Deadline Exceeded"). So a
+// call that runs out the router's deadline is ended from two sides at the same instant, by the
+// router's own timer and by the node's status for the same deadline, and grpc-go hands back
+// whichever arrives first. A deadline context reports no error until the runtime has run its
+// timer, so a status that arrived in that gap met a live context and was taken for the node's
+// answer, through the node-error arm of handleGRPCError: nothing counts a node error against the
+// endpoint, and the status went to the caller as the node's reply (MAG-4925). Under a burst a few
+// attempts in a hundred took the gap, and a provider that never answered was left on, short of
+// the disable threshold.
+//
+// The clock settles it. The node's deadline is never earlier than the router's: grpc-go rounds the
+// remaining time up when it writes the header, and the node starts its clock only when the header
+// arrives. So a DEADLINE_EXCEEDED read at or after the router's deadline is that deadline, echoed;
+// one read before it is the node's own (a query that timed out inside the node) and stays a node
+// error (TestSendGRPCRelay_NodeSentDeadlineIsANodeError). No other status is reinterpreted: a node
+// that answered anything else at that instant did answer, as on every HTTP transport.
+func routerDeadlineEchoed(ctx context.Context, err error, now time.Time) bool {
+	if status.Code(err) != codes.DeadlineExceeded {
+		return false
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && !now.Before(deadline)
 }
 
 // GRPCStatusError represents a gRPC status error.

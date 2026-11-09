@@ -245,6 +245,57 @@ func TestDirectRPCRelaySender_EmptyMessageErrorIsNodeError(t *testing.T) {
 	require.False(t, relayProvesEndpointHealthy(result), "a failed relay must not reset the endpoint's health")
 }
 
+// TestDirectRPCRelaySender_A429IsNotANodeError pins MAG-3030 at the sender, with the real JSON-RPC
+// verdict plugged in. A 429 is the upstream refusing for rate before any node answered, whatever its
+// body says: relayInnerDirect fails the attempt on the status alone, so a node-error flag on it could
+// only reach the client, as lava-identified-node-error on a relay no node answered. The rate-limit
+// flags still come from the classification. A 4xx whose body is the node's own JSON-RPC error stays
+// a node error.
+func TestDirectRPCRelaySender_A429IsNotANodeError(t *testing.T) {
+	cases := []struct {
+		name            string
+		status          int
+		contentType     string
+		body            string
+		wantNodeError   bool
+		wantRateLimited bool
+	}{
+		{"429 with a prose body", http.StatusTooManyRequests, "text/plain", "Too Many Requests", false, true},
+		{"429 with an HTML body", http.StatusTooManyRequests, "text/html", "<html><body><h1>429 Too Many Requests</h1></body></html>", false, true},
+		{"429 with a JSON-RPC error", http.StatusTooManyRequests, "application/json", `{"jsonrpc":"2.0","id":1,"error":{"code":429,"message":"Your app has exceeded its compute units per second capacity"}}`, false, true},
+		{"400 with a JSON-RPC error", http.StatusBadRequest, "application/json", `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid argument 0: hex string has length 3"}}`, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer mockServer.Close()
+
+			ctx := context.Background()
+			directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+			require.NoError(t, err)
+			sender := &DirectRPCRelaySender{
+				directConnection: directConn,
+				endpointName:     "refusing-upstream",
+				chainFamily:      common.ChainFamilyEVM,
+			}
+			chainMessage := &mockChainMessage{
+				requestData:        []byte(`{"jsonrpc":"2.0","method":"eth_getBalance","params":["0xDEAD","latest"],"id":1}`),
+				checkResponseError: rpcInterfaceMessages.JsonrpcMessage{}.CheckResponseError,
+			}
+
+			result, err := sender.SendDirectRelay(ctx, chainMessage, 5*time.Second)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.Equal(t, tc.wantNodeError, result.IsNodeError, "is it the node's answer")
+			assert.Equal(t, tc.wantRateLimited, result.IsRateLimited, "the rate limit is still classified")
+		})
+	}
+}
+
 func TestDirectRPCRelaySender_SendDirectRelay_Timeout(t *testing.T) {
 	// Create slow mock server that exceeds timeout
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

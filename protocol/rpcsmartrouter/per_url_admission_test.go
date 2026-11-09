@@ -308,7 +308,7 @@ func TestRevalidateTier_RecordsTheAdmission(t *testing.T) {
 	}}
 
 	recovered, stillFailed := rpsr.revalidateTier(t.Context(), []*lavasession.RPCStaticProviderEndpoint{provider},
-		liveParser(t, "ETH1", true), rpcEndpoint, reverifyTierStatic)
+		liveParser(t, "ETH1", true), rpcEndpoint, reverifyTierStatic, nil, true)
 	require.Len(t, recovered, 1)
 	require.Empty(t, stillFailed)
 	require.True(t, admissions.admissionFor(provider).URLRefused(1))
