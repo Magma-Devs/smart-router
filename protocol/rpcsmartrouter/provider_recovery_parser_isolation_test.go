@@ -110,6 +110,8 @@ func TestRevalidateTier_DoesNotRebindLiveGrpcParser(t *testing.T) {
 		chainParser,
 		rpcEndpoint,
 		reverifyTierStatic,
+		nil,
+		true,
 	)
 
 	// Verification has to have reached the mutation for the assertions below to mean
