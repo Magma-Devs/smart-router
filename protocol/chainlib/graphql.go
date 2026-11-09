@@ -372,9 +372,11 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// client-error status and a GraphQL error document the caller's client can actually read
 		// (MAG-4577).
 		//
-		// The refusal's own message is used, not the masked envelope: it is router-authored and
-		// constant apart from the limit's number, so it carries nothing to redact, and the masking
-		// exists for upstream errors that can leak a node url's credentials.
+		// The refusal's own message is used, not the masked envelope: it is router-authored, so it
+		// carries nothing to redact, and the masking exists for upstream errors that can leak a node
+		// url's credentials. A limit refusal is constant apart from the limit's number; a refused
+		// request member is quoted as the client sent it, and it differs from a known member only
+		// by letter case (MAG-4908).
 		refusal: func(err error, msgSeed string) (int, []byte, string, bool) {
 			refusal := rpcInterfaceMessages.GraphQLRefusalFrom(err)
 			if refusal == nil {
