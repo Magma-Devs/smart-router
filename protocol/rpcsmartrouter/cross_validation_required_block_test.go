@@ -13,6 +13,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -144,11 +145,62 @@ func TestCrossValidation_LatestIsNotHeldToTheTip(t *testing.T) {
 	}, 5*time.Second, 10*time.Millisecond)
 }
 
+// The optimizer's block for a provider moves only when the provider serves a relay or the probe
+// cycle runs, so it can trail the provider's own poll by a cycle: on a chain faster than the cycle,
+// that is the newest block most of the time. A provider whose url its own poll has already seen at
+// the requested block holds it, and must be asked. The control is the ticket's case with the polls
+// below the block too, which must still fail rather than return a null quorum.
+func TestCrossValidation_ProviderItsOwnPollSawAtTheBlockIsSelected(t *testing.T) {
+	const (
+		requested = 1000
+		behind    = requested - 1
+	)
+	params := fmt.Sprintf(`["0x%x",false]`, requested)
+
+	t.Run("their polls have seen the block", func(t *testing.T) {
+		upstreams := []requiredBlockUpstream{
+			{"synced", requested, requiredBlockData},
+			{"fed-a-block-earlier-1", behind, requiredBlockData},
+			{"fed-a-block-earlier-2", behind, requiredBlockData},
+		}
+		polled := map[string]uint64{"synced": requested, "fed-a-block-earlier-1": requested, "fed-a-block-earlier-2": requested}
+		hits, result, err := sendRequiredBlockRequestPolled(t, "eth_getBlockByNumber", params, requested, upstreams, polled)
+		require.NoError(t, err, "every provider holds the block, and the router has seen each one's url at it")
+		require.Equal(t, "success", pinOverrideReplyHeader(result, common.CROSS_VALIDATION_STATUS_HEADER_NAME))
+		require.JSONEq(t, requiredBlockData, string(result.Reply.Data))
+		require.Eventually(t, func() bool {
+			return hits["fed-a-block-earlier-1"].Load() == 1 && hits["fed-a-block-earlier-2"].Load() == 1
+		}, 5*time.Second, 10*time.Millisecond, "a provider whose own poll saw the block must be asked for it")
+	})
+
+	t.Run("control: their polls are below it too", func(t *testing.T) {
+		upstreams := []requiredBlockUpstream{
+			{"synced", requested, requiredBlockData},
+			{"lagging-1", behind, requiredBlockNull},
+			{"lagging-2", behind, requiredBlockNull},
+		}
+		polled := map[string]uint64{"synced": requested, "lagging-1": behind, "lagging-2": behind}
+		hits, result, err := sendRequiredBlockRequestPolled(t, "eth_getBlockByNumber", params, requested, upstreams, polled)
+		require.Error(t, err)
+		require.NotNil(t, result)
+		require.Equal(t, common.CrossValidationReasonInsufficientCapacity, result.CrossValidationFailureReason)
+		require.Zero(t, hits["lagging-1"].Load()+hits["lagging-2"].Load(), "a provider below the block by every account was asked for it")
+	})
+}
+
 // sendRequiredBlockRequest sends one cross-validated request for method with params through
 // SendParsedRelay, to a router pairing upstreams under an operator policy that enables cross-validation
 // on method with its defaults. seenBlock is the chain tip the request was parsed against, 0 for none.
 // It returns each upstream's request count with the outcome.
 func sendRequiredBlockRequest(t *testing.T, method, params string, seenBlock int64, upstreams []requiredBlockUpstream) (map[string]*atomic.Int64, *common.RelayResult, error) {
+	t.Helper()
+	return sendRequiredBlockRequestPolled(t, method, params, seenBlock, upstreams, nil)
+}
+
+// sendRequiredBlockRequestPolled is sendRequiredBlockRequest where polled names, by upstream, the block
+// its url's own poll has seen (the endpointtip store), for an upstream polled since the optimizer last
+// recorded it.
+func sendRequiredBlockRequestPolled(t *testing.T, method, params string, seenBlock int64, upstreams []requiredBlockUpstream, polled map[string]uint64) (map[string]*atomic.Int64, *common.RelayResult, error) {
 	t.Helper()
 	rand.InitRandomSeed()
 	ctx := context.Background()
@@ -184,6 +236,14 @@ func sendRequiredBlockRequest(t *testing.T, method, params string, seenBlock int
 		providers[uint64(i)] = provider
 		if upstream.knownBlock > 0 {
 			optimizer.AppendSyncData(upstream.name, upstream.knownBlock, provideroptimizer.SyncReference{})
+		}
+		// A process-wide store, so an upstream not polled here is cleared too: an earlier test may
+		// have left a tip on a url whose port this server reuses.
+		key := endpointtip.Key("ETH1", spectypes.APIInterfaceJsonRPC, server.URL)
+		endpointtip.Default().Remove(key)
+		t.Cleanup(func() { endpointtip.Default().Remove(key) })
+		if block := polled[upstream.name]; block > 0 {
+			endpointtip.Default().Set(key, endpointtip.Tip{Block: int64(block), ObservedAt: time.Now(), Source: endpointtip.SourcePoll}, time.Minute)
 		}
 	}
 	require.NoError(t, csm.UpdateAllProviders(1, providers, nil))

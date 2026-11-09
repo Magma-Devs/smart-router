@@ -1750,9 +1750,10 @@ type GetSessionsOptions struct {
 	CrossValidation bool
 	// RequiredBlock, when positive, is a block every provider the request goes to must hold
 	// (MAG-2786). Selection sets aside, for this request, every primary and backup whose last known
-	// block is below it (ProviderOptimizer.KnownBelowBlock), so a provider that holds it is chosen
-	// instead, and selection runs out of providers rather than settle for one that does not. A
-	// provider whose block is unknown stays eligible. Cross-validation sets it; the blocked-provider
+	// block is below it (ProviderOptimizer.KnownBelowBlock, unless one of its urls has been seen at
+	// or above it: endpointTipReaches), so a provider that holds it is chosen instead, and selection
+	// runs out of providers rather than settle for one that does not. A provider whose block is
+	// unknown stays eligible. Cross-validation sets it; the blocked-provider
 	// fallback does not read it, and a cross-validated request never reaches that fallback.
 	RequiredBlock int64
 }
@@ -2908,17 +2909,20 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 // optimizer knows to be below the block the request requires (GetSessionsOptions.RequiredBlock).
 // Backups too: a request whose primaries run out is offered the backup tier. A request that
 // requires no block is left alone. csm.lock must be held.
+//
+// A provider one of whose urls has already been seen at or above the block is not set aside,
+// whatever the optimizer holds (endpointTipReaches).
 func (csm *ConsumerSessionManager) ignoreProvidersBelowRequiredBlock(ctx context.Context, ignoredProviders *ignoredProviders) {
 	if ignoredProviders.requiredBlock <= 0 {
 		return
 	}
 	var setAside []string
 	for _, pool := range []map[string]*ConsumerSessionsWithProvider{csm.pairing, csm.backupProviders} {
-		for address := range pool {
+		for address, provider := range pool {
 			if _, ignored := ignoredProviders.providers[address]; ignored {
 				continue
 			}
-			if csm.providerOptimizer.KnownBelowBlock(address, ignoredProviders.requiredBlock) {
+			if csm.providerOptimizer.KnownBelowBlock(address, ignoredProviders.requiredBlock) && !csm.endpointTipReaches(provider, ignoredProviders.requiredBlock) {
 				ignoredProviders.providers[address] = struct{}{}
 				setAside = append(setAside, address)
 			}
@@ -2931,6 +2935,31 @@ func (csm *ConsumerSessionManager) ignoreProvidersBelowRequiredBlock(ctx context
 			utils.LogAttr("GUID", ctx),
 		)
 	}
+}
+
+// endpointTipReaches reports whether one of the provider's urls has been seen at or above block,
+// by its own poll or by a relay it answered (the endpointtip store). The optimizer's block for a
+// provider moves only when the provider serves a relay or the probe cycle runs (every
+// --probe-loop-interval), so it can trail the url's own poll by a whole cycle: on a chain faster
+// than the cycle, a synced provider reads one or more blocks short of the newest block for most
+// of it. A request refused for that sends no relay, so it does not refresh the block either.
+// csm.lock must be held.
+func (csm *ConsumerSessionManager) endpointTipReaches(provider *ConsumerSessionsWithProvider, block int64) bool {
+	if provider == nil {
+		return false
+	}
+	info := csm.RPCEndpoint()
+	provider.Lock.RLock()
+	defer provider.Lock.RUnlock()
+	for _, endpoint := range provider.Endpoints {
+		if endpoint == nil {
+			continue
+		}
+		if endpointtip.Default().Block(endpointtip.Key(info.ChainID, info.ApiInterface, endpoint.NetworkAddress)) >= block {
+			return true
+		}
+	}
+	return false
 }
 
 func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx context.Context, wantedProviderNumber int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int) (sessionWithProviderMap SessionWithProviderMap, err error) {
