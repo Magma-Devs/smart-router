@@ -21,6 +21,16 @@
       "expected_name": "NODE_METHOD_NOT_FOUND"
     },
     {
+      "_comment": "Tatum on GK8 Hoodi, eth_call with the pending block tag (MAG-5021): the node serves eth_call, not pending state. A capability answer, not a fault. The message is the one reported; the code is not confirmed, -32000 is assumed.",
+      "name": "tatum_hoodi_pending_state_not_supported",
+      "chain_family": "EVM",
+      "transport": "jsonrpc",
+      "error_code": -32000,
+      "error_message": "pending state is not supported",
+      "expected_lava_code": 2002,
+      "expected_name": "NODE_METHOD_NOT_SUPPORTED"
+    },
+    {
       "name": "geth_nonce_too_low",
       "chain_family": "EVM",
       "transport": "jsonrpc",

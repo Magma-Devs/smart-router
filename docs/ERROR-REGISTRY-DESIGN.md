@@ -56,7 +56,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 |------|------|-------------|-----------|---------------|
 | **Generic Node Errors (2000-2099)** |||||
 | 2001 | `NODE_METHOD_NOT_FOUND` | Node reports the method is not on its surface; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | JSON-RPC -32601 |
-| 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config). Retryable on a different provider (SubCategoryNodeCapability) | Yes | JSON-RPC -32004 |
+| 2002 | `NODE_METHOD_NOT_SUPPORTED` | Method exists but is DISABLED on this specific node (provider tier / policy / admin config), or a part of it is, such as the pending block tag (MAG-5021). Retryable on a different provider (SubCategoryNodeCapability) | Yes | JSON-RPC -32004 / MessageContains("method not supported" / "pending state is not supported") |
 | 2003 | `NODE_INTERNAL_ERROR` | Internal node error | Yes | JSON-RPC -32603 |
 | 2004 | `NODE_SERVER_ERROR` | Generic server error | Yes | JSON-RPC -32000 |
 | 2005 | `NODE_RATE_LIMITED` | Rate limited by node (SubCategoryRateLimit) | Yes | HTTP 429 / JSON-RPC code 429 / MessageContains("rate limit", "too many requests") |
@@ -66,7 +66,7 @@ Errors returned by the blockchain node itself (not execution/state errors).
 | 2009 | `NODE_ENDPOINT_NOT_FOUND` | Endpoint not found on this node; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | REST message rows ("endpoint/route/path not found"); JSON-RPC and gRPC `HTTPStatusContains(404)`. A REST HTTP 404 is 2017 — see §9 |
 | 2010 | `NODE_METHOD_NOT_ALLOWED` | HTTP method not allowed by this node; another provider may serve it (SubCategoryNodeCapability, MAG-2771) | Yes | HTTP 405 |
 | 2011 | `NODE_LIMIT_EXCEEDED` | Request exceeds node limit (e.g., eth_getLogs range) (SubCategoryRateLimit) | No | JSON-RPC -32005 |
-| 2012 | `NODE_RESOURCE_NOT_FOUND` | Resource not found at node level (SubCategoryDataScope) | Yes | JSON-RPC -32001 |
+| 2012 | `NODE_RESOURCE_NOT_FOUND` | Resource not found at node level (SubCategoryDataScope) | Yes | JSON-RPC -32001; XRP `actNotFound`, `entryNotFound`, `objectNotFound` and the other account/object/credential not-found names (MAG-4817) |
 | 2013 | `NODE_RESOURCE_UNAVAILABLE` | Resource exists but unavailable (SubCategoryDataScope) | Yes | JSON-RPC -32002 |
 | 2014 | `NODE_GATEWAY_TIMEOUT` | Gateway timeout (HTTP 504 from provider) | Yes | HTTP 504 |
 | 2015 | `NODE_BAD_GATEWAY` | Bad gateway (HTTP 502 from provider) | Yes | HTTP 502 |
