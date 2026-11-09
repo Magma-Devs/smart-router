@@ -39,6 +39,12 @@ const (
 	// maxBatchSignatureElements caps how many distinct methods a single signature may
 	// name, so one pathological batch can't mint a kilobyte-long label value.
 	maxBatchSignatureElements = 8
+
+	// MaxBatchSignaturesPerSpec and MaxDefaultMethodsPerSpec are the two budgets above,
+	// exported so the router's own error tally (relaycore, GET /debug/relay-errors) bounds
+	// its rows by the same numbers as this label rather than by a copy that could drift.
+	MaxBatchSignaturesPerSpec = maxBatchSignaturesPerSpec
+	MaxDefaultMethodsPerSpec  = maxDefaultMethodsPerSpec
 )
 
 // Reasons for the smartrouter_batch_signature_overflow_total `reason` label.

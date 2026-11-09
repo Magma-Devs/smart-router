@@ -165,8 +165,8 @@ func TestCheckXRPLResponseError(t *testing.T) {
 		require.Equal(t, "internal error", msg)
 	})
 
-	// Replies this rule leaves to the envelope, so they keep today's verdict: nothing here is a
-	// verdict the registry can classify on a submitted transaction.
+	// Replies that stay a success: no "status":"error", and no engine result that refuses a submitted
+	// transaction.
 	unchanged := []struct {
 		name   string
 		method string
@@ -179,10 +179,10 @@ func TestCheckXRPLResponseError(t *testing.T) {
 		{"engine_result_unknown", "submit", xrplSubmitReply("unknown", 0, "")},
 		{"engine_result_lowercased", "submit", xrplSubmitReply("tefpast_seq", -190, "")},
 		{"engine_result_not_a_string", "submit", `{"result":{"engine_result":-190,"status":"success"}}`},
-		// An API error outside the catalog, which nothing classifies.
-		{"uncatalogued_api_error", "submit", xrplAPIErrorReply("gatewayHiccup", 999, "Something only this gateway says.")},
 		{"api_error_without_status_error", "submit", `{"result":{"error":"noNetwork","status":"success"}}`},
-		{"api_error_on_a_read", "account_info", xrplAPIErrorReply("noNetwork", 17, "Not synced to the network.")},
+		// A transaction's recorded outcome is the answer to tx, not an error.
+		{"tx_with_tec_outcome", "tx", `{"result":{"hash":"AB12","meta":{"TransactionResult":"tecUNFUNDED_PAYMENT"},"validated":true,"status":"success"}}`},
+		{"ledger_success", "ledger", `{"result":{"ledger":{"ledger_index":"108018956","transactions":[]},"ledger_index":108018956,"validated":true,"status":"success"}}`},
 		{"null_result", "submit", `{"result":null}`},
 	}
 	for _, tc := range unchanged {
@@ -191,6 +191,62 @@ func TestCheckXRPLResponseError(t *testing.T) {
 			hasError, msg := jm.CheckXRPLResponseError([]byte(tc.body), http.StatusOK)
 			require.False(t, hasError)
 			require.Empty(t, msg)
+		})
+	}
+
+	// MAG-4817: an API error is a node error on every method, not only a submission. The GK8 case
+	// was lgrNotFound for a ledger the node did not hold yet, read as the answer and cached as final.
+	reads := []struct {
+		name        string
+		method      string
+		body        string
+		wantMessage string
+		lavaError   string
+	}{
+		{
+			name: "ledger_not_found", method: "ledger",
+			body:        `{"result":{"error":"lgrNotFound","error_code":21,"error_message":"ledgerNotFound","request":{"command":"ledger","expand":true,"ledger_index":108018956,"transactions":true},"status":"error"}}`,
+			wantMessage: "lgrNotFound: ledgerNotFound", lavaError: "CHAIN_BLOCK_NOT_FOUND",
+		},
+		{
+			name: "ledger_acquiring", method: "ledger",
+			body:        `{"result":{"acquiring":{"hash":"AB12"},"error":"lgrNotFound","error_code":21,"error_message":"acquiring ledger containing requested index","status":"error"}}`,
+			wantMessage: "lgrNotFound: acquiring ledger containing requested index", lavaError: "CHAIN_BLOCK_NOT_FOUND",
+		},
+		{
+			name: "tx_not_found", method: "tx",
+			body:        `{"result":{"error":"txnNotFound","error_code":29,"error_message":"Transaction not found.","searched_all":false,"status":"error"}}`,
+			wantMessage: "txnNotFound: Transaction not found.", lavaError: "CHAIN_TX_NOT_FOUND",
+		},
+		{
+			name: "account_not_found", method: "account_info",
+			body:        `{"result":{"account":"rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe","error":"actNotFound","error_code":19,"error_message":"Account not found.","ledger_index":108018956,"status":"error","validated":true}}`,
+			wantMessage: "actNotFound: Account not found.", lavaError: "NODE_RESOURCE_NOT_FOUND",
+		},
+		{
+			name: "syncing_on_a_read", method: "account_info", body: xrplAPIErrorReply("noNetwork", 17, "Not synced to the network."),
+			wantMessage: "noNetwork: Not synced to the network.", lavaError: "NODE_SYNCING",
+		},
+		{
+			name: "uncatalogued", method: "submit", body: xrplAPIErrorReply("gatewayHiccup", 999, "Something only this gateway says."),
+			wantMessage: "gatewayHiccup: Something only this gateway says.", lavaError: "UNKNOWN_ERROR",
+		},
+		{
+			name: "status_error_without_a_name", method: "ledger", body: `{"result":{"error_message":"boom","status":"error"}}`,
+			wantMessage: "boom", lavaError: "UNKNOWN_ERROR",
+		},
+		{
+			name: "status_error_empty", method: "ledger", body: `{"result":{"status":"error"}}`,
+			wantMessage: "XRPL error with an empty message", lavaError: "UNKNOWN_ERROR",
+		},
+	}
+	for _, tc := range reads {
+		t.Run("api_error_"+tc.name, func(t *testing.T) {
+			jm := JsonrpcMessage{Method: tc.method}
+			hasError, msg := jm.CheckXRPLResponseError([]byte(tc.body), http.StatusOK)
+			require.True(t, hasError, "an error inside result is a node error, never the answer")
+			require.Equal(t, tc.wantMessage, msg)
+			require.Equal(t, tc.lavaError, common.ClassifyError(nil, common.ChainFamilyXRP, common.TransportJsonRPC, http.StatusOK, msg).Name)
 		})
 	}
 

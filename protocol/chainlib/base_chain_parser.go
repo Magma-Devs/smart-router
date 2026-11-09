@@ -919,6 +919,10 @@ func getServiceApis(
 						Extension: parseValue.Extension,
 						Addon:     apiCollection.CollectionData.AddOn,
 					}
+					if parseValue.Severity == spectypes.ParseValue_PartialFail && verificationKey == (VerificationKey{}) {
+						utils.LavaFormatWarning("a basic check has no smaller part to switch off: its PartialFail acts as Fail", nil,
+							utils.LogAttr("verification", verification.Name))
+					}
 
 					verCont := VerificationContainer{
 						InternalPath:    apiCollection.CollectionData.InternalPath,
@@ -945,6 +949,10 @@ func getServiceApis(
 		}
 	}
 	markPathsServingRoot(retInternalPaths, baseApis, subscriptionApis)
+	for _, name := range spectypes.TakeUnknownSeverities() {
+		utils.LavaFormatWarning("a spec names a verification severity this router does not know: it reads as the default for where its check sits", nil,
+			utils.LogAttr("severity", name))
+	}
 	return retInternalPaths, serverApis, taggedApis, apiCollections, headers, verifications
 }
 

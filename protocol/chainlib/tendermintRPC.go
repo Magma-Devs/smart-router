@@ -153,7 +153,10 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 
 		metadata, overwriteReqBlock, _ := apip.HandleHeaders(metadata, apiCollectionForMessage, spectypes.Header_pass_send)
 		settingHeaderDirective, _, _ := apip.GetParsingByTag(spectypes.FUNCTION_TAG_SET_LATEST_IN_METADATA)
-		msg.BaseMessage = chainproxy.BaseMessage{Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective}
+		// msg is a copy of msgs[idx], and the message sent to the node is built from msgs, so the
+		// headers go onto the element itself (MAG-3079). The copy keeps them too, for the reads below.
+		msgs[idx].BaseMessage = jsonrpcBaseMessage(metadata, settingHeaderDirective)
+		msg.BaseMessage = msgs[idx].BaseMessage
 
 		if overwriteReqBlock == "" {
 			// Fetch requested block, it is used for data reliability
@@ -238,7 +241,7 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 		}
 	} else {
 		var err error
-		nodeMsg, err = apip.newBatchChainMessage(api, latestRequestedBlock, earliestRequestedBlock, blockHashes, msgs, apiCollection, parsedDefault)
+		nodeMsg, err = apip.newBatchChainMessage(api, latestRequestedBlock, earliestRequestedBlock, blockHashes, msgs, apiCollection, parsedDefault, apip.jsonrpcBatchBaseMessage(metadata, apiCollection))
 		if err != nil {
 			return nil, err
 		}
@@ -249,11 +252,12 @@ func (apip *TendermintChainParser) ParseMsg(urlPath string, data []byte, connect
 	return nodeMsg, nil
 }
 
-func (*TendermintChainParser) newBatchChainMessage(serviceApi *spectypes.Api, requestedBlock int64, earliestRequestedBlock int64, requestedHashes []string, msgs []rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) (*baseChainMessageContainer, error) {
+func (*TendermintChainParser) newBatchChainMessage(serviceApi *spectypes.Api, requestedBlock int64, earliestRequestedBlock int64, requestedHashes []string, msgs []rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool, baseMessage chainproxy.BaseMessage) (*baseChainMessageContainer, error) {
 	batchMessage, err := rpcInterfaceMessages.NewBatchMessage(msgs)
 	if err != nil {
 		return nil, err
 	}
+	batchMessage.BaseMessage = baseMessage
 	nodeMsg := &baseChainMessageContainer{
 		api:                      serviceApi,
 		apiCollection:            apiCollection,

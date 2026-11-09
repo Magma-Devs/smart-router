@@ -119,8 +119,8 @@ func TestReleaseBlockedProvidersIfPoolEmpty_ReportsAnEmptyPairing(t *testing.T) 
 	csm := CreateConsumerSessionManager()
 	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, nil, nil))
 
-	require.False(t,
-		csm.releaseCouldServeThisRequest(map[string]struct{}{}, "", nil, "", context.Background()),
+	_, couldServe := csm.releaseCouldServeThisRequest(map[string]struct{}{}, "", nil, "", context.Background())
+	require.False(t, couldServe,
 		"an empty pairing must decline the release — this is the branch the report has to survive")
 
 	records := captureLogs(t, func() {
