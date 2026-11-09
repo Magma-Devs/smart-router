@@ -5445,6 +5445,14 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 				utils.LogAttr("GUID", ctx),
 				utils.LogAttr("cacheActive", true),
 			)
+		} else if directive := nodeSteeringDirective(protocolMessage); directive != "" {
+			// The caller chose the node that answers, and a cached answer may be any node's
+			// (MAG-3520, MAG-3864). The chosen node's answer is still written to the cache.
+			utils.LavaFormatDebug("Cache bypassed due to a node-steering directive",
+				utils.LogAttr("GUID", ctx),
+				utils.LogAttr("cacheActive", true),
+				utils.LogAttr("directive", directive),
+			)
 		} else if cacheAnsweredEarlierAttempt(relayProcessor) {
 			// This is a retry of a node error the cache answered. Asking the cache again would
 			// return the same entry, so this attempt goes to an upstream (MAG-4416).
