@@ -24,7 +24,7 @@ func TestHandleGRPCError_CancelledContextReturnsNilResponse(t *testing.T) {
 	cancel() // a sibling relay won the stateful fan-out race
 
 	g := &GRPCDirectRPCConnection{}
-	resp, err := g.handleGRPCError(ctx, status.Error(codes.Canceled, "context canceled"), nil, true)
+	resp, err := g.handleGRPCError(ctx, status.Error(codes.Canceled, "context canceled"), nil, nil, true)
 
 	require.Nil(t, resp,
 		"a cancelled relay must not carry a response — that is the arm that records a success")
@@ -60,7 +60,7 @@ func TestHandleGRPCError_CancelledContextWinsOverTheReportedStatus(t *testing.T)
 			cancel() // a sibling relay won the race, or the client hung up
 
 			g := &GRPCDirectRPCConnection{}
-			resp, err := g.handleGRPCError(ctx, status.Error(code, "boom"), nil, true)
+			resp, err := g.handleGRPCError(ctx, status.Error(code, "boom"), nil, nil, true)
 
 			require.Nil(t, resp,
 				"a non-nil response routes this into the node-error arm, which returns err == nil "+
@@ -82,7 +82,7 @@ func TestHandleGRPCError_CancelledRelayKeepsItsCause(t *testing.T) {
 
 	cause := status.Error(codes.Unavailable, "connection reset by peer")
 	g := &GRPCDirectRPCConnection{}
-	_, err := g.handleGRPCError(ctx, cause, nil, true)
+	_, err := g.handleGRPCError(ctx, cause, nil, nil, true)
 
 	require.True(t, errors.Is(err, context.Canceled),
 		"the sentinel the carve-out resolves must still be reachable")
@@ -105,7 +105,7 @@ func TestHandleGRPCError_ExpiredDeadlineIsNotACancellation(t *testing.T) {
 
 	g := &GRPCDirectRPCConnection{}
 	cause := status.Error(codes.DeadlineExceeded, "context deadline exceeded")
-	resp, err := g.handleGRPCError(ctx, cause, nil, true)
+	resp, err := g.handleGRPCError(ctx, cause, nil, nil, true)
 
 	require.Nil(t, resp, "the router's own timeout is not an answer from the node")
 	require.ErrorIs(t, err, context.DeadlineExceeded)
@@ -118,7 +118,7 @@ func TestHandleGRPCError_ExpiredDeadlineIsNotACancellation(t *testing.T) {
 // answer: that stays a node error.
 func TestHandleGRPCError_NodeSentDeadlineIsTheNodesAnswer(t *testing.T) {
 	g := &GRPCDirectRPCConnection{}
-	resp, err := g.handleGRPCError(context.Background(), status.Error(codes.DeadlineExceeded, "query timed out on the node"), nil, true)
+	resp, err := g.handleGRPCError(context.Background(), status.Error(codes.DeadlineExceeded, "query timed out on the node"), nil, nil, true)
 
 	require.NotNil(t, resp, "the node's own status keeps its response so the node-error arm runs")
 	require.False(t, errors.Is(err, context.DeadlineExceeded), "nothing local timed out")
@@ -145,7 +145,7 @@ func TestHandleGRPCError_UndeliveredCallIsNotTheNodesAnswer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := &GRPCDirectRPCConnection{}
 			cause := status.Error(codes.Unavailable, tc.msg)
-			resp, err := g.handleGRPCError(context.Background(), cause, nil, false)
+			resp, err := g.handleGRPCError(context.Background(), cause, nil, nil, false)
 
 			require.Nil(t, resp, "no node saw the call, so there is no answer to carry")
 			var undelivered *common.GRPCCallUndeliveredError
@@ -164,7 +164,7 @@ func TestHandleGRPCError_UndeliveredCallIsNotTheNodesAnswer(t *testing.T) {
 // answer. Same code, and it stays the node's answer.
 func TestHandleGRPCError_NodeSentUnavailableIsTheNodesAnswer(t *testing.T) {
 	g := &GRPCDirectRPCConnection{}
-	resp, err := g.handleGRPCError(context.Background(), status.Error(codes.Unavailable, "node is shutting down"), nil, true)
+	resp, err := g.handleGRPCError(context.Background(), status.Error(codes.Unavailable, "node is shutting down"), nil, nil, true)
 
 	require.NotNil(t, resp, "the node's own status keeps its response so the node-error arm runs")
 	require.Equal(t, int(codes.Unavailable), resp.StatusCode)
@@ -182,7 +182,7 @@ func TestHandleGRPCError_LocalContextWinsOverAnUndeliveredCall(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		g := &GRPCDirectRPCConnection{}
-		_, err := g.handleGRPCError(ctx, status.Error(codes.Unavailable, "connection error"), nil, false)
+		_, err := g.handleGRPCError(ctx, status.Error(codes.Unavailable, "connection error"), nil, nil, false)
 		require.ErrorIs(t, err, context.Canceled)
 		var undelivered *common.GRPCCallUndeliveredError
 		require.False(t, errors.As(err, &undelivered))
@@ -191,7 +191,7 @@ func TestHandleGRPCError_LocalContextWinsOverAnUndeliveredCall(t *testing.T) {
 		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 		defer cancel()
 		g := &GRPCDirectRPCConnection{}
-		_, err := g.handleGRPCError(ctx, status.Error(codes.Unavailable, "connection error"), nil, false)
+		_, err := g.handleGRPCError(ctx, status.Error(codes.Unavailable, "connection error"), nil, nil, false)
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		var undelivered *common.GRPCCallUndeliveredError
 		require.False(t, errors.As(err, &undelivered))
@@ -227,7 +227,7 @@ func TestHandleGRPCError_RemoteCancellationIsNotLocal(t *testing.T) {
 			g := &GRPCDirectRPCConnection{}
 			// context.Background() is never cancelled — the production shape of a
 			// status the endpoint reported on a healthy local request.
-			resp, err := g.handleGRPCError(context.Background(), status.Error(tc.code, tc.msg), nil, true)
+			resp, err := g.handleGRPCError(context.Background(), status.Error(tc.code, tc.msg), nil, nil, true)
 
 			require.NotNil(t, resp,
 				"a remote status must keep its response so the node-error arm runs")
@@ -266,7 +266,7 @@ func TestHandleGRPCError_PreservesCause(t *testing.T) {
 	cause := status.Error(codes.InvalidArgument, "malformed transaction")
 
 	g := &GRPCDirectRPCConnection{}
-	resp, err := g.handleGRPCError(context.Background(), cause, nil, true)
+	resp, err := g.handleGRPCError(context.Background(), cause, nil, nil, true)
 
 	require.NotNil(t, resp, "a genuine node error still carries its response body")
 	require.Equal(t, int(codes.InvalidArgument), resp.StatusCode)

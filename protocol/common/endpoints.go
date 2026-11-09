@@ -633,6 +633,11 @@ type RelayResult struct {
 	// Orthogonal to IsNonRetryable — NODE_RATE_LIMITED (2005) is retryable,
 	// NODE_LIMIT_EXCEEDED (2011) is not, and both set this flag.
 	IsRateLimited bool
+	// RetryAfter is the wait a rate-limiting upstream asked for, 0 when it asked for none. Only a
+	// refusal that completes the relay sets it — a gRPC status, which returns no error — since a
+	// refusal that fails the relay carries its wait on the error (common.RetryAfterFrom). The
+	// hold-off reads whichever it got (MAG-4914).
+	RetryAfter time.Duration
 	// IsDataScope is true when the node error carries SubCategoryDataScope: the
 	// endpoint answered truthfully that it does not hold the requested data
 	// (pruned height, object that never existed). Retryable — an archive node may
