@@ -372,8 +372,10 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 	end.readTransaction(in.protocolMessage, reply)
 	end.status = in.result.GetStatusCode()
 
+	// Every reason a write's outcome is unclear is one unclearWriteError, so match the type, not one value.
+	var unclearWrite *unclearWriteError
 	switch {
-	case errors.Is(in.err, errUnknownWriteOutcome):
+	case errors.As(in.err, &unclearWrite):
 		end.outcome = relayOutcomeWriteUnknown
 	case in.err == nil && !served:
 		end.outcome = relayOutcomeRouterError // neither an answer nor an error: the router lost the result
@@ -399,7 +401,8 @@ func (rpcss *RPCSmartRouterServer) buildRelayEnd(ctx context.Context, in relayEn
 		// What the listener sends, whether or not the router returned a result to carry it.
 		end.status = http.StatusInternalServerError
 		end.errorCode = relayEndWriteUnknownCode(in.cause, end.attempts, requestRanOutOfRoad(end.stopReason))
-		end.errorText = relayEndText(errUnknownWriteOutcome.Error())
+		// The message the client reads, with the reason it gives (MAG-4380).
+		end.errorText = relayEndText(unclearWrite.Error())
 	default:
 		cause := in.cause
 		if cause == nil {
@@ -505,27 +508,34 @@ func relayEndProtocolErrorAttempt(protocolError relaycore.RelayError, ranOutOfRo
 	if protocolError.Response != nil {
 		attempt.latency = protocolError.Response.RelayResult.AttemptLatency
 	}
-	err := protocolError.GetError()
-	switch {
-	case protocolError.LavaError.IsRateLimited() || errors.Is(err, common.StatusCodeError429):
-		attempt.outcome = attemptOutcomeRateLimited
-	case errors.Is(err, context.Canceled) || protocolError.LavaError == common.LavaErrorContextCanceled:
-		// Cancelled because the budget ran out is a timeout; otherwise the router stopped waiting.
-		attempt.outcome = attemptOutcomeCancelled
-		if ranOutOfRoad {
-			attempt.outcome = attemptOutcomeTimeout
-		}
-	case errors.Is(err, context.DeadlineExceeded) || protocolError.LavaError == common.LavaErrorContextDeadline ||
-		protocolError.LavaError == common.LavaErrorConnectionTimeout || protocolError.LavaError == common.LavaErrorNoResponseTimeout:
-		attempt.outcome = attemptOutcomeTimeout
-	default:
-		attempt.outcome = attemptOutcomeTransportError
-	}
+	attempt.outcome = protocolErrorOutcome(protocolError, ranOutOfRoad)
 	attempt.errorCode = relayEndCode(protocolError.LavaError)
-	if err != nil {
+	if err := protocolError.GetError(); err != nil {
 		attempt.message = relayEndText(err.Error())
 	}
 	return attempt
+}
+
+// protocolErrorOutcome is how a transport failure ended its attempt. An unclear write reads its
+// timeouts from here too (writeCutOffs), so the reason the client gets and relay_end's attempts
+// agree on which attempts timed out.
+func protocolErrorOutcome(protocolError relaycore.RelayError, ranOutOfRoad bool) string {
+	err := protocolError.GetError()
+	switch {
+	case protocolError.LavaError.IsRateLimited() || errors.Is(err, common.StatusCodeError429):
+		return attemptOutcomeRateLimited
+	case errors.Is(err, context.Canceled) || protocolError.LavaError == common.LavaErrorContextCanceled:
+		// Cancelled because the budget ran out is a timeout; otherwise the router stopped waiting.
+		if ranOutOfRoad {
+			return attemptOutcomeTimeout
+		}
+		return attemptOutcomeCancelled
+	case errors.Is(err, context.DeadlineExceeded) || protocolError.LavaError == common.LavaErrorContextDeadline ||
+		protocolError.LavaError == common.LavaErrorConnectionTimeout || protocolError.LavaError == common.LavaErrorNoResponseTimeout:
+		return attemptOutcomeTimeout
+	default:
+		return attemptOutcomeTransportError
+	}
 }
 
 // relayEndErrorCode names, from the error registry, why a relay that did not end on an answer
