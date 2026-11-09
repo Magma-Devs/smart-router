@@ -40,6 +40,11 @@ type failedReplyInterface struct {
 	body         string
 	// jsonRpcShape: the router's own error is a JSON-RPC error object; otherwise {"error": "..."}.
 	jsonRpcShape bool
+	// headers are request headers sent on top of the ones every request here sends.
+	headers map[string]string
+	// upstreamTimeout is the node-url timeout of every upstream, which lengthens each attempt's
+	// own budget past the request's (NodeUrl.LowerContextTimeoutWithDuration).
+	upstreamTimeout time.Duration
 }
 
 func failedReplyInterfaces() []failedReplyInterface {
@@ -98,7 +103,7 @@ func startFailedReplyRouter(t *testing.T, iface failedReplyInterface, upstreamUR
 	parser := iface.parser(t)
 	providers := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
 	for i, upstreamURL := range upstreamURLs {
-		connection, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstreamURL}, 5, iface.apiInterface)
+		connection, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstreamURL, Timeout: iface.upstreamTimeout}, 5, iface.apiInterface)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = connection.Close() })
 		provider := lavasession.NewConsumerSessionWithProvider(fmt.Sprintf("upstream-%d", i+1), []*lavasession.Endpoint{{
@@ -138,6 +143,9 @@ func startFailedReplyRouter(t *testing.T, iface failedReplyInterface, upstreamUR
 		require.NoError(t, err)
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set(common.RELAY_TIMEOUT_HEADER_NAME, failedReplyRelayTimeout.String())
+		for name, value := range iface.headers {
+			request.Header.Set(name, value)
+		}
 		response, err := http.DefaultClient.Do(request)
 		require.NoError(t, err)
 		defer response.Body.Close()
@@ -333,4 +341,40 @@ func TestFailedRelayReply_BudgetExpiryKeepsTheRequestHeaders_MAG3980(t *testing.
 		strings.Split(read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME), ","),
 		"both upstreams were asked; nothing answered, so nothing follows them")
 	require.Equal(t, "true", read.header.Get(common.LAVA_HEDGE_TRIGGERED_HEADER))
+}
+
+// MAG-3980: a cross-validated request whose budget runs out while every upstream is quiet fails as
+// one with too few answers does. Its reply names the reason, insufficient-responses, as every
+// other cross-validation failure does, and every upstream asked is still pending.
+func TestFailedRelayReply_BudgetExpiryOfACrossValidatedRequestNamesItsReason_MAG3980(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	originalTimeout := common.DefaultTimeout
+	common.DefaultTimeout = 2 * failedReplyRelayTimeout
+	t.Cleanup(func() { common.DefaultTimeout = originalTimeout })
+
+	jsonRPC := failedReplyInterfaces()[0]
+	require.Equal(t, "jsonrpc", jsonRPC.name)
+	// Three upstreams for a threshold of two: the 429 cases above leave upstream-1 held off for a
+	// while, and selection leaves a held-off upstream out while another is ready.
+	jsonRPC.headers = map[string]string{
+		common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
+		common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
+	}
+	// A cross-validated attempt is not cut off with the request (MAG-2187), and its own budget is the
+	// request's, so it could give up just before the request does and be recorded as an error. Its
+	// upstreams' node-url timeout keeps every attempt out past the request's budget: nothing is back.
+	jsonRPC.upstreamTimeout = 5 * failedReplyRelayTimeout
+
+	read := startFailedReplyRouter(t, jsonRPC, hangingUpstream(t, nil), hangingUpstream(t, nil), hangingUpstream(t, nil))()
+	require.Equal(t, http.StatusGatewayTimeout, read.status, read.body)
+	require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+	require.Equal(t, "failed", read.header.Get(common.CROSS_VALIDATION_STATUS_HEADER_NAME))
+	queried := read.header.Get(common.CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME)
+	require.NotEmpty(t, queried)
+	require.Equal(t, queried, read.header.Get(common.CROSS_VALIDATION_PENDING_PROVIDERS_HEADER),
+		"every upstream asked is still out")
+	require.Equal(t, common.CrossValidationReasonInsufficientResponses, read.header.Get(common.CROSS_VALIDATION_FAILURE_REASON_HEADER),
+		"a failed cross-validation names its reason")
 }

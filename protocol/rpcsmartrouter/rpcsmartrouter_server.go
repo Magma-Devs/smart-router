@@ -1678,6 +1678,13 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 					RouterErrorName: common.LavaErrorContextDeadline.Name,
 				},
 			}
+			// A cross-validated request that ran out of time with nothing back has fewer successful
+			// responses than its threshold: insufficient-responses, the reason the processor gives
+			// when too few came back. Without it the reply said failed with no reason, and
+			// cross_validation_failed_total counted a failure its by-reason breakdown never saw.
+			if relayProcessor.GetSelection() == relaycore.CrossValidation {
+				timedOut.CrossValidationFailureReason = common.CrossValidationReasonInsufficientResponses
+			}
 			rpcss.appendHeadersToRelayResult(ctx, timedOut, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
 			return timedOut, err
 		}
