@@ -9,8 +9,9 @@ import (
 
 // TestGraphQLListener_KeysTheNodeWouldReadDifferentlyAreRefusedBeforeAnyProvider is MAG-4908 at
 // the listener: the ticket's three reproduction bodies, each decoded by the router as a read and by
-// a serde-based node as the mutation. Each is answered 400 with a GraphQL error document the caller
-// can read, and no provider is asked. The control, the same request with exact keys, is served.
+// a serde-based node as the mutation, and a document that holds a mutation beside a query. Each is
+// answered 400 with a GraphQL error document the caller can read, and no provider is asked. The
+// control, a read with exact keys, is served.
 func TestGraphQLListener_KeysTheNodeWouldReadDifferentlyAreRefusedBeforeAnyProvider(t *testing.T) {
 	relay := &parsingRelay{}
 	post := serveGraphQLListener(t, relay)
@@ -34,6 +35,13 @@ func TestGraphQLListener_KeysTheNodeWouldReadDifferentlyAreRefusedBeforeAnyProvi
 			body:        `{"query":"` + mutation + `","query":"{ chainIdentifier }"}`,
 			wantMessage: `repeats the "query" member`,
 		},
+		{
+			// The owner's ruling of 2026-11-09: a document that holds a mutation beside another
+			// operation is refused, even with exact keys and operationName naming the query.
+			name:        "a mutation beside a query, operationName naming the query",
+			body:        `{"query":"` + both + `","operationName":"Q"}`,
+			wantMessage: `holds a mutation beside another operation`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			relayed := relay.relayed
@@ -44,9 +52,9 @@ func TestGraphQLListener_KeysTheNodeWouldReadDifferentlyAreRefusedBeforeAnyProvi
 		})
 	}
 
-	t.Run("the same request with exact keys is served", func(t *testing.T) {
+	t.Run("a request with exact keys is served", func(t *testing.T) {
 		relayed := relay.relayed
-		status, body := post(`{"query":"` + both + `","operationName":"Q","variables":{},"extensions":{}}`)
+		status, body := post(`{"query":"query Q { chainIdentifier }","operationName":"Q","variables":{},"extensions":{}}`)
 		require.Equal(t, http.StatusOK, status, "body: %s", body)
 		require.Equal(t, relayed+1, relay.relayed, "the control must reach a provider")
 	})

@@ -584,21 +584,34 @@ func TestParseGraphQLMsgRefusesKeysTheNodeWouldReadDifferently(t *testing.T) {
 	}
 }
 
-// TestParseGraphQLMsgNamedOperationDecidesTheWrite pins what MAG-4908 leaves as it is. A document
-// holding a mutation and a query is a write only when operationName names the mutation: once the
-// wrapper keys agree (the test above), the node runs the operation the router classified, and
-// MAG-4452's nightly test pins the read as reaching one provider. Treating any document that holds a
-// mutation as a write is the ticket's second item and the owner's decision.
-func TestParseGraphQLMsgNamedOperationDecidesTheWrite(t *testing.T) {
-	const document = `mutation Write { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { effects { status } } } query Read { chainIdentifier }`
+// TestParseGraphQLMsgADocumentHoldingAMutationIsAWrite pins MAG-4908's second item, as the owner
+// ruled on 2026-11-09: a document that holds a mutation is a write. When every operation in it is
+// a mutation, the one operationName selects is handled as a write. A document that also holds a
+// query or a subscription is refused, whatever operationName names or when it names none.
+func TestParseGraphQLMsgADocumentHoldingAMutationIsAWrite(t *testing.T) {
+	const mixed = `mutation Write { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { effects { status } } } query Read { chainIdentifier }`
+	for _, body := range []string{
+		`{"query":"` + mixed + `","operationName":"Write"}`,
+		`{"query":"` + mixed + `","operationName":"Read"}`,
+		`{"query":"` + mixed + `"}`,
+		`{"query":"mutation Write { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } } subscription Events { events { digest } }","operationName":"Write"}`,
+	} {
+		_, err := ParseGraphQLMsg([]byte(body))
+		require.ErrorIs(t, err, ErrGraphQLRequestRefused, body)
+		require.ErrorContains(t, err, "holds a mutation beside another operation", body)
+	}
 
-	write, err := ParseGraphQLMsg([]byte(`{"query":"` + document + `","operationName":"Write"}`))
-	require.NoError(t, err)
-	require.True(t, write.IsMutation())
-	require.Equal(t, []string{"executeTransaction"}, write.RootFieldNames())
+	const mutations = `mutation First { executeTransaction(transactionDataBcs: \"x\", signatures: [\"y\"]) { digest } } mutation Second { executeTransaction(transactionDataBcs: \"z\", signatures: [\"w\"]) { digest } }`
+	for _, name := range []string{"First", "Second"} {
+		write, err := ParseGraphQLMsg([]byte(`{"query":"` + mutations + `","operationName":"` + name + `"}`))
+		require.NoError(t, err, name)
+		require.True(t, write.IsMutation(), name)
+		require.Equal(t, []string{"executeTransaction"}, write.RootFieldNames(), name)
+	}
 
-	read, err := ParseGraphQLMsg([]byte(`{"query":"` + document + `","operationName":"Read"}`))
-	require.NoError(t, err)
+	const queries = `query First { chainIdentifier } query Second { checkpoint { digest } }`
+	read, err := ParseGraphQLMsg([]byte(`{"query":"` + queries + `","operationName":"Second"}`))
+	require.NoError(t, err, "a document of queries only is not affected")
 	require.False(t, read.IsMutation())
-	require.Equal(t, []string{"chainIdentifier"}, read.RootFieldNames())
+	require.Equal(t, []string{"checkpoint"}, read.RootFieldNames())
 }

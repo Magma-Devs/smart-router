@@ -363,7 +363,8 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		noAnswer:    noAnswerJsonError,
 		// A request the router refused by one of its OWN limits: too many root fields, too deep a
 		// document, too deep a chain of fragment spreads. Or one whose wrapper keys the router and
-		// the node would read as two different requests (MAG-4908). Nothing failed — the router
+		// the node would read as two different requests, or whose document holds a mutation beside
+		// another operation (MAG-4908). Nothing failed — the router
 		// read the request and declined to serve it, and its own relay_end line says so (outcome
 		// rejected_before_dispatch, status 0). The refusal carries no status, so it used to fall to
 		// the 500: the status for "the server failed", which every alert rule counts as an outage

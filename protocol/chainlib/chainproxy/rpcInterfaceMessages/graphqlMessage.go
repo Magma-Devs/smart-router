@@ -203,6 +203,12 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 		return nil, err
 	}
 
+	// Before an operation is selected: a document that mixes a mutation with another operation is
+	// refused whatever operationName names (MAG-4908).
+	if err := refuseMixedMutationDocument(doc); err != nil {
+		return nil, err
+	}
+
 	operation, err := selectGraphQLOperation(doc, envelope.OperationName)
 	if err != nil {
 		return nil, err
@@ -227,6 +233,28 @@ func ParseGraphQLMsg(data []byte) (*GraphQLMessage, error) {
 		Operation:     operation.Operation,
 		RootFields:    rootFields,
 	}, nil
+}
+
+// refuseMixedMutationDocument refuses a document that holds a mutation beside a query or a
+// subscription (MAG-4908; the owner's ruling of 2026-11-09). A document that holds a mutation is a
+// write: when every operation in it is a mutation, the one operationName selects is a mutation too,
+// so it is handled as a write whatever is selected. A document that also holds another operation is
+// the one case where the request could be taken for a read while the node could run a write, and a
+// client that means the read has no reason to send the mutation with it. It is refused like the
+// router's other refusals: 400, a GraphQL error document, nothing sent to a provider.
+func refuseMixedMutationDocument(doc *ast.QueryDocument) error {
+	hasMutation, hasOther := false, false
+	for _, operation := range doc.Operations {
+		if operation.Operation == ast.Mutation {
+			hasMutation = true
+		} else {
+			hasOther = true
+		}
+	}
+	if hasMutation && hasOther {
+		return RefuseGraphQLRequest("graphql document holds a mutation beside another operation; send the mutation in a request of its own")
+	}
+	return nil
 }
 
 // selectGraphQLOperation picks the operation the request executes. A named request names it; an
