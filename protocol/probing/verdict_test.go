@@ -22,6 +22,7 @@ func TestRenderEndpointVerdict_AliveAndKeepingUp(t *testing.T) {
 	}
 	v := RenderEndpointVerdict(obs, 1005, true, now, cfg()) // 1000 >= 1005-10 → keeping up
 	require.True(t, v.Healthy)
+	require.True(t, v.Alive)
 	require.Equal(t, 30*time.Millisecond, v.Latency)
 	require.Equal(t, uint64(1000), v.Block)
 }
@@ -35,6 +36,7 @@ func TestRenderEndpointVerdict_StaleIsDead(t *testing.T) {
 	}
 	v := RenderEndpointVerdict(obs, 1000, true, now, cfg())
 	require.False(t, v.Healthy, "an observation older than StalenessWindow is not alive")
+	require.False(t, v.Alive)
 }
 
 func TestRenderEndpointVerdict_NeverObservedIsDead(t *testing.T) {
@@ -53,6 +55,7 @@ func TestRenderEndpointVerdict_LaggingIsUnhealthy(t *testing.T) {
 	}
 	v := RenderEndpointVerdict(obs, 1000, true, now, cfg())
 	require.False(t, v.Healthy, "an endpoint more than LagToleranceBlocks below the baseline is not keeping up")
+	require.True(t, v.Alive, "but it was heard from: lagging is not the same as stale")
 }
 
 func TestRenderEndpointVerdict_WithinLagToleranceIsHealthy(t *testing.T) {

@@ -1465,7 +1465,11 @@ func (csm *ConsumerSessionManager) cacheAddonAddresses(addon string, extensions 
 // the addresses it restores. It fixes nothing else. Without the narrowing the guard answered on the
 // strength of some OTHER provider being available, which is a fact a pinned request can never use:
 // it released every blocked provider for every other relay and then failed anyway.
-func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[string]struct{}, addon string, extensions []string, selectedProvider string, ctx context.Context) bool {
+//
+// The same fact bounds what a pinned request may release, so the provider its pin resolves to is
+// returned as pinned: releaseBlockedProvidersIfPoolEmpty returns that one provider to the pool and
+// no other (MAG-4731).
+func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[string]struct{}, addon string, extensions []string, selectedProvider string, ctx context.Context) (pinned string, couldServe bool) {
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
@@ -1490,12 +1494,25 @@ func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[stri
 		}
 		resolved, _ := resolveSelectedProviderAddress(selectedProvider, candidates)
 		if resolved == "" {
-			return false
+			return "", false
 		}
 		// Looked up by the resolved address exactly, as selection does: a pin this request has
 		// already tried fails as already-failed after a release, whatever its case-twin looks like.
-		_, alreadyTried := ignored[resolved]
-		return !alreadyTried
+		if _, alreadyTried := ignored[resolved]; alreadyTried {
+			return "", false
+		}
+		// A release puts a provider back in selection, not in service. When none of its urls can
+		// take a relay (inRotation, the rule the blocked gauge and the last-chance walk read) this
+		// request is handed it, finds nothing to dial and blocks it again on the spot, failing as it
+		// would have anyway. Meanwhile a dead provider sat in the pool where a new sticky session
+		// could claim it fleet-wide (MAG-4731), and every request the session sent reset its node's
+		// block and logged both edges. Only the pinned path asks this: a pin can be served by this
+		// provider alone and never reaches the last-chance walk, so a release it cannot use buys it
+		// nothing. The unpinned release is the cascade's own last resort and keeps its rule.
+		if !csm.pairing[resolved].inRotation() {
+			return "", false
+		}
+		return resolved, true
 	}
 
 	for _, address := range csm.pairingAddresses {
@@ -1503,14 +1520,14 @@ func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[stri
 			continue
 		}
 		if capable(address) {
-			return true
+			return "", true
 		}
 	}
-	return false
+	return "", false
 }
 
 // releaseBlockedProvidersIfPoolEmpty releases the standing blocked list and retries selection once,
-// as the last resort of the failover cascade.
+// as the last resort of the failover cascade. A pinned request releases only the provider it pinned.
 //
 // Two guards, and both matter. The pool must be genuinely empty: the errors that bring us here also
 // cover "every valid address is already ignored by this request", which is ordinary retry
@@ -1532,7 +1549,8 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 	// snapshot after the guard put the diagnosis on the far side of the branch that swallows it.
 	inventory := csm.snapshotPoolInventory(addon, extensionNames, ctx)
 
-	if !csm.releaseCouldServeThisRequest(tempIgnoredProviders.providers, addon, extensionNames, selectedProvider, ctx) {
+	pinned, couldServe := csm.releaseCouldServeThisRequest(tempIgnoredProviders.providers, addon, extensionNames, selectedProvider, ctx)
+	if !couldServe {
 		// A declined release is usually ordinary retry exhaustion: this request has already tried
 		// every provider, releasing rescues nothing, and that stays at DEBUG.
 		//
@@ -1573,7 +1591,17 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 
 	csm.logPoolEmpty(ctx, inventory, addon, extensionNames)
 
-	didReset := csm.resetValidAddresses(addon, extensionNames)
+	// A pinned request is answered by the provider its pin resolves to or by nothing, so that one
+	// provider is all a release on its behalf returns. Releasing the whole list put every OTHER
+	// blocked provider back in the pool, dead or not, undoing the outage for every other relay: a
+	// new sticky session could be claimed to a dead one fleet-wide and fail on it until the claim
+	// expired, two epochs later (MAG-4731).
+	didReset := false
+	if pinned != "" {
+		csm.validateAndReturnBlockedProviderToValidAddressesList(pinned, ReleasePoolEmpty)
+	} else {
+		didReset = csm.resetValidAddresses(addon, extensionNames)
+	}
 
 	// The reset refills validAddresses straight from the pairing, so it can only restore what the
 	// pairing holds. With an empty pairing it is a no-op — and the line that used to report this
@@ -1581,6 +1609,9 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 	// happened. Report the two outcomes as the different events they are.
 	restored := len(csm.cacheAddonAddresses(addon, extensionNames, ctx))
 	switch {
+	case pinned != "":
+		// Not a reset, so none of the lines below describes it: the release above logged the one
+		// provider it returned.
 	case !didReset:
 		// The re-verify inside resetValidAddresses found the pool already refilled, so this call
 		// released nothing. Whatever repopulated it — an epoch tick that landed while we waited for
@@ -1672,9 +1703,10 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 		} else if errors.Is(err, SelectedProviderUnavailableError) {
 			// A pinned request must never fall through to a provider the caller did not ask for, so
 			// neither the backup tier nor the blocked-provider walk applies here. But an empty pool
-			// still has to release the blocked list, exactly as the old top-of-GetSessions reset
-			// did: without this, lava-select-provider stops resolving the moment every provider is
-			// blocked, even though the pinned provider is sitting in that blocked list.
+			// still has to give the pinned provider back, as the old top-of-GetSessions reset did:
+			// without this, lava-select-provider stops resolving the moment every provider is
+			// blocked, even though the pinned provider is sitting in that blocked list. Only that
+			// provider comes back; the rest of the list stands (MAG-4731).
 			if released, ok := csm.releaseBlockedProvidersIfPoolEmpty(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget); ok {
 				return released, nil
 			}

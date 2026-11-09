@@ -23,6 +23,11 @@ type EndpointVerdict struct {
 	// window) and keeping up (block within tolerance of the consensus baseline). When false, the
 	// endpoint contributes a failure to its provider's availability and no latency/sync.
 	Healthy bool
+	// Alive is the liveness half of Healthy: a positive block observed within the staleness window.
+	// It is false for an endpoint nothing was heard from lately, whatever the reason. The prober uses
+	// it to tell "stale because we stopped polling it for a rate-limit hold-off" apart from a
+	// lagging endpoint, which is alive but not keeping up (MAG-4387).
+	Alive bool
 	// Latency is the endpoint's most recent poll latency; 0 means UNKNOWN (no successful poll yet —
 	// e.g. a relay-fed endpoint under the MAG-2159 traffic gate, or recovery's first healthy cycle).
 	// An unknown latency must NOT be fed as a fake 0 (it would falsely win the per-provider min and
