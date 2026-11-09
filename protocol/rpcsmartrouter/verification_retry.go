@@ -398,6 +398,10 @@ func (rpsr *RPCSmartRouter) retryPaired(ctx context.Context, chainKey string, st
 	epoch := rpsr.epochTimer.GetCurrentEpoch()
 	nextStatic, demotedStatic, promotedStatic := decideReverification(inputs, rpsr.providerSessions[chainKey], reverifyTierStatic, epoch, probedStatic, true)
 	nextBackup, demotedBackup, promotedBackup := decideReverification(inputs, rpsr.backupProviderSessions[chainKey], reverifyTierBackup, epoch, probedBackup, true)
+	// A provider the epoch demoted after the loop listed it as paired is promoted here when
+	// its retry passes, and leaves the failed list as an epoch promotion does.
+	pruneRestoredFromFailed(rpsr.failedStaticProviders, chainKey, nameSet(promotedStatic))
+	pruneRestoredFromFailed(rpsr.failedBackupProviders, chainKey, nameSet(promotedBackup))
 	queueDemoted(&rpsr.failedStaticProviders, chainKey, inputs.configuredStatic, demotedStatic, promotedStatic)
 	queueDemoted(&rpsr.failedBackupProviders, chainKey, inputs.configuredBackup, demotedBackup, promotedBackup)
 	if len(demotedStatic)+len(demotedBackup)+len(promotedStatic)+len(promotedBackup) == 0 {

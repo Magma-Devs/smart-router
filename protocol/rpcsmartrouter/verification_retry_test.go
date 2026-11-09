@@ -318,3 +318,34 @@ func providerNames(providers []*lavasession.RPCStaticProviderEndpoint) []string 
 	}
 	return names
 }
+
+// A paired provider the epoch demoted while the loop was busy with another retry is out
+// of the pairing and on the failed list by the time its own retry probes it. When that
+// retry passes it promotes the provider, which then has to leave the failed list, as an
+// epoch promotion does (TestUpdateEpoch_PromotedProviderLeavesTheFailedList). Left there,
+// the loop re-verifies a serving provider whole on the out-of-pairing path, without the
+// url grace, until one of those passes clears it.
+func TestRetryPaired_APromotedProviderLeavesTheFailedList(t *testing.T) {
+	rand.InitRandomSeed()
+	rpsr := createTestRPCSmartRouter()
+	sm, rpcEndpoint := createTestSessionManager("BSC", "jsonrpc")
+	chainKey := rpcEndpoint.Key()
+	rpsr.sessionManagers[chainKey] = sm
+	providers := bootTestProviders("healthy", "flaky")
+	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{0: createTestProviderSession("healthy", 1)}
+	rpsr.failedStaticProviders[chainKey] = providers[1:]
+	rpsr.reverifyInputs = map[string]*chainReverifyInputs{chainKey: {
+		rpcEndpoint:                rpcEndpoint,
+		convertProvidersToSessions: fakeConvertSessions(1),
+		configuredStatic:           providers,
+		validateFn:                 failThese(),
+		retries:                    newRetrySchedule(),
+	}}
+
+	rpsr.retryPaired(t.Context(), chainKey, providers[1:], nil, dueChecks{reverifyTierStatic: {"flaky": {{}}}})
+
+	rpsr.mu.Lock()
+	defer rpsr.mu.Unlock()
+	require.Contains(t, byName(rpsr.providerSessions[chainKey]), "flaky", "the retry that passed promotes it")
+	require.Empty(t, rpsr.failedStaticProviders[chainKey], "a promoted provider is not pending a failed-provider retry")
+}
