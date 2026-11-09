@@ -634,9 +634,13 @@ func (cs *ChainTracker) start(ctx context.Context) error {
 				// relay or probe answer that lifts the hold-off early therefore resumes the poll
 				// within one interval; a Retry-After the vendor named is still waited out in full,
 				// because the registry entry carries it (MAG-4387). fetchFails is left as it was:
-				// nothing was tried.
+				// nothing was tried. The held wake re-checks at the base cadence, not the failure
+				// backoff: a refused poll counts as a failure, so a url whose own polls were refused
+				// would otherwise resume up to BACKOFF_MAX_TIME after an answer lifted the hold-off,
+				// and the probe would score its stale observation dead until then. The hold-off
+				// already paces the refusals; a wake that sends nothing costs nothing.
 				if cs.rateLimitHeldFor() > 0 {
-					cs.updateTimer(fetchFails)
+					cs.updateTimer(0)
 					continue
 				}
 				fetchTimeout := FetchTimeout()

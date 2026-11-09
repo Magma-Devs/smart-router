@@ -342,3 +342,40 @@ func TestChainTracker_NoRegistryStillWaitsOutRetryAfter(t *testing.T) {
 		"polling resumes once the Retry-After has passed")
 	require.GreaterOrEqual(t, time.Since(refusedAt), 250*time.Millisecond, "but not before")
 }
+
+// A poll refused for rate counts as a failed poll, so a url whose own polls keep being refused has a
+// backed-off cadence by the time a relay answer lifts its hold-off. The held wakes must not run at
+// that backed-off cadence: they send nothing, and the hold-off already paces the refusals. Otherwise
+// an answer that lifts the hold-off resumes the poll up to BACKOFF_MAX_TIME later, and the probe loop
+// scores the stale, no-longer-held-off url unavailable every cycle until it does (MAG-4387).
+func TestChainTracker_PollResumesAtBaseCadenceAfterItsOwnRefusals(t *testing.T) {
+	registry := holdoff.NewRegistryWithClock(time.Now)
+	fetcher := &countingFetcher{}
+	startHoldoffTracker(t, fetcher, ChainTrackerConfig{
+		AverageBlockTime:  20 * time.Millisecond,
+		FlatPollInterval:  10 * time.Millisecond,
+		RateLimitHoldoff:  registry,
+		RateLimitProvider: holdoffTestProvider,
+		RateLimitURL:      holdoffTestURL,
+	})
+	require.Eventually(t, func() bool { return fetcher.calls.Load() >= 3 }, 2*time.Second, time.Millisecond,
+		"the tracker polls at its cadence")
+
+	// Seven refused polls in a row, each hold-off lifted by a relay answer: the failure backoff
+	// reaches 10 ms << 7 = 1.28 s.
+	const refusals = 7
+	for i := int32(1); i <= refusals; i++ {
+		fetcher.refuseNext.Store(int64(time.Nanosecond)) // a 429 with no usable Retry-After
+		require.Eventually(t, func() bool { return fetcher.refused.Load() == i }, 5*time.Second, time.Millisecond)
+		require.Eventually(t, func() bool { return registry.HeldOff(holdoffTestURL, holdoffTestURL) }, time.Second, time.Millisecond)
+		if i < refusals {
+			registry.RecordAnswer(holdoffTestProvider, holdoffTestURL)
+		}
+	}
+	time.Sleep(1500 * time.Millisecond) // let the held wakes settle into whatever cadence they run at
+	held := fetcher.calls.Load()
+
+	registry.RecordAnswer(holdoffTestProvider, holdoffTestURL)
+	require.Eventually(t, func() bool { return fetcher.calls.Load() > held }, 300*time.Millisecond, time.Millisecond,
+		"the poll resumes within the base cadence of the hold-off clearing, not the 1.28 s failure backoff")
+}
