@@ -107,6 +107,34 @@ func TestRestoreGivesUpWhenTheNodeRefusesTheResubscribe(t *testing.T) {
 	require.Eventually(t, func() bool { return h.activeSubscriptionCount() == 0 }, 10*time.Second, 10*time.Millisecond)
 }
 
+// TestRestoreGivesUpWhenTheReconnectFails: the socket drops and the node stays down past the
+// pool's reconnect ladder. The subscription is given up, and its client is told so, as on every
+// other exit of a failed restore (MAG-5022).
+func TestRestoreGivesUpWhenTheReconnectFails(t *testing.T) {
+	h := newReleaseHarness(t)
+	sub := h.subscribe("ws-1")
+	t.Cleanup(sub.disconnect)
+	countReplies(sub)
+
+	// A ladder of one short rung, so the reconnect runs out in milliseconds, not minutes.
+	h.manager.lock.RLock()
+	pool := h.manager.upstreamPools[h.srv.URL()]
+	h.manager.lock.RUnlock()
+	require.NotNil(t, pool)
+	pool.lock.Lock()
+	pool.backoff = &ExponentialBackoff{InitialInterval: time.Millisecond, MaxInterval: time.Millisecond, Multiplier: 1, MaxRetries: 1}
+	pool.lock.Unlock()
+
+	h.srv.setRefusing(true)
+	h.srv.dropConnections()
+
+	require.True(t, channelClosed(sub.replies, 20*time.Second), "a restore whose reconnect failed must give the subscription up")
+	require.GreaterOrEqual(t, h.srv.refusedDials.Load(), int32(1), "the restore tried to reconnect")
+	require.Equal(t, 1, h.upstreamCalls("eth_subscribe"), "no re-subscribe without a connection")
+	require.ErrorIs(t, h.manager.SubscriptionEndError("dapp", "10.0.0.1", sub.uid), chainlib.ErrSubscriptionUpstreamLost)
+	require.Eventually(t, func() bool { return h.activeSubscriptionCount() == 0 }, 10*time.Second, 10*time.Millisecond)
+}
+
 // TestSubscribeReservesItsPoolSlot is MAG-4278 item 11's reserve-on-pick.
 //
 // The manager used to pick a connection from the pool and count its subscription on it only
