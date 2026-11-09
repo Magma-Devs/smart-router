@@ -198,6 +198,12 @@ any relay, and its fields from what the subscription manager did:
 | got an answer upstream and then failed to set the subscription up | `router_error`, `PROTOCOL_SUBSCRIPTION_INIT_FAILED` | `""` | one |
 | failed to tear a client's subscriptions down for an unsubscribe-all | `router_error`, `PROTOCOL_SUBSCRIPTION_CLEANUP_FAILED` | `""` | none |
 
+A new subscription that fails over to the next endpoint (MAG-4730) still has one attempt in its
+event: the last one, on the endpoint that took the subscription, or on the last endpoint tried when
+every endpoint failed. Its `sent_ms` includes the time the earlier attempts took. Those earlier
+attempts are in the router's warning log ("subscribe failed on an endpoint, trying the next"), not
+in the event.
+
 The upstream is named by provider, as on every relay; the manager picks it by node URL, which may
 carry a credential. The messages a subscription pushes afterwards, and a subscription restored after
 its upstream connection drops, write no event.
