@@ -207,37 +207,45 @@ func extractSolanaContextSlot(data []byte) (int64, bool) {
 // first not an object (the first decides; gjson goes on to the second), and bytes that are not
 // valid JSON (no slot; gjson reads leniently and can find one). No node sends either.
 func resultIsNotAnObject(obj []byte) bool {
+	i := resultValueIndex(obj)
+	return i >= 0 && obj[i] != '{'
+}
+
+// resultValueIndex returns the index in obj, a JSON object, at which the value of its top-level
+// result member starts, reading only the members in front of it by the rules resultIsNotAnObject
+// describes. It returns -1 whenever it cannot tell cheaply.
+func resultValueIndex(obj []byte) int {
 	i := 1 // past the opening brace
 	for {
 		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i)
 		if i >= len(obj) || obj[i] != '"' {
-			return false
+			return -1
 		}
 		nameEnd := bytes.IndexByte(obj[i+1:], '"')
 		if nameEnd < 0 {
-			return false
+			return -1
 		}
 		name := obj[i+1 : i+1+nameEnd]
 		if bytes.IndexByte(name, '\\') >= 0 {
-			return false // an escaped name; leave it to the full read
+			return -1 // an escaped name; leave it to the full read
 		}
 		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i+nameEnd+2)
 		if i >= len(obj) || obj[i] != ':' {
-			return false
+			return -1
 		}
 		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i+1)
 		if i >= len(obj) {
-			return false
+			return -1
 		}
 		if string(name) == "result" {
-			return obj[i] != '{'
+			return i
 		}
 		if i = skipJSONScalar(obj, i); i < 0 {
-			return false
+			return -1
 		}
 		i = rpcInterfaceMessages.SkipJSONWhitespace(obj, i)
 		if i >= len(obj) || obj[i] != ',' {
-			return false // the object ended, or a member was malformed, before result
+			return -1 // the object ended, or a member was malformed, before result
 		}
 		i++
 	}
