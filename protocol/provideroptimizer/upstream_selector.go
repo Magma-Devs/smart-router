@@ -112,6 +112,12 @@ type UpstreamScoreDetails struct {
 	Sync         float64 // Sync score (0-1)
 	Stake        float64 // Stake score (0-1)
 	Composite    float64 // Combined QoS score (0-1)
+
+	// The inputs the scores came from, for the pick's debug record (MAG-3152)
+	RawAvailability float64 // Availability EWMA (0-1)
+	RawLatency      float64 // Latency EWMA (seconds)
+	RawSync         float64 // Sync lag EWMA (seconds)
+	RawStake        int64   // Stake as configured (raw amount, e.g. ulava)
 }
 
 // UpstreamSelectorConfig holds configuration options for creating a UpstreamSelector
@@ -308,8 +314,12 @@ func (ws *UpstreamSelector) CalculateScore(
 		composite = 1.0
 	}
 
-	// Log comprehensive score breakdown for analysis
-	utils.LavaFormatDebug("Provider score calculation breakdown",
+	// Trace, not debug: this runs for every candidate of every pick, and at debug its N records
+	// per relay filled the --debug-address ring until nothing else was left in it (MAG-3152).
+	// At debug the pick's one "Provider selection completed" record carries every candidate's
+	// scores and raw inputs, and the weights, from which the rest of this line follows
+	// (buildSelectionResult).
+	utils.LavaFormatTrace("Provider score calculation breakdown",
 		utils.LogAttr("provider", providerAddress),
 		utils.LogAttr("raw_availability", availability),
 		utils.LogAttr("raw_latency_sec", latency),
@@ -363,9 +373,10 @@ func (ws *UpstreamSelector) normalizeAvailability(availability float64) float64 
 	const minAcceptable = score.MinAcceptableAvailability // currently 0.80
 	const maxAvailability = 1.0
 
-	// Below minimum threshold = score of 0
+	// Below minimum threshold = score of 0. Logged at trace, as is every line here: this runs
+	// for every candidate of every pick, twice (MAG-3152, see CalculateScore).
 	if availability < minAcceptable {
-		utils.LavaFormatDebug("availability below minimum threshold",
+		utils.LavaFormatTrace("availability below minimum threshold",
 			utils.LogAttr("raw_availability", availability),
 			utils.LogAttr("min_acceptable", minAcceptable),
 			utils.LogAttr("normalized_score", 0.0),
@@ -386,7 +397,7 @@ func (ws *UpstreamSelector) normalizeAvailability(availability float64) float64 
 		normalized = 0.0
 	}
 
-	utils.LavaFormatDebug("normalized availability (Phase 1 rescaling)",
+	utils.LavaFormatTrace("normalized availability (Phase 1 rescaling)",
 		utils.LogAttr("raw_availability", availability),
 		utils.LogAttr("min_acceptable", minAcceptable),
 		utils.LogAttr("rescale_range", maxAvailability-minAcceptable),
@@ -572,7 +583,8 @@ func (ws *UpstreamSelector) normalizeStake(stake float64, totalStake float64) fl
 	// This reduces the gap between large and small stakers by ~17%
 	normalized := math.Sqrt(stakeRatio)
 
-	utils.LavaFormatDebug("normalized stake (square root scaling)",
+	// Trace: runs for every candidate of every pick, twice (MAG-3152, see CalculateScore)
+	utils.LavaFormatTrace("normalized stake (square root scaling)",
 		utils.LogAttr("stake", stakeFloat),
 		utils.LogAttr("total_stake", totalStakeFloat),
 		utils.LogAttr("stake_ratio", stakeRatio),
@@ -797,6 +809,10 @@ func (ws *UpstreamSelector) buildSelectionResult(
 			utils.LogAttr("total_score", totalScore),
 			utils.LogAttr("random_value", randomValue),
 			utils.LogAttr("num_candidates", len(providerScores)),
+			utils.LogAttr("availability_weight", ws.availabilityWeight),
+			utils.LogAttr("latency_weight", ws.latencyWeight),
+			utils.LogAttr("sync_weight", ws.syncWeight),
+			utils.LogAttr("stake_weight", ws.stakeWeight),
 		}
 
 		for i, p := range providerScores {
@@ -815,6 +831,10 @@ func (ws *UpstreamSelector) buildSelectionResult(
 					utils.LogAttr(prefix+"_sync", detail.Sync),
 					utils.LogAttr(prefix+"_stake", detail.Stake),
 					utils.LogAttr(prefix+"_composite", detail.Composite),
+					utils.LogAttr(prefix+"_raw_availability", detail.RawAvailability),
+					utils.LogAttr(prefix+"_raw_latency_sec", detail.RawLatency),
+					utils.LogAttr(prefix+"_raw_sync_sec", detail.RawSync),
+					utils.LogAttr(prefix+"_raw_stake", detail.RawStake),
 				)
 			}
 		}
@@ -893,12 +913,16 @@ func (ws *UpstreamSelector) CalculateUpstreamScores(
 
 		// Store detailed scores for selection stats
 		scoreDetails = append(scoreDetails, UpstreamScoreDetails{
-			Address:      providerAddress,
-			Availability: availabilityScore,
-			Latency:      latencyScore,
-			Sync:         syncScore,
-			Stake:        stakeScore,
-			Composite:    compositeScore,
+			Address:         providerAddress,
+			Availability:    availabilityScore,
+			Latency:         latencyScore,
+			Sync:            syncScore,
+			Stake:           stakeScore,
+			Composite:       compositeScore,
+			RawAvailability: availability,
+			RawLatency:      latency,
+			RawSync:         sync,
+			RawStake:        stake,
 		})
 
 		// Create QoS report for metrics
