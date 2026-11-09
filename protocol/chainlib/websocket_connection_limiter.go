@@ -124,7 +124,8 @@ func (wcl *WebsocketConnectionLimiter) decreaseIpConnection(key string) {
 // DefaultWebSocketTrustedProxies are the proxies the per-client websocket connection limit trusts to
 // name the client in X-Forwarded-For when --websocket-trusted-proxies is not set: loopback and the
 // private ranges, where a gateway in the router's own cluster lives. A CDN in front of that gateway
-// has public addresses, which the operator adds to the list.
+// has public addresses, which the operator adds to the list. Only a proxy that appends to
+// X-Forwarded-For the address it received the request from belongs in the list.
 const DefaultWebSocketTrustedProxies = "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7"
 
 var webSocketTrustedProxies = func() *atomic.Pointer[[]netip.Prefix] {
