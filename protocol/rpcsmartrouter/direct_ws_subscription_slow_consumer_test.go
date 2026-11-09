@@ -126,6 +126,17 @@ func requireEveryPushOrEnd(t *testing.T, received *atomic.Int64, closed <-chan s
 // its subscription. Dropped at the first full channel, a client reading 20,000 pushes a second
 // lost its subscription a few hundred pushes into a 1000-log burst.
 func TestBurstyClientThatReadsIsNotDropped(t *testing.T) {
+	// What is pinned is that a client reading from a full channel is waited for, where a zero
+	// grace drops it at once. The production grace is sized for the wait it imposes on a
+	// subscription's other clients, of which this test has none, and a loaded machine can leave
+	// the reader goroutine unscheduled for longer than 10 ms, a stall the fan-out would rightly
+	// call a slow consumer. A second is far above any such stall and well inside the test's own
+	// 10 s deadline, so a fan-out that stops waiting still fails it. Registered before the
+	// manager's Close so that the restore runs after every fan-out has stopped.
+	restoreGrace := subscriptionClientSendGrace
+	subscriptionClientSendGrace = time.Second
+	t.Cleanup(func() { subscriptionClientSendGrace = restoreGrace })
+
 	srv := newMockSubscriptionServer()
 	srv.messageInterval = time.Hour // only the burst below
 	t.Cleanup(srv.Close)

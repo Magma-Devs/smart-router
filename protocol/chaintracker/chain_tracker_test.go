@@ -23,6 +23,10 @@ const (
 	TimeForPollingMock = (2 * time.Millisecond)
 	SleepTime          = TimeForPollingMock * 2
 	SleepChunks        = 5
+	// trackerCatchUp bounds how long a test waits for the tracker to report a step it drove. A
+	// step takes a poll or two of TimeForPollingMock; the rest is for a loaded machine, where
+	// the fixed SleepChunks*SleepTime budget (20 ms) once left the tracker two blocks behind.
+	trackerCatchUp = 5 * time.Second
 )
 
 type MockChainFetcher struct {
@@ -315,17 +319,24 @@ func TestChainTrackerCallbacks(t *testing.T) {
 			utils.LavaFormatInfo(startedTestStr + tt.name)
 			callbackCalledFork.Store(false)
 			callbackCalledNewLatest.Store(false)
+			// The fork goes in before the blocks. A poll that has seen new blocks compares one
+			// stored hash against the mock (forkChanged) and then refetches the queue
+			// (fetchAllPreviousBlocks). A fork landing between those two reads is stored as the
+			// new hashes with no callback, and no later poll finds a difference to report. With
+			// the fork first, a poll that compared before it has seen no new block, so it
+			// refetches nothing.
+			mockChainFetcher.Fork(tt.fork)
 			for i := 0; i < int(tt.advancement); i++ {
 				currentLatestBlockInMock = mockChainFetcher.AdvanceBlock()
 			}
-			mockChainFetcher.Fork(tt.fork)
-			for sleepChunk := 0; sleepChunk < SleepChunks; sleepChunk++ {
-				time.Sleep(SleepTime) // stateTracker polls asynchronously
-				latestBlock := chainTracker.GetAtomicLatestBlockNum()
-				if latestBlock >= currentLatestBlockInMock && tt.shouldFork == false {
-					break
-				}
-			}
+			// The tracker polls on its own goroutine and publishes the head before it runs the
+			// callbacks, so the wait is for what this step's callbacks must have recorded:
+			// every advanced block processed, and the fork reported when one was made.
+			require.Eventually(t, func() bool {
+				return chainTracker.GetAtomicLatestBlockNum() >= currentLatestBlockInMock &&
+					callbackBlocksProcessed.Load() >= int64(totalAdvancement) &&
+					(!tt.shouldFork || callbackCalledFork.Load())
+			}, trackerCatchUp, TimeForPollingMock, "%s: the tracker did not report this step", tt.name)
 			latestBlock := chainTracker.GetAtomicLatestBlockNum()
 			require.Equal(t, currentLatestBlockInMock, latestBlock)
 

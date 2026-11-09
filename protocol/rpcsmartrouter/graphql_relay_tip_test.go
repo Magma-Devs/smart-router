@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
 )
@@ -29,6 +31,13 @@ const suiGraphQLHeadPoll = `{"query":"{ serviceConfig { availableRange(type: \"C
 const suiGraphQLAliasedHeadPoll = `{"query":"{ serviceConfig { availableRange(type: \"Checkpoint\") { last { sequenceNumber: networkTotalTransactions } } } }"}`
 
 const suiForgedTipReply = `{"data":{"serviceConfig":{"availableRange":{"last":{"sequenceNumber":6238095088}}}}}`
+
+// suiHonestTip is the tip a clean router recorded in the same reproduction (MAG-4373's C6b
+// control), and suiHonestTipReply is the head poll's answer carrying it.
+const (
+	suiHonestTip      = 334_287_093
+	suiHonestTipReply = `{"data":{"serviceConfig":{"availableRange":{"last":{"sequenceNumber":334287093}}}}}`
+)
 
 // suiGraphQLTipSpec mirrors lava-specs sui.json's graphql collection where the tip is concerned.
 // GET_BLOCKNUM is serviceConfig, an ordinary query field any caller may select, read at
@@ -144,8 +153,7 @@ func TestGraphQLUserRelayCarriesNoReplyBlock(t *testing.T) {
 	t.Run("even the head poll's own text", func(t *testing.T) {
 		// Nothing tells the honest text from a forged one at this point: both resolve to the same
 		// api and are read by the same rule, so the relay reads neither.
-		_, result := sendGraphQLUserRelay(t, chainParser, suiGraphQLHeadPoll,
-			`{"data":{"serviceConfig":{"availableRange":{"last":{"sequenceNumber":334287093}}}}}`)
+		_, result := sendGraphQLUserRelay(t, chainParser, suiGraphQLHeadPoll, suiHonestTipReply)
 		require.Zero(t, result.Reply.LatestBlock)
 	})
 }
@@ -154,7 +162,8 @@ func TestGraphQLUserRelayCarriesNoReplyBlock(t *testing.T) {
 // through the harvest the relay path runs on every success. Before the fix it set the endpoint's
 // tip in the per-endpoint store, and its HighestBlockSeen, to 6.2 billion. HighestBlockSeen is
 // never lowered, and an endpoint at the fleet high is never a head-stall candidate, so a stuck node
-// stayed in rotation until restart.
+// stayed in rotation until restart. The relay must leave no evidence at all, not merely not that
+// number; TestGraphQLUserRelayIsNeverHarvested checks the same through the whole relay path.
 func TestGraphQLAliasedTipQueryForgesNoTipOrStallEvidence(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -191,11 +200,124 @@ func TestGraphQLAliasedTipQueryForgesNoTipOrStallEvidence(t *testing.T) {
 	chainMessage, result := sendGraphQLUserRelay(t, chainParser, suiGraphQLAliasedHeadPoll, suiForgedTipReply)
 	rpcss.harvestAndUpdateTipFromRelay(endpoint, chainMessage, result.Reply, gen, "graphql-upstream")
 
-	// Both are checked whatever the first says: the tip store and the stall evidence are written
-	// separately, and the stall evidence is written first, with no guard.
-	assert.NotEqual(t, int64(6_238_095_088), endpointtip.Default().Block(endpointtip.Key("SUI", spectypes.APIInterfaceGraphQL, url)),
-		"a user's aliased query must not become the endpoint's tip")
+	if assertNoTipOrStallEvidence(t, monitor, url) {
+		requireRelayObservationShows(t, monitor, url, gen)
+	}
+}
+
+// TestGraphQLUserRelayIsNeverHarvested (MAG-4373) sends user queries on the tip field through
+// SendParsedRelay, the path a client's request takes, and fails if a relay reaches
+// RecordRelayObservation or noteAnsweredBlockLocked. A GraphQL endpoint's tip and stall evidence
+// come from its tracker's own poll only, so no user relay may feed them, whatever number it carries.
+//
+// Each url's tracker is registered before any relay, with no connection, so its polls fail and
+// write no evidence: whatever a url holds after the relay, the relay wrote. The relay path finds
+// that tracker and keeps it (ensureEndpointChainTracker), so it harvests under the generation
+// registered here.
+func TestGraphQLUserRelayIsNeverHarvested(t *testing.T) {
+	if !rand.Initialized() {
+		rand.InitRandomSeed()
+	}
+	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	chainParser := newSuiGraphQLTipParser(t)
+
+	for _, tc := range []struct {
+		name  string
+		query string
+		reply string
+	}{
+		{"an aliased query on the tip field", suiGraphQLAliasedHeadPoll, suiForgedTipReply},
+		// The ticket allowed harvesting a user relay whose body is the directive's template byte for
+		// byte. The fix harvests none (sendGraphQLRelay), and a change that harvests this one must
+		// change this case on purpose.
+		{"the head poll's own text", suiGraphQLHeadPoll, suiHonestTipReply},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			endpointtip.Default().Reset()
+			var tipObservations atomic.Int64
+			monitor := endpointstate.NewEndpointMonitor(ctx, endpointstate.EndpointChainTrackerConfig{
+				ChainParser:      chainParser,
+				ChainID:          "SUI",
+				ApiInterface:     spectypes.APIInterfaceGraphQL,
+				AverageBlockTime: 222 * time.Millisecond,
+				BlocksToSave:     1,
+				// The chain-wide tip's feed. RecordRelayObservation calls it for every block it
+				// accepts, and no poll here answers, so only a relay could.
+				OnTipObservation: func(string, int64, bool) { tipObservations.Add(1) },
+			})
+			t.Cleanup(monitor.Stop)
+
+			hits, server := newGatewayTestServer(t, chainParser, logs, refusalReply{http.StatusOK, tc.reply}, refusalReply{http.StatusOK, tc.reply})
+			server.endpointChainTrackerManager = monitor
+			gens := map[string]uint64{}
+			for _, directEndpoint := range server.sessionManager.GetAllDirectRPCEndpoints() {
+				url := directEndpoint.Endpoint.NetworkAddress
+				_, err := monitor.GetOrCreateTracker("", directEndpoint.Endpoint, nil)
+				require.NoError(t, err)
+				gen, ok := monitor.ObservationGeneration(url)
+				require.True(t, ok)
+				gens[url] = gen
+				require.True(t, assertNoTipOrStallEvidence(t, monitor, url), "the url holds evidence before any relay")
+			}
+			require.Len(t, gens, 2)
+
+			result, err := sendGatewayTestRequest(t, ctx, chainParser, server, tc.query)
+			require.NoError(t, err, "the harvest runs only on a successful relay")
+			require.JSONEq(t, tc.reply, string(result.Reply.Data), "the caller gets the node's answer")
+			answered := loadRefusalHits(hits)
+			require.Equal(t, int64(1), answered[0]+answered[1], "one upstream answers the read")
+			for url, gen := range gens {
+				liveGen, ok := monitor.ObservationGeneration(url)
+				require.True(t, ok)
+				require.Equal(t, gen, liveGen, "the relay path replaced the tracker, so the reads below are of another record")
+			}
+
+			clean := true
+			for url := range gens {
+				clean = assertNoTipOrStallEvidence(t, monitor, url) && clean
+			}
+			clean = assert.Zero(t, tipObservations.Load(), "a relay fed the chain-wide tip") && clean
+			if !clean {
+				return // the control below would only repeat the failure
+			}
+			for url, gen := range gens {
+				requireRelayObservationShows(t, monitor, url, gen)
+			}
+			require.Equal(t, int64(len(gens)), tipObservations.Load(), "each control observation feeds the chain-wide tip")
+		})
+	}
+}
+
+// assertNoTipOrStallEvidence fails the test if a relay reached RecordRelayObservation or
+// noteAnsweredBlockLocked for url, and reports whether none did. It reads what the two write: the
+// url's tip in the endpointtip store and its stall evidence. noteAnsweredBlockLocked sets
+// LastAnsweredBlock on every call, whatever the block, and RecordRelayObservation calls it for
+// every block it is handed under the url's live generation. So on a url whose polls all fail, a
+// zero LastAnsweredBlock means neither was reached, with the forged block or any other.
+// requireRelayObservationShows proves the generation is live.
+func assertNoTipOrStallEvidence(t *testing.T, monitor *endpointstate.EndpointMonitor, url string) bool {
+	t.Helper()
+	tip, stored := endpointtip.Default().Get(endpointtip.Key("SUI", spectypes.APIInterfaceGraphQL, url))
+	clean := assert.False(t, stored, "the url has a tip, %+v, and only its tracker's poll may write one; every poll here fails", tip)
 	observation, _ := monitor.GetObservation(url)
-	assert.NotEqual(t, int64(6_238_095_088), observation.HighestBlockSeen,
-		"a user's aliased query must not become the stall evidence's highest block")
+	clean = assert.Zero(t, observation.LastAnsweredBlock, "a relay reached noteAnsweredBlockLocked") && clean
+	clean = assert.Zero(t, observation.HighestBlockSeen, "a relay raised the url's highest block seen") && clean
+	clean = assert.Zero(t, observation.SameBlockCycles, "a cycle was counted against the url, which only an answered block does") && clean
+	return clean
+}
+
+// requireRelayObservationShows is the control for assertNoTipOrStallEvidence: an observation that
+// does reach RecordRelayObservation, under the generation the relay was harvested with, shows in
+// the same reads. Without it, a generation the monitor no longer accepts would make every zero pass
+// for nothing. It overwrites what it checks, so it runs after the zero reads.
+func requireRelayObservationShows(t *testing.T, monitor *endpointstate.EndpointMonitor, url string, gen uint64) {
+	t.Helper()
+	require.True(t, monitor.RecordRelayObservation(url, gen, suiHonestTip, time.Now()), "the control observation was refused")
+	observation, _ := monitor.GetObservation(url)
+	require.Equal(t, int64(suiHonestTip), observation.LastAnsweredBlock)
+	require.Equal(t, int64(suiHonestTip), observation.HighestBlockSeen)
+	require.Equal(t, int64(suiHonestTip), endpointtip.Default().Block(endpointtip.Key("SUI", spectypes.APIInterfaceGraphQL, url)))
 }
