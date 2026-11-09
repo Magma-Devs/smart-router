@@ -1405,12 +1405,44 @@ func (rpcss *RPCSmartRouterServer) ParseRelay(
 	return protocolMessage, nil
 }
 
-// errUnknownWriteOutcome is returned when a write ended with no endpoint having answered. "Failed"
-// would be a claim we cannot support: our deadline cannot un-send a transaction, and reporting a
-// failure invites a resubmit of one that may already be on chain.
-var errUnknownWriteOutcome = errors.New("transaction status unclear: timeout reached before any node responded; the transaction may already have been submitted — verify on-chain before resubmitting")
+// unclearWriteError is what a write whose outcome we do not know ends with. "Failed" would be a
+// claim we cannot support: our deadline cannot un-send a transaction, and reporting a failure
+// invites a resubmit of one that may already be on chain.
+//
+// The message reads the same around its reason — "transaction status unclear: <reason>; the
+// transaction may already have been submitted — verify on-chain before resubmitting" — so a client
+// keying on the opening words or acting on the advice is unaffected by which reason it carries. The
+// reason says why the outcome is unknown, and it has to be the true one (MAG-4380): every unclear
+// write used to say "timeout reached before any node responded", including one where both nodes
+// executed the transfer and both answers became a proxy's 502 within 0.3 s.
+type unclearWriteError struct {
+	reason string
+}
+
+func (e *unclearWriteError) Error() string {
+	return "transaction status unclear: " + e.reason + "; the transaction may already have been submitted — verify on-chain before resubmitting"
+}
+
+// The reasons, in the order unclearWriteReason tries them. A timeout covers every deadline: the
+// request's budget, the attempt's own, a dial or a response that timed out, and a gateway's 504.
+var (
+	// errUnknownWriteOutcome: no endpoint answered before a deadline.
+	errUnknownWriteOutcome = &unclearWriteError{reason: "timeout reached before any node responded"}
+	// errUnclearWriteNodeSilent: an endpoint answered, with a failure, but another one the write was
+	// sent to did not answer before a deadline, and it may hold the transaction.
+	errUnclearWriteNodeSilent = &unclearWriteError{reason: "timeout reached before every node responded"}
+	// errUnclearWriteAnswerLost: every endpoint came back before a deadline, none with an answer, and
+	// at least one connection broke after it was established (a reset, an EOF, a gateway's 502), so
+	// that node may have executed the transaction and its answer was lost. Nothing timed out.
+	errUnclearWriteAnswerLost = &unclearWriteError{reason: "a node's answer was lost after the transaction was sent"}
+	// errUnclearWriteNoAnswer: every endpoint came back before a deadline, none with an answer, and
+	// what leaves the outcome open is neither a timeout nor a broken connection: a cancellation, or
+	// an error nothing classifies. It claims neither a timeout nor a delivery.
+	errUnclearWriteNoAnswer = &unclearWriteError{reason: "a request to a node ended without an answer"}
+)
 
 // writeOutcomeIsUnknown reports whether a failed request was a write whose outcome we do not know.
+// unclearWriteOutcomeFor is the same verdict with its reason.
 //
 // The rule is silence: nothing succeeded, and some endpoint we asked did not answer at all — it may
 // be holding the transaction. A hung endpoint records no error, so any rule inspecting only the
@@ -1427,12 +1459,18 @@ var errUnknownWriteOutcome = errors.New("transaction status unclear: timeout rea
 // Evaluated here rather than in the results manager because a failed request reaches the client
 // through either of two branches in SendParsedRelay; deciding once keeps that invisible.
 func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) bool {
+	return unclearWriteOutcomeFor(protocolMessage, relayProcessor) != nil
+}
+
+// unclearWriteOutcomeFor is writeOutcomeIsUnknown with the reason: nil when the outcome is known,
+// otherwise the unclearWriteError that names why it is not (see unclearWriteReason).
+func unclearWriteOutcomeFor(protocolMessage chainlib.ProtocolMessage, relayProcessor *relaycore.RelayProcessor) *unclearWriteError {
 	if chainlib.GetStateful(protocolMessage) != common.CONSISTENCY_SELECT_ALL_PROVIDERS {
-		return false
+		return nil
 	}
 	if relayProcessor == nil {
 		// The request failed before a processor existed, so nothing was ever dispatched.
-		return false
+		return nil
 	}
 
 	successResults, nodeErrors, protocolErrors := relayProcessor.GetResultsData()
@@ -1444,21 +1482,26 @@ func writeOutcomeIsUnknown(protocolMessage chainlib.ProtocolMessage, relayProces
 	// endpoints than answered, and the verdict flips to "failed" while one is still silent.
 	dispatched := relayProcessor.GetUsedProviders().SessionsDispatched()
 
+	ranOutOfRoad := requestRanOutOfRoad(relayProcessor.GetStopReason())
+
 	// A node error is a reply, so it settles that endpoint. A transport error may not: an
 	// unclassified one proves nothing, and a reset, EOF or timeout can arrive after the request was
 	// already on the wire.
 	cutOffMidDelivery := false
+	var cutOffs writeCutOffs
 	for _, protocolError := range protocolErrors {
 		// Unmatched errors classify as UNKNOWN_ERROR, which carries the flag for the same reason,
 		// so a nil check here would be dead code rather than a safety net.
 		if protocolError.LavaError != nil && protocolError.LavaError.MayHaveReachedNode {
 			cutOffMidDelivery = true
-			break
 		}
+		cutOffs.add(protocolError, ranOutOfRoad)
 	}
 
-	return unknownWriteOutcome(len(successResults), answered, dispatched,
-		requestRanOutOfRoad(relayProcessor.GetStopReason()), cutOffMidDelivery)
+	if !unknownWriteOutcome(len(successResults), answered, dispatched, ranOutOfRoad, cutOffMidDelivery) {
+		return nil
+	}
+	return unclearWriteReason(answered, dispatched, cutOffs)
 }
 
 // withUnclearWriteStatus forces the HTTP status of an unclear-write reply to 500.
@@ -1478,7 +1521,8 @@ func withUnclearWriteStatus(result *common.RelayResult) *common.RelayResult {
 	stamped := *result
 	stamped.StatusCode = http.StatusInternalServerError
 	// MAG-4218: an unclear write outcome is the one case where the router must speak instead of
-	// the node. Drop the forwarded upstream answer so the listener renders errUnknownWriteOutcome.
+	// the node. Drop the forwarded upstream answer so the listener renders the unclearWriteError and
+	// its reason.
 	stamped.ClientFacing = nil
 	return &stamped
 }
@@ -1533,6 +1577,54 @@ func unknownWriteOutcome(successes, answered, dispatched int, ranOutOfRoad, cutO
 	// Everyone came back — but "came back" is not the same as answered. A connection that died
 	// after the request went out settles nothing about whether the node received it.
 	return cutOffMidDelivery
+}
+
+// writeCutOffs counts the transport failures of a write that its unclear reason tells apart.
+type writeCutOffs struct {
+	// timedOut: the endpoint did not answer before a deadline, whichever one ended it. That is what
+	// relay_end calls a timeout (the budget, the attempt's deadline, a dial or a response that timed
+	// out), plus a gateway's timeout (504), which is the same thing one hop further out.
+	timedOut int
+	// lost: the connection broke after it was established — a reset, an EOF, a gateway's 502 — so
+	// the node may hold the transaction and its answer did not come back.
+	lost int
+}
+
+func (c *writeCutOffs) add(protocolError relaycore.RelayError, ranOutOfRoad bool) {
+	switch {
+	case protocolErrorOutcome(protocolError, ranOutOfRoad) == attemptOutcomeTimeout,
+		protocolError.LavaError == common.LavaErrorNodeGatewayTimeout:
+		c.timedOut++
+	case protocolError.LavaError == common.LavaErrorConnectionReset,
+		protocolError.LavaError == common.LavaErrorConnectionClosed,
+		protocolError.LavaError == common.LavaErrorNodeBadGateway:
+		c.lost++
+	}
+}
+
+// unclearWriteReason names why a write's outcome is unknown. Call it only once unknownWriteOutcome
+// has said so; it always returns a reason.
+//
+// An endpoint that came back with a timeout did not answer either, so it counts with the ones still
+// silent. The first rule that applies wins:
+//   - no endpoint answered before a deadline: errUnknownWriteOutcome;
+//   - some did, not every one: errUnclearWriteNodeSilent. A timeout or a silence wins over a lost
+//     answer: the request spent its time waiting on the node that never answered, which is what
+//     the client lived through, and the advice is the same either way;
+//   - a connection broke after it was established: errUnclearWriteAnswerLost;
+//   - anything else, a cancellation or an error nothing classifies: errUnclearWriteNoAnswer.
+func unclearWriteReason(answered, dispatched int, cutOffs writeCutOffs) *unclearWriteError {
+	notAnswered := min(max(dispatched-answered+cutOffs.timedOut, 0), dispatched)
+	switch {
+	case notAnswered == dispatched:
+		return errUnknownWriteOutcome
+	case notAnswered > 0:
+		return errUnclearWriteNodeSilent
+	case cutOffs.lost > 0:
+		return errUnclearWriteAnswerLost
+	default:
+		return errUnclearWriteNoAnswer
+	}
 }
 
 // wakeWaitCap bounds how long a client relay that ends an idle period (or arrives while the wake
@@ -1629,11 +1721,12 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 
 	// Both failure returns below ask the same question, and the answer cannot differ between them.
 	// Memoised so the results snapshot and its two locks are taken once.
+	// nil when the write's outcome is known, otherwise the error naming why it is not.
 	var unknownWriteOnce sync.Once
-	var unknownWriteAnswer bool
-	unknownWrite := func() bool {
+	var unknownWriteAnswer *unclearWriteError
+	unknownWrite := func() *unclearWriteError {
 		unknownWriteOnce.Do(func() {
-			unknownWriteAnswer = writeOutcomeIsUnknown(protocolMessage, relayProcessor)
+			unknownWriteAnswer = unclearWriteOutcomeFor(protocolMessage, relayProcessor)
 		})
 		return unknownWriteAnswer
 	}
@@ -1658,10 +1751,10 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// failure hardest to diagnose, a silent upstream, and no Lava-Retries or
 		// Lava-Provider-Address to say what was tried. unknownWrite is true only for a processor
 		// that dispatched, so the processor is never nil there.
-		if unknownWrite() {
-			unclear := withUnclearWriteStatus(&common.RelayResult{})
-			rpcss.appendHeadersToRelayResult(ctx, unclear, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
-			return unclear, errUnknownWriteOutcome
+		if unclear := unknownWrite(); unclear != nil {
+			unclearResult := withUnclearWriteStatus(&common.RelayResult{})
+			rpcss.appendHeadersToRelayResult(ctx, unclearResult, relayProcessor.ProtocolErrors(), relayProcessor, protocolMessage, protocolMessage.GetApi().GetName(), analytics, false)
+			return unclearResult, unclear
 		}
 
 		// A hung upstream: the request was dispatched and the processing budget ran out before any
@@ -1750,7 +1843,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	//
 	// Safe to hoist: writeOutcomeIsUnknown returns false unless this is a stateful relay with no
 	// successes, so a served write and every read are unaffected.
-	if unknownWrite() {
+	if unclear := unknownWrite(); unclear != nil {
 		if analytics != nil {
 			analytics.Success = false
 		}
@@ -1758,7 +1851,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 		// are replaced. The underlying error goes to relay_end's attempts rather than being
 		// concatenated into the reply — "failed relay, insufficient results" in front of "status
 		// unclear" would tell the customer both things at once.
-		return withUnclearWriteStatus(returnedResult), errUnknownWriteOutcome
+		return withUnclearWriteStatus(returnedResult), unclear
 	}
 	if err != nil {
 		returnedResult = rpcss.withNoAnswerTimeout(returnedResult, protocolMessage)
