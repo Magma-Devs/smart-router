@@ -354,6 +354,8 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			},
 		},
 		{
+			// node-a answered and node-b never did, so the reason is a node still silent, not that
+			// nobody responded (MAG-4380).
 			name:   "write_unknown",
 			fanOut: true,
 			nodes: func(t *testing.T) []relayEndNode {
@@ -361,10 +363,14 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			},
 			body:    relayEndWrite,
 			timeout: 1500 * time.Millisecond,
-			check:   func(t *testing.T, _ *common.RelayResult, err error) { require.ErrorIs(t, err, errUnknownWriteOutcome) },
+			check: func(t *testing.T, _ *common.RelayResult, err error) {
+				require.ErrorIs(t, err, errUnclearWriteNodeSilent)
+			},
 		},
 		{
-			// Nothing comes back at all: the router returns no result, and the client still gets 500.
+			// Nothing comes back at all: the router answers for itself, and the client still gets
+			// 500. That reply carries the request's headers, as a write some upstream answered does
+			// (MAG-3980): the GUID, and every upstream the write went to.
 			name:   "write_unknown_every_upstream_silent",
 			fanOut: true,
 			nodes: func(*testing.T) []relayEndNode {
@@ -374,7 +380,12 @@ func TestRelayEnd_ExitPaths(t *testing.T) {
 			timeout: 1500 * time.Millisecond,
 			check: func(t *testing.T, result *common.RelayResult, err error) {
 				require.ErrorIs(t, err, errUnknownWriteOutcome)
-				require.Nil(t, result)
+				require.NotNil(t, result, "the reply carries no headers")
+				require.Equal(t, http.StatusInternalServerError, result.StatusCode)
+				guid, _ := replyHeader(result.GetReply().GetMetadata(), common.GUID_HEADER_NAME)
+				require.Equal(t, strconv.FormatUint(relayEndCaseGUID("write_unknown_every_upstream_silent"), 10), guid)
+				providers, _ := replyHeader(result.GetReply().GetMetadata(), common.PROVIDER_ADDRESS_HEADER_NAME)
+				require.ElementsMatch(t, []string{"node-a", "node-b"}, strings.Split(providers, ","))
 			},
 		},
 		{

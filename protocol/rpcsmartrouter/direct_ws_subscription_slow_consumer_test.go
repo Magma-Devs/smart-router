@@ -131,18 +131,16 @@ func TestBurstyClientThatReadsIsNotDropped(t *testing.T) {
 	// subscription's other clients, of which this test has none, and a loaded machine can leave
 	// the reader goroutine unscheduled for longer than 10 ms, a stall the fan-out would rightly
 	// call a slow consumer. A second is far above any such stall and well inside the test's own
-	// 10 s deadline, so a fan-out that stops waiting still fails it. Registered before the
-	// manager's Close so that the restore runs after every fan-out has stopped.
-	restoreGrace := subscriptionClientSendGrace
-	subscriptionClientSendGrace = time.Second
-	t.Cleanup(func() { subscriptionClientSendGrace = restoreGrace })
-
+	// 10 s deadline, so a fan-out that stops waiting still fails it. Raised on this test's own
+	// manager before its first subscription starts a fan-out, never on a package variable: an
+	// earlier test's fan-out can still be running after its manager's Close returns.
 	srv := newMockSubscriptionServer()
 	srv.messageInterval = time.Hour // only the burst below
 	t.Cleanup(srv.Close)
 	counter := &droppedClientsCounter{}
 	manager := NewDirectWSSubscriptionManager(counter, "jsonrpc", "ETH", "jsonrpc",
 		[]*common.NodeUrl{{Url: srv.URL()}}, nil, nil, nil)
+	manager.clientSendGrace = time.Second
 	t.Cleanup(manager.Close)
 	h := &releaseHarness{t: t, srv: srv, manager: manager}
 

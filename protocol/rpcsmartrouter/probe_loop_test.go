@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
+	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/probing"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
@@ -307,4 +308,77 @@ func TestValidatedProbeCadence(t *testing.T) {
 	require.Equal(t, defaultProbeCadence, validatedProbeCadence(0), "zero falls back to default")
 	require.Equal(t, defaultProbeCadence, validatedProbeCadence(-time.Second), "negative falls back to default")
 	require.Equal(t, 7*time.Second, validatedProbeCadence(7*time.Second), "a positive cadence is honored")
+}
+
+// A rate-limit hold-off stops the url's poll on purpose, so its observation goes stale for that
+// reason alone. The probe read that as "not alive" and fed the provider availability 0 every cycle:
+// after one burst of 429s a healthy vendor's availability fell 1.0 → 0.845 in a minute with no
+// traffic, and below 0.80 it contributes nothing to selection (MAG-4387, part of MAG-4370). Busy is
+// not dead. A held-off endpoint whose observation is stale is left out of its provider's sample,
+// under either key the url is held off by, and a provider whose every endpoint is in that state
+// gets no sample this cycle. A fresh observation is judged as usual, held off or not.
+func TestProbeCycle_HeldOffEndpointIsNotScoredUnavailable(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	stale := endpointstate.EndpointObservation{LatestBlock: 1000, ObservedAt: now.Add(-60 * time.Second), LastSuccessfulPoll: now.Add(-60 * time.Second)}
+	fresh := freshObs(1000, now.Add(-time.Second), now.Add(-time.Second), 20*time.Millisecond)
+	ref := provideroptimizer.SyncReference{ConsensusConfigured: true, Block: 1000, Time: now, Fresh: true}
+
+	run := func(t *testing.T, holdOff func(reg *holdoff.Registry), obsByURL map[string]endpointstate.EndpointObservation, endpoints ...*lavasession.EndpointWithDirectConnection) []probeCall {
+		t.Helper()
+		reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
+		restore := relayHoldoff
+		relayHoldoff = reg
+		t.Cleanup(func() { relayHoldoff = restore })
+		holdOff(reg)
+		getObs := func(url string) (endpointstate.EndpointObservation, bool) {
+			obs, ok := obsByURL[url]
+			return obs, ok
+		}
+		rec := &recordingAppender{}
+		runProbeCycleCore(endpoints, getObs, 1000, true, ref, now, probeCfg(), rec, nil, nil)
+		return rec.calls
+	}
+
+	t.Run("held off on the relay path's key, stale: no sample", func(t *testing.T) {
+		calls := run(t, func(reg *holdoff.Registry) { reg.RecordRateLimit("provider1", "http://a:8545", 0) },
+			map[string]endpointstate.EndpointObservation{"http://a:8545": stale},
+			ep("http://a:8545", "provider1", true))
+		require.Empty(t, calls, "a provider whose every endpoint is held off and unobserved is not sampled")
+	})
+	t.Run("held off on the url-only key, stale: no sample", func(t *testing.T) {
+		// The chain tracker records its own 429s under the url alone.
+		calls := run(t, func(reg *holdoff.Registry) { reg.RecordRateLimit("http://a:8545", "http://a:8545", 0) },
+			map[string]endpointstate.EndpointObservation{"http://a:8545": stale},
+			ep("http://a:8545", "provider1", true))
+		require.Empty(t, calls)
+	})
+	t.Run("held off and never observed: no sample", func(t *testing.T) {
+		calls := run(t, func(reg *holdoff.Registry) { reg.RecordRateLimit("provider1", "http://a:8545", 0) },
+			map[string]endpointstate.EndpointObservation{},
+			ep("http://a:8545", "provider1", true))
+		require.Empty(t, calls)
+	})
+	t.Run("a held-off stale endpoint is left out, its healthy sibling still counts", func(t *testing.T) {
+		calls := run(t, func(reg *holdoff.Registry) { reg.RecordRateLimit("provider1", "http://a:8545", 0) },
+			map[string]endpointstate.EndpointObservation{"http://a:8545": stale, "http://b:8545": fresh},
+			ep("http://a:8545", "provider1", true), ep("http://b:8545", "provider1", true))
+		require.Len(t, calls, 1)
+		require.Equal(t, 1.0, calls[0].availability, "the held-off endpoint is neither healthy nor counted")
+		require.True(t, calls[0].hasLatency)
+		require.True(t, calls[0].hasSync)
+	})
+	t.Run("a held-off endpoint with a fresh observation is judged as usual", func(t *testing.T) {
+		calls := run(t, func(reg *holdoff.Registry) { reg.RecordRateLimit("provider1", "http://a:8545", 0) },
+			map[string]endpointstate.EndpointObservation{"http://a:8545": fresh},
+			ep("http://a:8545", "provider1", true))
+		require.Len(t, calls, 1)
+		require.Equal(t, 1.0, calls[0].availability)
+	})
+	t.Run("a stale endpoint that is not held off is still unavailable", func(t *testing.T) {
+		calls := run(t, func(reg *holdoff.Registry) { reg.RecordRateLimit("provider2", "http://b:8545", 0) },
+			map[string]endpointstate.EndpointObservation{"http://a:8545": stale},
+			ep("http://a:8545", "provider1", true))
+		require.Len(t, calls, 1)
+		require.Equal(t, 0.0, calls[0].availability, "only the hold-off excuses a stale observation")
+	})
 }

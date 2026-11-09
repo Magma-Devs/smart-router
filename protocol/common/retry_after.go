@@ -156,23 +156,23 @@ func RateLimitFromGRPC(code uint32, message string, md map[string][]string) (tim
 // grpc-retry-pushback-ms convention, or a retry-after header a fronting HTTP proxy left
 // in. Keys are matched lowercase — http.Header canonicalization does not apply to gRPC
 // metadata. Clamped to MaxRetryAfter like every other capture.
+//
+// A key can carry several values: the request path joins the reply's header block and its
+// trailer, header first (handleGRPCError). Each value is tried in order and the first usable one
+// wins, so a malformed or non-positive value in the header does not hide a valid one in the
+// trailer.
 func grpcRetryDelayFromMD(md map[string][]string) time.Duration {
-	first := func(key string) string {
-		if vs := md[key]; len(vs) > 0 {
-			return vs[0]
-		}
-		return ""
-	}
-	if raw := first("grpc-retry-pushback-ms"); raw != "" {
+	for _, raw := range md["grpc-retry-pushback-ms"] {
 		if ms, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && ms > 0 {
-			d := time.Duration(ms) * time.Millisecond
-			if d > MaxRetryAfter {
+			// Clamp before converting: past about 292 years in milliseconds the product
+			// overflows int64, and the wrapped value is negative or tiny, never the clamp.
+			if int64(ms) > MaxRetryAfter.Milliseconds() {
 				return MaxRetryAfter
 			}
-			return d
+			return time.Duration(ms) * time.Millisecond
 		}
 	}
-	if raw := first("retry-after"); raw != "" {
+	for _, raw := range md["retry-after"] {
 		h := http.Header{}
 		h.Set("Retry-After", raw)
 		if d, ok := ParseRetryAfter(h, time.Now()); ok {
