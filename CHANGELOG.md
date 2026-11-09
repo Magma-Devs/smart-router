@@ -8,6 +8,115 @@ Versions follow [Semantic Versioning](https://semver.org/). Commit hashes
 in `### Changes` link to the canonical commit on GitHub via reference-style
 links collected at the bottom of each section.
 
+## v1.6.8 — 2026-11-09
+
+### Highlights
+
+Integrators upgrading to version 1.6.8 must account for several breaking changes across connection limits, caching, GraphQL handling, and health reporting. First, operators routing traffic through external proxies like CDNs must configure the new `--websocket-trusted-proxies` flag with their proxy IP ranges, because `--limit-parallel-websocket-connections-per-ip` now counts strictly by client address rather than a combination of address, `X-Forwarded-For`, and `User-Agent`. Second, requests containing `lava-select-provider`, `lava-stickiness`, or `lava-providers-block` headers now bypass all cache tiers to guarantee node execution, eliminating the need to append `lava-force-cache-refresh`. Third, the router enforces stricter GraphQL validation, returning HTTP 400 with a GraphQL error document instead of HTTP 500 for requests exceeding depth or field limits, and refusing payloads with duplicate fields, mismatched casing, or mixed mutation and query operations. Fourth, provider verification backoffs now retry nodes offline for over 16 minutes every 15 minutes instead of 3—reducing the frequency of `retry: provider verification still failing` log lines—while `smartrouter health` now reports `PartialFail` for failing add-on checks, removes URLs on explicit `Fail` states, and exposes new `scope="none"` and `scope="service"` metric series. Beyond these breaking changes, this release introduces `GET /debug/verification` to expose state transitions alongside `GET /debug/relay-errors` for tracking node and protocol error counts, and refines upstream error handling by correctly parsing Solana JSON-RPC errors during chain tracking, classifying XRP "not found" errors for proper retries, and respecting rate-limit wait times requested via gRPC headers or trailers.
+
+### Changes
+
+#### ⚠ Breaking changes
+- fix(chainlib)!: answer a GraphQL request the router refuses by its own limit with a client error and a GraphQL error document (MAG-4577) ([#598]) [`2d99d4b`]
+  - a GraphQL request refused by the router's own limits (more than 256 levels of depth, more than 300 root fields, or more than 32 nested fragments) now gets HTTP 400 with a GraphQL error document instead of HTTP 500 with the error inside a JSON string.
+- feat!: say what a failed verification costs (Fail, PartialFail, Warning), and publish every failing check (MAG-3950) ([#580]) [`67eeeba`]
+  - `smartrouter health` reports `PartialFail` for add-on and archive checks that read `Fail`; a url naming an undefined add-on is admitted with the name in `refusedServices` instead of refused; an explicit `"Fail"` on an add-on check now takes the url out; both verification metrics gain `scope="none"` series and `scope="service"` series keyed by undefined add-on names.
+- feat!: retry each failing verification on its own backoff, log its transitions, serve GET /debug/verification (MAG-3950) ([#582]) [`2ab221f`]
+  - a provider out for ~16 min or more is retried every 15 min (+jitter) instead of every 3 min; the url grace's second strike comes ~30s after the first instead of at the next epoch, so a blip that outlasts the retry delay demotes the provider; Loki rules counting `retry: provider verification still failing` lines see about one line per 15 min.
+- fix(chainlib)!: count the websocket connection limit per client address, read through trusted proxies (MAG-3083) ([#665]) [`104aead`]
+  - --limit-parallel-websocket-connections-per-ip counts connections per client address instead of per address, X-Forwarded-For and User-Agent. Behind a proxy whose address is not loopback or private, such as a CDN, add its ranges to the new --websocket-trusted-proxies flag, or every client behind it shares one allowance.
+- fix(chainlib)!: refuse a GraphQL request whose wrapper the router and the node would read differently (MAG-4908) ([#655]) [`46f4f4b`]
+  - a GraphQL request body that repeats `query`, `operationName`, `variables` or `extensions`, or spells one of them in a different letter case, is refused by the router with HTTP 400 instead of being relayed to a node. A GraphQL document that holds a mutation beside a query or a subscription is refused with HTTP 400 instead of running the operation operationName names.
+- fix(cache)!: never answer a pinned, sticky or node-excluding request from the cache (MAG-3520, MAG-3864) ([#663]) [`b9b4af3`]
+  - a request carrying lava-select-provider, lava-stickiness or lava-providers-block is no longer answered from the cache, by either tier; it always reaches a node, and the node's answer is still cached for other requests. Sending lava-force-cache-refresh next to a pin is no longer needed for this.
+
+#### Dependency updates
+- fix(deps): bump github.com/andybalholm/brotli from 1.1.0 to 1.2.8 (GO-2026-6888) ([#657]) [`1e25c1d`]
+
+#### New Features
+- feat!: say what a failed verification costs (Fail, PartialFail, Warning), and publish every failing check (MAG-3950) ([#580]) [`67eeeba`]
+- feat!: retry each failing verification on its own backoff, log its transitions, serve GET /debug/verification (MAG-3950) ([#582]) [`2ab221f`]
+- feat(debug): GET /debug/relay-errors reports node-error and protocol-error counts (MAG-4718) ([#626]) [`e709626`]
+
+#### Bug fixes
+- fix(chainlib)!: answer a GraphQL request the router refuses by its own limit with a client error and a GraphQL error document (MAG-4577) ([#598]) [`2d99d4b`]
+- fix(chaintracker): count a Solana latest-block poll answered with a JSON-RPC error as a failed poll (MAG-4613) ([#579]) [`c19b414`]
+- fix(provideroptimizer): log one debug record per pick, whatever the number of candidates (MAG-3152) ([#674]) [`7c4f843`]
+- fix(chainlib): keep the catch-all node url when two urls share a method list (MAG-3081) ([#673]) [`8116cca`]
+- fix(rpcsmartrouter): answer a refused JSON-RPC 429 without lava-identified-node-error (MAG-3030) ([#679]) [`52a648e`]
+- fix(rpcsmartrouter): never cache node-local Bitcoin-family or walletd reads (MAG-4207, MAG-4793) ([#672]) [`57dd388`]
+- fix(chainlib,common): an XRP error inside result is a node error on every method (MAG-4817) ([#649]) [`d1ad560`]
+- fix(common): retry every XRP "not found" and classify the rest of rippled's errors (MAG-4817) ([#649]) [`3603080`]
+- fix(common): keep a node that does not serve pending state switched on, and ask a peer (MAG-5021) ([#667]) [`22e12a1`]
+- fix(rpcsmartrouter): send the lava-* headers when a request's budget runs out unanswered (MAG-3980) ([#671]) [`6afab23`]
+- fix(chainlib): send the request headers a spec declares on JSON-RPC and Tendermint, as on REST and gRPC (MAG-3079) ([#662]) [`c793ca7`]
+- fix(chaintracker): resume polling when a hold-off clears and don't probe-score a held-off endpoint (MAG-4387) ([#537]) [`628e1e5`]
+- fix(grpc): a DEADLINE_EXCEEDED the node sends at the router's deadline is the router's timeout, not the node's answer (MAG-4925) ([#656]) [`efc90a5`]
+- fix(rpcsmartrouter): say why a write's outcome is unclear (MAG-4380) ([#546]) [`e90f7e3`]
+- fix(grpc): hold a rate-limited gRPC endpoint off for the wait it asked for, header or trailer (MAG-4914, MAG-4915) ([#678]) [`0e8b9bc`]
+- fix(chainlib)!: count the websocket connection limit per client address, read through trusted proxies (MAG-3083) ([#665]) [`104aead`]
+- fix(cache): never cache a null for a block at or below the router's tip (MAG-4124) ([#668]) [`5b9f81e`]
+- fix(lavasession): release only a pinned request's own provider, and only a live one (MAG-4731) ([#670]) [`4b1cc3c`]
+- fix(chainlib)!: refuse a GraphQL request whose wrapper the router and the node would read differently (MAG-4908) ([#655]) [`46f4f4b`]
+- fix(chainstate): let a single-endpoint tip follow its endpoint through a block storm (MAG-4964) ([#669]) [`9ec894f`]
+- fix(rpcsmartrouter): tell the caller when an archive request degrades to a non-archive node (MAG-4729) ([#675]) [`cc118a2`]
+- fix(version): report the toolchain's VCS revision when -ldflags left no commit (MAG-3298) ([#658]) [`f6f3214`]
+- fix(cache)!: never answer a pinned, sticky or node-excluding request from the cache (MAG-3520, MAG-3864) ([#663]) [`b9b4af3`]
+
+[#537]: https://github.com/magma-Devs/smart-router/pull/537
+[#546]: https://github.com/magma-Devs/smart-router/pull/546
+[#579]: https://github.com/magma-Devs/smart-router/pull/579
+[#580]: https://github.com/magma-Devs/smart-router/pull/580
+[#582]: https://github.com/magma-Devs/smart-router/pull/582
+[#598]: https://github.com/magma-Devs/smart-router/pull/598
+[#626]: https://github.com/magma-Devs/smart-router/pull/626
+[#649]: https://github.com/magma-Devs/smart-router/pull/649
+[#655]: https://github.com/magma-Devs/smart-router/pull/655
+[#656]: https://github.com/magma-Devs/smart-router/pull/656
+[#657]: https://github.com/magma-Devs/smart-router/pull/657
+[#658]: https://github.com/magma-Devs/smart-router/pull/658
+[#662]: https://github.com/magma-Devs/smart-router/pull/662
+[#663]: https://github.com/magma-Devs/smart-router/pull/663
+[#665]: https://github.com/magma-Devs/smart-router/pull/665
+[#667]: https://github.com/magma-Devs/smart-router/pull/667
+[#668]: https://github.com/magma-Devs/smart-router/pull/668
+[#669]: https://github.com/magma-Devs/smart-router/pull/669
+[#670]: https://github.com/magma-Devs/smart-router/pull/670
+[#671]: https://github.com/magma-Devs/smart-router/pull/671
+[#672]: https://github.com/magma-Devs/smart-router/pull/672
+[#673]: https://github.com/magma-Devs/smart-router/pull/673
+[#674]: https://github.com/magma-Devs/smart-router/pull/674
+[#675]: https://github.com/magma-Devs/smart-router/pull/675
+[#678]: https://github.com/magma-Devs/smart-router/pull/678
+[#679]: https://github.com/magma-Devs/smart-router/pull/679
+[`0e8b9bc`]: https://github.com/magma-Devs/smart-router/commit/0e8b9bc1e052015f2e7c91523f29cdb67de2dede
+[`104aead`]: https://github.com/magma-Devs/smart-router/commit/104aead91742622d3b31bc07257b20db6b6477dd
+[`1e25c1d`]: https://github.com/magma-Devs/smart-router/commit/1e25c1d37e786d01e00dc587fd3a46e4614c6465
+[`22e12a1`]: https://github.com/magma-Devs/smart-router/commit/22e12a169c993fa6a3ae9c9073796b04d1bf8c40
+[`2ab221f`]: https://github.com/magma-Devs/smart-router/commit/2ab221fed2eaeef560739525a8156299f1c183e6
+[`2d99d4b`]: https://github.com/magma-Devs/smart-router/commit/2d99d4b7f4781193c2453a50ced99c6258dc5519
+[`3603080`]: https://github.com/magma-Devs/smart-router/commit/36030802d8f108e92b33ead8de971f259378b2a3
+[`46f4f4b`]: https://github.com/magma-Devs/smart-router/commit/46f4f4b30275efcef94f2e219b5070248b39b5ad
+[`4b1cc3c`]: https://github.com/magma-Devs/smart-router/commit/4b1cc3c17d7a5da4b768aafe3ecdb25b85b8ecbd
+[`52a648e`]: https://github.com/magma-Devs/smart-router/commit/52a648e732fe26d460d7057d8073dcd06a69cb25
+[`57dd388`]: https://github.com/magma-Devs/smart-router/commit/57dd388cbc273bb486d10f622450c80c3809906d
+[`5b9f81e`]: https://github.com/magma-Devs/smart-router/commit/5b9f81eabda8310b04457bd8462adfc8c1c82775
+[`628e1e5`]: https://github.com/magma-Devs/smart-router/commit/628e1e51af28a3fa6222c4fc2f2c5ea98a719be3
+[`67eeeba`]: https://github.com/magma-Devs/smart-router/commit/67eeebad84b584d10b2d48fc47ba55283946411a
+[`6afab23`]: https://github.com/magma-Devs/smart-router/commit/6afab23000f39b0495602a6b5882999d16513132
+[`7c4f843`]: https://github.com/magma-Devs/smart-router/commit/7c4f843661119bfcc679439eafa0a857b1fcbb4a
+[`8116cca`]: https://github.com/magma-Devs/smart-router/commit/8116cca1969f98addeeefbfab5243e8e930cf60d
+[`9ec894f`]: https://github.com/magma-Devs/smart-router/commit/9ec894fb61f9d7767bca97934798f24b6e4d556f
+[`b9b4af3`]: https://github.com/magma-Devs/smart-router/commit/b9b4af32bf063b2505e3ff63a2acb006762def97
+[`c19b414`]: https://github.com/magma-Devs/smart-router/commit/c19b414991cf64f33b23ba770c5f337a9943c00b
+[`c793ca7`]: https://github.com/magma-Devs/smart-router/commit/c793ca7368e235caf772f977fa922bff4944de33
+[`cc118a2`]: https://github.com/magma-Devs/smart-router/commit/cc118a24479b3746bce496ba1f3ceeaf94403789
+[`d1ad560`]: https://github.com/magma-Devs/smart-router/commit/d1ad56034eb2d44827272c86e4262c5651e25fea
+[`e709626`]: https://github.com/magma-Devs/smart-router/commit/e7096265305b006d6162826d9d37499c9a4696ba
+[`e90f7e3`]: https://github.com/magma-Devs/smart-router/commit/e90f7e30a24ba0ece90a8dc222f5c108e0adb788
+[`efc90a5`]: https://github.com/magma-Devs/smart-router/commit/efc90a5f0c93ac17557b6e9b2f471795393972f7
+[`f6f3214`]: https://github.com/magma-Devs/smart-router/commit/f6f321400ef050c8119e455a89e82e9d6f4ef8c0
+
 ## v1.6.7 — 2026-11-08
 
 ### Highlights
