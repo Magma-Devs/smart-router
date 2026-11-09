@@ -66,8 +66,9 @@ another registry, and tests use `NewRegistry` or the jitter-free `NewRegistryWit
   a WebSocket handshake, a gRPC RESOURCE_EXHAUSTED) is answered with a plain 429.
 - **What counts as a 429.** An HTTP 429 status on any transport, a WebSocket upgrade the
   upstream rejected with 429, a gRPC status whose text names a rate limit (or
-  RESOURCE_EXHAUSTED with a retry delay, read from the reply's header or trailer metadata:
-  a status-only reply has no header block), and a JSON-RPC error body with code 429 or a
+  RESOURCE_EXHAUSTED with a retry delay: on the request path read from the reply's header or
+  trailer metadata, since a status-only reply has no header block; on a streaming
+  subscription from the stream's trailer only), and a JSON-RPC error body with code 429 or a
   "too many requests" / "rate limit" message — the shape a gateway answers with on an open
   WebSocket connection or inside a 200, where no status reaches the transport layer
   (`common/error_classifier.go`, JSON-RPC table). On GraphQL, an error coded
