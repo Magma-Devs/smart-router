@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -463,6 +464,62 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 	case <-loserCancelled:
 	case <-ctx.Done():
 		t.Fatal("the router never cancelled the losing attempt")
+	}
+}
+
+// MAG-3778: every upstream is slower than the attempt window, so the ticker hedges while the first
+// attempt is still running, and the first attempt answers before the hedge can. The hedge is cut
+// off with no result, and the reply still counts it: Lava-Retries counts every attempt the router
+// sent (MAG-1818), not the attempts that came back, so it reports one retry and names the hedge
+// before the upstream that answered.
+func TestJsonRpcListener_FirstAttemptBeatingItsHedgeCountsTheHedge(t *testing.T) {
+	rand.InitRandomSeed()
+	// Twice the window: the hedge goes out one window in, while the first attempt is still running,
+	// and the first attempt answers a whole window before the hedge could.
+	latency := 2 * failedReplyRelayTimeout
+	var arrivals atomic.Int32
+	hedgeCut := make(chan struct{})
+	markHedgeCut := sync.OnceFunc(func() { close(hedgeCut) })
+	slowUpstream := func(blockNumber string) string {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			arrivals.Add(1)
+			// Read to the end first: only then does the server watch the connection, and see the
+			// router hang up.
+			_, _ = io.Copy(io.Discard, r.Body)
+			select {
+			case <-time.After(latency):
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":77,"result":"` + blockNumber + `"}`))
+			case <-r.Context().Done():
+				markHedgeCut()
+			}
+		}))
+		t.Cleanup(upstream.Close)
+		return upstream.URL
+	}
+
+	jsonRPC := failedReplyInterfaces()[0]
+	require.Equal(t, "jsonrpc", jsonRPC.name)
+	read := startFailedReplyRouter(t, jsonRPC, slowUpstream("0x1"), slowUpstream("0x2"))()
+
+	require.Equal(t, http.StatusOK, read.status, read.body)
+	require.EqualValues(t, 2, arrivals.Load(), "setup: the ticker must have hedged to the other upstream")
+	require.Equal(t, "true", read.header.Get(common.LAVA_HEDGE_TRIGGERED_HEADER))
+	// Either upstream may be asked first; the body says which one answered.
+	winner, hedge := "upstream-1", "upstream-2"
+	if strings.Contains(read.body, `"0x2"`) {
+		winner, hedge = hedge, winner
+	}
+	require.Equal(t, "1", read.header.Get(common.RETRY_COUNT_HEADER_NAME),
+		"two attempts went out, and the one that lost was still running when the reply was built")
+	require.Equal(t, hedge+","+winner, read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME),
+		"the hedge is named, before the upstream that answered")
+
+	// The router cut the hedge off rather than the hedge answering: it had a window left to run.
+	select {
+	case <-hedgeCut:
+	case <-time.After(latency):
+		t.Fatal("the router never cancelled the hedge")
 	}
 }
 

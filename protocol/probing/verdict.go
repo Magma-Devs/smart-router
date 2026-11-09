@@ -89,6 +89,7 @@ func RenderEndpointVerdict(obs endpointstate.EndpointObservation, baseline int64
 	pollSucceededLast := obs.ConsecutivePollFailures == 0 && !obs.LastSuccessfulPoll.IsZero()
 	return EndpointVerdict{
 		Healthy: alive && keepingUp,
+		Alive:   alive,
 		Latency: obs.LastPollLatency, // 0 = unknown
 		Block:   block,
 		Recovery: RecoveryEvidence{
