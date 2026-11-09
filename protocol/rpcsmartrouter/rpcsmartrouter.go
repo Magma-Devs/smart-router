@@ -3486,7 +3486,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			}
 
 			rpcSmartRouter := RPCSmartRouter{}
-			utils.LavaFormatInfo("smart-router Binary Version: " + version.Version)
+			utils.LavaFormatInfo("smart-router Binary Version: " + version.Version + " commit " + version.Commit)
 			rand.InitRandomSeed()
 
 			// Backend selection (viper, not cmd.Flags, so every knob can also

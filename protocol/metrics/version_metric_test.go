@@ -10,8 +10,9 @@ import (
 // TestSetVersionInner pins the version-string normalizer's behavior. The
 // release pipeline injects strings shaped like `git describe` output
 // (v6.2.2, v6.2.2-3-gabc1234, v6.2.2-3-gabc1234-dirty), and dev builds
-// carry the default "dev". The metric must parse all of these without
-// silently zeroing the gauge for normal release builds.
+// carry the default "dev", or the Go toolchain's pseudo-version when they
+// were built from a git checkout without -ldflags. The metric must parse all
+// of these without silently zeroing the gauge for normal release builds.
 func TestSetVersionInner(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -26,6 +27,13 @@ func TestSetVersionInner(t *testing.T) {
 		{"build metadata", "v6.2.2+build.123", 6002002},
 		{"large numbers", "v123.456.789", 123_456_789},
 		{"zero version", "v0.0.0", 0},
+
+		// The toolchain's pseudo-version names the release after the tag the
+		// commit follows; the gauge reports that tag, as git describe does.
+		{"go pseudo-version past tag", "v1.6.8-0.20261108131709-22176166ebdc", 1006007},
+		{"go pseudo-version dirty", "v1.6.8-0.20261108131709-22176166ebdc+dirty", 1006007},
+		{"go pseudo-version past prerelease tag", "v1.7.0-rc.1.0.20261108131709-22176166ebdc", 1007000},
+		{"go pseudo-version with no tag", "v0.0.0-20261108131709-22176166ebdc", 0},
 
 		// Inputs that should fail to parse — gauge set to 0, error logged.
 		{"default dev string", "dev", 0},

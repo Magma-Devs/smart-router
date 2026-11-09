@@ -496,6 +496,17 @@ Customers should pin to `:vX.Y.Z`. `:latest` is for non-production "just give me
 
 The version string is injected at build time from the git tag — `smartrouter version` prints the tag verbatim, including the `v` prefix. Builds from non-tagged commits carry `git describe` output (e.g. `v1.2.0-3-gabc1234`), so a dev binary cannot masquerade as a release.
 
+#### Identifying a build
+
+`smartrouter version` prints two lines: the version, then `commit <sha>`. The router also logs both at startup (`smart-router Binary Version: ... commit ...`), so `kubectl logs` on a running pod names the build it is serving.
+
+- A **release or CI build** carries the version and commit the `-ldflags -X` flags stamped in.
+- A **plain `go build ./cmd/smartrouter` from a git checkout** carries no stamp, but the Go toolchain still records the checkout's revision in the binary. The router reads that record and reports it: the commit is the checkout's HEAD, the version is the toolchain-derived pseudo-version, `+dirty` when the tree had uncommitted changes. Read a pseudo-version as "after the nearest tag": `v1.6.8-0.20261108131709-22176166ebdc` is commit `22176166` somewhere after `v1.6.7`, not a 1.6.8 build.
+- A build with **neither** (`-buildvcs=false`, or a source tree without `.git`, such as a Docker build context) reports `dev` / `commit none`. Nothing in such a binary says which commit it is; the only fix is to pass the `-X` flags at build time.
+- A plain `go build` from a **`git worktree`** gets the record wrong or not at all. A worktree's `.git` is a file, and the toolchain only takes a `.git` directory for a checkout. Outside any other checkout, the binary gets no record and reports `dev` / `commit none`. Inside another checkout, such as `.claude/worktrees/<name>`, it gets the enclosing checkout's record and reports that checkout's commit, not the one it was built from. In a worktree, build with `make build`, which stamps the worktree's own commit with `-X`.
+
+`go version -m <binary>` prints the same toolchain record (`vcs.revision`, `vcs.time`, `vcs.modified`) without running the binary. Searching the file for a bare 40-hex commit (`strings <binary> | grep -E '^[0-9a-f]{40}$'`) only finds an `-ldflags`-stamped commit, because the toolchain record stores the revision as `vcs.revision=<sha>`, not on a line of its own.
+
 #### Pulling the image
 
 Smart Router Docker images are published to GHCR:
