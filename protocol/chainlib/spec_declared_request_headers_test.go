@@ -154,3 +154,41 @@ func TestJsonRPCCacheKeyFollowsTheSpecDeclaredHeaders(t *testing.T) {
 		require.Equal(t, cacheKey(t, nil), cacheKey(t, headers))
 	})
 }
+
+// TestHeadersStayNilWithoutADeclaredHeader holds every JSON-RPC and Tendermint request shape to
+// the nil guard above, not the JSON-RPC single request alone: with no declared header, the
+// message sent carries a nil header list, as before MAG-3079, so its cache key does not move.
+// Tendermint builds its element headers itself and a batch builds its own, so each shape can
+// lose the guard on its own.
+func TestHeadersStayNilWithoutADeclaredHeader(t *testing.T) {
+	const (
+		ethBlockNumber = `{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`
+		ethChainID     = `{"jsonrpc":"2.0","id":2,"method":"eth_chainId","params":[]}`
+		tmStatus       = `{"jsonrpc":"2.0","id":1,"method":"status","params":[]}`
+		tmAbciInfo     = `{"jsonrpc":"2.0","id":2,"method":"abci_info","params":[]}`
+	)
+	cases := []struct {
+		name           string
+		specIndex      string
+		apiInterface   string
+		url            string
+		connectionType string
+		body           string
+	}{
+		{name: "jsonrpc", specIndex: "ETH1", apiInterface: spectypes.APIInterfaceJsonRPC, connectionType: http.MethodPost, body: ethBlockNumber},
+		{name: "jsonrpc batch", specIndex: "ETH1", apiInterface: spectypes.APIInterfaceJsonRPC, connectionType: http.MethodPost, body: "[" + ethBlockNumber + "," + ethChainID + "]"},
+		{name: "tendermintrpc", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, body: tmStatus},
+		{name: "tendermintrpc uri", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, url: "status?"},
+		{name: "tendermintrpc batch", specIndex: "LAVA", apiInterface: spectypes.APIInterfaceTendermintRPC, body: "[" + tmStatus + "," + tmAbciInfo + "]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, tc.specIndex)
+			require.NoError(t, err)
+			chainParser := parserForSpec(t, tc.apiInterface, spec)
+			chainMessage, err := chainParser.ParseMsg(tc.url, []byte(tc.body), tc.connectionType, []pairingtypes.Metadata{{Name: undeclaredHeader, Value: "from-caller"}}, extensionslib.ExtensionInfo{LatestBlock: 0})
+			require.NoError(t, err)
+			require.Nil(t, chainMessage.GetRPCMessage().GetHeaders(), "an empty header list must stay nil")
+		})
+	}
+}
