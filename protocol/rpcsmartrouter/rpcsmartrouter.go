@@ -425,7 +425,8 @@ func (rpsr *RPCSmartRouter) Start(ctx context.Context, options *rpcSmartRouterSt
 			// the cache-server cobra command and never on the router's, so
 			// viper.GetDuration returns zero on every deployment; each backend reports
 			// the policy it is actually applying instead.
-			secondaryCache: options.secondaryCache,
+			secondaryCache:     options.secondaryCache,
+			relayCacheDisabled: options.cmdFlags.DisableRelayCache,
 		})
 		srv := &http.Server{Addr: options.cmdFlags.DebugAddress, Handler: debugMux}
 		// Watcher goroutine: shuts the server down gracefully when ctx is cancelled
@@ -535,6 +536,9 @@ type debugMuxDeps struct {
 	// /debug/reset-all would flush a live cache while /debug/cache-state reported
 	// no cache configured — two endpoints on one router contradicting each other.
 	secondaryCache performance.CacheReader
+	// relayCacheDisabled mirrors --disable-relay-cache for /debug/cache-state: a configured,
+	// reachable tier that no relay is read from or written to must not read as a working cache.
+	relayCacheDisabled bool
 }
 
 // debugPollNowTimeout caps how long POST /debug/poll-now waits per request (MAG-2649). A single
@@ -1036,6 +1040,10 @@ type debugCacheStateResponse struct {
 	// rather than average it away.
 	Engine string          `json:"engine"`
 	Tiers  debugCacheTiers `json:"tiers"`
+	// RelayCacheDisabled is --disable-relay-cache. When true no relay reply is read from a tier
+	// or written to one, whatever the tiers below report: the primary is then configured and
+	// reachable for shared state alone.
+	RelayCacheDisabled bool `json:"relay_cache_disabled"`
 }
 
 type debugCacheTiers struct {
@@ -1098,9 +1106,10 @@ func buildCacheStateResponse(deps debugMuxDeps) debugCacheStateResponse {
 		engine = secondary.Engine
 	}
 	return debugCacheStateResponse{
-		SchemaVersion: 1,
-		Engine:        engine,
-		Tiers:         debugCacheTiers{Primary: primary, Secondary: secondary},
+		SchemaVersion:      1,
+		Engine:             engine,
+		Tiers:              debugCacheTiers{Primary: primary, Secondary: secondary},
+		RelayCacheDisabled: deps.relayCacheDisabled,
 	}
 }
 
@@ -3513,6 +3522,11 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			for _, warning := range secondaryWarnings {
 				utils.LavaFormatWarning(warning, nil)
 			}
+			relayCacheMode := relayCacheModeFrom(viper.GetBool(common.DisableRelayCacheFlag), primaryForSecondary.Address != "", secondaryCacheConfig.Enabled(), viper.GetBool(common.SharedStateFlag))
+			if relayCacheErr := relayCacheMode.validate(); relayCacheErr != nil {
+				return utils.LavaFormatError("invalid cache configuration", relayCacheErr)
+			}
+			relayCacheMode.logStartup()
 			var secondaryCacheReader performance.CacheReader
 			if secondaryCacheConfig.Enabled() {
 				if secondaryRespEnabled {
@@ -3641,6 +3655,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 				ResponseCompression:               viper.GetString(common.ResponseCompressionFlag),
 				ShutdownGracePeriod:               viper.GetDuration(common.ShutdownGracePeriodFlag),
 				ReadYourWritesWindow:              viper.GetDuration(common.ReadYourWritesWindowFlag),
+				DisableRelayCache:                 viper.GetBool(common.DisableRelayCacheFlag),
 			}
 
 			rpcSmartRouterSharedState := viper.GetBool(common.SharedStateFlag)
@@ -3786,6 +3801,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(common.CorsMethodsFlag, "GET,POST,PUT,DELETE,OPTIONS", "set up Allowed OPTIONS methods, defaults to: \"GET,POST,PUT,DELETE,OPTIONS\"")
 	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Lava-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
 	cmdRPCSmartRouter.Flags().String(common.CDNCacheDurationFlag, "86400", "set up preflight options response cache duration, default 86400 (24h in seconds)")
+	cmdRPCSmartRouter.Flags().Bool(common.DisableRelayCacheFlag, false, "Keep relay replies out of the cache backend: none is read from it and none is written to it. With --shared-state the backend (cache-be or resp-cache) then carries shared state only: the sticky-session claims and the per-endpoint chain-tracker poll observations, through which a block a peer polled also reaches this replica's chain tip. The seen-block exchange that rides on each relay's cache calls is not made. Refused together with a secondary cache, which only serves cached replies")
 	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache): the consumer consistency seen-block travels through either. The per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod) additionally require --cache-be — the RESP backend does not carry them, so a RESP-backed router polls locally and logs a warning (docs/RESP-CACHE.md). Cross-pod sticky sessions (a lava-stickiness id resolving to the same upstream on every replica) travel through either backend; without this flag stickiness stays pod-local")
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check; when false, /readyz and /metrics/overall-health report 503 unconditionally, so keep it on under a readiness probe")

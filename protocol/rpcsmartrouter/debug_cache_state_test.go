@@ -290,6 +290,7 @@ func TestCacheStateWireContract(t *testing.T) {
 		`"schema_version"`, `"engine"`, `"tiers"`, `"primary"`, `"secondary"`,
 		`"configured"`, `"address"`, `"reachable"`, `"reachable_checked_at"`,
 		`"reachable_detail"`, `"when_unreachable"`, `"lifetimes"`, `"breaker"`,
+		`"relay_cache_disabled"`,
 	} {
 		require.Contains(t, body, key, "wire key must be present")
 	}
