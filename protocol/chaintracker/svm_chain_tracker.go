@@ -72,12 +72,19 @@ type SVMLatestBlockResponse struct {
 			BlockHash string `json:"blockhash"`
 		} `json:"value"`
 	} `json:"result"`
+	// Error is the JSON-RPC error a node answers with instead of a result, e.g. -32005
+	// "Node is behind by 42 slots".
+	Error *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 // fetchLatestBlockNumInner performs the SVM latest-block poll and returns the parsed
 // slot, the transport round-trip latency of the CustomMessage call (measured around the
 // network request only, excluding JSON unmarshalling and cache writes), and any error.
-// On any error path the returned slot is 0 so callers can treat it as a failed poll.
+// A reply that carries a JSON-RPC error, or no slot, is an error. On any error path the
+// returned slot is 0 so callers can treat it as a failed poll.
 func (cs *SVMChainTracker) fetchLatestBlockNumInner(ctx context.Context) (int64, time.Duration, error) {
 	reqStart := time.Now()
 	latestBlockResponse, err := cs.chainFetcher.CustomMessage(ctx, "", []byte(latestBlockRequest), "POST", "getLatestBlockhash")
@@ -90,11 +97,21 @@ func (cs *SVMChainTracker) fetchLatestBlockNumInner(ctx context.Context) (int64,
 	if err := json.Unmarshal(latestBlockResponse, &response); err != nil {
 		return 0, transportLatency, fmt.Errorf("failed to unmarshal response: %v", err)
 	}
+	// The transport hands an error answer over as a reply (usually HTTP 200), and
+	// CustomMessage turns only a rate limit into an error. Without these checks the reply
+	// unmarshals to slot 0 and the tracker takes it as a successful poll: no fetch error and
+	// no backoff (MAG-4613).
+	if response.Error != nil {
+		return 0, transportLatency, fmt.Errorf("node answered getLatestBlockhash with error %d: %s", response.Error.Code, response.Error.Message)
+	}
 
 	// Solana uses slot (not block height) as the canonical chain-position primitive.
 	// Provider spec parsing also reads context.slot, so the tracker's "seen" value
 	// must track slot to keep consistency validation apples-to-apples.
 	slot := response.Result.Context.Slot
+	if slot <= 0 {
+		return 0, transportLatency, fmt.Errorf("node answered getLatestBlockhash with no slot")
+	}
 	blockHash := response.Result.Value.BlockHash
 
 	atomic.StoreInt64(&cs.seenBlock, slot)

@@ -647,8 +647,9 @@ func TestGracefulFailure_DuplicateNameCollision(t *testing.T) {
 	require.Equal(t, "http://healthy:8080", healthy[0].NodeUrls[0].Url)
 }
 
-// Scenario 13/14/15: Retry goroutine self-terminates when failedStaticProviders is empty.
-func TestGracefulFailure_RetryGoroutineSelfTerminates(t *testing.T) {
+// Scenario 13/14/15: with nothing failing, the retry loop builds no session and exits
+// cleanly with its context.
+func TestGracefulFailure_RetryLoopIdlesAndExitsOnCancel(t *testing.T) {
 	rand.InitRandomSeed()
 	rpsr := createTestRPCSmartRouter()
 
@@ -660,8 +661,7 @@ func TestGracefulFailure_RetryGoroutineSelfTerminates(t *testing.T) {
 		0: createTestProviderSession("providerA", 1),
 	}
 
-	// Start with NO failed providers — retry should exit immediately on first tick
-	// (simulates the case where all providers recovered before the tick)
+	// Start with NO failed providers (all recovered before the first retry).
 	rpsr.failedStaticProviders[chainKey] = []*lavasession.RPCStaticProviderEndpoint{}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -675,22 +675,18 @@ func TestGracefulFailure_RetryGoroutineSelfTerminates(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		rpsr.retryFailedProviders(ctx, chainKey, nil, rpcEndpoint, convertFn)
+		rpsr.runVerificationRetries(ctx, chainKey, nil, rpcEndpoint, convertFn)
 		close(done)
 	}()
 
-	// The goroutine should exit within one ticker interval (3 minutes).
-	// We can't wait 3 minutes in a test, so cancel context to force exit if it doesn't self-terminate.
+	// The loop runs for the life of the chain (MAG-3950); cancelling its context is
+	// what stops it.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
 	select {
 	case <-done:
-		// Goroutine self-terminated — test passes
 	case <-time.After(5 * time.Second):
-		// In the real code, the ticker is 3 minutes. The goroutine won't self-terminate
-		// in 5 seconds because it waits for the ticker. Cancel context to verify clean exit.
-		cancel()
-		<-done
-		// This is expected — the goroutine waits for the ticker before checking.
-		// The important thing is it exited cleanly after context cancellation.
+		t.Fatal("the retry loop must exit cleanly when its context is cancelled")
 	}
 }
 

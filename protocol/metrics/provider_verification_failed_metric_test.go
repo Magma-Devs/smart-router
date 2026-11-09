@@ -145,3 +145,38 @@ func TestSetProviderVerificationFailures_SeverityFollowsWhatTheFailureCosts(t *t
 		require.Equal(t, started, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues(append([]string{"ETH1", "jsonrpc", "lava", "static"}, labels...)...)), labels)
 	}
 }
+
+// A failing Warning check is published as scope=none, severity Warning. Warning checks
+// fail independently of each other, so a new one starts its own clock (MAG-3950).
+func TestSetProviderVerificationFailures_EachWarningStartsItsOwnClock(t *testing.T) {
+	m, clock := newVerificationFailedManager()
+	tokens := ProviderVerificationFailure{Scope: VerificationScopeNone, Check: "tokens-owner-indexed", Severity: VerificationSeverityWarning}
+	tokensAt := clock.advance(0)
+	m.SetProviderVerificationFailures("SOLANA", "jsonrpc", "lava", "static", []ProviderVerificationFailure{tokens})
+
+	txs := ProviderVerificationFailure{Scope: VerificationScopeNone, Check: "tx-history", Severity: VerificationSeverityWarning}
+	txsAt := clock.advance(time.Hour)
+	m.SetProviderVerificationFailures("SOLANA", "jsonrpc", "lava", "static", []ProviderVerificationFailure{tokens, txs})
+	require.Equal(t, tokensAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("SOLANA", "jsonrpc", "lava", "static", "none", "", "tokens-owner-indexed", "Warning")))
+	require.Equal(t, txsAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("SOLANA", "jsonrpc", "lava", "static", "none", "", "tx-history", "Warning")))
+
+	// The first clears and the second moves on: it is not the first one's failure.
+	clock.advance(time.Hour)
+	m.SetProviderVerificationFailures("SOLANA", "jsonrpc", "lava", "static", []ProviderVerificationFailure{txs})
+	require.Equal(t, 1, testutil.CollectAndCount(m.providerVerificationFailed))
+	require.Equal(t, txsAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("SOLANA", "jsonrpc", "lava", "static", "none", "", "tx-history", "Warning")))
+}
+
+// A caller that tracks its failures' starts (VerificationFailuresSince) publishes them as
+// they are, and a failure it no longer lists is removed (MAG-3950).
+func TestSetProviderVerificationFailuresSince_PublishesTheGivenStart(t *testing.T) {
+	m, clock := newVerificationFailedManager()
+	started := clock.now.Add(-time.Hour)
+	tracked := VerificationFailuresSince(nil, []ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "chain-id"}}, started)
+	m.SetProviderVerificationFailuresSince("XRP", "jsonrpc", "blockdaemon", "backup", tracked)
+	require.Equal(t, float64(started.Unix()), testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("XRP", "jsonrpc", "blockdaemon", "backup", "provider", "", "chain-id", "Fail")),
+		"the start the caller tracked, not the time it published")
+
+	m.SetProviderVerificationFailuresSince("XRP", "jsonrpc", "blockdaemon", "backup", nil)
+	require.Equal(t, 0, testutil.CollectAndCount(m.providerVerificationFailed))
+}
