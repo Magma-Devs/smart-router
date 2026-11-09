@@ -953,6 +953,11 @@ func (cs *ChainTracker) waitOutRateLimitHoldoff(ctx context.Context) error {
 // retries the start for as long as the endpoint is down and warns once per attempt with this
 // error (startTrackerWithRetry), so an ERROR here described a dead endpoint, a non-fatal
 // condition the router handles, as "critical" every 30 s or less for the whole outage.
+//
+// The returned error is built here and only logged at debug. A LavaFormat* call whose level is
+// off returns the bare cause, so at the router's default --log-level (info) the step, the
+// attempts and the timeout suggestion would have reached neither that WARN nor the tracker's
+// retrying_start state. The endpoint stays out of the text: the WARN names it.
 func (cs *ChainTracker) retryInitFetch(ctx context.Context, step string, fetch func(context.Context) error) error {
 	var err error
 	for attempt := 0; attempt <= initRetriesCount; attempt++ {
@@ -981,15 +986,12 @@ func (cs *ChainTracker) retryInitFetch(ctx context.Context, step string, fetch f
 			}
 		}
 	}
-	attributes := []utils.Attribute{
-		{Key: "step", Value: step},
-		{Key: "attempts", Value: initRetriesCount + 1},
-		{Key: "endpoint", Value: cs.endpoint.String()},
-	}
+	failure := fmt.Errorf("chain tracker init: failed fetching data from the node: %s failed after %d attempts: %w", step, initRetriesCount+1, err)
 	if errors.Is(err, common.ContextDeadlineExceededError) {
-		attributes = append(attributes, utils.Attribute{Key: "suggestion", Value: "If you encounter a 'context deadline exceeded' error, consider increasing the timeout configuration in the 'node-url' config option. Sometimes, the initial HTTPS/WSS communication takes a long time to establish a connection."})
+		failure = fmt.Errorf("%w (suggestion: consider increasing the timeout configuration in the 'node-url' config option; the initial HTTPS/WSS communication sometimes takes a long time to establish a connection)", failure)
 	}
-	return utils.LavaFormatDebugErr("chain tracker init: failed fetching data from the node", err, attributes...)
+	utils.LavaFormatDebug(failure.Error(), utils.Attribute{Key: "endpoint", Value: cs.endpoint.String()})
+	return failure
 }
 
 func (cs *ChainTracker) fetchInitDataWithRetry(ctx context.Context) error {

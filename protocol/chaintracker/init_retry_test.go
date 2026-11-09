@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -108,6 +109,39 @@ func TestFetchInitDataWithRetry_SpentAttemptsLogNoError(t *testing.T) {
 		}
 		require.NotContains(t, line, `"level":"error"`, "a retried start failure is not an ERROR: %s", line)
 	}
+}
+
+// deadlineFetcher's head fetch always times out.
+type deadlineFetcher struct {
+	advancingFetcher
+}
+
+func (f *deadlineFetcher) FetchLatestBlockNum(context.Context) (int64, error) {
+	return 0, common.ContextDeadlineExceededError
+}
+
+// At the router's default --log-level (info) the spent failure still names its step and its
+// attempts, and a timeout still carries the suggestion. Built by a debug-level LavaFormat call,
+// it came back as the bare cause whenever debug was off, so the start loop's WARN printed only
+// "head fetch refused" (MAG-5022).
+func TestFetchInitDataWithRetry_SpentFailureNamesItsStepAtTheDefaultLogLevel(t *testing.T) {
+	utils.SetGlobalLoggingLevel("info")
+	t.Cleanup(func() { utils.SetGlobalLoggingLevel("debug") }) // utils' package default
+
+	attempts := fmt.Sprintf("after %d attempts", initRetriesCount+1)
+	for step, fetcher := range map[string]*stepFailingFetcher{
+		"head fetch":  {headFailures: initRetriesCount + 1},
+		"block fetch": {blockFailures: initRetriesCount + 1},
+	} {
+		fetcher.block.Store(100)
+		err := newInitRetryTracker(t, fetcher).fetchInitDataWithRetry(context.Background())
+		require.ErrorContains(t, err, step+" failed "+attempts, "the failure names its step and its attempts")
+		require.ErrorContains(t, err, step+" refused", "and keeps its cause")
+	}
+
+	err := newInitRetryTracker(t, &deadlineFetcher{}).fetchInitDataWithRetry(context.Background())
+	require.ErrorIs(t, err, common.ContextDeadlineExceededError, "the cause stays matchable")
+	require.ErrorContains(t, err, "'node-url' config option", "a timeout carries the suggestion")
 }
 
 // Cancellation during the spacing between attempts returns at once with the context's error,
