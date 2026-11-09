@@ -84,31 +84,27 @@ func (wcl *WebsocketConnectionLimiter) CanOpenConnection(websocketConn Websocket
 		forwardedFor, _ := websocketConn.Locals(common.IP_FORWARDING_HEADER_NAME).(string)
 		key := websocketClientAddress(websocketConn.RemoteAddr(), forwardedFor, GetWebSocketTrustedProxies())
 
-		// Check current connections before incrementing
-		currentConnections := wcl.getCurrentAmountOfConnections(key)
-		// If already at or exceeding limit, deny the connection
-		if currentConnections >= connectionLimit {
+		// Check and count in one step, so simultaneous opens cannot all pass the check.
+		if !wcl.tryAddIpConnection(key, connectionLimit) {
 			websocketConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, fmt.Sprintf("Too Many Open Connections, limited to %d", connectionLimit)))
 			return false, decreaseIpConnectionCallback
 		}
-		// If under limit, increment and return cleanup function
-		wcl.addIpConnection(key)
 		decreaseIpConnectionCallback = func() { wcl.decreaseIpConnection(key) }
 	}
 	return true, decreaseIpConnectionCallback
 }
 
-func (wcl *WebsocketConnectionLimiter) getCurrentAmountOfConnections(key string) int64 {
-	wcl.lock.RLock()
-	defer wcl.lock.RUnlock()
-	return wcl.ipToNumberOfActiveConnections[key]
-}
-
-func (wcl *WebsocketConnectionLimiter) addIpConnection(key string) {
+// tryAddIpConnection counts one more connection for key, unless key already holds limit of them.
+// The check and the count share one write lock: with the count read under the read lock and raised
+// under the write lock, simultaneous opens from one client could all pass the check.
+func (wcl *WebsocketConnectionLimiter) tryAddIpConnection(key string, limit int64) bool {
 	wcl.lock.Lock()
 	defer wcl.lock.Unlock()
-	// wether it exists or not we add 1.
-	wcl.ipToNumberOfActiveConnections[key] += 1
+	if wcl.ipToNumberOfActiveConnections[key] >= limit {
+		return false
+	}
+	wcl.ipToNumberOfActiveConnections[key]++
+	return true
 }
 
 func (wcl *WebsocketConnectionLimiter) decreaseIpConnection(key string) {

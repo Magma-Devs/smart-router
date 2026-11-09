@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http/httptest"
 	"net/netip"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gofiber/fiber/v2"
@@ -197,5 +199,50 @@ func TestParseTrustedProxies(t *testing.T) {
 	for _, invalid := range []string{"not-an-address", "10.0.0.0/33", "10.0.0.1:80"} {
 		_, err := ParseTrustedProxies(invalid)
 		require.Error(t, err, invalid)
+	}
+}
+
+// fakeWebsocketConnection is a goroutine-safe WebsocketConnection for the concurrency test below.
+type fakeWebsocketConnection struct{ remote net.Addr }
+
+func (f fakeWebsocketConnection) RemoteAddr() net.Addr { return f.remote }
+
+func (f fakeWebsocketConnection) Locals(key string) interface{} {
+	if key == WebSocketOpenConnectionsLimitHeader {
+		return int64(0)
+	}
+	return ""
+}
+
+func (f fakeWebsocketConnection) WriteMessage(int, []byte) error { return nil }
+
+// TestWebsocketConnectionLimiter_SimultaneousOpensStayWithinTheLimit pins that the check and the
+// count are one step (MAG-3083 review). With the count read under the read lock and raised under the
+// write lock, opens from one client that arrived together could all pass the check.
+func TestWebsocketConnectionLimiter_SimultaneousOpensStayWithinTheLimit(t *testing.T) {
+	previousLimit := MaximumNumberOfParallelWebsocketConnectionsPerIp
+	MaximumNumberOfParallelWebsocketConnectionsPerIp = 2
+	t.Cleanup(func() { MaximumNumberOfParallelWebsocketConnectionsPerIp = previousLimit })
+
+	const opens = 50
+	for round := 0; round < 200; round++ {
+		wcl := &WebsocketConnectionLimiter{ipToNumberOfActiveConnections: map[string]int64{}}
+		conn := fakeWebsocketConnection{remote: tcpPeer("203.0.113.7")}
+		start := make(chan struct{})
+		var allowed atomic.Int64
+		var wg sync.WaitGroup
+		for i := 0; i < opens; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if ok, _ := wcl.CanOpenConnection(conn); ok {
+					allowed.Add(1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		require.Equal(t, int64(2), allowed.Load(), "round %d: opens allowed at a limit of 2", round)
 	}
 }
