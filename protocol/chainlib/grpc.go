@@ -862,18 +862,20 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 		utils.LogAttr("apiInterface", spectypes.APIInterfaceGrpc),
 	)
 
-	var respHeaders metadata.MD
+	var respHeaders, respTrailers metadata.MD
 	response := msgFactory.NewMessage(methodDescriptor.GetOutputType())
 	connectCtx, cancel := cp.CapTimeoutForSend(ctx, chainMessage)
 	defer cancel()
-	err = conn.Invoke(connectCtx, "/"+nodeMessage.Path, msg, response, grpc.Header(&respHeaders))
+	err = conn.Invoke(connectCtx, "/"+nodeMessage.Path, msg, response, grpc.Header(&respHeaders), grpc.Trailer(&respTrailers))
 	if err != nil {
 		// A corroborated rate limit fails the send with the typed sentinel — matching the
 		// HTTP transports — instead of being converted into a node-error reply. gRPC has
 		// no status code to check, so common.RateLimitFromGRPC keys on the known texts,
-		// or on RESOURCE_EXHAUSTED corroborated by a retry delay in the metadata.
+		// or on RESOURCE_EXHAUSTED corroborated by a retry delay in the metadata: header or
+		// trailer, since a status-only reply has no header block and grpc-go's own retry reads
+		// the delay from the trailer (MAG-4915).
 		if st, ok := status.FromError(err); ok {
-			if retryAfter, limited := common.RateLimitFromGRPC(uint32(st.Code()), st.Message(), respHeaders); limited {
+			if retryAfter, limited := common.RateLimitFromGRPC(uint32(st.Code()), st.Message(), metadata.Join(respHeaders, respTrailers)); limited {
 				return nil, utils.LavaFormatWarning("gRPC node rate-limited the request", common.RateLimited(err, retryAfter),
 					utils.Attribute{Key: "GUID", Value: ctx},
 					utils.Attribute{Key: "chainID", Value: cp.BaseChainProxy.ChainID},

@@ -34,6 +34,20 @@ func (r *admissionRegistry) admissionFor(provider *lavasession.RPCStaticProvider
 	return r.admissions[provider]
 }
 
+// striking reports whether a url of the provider failed a pass it is still graced for:
+// it keeps its place until a second pass in a row refuses it (MAG-3950 retries that
+// pass about a retry delay later, not an epoch later).
+func (r *admissionRegistry) striking(provider *lavasession.RPCStaticProviderEndpoint) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for index, strikes := range r.strikes[provider] {
+		if strikes > 0 && !r.admissions[provider].URLRefused(index) {
+			return true
+		}
+	}
+	return false
+}
+
 // record stores a boot or retry pass's admission as it stands, and reports whether
 // the admitted set moved.
 func (r *admissionRegistry) record(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
@@ -45,7 +59,8 @@ func (r *admissionRegistry) record(provider *lavasession.RPCStaticProviderEndpoi
 
 // recordReverified gives a url the grace a whole provider gets (MAG-2445): one that
 // fails for the first time keeps its place until it has failed
-// reverifyDemoteThreshold epoch passes running.
+// reverifyDemoteThreshold passes running, epoch passes and the retries that re-ran
+// what refuses it.
 func (r *admissionRegistry) recordReverified(provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -58,6 +73,12 @@ func (r *admissionRegistry) recordReverified(provider *lavasession.RPCStaticProv
 	var graced []int
 	for _, index := range admission.RefusedURLs() {
 		if previous.URLRefused(index) {
+			continue
+		}
+		// A retry that kept the url's failing verdict instead of running the check again
+		// is no new strike: the url's own retry is (MAG-3950).
+		if !admission.URLRefusalRan(index) {
+			graced = append(graced, index)
 			continue
 		}
 		strikes[index]++

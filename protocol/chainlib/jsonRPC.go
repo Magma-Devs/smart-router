@@ -138,7 +138,11 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 
 		metadata, overwriteReqBlock, _ := apip.HandleHeaders(metadata, apiCollectionForMessage, spectypes.Header_pass_send)
 		settingHeaderDirective, _, _ := apip.GetParsingByTag(spectypes.FUNCTION_TAG_SET_LATEST_IN_METADATA)
-		msg.BaseMessage = chainproxy.BaseMessage{Headers: metadata, LatestBlockHeaderSetter: settingHeaderDirective}
+		// msg is a copy of msgs[idx], and the message sent to the node is built from msgs, so the
+		// headers go onto the element itself; written to the copy alone, they never reached the
+		// node (MAG-3079). The copy keeps them too, for the reads below.
+		msgs[idx].BaseMessage = jsonrpcBaseMessage(metadata, settingHeaderDirective)
+		msg.BaseMessage = msgs[idx].BaseMessage
 
 		if overwriteReqBlock == "" {
 			// Fetch requested block, it is used for data reliability
@@ -246,7 +250,7 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 			nodeMsg.earliestRequestedBlock = earliestRequestedBlock
 		}
 	} else {
-		nodeMsg, err = apip.newBatchChainMessage(api, latestRequestedBlock, earliestRequestedBlock, blockHashes, msgs, apiCollection, parsedDefault)
+		nodeMsg, err = apip.newBatchChainMessage(api, latestRequestedBlock, earliestRequestedBlock, blockHashes, msgs, apiCollection, parsedDefault, apip.jsonrpcBatchBaseMessage(metadata, apiCollection))
 		if err != nil {
 			return nil, err
 		}
@@ -255,11 +259,12 @@ func (apip *JsonRPCChainParser) ParseMsg(url string, data []byte, connectionType
 	return nodeMsg, nil
 }
 
-func (*JsonRPCChainParser) newBatchChainMessage(serviceApi *spectypes.Api, requestedBlock int64, earliestRequestedBlock int64, requestedBlockHashes []string, msgs []rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) (*baseChainMessageContainer, error) {
+func (*JsonRPCChainParser) newBatchChainMessage(serviceApi *spectypes.Api, requestedBlock int64, earliestRequestedBlock int64, requestedBlockHashes []string, msgs []rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool, baseMessage chainproxy.BaseMessage) (*baseChainMessageContainer, error) {
 	batchMessage, err := rpcInterfaceMessages.NewBatchMessage(msgs)
 	if err != nil {
 		return nil, err
 	}
+	batchMessage.BaseMessage = baseMessage
 	nodeMsg := &baseChainMessageContainer{
 		api:                      serviceApi,
 		apiCollection:            apiCollection,
@@ -276,6 +281,28 @@ func (*JsonRPCChainParser) newBatchChainMessage(serviceApi *spectypes.Api, reque
 
 func (apip *JsonRPCChainParser) newChainMessage(serviceApi *spectypes.Api, requestedBlock int64, requestedBlockHashes []string, msg *rpcInterfaceMessages.JsonrpcMessage, apiCollection *spectypes.ApiCollection, usedDefaultValue bool) *baseChainMessageContainer {
 	return newSingleChainMessage(serviceApi, apiCollection, requestedBlock, requestedBlockHashes, msg, rpcInterfaceMessages.JsonrpcResponseErrorChecker(apip.chainFamily(), msg), usedDefaultValue)
+}
+
+// jsonrpcBatchBaseMessage is the header part of a JSON-RPC or Tendermint batch, which goes to the
+// node as one request: the request's headers as the spec lets them through for the batch's
+// collection (MAG-3079). NewBatchMessage keeps only each element's method, params and id, so the
+// batch carries headers only if they are set on it.
+func (bcp *BaseChainParser) jsonrpcBatchBaseMessage(metadata []pairingtypes.Metadata, apiCollection *spectypes.ApiCollection) chainproxy.BaseMessage {
+	headers, _, _ := bcp.HandleHeaders(metadata, apiCollection, spectypes.Header_pass_send)
+	settingHeaderDirective, _, _ := bcp.GetParsingByTag(spectypes.FUNCTION_TAG_SET_LATEST_IN_METADATA)
+	return jsonrpcBaseMessage(headers, settingHeaderDirective)
+}
+
+// jsonrpcBaseMessage is the header part of a JSON-RPC or Tendermint request: the headers the spec
+// lets through (HandleHeaders) and its latest-block header directive. An empty header list is kept
+// nil, which is what every JSON-RPC and Tendermint request carried before MAG-3079: the cache key
+// marshals nil and empty differently ("null" against "[]"), so an empty list would move the key of
+// every request on a chain whose spec declares no header, which is every chain today.
+func jsonrpcBaseMessage(headers []pairingtypes.Metadata, latestBlockHeaderSetter *spectypes.ParseDirective) chainproxy.BaseMessage {
+	if len(headers) == 0 {
+		headers = nil
+	}
+	return chainproxy.BaseMessage{Headers: headers, LatestBlockHeaderSetter: latestBlockHeaderSetter}
 }
 
 // SetSpec sets the spec for the JsonRPCChainParser

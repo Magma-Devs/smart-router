@@ -654,6 +654,14 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	// This enables Provider-Latest-Block, lava-identified-node-error, and upstream hints
 	responseMetadata := convertHTTPHeadersToMetadata(response.Headers)
 
+	// A 429 is not a node error whatever its body says, as on REST and GraphQL: the upstream refused
+	// for rate before any node answered, and relayInnerDirect fails the attempt on the status alone.
+	// CheckResponseError reads the body only, as its other callers need, and finds a prose or HTML
+	// 429 a malformed reply, so the flag rode the failed relay out to the client as
+	// lava-identified-node-error: true on a request no node answered (MAG-3030). The classification
+	// below still runs on hasError, so the rate limit keeps its flags.
+	isNodeError := hasError && statusCode != http.StatusTooManyRequests
+
 	result := &common.RelayResult{
 		Reply: &pairingtypes.RelayReply{
 			Data:        responseData,
@@ -666,7 +674,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 			ProviderAddress: providerAddress,
 			ProviderGroup:   d.groupLabel,
 		},
-		IsNodeError: hasError,
+		IsNodeError: isNodeError,
 	}
 	if hasError {
 		classifyJSONRPCNodeError(result, d.chainFamily, statusCode, responseData, errorMessage)
@@ -1192,6 +1200,10 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 				if grpcErr.RateLimited() && common.ClassifyError(nil, d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage) == common.LavaErrorUnknown {
 					result.ApplyLavaErrorClassification(common.LavaErrorNodeRateLimited)
 				}
+				// The wait the node asked for rides on err, which this branch does not return, so the
+				// hold-off read 0 and held the endpoint off for its default whatever was asked: a vendor
+				// that asked for ten minutes was asked again after about 30 s (MAG-4914).
+				result.RetryAfter, _ = common.RetryAfterFrom(err)
 			}
 			return result, nil
 		}
