@@ -426,10 +426,12 @@ func grpcErrorMappings() []errorMapping {
 		// Deliberately NOT registered, each for its own reason — do not add them
 		// as a block, which is how `Code >= 13` went wrong in the first place:
 		//   4  DeadlineExceeded  - this endpoint was too slow; another may not be.
-		//                          Demoting it is the correct signal. Only the node's
-		//                          own deadline reaches here: the router's, and the
-		//                          node's echo of it, are resolved by handleGRPCError
-		//                          against the clock (MAG-4925).
+		//                          Demoting it is the correct signal. On the direct
+		//                          relay path only the node's own deadline reaches
+		//                          here: the router's, and the node's echo of it, are
+		//                          resolved by handleGRPCError against the clock
+		//                          (MAG-4925). chainlib's gRPC proxy (spec
+		//                          re-verification) has no such check.
 		//   7  PermissionDenied  - credentials are configured per endpoint, so one
 		//   16 Unauthenticated     rejecting ours is unusable to us and should demote.
 		//   8  ResourceExhausted - ambiguous in the gRPC spec (per-user quota vs.
