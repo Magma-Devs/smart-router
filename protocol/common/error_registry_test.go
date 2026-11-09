@@ -1058,12 +1058,15 @@ func TestClassifyError_UnsupportedMethodMatchersAreNarrow(t *testing.T) {
 }
 
 // TestClassifyError_PendingStateNotSupportedIsANodeCapability pins MAG-5021. On GK8 Hoodi, Tatum
-// answers eth_call with the "pending" block tag with exactly this reply. The node serves eth_call;
+// answers eth_call with the "pending" block tag with this message. Its code is not confirmed; the
+// reply below assumes -32000. Under -32603, -32602 or -32005 that code's row would win over the
+// text (code rows run first), so the verdict here would not hold. The node serves eth_call;
 // what it does not offer is pending state, so the answer is "can't serve here" — the verdict the
 // Sui FEATURE_UNAVAILABLE ruling gets: retried on another provider, not evidence against the
 // endpoint. Read as a bare -32000 it was NODE_SERVER_ERROR, at fault, and each such call walked
 // the refusal counter until the URL was switched off for every method. Clients differ on the code
-// (-32000, -32601), so the row matches the text and the verdict must hold whatever the code.
+// (-32000, -32601), so the row matches the text. Under -32601 the same verdict comes from the
+// -32601 row, which runs first; under -32000 and with no code the text row decides.
 func TestClassifyError_PendingStateNotSupportedIsANodeCapability(t *testing.T) {
 	const reply = `{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"pending state is not supported"}}`
 	var body struct {
