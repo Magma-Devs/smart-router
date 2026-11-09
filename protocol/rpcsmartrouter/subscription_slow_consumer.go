@@ -27,10 +27,13 @@ const subscriptionClientReplyBuffer = 100
 // so the other clients of a subscription never wait longer than they did before, and only while a
 // client is a full buffer behind rather than on every push. Zero restores drop-at-once.
 //
-// A variable so that a test can raise it: TestBurstyClientThatReadsIsNotDropped pins that a
-// reading client is paced rather than dropped, and on a loaded machine its reader goroutine can go
-// unscheduled for longer than 10 ms, which the fan-out would rightly call a slow consumer.
-var subscriptionClientSendGrace = 10 * time.Millisecond
+// The WebSocket manager copies it into its clientSendGrace when it is built, so that a test can
+// raise the grace on its own manager: TestBurstyClientThatReadsIsNotDropped pins that a reading
+// client is paced rather than dropped, and on a loaded machine its reader goroutine can go
+// unscheduled for longer than 10 ms, which the fan-out would rightly call a slow consumer. A
+// package variable the test overwrote raced with fan-outs that an earlier test's manager left
+// running, because Close does not wait for its listeners to return.
+const subscriptionClientSendGrace = 10 * time.Millisecond
 
 // errSlowConsumer is the status a gRPC client's stream ends with when it was dropped for not
 // keeping up with the subscription.

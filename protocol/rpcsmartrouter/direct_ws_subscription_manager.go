@@ -222,6 +222,11 @@ type DirectWSSubscriptionManager struct {
 	// Configuration - all configurable parameters
 	config *WebsocketConfig
 
+	// clientSendGrace is how long a push waits for room in a client's full reply channel before
+	// the client is dropped as a slow consumer. NewDirectWSSubscriptionManager sets it to
+	// subscriptionClientSendGrace; a test may raise it before the first subscription starts.
+	clientSendGrace time.Duration
+
 	// Rate limiting - per-client subscription rate limits
 	rateLimiter *ClientRateLimiter
 
@@ -277,8 +282,9 @@ func NewDirectWSSubscriptionManager(
 		subscriptionEndpoints: newSubscriptionEndpoints("DirectWS",
 			"no WebSocket endpoints available (primary and backup both exhausted)",
 			wsEndpoints, wsBackupEndpoints, optimizer),
-		config:      config,
-		rateLimiter: NewClientRateLimiter(config),
+		config:          config,
+		rateLimiter:     NewClientRateLimiter(config),
+		clientSendGrace: subscriptionClientSendGrace,
 	}
 }
 
@@ -570,7 +576,7 @@ func (dwsm *DirectWSSubscriptionManager) StartSubscription(
 	}
 
 	// Create reply channel for this client. Buffered for a burst; a client that lets it fill and
-	// frees no room within subscriptionClientSendGrace is dropped as a slow consumer (dropSlowClient).
+	// frees no room within clientSendGrace is dropped as a slow consumer (dropSlowClient).
 	repliesChannel := make(chan *pairingtypes.RelayReply, subscriptionClientReplyBuffer)
 	safeChannelSender := common.NewSafeChannelSender(ctx, repliesChannel)
 
@@ -1445,7 +1451,7 @@ func (dwsm *DirectWSSubscriptionManager) routeMessageToClients(
 			Data: rewrittenMsg,
 		}
 
-		switch info.sender.SendWithin(reply, subscriptionClientSendGrace) {
+		switch info.sender.SendWithin(reply, dwsm.clientSendGrace) {
 		case common.TrySendFull:
 			dwsm.dropSlowClient(activeSub.hashedParams, activeSub, clientKey)
 			continue
@@ -1462,7 +1468,7 @@ func (dwsm *DirectWSSubscriptionManager) routeMessageToClients(
 
 // dropSlowClient releases a client whose reply channel is full: it has fallen
 // subscriptionClientReplyBuffer pushes behind and freed no room within
-// subscriptionClientSendGrace. Its channel closes, and the connection is marked so that the
+// clientSendGrace. Its channel closes, and the connection is marked so that the
 // ingress, once it has handed the client what the channel still holds, closes the client's socket
 // with 1013 (try again later): the client reconnects and resubscribes, and its other
 // subscriptions on that socket end with it. That replaces losing the push silently (a gap in a
