@@ -189,7 +189,7 @@ func TestGraphQLRelay_GatewayJSONRPCEnvelopeIsAskedOfThePeer(t *testing.T) {
 			refusedFirst := 0
 			for i := 0; i < 12; i++ {
 				before := loadRefusalHits(hits)
-				result, sendErr := sendGatewayTestRequest(t, ctx, chainParser, server)
+				result, sendErr := sendGatewayTestRequest(t, ctx, chainParser, server, gatewayTestQuery)
 				after := loadRefusalHits(hits)
 				refuserAsked, peerAsked := after[0]-before[0], after[1]-before[1]
 				if refuserAsked == 0 {
@@ -258,9 +258,10 @@ func newGatewayTestServer(t *testing.T, chainParser chainlib.ChainParser, logs *
 	}
 }
 
-func sendGatewayTestRequest(t *testing.T, ctx context.Context, chainParser chainlib.ChainParser, server *RPCSmartRouterServer) (*common.RelayResult, error) {
+// sendGatewayTestRequest sends query through SendParsedRelay, the path a client's request takes.
+func sendGatewayTestRequest(t *testing.T, ctx context.Context, chainParser chainlib.ChainParser, server *RPCSmartRouterServer, query string) (*common.RelayResult, error) {
 	t.Helper()
-	body := []byte(gatewayTestQuery)
+	body := []byte(query)
 	chainMessage, err := chainParser.ParseMsg("", body, http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	relayData := lavaprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceGraphQL,

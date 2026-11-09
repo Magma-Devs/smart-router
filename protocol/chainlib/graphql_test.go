@@ -198,6 +198,8 @@ func TestGraphQLChainParserMutationIsStatefulWhateverTheSpecSays(t *testing.T) {
 // field is an ordinary query field. So the tag does not make a relay-harvested tip safe, and the
 // relay path reads no block out of a GraphQL reply at all (rpcsmartrouter
 // TestGraphQLUserRelayCarriesNoReplyBlock, TestGraphQLAliasedTipQueryForgesNoTipOrStallEvidence).
+// That no user relay reaches RecordRelayObservation or noteAnsweredBlockLocked is asserted there
+// too, through the whole relay path: TestGraphQLUserRelayIsNeverHarvested.
 func TestGraphQLChainParserTipDirectiveTagsItsOwnFieldOnly(t *testing.T) {
 	chainParser := newGraphQLTestParser(t)
 	parse := func(body string) ChainMessage {

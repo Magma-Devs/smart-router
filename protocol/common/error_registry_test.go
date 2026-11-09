@@ -1264,3 +1264,125 @@ func IsInternal(code uint32) bool {
 func IsExternal(code uint32) bool {
 	return getLavaError(code).Category == CategoryExternal
 }
+
+// --- XRP Ledger rows (ChainFamilyXRP in error_classifier.go) ---
+
+func TestIsXRPLRejection(t *testing.T) {
+	for engineResult, want := range map[string]bool{
+		"tefPAST_SEQ": true, "tefALREADY": true, "temBAD_FEE": true, "telINSUF_FEE_P": true, "terPRE_SEQ": true,
+		"terQUEUED": false, "tesSUCCESS": false, "tecUNFUNDED_PAYMENT": false,
+		"ERROR": false, "unknown": false, "tefpast_seq": false, "tef": false, "": false, "xtefPAST_SEQ": false,
+	} {
+		require.Equal(t, want, IsXRPLRejection(engineResult), "%q", engineResult)
+	}
+	// Kept out of the map literal above: gocritic's mapKey check reads a trailing space in a key
+	// as a typo, and the whole point of this case is that the space is there on purpose.
+	require.False(t, IsXRPLRejection("tefPAST_SEQ "), "a trailing space is not a ledger code")
+}
+
+// Every listed API error is classified by its row, on both message forms the classifier and the
+// direct-RPC sender write, and an unlisted one is UNKNOWN_ERROR.
+func TestXRPLAPIErrorRows(t *testing.T) {
+	rows := map[*LavaError][]string{
+		LavaErrorNodeSyncing:            {"noNetwork", "noCurrent", "noClosed", "notSynced", "notReady"},
+		LavaErrorNodeServiceUnavailable: {"amendmentBlocked", "unlBlocked"},
+		LavaErrorNodeRateLimited:        {"tooBusy", "slowDown"},
+		LavaErrorNodeInternalError:      {"internal", "internalJson", "internalSubmit", "internalTransaction", "dbDeserialization", "json_rpc"},
+		LavaErrorChainBlockNotFound:     {"lgrNotFound", "lgrNotValidated"},
+		LavaErrorChainTxNotFound:        {"txnNotFound"},
+		LavaErrorNodeResourceNotFound:   {"actNotFound", "srcActNotFound", "dstActNotFound", "delegateActNotFound", "entryNotFound", "objectNotFound", "badCredentials"},
+		LavaErrorNodeMethodNotFound:     {"unknownCmd"},
+		LavaErrorNodeUnimplemented:      {"notEnabled", "notImpl"},
+		LavaErrorNodeAccessDenied:       {"noPermission", "forbidden"},
+		LavaErrorUserInvalidParams: {
+			"invalidParams", "invalidTransaction", "badSyntax", "notSupported", "highFee", "badSecret",
+			"actMalformed", "badIssuer", "badKeyType", "channelAmtMalformed", "channelMalformed", "commandMissing",
+			"domainMalformed", "dstActMalformed", "dstActMissing", "dstAmtMalformed", "dstAmtMissing", "dstIsrMalformed",
+			"excessiveLgrRange", "invalidLgrRange", "issueMalformed", "lgrIdxMalformed", "lgrIdxsInvalid",
+			"malformedStream", "oracleMalformed", "publicMalformed", "sendMaxMalformed", "signingMalformed",
+			"srcActMalformed", "srcActMissing", "srcCurMalformed", "srcIsrMalformed", "transactionSigned",
+			"unexpectedLedgerType",
+			"wrongNetwork", "badFeature", "noEvents", "badMarket", "noPathRequest", "deprecated", "invalidHotWallet",
+			"badSeed", "masterDisabled", "alreadyMultisig", "alreadySingleSig",
+		},
+	}
+	for lavaError, names := range rows {
+		for _, name := range names {
+			for _, msg := range []string{name, name + ": detail", "HTTP 429: " + name + ": detail"} {
+				require.Equal(t, lavaError.Name, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, 200, msg).Name, msg)
+			}
+		}
+	}
+	require.Equal(t, LavaErrorUnknown.Name, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, 200, "gatewayHiccup: detail").Name)
+	require.Equal(t, LavaErrorUnknown.Name, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, 200, "NoNetwork: detail").Name, "names are case-sensitive, as rippled writes them")
+
+	// A name must be the message's first token: the rows do not reach into the detail text, and an
+	// API error name never takes a longer name's row.
+	require.Equal(t, LavaErrorNodeInternalError.Name, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, 200, "internalJson: bad").Name)
+	require.NotEqual(t, LavaErrorNodeSyncing.Name, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, 200, "tefFAILURE: noNetwork in the detail").Name)
+	require.Equal(t, LavaErrorChainTxRejected.Name, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, 200, "tefFAILURE: noNetwork in the detail").Name)
+}
+
+// The XRP rows are Tier-2: another family's node error that happens to start with an XRPL token is
+// not classified by them.
+func TestXRPLRowsAreXRPOnly(t *testing.T) {
+	for _, family := range []ChainFamily{ChainFamilyEVM, ChainFamilySolana, ChainFamilyUnknown} {
+		require.NotEqual(t, LavaErrorChainNonceTooLow.Name, ClassifyError(nil, family, TransportJsonRPC, 200, "tefPAST_SEQ: This sequence number has already passed.").Name, family.String())
+		require.NotEqual(t, LavaErrorNodeSyncing.Name, ClassifyError(nil, family, TransportJsonRPC, 200, "noNetwork: Not synced to the network.").Name, family.String())
+	}
+}
+
+// terQUEUED is carved out of IsXRPLRejection but still matches the catch-all row. That is the
+// deliberate trade documented at the XRP rows in error_classifier.go: a queued verdict arriving
+// from some other path is better labelled a rejection, which is non-retryable and not at fault,
+// than left UNKNOWN_ERROR, which is retryable and does cost the node its score.
+func TestXRPLTerQueuedRowKeepsTheGateOff(t *testing.T) {
+	require.False(t, IsXRPLRejection("terQUEUED"), "the classifier must never flag a queued verdict")
+
+	queued := ClassifyNodeErrorForRetry(ChainFamilyXRP, TransportJsonRPC, 0, "terQUEUED: Held until escalated fee drops.")
+	require.True(t, queued.IsNonRetryable, "a queued verdict must not be retried")
+	require.False(t, queued.IsDataScope)
+
+	// Control: an XRP message that matches no row at all is the outcome this trade avoids.
+	unmatched := ClassifyNodeErrorForRetry(ChainFamilyXRP, TransportJsonRPC, 0, "zzNOTAVERDICT: detail")
+	require.False(t, unmatched.IsNonRetryable, "an unmatched message is retryable and scored")
+}
+
+// The "not found" errors split by whose data is missing (MAG-4817). A node that does not hold the
+// ledger or the transaction is retried elsewhere without losing its score; an account or object
+// missing from a ledger the node holds is the chain's answer, neither retried nor blamed.
+func TestXRPLNotFoundRows(t *testing.T) {
+	// Every "not found" is this node's answer, not the chain's: retried on another node, and the
+	// node keeps its score (MAG-4817 rule 2).
+	for _, name := range []string{
+		"lgrNotFound", "lgrNotValidated", "txnNotFound",
+		"actNotFound", "srcActNotFound", "dstActNotFound", "delegateActNotFound", "entryNotFound", "objectNotFound", "badCredentials",
+	} {
+		c := ClassifyNodeErrorForRetry(ChainFamilyXRP, TransportJsonRPC, 200, name+": detail")
+		require.False(t, c.IsNonRetryable, name)
+		require.True(t, c.IsDataScope, name)
+		require.False(t, c.IsNodeAtFault, name)
+	}
+}
+
+// A client that asks for ripplerpc 3.0 gets rippled's real HTTP status instead of 200. The XRP row
+// still decides, ahead of the generic status rows.
+func TestXRPLRowsWinOverARealHTTPStatus(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		name   string
+		want   *LavaError
+	}{
+		{404, "lgrNotFound", LavaErrorChainBlockNotFound},
+		{404, "txnNotFound", LavaErrorChainTxNotFound},
+		{404, "actNotFound", LavaErrorNodeResourceNotFound},
+		{429, "tooBusy", LavaErrorNodeRateLimited},
+		{503, "noNetwork", LavaErrorNodeSyncing},
+		{503, "wrongNetwork", LavaErrorUserInvalidParams},
+		{400, "actMalformed", LavaErrorUserInvalidParams},
+		{500, "badFeature", LavaErrorUserInvalidParams},
+	} {
+		msg := fmt.Sprintf("HTTP %d: %s: detail", tc.status, tc.name)
+		require.Equal(t, tc.want.Name, ClassifyError(nil, ChainFamilyXRP, TransportJsonRPC, tc.status, msg).Name, msg)
+	}
+}
