@@ -22,7 +22,7 @@ import (
 // nothing and reads as empty.
 //
 // The rows are bounded (see boundedMethodLocked): two kinds of method name are the request's own
-// text, and each kind gets the method label's budget per chain and interface.
+// text, and each kind gets a budget per chain and interface, with the method label's numbers.
 type RelayErrorTally struct {
 	mu   sync.Mutex
 	rows map[relayErrorKey]*RelayErrorCount
@@ -90,11 +90,13 @@ func (t *RelayErrorTally) add(key relayErrorKey, count func(*RelayErrorCount)) {
 // for two kinds of name it is the request's own text: a "Default-<...>" name the parser mints for an
 // api the spec does not declare, and a name joined with chainlib.SEP (a batch's elements, or a
 // GraphQL operation's root fields). Left alone, every distinct one adds a row for the life of the
-// process (review 626-3: 200 unknown REST paths gave 200 rows). So each kind gets the method label's
-// own budget per chain and interface (metrics.MaxDefaultMethodsPerSpec, MaxBatchSignaturesPerSpec),
-// and past it, or past maxTallyMethodNameBytes, the attempt is counted on that kind's overflow row,
-// under the label's overflow name. Admission is monotone, as the label's is: an admitted name keeps
-// its row, and a full budget stays full. Declared methods are a spec-sized set and keep their names.
+// process (review 626-3: 200 unknown REST paths gave 200 rows). So each kind gets a budget per chain
+// and interface, with the method label's numbers (metrics.MaxDefaultMethodsPerSpec,
+// MaxBatchSignaturesPerSpec; the label's own budget is per chain, and it counts a path's shape and a
+// batch's set of methods rather than the name), and past it, or past maxTallyMethodNameBytes, the
+// attempt is counted on that kind's overflow row, under the label's overflow name. Admission is
+// monotone, as the label's is: an admitted name keeps its row, and a full budget stays full.
+// Declared methods are a spec-sized set and keep their names.
 // The caller holds t.mu.
 func (t *RelayErrorTally) boundedMethodLocked(chainID, apiInterface, method string) string {
 	batch := strings.Contains(method, chainlib.SEP)
