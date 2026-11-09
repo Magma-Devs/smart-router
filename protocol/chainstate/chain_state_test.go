@@ -739,6 +739,51 @@ func TestRecompute_SoleVoterGlitchIsNotFollowed(t *testing.T) {
 	require.Equal(t, honest+1, got, "a rejection against an older tip is no evidence about the current one")
 }
 
+// TestRecompute_SoleVoterGlitchesOnAStillChainDoNotAddUp: the tip need not move between two glitches.
+// On a chain that makes no block for longer than a TTL (a testnet gap or halt), the endpoint glitches
+// once. The endpointtip store then drops its lower answers while the glitch is its stored tip, so the
+// tip goes stale, and when the honest answers get through again they re-confirm the SAME block, which
+// keeps latestSince. Hours later the endpoint glitches once more. That second answer is not a repeat:
+// the rejection it would pair with has aged out with the answer it rejected.
+func TestRecompute_SoleVoterGlitchesOnAStillChainDoNotAddUp(t *testing.T) {
+	cs, clk := newSlowChainState(t)
+	const honest = int64(1_000_000)
+	cs.SetLatestBlock(honest)
+	cs.Recompute(soleVote(honest, clk.now()))
+
+	clk.advance(slowChainPoll)
+	_, _, advanced := cs.SetLatestBlock(honest + 10*cs.cfg.OutlierThreshold)
+	require.False(t, advanced, "the first glitch is rejected")
+
+	// Nothing reaches ChainState for longer than a TTL, then the honest answer, at the same block.
+	clk.advance(cs.cfg.TTL + slowChainPoll)
+	_, fresh := cs.GetLatestBlock()
+	require.False(t, fresh, "precondition: the tip went stale")
+	cs.SetLatestBlock(honest)
+	got, ok := cs.GetLatestBlock()
+	require.True(t, ok)
+	require.Equal(t, honest, got, "precondition: the same block is the tip again")
+
+	clk.advance(slowChainPoll)
+	glitch := honest + 20*cs.cfg.OutlierThreshold
+	glitchVote := soleVote(glitch, clk.now())
+	_, _, advanced = cs.SetLatestBlock(glitch)
+	require.False(t, advanced)
+	clk.advance(slowChainPoll)
+	cs.Recompute(glitchVote)
+	got, ok = cs.GetLatestBlock()
+	require.True(t, ok)
+	require.Equal(t, honest, got, "a single answer is not followed, however old the last rejection on this tip is")
+
+	// The same rule still follows a head the endpoint answers again after that fresh rejection.
+	clk.advance(slowChainPoll)
+	cs.SetLatestBlock(glitch)
+	cs.Recompute(soleVote(glitch, clk.now()))
+	got, ok = cs.GetLatestBlock()
+	require.True(t, ok)
+	require.Equal(t, glitch, got, "a head answered again after its first rejection is followed")
+}
+
 // TestRecompute_TwoDisagreeingVotersDoNotFollowARepeatedHead pins that the MAG-4964 pull-up is for a
 // SOLE voter. With a second endpoint that disagrees there is no majority, and a repeated over-threshold
 // head is what one endpoint lying persistently looks like; which of the two is right is what a third

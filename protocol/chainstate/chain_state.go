@@ -199,7 +199,8 @@ type ChainState struct {
 	latestSince time.Time
 	// rejectedSince is when SetLatestBlock's no-baseline guard first rejected a block more than
 	// OutlierThreshold above the CURRENT tip (MAG-4964). Read it through rejectedSinceLocked, which
-	// drops a stamp older than latestSince: that rejection was against a tip that has since moved.
+	// drops a stamp older than latestSince (that rejection was against a tip that has since moved)
+	// or older than StalenessWindow (that rejection has aged out, as the answer it rejected has).
 	// Recompute compares it with a sole voter's endpointtip stamp to tell a head the endpoint keeps
 	// answering (a block storm) from one it answered once (a glitch).
 	rejectedSince time.Time
@@ -394,7 +395,7 @@ func (cs *ChainState) SetLatestBlock(block int64) (latest int64, at time.Time, a
 	} else if cs.initialized && tipFresh && block > cs.latestBlock+cs.cfg.OutlierThreshold {
 		// No-baseline anti-lie guard, anchored on the fresh tip (see doc block above). Stamp the first
 		// rejection against this tip: Recompute follows a sole endpoint that answers past it (MAG-4964).
-		if cs.rejectedSinceLocked().IsZero() {
+		if cs.rejectedSinceLocked(nowReal.Add(cs.warpOffsetDuration())).IsZero() {
 			cs.rejectedSince = nowReal
 		}
 		return cs.latestBlock, cs.lastObservedAt, false
@@ -522,9 +523,17 @@ func (cs *ChainState) freshLatestLocked(now time.Time) (int64, bool) {
 // against the CURRENT tip, or the zero time if it has not. A stamp older than latestSince was taken
 // against an earlier tip, so it says nothing about this one. Comparing with latestSince, rather than
 // clearing the stamp at each site that moves the tip, covers every such site, including future ones,
-// because each of them re-establishes latestSince. The caller holds cs.mu.
-func (cs *ChainState) rejectedSinceLocked() time.Time {
+// because each of them re-establishes latestSince.
+//
+// A stamp older than StalenessWindow at now (the warped evaluation clock) is dropped too. A tip that
+// never moves keeps latestSince, so without an age limit one glitch on a still chain would make any
+// later single answer, hours on, read as its repeat. The answer the stamp rejected leaves the vote
+// after StalenessWindow as well, so the next rejection starts a new count. The caller holds cs.mu.
+func (cs *ChainState) rejectedSinceLocked(now time.Time) time.Time {
 	if cs.rejectedSince.Before(cs.latestSince) {
+		return time.Time{}
+	}
+	if cs.cfg.StalenessWindow > 0 && now.Sub(cs.rejectedSince) > cs.cfg.StalenessWindow {
 		return time.Time{}
 	}
 	return cs.rejectedSince
@@ -616,7 +625,7 @@ func (cs *ChainState) Recompute(snapshots []BlockObservation) {
 			// fallbacks cannot mistake a consensus-seeded tip for "never observed anything".
 			cs.initialized = true
 		}
-	} else if since := cs.rejectedSinceLocked(); !since.IsZero() && sole.ObservedAt.After(since) && sole.Block > cs.latestBlock {
+	} else if since := cs.rejectedSinceLocked(evalNow); !since.IsZero() && sole.ObservedAt.After(since) && sole.Block > cs.latestBlock {
 		// Sole-voter pull-up (MAG-4964). With one fresh voter there is no majority to lift the tip past
 		// a head SetLatestBlock's no-baseline guard rejected, and the guard's premise (the chain cannot
 		// outrun OutlierThreshold within a TTL) fails in a block storm: such a tip froze for 28 hours.
