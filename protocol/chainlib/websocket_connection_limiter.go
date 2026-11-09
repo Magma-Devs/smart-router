@@ -30,10 +30,8 @@ type WebsocketConnectionLimiter struct {
 
 func (wcl *WebsocketConnectionLimiter) HandleFiberRateLimitFlags(c *fiber.Ctx) {
 	// X-Forwarded-For as it arrived, "" when absent. CanOpenConnection reads it only through the
-	// trusted proxies (websocketClientAddress). c.Get returns a view into fasthttp's reusable
-	// request buffer, and this Local is read later, in the websocket handler, so it is copied
-	// (MAG-3881).
-	c.Locals(common.IP_FORWARDING_HEADER_NAME, strings.Clone(c.Get(common.IP_FORWARDING_HEADER_NAME)))
+	// trusted proxies (websocketClientAddress).
+	c.Locals(common.IP_FORWARDING_HEADER_NAME, forwardedForList(c))
 
 	rateLimitString := c.Get(WebSocketRateLimitHeader)
 	rateLimit, err := strconv.ParseInt(rateLimitString, 10, 64)
@@ -48,6 +46,21 @@ func (wcl *WebsocketConnectionLimiter) HandleFiberRateLimitFlags(c *fiber.Ctx) {
 		connectionLimit = 0
 	}
 	c.Locals(WebSocketOpenConnectionsLimitHeader, connectionLimit)
+}
+
+// forwardedForList is the request's X-Forwarded-For list: every line of the header, in order,
+// joined with commas, "" when there is none. A list sent as several lines is one list (RFC 9110,
+// section 5.3), and a proxy may add its own line instead of appending to the one it received, so
+// what it wrote can be in the last line; c.Get returns the first line only (MAG-3083). The lines
+// are views into fasthttp's reusable request buffer, and the list is read later, in the websocket
+// handler, so they are copied (MAG-3881).
+func forwardedForList(c *fiber.Ctx) string {
+	lines := c.Request().Header.PeekAll(common.IP_FORWARDING_HEADER_NAME)
+	entries := make([]string, len(lines))
+	for i, line := range lines {
+		entries[i] = string(line)
+	}
+	return strings.Join(entries, ",")
 }
 
 func (wcl *WebsocketConnectionLimiter) getConnectionLimit(websocketConn WebsocketConnection) int64 {

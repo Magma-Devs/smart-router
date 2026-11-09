@@ -1,10 +1,13 @@
 package chainlib
 
 import (
+	"io"
 	"net"
+	"net/http/httptest"
 	"net/netip"
 	"testing"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/golang/mock/gomock"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -115,6 +118,57 @@ func TestWebsocketConnectionLimiter_AClientCannotRaiseItsOwnLimit(t *testing.T) 
 		}
 		require.Equal(t, []bool{true, true, true}, got, "the claimed client's own connection through the proxy is still allowed")
 	})
+}
+
+// TestWebsocketForwardedForIsEveryHeaderLine pins that the limit reads X-Forwarded-For as one list
+// made of every line of the header, in order (MAG-3083). A proxy may add its own line instead of
+// appending to the one it received, so what it wrote can be in the last line, not the first.
+func TestWebsocketForwardedForIsEveryHeaderLine(t *testing.T) {
+	stored := func(t *testing.T, lines ...string) string {
+		t.Helper()
+		app := fiber.New()
+		app.Get("/ws", func(c *fiber.Ctx) error {
+			(&WebsocketConnectionLimiter{}).HandleFiberRateLimitFlags(c)
+			forwardedFor, _ := c.Locals(common.IP_FORWARDING_HEADER_NAME).(string)
+			return c.SendString(forwardedFor)
+		})
+		req := httptest.NewRequest("GET", "/ws", nil)
+		for _, line := range lines {
+			req.Header.Add(common.IP_FORWARDING_HEADER_NAME, line)
+		}
+		resp, err := app.Test(req)
+		require.NoError(t, err)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return string(body)
+	}
+
+	require.Equal(t, "", stored(t), "no header")
+	require.Equal(t, "198.51.100.1, 203.0.113.7", stored(t, "198.51.100.1, 203.0.113.7"), "one line is kept as it is")
+	twoLines := stored(t, "198.51.100.1", "203.0.113.7")
+	require.Equal(t, "198.51.100.1,203.0.113.7", twoLines, "every line, in order")
+
+	defaults, err := ParseTrustedProxies(DefaultWebSocketTrustedProxies)
+	require.NoError(t, err)
+	require.Equal(t, "203.0.113.7", websocketClientAddress(tcpPeer("10.0.0.5"), twoLines, defaults),
+		"behind a trusted proxy that added its own line, the address in that line")
+
+	previousLimit := MaximumNumberOfParallelWebsocketConnectionsPerIp
+	MaximumNumberOfParallelWebsocketConnectionsPerIp = 2
+	t.Cleanup(func() { MaximumNumberOfParallelWebsocketConnectionsPerIp = previousLimit })
+	ctrl := gomock.NewController(t)
+	wcl := &WebsocketConnectionLimiter{ipToNumberOfActiveConnections: map[string]int64{}}
+	open := func(clientLine string) bool {
+		conn := NewMockWebsocketConnection(ctrl)
+		conn.EXPECT().Locals(WebSocketOpenConnectionsLimitHeader).Return(int64(0)).AnyTimes()
+		conn.EXPECT().Locals(common.IP_FORWARDING_HEADER_NAME).Return(stored(t, clientLine, "203.0.113.7")).AnyTimes()
+		conn.EXPECT().RemoteAddr().Return(tcpPeer("10.0.0.5")).AnyTimes()
+		conn.EXPECT().WriteMessage(gomock.Any(), gomock.Any()).AnyTimes()
+		allowed, _ := wcl.CanOpenConnection(conn)
+		return allowed
+	}
+	require.Equal(t, []bool{true, true, false}, []bool{open("198.51.100.1"), open("198.51.100.2"), open("198.51.100.3")},
+		"one client behind the proxy is counted once, whatever the earlier lines say")
 }
 
 func TestParseTrustedProxies(t *testing.T) {
