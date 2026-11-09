@@ -17,7 +17,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/tidwall/gjson"
 )
 
@@ -122,7 +121,6 @@ type ConsumerWebsocketManager struct {
 	rpcConsumerLogs        *metrics.RPCConsumerLogs
 	cmdFlags               common.ConsumerCmdFlags
 	refererMatchString     string
-	relayMsgLogMaxChars    int
 	chainId                string
 	apiInterface           string
 	connectionType         string
@@ -138,7 +136,6 @@ type ConsumerWebsocketManagerOptions struct {
 	RpcConsumerLogs        *metrics.RPCConsumerLogs
 	RefererMatchString     string
 	CmdFlags               common.ConsumerCmdFlags
-	RelayMsgLogMaxChars    int
 	ChainID                string
 	ApiInterface           string
 	ConnectionType         string
@@ -156,7 +153,6 @@ func NewConsumerWebsocketManager(options ConsumerWebsocketManagerOptions) *Consu
 		rpcConsumerLogs:        options.RpcConsumerLogs,
 		cmdFlags:               options.CmdFlags,
 		refererMatchString:     options.RefererMatchString,
-		relayMsgLogMaxChars:    options.RelayMsgLogMaxChars,
 		chainId:                options.ChainID,
 		apiInterface:           options.ApiInterface,
 		connectionType:         options.ConnectionType,
@@ -362,6 +358,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	guid := utils.GenerateUniqueIdentifier()
 	guidString := strconv.FormatUint(guid, 10)
 	webSocketCtx = utils.WithUniqueIdentifier(webSocketCtx, guid)
+	webSocketCtx = utils.WithConnectionIdentifier(webSocketCtx, guid)
 	utils.LavaFormatDebug("consumer websocket manager started", utils.LogAttr("GUID", webSocketCtx))
 	defer func() {
 		// The connection is over. Release every subscription this client still holds
@@ -370,7 +367,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		// and the remote address are per-connection, so this key matches every
 		// subscribe the loop registered.
 		if cwm.wsSubscriptionManager != nil {
-			dappID, _ := websocketConn.Locals(ProjectIDHeader).(string)
+			dappID, _ := websocketConn.Locals(CustomerIDHeader).(string)
 			if err := cwm.wsSubscriptionManager.UnsubscribeAll(webSocketCtx, dappID, websocketConn.RemoteAddr().String(), cwm.WebsocketConnectionUID, nil); err != nil {
 				utils.LavaFormatDebug("error releasing subscriptions on websocket close", utils.LogAttr("err", err), utils.LogAttr("GUID", webSocketCtx))
 			}
@@ -454,18 +451,25 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	for {
 		idleFor.Store(time.Now().Unix())
 		startTime := time.Now()
-		msgSeed := guidString + "_" + strconv.Itoa(rand.Intn(10000000000)) // use message seed with original guid and new int
 
 		utils.LavaFormatTrace("listening for new message from the websocket")
 
 		if messageType, msg, err = websocketConn.ReadMessage(); err != nil {
 			utils.LavaFormatTrace("error reading msg from the websocket, probably websocket was closed by the user", utils.LogAttr("err", err))
-			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, guidString, relayBodyForLog(string(msg), cwm.cmdFlags.DebugRelays), cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 			}
 			break
 		}
+
+		// Each frame is a relay of its own, with its own GUID: its log lines, its relay_end and the
+		// error ID its client reads (Error_GUID) all carry it, so a connection's relays are told apart
+		// and an error a client reports can be found. The connection's GUID stays on the context as
+		// its connection identifier, and on the connection's own lines.
+		frameGUID := utils.GenerateUniqueIdentifier()
+		frameCtx := utils.WithUniqueIdentifier(webSocketCtx, frameGUID)
+		msgSeed := strconv.FormatUint(frameGUID, 10)
 
 		// Check rate limit is met
 		currentRequestsPerSecond := requestsPerSecond.Add(1)
@@ -478,10 +482,10 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			continue
 		}
 
-		dappID, ok := websocketConn.Locals(ProjectIDHeader).(string)
+		dappID, ok := websocketConn.Locals(CustomerIDHeader).(string)
 		if !ok {
 			// Log and remove the analyze
-			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), nil, msgSeed, []byte("Unable to extract dappID"), cwm.apiInterface, time.Since(startTime))
+			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), nil, msgSeed, "Unable to extract dappID", cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 			}
@@ -489,14 +493,11 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 
 		userIp := websocketConn.RemoteAddr().String()
 
-		logFormattedMsg := string(msg)
-		if !cwm.cmdFlags.DebugRelays {
-			logFormattedMsg = utils.FormatLongString(logFormattedMsg, cwm.relayMsgLogMaxChars)
-		}
+		logFormattedMsg := relayBodyForLog(string(msg), cwm.cmdFlags.DebugRelays)
 
 		utils.LavaFormatDebug("ws in <<<",
 			utils.LogAttr("seed", msgSeed),
-			utils.LogAttr("GUID", webSocketCtx),
+			utils.LogAttr("GUID", frameCtx),
 			utils.LogAttr("msg", logFormattedMsg),
 			utils.LogAttr("dappID", dappID),
 		)
@@ -504,9 +505,14 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		metricsData := metrics.NewRelayAnalytics(dappID, cwm.chainId, cwm.apiInterface)
 		metricsData.Origin = origin
 
-		protocolMessage, err := cwm.relaySender.ParseRelay(webSocketCtx, "", string(msg), cwm.connectionType, dappID, userIp, nil)
+		// startTime is taken before the read blocks, so it counts the client's idle time too.
+		parseStart := time.Now()
+		protocolMessage, err := cwm.relaySender.ParseRelay(frameCtx, "", string(msg), cwm.connectionType, dappID, userIp, nil)
 		if err != nil {
 			utils.LavaFormatDebug("ws manager could not parse message", utils.LogAttr("message", msg), utils.LogAttr("err", err))
+			if reporter, ok := cwm.relaySender.(RelayRejectionReporter); ok {
+				reporter.ReportRejectedRelay(frameCtx, parseStart, dappID, err)
+			}
 			// A batch the chain cannot take is a request the caller can fix, so it gets the same
 			// -32600 the POST handler returns rather than the masked GUID the generic formatter
 			// writes. Without this the identical request shape yields an actionable error over
@@ -519,7 +525,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					continue
 				}
 			}
-			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, logFormattedMsg, cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 			}
@@ -529,9 +535,11 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		// check whether it's a normal relay / unsubscribe / unsubscribe_all otherwise its a subscription flow.
 		if !IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_SUBSCRIBE) {
 			if IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_UNSUBSCRIBE) {
-				responseData, err := cwm.wsSubscriptionManager.Unsubscribe(webSocketCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+				subscriptionCtx := WithSubscriptionUpstream(frameCtx)
+				responseData, err := cwm.wsSubscriptionManager.Unsubscribe(subscriptionCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+				cwm.reportSubscriptionRelay(subscriptionCtx, protocolMessage, parseStart, err)
 				if err != nil {
-					utils.LavaFormatWarning("error unsubscribing from subscription", err, utils.LogAttr("GUID", webSocketCtx))
+					utils.LavaFormatWarning("error unsubscribing from subscription", err, utils.LogAttr("GUID", frameCtx))
 					if err == common.SubscriptionNotFoundError {
 						// Echo the caller's id (JSON-RPC 2.0 §4.2) — the template's hardcoded
 						// id is just a fallback for malformed requests with no id field.
@@ -542,7 +550,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 						sendWS(webSocketMsgWithType{messageType: messageType, msg: msgData})
 					} else {
 						// Send formatted error so client gets feedback (e.g. upstream timeout)
-						formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+						formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), err, msgSeed, logFormattedMsg, cwm.apiInterface, time.Since(startTime))
 						if formatterMsg != nil {
 							sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 						}
@@ -562,7 +570,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 							continue
 						}
 						utils.LavaFormatTrace("synthesized unsubscribe ack",
-							utils.LogAttr("GUID", webSocketCtx),
+							utils.LogAttr("GUID", frameCtx),
 							utils.LogAttr("dappID", dappID),
 						)
 					}
@@ -571,14 +579,16 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				}
 				continue
 			} else if IsFunctionTagOfType(protocolMessage, spectypes.FUNCTION_TAG_UNSUBSCRIBE_ALL) {
-				err := cwm.wsSubscriptionManager.UnsubscribeAll(webSocketCtx, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+				subscriptionCtx := WithSubscriptionUpstream(frameCtx)
+				err := cwm.wsSubscriptionManager.UnsubscribeAll(subscriptionCtx, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+				cwm.reportSubscriptionRelay(subscriptionCtx, protocolMessage, parseStart, err)
 				// The manager tears this client's subscriptions down itself and hands back no
 				// node frame, so the router answers, as the node would have (MAG-4064). A
 				// failed teardown is answered too, under the same id, so the client waiting
 				// on it unblocks. A notification gets no reply.
 				reply := buildUnsubscribeAllSuccessReply(msg)
 				if err != nil {
-					utils.LavaFormatWarning("error unsubscribing from all subscription", err, utils.LogAttr("GUID", webSocketCtx))
+					utils.LavaFormatWarning("error unsubscribing from all subscription", err, utils.LogAttr("GUID", frameCtx))
 					reply = buildUnsubscribeAllErrorReply(msg)
 				}
 				if reply != nil {
@@ -587,9 +597,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				continue
 			} else {
 				// Normal relay over websocket. (not subscription related)
-				relayResult, err := cwm.relaySender.SendParsedRelay(webSocketCtx, metricsData, protocolMessage)
+				relayResult, err := cwm.relaySender.SendParsedRelay(frameCtx, metricsData, protocolMessage)
 				if err != nil {
-					formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not send parsed relay", err), msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+					formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not send parsed relay", err), msgSeed, logFormattedMsg, cwm.apiInterface, time.Since(startTime))
 					if formatterMsg != nil {
 						sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg})
 					}
@@ -611,7 +621,9 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		// Subscription flow
 		outputFormatter := subscriptionReplyFormatter(protocolMessage.GetApiCollection().CollectionData.ApiInterface, protocolMessage.RelayPrivateData().Data)
 
-		reply, subscriptionMsgsChan, err := cwm.wsSubscriptionManager.StartSubscription(webSocketCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+		subscriptionCtx := WithSubscriptionUpstream(frameCtx)
+		reply, subscriptionMsgsChan, err := cwm.wsSubscriptionManager.StartSubscription(subscriptionCtx, protocolMessage, dappID, userIp, cwm.WebsocketConnectionUID, metricsData)
+		cwm.reportSubscriptionRelay(subscriptionCtx, protocolMessage, parseStart, err)
 		// A subscribe never passes SendParsedRelay, which stamps these for a normal request.
 		metricsData.ApiMethod = protocolMessage.GetApi().GetName()
 		metricsData.Latency = time.Since(startTime).Milliseconds()
@@ -620,13 +632,13 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 			// successful one is counted after its fields are snapshotted for the pushes.
 			logger.AddMetricForWebSocket(metricsData, err)
 			utils.LavaFormatWarning("StartSubscription returned an error", err,
-				utils.LogAttr("GUID", webSocketCtx),
+				utils.LogAttr("GUID", frameCtx),
 				utils.LogAttr("dappID", dappID),
 				utils.LogAttr("userIp", userIp),
 				utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
 			)
 
-			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not start subscription", err), msgSeed, msg, cwm.apiInterface, time.Since(startTime))
+			formatterMsg := logger.AnalyzeWebSocketErrorAndGetFormattedMessage(websocketConn.LocalAddr().String(), utils.LavaFormatError("could not start subscription", err), msgSeed, logFormattedMsg, cwm.apiInterface, time.Since(startTime))
 			if formatterMsg != nil {
 				sendWS(webSocketMsgWithType{messageType: messageType, msg: formatterMsg}) // No need to use outputFormatter here since we are sending an error
 				continue
@@ -655,7 +667,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 		if subscriptionMsgsChan != nil { // if == nil, it means that we already have an active subscription running on this query
 			go func() {
 				utils.LavaFormatTrace("created go routine for new websocketSubMsgsChan",
-					utils.LogAttr("GUID", webSocketCtx),
+					utils.LogAttr("GUID", frameCtx),
 					utils.LogAttr("dappID", dappID),
 					utils.LogAttr("userIp", userIp),
 					utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
@@ -677,7 +689,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				}
 
 				utils.LavaFormatTrace("subscriptionMsgsChan was closed",
-					utils.LogAttr("GUID", webSocketCtx),
+					utils.LogAttr("GUID", frameCtx),
 					utils.LogAttr("dappID", dappID),
 					utils.LogAttr("userIp", userIp),
 					utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
@@ -691,7 +703,7 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 				// subscriptions on it. Any other end of a subscription leaves the socket open.
 				if errors.Is(cwm.subscriptionEndError(dappID, userIp), ErrSubscriptionClientTooSlow) {
 					utils.LavaFormatDebug("websocket subscription client did not keep up, closing its connection",
-						utils.LogAttr("GUID", webSocketCtx),
+						utils.LogAttr("GUID", frameCtx),
 						utils.LogAttr("dappID", dappID),
 						utils.LogAttr("userIp", userIp),
 					)
@@ -713,6 +725,15 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 
 			logger.LogRequestAndResponse("jsonrpc ws msg", false, "ws", websocketConn.LocalAddr().String(), string(msg), string(reply.Data), msgSeed, time.Since(startTime), nil)
 		}
+	}
+}
+
+// reportSubscriptionRelay hands a subscription request's outcome to the relay sender, when it records
+// them (SubscriptionRelayReporter). Each subscribe, unsubscribe and unsubscribe-all frame calls it
+// once, after the manager returns.
+func (cwm *ConsumerWebsocketManager) reportSubscriptionRelay(ctx context.Context, protocolMessage ProtocolMessage, start time.Time, err error) {
+	if reporter, ok := cwm.relaySender.(SubscriptionRelayReporter); ok {
+		reporter.ReportSubscriptionRelay(ctx, protocolMessage, start, err)
 	}
 }
 

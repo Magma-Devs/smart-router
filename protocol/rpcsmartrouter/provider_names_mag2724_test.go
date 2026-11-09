@@ -70,7 +70,7 @@ func TestCollectHealthProviders_LoadsConfigWithDuplicateNames(t *testing.T) {
 	// collectHealthProviders drives the global viper; leave it as we found it.
 	t.Cleanup(viper.Reset)
 
-	providers, err := collectHealthProviders([]string{"dup"}, true)
+	providers, err := collectHealthProviders([]string{"dup"}, true, common.AuthConfig{})
 	require.NoError(t, err, "health must be able to load the config it is reached for, not refuse it")
 	require.Len(t, providers, 4, "both halves of the collision are probed, plus the unique provider and the backup")
 

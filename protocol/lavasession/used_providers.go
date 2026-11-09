@@ -71,9 +71,12 @@ type UsedProviders struct {
 	// Names, not a count, because a count cannot say which attempt is still out, and the reply's
 	// attempt headers have to name one: a hedge's cancelled loser was sent and never reported back
 	// (MAG-3762). The in-flight set cannot stand in for this list. It drops a provider when the
-	// provider's session is freed, and that happens before the provider's result is posted.
-	dispatched  []string
+	// provider's session is freed, and that happens before the provider's result is posted. Each
+	// entry also keeps its batch and when it was taken, which tell a retry or hedge from a broadcast.
+	dispatched  []Dispatch
 	batchNumber int
+	// consistencySkips are the upstreams the consistency check passed over, each time it did.
+	consistencySkips []ConsistencySkip
 	// chainID is used for chain-aware unsupported-method detection (so
 	// chain-native messages don't collide with broad Tier-1 substring
 	// matchers). Empty means classification falls back to Tier-1 only.
@@ -81,6 +84,29 @@ type UsedProviders struct {
 	// lastChanceTaken records that this request was already lent a disabled endpoint
 	// (TakeLastChance), so a retrying request is lent at most one.
 	lastChanceTaken bool
+	// routerHealthCheck marks the request as the router's own health check (MarkRouterHealthCheck),
+	// not a client's. Its answer is a poll, so it must not switch an endpoint back on (MAG-4790).
+	routerHealthCheck bool
+}
+
+// Dispatch is one session a request sent: its provider, the batch it went out in, counted from 0
+// with one batch per GetSessions that returned sessions, and when it was taken for sending.
+type Dispatch struct {
+	Provider string
+	Batch    int
+	At       time.Time
+	// StaleFallback marks a session sent although the consistency check had passed its provider
+	// over, because no other provider was left: its answer may be stale.
+	StaleFallback bool
+}
+
+// ConsistencySkip is a provider the consistency check passed over before sending: it was Lag blocks
+// behind the chain tip, more than the Threshold allowed, in batch Batch. It got no request then.
+type ConsistencySkip struct {
+	Provider  string
+	Lag       int64
+	Threshold int64
+	Batch     int
 }
 
 // SetChainID attaches a chain ID to this UsedProviders instance so that
@@ -110,6 +136,30 @@ func (up *UsedProviders) TakeLastChance() bool {
 	}
 	up.lastChanceTaken = true
 	return true
+}
+
+// MarkRouterHealthCheck records that this request is the router's own health check rather than a
+// client's. The relay path reads it with IsRouterHealthCheck: the health check may still be lent a
+// disabled endpoint by the last chance, so readiness can report whether a node answers, but its
+// success does not switch that endpoint back on (MAG-4790).
+func (up *UsedProviders) MarkRouterHealthCheck() {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	up.routerHealthCheck = true
+}
+
+// IsRouterHealthCheck reports whether MarkRouterHealthCheck was called: whether this request is the
+// router's own health check.
+func (up *UsedProviders) IsRouterHealthCheck() bool {
+	if up == nil {
+		return false
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return up.routerHealthCheck
 }
 
 func (up *UsedProviders) CurrentlyUsed() int {
@@ -155,6 +205,56 @@ func (up *UsedProviders) SessionsDispatched() int {
 func (up *UsedProviders) DispatchedProviders() []string {
 	if up == nil {
 		utils.LavaFormatError("UsedProviders.DispatchedProviders is nil, misuse detected", nil)
+		return nil
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	names := make([]string, len(up.dispatched))
+	for i, dispatch := range up.dispatched {
+		names[i] = dispatch.Provider
+	}
+	return names
+}
+
+// RecordConsistencySkip records that the consistency check passed provider over in the batch just
+// taken, so the request's record can say who was not asked, and why.
+func (up *UsedProviders) RecordConsistencySkip(provider string, lag, threshold int64) {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	up.consistencySkips = append(up.consistencySkips, ConsistencySkip{Provider: provider, Lag: lag, Threshold: threshold, Batch: max(up.batchNumber-1, 0)})
+}
+
+// ConsistencySkips returns every skip RecordConsistencySkip recorded, in order.
+func (up *UsedProviders) ConsistencySkips() []ConsistencySkip {
+	if up == nil {
+		return nil
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return slices.Clone(up.consistencySkips)
+}
+
+// MarkStaleFallback flags provider's latest dispatch as a stale fallback.
+func (up *UsedProviders) MarkStaleFallback(provider string) {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	for i := len(up.dispatched) - 1; i >= 0; i-- {
+		if up.dispatched[i].Provider == provider {
+			up.dispatched[i].StaleFallback = true
+			return
+		}
+	}
+}
+
+// Dispatches is DispatchedProviders with each session's batch and the time it was taken for sending.
+func (up *UsedProviders) Dispatches() []Dispatch {
+	if up == nil {
 		return nil
 	}
 	up.lock.RLock()
@@ -294,7 +394,7 @@ func (up *UsedProviders) ReleaseFromLatestBatch(provider string, routerKey Route
 	// Same reason: this provider never dispatched, so it must not count as one we asked. The latest
 	// batch added it, so its entry is the last one under its name.
 	for i := len(up.dispatched) - 1; i >= 0; i-- {
-		if up.dispatched[i] == provider {
+		if up.dispatched[i].Provider == provider {
 			up.dispatched = slices.Delete(up.dispatched, i, i+1)
 			break
 		}
@@ -400,6 +500,7 @@ func (up *UsedProviders) AddUsed(sessions ConsumerSessionsMap, err error) {
 	// this is nil safe
 	if len(sessions) > 0 && err == nil {
 		up.sessionsLatestBatch = 0
+		takenAt := time.Now()
 		for provider, sessionInfo := range sessions { // the key for ConsumerSessionsMap is the provider public address
 			var routerKey RouterKey
 			if sessionInfo.Session != nil {
@@ -410,7 +511,7 @@ func (up *UsedProviders) AddUsed(sessions ConsumerSessionsMap, err error) {
 			uniqueUsedProviders := up.createOrUseUniqueUsedProvidersForKey(routerKey)
 			uniqueUsedProviders.providers[provider] = struct{}{}
 			up.sessionsLatestBatch++
-			up.dispatched = append(up.dispatched, provider)
+			up.dispatched = append(up.dispatched, Dispatch{Provider: provider, Batch: up.batchNumber, At: takenAt})
 		}
 		// increase batch number
 		up.batchNumber++

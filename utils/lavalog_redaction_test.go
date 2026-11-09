@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	zerolog "github.com/rs/zerolog"
-	zerologlog "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,16 +18,14 @@ import (
 // previous logger and level are restored before returning.
 func captureLog(t *testing.T, level zerolog.Level, fn func()) string {
 	t.Helper()
-	prevLogger := zerologlog.Logger
-	prevLevel := defaultGlobalLogLevel
-	t.Cleanup(func() {
-		zerologlog.Logger = prevLogger
-		defaultGlobalLogLevel = prevLevel
-	})
-
+	prevLevel := currentLogLevel()
 	var buf bytes.Buffer
-	defaultGlobalLogLevel = level
-	zerologlog.Logger = zerolog.New(&buf).Level(level)
+	restore := SetStdLogger(zerolog.New(&buf).Level(level))
+	t.Cleanup(func() {
+		restore()
+		globalLogLevel.Store(int32(prevLevel))
+	})
+	globalLogLevel.Store(int32(level))
 	fn()
 	return buf.String()
 }
@@ -114,4 +111,36 @@ func TestLavaFormatLog_KeepsAttributesAfterAURL(t *testing.T) {
 	assert.NotContains(t, out, testSecretKey)
 	assert.Contains(t, out, "eth_call")
 	assert.Contains(t, out, "ETH1")
+}
+
+// A caller that stops writing a line must not change the error its client reads.
+func TestLavaFormatErrorSilent_ReturnsLavaFormatErrorsErrorAndWritesNothing(t *testing.T) {
+	cause := fmt.Errorf("post %s: %w", testSecretURL, errors.New("connection refused"))
+	cases := map[string]struct {
+		err   error
+		attrs []Attribute
+	}{
+		"cause and attributes": {cause, []Attribute{LogAttr("GUID", "7003"), LogAttr("endpoint", "ETH1jsonrpc")}},
+		"cause only":           {cause, nil},
+		"attributes only":      {nil, []Attribute{LogAttr("url", testSecretURL)}},
+		"neither":              {nil, nil},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var loud, silent error
+			logged := captureLog(t, zerolog.TraceLevel, func() {
+				loud = LavaFormatError("failed processing responses from RPC endpoints", tc.err, tc.attrs...)
+			})
+			written := captureLog(t, zerolog.TraceLevel, func() {
+				silent = LavaFormatErrorSilent("failed processing responses from RPC endpoints", tc.err, tc.attrs...)
+			})
+			require.NotEmpty(t, strings.TrimSpace(logged), "LavaFormatError writes the line")
+			assert.Empty(t, written)
+			assert.Equal(t, loud.Error(), silent.Error())
+			assert.NotContains(t, silent.Error(), testSecretKey)
+			if tc.err != nil {
+				assert.ErrorIs(t, silent, tc.err, "the cause stays reachable")
+			}
+		})
+	}
 }

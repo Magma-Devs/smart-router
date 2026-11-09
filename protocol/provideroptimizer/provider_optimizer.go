@@ -13,7 +13,6 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
-	"github.com/magma-Devs/smart-router/utils/lavaslices"
 	"github.com/magma-Devs/smart-router/utils/score"
 )
 
@@ -654,7 +653,7 @@ func (po *ProviderOptimizer) calculateSyncLag(latestSync uint64, timeSync time.T
 	}
 	// lag on first block
 	timeLag := sampleTime.Sub(timeSync) // received the latest block at time X, this provider provided the entry at time Y, which is X-Y time after
-	firstBlockLag := lavaslices.Min([]time.Duration{po.averageBlockTime, timeLag})
+	firstBlockLag := min(po.averageBlockTime, timeLag)
 	blocksGap := latestSync - providerBlock - 1                     // latestSync > providerBlock
 	blocksGapTime := time.Duration(blocksGap) * po.averageBlockTime // the provider is behind by X blocks, so is expected to catch up in averageBlockTime * X
 	timeLag = firstBlockLag + blocksGapTime

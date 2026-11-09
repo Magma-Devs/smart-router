@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -17,21 +19,14 @@ import (
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/lavaslices"
-	"github.com/magma-Devs/smart-router/utils/maps"
 )
 
 var (
 	// SkipWebsocketVerificationDefault seeds every parser built by NewChainParser and
 	// is bound to --skip-websocket-verification. It is written once during flag parsing,
-	// before any parser or goroutine exists, and is read-only from then on.
-	//
-	// It is deliberately NOT consulted at the point of use. The `health` command probes
-	// each direct-rpc entry concurrently and needs a different answer per entry (ws
-	// augmentation only routes for an entry that actually has a ws:// URL), so it used to
-	// flip a package global under a mutex around ValidateCollect. That missed the second
-	// reader — newChainRouter — which runs outside that mutex, so entries raced each other
-	// into the wrong ws enforcement and healthy legs reported red (MAG-2333). Per-parser
-	// state removes the shared cell entirely.
+	// before any parser or goroutine exists, and is read-only from then on. Nothing reads
+	// it at the point of use: a caller that needs another answer for one parser sets it
+	// there (SetSkipWebsocketVerification), as the `health` command does per provider.
 	SkipWebsocketVerificationDefault = false
 
 	// SkipAllVerifications is the process-wide off switch behind --skip-all-verifications.
@@ -54,6 +49,10 @@ type InternalPath struct {
 	ApiInterface   string
 	ConnectionType string
 	Addon          string
+	// ServesRoot: this path's base collection answers every non-subscription
+	// api of the root base collection, so a url pinned here can stand in for a
+	// root url (STRK's /rpc/v0_x and its root both inherit HTTP-ONLY).
+	ServesRoot bool
 }
 
 type BaseChainParser struct {
@@ -133,7 +132,7 @@ func forwardsClientBodyHeader(apiCollection *spectypes.ApiCollection, headerName
 	if apiCollection.CollectionData.ApiInterface != spectypes.APIInterfaceRest {
 		return false
 	}
-	if !restMethodCarriesBody(apiCollection.CollectionData.Type) {
+	if !RestMethodCarriesBody(apiCollection.CollectionData.Type) {
 		return false
 	}
 	_, ok := clientBodyHeaders[headerName]
@@ -284,8 +283,10 @@ func (bcp *BaseChainParser) SeparateAddonsExtensions(ctx context.Context, suppor
 				utils.Attribute{Key: "supported", Value: supportedToCheck})
 		}
 	}
-
-	return addons, extensions, err
+	if err != nil {
+		return addons, extensions, &VerificationFailure{Check: CheckUnsupportedAddon, Err: err}
+	}
+	return addons, extensions, nil
 }
 
 // gets all verifications for an endpoint supporting multiple addons and extensions
@@ -465,7 +466,7 @@ func (bcp *BaseChainParser) IsTagInCollection(tag spectypes.FUNCTION_TAG, collec
 	defer bcp.rwLock.RUnlock()
 
 	apiCollection, ok := bcp.apiCollections[collectionKey]
-	return ok && lavaslices.ContainsPredicate(apiCollection.ParseDirectives, func(elem *spectypes.ParseDirective) bool {
+	return ok && slices.ContainsFunc(apiCollection.ParseDirectives, func(elem *spectypes.ParseDirective) bool {
 		return elem.FunctionTag == tag
 	})
 }
@@ -473,7 +474,7 @@ func (bcp *BaseChainParser) IsTagInCollection(tag spectypes.FUNCTION_TAG, collec
 func (bcp *BaseChainParser) GetAllInternalPaths() []string {
 	bcp.rwLock.RLock()
 	defer bcp.rwLock.RUnlock()
-	return lavaslices.Map(maps.ValuesSlice(bcp.internalPaths), func(internalPath InternalPath) string {
+	return lavaslices.Map(slices.Collect(maps.Values(bcp.internalPaths)), func(internalPath InternalPath) string {
 		return internalPath.Path
 	})
 }
@@ -483,6 +484,15 @@ func (bcp *BaseChainParser) IsInternalPathEnabled(internalPath string, apiInterf
 	defer bcp.rwLock.RUnlock()
 	internalPathObj, ok := bcp.internalPaths[internalPath]
 	return ok && internalPathObj.Enabled && internalPathObj.ApiInterface == apiInterface && internalPathObj.Addon == addon
+}
+
+// ServesRootCollection reports whether a url pinned to internalPath can stand
+// in for the spec's root url. See InternalPath.ServesRoot.
+func (bcp *BaseChainParser) ServesRootCollection(internalPath string) bool {
+	bcp.rwLock.RLock()
+	defer bcp.rwLock.RUnlock()
+	internalPathObj, ok := bcp.internalPaths[internalPath]
+	return ok && internalPath != "" && internalPathObj.ServesRoot
 }
 
 func (bcp *BaseChainParser) ExtensionParsing(addon string, parsedMessageArg *baseChainMessageContainer, extensionInfo extensionslib.ExtensionInfo) {
@@ -588,7 +598,7 @@ func (apip *BaseChainParser) ApiHasStatefulCategory(name string) bool {
 	apip.rwLock.RLock()
 	defer apip.rwLock.RUnlock()
 	for apiKey, apiCont := range apip.serverApis {
-		if apiKey.Name == name && apiCont.api != nil && apiCont.api.Category.Stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
+		if apiKey.Name == name && apiCont.api != nil && apiCont.api.Enabled && apiCont.api.Category.Stateful == common.CONSISTENCY_SELECT_ALL_PROVIDERS {
 			return true
 		}
 	}
@@ -612,7 +622,7 @@ func (apip *BaseChainParser) ApiNameDefined(name string) bool {
 	apip.rwLock.RLock()
 	defer apip.rwLock.RUnlock()
 	for _, apiCont := range apip.serverApis {
-		if apiCont.api != nil && apiCont.api.Name == name {
+		if apiCont.api != nil && apiCont.api.Enabled && apiCont.api.Name == name {
 			return true
 		}
 	}
@@ -638,7 +648,7 @@ func (apip *BaseChainParser) ApiNamesLike(name string) []string {
 	seen := map[string]struct{}{}
 	var like []string
 	for _, apiCont := range apip.serverApis {
-		if apiCont.api == nil || apiCont.api.Name == name || shapeOf(apiCont.api.Name) != wanted {
+		if apiCont.api == nil || !apiCont.api.Enabled || apiCont.api.Name == name || shapeOf(apiCont.api.Name) != wanted {
 			continue
 		}
 		if _, dup := seen[apiCont.api.Name]; dup {
@@ -749,6 +759,23 @@ func (bcp *BaseChainParser) ReplyHeaderDirectives() []*spectypes.Header {
 	return bcp.replyHeaders
 }
 
+// addServerApi stores apiContainer under key. An enabled api always replaces a disabled one
+// and a disabled one never replaces an enabled one, so a method that one collection disables
+// and another serves stays served whatever order the collections load in. Between two
+// entries of the same kind, overwrite decides.
+func addServerApi(serverApis map[ApiKey]ApiContainer, key ApiKey, apiContainer ApiContainer, overwrite bool) {
+	if existing, ok := serverApis[key]; ok {
+		if existing.api.Enabled != apiContainer.api.Enabled {
+			if !apiContainer.api.Enabled {
+				return
+			}
+		} else if !overwrite {
+			return
+		}
+	}
+	serverApis[key] = apiContainer
+}
+
 func getServiceApis(
 	spec spectypes.Spec,
 	rpcInterface string,
@@ -766,6 +793,8 @@ func getServiceApis(
 	headers := map[ApiKey]*spectypes.Header{}
 	apiCollections := map[CollectionKey]*spectypes.ApiCollection{}
 	verifications := map[VerificationKey]map[string][]VerificationContainer{}
+	baseApis := map[string]map[baseApiKey]struct{}{}
+	subscriptionApis := map[string]struct{}{}
 	if spec.Enabled {
 		for _, apiCollection := range spec.ApiCollections {
 			if !apiCollection.Enabled {
@@ -780,13 +809,21 @@ func getServiceApis(
 				Addon:          apiCollection.CollectionData.AddOn,
 			}
 
-			// add as a valid internal path
-			retInternalPaths[apiCollection.CollectionData.InternalPath] = InternalPath{
-				Path:           apiCollection.CollectionData.InternalPath,
-				Enabled:        apiCollection.Enabled,
-				ApiInterface:   apiCollection.CollectionData.ApiInterface,
-				ConnectionType: apiCollection.CollectionData.Type,
-				Addon:          apiCollection.CollectionData.AddOn,
+			// add as a valid internal path. A path's base collection owns its
+			// entry: an add-on collection on the same path (ETH1's and STRK's
+			// root debug/trace) must not replace it, or the entry describes the
+			// add-on depending on collection order.
+			if existing, ok := retInternalPaths[apiCollection.CollectionData.InternalPath]; !ok || existing.Addon != "" || apiCollection.CollectionData.AddOn == "" {
+				retInternalPaths[apiCollection.CollectionData.InternalPath] = InternalPath{
+					Path:           apiCollection.CollectionData.InternalPath,
+					Enabled:        apiCollection.Enabled,
+					ApiInterface:   apiCollection.CollectionData.ApiInterface,
+					ConnectionType: apiCollection.CollectionData.Type,
+					Addon:          apiCollection.CollectionData.AddOn,
+				}
+			}
+			if apiCollection.CollectionData.AddOn == "" {
+				collectBaseApis(baseApis, subscriptionApis, apiCollection)
 			}
 
 			for _, parsing := range apiCollection.ParseDirectives {
@@ -808,49 +845,40 @@ func getServiceApis(
 				}
 			}
 
+			// Disabled apis are stored too, so a request for one finds it and getSupportedApi
+			// refuses it. Skipping them made the lookup miss and fall through to
+			// defaultApiContainer, which relays the method as a cacheable single-provider read
+			// (MAG-4185). addServerApi keeps an enabled entry over a disabled one for the same key.
 			for _, api := range apiCollection.Apis {
-				if !api.Enabled {
-					continue
-				}
-
 				if rpcInterface == spectypes.APIInterfaceRest {
 					apiKey, apiContainer, err := newRestApiContainer(api, collectionKey)
 					if err != nil {
 						utils.LavaFormatError("regex Compile api", err, utils.Attribute{Key: "apiName", Value: api.Name})
 						continue
 					}
-					serverApis[apiKey] = apiContainer
-				} else {
-					// add another internal path entry so it can specifically be referenced
-					if apiCollection.CollectionData.InternalPath != "" {
-						serverApis[ApiKey{
-							Name:           api.Name,
-							ConnectionType: collectionKey.ConnectionType,
-							InternalPath:   apiCollection.CollectionData.InternalPath,
-						}] = ApiContainer{
-							api:           api,
-							collectionKey: collectionKey,
-						}
-						// if it does not exist set it
-						if _, ok := serverApis[ApiKey{Name: api.Name, ConnectionType: collectionKey.ConnectionType}]; !ok {
-							serverApis[ApiKey{
-								Name:           api.Name,
-								ConnectionType: collectionKey.ConnectionType,
-							}] = ApiContainer{
-								api:           api,
-								collectionKey: collectionKey,
-							}
-						}
-					} else {
-						serverApis[ApiKey{
-							Name:           api.Name,
-							ConnectionType: collectionKey.ConnectionType,
-						}] = ApiContainer{
-							api:           api,
-							collectionKey: collectionKey,
-						}
-					}
+					addServerApi(serverApis, apiKey, apiContainer, true)
+					continue
 				}
+				apiContainer := ApiContainer{
+					api:           api,
+					collectionKey: collectionKey,
+				}
+				bareKey := ApiKey{
+					Name:           api.Name,
+					ConnectionType: collectionKey.ConnectionType,
+				}
+				if apiCollection.CollectionData.InternalPath == "" {
+					addServerApi(serverApis, bareKey, apiContainer, true)
+					continue
+				}
+				// add another internal path entry so it can specifically be referenced
+				addServerApi(serverApis, ApiKey{
+					Name:           api.Name,
+					ConnectionType: collectionKey.ConnectionType,
+					InternalPath:   apiCollection.CollectionData.InternalPath,
+				}, apiContainer, true)
+				// the bare key keeps whichever collection set it first
+				addServerApi(serverApis, bareKey, apiContainer, false)
 			}
 			for _, header := range apiCollection.Headers {
 				headers[ApiKey{
@@ -916,7 +944,64 @@ func getServiceApis(
 			apiCollections[collectionKey] = apiCollection
 		}
 	}
+	markPathsServingRoot(retInternalPaths, baseApis, subscriptionApis)
 	return retInternalPaths, serverApis, taggedApis, apiCollections, headers, verifications
+}
+
+// baseApiKey is one api a base collection answers, by name and connection type.
+type baseApiKey struct {
+	name           string
+	connectionType string
+}
+
+// collectBaseApis records the enabled apis of a base (add-on-less) collection
+// under its internal path, and the names its subscription directives use.
+func collectBaseApis(baseApis map[string]map[baseApiKey]struct{}, subscriptionApis map[string]struct{}, apiCollection *spectypes.ApiCollection) {
+	path := apiCollection.CollectionData.InternalPath
+	if baseApis[path] == nil {
+		baseApis[path] = map[baseApiKey]struct{}{}
+	}
+	for _, api := range apiCollection.Apis {
+		if api.Enabled {
+			baseApis[path][baseApiKey{name: api.Name, connectionType: apiCollection.CollectionData.Type}] = struct{}{}
+		}
+	}
+	for _, parsing := range apiCollection.ParseDirectives {
+		switch parsing.FunctionTag {
+		case spectypes.FUNCTION_TAG_SUBSCRIBE, spectypes.FUNCTION_TAG_UNSUBSCRIBE, spectypes.FUNCTION_TAG_UNSUBSCRIBE_ALL:
+			subscriptionApis[parsing.ApiName] = struct{}{}
+		}
+	}
+}
+
+// markPathsServingRoot sets ServesRoot on every non-root base path that answers
+// all of the root base collection's apis. Subscription apis are left out: they
+// travel over ws, and the question is whether an http url can take root
+// traffic. A root with no such apis is served by nothing.
+func markPathsServingRoot(internalPaths map[string]InternalPath, baseApis map[string]map[baseApiKey]struct{}, subscriptionApis map[string]struct{}) {
+	rootApis := make([]baseApiKey, 0, len(baseApis[""]))
+	for api := range baseApis[""] {
+		if _, subscription := subscriptionApis[api.name]; !subscription {
+			rootApis = append(rootApis, api)
+		}
+	}
+	if len(rootApis) == 0 {
+		return
+	}
+	for path, entry := range internalPaths {
+		if path == "" || entry.Addon != "" {
+			continue
+		}
+		servesAll := true
+		for _, api := range rootApis {
+			if _, ok := baseApis[path][api]; !ok {
+				servesAll = false
+				break
+			}
+		}
+		entry.ServesRoot = servesAll
+		internalPaths[path] = entry
+	}
 }
 
 func (bcp *BaseChainParser) ExtensionsParser() *extensionslib.ExtensionParser {

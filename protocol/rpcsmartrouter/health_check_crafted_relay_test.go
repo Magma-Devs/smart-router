@@ -2,8 +2,10 @@ package rpcsmartrouter
 
 import (
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -30,10 +32,31 @@ type healthRelayFleet struct {
 	server   *RPCSmartRouterServer
 	served   *atomic.Int32
 	resolver *CrossValidationPolicyResolver
+	// stopUpstream closes the upstream's listener, so later requests are refused.
+	stopUpstream func()
+	// endpoints are the fleet's endpoints, one per provider, so a test can switch them off.
+	endpoints []*lavasession.Endpoint
 }
 
 // newHealthRelayFleet wires the fleet under the given policy, written for the latest-block method.
 func newHealthRelayFleet(t *testing.T, policy CrossValidationPolicy) *healthRelayFleet {
+	t.Helper()
+	return newHealthRelayFleetAnswering(t, &policy, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`)
+}
+
+// newHealthRelayFleetAnswering is newHealthRelayFleet with the upstream's reply chosen. A nil
+// policy configures none.
+func newHealthRelayFleetAnswering(t *testing.T, policy *CrossValidationPolicy, reply string) *healthRelayFleet {
+	t.Helper()
+	return newHealthRelayFleetServing(t, policy, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(reply))
+	})
+}
+
+// newHealthRelayFleetServing is newHealthRelayFleetAnswering with the upstream's handler chosen.
+// served counts every request the handler receives.
+func newHealthRelayFleetServing(t *testing.T, policy *CrossValidationPolicy, handler http.HandlerFunc) *healthRelayFleet {
 	t.Helper()
 	rand.InitRandomSeed()
 	ctx := t.Context()
@@ -41,30 +64,36 @@ func newHealthRelayFleet(t *testing.T, policy CrossValidationPolicy) *healthRela
 	var served atomic.Int32
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		served.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x10"}`))
+		handler(w, r)
 	})
 	chainParser, _, _, closeServer, providerEndpoint, err := chainlib.CreateChainLibMocks(
 		ctx, "ETH1", spectypes.APIInterfaceJsonRPC, upstream, nil, "../../", nil)
-	if closeServer != nil {
-		t.Cleanup(closeServer)
+	var stopOnce sync.Once
+	stopUpstream := func() {
+		if closeServer != nil {
+			stopOnce.Do(closeServer)
+		}
 	}
+	t.Cleanup(stopUpstream)
 	require.NoError(t, err)
 
 	// Three providers, one upstream. Each holds its own connection, so session selection has a real
 	// choice to make and the relay it picks reaches a real node.
 	pairingList := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	var endpoints []*lavasession.Endpoint
 	for i, group := range []string{"group-a", "group-a", "group-b"} {
 		conn, connErr := lavasession.NewDirectRPCConnection(ctx, providerEndpoint.NodeUrls[0], 5, spectypes.APIInterfaceJsonRPC)
 		require.NoError(t, connErr)
 		t.Cleanup(func() { _ = conn.Close() })
+		endpoint := &lavasession.Endpoint{
+			NetworkAddress:    providerEndpoint.NodeUrls[0].Url,
+			Enabled:           true,
+			DirectConnections: []lavasession.DirectRPCConnection{conn},
+		}
+		endpoints = append(endpoints, endpoint)
 		provider := lavasession.NewConsumerSessionWithProvider(
 			"upstream-"+string(rune('a'+i)),
-			[]*lavasession.Endpoint{{
-				NetworkAddress:    providerEndpoint.NodeUrls[0].Url,
-				Enabled:           true,
-				DirectConnections: []lavasession.DirectRPCConnection{conn},
-			}},
+			[]*lavasession.Endpoint{endpoint},
 			100000, 1, 1)
 		provider.StaticProvider = true
 		provider.GroupLabel = group
@@ -74,20 +103,24 @@ func newHealthRelayFleet(t *testing.T, policy CrossValidationPolicy) *healthRela
 	rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 	require.NoError(t, sessionManager.UpdateAllProviders(1, pairingList, nil))
 
-	resolver, err := NewCrossValidationPolicyResolver(CrossValidationConfig{
-		Policies: []CrossValidationPolicyEntry{{
+	var config CrossValidationConfig
+	if policy != nil {
+		config.Policies = []CrossValidationPolicyEntry{{
 			ChainID: "ETH1", ApiInterface: "jsonrpc", Method: "eth_blockNumber",
-			CrossValidationPolicy: policy,
-		}},
-	})
+			CrossValidationPolicy: *policy,
+		}}
+	}
+	resolver, err := NewCrossValidationPolicyResolver(config)
 	require.NoError(t, err)
 
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 
 	return &healthRelayFleet{
-		served:   &served,
-		resolver: resolver,
+		served:       &served,
+		resolver:     resolver,
+		stopUpstream: stopUpstream,
+		endpoints:    endpoints,
 		server: &RPCSmartRouterServer{
 			chainParser:             chainParser,
 			sessionManager:          sessionManager,
@@ -144,9 +177,9 @@ func TestSendCraftedRelays_IgnoresCrossValidationPolicy(t *testing.T) {
 			require.Equal(t, relaycore.CrossValidation, clientSM.GetSelection())
 			require.Equal(t, threshold, clientSM.GetCrossValidationParams().AgreementThreshold)
 
-			success, err := fleet.server.sendCraftedRelays(1, false)
+			verdict, err := fleet.server.sendCraftedRelays(1, false)
 			require.NoError(t, err)
-			require.True(t, success,
+			require.Equal(t, metrics.ProbeHealthy, verdict,
 				"the health check must pass under a policy on its own method — threshold %d", threshold)
 			require.Positive(t, fleet.served.Load(),
 				"and it must pass by actually reaching a node, not by being skipped")
@@ -208,6 +241,125 @@ func TestHealthRelayUnderThePreFixWiring(t *testing.T) {
 				"refused before anything was sent — which is why no node was ever asked whether it was healthy")
 		})
 	}
+}
+
+// TestSendCraftedRelays_VerdictFollowsReachability is MAG-4641, through the real probe against a
+// live upstream. Only a result is health (MAG-4617: the check used to pass on an error answer). An
+// upstream that answers, however badly, is reachable, and every replica sharing it gets the same
+// answer, so the probe is inconclusive and readiness keeps its verdict. No answer at all is
+// unreachable, and that is what takes a replica out of rotation.
+func TestSendCraftedRelays_VerdictFollowsReachability(t *testing.T) {
+	answering := func(status int, body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+		stopped bool // the upstream's listener is closed before the probe
+		stalls  bool // the upstream never answers
+		retries int
+		want    metrics.ProbeVerdict
+	}{
+		{name: "a result", handler: answering(http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`), want: metrics.ProbeHealthy},
+		{name: "an error answer", handler: answering(http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"internal error"}}`), want: metrics.ProbeInconclusive},
+		{name: "an HTTP 503", handler: answering(http.StatusServiceUnavailable, `<html>origin down</html>`), want: metrics.ProbeInconclusive},
+		{name: "an HTTP 403", handler: answering(http.StatusForbidden, `{"error":"invalid api key"}`), want: metrics.ProbeInconclusive},
+		{name: "a rate limit", handler: answering(http.StatusTooManyRequests, `{"error":"too many requests"}`), want: metrics.ProbeInconclusive},
+		{name: "a dropped connection", handler: dropConnection, want: metrics.ProbeUnreachable},
+		{name: "a refused connection", handler: answering(http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`), stopped: true, want: metrics.ProbeUnreachable},
+		// One try, so the case costs one try deadline rather than six.
+		{name: "a stall to the deadline", stalls: true, retries: 1, want: metrics.ProbeUnreachable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, release := tc.handler, func() {}
+			if tc.stalls {
+				handler, release = stalling()
+			}
+			fleet := newHealthRelayFleetServing(t, nil, handler)
+			t.Cleanup(release)
+			if tc.stopped {
+				fleet.stopUpstream()
+			}
+			retries := tc.retries
+			if retries == 0 {
+				retries = 2
+			}
+
+			verdict, _ := fleet.server.sendCraftedRelays(retries, false)
+			if tc.stopped {
+				require.Zero(t, fleet.served.Load(), "premise: nothing reached the upstream")
+			} else {
+				require.Positive(t, fleet.served.Load(), "premise: the upstream was asked")
+			}
+			require.Equal(t, tc.want, verdict)
+		})
+	}
+}
+
+// dropConnection closes the connection without an answer.
+func dropConnection(w http.ResponseWriter, _ *http.Request) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		panic(http.ErrAbortHandler) // the server drops a connection it cannot hand over
+	}
+	conn, _, err := hijacker.Hijack()
+	if err == nil {
+		_ = conn.Close()
+	}
+}
+
+// stalling returns a handler that never answers, and the release that ends it. The router's
+// deadline cuts each request off on its side; the test server is not told, so the handler waits for
+// the release. Register the release with t.Cleanup after building the fleet: cleanups run
+// last-registered first, so it then runs before the fleet's cleanups close the server.
+func stalling() (http.HandlerFunc, func()) {
+	release := make(chan struct{})
+	var once sync.Once
+	handler := func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}
+	return handler, func() { once.Do(func() { close(release) }) }
+}
+
+// TestSendCraftedRelays_AStalledTryDoesNotAnswerTheNext: an attempt cut off at its try's deadline
+// still delivers its response, late. Were that response read by the next try, the next try would
+// take it as its own answer and cut off its own attempt microseconds after sending it, passing the
+// same late response down to the try after, so one stall would fail every try of the check. The
+// upstream here stalls on its first request and then answers each request with a result after
+// 50 ms: slower than reading a response already waiting, far faster than the try deadline. The
+// check must pass on its second try.
+func TestSendCraftedRelays_AStalledTryDoesNotAnswerTheNext(t *testing.T) {
+	var requests atomic.Int32
+	release := make(chan struct{})
+	fleet := newHealthRelayFleetServing(t, nil, func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			// Stalled. The router's deadline cuts the request off on its side; the test server is
+			// not told, so the handler waits for the test to end.
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"0x10"}`))
+	})
+	t.Cleanup(func() { close(release) }) // runs before the fleet's cleanups close the server
+
+	start := time.Now()
+	verdict, err := fleet.server.sendCraftedRelays(MaxRelayRetries, false)
+	require.GreaterOrEqual(t, time.Since(start), internalRelayTryTimeout, "premise: the first try stalled to its deadline")
+	require.GreaterOrEqual(t, fleet.served.Load(), int32(2), "premise: a later try reached the upstream")
+	require.NoError(t, err)
+	require.Equal(t, metrics.ProbeHealthy, verdict, "the try after the stall got a result from the upstream")
 }
 
 func thresholdName(threshold int) string {

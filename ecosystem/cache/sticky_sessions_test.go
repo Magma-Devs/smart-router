@@ -44,16 +44,16 @@ func TestStickyPinStore_SweepDropsExpiredEntries(t *testing.T) {
 
 	key := func(prefix string, i int) string { return prefix + string(rune('a'+i%26)) + string(rune('a'+i/26)) }
 
-	for i := 0; i < stickySweepEvery; i++ {
+	for i := 0; i < expiringMapSweepEvery; i++ {
 		s.setIfAbsent(key("old", i), core.StickyPin{Provider: "p", Epoch: 1}, time.Minute)
 	}
-	require.Equal(t, stickySweepEvery, s.len())
+	require.Equal(t, expiringMapSweepEvery, s.len())
 
 	now = now.Add(2 * time.Minute)
-	for i := 0; i < stickySweepEvery; i++ {
+	for i := 0; i < expiringMapSweepEvery; i++ {
 		s.setIfAbsent(key("new", i), core.StickyPin{Provider: "p", Epoch: 2}, time.Minute)
 	}
-	require.Equal(t, stickySweepEvery, s.len(), "the sweep should have collected every expired claim")
+	require.Equal(t, expiringMapSweepEvery, s.len(), "the sweep should have collected every expired claim")
 }
 
 // Re-claiming a LIVE session id is refused, and a refusal is not a write — so it does not move

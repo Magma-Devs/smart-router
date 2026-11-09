@@ -1,10 +1,11 @@
 package rpcsmartrouter
 
 import (
-	"math"
 	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/magma-Devs/smart-router/utils/backoff"
 )
 
 // WebSocket backoff constants for reconnection
@@ -64,23 +65,32 @@ func (b *ExponentialBackoff) NextBackoff() (time.Duration, bool) {
 		return 0, false // Max retries exceeded
 	}
 
-	// Calculate exponential delay: initial * multiplier^attempt
-	delay := float64(b.InitialInterval) * math.Pow(b.Multiplier, float64(b.currentAttempt))
-
-	// Cap at maximum
-	if delay > float64(b.MaxInterval) {
-		delay = float64(b.MaxInterval)
-	}
-
-	// Add jitter: delay * (1 - jitter + random * 2 * jitter)
-	// This spreads retries in range [delay*(1-jitter), delay*(1+jitter)]
-	if b.JitterFactor > 0 && b.rng != nil {
-		jitter := delay * b.JitterFactor
-		delay = delay - jitter + (b.rng.Float64() * 2 * jitter)
-	}
-
+	delay := b.rung(b.currentAttempt)
 	b.currentAttempt++
-	return time.Duration(delay), true
+	return delay, true
+}
+
+// LastBackoff returns the ladder's last rung, jittered like the others, without moving along the
+// ladder: the wait for a caller that keeps retrying once NextBackoff has run out. A ladder with no
+// MaxRetries never runs out, and answers its first rung.
+func (b *ExponentialBackoff) LastBackoff() time.Duration {
+	b.lock.Lock()
+	defer b.lock.Unlock()
+	return b.rung(max(b.MaxRetries-1, 0))
+}
+
+// rung is the delay for attempt, jittered when the ladder has jitter. Called with b.lock held.
+func (b *ExponentialBackoff) rung(attempt int) time.Duration {
+	cfg := backoff.Config{
+		Initial:      b.InitialInterval,
+		Max:          b.MaxInterval,
+		Multiplier:   b.Multiplier,
+		JitterFactor: b.JitterFactor,
+	}
+	if b.JitterFactor > 0 && b.rng != nil {
+		return backoff.Jittered(attempt, cfg, b.rng.Float64())
+	}
+	return backoff.Delay(attempt, cfg)
 }
 
 // Reset resets the backoff to initial state (call after successful connection)

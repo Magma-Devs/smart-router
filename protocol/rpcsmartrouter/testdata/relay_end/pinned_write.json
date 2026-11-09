@@ -1,0 +1,36 @@
+{
+  "GUID": "7450111",
+  "api_interface": "jsonrpc",
+  "attempts": [
+    {
+      "batch": 0,
+      "error_code": "",
+      "latency_ms": "<ms>",
+      "message": "",
+      "outcome": "ok",
+      "returned_to_client": true,
+      "sent_ms": "<ms>",
+      "upstream": "node-b"
+    }
+  ],
+  "chain": "ETH1",
+  "error": "",
+  "error_code": "",
+  "event": "relay_end",
+  "has_reply": true,
+  "is_batch": false,
+  "latency_ms": "<ms>",
+  "level": "info",
+  "message": "relay_end",
+  "method": "eth_sendRawTransaction",
+  "outcome": "ok",
+  "reply_bytes": 102,
+  "request_bytes": 168,
+  "schema": 2,
+  "selection": "stateful",
+  "served_by": "node-b",
+  "stateful": true,
+  "status": 200,
+  "stop_reason": "Success",
+  "tx_hash": "0x5c504ed432cb51138bcf09aa5e8a410dd4a1e204ef84bfed1be16dfba1b22060"
+}

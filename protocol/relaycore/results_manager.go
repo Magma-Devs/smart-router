@@ -20,6 +20,14 @@ func transportFromProtocolMessage(pm chainlib.ProtocolMessage) common.TransportT
 	return common.TransportJsonRPC
 }
 
+// replyStatusClassifier is a request message whose interface answers its errors inside a 2xx and
+// can say which HTTP status the error registry should classify a reply under
+// (rpcInterfaceMessages.GraphQLMessage). It stands in for the reply's status the way the body's
+// error code does for JSON-RPC.
+type replyStatusClassifier interface {
+	ClassificationStatus(data []byte, httpStatusCode int) int
+}
+
 type ResultsManager interface {
 	String() string
 	NodeResults() []common.RelayResult
@@ -28,6 +36,7 @@ type ResultsManager interface {
 	HasResults() bool
 	GetResults() (success int, nodeErrors int, specialNodeErrors int, protocolErrors int)
 	GetResultsData() (successResults []common.RelayResult, nodeErrors []common.RelayResult, protocolErrors []RelayError)
+	GetResultsDetail() (successResults []common.RelayResult, nodeErrors []RelayError, protocolErrors []RelayError)
 	SetResponse(response *RelayResponse, protocolMessage chainlib.ProtocolMessage) (nodeError error)
 	GetBestNodeErrorMessageForUser() RelayError
 	GetBestProtocolErrorMessageForUser() RelayError
@@ -165,10 +174,21 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// Use the HTTP status code for classification; for JSON-RPC, the HTTP status is 200
 		// even on errors, so extract the actual JSON-RPC error code from the response body.
 		errorCode := response.RelayResult.StatusCode
+		jsonRPCErrorCode := 0
 		if transport == common.TransportJsonRPC && response.RelayResult.Reply.Data != nil {
 			if code := common.ExtractJSONRPCErrorCode(response.RelayResult.Reply.Data); code != 0 {
-				errorCode = code
+				errorCode, jsonRPCErrorCode = code, code
 			}
+		}
+		// GraphQL answers its node faults inside a 200 as well, so the status says nothing there
+		// either. The message's own rule maps the error's code onto the status the registry's
+		// rows know (RESOURCE_EXHAUSTED a 429, INTERNAL_SERVER_ERROR a 500, a caller's error on a
+		// mutation a 400), which is how the sender already classified this reply for its retry
+		// decision (sendGraphQLRelay). Classified by the 200 instead, every GraphQL node fault was
+		// UNKNOWN_ERROR, logged at DEBUG and never blamed on the endpoint, while the same fault
+		// behind a 503 was an ERROR line with its own name (MAG-4375).
+		if statusClassifier, ok := protocolMessage.GetRPCMessage().(replyStatusClassifier); ok {
+			errorCode = statusClassifier.ClassificationStatus(response.RelayResult.Reply.Data, response.RelayResult.StatusCode)
 		}
 		// Resolve chain family so Tier-2 chain-specific matchers win over
 		// Tier-1 generic ones. Without this, chain-native codes like Solana's
@@ -198,7 +218,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 			utils.LogAttr("requestPayload", parser.CapStringLen(reqPayload)),
 			utils.LogAttr("requestHeaders", reqHeaders),
 		)
-		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, LavaError: nodeClassified})
+		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, LavaError: nodeClassified, JSONRPCErrorCode: jsonRPCErrorCode})
 		return err
 	}
 	rp.successResults = append(rp.successResults, response.RelayResult)
@@ -294,6 +314,14 @@ func (rp *ResultsManagerInst) GetResultsData() (successResults []common.RelayRes
 	rp.lock.RLock()
 	defer rp.lock.RUnlock()
 	return rp.successResults, rp.NodeErrors(), rp.protocolResponseErrors.RelayErrors
+}
+
+// GetResultsDetail is GetResultsData with each node error kept as its RelayError, so the error and
+// its classification come along with the result.
+func (rp *ResultsManagerInst) GetResultsDetail() (successResults []common.RelayResult, nodeErrors []RelayError, protocolErrors []RelayError) {
+	rp.lock.RLock()
+	defer rp.lock.RUnlock()
+	return rp.successResults, rp.nodeResponseErrors.RelayErrors, rp.protocolResponseErrors.RelayErrors
 }
 
 func (rp *ResultsManagerInst) GetBestNodeErrorMessageForUser() RelayError {

@@ -4,13 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"sort"
-	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -211,8 +210,10 @@ func (ecf *EndpointPoller) FetchLatestBlockNum(ctx context.Context) (blockNum in
 
 	// A 429 the upstream put inside the body of a 200 — or of a reply on an open WebSocket
 	// connection, where there is no status line — is a rate limit, not a parse failure: type it so
-	// the ChainTracker records a hold-off instead of retrying into the limit (MAG-4165).
-	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, parserInput); rateLimited != nil {
+	// the ChainTracker records a hold-off instead of retrying into the limit (MAG-4165). That
+	// includes a GraphQL error coded RESOURCE_EXHAUSTED (MAG-4378). No status is passed: the
+	// connection returns a status of 400 or more as an error, and a WebSocket reply has none.
+	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, chainMessage, responseData, 0, parserInput); rateLimited != nil {
 		return spectypes.NOT_APPLICABLE, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
@@ -350,7 +351,7 @@ func (ecf *EndpointPoller) fetchSingleBlockHash(
 	}
 
 	// Same body form as the head fetch: a 429 inside a 200 is a rate limit, not a parse failure.
-	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, parserInput); rateLimited != nil {
+	if rateLimited := chainlib.RateLimitedReplyError(ecf.chainID, chainMessage, responseData, 0, parserInput); rateLimited != nil {
 		return "", responseData, utils.LavaFormatDebugErr(tagName+" upstream refused the request for rate", rateLimited,
 			utils.LogAttr("chainID", ecf.chainID),
 			utils.LogAttr("endpoint", ecf.endpointURL),
@@ -428,6 +429,10 @@ func (ecf *EndpointPoller) CustomMessage(ctx context.Context, path string, data 
 	return reply, nil
 }
 
+// The SVM wrapper finds this hook by type assertion, so a drifted signature would silently
+// stop Solana-family endpoints recording poll observations (MAG-2221).
+var _ chaintracker.PollObserver = (*EndpointPoller)(nil)
+
 // ObserveLatestBlockPoll records a single latest-block poll observation for this
 // endpoint (Topic A / MAG-2158). It implements chaintracker.PollObserver so the SVM
 // wrapper — whose latest-block poll uses CustomMessage and therefore bypasses
@@ -449,7 +454,19 @@ func (ecf *EndpointPoller) ObserveLatestBlockPoll(block int64, transportLatency 
 // For REST/GET requests, requestData is a URL path that must be appended to the base URL.
 // For REST/POST requests, requestData is the JSON body and apiName is the URL path.
 // For JSON-RPC/POST requests, requestData is the JSON body.
-func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string, kind string) ([]byte, error) {
+func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byte, connectionType string, apiName string, kind string) (reply []byte, err error) {
+	// Both pollers (JSON-RPC and REST) pass here. An upstream's error answer reaches the caller as
+	// an HTTPStatusError whose Error() is canonical, so its own status line and body are logged
+	// here, as fields (MAG-4481).
+	defer func() {
+		if attrs := lavasession.UpstreamAnswerLogAttrs(err); attrs != nil {
+			utils.LavaFormatDebug("endpoint poll: upstream answered an error status", append(attrs,
+				utils.LogAttr("chainID", ecf.chainID),
+				utils.LogAttr("endpoint", utils.RedactURL(ecf.endpointURL)),
+				utils.LogAttr("api", apiName),
+			)...)
+		}
+	}()
 	if ecf.directConnection == nil {
 		return nil, fmt.Errorf("no direct connection for endpoint %s", utils.RedactURL(ecf.endpointURL))
 	}
@@ -477,7 +494,7 @@ func (ecf *EndpointPoller) sendRawRequest(ctx context.Context, requestData []byt
 	}
 
 	// JSON-RPC / Tendermint RPC / gRPC / POST: send requestData as the body.
-	headers := map[string]string{"Content-Type": "application/json"}
+	headers := map[string]string{"Content-Type": common.JSONContentType}
 	// gRPC carries the method PATH in a header, not in the URL or body: the connection dials apiName
 	// (e.g. cosmos.base.tendermint.v1beta1.Service/GetLatestBlock) and sends requestData as the request
 	// payload. Without this header GRPCDirectRPCConnection.SendRequest rejects every call with "gRPC
@@ -513,7 +530,7 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 		Body:   body,
 	}
 	if body != nil {
-		params.ContentType = "application/json"
+		params.ContentType = common.JSONContentType
 	}
 
 	resp, err := httpDoer.DoHTTPRequest(ctx, params)
@@ -521,13 +538,7 @@ func (ecf *EndpointPoller) doRESTRequest(ctx context.Context, method, path strin
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		retryAfter, _ := common.ParseRetryAfter(http.Header(resp.Headers), time.Now())
-		return nil, &lavasession.HTTPStatusError{
-			StatusCode: resp.StatusCode,
-			Status:     strconv.Itoa(resp.StatusCode),
-			Body:       resp.Body,
-			RetryAfter: retryAfter,
-		}
+		return nil, lavasession.NewHTTPStatusError(resp.StatusCode, resp.Status, resp.Headers, resp.Body)
 	}
 	return resp.Body, nil
 }

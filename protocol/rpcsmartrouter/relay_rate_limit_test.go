@@ -90,8 +90,10 @@ func TestReplayFailingRelay_RecoveredClearsHoldoff(t *testing.T) {
 	reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
 	relayHoldoff = reg
 
-	// Two strikes, then let the hold-off expire.
+	// Two strikes, then let the hold-off expire. A strike is a hold-off that ended in another
+	// 429, so the second comes after the first ran out (MAG-4386).
 	reg.RecordRateLimit("provider1", "http://fake:8545", 0)
+	now = now.Add(holdoff.InitialHoldoff + time.Second)
 	reg.RecordRateLimit("provider1", "http://fake:8545", 0)
 	now = now.Add(2 * time.Minute)
 	require.False(t, reg.HeldOff("provider1", "http://fake:8545"))

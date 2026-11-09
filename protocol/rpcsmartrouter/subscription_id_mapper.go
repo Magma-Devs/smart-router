@@ -2,13 +2,13 @@ package rpcsmartrouter
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"strconv"
 	"sync"
 	"sync/atomic"
+
+	"github.com/magma-Devs/smart-router/utils"
 )
 
 // SubscriptionIDMapper manages bidirectional mapping between router-generated
@@ -232,6 +232,5 @@ func (m *SubscriptionIDMapper) Stats() (routerCount, upstreamCount int) {
 
 // sha256Short returns the first 6 characters of the SHA-256 hash of input.
 func sha256Short(input string) string {
-	hash := sha256.Sum256([]byte(input))
-	return hex.EncodeToString(hash[:])[:6]
+	return utils.Digest(input, 3)
 }

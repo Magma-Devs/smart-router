@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -62,6 +63,38 @@ func TestGetUniqueGuidResponseDeterministic(t *testing.T) {
 	}
 }
 
+// A request's lines are found with the line filter |= "\"GUID\":\"<id>\"". The error-masking
+// line carries the GUID it is handed under GUID, byte for byte as the request's other lines render
+// it from the request's GUID or its context, and keeps msgSeed.
+func TestGetUniqueGuidResponseForError_LogsTheGUID(t *testing.T) {
+	// The debug ring gets the same fields as the stderr sink, and reading it does not
+	// depend on which stderr logger is installed.
+	utils.EnableDebugLogBuffer(100)
+	t.Cleanup(utils.DisableDebugLogBuffer)
+
+	const guid uint64 = 7698754902243305216
+	plog, err := NewRPCConsumerLogs(nil, nil, nil)
+	require.NoError(t, err)
+	plog.GetUniqueGuidResponseForError(errors.New("no upstream answered"), strconv.FormatUint(guid, 10))
+	// The forms a listener's request line uses: the GUID itself, and the context carrying it.
+	utils.LavaFormatError("request line", nil, utils.LogAttr("GUID", guid))
+	utils.LavaFormatError("request line from the context", nil, utils.LogAttr("GUID", utils.WithUniqueIdentifier(context.Background(), guid)))
+
+	lines := map[string]string{}
+	for _, line := range utils.ReadDebugLogBuffer("", time.Time{}, time.Time{}, 0) {
+		record := map[string]any{}
+		require.NoError(t, json.Unmarshal(line, &record))
+		message, _ := record["message"].(string)
+		lines[message] = string(line)
+	}
+	filter := `"GUID":"` + strconv.FormatUint(guid, 10) + `"`
+	for _, message := range []string{"UniqueGuidResponseForError", "request line", "request line from the context"} {
+		require.Contains(t, lines, message)
+		require.Contains(t, lines[message], filter, "the %q line", message)
+	}
+	require.Contains(t, lines["UniqueGuidResponseForError"], `"msgSeed":"`+strconv.FormatUint(guid, 10)+`"`)
+}
+
 func TestAnalyzeWebSocketErrorAndWriteMessage(t *testing.T) {
 	app := fiber.New()
 
@@ -69,7 +102,7 @@ func TestAnalyzeWebSocketErrorAndWriteMessage(t *testing.T) {
 		mt, _, _ := c.ReadMessage()
 		plog, _ := NewRPCConsumerLogs(nil, nil, nil)
 		responseError := errors.New("response error")
-		formatterMsg := plog.AnalyzeWebSocketErrorAndGetFormattedMessage(c.LocalAddr().String(), responseError, "seed", []byte{}, "rpcType", 1*time.Millisecond)
+		formatterMsg := plog.AnalyzeWebSocketErrorAndGetFormattedMessage(c.LocalAddr().String(), responseError, "seed", "", "rpcType", 1*time.Millisecond)
 		assert.NotNil(t, formatterMsg)
 		c.WriteMessage(mt, formatterMsg)
 	}))

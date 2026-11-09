@@ -339,7 +339,11 @@ func TestGRPCSubscriptionRestore_ACredentialRefusalEndsEveryClientWithoutItsText
 		require.NotContains(t, status.Convert(endErr).Message(), "sk-test", "the upstream's text about the router's key reached a client")
 	}
 	require.Equal(t, len(hosts), upstream.totalOpened(), "a refusal must not be restored")
-	require.Equal(t, int64(0), manager.GetActiveSubscriptionCount())
+	// cleanupSubscription closes the client channels before it decrements the count, so that the
+	// listener finds each client's status recorded when it sees the close. The closes awaited
+	// above therefore run ahead of the count by the rest of that release.
+	require.Eventually(t, func() bool { return manager.GetActiveSubscriptionCount() == 0 },
+		3*time.Second, 10*time.Millisecond, "every ended subscription must be released")
 }
 
 // newManagerAgainstUpstreams is newManagerAgainstUpstream over a primary tier of several
@@ -359,9 +363,9 @@ func newManagerAgainstUpstreams(t *testing.T, addrs ...string) *DirectGRPCSubscr
 	for _, endpoint := range endpoints {
 		pool, err := manager.getOrCreatePool(endpoint)
 		require.NoError(t, err)
-		conn, err := pool.GetConnectionForStream(ctx)
+		conn, err := pool.take(ctx, false)
 		require.NoError(t, err)
-		conn.descriptorsCache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", streamingMethodDescriptor(t))
+		conn.descriptors.cache.Store("grpc.reflection.v1.ServerReflection.ServerReflectionInfo", streamingMethodDescriptor(t))
 	}
 	return manager
 }
@@ -668,7 +672,7 @@ func dialRestoreListener(t *testing.T, manager *DirectGRPCSubscriptionManager) *
 
 	// The fake upstream serves any method, so the feed reuses the streaming descriptor the
 	// harness has: a server-streaming method over the reflection request and response types.
-	connectionForUpstream(t, manager).descriptorsCache.Store("test.v1.Feed.Subscribe", streamingMethodDescriptor(t))
+	connectionForUpstream(t, manager).descriptors.cache.Store("test.v1.Feed.Subscribe", streamingMethodDescriptor(t))
 
 	endpoint := &lavasession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc}
 	sender := &restoreRelaySender{rpcss: &RPCSmartRouterServer{chainParser: parser, listenEndpoint: endpoint}, manager: manager}
