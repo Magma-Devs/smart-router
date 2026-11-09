@@ -92,19 +92,23 @@ func serveGraphQLListener(t *testing.T, relay RelaySender) func(body string) (in
 }
 
 // requireGraphQLError reads a body as a GraphQL response and returns the message of its one error,
-// failing unless the body is the shape a GraphQL client reads: an object with a null data and an
-// errors list whose entries carry a message (GraphQL specification, Response Format).
+// failing unless the body is the shape a GraphQL client reads for a request error: an object with
+// an errors list whose entries carry a message, and no data key (GraphQL specification, Response
+// Format).
 func requireGraphQLError(t *testing.T, body string) string {
 	t.Helper()
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(body), &fields), "the body is not a JSON object: %s", body)
+	_, hasData := fields["data"]
+	require.False(t, hasData,
+		"a refusal is a request error, raised before anything ran, so it carries no data key: %s", body)
 	var response struct {
-		Data   *json.RawMessage `json:"data"`
 		Errors []struct {
 			Message    string            `json:"message"`
 			Extensions map[string]string `json:"extensions"`
 		} `json:"errors"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(body), &response), "the body is not JSON: %s", body)
-	require.Nil(t, response.Data, "a refused request resolved no data: %s", body)
 	require.Len(t, response.Errors, 1, "a GraphQL client reads the errors list: %s", body)
 	require.NotEmpty(t, response.Errors[0].Message, "an error entry carries a message: %s", body)
 	require.NotEmpty(t, response.Errors[0].Extensions["guid"],
@@ -239,10 +243,10 @@ func TestGraphQLListener_UnreadableRequestKeepsItsCurrentAnswer(t *testing.T) {
 // alter what a client reads.
 func TestConvertToGraphQLError(t *testing.T) {
 	body := convertToGraphQLError("graphql operation selects more than 300 root fields", "7699427112166331654")
-	require.JSONEq(t, `{"data":null,"errors":[{"message":"graphql operation selects more than 300 root fields","extensions":{"guid":"7699427112166331654"}}]}`, string(body))
+	require.JSONEq(t, `{"errors":[{"message":"graphql operation selects more than 300 root fields","extensions":{"guid":"7699427112166331654"}}]}`, string(body))
 
 	withoutGUID := convertToGraphQLError("refused", "")
-	require.JSONEq(t, `{"data":null,"errors":[{"message":"refused"}]}`, string(withoutGUID))
+	require.JSONEq(t, `{"errors":[{"message":"refused"}]}`, string(withoutGUID))
 }
 
 // A refused request is past one of the router's size limits, so it is the request most likely to be
