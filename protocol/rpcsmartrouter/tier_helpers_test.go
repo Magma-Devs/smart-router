@@ -35,7 +35,7 @@ func TestReadmitRecoveredProviders_StoresExactlyWhatTheSessionManagerIsHanded(t 
 			}
 			return out
 		},
-		recovered, nil, nil, nil)
+		recovered, nil)
 
 	require.Len(t, rpsr.providerSessions[chainKey], 1, "primary re-admitted")
 	require.NotContains(t, rpsr.backupProviderSessions, chainKey,

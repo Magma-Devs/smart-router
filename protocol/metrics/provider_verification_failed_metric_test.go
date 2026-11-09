@@ -166,3 +166,17 @@ func TestSetProviderVerificationFailures_EachWarningStartsItsOwnClock(t *testing
 	require.Equal(t, 1, testutil.CollectAndCount(m.providerVerificationFailed))
 	require.Equal(t, txsAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("SOLANA", "jsonrpc", "lava", "static", "none", "", "tx-history", "Warning")))
 }
+
+// A caller that tracks its failures' starts (VerificationFailuresSince) publishes them as
+// they are, and a failure it no longer lists is removed (MAG-3950).
+func TestSetProviderVerificationFailuresSince_PublishesTheGivenStart(t *testing.T) {
+	m, clock := newVerificationFailedManager()
+	started := clock.now.Add(-time.Hour)
+	tracked := VerificationFailuresSince(nil, []ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "chain-id"}}, started)
+	m.SetProviderVerificationFailuresSince("XRP", "jsonrpc", "blockdaemon", "backup", tracked)
+	require.Equal(t, float64(started.Unix()), testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("XRP", "jsonrpc", "blockdaemon", "backup", "provider", "", "chain-id", "Fail")),
+		"the start the caller tracked, not the time it published")
+
+	m.SetProviderVerificationFailuresSince("XRP", "jsonrpc", "blockdaemon", "backup", nil)
+	require.Equal(t, 0, testutil.CollectAndCount(m.providerVerificationFailed))
+}
