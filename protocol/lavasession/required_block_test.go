@@ -83,3 +83,22 @@ func TestGetSessions_RequiredBlockSetsAsideProvidersBelowIt(t *testing.T) {
 		require.Empty(t, sessions)
 	})
 }
+
+// The backup tier sets aside for itself too. Within a request the primary pass has already set aside
+// every backup below the block, but the backup pass starts by forgetting every provider set aside when
+// the pairing's epoch has moved on since the request began, so it must set them aside again. One
+// backup, below the block, and a request whose set-aside list dates from the previous epoch: the
+// backup tier must refuse the request, not hand that backup out.
+func TestBackupTier_RequiredBlockSetsAsideAgainAfterItsEpochReset(t *testing.T) {
+	csm := requiredBlockCSM(t, []knownProvider{{"behind", behindBlock}}, []knownProvider{{"backup-behind", behindBlock}})
+	ignored := &ignoredProviders{
+		providers:          map[string]struct{}{},
+		triedByThisRequest: map[string]struct{}{},
+		currentEpoch:       csm.atomicReadCurrentEpoch() - 1,
+		requiredBlock:      requiredBlock,
+	}
+	sessions, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(context.Background(), ignored, cuForFirstRequest, requiredBlock, "", nil, 0, NewUsedProviders(nil))
+	require.Error(t, err, "a backup below the block was handed out after the epoch reset")
+	require.Empty(t, sessions)
+	require.Contains(t, ignored.providers, "backup-behind")
+}
