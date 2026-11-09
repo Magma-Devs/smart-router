@@ -15,9 +15,10 @@ the design below follows the code:
   repo folder; every deployed router loads lava-specs `main` at boot (2.3).
 - "Slot already used is always unknown" (Q45) is not today's behaviour. It is a rule to build,
   and section 7.3 says where.
-- The rows the ticket calls vendor wording are mostly node-software wording (geth, Erigon,
-  Nethermind), which R-M allows. One row is a vendor's (Alchemy's `-32600 "unsupported method"`).
-  The geth rows' problem is that they apply to every JSON-RPC chain (2.1).
+- The ticket locks vendor wording out of specs, and does not say the router's own table has any.
+  It has one row: Alchemy's `-32600 "unsupported method"`. The rows the ticket calls geth-wording
+  rows are node-software wording (geth, Erigon, Nethermind), which R-M allows; their problem is
+  that they apply to every JSON-RPC chain (2.1).
 - A chain row can shadow a rate-limit row today, because chain rows run first. The locked rules
   in section 7 have to close that, not only the write path.
 
@@ -79,7 +80,7 @@ cannot define a verdict, a retry, a status rule or a write outcome.
   names is what can open the one exception under which a write is sent again.**
 - The unknown-write verdict comes from silence and from the may-have-reached-node flag on
   transport errors. A node error is a reply and passes through (`writeOutcomeIsUnknown`,
-  `protocol/rpcsmartrouter/rpcsmartrouter_server.go:1405-1460`).
+  `protocol/rpcsmartrouter/rpcsmartrouter_server.go:1408-1462`).
 - REST decides whether a 5xx body is the node's own reply with no chain family
   (`ServerErrorIsNodeReply`, `protocol/chainlib/chainproxy/rpcInterfaceMessages/restMessage.go:74`).
   That keeps a gateway's 502 or 504 on a write "unclear", and no chain row reaches it.
@@ -93,33 +94,34 @@ cannot define a verdict, a retry, a status rule or a write outcome.
 - Spec keys that drive behaviour today: `stateful`, `timeout_ms` (`protocol/chainlib/common.go:733-734`),
   `deterministic` (`rpcsmartrouter_server.go:6107, 6303`), `hanging_api` (`:3215`,
   `recovery_probe.go:136`), `block_parsing`, `parsers` and `imports`.
-- `imports` is resolved by `DoExpandSpec` (`types/spec/expand.go:20-104`). Only
+- `imports` is resolved by `DoExpandSpec` (`types/spec/expand.go:20-103`). Only
   `api_collections` are inherited; within a collection the child's entry wins by name
-  (`api_collection.go:580-582`, `combinable.go:37-67`). 150 of the 157 root specs import another.
+  (`api_collection.go:580-582`, `combinable.go:37-67`). 143 of the 157 root specs import another.
 - **Unknown JSON keys are dropped without a word** (`utils/keeper/spec.go:23-26`). An older
   router given a spec with a new section ignores it. The spec struct has no version field
   (`types/spec/spec.go:11-21`), and no spec carries an `errors` key today.
 - `--use-static-spec` accepts a local file or folder, or a GitHub or GitLab URL
   (`utils/specfetcher/fetcher.go:120-204`). A URL with no ref fetches the default branch
   (`github.go:33-37`). A ref is not checked to be a tag or commit. The resolved commit is never
-  recorded, because the tarball's pax header that carries it is skipped (`tarball.go:71-73`).
+  recorded, because the tarball's pax header that carries it is skipped (`tarball.go:73-75`).
   Nothing exports the source, ref or commit as a metric.
 - The release image ships no specs: `docker/Dockerfile.release` copies the binary only, and the
   goreleaser archives are binary-only. The dev image copies the repo's `specs/` folder
   (`docker/Dockerfile:30`). That folder holds 15 files, 14 of them also in lava-specs, and all 14
   differ from lava-specs.
 - The Helm chart's default is `staticSpecs.url: https://github.com/magma-devs/lava-specs` with
-  no ref (`smart-router-helm-chart/charts/smart-router/values.yaml:370-378`). No tenant in
-  smart-router-infrastructure overrides it. **Every deployed router loads lava-specs `main` at
-  boot**, so a merged spec reaches each router at its next restart.
+  no ref (`smart-router-helm-chart/charts/smart-router/values.yaml:450-458`, chart `main`
+  `2446606`). No tenant in smart-router-infrastructure overrides it. **Every deployed router
+  loads lava-specs `main` at boot**, so a merged spec reaches each router at its next restart.
 
 ### 2.4 lava-specs has no release discipline yet
 
 - No tags, local or remote. Default branch `main`.
 - `spec_guards.yml` runs on every PR: the guard scripts' self-tests, `check_node_admin_rpcs.sh`
-  and `check_disabled_count.sh`. `spec_pipeline.yml` runs the agent's phases 8 to 11 when a PR
-  opens. `check_stateful.sh` runs only inside the agent's method-schema gate, never on a
-  hand-edited PR. There is no `CODEOWNERS` file.
+  and `check_disabled_count.sh`. `spec_pipeline.yml` runs the agent's phases 8 to 11 once, when a
+  spec PR opens, a hand-edited one included. `check_stateful.sh` runs only inside the agent (its
+  method-schema gate and the Phase 10a re-run), so no CI job runs it, and a commit pushed after
+  the PR opened is never checked. There is no `CODEOWNERS` file.
 - `check_unused_fields.sh` rejects fifteen removed key names at any depth, including `title`,
   `description`, `local` and `subscription`. The router's `bundled_specs_guard_test.go` does the
   same for `specs/`. The errors section must not use those names.
@@ -207,9 +209,13 @@ For a node error on chain X, the router evaluates, in order, first match wins:
 
 Step 2 is the only change to today's order. Today a family row runs before every transport row,
 so a chain row could hide a rate limit, and the endpoint would be scored down instead of held
-off. None of the six tables matches a rate-limit input, so moving those rows to the front changes
-no verdict; the fixture replay in 8.2 proves it. Below step 2 a chain row may still shadow a
-transport row, which is what chain rows are for (Solana's `-32005`).
+off. Moving those rows to the front changes no fixture's verdict (8.2), and the one family table
+with rate-limit rows, XRP's `tooBusy` and `slowDown`, gives `NODE_RATE_LIMITED` either way. It
+does change the verdict of a family row matched by code alone when the message also carries a
+rate-limit phrase or a bare 429, because `HTTPStatusContains(429)` matches 429 anywhere in the
+text: Agave's `-32005` "Node is behind by 429 slots" goes from `NODE_SOLANA_UNHEALTHY` to
+`NODE_RATE_LIMITED`. Below step 2 a chain row may still shadow a transport row, which is what
+chain rows are for (Solana's `-32005`).
 
 Two decisions sit outside the rows, and the reader keeps them there: the connection-error step,
 which runs before any row, and REST's "is this 5xx the node's own reply", which classifies with no
@@ -223,14 +229,17 @@ BASE, and COSMOSSDK's reach COSMOSHUB. A child removes a parent's row by repeati
 `"disabled": true`. Only `rows` inherit; `schema_version` is the child's own.
 
 This is new code in `DoExpandSpec`, which today merges only `api_collections`
-(`expand.go:68-97`). With 150 importing specs it is the common case, not the edge.
+(`expand.go:68-97`). With 143 importing specs it is the common case, not the edge.
 
 ### 4.5 Examples
 
 The examples move three of today's family tables as they are. Each `error` is the registered
-name the code row points at today, so the move changes no verdict. The `class` letters, `source`
-links and `versions` show the shape only; MAG-4898 supplies the researched values, and the
-router's class table checks them.
+name the code row points at today. Today's rows apply to reads and writes alike, so a row moved
+as it is has `scope: both`; the `read` and `write` scopes below show the field, and narrowing a
+row to one is a behaviour change (Agave's `sendTransaction` can answer `-32016`, and a Cosmos SDK
+simulate, a read, can answer "account sequence mismatch"). The `class` letters, `source` links
+and `versions` show the shape only; MAG-4898 supplies the researched values, and the router's
+class table checks them.
 
 **Solana** (`solana.json`, no imports; 14 rows today at `error_classifier.go:24-44`, four shown):
 
@@ -392,9 +401,9 @@ when its `error` is:
   write whose every failure was a rate limit is sent again (2.2), so a row naming one could make
   the router re-send a write a node executed;
 - any `PROTOCOL_*` verdict (38 today): the router's own, never a node's reply;
-- `CHAIN_TX_ALREADY_KNOWN`: the lost-broadcast and read-your-writes logic turns on it
-  (`rpcsmartrouter_server.go:2565-2582`, `read_your_writes.go:218-231`), so its wording stays in
-  code;
+- `CHAIN_TX_ALREADY_KNOWN`: the read-your-writes logic turns on it (`read_your_writes.go:218-231`),
+  so its wording stays in code. The lost-broadcast release (`rpcsmartrouter_server.go:2565-2582`)
+  reads no verdict: it takes any node error that answers after another upstream accepted;
 - `UNKNOWN_ERROR`: a row that says "unknown" should not exist.
 
 A row also fails when its `match` could hide a rate limit or a status rule:
@@ -444,7 +453,7 @@ No tag is cut, and no tag reaches a customer, until all of these pass.
   `compatibility.json` names for the section's schema, and the router runs the same code at boot,
   so CI and boot cannot disagree.
 - **`check_stateful.sh` on every PR**, as a job in `spec_guards.yml`. Today it runs only inside
-  the create-spec agent, so a hand-edited PR is not checked (2.4).
+  the create-spec agent, once when a PR opens, so a commit pushed later is not checked (2.4).
 - **Write-safety job** in `spec_guards.yml`: the validator's write rules plus a diff that flags any
   added, removed or changed `write` or `both` row and labels the PR `write-rows`.
 - **Owner review for write rows.** `CODEOWNERS` matches paths and cannot name a JSON section, so
@@ -484,8 +493,9 @@ row, with a change-log line that says so.
 
 ## 9. Rollout
 
-**Step 0, before the router reads a single row.** This is router and CI work with no behaviour
-change:
+**Step 0, before the router reads a single row.** This is router and CI work. It moves no verdict
+except through step 2 of 4.3, and it changes what a router does at boot with an unpinned source
+(section 5):
 
 - pinning, `--allow-unpinned-spec`, and the resolved commit and content hash in the log and the
   metric (section 5);
@@ -575,4 +585,5 @@ source. Never a fork of lava-specs.
 - lava-specs: `.github/workflows/spec_guards.yml`, `spec_pipeline.yml`, `create_spec.yml`;
   `.claude/skills/create-spec/scripts/check_stateful.sh`, `check_unused_fields.sh`,
   `check_update_diff.sh`.
-- smart-router-helm-chart `charts/smart-router/values.yaml:370-378`: the unpinned default.
+- smart-router-helm-chart `charts/smart-router/values.yaml:450-458` (chart `main` `2446606`): the
+  unpinned default.
