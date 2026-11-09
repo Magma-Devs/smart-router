@@ -1,8 +1,9 @@
 package rpcInterfaceMessages
 
 import (
+	"fmt"
+
 	"github.com/vektah/gqlparser/v2/ast"
-	"github.com/vektah/gqlparser/v2/gqlerror"
 	"github.com/vektah/gqlparser/v2/lexer"
 	gqlparser "github.com/vektah/gqlparser/v2/parser"
 )
@@ -20,12 +21,23 @@ const MaxGraphQLQueryDepth = 256
 
 // parseGraphQLQuery parses a GraphQL document once it is known to nest no deeper than
 // MaxGraphQLQueryDepth.
+//
+// The two failures it returns are different answers, and the caller must not merge them: a document
+// past the depth limit is a refusal the ROUTER made (*GraphQLRefusal), while a document the parser
+// cannot read is the document's own fault. Wrapping the first in "failed parsing graphql query"
+// made the router's own limit look like a parse failure, which is both the wrong message for the
+// caller and the wrong classification for the forward-the-unreadable direction MAG-4351 decided: a
+// document too deep for the router's parser is exactly what must not be parsed.
 func parseGraphQLQuery(query string) (*ast.QueryDocument, error) {
 	source := &ast.Source{Input: query}
 	if err := checkGraphQLQueryDepth(source); err != nil {
 		return nil, err
 	}
-	return gqlparser.ParseQuery(source)
+	doc, err := gqlparser.ParseQuery(source)
+	if err != nil {
+		return nil, fmt.Errorf("failed parsing graphql query: %w", err)
+	}
+	return doc, nil
 }
 
 // checkGraphQLQueryDepth refuses a document that nests deeper than MaxGraphQLQueryDepth. It reads
@@ -49,7 +61,11 @@ func checkGraphQLQueryDepth(source *ast.Source) error {
 		case lexer.BraceL, lexer.BracketL, lexer.ParenL:
 			depth++
 			if depth > MaxGraphQLQueryDepth {
-				return gqlerror.ErrorPosf(&token.Pos, "query nests deeper than %d levels", MaxGraphQLQueryDepth)
+				// A refusal, not a parse error: the document is readable, the router declines to
+				// read it. The position is kept in the message, because it is the one thing that
+				// tells the caller where to cut (MAG-4577).
+				return RefuseGraphQLRequest("graphql query nests deeper than %d levels (line %d, column %d)",
+					MaxGraphQLQueryDepth, token.Pos.Line, token.Pos.Column)
 			}
 		case lexer.BraceR, lexer.BracketR, lexer.ParenR:
 			if depth > 0 {
