@@ -261,6 +261,34 @@ func TestInjectHTTP_OverwritesExistingTraceparent(t *testing.T) {
 	}
 }
 
+// TestInjectHTTP_NeverWritesThroughTheCallersSlice: the slice handed in is a
+// chain message's own headers, which every attempt of a relay shares and sends
+// at the same time, so InjectHTTP must leave it as it was: the entries within
+// its length (a stale traceparent it replaces) and its spare capacity (where an
+// append would land). Two attempts writing either at once was a data race, and
+// one attempt could send the other's traceparent.
+func TestInjectHTTP_NeverWritesThroughTheCallersSlice(t *testing.T) {
+	tracer := setupTestTracing(t)
+	ctx, span := tracer.Start(context.Background(), "outbound")
+	defer span.End()
+
+	stale := "00-00000000000000000000000000000001-0000000000000001-01"
+	// Spare capacity, as a header list grown by append has.
+	headers := make([]pairingtypes.Metadata, 2, 8)
+	headers[0] = pairingtypes.Metadata{Name: "X-Custom", Value: "keep"}
+	headers[1] = pairingtypes.Metadata{Name: "traceparent", Value: stale}
+
+	result := InjectHTTP(ctx, headers)
+
+	require.Contains(t, findMetadata(result, "traceparent"), span.SpanContext().TraceID().String())
+	require.Equal(t, []pairingtypes.Metadata{
+		{Name: "X-Custom", Value: "keep"},
+		{Name: "traceparent", Value: stale},
+	}, headers, "the caller's entries must be unchanged")
+	require.Equal(t, make([]pairingtypes.Metadata, cap(headers)-len(headers)), headers[len(headers):cap(headers)],
+		"nothing may be appended into the caller's spare capacity")
+}
+
 // TestInjectHTTP_OverwritesAllCaseInsensitiveDuplicates guards against the
 // case where the inbound metadata carries both "traceparent" and
 // "Traceparent". Replace-in-place must refresh every matching slot —
