@@ -604,6 +604,7 @@ func TestChainRouterWithMethodRoutes(t *testing.T) {
 		nodeUrls        []common.NodeUrl
 		success         bool
 		apiToUrlMapping map[string]string
+		batchKeyToUrl   map[string]string // when set, the batch BatchNodeUrlsByServices builds, key to the one url it holds
 	}{
 		{
 			name: "addon routing",
@@ -764,6 +765,41 @@ func TestChainRouterWithMethodRoutes(t *testing.T) {
 			},
 		},
 		{
+			// MAG-3081 (api-2 standing for the ticket's eth_call): the second url sharing a
+			// method list used to get route number 0, which RouterKey leaves out of the key, so
+			// it took the catch-all's key and replaced it, and the router refused to start for
+			// want of a catch-all.
+			name: "two urls sharing one method list keep the catch-all",
+			nodeUrls: []common.NodeUrl{
+				{
+					Url:     "-0-",
+					Methods: []string{},
+				},
+				{
+					Url:     "ws:-0-",
+					Methods: []string{},
+				},
+				{
+					Url:     "-1-",
+					Methods: []string{"api-2"},
+				},
+				{
+					Url:     "-2-",
+					Methods: []string{"api-2"},
+				},
+			},
+			success: true,
+			apiToUrlMapping: map[string]string{
+				"api-1": "-0-",
+				"api-2": "-2-", // one slot per router key, and the later url takes it, as for any repeated key
+			},
+			batchKeyToUrl: map[string]string{
+				"||":                "-0-",
+				"|websocket|":       "ws:-0-",
+				"||method-route:1|": "-2-",
+			},
+		},
+		{
 			name: "method routing without base",
 			nodeUrls: []common.NodeUrl{
 				{
@@ -813,6 +849,16 @@ func TestChainRouterWithMethodRoutes(t *testing.T) {
 			chainRouter, err := newChainRouter(ctx, 1, *endpoint, chainParser, mockProxyConstructor)
 			if play.success {
 				require.NoError(t, err)
+				if play.batchKeyToUrl != nil {
+					batch, err := chainRouter.BatchNodeUrlsByServices(ctx, *endpoint, chainParser)
+					require.NoError(t, err)
+					batchKeyToUrl := map[string]string{}
+					for routerKey, batchEndpoint := range batch {
+						require.Len(t, batchEndpoint.NodeUrls, 1, routerKey)
+						batchKeyToUrl[routerKey] = batchEndpoint.NodeUrls[0].Url
+					}
+					require.Equal(t, play.batchKeyToUrl, batchKeyToUrl)
+				}
 				for api, url := range play.apiToUrlMapping {
 					extension := extensionslib.ExtensionInfo{}
 					if strings.Contains(api, extMarker) {
