@@ -19,7 +19,7 @@ import (
 // The live-rotation acceptance proof against a REAL Valkey/Redis — miniredis
 // implements neither CONFIG, CLIENT, nor ACL, so it cannot express this.
 //
-//	docker run --rm -p 127.0.0.1:63790:6379 valkey/valkey:7.2
+//	docker run --rm -p 127.0.0.1:63790:6379 valkey/valkey:9.1.3
 //	RESP_CACHE_TEST_VALKEY_ADDR=127.0.0.1:63790 go test ./ecosystem/cache/redisstore -run LiveRotationAgainstRealValkey -v
 //
 // Asserts what the client guarantees: rotating between two ACL users through
@@ -37,7 +37,7 @@ import (
 func TestLiveRotationAgainstRealValkey(t *testing.T) {
 	addr := os.Getenv("RESP_CACHE_TEST_VALKEY_ADDR")
 	if addr == "" {
-		t.Skip("set RESP_CACHE_TEST_VALKEY_ADDR to a real Valkey/Redis (docker run --rm -d --name rot-valkey -p 127.0.0.1:63795:6379 valkey/valkey:7.2) to run")
+		t.Skip("set RESP_CACHE_TEST_VALKEY_ADDR to a real Valkey/Redis (docker run --rm -d --name rot-valkey -p 127.0.0.1:63795:6379 " + valkeyImage + ") to run")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -49,7 +49,7 @@ func TestLiveRotationAgainstRealValkey(t *testing.T) {
 	// dial error reads like a product fault rather than a missing prerequisite.
 	require.NoError(t, admin.Ping(ctx).Err(),
 		"RESP_CACHE_TEST_VALKEY_ADDR=%s is set but nothing is listening there — start the server first:\n"+
-			"  docker run --rm -d --name rot-valkey -p 127.0.0.1:63795:6379 valkey/valkey:7.2", addr)
+			"  docker run --rm -d --name rot-valkey -p 127.0.0.1:63795:6379 "+valkeyImage, addr)
 
 	for _, user := range []string{"rotuser1", "rotuser2"} {
 		require.NoError(t, admin.Do(ctx, "ACL", "SETUSER", user, "on", ">"+user+"-pw", "~*", "+@all").Err())
@@ -145,7 +145,7 @@ func TestLiveRotationAgainstRealValkey(t *testing.T) {
 func TestLiveRotationThroughConfiguredStore(t *testing.T) {
 	addr := os.Getenv("RESP_CACHE_TEST_VALKEY_ADDR")
 	if addr == "" {
-		t.Skip("set RESP_CACHE_TEST_VALKEY_ADDR to a real Valkey/Redis (docker run --rm -p 127.0.0.1:63790:6379 valkey/valkey) to run")
+		t.Skip("set RESP_CACHE_TEST_VALKEY_ADDR to a real Valkey/Redis (docker run --rm -p 127.0.0.1:63790:6379 " + valkeyImage + ") to run")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -232,7 +232,7 @@ func TestLiveRotationThroughConfiguredStore(t *testing.T) {
 func TestLiveRotationProofsRejectReplacementUnderPreviousUser(t *testing.T) {
 	addr := os.Getenv("RESP_CACHE_TEST_VALKEY_ADDR")
 	if addr == "" {
-		t.Skip("set RESP_CACHE_TEST_VALKEY_ADDR to a real Valkey/Redis (docker run --rm -p 127.0.0.1:63790:6379 valkey/valkey) to run")
+		t.Skip("set RESP_CACHE_TEST_VALKEY_ADDR to a real Valkey/Redis (docker run --rm -p 127.0.0.1:63790:6379 " + valkeyImage + ") to run")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

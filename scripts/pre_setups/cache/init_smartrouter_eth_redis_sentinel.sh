@@ -43,7 +43,7 @@
 #
 # ENVIRONMENT
 #   LAN_IP            override the auto-detected host address (VPNs, multi-NIC)
-#   REDIS_IMAGE       valkey/valkey:7.2 (default) or redis:7.2-alpine
+#   REDIS_IMAGE       valkey/valkey:9.1.3 (default) or redis:7.2-alpine
 #   ROUTER_PORT (3370)  METRICS_PORT (7790)   <- deliberately NOT the standalone
 #                                            lane's 3360/7779, so both can run at once
 #   PRIMARY_PORT (63811) REPLICA_PORT (63812) SENTINEL_PORTS (26390,26391,26392)
@@ -68,7 +68,7 @@ PROJECT_ROOT=$(git -C "$__dir" rev-parse --show-toplevel 2>/dev/null || true)
 LOGS_DIR="${PROJECT_ROOT}/debugging/logs"
 mkdir -p "$LOGS_DIR"
 
-REDIS_IMAGE="${REDIS_IMAGE:-valkey/valkey:7.2}"
+REDIS_IMAGE="${REDIS_IMAGE:-valkey/valkey:9.1.3}"
 PRIMARY_PORT="${PRIMARY_PORT:-63811}"
 REPLICA_PORT="${REPLICA_PORT:-63812}"
 IFS=',' read -r -a SENTINEL_PORTS <<< "${SENTINEL_PORTS:-26390,26391,26392}"

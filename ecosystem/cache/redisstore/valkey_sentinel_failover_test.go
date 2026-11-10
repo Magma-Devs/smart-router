@@ -88,11 +88,11 @@ func TestSentinelFailover(t *testing.T) {
 
 	// Data plane: primary and replica announce themselves through the host
 	// bindings so both sentinels and the (host-side) client can reach them.
-	run("sr-sent-primary", primaryPort, nil, "valkey/valkey:7.2",
+	run("sr-sent-primary", primaryPort, nil, valkeyImage,
 		"valkey-server", "--port", fmt.Sprint(primaryPort),
 		"--requirepass", dataPass, "--masterauth", dataPass,
 		"--replica-announce-ip", "host.docker.internal", "--replica-announce-port", fmt.Sprint(primaryPort))
-	run("sr-sent-replica", replicaPort, nil, "valkey/valkey:7.2",
+	run("sr-sent-replica", replicaPort, nil, valkeyImage,
 		"valkey-server", "--port", fmt.Sprint(replicaPort),
 		"--replicaof", "host.docker.internal", fmt.Sprint(primaryPort),
 		"--requirepass", dataPass, "--masterauth", dataPass,
@@ -112,7 +112,7 @@ sentinel down-after-milliseconds %s 2000
 sentinel failover-timeout %s 10000
 requirepass %s
 `, port, port, masterName, primaryPort, masterName, dataPass, masterName, masterName, sentinelPass)
-		run(fmt.Sprintf("sr-sent-s%d", i), port, []string{"-e", "SENTINEL_CONF=" + conf}, "valkey/valkey:7.2",
+		run(fmt.Sprintf("sr-sent-s%d", i), port, []string{"-e", "SENTINEL_CONF=" + conf}, valkeyImage,
 			"sh", "-c", `printf '%s' "$SENTINEL_CONF" > /tmp/sentinel.conf && exec valkey-sentinel /tmp/sentinel.conf`)
 	}
 

@@ -620,7 +620,7 @@ a documented command never prints PASS for a lane that verified nothing:
   fails with a dial error:
 
   ```bash
-  docker run --rm -d --name rot-valkey -p 127.0.0.1:63795:6379 valkey/valkey:7.2
+  docker run --rm -d --name rot-valkey -p 127.0.0.1:63795:6379 valkey/valkey:9.1.3
   RESP_CACHE_TEST_VALKEY_ADDR=127.0.0.1:63795 \
     go test ./ecosystem/cache/redisstore -run TestLiveRotationAgainstRealValkey -v
   docker rm -f rot-valkey

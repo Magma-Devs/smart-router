@@ -16,7 +16,7 @@
 
 services:
   valkey:
-    image: valkey/valkey:7.2
+    image: valkey/valkey:9.1.3
     # volatile-lru: every key the router writes carries a TTL, so eviction can
     # target the whole keyspace by recency without touching foreign non-TTL
     # keys — see the maxmemory-policy discussion in docs/RESP-CACHE.md.

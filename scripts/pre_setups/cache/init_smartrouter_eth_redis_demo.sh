@@ -31,7 +31,7 @@
 #                                         docker drills bind — see the reserved
 #                                         list below; the lane refuses on them.
 #   KEY_PREFIX (sr)     HEALTH_INTERVAL (15s)   SKIP_SMOKE=1
-#   REDIS_IMAGE (redis:7.2-alpine)        e.g. valkey/valkey:7.2
+#   REDIS_IMAGE (redis:7.2-alpine)        e.g. valkey/valkey:9.1.3
 #
 # The generated config and the password file land in debugging/ — which is
 # gitignored — because ETH_RPC_URL_* may embed an API key and REDIS_PASSWORD is

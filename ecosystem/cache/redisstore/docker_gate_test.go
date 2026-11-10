@@ -6,6 +6,9 @@ import (
 	"testing"
 )
 
+// valkeyImage is the server every docker-gated lane starts.
+const valkeyImage = "valkey/valkey:9.1.3"
+
 // requireDockerLane gates a docker-backed acceptance lane on its opt-in
 // environment variable.
 //
