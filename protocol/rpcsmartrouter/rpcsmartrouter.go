@@ -4349,7 +4349,7 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *routersession.RPCSta
 	urlFailures := make([]metrics.ProviderVerificationFailure, 0, len(refusedURLs))
 	for _, index := range refusedURLs {
 		failure := metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: failureCheck(admission.URLRefusal(index))}
-		if index < len(provider.NodeUrls) && isWebsocketURL(provider.NodeUrls[index].Url) {
+		if index < len(provider.NodeUrls) && chainlib.IsWebSocketURL(provider.NodeUrls[index].Url) {
 			failure.Service = chainlib.WebSocketExtension
 			if !websocketLeft(provider, admission) {
 				failure.Scope = metrics.VerificationScopeService
@@ -4379,16 +4379,10 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *routersession.RPCSta
 	return failures
 }
 
-// isWebsocketURL reports whether a node url is ws(s), as verification reads it.
-func isWebsocketURL(raw string) bool {
-	ws, err := chainlib.IsUrlWebSocket(raw)
-	return err == nil && ws
-}
-
 // websocketLeft reports whether a ws(s) url of the provider is still admitted.
 func websocketLeft(provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
 	for index, url := range provider.NodeUrls {
-		if isWebsocketURL(url.Url) && !admission.URLRefused(index) {
+		if chainlib.IsWebSocketURL(url.Url) && !admission.URLRefused(index) {
 			return true
 		}
 	}

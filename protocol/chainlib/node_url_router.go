@@ -72,7 +72,7 @@ func chainProxyConstructor(apiInterface string) (func(context.Context, uint, rou
 func ProviderShapeError(endpoint *routersession.RPCProviderEndpoint, chainParser ChainParser) error {
 	http, httpRoot := false, false
 	for _, url := range endpoint.NodeUrls {
-		if isWebSocketUrl(url.Url) {
+		if IsWebSocketURL(url.Url) {
 			continue
 		}
 		http = true
@@ -100,7 +100,7 @@ func MissingWebsocket(nodeUrls []common.NodeUrl, chainParser ChainParser) bool {
 		return false
 	}
 	for _, url := range nodeUrls {
-		if isWebSocketUrl(url.Url) {
+		if IsWebSocketURL(url.Url) {
 			return false
 		}
 	}
