@@ -507,3 +507,34 @@ func TestVerificationRetries_TheDemoteGraceAdvancesOnlyOnItsOwnCheck(t *testing.
 	rig.retryOnly(provider, chainlib.CheckID{Name: "chain-id"})
 	require.Nil(t, rig.session(t, provider.Name), "the retry of chain-id demotes it")
 }
+
+// A check that one url of a provider fails and another passes is retried at the url that
+// failed it: the url that passed keeps its verdict and is asked nothing (MAG-4505 finding
+// 16). When the failing url passes too, the check leaves the schedule.
+func TestVerificationRetries_ACheckIsRetriedOnlyAtTheUrlThatFailedIt(t *testing.T) {
+	up := newFakeUpstreams(t)
+	const pruned, full = "/pu/a/node", "/pu/b/" + upArchive
+	up.become(pruned, upPruned)
+	provider := staticProvider("ETH1",
+		commonlib.NodeUrl{Url: up.httpURL(pruned), Addons: []string{"archive"}},
+		commonlib.NodeUrl{Url: up.httpURL(full), Addons: []string{"archive"}},
+	)
+	rig := newPairedRetryRig(t, provider)
+	archive := chainlib.CheckID{Name: "pruning", Extension: "archive"}
+	require.Equal(t, []chainlib.CheckID{archive}, rig.inputs.retries.checksOf(reverifyTierStatic, provider.Name),
+		"boot found archive failing at one url")
+	askedPruned, askedFull := len(up.methods("http", pruned)), len(up.methods("http", full))
+
+	rig.retryOnly(provider, archive)
+	require.Greater(t, len(up.methods("http", pruned)), askedPruned, "the url that failed the check is asked it again")
+	require.Len(t, up.methods("http", full), askedFull, "the url that passed it keeps its verdict and is asked nothing")
+	require.Equal(t, []chainlib.CheckID{archive}, rig.inputs.retries.checksOf(reverifyTierStatic, provider.Name),
+		"still failing at the pruned url")
+
+	up.become(pruned, upArchive)
+	rig.retryOnly(provider, archive)
+	require.Empty(t, rig.inputs.retries.checksOf(reverifyTierStatic, provider.Name),
+		"the url that failed the check passes it now, and the check leaves the schedule")
+	require.Len(t, up.methods("http", full), askedFull, "the url that passed it is still asked nothing")
+	require.NotNil(t, rig.session(t, provider.Name), "the provider serves throughout")
+}

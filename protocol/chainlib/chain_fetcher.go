@@ -966,9 +966,9 @@ func (cf *ChainFetcher) ValidateCollectionsExcept(ctx context.Context, skip map[
 	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{skip: skip}))
 }
 
-// ValidateCollectionsAgain re-runs only the checks in only, on each node url that has
+// ValidateCollectionsAgain re-runs only the checks in only, at each node url that failed
 // them, keeps every other verdict from previous, and admits from the result as
-// ValidateCollections does (MAG-3950). A url with none of them is not dialed. A url
+// ValidateCollections does (MAG-3950). A url with none of them to re-run is not dialed. A url
 // previous could not dial or list has no verdicts to keep, so it is verified whole, and
 // so is every url when previous is no pass of this provider's urls or only names the
 // whole pass. A retry of a dial (CheckConnect) names no check of any url, so it dials
@@ -1347,8 +1347,8 @@ func (g *connectionGroup) notAsked(url common.NodeUrl) nodeUrlOutcome {
 // verification is off — it is then only dialed.
 //
 // With kept, the url's outcome in the pass a retry keeps verdicts from, it re-runs only
-// the checks in opts.only and keeps the verdicts of the rest. A url with none of them
-// to re-run is not dialed: its outcome is kept whole.
+// the checks in opts.only that it failed, and keeps the verdicts of the rest. A url with
+// none of them to re-run is not dialed: its outcome is kept whole.
 func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts verifyOptions, kept *nodeUrlOutcome) (outcome nodeUrlOutcome) {
 	outcome.url, outcome.served = url, url
 	utils.FormatInfo("starting validation for url", utils.LogAttr("url", url.String()))
@@ -1373,9 +1373,11 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		utils.FormatWarning("no verifications for url", nil, utils.LogAttr("url", url.String()))
 	}
 
-	// The checks this pass runs, and the verdicts it keeps for the others. A check with
-	// no verdict to keep runs too, whether the url's checks changed since the kept pass
-	// or its verdict there was inconclusive.
+	// The checks this pass runs, and the verdicts it keeps for the others. A due check
+	// runs again where this url failed it; a url that passed it keeps that verdict, since
+	// the check is due for the provider, not for every url that has it (MAG-4505 finding
+	// 16). A check with no verdict to keep runs too, whether the url's checks changed
+	// since the kept pass or its verdict there was inconclusive.
 	var keptVerdicts map[string]error
 	toRun := verifications
 	if kept != nil {
@@ -1387,7 +1389,7 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		for _, verification := range verifications {
 			_, due := opts.only[checkIDOf(verification)]
 			verdict, known := keptVerdicts[verdictKey(verification)]
-			if (due || !known || inconclusive(verdict)) && !skipVerification(url, verification.Name) {
+			if (!known || inconclusive(verdict) || (due && verdict != nil)) && !skipVerification(url, verification.Name) {
 				toRun = append(toRun, verification)
 			}
 		}
