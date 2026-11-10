@@ -229,7 +229,7 @@ and go-redis re-authenticates each one **in place** — no restart, no dropped o
 credential sources (e.g. an IAM SigV4 signer) can implement the `CredentialsSource` interface in
 `ecosystem/cache/redisstore`; the router deliberately bundles no cloud SDKs.
 
-Two caveats come from go-redis (v9.22) itself. First, re-authentication is driven by traffic:
+Two caveats come from go-redis (v9.23) itself. First, re-authentication is driven by traffic:
 the push only marks each connection, and the worker that re-authenticates a connection starts
 when that connection is next checked out and returned (a checkout of a marked connection is
 refused, which is what schedules the work). A connection that sits idle after the push, with no
@@ -254,7 +254,7 @@ force it, delete the previous ACL user (`ACL DELUSER`) or run `CLIENT KILL USER 
 both disconnect every session still authenticated as it, and the client reconnects with the
 current credentials. Keep the previous credential valid until then.
 
-Under `topology: sentinel` the go-redis failover client (v9.22) does not support in-place
+Under `topology: sentinel` the go-redis failover client (v9.23) does not support in-place
 streaming re-auth, so rotated credentials are resolved fresh **per connection attempt** — they
 apply on reconnects and failovers rather than being pushed to idle connections. Keep the
 previous credential valid for a rotation grace window (standard ACL dual-credential practice)
