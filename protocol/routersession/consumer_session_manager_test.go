@@ -2592,6 +2592,10 @@ func TestGetAllDirectRPCEndpoints_IncludesBackupProviders(t *testing.T) {
 		"backup with a dedicated URL must be included so startup ChainTracker init covers it")
 	require.False(t, isBackup["blockpi1"], "a pairing endpoint is not marked as a backup")
 	require.True(t, isBackup["backup1"], "a backup-list endpoint is marked as one")
+	for _, r := range results {
+		require.Equal(t, csm.holdoffKey(r.ProviderAddress), r.HoldoffKey, "the key the relay path holds its urls under")
+		require.NotEqual(t, r.ProviderAddress, r.HoldoffKey)
+	}
 }
 
 // TestProbeDirectRPCEndpoints_RespectsDisabledEndpoint guards the endpoint.Enabled

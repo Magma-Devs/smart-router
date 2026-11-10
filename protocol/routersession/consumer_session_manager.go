@@ -746,7 +746,10 @@ type EndpointWithDirectConnection struct {
 	Endpoint         *Endpoint
 	DirectConnection DirectRPCConnection
 	ProviderAddress  string
-	Backup           bool // from the backup provider list rather than the pairing
+	// HoldoffKey is the provider's key in the rate-limit hold-off (holdoff.ProviderKey): its
+	// name on this chain and api-interface, the key the relay path holds its urls under.
+	HoldoffKey string
+	Backup     bool // from the backup provider list rather than the pairing
 }
 
 // GetAllDirectRPCEndpoints returns all endpoints with direct RPC connections from both
@@ -779,6 +782,7 @@ func (csm *ConsumerSessionManager) GetAllDirectRPCEndpoints() []*EndpointWithDir
 						Endpoint:         endpoint,
 						DirectConnection: endpoint.DirectConnections[0],
 						ProviderAddress:  providerAddr,
+						HoldoffKey:       csm.holdoffKey(providerAddr),
 						Backup:           backup,
 					})
 				}

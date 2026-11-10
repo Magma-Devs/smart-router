@@ -4179,7 +4179,7 @@ func runProbeCycleCore(
 		// sends no sample this cycle. A fresh observation is judged as usual, held off or not; the
 		// re-enable pass above is unaffected.
 		if !verdict.Alive {
-			if readyAt := relayHoldoff.URLReadyAt(ep.ProviderAddress, ep.Endpoint.NetworkAddress); !readyAt.IsZero() {
+			if readyAt := relayHoldoff.URLReadyAt(ep.HoldoffKey, ep.Endpoint.NetworkAddress); !readyAt.IsZero() {
 				utils.FormatDebug("probe leaves a rate-limited endpoint out of its provider's sample",
 					utils.LogAttr("endpoint", ep.Endpoint.NetworkAddress),
 					utils.LogAttr("provider", ep.ProviderAddress),
