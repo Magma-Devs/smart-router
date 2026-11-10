@@ -379,8 +379,13 @@ func convertToJsonError(errorMsg string) []byte {
 const graphQLRefusalStatus = fiber.StatusBadRequest
 
 // convertToGraphQLError returns a GraphQL response carrying one error, which is what a GraphQL
-// client reads: a JSON object with a null `data` and an `errors` list whose entries have a
-// `message` (GraphQL specification, Response Format).
+// client reads: a JSON object with an `errors` list whose entries have a `message` (GraphQL
+// specification, Response Format).
+//
+// It has no `data` key. A refusal is a request error: the router declines before anything runs,
+// and for an error raised before execution begins the specification leaves `data` out. A `data`
+// entry, even `null`, tells the client the operation ran, which the 4xx status contradicts
+// (MAG-4577).
 //
 // The router's generic error body (convertToJsonError above) is `{"error": "<json text>"}` — a JSON
 // document inside a JSON string, with no errors list at all. A standard GraphQL client looks for
@@ -396,7 +401,6 @@ func convertToGraphQLError(message, guid string) []byte {
 		Extensions map[string]string `json:"extensions,omitempty"`
 	}
 	body := struct {
-		Data   interface{}         `json:"data"`
 		Errors []graphQLErrorEntry `json:"errors"`
 	}{
 		Errors: []graphQLErrorEntry{{Message: message}},
@@ -408,7 +412,7 @@ func convertToGraphQLError(message, guid string) []byte {
 	if err != nil {
 		// Unreachable: every field is a string. Still a GraphQL error document, so a client
 		// that reaches it reads it the same way.
-		return []byte(`{"data":null,"errors":[{"message":"failed to marshal error response to json"}]}`)
+		return []byte(`{"errors":[{"message":"failed to marshal error response to json"}]}`)
 	}
 	return jsonResponse
 }
