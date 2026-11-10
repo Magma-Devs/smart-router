@@ -374,6 +374,21 @@ A router started with `--debug-relays` adds `Lava-Cache-Backend` to cache-served
 naming the node that served the hit — the current master under sentinel, the touched shard
 under cluster. It is debug-gated because it exposes internal infrastructure addresses.
 
+The client library's own lines go through the router's logger, in the router's log format. A
+change of primary or of sentinel is logged at info, every time:
+
+| Message | Attributes |
+|---|---|
+| `resp-cache client follows a new primary` | `master`, `address` |
+| `resp-cache client attached to a sentinel` | `sentinel`, `primary` |
+| `resp-cache client discovered a sentinel` | `sentinel`, `master` |
+
+Every other line of the library is logged at warn as `resp-cache client reported a failure`,
+with the library's text in `detail`. Each kind of failure is printed at most once in 10s; the
+next line of that kind carries `suppressed`, the number dropped in between. The library has one
+logger for the process, so these lines do not say which store they are about when a secondary
+tier is configured.
+
 ### `GET /debug/cache-state`
 
 A router started with `--debug-address` serves a read-only snapshot of which backend is

@@ -344,3 +344,38 @@ func TestClientLeavesASilentSentinel(t *testing.T) {
 		}
 	}
 }
+
+// The three lines go-redis prints when the primary or the Sentinel changes are
+// logged at info with their values as attributes. This runs the real library,
+// so a release that rewords one of them fails here.
+func TestClientLogBridge(t *testing.T) {
+	deployment := newSentinelDeployment(t)
+	cfg := deployment.config(0)
+	cfg.Addresses = cfg.Addresses[:1]
+	seed, primary := cfg.Addresses[0], deployment.primary.Load().proxy.addr()
+
+	logged := captureLog(t, func() {
+		store, err := New(cfg)
+		require.NoError(t, err)
+		defer store.Close()
+		require.NoError(t, store.Ping(context.Background()))
+	})
+
+	lines := logLines(t, logged)
+	attached := findLogLine(lines, "resp-cache client attached to a sentinel")
+	require.NotNil(t, attached, "log: %s", logged)
+	require.Equal(t, "info", attached["level"])
+	require.Equal(t, seed, attached["sentinel"])
+	require.Equal(t, primary, attached["primary"])
+
+	follows := findLogLine(lines, "resp-cache client follows a new primary")
+	require.NotNil(t, follows, "log: %s", logged)
+	require.Equal(t, "info", follows["level"])
+	require.Equal(t, testMasterName, follows["master"])
+	require.Equal(t, primary, follows["address"])
+
+	discovered := findLogLine(lines, "resp-cache client discovered a sentinel")
+	require.NotNil(t, discovered, "log: %s", logged)
+	require.Equal(t, "info", discovered["level"])
+	require.Equal(t, testMasterName, discovered["master"])
+}
