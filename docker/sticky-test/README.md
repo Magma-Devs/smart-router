@@ -172,7 +172,7 @@ Two of these do not discriminate, and that is stated on purpose rather than left
 than it is: `select-provider` does not depend on shared state at all, and the concurrency check
 passed once with the feature disabled.
 
-**Known gap, not covered here.** A sticky request can be answered from the response cache before
-any upstream is chosen, so the pin is not consulted. Measured on a cold start: 24 sticky requests
-produced 19 claim resolutions. It shows up mainly as the first traffic after start-up. Awaiting a
-product decision; see the follow-up ticket.
+**Closed gap.** A sticky request used to be answered from the response cache before any upstream
+was chosen, so the pin was not consulted: on a cold start, 24 sticky requests produced 19 claim
+resolutions. A request carrying `lava-stickiness`, `lava-select-provider` or `lava-providers-block`
+no longer reads the cache (MAG-3864, MAG-3520), so every sticky request resolves a claim.

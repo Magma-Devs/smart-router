@@ -56,10 +56,12 @@ func TestRealSpecArchiveVerificationIsExtensionKeyed(t *testing.T) {
 	}
 	require.NotNil(t, pruning)
 
-	// Severity is omitted in the spec, and Fail is the zero value — which is why
-	// this failure is fatal rather than advisory when it is not attributed.
-	require.Equal(t, spectypes.ParseValue_Fail, pruning.Severity,
-		"an omitted severity means Fail, so mis-attributing this costs the provider")
+	// Severity is omitted in the spec, so it takes the default for where the check
+	// sits: an archive check is PartialFail. Attributed to nothing, it would cost
+	// the url (MAG-3950).
+	require.Equal(t, spectypes.ParseValue_Default, pruning.Severity, "the spec sets no severity")
+	require.Equal(t, spectypes.ParseValue_PartialFail, EffectiveSeverity(*pruning),
+		"an archive check costs only archive")
 	require.Equal(t, "", pruning.Addon, "attributing on Addon alone finds \"\" and goes fatal")
 	require.Equal(t, "archive", pruning.Extension)
 	require.Equal(t, "archive", refusedServiceFor(*pruning),

@@ -241,7 +241,7 @@ func TestRevalidateTier_NotesAndCountsTheFailedCheck(t *testing.T) {
 	throttled.Name = "throttled"
 
 	_, stillFailed := rpsr.revalidateTier(t.Context(), []*lavasession.RPCStaticProviderEndpoint{dead, throttled},
-		liveParser(t, "ETH1", true), inputs.rpcEndpoint, reverifyTierBackup)
+		liveParser(t, "ETH1", true), inputs.rpcEndpoint, reverifyTierBackup, nil, true)
 	require.Len(t, stillFailed, 2)
 	require.Equal(t, []string{"backup|dead|provider|chain-id"}, counted, "the dead node failed chain-id; the throttled one failed nothing")
 	require.Equal(t, "chain-id", inputs.lastFailure["backup|dead"])

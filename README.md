@@ -123,7 +123,7 @@ is printed first.
       "ok": false,
       "verifications": [
         { "name": "chain-id", "addon": "", "extension": "",        "severity": "Fail", "ok": true },
-        { "name": "pruning",  "addon": "", "extension": "archive", "severity": "Fail", "ok": false, "error": "block not found" }
+        { "name": "pruning",  "addon": "", "extension": "archive", "severity": "PartialFail", "ok": false, "error": "block not found" }
       ],
       "router": { "verdict": "admitted", "refusedServices": ["archive"] }
     }
@@ -134,19 +134,29 @@ is printed first.
 There is **one row per node URL**, and every field in it is that URL's own: its checks ran over its
 own connection, and `latestBlock` is its own height — `0` when the spec gives it no height request,
 `-1` when the request failed (`latestBlockError` says why). A row's `ok` is `true` only when the spec
-loaded (`specValid`), the URL was reached, and every verification passed, whatever its `severity`.
+loaded (`specValid`), the URL was reached, every add-on it names is one the spec defines, and every
+verification passed, whatever its `severity`.
 Top-level `ok` is the AND of all rows.
 
 `router` is what a router started with the same flags does with that URL:
 
 | `verdict` | Meaning |
 | --- | --- |
-| `admitted` | Served, minus any `refusedServices` — the add-ons and extensions whose own checks failed |
-| `refused` | Dropped: it failed a check no single service owns, or could not be dialed. The provider serves from its other URLs |
+| `admitted` | Served, minus any `refusedServices` — the add-ons and extensions whose own checks failed, or that the spec does not define |
+| `refused` | Dropped: it failed a `Fail` check (a basic check, or an add-on check the spec makes mandatory), or could not be dialed. The provider serves from its other URLs |
 | `excluded` | The whole provider is dropped: a path it serves has no URL left, or its node URLs are a list the router cannot serve from (`reason` says which) |
 | `unknown` | The probe could not decide — its spec did not load, it timed out, or the URL's checks were only rate-limited |
 
+`severity` is what a failure of that check costs: `Fail` takes the URL out, `PartialFail` only the
+add-on or extension it covers, `Warning` nothing. A spec value that sets none takes the default for
+where its check sits: `Fail` for a basic check, `PartialFail` for an add-on or extension check.
+
 A failed `Warning` check fails the row but never the verdict: the router logs it and serves.
+
+A name in a URL's `addons` that the spec does not define fails the row, with an `error` naming it,
+but not the verdict: the router ignores the name and serves the rest, and the verdict lists it in
+`refusedServices`, with `reason` saying it is not defined by the spec. Only a `standalone-addons` URL
+that names no add-on the spec defines is refused, since it serves nothing.
 
 When a URL's latest-block call fails, its row reports `latestBlock: -1` and the cause in
 `latestBlockError`. Checks that measure a distance from the head are then reported failed with
@@ -445,6 +455,8 @@ For tests that only need the endpoint-health reset, **`POST /debug/reset-endpoin
 
 `/debug/reset-pairing` and `/debug/reset-scores` remain available for targeted cleanup.
 
+**`GET /debug/verification`** shows, per chain and configured provider, what it is failing (`scope`, `service`, `check`, `severity`, and `since`, the start `smartrouter_provider_verification_failed` publishes), whether it is in the pairing, and when each check it is failing is next retried (`retries`, one entry per check, earliest due first: `check`, `addon`, `extension`, or `wholePass` for a url that could not be dialed, with `attempts`, `pendingSince` and `nextRetryAt`), with the retry delays in force (MAG-3950). A test can shorten those with `--verification-retry-delay` and `--verification-retry-max-delay` instead of waiting 30s to 15m between retries.
+
 ## Releases
 
 Releases are cut by pushing a semver tag matching `vX.Y.Z` (pre-release suffixes like `v1.2.0-rc1` are allowed). The tag push triggers `.github/workflows/release.yml`, which builds the release artifacts.
@@ -483,6 +495,17 @@ The standalone Linux binaries and the binaries inside the Docker image are produ
 Customers should pin to `:vX.Y.Z`. `:latest` is for non-production "just give me the newest stable" use; `:main` is for previewing unreleased work from `main`.
 
 The version string is injected at build time from the git tag — `smartrouter version` prints the tag verbatim, including the `v` prefix. Builds from non-tagged commits carry `git describe` output (e.g. `v1.2.0-3-gabc1234`), so a dev binary cannot masquerade as a release.
+
+#### Identifying a build
+
+`smartrouter version` prints two lines: the version, then `commit <sha>`. The router also logs both at startup (`smart-router Binary Version: ... commit ...`), so `kubectl logs` on a running pod names the build it is serving.
+
+- A **release or CI build** carries the version and commit the `-ldflags -X` flags stamped in.
+- A **plain `go build ./cmd/smartrouter` from a git checkout** carries no stamp, but the Go toolchain still records the checkout's revision in the binary. The router reads that record and reports it: the commit is the checkout's HEAD, the version is the toolchain-derived pseudo-version, `+dirty` when the tree had uncommitted changes. Read a pseudo-version as "after the nearest tag": `v1.6.8-0.20261108131709-22176166ebdc` is commit `22176166` somewhere after `v1.6.7`, not a 1.6.8 build.
+- A build with **neither** (`-buildvcs=false`, or a source tree without `.git`, such as a Docker build context) reports `dev` / `commit none`. Nothing in such a binary says which commit it is; the only fix is to pass the `-X` flags at build time.
+- A plain `go build` from a **`git worktree`** gets the record wrong or not at all. A worktree's `.git` is a file, and the toolchain only takes a `.git` directory for a checkout. Outside any other checkout, the binary gets no record and reports `dev` / `commit none`. Inside another checkout, such as `.claude/worktrees/<name>`, it gets the enclosing checkout's record and reports that checkout's commit, not the one it was built from. In a worktree, build with `make build`, which stamps the worktree's own commit with `-X`.
+
+`go version -m <binary>` prints the same toolchain record (`vcs.revision`, `vcs.time`, `vcs.modified`) without running the binary. Searching the file for a bare 40-hex commit (`strings <binary> | grep -E '^[0-9a-f]{40}$'`) only finds an `-ldflags`-stamped commit, because the toolchain record stores the revision as `vcs.revision=<sha>`, not on a line of its own.
 
 #### Pulling the image
 
