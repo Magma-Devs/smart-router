@@ -610,7 +610,11 @@ a documented command never prints PASS for a lane that verified nothing:
 
 - **Cross-backend parity** (every behavioural case against both the gRPC cache server and the
   RESP backend, no docker needed): `go test ./protocol/performance -run TestParity -v`
-- **Sentinel failover**: `RESP_CACHE_TEST_SENTINEL_DOCKER=1 go test ./ecosystem/cache/redisstore -run TestSentinelFailover -v -timeout 5m`
+- **Sentinel failover** (Linux only: three nodes, each a Valkey store and a sentinel, reached at
+  their container addresses through the production dialer and both password files. A hung
+  sentinel, a stopped sentinel, a node cut off the network and a stopped primary each end with
+  a write on the current primary. CI runs it on every pull request):
+  `RESP_CACHE_TEST_SENTINEL_DOCKER=1 go test ./ecosystem/cache/redisstore -run TestSentinelFailover -v -timeout 5m`
 - **Cluster** (three masters joined via one configuration endpoint; cross-slot pipelined
   lookups and prefix-scoped purge across masters):
   `RESP_CACHE_TEST_CLUSTER_DOCKER=1 go test ./ecosystem/cache/redisstore -run TestClusterDocker -v -timeout 5m`

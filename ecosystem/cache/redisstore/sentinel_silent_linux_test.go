@@ -273,33 +273,6 @@ func (d *sentinelDeployment) attached() *fakeNode {
 	return found
 }
 
-// The cadence of the router's health probe while its breaker is open, which
-// is the only traffic that reaches the client during an outage.
-const (
-	outageProbeTimeout  = 3 * time.Second
-	outageProbeInterval = time.Second
-)
-
-// recoveryTime probes the way the router does until a write lands on the node
-// the remaining Sentinels name, and returns how long that took.
-func recoveryTime(t *testing.T, store *Store, primary *fakeNode, limit time.Duration) time.Duration {
-	t.Helper()
-	key := core.HeightKey("ETH1", "after")
-	start := time.Now()
-	for {
-		ctx, cancel := context.WithTimeout(context.Background(), outageProbeTimeout)
-		err := store.SetHeight(ctx, key, 2, time.Hour)
-		cancel()
-		elapsed := time.Since(start)
-		if err == nil {
-			require.True(t, primary.server.Exists(store.key(key)), "the write lands on the node the remaining Sentinels name")
-			return elapsed
-		}
-		require.Less(t, elapsed, limit, "no write reached the new primary; last error: %v", err)
-		time.Sleep(outageProbeInterval)
-	}
-}
-
 // A router attached to a Sentinel that stops answering leaves it and follows
 // the primary the others name, whatever the pool size. The Sentinel goes silent
 // the two ways one does: its node is lost, so nothing completes a handshake, or
@@ -309,16 +282,15 @@ func recoveryTime(t *testing.T, store *Store, primary *fakeNode, limit time.Dura
 // lost with its primary one more for the idle connection to that primary,
 // which has to time out before the client dials at all.
 func TestClientLeavesASilentSentinel(t *testing.T) {
-	const failedProbe = outageProbeTimeout + outageProbeInterval
 	for _, tc := range []struct {
 		name        string
 		silence     func(*faultProxy)
 		loseOldData func(*faultProxy)
 		limit       time.Duration
 	}{
-		{"sentinel on a lost node", (*faultProxy).blackhole, (*faultProxy).refuse, 2 * failedProbe},
-		{"sentinel process hung", (*faultProxy).hang, (*faultProxy).refuse, 2 * failedProbe},
-		{"node lost with its primary", (*faultProxy).blackhole, (*faultProxy).blackhole, 3 * failedProbe},
+		{"sentinel on a lost node", (*faultProxy).blackhole, (*faultProxy).refuse, 2 * failedOutageProbe},
+		{"sentinel process hung", (*faultProxy).hang, (*faultProxy).refuse, 2 * failedOutageProbe},
+		{"node lost with its primary", (*faultProxy).blackhole, (*faultProxy).blackhole, 3 * failedOutageProbe},
 	} {
 		for _, pool := range []struct {
 			name string
@@ -338,7 +310,7 @@ func TestClientLeavesASilentSentinel(t *testing.T) {
 				tc.silence(attached.proxy)
 				tc.loseOldData(oldPrimary.proxy)
 
-				elapsed := recoveryTime(t, store, newPrimary, tc.limit)
+				elapsed := recoveryTime(t, store, newPrimary.server.Exists, tc.limit)
 				t.Logf("recovered in %s", elapsed.Round(10*time.Millisecond))
 			})
 		}
