@@ -192,3 +192,41 @@ func TestApplyReverification_ARecoveredURLComesBackWhileItsSiblingIsHeld(t *test
 	require.Len(t, up.methods("http", "/a/"+upArchive), askedAtBoot, "A is not sent a request by the pass")
 	require.True(t, holdoffs.HeldOff(key, provider.NodeUrls[0].Url))
 }
+
+// A held url is not asked, so the add-ons it was refused stay refused: a pruned
+// node does not get archive back while its sibling is checked (found in review).
+func TestApplyReverification_AHeldURLKeepsItsAddonRefusals(t *testing.T) {
+	up := newFakeUpstreams(t)
+	provider := staticProvider("ETH1",
+		common.NodeUrl{Url: up.httpURL("/a/" + upArchive)},
+		common.NodeUrl{Url: up.httpURL("/b/" + upPruned), Addons: []string{"archive"}},
+	)
+	parser := liveParser(t, "ETH1", true)
+	admissions := newAdmissionRegistry()
+	boot, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
+	require.NoError(t, err)
+	services, _ := boot.AdmittedServices(provider.NodeUrls[1])
+	require.Empty(t, services, "archive is refused on B at boot")
+	admissions.record(provider, boot)
+
+	key := holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name)
+	holdoffs := holdoff.NewRegistry()
+	holdoffs.RecordRateLimit(key, provider.NodeUrls[1].Url, 0) // B is busy
+	inputs := &chainReverifyInputs{
+		chainParser:                parser,
+		rpcEndpoint:                &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		convertProvidersToSessions: fakeConvert,
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{provider},
+		recordAdmission:            admissions.record,
+		recordReverifiedAdmission:  admissions.recordReverified,
+		admissionFor:               admissions.admissionFor,
+		rateLimitHoldoff:           holdoffs,
+	}
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
+
+	askedAtBoot := len(up.methods("http", "/b/"+upPruned))
+	applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
+	require.Len(t, up.methods("http", "/b/"+upPruned), askedAtBoot, "B is not sent a request by the pass")
+	after, _ := admissions.admissionFor(provider).AdmittedServices(provider.NodeUrls[1])
+	require.Empty(t, after, "archive stays refused on B")
+}

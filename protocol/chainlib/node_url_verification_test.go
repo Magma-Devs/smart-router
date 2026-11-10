@@ -31,14 +31,14 @@ func TestServingError(t *testing.T) {
 	require.NoError(t, allFine.servingError(urls[:2]))
 
 	var failed ProviderAdmission
-	failed.throttleURL(0, throttledErr())
+	failed.throttleURL(0, common.NodeUrl{}, throttledErr())
 	failed.refuseURL(1, errNotServed)
 	err := failed.servingError(urls)
 	require.ErrorIs(t, err, errNotServed, "a failed path outranks a throttled one in either order")
 	require.False(t, IsRateLimitFailure(err))
 
 	var throttled ProviderAdmission
-	throttled.throttleURL(0, throttledErr())
+	throttled.throttleURL(0, common.NodeUrl{}, throttledErr())
 	require.True(t, IsRateLimitFailure(throttled.servingError(urls[:1])), "nothing but a throttle: inconclusive")
 
 	var socketsOnly ProviderAdmission
@@ -141,8 +141,8 @@ func TestKeepingThrottledFrom(t *testing.T) {
 	previous.fail(url, "trace", "trace")
 
 	var now ProviderAdmission
-	now.throttleURL(1, throttledErr())
-	now.throttleURL(2, throttledErr())
+	now.throttleURL(1, common.NodeUrl{}, throttledErr())
+	now.throttleURL(2, common.NodeUrl{}, throttledErr())
 	now.throttleService(url, "trace", throttledErr())
 	now.throttleService(url, "archive", throttledErr())
 	now.refuseURL(3, errNotServed)
@@ -160,6 +160,31 @@ func TestKeepingThrottledFrom(t *testing.T) {
 	require.False(t, now.URLRefused(2), "the copy shares no map with its source")
 }
 
+// A url this pass could not ask — held off, or rate-limited at the url level —
+// re-checked none of its services, so the services it was refused stay refused.
+// Another url's refusals are not carried over by it.
+func TestKeepingThrottledFrom_AURLNotCheckedKeepsItsServiceRefusals(t *testing.T) {
+	full := common.NodeUrl{Url: "https://full"}
+	pruned := common.NodeUrl{Url: "https://pruned", Addons: []string{"archive"}}
+	other := common.NodeUrl{Url: "https://other", Addons: []string{"archive"}}
+
+	var previous ProviderAdmission
+	previous.fail(pruned, "archive", "archive")
+	previous.fail(other, "archive", "archive")
+
+	var now ProviderAdmission
+	now.throttleURL(1, pruned, ErrNotAskedHeldOff)
+
+	kept := now.KeepingThrottledFrom(previous)
+	services, keep := kept.AdmittedServices(pruned)
+	require.True(t, keep, "the url still serves its base collection")
+	require.Empty(t, services, "archive stays refused: nothing re-checked it")
+	services, _ = kept.AdmittedServices(other)
+	require.Equal(t, []string{"archive"}, services, "a url this pass did check settles its own services")
+	services, _ = kept.AdmittedServices(full)
+	require.Empty(t, services)
+}
+
 func TestWithoutURLRefusals(t *testing.T) {
 	var admission ProviderAdmission
 	admission.refuseURL(0, errNotServed)
@@ -173,7 +198,7 @@ func TestEqualIgnoresWhatWasOnlyThrottled(t *testing.T) {
 	var a, b ProviderAdmission
 	a.refuseURL(0, errNotServed)
 	b.refuseURL(0, errNotServed)
-	b.throttleURL(1, throttledErr())
+	b.throttleURL(1, common.NodeUrl{}, throttledErr())
 	require.True(t, a.Equal(b))
 	b.refuseURL(2, errNotServed)
 	require.False(t, a.Equal(b))

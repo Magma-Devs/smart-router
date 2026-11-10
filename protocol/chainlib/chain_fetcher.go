@@ -255,7 +255,10 @@ type ProviderAdmission struct {
 	refusedURLs       map[int]error
 	throttledServices map[admissionKey]struct{}
 	throttledURLs     map[int]error
-	throttle          error
+	// The url at each throttled position, so the verdicts on its services can be
+	// kept too: a pass that could not ask a url re-checked none of its services.
+	throttledURLAt map[int]common.NodeUrl
+	throttle       error
 	// warned are the failed checks whose severity is Warning, and unsettled the ones
 	// a rate limit or the deadline kept from answering, which keep what the last pass
 	// knew. Neither switches anything off (MAG-3950).
@@ -581,11 +584,13 @@ func (a *ProviderAdmission) refuseURL(index int, cause error) {
 	a.refusedURLs[index] = cause
 }
 
-func (a *ProviderAdmission) throttleURL(index int, cause error) {
+func (a *ProviderAdmission) throttleURL(index int, url common.NodeUrl, cause error) {
 	if a.throttledURLs == nil {
 		a.throttledURLs = map[int]error{}
+		a.throttledURLAt = map[int]common.NodeUrl{}
 	}
 	a.throttledURLs[index] = cause
+	a.throttledURLAt[index] = url
 	if a.throttle == nil {
 		a.throttle = cause
 	}
@@ -685,7 +690,9 @@ func (a ProviderAdmission) Equal(other ProviderAdmission) bool {
 }
 
 // KeepingThrottledFrom settles what this pass could not: each url or service the
-// vendor only rate-limited keeps the verdict previous gave it. Nothing in the result
+// vendor only rate-limited keeps the verdict previous gave it. A url this pass saw
+// only rate-limited, or did not ask because it was held off, also keeps every
+// service refusal previous gave it: none of its services was checked again. Nothing in the result
 // is throttled any more, but it still names the urls this pass could only see
 // rate-limited (URLThrottled): the url grace reads that, since a rate limit settles a
 // url's strike no more than its verdict.
@@ -701,21 +708,39 @@ func (a ProviderAdmission) KeepingThrottledFrom(previous ProviderAdmission) Prov
 			kept.warned[key] = struct{}{}
 		}
 	}
+	keep := func(key admissionKey, check string) {
+		if kept.refused == nil {
+			kept.refused = map[admissionKey]string{}
+		}
+		kept.refused[key] = check
+	}
 	for index, cause := range a.throttledURLs {
 		if previousCause, refused := previous.refusedURLs[index]; refused {
 			kept.refuseURL(index, previousCause)
 		}
 		if kept.throttledURLs == nil {
 			kept.throttledURLs = map[int]error{}
+			kept.throttledURLAt = map[int]common.NodeUrl{}
 		}
 		kept.throttledURLs[index] = cause
+		url := a.throttledURLAt[index]
+		for key, check := range previous.refused {
+			if key.url == url.Url && key.internalPath == url.InternalPath {
+				keep(key, check)
+			}
+		}
+		for key := range previous.warned {
+			if key.url == url.Url && key.internalPath == url.InternalPath {
+				if kept.warned == nil {
+					kept.warned = map[warningKey]struct{}{}
+				}
+				kept.warned[key] = struct{}{}
+			}
+		}
 	}
 	for key := range a.throttledServices {
 		if check, refused := previous.refused[key]; refused {
-			if kept.refused == nil {
-				kept.refused = map[admissionKey]string{}
-			}
-			kept.refused[key] = check
+			keep(key, check)
 		}
 	}
 	return kept
@@ -724,7 +749,7 @@ func (a ProviderAdmission) KeepingThrottledFrom(previous ProviderAdmission) Prov
 // WithoutURLRefusals admits the node urls at these positions again.
 func (a ProviderAdmission) WithoutURLRefusals(indices []int) ProviderAdmission {
 	kept := a.refusals()
-	kept.throttledURLs, kept.throttledServices, kept.throttle = a.throttledURLs, a.throttledServices, a.throttle
+	kept.throttledURLs, kept.throttledURLAt, kept.throttledServices, kept.throttle = a.throttledURLs, a.throttledURLAt, a.throttledServices, a.throttle
 	kept.warned, kept.unsettled, kept.pass = a.warned, a.unsettled, a.pass
 	for _, index := range indices {
 		delete(kept.refusedURLs, index)
@@ -1167,7 +1192,7 @@ func admit(outcomes []nodeUrlOutcome, logRefusals bool) (ProviderAdmission, erro
 				utils.FormatWarning("refusing node url", failed, utils.LogAttr("url", outcome.url.String()))
 			}
 		case throttled != nil:
-			admission.throttleURL(index, throttled)
+			admission.throttleURL(index, outcome.url, throttled)
 			if logRefusals && !errors.Is(throttled, ErrNotAskedHeldOff) {
 				utils.FormatWarning("node url rate-limited its checks; not refusing it", throttled, utils.LogAttr("url", outcome.url.String()))
 			}
