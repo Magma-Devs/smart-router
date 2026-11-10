@@ -91,6 +91,31 @@ func TestHealth_NoWebsocketURLIsAdmittedWithoutSubscriptions(t *testing.T) {
 	require.NotContains(t, rows[0].Router.Reason, noWebsocketReason)
 }
 
+// health says a provider serves no subscriptions when the router refuses each of its ws(s)
+// urls, as when it has none: its admitted http row names the reason, and the refused ws
+// row says why it is refused. The metric publishes both as the websocket service. A socket
+// that answers leaves the reason out.
+func TestHealth_EveryWebsocketURLRefusedServesNoSubscriptions(t *testing.T) {
+	up := newFakeUpstreams(t)
+	wsURL, accepting := refusingSocket(t, up, "/dead-health/"+upArchive)
+	urls := []commonlib.NodeUrl{{Url: up.httpURL("/dead-health/" + upArchive)}, {Url: wsURL}}
+	for _, skipWebsocket := range []bool{false, true} {
+		rows := healthProbe(t, "ETH1", skipWebsocket, 20*time.Second, urls...)
+		require.Len(t, rows, 2)
+		require.Equal(t, routerAdmitted, rows[0].Router.Verdict, "skip-websocket-verification=%t", skipWebsocket)
+		require.Equal(t, noWebsocketAdmittedReason, rows[0].Router.Reason, "skip-websocket-verification=%t", skipWebsocket)
+		require.NotEqual(t, routerAdmitted, rows[1].Router.Verdict, "the ws url that cannot be dialed is refused")
+	}
+
+	accepting.Store(true)
+	rows := healthProbe(t, "ETH1", true, 20*time.Second, urls...)
+	require.Len(t, rows, 2)
+	for _, row := range rows {
+		require.Equal(t, routerAdmitted, row.Router.Verdict)
+		require.Empty(t, row.Router.Reason, "a socket that answers serves the subscriptions")
+	}
+}
+
 // A missing websocket url is not a failed run, since no check ran: the counter leaves it
 // out, while the gauge holds it for as long as it lasts.
 func TestCountRefusals_LeavesOutAMissingWebsocketURL(t *testing.T) {
