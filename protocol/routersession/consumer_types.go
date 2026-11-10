@@ -1315,28 +1315,50 @@ func (cswp *ConsumerSessionsWithProvider) relayURLs(addon string, extensions []s
 	return urls
 }
 
-// endpointsByHoldoffLocked is cswp.Endpoints with every url held off after a rate limit moved to
-// the back (heldOff says which); both groups keep config order. Nothing is dropped: when every
-// url that fits the request is held, one is still handed out, as filterRateLimitedProviders keeps
-// a held provider rather than leave a request with nowhere to go (MAG-4732). The held urls need no
-// order of their own: two held at once escalate to the provider, which holds them all until the
-// longest ends. A nil heldOff keeps config order.
+// endpointsInPickOrderLocked is cswp.Endpoints in the order the url walk tries them.
 //
-// cswp.Lock must be held.
-func (cswp *ConsumerSessionsWithProvider) endpointsByHoldoffLocked(heldOff func(url string) bool) []*Endpoint {
-	if heldOff == nil {
-		return cswp.Endpoints
-	}
-	free := make([]*Endpoint, 0, len(cswp.Endpoints))
-	var held []*Endpoint
-	for _, endpoint := range cswp.Endpoints {
-		if heldOff(endpoint.NetworkAddress) {
-			held = append(held, endpoint)
-		} else {
-			free = append(free, endpoint)
+// Every url held off after a rate limit moves to the back (heldOff says which); both groups keep
+// config order. Nothing is dropped: when every url that fits the request is held, one is still
+// handed out, as filterRateLimitedProviders keeps a held provider rather than leave a request with
+// nowhere to go (MAG-4732). The held urls need no order of their own: two held at once escalate to
+// the provider, which holds them all until the longest ends. A nil heldOff keeps config order.
+//
+// The last chance (endpointPickLendDisabled) then orders by lendRankLocked: a url in rotation, then
+// one held by a state reason, then a switched-off one. The provider is lent one url for this
+// request, and config order alone could spend that lend on a dead url while a sibling would answer
+// (MAG-4734). A lent head-stalled url is still switched on, so it does not take the request's one
+// chance (GetSessions checks Enabled, kept by decision on MAG-4734): ranked first, it lets one
+// request be lent the stalled url of each blocked provider in turn. The sort is stable, so the
+// rate-limit order and config order hold within a rank. It is taken per pick, not kept, because a
+// url's state changes between requests.
+//
+// cswp.Lock must be held; each endpoint's mu is taken after it.
+func (cswp *ConsumerSessionsWithProvider) endpointsInPickOrderLocked(mode endpointPickMode, heldOff func(url string) bool) []*Endpoint {
+	ordered := cswp.Endpoints
+	if heldOff != nil {
+		ordered = make([]*Endpoint, 0, len(cswp.Endpoints))
+		var held []*Endpoint
+		for _, endpoint := range cswp.Endpoints {
+			if heldOff(endpoint.NetworkAddress) {
+				held = append(held, endpoint)
+			} else {
+				ordered = append(ordered, endpoint)
+			}
 		}
+		ordered = append(ordered, held...)
 	}
-	return append(free, held...)
+	if mode != endpointPickLendDisabled {
+		return ordered
+	}
+	ranks := make(map[*Endpoint]int, len(ordered))
+	for _, endpoint := range ordered {
+		endpoint.mu.RLock()
+		ranks[endpoint] = endpoint.lendRankLocked()
+		endpoint.mu.RUnlock()
+	}
+	ordered = slices.Clone(ordered) // never reorder cswp.Endpoints itself
+	slices.SortStableFunc(ordered, func(a, b *Endpoint) int { return ranks[a] - ranks[b] })
+	return ordered
 }
 
 // fetching an endpoint from a ConsumerSessionWithProvider and establishing a connection,
@@ -1356,8 +1378,9 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 		defer cswp.Lock.Unlock()
 		restrictToPath := cswp.restrictsToPathLocked(internalPath)
 		// A url held off after a rate limit goes to the back of the list, so a free sibling is
-		// handed out first; nothing is skipped for it (endpointsByHoldoffLocked).
-		for _, endpoint := range cswp.endpointsByHoldoffLocked(heldOff) {
+		// handed out first; nothing is skipped for it. The last chance also tries the urls that
+		// can answer before the dead ones (endpointsInPickOrderLocked).
+		for _, endpoint := range cswp.endpointsInPickOrderLocked(mode, heldOff) {
 			// Another path's url, a websocket-only url (it can never answer a relay, see
 			// ServesDirectRelays) and a url without the add-on cannot take this request. Skipping a
 			// websocket url leaves the provider with no selectable endpoint once its https url is

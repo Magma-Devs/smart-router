@@ -27,6 +27,21 @@ func (e *Endpoint) usableLocked() bool {
 	return e.Enabled && !e.heldByStateLocked()
 }
 
+// lendRankLocked orders an endpoint for the last chance, best first: 0 in rotation, 1 switched on
+// but held by a state reason (head-stalled: the node answers, a block behind), 2 switched off after
+// repeated failures. It reads the kind of state, never a reason's name, so a reason added later
+// takes the rank of its kind (MAG-4734). Caller must hold e.mu (read or write).
+func (e *Endpoint) lendRankLocked() int {
+	switch {
+	case !e.Enabled:
+		return 2
+	case e.heldByStateLocked():
+		return 1
+	default:
+		return 0
+	}
+}
+
 // IsUsable reports, under e.mu, whether selection may route to this endpoint right now. It differs
 // from IsEnabled, which describes only the event slot: an endpoint can be Enabled and still out of
 // rotation because a state reason (head-stalled) holds.
