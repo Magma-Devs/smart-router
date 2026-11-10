@@ -2,6 +2,10 @@ package rpcsmartrouter
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -106,4 +110,51 @@ func TestCountRefusals_LeavesOutAMissingWebsocketURL(t *testing.T) {
 
 	inputs.countRefusals(reverifyTierStatic, provider, admission)
 	require.Equal(t, []string{"p|service|archive|pruning"}, counted)
+}
+
+// refusingSocket is a websocket url whose upgrade is refused until accept is called;
+// from then on the fake upstreams answer it, as the archive node of path.
+func refusingSocket(t *testing.T, up *fakeUpstreams, path string) (url string, accept func()) {
+	t.Helper()
+	var accepting atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !accepting.Load() {
+			http.Error(w, "no websocket here", http.StatusServiceUnavailable)
+			return
+		}
+		up.ws.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	return "ws" + strings.TrimPrefix(server.URL, "http") + path, func() { accepting.Store(true) }
+}
+
+// A provider whose websocket url cannot be dialed serves over http, and its retry is the
+// dial of that url alone, not the whole pass (MAG-4505 finding 14): the http url passed
+// every check, keeps those verdicts, and is not asked again. The dial that succeeds
+// admits the url, and the provider leaves the schedule.
+func TestVerificationRetries_AUrlThatCannotBeDialedRetriesOnlyItsDial(t *testing.T) {
+	shortenRetryIntervals(t)
+	up := newFakeUpstreams(t)
+	const httpPath = "/dial/h/" + upArchive
+	wsURL, accept := refusingSocket(t, up, "/dial/w/"+upArchive)
+	provider := staticProvider("ETH1", commonlib.NodeUrl{Url: up.httpURL(httpPath)}, commonlib.NodeUrl{Url: wsURL})
+	rig := newPairedRetryRig(t, provider)
+	connect := chainlib.CheckID{Name: chainlib.CheckConnect}
+	require.Equal(t, []chainlib.CheckID{connect}, rig.inputs.retries.checksOf(reverifyTierStatic, provider.Name),
+		"boot could not dial the ws url: its dial is on the schedule, not the whole pass")
+	require.True(t, rig.admissions.admissionFor(provider).URLRefused(1), "the ws url is refused at boot")
+	require.NotNil(t, rig.session(t, provider.Name), "the provider serves over http")
+	booted := len(up.methods("http", httpPath))
+
+	runRetryLoop(t, rig.rpsr, rig.chainKey, rig.endpoint, fakeConvertSessions(0))
+	require.Eventually(t, func() bool { return attemptsOf(rig.inputs.retries, provider.Name, connect) >= 3 }, 10*time.Second, 10*time.Millisecond,
+		"the dial is retried on its own backoff")
+	require.Empty(t, up.methods("http", httpPath)[booted:], "no check of the http url is asked again")
+	require.True(t, rig.admissions.admissionFor(provider).URLRefused(1), "the ws url stays refused")
+
+	accept()
+	require.Eventually(t, func() bool { return !rig.pending() }, 10*time.Second, 10*time.Millisecond,
+		"the dial that succeeds leaves the schedule")
+	require.False(t, rig.admissions.admissionFor(provider).URLRefused(1), "and admits the ws url")
+	require.Empty(t, up.methods("http", httpPath)[booted:], "the http url is still not asked again")
 }

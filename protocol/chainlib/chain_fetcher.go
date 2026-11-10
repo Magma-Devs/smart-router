@@ -276,8 +276,9 @@ type ProviderAdmission struct {
 // CheckID names one verification value of a spec: its verification's name, and the
 // add-on and extension the value covers. ETH1's pruning is four of them: the base
 // one, archive, trace, and trace's archive. The zero CheckID is the whole pass, what a
-// retry re-runs for a url that could not be dialed or its checks listed: such a url
-// has no verdicts to keep.
+// retry re-runs for a provider whose pass gave no verdicts to keep. A url that could
+// not be dialed has no verdicts to keep either, but only that url: its retry is its
+// dial, CheckID{Name: CheckConnect}, which no check of another url answers to.
 type CheckID struct {
 	Name      string
 	Addon     string
@@ -394,9 +395,11 @@ func (a ProviderAdmission) Ran(check string) bool {
 
 // Retries is what a retry of this pass re-runs (MAG-3950), once each and sorted: every
 // check that failed, or that a rate limit or the deadline kept from answering, and the
-// whole pass when a url could not be dialed or its checks listed. A Warning check is
-// not retried: it switches nothing off, and the epoch re-runs it. Neither is an add-on
-// name the spec does not define: the router reads its config once.
+// dial of a url that could not be dialed. That retry dials the url again, and runs its
+// checks once it answers; the provider's other urls keep their verdicts, so a dead
+// websocket url costs no re-run of the http checks that passed (MAG-4505). A Warning
+// check is not retried: it switches nothing off, and the epoch re-runs it. Neither is
+// an add-on name the spec does not define: the router reads its config once.
 func (a ProviderAdmission) Retries() []CheckID {
 	var ids []CheckID
 	add := func(id CheckID) {
@@ -406,7 +409,11 @@ func (a ProviderAdmission) Retries() []CheckID {
 	}
 	for _, outcome := range a.pass {
 		if outcome.err != nil {
-			if FailedCheck(outcome.err) != CheckUnsupportedAddon {
+			switch FailedCheck(outcome.err) {
+			case CheckUnsupportedAddon:
+			case CheckConnect:
+				add(CheckID{Name: CheckConnect})
+			default:
 				add(CheckID{})
 			}
 			continue
@@ -906,7 +913,8 @@ func (cf *ChainFetcher) ValidateCollections(ctx context.Context) (ProviderAdmiss
 // ValidateCollections does (MAG-3950). A url with none of them is not dialed. A url
 // previous could not dial or list has no verdicts to keep, so it is verified whole, and
 // so is every url when previous is no pass of this provider's urls or only names the
-// whole pass.
+// whole pass. A retry of a dial (CheckConnect) names no check of any url, so it dials
+// only the urls previous could not dial.
 func (cf *ChainFetcher) ValidateCollectionsAgain(ctx context.Context, previous ProviderAdmission, only []CheckID) (ProviderAdmission, error) {
 	if len(previous.pass) != len(cf.endpoint.NodeUrls) || len(only) == 0 || slices.ContainsFunc(only, CheckID.WholePass) {
 		return cf.ValidateCollections(ctx)
