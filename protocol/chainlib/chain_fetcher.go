@@ -127,9 +127,11 @@ func stopValidateRetries(err error) bool {
 	return err == nil || IsRateLimitFailure(err)
 }
 
-// isWebSocketUrl reports whether a node url is dialed as a websocket. A gRPC
-// host:port does not parse as a url and is not one.
-func isWebSocketUrl(rawURL string) bool {
+// IsWebSocketURL reports whether a node url is dialed as a websocket, as verification
+// reads it. A gRPC host:port does not parse as a url and is not one. The publisher of
+// the websocket part (refusalsOf in rpcsmartrouter) reads urls through it too, so the
+// two cannot drift.
+func IsWebSocketURL(rawURL string) bool {
 	isWs, err := IsUrlWebSocket(rawURL)
 	return err == nil && isWs
 }
@@ -816,7 +818,7 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 	paths := map[string]*pathState{}
 	var order []string
 	for index, url := range nodeUrls {
-		if isWebSocketUrl(url.Url) {
+		if IsWebSocketURL(url.Url) {
 			continue
 		}
 		state, seen := paths[url.InternalPath]
@@ -1306,7 +1308,7 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		outcome.err = chargedTo(CheckUnsupportedAddon, err)
 		return outcome
 	}
-	socket := isWebSocketUrl(url.Url)
+	socket := IsWebSocketURL(url.Url)
 	if socket {
 		verifications = socketVerifications(g.parser, verifications)
 	} else if len(verifications) == 0 {
