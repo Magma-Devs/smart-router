@@ -364,25 +364,29 @@ func (apil *GraphQLChainListener) Serve(ctx context.Context, cmdFlags common.Con
 		// A request the router refused by one of its OWN limits: too many root fields, too deep a
 		// document, too deep a chain of fragment spreads. Or one whose wrapper keys the router and
 		// the node would read as two different requests, or whose document holds a mutation beside
-		// another operation (MAG-4908). Nothing failed — the router
+		// another operation (MAG-4908). Or one the router cannot read: a body that is not one JSON
+		// object, a member of the wrong type, no query, a query that does not parse, an operation it
+		// cannot select, a cyclic or undefined fragment, a subscription (MAG-4351, refused rather
+		// than forwarded by the owner's decision of 2026-11-09). Nothing failed — the router
 		// read the request and declined to serve it, and its own relay_end line says so (outcome
 		// rejected_before_dispatch, status 0). The refusal carries no status, so it used to fall to
 		// the 500: the status for "the server failed", which every alert rule counts as an outage
 		// of the router and every retry policy resends a request that can never succeed. It gets a
 		// client-error status and a GraphQL error document the caller's client can actually read
-		// (MAG-4577).
+		// (MAG-4577), with the GraphQL error code of the MAG-4351 family in extensions.
 		//
 		// The refusal's own message is used, not the masked envelope: it is router-authored, so it
 		// carries nothing to redact, and the masking exists for upstream errors that can leak a node
 		// url's credentials. A limit refusal is constant apart from the limit's number; a refused
 		// request member is quoted as the client sent it, and it differs from a known member only
-		// by letter case (MAG-4908).
+		// by letter case (MAG-4908); an unreadable request quotes at most the client's own names and
+		// the token its parser stopped at, never a decoder's error text (MAG-4351).
 		refusal: func(err error, msgSeed string) (int, []byte, string, bool) {
 			refusal := rpcInterfaceMessages.GraphQLRefusalFrom(err)
 			if refusal == nil {
 				return 0, nil, "", false
 			}
-			return graphQLRefusalStatus, convertToGraphQLError(refusal.ClientMessage(), msgSeed), refusal.ClientMessage(), true
+			return graphQLRefusalStatus, convertToGraphQLError(refusal.ClientMessage(), refusal.Code(), msgSeed), refusal.ClientMessage(), true
 		},
 		errorBody: func(_ *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
 			return convertToJsonError(errMasking)

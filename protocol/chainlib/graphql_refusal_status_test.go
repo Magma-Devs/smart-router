@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gofiber/fiber/v2"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
@@ -55,6 +56,25 @@ func (r *parsingRelay) SendParsedRelay(ctx context.Context, analytics *metrics.R
 // body to it and reads back the status and body a caller would see.
 func serveGraphQLListener(t *testing.T, relay RelaySender) func(body string) (int, string) {
 	t.Helper()
+	post := serveGraphQLListenerReplies(t, relay)
+	return func(body string) (int, string) {
+		t.Helper()
+		reply := post(body)
+		return reply.status, reply.body
+	}
+}
+
+// graphQLListenerReply is what a caller of the GraphQL listener reads: the status, the headers and
+// the body.
+type graphQLListenerReply struct {
+	status int
+	header http.Header
+	body   string
+}
+
+// serveGraphQLListenerReplies is serveGraphQLListener with the reply's headers too.
+func serveGraphQLListenerReplies(t *testing.T, relay RelaySender) func(body string) graphQLListenerReply {
+	t.Helper()
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
@@ -80,15 +100,21 @@ func serveGraphQLListener(t *testing.T, relay RelaySender) func(body string) (in
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	t.Cleanup(client.CloseIdleConnections)
-	return func(body string) (int, string) {
+	return func(body string) graphQLListenerReply {
 		t.Helper()
 		response, err := client.Post("http://"+addr+"/", "application/json", strings.NewReader(body))
 		require.NoError(t, err)
 		defer response.Body.Close()
 		raw, err := io.ReadAll(response.Body)
 		require.NoError(t, err)
-		return response.StatusCode, string(raw)
+		return graphQLListenerReply{status: response.StatusCode, header: response.Header, body: string(raw)}
 	}
+}
+
+// graphQLErrorEntryForTest is one entry of a GraphQL response's errors list.
+type graphQLErrorEntryForTest struct {
+	Message    string            `json:"message"`
+	Extensions map[string]string `json:"extensions"`
 }
 
 // requireGraphQLError reads a body as a GraphQL response and returns the message of its one error,
@@ -97,23 +123,26 @@ func serveGraphQLListener(t *testing.T, relay RelaySender) func(body string) (in
 // Format).
 func requireGraphQLError(t *testing.T, body string) string {
 	t.Helper()
+	return requireGraphQLErrorEntry(t, body).Message
+}
+
+// requireGraphQLErrorEntry is requireGraphQLError returning the whole entry, its extensions included.
+func requireGraphQLErrorEntry(t *testing.T, body string) graphQLErrorEntryForTest {
+	t.Helper()
 	var fields map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal([]byte(body), &fields), "the body is not a JSON object: %s", body)
 	_, hasData := fields["data"]
 	require.False(t, hasData,
 		"a refusal is a request error, raised before anything ran, so it carries no data key: %s", body)
 	var response struct {
-		Errors []struct {
-			Message    string            `json:"message"`
-			Extensions map[string]string `json:"extensions"`
-		} `json:"errors"`
+		Errors []graphQLErrorEntryForTest `json:"errors"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(body), &response), "the body is not JSON: %s", body)
 	require.Len(t, response.Errors, 1, "a GraphQL client reads the errors list: %s", body)
 	require.NotEmpty(t, response.Errors[0].Message, "an error entry carries a message: %s", body)
 	require.NotEmpty(t, response.Errors[0].Extensions["guid"],
 		"the router's own request id stays readable, in extensions: %s", body)
-	return response.Errors[0].Message
+	return response.Errors[0]
 }
 
 // TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody is MAG-4577's size-limit half.
@@ -134,7 +163,7 @@ func requireGraphQLError(t *testing.T, body string) string {
 // each limit, which must still be relayed.
 func TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody(t *testing.T) {
 	relay := &parsingRelay{}
-	post := serveGraphQLListener(t, relay)
+	post := serveGraphQLListenerReplies(t, relay)
 
 	nest := func(levels int) string {
 		return "{ " + strings.Repeat("a { ", levels-1) + "b" + strings.Repeat(" }", levels-1) + " }"
@@ -188,12 +217,18 @@ func TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			relayed := relay.relayed
-			status, body := post(envelope(tc.query))
+			reply := post(envelope(tc.query))
+			status, body := reply.status, reply.body
 
 			require.GreaterOrEqual(t, status, 400, "a refusal is a client error, not a server failure: %d", status)
 			require.Less(t, status, 500, "a refusal is a client error, not a server failure: %d", status)
 			require.Equal(t, graphQLRefusalStatus, status)
-			require.Contains(t, requireGraphQLError(t, body), tc.wantMessage)
+			entry := requireGraphQLErrorEntry(t, body)
+			require.Contains(t, entry.Message, tc.wantMessage)
+			require.NotContains(t, entry.Extensions, "code",
+				"a limit's reply is the one MAG-4577 decided, with no code: %s", body)
+			require.Equal(t, entry.Extensions["guid"], reply.header.Get(common.GUID_HEADER_NAME),
+				"the reply carries the request id in Lava-Guid too, as every relayed reply does")
 			require.NotContains(t, body, "Error_GUID",
 				"the reason must not be JSON inside a JSON string any more")
 			require.Equal(t, relayed, relay.relayed, "a refused request reaches no provider")
@@ -210,31 +245,77 @@ func TestGraphQLListener_RefusalIsAClientErrorWithAGraphQLBody(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			relayed := relay.relayed
-			status, body := post(envelope(tc.query))
-			require.Equal(t, http.StatusOK, status, "body: %s", body)
+			reply := post(envelope(tc.query))
+			require.Equal(t, http.StatusOK, reply.status, "body: %s", reply.body)
 			require.Equal(t, relayed+1, relay.relayed, "the control must reach a provider")
 		})
 	}
 }
 
-// TestGraphQLListener_UnreadableRequestKeepsItsCurrentAnswer draws the line this change does not
-// cross. A document the router cannot READ — a syntax error, a missing query, a subscription — is
-// MAG-4351's and MAG-4577's subscription half, and MAG-4351 decided those are forwarded to a node
-// and answered with the node's own reply. Until that lands they keep today's answer, and this test
-// says so rather than leaving a reader to wonder whether the refusal branch was meant to catch them.
-func TestGraphQLListener_UnreadableRequestKeepsItsCurrentAnswer(t *testing.T) {
-	post := serveGraphQLListener(t, &parsingRelay{})
+// TestGraphQLListener_UnreadableRequestIsRefused is MAG-4351, as its owner decided on 2026-11-09: a
+// request the router cannot read is refused, not forwarded. It used to get HTTP 500, the status for
+// a failure of the server, for the client's own typo, and a body with no errors list, so a GraphQL
+// client could not read the reason.
+//
+// The rows are the ticket's ten requests (PR-542-EXAMPLES-2026-10-19.md), then the rest of the
+// decision's list and the two more QA found (comment 30525). Each unreadable one gets HTTP 400, a
+// GraphQL error document with no data key, the code the decision names in extensions with the
+// request id beside it, the same id in Lava-Guid, and reaches no provider. The ticket's two controls
+// are readable, so they are still relayed: an unknown field is the node's to answer.
+func TestGraphQLListener_UnreadableRequestIsRefused(t *testing.T) {
+	relay := &parsingRelay{}
+	post := serveGraphQLListenerReplies(t, relay)
 
-	for _, tc := range []struct{ name, body string }{
-		{"a query with a syntax error", `{"query":"{ checkpoint { sequenceNumber }"}`},
-		{"no query at all", `{"query":""}`},
-		{"a subscription", `{"query":"subscription { checkpoints { cursor node { sequenceNumber } } }"}`},
+	const parseFailed = rpcInterfaceMessages.GraphQLParseFailedCode
+	const refused = rpcInterfaceMessages.GraphQLRequestRefusedCode
+	for _, tc := range []struct {
+		name, body, wantCode, wantMessage string
+	}{
+		// The ticket's ten, less its two controls.
+		{"a query with a syntax error", `{"query":"{ checkpoint { sequenceNumber }"}`, parseFailed, "failed parsing graphql query: Expected Name, found <EOF> (line 1, column 32)"},
+		{"a query that is not GraphQL", `{"query":"not graphql at all"}`, parseFailed, `failed parsing graphql query: Unexpected Name "not" (line 1, column 1)`},
+		{"an empty query", `{"query":""}`, refused, "graphql request carries no query"},
+		{"a body that is not JSON", `{"query":`, refused, "graphql request body is not JSON"},
+		{"a batch", `[{"query":"{ chainIdentifier }"},{"query":"{ checkpoint { digest } }"}]`, refused, "graphql request body is a JSON array"},
+		{"two operations and no operation name", `{"query":"query A { chainIdentifier } query B { checkpoint { digest } }"}`, refused, "graphql document defines multiple operations and the request names none"},
+		{"an undefined fragment", `{"query":"{ ...Missing }"}`, refused, `graphql query spreads undefined fragment "Missing"`},
+		{"a subscription", `{"query":"subscription { checkpoints { cursor node { sequenceNumber } } }"}`, refused, "graphql subscriptions are not served over HTTP POST"},
+		// The rest of the decision's list, and QA's two (comment 30525).
+		{"no query member", `{"variables":{}}`, refused, "graphql request carries no query"},
+		{"an operation name that matches none", `{"query":"query A { chainIdentifier }","operationName":"B"}`, refused, `graphql document defines no operation named "B"`},
+		{"a cyclic fragment", `{"query":"{ ...A } fragment A on Query { ...B } fragment B on Query { ...A }"}`, refused, `graphql fragment "A" is cyclic`},
+		{"variables that are not an object", `{"query":"{ chainIdentifier }","variables":7}`, refused, `graphql request member "variables" must be an object`},
+		{"a GraphQL document sent as the body", `{ chainIdentifier }`, refused, "graphql request body is not JSON"},
+		{"a body that is JSON but not an object", `null`, refused, "graphql request body is not a JSON object"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status, body := post(tc.body)
-			require.Equal(t, http.StatusInternalServerError, status,
-				"unchanged until MAG-4351 decides the forward: %s", body)
-			require.Contains(t, body, "Error_GUID")
+			relayed := relay.relayed
+			reply := post(tc.body)
+
+			require.Equal(t, graphQLRefusalStatus, reply.status, "a client error, not a server failure: %s", reply.body)
+			require.Equal(t, fiber.MIMEApplicationJSONCharsetUTF8, reply.header.Get(fiber.HeaderContentType))
+			entry := requireGraphQLErrorEntry(t, reply.body)
+			require.Equal(t, tc.wantCode, entry.Extensions["code"], "the decision's code: %s", reply.body)
+			require.Contains(t, entry.Message, tc.wantMessage)
+			require.Equal(t, entry.Extensions["guid"], reply.header.Get(common.GUID_HEADER_NAME),
+				"Lava-Guid carries the id the body's guid carries")
+			require.NotContains(t, reply.body, "Error_GUID", "the old 500 body")
+			require.NotContains(t, reply.body, "graphQLRequestEnvelope", "a decoder's text names the router's Go types")
+			require.Equal(t, relayed, relay.relayed, "an unreadable request reaches no provider")
+		})
+	}
+
+	// The ticket's two controls parse, so they are relayed: a valid read, and an unknown field,
+	// which the node answers with its own GRAPHQL_VALIDATION_FAILED.
+	for _, tc := range []struct{ name, body string }{
+		{"a valid read", `{"query":"{ chainIdentifier }"}`},
+		{"an unknown field", `{"query":"{ noSuchField }"}`},
+	} {
+		t.Run("control: "+tc.name, func(t *testing.T) {
+			relayed := relay.relayed
+			reply := post(tc.body)
+			require.Equal(t, http.StatusOK, reply.status, "body: %s", reply.body)
+			require.Equal(t, relayed+1, relay.relayed, "a readable request reaches a provider")
 		})
 	}
 }
@@ -242,11 +323,16 @@ func TestGraphQLListener_UnreadableRequestKeepsItsCurrentAnswer(t *testing.T) {
 // TestConvertToGraphQLError pins the body shape on its own, so a listener change cannot quietly
 // alter what a client reads.
 func TestConvertToGraphQLError(t *testing.T) {
-	body := convertToGraphQLError("graphql operation selects more than 300 root fields", "7699427112166331654")
+	body := convertToGraphQLError("graphql operation selects more than 300 root fields", "", "7699427112166331654")
 	require.JSONEq(t, `{"errors":[{"message":"graphql operation selects more than 300 root fields","extensions":{"guid":"7699427112166331654"}}]}`, string(body))
 
-	withoutGUID := convertToGraphQLError("refused", "")
+	withoutGUID := convertToGraphQLError("refused", "", "")
 	require.JSONEq(t, `{"errors":[{"message":"refused"}]}`, string(withoutGUID))
+
+	// MAG-4351's shape: the code beside the guid, still no data key.
+	unreadable := convertToGraphQLError("failed parsing graphql query: Expected Name, found <EOF> (line 1, column 32)",
+		rpcInterfaceMessages.GraphQLParseFailedCode, "7699427112166331654")
+	require.JSONEq(t, `{"errors":[{"message":"failed parsing graphql query: Expected Name, found <EOF> (line 1, column 32)","extensions":{"code":"GRAPHQL_PARSE_FAILED","guid":"7699427112166331654"}}]}`, string(unreadable))
 }
 
 // A refused request is past one of the router's size limits, so it is the request most likely to be

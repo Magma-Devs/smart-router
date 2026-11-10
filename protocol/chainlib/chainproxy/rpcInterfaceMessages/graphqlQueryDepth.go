@@ -1,8 +1,6 @@
 package rpcInterfaceMessages
 
 import (
-	"fmt"
-
 	"github.com/vektah/gqlparser/v2/ast"
 	"github.com/vektah/gqlparser/v2/lexer"
 	gqlparser "github.com/vektah/gqlparser/v2/parser"
@@ -22,12 +20,12 @@ const MaxGraphQLQueryDepth = 256
 // parseGraphQLQuery parses a GraphQL document once it is known to nest no deeper than
 // MaxGraphQLQueryDepth.
 //
-// The two failures it returns are different answers, and the caller must not merge them: a document
-// past the depth limit is a refusal the ROUTER made (*GraphQLRefusal), while a document the parser
-// cannot read is the document's own fault. Wrapping the first in "failed parsing graphql query"
-// made the router's own limit look like a parse failure, which is both the wrong message for the
-// caller and the wrong classification for the forward-the-unreadable direction MAG-4351 decided: a
-// document too deep for the router's parser is exactly what must not be parsed.
+// Both failures it returns are refusals, and they are different answers the caller must not merge:
+// a document past the depth limit is refused by the ROUTER's own limit, with the limit's message and
+// no code (MAG-4577), while a document the parser cannot read is the document's own fault, and says
+// so with GRAPHQL_PARSE_FAILED (MAG-4351). Wrapping the first in "failed parsing graphql query" made
+// the router's own limit look like a parse failure, which is the wrong message for the caller: the
+// document may be perfectly readable, and the router declined to read it.
 func parseGraphQLQuery(query string) (*ast.QueryDocument, error) {
 	source := &ast.Source{Input: query}
 	if err := checkGraphQLQueryDepth(source); err != nil {
@@ -35,7 +33,7 @@ func parseGraphQLQuery(query string) (*ast.QueryDocument, error) {
 	}
 	doc, err := gqlparser.ParseQuery(source)
 	if err != nil {
-		return nil, fmt.Errorf("failed parsing graphql query: %w", err)
+		return nil, refuseUnparsableGraphQLQuery(err)
 	}
 	return doc, nil
 }
