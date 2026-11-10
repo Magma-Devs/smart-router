@@ -339,7 +339,7 @@ func TestASuccessfulDialRetiresOnlyFaultsBeforeItBegan(t *testing.T) {
 func TestSentinelControlPlaneDialsNeverReportTheDataEndpointGone(t *testing.T) {
 	downSentinel := refusedAddr(t)
 	tracker := &endpointTracker{}
-	dial := trackingDialerMarkedOnly(nil, time.Second, tracker)
+	dial := sentinelDialer(nil, time.Second, tracker)
 
 	before := time.Now()
 	conn, err := dial(context.Background(), "tcp", downSentinel) // unmarked: control-plane

@@ -82,7 +82,7 @@ a word.
 | `tls.cert-file` / `tls.key-file` | *(unset)* | Client keypair for mTLS (both or neither). |
 | `tls.server-name` | *(unset)* | Overrides the verification/SNI name. |
 | `tls.insecure-skip-verify` | `false` | Skips server verification (testing only). Warned about at startup, carried on the "backend configured" line, and shown in `GET /debug/cache-state` as `tls=insecure-skip-verify` in the tier's `address`, so a development setting that travelled to production is visible to whoever reads the deployment later. |
-| `dial-timeout` / `read-timeout` / `write-timeout` | `500ms` dial; client defaults for read/write | Per-operation network limits. A **fresh** connection's dial and TLS handshake are bounded by `dial-timeout` *and* by the caller's own deadline, whichever is sooner — the default is deliberately sub-second so a black-holed backend cannot make cold lookups linger. |
+| `dial-timeout` / `read-timeout` / `write-timeout` | `500ms` dial; client defaults for read/write | Per-operation network limits. A **fresh** connection's dial and TLS handshake are bounded by `dial-timeout` *and* by the caller's own deadline, whichever is sooner — the default is deliberately sub-second so a black-holed backend cannot make cold lookups linger. Under `topology: sentinel`, `dial-timeout` also sets how long a sentinel has to answer before the router leaves it: see [Topologies](#topologies). |
 | `pool-size` | client default | Connection pool size (per client; the read client has its own). |
 | `expiration.finalized` | `1h` | Lifetime of a settled (finalized) answer. The sidecar's `--expiration`. Every `expiration.*` duration needs a unit (`1h`, `3600s`, `250ms`): a bare number is read as nanoseconds, so `3600` is 3.6µs, and any lifetime that resolves below one millisecond — the precision a RESP expiry has — is refused at startup with a message saying what the number became. |
 | `expiration.finalized-multiplier` | `1` | Multiplier on `expiration.finalized`. The sidecar's `--expiration-multiplier`, which the published chart sets to `1.5` (90 minutes) — this is where a router on a RESP backend keeps that. A multiplied lifetime that resolves below one millisecond (the precision a RESP expiry has), or past what a duration can hold, is refused at startup: below that the client would round every write up to 1ms, and to the store a zero lifetime is a key that never expires, not one that expires at once. |
@@ -152,6 +152,26 @@ resp-cache:
 
 Supplying only the data-node credential is the common misconfiguration — a hardened sentinel
 set fails *discovery*, before any data node is reached.
+
+The router asks one sentinel, the one it is attached to, for the primary each time it opens a
+connection to it. That sentinel has two fifths of `dial-timeout` (200ms at the default) to
+complete a connection, and the same again to answer each request. A sentinel that misses that,
+because its node is gone or its process hangs, is left inside the same connection attempt:
+the router asks every sentinel it knows of at once, attaches to the first that answers, and
+connects to the primary that one names. The cache operation that needed the connection fails,
+and the next one succeeds. None of this depends on `pool-size`.
+
+A healthy sentinel that is far away is held to the same limit: one that takes longer than two
+fifths of `dial-timeout` to connect or to answer is treated as silent and is never used. With
+sentinels in another region, set `dial-timeout` to at least 2.5 times the slowest sentinel's
+connection time.
+
+Connections already open to the old primary are dropped when the attached sentinel announces
+the switch. When that sentinel was lost together with the primary, no announcement arrives:
+each idle connection to the lost primary fails the operation that picks it up, after that
+operation's timeout, and the router asks a sentinel again only once it opens a new connection.
+While the health probe is the only traffic (a 3s timeout, one probe a second), that is about
+4s for each idle connection.
 
 **Cluster** — sharded. Point at the **configuration endpoint** (e.g. the ElastiCache cluster
 configuration endpoint); node membership, slots, and replicas are discovered and tracked
