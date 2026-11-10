@@ -335,8 +335,7 @@ var (
 	// default 50, reset only by a 2xx) and disables the URL for EVERY path — so a vendor gating
 	// one path behind a plan took out the whole endpoint, and a wrong or expired shared credential
 	// took out every endpoint that uses it, because a 401 fails every path and nothing ever resets
-	// the counter. REST also gets no replayable probe evidence (recordRelayProbeEvidence is
-	// JSON-RPC only), so recovery would be poll-only.
+	// the counter.
 	LavaErrorNodeAccessDenied = registerError(&LavaError{
 		Code: 2018, Name: "NODE_ACCESS_DENIED", Category: CategoryExternal,
 		SubCategory: SubCategoryNodeCapability,

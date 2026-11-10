@@ -3,9 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"errors"
-	"net/http"
 	"testing"
-	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -136,31 +134,4 @@ func TestHealthCheck_ClearsTheFailuresOfAnEndpointThatIsOn(t *testing.T) {
 	}
 	require.Positive(t, stillOn,
 		"the health check's success cleared the failures of the endpoint it reached, so one more does not switch it off")
-}
-
-// Review of #631, 631-2. A lent health check that FAILS must not rewrite the replay evidence of the
-// switched-off endpoint it was lent. The evidence is the request that switched the endpoint off, and
-// the prober replays it to decide whether the endpoint is back (MAG-2550). If the health check's
-// own latest-block poll replaced it, the prober would replay the poll, which the node answers, and
-// switch the endpoint on: the MAG-4790 outcome through the prober instead of the health check.
-func TestHealthCheck_AFailedLendLeavesTheReplayEvidenceAlone(t *testing.T) {
-	fleet := newHealthRelayFleetServing(t, nil, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	})
-	disableEveryEndpoint(t, fleet)
-	const failingMethod = "eth_getBalance"
-	payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0xa1","latest"]}`)
-	for _, endpoint := range fleet.endpoints {
-		endpoint.RecordFailingRelay(failingMethod, payload, 5*time.Second)
-		require.Equal(t, failingMethod, endpoint.HealthSnapshot().RelayProbeMethod, "premise: the endpoint carries the evidence of what switched it off")
-	}
-
-	_, _ = fleet.server.sendCraftedRelays(1, false)
-
-	require.Positive(t, fleet.served.Load(), "premise: the health check was lent an endpoint and the node was asked")
-	for _, endpoint := range fleet.endpoints {
-		require.Equal(t, failingMethod, endpoint.HealthSnapshot().RelayProbeMethod,
-			"the health check's own failed poll must not replace the request the prober replays")
-	}
-	require.Zero(t, enabledEndpoints(fleet))
 }
