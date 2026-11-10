@@ -30,14 +30,19 @@ func directRPCProviderForAcquisition(t *testing.T) (*ConsumerSessionsWithProvide
 
 // TestAcquisition_LeavesRecoveryEvidenceAlone is MAG-4242 item 11. Every session acquisition
 // used to write Enabled = true and clear the recovery tracking on the endpoint it had just read
-// as enabled: a wasted exclusive write per relay that also erased the failing relay recorded for
-// the prober to replay (MAG-2550), and — if MarkUnhealthy landed between the pre-read and that
-// write — re-enabled a just-benched endpoint with its refusals still at the threshold. A plain
-// acquisition must change nothing about the endpoint.
+// as enabled: a wasted exclusive write per relay that also erased the endpoint's recovery state,
+// and — if MarkUnhealthy landed between the pre-read and that write — re-enabled a just-benched
+// endpoint with its refusals still at the threshold. A plain acquisition must change nothing
+// about the endpoint.
 func TestAcquisition_LeavesRecoveryEvidenceAlone(t *testing.T) {
 	cswp, endpoint := directRPCProviderForAcquisition(t)
-	endpoint.RecordFailingRelay("eth_getBalance", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0","latest"]}`), time.Second)
-	require.Equal(t, "eth_getBalance", endpoint.HealthSnapshot().RelayProbeMethod)
+	// A marker in the recovery tracking, which the old write cleared (clearRecoveryTrackingLocked).
+	marker := time.Now().Add(-time.Minute)
+	endpoint.mu.Lock()
+	endpoint.lastRecoveryPoll = marker
+	endpoint.mu.Unlock()
+	before := endpoint.HealthSnapshot()
+	require.True(t, before.LastRecoveryPoll.Equal(marker))
 
 	connected, endpoints, _, err := cswp.fetchEndpointConnectionFromConsumerSessionWithProvider(context.Background(), endpointPickSkipDisabled, false, "", nil, nil)
 	require.NoError(t, err)
@@ -46,7 +51,7 @@ func TestAcquisition_LeavesRecoveryEvidenceAlone(t *testing.T) {
 
 	snapshot := endpoint.HealthSnapshot()
 	require.True(t, snapshot.Enabled)
-	require.Equal(t, "eth_getBalance", snapshot.RelayProbeMethod, "an acquisition must not erase the episode's recorded failing relay")
+	require.Equal(t, before, snapshot, "an acquisition must not write to the endpoint's recovery tracking")
 }
 
 // benchMidPickConn is the endpoint's real direct connection with one hook: GetURL, which
@@ -67,7 +72,7 @@ func (c *benchMidPickConn) GetURL() string {
 // for: the endpoint reads as enabled, MarkUnhealthy benches it before the acquisition finishes,
 // and the acquisition used to write Enabled = true over the disable — putting a just-benched
 // endpoint back into rotation with its refusals at the threshold and its episode (disabledAt,
-// reason, recorded relay) erased. In no pick mode may the acquisition change anything about the
+// reason) erased. In no pick mode may the acquisition change anything about the
 // benched endpoint. With main's consumer_types.go the skip and reconnect modes fail; lend was
 // already guarded by MAG-4232.
 func TestAcquisition_NeverReenablesAnEndpointBenchedMidPick(t *testing.T) {
@@ -85,7 +90,6 @@ func TestAcquisition_NeverReenablesAnEndpointBenchedMidPick(t *testing.T) {
 			var benched EndpointHealthSnapshot
 			endpoint.DirectConnections[0] = &benchMidPickConn{DirectRPCConnection: endpoint.DirectConnections[0], bench: func() {
 				fired = true
-				endpoint.RecordFailingRelay("eth_getBalance", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0","latest"]}`), time.Second)
 				for i := uint64(0); i < MaxConsecutiveConnectionAttempts; i++ {
 					endpoint.MarkUnhealthy(EndpointDisableNodeError)
 				}
@@ -108,7 +112,6 @@ func TestAcquisition_NeverReenablesAnEndpointBenchedMidPick(t *testing.T) {
 // back into rotation, with the old episode's tracking cleared.
 func TestReconnectRoutine_StillReenablesADisabledEndpoint(t *testing.T) {
 	cswp, endpoint := directRPCProviderForAcquisition(t)
-	endpoint.RecordFailingRelay("eth_getBalance", []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0x0","latest"]}`), time.Second)
 	for i := uint64(0); i < MaxConsecutiveConnectionAttempts; i++ {
 		endpoint.MarkUnhealthy(EndpointDisableUnreachable)
 	}
@@ -123,5 +126,4 @@ func TestReconnectRoutine_StillReenablesADisabledEndpoint(t *testing.T) {
 	require.True(t, snapshot.Enabled, "the reconnect routine re-enables what it reached")
 	require.Empty(t, snapshot.DisableReason)
 	require.True(t, snapshot.DisabledAt.IsZero())
-	require.Empty(t, snapshot.RelayProbeMethod, "the old episode's evidence goes with the re-enable")
 }
