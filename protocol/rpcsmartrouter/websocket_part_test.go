@@ -18,7 +18,7 @@ import (
 )
 
 // A provider with no websocket url on a chain that subscribes boots into the pairing
-// and raises one alarm: an error line naming the websocket's missing-url, and the same
+// and raises one alarm: a warning line naming the websocket's missing-url, and the same
 // failure on GET /debug/verification (MAG-4505 comment 30715 point 5). It is not put on
 // the retry schedule, since no retry can give it a url, and an epoch pass keeps it
 // serving without logging the failure again.
@@ -41,7 +41,7 @@ func TestNoWebsocketURL_ServesAndRaisesOneAlarm(t *testing.T) {
 
 	lines := verificationLogLines(t, provider.Name)
 	require.Len(t, lines, 1)
-	require.Equal(t, "error", lines[0]["level"])
+	require.Equal(t, "warn", lines[0]["level"], "a missing url is config, not a failure: a warning, not an error")
 	require.Equal(t, metrics.VerificationScopeService, lines[0]["scope"])
 	require.Equal(t, chainlib.WebSocketExtension, lines[0]["service"])
 	require.Equal(t, chainlib.CheckMissingURL, lines[0]["check"])
