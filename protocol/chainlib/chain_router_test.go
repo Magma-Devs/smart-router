@@ -411,11 +411,12 @@ func testChainRouterWithWebSocketInSpec(t *testing.T, wsEnabled bool) {
 // `smartrouter health` flipped per endpoint while probing endpoints concurrently. Two
 // endpoints wanting opposite answers raced, and whichever wrote last decided for both —
 // so healthy legs reported red. The flag now lives on the parser and health builds one
-// parser per endpoint, so concurrent routers must each get the answer they asked for.
+// parser per endpoint, so concurrent routers must each keep the answer they asked for.
 //
-// The endpoint is deliberately http-only against a subscribe-capable spec: that is the
-// exact shape that trips enforcement, and the shape the existing ws tests never reach
-// because they always pair an http URL with a ws URL.
+// That branch is gone (MAG-3950): a provider with no ws url serves over http, and
+// verification publishes its missing url instead. So both routers accept the http-only
+// endpoint against a subscribe-capable spec, and what the test still pins is that
+// neither parser's flag leaks into the other or into the process default.
 func TestSkipWebsocketVerificationIsPerParser(t *testing.T) {
 	newSubscribeParser := func(skip bool) ChainParser {
 		t.Helper()
@@ -460,8 +461,8 @@ func TestSkipWebsocketVerificationIsPerParser(t *testing.T) {
 	}()
 	wg.Wait()
 
-	require.NoError(t, skipErr, "a parser that opted out of ws verification must accept an http-only endpoint")
-	require.Error(t, enforceErr, "a parser that did not opt out must still refuse an http-only endpoint for a subscribe-capable spec")
+	require.NoError(t, skipErr, "a parser that opted out of ws verification accepts an http-only endpoint")
+	require.NoError(t, enforceErr, "so does one that did not: a router serves a provider with no ws url over http")
 
 	// Neither router run may have leaked into the other parser or into the process default.
 	require.True(t, skipping.SkipWebsocketVerification())
