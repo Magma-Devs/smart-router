@@ -909,7 +909,8 @@ func (cf *ChainFetcher) ValidateCollections(ctx context.Context) (ProviderAdmiss
 }
 
 // ValidateCollectionsAgain re-runs only the checks in only, at each node url that failed
-// them, keeps every other verdict from previous, and admits from the result as
+// them in previous (at every url that has them, when previous holds one passing
+// everywhere), keeps every other verdict from previous, and admits from the result as
 // ValidateCollections does (MAG-3950). A url with none of them to re-run is not dialed. A url
 // previous could not dial or list has no verdicts to keep, so it is verified whole, and
 // so is every url when previous is no pass of this provider's urls or only names the
@@ -923,7 +924,15 @@ func (cf *ChainFetcher) ValidateCollectionsAgain(ctx context.Context, previous P
 	for _, id := range only {
 		set[id] = struct{}{}
 	}
-	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{only: set, previous: previous.pass}))
+	failing := map[CheckID]struct{}{}
+	for _, outcome := range previous.pass {
+		for _, check := range outcome.checks {
+			if _, due := set[checkIDOf(check.verification)]; due && check.err != nil {
+				failing[checkIDOf(check.verification)] = struct{}{}
+			}
+		}
+	}
+	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{only: set, previous: previous.pass, failing: failing}))
 }
 
 // VerificationResult is the outcome of running a single spec verification against one node URL.
@@ -993,6 +1002,12 @@ type verifyOptions struct {
 	// verdicts it keeps for the rest, per node url by position.
 	only     map[CheckID]struct{}
 	previous []nodeUrlOutcome
+	// failing is the checks of only that previous holds failing, or undecided, at some
+	// url. A url that passed one of them keeps that verdict: the retry is for the urls
+	// that did not (MAG-4505 finding 16). A check of only that previous holds passing at
+	// every url was made due by a pass that previous is not, one a rate limit left
+	// unrecorded, so it runs at every url.
+	failing map[CheckID]struct{}
 }
 
 // kept is the outcome previous gave the url at index, when this pass keeps verdicts
@@ -1299,10 +1314,11 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 	}
 
 	// The checks this pass runs, and the verdicts it keeps for the others. A due check
-	// runs again where this url failed it; a url that passed it keeps that verdict, since
-	// the check is due for the provider, not for every url that has it (MAG-4505 finding
-	// 16). A check with no verdict to keep runs too, whether the url's checks changed
-	// since the kept pass or its verdict there was inconclusive.
+	// runs again where this url failed it. A url that passed it keeps that verdict when
+	// another url failed it in the kept pass, since the retry is for that url (MAG-4505
+	// finding 16); when no url did, the kept pass is older than what made it due, and it
+	// runs here too. A check with no verdict to keep runs too, whether the url's checks
+	// changed since the kept pass or its verdict there was inconclusive.
 	var keptVerdicts map[string]error
 	toRun := verifications
 	if kept != nil {
@@ -1313,8 +1329,9 @@ func (g *connectionGroup) verify(ctx context.Context, url common.NodeUrl, opts v
 		toRun = nil
 		for _, verification := range verifications {
 			_, due := opts.only[checkIDOf(verification)]
+			_, failedElsewhere := opts.failing[checkIDOf(verification)]
 			verdict, known := keptVerdicts[verdictKey(verification)]
-			if (!known || inconclusive(verdict) || (due && verdict != nil)) && !skipVerification(url, verification.Name) {
+			if (!known || inconclusive(verdict) || (due && (verdict != nil || !failedElsewhere))) && !skipVerification(url, verification.Name) {
 				toRun = append(toRun, verification)
 			}
 		}

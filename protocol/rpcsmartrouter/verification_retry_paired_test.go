@@ -538,3 +538,19 @@ func TestVerificationRetries_ACheckIsRetriedOnlyAtTheUrlThatFailedIt(t *testing.
 	require.Len(t, up.methods("http", full), askedFull, "the url that passed it is still asked nothing")
 	require.NotNil(t, rig.session(t, provider.Name), "the provider serves throughout")
 }
+
+// A check that is due while every url of the provider passed it in the kept pass runs at
+// every url: the pass that made it due is not the kept one, as when a rate limit kept a
+// later pass from answering and left nothing recorded (MAG-4505 C5).
+func TestVerificationRetries_ADueCheckThatEveryUrlPassedRunsAtEveryUrl(t *testing.T) {
+	up := newFakeUpstreams(t)
+	const a, b = "/pe/a/" + upArchive, "/pe/b/" + upArchive
+	provider := staticProvider("ETH1", commonlib.NodeUrl{Url: up.httpURL(a)}, commonlib.NodeUrl{Url: up.httpURL(b)})
+	rig := newPairedRetryRig(t, provider)
+	require.False(t, rig.pending(), "every url passed at boot")
+	askedA, askedB := count(up.methods("http", a), "eth_chainId"), count(up.methods("http", b), "eth_chainId")
+
+	rig.retryOnly(provider, chainlib.CheckID{Name: "chain-id"})
+	require.Greater(t, count(up.methods("http", a), "eth_chainId"), askedA, "the due check runs at the first url")
+	require.Greater(t, count(up.methods("http", b), "eth_chainId"), askedB, "and at the second")
+}
