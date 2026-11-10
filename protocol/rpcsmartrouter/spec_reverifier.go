@@ -184,6 +184,91 @@ func holdoffURLKeys(p *lavasession.RPCStaticProviderEndpoint) []string {
 	return keys
 }
 
+// holdoffEntry is where the hold-off keeps one node url: under the provider entry's key
+// (holdoff.ProviderKey) for a url that answers relays, and under the url alone for a
+// websocket url — the key the WS subscription path reads and writes. Relay selection never
+// counts a websocket url, so a 429 on it must not count toward the entry's escalation and
+// hold the entry's https urls with it.
+type holdoffEntry struct {
+	provider string
+	url      string
+}
+
+func holdoffEntries(providerKey string, p *lavasession.RPCStaticProviderEndpoint) []holdoffEntry {
+	urls := holdoffURLKeys(p)
+	entries := make([]holdoffEntry, len(urls))
+	for index, url := range urls {
+		entries[index] = holdoffEntry{provider: providerKey, url: url}
+		if index < len(p.NodeUrls) {
+			if socket, err := chainlib.IsUrlWebSocket(p.NodeUrls[index].Url); err == nil && socket {
+				entries[index].provider = url
+			}
+		}
+	}
+	return entries
+}
+
+// urlPassResult is what one re-verify pass learned about one node url, for the hold-off.
+type urlPassResult struct {
+	// throttle is the rate limit the url met, nil when it met none.
+	throttle error
+	// answered: the url answered with something other than a rate limit.
+	answered bool
+	// notAsked: the pass left the url out because it was held off.
+	notAsked bool
+}
+
+// recordPassHoldoffs writes one pass's results into the hold-off. Results are merged per
+// registry key first, since the same url may be configured more than once (with different
+// services): a key met a rate limit when any of its urls did. Then every rate limit is
+// recorded before any answer: an answer drops the entry's escalation, so a url that answered
+// in this pass is free whatever the config order, and a url that answered never clears a
+// 429 the same pass met on the same url. A url the pass did not ask changes nothing.
+func recordPassHoldoffs(reg *holdoff.Registry, chainID, providerName string, entries []holdoffEntry, results []urlPassResult) {
+	type merged struct {
+		throttle error
+		index    int
+		answered bool
+	}
+	byEntry := map[holdoffEntry]*merged{}
+	var order []holdoffEntry
+	for index, entry := range entries {
+		result := results[index]
+		if result.notAsked {
+			continue
+		}
+		m := byEntry[entry]
+		if m == nil {
+			m = &merged{index: index}
+			byEntry[entry] = m
+			order = append(order, entry)
+		}
+		if result.throttle != nil && m.throttle == nil {
+			m.throttle, m.index = result.throttle, index
+		}
+		m.answered = m.answered || result.answered
+	}
+	for _, entry := range order {
+		m := byEntry[entry]
+		if m.throttle == nil {
+			continue
+		}
+		retryAfter, _ := common.RetryAfterFrom(m.throttle)
+		delay := reg.RecordRateLimit(entry.provider, entry.url, retryAfter)
+		utils.LavaFormatWarning("re-verify: provider url rate-limited, backing off", m.throttle,
+			utils.LogAttr("chain", chainID),
+			utils.LogAttr("provider", providerName),
+			utils.LogAttr("url_index", m.index),
+			utils.LogAttr("holdoff", delay.String()),
+		)
+	}
+	for _, entry := range order {
+		if m := byEntry[entry]; m.throttle == nil && m.answered {
+			reg.RecordAnswer(entry.provider, entry.url)
+		}
+	}
+}
+
 // isRateLimitFailure reports whether a failed validation was the upstream refusing us for
 // asking too fast, rather than the upstream being unable to serve what it declares.
 //
@@ -256,7 +341,10 @@ func applyReverification(
 	// probe returns the validation's error and this pass's own admission, which says per url
 	// what it met: a rate limit, a refusal, or neither. The admission is nil when the pass
 	// says nothing per url (validateFn).
-	probe := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) (error, *chainlib.ProviderAdmission) {
+	//
+	// skip are the positions of urls held off after a rate limit: the pass does not ask them,
+	// and reads each as only rate-limited, so it keeps the verdict the last pass gave it.
+	probe := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint, skip map[int]struct{}) (error, *chainlib.ProviderAdmission) {
 		if inputs.validateFn != nil {
 			return inputs.validateFn(c, p), nil
 		}
@@ -270,7 +358,7 @@ func applyReverification(
 		// refusal from outliving the failure that caused it: a service that
 		// recovers is re-admitted at the next tick instead of staying refused
 		// until the process restarts.
-		admission, err := validateProviderCollections(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout)
+		admission, err := validateProviderCollectionsExcept(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout, skip)
 		pass := admission
 		if err != nil {
 			return err, &pass
@@ -306,12 +394,15 @@ func applyReverification(
 		inputs.rateLimitHoldoff = holdoff.Shared
 	}
 
-	// A provider with a url held off after a rate-limit is not re-probed: the pass would ask
-	// that url again. The skip returns the rate-limit error itself, so the reconciliation
-	// below reaches the same inconclusive verdict it would have from a fresh 429 —
-	// membership unchanged, streak untouched — without spending a request to learn it.
+	// A url held off after a rate limit is not asked: the pass would send it the request it was
+	// told to stop sending. It reads as only rate-limited, so it keeps the verdict the last pass
+	// gave it, and the provider's other urls are still checked: a url refused for a capability
+	// problem comes back while a sibling is busy (MAG-4733). Only when every url is held is the
+	// pass skipped, returning the rate-limit error itself, so the reconciliation below reaches
+	// the same inconclusive verdict it would have from a fresh 429 — membership unchanged,
+	// streak untouched — without spending a request to learn it.
 	//
-	// Each url is held or cleared on its own key (MAG-4733): a 429 holds the url that
+	// Each url is held or cleared on its own key (recordPassHoldoffs): a 429 holds the url that
 	// answered it. Any other answer clears the url: an upstream that is answering us again,
 	// even to report a genuine capability failure, is no longer refusing us for load. A url
 	// that got no answer (timeout, refused or reset connection, DNS) clears nothing: a
@@ -320,45 +411,43 @@ func applyReverification(
 	// hold-off and strikes (MAG-4165).
 	validate := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
 		// The provider on this chain and api-interface, as relay selection keys it.
-		holdoffKey := holdoff.ProviderKey(inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name)
-		keys := holdoffURLKeys(p)
-		for _, key := range keys {
-			if inputs.rateLimitHoldoff.HeldOff(holdoffKey, key) {
-				utils.LavaFormatDebug("re-verify: provider held off after a rate-limit, skipping probe",
-					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
-					utils.LogAttr("provider", p.Name),
-				)
-				return common.StatusCodeError429
+		providerKey := holdoff.ProviderKey(inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name)
+		entries := holdoffEntries(providerKey, p)
+		held := map[int]struct{}{}
+		for index, entry := range entries {
+			if inputs.rateLimitHoldoff.HeldOff(entry.provider, entry.url) {
+				held[index] = struct{}{}
 			}
 		}
-		err, pass := probe(c, p)
-		// A rate limit the pass does not tie to a url holds them all, as it held the
-		// provider before.
+		if len(held) == len(entries) {
+			utils.LavaFormatDebug("re-verify: every url of the provider held off after a rate-limit, skipping probe",
+				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
+				utils.LogAttr("provider", p.Name),
+			)
+			return common.StatusCodeError429
+		}
+		err, pass := probe(c, p, held)
+		// A rate limit the pass does not tie to a url holds every url it asked, as it held
+		// the provider before.
 		untied := isRateLimitFailure(err) && (pass == nil || pass.URLThrottle() == nil)
-		for index, key := range keys {
-			var throttle error
-			answered := common.DetectConnectionError(err) == nil && !isRateLimitFailure(err)
+		results := make([]urlPassResult, len(entries))
+		for index := range entries {
+			result := &results[index]
+			if _, skipped := held[index]; skipped {
+				result.notAsked = true
+				continue
+			}
 			if pass != nil {
-				throttle = pass.URLRateLimit(index)
-				answered = throttle == nil && common.DetectConnectionError(pass.URLRefusal(index)) == nil
+				result.throttle = pass.URLRateLimit(index)
+				result.answered = result.throttle == nil && common.DetectConnectionError(pass.URLRefusal(index)) == nil
+			} else {
+				result.answered = common.DetectConnectionError(err) == nil && !isRateLimitFailure(err)
 			}
-			if throttle == nil && untied {
-				throttle = err
-			}
-			switch {
-			case throttle != nil:
-				retryAfter, _ := common.RetryAfterFrom(throttle)
-				delay := inputs.rateLimitHoldoff.RecordRateLimit(holdoffKey, key, retryAfter)
-				utils.LavaFormatWarning("re-verify: provider url rate-limited, backing off", throttle,
-					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
-					utils.LogAttr("provider", p.Name),
-					utils.LogAttr("url_index", index),
-					utils.LogAttr("holdoff", delay.String()),
-				)
-			case answered:
-				inputs.rateLimitHoldoff.RecordAnswer(holdoffKey, key)
+			if result.throttle == nil && untied {
+				result.throttle, result.answered = err, false
 			}
 		}
+		recordPassHoldoffs(inputs.rateLimitHoldoff, inputs.rpcEndpoint.ChainID, p.Name, entries, results)
 		return err
 	}
 
@@ -660,6 +749,18 @@ func validateProviderCollections(
 	chainParser chainlib.ChainParser,
 	timeout time.Duration,
 ) (chainlib.ProviderAdmission, error) {
+	return validateProviderCollectionsExcept(ctx, provider, chainParser, timeout, nil)
+}
+
+// validateProviderCollectionsExcept is validateProviderCollections that does not ask the node
+// urls at the positions in skip (chainlib.ValidateCollectionsExcept).
+func validateProviderCollectionsExcept(
+	ctx context.Context,
+	provider *lavasession.RPCStaticProviderEndpoint,
+	chainParser chainlib.ChainParser,
+	timeout time.Duration,
+	skip map[int]struct{},
+) (chainlib.ProviderAdmission, error) {
 	endpoint := &lavasession.RPCProviderEndpoint{
 		NetworkAddress: provider.NetworkAddress,
 		ChainID:        provider.ChainID,
@@ -693,5 +794,5 @@ func validateProviderCollections(
 		NodeUrlRouter: nodeUrlRouter,
 	})
 
-	return verificationFetcher.ValidateCollections(attemptCtx)
+	return verificationFetcher.ValidateCollectionsExcept(attemptCtx, skip)
 }

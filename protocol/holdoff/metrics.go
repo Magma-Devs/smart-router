@@ -26,7 +26,7 @@ const (
 func init() {
 	holdoffEvents = registerCounterVec(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_rate_limit_holdoffs_total",
-		Help: "Rate-limit hold-off registry events: recorded (a 429 held an endpoint off), escalated (a vendor's hold-off widened to the provider name), cleared (an answer dropped the penalty).",
+		Help: "Rate-limit hold-off registry events: recorded (a 429 held an endpoint off), escalated (a vendor's hold-off widened to the whole provider entry: its name on one chain and api-interface), cleared (an answer dropped the penalty).",
 	}, []string{"provider", "event"}))
 	holdoffDurations = registerHistogramVec(prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "smartrouter_rate_limit_holdoff_seconds",

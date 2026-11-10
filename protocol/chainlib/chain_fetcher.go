@@ -620,6 +620,19 @@ func (cf *ChainFetcher) ValidateCollections(ctx context.Context) (ProviderAdmiss
 	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{}))
 }
 
+// ErrNotAskedHeldOff stands in for the checks of a node url a pass left out because the
+// url is held off after a rate limit. It is a rate limit, so the pass reads the url as
+// only rate-limited: it decides nothing, and re-verification keeps the url's last verdict
+// (KeepingThrottledFrom) without sending it a request (MAG-4733).
+var ErrNotAskedHeldOff = fmt.Errorf("not asked: held off after a rate limit: %w", common.StatusCodeError429)
+
+// ValidateCollectionsExcept is ValidateCollections that does not ask the node urls at the
+// positions in skip. Each reads as rate-limited with ErrNotAskedHeldOff, and a connection
+// whose every url is skipped is not dialed.
+func (cf *ChainFetcher) ValidateCollectionsExcept(ctx context.Context, skip map[int]struct{}) (ProviderAdmission, error) {
+	return admissionFrom(cf.verifyNodeUrls(ctx, verifyOptions{skip: skip}))
+}
+
 // VerificationResult is the outcome of running a single spec verification against one node URL.
 // It carries the spec-derived identity of the verification (Name/Addon/Extension/Severity) plus
 // whether the crafted relay succeeded. It is used by the `smartrouter health` command, which
@@ -681,6 +694,8 @@ var errCheckNotRun error = &VerificationFailure{Check: CheckNotRun, Err: errors.
 type verifyOptions struct {
 	// readEveryHead reads every url's height, not just the ones a check needs.
 	readEveryHead bool
+	// skip are the positions of urls not to ask (ValidateCollectionsExcept).
+	skip map[int]struct{}
 }
 
 type checkOutcome struct {
@@ -789,7 +804,9 @@ func admissionFrom(outcomes []nodeUrlOutcome) (ProviderAdmission, error) {
 			utils.LavaFormatWarning("refusing node url", failed, utils.LogAttr("url", outcome.url.String()))
 		case throttled != nil:
 			admission.throttleURL(index, throttled)
-			utils.LavaFormatWarning("node url rate-limited its checks; not refusing it", throttled, utils.LogAttr("url", outcome.url.String()))
+			if !errors.Is(throttled, ErrNotAskedHeldOff) {
+				utils.LavaFormatWarning("node url rate-limited its checks; not refusing it", throttled, utils.LogAttr("url", outcome.url.String()))
+			}
 		}
 	}
 	served := make([]common.NodeUrl, len(outcomes))
@@ -813,6 +830,10 @@ func (cf *ChainFetcher) verifyNodeUrls(ctx context.Context, opts verifyOptions) 
 			defer wg.Done()
 			group := cf.newConnectionGroup(cf.endpoint.NodeUrls[positions[0]])
 			for _, index := range positions {
+				if _, skipped := opts.skip[index]; skipped {
+					outcomes[index] = group.notAsked(cf.endpoint.NodeUrls[index])
+					continue
+				}
 				outcomes[index] = group.verify(ctx, cf.endpoint.NodeUrls[index], opts)
 			}
 		}()
@@ -888,6 +909,16 @@ func (g *connectionGroup) dial(ctx context.Context) (ChainRouter, error) {
 		}
 	}
 	return g.router, g.dialErr
+}
+
+// notAsked is the share of a pass of a url the pass leaves out: rate-limited, with nothing
+// sent (ErrNotAskedHeldOff).
+func (g *connectionGroup) notAsked(url common.NodeUrl) nodeUrlOutcome {
+	outcome := nodeUrlOutcome{url: url, served: url, err: ErrNotAskedHeldOff, head: spectypes.NOT_APPLICABLE}
+	if served, err := ServedAs(g.parser, url); err == nil {
+		outcome.served = served
+	}
+	return outcome
 }
 
 // verify is one url's share of a pass. A websocket url answers only for the checks
