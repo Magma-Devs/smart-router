@@ -679,10 +679,11 @@ doubling for every pass in a row that still does, up to `--verification-retry-ma
 (15m), plus up to 20% jitter, and never before the provider's rate-limit hold-off ends.
 That covers a provider out of the pairing (failed at boot, or demoted), a refused service
 or url, and a url on its first strike. A retry re-runs only the provider's checks that are
-due, on each node url that has them, and keeps every other verdict from the pass before:
+due, at each node url that failed them, and keeps every other verdict from the pass before:
 with `debug` and `archive` both failing, each has its own schedule, and the checks that
-pass (`chain-id` and the rest) are re-run by the epoch alone. A url that could not be
-dialed is retried whole. Checks that failed in the same pass stay due together until
+pass (`chain-id` and the rest) are re-run by the epoch alone, as is a due check at a url
+that passed it. A url that could not be dialed is retried by its dial alone (`connect`).
+Checks that failed in the same pass stay due together until
 their attempts part. While its chain is dark, every provider out of the pairing is
 verified whole from 2s instead, doubling to 3m, and those passes do not push a check's
 own retry back. The epoch pass counts as an attempt for every check it finds failing, so
