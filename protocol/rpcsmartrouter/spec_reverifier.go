@@ -217,13 +217,139 @@ func failureCheck(err error) string {
 	return "unknown"
 }
 
-// holdoffURLKey is the URL tier's key for a probed provider: its first node URL, so two
-// providers sharing a vendor name but hitting different endpoints are held off apart.
-func holdoffURLKey(p *routersession.RPCStaticProviderEndpoint) string {
-	if len(p.NodeUrls) > 0 && p.NodeUrls[0].Url != "" {
-		return p.NodeUrls[0].Url
+// holdoffURLKeys is the URL tier's key of each of a probed provider's node urls, by position:
+// the url itself, the key the relay path records a 429 under for the endpoint it dialed. A 429
+// is held on the url that answered it, so relay selection, which counts a provider's urls one by
+// one, keeps off that url and not a sibling (MAG-4733).
+func holdoffURLKeys(p *routersession.RPCStaticProviderEndpoint) []string {
+	if len(p.NodeUrls) == 0 {
+		return []string{p.Name}
 	}
-	return p.Name
+	keys := make([]string, len(p.NodeUrls))
+	for index, url := range p.NodeUrls {
+		keys[index] = url.Url
+		if keys[index] == "" {
+			keys[index] = p.Name
+		}
+	}
+	return keys
+}
+
+// holdoffEntry is where the hold-off keeps one node url: under the provider entry's key
+// (holdoff.ProviderKey) for a url that answers relays, and under the url alone for a
+// websocket url — the key the WS subscription path reads and writes. Relay selection never
+// counts a websocket url, so a 429 on it must not count toward the entry's escalation and
+// hold the entry's https urls with it.
+type holdoffEntry struct {
+	provider string
+	url      string
+}
+
+func holdoffEntries(providerKey string, p *routersession.RPCStaticProviderEndpoint) []holdoffEntry {
+	urls := holdoffURLKeys(p)
+	entries := make([]holdoffEntry, len(urls))
+	for index, url := range urls {
+		entries[index] = holdoffEntry{provider: providerKey, url: url}
+		if index < len(p.NodeUrls) {
+			if socket, err := chainlib.IsUrlWebSocket(p.NodeUrls[index].Url); err == nil && socket {
+				entries[index].provider = url
+			}
+		}
+	}
+	return entries
+}
+
+// urlPassResult is what one re-verify pass learned about one node url, for the hold-off.
+type urlPassResult struct {
+	// throttle is the rate limit the url met, nil when it met none.
+	throttle error
+	// answered: the url answered with something other than a rate limit.
+	answered bool
+	// notAsked: the pass left the url out because it was held off.
+	notAsked bool
+}
+
+// recordPassHoldoffs writes one pass's results into the hold-off. Results are merged per
+// registry key first, since the same url may be configured more than once (with different
+// services): a key met a rate limit when any of its urls did. Then every rate limit is
+// recorded before any answer: an answer drops the entry's escalation, so a url that answered
+// in this pass is free whatever the config order, and a url that answered never clears a
+// 429 the same pass met on the same url. A url the pass did not ask changes nothing.
+func recordPassHoldoffs(reg *holdoff.Registry, chainID, providerName string, entries []holdoffEntry, results []urlPassResult) {
+	type merged struct {
+		throttle error
+		index    int
+		answered bool
+	}
+	byEntry := map[holdoffEntry]*merged{}
+	var order []holdoffEntry
+	for index, entry := range entries {
+		result := results[index]
+		if result.notAsked {
+			continue
+		}
+		m := byEntry[entry]
+		if m == nil {
+			m = &merged{index: index}
+			byEntry[entry] = m
+			order = append(order, entry)
+		}
+		if result.throttle != nil && m.throttle == nil {
+			m.throttle, m.index = result.throttle, index
+		}
+		m.answered = m.answered || result.answered
+	}
+	for _, entry := range order {
+		m := byEntry[entry]
+		if m.throttle == nil {
+			continue
+		}
+		retryAfter, _ := common.RetryAfterFrom(m.throttle)
+		delay := reg.RecordRateLimit(entry.provider, entry.url, retryAfter)
+		utils.FormatWarning("re-verify: provider url rate-limited, backing off", m.throttle,
+			utils.LogAttr("chain", chainID),
+			utils.LogAttr("provider", providerName),
+			utils.LogAttr("url_index", m.index),
+			utils.LogAttr("holdoff", delay.String()),
+		)
+	}
+	for _, entry := range order {
+		if m := byEntry[entry]; m.throttle == nil && m.answered {
+			reg.RecordAnswer(entry.provider, entry.url)
+		}
+	}
+}
+
+// urlPassResults is what one probe learned per node url, for the hold-off. A url the
+// pass did not ask — held off, or a retry kept its verdicts without dialing it — is
+// not asked. A pass that says nothing per url (a test's validateFn) answers or limits
+// every url alike; a pass that never ran (a config error) sent nothing, so it answers
+// none of them.
+func urlPassResults(inputs *chainReverifyInputs, result reverifyProbe, urls int, held map[int]struct{}) []urlPassResult {
+	err, pass := result.err, result.admission
+	perURL := inputs.validateFn == nil && pass.Verified()
+	// A rate limit the pass does not tie to a url holds every url it asked, as it held
+	// the provider before.
+	untied := isRateLimitFailure(err) && (!perURL || pass.URLThrottle() == nil)
+	results := make([]urlPassResult, urls)
+	for index := range results {
+		r := &results[index]
+		if _, skipped := held[index]; skipped || (perURL && !pass.URLAsked(index)) {
+			r.notAsked = true
+			continue
+		}
+		switch {
+		case perURL:
+			r.throttle = pass.URLRateLimit(index)
+			r.answered = r.throttle == nil && common.DetectConnectionError(pass.URLRefusal(index)) == nil
+		case inputs.validateFn != nil:
+			r.answered = common.DetectConnectionError(err) == nil && !isRateLimitFailure(err)
+		}
+		if r.throttle == nil && untied {
+			r.throttle, r.answered = err, false
+		}
+	}
+	return results
 }
 
 // isRateLimitFailure reports whether a failed validation was the upstream refusing us for
@@ -314,12 +440,21 @@ type reverifyProbe struct {
 // router lock: decideReverification applies them. The rate-limit hold-off is its own
 // registry, updated here:
 //
-// A provider that answered with a rate-limit is held off rather than re-probed. The skip
-// returns the rate-limit error itself, so the reconciliation reaches the same
-// inconclusive verdict it would have from a fresh 429 — membership unchanged, streak
-// untouched — without spending a request to learn it. Any other answer clears the
-// penalty: an upstream that is answering us again, even to report a genuine capability
-// failure, is no longer refusing us for load. A probe with no answer clears nothing.
+// A url held off after a rate limit is not asked: the pass would send it the request it
+// was told to stop sending. It reads as only rate-limited, so it keeps the verdict the
+// last pass gave it, and the provider's other urls are still checked: a url refused for a
+// capability problem comes back while a sibling is busy (MAG-4733). Only when every url
+// is held is the probe skipped, returning the rate-limit error itself, so the
+// reconciliation reaches the same inconclusive verdict it would have from a fresh 429 —
+// membership unchanged, streak untouched — without spending a request to learn it.
+//
+// Each url is held or cleared on its own key (recordPassHoldoffs): a 429 holds the url
+// that answered it. Any other answer clears the url: an upstream that is answering us
+// again, even to report a genuine capability failure, is no longer refusing us for load.
+// A url that got no answer (timeout, refused or reset connection, DNS) clears nothing: a
+// gateway enforcing a ban often drops the connection rather than answering, and the
+// url's entries are shared — RecordAnswer also drops the per-url chain tracker's
+// hold-off and strikes (MAG-4165).
 //
 // With only, a provider named in it re-runs only those checks and keeps its other
 // verdicts from its last pass: previous's, else the admission last recorded for it (a
@@ -337,19 +472,23 @@ func probeReverification(
 	}
 	probe := func(c context.Context, p *routersession.RPCStaticProviderEndpoint) reverifyProbe {
 		result := reverifyProbe{provider: p, started: time.Now(), ran: only[p.Name]}
-		urlKey := holdoffURLKey(p)
-		if registry.HeldOff(p.Name, urlKey) {
-			utils.FormatDebug("re-verify: provider held off after a rate-limit, skipping probe",
+		// The provider on this chain and api-interface, as relay selection keys it.
+		providerKey := holdoff.ProviderKey(inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name)
+		entries := holdoffEntries(providerKey, p)
+		held := map[int]struct{}{}
+		for index, entry := range entries {
+			if registry.HeldOff(entry.provider, entry.url) {
+				held[index] = struct{}{}
+			}
+		}
+		if len(held) == len(entries) {
+			utils.FormatDebug("re-verify: every url of the provider held off after a rate-limit, skipping probe",
 				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 				utils.LogAttr("provider", p.Name),
 			)
 			result.err = common.StatusCodeError429
 			return result
 		}
-		// throttle is the rate limit a pass that otherwise succeeded met on one of the
-		// provider's urls, and unanswered why the url the hold-off is keyed by
-		// (holdoffURLKey: the first one) got no answer when the provider passed without it.
-		var throttle, unanswered error
 		if inputs.validateFn != nil {
 			result.err = inputs.validateFn(c, p)
 		} else {
@@ -362,43 +501,10 @@ func probeReverification(
 			if !failed && inputs.admissionFor != nil {
 				last = inputs.admissionFor(p)
 			}
-			result.admission, result.err = revalidateProviderCollections(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout, last, result.ran)
+			result.admission, result.err = revalidateProviderCollections(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout, last, result.ran, held)
 			result.validated = result.err == nil
-			if result.validated {
-				// A provider now passes on its other urls with its first one refused. That
-				// url's refusal is the pass's verdict on it: a dial or a request that got
-				// no answer leaves its hold-off as it was (MAG-4165).
-				if cause := result.admission.URLRefusal(0); common.DetectConnectionError(cause) != nil {
-					unanswered = cause
-				}
-				// Only a url that was rate-limited backs the provider off: the hold-off is
-				// the provider's, and relay selection skips a held provider for every
-				// request. A 429 on one add-on's own check (a premium method's own limit)
-				// says nothing about the base traffic the provider carries.
-				throttle = result.admission.URLThrottle()
-			}
 		}
-		if isRateLimitFailure(result.err) {
-			throttle = result.err
-		}
-		if throttle != nil {
-			retryAfter, _ := common.RetryAfterFrom(throttle)
-			delay := registry.RecordRateLimit(p.Name, urlKey, retryAfter)
-			utils.FormatWarning("re-verify: provider rate-limited, backing off", throttle,
-				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
-				utils.LogAttr("provider", p.Name),
-				utils.LogAttr("holdoff", delay.String()),
-			)
-			return result
-		}
-		// A probe that got no answer (timeout, refused or reset connection, DNS) is not one:
-		// it clears nothing. A gateway enforcing a ban often drops the connection rather than
-		// answering, and the url's entries are shared — RecordAnswer also drops the per-url
-		// chain tracker's hold-off and strikes (MAG-4165). The same goes for the keyed url
-		// alone, when the provider passed on its others.
-		if common.DetectConnectionError(result.err) == nil && unanswered == nil {
-			registry.RecordAnswer(p.Name, urlKey)
-		}
+		recordPassHoldoffs(registry, inputs.rpcEndpoint.ChainID, p.Name, entries, urlPassResults(inputs, result, len(entries), held))
 		return result
 	}
 
@@ -812,13 +918,14 @@ func validateProviderCollections(
 	chainParser chainlib.ChainParser,
 	timeout time.Duration,
 ) (chainlib.ProviderAdmission, error) {
-	return revalidateProviderCollections(ctx, provider, chainParser, timeout, chainlib.ProviderAdmission{}, nil)
+	return revalidateProviderCollections(ctx, provider, chainParser, timeout, chainlib.ProviderAdmission{}, nil, nil)
 }
 
 // revalidateProviderCollections is validateProviderCollections for a retry: it re-runs
 // only the checks in only and keeps the other verdicts from previous, the provider's
 // last pass (chainlib.ChainFetcher.ValidateCollectionsAgain), so a retry re-runs what
 // failed, not every check (MAG-3950). With only empty it verifies the provider whole.
+// The node urls at the positions in skip are not asked (chainlib.ValidateCollectionsExcept).
 func revalidateProviderCollections(
 	ctx context.Context,
 	provider *routersession.RPCStaticProviderEndpoint,
@@ -826,6 +933,7 @@ func revalidateProviderCollections(
 	timeout time.Duration,
 	previous chainlib.ProviderAdmission,
 	only []chainlib.CheckID,
+	skip map[int]struct{},
 ) (chainlib.ProviderAdmission, error) {
 	// The urls the router dials, generated per-path ones included, each verified on
 	// its own path (MAG-4214).
@@ -863,7 +971,7 @@ func revalidateProviderCollections(
 	})
 
 	if len(only) > 0 {
-		return verificationFetcher.ValidateCollectionsAgain(attemptCtx, previous, only)
+		return verificationFetcher.ValidateCollectionsAgain(attemptCtx, previous, only, skip)
 	}
-	return verificationFetcher.ValidateCollections(attemptCtx)
+	return verificationFetcher.ValidateCollectionsExcept(attemptCtx, skip)
 }

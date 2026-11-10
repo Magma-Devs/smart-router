@@ -4470,7 +4470,7 @@ func activeProviders(
 // only those checks and keeps the other verdicts from previous, the pass that refused
 // the provider (MAG-3950).
 var retryValidateFn = func(ctx context.Context, provider *routersession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser, previous chainlib.ProviderAdmission, only []chainlib.CheckID) (chainlib.ProviderAdmission, error) {
-	return revalidateProviderCollections(ctx, provider, chainParser, BootValidateTimeout, previous, only)
+	return revalidateProviderCollections(ctx, provider, chainParser, BootValidateTimeout, previous, only, nil)
 }
 
 // revalidateTier re-runs verification over one tier's failed providers, returning

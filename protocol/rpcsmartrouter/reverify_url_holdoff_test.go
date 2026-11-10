@@ -1,9 +1,11 @@
 package rpcsmartrouter
 
 import (
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/routersession"
@@ -229,4 +231,73 @@ func TestApplyReverification_AHeldURLKeepsItsAddonRefusals(t *testing.T) {
 	require.Len(t, up.methods("http", "/b/"+upPruned), askedAtBoot, "B is not sent a request by the pass")
 	after, _ := admissions.admissionFor(provider).AdmittedServices(provider.NodeUrls[1])
 	require.Empty(t, after, "archive stays refused on B")
+}
+
+// A retry waits only until one url is free: the pass asks the free urls and skips the
+// held ones (MAG-4733). A websocket url is read where the WS path holds it.
+func TestHeldOffUntil_OneFreeURLIsEnough(t *testing.T) {
+	provider := staticProvider("ETH1",
+		common.NodeUrl{Url: "https://a"},
+		common.NodeUrl{Url: "https://b"},
+		common.NodeUrl{Url: "wss://a"},
+	)
+	key := holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name)
+	reg := holdoff.NewRegistry()
+	reg.RecordRateLimit(key, "https://b", 30*time.Second)
+	reg.RecordRateLimit("wss://a", "wss://a", 0)
+	require.True(t, heldOffUntil(reg, provider).IsZero(), "a is free")
+
+	reg.RecordRateLimit(key, "https://a", 0)
+	until := heldOffUntil(reg, provider)
+	require.False(t, until.IsZero(), "every url held")
+	for _, entry := range holdoffEntries(key, provider) {
+		require.False(t, until.After(reg.ReadyAt(entry.provider, entry.url)), "the first url to come out")
+	}
+}
+
+// A retry re-runs only the checks it is due for, and a url with none of them is not
+// dialed. That url answered nothing, so its rate-limit strikes stand: the next 429 on it
+// is held for longer, not as a first one.
+func TestProbeReverification_ARetryLeavesAURLItDidNotAskAsItWas(t *testing.T) {
+	up := newFakeUpstreams(t)
+	provider := staticProvider("ETH1",
+		common.NodeUrl{Url: up.httpURL("/a/" + upArchive)},
+		common.NodeUrl{Url: up.httpURL("/b/" + upPruned), Addons: []string{"archive"}},
+	)
+	parser := liveParser(t, "ETH1", true)
+	boot, err := validateProviderCollections(t.Context(), provider, parser, 20*time.Second)
+	require.NoError(t, err)
+	only := boot.Retries()
+	require.NotEmpty(t, only, "B's archive check is due")
+
+	now := time.Now()
+	reg := holdoff.NewRegistryWithClock(func() time.Time { return now })
+	key := holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name)
+	a := provider.NodeUrls[0].Url
+	first := reg.RecordRateLimit(key, a, 0)
+	now = now.Add(first + time.Second)
+	require.False(t, reg.HeldOff(key, a), "A's hold-off is over, its strike is not")
+
+	inputs := &chainReverifyInputs{
+		chainParser:      parser,
+		rpcEndpoint:      &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		rateLimitHoldoff: reg,
+	}
+	askedA := len(up.methods("http", "/a/"+upArchive))
+	probeReverification(t.Context(), inputs, []*routersession.RPCStaticProviderEndpoint{provider},
+		map[string][]chainlib.CheckID{provider.Name: only},
+		map[string]chainlib.ProviderAdmission{provider.Name: boot})
+	require.Len(t, up.methods("http", "/a/"+upArchive), askedA, "the retry does not dial A")
+	require.Greater(t, reg.RecordRateLimit(key, a, 0), first, "A's strike stands")
+}
+
+// A pass that never ran — the provider's config is refused before any url is dialed —
+// sent nothing, so it answers no url and clears no hold-off.
+func TestURLPassResults_APassThatNeverRanAnswersNoURL(t *testing.T) {
+	inputs := &chainReverifyInputs{}
+	result := reverifyProbe{err: &chainlib.VerificationFailure{Check: chainlib.CheckConfig, Err: errors.New("bad config")}}
+	for index, r := range urlPassResults(inputs, result, 2, nil) {
+		require.False(t, r.answered, "url %d", index)
+		require.Nil(t, r.throttle, "url %d", index)
+	}
 }

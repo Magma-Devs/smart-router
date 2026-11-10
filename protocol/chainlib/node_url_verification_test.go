@@ -236,3 +236,22 @@ func TestReadsOwnHead(t *testing.T) {
 		Return(&spectypes.ParseDirective{}, atPath("/C/rpc"), true)
 	require.True(t, readsOwnHead(parser, versioned, false))
 }
+
+// A url was asked when the pass dialed it or ran a check on it. One left out for its
+// hold-off, or one a retry kept whole without dialing, was not.
+func TestURLAsked(t *testing.T) {
+	admission := ProviderAdmission{pass: []nodeUrlOutcome{
+		{checks: []checkOutcome{{kept: true}, {kept: true}}},
+		{err: ErrNotAskedHeldOff},
+		{checks: []checkOutcome{{kept: true}, {}}},
+		{err: errNotServed},
+		{},
+	}}
+	require.False(t, admission.URLAsked(0), "a retry kept every verdict: not dialed")
+	require.False(t, admission.URLAsked(1), "held off: not asked")
+	require.True(t, admission.URLAsked(2), "one check ran")
+	require.True(t, admission.URLAsked(3), "a dial that failed was an attempt")
+	require.True(t, admission.URLAsked(4), "dialed only (a websocket url)")
+	require.False(t, admission.URLAsked(5), "no such url")
+	require.False(t, ProviderAdmission{}.URLAsked(0), "no pass ran")
+}

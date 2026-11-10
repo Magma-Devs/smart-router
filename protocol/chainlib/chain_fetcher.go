@@ -334,6 +334,21 @@ func (a ProviderAdmission) Rerun() ProviderAdmission {
 	return rerun
 }
 
+// URLAsked reports whether this pass sent the node url at this position a request: it
+// was dialed, or a check ran on it rather than keeping its verdict from an earlier pass.
+// A url left out because it is held off (ErrNotAskedHeldOff), or one a retry kept whole
+// without dialing, was not. Only a pass's admission knows; any other answers false.
+func (a ProviderAdmission) URLAsked(index int) bool {
+	if index >= len(a.pass) {
+		return false
+	}
+	outcome := a.pass[index]
+	if outcome.err != nil {
+		return !errors.Is(outcome.err, ErrNotAskedHeldOff)
+	}
+	return len(outcome.checks) == 0 || slices.ContainsFunc(outcome.checks, func(c checkOutcome) bool { return !c.kept })
+}
+
 // URLRefusalRan reports whether this pass itself found what refuses the node url at this
 // position: the url could not be dialed or listed, or a check it ran this time, one that
 // costs the url, failed. A url refused only by verdicts a retry kept from an earlier pass
