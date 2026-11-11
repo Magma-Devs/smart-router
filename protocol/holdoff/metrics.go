@@ -11,7 +11,7 @@ import (
 
 // Registry events surface as metrics so a vendor cap tripping in production shows on a
 // dashboard instead of only in debug logs. Instrumented here, at the registry, so every
-// consumer path (re-verify, hot path, recovery probe, ws subscriptions) is covered
+// consumer path (re-verify, hot path, ws subscriptions) is covered
 // uniformly and a new consumer cannot forget to wire it. Registration is best-effort: an
 // existing collector is reused (tests, repeated init), and a failure never panics.
 var (
