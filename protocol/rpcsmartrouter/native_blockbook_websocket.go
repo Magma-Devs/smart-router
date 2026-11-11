@@ -186,13 +186,6 @@ func (s *nativeBlockbookSession) Handle(frame []byte) (bool, error) {
 		s.recordFailure(id, request.Method, err)
 		return true, err
 	}
-	if strings.HasPrefix(request.Method, "subscribe") {
-		for oldID, old := range s.requests {
-			if old.method == request.Method && oldID != id {
-				delete(s.requests, oldID)
-			}
-		}
-	}
 	s.requests[id] = nativeBlockbookRequest{method: request.Method, start: time.Now()}
 	s.mu.Unlock()
 	if conn.SetWriteDeadline(time.Now().Add(10*time.Second)) != nil || conn.WriteMessage(websocket.TextMessage, frame) != nil {
@@ -320,11 +313,20 @@ func (s *nativeBlockbookSession) recordFrame(frame []byte) {
 	wasAcked := request.acked
 	if exists {
 		if !failed && (data.Subscribed || request.acked) && strings.HasPrefix(request.method, "subscribe") {
+			// A refused replacement leaves the old provider subscription live.
+			// Retire its accounting only after the new subscription acknowledges.
+			if data.Subscribed {
+				for oldID, old := range s.requests {
+					if oldID != response.ID && old.method == request.method && old.acked {
+						delete(s.requests, oldID)
+					}
+				}
+			}
 			request.acked = true
 			s.requests[response.ID] = request
 		} else {
 			delete(s.requests, response.ID)
-			if strings.HasPrefix(request.method, "unsubscribe") {
+			if !failed && strings.HasPrefix(request.method, "unsubscribe") {
 				for id, sub := range s.requests {
 					if sub.method == strings.TrimPrefix(request.method, "un") {
 						delete(s.requests, id)

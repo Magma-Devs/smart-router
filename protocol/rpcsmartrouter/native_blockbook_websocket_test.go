@@ -355,3 +355,71 @@ func TestNativeBlockbookFactoryIsInertWithoutConfiguration(t *testing.T) {
 	server := &RPCSmartRouterServer{}
 	require.Nil(t, server.NewNativeWebSocketSession(context.Background(), nil, nil, nil))
 }
+
+func TestNativeBlockbookFailedUnsubscribeKeepsNotificationAccounting(t *testing.T) {
+	var methods []string
+	var failures []bool
+	s := &nativeBlockbookSession{
+		provider: "test",
+		requests: map[string]nativeBlockbookRequest{
+			"blocks": {method: "subscribeNewBlock", acked: true},
+			"stop":   {method: "unsubscribeNewBlock", start: time.Now()},
+		},
+		record: func(method, provider string, latency time.Duration, err error) {
+			methods = append(methods, method)
+			failures = append(failures, err != nil)
+		},
+	}
+	s.recordFrame([]byte(`{"id":"stop","data":{"error":{"message":"unsubscription refused"}}}`))
+	s.recordFrame([]byte(`{"id":"blocks","data":{"height":1,"hash":"fixture"}}`))
+	require.Equal(t, []string{"unsubscribeNewBlock", "subscribeNewBlock"}, methods)
+	require.Equal(t, []bool{true, false}, failures, "a refused unsubscribe leaves the live stream accountable")
+}
+
+func TestNativeBlockbookRefusedReplacementKeepsNotificationAccounting(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for i := 0; i < 2; i++ {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+			reply := `{"id":"old","data":{"subscribed":true}}`
+			if i == 1 {
+				reply = `{"id":"new","data":{"error":{"message":"replacement refused"}}}`
+			}
+			if conn.WriteMessage(websocket.TextMessage, []byte(reply)) != nil {
+				return
+			}
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"id":"old","data":{"height":1}}`))
+		_, _, _ = conn.ReadMessage()
+	}))
+	t.Cleanup(backend.Close)
+	frames := make(chan []byte, 3)
+	observations := make(chan bool, 3)
+	s := nativeTestSession(t, "ws"+strings.TrimPrefix(backend.URL, "http"), func(_ context.Context, frame []byte) bool {
+		frames <- frame
+		return true
+	}, func() {})
+	s.record = func(method, provider string, latency time.Duration, err error) { observations <- err != nil }
+	for _, id := range []string{"old", "new"} {
+		handled, err := s.Handle([]byte(fmt.Sprintf(`{"id":%q,"method":"subscribeNewBlock","params":{}}`, id)))
+		require.True(t, handled)
+		require.NoError(t, err)
+		receiveNativeFrame(t, frames)
+	}
+	require.Equal(t, "old", receiveNativeFrame(t, frames)["id"])
+	for _, wantFailure := range []bool{false, true, false} {
+		select {
+		case failed := <-observations:
+			require.Equal(t, wantFailure, failed)
+		case <-time.After(time.Second):
+			t.Fatal("notification accounting stopped after a refused replacement")
+		}
+	}
+}
