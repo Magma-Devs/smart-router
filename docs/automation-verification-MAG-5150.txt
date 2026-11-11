@@ -1,0 +1,1 @@
+Temporary Jira merged-PR automation verification. Only merge into the temporary verification target branch; delete both branches after verification.
