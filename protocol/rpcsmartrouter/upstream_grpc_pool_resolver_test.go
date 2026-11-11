@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -53,7 +53,7 @@ func soleChannelDescriptors(nodeUrl *common.NodeUrl) (descriptors *grpcEndpointD
 	descriptors = newGRPCEndpointDescriptors(nodeUrl, func(ctx context.Context) (*grpc.ClientConn, func(), error) {
 		conn := only.Load()
 		if conn == nil {
-			return nil, nil, lavasession.ErrGRPCConnectionClosed
+			return nil, nil, routersession.ErrGRPCConnectionClosed
 		}
 		return conn.lendChannel(ctx)
 	})
@@ -163,7 +163,7 @@ func TestUpstreamGRPCStreamConnection_ALookupOnAClosedConnectionReportsItClosed(
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := conn.GetMethodDescriptor(ctx, "grpc.health.v1.Health", "Check")
-	require.ErrorIs(t, err, lavasession.ErrGRPCConnectionClosed)
+	require.ErrorIs(t, err, routersession.ErrGRPCConnectionClosed)
 	require.Zero(t, streams.Load())
 }
 

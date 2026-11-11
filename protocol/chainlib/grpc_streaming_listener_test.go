@@ -10,8 +10,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -174,7 +174,7 @@ func newStreamingListener(t *testing.T, sender *stubRelaySender) *GrpcChainListe
 	require.NoError(t, err)
 	return &GrpcChainListener{
 		chainListenerBase: chainListenerBase{
-			endpoint:    &lavasession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc},
+			endpoint:    &routersession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGrpc},
 			relaySender: sender,
 			logger:      logger,
 		},

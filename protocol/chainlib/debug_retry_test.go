@@ -19,13 +19,13 @@ func TestSpecificErrorFromUser(t *testing.T) {
 
 	t.Run("Error object is the node's NODE_UNIMPLEMENTED, not a router-terminal unsupported method", func(t *testing.T) {
 		err := errors.New(errorMsg)
-		require.Equal(t, common.LavaErrorNodeUnimplemented, ClassifyNodeError(err, -1, common.TransportGRPC))
+		require.Equal(t, common.RouterErrorNodeUnimplemented, ClassifyNodeError(err, -1, common.TransportGRPC))
 		require.False(t, IsUnsupportedMethodError(err))
 	})
 
 	t.Run("gRPC Unknown status is the node's NODE_UNIMPLEMENTED too", func(t *testing.T) {
 		grpcErr := status.Error(codes.Unknown, "unsupported method 'Default-/cosmos/base/tendermint/v1beta1/blocks1/2': Not Implemented")
-		require.Equal(t, common.LavaErrorNodeUnimplemented, ClassifyNodeError(grpcErr, -1, common.TransportGRPC))
+		require.Equal(t, common.RouterErrorNodeUnimplemented, ClassifyNodeError(grpcErr, -1, common.TransportGRPC))
 		require.False(t, IsUnsupportedMethodError(grpcErr))
 	})
 

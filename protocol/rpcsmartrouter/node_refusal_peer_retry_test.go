@@ -13,11 +13,11 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
@@ -70,31 +70,31 @@ func TestNodeRefusal_AskedOfAPeerBeforeFailingTheCaller_MAG2771(t *testing.T) {
 			// The MAG-2735 shape: a provider with the method off for its plan answers -32601.
 			name:      "2001 NODE_METHOD_NOT_FOUND, -32601",
 			refusal:   refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found: eth_getBalance"}}`},
-			code:      common.LavaErrorNodeMethodNotFound.Code,
+			code:      common.RouterErrorNodeMethodNotFound.Code,
 			peerAsked: true,
 		},
 		{
 			name:      "2008 NODE_UNIMPLEMENTED, HTTP 501",
 			refusal:   refusalReply{http.StatusNotImplemented, `{}`},
-			code:      common.LavaErrorNodeUnimplemented.Code,
+			code:      common.RouterErrorNodeUnimplemented.Code,
 			peerAsked: true,
 		},
 		{
 			name:      "2009 NODE_ENDPOINT_NOT_FOUND, HTTP 404",
 			refusal:   refusalReply{http.StatusNotFound, `{}`},
-			code:      common.LavaErrorNodeEndpointNotFound.Code,
+			code:      common.RouterErrorNodeEndpointNotFound.Code,
 			peerAsked: true,
 		},
 		{
 			name:      "2010 NODE_METHOD_NOT_ALLOWED, HTTP 405",
 			refusal:   refusalReply{http.StatusMethodNotAllowed, `{}`},
-			code:      common.LavaErrorNodeMethodNotAllowed.Code,
+			code:      common.RouterErrorNodeMethodNotAllowed.Code,
 			peerAsked: true,
 		},
 		{
 			name:      "2016 NODE_UNAUTHORIZED, HTTP 401",
 			refusal:   refusalReply{http.StatusUnauthorized, `{}`},
-			code:      common.LavaErrorNodeUnauthorized.Code,
+			code:      common.RouterErrorNodeUnauthorized.Code,
 			peerAsked: true,
 		},
 		{
@@ -103,19 +103,19 @@ func TestNodeRefusal_AskedOfAPeerBeforeFailingTheCaller_MAG2771(t *testing.T) {
 			// the harness.
 			name:      "control: 2002 NODE_METHOD_NOT_SUPPORTED, -32004",
 			refusal:   refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"Method not supported"}}`},
-			code:      common.LavaErrorNodeMethodNotSupported.Code,
+			code:      common.RouterErrorNodeMethodNotSupported.Code,
 			peerAsked: true,
 		},
 		{
 			name:      "control: CHAIN_EXECUTION_REVERTED stays terminal",
 			refusal:   refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted"}}`},
-			code:      common.LavaErrorChainExecutionReverted.Code,
+			code:      common.RouterErrorChainExecutionReverted.Code,
 			peerAsked: false,
 		},
 		{
 			name:      "control: USER_INVALID_PARAMS stays terminal",
 			refusal:   refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid argument 0: hex string has length 2, want 40 for common.Address"}}`},
-			code:      common.LavaErrorUserInvalidParams.Code,
+			code:      common.RouterErrorUserInvalidParams.Code,
 			peerAsked: false,
 		},
 	}
@@ -254,12 +254,12 @@ func TestNodeRefusal_ThePeersTerminalAnswerReachesTheCaller_MAG2771(t *testing.T
 		{
 			name: "CHAIN_EXECUTION_REVERTED",
 			peer: refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":3,"message":"execution reverted","data":"0x08c379a0"}}`},
-			code: common.LavaErrorChainExecutionReverted.Code,
+			code: common.RouterErrorChainExecutionReverted.Code,
 		},
 		{
 			name: "USER_INVALID_PARAMS",
 			peer: refusalReply{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid argument 0: hex string has length 2, want 40 for common.Address"}}`},
-			code: common.LavaErrorUserInvalidParams.Code,
+			code: common.RouterErrorUserInvalidParams.Code,
 		},
 	}
 	for _, tc := range cases {
@@ -286,7 +286,7 @@ func TestNodeRefusal_ThePeersTerminalAnswerReachesTheCaller_MAG2771(t *testing.T
 // classifyLikeTheJSONRPCSender classifies a reply from the same inputs sendJSONRPCRelay builds: the
 // body's JSON-RPC code when it has one, otherwise the HTTP status, and the status prefixed to the
 // message when it is not 2xx.
-func classifyLikeTheJSONRPCSender(t *testing.T, chainParser chainlib.ChainParser, reply refusalReply) *common.LavaError {
+func classifyLikeTheJSONRPCSender(t *testing.T, chainParser chainlib.ChainParser, reply refusalReply) *common.RouterError {
 	t.Helper()
 	chainMessage := parseRefusalTestRequest(t, chainParser)
 	hasError, message := chainMessage.CheckResponseError([]byte(reply.body), reply.status)
@@ -310,11 +310,11 @@ func newRefusalTestServer(t *testing.T, chainParser chainlib.ChainParser, logs *
 	t.Helper()
 	ctx := context.Background()
 	hits := &[2]int64{}
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "ETH1")
-	csm := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 
-	tiers := []map[uint64]*lavasession.ConsumerSessionsWithProvider{{}, {}}
+	tiers := []map[uint64]*routersession.ConsumerSessionsWithProvider{{}, {}}
 	for i, upstreamCfg := range []struct {
 		name  string
 		reply refusalReply
@@ -327,10 +327,10 @@ func newRefusalTestServer(t *testing.T, chainParser chainlib.ChainParser, logs *
 			_, _ = w.Write([]byte(reply.body))
 		}))
 		t.Cleanup(upstream.Close)
-		connection, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
+		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
 		require.NoError(t, err)
-		endpoint := &lavasession.Endpoint{NetworkAddress: upstream.URL, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection}}
-		provider := lavasession.NewConsumerSessionWithProvider(upstreamCfg.name, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
+		endpoint := &routersession.Endpoint{NetworkAddress: upstream.URL, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
+		provider := routersession.NewConsumerSessionWithProvider(upstreamCfg.name, []*routersession.Endpoint{endpoint}, 100000, 1, 1)
 		provider.StaticProvider = true
 		tiers[i][uint64(i)] = provider
 	}
@@ -379,7 +379,7 @@ func sendRefusalTestRequestBody(t *testing.T, ctx context.Context, chainParser c
 func refusalTestProtocolMessage(t *testing.T, ctx context.Context, chainParser chainlib.ChainParser, body []byte) chainlib.ProtocolMessage {
 	t.Helper()
 	chainMessage := parseRefusalTestRequestBody(t, chainParser, body)
-	relayData := lavaprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceJsonRPC,
+	relayData := relayprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceJsonRPC,
 		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
 	return chainlib.NewProtocolMessage(chainMessage, nil, relayData, "dapp", "1.2.3.4")
 }

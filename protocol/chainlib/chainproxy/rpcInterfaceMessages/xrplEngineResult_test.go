@@ -29,11 +29,11 @@ func xrplAPIErrorReply(name string, code int, message string) string {
 // classification paths: the relay processor, which runs the connection-error string fallback first
 // and passes the HTTP status as the code, and the direct-RPC sender, which prefixes "HTTP <status>: "
 // to a non-2xx reply. Unclassified, it would be scored against the node like any unknown failure.
-func requireClassifiedAs(t *testing.T, msg string, lavaError string) common.NodeErrorClassification {
+func requireClassifiedAs(t *testing.T, msg string, routerError string) common.NodeErrorClassification {
 	t.Helper()
 	require.Nil(t, common.DetectConnectionError(errors.New(msg)))
-	require.Equal(t, lavaError, common.ClassifyError(nil, common.ChainFamilyXRP, common.TransportJsonRPC, http.StatusOK, msg).Name)
-	require.Equal(t, lavaError, common.ClassifyError(nil, common.ChainFamilyXRP, common.TransportJsonRPC, http.StatusTooManyRequests, "HTTP 429: "+msg).Name)
+	require.Equal(t, routerError, common.ClassifyError(nil, common.ChainFamilyXRP, common.TransportJsonRPC, http.StatusOK, msg).Name)
+	require.Equal(t, routerError, common.ClassifyError(nil, common.ChainFamilyXRP, common.TransportJsonRPC, http.StatusTooManyRequests, "HTTP 429: "+msg).Name)
 	return common.ClassifyNodeErrorForRetry(common.ChainFamilyXRP, common.TransportJsonRPC, http.StatusOK, msg)
 }
 
@@ -48,7 +48,7 @@ func TestCheckXRPLResponseError(t *testing.T) {
 		engineResult string
 		code         int
 		message      string
-		lavaError    string
+		routerError  string
 	}{
 		{"tefPAST_SEQ", -190, "This sequence number has already passed.", "CHAIN_NONCE_TOO_LOW"},
 		{"tefALREADY", -198, "The exact transaction was already in this ledger.", "CHAIN_TX_ALREADY_KNOWN"},
@@ -63,7 +63,7 @@ func TestCheckXRPLResponseError(t *testing.T) {
 			hasError, msg := submit.CheckXRPLResponseError([]byte(xrplSubmitReply(tc.engineResult, tc.code, tc.message)), http.StatusOK)
 			require.True(t, hasError, "a rejected transaction must be a node error, not the answer")
 			require.Equal(t, tc.engineResult+": "+tc.message, msg)
-			classification := requireClassifiedAs(t, msg, tc.lavaError)
+			classification := requireClassifiedAs(t, msg, tc.routerError)
 			require.True(t, classification.IsNonRetryable, "the availability gate exempts only non-retryable node errors")
 			require.False(t, classification.IsNodeAtFault, "a rejected transaction says nothing about the node's health")
 		})
@@ -75,43 +75,43 @@ func TestCheckXRPLResponseError(t *testing.T) {
 		name          string
 		body          string
 		wantMessage   string
-		lavaError     string
+		routerError   string
 		retryable     bool
 		atFault       bool
 		isRateLimited bool
 	}{
 		{
 			name: "noNetwork", body: xrplAPIErrorReply("noNetwork", 17, "Not synced to the network."),
-			wantMessage: "noNetwork: Not synced to the network.", lavaError: "NODE_SYNCING", retryable: true, atFault: true,
+			wantMessage: "noNetwork: Not synced to the network.", routerError: "NODE_SYNCING", retryable: true, atFault: true,
 		},
 		{
 			name: "notSynced", body: xrplAPIErrorReply("notSynced", 55, "Not synced to the network."),
-			wantMessage: "notSynced: Not synced to the network.", lavaError: "NODE_SYNCING", retryable: true, atFault: true,
+			wantMessage: "notSynced: Not synced to the network.", routerError: "NODE_SYNCING", retryable: true, atFault: true,
 		},
 		{
 			name: "amendmentBlocked", body: xrplAPIErrorReply("amendmentBlocked", 14, "Amendment blocked, need upgrade."),
-			wantMessage: "amendmentBlocked: Amendment blocked, need upgrade.", lavaError: "NODE_SERVICE_UNAVAILABLE", retryable: true, atFault: true,
+			wantMessage: "amendmentBlocked: Amendment blocked, need upgrade.", routerError: "NODE_SERVICE_UNAVAILABLE", retryable: true, atFault: true,
 		},
 		{
 			name: "tooBusy", body: xrplAPIErrorReply("tooBusy", 9, "The server is too busy to help you now."),
-			wantMessage: "tooBusy: The server is too busy to help you now.", lavaError: "NODE_RATE_LIMITED", retryable: true, isRateLimited: true,
+			wantMessage: "tooBusy: The server is too busy to help you now.", routerError: "NODE_RATE_LIMITED", retryable: true, isRateLimited: true,
 		},
 		{
 			name: "internal", body: xrplAPIErrorReply("internal", 73, "Internal error."),
-			wantMessage: "internal: Internal error.", lavaError: "NODE_INTERNAL_ERROR", retryable: true, atFault: true,
+			wantMessage: "internal: Internal error.", routerError: "NODE_INTERNAL_ERROR", retryable: true, atFault: true,
 		},
 		{
 			// Live shape (s.altnet.rippletest.net and testnet.xrpl-labs.com, 2026-09-30): the reason
 			// rides in error_exception beside error_message:null.
 			name:        "invalidTransaction",
 			body:        `{"result":{"error":"invalidTransaction","error_exception":"Transaction length invalid","error_message":null,"request":{"command":"submit","tx_blob":"00"},"status":"error"}}`,
-			wantMessage: "invalidTransaction: Transaction length invalid", lavaError: "USER_INVALID_PARAMS",
+			wantMessage: "invalidTransaction: Transaction length invalid", routerError: "USER_INVALID_PARAMS",
 		},
 		{
 			// Live shape: how a public node answers a sign-and-submit (s.altnet.rippletest.net, 2026-10-01).
 			name:        "notSupported",
 			body:        `{"result":{"error":"notSupported","error_code":75,"error_message":"Signing is not supported by this server.","request":{"command":"submit","secret":"<masked>"},"status":"error"}}`,
-			wantMessage: "notSupported: Signing is not supported by this server.", lavaError: "USER_INVALID_PARAMS",
+			wantMessage: "notSupported: Signing is not supported by this server.", routerError: "USER_INVALID_PARAMS",
 		},
 	}
 	for _, tc := range apiErrors {
@@ -119,7 +119,7 @@ func TestCheckXRPLResponseError(t *testing.T) {
 			hasError, msg := submit.CheckXRPLResponseError([]byte(tc.body), http.StatusOK)
 			require.True(t, hasError, "a failed submit call must not count as a success")
 			require.Equal(t, tc.wantMessage, msg)
-			classification := requireClassifiedAs(t, msg, tc.lavaError)
+			classification := requireClassifiedAs(t, msg, tc.routerError)
 			require.Equal(t, !tc.retryable, classification.IsNonRetryable)
 			require.Equal(t, tc.atFault, classification.IsNodeAtFault)
 			require.Equal(t, tc.isRateLimited, classification.IsRateLimited)
@@ -201,43 +201,43 @@ func TestCheckXRPLResponseError(t *testing.T) {
 		method      string
 		body        string
 		wantMessage string
-		lavaError   string
+		routerError string
 	}{
 		{
 			name: "ledger_not_found", method: "ledger",
 			body:        `{"result":{"error":"lgrNotFound","error_code":21,"error_message":"ledgerNotFound","request":{"command":"ledger","expand":true,"ledger_index":108018956,"transactions":true},"status":"error"}}`,
-			wantMessage: "lgrNotFound: ledgerNotFound", lavaError: "CHAIN_BLOCK_NOT_FOUND",
+			wantMessage: "lgrNotFound: ledgerNotFound", routerError: "CHAIN_BLOCK_NOT_FOUND",
 		},
 		{
 			name: "ledger_acquiring", method: "ledger",
 			body:        `{"result":{"acquiring":{"hash":"AB12"},"error":"lgrNotFound","error_code":21,"error_message":"acquiring ledger containing requested index","status":"error"}}`,
-			wantMessage: "lgrNotFound: acquiring ledger containing requested index", lavaError: "CHAIN_BLOCK_NOT_FOUND",
+			wantMessage: "lgrNotFound: acquiring ledger containing requested index", routerError: "CHAIN_BLOCK_NOT_FOUND",
 		},
 		{
 			name: "tx_not_found", method: "tx",
 			body:        `{"result":{"error":"txnNotFound","error_code":29,"error_message":"Transaction not found.","searched_all":false,"status":"error"}}`,
-			wantMessage: "txnNotFound: Transaction not found.", lavaError: "CHAIN_TX_NOT_FOUND",
+			wantMessage: "txnNotFound: Transaction not found.", routerError: "CHAIN_TX_NOT_FOUND",
 		},
 		{
 			name: "account_not_found", method: "account_info",
 			body:        `{"result":{"account":"rPT1Sjq2YGrBMTttX4GZHjKu9dyfzbpAYe","error":"actNotFound","error_code":19,"error_message":"Account not found.","ledger_index":108018956,"status":"error","validated":true}}`,
-			wantMessage: "actNotFound: Account not found.", lavaError: "NODE_RESOURCE_NOT_FOUND",
+			wantMessage: "actNotFound: Account not found.", routerError: "NODE_RESOURCE_NOT_FOUND",
 		},
 		{
 			name: "syncing_on_a_read", method: "account_info", body: xrplAPIErrorReply("noNetwork", 17, "Not synced to the network."),
-			wantMessage: "noNetwork: Not synced to the network.", lavaError: "NODE_SYNCING",
+			wantMessage: "noNetwork: Not synced to the network.", routerError: "NODE_SYNCING",
 		},
 		{
 			name: "uncatalogued", method: "submit", body: xrplAPIErrorReply("gatewayHiccup", 999, "Something only this gateway says."),
-			wantMessage: "gatewayHiccup: Something only this gateway says.", lavaError: "UNKNOWN_ERROR",
+			wantMessage: "gatewayHiccup: Something only this gateway says.", routerError: "UNKNOWN_ERROR",
 		},
 		{
 			name: "status_error_without_a_name", method: "ledger", body: `{"result":{"error_message":"boom","status":"error"}}`,
-			wantMessage: "boom", lavaError: "UNKNOWN_ERROR",
+			wantMessage: "boom", routerError: "UNKNOWN_ERROR",
 		},
 		{
 			name: "status_error_empty", method: "ledger", body: `{"result":{"status":"error"}}`,
-			wantMessage: "XRPL error with an empty message", lavaError: "UNKNOWN_ERROR",
+			wantMessage: "XRPL error with an empty message", routerError: "UNKNOWN_ERROR",
 		},
 	}
 	for _, tc := range reads {
@@ -246,7 +246,7 @@ func TestCheckXRPLResponseError(t *testing.T) {
 			hasError, msg := jm.CheckXRPLResponseError([]byte(tc.body), http.StatusOK)
 			require.True(t, hasError, "an error inside result is a node error, never the answer")
 			require.Equal(t, tc.wantMessage, msg)
-			require.Equal(t, tc.lavaError, common.ClassifyError(nil, common.ChainFamilyXRP, common.TransportJsonRPC, http.StatusOK, msg).Name)
+			require.Equal(t, tc.routerError, common.ClassifyError(nil, common.ChainFamilyXRP, common.TransportJsonRPC, http.StatusOK, msg).Name)
 		})
 	}
 
@@ -279,7 +279,7 @@ func TestCheckXRPLResponseError_FlaggedIsClassified(t *testing.T) {
 			continue
 		}
 		classification := common.ClassifyNodeErrorForRetry(common.ChainFamilyXRP, common.TransportJsonRPC, http.StatusOK, msg)
-		require.NotEqual(t, common.LavaErrorUnknown.Name, common.ClassifyError(nil, common.ChainFamilyXRP, common.TransportJsonRPC, http.StatusOK, msg).Name, "%q flagged but unclassified", engineResult)
+		require.NotEqual(t, common.RouterErrorUnknown.Name, common.ClassifyError(nil, common.ChainFamilyXRP, common.TransportJsonRPC, http.StatusOK, msg).Name, "%q flagged but unclassified", engineResult)
 		require.True(t, classification.IsNonRetryable, "%q", engineResult)
 		require.False(t, classification.IsNodeAtFault, "%q", engineResult)
 	}

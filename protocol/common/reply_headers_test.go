@@ -102,7 +102,7 @@ func TestFilterUpstreamReplyMetadataDropsRouterOwnedNamesWhateverTheUpstreamClai
 	h.Set(PROVIDER_LATEST_BLOCK_HEADER_NAME, "999999999")
 	h.Set(SMART_ROUTER_VERSION_HEADER_NAME, "0.0.0")
 	h.Set(RETRY_COUNT_HEADER_NAME, "0")
-	h.Set(LAVA_IDENTIFIED_NODE_ERROR_HEADER, "true")
+	h.Set(IDENTIFIED_NODE_ERROR_HEADER, "true")
 	h.Set("LAVA-GUID", "deadbeef")
 	h.Set(StatusCodeMetadataKey, "200")
 
@@ -256,7 +256,7 @@ func TestIsRouterOwnedHeader(t *testing.T) {
 	owned := []string{
 		PROVIDER_ADDRESS_HEADER_NAME, "lava-provider-address", "LAVA-GUID",
 		"lava-cross-validation-status", RETRY_COUNT_HEADER_NAME,
-		LAVA_IDENTIFIED_NODE_ERROR_HEADER, CACHE_TIER_HEADER_NAME,
+		IDENTIFIED_NODE_ERROR_HEADER, CACHE_TIER_HEADER_NAME,
 		PROVIDER_LATEST_BLOCK_HEADER_NAME, "provider-latest-block",
 		SMART_ROUTER_VERSION_HEADER_NAME, "SMART-ROUTER-VERSION",
 		StatusCodeMetadataKey, "Status-Code",

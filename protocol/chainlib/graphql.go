@@ -16,9 +16,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -84,7 +84,7 @@ func (apip *GraphQLChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 		// the directive back off the crafted message today, so a mismatch would be invisible:
 		// refuse it here rather than let a spec typo degrade silently.
 		if parsing != nil && parsing.ApiName != "" && chainMessage.GetApi().Name != parsing.ApiName {
-			return nil, utils.LavaFormatError("graphql parse directive template does not invoke the operation it names", nil,
+			return nil, utils.FormatError("graphql parse directive template does not invoke the operation it names", nil,
 				utils.LogAttr("apiName", parsing.ApiName),
 				utils.LogAttr("templateOperation", chainMessage.GetApi().Name),
 				utils.LogAttr("functionTag", parsing.FunctionTag),
@@ -107,7 +107,7 @@ func (apip *GraphQLChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 	// the body and nowhere else, so unlike gRPC — where an empty payload is a legitimate
 	// no-argument call — an empty template here is a spec gap, not an empty request.
 	if parsing.FunctionTemplate == "" {
-		return nil, utils.LavaFormatError("graphql parse directive has no function template", nil,
+		return nil, utils.FormatError("graphql parse directive has no function template", nil,
 			utils.LogAttr("apiName", parsing.ApiName),
 			utils.LogAttr("functionTag", parsing.FunctionTag),
 		)
@@ -115,7 +115,7 @@ func (apip *GraphQLChainParser) CraftMessage(parsing *spectypes.ParseDirective, 
 
 	graphqlMessage, err := rpcInterfaceMessages.ParseGraphQLMsg([]byte(parsing.FunctionTemplate))
 	if err != nil {
-		return nil, utils.LavaFormatError("failed parsing graphql function template", err,
+		return nil, utils.FormatError("failed parsing graphql function template", err,
 			utils.LogAttr("apiName", parsing.ApiName),
 			utils.LogAttr("functionTemplate", parsing.FunctionTemplate),
 		)
@@ -165,7 +165,7 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 	for index, rootField := range graphqlMessage.RootFields {
 		apiCont, err := apip.getSupportedApi(rootField.Name, connectionType, internalPath)
 		if err != nil {
-			utils.LavaFormatError("getSupportedApi graphql failed", err,
+			utils.FormatError("getSupportedApi graphql failed", err,
 				utils.LogAttr("operation", rootField.Name),
 				utils.LogAttr("connectionType", connectionType),
 				utils.LogAttr("internalPath", internalPath),
@@ -175,7 +175,7 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 
 		apiCollectionForRootField, err := apip.getApiCollection(connectionType, apiCont.collectionKey.InternalPath, apiCont.collectionKey.Addon)
 		if err != nil {
-			return nil, utils.LavaFormatError("could not find the graphql api collection", err,
+			return nil, utils.FormatError("could not find the graphql api collection", err,
 				utils.LogAttr("connectionType", connectionType),
 				utils.LogAttr("operation", apiCont.api.Name),
 			)
@@ -201,7 +201,7 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 			parsedBlock, err := graphqlMessage.ParseBlock(overwriteReqBlock)
 			parsedInput.SetBlock(parsedBlock)
 			if err != nil {
-				utils.LavaFormatError("failed parsing block from an overwrite header", err,
+				utils.FormatError("failed parsing block from an overwrite header", err,
 					utils.LogAttr("chain", apip.spec.Name),
 					utils.LogAttr("overwriteRequestedBlock", overwriteReqBlock),
 				)
@@ -223,7 +223,7 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 
 		if apiCollectionForRootField.CollectionData.AddOn != "" && apiCollectionForRootField.CollectionData.AddOn != apiCollection.CollectionData.AddOn {
 			if apiCollection.CollectionData.AddOn != "" {
-				return nil, utils.LavaFormatError("unable to parse a graphql request selecting root fields from multiple addons", nil,
+				return nil, utils.FormatError("unable to parse a graphql request selecting root fields from multiple addons", nil,
 					utils.LogAttr("first addon", apiCollection.CollectionData.AddOn),
 					utils.LogAttr("second addon", apiCollectionForRootField.CollectionData.AddOn),
 				)
@@ -251,7 +251,7 @@ func (apip *GraphQLChainParser) ParseMsg(url string, data []byte, connectionType
 	// today. It is guarded anyway because the loop below it dereferences both values, and the
 	// guarantee lives in another file.
 	if combinedApi == nil || apiCollection == nil {
-		return nil, utils.LavaFormatError("graphql request resolved to no api", nil,
+		return nil, utils.FormatError("graphql request resolved to no api", nil,
 			utils.LogAttr("method", graphqlMessage.GetMethod()),
 		)
 	}
@@ -320,7 +320,7 @@ type GraphQLChainListener struct {
 }
 
 // NewGraphQLChainListener creates a new instance of GraphQLChainListener
-func NewGraphQLChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEndpoint,
+func NewGraphQLChainListener(ctx context.Context, listenEndpoint *routersession.RPCEndpoint,
 	relaySender RelaySender, healthReporter HealthReporter,
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
 ) (chainListener *GraphQLChainListener) {
@@ -414,7 +414,7 @@ type GraphQLChainProxy struct {
 	BaseChainProxy
 }
 
-func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
+func NewGraphQLChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint routersession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
 	if err := requireNodeUrl(rpcProviderEndpoint); err != nil {
 		return nil, err
 	}
@@ -446,7 +446,7 @@ func (gcp *GraphQLChainProxy) SendNodeMsg(ctx context.Context, chainMessage Chai
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.GraphQLMessage)
 	if !ok {
-		return nil, utils.LavaFormatError("invalid message type in graphql, failed to cast RPCInput from chainMessage", nil, traceAttrs(ctx,
+		return nil, utils.FormatError("invalid message type in graphql, failed to cast RPCInput from chainMessage", nil, traceAttrs(ctx,
 			utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage},
 		)...)
 	}
@@ -465,7 +465,7 @@ func (gcp *GraphQLChainProxy) SendNodeMsg(ctx context.Context, chainMessage Chai
 	req.Header.Set("Content-Type", common.JSONContentType)
 
 	res, err := gcp.doHTTP(ctx, req, nodeMessage.GetHeaders(), nodeMessage.GetDisableErrorHandling(), chainMessage.GetApi().Name, func(header http.Header) {
-		utils.LavaFormatInfo("Sending request to node from provider",
+		utils.FormatInfo("Sending request to node from provider",
 			utils.LogAttr("_method", nodeMessage.GetMethod()),
 			utils.LogAttr("headers", utils.RedactHeaders(header)),
 			utils.LogAttr("apiInterface", spectypes.APIInterfaceGraphQL),
@@ -486,7 +486,7 @@ func (gcp *GraphQLChainProxy) SendNodeMsg(ctx context.Context, chainMessage Chai
 	// Every GraphQL reply is a JSON document, errors included — the interface has no other
 	// representation — so a non-JSON body did not come from a GraphQL endpoint.
 	if err := gcp.HandleJSONFormatError(reply.RelayReply.Data); err != nil {
-		return nil, utils.LavaFormatError("GraphQL reply is neither a JSON object nor a JSON array of objects", nil,
+		return nil, utils.FormatError("GraphQL reply is neither a JSON object nor a JSON array of objects", nil,
 			utils.Attribute{Key: "reply.Data", Value: string(reply.RelayReply.Data)},
 		)
 	}

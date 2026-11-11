@@ -9,7 +9,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -106,7 +106,7 @@ func TestRelayProcessor_CrossValidationOutlierRealPath(t *testing.T) {
 	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	sm := newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation) // threshold 2, minGroups 1
 	rp := NewRelayProcessor(ctx, sm.crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, sm)
 
@@ -242,7 +242,7 @@ func TestRelayProcessor_CrossValidationFailureRealPath(t *testing.T) {
 	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	sm := newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation) // threshold 2, minGroups 1
 	rp := NewRelayProcessor(ctx, sm.crossValidationParams, RelayProcessorMetrics, RelayProcessorMetrics, sm)
 
@@ -495,7 +495,7 @@ func TestRelayProcessor_PerGroupNilReplyRealPath(t *testing.T) {
 	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	sm := &mockRelayStateMachine{
 		protocolMessage:       protocolMessage,
 		usedProviders:         usedProviders,

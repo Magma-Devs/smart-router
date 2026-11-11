@@ -149,7 +149,7 @@ func receivedAttrs(ctx context.Context, guid uint64, attrs ...utils.Attribute) [
 // logReceivedWithSeedAfterDapp writes the received line the REST POST and GraphQL handlers share.
 func logReceivedWithSeedAfterDapp(message string) func(context.Context, uint64, string, string, httpRelayRequest, []pairingtypes.Metadata) {
 	return func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-		utils.LavaFormatInfo(message, receivedAttrs(ctx, guid,
+		utils.FormatInfo(message, receivedAttrs(ctx, guid,
 			utils.LogAttr("path", req.path),
 			utils.LogAttr("dappID", dappID),
 			utils.LogAttr("msgSeed", msgSeed),
@@ -253,8 +253,8 @@ func (wsl *wsListenerBase) websocketRoutes(ctx context.Context, app *fiber.App, 
 			rateLimit = 0
 		}
 
-		utils.LavaFormatDebug(name+" websocket opened", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
-		defer utils.LavaFormatDebug(name+" websocket closed", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
+		utils.FormatDebug(name+" websocket opened", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
+		defer utils.FormatDebug(name+" websocket closed", utils.LogAttr("consumerIp", websocketConn.LocalAddr().String()))
 
 		consumerWebsocketManager := NewConsumerWebsocketManager(ConsumerWebsocketManagerOptions{
 			WebsocketConn:          websocketConn,

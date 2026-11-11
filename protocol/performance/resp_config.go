@@ -183,18 +183,18 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 	if cacheKeyPrefix != "" {
 		switch {
 		case respEnabled:
-			utils.LavaFormatWarning(CacheKeyPrefixFlagName+" is set but the RESP backend is configured and takes precedence, so the gRPC prefix scopes nothing; the keyspace in force is resp-cache.key-prefix", nil,
+			utils.FormatWarning(CacheKeyPrefixFlagName+" is set but the RESP backend is configured and takes precedence, so the gRPC prefix scopes nothing; the keyspace in force is resp-cache.key-prefix", nil,
 				utils.LogAttr("key-prefix", cacheKeyPrefix),
 				utils.LogAttr("resp-cache-key-prefix", respConfig.KeyPrefix))
 		case cacheAddr == "":
-			utils.LavaFormatWarning(CacheKeyPrefixFlagName+" is set while "+CacheFlagName+" is empty — dangling configuration, it scopes nothing (set "+CacheFlagName+" or drop the prefix; the RESP backend's keyspace is resp-cache.key-prefix)", nil,
+			utils.FormatWarning(CacheKeyPrefixFlagName+" is set while "+CacheFlagName+" is empty — dangling configuration, it scopes nothing (set "+CacheFlagName+" or drop the prefix; the RESP backend's keyspace is resp-cache.key-prefix)", nil,
 				utils.LogAttr("key-prefix", cacheKeyPrefix))
 		}
 	}
 
 	if respEnabled {
 		if cacheAddr != "" {
-			utils.LavaFormatWarning("both resp-cache and cache-be are configured — the RESP backend takes precedence; cache-be is preserved as the rollback path (remove the resp-cache configuration to revert)", nil,
+			utils.FormatWarning("both resp-cache and cache-be are configured — the RESP backend takes precedence; cache-be is preserved as the rollback path (remove the resp-cache configuration to revert)", nil,
 				utils.LogAttr("cache-be", cacheAddr))
 		}
 		store, storeErr := redisstore.New(respConfig)
@@ -204,7 +204,7 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 		// The RESOLVED topology, never the raw field: an omitted topology printed
 		// as a blank here, which is how a sentinel configuration missing its
 		// topology line ran as standalone without a trace (MAG-3671).
-		utils.LavaFormatInfo("resp-cache backend configured",
+		utils.FormatInfo("resp-cache backend configured",
 			utils.LogAttr("topology", respConfig.EffectiveTopology()),
 			utils.LogAttr("master-name", respConfig.MasterName),
 			utils.LogAttr("addresses", respConfig.Addresses),
@@ -224,9 +224,9 @@ func SelectCacheBackend(ctx context.Context, v *viper.Viper) (CacheBackend, erro
 	if cacheAddr != "" {
 		grpcCache, initErr := InitCacheWithKeyPrefix(ctx, cacheAddr, cacheKeyPrefix)
 		if initErr != nil {
-			utils.LavaFormatError("Failed To Connect to cache at address", initErr, utils.Attribute{Key: "address", Value: cacheAddr})
+			utils.FormatError("Failed To Connect to cache at address", initErr, utils.Attribute{Key: "address", Value: cacheAddr})
 		} else {
-			utils.LavaFormatInfo("cache service connected", utils.Attribute{Key: "address", Value: cacheAddr}, utils.LogAttr("key-prefix", cacheKeyPrefix))
+			utils.FormatInfo("cache service connected", utils.Attribute{Key: "address", Value: cacheAddr}, utils.LogAttr("key-prefix", cacheKeyPrefix))
 		}
 		cache = grpcCache
 	}

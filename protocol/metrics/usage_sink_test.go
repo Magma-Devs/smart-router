@@ -38,7 +38,7 @@ func TestNoopUsageSink_OptimizerQoSIsZeroCost(t *testing.T) {
 	for i := 0; i < 1000; i++ {
 		sink.EmitOptimizerQoS(OptimizerQoSReportToSend{
 			Timestamp:       time.Now(),
-			ProviderAddress: "lava@p",
+			ProviderAddress: "provider@p",
 			ChainId:         "eth",
 		})
 	}
@@ -59,7 +59,7 @@ func TestNewRelayUsageEvent_FullFidelity(t *testing.T) {
 		CacheHit:        true,
 		IsArchive:       true,
 		HedgeCount:      2,
-		ProviderAddress: "lava@provider1",
+		ProviderAddress: "provider@provider1",
 		Origin:          "https://app.example",
 	}
 
@@ -75,6 +75,6 @@ func TestNewRelayUsageEvent_FullFidelity(t *testing.T) {
 	require.True(t, event.CacheHit)
 	require.True(t, event.IsArchive)
 	require.Equal(t, uint64(2), event.HedgeCount)
-	require.Equal(t, "lava@provider1", event.ProviderAddress)
+	require.Equal(t, "provider@provider1", event.ProviderAddress)
 	require.Equal(t, "https://app.example", event.Origin)
 }

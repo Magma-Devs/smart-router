@@ -105,7 +105,7 @@ func (cs *CacheServer) newRistretto(name string) *ristretto.Cache[string, any] {
 		},
 	})
 	if err != nil {
-		utils.LavaFormatFatal("could not create "+name, err)
+		utils.FormatFatal("could not create "+name, err)
 	}
 	return tier
 }
@@ -124,7 +124,7 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 	if strings.HasPrefix(listenAddr, common.UnixSocketPrefix) {
 		host, port, err := net.SplitHostPort(listenAddr)
 		if err != nil {
-			utils.LavaFormatFatal("Failed to parse unix socket, provide address in this format unix:/tmp/example.sock", err)
+			utils.FormatFatal("Failed to parse unix socket, provide address in this format unix:/tmp/example.sock", err)
 			return
 		}
 
@@ -132,25 +132,25 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 
 		addr, err := net.ResolveUnixAddr(host, port)
 		if err != nil {
-			utils.LavaFormatFatal("Failed to resolve unix socket address", err)
+			utils.FormatFatal("Failed to resolve unix socket address", err)
 			return
 		}
 
 		lis, err = net.ListenUnix(host, addr)
 		if err != nil {
-			utils.LavaFormatFatal("Failed to listen to unix socket listener", err)
+			utils.FormatFatal("Failed to listen to unix socket listener", err)
 			return
 		}
 
 		err = os.Chmod(port, 0o600)
 		if err != nil {
-			utils.LavaFormatFatal("Failed to set permissions for Unix socket", err)
+			utils.FormatFatal("Failed to set permissions for Unix socket", err)
 			return
 		}
 	} else {
 		lis, err = net.Listen("tcp", listenAddr)
 		if err != nil {
-			utils.LavaFormatFatal("Cache server failure setting up TCP listener", err)
+			utils.FormatFatal("Cache server failure setting up TCP listener", err)
 			return
 		}
 	}
@@ -172,25 +172,25 @@ func (cs *CacheServer) Serve(ctx context.Context, listenAddr string) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = utils.LavaFormatInfo("Cache Server ctx.Done")
+			_ = utils.FormatInfo("Cache Server ctx.Done")
 		case <-signalChan:
-			_ = utils.LavaFormatInfo("Cache Server signalChan")
+			_ = utils.FormatInfo("Cache Server signalChan")
 		}
 
 		shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownRelease()
 
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			utils.LavaFormatFatal("Cache failed to shutdown", err)
+			utils.FormatFatal("Cache failed to shutdown", err)
 		}
 	}()
 
 	cacheServer := &RelayerCacheServer{CacheServer: cs}
 	relaytypes.RegisterRelayerCacheServer(s, cacheServer)
 
-	_ = utils.LavaFormatInfo("Cache Server listening", utils.Attribute{Key: "Address", Value: lis.Addr().String()})
+	_ = utils.FormatInfo("Cache Server listening", utils.Attribute{Key: "Address", Value: lis.Addr().String()})
 	if err := httpServer.Serve(lis); !errors.Is(err, http.ErrServerClosed) {
-		utils.LavaFormatFatal("cache failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr().String()})
+		utils.FormatFatal("cache failed to serve", err, utils.Attribute{Key: "Address", Value: lis.Addr().String()})
 	}
 }
 
@@ -266,7 +266,7 @@ func Server(
 func mustReadFlag[T any](read func(name string) (T, error), name string) T {
 	value, err := read(name)
 	if err != nil {
-		utils.LavaFormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: name})
+		utils.FormatFatal("failed to read flag", err, utils.Attribute{Key: "flag", Value: name})
 	}
 	return value
 }

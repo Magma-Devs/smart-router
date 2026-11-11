@@ -10,9 +10,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -43,7 +43,7 @@ func TestStateMachine_NonPositiveAttemptWindowDoesNotEndTheProcess(t *testing.T)
 			require.NoError(t, err)
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "1.2.3.4")
 
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 			stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders,
 				&SmartRouterRelaySenderMock{retValue: nil, tickerValue: window}, protocolMessage, nil, false)
 			require.NoError(t, err)
@@ -62,7 +62,7 @@ func TestStateMachine_NonPositiveAttemptWindowDoesNotEndTheProcess(t *testing.T)
 			case <-time.After(2 * time.Second):
 				t.Fatal("the state machine never dispatched the first attempt")
 			}
-			usedProviders.AddUsed(lavasession.ConsumerSessionsMap{"lava@a": &lavasession.SessionInfo{}}, nil)
+			usedProviders.AddUsed(routersession.ConsumerSessionsMap{"provider@a": &routersession.SessionInfo{}}, nil)
 			relayProcessor.UpdateBatch(nil)
 
 			// A window that means nothing means no hedging, not a hedge storm: nothing further is
@@ -106,7 +106,7 @@ func relayTimeoutTestServer(t *testing.T) *RPCSmartRouterServer {
 	require.NoError(t, err)
 	return &RPCSmartRouterServer{
 		chainParser:    chainParser,
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
 	}
 }
 
@@ -222,7 +222,7 @@ func TestRelayTimeoutHeader_AppliedWindowIsReportedToTheCaller(t *testing.T) {
 		protocolMessage := parseWithRelayTimeout(t, srv, relayTimeoutLightRequest, header)
 		relayResult := &common.RelayResult{
 			Reply:        &pairingtypes.RelayReply{},
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@a"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@a"},
 		}
 		srv.appendHeadersToRelayResult(context.Background(), relayResult, 0,
 			&MockRelayProcessorForHeaders{selection: relaycore.Stateless}, protocolMessage, "eth_getBalance", nil, true)
@@ -274,7 +274,7 @@ func TestRelayTimeoutHeader_BoundIsTheCallsOwnBudgetNotItsCategory(t *testing.T)
 	require.NoError(t, err)
 	srv := &RPCSmartRouterServer{
 		chainParser:    chainParser,
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "BTC", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "BTC", ApiInterface: spectypes.APIInterfaceJsonRPC},
 	}
 	const sendRawTransaction = `{"jsonrpc":"1.0","id":1,"method":"sendrawtransaction","params":["00"]}`
 
@@ -317,7 +317,7 @@ func TestRelayTimeoutHeader_QuietNodeGivesUpAtTheRouterBudgetNotTheHeader(t *tes
 	require.Equal(t, ownBudget, budget, "a 10m header must not raise the budget past the call's own")
 
 	ctx := context.Background()
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders,
 		&relayTimeoutBudgetSender{srv: srv}, protocolMessage, nil, false)
 	require.NoError(t, err)
@@ -341,7 +341,7 @@ func TestRelayTimeoutHeader_QuietNodeGivesUpAtTheRouterBudgetNotTheHeader(t *tes
 					"the request must end at the router's budget (%s), not at the caller's 10m", ownBudget)
 				return
 			}
-			usedProviders.AddUsed(lavasession.ConsumerSessionsMap{fmt.Sprintf("quiet-%d", attempt): &lavasession.SessionInfo{}}, nil)
+			usedProviders.AddUsed(routersession.ConsumerSessionsMap{fmt.Sprintf("quiet-%d", attempt): &routersession.SessionInfo{}}, nil)
 			relayProcessor.UpdateBatch(nil)
 		case <-deadline:
 			t.Fatalf("still holding the request after %s: the caller's 10m set the budget, not the router (own budget %s)",

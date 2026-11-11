@@ -12,8 +12,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -115,7 +115,7 @@ func (apip *RestChainParser) ParseMsg(urlPath string, data []byte, connectionTyp
 		parsedBlock, err := restMessage.ParseBlock(overwriteReqBlock)
 		parsedInput.SetBlock(parsedBlock)
 		if err != nil {
-			utils.LavaFormatError("failed parsing block from an overwrite header", err,
+			utils.FormatError("failed parsing block from an overwrite header", err,
 				utils.LogAttr("chain", apip.spec.Name),
 				utils.LogAttr("overwriteRequestedBlock", overwriteReqBlock),
 			)
@@ -234,7 +234,7 @@ func restRequestPath(fiberCtx *fiber.Ctx) string {
 }
 
 // NewRestChainListener creates a new instance of RestChainListener
-func NewRestChainListener(ctx context.Context, listenEndpoint *lavasession.RPCEndpoint,
+func NewRestChainListener(ctx context.Context, listenEndpoint *routersession.RPCEndpoint,
 	relaySender RelaySender, healthReporter HealthReporter,
 	rpcConsumerLogs *metrics.RPCConsumerLogs,
 ) (chainListener *RestChainListener) {
@@ -271,7 +271,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 		if !errors.Is(err, common.APINotSupportedError) {
 			return false, nil
 		}
-		utils.LavaFormatError("api method is not supported", err, utils.LogAttr("GUID", ctx))
+		utils.FormatError("api method is not supported", err, utils.LogAttr("GUID", ctx))
 		return true, common.CreateRestMethodNotFoundError(fiberCtx, chainID)
 	}
 	errorBody := func(_ *fiber.Ctx, _ *common.RelayResult, errMasking, _ string) []byte {
@@ -315,7 +315,7 @@ func (apil *RestChainListener) Serve(ctx context.Context, cmdFlags common.Consum
 			}
 		},
 		logReceived: func(ctx context.Context, guid uint64, msgSeed, dappID string, req httpRelayRequest, headers []pairingtypes.Metadata) {
-			utils.LavaFormatInfo("Consumer received a new REST non-POST request", receivedAttrs(ctx, guid,
+			utils.FormatInfo("Consumer received a new REST non-POST request", receivedAttrs(ctx, guid,
 				utils.LogAttr("path", req.path),
 				utils.LogAttr("seed", msgSeed),
 				utils.LogAttr("dappID", dappID),
@@ -336,7 +336,7 @@ type RestChainProxy struct {
 	BaseChainProxy
 }
 
-func NewRestChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint lavasession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
+func NewRestChainProxy(ctx context.Context, nConns uint, rpcProviderEndpoint routersession.RPCProviderEndpoint, chainParser ChainParser) (ChainProxy, error) {
 	if err := requireNodeUrl(rpcProviderEndpoint); err != nil {
 		return nil, err
 	}
@@ -359,7 +359,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 	rpcInputMessage := chainMessage.GetRPCMessage()
 	nodeMessage, ok := rpcInputMessage.(*rpcInterfaceMessages.RestMessage)
 	if !ok {
-		return nil, utils.LavaFormatError("invalid message type in rest, failed to cast RPCInput from chainMessage", nil, traceAttrs(ctx, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})...)
+		return nil, utils.FormatError("invalid message type in rest, failed to cast RPCInput from chainMessage", nil, traceAttrs(ctx, utils.Attribute{Key: "rpcMessage", Value: rpcInputMessage})...)
 	}
 	var connectionTypeSlected string = http.MethodGet
 	// if ConnectionType is default value or empty we will choose http.MethodGet otherwise choosing the header type provided
@@ -385,7 +385,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 	}
 
 	res, err := rcp.doHTTP(ctx, req, nodeMessage.GetHeaders(), nodeMessage.GetDisableErrorHandling(), chainMessage.GetApi().Name, func(header http.Header) {
-		utils.LavaFormatInfo("Sending request to node from provider",
+		utils.FormatInfo("Sending request to node from provider",
 			utils.LogAttr("_method", nodeMessage.Path),
 			utils.LogAttr("headers", utils.RedactHeaders(header)),
 			utils.LogAttr("apiInterface", spectypes.APIInterfaceRest),
@@ -407,7 +407,7 @@ func (rcp *RestChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMe
 		// checking if rest reply data is in json format
 		err = rcp.HandleJSONFormatError(reply.RelayReply.Data)
 		if err != nil {
-			return nil, utils.LavaFormatError("Rest reply is neither a JSON object nor a JSON array of objects", nil, utils.Attribute{Key: "reply.Data", Value: string(reply.RelayReply.Data)})
+			return nil, utils.FormatError("Rest reply is neither a JSON object nor a JSON array of objects", nil, utils.Attribute{Key: "reply.Data", Value: string(reply.RelayReply.Data)})
 		}
 	}
 

@@ -25,10 +25,10 @@ func TestLogCodedNodeAnswerStillCountsTheError(t *testing.T) {
 	t.Cleanup(func() { SetErrorMetricsCallback(nil) })
 
 	LogCodedNodeAnswer("received node error reply from provider", errors.New("tx not found"),
-		LavaErrorNodeDataNotHeld, "COSMOSHUB", 404, "tx not found: 0000")
+		RouterErrorNodeDataNotHeld, "COSMOSHUB", 404, "tx not found: 0000")
 
 	require.Len(t, got, 1, "the debug path must still fire the metric exactly once")
-	require.Equal(t, LavaErrorNodeDataNotHeld.Code, got[0].code)
+	require.Equal(t, RouterErrorNodeDataNotHeld.Code, got[0].code)
 	require.Equal(t, "NODE_DATA_NOT_HELD", got[0].name)
 	require.True(t, got[0].retryable)
 	require.Equal(t, "COSMOSHUB", got[0].chainID)

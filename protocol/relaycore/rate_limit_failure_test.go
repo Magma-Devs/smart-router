@@ -10,12 +10,12 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
-func newTwoProviderProcessor(t *testing.T) (*RelayProcessor, *lavasession.UsedProviders, func()) {
+func newTwoProviderProcessor(t *testing.T) (*RelayProcessor, *routersession.UsedProviders, func()) {
 	t.Helper()
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -24,13 +24,13 @@ func newTwoProviderProcessor(t *testing.T) (*RelayProcessor, *lavasession.UsedPr
 	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "123.11")
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	rp := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachine(protocolMessage, usedProviders))
 
 	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 	defer cancel()
 	require.Nil(t, usedProviders.TryLockSelection(lockCtx))
-	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{"lava@a": &lavasession.SessionInfo{}, "lava@b": &lavasession.SessionInfo{}}, nil)
+	usedProviders.AddUsed(routersession.ConsumerSessionsMap{"provider@a": &routersession.SessionInfo{}, "provider@b": &routersession.SessionInfo{}}, nil)
 	closer := func() {
 		if closeServer != nil {
 			closeServer()
@@ -41,14 +41,14 @@ func newTwoProviderProcessor(t *testing.T) (*RelayProcessor, *lavasession.UsedPr
 
 // startBatch opens a new selection batch of the given providers, so a follow-up
 // WaitForResults expects exactly their responses — the shape of a retry round.
-func startBatch(t *testing.T, usedProviders *lavasession.UsedProviders, providers ...string) {
+func startBatch(t *testing.T, usedProviders *routersession.UsedProviders, providers ...string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
 	require.Nil(t, usedProviders.TryLockSelection(ctx))
-	sessions := lavasession.ConsumerSessionsMap{}
+	sessions := routersession.ConsumerSessionsMap{}
 	for _, provider := range providers {
-		sessions[provider] = &lavasession.SessionInfo{}
+		sessions[provider] = &routersession.SessionInfo{}
 	}
 	usedProviders.AddUsed(sessions, nil)
 }
@@ -56,7 +56,7 @@ func startBatch(t *testing.T, usedProviders *lavasession.UsedProviders, provider
 // upstream429Err is what the sender records for an upstream's HTTP 429: the upstream's answer,
 // unwrapping to the typed rate-limit sentinel.
 func upstream429Err(body string, retryAfter time.Duration) error {
-	return &lavasession.HTTPStatusError{StatusCode: http.StatusTooManyRequests, Body: []byte(body), RetryAfter: retryAfter}
+	return &routersession.HTTPStatusError{StatusCode: http.StatusTooManyRequests, Body: []byte(body), RetryAfter: retryAfter}
 }
 
 // Every attempt refused for rate: the policy summary says the failures were only rate limits, and
@@ -65,8 +65,8 @@ func TestProcessingResult_AllRateLimitedIsTheNodes429(t *testing.T) {
 	rp, _, closer := newTwoProviderProcessor(t)
 	defer closer()
 
-	go SendProtocolError(rp, "lava@a", time.Millisecond, upstream429Err(`{"error":"quota"}`, 30*time.Second))
-	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, upstream429Err(`{"error":"quota"}`, 0))
+	go SendProtocolError(rp, "provider@a", time.Millisecond, upstream429Err(`{"error":"quota"}`, 30*time.Second))
+	go SendProtocolError(rp, "provider@b", 2*time.Millisecond, upstream429Err(`{"error":"quota"}`, 0))
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	_ = rp.WaitForResults(ctx)
@@ -90,8 +90,8 @@ func TestProcessingResult_AllRateLimitedWithoutNodeStatusIs429(t *testing.T) {
 	rp, _, closer := newTwoProviderProcessor(t)
 	defer closer()
 
-	go SendProtocolError(rp, "lava@a", time.Millisecond, common.RateLimited(errors.New("websocket: bad handshake"), 0))
-	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, common.RateLimited(errors.New("websocket: bad handshake"), 0))
+	go SendProtocolError(rp, "provider@a", time.Millisecond, common.RateLimited(errors.New("websocket: bad handshake"), 0))
+	go SendProtocolError(rp, "provider@b", 2*time.Millisecond, common.RateLimited(errors.New("websocket: bad handshake"), 0))
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	_ = rp.WaitForResults(ctx)
@@ -112,8 +112,8 @@ func TestProcessingResult_ForwardedNode429BeatsStatuslessRateLimit(t *testing.T)
 		if !nodeFirst {
 			nodeDelay, bareDelay = bareDelay, nodeDelay
 		}
-		go SendProtocolError(rp, "lava@a", nodeDelay, upstream429Err(`{"error":"quota"}`, 0))
-		go SendProtocolError(rp, "lava@b", bareDelay, common.RateLimited(errors.New("websocket: bad handshake"), 0))
+		go SendProtocolError(rp, "provider@a", nodeDelay, upstream429Err(`{"error":"quota"}`, 0))
+		go SendProtocolError(rp, "provider@b", bareDelay, common.RateLimited(errors.New("websocket: bad handshake"), 0))
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		_ = rp.WaitForResults(ctx)
 		cancel()
@@ -134,8 +134,8 @@ func TestProcessingResult_MixedFailuresUnchanged(t *testing.T) {
 	rp, _, closer := newTwoProviderProcessor(t)
 	defer closer()
 
-	go SendProtocolError(rp, "lava@a", time.Millisecond, common.RateLimited(errors.New("HTTP 429"), 0))
-	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, errors.New("connection refused"))
+	go SendProtocolError(rp, "provider@a", time.Millisecond, common.RateLimited(errors.New("HTTP 429"), 0))
+	go SendProtocolError(rp, "provider@b", 2*time.Millisecond, errors.New("connection refused"))
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	_ = rp.WaitForResults(ctx)
@@ -155,8 +155,8 @@ func TestProcessingResult_RateLimited429DoesNotStick(t *testing.T) {
 	defer closer()
 
 	// Iteration 1: every failure is a rate limit.
-	go SendProtocolError(rp, "lava@a", time.Millisecond, upstream429Err("", 0))
-	go SendProtocolError(rp, "lava@b", 2*time.Millisecond, upstream429Err("", 0))
+	go SendProtocolError(rp, "provider@a", time.Millisecond, upstream429Err("", 0))
+	go SendProtocolError(rp, "provider@b", 2*time.Millisecond, upstream429Err("", 0))
 	firstCtx, cancelFirst := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancelFirst()
 	_ = rp.WaitForResults(firstCtx)
@@ -166,8 +166,8 @@ func TestProcessingResult_RateLimited429DoesNotStick(t *testing.T) {
 	require.Equal(t, http.StatusTooManyRequests, result.StatusCode)
 
 	// Iteration 2: the retry lands on an endpoint that is down rather than capped.
-	startBatch(t, usedProviders, "lava@c")
-	go SendProtocolError(rp, "lava@c", time.Millisecond, errors.New("connection refused"))
+	startBatch(t, usedProviders, "provider@c")
+	go SendProtocolError(rp, "provider@c", time.Millisecond, errors.New("connection refused"))
 	secondCtx, cancelSecond := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancelSecond()
 	_ = rp.WaitForResults(secondCtx)

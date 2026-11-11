@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -112,8 +112,8 @@ func TestRealSpecRootEntryIsTheBaseCollection(t *testing.T) {
 func TestProviderShapeErrorAdmitsAPinnedUrlServingTheRoot(t *testing.T) {
 	apiInterface := spectypes.APIInterfaceJsonRPC
 	chainParser := parserFor(t, apiInterface, rootServedByVersionedPathCollections(apiInterface, []string{"a", "b"}))
-	endpoint := func(path string) *lavasession.RPCProviderEndpoint {
-		return &lavasession.RPCProviderEndpoint{
+	endpoint := func(path string) *routersession.RPCProviderEndpoint {
+		return &routersession.RPCProviderEndpoint{
 			ApiInterface: apiInterface,
 			NodeUrls: []common.NodeUrl{
 				{Url: "https://vendor.example/rpc/v1/key", InternalPath: path},

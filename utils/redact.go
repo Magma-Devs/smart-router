@@ -80,7 +80,7 @@ func RedactURL(raw string) string {
 // RedactIfURL redacts s only when it looks like a url — it carries a "://"
 // scheme, or a path/query/fragment delimiter. Anything else comes back
 // untouched, which matters where the input is a url OR an identifier: a lava
-// provider address ("lava@provider") is not a url, and RedactURL would read its
+// provider address ("provider@provider") is not a url, and RedactURL would read its
 // "@" as userinfo and drop the prefix.
 func RedactIfURL(s string) string {
 	if strings.Contains(s, "://") || strings.ContainsAny(s, "/?#") {
@@ -135,7 +135,7 @@ func RedactSecretsErr(err error) error {
 	if redacted == msg {
 		return err
 	}
-	return &wrappedLavaError{msg: redacted, cause: err}
+	return &wrappedRouterError{msg: redacted, cause: err}
 }
 
 // safeHeaderValues names the headers whose values may be logged. Everything else

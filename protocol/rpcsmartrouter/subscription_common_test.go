@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,7 +39,7 @@ func TestSubscriptionManagers_SelectEndpointsByTheSameRules(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "primary-a", ep.Url, "the primary tier serves first")
 
-			endpoints.stickyStore.Set("client", &lavasession.StickySession{Provider: "backup-a"})
+			endpoints.stickyStore.Set("client", &routersession.StickySession{Provider: "backup-a"})
 			ep, err = endpoints.selectEndpoint(ctx, "client", nil)
 			require.NoError(t, err)
 			require.Equal(t, "backup-a", ep.Url, "a sticky endpoint resolves in either tier")

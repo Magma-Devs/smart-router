@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -18,7 +18,7 @@ type cacheStickyStore struct {
 	backend StickySessionBackend
 }
 
-var _ lavasession.SharedStickyStore = (*cacheStickyStore)(nil)
+var _ routersession.SharedStickyStore = (*cacheStickyStore)(nil)
 
 // NewCacheStickyStore wraps a cache backend as the fleet claim registry, or returns nil when the
 // configured backend cannot carry claims. Nil leaves stickiness pod-local.
@@ -28,7 +28,7 @@ var _ lavasession.SharedStickyStore = (*cacheStickyStore)(nil)
 // had before this feature existed. Once a registry IS wired, an unreachable one fails requests
 // rather than falling back — the difference is between "cross-pod stickiness was never enabled
 // here" and "it is enabled and we cannot honour it".
-func NewCacheStickyStore(cache CacheBackend) lavasession.SharedStickyStore {
+func NewCacheStickyStore(cache CacheBackend) routersession.SharedStickyStore {
 	if cache == nil {
 		return nil
 	}
@@ -40,7 +40,7 @@ func NewCacheStickyStore(cache CacheBackend) lavasession.SharedStickyStore {
 	}
 	backend, ok := cache.(StickySessionBackend)
 	if !ok {
-		utils.LavaFormatWarning("cross-pod sticky sessions: the configured cache backend cannot hold claims; stickiness stays pod-local", nil,
+		utils.FormatWarning("cross-pod sticky sessions: the configured cache backend cannot hold claims; stickiness stays pod-local", nil,
 			utils.LogAttr("backend", fmt.Sprintf("%T", cache)))
 		return nil
 	}

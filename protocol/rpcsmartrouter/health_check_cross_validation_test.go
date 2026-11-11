@@ -8,8 +8,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -105,14 +105,14 @@ func TestInternalRelayIgnoresCrossValidationPolicy(t *testing.T) {
 			}
 			serverWith := func(r *CrossValidationPolicyResolver) *RPCSmartRouterServer {
 				return &RPCSmartRouterServer{
-					listenEndpoint:          &lavasession.RPCEndpoint{ChainID: tc.specID, ApiInterface: tc.apiInterface},
+					listenEndpoint:          &routersession.RPCEndpoint{ChainID: tc.specID, ApiInterface: tc.apiInterface},
 					crossValidationResolver: r,
 				}
 			}
 
 			t.Run("the health check is not cross-validated", func(t *testing.T) {
 				server := serverWith(resolverFor(t, 2))
-				sm, smErr := server.internalRelayStateMachine(ctx, lavasession.NewUsedProviders(nil), message(t, nil))
+				sm, smErr := server.internalRelayStateMachine(ctx, routersession.NewUsedProviders(nil), message(t, nil))
 				require.NoError(t, smErr)
 				require.Equal(t, relaycore.Stateless, sm.GetSelection(),
 					"a health check must take one provider's latest block, not require several to agree on it")
@@ -131,7 +131,7 @@ func TestInternalRelayIgnoresCrossValidationPolicy(t *testing.T) {
 					common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
 					common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
 				})
-				sm, smErr := server.internalRelayStateMachine(ctx, lavasession.NewUsedProviders(nil), withHeaders)
+				sm, smErr := server.internalRelayStateMachine(ctx, routersession.NewUsedProviders(nil), withHeaders)
 				require.NoError(t, smErr)
 				require.Equal(t, relaycore.Stateless, sm.GetSelection(),
 					"the internal path must forbid cross-validation outright, not merely lack a resolver")
@@ -144,7 +144,7 @@ func TestInternalRelayIgnoresCrossValidationPolicy(t *testing.T) {
 			// or a policy that never loaded.
 			t.Run("control: a client request is still cross-validated", func(t *testing.T) {
 				resolver := resolverFor(t, 2)
-				clientSM, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil),
+				clientSM, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, routersession.NewUsedProviders(nil),
 					serverWith(resolver), message(t, nil), nil, false, resolver, tc.specID, tc.apiInterface)
 				require.NoError(t, smErr)
 				require.Equal(t, relaycore.CrossValidation, clientSM.GetSelection(),

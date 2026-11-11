@@ -79,7 +79,7 @@ var errChainTipUnreadable = errors.New("chain tip could not be read from the sto
 func (e *Engine) chainTip(ctx context.Context, chainId string) int64 {
 	tip, fresh, err := e.Store.GetChainTip(ctx, ChainTipKey(chainId))
 	if err != nil {
-		utils.LavaFormatDebug("chain tip unreadable", utils.LogAttr("chainId", chainId), utils.LogAttr("error", err))
+		utils.FormatDebug("chain tip unreadable", utils.LogAttr("chainId", chainId), utils.LogAttr("error", err))
 		return tipReadFailed
 	}
 	if !fresh {
@@ -97,10 +97,10 @@ func (e *Engine) GetSharedTip(ctx context.Context, chainId, sharedStateId string
 	key := SharedTipKey(chainId, sharedStateId)
 	value, found, err := e.Store.GetInt64(ctx, key)
 	if err != nil || !found {
-		utils.LavaFormatInfo("Failed fetching state from cache for this user id", utils.LogAttr("id", key))
+		utils.FormatInfo("Failed fetching state from cache for this user id", utils.LogAttr("id", key))
 		return 0
 	}
-	utils.LavaFormatInfo("getting seen block cache", utils.LogAttr("id", key), utils.LogAttr("value", value))
+	utils.FormatInfo("getting seen block cache", utils.LogAttr("id", key), utils.LogAttr("value", value))
 	return value
 }
 
@@ -111,7 +111,7 @@ func (e *Engine) SetSharedTip(ctx context.Context, chainId, sharedStateId string
 		return
 	}
 	if err := e.Store.SetInt64IfGreaterOrEqual(ctx, SharedTipKey(chainId, sharedStateId), seenBlock, ttl); err != nil {
-		utils.LavaFormatWarning("failed setting shared-state tip", err, utils.LogAttr("chainId", chainId))
+		utils.FormatWarning("failed setting shared-state tip", err, utils.LogAttr("chainId", chainId))
 	}
 }
 
@@ -151,7 +151,7 @@ func (e *Engine) setBlocksHashesToHeights(ctx context.Context, chainId string, b
 	for _, hashToHeight := range blocksHashesToHeights {
 		if hashToHeight.Height >= 0 {
 			if err := e.Store.SetHeight(ctx, HeightKey(chainId, hashToHeight.Hash), hashToHeight.Height, e.Policy.BlocksHashesToHeights); err != nil {
-				utils.LavaFormatWarning("failed setting block hash to height", err, utils.LogAttr("chainId", chainId))
+				utils.FormatWarning("failed setting block hash to height", err, utils.LogAttr("chainId", chainId))
 			}
 		}
 	}
@@ -186,7 +186,7 @@ func (e *Engine) getRelayInner(ctx context.Context, relayCacheGet *relaytypes.Re
 		return nil, NotFoundError
 	}
 	if cacheVal.Hash == nil {
-		utils.LavaFormatDebug("returning response",
+		utils.FormatDebug("returning response",
 			utils.Attribute{Key: "cache_source", Value: cacheSource},
 			utils.Attribute{Key: "hash", Value: "nil"},
 			utils.Attribute{Key: "response_data", Value: parser.CapStringLen(string(cacheVal.Response.Data))},
@@ -194,7 +194,7 @@ func (e *Engine) getRelayInner(ctx context.Context, relayCacheGet *relaytypes.Re
 		return cacheVal.ToCacheReply(), nil
 	}
 	if bytes.Equal(cacheVal.Hash, relayCacheGet.BlockHash) {
-		utils.LavaFormatDebug("returning response",
+		utils.FormatDebug("returning response",
 			utils.Attribute{Key: "cache_source", Value: cacheSource},
 			utils.Attribute{Key: "hash", Value: "match"},
 			utils.Attribute{Key: "response_data", Value: parser.CapStringLen(string(cacheVal.Response.Data))},
@@ -234,7 +234,7 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 		relayCacheGet.RequestedBlock = replaceRequestedBlock(originalRequestedBlock, getLatestBlock)
 	}
 
-	utils.LavaFormatDebug("Got Cache Get",
+	utils.FormatDebug("Got Cache Get",
 		utils.Attribute{Key: "request_hash", Value: string(relayCacheGet.RequestHash)},
 		utils.Attribute{Key: "finalized", Value: relayCacheGet.Finalized},
 		utils.Attribute{Key: "requested_block", Value: originalRequestedBlock},
@@ -273,7 +273,7 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 
 		if err == nil {
 			if cacheReply.SeenBlock < min(relayCacheGet.SeenBlock, relayCacheGet.RequestedBlock) {
-				err = utils.LavaFormatDebug("reply seen block is smaller than our expectations",
+				err = utils.FormatDebug("reply seen block is smaller than our expectations",
 					utils.LogAttr("cacheReply.SeenBlock", cacheReply.SeenBlock),
 					utils.LogAttr("seenBlock", relayCacheGet.SeenBlock),
 				)
@@ -290,7 +290,7 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 			// context's own error rides along, so a timeout is classified as one.
 			return cacheReply, false, errors.Join(StoreError, errChainTipUnreadable, ctx.Err())
 		}
-		err = utils.LavaFormatDebug("Requested block is invalid",
+		err = utils.FormatDebug("Requested block is invalid",
 			utils.LogAttr("requested block", relayCacheGet.RequestedBlock),
 			utils.LogAttr("request_hash", string(relayCacheGet.RequestHash)),
 		)
@@ -299,7 +299,7 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 
 	cacheReply.BlocksHashesToHeights = blockHashes
 	if blockHashes != nil {
-		utils.LavaFormatDebug("block hashes:", utils.LogAttr("hashes", blockHashes))
+		utils.FormatDebug("block hashes:", utils.LogAttr("hashes", blockHashes))
 	}
 
 	hit = cacheReply.Reply != nil
@@ -311,7 +311,7 @@ func (e *Engine) GetRelay(ctx context.Context, relayCacheGet *relaytypes.RelayCa
 // scalars.
 func (e *Engine) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCacheSet) error {
 	if relayCacheSet.RequestedBlock < 0 {
-		return utils.LavaFormatError("invalid relay cache set data, request block is negative", nil, utils.Attribute{Key: "requestBlock", Value: relayCacheSet.RequestedBlock})
+		return utils.FormatError("invalid relay cache set data, request block is negative", nil, utils.Attribute{Key: "requestBlock", Value: relayCacheSet.RequestedBlock})
 	}
 	latestKnownBlock := int64(math.Max(float64(relayCacheSet.Response.LatestBlock), float64(relayCacheSet.SeenBlock)))
 	// Same scoping as GetRelay: the entry and all of its bookkeeping land in the
@@ -321,7 +321,7 @@ func (e *Engine) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCa
 
 	cacheKey := RelayKey(relayCacheSet.Finalized, chainId, relayCacheSet.RequestHash, relayCacheSet.RequestedBlock)
 	cacheValue := NewEnvelope(relayCacheSet.Response, relayCacheSet.BlockHash, relayCacheSet.Finalized, relayCacheSet.OptionalMetadata, latestKnownBlock, relayCacheSet.IsNodeError, relayCacheSet.StatusCode)
-	utils.LavaFormatDebug("Got Cache Set",
+	utils.FormatDebug("Got Cache Set",
 		utils.Attribute{Key: "cacheKey", Value: cacheKey},
 		utils.Attribute{Key: "finalized", Value: relayCacheSet.Finalized},
 		utils.Attribute{Key: "requested_block", Value: relayCacheSet.RequestedBlock},
@@ -335,7 +335,7 @@ func (e *Engine) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCa
 	ttl := e.Policy.ForRelayEntry(relayCacheSet.Finalized, relayCacheSet.IsNodeError, time.Duration(relayCacheSet.AverageBlockTime), relayCacheSet.BlockHash)
 	var storeErr error
 	if err := e.Store.SetEntry(ctx, cacheKey, &cacheValue, ttl); err != nil {
-		utils.LavaFormatWarning("failed storing cache entry", err, utils.LogAttr("cacheKey", cacheKey))
+		utils.FormatWarning("failed storing cache entry", err, utils.LogAttr("cacheKey", cacheKey))
 		storeErr = errors.Join(StoreError, err)
 	}
 
@@ -347,7 +347,7 @@ func (e *Engine) SetRelay(ctx context.Context, relayCacheSet *relaytypes.RelayCa
 	// yields to any write (MAG-3755) it must not be allowed to replace a real one.
 	if latestKnownBlock > 0 {
 		if err := e.Store.SetChainTipIfGreaterOrEqualOrStale(ctx, ChainTipKey(chainId), latestKnownBlock); err != nil {
-			utils.LavaFormatWarning("failed setting chain tip", err, utils.LogAttr("chainId", relayCacheSet.ChainId))
+			utils.FormatWarning("failed setting chain tip", err, utils.LogAttr("chainId", relayCacheSet.ChainId))
 		}
 	}
 	e.setBlocksHashesToHeights(ctx, chainId, relayCacheSet.BlocksHashesToHeights)

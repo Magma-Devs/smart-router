@@ -17,7 +17,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // setupTestTracingWithExporter installs a TracerProvider with an in-memory
@@ -240,8 +240,8 @@ func TestRecordProviderAttributes(t *testing.T) {
 		guid            uint64
 		providerAddress string
 	}{
-		{name: "typical provider", guid: 999, providerAddress: "lava@1abc"},
-		{name: "zero guid", guid: 0, providerAddress: "lava@1xyz"},
+		{name: "typical provider", guid: 999, providerAddress: "provider@1abc"},
+		{name: "zero guid", guid: 0, providerAddress: "provider@1xyz"},
 	}
 
 	for _, tc := range tests {
@@ -463,21 +463,21 @@ func TestRecordHTTPRequest(t *testing.T) {
 func TestRecordHTTPResponse(t *testing.T) {
 	tests := []struct {
 		name                string
-		response            *lavasession.HTTPDirectRPCResponse
+		response            *routersession.HTTPDirectRPCResponse
 		expectResponseAttrs bool
 		expectStatus        int
 		expectSize          int
 	}{
 		{
 			name:                "200 with body",
-			response:            &lavasession.HTTPDirectRPCResponse{StatusCode: 200, Body: []byte(`{"result":1}`)},
+			response:            &routersession.HTTPDirectRPCResponse{StatusCode: 200, Body: []byte(`{"result":1}`)},
 			expectResponseAttrs: true,
 			expectStatus:        200,
 			expectSize:          12,
 		},
 		{
 			name:                "500 with empty body",
-			response:            &lavasession.HTTPDirectRPCResponse{StatusCode: 500, Body: nil},
+			response:            &routersession.HTTPDirectRPCResponse{StatusCode: 500, Body: nil},
 			expectResponseAttrs: true,
 			expectStatus:        500,
 			expectSize:          0,
@@ -564,21 +564,21 @@ func TestRecordGRPCRequest(t *testing.T) {
 func TestRecordGRPCResponse(t *testing.T) {
 	tests := []struct {
 		name                string
-		response            *lavasession.DirectRPCResponse
+		response            *routersession.DirectRPCResponse
 		expectResponseAttrs bool
 		expectStatus        int
 		expectSize          int
 	}{
 		{
 			name:                "200 with data",
-			response:            &lavasession.DirectRPCResponse{StatusCode: 200, Data: []byte("hello world")},
+			response:            &routersession.DirectRPCResponse{StatusCode: 200, Data: []byte("hello world")},
 			expectResponseAttrs: true,
 			expectStatus:        200,
 			expectSize:          11,
 		},
 		{
 			name:                "200 with empty data",
-			response:            &lavasession.DirectRPCResponse{StatusCode: 200, Data: nil},
+			response:            &routersession.DirectRPCResponse{StatusCode: 200, Data: nil},
 			expectResponseAttrs: true,
 			expectStatus:        200,
 			expectSize:          0,

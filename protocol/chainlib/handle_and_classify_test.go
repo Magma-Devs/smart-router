@@ -24,7 +24,7 @@ func TestHandleAndClassify_MethodNotFoundIsRetryable(t *testing.T) {
 	err := errors.New("method not found")
 	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
 	require.NotNil(t, result)
-	assert.True(t, errors.Is(result, common.LavaErrorNodeMethodNotFound))
+	assert.True(t, errors.Is(result, common.RouterErrorNodeMethodNotFound))
 	assert.False(t, IsUnsupportedMethodErrorType(result))
 	assert.True(t, ShouldRetryError(result), "another provider may serve the method")
 }
@@ -46,7 +46,7 @@ func TestHandleAndClassify_RetryableError(t *testing.T) {
 	err := errors.New("rate limit exceeded")
 	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
 	require.NotNil(t, result)
-	assert.True(t, errors.Is(result, common.LavaErrorNodeRateLimited))
+	assert.True(t, errors.Is(result, common.RouterErrorNodeRateLimited))
 	assert.False(t, IsUnsupportedMethodErrorType(result))
 	assert.False(t, IsSolanaNonRetryableErrorType(result))
 }
@@ -69,7 +69,7 @@ func TestClassifyNodeError_NilError(t *testing.T) {
 func TestClassifyNodeError_PlainError(t *testing.T) {
 	result := ClassifyNodeError(errors.New("nonce too low"), common.ChainFamilyEVM, common.TransportJsonRPC)
 	require.NotNil(t, result)
-	assert.Equal(t, common.LavaErrorChainNonceTooLow, result)
+	assert.Equal(t, common.RouterErrorChainNonceTooLow, result)
 }
 
 func TestClassifyNodeError_GRPCStatusError(t *testing.T) {
@@ -78,7 +78,7 @@ func TestClassifyNodeError_GRPCStatusError(t *testing.T) {
 	grpcErr := status.Error(codes.Unimplemented, "method not implemented")
 	result := ClassifyNodeError(grpcErr, -1, common.TransportGRPC)
 	require.NotNil(t, result)
-	assert.Equal(t, common.LavaErrorNodeUnimplemented, result)
+	assert.Equal(t, common.RouterErrorNodeUnimplemented, result)
 	assert.True(t, result.SubCategory.IsNodeCapability())
 	assert.True(t, result.Retryable)
 }
@@ -91,7 +91,7 @@ func TestClassifyNodeError_HTTPError(t *testing.T) {
 	}
 	result := ClassifyNodeError(httpErr, -1, common.TransportJsonRPC)
 	require.NotNil(t, result)
-	assert.Equal(t, common.LavaErrorNodeMethodNotFound, result)
+	assert.Equal(t, common.RouterErrorNodeMethodNotFound, result)
 }
 
 // TestExtractNodeErrorDetails_JSONRPCBodyBeatsHTTPStatus locks in the priority
@@ -128,7 +128,7 @@ func TestExtractNodeErrorDetails_JSONRPCBodyBeatsHTTPStatus(t *testing.T) {
 	// JSON-RPC code wins despite the new HTTP prefix on the message.
 	result := ClassifyNodeError(httpErr, -1, common.TransportJsonRPC)
 	require.NotNil(t, result)
-	assert.Equal(t, common.LavaErrorUserParseError, result,
+	assert.Equal(t, common.RouterErrorUserParseError, result,
 		"-32700 must classify as USER_PARSE_ERROR; if the HTTP status overwrote the code we'd get UNKNOWN")
 }
 
@@ -144,20 +144,20 @@ func TestExtractNodeErrorDetails_HTTPStatusFallback(t *testing.T) {
 	assert.Equal(t, 503, code, "HTTP status must be used when no JSON-RPC body is recoverable")
 }
 
-func TestUnwrapLavaError_FromWrapped(t *testing.T) {
-	err := common.NewLavaError(common.LavaErrorChainNonceTooLow, "test")
-	le := common.AsLavaError(err)
+func TestUnwrapRouterError_FromWrapped(t *testing.T) {
+	err := common.NewRouterError(common.RouterErrorChainNonceTooLow, "test")
+	le := common.AsRouterError(err)
 	require.NotNil(t, le)
-	assert.Equal(t, common.LavaErrorChainNonceTooLow, le)
+	assert.Equal(t, common.RouterErrorChainNonceTooLow, le)
 }
 
-func TestUnwrapLavaError_FromPlainError(t *testing.T) {
-	le := common.AsLavaError(errors.New("plain"))
+func TestUnwrapRouterError_FromPlainError(t *testing.T) {
+	le := common.AsRouterError(errors.New("plain"))
 	assert.Nil(t, le)
 }
 
-func TestUnwrapLavaError_Nil(t *testing.T) {
-	le := common.AsLavaError(nil)
+func TestUnwrapRouterError_Nil(t *testing.T) {
+	le := common.AsRouterError(nil)
 	assert.Nil(t, le)
 }
 
@@ -168,9 +168,9 @@ func TestHandleAndClassify_JsonRPCMethodNotFound(t *testing.T) {
 	err := errors.New("method not found")
 	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
 	require.NotNil(t, result)
-	lavaErr := common.AsLavaError(result)
-	require.NotNil(t, lavaErr)
-	assert.True(t, lavaErr.SubCategory.IsNodeCapability())
+	routerErr := common.AsRouterError(result)
+	require.NotNil(t, routerErr)
+	assert.True(t, routerErr.SubCategory.IsNodeCapability())
 	assert.False(t, IsUnsupportedMethodErrorType(result))
 }
 
@@ -181,7 +181,7 @@ func TestHandleAndClassify_MethodNotSupported(t *testing.T) {
 	err := errors.New("method not supported")
 	result := handleAndClassify(context.Background(), err, common.TransportJsonRPC, common.ChainFamilyEVM, "", &genericErrorHandler{})
 	require.NotNil(t, result, "retryable classified errors must be wrapped, not silently dropped")
-	assert.True(t, errors.Is(result, common.LavaErrorNodeMethodNotSupported))
+	assert.True(t, errors.Is(result, common.RouterErrorNodeMethodNotSupported))
 	assert.False(t, IsUnsupportedMethodErrorType(result), "method not supported is retryable, not a hard unsupported-method")
 	assert.True(t, ShouldRetryError(result), "Retryable=true must be surfaced to the retry logic")
 }
@@ -218,7 +218,7 @@ func (m *metricCounter) snapshot() int {
 // TestHandleAndClassify_SingleMetricPerCall verifies the single-emit invariant:
 // every path through handleAndClassify emits exactly one metric (including the
 // Unknown + handleGenericErrors branch, which previously double-logged via both
-// LogCodedError and LavaFormatProduction).
+// LogCodedError and FormatProduction).
 func TestHandleAndClassify_SingleMetricPerCall(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -228,33 +228,33 @@ func TestHandleAndClassify_SingleMetricPerCall(t *testing.T) {
 		{
 			name:         "classified non-Unknown",
 			err:          errors.New("method not found"),
-			expectedCode: common.LavaErrorNodeMethodNotFound.Code,
+			expectedCode: common.RouterErrorNodeMethodNotFound.Code,
 		},
 		{
 			name:         "classified retryable",
 			err:          errors.New("rate limit exceeded"),
-			expectedCode: common.LavaErrorNodeRateLimited.Code,
+			expectedCode: common.RouterErrorNodeRateLimited.Code,
 		},
 		{
 			name:         "Unknown fall-through (handleGenericErrors returns nil)",
 			err:          errors.New("something completely unexpected"),
-			expectedCode: common.LavaErrorUnknown.Code,
+			expectedCode: common.RouterErrorUnknown.Code,
 		},
 		{
 			// net.ErrClosed is not in the registry (classifies Unknown), but
-			// handleGenericErrors recognises it and logs via LavaFormatProduction.
+			// handleGenericErrors recognises it and logs via FormatProduction.
 			// The handler routes the metric through EmitErrorMetric only for
 			// this path so the structured log fires exactly once while the
 			// Prometheus counter still increments. (io.EOF used to be the example
 			// here; it classifies as PROTOCOL_CONNECTION_CLOSED since MAG-4242.)
 			name:         "Unknown + handleGenericErrors logs (net.ErrClosed)",
 			err:          net.ErrClosed,
-			expectedCode: common.LavaErrorUnknown.Code,
+			expectedCode: common.RouterErrorUnknown.Code,
 		},
 		{
 			name:         "EOF is a closed connection, not Unknown",
 			err:          io.EOF,
-			expectedCode: common.LavaErrorConnectionClosed.Code,
+			expectedCode: common.RouterErrorConnectionClosed.Code,
 		},
 	}
 	for _, tt := range tests {

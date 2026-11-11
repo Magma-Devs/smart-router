@@ -17,9 +17,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -351,7 +351,7 @@ func TestRestChainListener_HealthPathNeverReachesTheRelay(t *testing.T) {
 			stub := &restHealthRelayStub{}
 			logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 			require.NoError(t, err)
-			endpoint := &lavasession.RPCEndpoint{
+			endpoint := &routersession.RPCEndpoint{
 				NetworkAddress:  "127.0.0.1:0",
 				ChainID:         "LAV1",
 				ApiInterface:    "rest",
@@ -442,7 +442,7 @@ func TestRestChainListener_RelaysTheBodyOfMethodsThatCarryOne(t *testing.T) {
 	stub := &restBodyRelayStub{}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	endpoint := &lavasession.RPCEndpoint{
+	endpoint := &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "LAV1",
 		ApiInterface:    "rest",
@@ -507,7 +507,7 @@ func TestRestListener_UndeclaredVerbIs501OnEveryHandler(t *testing.T) {
 	defer cancel()
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	listener := NewRestChainListener(ctx, &lavasession.RPCEndpoint{
+	listener := NewRestChainListener(ctx, &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "LAV1",
 		ApiInterface:    "rest",

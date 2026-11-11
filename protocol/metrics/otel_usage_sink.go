@@ -98,7 +98,7 @@ func NewOTelUsageSink(cfg OTelUsageSinkConfig) *OTelUsageSink {
 
 	exporter, err := otlploghttp.New(context.Background(), exporterOpts...)
 	if err != nil {
-		utils.LavaFormatError("Failed to construct OTLP log exporter", err,
+		utils.FormatError("Failed to construct OTLP log exporter", err,
 			utils.LogAttr("endpoint", cfg.Endpoint))
 		return nil
 	}
@@ -115,7 +115,7 @@ func NewOTelUsageSink(cfg OTelUsageSinkConfig) *OTelUsageSink {
 		semconv.ServiceInstanceID(cfg.ServiceInstanceID),
 	))
 	if err != nil {
-		utils.LavaFormatError("Failed to build OTel resource", err)
+		utils.FormatError("Failed to build OTel resource", err)
 		_ = exporter.Shutdown(context.Background())
 		return nil
 	}
@@ -125,7 +125,7 @@ func NewOTelUsageSink(cfg OTelUsageSinkConfig) *OTelUsageSink {
 		sdklog.WithResource(res),
 	)
 
-	utils.LavaFormatInfo("Starting OTel usage sink",
+	utils.FormatInfo("Starting OTel usage sink",
 		utils.LogAttr("endpoint", cfg.Endpoint),
 		utils.LogAttr("insecure", cfg.Insecure),
 		utils.LogAttr("queue_size", cfg.QueueSize),
@@ -233,9 +233,9 @@ func (s *OTelUsageSink) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.ExportTimeout)
 	defer cancel()
 	if err := s.provider.Shutdown(ctx); err != nil {
-		utils.LavaFormatWarning("Error shutting down OTel usage sink", err)
+		utils.FormatWarning("Error shutting down OTel usage sink", err)
 	}
-	utils.LavaFormatInfo("OTel usage sink closed",
+	utils.FormatInfo("OTel usage sink closed",
 		utils.LogAttr("sent_total", s.Stats().Sent),
 	)
 }

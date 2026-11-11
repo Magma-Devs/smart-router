@@ -22,7 +22,7 @@ func TestShouldRetryError(t *testing.T) {
 		{
 			// MAG-2771: a node's method-not-found is a claim about that node.
 			name:        "Wrapped NODE_METHOD_NOT_FOUND retries on another provider",
-			err:         common.NewLavaError(common.LavaErrorNodeMethodNotFound, "unsupported method \"eth_test\""),
+			err:         common.NewRouterError(common.RouterErrorNodeMethodNotFound, "unsupported method \"eth_test\""),
 			shouldRetry: true,
 		},
 		{
@@ -90,7 +90,7 @@ func TestIsUnsupportedMethodErrorType(t *testing.T) {
 			// MAG-2771: NODE_METHOD_NOT_FOUND is node-capability, so no node refusal reads as a
 			// router-terminal unsupported method any more.
 			name:     "Wrapped NODE_METHOD_NOT_FOUND is not an unsupported method",
-			err:      common.NewLavaError(common.LavaErrorNodeMethodNotFound, "unsupported method \"eth_test\""),
+			err:      common.NewRouterError(common.RouterErrorNodeMethodNotFound, "unsupported method \"eth_test\""),
 			expected: false,
 		},
 		{
@@ -100,7 +100,7 @@ func TestIsUnsupportedMethodErrorType(t *testing.T) {
 		},
 		{
 			name:     "Wrapped NODE_UNIMPLEMENTED is not an unsupported method",
-			err:      common.NewLavaError(common.LavaErrorNodeUnimplemented, "unsupported method"),
+			err:      common.NewRouterError(common.RouterErrorNodeUnimplemented, "unsupported method"),
 			expected: false,
 		},
 	}
@@ -142,7 +142,7 @@ func TestIsSolanaNonRetryableErrorType(t *testing.T) {
 		{
 			// MAG-2771: another provider may serve a method this node does not.
 			name:     "Wrapped NODE_METHOD_NOT_FOUND is retryable",
-			err:      common.NewLavaError(common.LavaErrorNodeMethodNotFound, "unsupported method \"eth_test\""),
+			err:      common.NewRouterError(common.RouterErrorNodeMethodNotFound, "unsupported method \"eth_test\""),
 			expected: false,
 		},
 	}
@@ -208,8 +208,8 @@ func TestSolanaNonRetryableError_ErrorMessage(t *testing.T) {
 
 	require.Contains(t, wrappedErr.Error(), "missing in long-term storage")
 
-	// Test Unwrap returns the underlying LavaError
+	// Test Unwrap returns the underlying RouterError
 	unwrapped := errors.Unwrap(wrappedErr)
 	require.NotNil(t, unwrapped)
-	require.True(t, errors.Is(wrappedErr, common.LavaErrorChainSolanaMissingLongTerm))
+	require.True(t, errors.Is(wrappedErr, common.RouterErrorChainSolanaMissingLongTerm))
 }

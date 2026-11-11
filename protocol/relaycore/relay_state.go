@@ -41,7 +41,7 @@ func GetEmptyRelayState(protocolMessage chainlib.ProtocolMessage) *RelayState {
 
 func NewRelayState(protocolMessage chainlib.ProtocolMessage, stateNumber int, archiveStatus *ArchiveStatus) *RelayState {
 	if archiveStatus == nil {
-		utils.LavaFormatError("misuse detected archiveStatus is nil", nil, utils.Attribute{Key: "protocolMessage.GetApi", Value: protocolMessage.GetApi()})
+		utils.FormatError("misuse detected archiveStatus is nil", nil, utils.Attribute{Key: "protocolMessage.GetApi", Value: protocolMessage.GetApi()})
 		archiveStatus = &ArchiveStatus{}
 	}
 	rs := &RelayState{

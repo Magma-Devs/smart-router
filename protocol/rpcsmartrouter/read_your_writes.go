@@ -227,7 +227,7 @@ func rywReplyIsAlreadyKnown(replyData []byte, chainFamily common.ChainFamily) bo
 	if json.Unmarshal(replyData, &reply) != nil || reply.Error == nil {
 		return false
 	}
-	return common.ClassifyError(nil, chainFamily, common.TransportJsonRPC, reply.Error.Code, reply.Error.Message) == common.LavaErrorChainTxAlreadyKnown
+	return common.ClassifyError(nil, chainFamily, common.TransportJsonRPC, reply.Error.Code, reply.Error.Message) == common.RouterErrorChainTxAlreadyKnown
 }
 
 // rywReplyTxHash reads the transaction hash out of an eth_sendRawTransaction reply, lowercased, or

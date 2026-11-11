@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
@@ -33,7 +33,7 @@ func newEthChainFetcherWithReply(t *testing.T, body string) *ChainFetcher {
 	require.NoError(t, err)
 	cp.SetSpec(spec)
 	return &ChainFetcher{
-		endpoint:    &lavasession.RPCProviderEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		endpoint:    &routersession.RPCProviderEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
 		chainRouter: replyingChainRouter{body: body},
 		chainParser: cp,
 	}

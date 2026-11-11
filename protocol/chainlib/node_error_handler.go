@@ -11,16 +11,16 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"google.golang.org/grpc/status"
 
 	"github.com/itchyny/gojq"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-// NewSolanaNonRetryableError creates an error wrapping a LavaError with non-retryable classification.
+// NewSolanaNonRetryableError creates an error wrapping a RouterError with non-retryable classification.
 func NewSolanaNonRetryableError(err error) error {
-	return common.NewLavaError(common.LavaErrorChainSolanaMissingLongTerm, err.Error())
+	return common.NewRouterError(common.RouterErrorChainSolanaMissingLongTerm, err.Error())
 }
 
 // ExtractNodeErrorDetails extracts the numeric error code and canonical message from a node error.
@@ -30,7 +30,7 @@ func NewSolanaNonRetryableError(err error) error {
 //  3. Raw HTTP status code        — extracts the HTTP status integer
 //
 // "HTTP-wrapped" means either HTTP error the router produces: rpcclient.HTTPError from the
-// chainlib proxies and *lavasession.HTTPStatusError from the direct senders (see httpErrorParts).
+// chainlib proxies and *routersession.HTTPStatusError from the direct senders (see httpErrorParts).
 // The direct one used to reach none of the three steps, so a direct-path 5xx carrying a JSON-RPC
 // error body was classified by its status line alone and its body's code was never read.
 //
@@ -99,7 +99,7 @@ func ExtractNodeErrorDetails(nodeError error) (errorCode int, errorMessage strin
 	return 0, errorMessage
 }
 
-// ClassifyNodeError classifies a node error into a LavaError using the error registry.
+// ClassifyNodeError classifies a node error into a RouterError using the error registry.
 // It extracts error codes and messages from JSON-RPC, gRPC, and HTTP errors,
 // then delegates to common.ClassifyError for two-tier classification.
 //
@@ -107,7 +107,7 @@ func ExtractNodeErrorDetails(nodeError error) (errorCode int, errorMessage strin
 //   - nodeError: the error from the node
 //   - chainFamily: the chain family for Tier 2 lookups (use -1 if unknown)
 //   - transport: the transport type for Tier 1 generic matcher partitioning
-func ClassifyNodeError(nodeError error, chainFamily common.ChainFamily, transport common.TransportType) *common.LavaError {
+func ClassifyNodeError(nodeError error, chainFamily common.ChainFamily, transport common.TransportType) *common.RouterError {
 	classified, _, _ := ClassifyNodeErrorWithDetails(nodeError, chainFamily, transport)
 	return classified
 }
@@ -116,7 +116,7 @@ func ClassifyNodeError(nodeError error, chainFamily common.ChainFamily, transpor
 // error code and inner error message extracted from the raw node error. Callers that
 // emit structured logs should prefer this so they don't lose the precise code/message
 // that classification already computed. Returns (nil, 0, "") when nodeError is nil.
-func ClassifyNodeErrorWithDetails(nodeError error, chainFamily common.ChainFamily, transport common.TransportType) (*common.LavaError, int, string) {
+func ClassifyNodeErrorWithDetails(nodeError error, chainFamily common.ChainFamily, transport common.TransportType) (*common.RouterError, int, string) {
 	if nodeError == nil {
 		return nil, 0, ""
 	}
@@ -144,9 +144,9 @@ func IsUnsupportedMethodError(nodeError error) bool {
 	return false
 }
 
-// IsUnsupportedMethodErrorType checks if an error wraps a LavaError with unsupported method SubCategory.
+// IsUnsupportedMethodErrorType checks if an error wraps a RouterError with unsupported method SubCategory.
 func IsUnsupportedMethodErrorType(err error) bool {
-	if le := common.AsLavaError(err); le != nil {
+	if le := common.AsRouterError(err); le != nil {
 		return le.SubCategory.IsUnsupportedMethod()
 	}
 	return false
@@ -161,15 +161,15 @@ func IsSolanaNonRetryableError(nodeError error) bool {
 	}
 	classified := ClassifyNodeError(nodeError, common.ChainFamilySolana, common.TransportJsonRPC)
 	switch classified {
-	case common.LavaErrorChainSolanaMissingLongTerm, common.LavaErrorUserInvalidParams:
+	case common.RouterErrorChainSolanaMissingLongTerm, common.RouterErrorUserInvalidParams:
 		return true
 	}
 	return false
 }
 
-// IsSolanaNonRetryableErrorType checks if an error wraps a non-retryable LavaError.
+// IsSolanaNonRetryableErrorType checks if an error wraps a non-retryable RouterError.
 func IsSolanaNonRetryableErrorType(err error) bool {
-	if le := common.AsLavaError(err); le != nil {
+	if le := common.AsRouterError(err); le != nil {
 		return !le.Retryable
 	}
 	return false
@@ -199,7 +199,7 @@ func ShouldRetryErrorWithContext(err error, chainFamily common.ChainFamily, tran
 
 	// Classify using the registry with chain-specific and transport-specific matchers
 	classified := ClassifyNodeError(err, chainFamily, transport)
-	if classified != nil && classified != common.LavaErrorUnknown {
+	if classified != nil && classified != common.RouterErrorUnknown {
 		// Unsupported methods are never retried regardless of Retryable flag
 		if classified.SubCategory.IsUnsupportedMethod() {
 			return false
@@ -219,24 +219,24 @@ func (geh *genericErrorHandler) handleConnectionError(err error) error {
 
 	// Only shapes common.DetectConnectionError does not name get here: handleAndClassify calls this
 	// on its Unknown branch alone, and the timeouts, refusals, EOF, DNS failures and the
-	// http-served-as-https reply are classified there first (MAG-4242), as connection LavaErrors.
+	// http-served-as-https reply are classified there first (MAG-4242), as connection RouterErrors.
 	switch {
 	case err == net.ErrWriteToConnected:
-		return utils.LavaFormatProduction(genericMsg+", Reason: Write to connected connection", nil)
+		return utils.FormatProduction(genericMsg+", Reason: Write to connected connection", nil)
 	case err == net.ErrClosed:
-		return utils.LavaFormatProduction(genericMsg+", Reason: Operation on closed connection", nil)
+		return utils.FormatProduction(genericMsg+", Reason: Operation on closed connection", nil)
 	}
 
 	if _, ok := err.(*net.OpError); ok {
 		// Handle the OpError cases the detector does not name without exposing specific details
-		return utils.LavaFormatProduction(genericMsg+", Reason: Network operation error", nil)
+		return utils.FormatProduction(genericMsg+", Reason: Network operation error", nil)
 	}
 
 	// Mask IP addresses and potential secrets in the error message, and check if any secret was found
 	maskedError, foundSecret := maskSensitiveInfo(err.Error())
 	if foundSecret {
 		// Log or handle the case when a secret was found, if necessary
-		utils.LavaFormatProduction(genericMsg+maskedError, nil)
+		utils.FormatProduction(genericMsg+maskedError, nil)
 	}
 	return nil
 }
@@ -265,12 +265,12 @@ func maskSensitiveInfo(errMsg string) (string, bool) {
 // is received, preserving pre-existing behavior for unrecognised error shapes.
 func (geh *genericErrorHandler) handleGenericErrors(ctx context.Context, nodeError error) error {
 	if nodeError == context.DeadlineExceeded || ctx.Err() == context.DeadlineExceeded {
-		return utils.LavaFormatProduction("Provider Failed Sending Message", common.ContextDeadlineExceededError)
+		return utils.FormatProduction("Provider Failed Sending Message", common.ContextDeadlineExceededError)
 	}
 	retError := geh.handleConnectionError(nodeError)
 	if retError != nil {
 		// printing the original error as  it was masked for the consumer to not see the private information such as ip address etc..
-		utils.LavaFormatProduction("Original Node Error", nodeError)
+		utils.FormatProduction("Original Node Error", nodeError)
 	}
 	return retError
 }
@@ -282,7 +282,7 @@ func (geh *genericErrorHandler) HandleStatusError(statusCode int, strict bool) e
 func (geh *genericErrorHandler) HandleJSONFormatError(replyData []byte) error {
 	_, err := gojq.Parse(string(replyData))
 	if err != nil {
-		return utils.LavaFormatError("Rest reply is not in JSON format", err, utils.Attribute{Key: "reply.Data", Value: string(replyData)})
+		return utils.FormatError("Rest reply is not in JSON format", err, utils.Attribute{Key: "reply.Data", Value: string(replyData)})
 	}
 	return nil
 }
@@ -317,14 +317,14 @@ func (geh *genericErrorHandler) ValidateRequestAndResponseIds(nodeMessageID json
 }
 
 // httpErrorParts returns the status and body of either HTTP error the router produces:
-// rpcclient.HTTPError, from the chainlib proxies, and *lavasession.HTTPStatusError, from the
+// rpcclient.HTTPError, from the chainlib proxies, and *routersession.HTTPStatusError, from the
 // direct senders. Both are matched by type, not through wrapping, as the rpcclient one always
 // was: an error the direct path already classified and wrapped keeps the verdict it was given.
 func httpErrorParts(err error) (statusCode int, body []byte, ok bool) {
 	switch httpError := err.(type) {
 	case rpcclient.HTTPError:
 		return httpError.StatusCode, httpError.Body, true
-	case *lavasession.HTTPStatusError:
+	case *routersession.HTTPStatusError:
 		if httpError != nil {
 			return httpError.StatusCode, httpError.Body, true
 		}
@@ -339,7 +339,7 @@ func TryRecoverNodeErrorFromClientError(nodeErr error) *rpcclient.JsonrpcMessage
 		jsonMessage := &rpcclient.JsonrpcMessage{}
 		err := json.Unmarshal(body, jsonMessage)
 		if err == nil {
-			utils.LavaFormatDebug("Successfully recovered HTTPError to node message", utils.LogAttr("jsonMessage", jsonMessage))
+			utils.FormatDebug("Successfully recovered HTTPError to node message", utils.LogAttr("jsonMessage", jsonMessage))
 			return jsonMessage
 		}
 	}
@@ -349,13 +349,13 @@ func TryRecoverNodeErrorFromClientError(nodeErr error) *rpcclient.JsonrpcMessage
 // emitClassificationTelemetry emits structured log + metric for a node
 // failure, respecting the single-log invariant: if a downstream handler
 // already logged the same failure via a different path (e.g.
-// LavaFormatProduction inside handleGenericErrors), we emit the metric
+// FormatProduction inside handleGenericErrors), we emit the metric
 // only and skip our structured log so each failure produces at most one
 // log line.
 //
 // Passing alreadyLoggedElsewhere=true is the "metric-only" path; passing
 // false is the "log + metric" path.
-func emitClassificationTelemetry(nodeError error, classified *common.LavaError, chainID string, errorCode int, errorMessage string, alreadyLoggedElsewhere bool) {
+func emitClassificationTelemetry(nodeError error, classified *common.RouterError, chainID string, errorCode int, errorMessage string, alreadyLoggedElsewhere bool) {
 	if alreadyLoggedElsewhere {
 		common.EmitErrorMetric(classified, chainID)
 		return
@@ -366,7 +366,7 @@ func emitClassificationTelemetry(nodeError error, classified *common.LavaError, 
 // handleAndClassify is the shared error handling path for all transports.
 // It composes three steps:
 //
-//  1. Classify — extract code/message and resolve to a *LavaError.
+//  1. Classify — extract code/message and resolve to a *RouterError.
 //  2. Route    — classified errors return immediately wrapped; Unknown
 //     errors fall through to handleGenericErrors for IP masking /
 //     transport-specific handling.
@@ -374,7 +374,7 @@ func emitClassificationTelemetry(nodeError error, classified *common.LavaError, 
 //     (see emitClassificationTelemetry for the single-log invariant).
 //
 // The Unknown branch is load-bearing: handleGenericErrors may log via
-// LavaFormatProduction for recognised connection shapes, and its return
+// FormatProduction for recognised connection shapes, and its return
 // value controls whether the caller falls back to the raw error. Callers
 // of HandleNodeError treat a nil return as "fall back to raw err" — see
 // jsonRPC.go: `if parsedError != nil { return parsedError } return err`.
@@ -385,14 +385,14 @@ func handleAndClassify(ctx context.Context, nodeError error, transport common.Tr
 
 	// Step 2 + 3 (classified path): log + metric here, wrap, return.
 	// handleGenericErrors is not reached on this branch.
-	if classified != common.LavaErrorUnknown {
+	if classified != common.RouterErrorUnknown {
 		emitClassificationTelemetry(nodeError, classified, chainID, errorCode, errorMessage, false /* not already logged */)
-		return common.NewLavaError(classified, nodeError.Error())
+		return common.NewRouterError(classified, nodeError.Error())
 	}
 
 	// Step 2 (Unknown path): delegate to handleGenericErrors. A non-nil
 	// return means it recognised a connection pattern and logged via
-	// LavaFormatProduction; a nil return means it didn't recognise the
+	// FormatProduction; a nil return means it didn't recognise the
 	// shape and the caller should fall back to the raw error.
 	parsed := geh.handleGenericErrors(ctx, nodeError)
 

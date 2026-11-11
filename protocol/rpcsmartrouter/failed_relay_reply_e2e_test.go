@@ -16,9 +16,9 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
@@ -102,13 +102,13 @@ func startFailedReplyRouter(t *testing.T, iface failedReplyInterface, upstreamUR
 	t.Cleanup(cancel)
 
 	parser := iface.parser(t)
-	providers := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	providers := map[uint64]*routersession.ConsumerSessionsWithProvider{}
 	for i, upstreamURL := range upstreamURLs {
-		connection, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstreamURL, Timeout: iface.upstreamTimeout}, 5, iface.apiInterface)
+		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstreamURL, Timeout: iface.upstreamTimeout}, 5, iface.apiInterface)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = connection.Close() })
-		provider := lavasession.NewConsumerSessionWithProvider(fmt.Sprintf("upstream-%d", i+1), []*lavasession.Endpoint{{
-			NetworkAddress: upstreamURL, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection},
+		provider := routersession.NewConsumerSessionWithProvider(fmt.Sprintf("upstream-%d", i+1), []*routersession.Endpoint{{
+			NetworkAddress: upstreamURL, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection},
 		}}, 100000, 1, 1)
 		provider.StaticProvider = true
 		providers[uint64(i)] = provider
@@ -157,7 +157,7 @@ func startFailedReplyRouter(t *testing.T, iface failedReplyInterface, upstreamUR
 			body:        string(read),
 			contentType: response.Header.Get("Content-Type"),
 			guid:        response.Header.Get(common.GUID_HEADER_NAME),
-			nodeError:   response.Header.Get(common.LAVA_IDENTIFIED_NODE_ERROR_HEADER),
+			nodeError:   response.Header.Get(common.IDENTIFIED_NODE_ERROR_HEADER),
 			header:      response.Header,
 		}
 	}
@@ -355,7 +355,7 @@ func TestFailedRelayReply_BudgetExpiryKeepsTheRequestHeaders_MAG3980(t *testing.
 	require.ElementsMatch(t, []string{"upstream-1", "upstream-2"},
 		strings.Split(read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME), ","),
 		"both upstreams were asked; nothing answered, so nothing follows them")
-	require.Equal(t, "true", read.header.Get(common.LAVA_HEDGE_TRIGGERED_HEADER))
+	require.Equal(t, "true", read.header.Get(common.HEDGE_TRIGGERED_HEADER))
 }
 
 // MAG-3980: a cross-validated request whose budget runs out while every upstream is quiet fails as

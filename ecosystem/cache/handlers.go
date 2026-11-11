@@ -118,7 +118,7 @@ func (s *RelayerCacheServer) FlushCache(ctx context.Context, req *emptypb.Empty)
 	if err := s.engine().Purge(ctx); err != nil {
 		return nil, err
 	}
-	utils.LavaFormatInfo("cache server flushed by FlushCache RPC")
+	utils.FormatInfo("cache server flushed by FlushCache RPC")
 	return &emptypb.Empty{}, nil
 }
 
@@ -139,7 +139,7 @@ func (s *RelayerCacheServer) cacheMiss(ctx context.Context, errPrint error) {
 func (s *RelayerCacheServer) PrintCacheStats(ctx context.Context, desc string) {
 	hits := atomic.LoadUint64(&s.cacheHits)
 	misses := atomic.LoadUint64(&s.cacheMisses)
-	_ = utils.LavaFormatDebug(desc,
+	_ = utils.FormatDebug(desc,
 		utils.Attribute{Key: "misses", Value: strconv.FormatUint(misses, 10)},
 		utils.Attribute{Key: "hits", Value: strconv.FormatUint(hits, 10)},
 	)

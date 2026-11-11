@@ -10,8 +10,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -22,7 +22,7 @@ const batchTestProvider = "provider-a"
 // batchStateMachine is the smallest RelayStateMachine a RelayProcessor needs to summarise results.
 type batchStateMachine struct {
 	protocolMessage chainlib.ProtocolMessage
-	usedProviders   *lavasession.UsedProviders
+	usedProviders   *routersession.UsedProviders
 }
 
 func (m *batchStateMachine) GetProtocolMessage() chainlib.ProtocolMessage { return m.protocolMessage }
@@ -33,7 +33,7 @@ func (m *batchStateMachine) GetRelayTaskChannel() (chan relaycore.RelayStateSend
 func (m *batchStateMachine) UpdateBatch(error)                                       {}
 func (m *batchStateMachine) GetSelection() relaycore.Selection                       { return relaycore.Stateless }
 func (m *batchStateMachine) GetCrossValidationParams() *common.CrossValidationParams { return nil }
-func (m *batchStateMachine) GetUsedProviders() *lavasession.UsedProviders            { return m.usedProviders }
+func (m *batchStateMachine) GetUsedProviders() *routersession.UsedProviders          { return m.usedProviders }
 func (m *batchStateMachine) SetResultsChecker(relaycore.ResultsCheckerInf)           {}
 
 type noMetrics struct{}
@@ -61,11 +61,11 @@ func batchRelayProcessor(t *testing.T) (*relaycore.RelayProcessor, chainlib.Prot
 	require.True(t, chainMessage.IsBatch())
 	protocolMessage := chainlib.NewProtocolMessage(chainMessage, nil, nil, "dapp", "127.0.0.1")
 
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 	defer cancel()
 	require.Nil(t, usedProviders.TryLockSelection(lockCtx))
-	usedProviders.AddUsed(lavasession.ConsumerSessionsMap{batchTestProvider: &lavasession.SessionInfo{}}, nil)
+	usedProviders.AddUsed(routersession.ConsumerSessionsMap{batchTestProvider: &routersession.SessionInfo{}}, nil)
 
 	stateMachine := &batchStateMachine{protocolMessage: protocolMessage, usedProviders: usedProviders}
 	return relaycore.NewRelayProcessor(ctx, nil, noMetrics{}, noMetrics{}, stateMachine), protocolMessage
@@ -76,7 +76,7 @@ func batchRelayProcessor(t *testing.T) (*relaycore.RelayProcessor, chainlib.Prot
 func completeAttempt(relayProcessor *relaycore.RelayProcessor, response *relaycore.RelayResponse) {
 	go func() {
 		time.Sleep(time.Millisecond)
-		relayProcessor.GetUsedProviders().RemoveUsed(batchTestProvider, lavasession.NewRouterKey(nil), response.Err)
+		relayProcessor.GetUsedProviders().RemoveUsed(batchTestProvider, routersession.NewRouterKey(nil), response.Err)
 		relayProcessor.SetResponse(response)
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)

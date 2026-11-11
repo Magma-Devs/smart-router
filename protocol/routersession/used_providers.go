@@ -1,0 +1,636 @@
+package routersession
+
+import (
+	"context"
+	"maps"
+	"slices"
+	"sync"
+	"time"
+
+	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/utils"
+)
+
+// A caller that finds another selection in flight for the same request polls for it to finish,
+// every selectionLockPollInterval, for at most selectionLockMaxWait. The caller's context bounds
+// the wait first; a deadline on it is honoured as a deadline, not only once its timer fires.
+// GetSessions used to add a one-second context.WithTimeout of its own per call — a timer and a
+// cancel func per relay for a wait that almost never happens — so the bound lives here now, and
+// the common path allocates nothing (MAG-4244). That second always ended the wait first (the
+// 500-poll loop under it needed 2.5 s), and it ended it as a done context, so the bound is that
+// second and ends the same way.
+const (
+	selectionLockPollInterval = 5 * time.Millisecond
+	selectionLockMaxWait      = time.Second
+)
+
+type BlockedProvidersInf interface {
+	GetBlockedProviders() []string
+}
+
+func NewUsedProviders(blockedProviders BlockedProvidersInf) *UsedProviders {
+	// originalUnwantedProviders holds ONLY the user's blocklist. Each router key is seeded from a
+	// COPY of it (see newSeededUniqueUsedProviders), never a reference — sharing one reference let a
+	// write under one key mutate the user's blocklist and every other key seeded from it (MAG-2442).
+	originalUnwantedProviders := map[string]struct{}{}
+	if blockedProviders != nil {
+		for _, providerAddress := range blockedProviders.GetBlockedProviders() {
+			originalUnwantedProviders[providerAddress] = struct{}{}
+		}
+	}
+
+	return &UsedProviders{
+		uniqueUsedProviders: map[string]*UniqueUsedProviders{
+			GetEmptyRouterKey().String(): newSeededUniqueUsedProviders(originalUnwantedProviders),
+		},
+		originalUnwantedProviders: originalUnwantedProviders,
+	}
+}
+
+// unique used providers are specific for an extension router key.
+// meaning each extension router key has a different used providers struct
+type UniqueUsedProviders struct {
+	providers         map[string]struct{}
+	unwantedProviders map[string]struct{}
+	erroredProviders  map[string]struct{} // providers who returned protocol errors (used to debug relays for now)
+	blockOnSyncLoss   map[string]struct{}
+}
+
+type UsedProviders struct {
+	lock                      sync.RWMutex
+	uniqueUsedProviders       map[string]*UniqueUsedProviders
+	originalUnwantedProviders map[string]struct{}
+	selecting                 bool
+	sessionsLatestBatch       int
+	// dispatched is sessionsLatestBatch without the per-batch reset: the provider of every session
+	// this request has dispatched in total, one entry per session. Callers comparing against a
+	// CUMULATIVE tally — "did everyone we asked come back?" — need this one; sessionsLatestBatch
+	// answers a per-batch question and silently means something else the moment a request runs a
+	// second batch.
+	//
+	// Names, not a count, because a count cannot say which attempt is still out, and the reply's
+	// attempt headers have to name one: a hedge's cancelled loser was sent and never reported back
+	// (MAG-3762). The in-flight set cannot stand in for this list. It drops a provider when the
+	// provider's session is freed, and that happens before the provider's result is posted. Each
+	// entry also keeps its batch and when it was taken, which tell a retry or hedge from a broadcast.
+	dispatched  []Dispatch
+	batchNumber int
+	// consistencySkips are the upstreams the consistency check passed over, each time it did.
+	consistencySkips []ConsistencySkip
+	// chainID is used for chain-aware unsupported-method detection (so
+	// chain-native messages don't collide with broad Tier-1 substring
+	// matchers). Empty means classification falls back to Tier-1 only.
+	chainID string
+	// lastChanceTaken records that this request was already lent a disabled endpoint
+	// (TakeLastChance), so a retrying request is lent at most one.
+	lastChanceTaken bool
+	// routerHealthCheck marks the request as the router's own health check (MarkRouterHealthCheck),
+	// not a client's. Its answer is a poll, so it must not switch an endpoint back on (MAG-4790).
+	routerHealthCheck bool
+}
+
+// Dispatch is one session a request sent: its provider, the batch it went out in, counted from 0
+// with one batch per GetSessions that returned sessions, and when it was taken for sending.
+type Dispatch struct {
+	Provider string
+	Batch    int
+	At       time.Time
+	// StaleFallback marks a session sent although the consistency check had passed its provider
+	// over, because no other provider was left: its answer may be stale.
+	StaleFallback bool
+}
+
+// ConsistencySkip is a provider the consistency check passed over before sending: it was Lag blocks
+// behind the chain tip, more than the Threshold allowed, in batch Batch. It got no request then.
+type ConsistencySkip struct {
+	Provider  string
+	Lag       int64
+	Threshold int64
+	Batch     int
+}
+
+// SetChainID attaches a chain ID to this UsedProviders instance so that
+// session-layer error classification (e.g. shouldRetryWithThisError) can
+// consult chain-specific Tier-2 matchers. Safe to call once after NewUsedProviders.
+func (up *UsedProviders) SetChainID(chainID string) {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	up.chainID = chainID
+}
+
+// TakeLastChance claims this request's single last chance: lending a disabled endpoint of a
+// provider the blocked-list fallback handed out. It returns true the first time and false after
+// that, so a request whose lent endpoint fails, and which then retries, is not lent one disabled
+// endpoint after another.
+func (up *UsedProviders) TakeLastChance() bool {
+	if up == nil {
+		return true
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	if up.lastChanceTaken {
+		return false
+	}
+	up.lastChanceTaken = true
+	return true
+}
+
+// MarkRouterHealthCheck records that this request is the router's own health check rather than a
+// client's. The relay path reads it with IsRouterHealthCheck: the health check may still be lent a
+// disabled endpoint by the last chance, so readiness can report whether a node answers, but its
+// success does not switch that endpoint back on (MAG-4790).
+func (up *UsedProviders) MarkRouterHealthCheck() {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	up.routerHealthCheck = true
+}
+
+// IsRouterHealthCheck reports whether MarkRouterHealthCheck was called: whether this request is the
+// router's own health check.
+func (up *UsedProviders) IsRouterHealthCheck() bool {
+	if up == nil {
+		return false
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return up.routerHealthCheck
+}
+
+func (up *UsedProviders) CurrentlyUsed() int {
+	if up == nil {
+		utils.FormatError("UsedProviders.CurrentlyUsed is nil, misuse detected", nil)
+		return 0
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	currentlyUsed := 0
+	for _, uniqueUsedProviders := range up.uniqueUsedProviders {
+		currentlyUsed += len(uniqueUsedProviders.providers)
+	}
+	return currentlyUsed
+}
+
+func (up *UsedProviders) SessionsLatestBatch() int {
+	if up == nil {
+		utils.FormatError("UsedProviders.SessionsLatestBatch is nil, misuse detected", nil)
+		return 0
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return up.sessionsLatestBatch
+}
+
+// SessionsDispatched returns how many sessions this request has dispatched across every batch.
+// Use it, not SessionsLatestBatch, whenever the other side of the comparison is cumulative.
+func (up *UsedProviders) SessionsDispatched() int {
+	if up == nil {
+		utils.FormatError("UsedProviders.SessionsDispatched is nil, misuse detected", nil)
+		return 0
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return len(up.dispatched)
+}
+
+// DispatchedProviders names the provider of every session this request has dispatched, one entry
+// per session, so a provider asked twice appears twice. Batches appear in the order they went out;
+// within one batch the order is arbitrary. A provider released before dispatch is not listed; one
+// that has since answered still is.
+func (up *UsedProviders) DispatchedProviders() []string {
+	if up == nil {
+		utils.FormatError("UsedProviders.DispatchedProviders is nil, misuse detected", nil)
+		return nil
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	names := make([]string, len(up.dispatched))
+	for i, dispatch := range up.dispatched {
+		names[i] = dispatch.Provider
+	}
+	return names
+}
+
+// RecordConsistencySkip records that the consistency check passed provider over in the batch just
+// taken, so the request's record can say who was not asked, and why.
+func (up *UsedProviders) RecordConsistencySkip(provider string, lag, threshold int64) {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	up.consistencySkips = append(up.consistencySkips, ConsistencySkip{Provider: provider, Lag: lag, Threshold: threshold, Batch: max(up.batchNumber-1, 0)})
+}
+
+// ConsistencySkips returns every skip RecordConsistencySkip recorded, in order.
+func (up *UsedProviders) ConsistencySkips() []ConsistencySkip {
+	if up == nil {
+		return nil
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return slices.Clone(up.consistencySkips)
+}
+
+// MarkStaleFallback flags provider's latest dispatch as a stale fallback.
+func (up *UsedProviders) MarkStaleFallback(provider string) {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	for i := len(up.dispatched) - 1; i >= 0; i-- {
+		if up.dispatched[i].Provider == provider {
+			up.dispatched[i].StaleFallback = true
+			return
+		}
+	}
+}
+
+// Dispatches is DispatchedProviders with each session's batch and the time it was taken for sending.
+func (up *UsedProviders) Dispatches() []Dispatch {
+	if up == nil {
+		return nil
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return slices.Clone(up.dispatched)
+}
+
+func (up *UsedProviders) BatchNumber() int {
+	if up == nil {
+		utils.FormatError("UsedProviders.BatchNumber is nil, misuse detected", nil)
+		return 0
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	return up.batchNumber
+}
+
+func (up *UsedProviders) CurrentlyUsedAddresses() []string {
+	if up == nil {
+		utils.FormatError("UsedProviders.CurrentlyUsedAddresses is nil, misuse detected", nil)
+		return []string{}
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	addresses := []string{}
+	for _, uniqueUsedProviders := range up.uniqueUsedProviders {
+		for addr := range uniqueUsedProviders.providers {
+			addresses = append(addresses, addr)
+		}
+	}
+	return addresses
+}
+
+func (up *UsedProviders) AllUnwantedAddresses() []string {
+	if up == nil {
+		utils.FormatError("UsedProviders.UnwantedAddresses is nil, misuse detected", nil)
+		return []string{}
+	}
+	up.lock.RLock()
+	defer up.lock.RUnlock()
+	// Dedup across router keys: the same provider is commonly unwanted under several keys
+	// (every key is seeded from the user blocklist), and callers expect a set, not a bag.
+	unwantedSet := map[string]struct{}{}
+	for _, uniqueUsedProviders := range up.uniqueUsedProviders {
+		for addr := range uniqueUsedProviders.unwantedProviders {
+			unwantedSet[addr] = struct{}{}
+		}
+	}
+	addresses := make([]string, 0, len(unwantedSet))
+	for addr := range unwantedSet {
+		addresses = append(addresses, addr)
+	}
+	return addresses
+}
+
+// newSeededUniqueUsedProviders builds a fresh per-router-key exclusion set whose unwanted map is a
+// COPY of the user's original blocklist. Each router key must own its unwanted map: seeding it with a
+// reference to originalUnwantedProviders (as this code once did) let a write under one key
+// (AddUnwantedAddresses, setUnwanted via RemoveUsed/ReleaseFromLatestBatch, MigrateUnwantedProviders)
+// mutate the user's blocklist and, through it, every other key seeded from the same reference
+// (MAG-2442). maps.Clone(nil) returns nil, so fall back to an empty map to keep writes safe.
+func newSeededUniqueUsedProviders(originalUnwantedProviders map[string]struct{}) *UniqueUsedProviders {
+	seededUnwanted := maps.Clone(originalUnwantedProviders)
+	if seededUnwanted == nil {
+		seededUnwanted = map[string]struct{}{}
+	}
+	return &UniqueUsedProviders{
+		providers:         map[string]struct{}{},
+		unwantedProviders: seededUnwanted,
+		blockOnSyncLoss:   map[string]struct{}{},
+		erroredProviders:  map[string]struct{}{},
+	}
+}
+
+// Use when locked. Checking wether a router key exists in unique used providers,
+// if it does, return it. If it doesn't
+// creating a new instance and returning it.
+func (up *UsedProviders) createOrUseUniqueUsedProvidersForKey(key RouterKey) *UniqueUsedProviders {
+	keyString := key.String()
+	uniqueUsedProviders, ok := up.uniqueUsedProviders[keyString]
+	if !ok {
+		// Seed from a COPY of the user blocklist so this key's writes stay local to it (MAG-2442).
+		uniqueUsedProviders = newSeededUniqueUsedProviders(up.originalUnwantedProviders)
+		up.uniqueUsedProviders[keyString] = uniqueUsedProviders
+	}
+	return uniqueUsedProviders
+}
+
+func (up *UsedProviders) AddUnwantedAddresses(address string, routerKey RouterKey) {
+	if up == nil {
+		utils.FormatError("UsedProviders.AddUnwantedAddresses is nil, misuse detected", nil)
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	uniqueUsedProviders := up.createOrUseUniqueUsedProvidersForKey(routerKey)
+	uniqueUsedProviders.unwantedProviders[address] = struct{}{}
+}
+
+// ReleaseFromLatestBatch removes a provider from the current batch as if it
+// had never dispatched. Use when a session is dropped AFTER AddUsed but BEFORE
+// any response was sent to the RelayProcessor (e.g. by a pre-dispatch filter
+// such as filterEndpointsByConsistency in the smart router).
+//
+// Decrements sessionsLatestBatch so RelayProcessor.checkEndProcessing's
+// "all workers reported back" exit (responsesCount >= sessionsLatestBatch)
+// matches the number of goroutines actually launched. Also removes the
+// provider from the in-flight set, marks it unwanted so subsequent retries
+// skip it, and records it as errored for debugging.
+//
+// Idempotent: a second call for the same provider is a no-op (the providers
+// map check guards against double-decrement).
+//
+// MUST NOT be called from the response path. The response path goes through
+// SingleConsumerSession.Free → RemoveUsed, which intentionally leaves
+// sessionsLatestBatch alone — the RelayProcessor counts via responsesCount.
+func (up *UsedProviders) ReleaseFromLatestBatch(provider string, routerKey RouterKey, err error) {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	uniqueUsedProviders := up.createOrUseUniqueUsedProvidersForKey(routerKey)
+
+	if _, inBatch := uniqueUsedProviders.providers[provider]; !inBatch {
+		return
+	}
+
+	delete(uniqueUsedProviders.providers, provider)
+	up.setUnwanted(uniqueUsedProviders, provider)
+	if err != nil {
+		uniqueUsedProviders.erroredProviders[provider] = struct{}{}
+	}
+	if up.sessionsLatestBatch > 0 {
+		up.sessionsLatestBatch--
+	}
+	// Same reason: this provider never dispatched, so it must not count as one we asked. The latest
+	// batch added it, so its entry is the last one under its name.
+	for i := len(up.dispatched) - 1; i >= 0; i-- {
+		if up.dispatched[i].Provider == provider {
+			up.dispatched = slices.Delete(up.dispatched, i, i+1)
+			break
+		}
+	}
+}
+
+// ReleaseSessionsFromLatestBatch is ReleaseFromLatestBatch for every entry of a
+// GetSessions result, each under the router key AddUsed filed it under: the
+// session's own key, or the empty key for an entry without a session. A key the
+// caller recomputes from the request can differ from the session's (extension
+// degradation picks sessions under the empty key while the message keeps its
+// extensions), and a mismatched key releases nothing.
+//
+// Call it before the sessions are freed: Free resets the session's key.
+func (up *UsedProviders) ReleaseSessionsFromLatestBatch(sessions ConsumerSessionsMap, err error) {
+	for provider, sessionInfo := range sessions {
+		if sessionInfo == nil { // AddUsed would have dereferenced it, so it was never registered
+			continue
+		}
+		routerKey := NewRouterKey(nil)
+		if sessionInfo.Session != nil {
+			routerKey = sessionInfo.Session.routerKey
+		}
+		up.ReleaseFromLatestBatch(provider, routerKey, err)
+	}
+}
+
+func (up *UsedProviders) RemoveUsed(provider string, routerKey RouterKey, err error) {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	uniqueUsedProviders := up.createOrUseUniqueUsedProvidersForKey(routerKey)
+
+	// Track errored providers for debugging
+	if err != nil {
+		uniqueUsedProviders.erroredProviders[provider] = struct{}{}
+	}
+
+	// Compute eligibility inputs for the policy
+	_, alreadyBlocked := uniqueUsedProviders.blockOnSyncLoss[provider]
+	isUnsupportedMethod := err != nil && common.IsUnsupportedMethodError(up.chainID, 0, err.Error())
+	isSyncLoss := err != nil && IsSessionSyncLoss(err)
+	isFirstSyncLoss := isSyncLoss && !alreadyBlocked
+
+	// Eligibility decision (a pure function of the three flags)
+	result := common.DecideEligibility(isUnsupportedMethod, isSyncLoss, isFirstSyncLoss)
+
+	if result.Action == common.EligibilityAllowRetry {
+		uniqueUsedProviders.blockOnSyncLoss[provider] = struct{}{}
+		utils.FormatWarning("Identified SyncLoss in provider, allowing retry", err, utils.Attribute{Key: "address", Value: provider})
+	} else {
+		up.setUnwanted(uniqueUsedProviders, provider)
+	}
+
+	delete(uniqueUsedProviders.providers, provider)
+}
+
+func (up *UsedProviders) ClearUnwanted() {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	// this is nil safe
+	for _, uniqueUsedProviders := range up.uniqueUsedProviders {
+		uniqueUsedProviders.unwantedProviders = map[string]struct{}{}
+	}
+}
+
+// RemoveUnwantedAddresses makes only the supplied providers eligible for
+// selection again, across every router key used by this request. Unlike
+// ClearUnwanted, it preserves exclusions for providers that failed for other
+// reasons. This is used by the smart router's all-stale consistency fallback:
+// once every selectable provider has failed pre-dispatch consistency
+// validation, only those consistency-rejected providers may be retried.
+func (up *UsedProviders) RemoveUnwantedAddresses(addresses []string) {
+	if up == nil || len(addresses) == 0 {
+		return
+	}
+
+	addressesToRemove := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		addressesToRemove[address] = struct{}{}
+	}
+
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	for _, uniqueUsedProviders := range up.uniqueUsedProviders {
+		for address := range addressesToRemove {
+			delete(uniqueUsedProviders.unwantedProviders, address)
+		}
+	}
+}
+
+func (up *UsedProviders) AddUsed(sessions ConsumerSessionsMap, err error) {
+	if up == nil {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	// this is nil safe
+	if len(sessions) > 0 && err == nil {
+		up.sessionsLatestBatch = 0
+		takenAt := time.Now()
+		for provider, sessionInfo := range sessions { // the key for ConsumerSessionsMap is the provider public address
+			var routerKey RouterKey
+			if sessionInfo.Session != nil {
+				routerKey = sessionInfo.Session.routerKey
+			} else {
+				routerKey = NewRouterKey(nil)
+			}
+			uniqueUsedProviders := up.createOrUseUniqueUsedProvidersForKey(routerKey)
+			uniqueUsedProviders.providers[provider] = struct{}{}
+			up.sessionsLatestBatch++
+			up.dispatched = append(up.dispatched, Dispatch{Provider: provider, Batch: up.batchNumber, At: takenAt})
+		}
+		// increase batch number
+		up.batchNumber++
+	}
+	up.selecting = false
+}
+
+// called when already locked.
+func (up *UsedProviders) setUnwanted(uniqueUsedProviders *UniqueUsedProviders, provider string) {
+	uniqueUsedProviders.unwantedProviders[provider] = struct{}{}
+}
+
+func (up *UsedProviders) TryLockSelection(ctx context.Context) error {
+	if up == nil {
+		return nil
+	}
+	// A request that is already over takes no selection, free lock or not: the loop this replaced
+	// looked at the context before its first attempt. Err allocates nothing.
+	if ctx.Err() != nil {
+		return ContextDoneNoNeedToLockSelectionError
+	}
+	if up.tryLockSelection() {
+		return nil // the common case: no other selection is running for this request
+	}
+	deadline := time.Now().Add(selectionLockMaxWait)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			utils.FormatTrace("Failed locking selection, context is done")
+			return ContextDoneNoNeedToLockSelectionError
+		default:
+		}
+		if up.tryLockSelection() {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(selectionLockPollInterval)
+	}
+	// Either bound ends the wait the way GetSessions' own one-second context used to.
+	utils.FormatTrace("Failed locking selection, wait bound reached", utils.LogAttr("GUID", ctx), utils.LogAttr("maxWait", selectionLockMaxWait))
+	return ContextDoneNoNeedToLockSelectionError
+}
+
+func (up *UsedProviders) tryLockSelection() bool {
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	if !up.selecting {
+		up.selecting = true
+		return true
+	}
+	return false
+}
+
+// GetErroredProviders returns the providers that reported a protocol error under routerKey, as a
+// COPY taken while the lock is held. The live map keeps changing after this returns: the router
+// answers as soon as enough providers agree, and the slower ones then land in RemoveUsed and
+// ReleaseFromLatestBatch, which write to it. Handing out the map itself let a caller iterate it
+// concurrently with those writes, which Go's runtime treats as a fatal throw rather than a panic:
+// nothing on the path can recover it and the process ends (MAG-3103). GetUnwantedProvidersToSend
+// below already copies for the same reason.
+func (up *UsedProviders) GetErroredProviders(routerKey RouterKey) map[string]struct{} {
+	if up == nil {
+		return map[string]struct{}{}
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	uniqueUsedProviders := up.createOrUseUniqueUsedProvidersForKey(routerKey)
+	return maps.Clone(uniqueUsedProviders.erroredProviders)
+}
+
+func (up *UsedProviders) GetUnwantedProvidersToSend(routerKey RouterKey) map[string]struct{} {
+	if up == nil {
+		return map[string]struct{}{}
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	uniqueUsedProviders := up.createOrUseUniqueUsedProvidersForKey(routerKey)
+	unwantedProvidersToSend := map[string]struct{}{}
+	// block the currently used providers
+	for provider := range uniqueUsedProviders.providers {
+		unwantedProvidersToSend[provider] = struct{}{}
+	}
+	// block providers that we have a response for
+	for provider := range uniqueUsedProviders.unwantedProviders {
+		unwantedProvidersToSend[provider] = struct{}{}
+	}
+	return unwantedProvidersToSend
+}
+
+// MigrateUnwantedProviders copies every provider already tried under the src
+// routerKey (whether still in-flight in providers, or already responded and moved
+// to unwantedProviders) into the unwanted set of the dst routerKey.
+//
+// The used/unwanted exclusion is partitioned per routerKey, and routerKey is derived
+// from the request's extensions. When a retry toggles an extension (e.g. the
+// speculative archive add/remove) the routerKey changes, so a provider that just
+// failed under the old key would not be excluded under the new one and could be
+// re-selected for the retry (MAG-2228). Calling this on a toggle keeps an
+// already-tried provider excluded across the change.
+func (up *UsedProviders) MigrateUnwantedProviders(src, dst RouterKey) {
+	if up == nil {
+		return
+	}
+	if src.String() == dst.String() {
+		return
+	}
+	up.lock.Lock()
+	defer up.lock.Unlock()
+	srcProviders := up.createOrUseUniqueUsedProvidersForKey(src)
+	dstProviders := up.createOrUseUniqueUsedProvidersForKey(dst)
+	for provider := range srcProviders.providers {
+		dstProviders.unwantedProviders[provider] = struct{}{}
+	}
+	for provider := range srcProviders.unwantedProviders {
+		dstProviders.unwantedProviders[provider] = struct{}{}
+	}
+}

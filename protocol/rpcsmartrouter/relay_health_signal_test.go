@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
 )
@@ -41,7 +41,7 @@ func TestUpstreamAnswerFrom(t *testing.T) {
 		},
 		{name: "a node error", nodeErrors: []relaycore.RelayError{{Err: errors.New("execution reverted")}}, want: upstreamAnswerError},
 		{name: "a JSON-RPC error status", protocolErrors: []relaycore.RelayError{
-			failed(fmt.Errorf("relay failed: %w", &lavasession.HTTPStatusError{StatusCode: 503}), common.RelayResult{}),
+			failed(fmt.Errorf("relay failed: %w", &routersession.HTTPStatusError{StatusCode: 503}), common.RelayResult{}),
 		}, want: upstreamAnswerError},
 		{name: "a REST error status", protocolErrors: []relaycore.RelayError{
 			failed(errors.New("HTTP 503"), common.RelayResult{IsNodeError: true}),
@@ -50,7 +50,7 @@ func TestUpstreamAnswerFrom(t *testing.T) {
 			failed(fmt.Errorf("HTTP 429: %w", common.StatusCodeError429), common.RelayResult{}),
 		}, want: upstreamAnswerError},
 		{name: "a classified rate limit", protocolErrors: []relaycore.RelayError{
-			{Err: errors.New("slow down"), LavaError: common.LavaErrorNodeRateLimited},
+			{Err: errors.New("slow down"), RouterError: common.RouterErrorNodeRateLimited},
 		}, want: upstreamAnswerError},
 		{name: "a refused connection", protocolErrors: []relaycore.RelayError{
 			failed(errors.New("dial tcp 10.0.0.1:443: connect: connection refused"), common.RelayResult{}),

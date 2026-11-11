@@ -23,7 +23,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
@@ -282,7 +282,7 @@ func CreateChainLibMocks(
 	wsServerCallback http.HandlerFunc,
 	getToTopMostPath string,
 	services []string,
-) (cpar ChainParser, crout ChainRouter, cfetc chaintracker.ChainFetcher, closeServer func(), endpointRet *lavasession.RPCProviderEndpoint, errRet error) {
+) (cpar ChainParser, crout ChainRouter, cfetc chaintracker.ChainFetcher, closeServer func(), endpointRet *routersession.RPCProviderEndpoint, errRet error) {
 	// The mocks log at debug. The level is process-wide, so it is set once for the whole binary.
 	UseMockLogLevel()
 	// Create a cancellable context for the connector to prevent leaks
@@ -311,8 +311,8 @@ func CreateChainLibMocks(
 	}
 	var chainRouter ChainRouter
 	chainParser.SetSpec(spec)
-	endpoint := &lavasession.RPCProviderEndpoint{
-		NetworkAddress: lavasession.NetworkAddressData{},
+	endpoint := &routersession.RPCProviderEndpoint{
+		NetworkAddress: routersession.NetworkAddressData{},
 		ChainID:        specIndex,
 		ApiInterface:   apiInterface,
 		NodeUrls:       []common.NodeUrl{},

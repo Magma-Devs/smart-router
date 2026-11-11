@@ -8,7 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -16,7 +16,7 @@ import (
 
 // TestMetadataFromDirectiveHeadersRoundTrip guards the earliest-block re-parse fix in
 // updateProtocolMessageIfNeededWithNewEarliestData: directive headers rebuilt into metadata must
-// survive being re-split by LavaDirectiveHeaders (the same path ParseRelay uses), so a re-parsed
+// survive being re-split by DirectiveHeaders (the same path ParseRelay uses), so a re-parsed
 // protocol message keeps the client's lava-extension (and other) directives. Without this, the
 // rebuilt message's cache key would disagree with the original message's key on the archive path,
 // undermining the per-directive cache lane.
@@ -28,7 +28,7 @@ func TestMetadataFromDirectiveHeadersRoundTrip(t *testing.T) {
 			common.EXTENSION_OVERRIDE_HEADER_NAME:  "archive",
 			common.FORCE_CACHE_REFRESH_HEADER_NAME: "true",
 		}
-		forwarded, directives := rpcss.LavaDirectiveHeaders(metadataFromDirectiveHeaders(original))
+		forwarded, directives := rpcss.DirectiveHeaders(metadataFromDirectiveHeaders(original))
 		require.Empty(t, forwarded, "directive headers must not leak into forwarded metadata")
 		require.Equal(t, original, directives, "directives must survive the metadata round-trip")
 	})
@@ -47,8 +47,8 @@ func TestMetadataFromDirectiveHeadersRoundTrip(t *testing.T) {
 // outcome passes having measured nothing. That is the exact failure mode this feature
 // exists to escape, so it is guarded rather than argued.
 //
-// lava-debug-relay qualifies because it is registered in SPECIAL_LAVA_DIRECTIVE_HEADERS
-// and stripped by LavaDirectiveHeaders before ParseMsg, so it is gone before the key is
+// lava-debug-relay qualifies because it is registered in SPECIAL_DIRECTIVE_HEADERS
+// and stripped by DirectiveHeaders before ParseMsg, so it is gone before the key is
 // built. A newly minted header fails a second way worth recording: BaseChainParser
 // .HandleHeaders keeps only headers the SPEC declares, so an undeclared name is
 // dropped and the router never sees the request at all — and a name a spec DOES
@@ -59,7 +59,7 @@ func TestCacheTierDirectiveDoesNotChangeTheCacheKey(t *testing.T) {
 
 	// The registration is what makes the stripping happen; without it the directive
 	// would be an ordinary header and everything below would change meaning.
-	require.Contains(t, common.SPECIAL_LAVA_DIRECTIVE_HEADERS, common.LAVA_DEBUG_RELAY,
+	require.Contains(t, common.SPECIAL_DIRECTIVE_HEADERS, common.DEBUG_RELAY,
 		"the cache-tier headers are gated on this directive, which must stay a stripped one")
 
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -71,7 +71,7 @@ func TestCacheTierDirectiveDoesNotChangeTheCacheKey(t *testing.T) {
 
 	rpcss := &RPCSmartRouterServer{
 		chainParser:    chainParser,
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: spectypes.APIInterfaceRest},
 	}
 
 	const apiURL = "/cosmos/base/tendermint/v1beta1/blocks/latest"
@@ -93,17 +93,17 @@ func TestCacheTierDirectiveDoesNotChangeTheCacheKey(t *testing.T) {
 	plain := parse(t, apiURL, nil)
 
 	t.Run("the directive never reaches the metadata the key is built from", func(t *testing.T) {
-		withDirective := parse(t, apiURL, []pairingtypes.Metadata{{Name: common.LAVA_DEBUG_RELAY, Value: "true"}})
+		withDirective := parse(t, apiURL, []pairingtypes.Metadata{{Name: common.DEBUG_RELAY, Value: "true"}})
 		for _, metadata := range withDirective.RelayPrivateData().Metadata {
-			require.NotEqual(t, common.LAVA_DEBUG_RELAY, strings.ToLower(metadata.Name),
+			require.NotEqual(t, common.DEBUG_RELAY, strings.ToLower(metadata.Name),
 				"a directive that survived into RelayPrivateData would be hashed into the cache key")
 		}
-		require.Contains(t, withDirective.GetDirectiveHeaders(), common.LAVA_DEBUG_RELAY,
+		require.Contains(t, withDirective.GetDirectiveHeaders(), common.DEBUG_RELAY,
 			"stripped from the request, but still delivered to the router as a directive")
 	})
 
 	t.Run("lava-debug-relay leaves the key untouched", func(t *testing.T) {
-		withDirective := parse(t, apiURL, []pairingtypes.Metadata{{Name: common.LAVA_DEBUG_RELAY, Value: "true"}})
+		withDirective := parse(t, apiURL, []pairingtypes.Metadata{{Name: common.DEBUG_RELAY, Value: "true"}})
 		require.Equal(t, hashOf(t, plain), hashOf(t, withDirective),
 			"asking for the cache tier must not move the request into its own cache lane")
 	})

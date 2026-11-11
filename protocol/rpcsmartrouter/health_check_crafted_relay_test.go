@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
@@ -35,7 +35,7 @@ type healthRelayFleet struct {
 	// stopUpstream closes the upstream's listener, so later requests are refused.
 	stopUpstream func()
 	// endpoints are the fleet's endpoints, one per provider, so a test can switch them off.
-	endpoints []*lavasession.Endpoint
+	endpoints []*routersession.Endpoint
 }
 
 // newHealthRelayFleet wires the fleet under the given policy, written for the latest-block method.
@@ -79,21 +79,21 @@ func newHealthRelayFleetServing(t *testing.T, policy *CrossValidationPolicy, han
 
 	// Three providers, one upstream. Each holds its own connection, so session selection has a real
 	// choice to make and the relay it picks reaches a real node.
-	pairingList := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
-	var endpoints []*lavasession.Endpoint
+	pairingList := map[uint64]*routersession.ConsumerSessionsWithProvider{}
+	var endpoints []*routersession.Endpoint
 	for i, group := range []string{"group-a", "group-a", "group-b"} {
-		conn, connErr := lavasession.NewDirectRPCConnection(ctx, providerEndpoint.NodeUrls[0], 5, spectypes.APIInterfaceJsonRPC)
+		conn, connErr := routersession.NewDirectRPCConnection(ctx, providerEndpoint.NodeUrls[0], 5, spectypes.APIInterfaceJsonRPC)
 		require.NoError(t, connErr)
 		t.Cleanup(func() { _ = conn.Close() })
-		endpoint := &lavasession.Endpoint{
+		endpoint := &routersession.Endpoint{
 			NetworkAddress:    providerEndpoint.NodeUrls[0].Url,
 			Enabled:           true,
-			DirectConnections: []lavasession.DirectRPCConnection{conn},
+			DirectConnections: []routersession.DirectRPCConnection{conn},
 		}
 		endpoints = append(endpoints, endpoint)
-		provider := lavasession.NewConsumerSessionWithProvider(
+		provider := routersession.NewConsumerSessionWithProvider(
 			"upstream-"+string(rune('a'+i)),
-			[]*lavasession.Endpoint{endpoint},
+			[]*routersession.Endpoint{endpoint},
 			100000, 1, 1)
 		provider.StaticProvider = true
 		provider.GroupLabel = group
@@ -171,7 +171,7 @@ func TestSendCraftedRelays_IgnoresCrossValidationPolicy(t *testing.T) {
 			// Premise: the policy is live and really would bind this method for a CLIENT request,
 			// with the operator's own threshold. Without this the case below would pass equally
 			// against a resolver that had quietly stopped working.
-			clientSM, err := NewSmartRouterRelayStateMachineWithPolicy(t.Context(), lavasession.NewUsedProviders(nil),
+			clientSM, err := NewSmartRouterRelayStateMachineWithPolicy(t.Context(), routersession.NewUsedProviders(nil),
 				fleet.server, fleet.craftedMessage(t), nil, false, fleet.resolver, "ETH1", "jsonrpc")
 			require.NoError(t, err)
 			require.Equal(t, relaycore.CrossValidation, clientSM.GetSelection())
@@ -214,7 +214,7 @@ func TestHealthRelayUnderThePreFixWiring(t *testing.T) {
 			ctx := t.Context()
 			message := fleet.craftedMessage(t)
 
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 			usedProviders.SetChainID("ETH1")
 			// The pre-fix constructor, verbatim.
 			stateMachine, err := NewSmartRouterRelayStateMachineWithPolicy(ctx, usedProviders, fleet.server,
@@ -235,7 +235,7 @@ func TestHealthRelayUnderThePreFixWiring(t *testing.T) {
 				return
 			}
 			require.Error(t, err, "one session cannot satisfy this policy")
-			require.ErrorIs(t, err, lavasession.PairingListEmptyError)
+			require.ErrorIs(t, err, routersession.PairingListEmptyError)
 			require.Contains(t, err.Error(), tc.refusal, "the refusal an operator saw on every health check")
 			require.Zero(t, fleet.served.Load(),
 				"refused before anything was sent — which is why no node was ever asked whether it was healthy")

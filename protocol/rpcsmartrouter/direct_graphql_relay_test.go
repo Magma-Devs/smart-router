@@ -13,7 +13,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
@@ -188,7 +188,7 @@ func TestGraphQLDirectRelay(t *testing.T) {
 			}))
 			defer server.Close()
 
-			directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: server.URL + "/graphql"}, 1, "")
+			directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: server.URL + "/graphql"}, 1, "")
 			require.NoError(t, err)
 			sender := &DirectRPCRelaySender{directConnection: directConn, endpointName: "graphql-upstream"}
 

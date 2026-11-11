@@ -20,10 +20,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
@@ -33,13 +33,13 @@ import (
 // metadata shows is typed on it.
 func grpcStatusRelayWithMetadata(t *testing.T, code codes.Code, nodeMessage string, md map[string][]string) *common.RelayResult {
 	t.Helper()
-	body, err := json.Marshal(lavasession.GRPCNodeErrorResponse{ErrorMessage: nodeMessage, ErrorCode: uint32(code)})
+	body, err := json.Marshal(routersession.GRPCNodeErrorResponse{ErrorMessage: nodeMessage, ErrorCode: uint32(code)})
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
 		directConnection: &fakeDirectConn{
-			resp: &lavasession.DirectRPCResponse{Data: body, StatusCode: int(code), Metadata: md},
-			err:  lavasession.NewGRPCStatusError(uint32(code), nodeMessage, nil, md),
+			resp: &routersession.DirectRPCResponse{Data: body, StatusCode: int(code), Metadata: md},
+			err:  routersession.NewGRPCStatusError(uint32(code), nodeMessage, nil, md),
 		},
 		endpointName: "grpc-endpoint",
 		chainFamily:  common.ChainFamily(-1),
@@ -146,18 +146,18 @@ func newGRPCRateLimitRouter(t *testing.T, address string) (server *RPCSmartRoute
 	parser.SetSpec(spec)
 
 	nodeURL := common.NodeUrl{Url: "grpc://" + address, GrpcConfig: common.GrpcConfig{AllowInsecure: true}}
-	connection, err := lavasession.NewDirectRPCConnection(context.Background(), nodeURL, 5, "")
+	connection, err := routersession.NewDirectRPCConnection(context.Background(), nodeURL, 5, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = connection.Close() })
 	provider = "grpc-rate-limited"
-	endpoint := &lavasession.Endpoint{NetworkAddress: nodeURL.Url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection}}
-	providerSessions := lavasession.NewConsumerSessionWithProvider(provider, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
+	endpoint := &routersession.Endpoint{NetworkAddress: nodeURL.Url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
+	providerSessions := routersession.NewConsumerSessionWithProvider(provider, []*routersession.Endpoint{endpoint}, 100000, 1, 1)
 	providerSessions.StaticProvider = true
 
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: spectypes.APIInterfaceGrpc}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: spectypes.APIInterfaceGrpc}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, 1, nil, chainID)
-	sessionManager := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
-	require.NoError(t, sessionManager.UpdateAllProviders(1, map[uint64]*lavasession.ConsumerSessionsWithProvider{0: providerSessions}, nil))
+	sessionManager := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
+	require.NoError(t, sessionManager.UpdateAllProviders(1, map[uint64]*routersession.ConsumerSessionsWithProvider{0: providerSessions}, nil))
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
 	return &RPCSmartRouterServer{

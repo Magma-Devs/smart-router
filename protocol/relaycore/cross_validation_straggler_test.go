@@ -10,7 +10,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
@@ -37,7 +37,7 @@ func TestWatchCrossValidationStragglers(t *testing.T) {
 	consensusHash := canonicalResponseHash(consensusBody)
 
 	newCVProcessor := func() *RelayProcessor {
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		return NewRelayProcessor(ctx, &common.CrossValidationParams{MaxParticipants: 3, AgreementThreshold: 2}, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, CrossValidation))
 	}
 	successResponse := func(provider, group string, body []byte) *RelayResponse {

@@ -24,7 +24,7 @@ func InitErrorMetrics() {
 		//   - chain_id:       ~50 live chains
 		// Theoretical max: 100 × 2 × 2 × 50 = 20,000 series.
 		// Practical max is much lower because (a) category and retryable are
-		// 1:1 derivable from error_name — each LavaError pins both at
+		// 1:1 derivable from error_name — each RouterError pins both at
 		// registration — and (b) most (name, chain) pairs never fire.
 		// Realistic steady-state: a few hundred series.
 		//
@@ -55,7 +55,7 @@ func InitErrorMetrics() {
 		//     keeps accumulating in-process and can be reached via direct
 		//     introspection, but /metrics will be missing the series.
 		counter = RegisterOrReuse(prometheus.DefaultRegisterer, counter, func(err error) {
-			utils.LavaFormatWarning("failed to register smartrouter_errors_total Prometheus counter; metric will not appear in /metrics scrapes", err)
+			utils.FormatWarning("failed to register smartrouter_errors_total Prometheus counter; metric will not appear in /metrics scrapes", err)
 		})
 
 		common.SetErrorMetricsCallback(func(_ uint32, errorName string, errorCategory string, retryable bool, chainID string) {

@@ -7,10 +7,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaypolicy"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -57,7 +57,7 @@ func SmartRouterPolicyConfig() relaypolicy.PolicyConfig {
 // a request outright on a header it could not parse (MAG-3603).
 func NewSmartRouterRelayStateMachineWithPolicy(
 	ctx context.Context,
-	usedProviders *lavasession.UsedProviders,
+	usedProviders *routersession.UsedProviders,
 	relaySender SmartRouterRelaySender,
 	protocolMessage chainlib.ProtocolMessage,
 	analytics *metrics.RelayMetrics,
@@ -116,7 +116,7 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 				var err error
 				caller, callerPresent, err = protocolMessage.GetCrossValidationParameters()
 				if callerPresent && err != nil {
-					return nil, utils.LavaFormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
+					return nil, utils.FormatError("invalid cross-validation headers", err, utils.LogAttr("GUID", ctx))
 				}
 			}
 			for _, policyMethod := range policyMethods {
@@ -129,7 +129,7 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 			if cvOverride != nil {
 				eff := *cvOverride
 				if debugRelays {
-					utils.LavaFormatDebug("[CrossValidation] per-method policy resolved",
+					utils.FormatDebug("[CrossValidation] per-method policy resolved",
 						utils.LogAttr("chainID", chainID),
 						utils.LogAttr("apiInterface", apiInterface),
 						utils.LogAttr("method", method),
@@ -145,7 +145,7 @@ func NewSmartRouterRelayStateMachineWithPolicy(
 			// Two reasons reach here now, and naming the wrong one sends an operator looking for
 			// a policy nobody wrote: before the write skip above, this branch was reachable only
 			// when a forbid policy existed. Both can hold at once, and then both are named.
-			utils.LavaFormatDebug("[CrossValidation] caller cross-validation headers not consulted",
+			utils.FormatDebug("[CrossValidation] caller cross-validation headers not consulted",
 				utils.LogAttr("reason", callerCVSkipReason(forbidCallerCV, routesAsWrite)),
 				utils.LogAttr("chainID", chainID),
 				utils.LogAttr("apiInterface", apiInterface),

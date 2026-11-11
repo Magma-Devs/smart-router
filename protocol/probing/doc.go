@@ -12,5 +12,5 @@
 //
 // This package is an intentionally empty shell created during the
 // ChainTracker & Probing Redesign prep (MAG-2171) to stake out the boundary
-// before the probing logic is extracted here from lavasession in a later ticket.
+// before the probing logic is extracted here from routersession in a later ticket.
 package probing
