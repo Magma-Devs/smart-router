@@ -83,7 +83,8 @@ affecting one of the subscribed addresses; no transaction is sent by this test.
 
 The regular JSON-RPC health command verifies normal RPC endpoints; it does not
 verify this native socket. Provider product activation can be independent of
-ordinary Bitcoin RPC and of accepting a subscription. For example, an Alchemy
-UTXO REST request returning `UTXO requests are not allowed` requires checking
-the app's Bitcoin/UTXO endpoint toggle. Purchasing a different plan is not a
-substitute for verifying the supported method and the app's activation.
+ordinary Bitcoin RPC and of accepting a subscription. An Alchemy app can have
+Bitcoin Testnet4 enabled while its separately billed UTXO add-on is inactive.
+Subscription acknowledgement does not establish that indexed information
+methods are available. Check each required method and real event delivery
+using the account's current entitlements before considering a purchase.
