@@ -360,7 +360,7 @@ func TestFetchEndpointConnection_InternalPath(t *testing.T) {
 }
 
 // TestFetchEndpointConnection_DirectRPC_SkipsWebsocketEndpoints is the regression guard for
-// the hypernative monad incident: a vendor listed as [https, wss] under jsonrpc. With the
+// the Monad incident (MAG-3477): a vendor listed as [https, wss] under jsonrpc. With the
 // https url backed off for timing out, selection used to fall through to the wss endpoint,
 // and every relay then failed instantly with "connection does not support HTTP requests
 // (protocol: wss)". A websocket endpoint must never be offered for a relay.

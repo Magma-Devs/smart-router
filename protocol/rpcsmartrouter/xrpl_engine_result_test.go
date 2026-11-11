@@ -179,7 +179,7 @@ func TestJSONRPCListener_XRPLSubmitBroadcast(t *testing.T) {
 		wantNodeErrFlag bool
 	}{
 		{
-			// The dfns case: the rejection arrives first, and the caller must still see the success.
+			// The rejection arrives first, and the caller must still see the success.
 			name: "gossip rejection first", firstReply: xrplPastSeq, laterReply: xrplApplied,
 			wantReply: xrplApplied,
 		},

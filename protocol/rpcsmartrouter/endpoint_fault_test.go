@@ -52,7 +52,7 @@ func TestEndpointFault_AnswerShapes(t *testing.T) {
 			why:    "a full node is not broken for being a full node; the retry reaches the archive tier",
 		},
 		{
-			// MAG-5021: Tatum on GK8 Hoodi, eth_call tagged "pending", answered
+			// MAG-5021: Tatum on Hoodi, eth_call tagged "pending", answered
 			// "pending state is not supported". The code is not confirmed; -32000 is assumed.
 			name:   "pending state not served by this node",
 			result: jsonrpcNodeError(-32000, "pending state is not supported"),

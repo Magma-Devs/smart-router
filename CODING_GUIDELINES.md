@@ -44,6 +44,11 @@ This document is an extension to [CONTRIBUTING](./CONTRIBUTING.md) and provides 
   for a small allow-list of transport headers, because auth header names are
   operator-configured and no deny-list can enumerate them.
 
+* Customer identities and customer-specific usage figures belong in private Jira
+  evidence. Public source, comments, fixtures, documentation, commit messages and
+  pull request discussions use neutral examples and reserved example domains.
+  Preserve the technical failure and Jira reference without identifying the tenant.
+
 ### Documentation
 
 When writing code that is complex or relies on another piece of the code, it is advised to create a diagram or a flowchart to explain the logic. This will help other developers to understand the code and will also help you to understand the logic better.
