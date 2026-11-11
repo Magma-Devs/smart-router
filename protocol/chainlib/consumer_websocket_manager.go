@@ -385,6 +385,30 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 	}
 
 	go runWebsocketWriter(ctx, webSocketCtx, cwm.websocketConn, websocketConnWriteChan, writerDone)
+	var nativeSession NativeWebSocketSession
+	if factory, ok := cwm.relaySender.(NativeWebSocketSessionFactory); ok {
+		nativeCustomerID, _ := websocketConn.Locals(CustomerIDHeader).(string)
+		nativeSession = factory.NewNativeWebSocketSession(webSocketCtx, func(nativeCtx context.Context, frame []byte) bool {
+			select {
+			case websocketConnWriteChan <- webSocketMsgWithType{messageType: websocket.TextMessage, msg: frame}:
+				return true
+			case <-nativeCtx.Done():
+			case <-webSocketCtx.Done():
+			case <-ctx.Done():
+			case <-writerDone:
+			}
+			return false
+		}, func() {
+			sendWS(webSocketMsgWithType{messageType: websocket.CloseMessage, msg: websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "Blockbook upstream ended; reconnect and resubscribe"), final: true})
+		}, func(method, provider string, latency time.Duration, err error) {
+			data := metrics.NewRelayAnalytics(nativeCustomerID, cwm.chainId, cwm.apiInterface)
+			data.ApiMethod, data.ProviderAddress, data.Origin, data.Latency = method, provider, origin, latency.Milliseconds()
+			logger.AddMetricForWebSocket(data, err)
+		})
+		if nativeSession != nil {
+			defer nativeSession.Close()
+		}
+	}
 
 	// set up a routine to check for rate limits or idle time
 	idleFor := atomic.Int64{}
@@ -504,6 +528,11 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 
 		metricsData := metrics.NewRelayAnalytics(dappID, cwm.chainId, cwm.apiInterface)
 		metricsData.Origin = origin
+		if nativeSession != nil {
+			if handled, _ := nativeSession.Handle(msg); handled {
+				continue
+			}
+		}
 
 		// startTime is taken before the read blocks, so it counts the client's idle time too.
 		parseStart := time.Now()

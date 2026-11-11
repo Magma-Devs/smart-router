@@ -76,6 +76,7 @@ const (
 
 // implements Relay Sender interfaced and uses an ChainListener to get it called
 type RPCSmartRouterServer struct {
+	nativeBlockbookEndpoints []nativeBlockbookEndpoint
 	// relayErrors is the router's own count of node and protocol errors for GET
 	// /debug/relay-errors (MAG-4718), shared by every endpoint of the router. Nil records nothing.
 	relayErrors *relaycore.RelayErrorTally
@@ -194,6 +195,11 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.wsSubscriptionManager = wsSubscriptionManager
 	rpcss.debugRelays = cmdFlags.DebugRelays
 	rpcss.enableSelectionStats = cmdFlags.EnableSelectionStats
+	nativeEndpoints, nativeErr := parseNativeBlockbookEndpoints(viper.GetViper(), listenEndpoint.ChainID, listenEndpoint.ApiInterface)
+	if nativeErr != nil {
+		return nativeErr
+	}
+	rpcss.nativeBlockbookEndpoints = nativeEndpoints
 
 	// Load optional per-method cross-validation policies (empty => header-driven CV only, fully
 	// backwards compatible). Fail fast on invalid config.
