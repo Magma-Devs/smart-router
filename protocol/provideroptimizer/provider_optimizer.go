@@ -228,7 +228,7 @@ func (po *ProviderOptimizer) getAdaptiveLatencyBounds() (p10, p90 float64) {
 
 	p10, p90 = po.globalLatencyCalculator.GetAdaptiveBounds()
 	if math.IsNaN(p10) || math.IsNaN(p90) || math.IsInf(p10, 0) || math.IsInf(p90, 0) || p10 <= 0 || p90 <= 0 || p90 <= p10 {
-		utils.LavaFormatWarning("invalid adaptive latency bounds, using defaults",
+		utils.FormatWarning("invalid adaptive latency bounds, using defaults",
 			nil,
 			utils.LogAttr("p10", p10),
 			utils.LogAttr("p90", p90),
@@ -254,7 +254,7 @@ func (po *ProviderOptimizer) getAdaptiveSyncBounds() (p10, p90 float64) {
 
 	p10, p90 = po.globalSyncCalculator.GetAdaptiveBounds()
 	if math.IsNaN(p10) || math.IsNaN(p90) || math.IsInf(p10, 0) || math.IsInf(p90, 0) || p10 <= 0 || p90 <= 0 || p90 <= p10 {
-		utils.LavaFormatWarning("invalid adaptive sync bounds, using defaults",
+		utils.FormatWarning("invalid adaptive sync bounds, using defaults",
 			nil,
 			utils.LogAttr("p10", p10),
 			utils.LogAttr("p90", p90),
@@ -458,7 +458,7 @@ func (po *ProviderOptimizer) appendRelayData(provider string, latency time.Durat
 	po.providersStorage.Set(provider, providerData, 1)
 	po.updateRelayTime(provider, sampleTime)
 
-	utils.LavaFormatTrace("[Optimizer] relay update",
+	utils.FormatTrace("[Optimizer] relay update",
 		utils.LogAttr("providerData", providerData),
 		utils.LogAttr("syncBlock", syncBlock),
 		utils.LogAttr("cu", cu),
@@ -528,7 +528,7 @@ func (po *ProviderOptimizer) AppendProbeData(providerAddress string, availabilit
 	}
 	po.providersStorage.Set(providerAddress, providerData, 1)
 
-	utils.LavaFormatTrace("[Optimizer] probe data update",
+	utils.FormatTrace("[Optimizer] probe data update",
 		utils.LogAttr("providerAddress", providerAddress),
 		utils.LogAttr("availability", availability),
 		utils.LogAttr("latency", latency),
@@ -605,7 +605,7 @@ func (po *ProviderOptimizer) ChooseUpstreamWithStats(ctx context.Context, allAdd
 
 	if len(providerScores) == 0 {
 		// No providers to choose from
-		utils.LavaFormatWarning("[Optimizer] no providers available for selection", nil)
+		utils.FormatWarning("[Optimizer] no providers available for selection", nil)
 		return []string{}, nil
 	}
 
@@ -613,7 +613,7 @@ func (po *ProviderOptimizer) ChooseUpstreamWithStats(ctx context.Context, allAdd
 	selectedProvider, selectionStats := po.upstreamSelector.SelectUpstreamWithStats(ctx, providerScores, scoreDetails)
 	returnedProviders := []string{selectedProvider}
 
-	utils.LavaFormatTrace("[Optimizer] returned providers",
+	utils.FormatTrace("[Optimizer] returned providers",
 		utils.LogAttr("providers", strings.Join(returnedProviders, ",")),
 		utils.LogAttr("selectedWeight", getProviderSelectionWeight(selectedProvider, providerScores)),
 		utils.LogAttr("selectedCompositeScore", getProviderCompositeScore(selectedProvider, providerScores)),
@@ -680,7 +680,7 @@ func (po *ProviderOptimizer) getProviderData(providerAddress string) (providerDa
 
 		providerData, ok = storedVal.(ProviderData)
 		if !ok {
-			utils.LavaFormatFatal("invalid usage of optimizer provider storage", nil, utils.Attribute{Key: "storedVal", Value: storedVal})
+			utils.FormatFatal("invalid usage of optimizer provider storage", nil, utils.Attribute{Key: "storedVal", Value: storedVal})
 		}
 	} else {
 		providerData = ProviderData{
@@ -696,7 +696,7 @@ func (po *ProviderOptimizer) getProviderData(providerAddress string) (providerDa
 
 func (po *ProviderOptimizer) validateUpdateError(err error, errorMsg string) error {
 	if !errors.Is(err, score.TimeConflictingScoresError) {
-		utils.LavaFormatError(errorMsg, err)
+		utils.FormatError(errorMsg, err)
 	}
 	return err
 }
@@ -711,7 +711,7 @@ func (po *ProviderOptimizer) updateDecayingWeightedAverage(providerData Provider
 			score.WithLatencyCuFactor(score.GetLatencyFactor(cu)),
 		)
 		if err != nil {
-			utils.LavaFormatError("[UpdateConfig] did not update provider latency score", err)
+			utils.FormatError("[UpdateConfig] did not update provider latency score", err)
 			return providerData, err
 		}
 		err = providerData.Latency.Update(sample, sampleTime)
@@ -725,7 +725,7 @@ func (po *ProviderOptimizer) updateDecayingWeightedAverage(providerData Provider
 		po.adaptiveLock.Lock()
 		if po.globalLatencyCalculator != nil {
 			if err := po.globalLatencyCalculator.AddSample(adjustedSample, sampleTime); err != nil {
-				utils.LavaFormatWarning("failed to update global latency adaptive calculator",
+				utils.FormatWarning("failed to update global latency adaptive calculator",
 					err,
 					utils.LogAttr("sample", adjustedSample),
 					utils.LogAttr("sampleTime", sampleTime),
@@ -737,7 +737,7 @@ func (po *ProviderOptimizer) updateDecayingWeightedAverage(providerData Provider
 	case score.SyncScoreType:
 		err := providerData.Sync.UpdateConfig(score.WithWeight(weight), score.WithDecayHalfLife(halfTime))
 		if err != nil {
-			utils.LavaFormatError("[UpdateConfig] did not update provider sync score", err)
+			utils.FormatError("[UpdateConfig] did not update provider sync score", err)
 			return providerData, err
 		}
 		err = providerData.Sync.Update(sample, sampleTime)
@@ -749,7 +749,7 @@ func (po *ProviderOptimizer) updateDecayingWeightedAverage(providerData Provider
 		po.adaptiveLock.Lock()
 		if po.globalSyncCalculator != nil {
 			if err := po.globalSyncCalculator.AddSample(sample, sampleTime); err != nil {
-				utils.LavaFormatWarning("failed to update global sync adaptive calculator",
+				utils.FormatWarning("failed to update global sync adaptive calculator",
 					err,
 					utils.LogAttr("sample", sample),
 					utils.LogAttr("sampleTime", sampleTime),
@@ -761,7 +761,7 @@ func (po *ProviderOptimizer) updateDecayingWeightedAverage(providerData Provider
 	case score.AvailabilityScoreType:
 		err := providerData.Availability.UpdateConfig(score.WithWeight(weight), score.WithDecayHalfLife(halfTime))
 		if err != nil {
-			utils.LavaFormatError("[UpdateConfig] did not update provider availability score", err)
+			utils.FormatError("[UpdateConfig] did not update provider availability score", err)
 			return providerData, err
 		}
 		err = providerData.Availability.Update(sample, sampleTime)
@@ -901,7 +901,7 @@ func (po *ProviderOptimizer) getRelayStatsTimeDiff(providerAddress string, sampl
 	if medianTime.Before(sampleTime) {
 		return sampleTime.Sub(medianTime)
 	}
-	utils.LavaFormatWarning("did not use sample time in optimizer calculation", nil,
+	utils.FormatWarning("did not use sample time in optimizer calculation", nil,
 		utils.LogAttr("median", medianTime.UTC().Unix()),
 		utils.LogAttr("sample", sampleTime.UTC().Unix()),
 		utils.LogAttr("diff", sampleTime.UTC().Unix()-medianTime.UTC().Unix()),
@@ -912,7 +912,7 @@ func (po *ProviderOptimizer) getRelayStatsTimeDiff(providerAddress string, sampl
 func NewProviderOptimizer(strategy Strategy, averageBlockTIme time.Duration, wantedNumProvidersInConcurrency uint, consumerOptimizerQoSClient consumerOptimizerQoSClientInf, chainId string) *ProviderOptimizer {
 	cache, err := ristretto.NewCache(&ristretto.Config[string, any]{NumCounters: CacheNumCounters, MaxCost: CacheMaxCost, BufferItems: 64, IgnoreInternalCost: true})
 	if err != nil {
-		utils.LavaFormatFatal("failed setting up cache for queries", err)
+		utils.FormatFatal("failed setting up cache for queries", err)
 	}
 	if strategy == StrategyPrivacy {
 		// overwrite
@@ -961,12 +961,12 @@ func NewProviderOptimizer(strategy Strategy, averageBlockTIme time.Duration, wan
 func (po *ProviderOptimizer) GetReputationReportForProvider(providerAddress string) (report *pairingtypes.QualityOfServiceReport, lastUpdateTime time.Time) {
 	providerData, found := po.getProviderData(providerAddress)
 	if !found {
-		utils.LavaFormatWarning("provider data not found, using default", nil, utils.LogAttr("address", providerAddress))
+		utils.FormatWarning("provider data not found, using default", nil, utils.LogAttr("address", providerAddress))
 	}
 
 	latency, err := providerData.Latency.Resolve()
 	if err != nil {
-		utils.LavaFormatError("could not resolve latency score", err, utils.LogAttr("address", providerAddress))
+		utils.FormatError("could not resolve latency score", err, utils.LogAttr("address", providerAddress))
 		return nil, time.Time{}
 	}
 	if latency > score.WorstLatencyScore {
@@ -975,7 +975,7 @@ func (po *ProviderOptimizer) GetReputationReportForProvider(providerAddress stri
 
 	sync, err := providerData.Sync.Resolve()
 	if err != nil {
-		utils.LavaFormatError("could not resolve sync score", err, utils.LogAttr("address", providerAddress))
+		utils.FormatError("could not resolve sync score", err, utils.LogAttr("address", providerAddress))
 		return nil, time.Time{}
 	}
 	if sync == 0 {
@@ -990,7 +990,7 @@ func (po *ProviderOptimizer) GetReputationReportForProvider(providerAddress stri
 
 	availability, err := providerData.Availability.Resolve()
 	if err != nil {
-		utils.LavaFormatError("could not resolve availability score", err, utils.LogAttr("address", providerAddress))
+		utils.FormatError("could not resolve availability score", err, utils.LogAttr("address", providerAddress))
 		return nil, time.Time{}
 	}
 
@@ -1000,7 +1000,7 @@ func (po *ProviderOptimizer) GetReputationReportForProvider(providerAddress stri
 		Sync:         sync,
 	}
 
-	utils.LavaFormatTrace("[Optimizer] QoS Excellence for provider",
+	utils.FormatTrace("[Optimizer] QoS Excellence for provider",
 		utils.LogAttr("address", providerAddress),
 		utils.LogAttr("report", report),
 	)
@@ -1013,7 +1013,7 @@ func (po *ProviderOptimizer) GetReputationReportForProvider(providerAddress stri
 func (po *ProviderOptimizer) UpdateUpstreamSelectorStrategy(strategy Strategy) {
 	if po.upstreamSelector != nil {
 		po.upstreamSelector.UpdateStrategy(strategy)
-		utils.LavaFormatTrace("[Optimizer] weighted selector strategy updated",
+		utils.FormatTrace("[Optimizer] weighted selector strategy updated",
 			utils.LogAttr("strategy", strategy.String()),
 		)
 	}

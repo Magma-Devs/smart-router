@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,8 +44,8 @@ func (f *countingGateFetcher) CustomMessage(ctx context.Context, path string, da
 	return nil, fmt.Errorf("counting fetcher: SVM custom message reached upstream")
 }
 
-func (f *countingGateFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{}
+func (f *countingGateFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{}
 }
 
 func (f *countingGateFetcher) upstreamCalls() int32 {
@@ -168,8 +168,8 @@ func (f *advancingFetcher) FetchBlockHashByNum(_ context.Context, blockNum int64
 	return fmt.Sprintf("hash-%d", blockNum), nil
 }
 
-func (f *advancingFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{}
+func (f *advancingFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{}
 }
 
 func (f *advancingFetcher) CustomMessage(context.Context, string, []byte, string, string) ([]byte, error) {

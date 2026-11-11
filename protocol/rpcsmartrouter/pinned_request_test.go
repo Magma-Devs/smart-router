@@ -10,21 +10,21 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	common "github.com/magma-Devs/smart-router/protocol/common"
-	lavasession "github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	routersession "github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
 
 // newPinnedHarness is newStopReasonHarness with the request pinned by lava-stickiness: the real
 // state machine and policy over the REST mock chain, with a hedge window long enough never to fire.
-func newPinnedHarness(t *testing.T) (*relaycore.RelayProcessor, *lavasession.UsedProviders) {
+func newPinnedHarness(t *testing.T) (*relaycore.RelayProcessor, *routersession.UsedProviders) {
 	t.Helper()
 	return newPinnedHarnessWith(t, map[string]string{common.STICKINESS_HEADER_NAME: "ingest-42"})
 }
 
-func newPinnedHarnessWith(t *testing.T, directives map[string]string) (*relaycore.RelayProcessor, *lavasession.UsedProviders) {
+func newPinnedHarnessWith(t *testing.T, directives map[string]string) (*relaycore.RelayProcessor, *routersession.UsedProviders) {
 	t.Helper()
 	ctx := context.Background()
 	serverHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +38,7 @@ func newPinnedHarnessWith(t *testing.T, directives map[string]string) (*relaycor
 	chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, directives, nil, "dapp", "123.11")
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	stateMachine, err := NewSmartRouterRelayStateMachine(ctx, usedProviders, &SmartRouterRelaySenderMock{retValue: nil, tickerValue: 10 * time.Second}, protocolMessage, nil, false)
 	require.NoError(t, err)
 	return relaycore.NewRelayProcessor(ctx, &common.DefaultCrossValidationParams, relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, stateMachine), usedProviders
@@ -49,12 +49,12 @@ func newPinnedHarnessWith(t *testing.T, directives map[string]string) (*relaycor
 var strictPinShapes = map[string]map[string]string{
 	"sticky": {common.STICKINESS_HEADER_NAME: "ingest-42"},
 	"select-provider strict": {
-		common.SELECT_PROVIDER_HEADER_NAME:        "lava@pinned",
+		common.SELECT_PROVIDER_HEADER_NAME:        "provider@pinned",
 		common.SELECT_PROVIDER_STRICT_HEADER_NAME: "true",
 	},
 	"sticky with select-provider": {
 		common.STICKINESS_HEADER_NAME:      "ingest-42",
-		common.SELECT_PROVIDER_HEADER_NAME: "lava@pinned",
+		common.SELECT_PROVIDER_HEADER_NAME: "provider@pinned",
 	},
 }
 
@@ -65,7 +65,7 @@ func TestPinnedRequest_NodeErrorEndsTheRequestOnThePinnedUpstream(t *testing.T) 
 	for name, directives := range strictPinShapes {
 		t.Run(name, func(t *testing.T) {
 			relayProcessor, usedProviders := newPinnedHarnessWith(t, directives)
-			sessions := lavasession.ConsumerSessionsMap{"lava@pinned": &lavasession.SessionInfo{}}
+			sessions := routersession.ConsumerSessionsMap{"provider@pinned": &routersession.SessionInfo{}}
 
 			relayTaskChannel, err := relayProcessor.GetRelayTaskChannel()
 			require.NoError(t, err)
@@ -79,7 +79,7 @@ func TestPinnedRequest_NodeErrorEndsTheRequestOnThePinnedUpstream(t *testing.T) 
 				batches++
 				usedProviders.AddUsed(sessions, nil)
 				relayProcessor.UpdateBatch(nil)
-				relaycoretest.SendNodeError(relayProcessor, "lava@pinned", time.Millisecond)
+				relaycoretest.SendNodeError(relayProcessor, "provider@pinned", time.Millisecond)
 			}
 			t.Fatal("channel closed without a Done instruction")
 		})
@@ -98,12 +98,12 @@ func TestPinnedRequest_UnservableUpstreamStopsOnTheFirstRefusal(t *testing.T) {
 	for task := range relayTaskChannel {
 		if task.IsDone() {
 			require.Equal(t, "PinnedProviderUnavailable", task.StopReason)
-			require.ErrorIs(t, task.Err, lavasession.SelectedProviderUnavailableError)
+			require.ErrorIs(t, task.Err, routersession.SelectedProviderUnavailableError)
 			require.Equal(t, 1, sends, "one refusal is final for a pinned request")
 			return
 		}
 		sends++
-		relayProcessor.UpdateBatch(fmt.Errorf("pinned provider is 15 blocks behind the chain tip: %w", lavasession.SelectedProviderUnavailableError))
+		relayProcessor.UpdateBatch(fmt.Errorf("pinned provider is 15 blocks behind the chain tip: %w", routersession.SelectedProviderUnavailableError))
 	}
 	t.Fatal("channel closed without a Done instruction")
 }
@@ -112,12 +112,12 @@ func TestPinnedRequest_UnservableUpstreamStopsOnTheFirstRefusal(t *testing.T) {
 // (MAG-4123): it carries the sentinel the send stage stops on at once, so the resend that used to
 // drop the pin and serve the request from a fresher node never runs, and the lag is named.
 func TestPinnedConsistencyRejection_IsTerminalAndNamesTheLag(t *testing.T) {
-	failed := lavasession.ConsumerSessionsMap{"chain-evm-1-erigon-active-0": &lavasession.SessionInfo{}}
+	failed := routersession.ConsumerSessionsMap{"chain-evm-1-erigon-active-0": &routersession.SessionInfo{}}
 	lags := map[string]consistencyLag{"chain-evm-1-erigon-active-0": {lag: 15, threshold: 10}}
 
 	err := pinnedConsistencyRejection(context.Background(), failed, lags)
 
-	require.ErrorIs(t, err, lavasession.SelectedProviderUnavailableError)
+	require.ErrorIs(t, err, routersession.SelectedProviderUnavailableError)
 	require.True(t, relaycore.PinnedUpstreamUnservable(err), "the send stage must stop on it at once")
 	require.Contains(t, err.Error(), "too far behind the chain tip")
 }
@@ -132,7 +132,7 @@ func TestConsistencyGate_RejectsAStrictPinAndRetriesTheRest(t *testing.T) {
 		strict     bool
 	}
 	cases := map[string]gateCase{
-		"plain select-provider": {map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "lava@pinned"}, false},
+		"plain select-provider": {map[string]string{common.SELECT_PROVIDER_HEADER_NAME: "provider@pinned"}, false},
 		"unpinned":              {nil, false},
 	}
 	for name, directives := range strictPinShapes {
@@ -148,11 +148,11 @@ func TestConsistencyGate_RejectsAStrictPinAndRetriesTheRest(t *testing.T) {
 			}})
 			if tc.strict {
 				require.True(t, relaycore.PinnedUpstreamUnservable(err), "a strict pin must stop here, not retry: %v", err)
-				require.NotErrorIs(t, err, lavasession.ConsistencyPreValidationError)
+				require.NotErrorIs(t, err, routersession.ConsistencyPreValidationError)
 				require.Contains(t, err.Error(), "too far behind the chain tip")
 				return
 			}
-			require.ErrorIs(t, err, lavasession.ConsistencyPreValidationError, "the gate must keep its retry")
+			require.ErrorIs(t, err, routersession.ConsistencyPreValidationError, "the gate must keep its retry")
 			require.False(t, relaycore.PinnedUpstreamUnservable(err))
 		})
 	}
@@ -163,8 +163,8 @@ func TestConsistencyGate_RejectsAStrictPinAndRetriesTheRest(t *testing.T) {
 // a select-provider whose strict header is anything but "true".
 func TestPinnedRequest_PlainSelectProviderRetriesANodeError(t *testing.T) {
 	for name, directives := range map[string]map[string]string{
-		"plain select-provider": {common.SELECT_PROVIDER_HEADER_NAME: "lava@1"},
-		"strict false":          {common.SELECT_PROVIDER_HEADER_NAME: "lava@1", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "false"},
+		"plain select-provider": {common.SELECT_PROVIDER_HEADER_NAME: "provider@1"},
+		"strict false":          {common.SELECT_PROVIDER_HEADER_NAME: "provider@1", common.SELECT_PROVIDER_STRICT_HEADER_NAME: "false"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			relayProcessor, usedProviders := newPinnedHarnessWith(t, directives)
@@ -178,8 +178,8 @@ func TestPinnedRequest_PlainSelectProviderRetriesANodeError(t *testing.T) {
 					return
 				}
 				batches++
-				provider := fmt.Sprintf("lava@%d", batches)
-				usedProviders.AddUsed(lavasession.ConsumerSessionsMap{provider: &lavasession.SessionInfo{}}, nil)
+				provider := fmt.Sprintf("provider@%d", batches)
+				usedProviders.AddUsed(routersession.ConsumerSessionsMap{provider: &routersession.SessionInfo{}}, nil)
 				relayProcessor.UpdateBatch(nil)
 				if batches == 1 {
 					relaycoretest.SendNodeError(relayProcessor, provider, time.Millisecond)

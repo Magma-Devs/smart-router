@@ -14,8 +14,8 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -78,7 +78,7 @@ func (wsSendFailingStub) SendParsedRelay(ctx context.Context, analytics *metrics
 	return nil, errors.New("no upstream answered")
 }
 
-type newTestListener func(context.Context, *lavasession.RPCEndpoint, RelaySender, *metrics.RPCConsumerLogs) ChainListener
+type newTestListener func(context.Context, *routersession.RPCEndpoint, RelaySender, *metrics.RPCConsumerLogs) ChainListener
 
 // serveWithFlags starts a listener on an ephemeral port in front of relay, under cmdFlags, and
 // returns its address. The listener stops with the test.
@@ -93,7 +93,7 @@ func serveWithFlags(t *testing.T, newListener newTestListener, apiInterface stri
 	t.Cleanup(cancel)
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	listener := newListener(ctx, &lavasession.RPCEndpoint{
+	listener := newListener(ctx, &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "LAV1",
 		ApiInterface:    apiInterface,
@@ -150,16 +150,16 @@ func TestListeners_LogTheBodyCutUnlessDebugRelays(t *testing.T) {
 	t.Cleanup(utils.DisableDebugLogBuffer)
 
 	body, cut := longBodyWithRunesAtTheCuts()
-	newJsonRPC := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newJsonRPC := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewJrpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, nil, nil)
 	}
-	newRest := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newRest := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewRestChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger)
 	}
-	newTendermint := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newTendermint := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewTendermintRpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, nil, nil)
 	}
-	newGraphQL := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newGraphQL := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewGraphQLChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger)
 	}
 
@@ -232,7 +232,7 @@ func TestListeners_LogTheBodyCutUnlessDebugRelays(t *testing.T) {
 		} {
 			t.Run(name(ws.name), func(t *testing.T) {
 				utils.ClearDebugLogBuffer()
-				newListener := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+				newListener := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 					return NewJrpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, nil, ws.subscriptions)
 				}
 				addr := serveWithFlags(t, newListener, spectypes.APIInterfaceJsonRPC, ws.relay, flags)
@@ -264,7 +264,7 @@ func TestListeners_LogTheBodyCutUnlessDebugRelays(t *testing.T) {
 		t.Run(name("grpc unary"), func(t *testing.T) {
 			utils.ClearDebugLogBuffer()
 			sender := &stubRelaySender{parser: grpcParserWithSubscription()}
-			newGrpc := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+			newGrpc := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 				return NewGrpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, sender.parser)
 			}
 			addr := serveWithFlags(t, newGrpc, spectypes.APIInterfaceGrpc, sender, flags)
@@ -299,7 +299,7 @@ func TestListeners_LogTheBodyCutUnlessDebugRelays(t *testing.T) {
 			manager := newStubGRPCSubscriptionManager()
 			manager.startErr = errors.New("no upstream answered")
 			sender := streamingRelaySender{stubRelaySender: &stubRelaySender{parser: grpcParserWithSubscription()}, manager: manager}
-			newGrpc := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+			newGrpc := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 				return NewGrpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, sender.parser)
 			}
 			addr := serveWithFlags(t, newGrpc, spectypes.APIInterfaceGrpc, sender, flags)

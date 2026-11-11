@@ -13,11 +13,11 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
@@ -132,7 +132,7 @@ func TestGraphQLDirectRelay_GatewayJSONRPCEnvelope(t *testing.T) {
 			}))
 			defer server.Close()
 
-			directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: server.URL + "/graphql"}, 1, "")
+			directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: server.URL + "/graphql"}, 1, "")
 			require.NoError(t, err)
 			sender := &DirectRPCRelaySender{directConnection: directConn, endpointName: "graphql-upstream"}
 
@@ -223,11 +223,11 @@ func newGatewayTestServer(t *testing.T, chainParser chainlib.ChainParser, logs *
 	t.Helper()
 	ctx := context.Background()
 	hits := &[2]int64{}
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGraphQL}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGraphQL}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "SUI")
-	csm := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 
-	tiers := []map[uint64]*lavasession.ConsumerSessionsWithProvider{{}, {}}
+	tiers := []map[uint64]*routersession.ConsumerSessionsWithProvider{{}, {}}
 	for i, upstreamCfg := range []struct {
 		name  string
 		reply refusalReply
@@ -240,10 +240,10 @@ func newGatewayTestServer(t *testing.T, chainParser chainlib.ChainParser, logs *
 			_, _ = w.Write([]byte(reply.body))
 		}))
 		t.Cleanup(upstream.Close)
-		connection, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL + "/graphql"}, 5, "")
+		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL + "/graphql"}, 5, "")
 		require.NoError(t, err)
-		endpoint := &lavasession.Endpoint{NetworkAddress: upstream.URL, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection}}
-		provider := lavasession.NewConsumerSessionWithProvider(upstreamCfg.name, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
+		endpoint := &routersession.Endpoint{NetworkAddress: upstream.URL, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
+		provider := routersession.NewConsumerSessionWithProvider(upstreamCfg.name, []*routersession.Endpoint{endpoint}, 100000, 1, 1)
 		provider.StaticProvider = true
 		tiers[i][uint64(i)] = provider
 	}
@@ -264,7 +264,7 @@ func sendGatewayTestRequest(t *testing.T, ctx context.Context, chainParser chain
 	body := []byte(query)
 	chainMessage, err := chainParser.ParseMsg("", body, http.MethodPost, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
-	relayData := lavaprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceGraphQL,
+	relayData := relayprotocol.NewRelayData(ctx, http.MethodPost, "", body, 0, spectypes.LATEST_BLOCK, spectypes.APIInterfaceGraphQL,
 		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
 	protocolMessage := chainlib.NewProtocolMessage(chainMessage, nil, relayData, "dapp", "1.2.3.4")
 

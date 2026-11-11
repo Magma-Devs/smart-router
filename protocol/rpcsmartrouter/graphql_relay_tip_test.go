@@ -16,8 +16,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
 )
@@ -122,7 +122,7 @@ func sendGraphQLUserRelay(t *testing.T, chainParser chainlib.ChainParser, body, 
 	}))
 	t.Cleanup(server.Close)
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: server.URL + "/graphql"}, 1, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: server.URL + "/graphql"}, 1, "")
 	require.NoError(t, err)
 	sender := &DirectRPCRelaySender{directConnection: directConn, endpointName: "graphql-upstream"}
 
@@ -183,7 +183,7 @@ func TestGraphQLAliasedTipQueryForgesNoTipOrStallEvidence(t *testing.T) {
 	endpointtip.Default().Reset()
 
 	const url = "https://sui-graphql.example/graphql"
-	endpoint := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	endpoint := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	// A nil connection only makes the background poll fail; the generation is what the harvest
 	// needs.
 	_, err := monitor.GetOrCreateTracker("", endpoint, nil)
@@ -192,7 +192,7 @@ func TestGraphQLAliasedTipQueryForgesNoTipOrStallEvidence(t *testing.T) {
 	require.True(t, ok)
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGraphQL},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGraphQL},
 		endpointChainTrackerManager: monitor,
 		chainParser:                 chainParser,
 	}

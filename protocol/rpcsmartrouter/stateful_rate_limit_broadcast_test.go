@@ -16,11 +16,11 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
@@ -136,11 +136,11 @@ func newTwoPrimaryWriteServer(t *testing.T, tc writeInterfaceCase, chainParser c
 	t.Helper()
 	ctx := context.Background()
 	hits := &[2]int64{}
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: tc.chainID, ApiInterface: tc.apiInterface}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: tc.chainID, ApiInterface: tc.apiInterface}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, tc.chainID)
-	csm := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 
-	primaries := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	primaries := map[uint64]*routersession.ConsumerSessionsWithProvider{}
 	for i, upstreamCfg := range upstreams {
 		counter, reply := &hits[i], upstreamCfg
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -167,10 +167,10 @@ func newTwoPrimaryWriteServer(t *testing.T, tc writeInterfaceCase, chainParser c
 		name, url := upstreamCfg.name, upstream.URL+tc.nodeURLPath
 		t.Cleanup(func() { holdoff.Shared.RecordAnswer(name, url) })
 
-		connection, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
+		connection, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
 		require.NoError(t, err)
-		endpoint := &lavasession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection}}
-		provider := lavasession.NewConsumerSessionWithProvider(upstreamCfg.name, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
+		endpoint := &routersession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
+		provider := routersession.NewConsumerSessionWithProvider(upstreamCfg.name, []*routersession.Endpoint{endpoint}, 100000, 1, 1)
 		provider.StaticProvider = true
 		primaries[uint64(i)] = provider
 	}
@@ -192,7 +192,7 @@ func sendWrite(t *testing.T, tc writeInterfaceCase, chainParser chainlib.ChainPa
 	ctx := context.Background()
 	chainMessage, err := chainParser.ParseMsg(tc.path, []byte(tc.body), tc.method, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 	require.NoError(t, err)
-	relayData := lavaprotocol.NewRelayData(ctx, tc.method, tc.path, []byte(tc.body), 0, spectypes.NOT_APPLICABLE, tc.apiInterface,
+	relayData := relayprotocol.NewRelayData(ctx, tc.method, tc.path, []byte(tc.body), 0, spectypes.NOT_APPLICABLE, tc.apiInterface,
 		chainMessage.GetRPCMessage().GetHeaders(), chainlib.GetAddon(chainMessage), common.GetExtensionNames(chainMessage.GetExtensions()))
 	protocolMessage := chainlib.NewProtocolMessage(chainMessage, nil, relayData, "dapp", "1.2.3.4")
 	require.Equal(t, uint32(common.CONSISTENCY_SELECT_ALL_PROVIDERS), chainlib.GetStateful(protocolMessage),

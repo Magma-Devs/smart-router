@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
 )
@@ -156,7 +156,7 @@ func NewCrossValidationPolicyResolver(cfg CrossValidationConfig) (*CrossValidati
 // loaded, behind the boot configuration barrier, so their refusal still precedes every listener (see
 // cross_validation_boot.go). The capacity bounds need the endpoint's configured providers and stay in
 // validateCrossValidationStartup.
-func PreflightValidateCrossValidationConfig(v *viper.Viper, endpoints []*lavasession.RPCEndpoint) error {
+func PreflightValidateCrossValidationConfig(v *viper.Viper, endpoints []*routersession.RPCEndpoint) error {
 	cfg, err := ParseCrossValidationConfig(v)
 	if err != nil {
 		return err
@@ -172,7 +172,7 @@ func PreflightValidateCrossValidationConfig(v *viper.Viper, endpoints []*lavases
 // (policyKeyPrefix). It names each by its position in the list as well as its identifiers, because the
 // log redactor mistakes a gRPC method name for a url and hides its method part. A policy that governs
 // nothing does nothing by design, so it is left alone.
-func validatePolicyEndpoints(cfg CrossValidationConfig, endpoints []*lavasession.RPCEndpoint) error {
+func validatePolicyEndpoints(cfg CrossValidationConfig, endpoints []*routersession.RPCEndpoint) error {
 	served := make(map[string]struct{}, len(endpoints))
 	servedNames := make([]string, 0, len(endpoints))
 	for _, endpoint := range endpoints {

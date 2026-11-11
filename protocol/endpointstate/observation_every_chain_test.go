@@ -9,7 +9,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/stretchr/testify/require"
 )
@@ -121,7 +121,7 @@ func TestEndpointMonitor_RealPoll_EveryChain_RecordsPollFailure(t *testing.T) {
 
 					url := "http://" + chainID + "-down:1/"
 					conn := &mockDirectRPCConnection{url: url, sendErr: errors.New("connection refused")}
-					_, err = m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+					_, err = m.GetOrCreateTracker("", &routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 					require.NoError(t, err)
 
 					require.Eventually(t, func() bool {

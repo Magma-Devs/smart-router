@@ -18,8 +18,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/parser"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/tracing"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
@@ -30,7 +30,7 @@ import (
 // DirectRPCRelaySender handles sending relay requests directly to RPC endpoints
 // (bypassing the Lava provider-relay protocol)
 type DirectRPCRelaySender struct {
-	directConnection    lavasession.DirectRPCConnection
+	directConnection    routersession.DirectRPCConnection
 	endpointName        string             // Sanitized endpoint name (no API keys)
 	originalRequestData []byte             // Original request bytes (for batch support)
 	chainFamily         common.ChainFamily // Chain family for Tier 2 classification (-1 if unknown)
@@ -101,7 +101,7 @@ func extractBlockHeightFromJSONResponse(
 	// tip — see maxJSONRPCResponseSizeForBlockExtraction for what the skip gives up.
 	// Per-endpoint ChainTracker provides block tracking independently when it fires.
 	if len(responseData) > maxJSONRPCResponseSizeForBlockExtraction {
-		utils.LavaFormatDebug("skipping block extraction for large response",
+		utils.FormatDebug("skipping block extraction for large response",
 			utils.LogAttr("response_size", len(responseData)),
 			utils.LogAttr("threshold", maxJSONRPCResponseSizeForBlockExtraction),
 			utils.LogAttr("method", chainMessage.GetApi().Name),
@@ -350,7 +350,7 @@ func extractBlockHeightFromEVMResponse(responseData []byte, method string) int64
 		}
 	}
 
-	utils.LavaFormatDebug("EVM fallback: no block height for method",
+	utils.FormatDebug("EVM fallback: no block height for method",
 		utils.LogAttr("method", method),
 		utils.LogAttr("response_size", len(responseData)),
 	)
@@ -385,7 +385,7 @@ func extractBlockHeightFromGRPCResponse(
 	// rather than at some smaller round number. Per-endpoint ChainTracker provides block
 	// tracking independently as a fallback when it does fire.
 	if len(responseData) > maxGRPCResponseSizeForBlockExtraction {
-		utils.LavaFormatDebug("skipping gRPC block extraction for large response",
+		utils.FormatDebug("skipping gRPC block extraction for large response",
 			utils.LogAttr("response_size", len(responseData)),
 			utils.LogAttr("threshold", maxGRPCResponseSizeForBlockExtraction),
 			utils.LogAttr("method", chainMessage.GetApi().Name),
@@ -405,7 +405,7 @@ func extractBlockHeightFromGRPCResponse(
 		chainMessage,
 	)
 	if err != nil {
-		utils.LavaFormatTrace("failed to format gRPC response for block parsing",
+		utils.FormatTrace("failed to format gRPC response for block parsing",
 			utils.LogAttr("error", err))
 		return 0
 	}
@@ -548,7 +548,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		endpointIdentifier = sanitizeEndpointURL(d.directConnection.GetURL())
 	}
 
-	utils.LavaFormatTrace("sending direct RPC request",
+	utils.FormatTrace("sending direct RPC request",
 		utils.LogAttr("endpoint", endpointIdentifier),
 		utils.LogAttr("protocol", d.directConnection.GetProtocol()),
 		utils.LogAttr("method", chainMessage.GetApi().Name),
@@ -557,13 +557,13 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 
 	// Use DoHTTPRequest with []Metadata (preserves duplicates, supports delete semantics)
 	// Instead of map[string]string which loses duplicates and doesn't support delete (empty = delete)
-	httpDoer, ok := d.directConnection.(lavasession.HTTPDirectRPCDoer)
+	httpDoer, ok := d.directConnection.(routersession.HTTPDirectRPCDoer)
 	if !ok {
 		return nil, fmt.Errorf("connection does not support HTTP requests (protocol: %s)", d.directConnection.GetProtocol())
 	}
 
 	// Build HTTP request params (same as REST path for consistency)
-	httpParams := lavasession.HTTPRequestParams{
+	httpParams := routersession.HTTPRequestParams{
 		Method:      "POST",
 		URL:         nodeUrl.Url,
 		Body:        requestData,
@@ -584,7 +584,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 
 	if err != nil {
 		tracing.RecordError(span, err)
-		utils.LavaFormatDebug("direct RPC request failed",
+		utils.FormatDebug("direct RPC request failed",
 			utils.LogAttr("endpoint", endpointIdentifier),
 			utils.LogAttr("protocol", d.directConnection.GetProtocol()),
 			utils.LogAttr("error", err.Error()),
@@ -598,12 +598,12 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 
 	// Handle HTTP error status codes
 	if statusCode >= 500 {
-		utils.LavaFormatDebug("direct RPC request returned server error",
+		utils.FormatDebug("direct RPC request returned server error",
 			utils.LogAttr("endpoint", endpointIdentifier),
 			utils.LogAttr("status", statusCode),
 			utils.LogAttr("latency", latency),
 		)
-		httpErr := &lavasession.HTTPStatusError{
+		httpErr := &routersession.HTTPStatusError{
 			StatusCode:  statusCode,
 			Status:      response.Status, // the upstream's own status line, for the client reply (MAG-4218)
 			Body:        responseData,
@@ -612,7 +612,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 		return nil, classifyAndWrap(httpErr, d.chainFamily, common.TransportJsonRPC)
 	}
 
-	utils.LavaFormatTrace("direct RPC request succeeded",
+	utils.FormatTrace("direct RPC request succeeded",
 		utils.LogAttr("endpoint", endpointIdentifier),
 		utils.LogAttr("latency", latency),
 		utils.LogAttr("status_code", statusCode),
@@ -627,7 +627,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	// error. Schema-level malformation (well-formed JSON missing required
 	// fields) is detected later by CheckResponseError on the node-error path.
 	if statusCode >= 200 && statusCode < 300 && len(responseData) > 0 && !json.Valid(responseData) {
-		utils.LavaFormatDebug("direct RPC response is not valid JSON",
+		utils.FormatDebug("direct RPC response is not valid JSON",
 			utils.LogAttr("endpoint", endpointIdentifier),
 			utils.LogAttr("status_code", statusCode),
 			utils.LogAttr("response_size", len(responseData)),
@@ -641,7 +641,7 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	// STEP 4: Check response for errors using chainMessage (with actual HTTP status)
 	hasError, errorMessage := chainMessage.CheckResponseError(responseData, statusCode)
 	if hasError {
-		utils.LavaFormatDebug("RPC response contains error",
+		utils.FormatDebug("RPC response contains error",
 			utils.LogAttr("endpoint", endpointIdentifier),
 			utils.LogAttr("error", errorMessage),
 		)
@@ -736,7 +736,7 @@ func classifyJSONRPCNodeError(result *common.RelayResult, family common.ChainFam
 	// upstream rejected the request shape itself (not a node-internal
 	// hiccup), trust that verdict. We only escalate to non-retryable —
 	// never demote — so 2xx body errors keep their existing semantics
-	// and 5xx (which already map to retryable LavaErrors) are unaffected.
+	// and 5xx (which already map to retryable RouterErrors) are unaffected.
 	//
 	// The statusCode != errorCode guard skips the redundant pass in the
 	// bare-body fallback case where ExtractJSONRPCErrorCode returned 0
@@ -813,7 +813,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	}
 
 	// Type-assert to HTTP doer
-	httpDoer, ok := d.directConnection.(lavasession.HTTPDirectRPCDoer)
+	httpDoer, ok := d.directConnection.(routersession.HTTPDirectRPCDoer)
 	if !ok {
 		return nil, fmt.Errorf("connection doesn't support REST (HTTP)")
 	}
@@ -825,7 +825,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	headers = tracing.InjectHTTP(requestCtx, headers)
 
 	startTime := time.Now()
-	response, err := httpDoer.DoHTTPRequest(requestCtx, lavasession.HTTPRequestParams{
+	response, err := httpDoer.DoHTTPRequest(requestCtx, routersession.HTTPRequestParams{
 		Method:      httpMethod,
 		URL:         fullURL,
 		Body:        restBody, // As-is for a body method; nil for every other method (above)
@@ -848,7 +848,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	// parseable is treated as a transport failure (truncated bytes or
 	// corrupted upstream encoder).
 	if response.StatusCode >= 200 && response.StatusCode < 300 && looksLikeJSONOpening(response.Body) && !json.Valid(response.Body) {
-		utils.LavaFormatDebug("direct REST response opens as JSON but is not valid",
+		utils.FormatDebug("direct REST response opens as JSON but is not valid",
 			utils.LogAttr("endpoint", d.endpointName),
 			utils.LogAttr("status_code", response.StatusCode),
 			utils.LogAttr("response_size", len(response.Body)),
@@ -863,7 +863,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 	// and say whether the status is a success at all.
 	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
 	if hasError && errorMessage != "" {
-		utils.LavaFormatDebug("REST response contains error",
+		utils.FormatDebug("REST response contains error",
 			utils.LogAttr("endpoint", d.endpointName),
 			utils.LogAttr("error", errorMessage),
 		)
@@ -911,7 +911,7 @@ func (d *DirectRPCRelaySender) sendRESTRelay(
 		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, response.StatusCode, errorMessage)
 	}
 
-	utils.LavaFormatTrace("REST request completed",
+	utils.FormatTrace("REST request completed",
 		utils.LogAttr("method", httpMethod),
 		utils.LogAttr("status", response.StatusCode),
 		utils.LogAttr("response_size", len(response.Body)),
@@ -943,12 +943,12 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		return nil, fmt.Errorf("expected GraphQLMessage for GraphQL API, got %T", rpcMessage)
 	}
 
-	httpDoer, ok := d.directConnection.(lavasession.HTTPDirectRPCDoer)
+	httpDoer, ok := d.directConnection.(routersession.HTTPDirectRPCDoer)
 	if !ok {
 		return nil, fmt.Errorf("connection doesn't support GraphQL (HTTP)")
 	}
 
-	httpParams := lavasession.HTTPRequestParams{
+	httpParams := routersession.HTTPRequestParams{
 		Method:      "POST",
 		URL:         nodeUrl.Url,
 		Body:        graphqlMessage.Msg,
@@ -974,7 +974,7 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 	// Every GraphQL reply is a JSON document, errors included, so a 2xx body that does not
 	// parse is a truncated or corrupted reply: a transport failure, as on JSON-RPC.
 	if response.StatusCode >= 200 && response.StatusCode < 300 && len(response.Body) > 0 && !json.Valid(response.Body) {
-		utils.LavaFormatDebug("direct GraphQL response is not valid JSON",
+		utils.FormatDebug("direct GraphQL response is not valid JSON",
 			utils.LogAttr("endpoint", d.endpointName),
 			utils.LogAttr("status_code", response.StatusCode),
 			utils.LogAttr("response_size", len(response.Body)),
@@ -987,7 +987,7 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 
 	hasError, errorMessage := chainMessage.CheckResponseError(response.Body, response.StatusCode)
 	if hasError && errorMessage != "" {
-		utils.LavaFormatDebug("GraphQL response contains error",
+		utils.FormatDebug("GraphQL response contains error",
 			utils.LogAttr("endpoint", d.endpointName),
 			utils.LogAttr("error", errorMessage),
 		)
@@ -1034,7 +1034,7 @@ func (d *DirectRPCRelaySender) sendGraphQLRelay(
 		result.ApplyNodeErrorClassification(d.chainFamily, common.TransportREST, classificationStatus, errorMessage)
 	}
 
-	utils.LavaFormatTrace("GraphQL request completed",
+	utils.FormatTrace("GraphQL request completed",
 		utils.LogAttr("method", chainMessage.GetApi().Name),
 		utils.LogAttr("status", response.StatusCode),
 		utils.LogAttr("response_size", len(response.Body)),
@@ -1080,7 +1080,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 
 	// Build headers with required gRPC method header
 	headers := make(map[string]string)
-	headers[lavasession.GRPCMethodHeader] = methodPath
+	headers[routersession.GRPCMethodHeader] = methodPath
 
 	// Add any additional headers from the RPC message
 	for _, meta := range grpcMessage.GetHeaders() {
@@ -1095,7 +1095,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		endpointIdentifier = sanitizeEndpointURL(d.directConnection.GetURL())
 	}
 
-	utils.LavaFormatTrace("sending direct gRPC request",
+	utils.FormatTrace("sending direct gRPC request",
 		utils.LogAttr("endpoint", endpointIdentifier),
 		utils.LogAttr("method", methodPath),
 		utils.LogAttr("timeout", attemptBudget),
@@ -1114,7 +1114,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 
 	if err != nil {
 		tracing.RecordError(span, err)
-		utils.LavaFormatDebug("direct gRPC request failed",
+		utils.FormatDebug("direct gRPC request failed",
 			utils.LogAttr("endpoint", endpointIdentifier),
 			utils.LogAttr("method", methodPath),
 			utils.LogAttr("error", err.Error()),
@@ -1125,7 +1125,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		// Unwrap, so it is meant to be inspected through wrapping. A plain assertion
 		// would silently stop matching the moment anything wraps the error on its way
 		// here, rerouting node errors into classifyAndWrap with no visible cause.
-		var grpcErr *lavasession.GRPCStatusError
+		var grpcErr *routersession.GRPCStatusError
 		isGRPCErr := errors.As(err, &grpcErr)
 
 		if isGRPCErr && response != nil {
@@ -1205,8 +1205,8 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 				// registry sees a code and a message and has no row for it, so without this it was
 				// UNKNOWN_ERROR and scored against the endpoint (MAG-4278 item 5). A verdict the
 				// registry did give is left alone.
-				if grpcErr.RateLimited() && common.ClassifyError(nil, d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage) == common.LavaErrorUnknown {
-					result.ApplyLavaErrorClassification(common.LavaErrorNodeRateLimited)
+				if grpcErr.RateLimited() && common.ClassifyError(nil, d.chainFamily, common.TransportGRPC, response.StatusCode, errorMessage) == common.RouterErrorUnknown {
+					result.ApplyRouterErrorClassification(common.RouterErrorNodeRateLimited)
 				}
 				// The wait the node asked for rides on err, which this branch does not return, so the
 				// hold-off read 0 and held the endpoint off for its default whatever was asked: a vendor
@@ -1219,7 +1219,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 		return nil, classifyAndWrap(err, d.chainFamily, common.TransportGRPC)
 	}
 
-	utils.LavaFormatTrace("direct gRPC request succeeded",
+	utils.FormatTrace("direct gRPC request succeeded",
 		utils.LogAttr("endpoint", endpointIdentifier),
 		utils.LogAttr("method", methodPath),
 		utils.LogAttr("latency", latency),
@@ -1229,7 +1229,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 	// Check for errors in response using chainMessage
 	hasError, errorMessage := chainMessage.CheckResponseError(response.Data, response.StatusCode)
 	if hasError {
-		utils.LavaFormatDebug("gRPC response contains error",
+		utils.FormatDebug("gRPC response contains error",
 			utils.LogAttr("endpoint", endpointIdentifier),
 			utils.LogAttr("method", methodPath),
 			utils.LogAttr("error", errorMessage),
@@ -1245,7 +1245,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 	// warm-up sweep, a JSON request on the same service (the endpoint poller) or the background
 	// lookup an earlier relay started has resolved it. Until then, and on a node without working
 	// reflection, a binary reply's block is not extracted.
-	if descriptorProvider, ok := d.directConnection.(lavasession.GRPCDescriptorProvider); ok {
+	if descriptorProvider, ok := d.directConnection.(routersession.GRPCDescriptorProvider); ok {
 		if methodDesc := descriptorProvider.GetCachedMethodDescriptor(methodPath); methodDesc != nil {
 			formatter := createGRPCFormatter(methodDesc)
 			grpcMessage.SetParsingData(methodDesc, formatter)
@@ -1296,8 +1296,8 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 // service and bounded by the node's reflection-timeout, so it always ends.
 func grpcMethodIsServerStreaming(
 	ctx context.Context,
-	resolver lavasession.GRPCMethodResolver,
-	conn lavasession.DirectRPCConnection,
+	resolver routersession.GRPCMethodResolver,
+	conn routersession.DirectRPCConnection,
 	chainMessage chainlib.ChainMessage,
 	methodPath string,
 	window time.Duration,
@@ -1323,13 +1323,13 @@ func grpcRelayNeedsDescriptor(chainMessage chainlib.ChainMessage) bool {
 	if !ok {
 		return true
 	}
-	return lavasession.GRPCRequestNeedsDescriptor(grpcMessage.Msg)
+	return routersession.GRPCRequestNeedsDescriptor(grpcMessage.Msg)
 }
 
 // cachedGRPCMethodDescriptor returns the connection's cached descriptor for methodPath,
 // or nil when it has none, without waiting on a lookup.
-func cachedGRPCMethodDescriptor(conn lavasession.DirectRPCConnection, methodPath string) *desc.MethodDescriptor {
-	provider, ok := conn.(lavasession.GRPCDescriptorProvider)
+func cachedGRPCMethodDescriptor(conn routersession.DirectRPCConnection, methodPath string) *desc.MethodDescriptor {
+	provider, ok := conn.(routersession.GRPCDescriptorProvider)
 	if !ok {
 		return nil
 	}

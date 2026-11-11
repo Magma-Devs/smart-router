@@ -61,5 +61,5 @@ func isJSONRPCErrorEnvelope(data []byte) bool {
 func statusFiledAsCallersRequest(status int) bool {
 	classified := common.ClassifyError(nil, common.ChainFamilyUnknown, common.TransportREST, status, "")
 	return classified != nil &&
-		(classified.Code == common.LavaErrorUserInvalidRequest.Code || classified.Code == common.LavaErrorUserInvalidParams.Code)
+		(classified.Code == common.RouterErrorUserInvalidRequest.Code || classified.Code == common.RouterErrorUserInvalidParams.Code)
 }

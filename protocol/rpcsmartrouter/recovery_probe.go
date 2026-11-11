@@ -9,7 +9,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
@@ -45,7 +45,7 @@ const (
 // relayProbeFunc replays a disabled endpoint's recorded failing request under the recorded relay
 // timeout and judges the outcome. Injected into runProbeCycleCore (via relayProbeRunner) so the
 // pure cycle body stays testable without network I/O.
-type relayProbeFunc func(ep *lavasession.EndpointWithDirectConnection, method string, payload []byte, relayTimeout time.Duration) relayProbeVerdict
+type relayProbeFunc func(ep *routersession.EndpointWithDirectConnection, method string, payload []byte, relayTimeout time.Duration) relayProbeVerdict
 
 // relayProbeRunner executes replays for the probe cycle WITHOUT blocking it. The probe loop is a
 // single serial ticker that also feeds every provider's QoS sample; a replay can legitimately run
@@ -123,7 +123,7 @@ func (r *relayProbeRunner) launch(key string, run func()) {
 // Unsupported-method responses never reach this function at all: classifyEndpointHealth returns
 // shouldMarkUnhealthy=false for them, so they neither disable the endpoint nor pollute the
 // recorded evidence.
-func (rpcss *RPCSmartRouterServer) recordRelayProbeEvidence(endpoint *lavasession.Endpoint, chainMessage chainlib.ChainMessage, requestData []byte, relayTimeout time.Duration) {
+func (rpcss *RPCSmartRouterServer) recordRelayProbeEvidence(endpoint *routersession.Endpoint, chainMessage chainlib.ChainMessage, requestData []byte, relayTimeout time.Duration) {
 	if endpoint == nil || chainMessage == nil {
 		return
 	}
@@ -162,7 +162,7 @@ func isBatchPayload(data []byte) bool {
 // rather than by its status: the JSON-RPC sender wraps every 5xx in an HTTPStatusError and
 // classifies it through classifyDirectRPCError, which reads that body first. 501 keeps its
 // capability rule here, and the sender never builds an HTTPStatusError below 500.
-func judgedByItsBody(httpErr *lavasession.HTTPStatusError) bool {
+func judgedByItsBody(httpErr *routersession.HTTPStatusError) bool {
 	if httpErr.StatusCode < http.StatusInternalServerError || httpErr.StatusCode == http.StatusNotImplemented {
 		return false
 	}
@@ -186,7 +186,7 @@ func judgedByItsBody(httpErr *lavasession.HTTPStatusError) bool {
 //     body on transport success (a proxy's HTML error page). Failing OPEN here would degrade the
 //     gate to "always confirm" with no signal; failing CLOSED would escalate the flap hysteresis
 //     on evidence of nothing. Inconclusive does neither.
-func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *lavasession.EndpointWithDirectConnection, payload []byte, relayTimeout time.Duration) relayProbeVerdict {
+func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *routersession.EndpointWithDirectConnection, payload []byte, relayTimeout time.Duration) relayProbeVerdict {
 	if ep == nil || ep.DirectConnection == nil || len(payload) == 0 {
 		return relayProbeInconclusive
 	}
@@ -218,7 +218,7 @@ func (rpcss *RPCSmartRouterServer) replayFailingRelay(ep *lavasession.EndpointWi
 		// on (unrecognized 4xx: auth drift, a proxy in the way) prove nothing about the recorded
 		// failure — inconclusive, never "recovered". A 5xx carrying the node's JSON-RPC error is
 		// read by that error, below, as the relay path reads it.
-		if httpErr, ok := err.(*lavasession.HTTPStatusError); ok && !judgedByItsBody(httpErr) {
+		if httpErr, ok := err.(*routersession.HTTPStatusError); ok && !judgedByItsBody(httpErr) {
 			switch {
 			case httpErr.StatusCode == http.StatusTooManyRequests:
 				// busy: the failing handler was never exercised. Hold the endpoint off so

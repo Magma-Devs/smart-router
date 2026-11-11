@@ -67,7 +67,7 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
 	// Protocol errors are plain Go errors (nothing in this fork carries an sdkerrors ABCI code any
 	// more), so they are classified by connection shape and message text. TransportGRPC is the
 	// historical choice for the message-based fallback and is kept so the verdicts do not move.
-	var classified *common.LavaError
+	var classified *common.RouterError
 	if response.Err != nil {
 		classified = common.ClassifyError(common.DetectConnectionError(response.Err), common.ChainFamilyUnknown, common.TransportGRPC, 0, response.Err.Error())
 	}
@@ -81,7 +81,7 @@ func (rp *ResultsManagerInst) setErrorResponse(response *RelayResponse) {
 		utils.Attribute{Key: "statusCode", Value: response.RelayResult.StatusCode},
 		utils.Attribute{Key: "providerTrailer", Value: response.RelayResult.ProviderTrailer},
 	)
-	rp.protocolResponseErrors.AddError(RelayError{Err: response.Err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, LavaError: classified})
+	rp.protocolResponseErrors.AddError(RelayError{Err: response.Err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: classified})
 }
 
 // only when locked
@@ -117,7 +117,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 	}
 
 	if response.RelayResult.Reply == nil {
-		utils.LavaFormatError("got to setValidResponse with nil Reply",
+		utils.FormatError("got to setValidResponse with nil Reply",
 			response.Err,
 			utils.LogAttr("ProviderInfo", response.RelayResult.ProviderInfo),
 			utils.LogAttr("StatusCode", response.RelayResult.StatusCode),
@@ -203,8 +203,8 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 		// routine — see LogCodedNodeAnswer. The metric fires either way.
 		logNodeError := common.LogCodedNodeAnswer
 		if nodeClassified.EndpointAtFault() {
-			logNodeError = func(description string, err error, lavaError *common.LavaError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) {
-				common.LogCodedError(description, err, lavaError, chainID, chainErrorCode, chainErrorMessage, attributes...)
+			logNodeError = func(description string, err error, routerError *common.RouterError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) {
+				common.LogCodedError(description, err, routerError, chainID, chainErrorCode, chainErrorMessage, attributes...)
 			}
 		}
 		logNodeError("received node error reply from provider", err, nodeClassified, rp.chainID, errorCode, err.Error(),
@@ -218,7 +218,7 @@ func (rp *ResultsManagerInst) setValidResponse(response *RelayResponse, protocol
 			utils.LogAttr("requestPayload", parser.CapStringLen(reqPayload)),
 			utils.LogAttr("requestHeaders", reqHeaders),
 		)
-		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, LavaError: nodeClassified, JSONRPCErrorCode: jsonRPCErrorCode})
+		rp.nodeResponseErrors.AddError(RelayError{Err: err, ProviderInfo: response.RelayResult.ProviderInfo, Response: response, RouterError: nodeClassified, JSONRPCErrorCode: jsonRPCErrorCode})
 		return err
 	}
 	rp.successResults = append(rp.successResults, response.RelayResult)
@@ -278,7 +278,7 @@ func (rp *ResultsManagerInst) RequiredResults(requiredSuccesses int, selection S
 	resultsCount := len(rp.successResults)
 	if resultsCount >= requiredSuccesses {
 		// we have enough successes, we can return
-		utils.LavaFormatDebug("Reached RequiredResults", utils.LogAttr("resultsCount", resultsCount), utils.LogAttr("requiredSuccesses", requiredSuccesses), utils.LogAttr("GUID", rp.guid))
+		utils.FormatDebug("Reached RequiredResults", utils.LogAttr("resultsCount", resultsCount), utils.LogAttr("requiredSuccesses", requiredSuccesses), utils.LogAttr("GUID", rp.guid))
 		return true
 	}
 	// Only count successful results for cross-validation

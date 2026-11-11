@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -75,7 +75,7 @@ func newSuiGraphQLChainFetcherWithReply(t *testing.T, body string) *ChainFetcher
 	require.NoError(t, err)
 	cp.SetSpec(suiGraphQLPollSpec())
 	return &ChainFetcher{
-		endpoint:    &lavasession.RPCProviderEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGraphQL},
+		endpoint:    &routersession.RPCProviderEndpoint{ChainID: "SUI", ApiInterface: spectypes.APIInterfaceGraphQL},
 		chainRouter: replyingChainRouter{body: body},
 		chainParser: cp,
 	}

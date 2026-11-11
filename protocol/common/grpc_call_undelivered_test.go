@@ -16,14 +16,14 @@ func TestDetectConnectionError_UndeliveredGRPCCall(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		msg  string
-		want *LavaError
+		want *RouterError
 	}{
-		{"refused dial keeps its own code", `connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:9090: connect: connection refused"`, LavaErrorConnectionRefused},
-		{"unresolved name keeps its own code", `connection error: desc = "transport: Error while dialing: dial tcp: lookup node.example: no such host"`, LavaErrorDNSFailure},
-		{"reset keeps its own code", `connection error: desc = "transport: Error while dialing: read tcp 127.0.0.1:9090: connection reset by peer"`, LavaErrorConnectionReset},
-		{"failed TLS handshake", `connection error: desc = "transport: authentication handshake failed: tls: failed to verify certificate"`, LavaErrorProviderUnavailable},
-		{"resolver produced no address", "name resolver error: produced zero addresses", LavaErrorProviderUnavailable},
-		{"transport closing", "transport is closing", LavaErrorProviderUnavailable},
+		{"refused dial keeps its own code", `connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:9090: connect: connection refused"`, RouterErrorConnectionRefused},
+		{"unresolved name keeps its own code", `connection error: desc = "transport: Error while dialing: dial tcp: lookup node.example: no such host"`, RouterErrorDNSFailure},
+		{"reset keeps its own code", `connection error: desc = "transport: Error while dialing: read tcp 127.0.0.1:9090: connection reset by peer"`, RouterErrorConnectionReset},
+		{"failed TLS handshake", `connection error: desc = "transport: authentication handshake failed: tls: failed to verify certificate"`, RouterErrorProviderUnavailable},
+		{"resolver produced no address", "name resolver error: produced zero addresses", RouterErrorProviderUnavailable},
+		{"transport closing", "transport is closing", RouterErrorProviderUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := &GRPCCallUndeliveredError{Err: status.Error(codes.Unavailable, tc.msg)}
@@ -33,7 +33,7 @@ func TestDetectConnectionError_UndeliveredGRPCCall(t *testing.T) {
 			require.True(t, got.Retryable, "another endpoint may still serve the relay")
 		})
 	}
-	require.False(t, LavaErrorProviderUnavailable.MayHaveReachedNode,
+	require.False(t, RouterErrorProviderUnavailable.MayHaveReachedNode,
 		"the fallback code is only reached when no stream was opened, so the request provably stayed in this process")
 }
 
@@ -42,7 +42,7 @@ func TestDetectConnectionError_UndeliveredGRPCCall(t *testing.T) {
 func TestDetectConnectionError_BareUnavailableIsNotAConnectionFault(t *testing.T) {
 	bare := status.Error(codes.Unavailable, "node is shutting down")
 	require.Nil(t, DetectConnectionError(bare))
-	require.Equal(t, LavaErrorNodeServiceUnavailable,
+	require.Equal(t, RouterErrorNodeServiceUnavailable,
 		ClassifyError(nil, ChainFamily(-1), TransportGRPC, int(codes.Unavailable), "node is shutting down"))
 }
 

@@ -38,7 +38,7 @@ func TestLogEvent_WrittenWhateverTheLevel(t *testing.T) {
 	for _, level := range []zerolog.Level{zerolog.DebugLevel, zerolog.InfoLevel, zerolog.WarnLevel, zerolog.ErrorLevel} {
 		t.Run(level.String(), func(t *testing.T) {
 			out := captureLog(t, level, func() {
-				LavaFormatInfo("narrative line")
+				FormatInfo("narrative line")
 				LogEvent("test_end", testEvent{})
 			})
 

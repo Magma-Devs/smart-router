@@ -17,7 +17,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 )
@@ -72,7 +72,7 @@ func TestGrpcChainProxy_RateLimitWaitIsReadFromHeaderOrTrailer(t *testing.T) {
 			go func() { _ = srv.Serve(lis) }()
 			t.Cleanup(srv.Stop)
 
-			endpoint := &lavasession.RPCProviderEndpoint{
+			endpoint := &routersession.RPCProviderEndpoint{
 				ChainID:      "GRPCTEST",
 				ApiInterface: spectypes.APIInterfaceGrpc,
 				NodeUrls:     []common.NodeUrl{{Url: lis.Addr().String()}},

@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -25,16 +25,16 @@ func TestSetErrorResponse_ProtocolErrorClassification(t *testing.T) {
 		name    string
 		chainID string
 		err     error
-		want    *common.LavaError
+		want    *common.RouterError
 	}{
-		{"gRPC-only text matcher", "ETH1", errors.New("not implemented"), common.LavaErrorNodeUnimplemented},
-		{"JSON-RPC-only text matcher", "ETH1", errors.New("nonce too low"), common.LavaErrorUnknown},
-		{"no chain family", "SOLANA", errors.New("blockhash not found"), common.LavaErrorUnknown},
-		{"HTTP status text", "ETH1", errors.New("HTTP status 503: Service Unavailable"), common.LavaErrorNodeServiceUnavailable},
-		{"context deadline", "ETH1", context.DeadlineExceeded, common.LavaErrorContextDeadline},
-		{"EOF", "ETH1", fmt.Errorf("post: %w", io.EOF), common.LavaErrorConnectionClosed},
-		{"DNS", "ETH1", fmt.Errorf("dial: %w", &net.DNSError{Err: "no such host", Name: "node.invalid", IsNotFound: true}), common.LavaErrorDNSFailure},
-		{"session error", "ETH1", lavasession.PairingListEmptyError, common.LavaErrorUnknown},
+		{"gRPC-only text matcher", "ETH1", errors.New("not implemented"), common.RouterErrorNodeUnimplemented},
+		{"JSON-RPC-only text matcher", "ETH1", errors.New("nonce too low"), common.RouterErrorUnknown},
+		{"no chain family", "SOLANA", errors.New("blockhash not found"), common.RouterErrorUnknown},
+		{"HTTP status text", "ETH1", errors.New("HTTP status 503: Service Unavailable"), common.RouterErrorNodeServiceUnavailable},
+		{"context deadline", "ETH1", context.DeadlineExceeded, common.RouterErrorContextDeadline},
+		{"EOF", "ETH1", fmt.Errorf("post: %w", io.EOF), common.RouterErrorConnectionClosed},
+		{"DNS", "ETH1", fmt.Errorf("dial: %w", &net.DNSError{Err: "no such host", Name: "node.invalid", IsNotFound: true}), common.RouterErrorDNSFailure},
+		{"session error", "ETH1", routersession.PairingListEmptyError, common.RouterErrorUnknown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -42,7 +42,7 @@ func TestSetErrorResponse_ProtocolErrorClassification(t *testing.T) {
 			require.NoError(t, rm.SetResponse(&RelayResponse{Err: tc.err}, nil))
 			_, _, protocolErrors := rm.GetResultsData()
 			require.Len(t, protocolErrors, 1)
-			require.Same(t, tc.want, protocolErrors[0].LavaError, "got %v", protocolErrors[0].LavaError)
+			require.Same(t, tc.want, protocolErrors[0].RouterError, "got %v", protocolErrors[0].RouterError)
 		})
 	}
 }

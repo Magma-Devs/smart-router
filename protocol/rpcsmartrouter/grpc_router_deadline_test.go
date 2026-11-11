@@ -14,8 +14,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // startGRPCNode serves every method with handle, through the router's real gRPC
@@ -35,7 +35,7 @@ func startGRPCNode(t *testing.T, handle func(stream grpc.ServerStream) error) st
 func sendGRPCRelayTo(t *testing.T, addr string, attemptBudget time.Duration) (*common.RelayResult, error) {
 	t.Helper()
 	nodeUrl := common.NodeUrl{Url: "grpc://" + addr, GrpcConfig: common.GrpcConfig{AllowInsecure: true}}
-	conn, err := lavasession.NewDirectRPCConnection(context.Background(), nodeUrl, 5, "")
+	conn, err := routersession.NewDirectRPCConnection(context.Background(), nodeUrl, 5, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
@@ -62,12 +62,12 @@ func TestSendGRPCRelay_RouterDeadlineIsATimeout(t *testing.T) {
 
 	require.Nil(t, result, "the router's own timeout is not an answer from the node")
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Equal(t, common.LavaErrorContextDeadline, common.AsLavaError(err))
+	require.Equal(t, common.RouterErrorContextDeadline, common.AsRouterError(err))
 	require.False(t, common.IsClientCancellation(err, context.Background()), "a slow endpoint is not excused")
-	unhealthy, _ := classifyEndpointHealth(common.AsLavaError(err), false)
+	unhealthy, _ := classifyEndpointHealth(common.AsRouterError(err), false)
 	require.True(t, unhealthy, "the endpoint is still blamed for the timeout")
 
-	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, LavaError: common.AsLavaError(err)}, false)
+	attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: err, RouterError: common.AsRouterError(err)}, false)
 	require.Equal(t, attemptOutcomeTimeout, attempt.outcome, "relay_end reads it as a timeout")
 }
 
@@ -91,7 +91,7 @@ func TestSendGRPCRelay_NodeSentDeadlineIsANodeError(t *testing.T) {
 // instead of failing the test, and closes its connection itself.
 func sendGRPCRelayOnItsOwnConnection(addr string, attemptBudget time.Duration) (*common.RelayResult, error) {
 	nodeUrl := common.NodeUrl{Url: "grpc://" + addr, GrpcConfig: common.GrpcConfig{AllowInsecure: true}}
-	conn, err := lavasession.NewDirectRPCConnection(context.Background(), nodeUrl, 1, "")
+	conn, err := routersession.NewDirectRPCConnection(context.Background(), nodeUrl, 1, "")
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +148,7 @@ func TestSendGRPCRelay_DeadlineEchoedByTheNodeIsATimeout(t *testing.T) {
 		}
 		require.Nil(t, got.result, "the router's own timeout is not an answer from the node")
 		require.ErrorIs(t, got.err, context.DeadlineExceeded)
-		require.Equal(t, common.LavaErrorContextDeadline, common.AsLavaError(got.err))
+		require.Equal(t, common.RouterErrorContextDeadline, common.AsRouterError(got.err))
 	}
 	require.Zero(t, nodeAnswers,
 		"%d of %d attempts took the node's DEADLINE_EXCEEDED for its answer; each is an attempt the endpoint is not blamed for",

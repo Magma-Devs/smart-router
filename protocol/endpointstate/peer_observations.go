@@ -147,7 +147,7 @@ func (c *cachePeerObservations) warnIfUnimplemented(err error) {
 		return
 	}
 	c.unimplementedOnce.Do(func() {
-		utils.LavaFormatWarning("fleet tracker gate: the cache backend does not implement endpoint observations; polling locally until it is upgraded", err)
+		utils.FormatWarning("fleet tracker gate: the cache backend does not implement endpoint observations; polling locally until it is upgraded", err)
 	})
 }
 
@@ -226,7 +226,7 @@ func (m *EndpointMonitor) publishLocalObservation(endpointURL string, block int6
 		err := m.peerObservations.Publish(ctx, m.chainID, m.apiInterface, EndpointID(endpointURL), m.podID, block, m.relayGateFreshness*peerObservationTTLMultiplier)
 		if err != nil && m.ctx.Err() == nil {
 			m.noteGateError(endpointURL, metrics.TrackerGateOpPublish)
-			utils.LavaFormatDebug("fleet gate: publishing local observation failed",
+			utils.FormatDebug("fleet gate: publishing local observation failed",
 				utils.LogAttr("chainID", m.chainID),
 				utils.LogAttr("apiInterface", m.apiInterface),
 				utils.LogAttr("endpoint", endpointURL),
@@ -272,7 +272,7 @@ func (m *EndpointMonitor) freshPeerTip(endpointURL string, gen uint64, now time.
 	if err != nil {
 		if m.ctx.Err() == nil {
 			m.noteGateError(endpointURL, metrics.TrackerGateOpFetch)
-			utils.LavaFormatDebug("fleet gate: fetching peer observation failed, polling locally",
+			utils.FormatDebug("fleet gate: fetching peer observation failed, polling locally",
 				utils.LogAttr("chainID", m.chainID),
 				utils.LogAttr("endpoint", endpointURL),
 				utils.LogAttr("error", err),

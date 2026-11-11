@@ -8,7 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
@@ -49,7 +49,7 @@ func contentTypeRelayHarness(t *testing.T, chainID, apiInterface string, specOve
 		chainParser.SetSpec(spec)
 	}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, "")
 	require.NoError(t, err)
 	sender := &DirectRPCRelaySender{directConnection: directConn, endpointName: "content-type-upstream"}
 

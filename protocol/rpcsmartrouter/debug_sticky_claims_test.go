@@ -14,8 +14,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
@@ -61,25 +61,25 @@ func (s *stickyClaimsTestRegistry) Flush(_ context.Context) error {
 
 // stickyClaimsTestCSM builds a session manager the way the router does for a direct-RPC upstream,
 // with the registry wired when one is given.
-func stickyClaimsTestCSM(t *testing.T, chainID string, registry lavasession.SharedStickyStore) *lavasession.ConsumerSessionManager {
+func stickyClaimsTestCSM(t *testing.T, chainID string, registry routersession.SharedStickyStore) *routersession.ConsumerSessionManager {
 	t.Helper()
 	rand.InitRandomSeed()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 	t.Cleanup(upstream.Close)
-	conn, err := lavasession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: upstream.URL}, 1, spectypes.APIInterfaceJsonRPC)
+	conn, err := routersession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: upstream.URL}, 1, spectypes.APIInterfaceJsonRPC)
 	require.NoError(t, err)
 
-	endpoint := &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: spectypes.APIInterfaceJsonRPC, NetworkAddress: "127.0.0.1:0"}
+	endpoint := &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: spectypes.APIInterfaceJsonRPC, NetworkAddress: "127.0.0.1:0"}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, 1, nil, chainID)
-	csm := lavasession.NewConsumerSessionManager(endpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+	csm := routersession.NewConsumerSessionManager(endpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 	if registry != nil {
 		csm.SetSharedStickyStore(registry, 15*time.Minute)
 	}
-	provider := lavasession.NewConsumerSessionWithProvider("upstream-1",
-		[]*lavasession.Endpoint{{NetworkAddress: upstream.URL, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{conn}}},
+	provider := routersession.NewConsumerSessionWithProvider("upstream-1",
+		[]*routersession.Endpoint{{NetworkAddress: upstream.URL, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{conn}}},
 		999999999, 1, StaticProviderDummyStake)
 	provider.StaticProvider = true
-	require.NoError(t, csm.UpdateAllProviders(1, map[uint64]*lavasession.ConsumerSessionsWithProvider{0: provider}, nil))
+	require.NoError(t, csm.UpdateAllProviders(1, map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, nil))
 	return csm
 }
 
@@ -89,9 +89,9 @@ func stickyClaimsMux(router *RPCSmartRouter, cache cacheFlusher) http.Handler {
 }
 
 // stickyRequest sends one request carrying a sticky id through csm and completes it.
-func stickyRequest(t *testing.T, csm *lavasession.ConsumerSessionManager, stickyID string) {
+func stickyRequest(t *testing.T, csm *routersession.ConsumerSessionManager, stickyID string) {
 	t.Helper()
-	sessions, err := csm.GetSessions(context.Background(), 1, 10, lavasession.NewUsedProviders(nil), spectypes.LATEST_BLOCK, "", nil, common.NO_STATE, 0, stickyID, "")
+	sessions, err := csm.GetSessions(context.Background(), 1, 10, routersession.NewUsedProviders(nil), spectypes.LATEST_BLOCK, "", nil, common.NO_STATE, 0, stickyID, "")
 	require.NoError(t, err)
 	for _, session := range sessions {
 		require.NoError(t, csm.OnSessionDone(session.Session, spectypes.LATEST_BLOCK, 10, time.Millisecond, time.Millisecond, 1, 1, 1, false, nil))
@@ -148,7 +148,7 @@ func TestDebugStickyClaims_ReportsEachEndpointsOutcomes(t *testing.T) {
 	stickyRequest(t, refused, "session-1")
 
 	router := createTestRPCSmartRouter()
-	for _, csm := range []*lavasession.ConsumerSessionManager{shared, podLocal, refused} {
+	for _, csm := range []*routersession.ConsumerSessionManager{shared, podLocal, refused} {
 		endpoint := csm.RPCEndpoint()
 		router.sessionManagers[endpoint.Key()] = csm
 	}

@@ -9,10 +9,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -32,7 +32,7 @@ func (archiveRequest) GetExtensions() []*spectypes.Extension {
 func rejectEveryDegradedSession(t *testing.T, msg archiveRequest) *relaycore.RelayProcessor {
 	t.Helper()
 	relayProcessor, err := sendToEveryEndpointStale(t, msg)
-	require.ErrorIs(t, err, lavasession.ConsistencyPreValidationError, "setup: both sessions must have been rejected as stale")
+	require.ErrorIs(t, err, routersession.ConsistencyPreValidationError, "setup: both sessions must have been rejected as stale")
 	return relayProcessor
 }
 
@@ -54,52 +54,52 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 
 	chainTip := seedChainTip(200)
 	endpointtip.Default().Reset()
-	staleEp1 := &lavasession.Endpoint{NetworkAddress: "http://stale1:8545"}
+	staleEp1 := &routersession.Endpoint{NetworkAddress: "http://stale1:8545"}
 	seedEndpointTip("LAVA", "rest", "http://stale1:8545", 50)
-	staleEp2 := &lavasession.Endpoint{NetworkAddress: "http://stale2:8545"}
+	staleEp2 := &routersession.Endpoint{NetworkAddress: "http://stale2:8545"}
 	seedEndpointTip("LAVA", "rest", "http://stale2:8545", 50)
 
-	mkSession := func(addr string, ep *lavasession.Endpoint) *lavasession.SingleConsumerSession {
-		return &lavasession.SingleConsumerSession{
-			Parent:     &lavasession.ConsumerSessionsWithProvider{PublicLavaAddress: addr, Endpoints: []*lavasession.Endpoint{ep}},
-			Connection: &lavasession.DirectRPCSessionConnection{Endpoint: ep},
+	mkSession := func(addr string, ep *routersession.Endpoint) *routersession.SingleConsumerSession {
+		return &routersession.SingleConsumerSession{
+			Parent:     &routersession.ConsumerSessionsWithProvider{PublicAddress: addr, Endpoints: []*routersession.Endpoint{ep}},
+			Connection: &routersession.DirectRPCSessionConnection{Endpoint: ep},
 			QoSManager: qos.NewQoSManager(),
 		}
 	}
-	sess1 := mkSession("lava@provider1", staleEp1)
-	sess2 := mkSession("lava@provider2", staleEp2)
-	for _, s := range []*lavasession.SingleConsumerSession{sess1, sess2} {
+	sess1 := mkSession("provider@provider1", staleEp1)
+	sess2 := mkSession("provider@provider2", staleEp2)
+	for _, s := range []*routersession.SingleConsumerSession{sess1, sess2} {
 		_, ok := s.TryUseSession()
 		require.True(t, ok, "test setup: failed to lock session")
 	}
 
 	// In GetSessions order: the key goes on each session first, then AddUsed files the providers
 	// under it. The key is the plain one, because the request degraded.
-	usedProviders := lavasession.NewUsedProviders(nil)
-	plainKey := lavasession.NewRouterKey(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
+	plainKey := routersession.NewRouterKey(nil)
 	require.NoError(t, sess1.SetUsageForSession(0, nil, usedProviders, plainKey))
 	require.NoError(t, sess2.SetUsageForSession(0, nil, usedProviders, plainKey))
-	sessionsMap := lavasession.ConsumerSessionsMap{
-		"lava@provider1": &lavasession.SessionInfo{Session: sess1},
-		"lava@provider2": &lavasession.SessionInfo{Session: sess2},
+	sessionsMap := routersession.ConsumerSessionsMap{
+		"provider@provider1": &routersession.SessionInfo{Session: sess1},
+		"provider@provider2": &routersession.SessionInfo{Session: sess2},
 	}
 	usedProviders.AddUsed(sessionsMap, nil)
-	require.ElementsMatch(t, []string{"lava@provider1", "lava@provider2"}, usedProviders.DispatchedProviders())
+	require.ElementsMatch(t, []string{"provider@provider1", "provider@provider2"}, usedProviders.DispatchedProviders())
 
-	require.NotEqual(t, plainKey.String(), lavasession.NewRouterKeyFromExtensions(msg.GetExtensions()).String(),
+	require.NotEqual(t, plainKey.String(), routersession.NewRouterKeyFromExtensions(msg.GetExtensions()).String(),
 		"setup: the request's key must differ from the key its sessions were taken under, or this measures nothing")
 
 	sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: msg}
 	relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{}, sm)
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:    rpcEndpoint,
 		chainParser:       chainParser,
 		consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
 		chainState:        chainTip,
-		sessionManager: lavasession.NewConsumerSessionManager(
-			rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage()),
+		sessionManager: routersession.NewConsumerSessionManager(
+			rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage()),
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

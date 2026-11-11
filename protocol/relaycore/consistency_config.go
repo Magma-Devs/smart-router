@@ -73,7 +73,7 @@ func NewConsistencyValidationConfig(
 		EndpointLagThreshold: endpointLagThreshold,
 	}
 
-	utils.LavaFormatInfo("created consistency validation config",
+	utils.FormatInfo("created consistency validation config",
 		utils.LogAttr("endpointLagThreshold", config.EndpointLagThreshold),
 		utils.LogAttr("blockLagForQosSync", blockLagForQosSync),
 		utils.LogAttr("blockGapFactor", gapFactor),

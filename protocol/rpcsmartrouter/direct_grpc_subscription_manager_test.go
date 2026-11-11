@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -269,8 +269,8 @@ func TestDirectGRPCSubscriptionManager_StickySessions(t *testing.T) {
 	assert.False(t, exists)
 
 	// Simulate setting a sticky session
-	manager.stickyStore.Set("client-1", &lavasession.StickySession{Provider: "grpc://node1:9090"})
-	manager.stickyStore.Set("client-2", &lavasession.StickySession{Provider: "grpc://node2:9090"})
+	manager.stickyStore.Set("client-1", &routersession.StickySession{Provider: "grpc://node1:9090"})
+	manager.stickyStore.Set("client-2", &routersession.StickySession{Provider: "grpc://node2:9090"})
 
 	s1, ok1 := manager.stickyStore.Get("client-1")
 	require.True(t, ok1)

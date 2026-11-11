@@ -128,7 +128,7 @@ func (r ristrettoStore) GetEntries(ctx context.Context, keys []string) ([]*core.
 			entries[i] = &cacheVal
 			continue
 		}
-		utils.LavaFormatError("entry in cache was not a CacheValue", EntryTypeError, utils.Attribute{Key: "entry", Value: fmt.Sprintf("%+v", value)})
+		utils.FormatError("entry in cache was not a CacheValue", EntryTypeError, utils.Attribute{Key: "entry", Value: fmt.Sprintf("%+v", value)})
 	}
 	return entries, nil
 }
@@ -146,7 +146,7 @@ func (r ristrettoStore) GetInt64(ctx context.Context, key string) (int64, bool, 
 	if cacheValue, ok := value.(int64); ok {
 		return cacheValue, true, nil
 	}
-	utils.LavaFormatFatal("Failed converting cache result to int64", nil, utils.LogAttr("value", value))
+	utils.FormatFatal("Failed converting cache result to int64", nil, utils.LogAttr("value", value))
 	return 0, false, nil
 }
 
@@ -183,7 +183,7 @@ func (r ristrettoStore) GetChainTip(ctx context.Context, key string) (int64, boo
 
 func (r ristrettoStore) SetChainTipIfGreaterOrEqualOrStale(ctx context.Context, key string, block int64) error {
 	now := time.Now()
-	utils.LavaFormatDebug("setting latest block", utils.Attribute{Key: "key", Value: key}, utils.Attribute{Key: "latestBlock", Value: block})
+	utils.FormatDebug("setting latest block", utils.Attribute{Key: "key", Value: key}, utils.Attribute{Key: "latestBlock", Value: block})
 	r.cs.chainTips.setIfGreaterOrEqualOrStale(key, LastestCacheStore{latestBlock: block, latestExpirationTime: now.Add(core.DefaultExpirationForNonFinalized)}, now)
 	return nil
 }

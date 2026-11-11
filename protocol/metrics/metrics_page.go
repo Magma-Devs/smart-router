@@ -27,6 +27,6 @@ func newMetricsPageHandler(registerer prometheus.Registerer, gatherer prometheus
 type metricsPageErrorLog struct{}
 
 func (metricsPageErrorLog) Println(v ...interface{}) {
-	utils.LavaFormatError("metrics page: a metric could not be served and was left out of the page", nil,
+	utils.FormatError("metrics page: a metric could not be served and was left out of the page", nil,
 		utils.LogAttr("error", strings.TrimSpace(fmt.Sprintln(v...))))
 }

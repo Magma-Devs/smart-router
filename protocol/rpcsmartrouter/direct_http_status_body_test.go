@@ -8,7 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,14 +19,14 @@ import (
 // method, which does not blame the endpoint. Read by its status line alone, it was
 // NODE_SERVICE_UNAVAILABLE and marked the endpoint unhealthy.
 func TestClassifyDirectRPCError_A5xxWithAJSONRPCBodyIsClassifiedByTheBody(t *testing.T) {
-	httpErr := &lavasession.HTTPStatusError{
+	httpErr := &routersession.HTTPStatusError{
 		StatusCode: 503,
 		Body:       []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"the method eth_foo does not exist/is not available"}}`),
 	}
 
 	classified, wrapped := classifyDirectRPCError(httpErr, common.ChainFamilyUnknown, common.TransportJsonRPC)
 
-	assert.Equal(t, common.LavaErrorNodeMethodNotFound, classified)
+	assert.Equal(t, common.RouterErrorNodeMethodNotFound, classified)
 	assert.ErrorIs(t, wrapped, httpErr, "the original error stays reachable")
 	unhealthy, backoff := classifyEndpointHealth(classified, false)
 	assert.False(t, unhealthy, "a node that lacks a method is not a broken endpoint")
@@ -35,11 +35,11 @@ func TestClassifyDirectRPCError_A5xxWithAJSONRPCBodyIsClassifiedByTheBody(t *tes
 
 // A 5xx with no JSON-RPC body is still read by its status, and still blames the endpoint.
 func TestClassifyDirectRPCError_A5xxWithoutABodyKeepsItsStatusVerdict(t *testing.T) {
-	httpErr := &lavasession.HTTPStatusError{StatusCode: 503, Body: []byte(`<html>Service Unavailable</html>`)}
+	httpErr := &routersession.HTTPStatusError{StatusCode: 503, Body: []byte(`<html>Service Unavailable</html>`)}
 
 	classified, _ := classifyDirectRPCError(httpErr, common.ChainFamilyUnknown, common.TransportJsonRPC)
 
-	assert.Equal(t, common.LavaErrorNodeServiceUnavailable, classified)
+	assert.Equal(t, common.RouterErrorNodeServiceUnavailable, classified)
 	unhealthy, backoff := classifyEndpointHealth(classified, false)
 	assert.True(t, unhealthy)
 	assert.True(t, backoff)
@@ -65,7 +65,7 @@ func TestReplayFailingRelay_A5xxWithAJSONRPCBodyIsJudgedLikeTheRelayPath(t *test
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			httpErr := &lavasession.HTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable", Body: []byte(tc.body)}
+			httpErr := &routersession.HTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable", Body: []byte(tc.body)}
 
 			// What the relay path decides for the same answer.
 			classified, _ := classifyDirectRPCError(httpErr, common.ChainFamilyEVM, common.TransportJsonRPC)
@@ -74,8 +74,8 @@ func TestReplayFailingRelay_A5xxWithAJSONRPCBodyIsJudgedLikeTheRelayPath(t *test
 
 			registry := withFreshRelayHoldoff(t)
 			conn := &fakeDirectConn{err: httpErr}
-			ep := &lavasession.EndpointWithDirectConnection{
-				Endpoint:         &lavasession.Endpoint{NetworkAddress: "http://fake:8545"},
+			ep := &routersession.EndpointWithDirectConnection{
+				Endpoint:         &routersession.Endpoint{NetworkAddress: "http://fake:8545"},
 				DirectConnection: conn,
 				ProviderAddress:  "provider1",
 			}
@@ -105,13 +105,13 @@ func TestClassifyDirectRPCError_A5xxWithANonRetryableBodyStillFailsOver(t *testi
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			httpErr := &lavasession.HTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable", Body: []byte(tc.body)}
+			httpErr := &routersession.HTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable", Body: []byte(tc.body)}
 
 			classified, wrapped := classifyDirectRPCError(httpErr, tc.family, common.TransportJsonRPC)
 
 			require.True(t, endsRelay(classified, httpErr), "the case must be one the body alone would end: %s", classified.Name)
-			assert.NotEqual(t, common.LavaErrorNodeServiceUnavailable, classified, "health is decided by the body")
-			assert.Equal(t, common.LavaErrorNodeServiceUnavailable, common.AsLavaError(wrapped),
+			assert.NotEqual(t, common.RouterErrorNodeServiceUnavailable, classified, "health is decided by the body")
+			assert.Equal(t, common.RouterErrorNodeServiceUnavailable, common.AsRouterError(wrapped),
 				"retry, failover and the reply keep the status's verdict")
 			assert.False(t, chainlib.IsUnsupportedMethodError(wrapped))
 			assert.True(t, chainlib.ShouldRetryError(wrapped), "the relay fails over, as before the body was read")
@@ -123,15 +123,15 @@ func TestClassifyDirectRPCError_A5xxWithANonRetryableBodyStillFailsOver(t *testi
 // A body whose verdict still fails over is carried as is: a 503 around a rate limit is a rate
 // limit for retry as well as for health.
 func TestClassifyDirectRPCError_A5xxWithARetryableBodyKeepsTheBodysVerdict(t *testing.T) {
-	httpErr := &lavasession.HTTPStatusError{
+	httpErr := &routersession.HTTPStatusError{
 		StatusCode: 503,
 		Body:       []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"too many requests"}}`),
 	}
 
 	classified, wrapped := classifyDirectRPCError(httpErr, common.ChainFamilyUnknown, common.TransportJsonRPC)
 
-	require.Equal(t, common.LavaErrorNodeRateLimited, classified)
-	assert.Same(t, classified, common.AsLavaError(wrapped))
+	require.Equal(t, common.RouterErrorNodeRateLimited, classified)
+	assert.Same(t, classified, common.AsRouterError(wrapped))
 	assert.True(t, chainlib.ShouldRetryError(wrapped))
 }
 

@@ -11,8 +11,8 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -46,19 +46,19 @@ var callerTracingIds = tracingIds{requestId: "req-42", taskId: "task-7", txId: "
 // httpTracingEntryPoint is one HTTP route that reads the caller's tracing headers.
 type httpTracingEntryPoint struct {
 	name, apiInterface, method, path, body string
-	newListener                            func(context.Context, *lavasession.RPCEndpoint, RelaySender, *metrics.RPCConsumerLogs) ChainListener
+	newListener                            func(context.Context, *routersession.RPCEndpoint, RelaySender, *metrics.RPCConsumerLogs) ChainListener
 }
 
 // httpTracingEntryPoints lists every HTTP route that reads the tracing headers: JSON-RPC's and
 // REST's from the start, Tendermint RPC's two since MAG-3798.
 func httpTracingEntryPoints() []httpTracingEntryPoint {
-	newJsonRPC := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newJsonRPC := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewJrpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, nil, nil)
 	}
-	newRest := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newRest := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewRestChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger)
 	}
-	newTendermint := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newTendermint := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewTendermintRpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, nil, nil)
 	}
 	return []httpTracingEntryPoint{
@@ -81,7 +81,7 @@ func (ep httpTracingEntryPoint) serve(t *testing.T, ctx context.Context, relay R
 	}
 	logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	listener := ep.newListener(ctx, &lavasession.RPCEndpoint{
+	listener := ep.newListener(ctx, &routersession.RPCEndpoint{
 		NetworkAddress:  "127.0.0.1:0",
 		ChainID:         "LAV1",
 		ApiInterface:    ep.apiInterface,
@@ -173,7 +173,7 @@ func startTestGrpcListener(t *testing.T, sender *stubRelaySender) string {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
 	}
-	endpoint := &lavasession.RPCEndpoint{
+	endpoint := &routersession.RPCEndpoint{
 		NetworkAddress: "127.0.0.1:0",
 		ChainID:        "SUIT",
 		ApiInterface:   spectypes.APIInterfaceGrpc,

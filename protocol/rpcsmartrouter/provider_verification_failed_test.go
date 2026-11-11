@@ -11,8 +11,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
@@ -57,10 +57,10 @@ func failingSeries(t *testing.T, spec string) []string {
 	return keys
 }
 
-func sessionsFor(names ...string) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-	out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(names))
+func sessionsFor(names ...string) map[uint64]*routersession.ConsumerSessionsWithProvider {
+	out := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(names))
 	for i, n := range names {
-		out[uint64(i)] = &lavasession.ConsumerSessionsWithProvider{PublicLavaAddress: n}
+		out[uint64(i)] = &routersession.ConsumerSessionsWithProvider{PublicAddress: n}
 	}
 	return out
 }
@@ -69,11 +69,11 @@ func newVerificationFailedRouter(t *testing.T, spec string, inputs *chainReverif
 	t.Helper()
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	require.NotNil(t, mm)
-	inputs.rpcEndpoint = &lavasession.RPCEndpoint{ChainID: spec, ApiInterface: "jsonrpc"}
+	inputs.rpcEndpoint = &routersession.RPCEndpoint{ChainID: spec, ApiInterface: "jsonrpc"}
 	return &RPCSmartRouter{
 		smartRouterMetricsManager: mm,
-		providerSessions:          map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider{},
-		backupProviderSessions:    map[string]map[uint64]*lavasession.ConsumerSessionsWithProvider{},
+		providerSessions:          map[string]map[uint64]*routersession.ConsumerSessionsWithProvider{},
+		backupProviderSessions:    map[string]map[uint64]*routersession.ConsumerSessionsWithProvider{},
 		// Keyed as the router keys a chain's inputs, so code that looks them up by
 		// RPCEndpoint.Key() (the retry loop) finds them.
 		reverifyInputs: map[string]*chainReverifyInputs{inputs.rpcEndpoint.Key(): inputs},
@@ -87,8 +87,8 @@ func TestPublishServingTier_ProviderOutCarriesTheFailedCheck(t *testing.T) {
 	const spec = "VERIFYFAILEDCHECK"
 	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	inputs := &chainReverifyInputs{
-		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "tatum"}, {Name: "gk8"}},
-		configuredBackup: []*lavasession.RPCStaticProviderEndpoint{{Name: "blockdaemon"}},
+		configuredStatic: []*routersession.RPCStaticProviderEndpoint{{Name: "tatum"}, {Name: "gk8"}},
+		configuredBackup: []*routersession.RPCStaticProviderEndpoint{{Name: "blockdaemon"}},
 	}
 	rpsr := newVerificationFailedRouter(t, spec, inputs)
 	rpsr.providerSessions[chainKey] = sessionsFor("tatum")
@@ -121,8 +121,8 @@ func TestPublishServingTier_RefusedServiceOfAPairedProvider(t *testing.T) {
 	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	refused := map[string][]metrics.ProviderVerificationFailure{"lava": {{Scope: metrics.VerificationScopeService, Service: "archive", Check: "pruning"}}}
 	inputs := &chainReverifyInputs{
-		configuredBackup: []*lavasession.RPCStaticProviderEndpoint{{Name: "lava"}},
-		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
+		configuredBackup: []*routersession.RPCStaticProviderEndpoint{{Name: "lava"}},
+		refusedFor: func(p *routersession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
 			return refused[p.Name]
 		},
 	}
@@ -144,8 +144,8 @@ func TestPublishServingTier_VerificationFailedKeepsTiersApart(t *testing.T) {
 	const spec = "VERIFYFAILEDTIERS"
 	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	inputs := &chainReverifyInputs{
-		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "lava"}},
-		configuredBackup: []*lavasession.RPCStaticProviderEndpoint{{Name: "lava"}},
+		configuredStatic: []*routersession.RPCStaticProviderEndpoint{{Name: "lava"}},
+		configuredBackup: []*routersession.RPCStaticProviderEndpoint{{Name: "lava"}},
 	}
 	rpsr := newVerificationFailedRouter(t, spec, inputs)
 	rpsr.providerSessions[chainKey] = sessionsFor("lava")
@@ -161,7 +161,7 @@ func TestPublishServingTier_UncheckedErrorIsUnknown(t *testing.T) {
 	const spec = "VERIFYFAILEDUNKNOWN"
 	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	inputs := &chainReverifyInputs{
-		configuredBackup: []*lavasession.RPCStaticProviderEndpoint{{Name: "blockdaemon"}},
+		configuredBackup: []*routersession.RPCStaticProviderEndpoint{{Name: "blockdaemon"}},
 	}
 	rpsr := newVerificationFailedRouter(t, spec, inputs)
 	inputs.noteFailure(reverifyTierBackup, "blockdaemon", errors.New("plain error"))
@@ -176,9 +176,9 @@ func TestApplyReverification_CountsEachFailedRun(t *testing.T) {
 	var counted []string
 	rateLimited := false
 	inputs := &chainReverifyInputs{
-		rpcEndpoint:      &lavasession.RPCEndpoint{ChainID: "VERIFYFAILEDRUNS", ApiInterface: "jsonrpc"},
-		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "tatum"}},
-		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+		rpcEndpoint:      &routersession.RPCEndpoint{ChainID: "VERIFYFAILEDRUNS", ApiInterface: "jsonrpc"},
+		configuredStatic: []*routersession.RPCStaticProviderEndpoint{{Name: "tatum"}},
+		validateFn: func(_ context.Context, _ *routersession.RPCStaticProviderEndpoint) error {
 			if rateLimited {
 				return common.StatusCodeError429
 			}
@@ -240,7 +240,7 @@ func TestRevalidateTier_NotesAndCountsTheFailedCheck(t *testing.T) {
 	throttled := staticProvider("ETH1", common.NodeUrl{Url: up.httpURL("/rt/" + upThrottled)})
 	throttled.Name = "throttled"
 
-	_, stillFailed := rpsr.revalidateTier(t.Context(), []*lavasession.RPCStaticProviderEndpoint{dead, throttled},
+	_, stillFailed := rpsr.revalidateTier(t.Context(), []*routersession.RPCStaticProviderEndpoint{dead, throttled},
 		liveParser(t, "ETH1", true), inputs.rpcEndpoint, reverifyTierBackup, nil, true)
 	require.Len(t, stillFailed, 2)
 	require.Equal(t, []string{"backup|dead|provider|chain-id"}, counted, "the dead node failed chain-id; the throttled one failed nothing")
@@ -248,7 +248,7 @@ func TestRevalidateTier_NotesAndCountsTheFailedCheck(t *testing.T) {
 	require.Equal(t, checkRateLimited, inputs.lastFailure["backup|throttled"])
 }
 
-func applyReverificationKeep(inputs *chainReverifyInputs, fresh map[uint64]*lavasession.ConsumerSessionsWithProvider) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+func applyReverificationKeep(inputs *chainReverifyInputs, fresh map[uint64]*routersession.ConsumerSessionsWithProvider) map[uint64]*routersession.ConsumerSessionsWithProvider {
 	next, _, _ := applyReverification(context.Background(), inputs, fresh, reverifyTierStatic, 1)
 	return next
 }
@@ -257,9 +257,9 @@ func applyReverificationKeep(inputs *chainReverifyInputs, fresh map[uint64]*lava
 // inside the demotion grace, so the check is known the moment it is demoted.
 func TestApplyReverification_RecordsTheFailedCheck(t *testing.T) {
 	inputs := &chainReverifyInputs{
-		rpcEndpoint:      &lavasession.RPCEndpoint{ChainID: "VERIFYFAILEDEPOCH", ApiInterface: "jsonrpc"},
-		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "tatum"}},
-		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+		rpcEndpoint:      &routersession.RPCEndpoint{ChainID: "VERIFYFAILEDEPOCH", ApiInterface: "jsonrpc"},
+		configuredStatic: []*routersession.RPCStaticProviderEndpoint{{Name: "tatum"}},
+		validateFn: func(_ context.Context, _ *routersession.RPCStaticProviderEndpoint) error {
 			return &chainlib.VerificationFailure{Check: "pruning", Err: errors.New("pruned")}
 		},
 		rateLimitHoldoff: holdoff.NewRegistry(),
@@ -300,8 +300,8 @@ func TestPublishServingTier_RefusedURLOfAPairedProvider(t *testing.T) {
 	const spec = "VERIFYFAILEDURL"
 	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	inputs := &chainReverifyInputs{
-		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "tatum"}},
-		refusedFor: func(*lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
+		configuredStatic: []*routersession.RPCStaticProviderEndpoint{{Name: "tatum"}},
+		refusedFor: func(*routersession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
 			return []metrics.ProviderVerificationFailure{{Scope: metrics.VerificationScopeURL, Check: chainlib.CheckConnect}}
 		},
 	}

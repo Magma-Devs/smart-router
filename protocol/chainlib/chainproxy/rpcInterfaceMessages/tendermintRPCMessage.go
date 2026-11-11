@@ -82,7 +82,7 @@ func GetTendermintRPCError(jsonError *rpcclient.JsonError) (*RPCError, error) {
 	if jsonError.Data != nil {
 		errData, ok = jsonError.Data.(string)
 		if !ok {
-			return nil, utils.LavaFormatError("(rpcMsg.Error.Data).(string) conversion failed", nil, utils.Attribute{Key: "data", Value: jsonError.Data})
+			return nil, utils.FormatError("(rpcMsg.Error.Data).(string) conversion failed", nil, utils.Attribute{Key: "data", Value: jsonError.Data})
 		}
 	}
 
@@ -98,7 +98,7 @@ func ConvertErrorToRPCError(errString string, code int) *RPCError {
 	var rpcError *RPCError
 	unmarshalError := json.Unmarshal([]byte(errString), &rpcError)
 	if unmarshalError != nil || (rpcError.Data == "" && rpcError.Message == "") {
-		utils.LavaFormatWarning("Failed unmarshalling error tendermintrpc", unmarshalError, utils.Attribute{Key: "err", Value: errString})
+		utils.FormatWarning("Failed unmarshalling error tendermintrpc", unmarshalError, utils.Attribute{Key: "err", Value: errString})
 		rpcError = &RPCError{
 			Code:    code,
 			Message: "Rpc Error",
@@ -182,20 +182,20 @@ func ConvertToTendermintError(errString string, inputInfo []byte) string {
 	if err == nil {
 		id, errId := IdFromRawMessage(msg.ID)
 		if errId != nil {
-			utils.LavaFormatError("error idFromRawMessage", errId)
+			utils.FormatError("error idFromRawMessage", errId)
 			return chainproxy.InternalErrorString
 		}
 		res, merr := json.Marshal(&RPCResponse{
 			JSONRPC: msg.Version,
 			ID:      id,
-			Error:   ConvertErrorToRPCError(errString, chainproxy.LavaErrorCode),
+			Error:   ConvertErrorToRPCError(errString, chainproxy.RouterErrorCode),
 		})
 		if merr != nil {
-			utils.LavaFormatError("convertToTendermintError json.Marshal", merr)
+			utils.FormatError("convertToTendermintError json.Marshal", merr)
 			return chainproxy.InternalErrorString
 		}
 		return string(res)
 	}
-	utils.LavaFormatError("error convertToTendermintError", err)
+	utils.FormatError("error convertToTendermintError", err)
 	return chainproxy.InternalErrorString
 }

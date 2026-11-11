@@ -247,7 +247,7 @@ func TestPointViperAtConfigResolution(t *testing.T) {
 // TestPointViperAtConfigNotFound covers the other half of MAG-2861: the message. Pointing
 // viper at an exact file makes a miss an fs.ErrNotExist rather than a
 // viper.ConfigFileNotFoundError, and the router's clean-error branch keyed only on the
-// latter — so a typo'd path would have taken the LavaFormatFatal stack-dump path instead.
+// latter — so a typo'd path would have taken the FormatFatal stack-dump path instead.
 func TestPointViperAtConfigNotFound(t *testing.T) {
 	t.Run("missing absolute path is a clean not-found naming that path", func(t *testing.T) {
 		dir := t.TempDir()
@@ -338,7 +338,7 @@ func TestPointViperAtConfigNotFound(t *testing.T) {
 
 	t.Run("a path that is a directory is a clean not-found, not a stack dump", func(t *testing.T) {
 		// Pointing viper at a directory fails with EISDIR rather than fs.ErrNotExist, which
-		// classified as "not a not-found" and so took the LavaFormatFatal path — the exact
+		// classified as "not a not-found" and so took the FormatFatal path — the exact
 		// failure mode MAG-2861 exists to remove, reintroduced in a narrow case. Searching
 		// for a *name* never hit this: searchInPath skips directories.
 		dir := t.TempDir()

@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
@@ -55,7 +55,7 @@ func TestParseStaticProviderEndpoints_AcceptsDuplicateNames(t *testing.T) {
 	require.Len(t, endpoints, 3)
 
 	// And the boot path is where it is rejected.
-	require.Error(t, lavasession.ValidateUniqueProviderNames(endpoints))
+	require.Error(t, routersession.ValidateUniqueProviderNames(endpoints))
 }
 
 // TestCollectHealthProviders_LoadsConfigWithDuplicateNames pins that `smart-router health` still

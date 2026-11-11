@@ -18,7 +18,7 @@ import (
 func rawRequestHash(kind string, headers []pairingtypes.Metadata, identity string, body []byte) ([]byte, error) {
 	headersByteArray, err := json.Marshal(headers)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling headers on "+kind+" message", err, utils.LogAttr("headers", common.RedactMetadata(headers)))
+		utils.FormatError("Failed marshalling headers on "+kind+" message", err, utils.LogAttr("headers", common.RedactMetadata(headers)))
 		return []byte{}, err
 	}
 	return sigs.HashMsg(append(append([]byte(identity), body...), headersByteArray...)), nil

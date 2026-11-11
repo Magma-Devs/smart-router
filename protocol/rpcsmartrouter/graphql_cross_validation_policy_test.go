@@ -10,8 +10,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
@@ -59,7 +59,7 @@ func TestGraphQLMultiRootCrossValidationPolicy(t *testing.T) {
 		return resolver
 	}
 	stateMachine := func(pm chainlib.ProtocolMessage, resolver *CrossValidationPolicyResolver) RelayStateMachine {
-		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, resolver, chainID, apiInterface)
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, routersession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, resolver, chainID, apiInterface)
 		require.NoError(t, smErr)
 		return sm
 	}

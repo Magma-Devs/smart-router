@@ -117,8 +117,8 @@ type ConsumerMetricsManagerInf interface {
 	SetCSMBlockedProvidersCount(chainId, apiInterface string, count int)
 	// SetCSMBlockedProvidersByReason publishes the blocked-provider count split by reason. The map
 	// is complete — every known reason, zeros included — so consumers can write all of them and
-	// keep the series self-correcting. Keys are lavasession.BlockReason values as plain strings;
-	// this package cannot import lavasession (that would be a cycle).
+	// keep the series self-correcting. Keys are routersession.BlockReason values as plain strings;
+	// this package cannot import routersession (that would be a cycle).
 	SetCSMBlockedProvidersByReason(chainId, apiInterface string, countsByReason map[string]int)
 	SetCSMPreviousEpochBlockedProvidersCount(chainId, apiInterface string, count int)
 	SetCSMBlockedBackupProvidersCount(chainId, apiInterface string, count int)

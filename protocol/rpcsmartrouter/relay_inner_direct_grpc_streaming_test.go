@@ -8,7 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -40,32 +40,32 @@ func startGRPCTestNode(t *testing.T) string {
 func newGRPCRelayHarness(t *testing.T, address string) *directRelayHarness {
 	t.Helper()
 	nodeUrl := common.NodeUrl{Url: "grpc://" + address, GrpcConfig: common.GrpcConfig{AllowInsecure: true}}
-	directConn, err := lavasession.NewDirectRPCConnection(context.Background(), nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(context.Background(), nodeUrl, 5, "")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = directConn.Close() })
 
-	prewarmer, ok := directConn.(lavasession.DirectRPCPrewarmer)
+	prewarmer, ok := directConn.(routersession.DirectRPCPrewarmer)
 	require.True(t, ok)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	require.NoError(t, prewarmer.Prewarm(ctx))
 
-	endpoint := &lavasession.Endpoint{
+	endpoint := &routersession.Endpoint{
 		NetworkAddress:    nodeUrl.Url,
 		Enabled:           true,
-		DirectConnections: []lavasession.DirectRPCConnection{directConn},
+		DirectConnections: []routersession.DirectRPCConnection{directConn},
 	}
 	return &directRelayHarness{
 		rpcss: &RPCSmartRouterServer{
-			listenEndpoint: &lavasession.RPCEndpoint{ChainID: "GRPCTEST", ApiInterface: "grpc"},
+			listenEndpoint: &routersession.RPCEndpoint{ChainID: "GRPCTEST", ApiInterface: "grpc"},
 		},
-		session: &lavasession.SingleConsumerSession{
-			Parent: &lavasession.ConsumerSessionsWithProvider{
-				PublicLavaAddress: "grpc-node-under-test",
-				PairingEpoch:      100,
-				Endpoints:         []*lavasession.Endpoint{endpoint},
+		session: &routersession.SingleConsumerSession{
+			Parent: &routersession.ConsumerSessionsWithProvider{
+				PublicAddress: "grpc-node-under-test",
+				PairingEpoch:  100,
+				Endpoints:     []*routersession.Endpoint{endpoint},
 			},
-			Connection: &lavasession.DirectRPCSessionConnection{
+			Connection: &routersession.DirectRPCSessionConnection{
 				DirectConnection: directConn,
 				EndpointAddress:  nodeUrl.Url,
 				Endpoint:         endpoint,

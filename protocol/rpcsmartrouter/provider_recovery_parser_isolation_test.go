@@ -10,7 +10,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy/dyncodec"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -90,13 +90,13 @@ func TestRevalidateTier_DoesNotRebindLiveGrpcParser(t *testing.T) {
 	require.NotNil(t, servingRegistry,
 		"precondition: boot must leave the live parser bound, or there is nothing for recovery to break")
 
-	provider := &lavasession.RPCStaticProviderEndpoint{
+	provider := &routersession.RPCStaticProviderEndpoint{
 		Name:         "recovering-provider",
 		ChainID:      endpoint.ChainID,
 		ApiInterface: endpoint.ApiInterface,
 		NodeUrls:     endpoint.NodeUrls,
 	}
-	rpcEndpoint := &lavasession.RPCEndpoint{
+	rpcEndpoint := &routersession.RPCEndpoint{
 		ChainID:      endpoint.ChainID,
 		ApiInterface: endpoint.ApiInterface,
 	}
@@ -106,7 +106,7 @@ func TestRevalidateTier_DoesNotRebindLiveGrpcParser(t *testing.T) {
 	// node url, with validateProviderCollections' own attemptCtx cancelled on the way out.
 	recovered, stillFailed := (&RPCSmartRouter{}).revalidateTier(
 		ctx,
-		[]*lavasession.RPCStaticProviderEndpoint{provider},
+		[]*routersession.RPCStaticProviderEndpoint{provider},
 		chainParser,
 		rpcEndpoint,
 		reverifyTierStatic,

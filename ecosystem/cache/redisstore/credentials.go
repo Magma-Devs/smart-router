@@ -75,7 +75,7 @@ func (f *FileCredentials) Credentials() (string, string, error) {
 		// interpretation for whoever meant it and is the only breadcrumb for
 		// whoever did not.
 		f.warnedCombined.Do(func() {
-			utils.LavaFormatInfo(logName(f.Name)+" password file contains ':' and is read as \"username:password\"; a password that itself contains a colon cannot be expressed in this file",
+			utils.FormatInfo(logName(f.Name)+" password file contains ':' and is read as \"username:password\"; a password that itself contains a colon cannot be expressed in this file",
 				utils.LogAttr("path", f.Path),
 				utils.LogAttr("parsed-username", username),
 			)
@@ -164,7 +164,7 @@ func invisibleStart(username, password string) (field string, r rune, ok bool) {
 }
 
 func warnCredentialBeginsInvisibly(name, path, field string, r rune) {
-	utils.LavaFormatWarning(logName(name)+" credential file begins with a non-printable rune that no trim removes; it is sent as part of the credential", nil,
+	utils.FormatWarning(logName(name)+" credential file begins with a non-printable rune that no trim removes; it is sent as part of the credential", nil,
 		utils.LogAttr("path", path),
 		utils.LogAttr("field", field),
 		utils.LogAttr("rune", fmt.Sprintf("U+%04X", r)),
@@ -350,7 +350,7 @@ func (p *StreamingProvider) Refresh() {
 	listeners := p.liveListenersLocked()
 	p.mu.Unlock()
 
-	utils.LavaFormatInfo(logName(p.name)+" credentials rotated; re-authenticating live connections", utils.LogAttr("connections", len(listeners)))
+	utils.FormatInfo(logName(p.name)+" credentials rotated; re-authenticating live connections", utils.LogAttr("connections", len(listeners)))
 	for _, listener := range listeners {
 		listener.OnNext(creds)
 	}
@@ -401,7 +401,7 @@ func (p *StreamingProvider) noteSourceFailure(err error) {
 	if sameCause {
 		return
 	}
-	utils.LavaFormatWarning(logName(p.name)+" credential source unreadable; connections keep the last credentials read until it is readable again (reported once per outage)", err)
+	utils.FormatWarning(logName(p.name)+" credential source unreadable; connections keep the last credentials read until it is readable again (reported once per outage)", err)
 }
 
 // noteSourceRecovered closes an outage with one line, so whoever saw the
@@ -412,7 +412,7 @@ func (p *StreamingProvider) noteSourceRecovered() {
 	p.sourceFailingWith = ""
 	p.mu.Unlock()
 	if wasFailing {
-		utils.LavaFormatInfo(logName(p.name) + " credential source readable again; refresh resumed")
+		utils.FormatInfo(logName(p.name) + " credential source readable again; refresh resumed")
 	}
 }
 

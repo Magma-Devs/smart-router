@@ -8,7 +8,7 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -150,7 +150,7 @@ func newValidationFetcher(t *testing.T, url common.NodeUrl, verifications []Veri
 	}
 
 	return &ChainFetcher{
-		endpoint: &lavasession.RPCProviderEndpoint{
+		endpoint: &routersession.RPCProviderEndpoint{
 			ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC,
 			NodeUrls: []common.NodeUrl{url},
 		},
@@ -318,7 +318,7 @@ func TestValidate_ChargesTheFailedCheck(t *testing.T) {
 		parser.EXPECT().GetVerifications(gomock.Any(), gomock.Any(), gomock.Any()).
 			Return(nil, errors.New("invalid supported to check, is neither an addon or an extension")).AnyTimes()
 		fetcher := &ChainFetcher{
-			endpoint: &lavasession.RPCProviderEndpoint{
+			endpoint: &routersession.RPCProviderEndpoint{
 				ChainID: "AVALANCHEP", ApiInterface: spectypes.APIInterfaceJsonRPC,
 				NodeUrls: []common.NodeUrl{url},
 			},

@@ -100,7 +100,7 @@ func TestOTelUsageSink_BadEndpoint_DoesNotPanic(t *testing.T) {
 	// Optimizer-QoS path: also non-blocking, no panics, counters advance.
 	report := OptimizerQoSReportToSend{
 		Timestamp:        time.Now(),
-		ProviderAddress:  "lava@p",
+		ProviderAddress:  "provider@p",
 		ConsumerHostname: "host01",
 		ChainId:          "eth",
 		Epoch:            1234,

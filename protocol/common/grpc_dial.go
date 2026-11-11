@@ -53,24 +53,24 @@ func (ac *AuthConfig) TLSConfig() *tls.Config {
 		return tlsConf
 	}
 	if cacert := ac.GetCaCertificateParams(); cacert != "" {
-		utils.LavaFormatDebug("Loading ca certificate from local path", utils.LogAttr("cacert", cacert))
+		utils.FormatDebug("Loading ca certificate from local path", utils.LogAttr("cacert", cacert))
 		// An empty pool, not nil: nil means the system roots, and a CA that was configured
 		// but could not be loaded must not widen trust to them.
 		caCertPool := x509.NewCertPool()
 		caCert, err := os.ReadFile(cacert)
 		switch {
 		case err != nil:
-			utils.LavaFormatError("Failed loading CA certificate, no server will verify until it is fixed", err, utils.LogAttr("cacert", cacert))
+			utils.FormatError("Failed loading CA certificate, no server will verify until it is fixed", err, utils.LogAttr("cacert", cacert))
 		case !caCertPool.AppendCertsFromPEM(caCert):
-			utils.LavaFormatError("CA certificate file holds no PEM certificate, no server will verify until it is fixed", nil, utils.LogAttr("cacert", cacert))
+			utils.FormatError("CA certificate file holds no PEM certificate, no server will verify until it is fixed", nil, utils.LogAttr("cacert", cacert))
 		}
 		tlsConf.RootCAs = caCertPool
 	}
 	if keyPem, certPem := ac.GetLoadingCertificateParams(); keyPem != "" && certPem != "" {
-		utils.LavaFormatDebug("Loading certificate from local path", utils.LogAttr("certPem", certPem), utils.LogAttr("keyPem", keyPem))
+		utils.FormatDebug("Loading certificate from local path", utils.LogAttr("certPem", certPem), utils.LogAttr("keyPem", keyPem))
 		cert, err := tls.LoadX509KeyPair(certPem, keyPem)
 		if err != nil {
-			utils.LavaFormatError("Failed setting up tls certificate from local path, continuing with dynamic certificates", err)
+			utils.FormatError("Failed setting up tls certificate from local path, continuing with dynamic certificates", err)
 		} else {
 			tlsConf.Certificates = []tls.Certificate{cert}
 		}

@@ -53,7 +53,7 @@ func StartPyroscopeFromFlags(flags *pflag.FlagSet, defaultAppName string) error 
 	}
 	pyroscopeServerAddress, err := flags.GetString(PyroscopeAddressFlagName)
 	if err != nil {
-		utils.LavaFormatFatal("failed to read pyroscope address flag", err)
+		utils.FormatFatal("failed to read pyroscope address flag", err)
 	}
 	pyroscopeAppName, err := flags.GetString(PyroscopeAppNameFlagName)
 	if err != nil || pyroscopeAppName == "" {
@@ -70,7 +70,7 @@ func StartPyroscopeFromFlags(flags *pflag.FlagSet, defaultAppName string) error 
 	tagsStr, _ := flags.GetString(PyroscopeTagsFlagName)
 	err = StartPyroscope(pyroscopeAppName, pyroscopeServerAddress, mutexProfileFraction, blockProfileRate, ParseTags(tagsStr))
 	if err != nil {
-		return utils.LavaFormatError("failed to start pyroscope profiler", err)
+		return utils.FormatError("failed to start pyroscope profiler", err)
 	}
 	return nil
 }
@@ -104,10 +104,10 @@ func StartPyroscope(appName, serverAddress string, mutexProfileFraction, blockPr
 		},
 	})
 	if err != nil {
-		return utils.LavaFormatError("failed to start pyroscope profiler", err)
+		return utils.FormatError("failed to start pyroscope profiler", err)
 	}
 
-	utils.LavaFormatInfo("started pyroscope profiler",
+	utils.FormatInfo("started pyroscope profiler",
 		utils.Attribute{Key: "application", Value: appName},
 		utils.Attribute{Key: "server", Value: serverAddress},
 	)

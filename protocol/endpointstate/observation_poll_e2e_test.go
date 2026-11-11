@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
@@ -61,7 +61,7 @@ func TestEndpointPoller_FetchLatestBlockNum_RecordsExactlyOneObservation(t *test
 	url := "http://eth-ep:8545"
 	conn := &mockDirectRPCConnection{url: url} // default response is eth_blockNumber -> 0x100 (256)
 	poller := NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: url, Enabled: true},
+		&routersession.Endpoint{NetworkAddress: url, Enabled: true},
 		conn,
 		chainParser,
 		"ETH1",
@@ -111,7 +111,7 @@ func TestEndpointMonitor_RealPoll_NonSVM_PopulatesObservation(t *testing.T) {
 
 	url := "http://eth-ep:8545"
 	conn := &mockDirectRPCConnection{url: url}
-	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -158,7 +158,7 @@ func TestEndpointMonitor_RealPoll_SVM_PopulatesObservation(t *testing.T) {
 	require.NotNil(t, m)
 	defer m.Stop()
 
-	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -198,7 +198,7 @@ func TestEndpointMonitor_RealPoll_SVM_FailureRecordsFailure(t *testing.T) {
 	require.NotNil(t, m)
 	defer m.Stop()
 
-	_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("", &routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	require.Eventually(t, func() bool {
@@ -243,7 +243,7 @@ func TestEndpointMonitor_RealPoll_SVM_ErrorReplyCountsAsFetchFailure(t *testing.
 	require.NotNil(t, m)
 	defer m.Stop()
 
-	tracker, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	tracker, err := m.GetOrCreateTracker("", &routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 	healthyInterval := tracker.CurrentPollInterval()
 
@@ -265,7 +265,7 @@ type svmTurnsErrorConnection struct {
 	polls          atomic.Int32
 }
 
-func (c *svmTurnsErrorConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*lavasession.DirectRPCResponse, error) {
+func (c *svmTurnsErrorConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*routersession.DirectRPCResponse, error) {
 	if string(data) != svmLatestBlockRequest {
 		return c.mockDirectRPCConnection.SendRequest(ctx, data, headers)
 	}
@@ -273,5 +273,5 @@ func (c *svmTurnsErrorConnection) SendRequest(ctx context.Context, data []byte, 
 	if c.polls.Add(1) == 1 {
 		reply = c.good
 	}
-	return &lavasession.DirectRPCResponse{Data: reply, StatusCode: 200}, nil
+	return &routersession.DirectRPCResponse{Data: reply, StatusCode: 200}, nil
 }

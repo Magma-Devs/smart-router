@@ -10,8 +10,8 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -67,7 +67,7 @@ func dialIngress(t *testing.T, manager *DirectWSSubscriptionManager) *websocket.
 	t.Cleanup(cancel)
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	endpoint := &lavasession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "ETH1", ApiInterface: "jsonrpc", HealthCheckPath: common.DEFAULT_HEALTH_PATH}
+	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: "ETH1", ApiInterface: "jsonrpc", HealthCheckPath: common.DEFAULT_HEALTH_PATH}
 	listener := chainlib.NewJrpcChainListener(ctx, endpoint, subscribeOnlyRelaySender{}, nil, logs, nil, manager)
 	go listener.Serve(ctx, common.ConsumerCmdFlags{})
 	t.Cleanup(func() {

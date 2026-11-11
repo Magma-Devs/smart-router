@@ -10,11 +10,11 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -74,20 +74,20 @@ func TestBlameAtCallSite(t *testing.T) {
 			chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/latest", nil,
 				http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
-			relayData := lavaprotocol.NewRelayData(ctx, http.MethodGet, "/cosmos/base/tendermint/v1beta1/blocks/latest",
+			relayData := relayprotocol.NewRelayData(ctx, http.MethodGet, "/cosmos/base/tendermint/v1beta1/blocks/latest",
 				nil, 0, spectypes.LATEST_BLOCK, "rest", chainMsg.GetRPCMessage().GetHeaders(),
 				chainlib.GetAddon(chainMsg), common.GetExtensionNames(chainMsg.GetExtensions()))
 			protocolMsg := chainlib.NewProtocolMessage(chainMsg, nil, relayData, "test", "1.2.3.4")
 
-			endpoint := &lavasession.Endpoint{NetworkAddress: upstream.URL}
-			directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
+			endpoint := &routersession.Endpoint{NetworkAddress: upstream.URL}
+			directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
 			require.NoError(t, err)
-			session := &lavasession.SingleConsumerSession{
-				Parent: &lavasession.ConsumerSessionsWithProvider{
-					PublicLavaAddress: "lava@silent",
-					Endpoints:         []*lavasession.Endpoint{endpoint},
+			session := &routersession.SingleConsumerSession{
+				Parent: &routersession.ConsumerSessionsWithProvider{
+					PublicAddress: "provider@silent",
+					Endpoints:     []*routersession.Endpoint{endpoint},
 				},
-				Connection: &lavasession.DirectRPCSessionConnection{
+				Connection: &routersession.DirectRPCSessionConnection{
 					DirectConnection: directConn,
 					EndpointAddress:  upstream.URL,
 					Endpoint:         endpoint,
@@ -97,10 +97,10 @@ func TestBlameAtCallSite(t *testing.T) {
 			_, ok := session.TryUseSession()
 			require.True(t, ok, "setup: failed to lock session")
 
-			usedProviders := lavasession.NewUsedProviders(nil)
-			sessions := lavasession.ConsumerSessionsMap{"lava@silent": &lavasession.SessionInfo{Session: session}}
+			usedProviders := routersession.NewUsedProviders(nil)
+			sessions := routersession.ConsumerSessionsMap{"provider@silent": &routersession.SessionInfo{Session: session}}
 			usedProviders.AddUsed(sessions, nil)
-			require.NoError(t, session.SetUsageForSession(0, nil, usedProviders, lavasession.NewRouterKey(nil)))
+			require.NoError(t, session.SetUsageForSession(0, nil, usedProviders, routersession.NewRouterKey(nil)))
 
 			sm := &budgetCallSiteStateMachine{usedProviders: usedProviders, protocolMessage: protocolMsg}
 			relayProcessor := relaycore.NewRelayProcessor(ctx, nil, cvGuardMetrics{}, cvGuardMetrics{},
@@ -109,14 +109,14 @@ func TestBlameAtCallSite(t *testing.T) {
 			// deferred cancel that releases the goroutines.
 			relayProcessor.SetStopReason(tc.stopReason)
 
-			rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+			rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 			rpcss := &RPCSmartRouterServer{
 				listenEndpoint:    rpcEndpoint,
 				chainParser:       chainParser,
 				consistencyConfig: relaycore.DefaultConsistencyValidationConfig(),
-				sessionManager: lavasession.NewConsumerSessionManager(rpcEndpoint,
+				sessionManager: routersession.NewConsumerSessionManager(rpcEndpoint,
 					provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA"),
-					nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage()),
+					nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage()),
 			}
 
 			relayCtx, cancelRelay := context.WithCancel(ctx)

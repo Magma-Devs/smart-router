@@ -8,7 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -44,7 +44,7 @@ func TestRelayProcessor_CountsEachNodeErrorInTheRoutersOwnTally(t *testing.T) {
 			chainMsg, err := chainParser.ParseMsg("/cosmos/base/tendermint/v1beta1/blocks/17", nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 			require.NoError(t, err)
 			protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "", "")
-			usedProviders := lavasession.NewUsedProviders(nil)
+			usedProviders := routersession.NewUsedProviders(nil)
 			if tc.healthCheck {
 				usedProviders.MarkRouterHealthCheck()
 			}
@@ -56,10 +56,10 @@ func TestRelayProcessor_CountsEachNodeErrorInTheRoutersOwnTally(t *testing.T) {
 			lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
 			defer cancel()
 			require.Nil(t, usedProviders.TryLockSelection(lockCtx))
-			usedProviders.AddUsed(lavasession.ConsumerSessionsMap{"lava@test1": &lavasession.SessionInfo{}}, nil)
+			usedProviders.AddUsed(routersession.ConsumerSessionsMap{"provider@test1": &routersession.SessionInfo{}}, nil)
 
 			// Responses are handled while WaitForResults runs, so the count is read after it returns.
-			go sendNodeErrorWithData(relayProcessor, "lava@test1", time.Millisecond,
+			go sendNodeErrorWithData(relayProcessor, "provider@test1", time.Millisecond,
 				[]byte(`{"message":"invalid argument 0: hex string has length 3","code":400}`))
 			waitCtx, waitCancel := context.WithTimeout(ctx, 200*time.Millisecond)
 			defer waitCancel()
@@ -70,7 +70,7 @@ func TestRelayProcessor_CountsEachNodeErrorInTheRoutersOwnTally(t *testing.T) {
 				return
 			}
 			require.Equal(t, []RelayErrorCount{{
-				ChainID: "testId", ApiInterface: "testInterface", ProviderAddress: "lava@test1",
+				ChainID: "testId", ApiInterface: "testInterface", ProviderAddress: "provider@test1",
 				Method: protocolMessage.GetApi().Name, NodeErrors: 1,
 			}}, tally.Counts())
 		})

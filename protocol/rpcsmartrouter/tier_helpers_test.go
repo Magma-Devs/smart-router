@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 )
@@ -25,11 +25,11 @@ func TestReadmitRecoveredProviders_StoresExactlyWhatTheSessionManagerIsHanded(t 
 
 	recovered := bootTestProviders("primary1")
 	rpsr.failedStaticProviders[chainKey] = recovered
-	rpsr.backupProviderSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	rpsr.backupProviderSessions[chainKey] = map[uint64]*routersession.ConsumerSessionsWithProvider{}
 
 	rpsr.readmitRecoveredProviders(chainKey, rpcEndpoint,
-		func(providers []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-			out := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(providers))
+		func(providers []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
+			out := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(providers))
 			for i, p := range providers {
 				out[uint64(i)] = createTestProviderSession(p.Name, 0)
 			}
@@ -46,15 +46,15 @@ func TestReadmitRecoveredProviders_StoresExactlyWhatTheSessionManagerIsHanded(t 
 // WebSocket takes the ws:// and wss:// urls of any provider, gRPC takes every url of a
 // gRPC provider and nothing from the others.
 func TestCollectEndpoints_EachTransportTakesItsOwnUrls(t *testing.T) {
-	jsonrpc := &lavasession.RPCStaticProviderEndpoint{
+	jsonrpc := &routersession.RPCStaticProviderEndpoint{
 		Name: "evm", ChainID: "ETH1", ApiInterface: "jsonrpc",
 		NodeUrls: []common.NodeUrl{{Url: "https://evm"}, {Url: "WSS://evm/ws"}, {Url: "ws://evm/plain"}},
 	}
-	grpc := &lavasession.RPCStaticProviderEndpoint{
+	grpc := &routersession.RPCStaticProviderEndpoint{
 		Name: "cosmos", ChainID: "LAV1", ApiInterface: "grpc",
 		NodeUrls: []common.NodeUrl{{Url: "cosmos:9090"}, {Url: "grpcs://cosmos:443"}},
 	}
-	providers := []*lavasession.RPCStaticProviderEndpoint{jsonrpc, grpc}
+	providers := []*routersession.RPCStaticProviderEndpoint{jsonrpc, grpc}
 
 	urls := func(endpoints []*common.NodeUrl) []string {
 		out := make([]string, 0, len(endpoints))

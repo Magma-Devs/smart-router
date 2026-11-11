@@ -13,7 +13,7 @@ import (
 )
 
 // Capturing Retry-After is only worth anything if it survives the trip out of the chain proxy.
-// Each of the three status-code call sites hands its error to LavaFormatWarning, where passing
+// Each of the three status-code call sites hands its error to FormatWarning, where passing
 // it as an attribute instead of the cause severs the chain silently — the error still reads
 // right in the log and no longer unwraps. These pin the whole path per interface.
 func TestRetryAfterPropagatesOutOfChainProxies(t *testing.T) {

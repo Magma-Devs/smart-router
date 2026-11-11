@@ -15,7 +15,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/assert"
@@ -40,7 +40,7 @@ func TestDirectRPCRelaySender_SendDirectRelay(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 	require.NotNil(t, directConn)
 
@@ -80,7 +80,7 @@ func TestDirectRPCRelaySender_SendDirectRelay(t *testing.T) {
 // NodeError, so per-provider health dashboards correctly identify flaky
 // upstreams. A regression here would re-introduce the silent-forwarding bug.
 //
-// The test also asserts that the returned error wraps a *common.LavaError so a
+// The test also asserts that the returned error wraps a *common.RouterError so a
 // future refactor that bypasses classifyAndWrap (and loses the protocol-error
 // classification) would be caught.
 func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *testing.T) {
@@ -88,10 +88,10 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 		t.Helper()
 		require.Error(t, err, "%s body must surface as transport-level error, not a RelayResult", bodyKind)
 		require.Contains(t, err.Error(), "malformed")
-		var wrapped *common.LavaWrappedError
+		var wrapped *common.RouterWrappedError
 		require.True(t, errors.As(err, &wrapped),
 			"transport error must be wrapped via classifyAndWrap so the protocol-error classifier sees it")
-		require.NotNil(t, wrapped.LavaErr, "wrapped error must carry a classified LavaError")
+		require.NotNil(t, wrapped.RouterErr, "wrapped error must carry a classified RouterError")
 	}
 
 	t.Run("jsonrpc_truncated_body", func(t *testing.T) {
@@ -104,7 +104,7 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 		defer mockServer.Close()
 
 		ctx := context.Background()
-		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 		require.NoError(t, err)
 
 		sender := &DirectRPCRelaySender{
@@ -128,7 +128,7 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 		defer mockServer.Close()
 
 		ctx := context.Background()
-		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 		require.NoError(t, err)
 
 		sender := &DirectRPCRelaySender{
@@ -154,7 +154,7 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 		defer mockServer.Close()
 
 		ctx := context.Background()
-		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 		require.NoError(t, err)
 
 		sender := &DirectRPCRelaySender{
@@ -182,7 +182,7 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 		defer mockServer.Close()
 
 		ctx := context.Background()
-		directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+		directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 		require.NoError(t, err)
 
 		sender := &DirectRPCRelaySender{
@@ -219,7 +219,7 @@ func TestDirectRPCRelaySender_EmptyMessageErrorIsNodeError(t *testing.T) {
 	defer mockServer.Close()
 
 	ctx := context.Background()
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
@@ -275,7 +275,7 @@ func TestDirectRPCRelaySender_A429IsNotANodeError(t *testing.T) {
 			defer mockServer.Close()
 
 			ctx := context.Background()
-			directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+			directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 			require.NoError(t, err)
 			sender := &DirectRPCRelaySender{
 				directConnection: directConn,
@@ -309,7 +309,7 @@ func TestDirectRPCRelaySender_SendDirectRelay_Timeout(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	// Create sender
@@ -342,7 +342,7 @@ func TestDirectRPCRelaySender_SendDirectRelay_ServerError(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	// Create sender
@@ -372,9 +372,9 @@ func TestDirectRPCRelaySender_SendDirectRelay_ServerError(t *testing.T) {
 //
 // The discriminator: when the upstream returns HTTP 404/413 with a JSON-RPC
 // body whose code is generic (-1, not in the registry), the only signal that
-// can route classification to a non-retryable LavaError is the HTTP status
+// can route classification to a non-retryable RouterError is the HTTP status
 // digits in the message. A bare/inert message (no substring matcher hits)
-// classifies to LavaErrorUnknown (retryable), so IsNonRetryable flips between
+// classifies to RouterErrorUnknown (retryable), so IsNonRetryable flips between
 // true (prefix present) and false (prefix removed).
 func TestDirectRPCRelaySender_HTTPStatusPrefixReachesClassifier_MAG1666(t *testing.T) {
 	// The bare error message returned by CheckResponseError. Must be inert —
@@ -385,10 +385,10 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixReachesClassifier_MAG1666(t *testi
 
 	// Discriminator assertion: without the call site's prefix, this exact
 	// (transport, errorCode, message) combination must classify to
-	// LavaErrorUnknown. If a future matcher swallows it, the test must fail
+	// RouterErrorUnknown. If a future matcher swallows it, the test must fail
 	// loudly here rather than producing a confusing failure below.
 	require.Equal(t,
-		common.LavaErrorUnknown,
+		common.RouterErrorUnknown,
 		common.ClassifyError(nil, common.ChainFamilyEVM, common.TransportJsonRPC, -1, bareErrorMessage),
 		"bare message must classify to UNKNOWN without the HTTP <status>: prefix — "+
 			"otherwise this test cannot prove the prefix is what flipped the verdict")
@@ -422,7 +422,7 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixReachesClassifier_MAG1666(t *testi
 			ctx := context.Background()
 			nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-			directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+			directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 			require.NoError(t, err)
 
 			sender := &DirectRPCRelaySender{
@@ -473,7 +473,7 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixSkippedOn2xx(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
@@ -495,7 +495,7 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixSkippedOn2xx(t *testing.T) {
 	assert.Equal(t, 200, result.StatusCode)
 	assert.True(t, result.IsNodeError)
 	// HTTP 200 + generic body code (-1) + inert message → no matcher fires →
-	// LavaErrorUnknown → IsNonRetryable=false. An "always-prefix" regression
+	// RouterErrorUnknown → IsNonRetryable=false. An "always-prefix" regression
 	// would inject "HTTP 200: ..." into the classifier message, which is
 	// harmless today but documents that 2xx responses must not be reclassified
 	// through HTTP-status matchers.
@@ -506,7 +506,7 @@ func TestDirectRPCRelaySender_HTTPStatusPrefixSkippedOn2xx(t *testing.T) {
 // TestDirectRPCRelaySender_HTTPStatusOverridesRetryableBodyCode_MAG1870 covers
 // the gap MAG-1666 left behind: an upstream that returns HTTP 4xx alongside a
 // proper JSON-RPC envelope whose error.code is a REGISTERED RETRYABLE code
-// (e.g. -32603 → LavaErrorNodeInternalError, -32000 → LavaErrorNodeServerError).
+// (e.g. -32603 → RouterErrorNodeInternalError, -32000 → RouterErrorNodeServerError).
 //
 // The previous fix prepended "HTTP <status>: " to the classifier message so a
 // substring matcher (HTTPStatusContains) could fire. But matcher iteration is
@@ -576,7 +576,7 @@ func TestDirectRPCRelaySender_HTTPStatusOverridesRetryableBodyCode_MAG1870(t *te
 			ctx := context.Background()
 			nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-			directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+			directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 			require.NoError(t, err)
 
 			sender := &DirectRPCRelaySender{
@@ -645,7 +645,7 @@ func TestDirectRPCRelaySender_SendDirectRelay_BatchRequest(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 	require.NotNil(t, directConn)
 
@@ -698,26 +698,26 @@ func TestDirectRPCSession_IsDirectRPC(t *testing.T) {
 	ctx := context.Background()
 	nodeUrl := common.NodeUrl{Url: mockServer.URL}
 
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, nodeUrl, 5, "")
 	require.NoError(t, err)
 
 	// Create parent ConsumerSessionsWithProvider with endpoint
-	cswp := &lavasession.ConsumerSessionsWithProvider{
-		PublicLavaAddress: "test-direct-endpoint",
-		PairingEpoch:      100,
-		Endpoints: []*lavasession.Endpoint{
+	cswp := &routersession.ConsumerSessionsWithProvider{
+		PublicAddress: "test-direct-endpoint",
+		PairingEpoch:  100,
+		Endpoints: []*routersession.Endpoint{
 			{
 				NetworkAddress:    mockServer.URL,
 				Enabled:           true,
-				DirectConnections: []lavasession.DirectRPCConnection{directConn},
+				DirectConnections: []routersession.DirectRPCConnection{directConn},
 			},
 		},
 	}
 
 	// Create DirectRPCSessionConnection (smart router session)
-	session := &lavasession.SingleConsumerSession{
+	session := &routersession.SingleConsumerSession{
 		Parent: cswp,
-		Connection: &lavasession.DirectRPCSessionConnection{
+		Connection: &routersession.DirectRPCSessionConnection{
 			DirectConnection: directConn,
 			EndpointAddress:  mockServer.URL,
 		},

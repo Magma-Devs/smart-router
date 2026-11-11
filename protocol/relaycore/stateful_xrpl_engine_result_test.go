@@ -10,7 +10,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 const (
@@ -35,16 +35,16 @@ func newStatefulXRPLProcessor(t *testing.T, providers ...string) *RelayProcessor
 	chainMsg, err := chainParser.ParseMsg("", []byte(`{"method":"submit","params":[{"tx_blob":"1200002280000000"}]}`), http.MethodPost, nil, extensionslib.ExtensionInfo{})
 	require.NoError(t, err)
 	protocolMessage := chainlib.NewProtocolMessage(chainMsg, nil, nil, "dapp", "127.0.0.1")
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	relayProcessor := NewRelayProcessor(ctx, nil, RelayProcessorMetrics, RelayProcessorMetrics, newMockRelayStateMachineWithSelection(protocolMessage, usedProviders, Stateful))
 
 	require.NoError(t, usedProviders.TryLockSelection(ctx))
 	if len(providers) == 0 {
 		providers = []string{xrplGossipNode, xrplApplierNode}
 	}
-	sessions := lavasession.ConsumerSessionsMap{}
+	sessions := routersession.ConsumerSessionsMap{}
 	for _, provider := range providers {
-		sessions[provider] = &lavasession.SessionInfo{}
+		sessions[provider] = &routersession.SessionInfo{}
 	}
 	usedProviders.AddUsed(sessions, nil)
 	return relayProcessor

@@ -28,12 +28,12 @@ func SetErrorMetricsCallback(cb ErrorMetricsCallback) {
 }
 
 // buildCodedAttrs assembles the structured log attributes for a classified error.
-func buildCodedAttrs(lavaError *LavaError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) []utils.Attribute {
+func buildCodedAttrs(routerError *RouterError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) []utils.Attribute {
 	codedAttrs := []utils.Attribute{
-		{Key: "error_code", Value: lavaError.Code},
-		{Key: "error_name", Value: lavaError.Name},
-		{Key: "error_category", Value: lavaError.Category.String()},
-		{Key: "retryable", Value: lavaError.Retryable},
+		{Key: "error_code", Value: routerError.Code},
+		{Key: "error_name", Value: routerError.Name},
+		{Key: "error_category", Value: routerError.Category.String()},
+		{Key: "retryable", Value: routerError.Retryable},
 	}
 	if chainErrorCode != 0 {
 		codedAttrs = append(codedAttrs, utils.Attribute{Key: "chain_error_code", Value: chainErrorCode})
@@ -54,31 +54,31 @@ func buildCodedAttrs(lavaError *LavaError, chainID string, chainErrorCode int, c
 // the Prometheus counter is still incremented exactly once.
 //
 // Uses an atomic pointer load — no locks on the hot classification path.
-func EmitErrorMetric(lavaError *LavaError, chainID string) {
+func EmitErrorMetric(routerError *RouterError, chainID string) {
 	cb := errorMetricsCallbackPtr.Load()
 	if cb == nil {
 		return
 	}
-	(*cb)(lavaError.Code, lavaError.Name, lavaError.Category.String(), lavaError.Retryable, chainID)
+	(*cb)(routerError.Code, routerError.Name, routerError.Category.String(), routerError.Retryable, chainID)
 }
 
-// LogCodedError logs an error at Error level with a classified LavaError, auto-populating
+// LogCodedError logs an error at Error level with a classified RouterError, auto-populating
 // structured fields and invoking the metrics callback if registered.
 //
 // Parameters:
 //   - description: human-readable context (e.g., "relay to provider failed")
 //   - err: the original error
-//   - lavaError: the classified LavaError (nil defaults to LavaErrorUnknown)
+//   - routerError: the classified RouterError (nil defaults to RouterErrorUnknown)
 //   - chainID: the chain ID for metrics labels (may be empty)
 //   - chainErrorCode: the original error code from the node (0 if not applicable)
 //   - chainErrorMessage: the original error message from the node (may be empty)
 //   - attributes: additional structured log attributes
-func LogCodedError(description string, err error, lavaError *LavaError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) error {
-	if lavaError == nil {
-		lavaError = LavaErrorUnknown
+func LogCodedError(description string, err error, routerError *RouterError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) error {
+	if routerError == nil {
+		routerError = RouterErrorUnknown
 	}
-	EmitErrorMetric(lavaError, chainID)
-	return utils.LavaFormatError(description, err, buildCodedAttrs(lavaError, chainID, chainErrorCode, chainErrorMessage, attributes...)...)
+	EmitErrorMetric(routerError, chainID)
+	return utils.FormatError(description, err, buildCodedAttrs(routerError, chainID, chainErrorCode, chainErrorMessage, attributes...)...)
 }
 
 // LogCodedNodeAnswer logs a classified node error at DEBUG level, with the same structured
@@ -91,18 +91,18 @@ func LogCodedError(description string, err error, lavaError *LavaError, chainID 
 // attached) is emitted at request rate and buries the failures an operator needs to see. The
 // metric still fires, so nothing stops being counted; only the level changes.
 //
-// Callers choose between this and LogCodedError on LavaError.EndpointAtFault: if the endpoint is
+// Callers choose between this and LogCodedError on RouterError.EndpointAtFault: if the endpoint is
 // to blame, the line stays at ERROR.
-func LogCodedNodeAnswer(description string, err error, lavaError *LavaError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) {
-	if lavaError == nil {
-		lavaError = LavaErrorUnknown
+func LogCodedNodeAnswer(description string, err error, routerError *RouterError, chainID string, chainErrorCode int, chainErrorMessage string, attributes ...utils.Attribute) {
+	if routerError == nil {
+		routerError = RouterErrorUnknown
 	}
-	EmitErrorMetric(lavaError, chainID)
-	attrs := buildCodedAttrs(lavaError, chainID, chainErrorCode, chainErrorMessage, attributes...)
+	EmitErrorMetric(routerError, chainID)
+	attrs := buildCodedAttrs(routerError, chainID, chainErrorCode, chainErrorMessage, attributes...)
 	if err != nil {
 		attrs = append(attrs, utils.Attribute{Key: "error", Value: err.Error()})
 	}
-	utils.LavaFormatDebug(description, attrs...)
+	utils.FormatDebug(description, attrs...)
 }
 
 // ExtractJSONRPCErrorCode extracts the error code from a JSON-RPC error response body.

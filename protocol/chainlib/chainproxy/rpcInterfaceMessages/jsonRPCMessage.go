@@ -40,7 +40,7 @@ func (jm *JsonrpcMessage) GetRawRequestHash() ([]byte, error) {
 func (jm *JsonrpcMessage) rawRequestHashWithParams(identity string) ([]byte, error) {
 	paramsByteArray, err := json.Marshal(jm.Params)
 	if err != nil {
-		utils.LavaFormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("headers", jm.Params))
+		utils.FormatError("Failed marshalling params on jsonRpc message", err, utils.LogAttr("headers", jm.Params))
 		return []byte{}, err
 	}
 	return rawRequestHash("jsonRpc", jm.GetHeaders(), identity, paramsByteArray)
@@ -101,7 +101,7 @@ func truncateForLog(data []byte) string {
 func checkJsonrpcEnvelope(data []byte, kind string) (hasError bool, errorMessage string, resultBytes []byte) {
 	scan, err := scanJsonrpcEnvelope(data)
 	if err != nil {
-		utils.LavaFormatWarning("malformed "+kind+" response", err, utils.LogAttr("data", truncateForLog(data)))
+		utils.FormatWarning("malformed "+kind+" response", err, utils.LogAttr("data", truncateForLog(data)))
 		return true, fmt.Sprintf("malformed %s response: %v", kind, err), nil
 	}
 	hasErr := scan.hasError && !isJSONNull(scan.errorBytes)
@@ -197,7 +197,7 @@ func (jm JsonrpcMessage) NewParsableRPCInput(input json.RawMessage) (parser.RPCI
 	msg := &JsonrpcMessage{}
 	err := json.Unmarshal(input, msg)
 	if err != nil {
-		return nil, utils.LavaFormatError("failed unmarshaling JsonrpcMessage", err, utils.Attribute{Key: "input", Value: input})
+		return nil, utils.FormatError("failed unmarshaling JsonrpcMessage", err, utils.Attribute{Key: "input", Value: input})
 	}
 
 	return ParsableRPCInput{Result: msg.Result, Error: msg.Error}, nil
@@ -213,7 +213,7 @@ func (jm JsonrpcMessage) GetMethod() string {
 
 func (jm JsonrpcMessage) GetResult() json.RawMessage {
 	if jm.Error != nil {
-		utils.LavaFormatWarning("GetResult() Request got an error from the node", nil, utils.Attribute{Key: "error", Value: jm.Error})
+		utils.FormatWarning("GetResult() Request got an error from the node", nil, utils.Attribute{Key: "error", Value: jm.Error})
 	}
 	return jm.Result
 }
@@ -372,7 +372,7 @@ func checkResponseErrorForBatch(data []byte, httpStatusCode int, elementCheck fu
 	})
 
 	if walkErr != nil {
-		utils.LavaFormatWarning("malformed JSON-RPC batch response", walkErr, utils.LogAttr("data", truncateForLog(data)))
+		utils.FormatWarning("malformed JSON-RPC batch response", walkErr, utils.LogAttr("data", truncateForLog(data)))
 		return true, fmt.Sprintf("malformed JSON-RPC batch response: %v", walkErr)
 	}
 
