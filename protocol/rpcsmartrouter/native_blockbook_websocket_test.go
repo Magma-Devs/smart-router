@@ -47,9 +47,17 @@ func TestNativeBlockbookConfiguration(t *testing.T) {
 func nativeTestSession(t *testing.T, endpoint string, send func(context.Context, []byte) bool, disconnected func()) *nativeBlockbookSession {
 	t.Helper()
 	server := &RPCSmartRouterServer{nativeBlockbookEndpoints: []nativeBlockbookEndpoint{{ChainID: "BTCT4", Name: "test", NodeURL: common.NodeUrl{Url: endpoint}}}}
-	s := server.NewNativeWebSocketSession(context.Background(), send, disconnected, nil).(*nativeBlockbookSession)
+	s, ok := server.NewNativeWebSocketSession(context.Background(), send, disconnected, nil).(*nativeBlockbookSession)
+	require.True(t, ok)
 	t.Cleanup(s.Close)
 	return s
+}
+
+func nativeTestObject(t *testing.T, value any) map[string]any {
+	t.Helper()
+	object, ok := value.(map[string]any)
+	require.True(t, ok)
+	return object
 }
 
 func receiveNativeFrame(t *testing.T, frames <-chan []byte) map[string]any {
@@ -119,9 +127,9 @@ func TestNativeBlockbookPreservesAckEventsAndClientIsolation(t *testing.T) {
 	for i, ch := range []chan []byte{a, b} {
 		ack := receiveNativeFrame(t, ch)
 		require.Equal(t, "same-client-id", ack["id"])
-		require.Equal(t, true, ack["data"].(map[string]any)["subscribed"])
+		require.Equal(t, true, nativeTestObject(t, ack["data"])["subscribed"])
 		event := receiveNativeFrame(t, ch)
-		require.Equal(t, []any{[]string{"address-a", "address-b"}[i]}, event["data"].(map[string]any)["addresses"])
+		require.Equal(t, []any{[]string{"address-a", "address-b"}[i]}, nativeTestObject(t, event["data"])["addresses"])
 	}
 	require.EqualValues(t, 2, opened.Load())
 	s1.Close()
@@ -215,7 +223,7 @@ func TestNativeBlockbookUsesConfiguredAuthAndCountsProviderErrorAsFailure(t *tes
 	require.True(t, handled)
 	require.NoError(t, err)
 	frame := receiveNativeFrame(t, frames)
-	require.EqualValues(t, -32600, frame["error"].(map[string]any)["code"])
+	require.EqualValues(t, -32600, nativeTestObject(t, frame["error"])["code"])
 	select {
 	case err := <-recorded:
 		require.Error(t, err)

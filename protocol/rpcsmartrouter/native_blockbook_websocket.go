@@ -41,7 +41,7 @@ func parseNativeBlockbookEndpoints(v *viper.Viper, chainID, apiInterface string)
 	if len(configured) > 8 {
 		return nil, errors.New("blockbook-websocket: at most 8 endpoints are allowed")
 	}
-	var endpoints []nativeBlockbookEndpoint
+	endpoints := make([]nativeBlockbookEndpoint, 0, len(configured))
 	names := map[string]bool{}
 	for i, ep := range configured {
 		u, err := url.Parse(ep.NodeURL.Url)
@@ -153,7 +153,7 @@ func (s *nativeBlockbookSession) Handle(frame []byte) (bool, error) {
 	s.requests[id] = nativeBlockbookRequest{method: request.Method, start: time.Now()}
 	s.mu.Unlock()
 	if conn.SetWriteDeadline(time.Now().Add(10*time.Second)) != nil || conn.WriteMessage(websocket.TextMessage, frame) != nil {
-		err := errors.New("Blockbook WebSocket upstream write failed; reconnect and resubscribe")
+		err := errors.New("blockbook WebSocket upstream write failed; reconnect and resubscribe")
 		s.recordFailure(id, request.Method, err)
 		s.cancel()
 		_ = conn.Close()
@@ -178,7 +178,7 @@ func (s *nativeBlockbookSession) connection() (*websocket.Conn, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ctx.Err() != nil {
-		return nil, errors.New("Blockbook WebSocket session is closed")
+		return nil, errors.New("blockbook WebSocket session is closed")
 	}
 	if s.conn != nil {
 		return s.conn, nil
@@ -295,7 +295,7 @@ func (s *nativeBlockbookSession) recordFrame(frame []byte) {
 	if exists && s.record != nil {
 		var err error
 		if failed {
-			err = errors.New("Blockbook upstream returned an error")
+			err = errors.New("blockbook upstream returned an error")
 		}
 		latency := time.Duration(0)
 		if !wasAcked {
