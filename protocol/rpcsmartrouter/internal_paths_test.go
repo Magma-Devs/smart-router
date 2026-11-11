@@ -19,8 +19,8 @@ func httpOnlyCollections(string, []string) bool { return false }
 func TestExpandInternalPaths(t *testing.T) {
 	t.Run("a spec with no internal paths is left alone", func(t *testing.T) {
 		urls := []common.NodeUrl{{Url: "https://eth.example"}}
-		require.Equal(t, urls, expandInternalPaths(urls, []string{""}, httpOnlyCollections))
-		require.Equal(t, urls, expandInternalPaths(urls, nil, httpOnlyCollections))
+		require.Equal(t, urls, expandInternalPaths(urls, []string{""}, true, httpOnlyCollections))
+		require.Equal(t, urls, expandInternalPaths(urls, nil, true, httpOnlyCollections))
 	})
 
 	t.Run("a shared root yields one url per path, with the path appended", func(t *testing.T) {
@@ -29,6 +29,7 @@ func TestExpandInternalPaths(t *testing.T) {
 		got := expandInternalPaths(
 			[]common.NodeUrl{{Url: "https://ton.example/api"}},
 			[]string{"/v3", "", "/v2"},
+			true,
 			httpOnlyCollections,
 		)
 		require.Equal(t, []common.NodeUrl{
@@ -45,7 +46,7 @@ func TestExpandInternalPaths(t *testing.T) {
 			{Url: "https://ton.tatum.example", InternalPath: "/v2"},
 			{Url: "https://ton.tatum.example/api/v3", InternalPath: "/v3"},
 		}
-		require.Equal(t, urls, expandInternalPaths(urls, []string{"", "/v2", "/v3"}, httpOnlyCollections))
+		require.Equal(t, urls, expandInternalPaths(urls, []string{"", "/v2", "/v3"}, true, httpOnlyCollections))
 	})
 
 	t.Run("a mixed provider expands only the unpinned urls", func(t *testing.T) {
@@ -55,6 +56,7 @@ func TestExpandInternalPaths(t *testing.T) {
 				{Url: "https://ton.tatum.example", InternalPath: "/v2"},
 			},
 			[]string{"", "/v2", "/v3"},
+			true,
 			httpOnlyCollections,
 		)
 		require.Equal(t, []common.NodeUrl{
@@ -72,6 +74,7 @@ func TestExpandInternalPaths(t *testing.T) {
 		got := expandInternalPaths(
 			[]common.NodeUrl{{Url: "https://avax.example", Addons: []string{"archive"}}},
 			[]string{"", "/P"},
+			true,
 			httpOnlyCollections,
 		)
 		require.Len(t, got, 2)
@@ -87,6 +90,7 @@ func TestExpandInternalPaths(t *testing.T) {
 		got := expandInternalPaths(
 			[]common.NodeUrl{{Url: "https://strk.example"}},
 			[]string{"", "HTTP-ONLY", "WS-ONLY", "/rpc/v0_9"},
+			true,
 			httpOnlyCollections,
 		)
 		require.Equal(t, []common.NodeUrl{
@@ -104,6 +108,7 @@ func TestExpandInternalPaths(t *testing.T) {
 				{Url: "https://ton.example/api/v2", InternalPath: "/v2"},
 			},
 			[]string{"", "/v2", "/v3"},
+			true,
 			httpOnlyCollections,
 		)
 		require.Equal(t, []common.NodeUrl{
@@ -121,6 +126,7 @@ func TestExpandInternalPaths(t *testing.T) {
 		got := expandInternalPaths(
 			[]common.NodeUrl{{Url: "https://vendor.example/rpc/v0_8"}},
 			[]string{"", "/rpc/v0_8", "/rpc/v0_9"},
+			true,
 			httpOnlyCollections,
 		)
 		require.Equal(t, []common.NodeUrl{
@@ -152,6 +158,7 @@ func TestExpandInternalPaths(t *testing.T) {
 				{Url: "wss://strk.example"},
 			},
 			strkPaths,
+			true,
 			subscriptionCollections,
 		)
 
@@ -175,6 +182,7 @@ func TestExpandInternalPaths(t *testing.T) {
 		got := expandInternalPaths(
 			[]common.NodeUrl{{Url: "avax.example:9090"}},
 			[]string{"", "/P"},
+			true,
 			httpOnlyCollections,
 		)
 		require.Equal(t, []common.NodeUrl{
@@ -183,10 +191,54 @@ func TestExpandInternalPaths(t *testing.T) {
 		}, got)
 	})
 
+	t.Run("on a spec with no root collection the bare base url is not an endpoint", func(t *testing.T) {
+		// TON and AVAX serve only from their paths. No relay is routed to the bare
+		// base, and its tracker only ever got a 404 for the spec-wide head request,
+		// which pulled the provider's availability down (MAG-4214).
+		got := expandInternalPaths(
+			[]common.NodeUrl{{Url: "https://ton.example/api"}},
+			[]string{"/v2", "/v3"},
+			false,
+			httpOnlyCollections,
+		)
+		require.Equal(t, []common.NodeUrl{
+			{Url: "https://ton.example/api/v2", InternalPath: "/v2"},
+			{Url: "https://ton.example/api/v3", InternalPath: "/v3"},
+		}, got)
+	})
+
+	t.Run("with no root collection, a url baked to a path stays that path's endpoint only", func(t *testing.T) {
+		got := expandInternalPaths(
+			[]common.NodeUrl{{Url: "https://ton.example/api/v2"}},
+			[]string{"/v2", "/v3"},
+			false,
+			httpOnlyCollections,
+		)
+		require.Equal(t, []common.NodeUrl{
+			{Url: "https://ton.example/api/v2", InternalPath: "/v2"},
+			{Url: "https://ton.example/api/v2/v3", InternalPath: "/v3"},
+		}, got)
+	})
+
+	t.Run("with no root collection, a websocket url and a url nothing is generated from stay", func(t *testing.T) {
+		wsOnly := func(string, []string) bool { return true }
+		got := expandInternalPaths(
+			[]common.NodeUrl{{Url: "wss://ton.example/api"}, {Url: "https://ton.example/api"}},
+			[]string{"/v2"},
+			false,
+			wsOnly,
+		)
+		require.Equal(t, []common.NodeUrl{
+			{Url: "wss://ton.example/api"},
+			{Url: "wss://ton.example/api/v2", InternalPath: "/v2"},
+			{Url: "https://ton.example/api"},
+		}, got, "the https url serves no path here, so dropping it would leave nothing of it")
+	})
+
 	t.Run("output order is stable whatever order the paths arrive in", func(t *testing.T) {
 		urls := []common.NodeUrl{{Url: "https://ton.example/api"}}
-		first := expandInternalPaths(urls, []string{"/v3", "/v2", ""}, httpOnlyCollections)
-		second := expandInternalPaths(urls, []string{"", "/v2", "/v3"}, httpOnlyCollections)
+		first := expandInternalPaths(urls, []string{"/v3", "/v2", ""}, true, httpOnlyCollections)
+		second := expandInternalPaths(urls, []string{"", "/v2", "/v3"}, true, httpOnlyCollections)
 		require.Equal(t, first, second)
 	})
 }

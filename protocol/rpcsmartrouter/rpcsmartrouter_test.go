@@ -176,6 +176,7 @@ func TestUpdateEpoch_PreservesGroupLabel(t *testing.T) {
 		[]*lavasession.Endpoint{{NetworkAddress: "http://primary:8080", Enabled: true}}, 100, 1, int64(1))
 	primary.StaticProvider = true
 	primary.GroupLabel = "tier-1"
+	primary.UnservedInternalPaths = map[string]struct{}{"/v2": {}}
 	rpsr.providerSessions[chainKey] = map[uint64]*lavasession.ConsumerSessionsWithProvider{0: primary}
 
 	backup := lavasession.NewConsumerSessionWithProvider("lava@backup",
@@ -190,6 +191,8 @@ func TestUpdateEpoch_PreservesGroupLabel(t *testing.T) {
 	require.NotNil(t, freshPrimary)
 	require.False(t, primary == freshPrimary, "primary session must be a fresh instance after epoch refresh")
 	require.Equal(t, "tier-1", freshPrimary.GroupLabel, "primary GroupLabel must survive epoch refresh")
+	require.Equal(t, map[string]struct{}{"/v2": {}}, freshPrimary.UnservedInternalPaths,
+		"a path lost at admission stays lost across the epoch refresh (MAG-4214)")
 
 	freshBackup := rpsr.backupProviderSessions[chainKey][0]
 	require.NotNil(t, freshBackup)

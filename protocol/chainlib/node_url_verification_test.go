@@ -17,7 +17,7 @@ func throttledErr() error {
 	return fmt.Errorf("chain-id verification failed: %w", common.StatusCodeError429)
 }
 
-// A provider has nothing to serve from when a path it declares has no url left. A path
+// A provider has nothing to serve from when no path it declares has a url left. A path
 // whose urls all failed outright is a failure, whatever else is throttled; only when
 // every empty path is merely throttled is the answer the rate limit.
 func TestServingError(t *testing.T) {
@@ -43,6 +43,72 @@ func TestServingError(t *testing.T) {
 
 	var socketsOnly ProviderAdmission
 	require.Error(t, socketsOnly.servingError(urls[2:]), "a socket serves no path")
+}
+
+// A failed path costs that path, not the provider, while another path is served
+// (MAG-4214): TON's /v2 url failing chain-id must not take the healthy /v3 url with it.
+func TestServingError_AFailedPathCostsOnlyThatPath(t *testing.T) {
+	urls := []common.NodeUrl{
+		{Url: "https://a/v2", InternalPath: "/v2"},
+		{Url: "https://a/v3", InternalPath: "/v3"},
+		{Url: "https://a/v4", InternalPath: "/v4"},
+	}
+
+	var v2Refused ProviderAdmission
+	v2Refused.refuseURL(0, errNotServed)
+	require.NoError(t, v2Refused.servingError(urls[:2]), "/v3 is still served")
+
+	var noneServed ProviderAdmission
+	noneServed.refuseURL(0, errNotServed)
+	noneServed.throttleURL(1, throttledErr())
+	err := noneServed.servingError(urls[:2])
+	require.ErrorIs(t, err, errNotServed, "no path served: the failure, not the throttle")
+	require.False(t, IsRateLimitFailure(err))
+
+	var servedAndUnknown ProviderAdmission
+	servedAndUnknown.refuseURL(0, errNotServed)
+	servedAndUnknown.throttleURL(2, throttledErr())
+	require.True(t, IsRateLimitFailure(servedAndUnknown.servingError(urls)),
+		"a lost path is no failure while /v3 is served; the throttled /v4 leaves the pass inconclusive, as before")
+}
+
+// RefusesURL finds a url by value in the list the pass verified, so a caller holding
+// the configured list and one holding the generated per-path list agree (MAG-4214).
+func TestProviderAdmission_RefusesURL(t *testing.T) {
+	base := common.NodeUrl{Url: "https://a"}
+	v2 := common.NodeUrl{Url: "https://a/v2", InternalPath: "/v2"}
+	v3 := common.NodeUrl{Url: "https://a/v3", InternalPath: "/v3"}
+	admission, err := admissionFrom([]nodeUrlOutcome{
+		{url: base, served: base},
+		{url: v2, served: v2, err: errNotServed},
+		{url: v3, served: v3},
+	})
+	require.NoError(t, err)
+
+	require.True(t, admission.RefusesURL(v2))
+	require.False(t, admission.RefusesURL(v3))
+	require.False(t, admission.RefusesURL(base))
+	require.False(t, admission.RefusesURL(common.NodeUrl{Url: "https://a/v2"}), "same url, other path: another endpoint")
+	require.False(t, admission.RefusesURL(common.NodeUrl{Url: "https://a/v2", InternalPath: "/v2", Addons: []string{"archive"}}),
+		"declared add-ons are part of what was verified")
+	require.False(t, ProviderAdmission{}.RefusesURL(v2), "no pass, nothing refused")
+
+	require.False(t, admission.WithoutURLRefusals([]int{1}).RefusesURL(v2), "the url grace admits it again")
+	require.True(t, admission.KeepingThrottledFrom(ProviderAdmission{}).RefusesURL(v2), "a copy keeps the verified list")
+
+	keyed := func(key string) common.NodeUrl {
+		url := v2
+		url.AuthConfig.AuthHeaders = map[string]string{"X-Api-Key": key}
+		return url
+	}
+	revoked, good := keyed("revoked"), keyed("good")
+	twoKeys, err := admissionFrom([]nodeUrlOutcome{
+		{url: revoked, served: revoked, err: errNotServed},
+		{url: good, served: good},
+	})
+	require.NoError(t, err)
+	require.True(t, twoKeys.RefusesURL(revoked))
+	require.False(t, twoKeys.RefusesURL(good), "same url and path, other key: verified apart (MAG-4214 review)")
 }
 
 // A path that declares a url serving the base collection needs one of those left: a standalone-

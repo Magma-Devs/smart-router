@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"mime"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -234,8 +235,11 @@ type admissionKey struct {
 
 // ProviderAdmission records what a provider's node urls failed to verify, so a
 // failure costs the narrowest thing that owns it: one service on one url
-// (MAG-3326), else that url — and the whole provider only when a path it serves
-// has no url left. Urls are the provider's configured node urls, by position.
+// (MAG-3326), else that url, else the internal path that url served — and the
+// whole provider only when no path it serves has a url left (MAG-4214). Positions
+// are into the list the pass verified: the urls the router dials, the generated
+// per-path ones included. RefusesURL answers for a url by value, so a caller
+// holding the configured list does not depend on those positions.
 //
 // "Service" is a name as it appears in NodeUrl.Addons, which mixes add-on and
 // extension names — the router's own config makes no distinction, and neither
@@ -261,6 +265,9 @@ type ProviderAdmission struct {
 	// A retry re-runs only the checks it is due for and keeps the rest from it
 	// (ValidateCollectionsAgain). Nil when no pass ran: a test's or a config error's.
 	pass []nodeUrlOutcome
+	// urls is the list the pass verified, by position; nil for an admission no pass
+	// produced (every url admitted).
+	urls []common.NodeUrl
 }
 
 // CheckID names one verification value of a spec: its verification's name, and the
@@ -592,6 +599,19 @@ func (a ProviderAdmission) URLRefused(index int) bool {
 	return refused
 }
 
+// RefusesURL reports whether this node url was refused, found by value in the list
+// the pass verified. A url the pass did not verify is not refused. The match is on
+// the whole entry: two entries on one url that differ in their key or timeout are
+// verified apart, and one's verdict says nothing about the other.
+func (a ProviderAdmission) RefusesURL(url common.NodeUrl) bool {
+	for index, verified := range a.urls {
+		if reflect.DeepEqual(verified, url) {
+			return a.URLRefused(index)
+		}
+	}
+	return false
+}
+
 // URLRefusal is why the node url at this position was refused, nil when it was not.
 func (a ProviderAdmission) URLRefusal(index int) error {
 	return a.refusedURLs[index]
@@ -709,7 +729,7 @@ func (a ProviderAdmission) WithoutURLRefusals(indices []int) ProviderAdmission {
 
 // refusals is a copy of the refusals alone, sharing no map with a.
 func (a ProviderAdmission) refusals() ProviderAdmission {
-	var copied ProviderAdmission
+	copied := ProviderAdmission{urls: a.urls}
 	for key, check := range a.refused {
 		if copied.refused == nil {
 			copied.refused = map[admissionKey]string{}
@@ -772,8 +792,12 @@ var errKeepsNothing = errors.New("every service it declares was refused, and it 
 // declares a non-websocket url for has failed when every url there was refused,
 // and is unknown when the rest were only rate-limited. A path that declares a url
 // serving the base collection needs one of those left: a standalone-addons url
-// carries no base traffic. A failed path makes the error a failure; only unknown
-// ones make it the rate limit, which re-verification reads as inconclusive.
+// carries no base traffic.
+//
+// A failed path costs that path, not the provider (MAG-4214): while another path
+// is served, the provider stays and is simply not a candidate for the failed
+// path's apis. So the error is a failure only when no path is served; an unknown
+// path makes it the rate limit, which re-verification reads as inconclusive.
 func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 	type pathState struct {
 		served, base, servedBase bool
@@ -813,7 +837,9 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 		}
 		return "internal path " + path
 	}
-	var unknown error
+	var failed, unknown error
+	var lost []string
+	anyServed := false
 	for _, path := range order {
 		state := paths[path]
 		served := state.served
@@ -822,11 +848,22 @@ func (a ProviderAdmission) servingError(nodeUrls []common.NodeUrl) error {
 		}
 		switch {
 		case served:
+			anyServed = true
 		case len(state.throttle) == 0:
-			return fmt.Errorf("no node url left serving %s: %w", where(path), state.refused[0])
+			lost = append(lost, path)
+			if failed == nil {
+				failed = fmt.Errorf("no node url left serving %s: %w", where(path), state.refused[0])
+			}
 		case unknown == nil:
 			unknown = fmt.Errorf("no node url verified serving %s: %w", where(path), state.throttle[0])
 		}
+	}
+	if !anyServed && failed != nil {
+		return failed
+	}
+	for _, path := range lost {
+		utils.LavaFormatWarning("no node url left serving "+where(path)+"; keeping the provider for its other paths", nil,
+			utils.LogAttr("internalPath", path))
 	}
 	return unknown
 }
@@ -1116,8 +1153,10 @@ func admit(outcomes []nodeUrlOutcome, logRefusals bool) (ProviderAdmission, erro
 		}
 	}
 	served := make([]common.NodeUrl, len(outcomes))
+	admission.urls = make([]common.NodeUrl, len(outcomes))
 	for index, outcome := range outcomes {
 		served[index] = outcome.served
+		admission.urls[index] = outcome.url
 	}
 	admission.pass = outcomes
 	if err := admission.servingError(served); err != nil {
