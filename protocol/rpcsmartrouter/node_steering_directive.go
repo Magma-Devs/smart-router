@@ -10,8 +10,8 @@ import (
 // from either cache tier (MAG-3520, MAG-3864).
 //
 // A cached answer came from whichever node served the request first, and its reply names no node
-// (Lava-Provider-Address: Cached). A caller that pinned a node with lava-select-provider, kept a
-// session on one with lava-stickiness, or excluded nodes with lava-providers-block could therefore
+// (Smart-Router-Provider-Address: Cached). A caller that pinned a node with smartrouter-select-provider, kept a
+// session on one with smartrouter-stickiness, or excluded nodes with smartrouter-providers-block could therefore
 // be handed the answer of a node it did not choose, even the very node it excluded, with no way to
 // tell. Omer ruled on MAG-4122 (2026-10-05) that a pinned request is answered by the node it is
 // pinned to, never from the cache, and MAG-3520 holds an exclusion list to the same rule. Only the

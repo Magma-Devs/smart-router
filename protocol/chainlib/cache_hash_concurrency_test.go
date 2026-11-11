@@ -55,7 +55,7 @@ func historicalCacheKey(t *testing.T, relayData *pairingtypes.RelayPrivateData, 
 	raw, err := json.Marshal(&pairingtypes.CacheHash{Request: relayData, ChainId: chainId})
 	require.NoError(t, err)
 	if explicitExtensionDirective != "" {
-		raw = append(raw, []byte("\x00lava-extension="+explicitExtensionDirective)...)
+		raw = append(raw, []byte("\x00smartrouter-extension="+explicitExtensionDirective)...)
 	}
 	return sigs.HashMsg(raw)
 }

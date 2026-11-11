@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — multi-chain (ETH + Solana + Cosmos) WITH cache
-# Mode: Direct connections to public RPC endpoints (no Lava providers!)
+# Mode: Direct connections to public RPC endpoints (no provider-relay network — direct upstreams)
 #
 # Same shape as smartrouter_multichain.yml, but trimmed to three chains and with
 # the external cache-be address baked into the config (cache-be: below). Run it

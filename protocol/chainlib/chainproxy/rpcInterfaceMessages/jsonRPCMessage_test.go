@@ -413,7 +413,7 @@ func TestJsonrpcMessage_CheckResponseError_MalformedShapes(t *testing.T) {
 // TestJsonrpcMessage_CheckResponseError_EmptyErrorMessage pins MAG-3991: an error
 // object is an error whether or not it carries message text. Read as a success,
 // {"error":{"code":-32000,"message":""}} ended the relay on the node that sent
-// it — no failover, no lava-identified-node-error header, no score against the
+// it — no failover, no smartrouter-identified-node-error header, no score against the
 // node, and the error eligible for the cache as the answer. The one reply that
 // still reads as a success is a zero-value error object beside a result, which
 // states no failure.

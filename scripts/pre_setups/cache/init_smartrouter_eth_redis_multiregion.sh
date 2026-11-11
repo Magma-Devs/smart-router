@@ -20,7 +20,7 @@
 #   1. A relay through router-A writes an entry into region A.
 #   2. The infrastructure replicates it to region B (poll until it lands).
 #   3. The SAME relay through router-B is a cache HIT — it never touches a
-#      blockchain node, and Lava-Cache-Backend names region B's replica, so the
+#      blockchain node, and Smart-Router-Cache-Backend names region B's replica, so the
 #      read demonstrably came from the LOCAL endpoint.
 #   4. A relay for a DIFFERENT block through router-B writes back to region A
 #      (the write endpoint), not to its local replica.
@@ -189,7 +189,7 @@ relay_to() { # port, block
 headers_from() { # port, block
     curl -s -m 25 -D- -o /dev/null -X POST "http://127.0.0.1:$1" -H 'Content-Type: application/json' \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getBlockByNumber\",\"params\":[\"$2\",false],\"id\":1}" \
-        | grep -iE 'lava-provider-address|lava-cache-backend' | tr -d '\r'
+        | grep -iE 'smart-router-provider-address|smart-router-cache-backend' | tr -d '\r'
 }
 # Count and list FINALIZED relay entries only. Non-finalized ("latest") entries
 # carry a sub-second TTL, so they appear and vanish between two samples — a
@@ -433,11 +433,11 @@ if [[ "$SKIP_SMOKE" != "1" ]]; then
         name="${pair%%:*}"; port="${pair##*:}"
         code=""
         for _ in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${port}/lava/health")
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${port}/smartrouter/health")
             [[ "$code" == "200" ]] && break
             sleep 1
         done
-        printf '  %-10s /lava/health %s\n' "$name" "$code"
+        printf '  %-10s /smartrouter/health %s\n' "$name" "$code"
         [[ "$code" == "200" ]] || ok=0
     done
     [[ "$ok" == "1" ]] && echo "  SMOKE PASS" || { echo "  SMOKE FAIL — see $LOG_A / $LOG_B"; exit 1; }
@@ -467,9 +467,9 @@ Or by hand:
   # 3. the same request in region B is a local cache hit
   curl -s -D- -o /dev/null -X POST http://127.0.0.1:${ROUTER_B_PORT} -H 'Content-Type: application/json' \\
     -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x5",false],"id":1}' \\
-    | grep -iE 'lava-provider-address|lava-cache-backend'
-    #  Lava-Provider-Address: Cached
-    #  Lava-Cache-Backend: 127.0.0.1:${B_PORT}   <- the LOCAL replica served it
+    | grep -iE 'smart-router-provider-address|smart-router-cache-backend'
+    #  Smart-Router-Provider-Address: Cached
+    #  Smart-Router-Cache-Backend: 127.0.0.1:${B_PORT}   <- the LOCAL replica served it
 
   $0 --status
 Stop everything

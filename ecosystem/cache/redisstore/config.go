@@ -630,7 +630,7 @@ type dataDialMarkKey struct{}
 // quorum reports — as IPs, while configs seed hostnames — so a static exclude
 // list built from the configured addresses always misses the discovered peers,
 // and the tracker records a sentinel after all (last write wins; sentinels
-// re-dial at arbitrary times). The tracker feeds the Lava-Cache-Backend
+// re-dial at arbitrary times). The tracker feeds the Smart-Router-Cache-Backend
 // header, which is how a failover is observed, so that pollution turns the
 // signal into a coin flip.
 //

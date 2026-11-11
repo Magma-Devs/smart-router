@@ -23,8 +23,8 @@ func TestSanitizeForeignCacheReplyDropsIdentityMetadataAndSignatures(t *testing.
 		FinalizedBlocksHashes: []byte(`{"1200":"0xabc"}`),
 		Metadata: []pairingtypes.Metadata{
 			// router-lineage identity headers
-			{Name: "Lava-Provider-Address", Value: "provider@provider1"},
-			{Name: "lava-cross-validation-all-providers", Value: "provider@p1,provider@p2"},
+			{Name: "Smart-Router-Provider-Address", Value: "provider@provider1"},
+			{Name: "smartrouter-cross-validation-all-providers", Value: "provider@p1,provider@p2"},
 			// arbitrary upstream provider-identifying headers no denylist could enumerate
 			{Name: "X-Provider-ID", Value: "prov-42"},
 			{Name: "X-Backend", Value: "geth-fra-03"},
@@ -119,13 +119,13 @@ func TestSanitizeForeignCacheReplyAppliesTheSpecsReplyDirectives(t *testing.T) {
 			{Name: "Content-Type", Value: "application/json"},
 			{Name: "X-Aptos-Ledger-Version", Value: "7479307940"},
 			{Name: "X-Aptos-Chain-Id", Value: "1"},
-			{Name: "Lava-Provider-Address", Value: "provider@provider1"},
+			{Name: "Smart-Router-Provider-Address", Value: "provider@provider1"},
 			{Name: "Server", Value: "cloudflare"},
 		},
 	}
 	interfaceDirectives := []*spectypes.Header{
 		{Name: "x-aptos-ledger-version", Kind: spectypes.Header_pass_reply},
-		{Name: "lava-provider-address", Kind: spectypes.Header_pass_reply},
+		{Name: "smart-router-provider-address", Kind: spectypes.Header_pass_reply},
 	}
 	collectionDirectives := []*spectypes.Header{
 		{Name: "x-aptos-chain-id", Kind: spectypes.Header_pass_both},

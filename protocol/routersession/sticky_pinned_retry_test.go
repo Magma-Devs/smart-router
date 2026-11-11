@@ -10,7 +10,7 @@ import (
 
 // A sticky provider that already failed THIS request is not replaced (MAG-2280). The retry policy
 // never retries a pinned request, so selection only sees this on a path nobody meant to take, and
-// then it must refuse the way lava-select-provider does, not fall through to another provider.
+// then it must refuse the way smartrouter-select-provider does, not fall through to another provider.
 // The session keeps its choice: the provider answered, it is not unusable.
 func TestStickyPodLocal_ProviderThatFailedThisRequestIsNotReplaced(t *testing.T) {
 	csm := CreateConsumerSessionManager()

@@ -235,8 +235,8 @@ func TestRelayProcessorRetry(t *testing.T) {
 
 // TestRelayProcessorExhaustedTransportErrors covers MAG-2351: when EVERY attempt fails at the
 // transport level, the failure result must carry the single provider whose error body is returned —
-// not the comma-joined attempted list, which the Lava-Provider-Address chain builder would append
-// wholesale as its resolver entry (doubling the header and disagreeing with Lava-Retries).
+// not the comma-joined attempted list, which the Smart-Router-Provider-Address chain builder would append
+// wholesale as its resolver entry (doubling the header and disagreeing with Smart-Router-Retries).
 func TestRelayProcessorExhaustedTransportErrors(t *testing.T) {
 	run := func(t *testing.T, selection Selection) {
 		ctx := context.Background()
@@ -2334,17 +2334,17 @@ func TestCrossValidationAgreesOnDifferentKeyOrder(t *testing.T) {
 	)
 
 	usedProviders.AddUsed(routersession.ConsumerSessionsMap{
-		"lavagateway": &routersession.SessionInfo{},
-		"tatum1":      &routersession.SessionInfo{},
+		"chainstack": &routersession.SessionInfo{},
+		"tatum1":     &routersession.SessionInfo{},
 	}, nil)
 
 	// Same result value, byte-different envelopes (key order differs).
-	lavaGatewayData := []byte(`{"jsonrpc":"2.0","id":1,"result":"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"}`)
+	chainstackData := []byte(`{"jsonrpc":"2.0","id":1,"result":"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"}`)
 	tatumData := []byte(`{"id":1,"jsonrpc":"2.0","result":"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"}`)
 	// Guard the premise: the two envelopes really are byte-different.
-	require.NotEqual(t, lavaGatewayData, tatumData, "test payloads must differ at the byte level")
+	require.NotEqual(t, chainstackData, tatumData, "test payloads must differ at the byte level")
 
-	relayProcessor.SetResponse(createMockRelayResponseWithData("lavagateway", lavaGatewayData, nil))
+	relayProcessor.SetResponse(createMockRelayResponseWithData("chainstack", chainstackData, nil))
 	relayProcessor.SetResponse(createMockRelayResponseWithData("tatum1", tatumData, nil))
 
 	waitCtx, cancel := context.WithTimeout(context.Background(), time.Millisecond*100)
@@ -2358,7 +2358,7 @@ func TestCrossValidationAgreesOnDifferentKeyOrder(t *testing.T) {
 	// The returned bytes must be one of the verbatim provider envelopes — the
 	// fix changes only the bucket key, never the body returned to the client.
 	returned := result.Reply.Data
-	require.True(t, bytes.Equal(returned, lavaGatewayData) || bytes.Equal(returned, tatumData),
+	require.True(t, bytes.Equal(returned, chainstackData) || bytes.Equal(returned, tatumData),
 		"returned body must be a verbatim provider envelope, got: %s", string(returned))
 }
 

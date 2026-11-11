@@ -1,4 +1,4 @@
-// Package rpcsmartrouter provides the RPC routing solution for the Lava protocol.
+// Package rpcsmartrouter provides the RPC routing solution for the Smart Router.
 //
 // # Architecture Overview
 //
@@ -1371,7 +1371,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 		//    Why ResetBlockedProviders runs separately from
 		//    ResetTransientFailureState:
 		//    ResetTransientFailureState deliberately preserves
-		//    currentlyBlockedProviderAddresses because in lava-pairing-network
+		//    currentlyBlockedProviderAddresses because in pairing-network
 		//    mode unblocking is an epoch-boundary operation. In direct-rpc mode
 		//    (this fork's default) there are no epoch transitions, so blocked
 		//    providers can only accumulate across test runs unless we mass-
@@ -1701,7 +1701,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	// that answered (endpointstate.LocalPodID: the host name and a per-process suffix), and the debug
 	// Service balances across a router's pods, so a reader pins one pod (a port-forward) or compares two
 	// readings only when their PodID matches. "adopted" is how a peer's claim shows up, which
-	// Lava-Provider-Address cannot show, because it reads the same whether a pod used its own claim or a
+	// Smart-Router-Provider-Address cannot show, because it reads the same whether a pod used its own claim or a
 	// peer's; a pod that dropped its local copy of its own claim (invalidated) reads it back as adopted
 	// too, and the registry does not say whose claim it holds, so the two cannot be split here.
 	// /debug/reset-all is not such a case: it clears this pod's local pins and flushes the shared claims
@@ -2060,14 +2060,14 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 	//
 	// One row per recorded comparison outcome, oldest first, from both recording paths (Source):
 	//   reply-time  a content outlier seen before the reply — it is in the request's
-	//               lava-cross-validation-disagreeing-providers header.
+	//               smartrouter-cross-validation-disagreeing-providers header.
 	//   straggler   a provider that lost the race to quorum (it is in pending-providers) and whose
 	//               late answer the async watcher resolved. EVERY resolution is recorded, not only
 	//               dissent: an "agreed" row is the positive control a test asserting "no dissent
 	//               happened" anchors on, and node-error / protocol-error / not-received rows say a
 	//               late answer arrived broken or never arrived.
 	//
-	// Filters (all optional, ANDed): request_id (the Lava-Guid response header value — NOT
+	// Filters (all optional, ANDed): request_id (the Smart-Router-Guid response header value — NOT
 	// /debug/logs' request_id, which is the caller's X-Request-Id), chain_id, outcome, limit (keeps
 	// the most recent N). Status codes:
 	//   200  the rows follow, as a flat JSON array; [] means the recorder was live and saw no dissent.
@@ -3871,9 +3871,9 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	cmdRPCSmartRouter.Flags().String(common.CorsHeadersFlag, "", "Set up CORS allowed headers, * for all, default simple cors specification headers")
 	cmdRPCSmartRouter.Flags().String(common.CorsOriginFlag, "*", "Set up CORS allowed origin, enabled * by default")
 	cmdRPCSmartRouter.Flags().String(common.CorsMethodsFlag, "GET,POST,PUT,DELETE,OPTIONS", "set up Allowed OPTIONS methods, defaults to: \"GET,POST,PUT,DELETE,OPTIONS\"")
-	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Lava-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
+	cmdRPCSmartRouter.Flags().String(common.CorsExposeHeadersFlag, "", "Set up CORS Access-Control-Expose-Headers — response headers a browser may read (e.g. \"Smart-Router-Provider-Address\", or \"*\" for all). Empty by default (only simple response headers are readable from JS).")
 	cmdRPCSmartRouter.Flags().String(common.CDNCacheDurationFlag, "86400", "set up preflight options response cache duration, default 86400 (24h in seconds)")
-	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache): the consumer consistency seen-block travels through either. The per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod) additionally require --cache-be — the RESP backend does not carry them, so a RESP-backed router polls locally and logs a warning (docs/RESP-CACHE.md). Cross-pod sticky sessions (a lava-stickiness id resolving to the same upstream on every replica) travel through either backend; without this flag stickiness stays pod-local")
+	cmdRPCSmartRouter.Flags().Bool(common.SharedStateFlag, false, "Share state across router replicas through the cache backend (cache-be or resp-cache): the consumer consistency seen-block travels through either. The per-endpoint chain-tracker poll observations (an upstream polled about once per interval fleet-wide instead of once per pod) additionally require --cache-be — the RESP backend does not carry them, so a RESP-backed router polls locally and logs a warning (docs/RESP-CACHE.md). Cross-pod sticky sessions (a smartrouter-stickiness id resolving to the same upstream on every replica) travel through either backend; without this flag stickiness stays pod-local")
 	// relays health check related flags
 	cmdRPCSmartRouter.Flags().Bool(common.RelaysHealthEnableFlag, RelaysHealthEnableFlagDefault, "enables relays health check; when false, /readyz and /metrics/overall-health report 503 unconditionally, so keep it on under a readiness probe")
 	cmdRPCSmartRouter.Flags().Duration(common.RelayHealthIntervalFlag, RelayHealthIntervalFlagDefault, "interval between relay health checks")
@@ -3919,7 +3919,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 
 	cmdRPCSmartRouter.Flags().DurationVar(&common.DefaultTimeout, common.DefaultProcessingTimeoutFlagName, common.DefaultTimeout, "default timeout for relay processing (e.g., 30s, 1m)")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.MinimumTimePerRelayDelay, common.MinRelayTimeoutFlagName, common.MinimumTimePerRelayDelay, "minimum relay timeout floor applied to all methods when CU-based timeout is lower (e.g., 1s, 5s)")
-	cmdRPCSmartRouter.Flags().DurationVar(&common.MaxCallerRelayTimeout, common.MaxCallerRelayTimeoutFlagName, common.MaxCallerRelayTimeout, "longest a caller's lava-relay-timeout header may make the router hold one request (e.g., 2m). It only lets the header extend a request past the budget the router gives it with no header, and never shortens a budget; the default 0 allows no extension. An extended request does not hedge, not even to the backup tier: its attempt window is its whole budget")
+	cmdRPCSmartRouter.Flags().DurationVar(&common.MaxCallerRelayTimeout, common.MaxCallerRelayTimeoutFlagName, common.MaxCallerRelayTimeout, "longest a caller's smartrouter-relay-timeout header may make the router hold one request (e.g., 2m). It only lets the header extend a request past the budget the router gives it with no header, and never shortens a budget; the default 0 allows no extension. An extended request does not hedge, not even to the backup tier: its attempt window is its whole budget")
 	cmdRPCSmartRouter.Flags().DurationVar(&common.CacheTimeout, common.CacheTimeoutFlagName, common.CacheTimeout, "per-relay cache lookup budget; must exceed the network round trip to the cache backend, so raise it for a remote (e.g. cross-region RESP) backend (e.g., 400ms)")
 	cmdRPCSmartRouter.Flags().Int64(common.CacheMaxEntryBytesFlagName, common.DefaultCacheMaxEntryBytes, "largest reply body, in bytes, written to the cache (gRPC or RESP backend); a larger reply is served but not written, since encoding a multi-MB entry costs more than its rare hits save. Off by default (0); set a value to turn it on")
 	cmdRPCSmartRouter.Flags().Uint64(common.BenchAfterFlagName, routersession.DefaultBenchAfter,
@@ -3943,7 +3943,7 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 	// unless OTEL_SDK_DISABLED=true or OTEL_TRACES_EXPORTER=none; when no OTLP
 	// endpoint is configured the SDK falls back to the spec default
 	// (localhost:4317 for gRPC, localhost:4318 for HTTP).
-	// --otel-trace-body is the only Lava-specific knob, exposed as a CLI flag
+	// --otel-trace-body is the only router-specific knob, exposed as a CLI flag
 	// because it's a per-invocation debug toggle rather than deployment
 	// configuration. Body size is delegated to the SDK via
 	// OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT (SDK default: unlimited).

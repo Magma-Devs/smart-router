@@ -24,7 +24,7 @@ func TestCacheWriteReplySnapshot(t *testing.T) {
 
 	// What the response path does to the reply once the write has been handed off.
 	reply.LatestBlock = 100
-	reply.Metadata = append(reply.Metadata, pairingtypes.Metadata{Name: "Lava-Guid", Value: "per-request"})
+	reply.Metadata = append(reply.Metadata, pairingtypes.Metadata{Name: "Smart-Router-Guid", Value: "per-request"})
 	reply.Metadata[0].Value = "changed"
 
 	require.Equal(t, int64(0), snapshot.LatestBlock, "the tip stamped after the write is not the snapshot's")
@@ -54,7 +54,7 @@ func TestCacheWriteSnapshotSurvivesResponseMutation(t *testing.T) {
 	}
 	rpcss.tryCacheWrite(context.Background(), msg, result)
 	result.Reply.LatestBlock = tip + 5
-	result.Reply.Metadata = append(result.Reply.Metadata, pairingtypes.Metadata{Name: "Lava-Guid", Value: "per-request"})
+	result.Reply.Metadata = append(result.Reply.Metadata, pairingtypes.Metadata{Name: "Smart-Router-Guid", Value: "per-request"})
 	// An append alone cannot tell a cloned Metadata from a shared one: it lands past the
 	// snapshot's length. Writing an existing element can.
 	result.Reply.Metadata[0].Value = "changed"

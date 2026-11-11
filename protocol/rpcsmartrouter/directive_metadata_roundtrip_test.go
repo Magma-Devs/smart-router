@@ -17,7 +17,7 @@ import (
 // TestMetadataFromDirectiveHeadersRoundTrip guards the earliest-block re-parse fix in
 // updateProtocolMessageIfNeededWithNewEarliestData: directive headers rebuilt into metadata must
 // survive being re-split by DirectiveHeaders (the same path ParseRelay uses), so a re-parsed
-// protocol message keeps the client's lava-extension (and other) directives. Without this, the
+// protocol message keeps the client's smartrouter-extension (and other) directives. Without this, the
 // rebuilt message's cache key would disagree with the original message's key on the archive path,
 // undermining the per-directive cache lane.
 func TestMetadataFromDirectiveHeadersRoundTrip(t *testing.T) {
@@ -47,7 +47,7 @@ func TestMetadataFromDirectiveHeadersRoundTrip(t *testing.T) {
 // outcome passes having measured nothing. That is the exact failure mode this feature
 // exists to escape, so it is guarded rather than argued.
 //
-// lava-debug-relay qualifies because it is registered in SPECIAL_DIRECTIVE_HEADERS
+// smartrouter-debug-relay qualifies because it is registered in SPECIAL_DIRECTIVE_HEADERS
 // and stripped by DirectiveHeaders before ParseMsg, so it is gone before the key is
 // built. A newly minted header fails a second way worth recording: BaseChainParser
 // .HandleHeaders keeps only headers the SPEC declares, so an undeclared name is
@@ -102,7 +102,7 @@ func TestCacheTierDirectiveDoesNotChangeTheCacheKey(t *testing.T) {
 			"stripped from the request, but still delivered to the router as a directive")
 	})
 
-	t.Run("lava-debug-relay leaves the key untouched", func(t *testing.T) {
+	t.Run("smartrouter-debug-relay leaves the key untouched", func(t *testing.T) {
 		withDirective := parse(t, apiURL, []pairingtypes.Metadata{{Name: common.DEBUG_RELAY, Value: "true"}})
 		require.Equal(t, hashOf(t, plain), hashOf(t, withDirective),
 			"asking for the cache tier must not move the request into its own cache lane")

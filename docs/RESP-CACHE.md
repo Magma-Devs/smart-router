@@ -350,7 +350,7 @@ probe.
 
 The shared `smartrouter_cache_*` hit/miss series keep working unchanged.
 
-A router started with `--debug-relays` adds `Lava-Cache-Backend` to cache-served responses,
+A router started with `--debug-relays` adds `Smart-Router-Cache-Backend` to cache-served responses,
 naming the node that served the hit — the current master under sentinel, the touched shard
 under cluster. It is debug-gated because it exposes internal infrastructure addresses.
 
@@ -614,7 +614,7 @@ It ends with a self-check, so a broken stack is caught before you start:
 
 ```
 [Smoke] relay -> cache write -> cache hit
-  router /lava/health            200
+  router /smartrouter/health            200
   relay eth_blockNumber          ok
   cache hits                     7
   resp_cache_connected           1
@@ -664,11 +664,11 @@ docker exec smartrouter-demo-redis redis-cli ttl sr:chaintip:ETH1        # 86399
 Issue the same request again and it is served from the backend:
 
 ```
-Lava-Provider-Address: Cached
-Lava-Cache-Backend: 127.0.0.1:63790
+Smart-Router-Provider-Address: Cached
+Smart-Router-Cache-Backend: 127.0.0.1:63790
 ```
 
-`Lava-Cache-Backend` appears only under `--debug-relays` (which the lanes pass). To read a
+`Smart-Router-Cache-Backend` appears only under `--debug-relays` (which the lanes pass). To read a
 stored value, note that `response.data` is base64 and, above the compression threshold,
 gzipped:
 
@@ -772,7 +772,7 @@ master before:  <lan-ip>:63811
 ```
 
 The router re-asked the sentinels and followed the new master; the connectivity gauge never
-left 1. With `--debug-relays`, `Lava-Cache-Backend` flips from `…:63811` to `…:63812` on the
+left 1. With `--debug-relays`, `Smart-Router-Cache-Backend` flips from `…:63811` to `…:63812` on the
 next cache hit, so the promotion is observable from outside the system. Call the endpoint
 twice — the first relay warms the cache, the second carries the header.
 
@@ -820,8 +820,8 @@ scripts/pre_setups/init_smartrouter_eth_redis_multiregion.sh --demo
 [2] the infrastructure replicates it to region B
       sr:rel:f:ETH1:a706caf8…:5
 [3] the SAME request through router-B — served locally, no node call
-    Lava-Provider-Address: Cached
-    Lava-Cache-Backend: 127.0.0.1:63822
+    Smart-Router-Provider-Address: Cached
+    Smart-Router-Cache-Backend: 127.0.0.1:63822
 [4] a DIFFERENT block (0x6) through router-B — writes go to region A
     new entry in region A (the WRITE endpoint):
       sr:rel:f:ETH1:7868f0c4…:6
@@ -931,7 +931,7 @@ Router 2 stays up on `:3365`; `--stop` removes both.
 | Lane refuses: "port(s) are held by process(es) it does not own" | Another stack holds them. The lane prints a ready-made override; nothing was killed. |
 | `/metrics/overall-health` returns 503 right after boot | Fail-closed until the first relays health sweep. The lanes shorten the cadence to 15s; wait one cycle. |
 | `--scan` shows only `sr:chaintip:ETH1` | A `latest` query was relayed — sub-second TTL. Use a finalized block. |
-| `Lava-Cache-Backend` missing | Either the response was not a cache hit (check `Lava-Provider-Address`), or the router lacks `--debug-relays`. Call the endpoint twice. |
+| `Smart-Router-Cache-Backend` missing | Either the response was not a cache hit (check `Smart-Router-Provider-Address`), or the router lacks `--debug-relays`. Call the endpoint twice. |
 | Header names an unexpected backend | You are talking to a different lane's router — check the port (standalone `:3360`, sentinel `:3370`, multi-region `:3380`/`:3381`). |
 | `resp_cache_connected` is 0 | Backend unreachable — the container may have been `docker stop`ped, which deletes it (`--rm`). Re-run the lane. |
 | Relays fail or the smoke check fails | Public endpoint rate limits. Set `ETH_RPC_URL_1/2` and `ETH_WS_URL_1/2` to your own endpoints. |

@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// newPinnedHarness is newStopReasonHarness with the request pinned by lava-stickiness: the real
+// newPinnedHarness is newStopReasonHarness with the request pinned by smartrouter-stickiness: the real
 // state machine and policy over the REST mock chain, with a hedge window long enough never to fire.
 func newPinnedHarness(t *testing.T) (*relaycore.RelayProcessor, *routersession.UsedProviders) {
 	t.Helper()
@@ -158,7 +158,7 @@ func TestConsistencyGate_RejectsAStrictPinAndRetriesTheRest(t *testing.T) {
 	}
 }
 
-// A plain lava-select-provider keeps its documented failover (MAG-4826 D2): the same node error
+// A plain smartrouter-select-provider keeps its documented failover (MAG-4826 D2): the same node error
 // is retried, so the state machine asks for a second batch instead of stopping on "Pinned". So is
 // a select-provider whose strict header is anything but "true".
 func TestPinnedRequest_PlainSelectProviderRetriesANodeError(t *testing.T) {

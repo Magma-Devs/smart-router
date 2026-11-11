@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-3080: the caller's lava-providers-block list must hold however long it is, including when it
+// MAG-3080: the caller's smartrouter-providers-block list must hold however long it is, including when it
 // covers every primary — through the backup tier and the blocked-list fallback.
 
 // mkBlockListProvider is mkProviderForBenchTest with a compute-unit budget large enough for the

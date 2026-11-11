@@ -148,14 +148,14 @@ func TestStore_Key_NoCrossChainCollision(t *testing.T) {
 	s := NewStore()
 	url := "https://shared.example:443"
 	kEth := Key("ETH1", "jsonrpc", url)
-	kLava := Key("LAVA", "jsonrpc", url)
-	require.NotEqual(t, kEth, kLava)
+	kCosmos := Key("COSMOSHUB", "jsonrpc", url)
+	require.NotEqual(t, kEth, kCosmos)
 
 	now := time.Unix(2_000, 0)
 	s.Set(kEth, Tip{Block: 111, ObservedAt: now, Source: SourcePoll}, time.Minute)
-	s.Set(kLava, Tip{Block: 222, ObservedAt: now, Source: SourcePoll}, time.Minute)
+	s.Set(kCosmos, Tip{Block: 222, ObservedAt: now, Source: SourcePoll}, time.Minute)
 	require.Equal(t, int64(111), s.Block(kEth))
-	require.Equal(t, int64(222), s.Block(kLava))
+	require.Equal(t, int64(222), s.Block(kCosmos))
 }
 
 // TestStore_RemoveAndReset covers the lifecycle cleanup (Remove on tracker removal) and

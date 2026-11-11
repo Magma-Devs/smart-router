@@ -507,11 +507,11 @@ if [[ "$SKIP_SMOKE" != "1" ]]; then
 
     HEALTH=""
     for _ in $(seq 1 30); do
-        HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/lava/health")
+        HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/smartrouter/health")
         [[ "$HEALTH" == "200" ]] && break
         sleep 1
     done
-    [[ "$HEALTH" == "200" ]] && note "router /lava/health" "200" || { note "router /lava/health" "$HEALTH (want 200)"; SMOKE_FAIL=1; }
+    [[ "$HEALTH" == "200" ]] && note "router /smartrouter/health" "200" || { note "router /smartrouter/health" "$HEALTH (want 200)"; SMOKE_FAIL=1; }
 
     BODY=$(curl -sf -m 20 -X POST "http://127.0.0.1:${ROUTER_PORT}" -H 'Content-Type: application/json' -d "$RELAY" || true)
     [[ "$BODY" == *'"result"'* ]] && note "relay eth_getBlockByNumber" "ok" \

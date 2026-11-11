@@ -158,7 +158,7 @@ func forwardedHeaders(protocolMessage chainlib.ProtocolMessage) map[string]strin
 	return forwarded
 }
 
-// A gRPC client pins a unary call the same way an HTTP client does: lava-select-provider
+// A gRPC client pins a unary call the same way an HTTP client does: smartrouter-select-provider
 // travels as call metadata, the gRPC listener hands its metadata to the same
 // directive parser as an HTTP header, the pin is kept out of the metadata the node
 // receives, and it reaches resolvePinDirectives. What the session manager does with a

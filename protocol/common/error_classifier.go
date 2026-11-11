@@ -109,7 +109,7 @@ var chainErrorMappings = map[ChainFamily][]errorMapping{
 		// Engine results (submit, submit_multisigned): what happened to the transaction, never that
 		// the node is broken, so each is a non-retryable chain error that keeps the availability gate
 		// off the node. The catch-all row also matches terQUEUED, which IsXRPLRejection carves out so
-		// the classifier never flags it; one reaching here some other way (a lava-identified-node-error
+		// the classifier never flags it; one reaching here some other way (a smartrouter-identified-node-error
 		// hint, a provider-supplied body) is better labelled a rejection, non-retryable and not at
 		// fault, than left UNKNOWN_ERROR, which is retryable and scored
 		// (TestXRPLTerQueuedRowKeepsTheGateOff).
@@ -933,7 +933,7 @@ type stringConnectionFallback struct {
 	// substrings that, if any are present, disqualify the row. Used to carve
 	// exceptions out of a broad match (e.g. GOAWAY except ENHANCE_YOUR_CALM).
 	mustNotContain []string
-	// lava error returned when the row matches.
+	// router error returned when the row matches.
 	result *RouterError
 	// transportOnly marks a row that only describes how Go's net, net/http and io word a failed
 	// connection. DetectConnectionErrorInReplyText skips it: a node's reply proves the connection

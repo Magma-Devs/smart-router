@@ -140,7 +140,7 @@ func NewUnifiedRelayStateMachine(
 	// methods only: a write routes as a write whatever headers arrive with it (MAG-3603).
 	cvOverride *common.CrossValidationParams,
 	// forbidCallerCrossValidation, when true, suppresses the caller-header-driven CrossValidation decision
-	// for this method: the request's lava-cross-validation-* headers are ignored entirely (not even
+	// for this method: the request's smartrouter-cross-validation-* headers are ignored entirely (not even
 	// validated) and the method routes by its normal stateful/stateless category. It is what an operator
 	// reaches for on a STATELESS method, since a write now ignores those headers on its own account
 	// (MAG-3603) and needs no policy written for it. The rpcsmartrouter layer
@@ -332,12 +332,12 @@ func (sm *UnifiedRelayStateMachine) buildDecisionInput(isTickerHedge bool) Decis
 // at all, never retried, hedged or rerouted by the consistency gate onto another one (MAG-2280,
 // MAG-4123). Two ways in (MAG-4826):
 //
-//   - lava-stickiness, always. A sticky session that straddles two nodes is the false gap the
+//   - smartrouter-stickiness, always. A sticky session that straddles two nodes is the false gap the
 //     header exists to prevent, and the sticky-sessions docs promise "route to the session's node,
-//     or fail". This holds whatever else the request sends, so adding lava-select-provider to a
+//     or fail". This holds whatever else the request sends, so adding smartrouter-select-provider to a
 //     sticky request can never make it leak.
-//   - lava-select-provider with lava-select-provider-strict: true (SelectProviderStrict). A plain
-//     lava-select-provider keeps its documented behaviour: the named upstream gets the first
+//   - smartrouter-select-provider with smartrouter-select-provider-strict: true (SelectProviderStrict). A plain
+//     smartrouter-select-provider keeps its documented behaviour: the named upstream gets the first
 //     attempt, and failover may use the rest of the pool.
 //
 // Read from the request's ORIGINAL headers: the pin is a property of the request, not of one
@@ -355,9 +355,9 @@ func PinnedByDirectives(directiveHeaders map[string]string) bool {
 	return selected && SelectProviderStrict(directiveHeaders)
 }
 
-// SelectProviderStrict reports whether the caller sent lava-select-provider-strict: true. Only the
-// value "true" (any case) turns it on, unlike the presence-only lava-force-cache-refresh: "false"
-// must not silently mean yes. It only matters next to lava-select-provider; alone it pins nothing.
+// SelectProviderStrict reports whether the caller sent smartrouter-select-provider-strict: true. Only the
+// value "true" (any case) turns it on, unlike the presence-only smartrouter-force-cache-refresh: "false"
+// must not silently mean yes. It only matters next to smartrouter-select-provider; alone it pins nothing.
 func SelectProviderStrict(directiveHeaders map[string]string) bool {
 	return strings.EqualFold(strings.TrimSpace(directiveHeaders[common.SELECT_PROVIDER_STRICT_HEADER_NAME]), "true")
 }

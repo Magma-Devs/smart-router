@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Brand palette — anchored on Lava Connect brand red #FF3900, with a warm
+// Brand palette — anchored on Smart Router brand red #FF3900, with a warm
 // ember gradient for the logo and muted neutrals for body text.
 var (
 	Brand   = lipgloss.Color("#FF3900") // primary brand red

@@ -54,7 +54,7 @@ func (rawBytesCodec) Name() string { return "mag3881-raw" }
 // value with Huffman coding when that is shorter and as a literal otherwise, and the two controls
 // below pin which value takes which path.
 func TestGRPCIncomingMetadata_ValuesOutliveTheConnection(t *testing.T) {
-	const probeHeader = "x-lava-probe"
+	const probeHeader = "x-smartrouter-probe"
 	var mu sync.Mutex
 	var seen []string
 	server := grpc.NewServer(grpc.UnknownServiceHandler(func(srv any, stream grpc.ServerStream) error {

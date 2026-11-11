@@ -42,7 +42,7 @@ func TestGRPCProxy(t *testing.T) {
 }
 
 // TestGRPCProxy_MetadataOnError proves the proxy surfaces callback response metadata as gRPC trailers on
-// the error path — the channel that carries lava-cross-validation-* failure headers to gRPC clients when a
+// the error path — the channel that carries smartrouter-cross-validation-* failure headers to gRPC clients when a
 // relay fails. Before the fix the handler returned the error before setting any metadata, so it was dropped.
 func TestGRPCProxy_MetadataOnError(t *testing.T) {
 	t.Run("error with metadata is surfaced as trailers", func(t *testing.T) {

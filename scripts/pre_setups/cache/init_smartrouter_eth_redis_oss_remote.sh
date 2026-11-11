@@ -32,7 +32,7 @@
 #     network round trip, so a budget below the backend RTT turns EVERY lookup
 #     into a timeout — smartrouter_resp_cache_failed_total{kind="timeout",
 #     op="get"} climbs while writes still land, and relays are answered by the
-#     upstream (Lava-Provider-Address: eth-rpc-N, never Cached).
+#     upstream (Smart-Router-Provider-Address: eth-rpc-N, never Cached).
 #   - The lane therefore measures the RTT and passes a --cache-timeout sized
 #     to it (2*RTT + 150ms headroom; CACHE_TIMEOUT overrides), so cache HITS
 #     work from anywhere. The trade is honest: a hit saves the upstream call
@@ -462,11 +462,11 @@ if [[ "$SKIP_SMOKE" != "1" ]]; then
 
     HEALTH=""
     for _ in $(seq 1 30); do
-        HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/lava/health")
+        HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/smartrouter/health")
         [[ "$HEALTH" == "200" ]] && break
         sleep 1
     done
-    [[ "$HEALTH" == "200" ]] && note "router /lava/health" "200" || { note "router /lava/health" "$HEALTH (want 200)"; SMOKE_FAIL=1; }
+    [[ "$HEALTH" == "200" ]] && note "router /smartrouter/health" "200" || { note "router /smartrouter/health" "$HEALTH (want 200)"; SMOKE_FAIL=1; }
 
     # The gauge is driven by a periodic probe (3s budget — WAN-tolerant); give
     # it a couple of cycles rather than sampling once.
@@ -505,7 +505,7 @@ if [[ "$SKIP_SMOKE" != "1" ]]; then
     done
     if [[ "$HIT_OK" == "1" ]]; then
         note "cache_success_total" "$(hits) (>0)"
-        HDR=$(curl -s -D - -o /dev/null -m 20 -X POST "http://127.0.0.1:${ROUTER_PORT}" -H 'Content-Type: application/json' -d "$RELAY_FIXED" | grep -i '^Lava-Cache-Backend' | tr -d '\r')
+        HDR=$(curl -s -D - -o /dev/null -m 20 -X POST "http://127.0.0.1:${ROUTER_PORT}" -H 'Content-Type: application/json' -d "$RELAY_FIXED" | grep -i '^Smart-Router-Cache-Backend' | tr -d '\r')
         [[ -n "$HDR" ]] && note "hit served by" "${HDR#*: }"
     else
         # connected=1 + keys present + zero hits means lookups still time out:
@@ -557,11 +557,11 @@ One-time in your shell (paste as-is), then use 'rd <COMMAND>':
      rd TTL '<paste one key from the scan>'
 
 3. Repeat the SAME relay and look at the headers — a cache hit is served as
-   "Cached" and Lava-Cache-Backend names the node that served it:
+   "Cached" and Smart-Router-Cache-Backend names the node that served it:
      curl -s -D - -o /dev/null -X POST http://127.0.0.1:${ROUTER_PORT} -H 'Content-Type: application/json' \\
        -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x112a880",false],"id":1}' \\
-       | grep -iE 'lava-(provider-address|cache-backend)'
-     # expect:  Lava-Provider-Address: Cached  +  Lava-Cache-Backend: ${REDIS_HOST}:${REDIS_PORT}
+       | grep -iE 'smart-router-(provider-address|cache-backend)'
+     # expect:  Smart-Router-Provider-Address: Cached  +  Smart-Router-Cache-Backend: ${REDIS_HOST}:${REDIS_PORT}
      # (works even far from the backend — the lane raised the router's lookup
      #  budget with --cache-timeout ${CACHE_TIMEOUT}; the production default is 50ms)
 

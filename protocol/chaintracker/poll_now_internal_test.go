@@ -312,7 +312,7 @@ func TestChainTracker_PollNow_ConcurrentTriggersAllComplete(t *testing.T) {
 // rate-limit hold-off would re-arm a ban-type limit and add a strike (MAG-4165). While held,
 // WakePoll sends nothing, writes nothing, and reports its own sentinel — also the typed 429 with
 // the remaining wait. An explicit PollNow (/debug/poll-now) still goes through: one asked-for
-// request is the caller's call, as an explicit lava-select-provider outranks a relay hold-off.
+// request is the caller's call, as an explicit smartrouter-select-provider outranks a relay hold-off.
 func TestChainTracker_WakePoll_DeclinesWhileHeldOff_PollNowDoesNot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

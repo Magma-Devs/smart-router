@@ -7,10 +7,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 )
 
-// A strict pin (lava-stickiness, or lava-select-provider with lava-select-provider-strict: true)
+// A strict pin (smartrouter-stickiness, or smartrouter-select-provider with smartrouter-select-provider-strict: true)
 // is read on every attempt, so should a second batch ever be sent the pin is still there and
 // selection refuses the already-tried upstream loudly (MAG-2280, MAG-4123). A plain
-// lava-select-provider is read on the first attempt only, its documented failover (MAG-2228,
+// smartrouter-select-provider is read on the first attempt only, its documented failover (MAG-2228,
 // kept by MAG-4826): a retry may reach the rest of the pool.
 func TestResolvePinDirectives(t *testing.T) {
 	const (

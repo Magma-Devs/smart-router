@@ -22,12 +22,12 @@ func newSmartRouterForBlockedProviderTest() *SmartRouterMetricsManager {
 // an empty body also satisfies, so it passed against the very stub it was named after.
 func TestSetBlockedProvider_PublishesBothDirections(t *testing.T) {
 	m := newSmartRouterForBlockedProviderTest()
-	g := m.csmProviderBlocked.WithLabelValues("LAVA", "tendermintrpc", "provider-1")
+	g := m.csmProviderBlocked.WithLabelValues("COSMOSHUB", "tendermintrpc", "provider-1")
 
-	m.SetBlockedProvider("LAVA", "tendermintrpc", "provider-1", "http://127.0.0.1:1", true)
+	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "provider-1", "http://127.0.0.1:1", true)
 	require.Equal(t, float64(1), testutil.ToFloat64(g), "a blocked provider must publish 1")
 
-	m.SetBlockedProvider("LAVA", "tendermintrpc", "provider-1", "http://127.0.0.1:1", false)
+	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "provider-1", "http://127.0.0.1:1", false)
 	require.Equal(t, float64(0), testutil.ToFloat64(g), "a restored provider must publish 0")
 }
 
@@ -37,13 +37,13 @@ func TestSetBlockedProvider_PublishesBothDirections(t *testing.T) {
 func TestSetBlockedProvider_DoesNotLabelByNodeURL(t *testing.T) {
 	m := newSmartRouterForBlockedProviderTest()
 
-	m.SetBlockedProvider("LAVA", "tendermintrpc", "provider-1", "https://node.example/v2/SECRET-KEY", true)
-	m.SetBlockedProvider("LAVA", "tendermintrpc", "provider-1", "https://node.example/v2/ROTATED-KEY", false)
+	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "provider-1", "https://node.example/v2/SECRET-KEY", true)
+	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "provider-1", "https://node.example/v2/ROTATED-KEY", false)
 
 	require.Equal(t, 1, testutil.CollectAndCount(m.csmProviderBlocked),
 		"the endpoint must not be a label — a changed URL must not fork a second series")
 	require.Equal(t, float64(0),
-		testutil.ToFloat64(m.csmProviderBlocked.WithLabelValues("LAVA", "tendermintrpc", "provider-1")),
+		testutil.ToFloat64(m.csmProviderBlocked.WithLabelValues("COSMOSHUB", "tendermintrpc", "provider-1")),
 		"the unblock must land on the same series as the block")
 }
 
@@ -53,26 +53,26 @@ func TestSetBlockedProvider_DoesNotLabelByNodeURL(t *testing.T) {
 // else can ever clear it.
 func TestResetBlockedProvidersMetrics_DropsProvidersNoLongerPaired(t *testing.T) {
 	m := newSmartRouterForBlockedProviderTest()
-	m.SetBlockedProvider("LAVA", "tendermintrpc", "stays", "", true)
-	m.SetBlockedProvider("LAVA", "tendermintrpc", "leaves", "", true)
+	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "stays", "", true)
+	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "leaves", "", true)
 	require.Equal(t, 2, testutil.CollectAndCount(m.csmProviderBlocked))
 
-	m.ResetBlockedProvidersMetrics("LAVA", "tendermintrpc", map[string]string{"stays": "http://127.0.0.1:1"})
+	m.ResetBlockedProvidersMetrics("COSMOSHUB", "tendermintrpc", map[string]string{"stays": "http://127.0.0.1:1"})
 
 	require.Equal(t, 1, testutil.CollectAndCount(m.csmProviderBlocked),
 		"the departed provider's series must be dropped, not frozen at 1")
 	require.Equal(t, float64(0),
-		testutil.ToFloat64(m.csmProviderBlocked.WithLabelValues("LAVA", "tendermintrpc", "stays")),
+		testutil.ToFloat64(m.csmProviderBlocked.WithLabelValues("COSMOSHUB", "tendermintrpc", "stays")),
 		"a provider carried into the new pairing is seeded as serving")
 }
 
 // The rebase is scoped to one chain: a reset on one spec/apiInterface must not wipe another's.
 func TestResetBlockedProvidersMetrics_ScopedToOneChain(t *testing.T) {
 	m := newSmartRouterForBlockedProviderTest()
-	m.SetBlockedProvider("LAVA", "tendermintrpc", "provider-1", "", true)
+	m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "provider-1", "", true)
 	m.SetBlockedProvider("ETH1", "jsonrpc", "provider-1", "", true)
 
-	m.ResetBlockedProvidersMetrics("LAVA", "tendermintrpc", map[string]string{})
+	m.ResetBlockedProvidersMetrics("COSMOSHUB", "tendermintrpc", map[string]string{})
 
 	require.Equal(t, 1, testutil.CollectAndCount(m.csmProviderBlocked))
 	require.Equal(t, float64(1),
@@ -84,7 +84,7 @@ func TestResetBlockedProvidersMetrics_ScopedToOneChain(t *testing.T) {
 func TestBlockedProviderMetrics_NilManagerIsSafe(t *testing.T) {
 	var m *SmartRouterMetricsManager
 	require.NotPanics(t, func() {
-		m.SetBlockedProvider("LAVA", "tendermintrpc", "provider-1", "", true)
-		m.ResetBlockedProvidersMetrics("LAVA", "tendermintrpc", map[string]string{"provider-1": ""})
+		m.SetBlockedProvider("COSMOSHUB", "tendermintrpc", "provider-1", "", true)
+		m.ResetBlockedProvidersMetrics("COSMOSHUB", "tendermintrpc", map[string]string{"provider-1": ""})
 	})
 }

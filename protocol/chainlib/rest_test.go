@@ -276,8 +276,8 @@ func TestRegexParsing(t *testing.T) {
 	// Only the slash is relaxed — a path the spec genuinely does not describe still falls
 	// through, which is what keeps Default-* a usable spec-gap signal.
 	for _, api := range []string{
-		"/not/a/real/lava/path",
-		"/not/a/real/lava/path/",
+		"/not/a/real/chain/path",
+		"/not/a/real/chain/path/",
 	} {
 		chainMessage, err := chainParser.ParseMsg(api, nil, http.MethodGet, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
 		if err == nil {

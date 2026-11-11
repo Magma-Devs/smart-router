@@ -98,12 +98,12 @@ func TestFilterUpstreamReplyMetadataDropsRouterOwnedNamesWhateverTheUpstreamClai
 	h := http.Header{}
 	h.Set("Content-Type", "application/json")
 	h.Set(PROVIDER_ADDRESS_HEADER_NAME, "somebody-else")
-	h.Set("lava-cross-validation-status", "success")
+	h.Set("smartrouter-cross-validation-status", "success")
 	h.Set(PROVIDER_LATEST_BLOCK_HEADER_NAME, "999999999")
 	h.Set(SMART_ROUTER_VERSION_HEADER_NAME, "0.0.0")
 	h.Set(RETRY_COUNT_HEADER_NAME, "0")
 	h.Set(IDENTIFIED_NODE_ERROR_HEADER, "true")
-	h.Set("LAVA-GUID", "deadbeef")
+	h.Set("SMART-ROUTER-GUID", "deadbeef")
 	h.Set(StatusCodeMetadataKey, "200")
 
 	got := FilterUpstreamReplyMetadata(upstreamMetadata(h))
@@ -188,7 +188,7 @@ func TestFilterUpstreamReplyMetadataUnionsTheInterfacesDirectivesWithTheCollecti
 
 func TestFilterUpstreamReplyMetadataSpecCannotAuthoriseARouterOwnedName(t *testing.T) {
 	directives := []*spectypes.Header{
-		{Name: "lava-provider-address", Kind: spectypes.Header_pass_reply},
+		{Name: "smart-router-provider-address", Kind: spectypes.Header_pass_reply},
 		{Name: "provider-latest-block", Kind: spectypes.Header_pass_both},
 		{Name: "smart-router-version", Kind: spectypes.Header_pass_reply},
 		{Name: StatusCodeMetadataKey, Kind: spectypes.Header_pass_ignore},
@@ -254,8 +254,8 @@ func TestUpstreamReplyHeaderAllowlistNamesNothingTheRouterOwns(t *testing.T) {
 
 func TestIsRouterOwnedHeader(t *testing.T) {
 	owned := []string{
-		PROVIDER_ADDRESS_HEADER_NAME, "lava-provider-address", "LAVA-GUID",
-		"lava-cross-validation-status", RETRY_COUNT_HEADER_NAME,
+		PROVIDER_ADDRESS_HEADER_NAME, "smart-router-provider-address", "SMART-ROUTER-GUID",
+		"smartrouter-cross-validation-status", RETRY_COUNT_HEADER_NAME,
 		IDENTIFIED_NODE_ERROR_HEADER, CACHE_TIER_HEADER_NAME,
 		PROVIDER_LATEST_BLOCK_HEADER_NAME, "provider-latest-block",
 		SMART_ROUTER_VERSION_HEADER_NAME, "SMART-ROUTER-VERSION",
@@ -266,7 +266,7 @@ func TestIsRouterOwnedHeader(t *testing.T) {
 	}
 	notOwned := []string{
 		"Content-Type", "Retry-After", "x-cosmos-block-height", "X-Aptos-Ledger-Version",
-		"lavatory", "lava", "Provider-Latest-Blocks", "Server", "status",
+		"smartrouterish", "smartrouter", "smart-router", "Provider-Latest-Blocks", "Server", "status",
 	}
 	for _, name := range notOwned {
 		require.Falsef(t, IsRouterOwnedHeader(name), "%q should not be router-owned", name)

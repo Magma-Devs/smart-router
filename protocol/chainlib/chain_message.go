@@ -29,7 +29,7 @@ type baseChainMessageContainer struct {
 	msg                    updatableRPCInput
 	apiCollection          *spectypes.ApiCollection
 	extensions             []*spectypes.Extension
-	// unavailableExtensions are extensions the caller asked for (lava-extension) that the spec
+	// unavailableExtensions are extensions the caller asked for (smartrouter-extension) that the spec
 	// knows but no node on this router offers. The request is served without them; they are kept
 	// so the reply can say so (MAG-3935).
 	unavailableExtensions []string
@@ -172,7 +172,7 @@ func (bcnc *baseChainMessageContainer) GetExtensions() []*spectypes.Extension {
 	return bcnc.extensions
 }
 
-// OverrideExtensions adds the extensions the request's lava-extension directive names. One that
+// OverrideExtensions adds the extensions the request's smartrouter-extension directive names. One that
 // no node on this router offers is recorded, so the reply can tell the caller it was dropped.
 func (bcnc *baseChainMessageContainer) OverrideExtensions(extensionNames []string, extensionParser *extensionslib.ExtensionParser) {
 	bcnc.addExtensions(extensionNames, extensionParser, true)

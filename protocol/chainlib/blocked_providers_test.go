@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-3080: lava-providers-block used to silently drop the whole list at three or more names.
+// MAG-3080: smartrouter-providers-block used to silently drop the whole list at three or more names.
 
 func blockedFromHeader(value string) []string {
 	return NewProtocolMessage(nil, map[string]string{common.BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME: value}, nil, "", "").GetBlockedProviders()

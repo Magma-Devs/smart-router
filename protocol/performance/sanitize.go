@@ -20,7 +20,7 @@ import (
 // is shared with the live relay and the primary cache hit so the tiers cannot drift on
 // what a client sees (MAG-4278: the secondary tier used to keep only the transport pair
 // and so dropped the Aptos ledger-state headers a primary hit of the same entry
-// replays). Headers the router mints itself — Lava-Provider-Address: Cached, the GUID,
+// replays). Headers the router mints itself — Smart-Router-Provider-Address: Cached, the GUID,
 // the version header — are appended by appendHeadersToRelayResult after sanitization and
 // are unaffected, and a directive naming one of them is ignored by the filter.
 //

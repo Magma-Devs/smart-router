@@ -14,7 +14,7 @@ import (
 )
 
 // captureLog swaps the global zerolog sink for a buffer, runs fn, and returns
-// everything written. lavalog writes through a package-level singleton, so the
+// everything written. utils/log writes through a package-level singleton, so the
 // previous logger and level are restored before returning.
 func captureLog(t *testing.T, level zerolog.Level, fn func()) string {
 	t.Helper()

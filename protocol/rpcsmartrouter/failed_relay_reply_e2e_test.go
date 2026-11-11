@@ -86,11 +86,11 @@ type failedReplyClientRead struct {
 	body        string
 	contentType string
 	guid        string
-	nodeError   string // lava-identified-node-error
+	nodeError   string // smartrouter-identified-node-error
 	header      http.Header
 }
 
-// failedReplyRelayTimeout is the attempt window every request here asks for in lava-relay-timeout.
+// failedReplyRelayTimeout is the attempt window every request here asks for in smartrouter-relay-timeout.
 const failedReplyRelayTimeout = 300 * time.Millisecond
 
 // startFailedReplyRouter serves iface through a real listener and router whose providers are
@@ -300,7 +300,7 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 				// MAG-3980: the router's own 504 carries the request's headers, as a reply an
 				// upstream produced does: the GUID, and the upstream it asked. One attempt went out,
 				// so there is no retry to report.
-				require.NotEmpty(t, read.guid, "the router's 504 carries no Lava-Guid")
+				require.NotEmpty(t, read.guid, "the router's 504 carries no Smart-Router-Guid")
 				require.Equal(t, "upstream-1", read.header.Get(common.PROVIDER_ADDRESS_HEADER_NAME))
 				require.Empty(t, read.header.Get(common.RETRY_COUNT_HEADER_NAME))
 			})
@@ -329,8 +329,8 @@ func TestFailedRelayReply_EndToEnd_MAG4481(t *testing.T) {
 
 // MAG-3980: a request whose budget runs out while every upstream is quiet is answered by the
 // router itself, and that reply carries the request's headers like any other failed reply. It used
-// to return before they were built, so the client had no Lava-Guid to quote for the failure that
-// is hardest to diagnose, and no Lava-Retries or Lava-Provider-Address to say what was tried.
+// to return before they were built, so the client had no Smart-Router-Guid to quote for the failure that
+// is hardest to diagnose, and no Smart-Router-Retries or Smart-Router-Provider-Address to say what was tried.
 func TestFailedRelayReply_BudgetExpiryKeepsTheRequestHeaders_MAG3980(t *testing.T) {
 	if !rand.Initialized() {
 		rand.InitRandomSeed()
@@ -349,7 +349,7 @@ func TestFailedRelayReply_BudgetExpiryKeepsTheRequestHeaders_MAG3980(t *testing.
 	require.Equal(t, http.StatusGatewayTimeout, read.status, read.body)
 	require.EqualValues(t, 2, arrivals.Load(), "setup: the ticker must have hedged to the other upstream, or this measures a single attempt")
 
-	require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+	require.NotEmpty(t, read.guid, "the reply carries no Smart-Router-Guid")
 	require.Contains(t, read.body, read.guid, "the header names the request the body names")
 	require.Equal(t, "1", read.header.Get(common.RETRY_COUNT_HEADER_NAME), "two attempts went out")
 	require.ElementsMatch(t, []string{"upstream-1", "upstream-2"},
@@ -384,7 +384,7 @@ func TestFailedRelayReply_BudgetExpiryOfACrossValidatedRequestNamesItsReason_MAG
 
 	read := startFailedReplyRouter(t, jsonRPC, hangingUpstream(t, nil), hangingUpstream(t, nil), hangingUpstream(t, nil))()
 	require.Equal(t, http.StatusGatewayTimeout, read.status, read.body)
-	require.NotEmpty(t, read.guid, "the reply carries no Lava-Guid")
+	require.NotEmpty(t, read.guid, "the reply carries no Smart-Router-Guid")
 	require.Equal(t, "failed", read.header.Get(common.CROSS_VALIDATION_STATUS_HEADER_NAME))
 	queried := read.header.Get(common.CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME)
 	require.NotEmpty(t, queried)

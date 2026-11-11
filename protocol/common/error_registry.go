@@ -12,11 +12,11 @@ import (
 // Core types
 // ---------------------------------------------------------------------------
 
-// ErrorCategory — top-level grouping: internal (Lava-introduced) vs external (pass-through)
+// ErrorCategory — top-level grouping: internal (router-introduced) vs external (pass-through)
 type ErrorCategory int
 
 const (
-	CategoryInternal ErrorCategory = iota // Errors introduced by Lava — user would never see these without Lava
+	CategoryInternal ErrorCategory = iota // Errors introduced by the router — user would never see these without it
 	CategoryExternal                      // Pass-through errors — user would get the same error talking to the node directly
 )
 

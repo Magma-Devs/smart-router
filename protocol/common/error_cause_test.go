@@ -23,10 +23,10 @@ func TestRouterErrorWrapping_AllPathsResolve(t *testing.T) {
 	t.Run("cause sentinel is reachable", func(t *testing.T) {
 		assert.True(t, errors.Is(wrapped, context.Canceled))
 	})
-	t.Run("lava error still matches by code", func(t *testing.T) {
+	t.Run("router error still matches by code", func(t *testing.T) {
 		assert.True(t, errors.Is(wrapped, RouterErrorContextCanceled))
 	})
-	t.Run("lava error still resolves via As", func(t *testing.T) {
+	t.Run("router error still resolves via As", func(t *testing.T) {
 		var le *RouterError
 		require.True(t, errors.As(wrapped, &le))
 		assert.Equal(t, RouterErrorContextCanceled.Code, le.Code)
@@ -124,7 +124,7 @@ func TestIsClientCancellation(t *testing.T) {
 //
 // The constructors always set RouterErr today, so every case here is latent. They are pinned
 // anyway: this type exists because a silently unreachable resolution path was expensive.
-func TestRouterWrappedError_NilLavaErrIsSafe(t *testing.T) {
+func TestRouterWrappedError_NilRouterErrIsSafe(t *testing.T) {
 	bare := &RouterWrappedError{Context: "some context"}
 
 	t.Run("Error does not panic", func(t *testing.T) {

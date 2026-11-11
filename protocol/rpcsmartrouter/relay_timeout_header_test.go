@@ -20,7 +20,7 @@ import (
 
 // MAG-3600: the attempt window reaches time.NewTicker inside the state machine's goroutine, and
 // NewTicker panics on an interval that is not positive. Nothing recovers a panic there, so before
-// the fix one request carrying `lava-relay-timeout: -45s` ended the whole router process.
+// the fix one request carrying `smartrouter-relay-timeout: -45s` ended the whole router process.
 //
 // This drives the real state machine with a relay sender that hands it such a window. On the
 // unfixed code the test binary itself dies with "non-positive interval for NewTicker" — a crash,
@@ -94,7 +94,7 @@ func pinRelayTimeoutGlobals(t *testing.T, defaultTimeout, maxCallerRelayTimeout 
 
 // relayTimeoutTestServer is a router with a real ETH1 JSON-RPC parser: enough for ParseRelay,
 // GetProcessingTimeout and appendHeadersToRelayResult, which is the whole path a caller's
-// lava-relay-timeout takes.
+// smartrouter-relay-timeout takes.
 func relayTimeoutTestServer(t *testing.T) *RPCSmartRouterServer {
 	t.Helper()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -167,13 +167,13 @@ func TestRelayTimeoutHeader_BoundedBetweenParseAndTheStateMachine(t *testing.T) 
 		t.Run(tt.name, func(t *testing.T) {
 			protocolMessage := parseWithRelayTimeout(t, srv, relayTimeoutLightRequest, tt.header)
 			budget, window := srv.GetProcessingTimeout(protocolMessage)
-			require.Equal(t, tt.wantWindow, window, "attempt window for lava-relay-timeout: %s", tt.header)
+			require.Equal(t, tt.wantWindow, window, "attempt window for smartrouter-relay-timeout: %s", tt.header)
 			require.Equal(t, ownBudget, budget,
-				"on a call whose own window sits inside its budget, the header must not move the budget by default (lava-relay-timeout: %s)", tt.header)
+				"on a call whose own window sits inside its budget, the header must not move the budget by default (smartrouter-relay-timeout: %s)", tt.header)
 			if tt.wantWindow == ownWindow {
 				// Ignored at parse time, not merely at use: a stored value would be copied onto any
 				// message rebuilt from this one (preserveRelayTimeout).
-				require.Zero(t, protocolMessage.TimeoutOverride(), "an ignored lava-relay-timeout must not be stored (%s)", tt.header)
+				require.Zero(t, protocolMessage.TimeoutOverride(), "an ignored smartrouter-relay-timeout must not be stored (%s)", tt.header)
 			}
 		})
 	}
@@ -248,7 +248,7 @@ func TestRelayTimeoutHeader_AppliedWindowIsReportedToTheCaller(t *testing.T) {
 	} {
 		t.Run(header, func(t *testing.T) {
 			value, reported := applied(t, header)
-			require.True(t, reported, "a request that carried lava-relay-timeout must be told what applied")
+			require.True(t, reported, "a request that carried smartrouter-relay-timeout must be told what applied")
 			require.Equal(t, want, value)
 		})
 	}
@@ -303,7 +303,7 @@ func (s *relayTimeoutBudgetSender) GetProcessingTimeout(chainMessage chainlib.Ch
 	return s.srv.GetProcessingTimeout(chainMessage)
 }
 
-// MAG-3992: a huge lava-relay-timeout against a node that never answers. Since PR #374 an attempt
+// MAG-3992: a huge smartrouter-relay-timeout against a node that never answers. Since PR #374 an attempt
 // lives on the request budget, so before the bound the header itself was that budget and one request
 // held its worker for as long as the caller asked. The request must give up when the router's own
 // budget runs out, measured on the clock, not at the header's value.

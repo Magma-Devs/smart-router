@@ -36,8 +36,8 @@ const (
 	CustomerIDHeader           = "customer-id"
 	RetryListeningInterval     = 10 // seconds
 	relayMsgLogMaxChars        = 200
-	RPCProviderNodeAddressHash = "Lava-Provider-Node-Address-Hash"
-	RPCProviderNodeExtension   = "Lava-Provider-Node-Extension"
+	RPCProviderNodeAddressHash = "Smart-Router-Provider-Node-Address-Hash"
+	RPCProviderNodeExtension   = "Smart-Router-Provider-Node-Extension"
 	WebSocketExtension         = "websocket"
 )
 
@@ -711,7 +711,7 @@ func CombineEarliestRequestedBlock(currentEarliest, parsedBlock int64) int64 {
 // It is NOT how long an attempt may live — that is the processing budget, see
 // GetTimeoutForProcessing and sendRelayToDirectEndpoints.
 //
-// A caller's lava-relay-timeout replaces the computed window only once it has been bounded
+// A caller's smartrouter-relay-timeout replaces the computed window only once it has been bounded
 // (common.BoundCallerRelayTimeout), and a bounded value is always positive. The window feeds
 // time.NewTicker, and the processing budget is never shorter than it, so this is the one place both
 // hazards of an unchecked header are closed for every consumer of the window (MAG-3600).
@@ -848,7 +848,7 @@ func createAndSetupBaseAppListener(cmdFlags common.ConsumerCmdFlags, healthCheck
 		c.Set("Access-Control-Allow-Origin", cmdFlags.OriginFlag)
 		// Expose selected response headers to browser JS. Access-Control-Expose-
 		// Headers must be present on the ACTUAL response (not just the preflight)
-		// for fetch() to read a non-simple header like Lava-Provider-Address.
+		// for fetch() to read a non-simple header like Smart-Router-Provider-Address.
 		// Empty flag => header omitted (only simple response headers readable).
 		if cmdFlags.ExposeHeadersFlag != "" {
 			c.Set("Access-Control-Expose-Headers", cmdFlags.ExposeHeadersFlag)

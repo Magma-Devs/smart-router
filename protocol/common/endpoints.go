@@ -20,87 +20,87 @@ const (
 	URL_QUERY_PARAMETERS_SEPARATOR_FROM_PATH        = "?"
 	URL_QUERY_PARAMETERS_SEPARATOR_OTHER_PARAMETERS = "&"
 	IP_FORWARDING_HEADER_NAME                       = "X-Forwarded-For"
-	PROVIDER_ADDRESS_HEADER_NAME                    = "Lava-Provider-Address"
-	RETRY_COUNT_HEADER_NAME                         = "Lava-Retries"
+	PROVIDER_ADDRESS_HEADER_NAME                    = "Smart-Router-Provider-Address"
+	RETRY_COUNT_HEADER_NAME                         = "Smart-Router-Retries"
 	PROVIDER_LATEST_BLOCK_HEADER_NAME               = "Provider-Latest-Block"
-	GUID_HEADER_NAME                                = "Lava-Guid"
-	ERRORED_PROVIDERS_HEADER_NAME                   = "Lava-Errored-Providers"
-	NODE_ERRORS_PROVIDERS_HEADER_NAME               = "Lava-Node-Errors-providers"
-	REPORTED_PROVIDERS_HEADER_NAME                  = "Lava-Reported-Providers"
-	RELAY_PROTOCOL_HEADER_NAME                      = "Lava-Relay-Protocol"
-	USER_REQUEST_TYPE                               = "lava-user-request-type"
-	STATEFUL_API_HEADER                             = "lava-stateful-api"
-	STATEFUL_ALL_PROVIDERS_HEADER_NAME              = "lava-fast-tx-participants"
-	REQUESTED_BLOCK_HEADER_NAME                     = "lava-parsed-requested-block"
-	IDENTIFIED_NODE_ERROR_HEADER                    = "lava-identified-node-error"
-	HEDGE_TRIGGERED_HEADER                          = "lava-hedge-triggered"
+	GUID_HEADER_NAME                                = "Smart-Router-Guid"
+	ERRORED_PROVIDERS_HEADER_NAME                   = "Smart-Router-Errored-Providers"
+	NODE_ERRORS_PROVIDERS_HEADER_NAME               = "Smart-Router-Node-Errors-Providers"
+	REPORTED_PROVIDERS_HEADER_NAME                  = "Smart-Router-Reported-Providers"
+	RELAY_PROTOCOL_HEADER_NAME                      = "Smart-Router-Relay-Protocol"
+	USER_REQUEST_TYPE                               = "smartrouter-user-request-type"
+	STATEFUL_API_HEADER                             = "smartrouter-stateful-api"
+	STATEFUL_ALL_PROVIDERS_HEADER_NAME              = "smartrouter-fast-tx-participants"
+	REQUESTED_BLOCK_HEADER_NAME                     = "smartrouter-parsed-requested-block"
+	IDENTIFIED_NODE_ERROR_HEADER                    = "smartrouter-identified-node-error"
+	HEDGE_TRIGGERED_HEADER                          = "smartrouter-hedge-triggered"
 	SMART_ROUTER_VERSION_HEADER_NAME                = "Smart-Router-Version"
 	// EXTENSION_UNAVAILABLE_HEADER_NAME lists, comma-separated, the extensions the caller asked for
-	// with lava-extension that no node on this router offers. The request was served WITHOUT them
+	// with smartrouter-extension that no node on this router offers. The request was served WITHOUT them
 	// — e.g. from a non-archive node — so a caller that needs the extension must not trust the
 	// answer (MAG-3935). An extension the router adds on its own, such as archive for an eth_call
 	// deep behind the head, is never listed: the caller did not ask for it.
-	EXTENSION_UNAVAILABLE_HEADER_NAME = "Lava-Extension-Unavailable"
-	// RELAY_TIMEOUT_APPLIED_HEADER_NAME answers a request that carried lava-relay-timeout with the
+	EXTENSION_UNAVAILABLE_HEADER_NAME = "Smart-Router-Extension-Unavailable"
+	// RELAY_TIMEOUT_APPLIED_HEADER_NAME answers a request that carried smartrouter-relay-timeout with the
 	// attempt window the router actually used, as a Go duration (MAG-3600). See
 	// appendHeadersToRelayResult.
-	RELAY_TIMEOUT_APPLIED_HEADER_NAME = "Lava-Relay-Timeout-Applied"
+	RELAY_TIMEOUT_APPLIED_HEADER_NAME = "Smart-Router-Relay-Timeout-Applied"
 	// CACHE_BACKEND_HEADER_NAME names the cache backend that served a hit — the
 	// cache-be address, or the RESP node actually dialled (the current master
 	// under sentinel, the touched shard under cluster). Debug-only: it exposes
 	// internal infrastructure addresses, so it is emitted ONLY under
 	// --debug-relays, never to ordinary clients.
-	CACHE_BACKEND_HEADER_NAME = "Lava-Cache-Backend"
+	CACHE_BACKEND_HEADER_NAME = "Smart-Router-Cache-Backend"
 	// CACHE_TIER_HEADER_NAME names the cache tier that served the response
 	// ("primary" | "secondary" | "none"), and CACHE_OUTCOME_HEADER_NAME gives what
 	// each tier did ("primary=miss,secondary=error"). Both are emitted together
-	// whenever the request carried the lava-debug-relay directive — see
+	// whenever the request carried the smartrouter-debug-relay directive — see
 	// CacheLookupReport for why a header rather than the cache_tier counter, and note
 	// that unlike CACHE_BACKEND_HEADER_NAME above these values name no infrastructure,
 	// which is what makes a client-settable directive an acceptable gate for them.
-	CACHE_TIER_HEADER_NAME    = "Lava-Cache-Tier"
-	CACHE_OUTCOME_HEADER_NAME = "Lava-Cache-Outcome"
+	CACHE_TIER_HEADER_NAME    = "Smart-Router-Cache-Tier"
+	CACHE_OUTCOME_HEADER_NAME = "Smart-Router-Cache-Outcome"
 	// these headers need to be lowercase
-	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME = "lava-providers-block"
-	RELAY_TIMEOUT_HEADER_NAME             = "lava-relay-timeout"
-	EXTENSION_OVERRIDE_HEADER_NAME        = "lava-extension"
-	FORCE_CACHE_REFRESH_HEADER_NAME       = "lava-force-cache-refresh"
-	DEBUG_RELAY                           = "lava-debug-relay"
-	LB_UNIQUE_ID_HEADER                   = "lava-lb-unique-id"
-	SELECTION_STATS_HEADER_NAME           = "lava-selection-stats"
-	STICKINESS_HEADER_NAME                = "lava-stickiness"
-	SELECT_PROVIDER_HEADER_NAME           = "lava-select-provider"
-	// SELECT_PROVIDER_STRICT_HEADER_NAME, set to "true" next to lava-select-provider, makes the
+	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME = "smartrouter-providers-block"
+	RELAY_TIMEOUT_HEADER_NAME             = "smartrouter-relay-timeout"
+	EXTENSION_OVERRIDE_HEADER_NAME        = "smartrouter-extension"
+	FORCE_CACHE_REFRESH_HEADER_NAME       = "smartrouter-force-cache-refresh"
+	DEBUG_RELAY                           = "smartrouter-debug-relay"
+	LB_UNIQUE_ID_HEADER                   = "smartrouter-lb-unique-id"
+	SELECTION_STATS_HEADER_NAME           = "smartrouter-selection-stats"
+	STICKINESS_HEADER_NAME                = "smartrouter-stickiness"
+	SELECT_PROVIDER_HEADER_NAME           = "smartrouter-select-provider"
+	// SELECT_PROVIDER_STRICT_HEADER_NAME, set to "true" next to smartrouter-select-provider, makes the
 	// selection a strict pin: the named provider answers or the request fails, with no retry, hedge
-	// or consistency-gate reroute on another provider. Without it lava-select-provider pins the first
-	// attempt only. lava-stickiness is always strict and needs no such header (MAG-4826).
-	SELECT_PROVIDER_STRICT_HEADER_NAME            = "lava-select-provider-strict"
-	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS      = "lava-cross-validation-max-participants"
-	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD   = "lava-cross-validation-agreement-threshold"
-	CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME    = "lava-cross-validation-all-providers"
-	CROSS_VALIDATION_STATUS_HEADER_NAME           = "lava-cross-validation-status"
-	CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER    = "lava-cross-validation-agreeing-providers"
-	CROSS_VALIDATION_DISAGREEING_PROVIDERS_HEADER = "lava-cross-validation-disagreeing-providers"
+	// or consistency-gate reroute on another provider. Without it smartrouter-select-provider pins the first
+	// attempt only. smartrouter-stickiness is always strict and needs no such header (MAG-4826).
+	SELECT_PROVIDER_STRICT_HEADER_NAME            = "smartrouter-select-provider-strict"
+	CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS      = "smartrouter-cross-validation-max-participants"
+	CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD   = "smartrouter-cross-validation-agreement-threshold"
+	CROSS_VALIDATION_ALL_PROVIDERS_HEADER_NAME    = "smartrouter-cross-validation-all-providers"
+	CROSS_VALIDATION_STATUS_HEADER_NAME           = "smartrouter-cross-validation-status"
+	CROSS_VALIDATION_AGREEING_PROVIDERS_HEADER    = "smartrouter-cross-validation-agreeing-providers"
+	CROSS_VALIDATION_DISAGREEING_PROVIDERS_HEADER = "smartrouter-cross-validation-disagreeing-providers"
 	// Providers that were queried but whose response had not arrived when the quorum early-exit built the
 	// reply (MAG-2187). Disagreeing-providers lists only dissent the router actually received; an empty
 	// disagreeing header must mean "everyone we heard from agreed", never "we didn't hear everyone" — this
 	// header carries the "didn't hear" part explicitly. Their late responses are compared against the
 	// consensus asynchronously (straggler watcher) and recorded via log + metric.
-	CROSS_VALIDATION_PENDING_PROVIDERS_HEADER = "lava-cross-validation-pending-providers"
-	CROSS_VALIDATION_FAILURE_REASON_HEADER    = "lava-cross-validation-failure-reason"
+	CROSS_VALIDATION_PENDING_PROVIDERS_HEADER = "smartrouter-cross-validation-pending-providers"
+	CROSS_VALIDATION_FAILURE_REASON_HEADER    = "smartrouter-cross-validation-failure-reason"
 	// On a failed quorum, the largest set of providers that returned the same response, and its size
 	// (MAG-2192). Additive to disagreeing-providers, which keeps listing every successful provider: a
 	// plurality below the client's agreement threshold is NOT a consensus, so it must not turn the
 	// minority into the accused. These say who formed the plurality without claiming it is right.
 	// plurality-providers is empty on a tie, which has no plurality.
-	CROSS_VALIDATION_PLURALITY_SIZE_HEADER      = "lava-cross-validation-plurality-size"
-	CROSS_VALIDATION_PLURALITY_PROVIDERS_HEADER = "lava-cross-validation-plurality-providers"
-	// send http request to /lava/health to see if the process is up - (ret code 200)
-	DEFAULT_HEALTH_PATH                                       = "/lava/health"
+	CROSS_VALIDATION_PLURALITY_SIZE_HEADER      = "smartrouter-cross-validation-plurality-size"
+	CROSS_VALIDATION_PLURALITY_PROVIDERS_HEADER = "smartrouter-cross-validation-plurality-providers"
+	// send http request to /smartrouter/health to see if the process is up - (ret code 200)
+	DEFAULT_HEALTH_PATH                                       = "/smartrouter/health"
 	MAXIMUM_ALLOWED_TIMEOUT_EXTEND_MULTIPLIER_BY_THE_CONSUMER = 4
 )
 
-// Legacy cached node-error marker. Upstream-lava cache writers embed this exact JSON
+// Legacy cached node-error marker. Cache writers from the upstream lineage embed this exact JSON
 // fragment as the Error_GUID value when storing a node-error payload; on a cache hit
 // the router substitutes the current request's GUID for the placeholder before
 // serving. No producer exists in this repository — the constants preserve byte-exact
@@ -150,8 +150,6 @@ const (
 // routed and answered like any other, but it does not count as activity for idle mode, so a probed
 // chain can still go idle (MAG-4797). It is a directive header: stripped before the request is
 // forwarded upstream and before the cache key is built.
-// Named smartrouter-*, after Smart-Router-Version: a header minted here does not take the lava-
-// prefix of the older directives.
 const INTERNAL_PROBE_HEADER_NAME = "smartrouter-internal-probe"
 
 var SPECIAL_DIRECTIVE_HEADERS = map[string]struct{}{
@@ -616,7 +614,7 @@ type RelayResult struct {
 	ResponseHash        [32]byte // cached SHA256 hash of Reply.Data for cross-validation comparison, zero-value if not computed
 	IsUnsupportedMethod bool     // Indicates this node error is an unsupported method (zero CU, cached)
 	// CrossValidationFailureReason distinguishes WHY cross-validation failed, surfaced to the client via
-	// the lava-cross-validation-failure-reason header. One of CrossValidationReason* ("" on success).
+	// the smartrouter-cross-validation-failure-reason header. One of CrossValidationReason* ("" on success).
 	CrossValidationFailureReason string
 	// IsNonRetryable is the umbrella flag the retry state machine consults:
 	// it's true whenever the matched registry RouterError has Retryable=false,
@@ -658,8 +656,8 @@ type RelayResult struct {
 	// the upstream's own answer when it gave one, else the leaf cause (MAG-4218).
 	ClientFacing *ClientFacingError
 	// CacheLookup is what each cache tier did on the attempt that produced this result,
-	// surfaced to the caller as Lava-Cache-Tier / Lava-Cache-Outcome when the request
-	// carried lava-debug-relay. Same shape as the per-request serving facts above that
+	// surfaced to the caller as Smart-Router-Cache-Tier / Smart-Router-Cache-Outcome when the request
+	// carried smartrouter-debug-relay. Same shape as the per-request serving facts above that
 	// headers already read (IsNodeError, StatusCode, CrossValidationFailureReason);
 	// see CacheLookupReport for why the cache_tier counter could not answer this.
 	CacheLookup CacheLookupReport

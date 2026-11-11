@@ -11,7 +11,7 @@ import (
 )
 
 // resetDebugBuffer restores the debug-buffer package state to its disabled
-// default. lavalog uses package-level singletons; tests must leave the buffer
+// default. utils/log uses package-level singletons; tests must leave the buffer
 // disabled so they don't leak into one another or other package tests.
 func resetDebugBuffer() {
 	debugRingMu.Lock()

@@ -902,7 +902,7 @@ type RPCEndpoint struct {
 	ChainID         string `yaml:"chain-id,omitempty" json:"chain-id,omitempty" mapstructure:"chain-id"`                      // spec chain identifier
 	ApiInterface    string `yaml:"api-interface,omitempty" json:"api-interface,omitempty" mapstructure:"api-interface"`
 	TLSEnabled      bool   `yaml:"tls-enabled,omitempty" json:"tls-enabled,omitempty" mapstructure:"tls-enabled"`
-	HealthCheckPath string `yaml:"health-check-path,omitempty" json:"health-check-path,omitempty" mapstructure:"health-check-path"` // health check status code 200 path, default is common.DEFAULT_HEALTH_PATH ("/lava/health"); a websocket upgrade on it is still served as a websocket
+	HealthCheckPath string `yaml:"health-check-path,omitempty" json:"health-check-path,omitempty" mapstructure:"health-check-path"` // health check status code 200 path, default is common.DEFAULT_HEALTH_PATH ("/smartrouter/health"); a websocket upgrade on it is still served as a websocket
 }
 
 func (endpoint *RPCEndpoint) String() (retStr string) {

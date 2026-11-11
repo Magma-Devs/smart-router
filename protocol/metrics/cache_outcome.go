@@ -16,7 +16,7 @@ import (
 // classification so operators can tell a clean miss from a broken or slow tier.
 //
 // Aliased from protocol/common, which is where the same values are also rendered into
-// the per-request Lava-Cache-Tier / Lava-Cache-Outcome headers. One definition, so a
+// the per-request Smart-Router-Cache-Tier / Smart-Router-Cache-Outcome headers. One definition, so a
 // counter and a header describing the same lookup cannot drift apart. common carries
 // three further not-consulted values (off / skipped / unknown) that are deliberately
 // NOT aliased here: no lookup happened, so there is nothing to count, and admitting

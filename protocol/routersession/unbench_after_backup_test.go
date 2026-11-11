@@ -195,7 +195,7 @@ func TestRetryExhaustion_DoesNotReleaseTheBlock(t *testing.T) {
 	require.Len(t, csm.validAddresses, 2, "the pool was never empty and must be untouched")
 }
 
-// A pinned request (lava-select-provider) resolves against validAddresses BEFORE the empty-pool
+// A pinned request (smartrouter-select-provider) resolves against validAddresses BEFORE the empty-pool
 // check, and fails with SelectedProviderUnavailableError rather than PairingListEmptyError. Moving
 // the release into the cascade therefore has to catch that error too, or pinning silently stops
 // working the moment every provider is blocked — the pinned provider is sitting in the blocked list.

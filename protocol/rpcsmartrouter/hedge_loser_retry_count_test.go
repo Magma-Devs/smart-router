@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-3762. Lava-Retries counts every attempt the router sent, a hedge's loser included
+// MAG-3762. Smart-Router-Retries counts every attempt the router sent, a hedge's loser included
 // (MAG-1818). Since an attempt outlives the window that dispatches the hedge, the loser is still
 // running when the hedge wins, so it has no result when the reply is built. Counting results
 // alone reported the race as zero retries and named only the winner.
@@ -287,7 +287,7 @@ func TestRetryCountHeader_CountsAttemptsWithoutResult(t *testing.T) {
 		{
 			// Unchanged as well: a cross-validation round sends every participant in one batch and
 			// names them in its own headers. The participant still out when the reply was built is
-			// pending, not a retry, so neither Lava-Retries nor Lava-Provider-Address is set.
+			// pending, not a retry, so neither Smart-Router-Retries nor Smart-Router-Provider-Address is set.
 			name: "a cross-validation round is one batch, not N retries",
 			rp: &MockRelayProcessorForHeaders{
 				selection:                       relaycore.CrossValidation,
@@ -469,7 +469,7 @@ func TestRESTListener_HedgedLoserCountsAsARetry(t *testing.T) {
 
 // MAG-3778: every upstream is slower than the attempt window, so the ticker hedges while the first
 // attempt is still running, and the first attempt answers before the hedge can. The hedge is cut
-// off with no result, and the reply still counts it: Lava-Retries counts every attempt the router
+// off with no result, and the reply still counts it: Smart-Router-Retries counts every attempt the router
 // sent (MAG-1818), not the attempts that came back, so it reports one retry and names the hedge
 // before the upstream that answered.
 func TestJsonRpcListener_FirstAttemptBeatingItsHedgeCountsTheHedge(t *testing.T) {

@@ -208,7 +208,7 @@ func TestDirectRPCRelaySender_MalformedJSONResponseRoutesAsTransportError(t *tes
 // sender, with the real JSON-RPC verdict plugged in: a node that answers
 // {"error":{"code":-32000,"message":""}} failed the request exactly as one whose
 // message has text. Read as a success, the reply carried IsNodeError=false, so
-// the relay ended on it — no lava-identified-node-error header, no failover, a
+// the relay ended on it — no smartrouter-identified-node-error header, no failover, a
 // cache write of the error as the answer, and nothing scored against the node.
 func TestDirectRPCRelaySender_EmptyMessageErrorIsNodeError(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -248,7 +248,7 @@ func TestDirectRPCRelaySender_EmptyMessageErrorIsNodeError(t *testing.T) {
 // TestDirectRPCRelaySender_A429IsNotANodeError pins MAG-3030 at the sender, with the real JSON-RPC
 // verdict plugged in. A 429 is the upstream refusing for rate before any node answered, whatever its
 // body says: relayInnerDirect fails the attempt on the status alone, so a node-error flag on it could
-// only reach the client, as lava-identified-node-error on a relay no node answered. The rate-limit
+// only reach the client, as smartrouter-identified-node-error on a relay no node answered. The rate-limit
 // flags still come from the classification. A 4xx whose body is the node's own JSON-RPC error stays
 // a node error.
 func TestDirectRPCRelaySender_A429IsNotANodeError(t *testing.T) {

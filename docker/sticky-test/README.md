@@ -16,7 +16,7 @@ Exit codes: `0` pass, `1` an assertion failed, `2` the harness itself is untrust
 
 ## What it proves
 
-A request carrying `lava-stickiness: <id>` reaches the same upstream no matter which replica
+A request carrying `smartrouter-stickiness: <id>` reaches the same upstream no matter which replica
 serves it. Three replicas behind a plain round-robin ingress mean a session lands on a
 different pod almost every request, which is exactly the arrangement that used to break it.
 
@@ -163,7 +163,7 @@ infrastructure disturbed — a replica restarted, the registry stopped and start
 | Customer sequence across replicas | head-then-fetch over 3 replicas, no false gaps | yes |
 | Session id on every call | the id must be on the head request too, not only the fetch | yes |
 | Concurrent requests on one id | simultaneous requests do not split across upstreams | weakly |
-| `lava-select-provider` beats a claim | naming a provider explicitly still wins | no, by design |
+| `smartrouter-select-provider` beats a claim | naming a provider explicitly still wins | no, by design |
 | A replica restarts | a pod with an empty table adopts the fleet's claim | yes |
 | Registry unreachable | sticky fails closed; traffic without the header is unaffected | yes |
 | Registry restored | sticky works again | yes |
@@ -174,5 +174,5 @@ passed once with the feature disabled.
 
 **Closed gap.** A sticky request used to be answered from the response cache before any upstream
 was chosen, so the pin was not consulted: on a cold start, 24 sticky requests produced 19 claim
-resolutions. A request carrying `lava-stickiness`, `lava-select-provider` or `lava-providers-block`
+resolutions. A request carrying `smartrouter-stickiness`, `smartrouter-select-provider` or `smartrouter-providers-block`
 no longer reads the cache (MAG-3864, MAG-3520), so every sticky request resolves a claim.

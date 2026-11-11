@@ -63,7 +63,7 @@ func eth1WriteParser(t *testing.T) chainlib.ChainParser {
 	return chainParser
 }
 
-func lavaRESTWriteParser(t *testing.T) chainlib.ChainParser {
+func restWriteParser(t *testing.T) chainlib.ChainParser {
 	t.Helper()
 	noop := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	chainParser, _, _, closeServer, _, err := chainlib.CreateChainLibMocks(context.Background(), "LAVA", spectypes.APIInterfaceRest, noop, nil, "../../", nil)
@@ -114,7 +114,7 @@ var writeInterfaceCases = []writeInterfaceCase{
 		success: `{"jsonrpc":"2.0","id":1,"result":"0xabc"}`,
 	},
 	{
-		name: "rest", chainID: "LAVA", apiInterface: spectypes.APIInterfaceRest, parser: lavaRESTWriteParser,
+		name: "rest", chainID: "LAVA", apiInterface: spectypes.APIInterfaceRest, parser: restWriteParser,
 		method: http.MethodPost, path: "/cosmos/tx/v1beta1/txs", body: `{"tx_bytes":"dHg=","mode":"BROADCAST_MODE_SYNC"}`,
 		success: `{"tx_response":{"code":0,"txhash":"ABC"}}`,
 	},

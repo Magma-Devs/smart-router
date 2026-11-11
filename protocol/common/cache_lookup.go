@@ -4,14 +4,14 @@ import "strings"
 
 // Cache tier and lookup-outcome values. Defined here rather than in protocol/metrics
 // because two consumers now share them — the cache_tier/outcome metric labels and the
-// per-request Lava-Cache-Tier / Lava-Cache-Outcome headers (MAG-3540) — and a metric
+// per-request Smart-Router-Cache-Tier / Smart-Router-Cache-Outcome headers (MAG-3540) — and a metric
 // label that disagreed with the header on the same request would defeat the point of
 // having both. protocol/metrics aliases these; protocol/common must not import it.
 const (
 	CacheTierPrimary   = "primary"
 	CacheTierSecondary = "secondary"
 	// CacheTierNone is header-only: no tier served this response. It is emitted
-	// explicitly rather than by omitting the header, so an absent Lava-Cache-Tier can
+	// explicitly rather than by omitting the header, so an absent Smart-Router-Cache-Tier can
 	// only mean "router too old / directive not honored" and never "a provider served
 	// it". Without it a test could pass having measured nothing.
 	CacheTierNone = "none"
@@ -34,7 +34,7 @@ const (
 	CacheOutcomeOff = "off"
 	// CacheOutcomeSkipped: the tier is active but was not asked on this attempt —
 	// either a bypass rule applied to both tiers (cross-validation, stateful,
-	// lava-force-cache-refresh, a non-cacheable requested block, a retry after a
+	// smartrouter-force-cache-refresh, a non-cacheable requested block, a retry after a
 	// cached node error), or the primary already hit and the secondary is only
 	// consulted after a primary non-hit.
 	CacheOutcomeSkipped = "skipped"
@@ -81,7 +81,7 @@ func (r CacheLookupReport) ServedBy(tier string) CacheLookupReport {
 	return r
 }
 
-// TierHeaderValue renders the Lava-Cache-Tier value, mapping the zero value onto an
+// TierHeaderValue renders the Smart-Router-Cache-Tier value, mapping the zero value onto an
 // explicit "none" so the header is never emitted empty.
 func (r CacheLookupReport) TierHeaderValue() string {
 	if r.ServedTier == "" {
@@ -90,7 +90,7 @@ func (r CacheLookupReport) TierHeaderValue() string {
 	return r.ServedTier
 }
 
-// OutcomeHeaderValue renders the Lava-Cache-Outcome value as "primary=<x>,secondary=<y>".
+// OutcomeHeaderValue renders the Smart-Router-Cache-Outcome value as "primary=<x>,secondary=<y>".
 //
 // Both tiers are always named, always in that order, so a caller can assert the whole
 // string rather than parsing for the field it cares about. An unset field renders as

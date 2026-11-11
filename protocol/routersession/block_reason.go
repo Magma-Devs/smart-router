@@ -94,7 +94,7 @@ const (
 
 	// ReleasePoolEmpty — the last resort. Nothing (primary or backup) could serve the request, so
 	// the whole blocked list was released at once. A request pinned to one provider (a
-	// lava-select-provider header, or a fleet sticky claim) releases that provider alone.
+	// smartrouter-select-provider header, or a fleet sticky claim) releases that provider alone.
 	ReleasePoolEmpty ReleaseRoute = "pool-empty-release"
 
 	// ReleaseOperatorReset — /debug/reset-all.

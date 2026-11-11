@@ -212,7 +212,7 @@ log_since() { tail -n "+$(( ${1:-0} + 1 ))" "$ROUTER_LOG" 2>/dev/null; }
 
 require_up() {
     router_healthy && return 0
-    echo "ERROR: no router answering 200 on :${ROUTER_PORT}/lava/health."
+    echo "ERROR: no router answering 200 on :${ROUTER_PORT}/smartrouter/health."
     echo "       Bring the lane up first:  $0"
     exit 1
 }
@@ -261,7 +261,7 @@ emit_config() {
     cat <<EOF
 
 # One policy per use case. A method absent from this list is untouched: it is
-# cross-validated only when the caller sends the lava-cross-validation-* headers,
+# cross-validated only when the caller sends the smartrouter-cross-validation-* headers,
 # which is the pre-feature behaviour (UC-7).
 cross-validation:
   policies:
@@ -404,7 +404,7 @@ uc1() {
     call "$M_NOPOLICY" "[\"$BLOCK\",false]" >/dev/null
     if cv_present; then
         fail "unexpected cross-validation on a method with no policy"
-        grep -i '^lava-cross-validation-' "$HDR" | tr -d '\r' | sed 's/^/        /'
+        grep -i '^smartrouter-cross-validation-' "$HDR" | tr -d '\r' | sed 's/^/        /'
     else
         pass "not cross-validated — a policy is scoped to its own method"
     fi
@@ -412,8 +412,8 @@ uc1() {
     echo ""
     echo "[3] the same method, with the caller's headers — the pre-feature path"
     call "$M_NOPOLICY" "[\"$BLOCK\",false]" \
-        -H 'lava-cross-validation-max-participants: 3' \
-        -H 'lava-cross-validation-agreement-threshold: 2' >/dev/null
+        -H 'smartrouter-cross-validation-max-participants: 3' \
+        -H 'smartrouter-cross-validation-agreement-threshold: 2' >/dev/null
     note "status" "$(hdr status)"
     check "header-driven cross-validation still works" "$(hdr status)" "success"
     check "the caller's max-participants was honoured" "$(count_csv "$(hdr all-providers)")" "3"
@@ -421,11 +421,11 @@ uc1() {
     echo ""
     echo "[4] '$M_FORBID' carries forbid-caller-cv — the same headers are IGNORED"
     call "$M_FORBID" "[]" \
-        -H 'lava-cross-validation-max-participants: 3' \
-        -H 'lava-cross-validation-agreement-threshold: 2' >/dev/null
+        -H 'smartrouter-cross-validation-max-participants: 3' \
+        -H 'smartrouter-cross-validation-agreement-threshold: 2' >/dev/null
     if cv_present; then
         fail "forbid-caller-cv did not suppress the caller's headers"
-        grep -i '^lava-cross-validation-' "$HDR" | tr -d '\r' | sed 's/^/        /'
+        grep -i '^smartrouter-cross-validation-' "$HDR" | tr -d '\r' | sed 's/^/        /'
     else
         pass "cross-validation is off for this method whatever the caller asks"
     fi
@@ -434,8 +434,8 @@ uc1() {
     echo "[5] precedence on '$M_CLAMP' — floor 2/cap 3 threshold, max-participants pinned to 3"
     echo "    a caller asking for MORE than the cap is clamped down to it:"
     call "$M_CLAMP" "[\"$(addr 12)\",\"$BLOCK\"]" \
-        -H 'lava-cross-validation-max-participants: 6' \
-        -H 'lava-cross-validation-agreement-threshold: 6' >/dev/null
+        -H 'smartrouter-cross-validation-max-participants: 6' \
+        -H 'smartrouter-cross-validation-agreement-threshold: 6' >/dev/null
     note "requested" "max-participants 6, threshold 6"
     note "all-providers" "$(hdr all-providers)"
     check "the cap bounded the caller's fan-out" "$(count_csv "$(hdr all-providers)")" "3"
@@ -443,8 +443,8 @@ uc1() {
 
     echo "    a caller asking for LESS than the floor gets the floor:"
     call "$M_CLAMP" "[\"$(addr 13)\",\"$BLOCK\"]" \
-        -H 'lava-cross-validation-max-participants: 1' \
-        -H 'lava-cross-validation-agreement-threshold: 1' >/dev/null
+        -H 'smartrouter-cross-validation-max-participants: 1' \
+        -H 'smartrouter-cross-validation-agreement-threshold: 1' >/dev/null
     note "requested" "max-participants 1, threshold 1"
     note "all-providers" "$(hdr all-providers)"
     check "the floor held against a weakening caller" "$(count_csv "$(hdr all-providers)")" "3"
@@ -560,7 +560,7 @@ assert_refuses_to_start() {
         fail "expected the router's own capacity error /$rx/ (rc=$rc); tail of $NEG_LOG:"
         tail -n 8 "$NEG_LOG" 2>/dev/null | cut -c1-160 | sed 's/^/        /'
     fi
-    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${NEG_PORT}/lava/health" 2>/dev/null; then
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${NEG_PORT}/smartrouter/health" 2>/dev/null; then
         fail "the unsatisfiable instance is STILL SERVING on :${NEG_PORT}"
     fi
 }
@@ -664,8 +664,8 @@ uc5() {
     echo "    (a retry against this router can never help — the client should fall back)"
     fleet_clean
     call "$M_NOPOLICY" "[\"$BLOCK\",false]" \
-        -H 'lava-cross-validation-max-participants: 99' \
-        -H 'lava-cross-validation-agreement-threshold: 99' >/dev/null
+        -H 'smartrouter-cross-validation-max-participants: 99' \
+        -H 'smartrouter-cross-validation-agreement-threshold: 99' >/dev/null
     note "status" "$(hdr status)"
     note "failure-reason" "$(hdr failure-reason)"
     check "still a structured failure" "$(hdr status)" "failed"
@@ -786,7 +786,7 @@ smoke() {
     fleet_clean
     local layout
     layout=$(grep "cross-validation per-method policies loaded" "$ROUTER_LOG" 2>/dev/null | head -n1)
-    note "router /lava/health" "$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:${ROUTER_PORT}/lava/health")"
+    note "router /smartrouter/health" "$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:${ROUTER_PORT}/smartrouter/health")"
     note "policies loaded" "$(printf '%s' "$layout" | grep -o 'policies=[0-9]*' | head -1)"
     note "distinct groups" "$(printf '%s' "$layout" | grep -o 'distinctGroups=[0-9]*' | head -1)"
     call "$M_MANDATE" "[\"$(addr 1)\",\"$BLOCK\"]" >/dev/null
@@ -870,11 +870,11 @@ $CONFIG_REL \
     wait_healthy "$ROUTER_PORT" "$ROUTER_SCREEN" || {
         echo "Tail of $ROUTER_LOG:"
         tail -n 30 "$ROUTER_LOG" 2>/dev/null | sed 's/^/    /'
-        die "the router never answered 200 on /lava/health"
+        die "the router never answered 200 on /smartrouter/health"
     }
     record_owned "$PIDFILE" "$ROUTER_PORT" "router" || exit 1
 
-    # /lava/health going 200 is not provider readiness — the listener starts while
+    # /smartrouter/health going 200 is not provider readiness — the listener starts while
     # validation is still running, so a request issued now can see a partial fleet.
     echo "[Setup] waiting for all six providers to become selectable ..."
     wait_providers "$ROUTER_PORT" 6 "$M_NOPOLICY" \
@@ -895,7 +895,7 @@ Router is running — manual commands
 A mandated cross-validation (no caller headers needed):
   curl -si -X POST http://127.0.0.1:${ROUTER_PORT} -H 'Content-Type: application/json' \\
     -d '{"jsonrpc":"2.0","method":"${M_MANDATE}","params":["0x00000000000000000000000000000000000000ff","${BLOCK}"],"id":1}' \\
-    | grep -i '^lava-cross-validation'
+    | grep -i '^smartrouter-cross-validation'
 
 The group-diversity method, and the per-group one:
   ... "method":"${M_DIVERSITY}"   (one quorum spanning >= 2 groups)

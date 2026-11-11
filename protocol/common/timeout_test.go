@@ -185,7 +185,7 @@ func TestGetTimePerCu_FloorAfterValidation(t *testing.T) {
 	require.Equal(t, 20*time.Second, GetTimePerCu(200))
 }
 
-// --- BoundCallerRelayTimeout: a caller's lava-relay-timeout (MAG-3600) ---
+// --- BoundCallerRelayTimeout: a caller's smartrouter-relay-timeout (MAG-3600) ---
 
 func TestBoundCallerRelayTimeout(t *testing.T) {
 	light := TimeoutInfo{CU: 20}                                                // budget: DefaultTimeout
@@ -298,10 +298,10 @@ func TestBoundCallerRelayTimeout_NeverZeroAndNeverPastTheBound(t *testing.T) {
 					budget := GetTimeoutForProcessing(window, info)
 					require.Positive(t, window, "an accepted window must be positive (%s)", value)
 					require.LessOrEqual(t, budget, max(ownBudget, maxCaller),
-						"lava-relay-timeout: %s stretched the budget past the bound (max-caller-relay-timeout %s, own window %s, info %+v)", value, maxCaller, ownWindow, info)
+						"smartrouter-relay-timeout: %s stretched the budget past the bound (max-caller-relay-timeout %s, own window %s, info %+v)", value, maxCaller, ownWindow, info)
 					if value >= ownWindow {
 						require.GreaterOrEqual(t, budget, ownBudget,
-							"lava-relay-timeout: %s asked for more than the router's own window %s and got a smaller budget than no header (%s < %s)", value, ownWindow, budget, ownBudget)
+							"smartrouter-relay-timeout: %s asked for more than the router's own window %s and got a smaller budget than no header (%s < %s)", value, ownWindow, budget, ownBudget)
 					}
 				}
 			}

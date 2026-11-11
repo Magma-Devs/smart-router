@@ -1386,8 +1386,8 @@ func TestSelectedProviderUnknownNameIsNotReportedAsAFailure(t *testing.T) {
 	require.NotContains(t, err.Error(), "already failed")
 }
 
-// The header naming the right provider in the wrong case: `lava-select-provider:
-// Lava` and a registered `lava` are the same provider. A case-sensitive match
+// The header naming the right provider in the wrong case: `smartrouter-select-provider:
+// Llama` and a registered `llama` are the same provider. A case-sensitive match
 // rejected the relay outright rather than falling back.
 func TestSelectedProviderMatchesCaseInsensitively(t *testing.T) {
 	csm := CreateConsumerSessionManager()
@@ -1433,29 +1433,29 @@ func TestSelectedProviderAlreadyFailedIsCaseInsensitive(t *testing.T) {
 }
 
 // With two providers whose names differ only in case, the in-request ignored set has to be
-// consulted by the resolved address rather than by a case-fold. `lava` having failed says
-// nothing about `Lava` — they are two different upstreams — so folding here would reject a
+// consulted by the resolved address rather than by a case-fold. `llama` having failed says
+// nothing about `Llama` — they are two different upstreams — so folding here would reject a
 // provider that is healthy and was never tried.
 func TestSelectedProviderIgnoredSetDoesNotFoldOntoACaseTwin(t *testing.T) {
 	csm := CreateConsumerSessionManager()
-	err := csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("Lava", "lava"), nil)
+	err := csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("Llama", "llama"), nil)
 	require.NoError(t, err)
 	time.Sleep(5 * time.Millisecond) // let probes finish
 
-	require.ElementsMatch(t, []string{"Lava", "lava"}, csm.getValidAddresses("", nil, context.Background()))
+	require.ElementsMatch(t, []string{"Llama", "llama"}, csm.getValidAddresses("", nil, context.Background()))
 
-	// `lava` failed earlier in this request; the header pins `Lava`, which did not.
-	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"lava": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "Lava")
-	require.NoError(t, err, "Lava never failed — its case-twin's failure must not reject it")
-	require.Equal(t, []string{"Lava"}, got)
+	// `llama` failed earlier in this request; the header pins `Llama`, which did not.
+	got, err := csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"llama": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "Llama")
+	require.NoError(t, err, "Llama never failed — its case-twin's failure must not reject it")
+	require.Equal(t, []string{"Llama"}, got)
 
 	// ...and the reverse, so neither spelling is privileged.
-	got, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "lava")
+	got, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Llama": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "llama")
 	require.NoError(t, err)
-	require.Equal(t, []string{"lava"}, got)
+	require.Equal(t, []string{"llama"}, got)
 
 	// The spin bound still holds when it is the pinned provider itself that failed.
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Lava": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "Lava")
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{"Llama": {}}, nil, 10, 100, "", nil, common.NO_STATE, "", "Llama")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderAlreadyFailedError),
 		"expected SelectedProviderAlreadyFailedError, got: %v", err)
@@ -1466,30 +1466,30 @@ func TestSelectedProviderIgnoredSetDoesNotFoldOntoACaseTwin(t *testing.T) {
 // not ask for, and validAddresses has no stable order to break the tie with anyway.
 func TestSelectedProviderAmbiguousCaseIsRejected(t *testing.T) {
 	csm := CreateConsumerSessionManager()
-	err := csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("Lava", "lava"), nil)
+	err := csm.UpdateAllProviders(firstEpochHeight, createNamedPairingList("Llama", "llama"), nil)
 	require.NoError(t, err)
 	time.Sleep(5 * time.Millisecond) // let probes finish
 
-	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", "LAVA")
+	_, err = csm.getValidProviderAddresses(context.Background(), 1, map[string]struct{}{}, nil, 10, 100, "", nil, common.NO_STATE, "", "LLAMA")
 	require.Error(t, err)
 	require.True(t, errors.Is(err, SelectedProviderUnavailableError),
 		"expected SelectedProviderUnavailableError, got: %v", err)
 	// The operator has to be able to see which names collided to know what to rename.
 	require.Contains(t, err.Error(), "matches more than one provider")
-	require.Contains(t, err.Error(), "Lava")
-	require.Contains(t, err.Error(), "lava")
+	require.Contains(t, err.Error(), "Llama")
+	require.Contains(t, err.Error(), "llama")
 }
 
 func TestResolveSelectedProviderAddress(t *testing.T) {
-	addresses := []string{"lava", "blockdaemon", "my-node-co"}
+	addresses := []string{"llama", "blockdaemon", "my-node-co"}
 
 	for _, tt := range []struct {
 		requested string
 		want      string
 	}{
-		{"lava", "lava"},
-		{"Lava", "lava"},
-		{"LAVA", "lava"},
+		{"llama", "llama"},
+		{"Llama", "llama"},
+		{"LLAMA", "llama"},
 		{"BlockDaemon", "blockdaemon"},
 		{"My-Node-Co", "my-node-co"},
 		{"tatum", ""},
@@ -1504,15 +1504,15 @@ func TestResolveSelectedProviderAddress(t *testing.T) {
 func TestResolveSelectedProviderAddressPrefersTheExactSpelling(t *testing.T) {
 	// Two names differing only in case is legal config — ValidateUniqueProviderNames
 	// groups by exact name — so an exact hit has to win outright.
-	addresses := []string{"Lava", "lava"}
+	addresses := []string{"Llama", "llama"}
 
-	got, ambiguous := resolveSelectedProviderAddress("lava", addresses)
+	got, ambiguous := resolveSelectedProviderAddress("llama", addresses)
 	require.Empty(t, ambiguous)
-	require.Equal(t, "lava", got)
+	require.Equal(t, "llama", got)
 
-	got, ambiguous = resolveSelectedProviderAddress("Lava", addresses)
+	got, ambiguous = resolveSelectedProviderAddress("Llama", addresses)
 	require.Empty(t, ambiguous)
-	require.Equal(t, "Lava", got)
+	require.Equal(t, "Llama", got)
 }
 
 // Absent an exact hit, a fold matching two providers resolves to neither. Which one the
@@ -1521,14 +1521,14 @@ func TestResolveSelectedProviderAddressPrefersTheExactSpelling(t *testing.T) {
 // recovered, so picking by position would serve the same pinned name from a different
 // upstream run to run.
 func TestResolveSelectedProviderAddressRefusesAnAmbiguousFold(t *testing.T) {
-	got, ambiguous := resolveSelectedProviderAddress("LAVA", []string{"Lava", "lava"})
+	got, ambiguous := resolveSelectedProviderAddress("LLAMA", []string{"Llama", "llama"})
 	require.Empty(t, got)
-	require.Equal(t, []string{"Lava", "lava"}, ambiguous)
+	require.Equal(t, []string{"Llama", "llama"}, ambiguous)
 
 	// Reported sorted, so one bad config reads the same way on every run whatever order
 	// the reset happened to leave validAddresses in.
-	_, ambiguous = resolveSelectedProviderAddress("LAVA", []string{"lava", "Lava"})
-	require.Equal(t, []string{"Lava", "lava"}, ambiguous)
+	_, ambiguous = resolveSelectedProviderAddress("LLAMA", []string{"llama", "Llama"})
+	require.Equal(t, []string{"Llama", "llama"}, ambiguous)
 }
 
 func TestPairingWithStateful(t *testing.T) {

@@ -342,7 +342,7 @@ type Badge struct {
 	CuAllocation uint64 `json:"cu_allocation"`
 	Epoch        uint64 `json:"epoch"`
 	Address      string `json:"address"`
-	LavaChainId  string `json:"lava_chain_id"`
+	NetworkId    string `json:"network_id"`
 	ProjectSig   []byte `json:"project_sig"`
 }
 
@@ -367,9 +367,9 @@ func (b *Badge) GetAddress() string {
 	return ""
 }
 
-func (b *Badge) GetLavaChainId() string {
+func (b *Badge) GetNetworkId() string {
 	if b != nil {
-		return b.LavaChainId
+		return b.NetworkId
 	}
 	return ""
 }
@@ -392,7 +392,7 @@ type RelaySession struct {
 	QosReport             *QualityOfServiceReport `json:"qos_report"`
 	Epoch                 int64                   `json:"epoch"`
 	UnresponsiveProviders []*ReportedProvider     `json:"unresponsive_providers"`
-	LavaChainId           string                  `json:"lava_chain_id"`
+	NetworkId             string                  `json:"network_id"`
 	Sig                   []byte                  `json:"sig"`
 	Badge                 *Badge                  `json:"badge"`
 }
@@ -460,9 +460,9 @@ func (rs *RelaySession) GetUnresponsiveProviders() []*ReportedProvider {
 	return nil
 }
 
-func (rs *RelaySession) GetLavaChainId() string {
+func (rs *RelaySession) GetNetworkId() string {
 	if rs != nil {
-		return rs.LavaChainId
+		return rs.NetworkId
 	}
 	return ""
 }
@@ -520,7 +520,7 @@ func (rs RelaySession) DataToSign() []byte {
 	appendString(rs.Provider)
 	appendUint64(rs.RelayNum)
 	appendInt64(rs.Epoch)
-	appendString(rs.LavaChainId)
+	appendString(rs.NetworkId)
 
 	return buf
 }

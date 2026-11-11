@@ -24,14 +24,14 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	if input.Selection == relaycore.CrossValidation {
 		return relaycore.DecisionOutput{Action: relaycore.ActionStop, Reason: "CrossValidation"}
 	}
-	// A pinned request (a strict pin: lava-stickiness, or lava-select-provider with
-	// lava-select-provider-strict: true; see relaycore.PinnedByDirectives) is served by the pinned
+	// A pinned request (a strict pin: smartrouter-stickiness, or smartrouter-select-provider with
+	// smartrouter-select-provider-strict: true; see relaycore.PinnedByDirectives) is served by the pinned
 	// upstream or not at all (MAG-2280, MAG-4123, MAG-4826). The caller chose the node; a retry or
 	// a hedge on another one would be the silent substitution the pin exists to prevent. For the
 	// sequence a sticky session protects, read the head then
 	// fetch that block, it is exactly how a false gap is produced: nothing here checks that the
 	// other node has reached the block. The pinned node's own answer, error included, goes back
-	// to the caller with Lava-Retries 0. Checked before the stateful rate-limit carve-out, so a
+	// to the caller with Smart-Router-Retries 0. Checked before the stateful rate-limit carve-out, so a
 	// pinned write refused for rate is not broadcast elsewhere either. Cross-validation overrides
 	// pins and stopped above.
 	if input.Pinned {
@@ -132,7 +132,7 @@ func (p *Policy) Decide(input relaycore.DecisionInput) relaycore.DecisionOutput 
 	//   - EIP-1898 block objects, {"blockHash": ...} AND {"blockNumber": ...}, on eth_call,
 	//     eth_getBalance, eth_getStorageAt, eth_getTransactionCount, eth_getCode and eth_getProof.
 	// A rule.block change cannot fix either. For the forms that name a hash, the caller sends
-	// `lava-extension: archive`: by product decision (MAG-4142) that header is the supported
+	// `smartrouter-extension: archive`: by product decision (MAG-4142) that header is the supported
 	// route and no automatic one is planned. The {"blockNumber": ...} form is a parser fix (MAG-4758).
 	//
 	// Adding it anyway inverted the retry: the extension filter dropped every endpoint without
@@ -168,7 +168,7 @@ func (p *Policy) OnSendRelayResult(err error, isPairingListEmpty bool, selection
 	// upstream is unknown, blocked, busy, or too far behind the chain tip, and a resend of the same
 	// pinned request changes none of that. Stop now, before a resend could run selection without
 	// the pin, and without SendRelayAttempts identical refusals first. This also covers a plain
-	// lava-select-provider: nothing has been dispatched, so its resend would keep the pin and be
+	// smartrouter-select-provider: nothing has been dispatched, so its resend would keep the pin and be
 	// refused again; the outcome is the same, only sooner.
 	if relaycore.PinnedUpstreamUnservable(err) {
 		return relaycore.SendStop

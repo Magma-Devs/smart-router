@@ -2,7 +2,7 @@
 
 ## 1. Design: Error Layer Taxonomy
 
-Four layers, each with a dedicated Lava error code range.
+Four layers, each with a dedicated router error code range.
 
 > **Retryable** means: retrying the same relay (with the same parameters) to a different endpoint/provider has a chance of succeeding. `Yes` = retry on a different provider. `No` = do not retry.
 
@@ -13,7 +13,7 @@ Four layers, each with a dedicated Lava error code range.
 | 0 | `UNKNOWN_ERROR` | Unclassified error — no matcher matched | Yes |
 
 ### Layer A: Protocol Errors (`PROTOCOL_*` — range 1000-1999) — Category: Internal
-Errors raised from within the Lava protocol itself — not from nodes or chains.
+Errors raised from within the router itself — not from nodes or chains.
 
 | Code | Name | Description | Retryable |
 |------|------|-------------|-----------|
@@ -31,7 +31,7 @@ Errors raised from within the Lava protocol itself — not from nodes or chains.
 | 1012 | `PROTOCOL_PROVIDER_UNAVAILABLE` | Provider service unavailable (gRPC UNAVAILABLE). The UNAVAILABLE the router's own gRPC client produces for a call it failed before any stream to the node was open (`GRPCCallUndeliveredError`), when no connection row names the text: a failed TLS handshake, a resolver that produced no address. A refused dial or an unresolved name keeps its own code (1002, 1003). A node's own gRPC UNAVAILABLE is a node error (2006) | Yes |
 | 1013 | `PROTOCOL_PROVIDER_ABORTED` | Provider aborted (gRPC ABORTED). Not produced by the smart router: a node's gRPC status is a node error (2019) | Yes |
 | 1014 | `PROTOCOL_PROVIDER_DATA_LOSS` | Provider data loss (gRPC DATA_LOSS). Not produced by the smart router. No node it routes to sends gRPC DATA_LOSS; if one did, it would classify `UNKNOWN_ERROR` | Yes |
-| 1020 | `PROTOCOL_RATE_LIMITED` | Lava-side rate limit exceeded (SubCategoryRateLimit) | No |
+| 1020 | `PROTOCOL_RATE_LIMITED` | Router-side rate limit exceeded (SubCategoryRateLimit) | No |
 | 1021 | `PROTOCOL_MAX_CU_EXCEEDED` | Maximum compute units exceeded for session | No |
 | 1022 | `PROTOCOL_BATCH_SIZE_EXCEEDED` | Batch request size exceeded limit | No |
 | 1030 | `PROTOCOL_SESSION_NOT_FOUND` | Session does not exist | No |
@@ -170,7 +170,7 @@ Uses a **tiered classification system** (see Section 3 for details):
 | 3363 | `CHAIN_NEAR_NOT_SYNCED_YET` | Node still syncing (NOT_SYNCED_YET) | Yes | NEAR |
 
 ### Layer D: User Errors (`USER_*` — range 4000-4999) — Category: External
-Errors caused by malformed or invalid client requests — classified by nature of error, regardless of where caught (pre-forwarding by Lava or returned by node).
+Errors caused by malformed or invalid client requests — classified by nature of error, regardless of where caught (pre-forwarding by the router or returned by node).
 
 Layer D codes are non-retryable but charge **normal CU** — the provider does real work on every call because the response is not cached (the next request from the same client may carry valid input). Only `SubCategoryUnsupportedMethod` errors get the zero-CU carve-out, because those responses *are* cached and the provider won't be hit again. Since MAG-2771 no registered code carries that subcategory (decision 11).
 
@@ -188,20 +188,20 @@ Layer D codes are non-retryable but charge **normal CU** — the provider does r
 
 ## 2. Design: Error Code Format
 
-Each Lava error has:
-- **Lava Code** (uint32): Internal code for logging, metrics, counting (1001, 2001, etc.)
+Each router error has:
+- **Router Code** (uint32): Internal code for logging, metrics, counting (1001, 2001, etc.)
 - **Name** (string): Human-readable constant name (`PROTOCOL_CONNECTION_TIMEOUT`)
-- **Category** (enum): `Internal` (Lava-introduced) or `External` (pass-through)
+- **Category** (enum): `Internal` (router-introduced) or `External` (pass-through)
 - **SubCategory** (enum): Finer classification (e.g., `SubCategoryUnsupportedMethod`)
 - **Retryable** (bool): Whether the error warrants retry on a different provider
 - **Description** (string): Human-readable explanation
 
 ### Visibility Scope
-Lava error codes are **internal only** — they live within the Lava protocol layer:
-- **Smart Router path:** Between router and endpoint (user and node never see Lava codes)
-- **Decentralized path:** Between consumer and provider (user and node never see Lava codes)
+Router error codes are **internal only** — they live within the router protocol layer:
+- **Smart Router path:** Between router and endpoint (user and node never see router codes)
+- **Decentralized path:** Between consumer and provider (user and node never see router codes)
 - External responses always use standard protocol codes (JSON-RPC, gRPC, HTTP)
-- Lava codes appear in **logs and metrics only**
+- router codes appear in **logs and metrics only**
 
 ---
 
@@ -333,7 +333,7 @@ A gRPC status needs the wrapper because grpc-go words a connection it could not 
 1. **`GenericErrorMappings` is evaluated in declaration order — first match wins.** Matchers MUST be ordered most-specific first. A broader matcher placed before a narrower one will shadow it silently.
 2. **Safety nets (required in Phase 1):**
    - **Shadow detection test:** A unit test that iterates every pair of matchers and fails if a broader matcher appears before a narrower one it would shadow.
-   - **Real-world fixture tests:** A `testdata/` directory containing actual error responses captured from each node client (Geth, Erigon, Nethermind, Solana validator, Bitcoin Core, etc.). Table-driven tests run every fixture through `ClassifyError` and assert the expected Lava error code. When a new client variant surfaces in production as `UNKNOWN_ERROR`, its message is added to the fixtures.
+   - **Real-world fixture tests:** A `testdata/` directory containing actual error responses captured from each node client (Geth, Erigon, Nethermind, Solana validator, Bitcoin Core, etc.). Table-driven tests run every fixture through `ClassifyError` and assert the expected router error code. When a new client variant surfaces in production as `UNKNOWN_ERROR`, its message is added to the fixtures.
 
 ### Mapping Registration
 
@@ -409,11 +409,11 @@ var GenericErrorMappings = map[TransportType][]GenericMapping{
 Single file: `protocol/common/error_registry.go`
 
 ```go
-// ErrorCategory — top-level grouping: internal (Lava-introduced) vs external (pass-through)
+// ErrorCategory — top-level grouping: internal (router-introduced) vs external (pass-through)
 type ErrorCategory int
 
 const (
-    Internal ErrorCategory = iota // Errors introduced by Lava — user would never see these without Lava
+    Internal ErrorCategory = iota // Errors introduced by the router — user would never see these without it
     External                      // Pass-through errors — user would get the same error talking to the node directly
 )
 
@@ -539,7 +539,7 @@ Log output automatically includes:
 - [x] Write unit tests for the registry and classification logic
 - [x] Write shadow detection test to verify no broader matcher shadows a narrower one in `GenericErrorMappings`
 - [x] Create `testdata/` directory with real error response fixtures from each node client (Geth, Erigon, Nethermind, Solana validator, Bitcoin Core, Starknet, etc.)
-- [x] Write table-driven fixture tests that run every fixture through `ClassifyError` and assert expected Lava error code
+- [x] Write table-driven fixture tests that run every fixture through `ClassifyError` and assert expected router error code
 
 ### Phase 2: Logging Integration
 - [x] Add `FormatCodedError` helper to `utils/log.go` that takes a `RouterError` code
@@ -601,11 +601,11 @@ _Blocked on protocol upgrade: sdkerrors carry ABCI codes used in the gRPC wire f
 
 ## 7. Decisions Made
 
-1. **User Error boundary**: `USER_*` errors include cases detected both pre-forwarding by Lava AND returned by the node (e.g., `-32602 Invalid params`). Classification is by nature of error, not where it's caught.
+1. **User Error boundary**: `USER_*` errors include cases detected both pre-forwarding by the router AND returned by the node (e.g., `-32602 Invalid params`). Classification is by nature of error, not where it's caught.
 
-2. **Error code visibility**: Lava error codes are **internal only** — visible in logs and metrics. They live within the Lava protocol layer (Smart Router: between router and endpoint; Decentralized: between consumer and provider). Users and nodes never see Lava codes. External responses use standard protocol codes (JSON-RPC, gRPC, HTTP).
+2. **Error code visibility**: Router error codes are **internal only** — visible in logs and metrics. They live within the router protocol layer (Smart Router: between router and endpoint; Decentralized: between consumer and provider). Users and nodes never see router codes. External responses use standard protocol codes (JSON-RPC, gRPC, HTTP).
 
-3. **Chain-specific codes**: **Tiered approach (Option A hybrid)**. Distinct Lava codes exist for chain-specific errors where retryability differs from the generic pattern (Solana -32009 vs -32007, Bitcoin warmup, Starknet class errors, etc.). All other errors use generic semantic codes with chain detail in log attributes.
+3. **Chain-specific codes**: **Tiered approach (Option A hybrid)**. Distinct router codes exist for chain-specific errors where retryability differs from the generic pattern (Solana -32009 vs -32007, Bitcoin warmup, Starknet class errors, etc.). All other errors use generic semantic codes with chain detail in log attributes.
 
 4. **x/ module errors**: Left as-is — governed by Cosmos SDK conventions, only relevant on-chain.
 
@@ -615,11 +615,11 @@ _Blocked on protocol upgrade: sdkerrors carry ABCI codes used in the gRPC wire f
 
 7. **Unsupported methods use `SubCategoryUnsupportedMethod`.** Codes 2001, 2008, 2009, and 2010 have `SubCategory: SubCategoryUnsupportedMethod`. This replaces the current pattern-matching approach (`IsUnsupportedMethodError`, `IsUnsupportedMethodMessage`) with a subcategory check via `RouterError.SubCategory.IsUnsupportedMethod()`. The special behavior (zero CU, cached response, no provider scoring) is derived from the subcategory. The retry short-circuit itself runs off the registry's `Retryable` flag — see Decision 10. _(Note: 2002 `NODE_METHOD_NOT_SUPPORTED` was removed from this list during Phase 7 review — it represents a method that exists but is disabled on this node, which is a retryable condition on a different provider. It has `Retryable: true` and no subcategory.)_ _(Superseded by decision 11: no registered code carries `SubCategoryUnsupportedMethod` any more.)_
 
-8. **Two-level error grouping: Category + SubCategory.** Category is `Internal` (errors Lava introduces — protocol layer) vs `External` (errors the user would get regardless of Lava — node, chain, user input). SubCategory provides finer classification within each category (e.g., UnsupportedMethod, Connection, Session, ChainExecution, ChainState, UserInput). SubCategories to be finalized before Phase 1 implementation.
+8. **Two-level error grouping: Category + SubCategory.** Category is `Internal` (errors the router introduces — protocol layer) vs `External` (errors the user would get regardless of the router — node, chain, user input). SubCategory provides finer classification within each category (e.g., UnsupportedMethod, Connection, Session, ChainExecution, ChainState, UserInput). SubCategories to be finalized before Phase 1 implementation.
 
 9. **Transparent hop: original errors pass through unchanged.** The router/consumer is a transparent hop — the user always receives the original error from the node, unmodified. `RouterError` classification is metadata for internal use only (logging, metrics, endpoint health). Unknown/unmatched errors default to `CategoryExternal` because they are node pass-throughs. _(Clarification added in Phase 7: `handleAndClassify` wraps classified errors in `RouterWrappedError` on the **Go error return path** — this is internal plumbing for retry/health decisions and never reaches the user. The actual node response body travels separately and is always returned unmodified to the user. The "transparent hop" principle applies to the response body, not the internal Go error return.)_
 
-10. **Retryable is the primary retry signal, not SubCategory.** The consumer and smart-router retry state machines short-circuit on `RouterError.Retryable=false` via `RelayResult.IsNonRetryable`, populated at classification time on both paths (consumer: `rpcconsumer_server.go`; smart-router: `direct_rpc_relay.go` / `rpcsmartrouter_server.go`). This covers every terminal classification — `CHAIN_EXECUTION_REVERTED`, `CHAIN_OUT_OF_GAS`, `CHAIN_DOUBLE_SPEND`, `CHAIN_INVALID_SIGNATURE`, all of 3000-range — not only unsupported methods. SubCategory continues to govern adjacent policy: `SubCategoryUnsupportedMethod` triggers the zero-CU carve-out and caching, and `SubCategoryRateLimit` drives backoff without marking the endpoint unhealthy. `SubCategoryDataScope` is the third such axis and the one Retryable cannot express: the errors are retryable (a pruned endpoint's miss may be another endpoint's hit; the retry no longer adds the archive extension, so it reaches an archive endpoint only if selection picks one or the caller sent `lava-extension: archive`, which MAG-4142 settled as the supported route) yet must stay out of the availability signal, because the endpoint answered truthfully about its own data scope. `rpcsmartrouter.shouldFailSessionForResult` reads all three. Layer D user-input errors are non-retryable but charge normal CU — the provider does real work because responses are not cached. `relay_processor.HasNonRetryableUserFacingErrors` keys off the `IsNonRetryable` flag rather than re-classifying, so adding a new non-retryable error type requires no state-machine changes.
+10. **Retryable is the primary retry signal, not SubCategory.** The consumer and smart-router retry state machines short-circuit on `RouterError.Retryable=false` via `RelayResult.IsNonRetryable`, populated at classification time on both paths (consumer: `rpcconsumer_server.go`; smart-router: `direct_rpc_relay.go` / `rpcsmartrouter_server.go`). This covers every terminal classification — `CHAIN_EXECUTION_REVERTED`, `CHAIN_OUT_OF_GAS`, `CHAIN_DOUBLE_SPEND`, `CHAIN_INVALID_SIGNATURE`, all of 3000-range — not only unsupported methods. SubCategory continues to govern adjacent policy: `SubCategoryUnsupportedMethod` triggers the zero-CU carve-out and caching, and `SubCategoryRateLimit` drives backoff without marking the endpoint unhealthy. `SubCategoryDataScope` is the third such axis and the one Retryable cannot express: the errors are retryable (a pruned endpoint's miss may be another endpoint's hit; the retry no longer adds the archive extension, so it reaches an archive endpoint only if selection picks one or the caller sent `smartrouter-extension: archive`, which MAG-4142 settled as the supported route) yet must stay out of the availability signal, because the endpoint answered truthfully about its own data scope. `rpcsmartrouter.shouldFailSessionForResult` reads all three. Layer D user-input errors are non-retryable but charge normal CU — the provider does real work because responses are not cached. `relay_processor.HasNonRetryableUserFacingErrors` keys off the `IsNonRetryable` flag rather than re-classifying, so adding a new non-retryable error type requires no state-machine changes.
 
 11. **A node's refusal of its own is retried on another provider (MAG-2771).** A refusal ends the request only if it is a fact about the chain. A `NODE_*` refusal is a claim the node makes about itself — the methods it serves, the routes its front end knows, the credentials it was given — so it is provider-local until a peer confirms it. `NODE_METHOD_NOT_FOUND` (2001), `NODE_UNIMPLEMENTED` (2008), `NODE_ENDPOINT_NOT_FOUND` (2009), `NODE_METHOD_NOT_ALLOWED` (2010) and `NODE_UNAUTHORIZED` (2016) are therefore `Retryable: true` with `SubCategoryNodeCapability`, alongside 2002 and 2018: the request goes to another provider, and the endpoint that refused is neither blamed nor scored. `NODE_LIMIT_EXCEEDED` (2011) is left out for now: a `-32005` is usually a cap on the request that every provider shares, and its `SubCategoryRateLimit` hold-off would spread to every provider a retry reached, so retrying it needs its own hold-off design. On the wire a method a provider's plan disables cannot be told apart from one that does not exist (MAG-2735: one provider answered `-32601` for `net_listening` while its peer served it). With two providers, being wrong in the retry direction costs one extra call on a request that was already failing; being wrong in the other is a customer-visible failure. `CHAIN_*` and `USER_*` codes are the same answer from every node and stay non-retryable. Writes are unchanged: a stateful relay is already delivered to every upstream at once, and `relaypolicy` never re-sends one except after a rate limit. Two rules keep the retry honest. A method the spec does not list (a `Default-` API: a typo, a scanner, another chain's method) is forwarded only because the spec cannot rule it out, so its refusal stays final (`relaypolicy`, `UnlistedMethodRefused`). And when a peer ends the request with a non-retryable answer, that answer is what the caller gets, not the refusal that came first (`relaycore.processNonCrossValidationResult`).
 
@@ -662,7 +662,7 @@ unchanged. What "node error" changes is the same as on JSON-RPC:
   vendor broadcast the transaction). This is the whole of what MAG-3972/3974/3976 need.
 - The error registry classifies the reply, and its REST status rows decide the rest.
 - Every REST node error is counted the way a JSON-RPC one is (`smartrouter_errors_total`,
-  `lava-identified-node-error: true` on the reply) and logged as "received node error reply from
+  `smartrouter-identified-node-error: true` on the reply) and logged as "received node error reply from
   provider": at ERROR when the endpoint is at fault, at DEBUG when it is not (9.3, item 6). It is
   not cached — no non-2xx reply ever was.
 
