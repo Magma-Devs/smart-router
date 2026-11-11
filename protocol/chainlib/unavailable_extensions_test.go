@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MAG-3935: a lava-extension the spec knows but no node on the router offers used to vanish with
+// MAG-3935: a smartrouter-extension the spec knows but no node on the router offers used to vanish with
 // only a trace-level log. It is still not applied — nothing could serve it — but it is now
 // recorded, so the reply can tell the caller the request was served without it.
 
@@ -64,7 +64,7 @@ func TestOverrideExtensions_RepeatedRequestReportedOnce(t *testing.T) {
 }
 
 // The router's own archive promotion for a deep eth_call is kept apart from the caller's
-// lava-extension so that it is never reported back, but it must still be applied when a node
+// smartrouter-extension so that it is never reported back, but it must still be applied when a node
 // offers archive.
 func TestParseMsg_DeepEthCallStillGetsArchiveWhenANodeOffersIt(t *testing.T) {
 	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "ETH1")

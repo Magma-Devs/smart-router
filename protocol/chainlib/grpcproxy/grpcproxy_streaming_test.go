@@ -16,7 +16,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const testMethodPath = "/lavanet.testproto.Test/Test"
+const testMethodPath = "/smartrouter.testproto.Test/Test"
 
 func testCmdFlags() common.ConsumerCmdFlags {
 	return common.ConsumerCmdFlags{HeadersFlag: "*", OriginFlag: "*", MethodsFlag: "GET,POST,OPTIONS", CDNCacheDuration: "86400"}
@@ -74,7 +74,7 @@ func TestGRPCProxy_ServerStreaming_ForwardsUntilUpstreamEnds(t *testing.T) {
 		func(ctx context.Context, method string, reqBody []byte) (*StreamResponse, error) {
 			return &StreamResponse{
 				Replies:  replies,
-				Metadata: metadata.MD{"X-Lava-Grpc-Sub-Id": []string{"router-sub-1"}},
+				Metadata: metadata.MD{"X-Smartrouter-Grpc-Sub-Id": []string{"router-sub-1"}},
 			}, nil
 		})
 	require.NoError(t, err)
@@ -84,7 +84,7 @@ func TestGRPCProxy_ServerStreaming_ForwardsUntilUpstreamEnds(t *testing.T) {
 
 	header, err := stream.Header()
 	require.NoError(t, err)
-	require.Equal(t, []string{"router-sub-1"}, header.Get("x-lava-grpc-sub-id"),
+	require.Equal(t, []string{"router-sub-1"}, header.Get("x-smartrouter-grpc-sub-id"),
 		"the subscription id must ride in the headers: a stream message has to decode as the method's output type")
 
 	for _, expected := range []string{"first", "second", "third"} {

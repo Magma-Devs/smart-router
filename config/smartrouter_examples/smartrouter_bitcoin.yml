@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — Bitcoin (BTC)
-# Mode: Direct connection to a public Bitcoin JSON-RPC endpoint (no Lava providers!)
+# Mode: Direct connection to a public Bitcoin JSON-RPC endpoint (no provider-relay network — direct upstreams)
 #
 # Upstream: PublicNode (bitcoin-rpc.publicnode.com), HTTP. Bitcoin Core's
 # JSON-RPC has no websocket/subscription surface, so this example is HTTP-only —

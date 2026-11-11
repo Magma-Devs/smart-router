@@ -28,7 +28,7 @@ import (
 // MAG-4729: the only node-url tagged archive is a backup that boot did not admit with archive —
 // its archive check was refused, or it was unreachable. An archive request then has no node to go
 // to, and the degrade path serves it from the pruned primary. The reply has to carry
-// Lava-Extension-Unavailable: archive, as it does when no node-url declares archive at all
+// Smart-Router-Extension-Unavailable: archive, as it does when no node-url declares archive at all
 // (MAG-3935); without it a non-archive answer to an archive request reads as a real one.
 
 // bootArchiveBackupEndpoint runs the real CreateSmartRouterEndpoint for ETH1 JSON-RPC with one
@@ -86,7 +86,7 @@ func bootETH1Endpoint(t *testing.T, primaries, backups []*routersession.RPCStati
 }
 
 // relayGetCode sends one eth_getCode at block through the listener, as a client would, naming
-// extension in lava-extension unless it is empty.
+// extension in smartrouter-extension unless it is empty.
 func relayGetCode(t *testing.T, server *RPCSmartRouterServer, block, extension string) *http.Response {
 	t.Helper()
 	headers := map[string]string{}
@@ -136,7 +136,7 @@ func TestArchiveOnUnadmittedBackupReportsExtensionUnavailable(t *testing.T) {
 		backup       string   // personality of the backup's url
 		backupAddons []string // what the backup's url declares
 		block        string   // eth_getCode's block
-		directive    string   // the request's lava-extension; empty sends none
+		directive    string   // the request's smartrouter-extension; empty sends none
 		servedBy     string
 		unavailable  string
 	}{
@@ -222,8 +222,8 @@ func (c *writeRecordingCache) emptyCodeWrites() int {
 }
 
 // A reply served after the request degraded is not cached (MAG-4729). Its entry would sit under a
-// key that names the caller's lava-extension, so every repeat archive request would be answered
-// from it: pruned-node data without Lava-Extension-Unavailable, since a cache hit never reaches the
+// key that names the caller's smartrouter-extension, so every repeat archive request would be answered
+// from it: pruned-node data without Smart-Router-Extension-Unavailable, since a cache hit never reaches the
 // degrade path that records it, and still after the archive node recovers.
 func TestArchiveOnUnadmittedBackupIsNotCached(t *testing.T) {
 	archive := extensionslib.ArchiveExtension
@@ -269,7 +269,7 @@ func TestArchiveOnUnadmittedBackupIsNotCached(t *testing.T) {
 // The winner of a cross-validated request that degraded is not cached either (MAG-4729). It is
 // written once, after the quorum, by SendParsedRelay rather than by a relay goroutine, so it has
 // a skip of its own. The caller names archive and blocks both archive nodes with
-// lava-providers-block: the request degrades to the two pruned primaries, which agree.
+// smartrouter-providers-block: the request degrades to the two pruned primaries, which agree.
 func TestArchiveDegradedCrossValidationWinnerIsNotCached(t *testing.T) {
 	archive := extensionslib.ArchiveExtension
 	crossValidated := map[string]string{

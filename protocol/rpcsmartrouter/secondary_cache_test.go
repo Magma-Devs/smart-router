@@ -496,7 +496,7 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 				Sig:         []byte{0xde, 0xad},
 				SigBlocks:   []byte{0xbe, 0xef},
 				Metadata: []pairingtypes.Metadata{
-					{Name: "Lava-Provider-Address", Value: "provider@provider1"},
+					{Name: "Smart-Router-Provider-Address", Value: "provider@provider1"},
 					{Name: "X-Provider-ID", Value: "prov-42"},
 					{Name: "X-Backend", Value: "geth-fra-03"},
 					{Name: "X-Served-By", Value: "edge-9.internal"},
@@ -524,7 +524,7 @@ func TestSecondaryPoisonedEntrySanitizedForCallerAndBackfill(t *testing.T) {
 	require.Nil(t, result.Reply.SigBlocks)
 	require.Equal(t, []pairingtypes.Metadata{{Name: "Content-Type", Value: "application/json"}}, result.Reply.Metadata,
 		"every identity-bearing header is dropped; only the transport allowlist survives")
-	require.Equal(t, "", result.ProviderInfo.ProviderAddress, "locally minted Lava-Provider-Address: Cached still applies downstream")
+	require.Equal(t, "", result.ProviderInfo.ProviderAddress, "locally minted Smart-Router-Provider-Address: Cached still applies downstream")
 	require.Equal(t, payload, result.Reply.Data)
 	require.Zero(t, result.Reply.LatestBlock, "a foreign chain height must not ride out on the served reply")
 
@@ -811,7 +811,7 @@ func TestSecondaryFutureKeyBackfillNeverRaisesPrimaryChainTip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // Entry-kind resolution is the single helper BOTH tiers call, which is what makes a
-// replayed node error carry lava-identified-node-error regardless of which cache
+// replayed node error carry smartrouter-identified-node-error regardless of which cache
 // answered. Pinning it here covers the primary tier's use too: that call site is two
 // lines inside sendRelayToEndpoint, which cannot be driven without a full session and
 // endpoint fixture, whereas the decision itself lives entirely in this function.

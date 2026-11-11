@@ -212,7 +212,7 @@ func TestStickyIDDigest_HidesThePlaintextAndIsStable(t *testing.T) {
 
 // --- regressions found in review of the first cut ---------------------------------------
 
-// lava-select-provider names an upstream explicitly, which is the more specific ask, and it has
+// smartrouter-select-provider names an upstream explicitly, which is the more specific ask, and it has
 // always taken priority — getValidProviderAddresses handles it and returns before the sticky
 // block. The first cut of cross-pod stickiness overwrote it unconditionally, inverting that
 // order on any deployment running --shared-state.

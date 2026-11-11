@@ -250,14 +250,14 @@ if [[ "$RUN_DEMO" == "1" ]]; then
     #    backend-selection log line we gate startup on, so a single probe here
     #    races the bind and reports 000. Poll to a bounded deadline instead of
     #    sleeping a guessed amount: the wait is observed, not assumed.
-    LAVA_HEALTH=""
+    ROUTER_HEALTH=""
     for _ in $(seq 1 30); do
-        LAVA_HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/lava/health")
-        [[ "$LAVA_HEALTH" == "200" ]] && break
+        ROUTER_HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/smartrouter/health")
+        [[ "$ROUTER_HEALTH" == "200" ]] && break
         sleep 1
     done
-    [[ "$LAVA_HEALTH" == "200" ]] && note "router /lava/health" "200" \
-        || { note "router /lava/health" "$LAVA_HEALTH (expected 200)"; DEMO_FAIL=1; }
+    [[ "$ROUTER_HEALTH" == "200" ]] && note "router /smartrouter/health" "200" \
+        || { note "router /smartrouter/health" "$ROUTER_HEALTH (expected 200)"; DEMO_FAIL=1; }
 
     # 2. metrics health — overall-health is fail-closed until endpoint setup
     #    has verified a provider, so poll rather than sampling once.

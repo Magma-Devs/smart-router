@@ -152,7 +152,7 @@ checks() {
     call "$METHOD" "[\"$(addr 71)\",\"$BLOCK\"]" >/dev/null
     if cv_present; then
         fail "cross-validation happened with no policy and no caller headers"
-        grep -i '^lava-cross-validation-' "$HDR" | tr -d '\r' | sed 's/^/        /'
+        grep -i '^smartrouter-cross-validation-' "$HDR" | tr -d '\r' | sed 's/^/        /'
     else
         pass "one provider, one relay — nothing changed for existing callers"
     fi
@@ -168,8 +168,8 @@ checks() {
     echo "[3] a caller that DOES send the headers still gets cross-validation"
     before="$after"
     call "$METHOD" "[\"$(addr 72)\",\"$BLOCK\"]" \
-        -H 'lava-cross-validation-max-participants: 3' \
-        -H 'lava-cross-validation-agreement-threshold: 2' >/dev/null
+        -H 'smartrouter-cross-validation-max-participants: 3' \
+        -H 'smartrouter-cross-validation-agreement-threshold: 2' >/dev/null
     note "status" "$(hdr status)"
     note "all-providers" "$(hdr all-providers)"
     note "agreeing-providers" "$(hdr agreeing-providers)"
@@ -188,8 +188,8 @@ checks() {
     echo "[5] the degenerate caller request the docs warn about"
     echo "    (max-participants 1 + agreement-threshold 1: a 'quorum' of one)"
     call "$METHOD" "[\"$(addr 73)\",\"$BLOCK\"]" \
-        -H 'lava-cross-validation-max-participants: 1' \
-        -H 'lava-cross-validation-agreement-threshold: 1' >/dev/null
+        -H 'smartrouter-cross-validation-max-participants: 1' \
+        -H 'smartrouter-cross-validation-agreement-threshold: 1' >/dev/null
     note "status" "$(hdr status)"
     note "all-providers" "$(hdr all-providers)"
     note "agreeing-providers" "$(hdr agreeing-providers)"
@@ -267,11 +267,11 @@ $CONFIG_REL \
     wait_healthy "$ROUTER_PORT" "$ROUTER_SCREEN" || {
         echo "Tail of $ROUTER_LOG:"
         tail -n 30 "$ROUTER_LOG" 2>/dev/null | sed 's/^/    /'
-        die "the router never answered 200 on /lava/health"
+        die "the router never answered 200 on /smartrouter/health"
     }
     record_owned "$PIDFILE" "$ROUTER_PORT" "router" || exit 1
 
-    # A 200 from /lava/health is not a provider-readiness signal: the listener
+    # A 200 from /smartrouter/health is not a provider-readiness signal: the listener
     # starts in a goroutine while provider validation continues. Step [3] asks for
     # three providers, so a partially-validated fleet would fail it as
     # insufficient-capacity under a banner claiming UC-7 is broken.
@@ -291,14 +291,14 @@ Router is running — manual commands
 Plain relay — no cross-validation, no headers on the way back:
   curl -si -X POST http://127.0.0.1:${ROUTER_PORT} -H 'Content-Type: application/json' \\
     -d '{"jsonrpc":"2.0","method":"${METHOD}","params":["0x00000000000000000000000000000000000000ff","${BLOCK}"],"id":1}' \\
-    | grep -i '^lava-'
+    | grep -iE '^smart-?router-'
 
 The same request, with the caller opting in as it always could:
   curl -si -X POST http://127.0.0.1:${ROUTER_PORT} -H 'Content-Type: application/json' \\
-    -H 'lava-cross-validation-max-participants: 3' \\
-    -H 'lava-cross-validation-agreement-threshold: 2' \\
+    -H 'smartrouter-cross-validation-max-participants: 3' \\
+    -H 'smartrouter-cross-validation-agreement-threshold: 2' \\
     -d '{"jsonrpc":"2.0","method":"${METHOD}","params":["0x00000000000000000000000000000000000000fe","${BLOCK}"],"id":1}' \\
-    | grep -i '^lava-cross-validation'
+    | grep -i '^smartrouter-cross-validation'
 
 The two configs run the same six providers, so this diff is the feature and
 nothing else — the policy block, the group labels, and the listen port:
@@ -322,7 +322,7 @@ case "${1:-}" in
         [[ -f "$PIDFILE" ]] && echo "owned router pid: $(cut -d'|' -f1 "$PIDFILE")"
         exit 0 ;;
     --check)
-        router_healthy || die "no router answering 200 on :${ROUTER_PORT}/lava/health. Bring the lane up first: $0"
+        router_healthy || die "no router answering 200 on :${ROUTER_PORT}/smartrouter/health. Bring the lane up first: $0"
         checks ;;
     "")
         bring_up

@@ -111,7 +111,7 @@ func sendToEveryEndpointStale(t *testing.T, msg archiveRequest) (*relaycore.Rela
 // A session the consistency filter rejects was never asked, so it must leave the request's
 // dispatch history. UsedProviders filed it under the key it was taken with, and on the degraded
 // path that is the plain key, not the request's. A release under the request's key found nothing,
-// so the provider stayed in the history, and Lava-Retries then counted an attempt at a node that
+// so the provider stayed in the history, and Smart-Router-Retries then counted an attempt at a node that
 // never received the request (MAG-3762).
 func TestSendRelayToDirectEndpoints_ReleasesADegradedSessionUnderItsOwnKey(t *testing.T) {
 	relayProcessor := rejectEveryDegradedSession(t, archiveRequest{&MockProtocolMessage{
@@ -122,7 +122,7 @@ func TestSendRelayToDirectEndpoints_ReleasesADegradedSessionUnderItsOwnKey(t *te
 
 	usedProviders := relayProcessor.GetUsedProviders()
 	require.Empty(t, usedProviders.DispatchedProviders(),
-		"a rejected session was never asked, so it must not stay in the history Lava-Retries counts")
+		"a rejected session was never asked, so it must not stay in the history Smart-Router-Retries counts")
 	require.Equal(t, 0, usedProviders.SessionsLatestBatch())
 	require.Equal(t, 0, usedProviders.CurrentlyUsed())
 }

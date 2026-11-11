@@ -20,7 +20,7 @@
             },
             "apis": [
               {
-                "name": "lavatest.v1.BlockService/GetLatestBlock",
+                "name": "smartroutertest.v1.BlockService/GetLatestBlock",
                 "block_parsing": {
                   "parser_arg": [
                     "latest"
@@ -53,7 +53,7 @@
                   ],
                   "parser_func": "PARSE_CANONICAL"
                 },
-                "api_name": "lavatest.v1.BlockService/GetLatestBlock"
+                "api_name": "smartroutertest.v1.BlockService/GetLatestBlock"
               },
               {
                 "function_template": "%d",

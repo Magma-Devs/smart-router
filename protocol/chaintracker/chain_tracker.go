@@ -694,7 +694,7 @@ func (cs *ChainTracker) start(ctx context.Context) error {
 				// ban-type limit and add a strike (MAG-4165). It gets ErrorPollNowHeldOff — also the
 				// typed rate-limit error, the remaining wait as its Retry-After; nothing was sent, so
 				// nothing is recorded. An explicit PollNow (/debug/poll-now) goes through, as an explicit
-				// lava-select-provider outranks a relay hold-off: one asked-for request is the caller's call.
+				// smartrouter-select-provider outranks a relay hold-off: one asked-for request is the caller's call.
 				if heldFor := cs.rateLimitHeldFor(); req.respectHoldoff && heldFor > 0 {
 					req.resp <- common.RateLimited(fmt.Errorf("%w, %s left", ErrorPollNowHeldOff, heldFor.Round(time.Second)), heldFor)
 					continue

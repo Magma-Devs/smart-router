@@ -19,7 +19,7 @@ import (
 	"github.com/magma-Devs/smart-router/utils"
 )
 
-// TraceBodyFlag is the only Lava-specific tracing CLI flag.
+// TraceBodyFlag is the only router-specific tracing CLI flag.
 // Everything else comes from the standard OTel SDK environment variables, which
 // are auto-read by the OTel exporter packages and the autoexport contrib package.
 //
@@ -64,7 +64,7 @@ const defaultServiceName = "smartrouter"
 
 const shutdownTimeout = 5 * time.Second
 
-// TraceConfig holds Lava-specific tracing configuration.
+// TraceConfig holds router-specific tracing configuration.
 // Standard OTel knobs are read from environment variables — see TraceBodyFlag doc.
 type TraceConfig struct {
 	// TraceBody enables recording of request/response bodies as span attributes.
@@ -150,7 +150,7 @@ func New(ctx context.Context, cfg TraceConfig) (*TraceManager, error) {
 	otel.SetTextMapPropagator(propagator)
 
 	// Surface OTel SDK internal errors (export failures, batch drops, etc.) via
-	// the Lava logger. By default the SDK swallows these silently, which makes
+	// the router logger. By default the SDK swallows these silently, which makes
 	// "spans aren't reaching my collector" a frustrating black box to debug.
 	// We deliberately install this AFTER SetTracerProvider so the handler is
 	// not invoked during early SDK setup.

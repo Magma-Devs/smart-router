@@ -372,13 +372,13 @@ the other series; `reason="invalid"` counts names that no limit would admit.
 
 #### Extensions no node offers
 
-A caller can ask for an extension (`archive`, …) with the `lava-extension` request header. When no
+A caller can ask for an extension (`archive`, …) with the `smartrouter-extension` request header. When no
 node on the router offers it, the request is still served without it and the reply carries the
-`Lava-Extension-Unavailable` response header ([README](../protocol/rpcsmartrouter/README.md#extensions-no-node-offers)).
+`Smart-Router-Extension-Unavailable` response header ([README](../protocol/rpcsmartrouter/README.md#extensions-no-node-offers)).
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_extension_unavailable_total` | Counter | `spec`, `apiInterface`, `extension` | Requests served without an extension the caller asked for, once per request per such extension — the same replies that carry `Lava-Extension-Unavailable`. Never counts an extension the router adds on its own (`archive` for a deep `eth_call`). `extension` is bounded by the spec: only names the spec defines as extensions (plus `websocket`) can be recorded, so arbitrary caller values do not create series. Non-zero means callers depend on an extension this deployment has no node for. |
+| `smartrouter_extension_unavailable_total` | Counter | `spec`, `apiInterface`, `extension` | Requests served without an extension the caller asked for, once per request per such extension — the same replies that carry `Smart-Router-Extension-Unavailable`. Never counts an extension the router adds on its own (`archive` for a deep `eth_call`). `extension` is bounded by the spec: only names the spec defines as extensions (plus `websocket`) can be recorded, so arbitrary caller values do not create series. Non-zero means callers depend on an extension this deployment has no node for. |
 
 #### Errors
 
@@ -400,7 +400,7 @@ Prometheus counter, so it answers on a router run without `--metrics-listen-addr
   from the upstream: a refused or dropped connection, a body cut off or not JSON, a hang past the
   request's budget, or an attempt still silent when its window ran out. The last one counts even
   when a retry then answers and the attempt is cancelled, because the silence came first: a
-  provider in simulator mode `hang` behind a `lava-relay-timeout: 300ms` window gets its row
+  provider in simulator mode `hang` behind a `smartrouter-relay-timeout: 300ms` window gets its row
   although another provider answers the retry. These are not counted: an HTTP status (an answer),
   a request the router could not build, an attempt the router cancelled inside its window (a race
   it lost), anything on gRPC, a write, and the router's own health check. A client that hangs up
@@ -418,7 +418,7 @@ Prometheus counter, so it answers on a router run without `--metrics-listen-addr
 
 Both counts are per attempt: a retry that answered hides the first attempt from the caller, and
 this is where its classification shows. `chain_id`, `api_interface` and `provider` narrow the
-rows; `provider` matches `ProviderAddress`, the value `Lava-Provider-Address` carries. The counts
+rows; `provider` matches `ProviderAddress`, the value `Smart-Router-Provider-Address` carries. The counts
 are per process and cumulative for its lifetime, and no `/debug/reset-*` route clears them: the
 debug Service balances across a router's pods, so compare two readings only when their `PodID`
 matches.
@@ -433,7 +433,7 @@ matches.
 | `smartrouter_retry_attempts` | Histogram | `spec`, `apiInterface`, `method` | Attempts per retried request (buckets 1…10). |
 
 A hedged request is counted here as well. A hedge is an extra attempt, and these series are
-recorded from the same count as the `Lava-Retries` header, which includes every attempt the
+recorded from the same count as the `Smart-Router-Retries` header, which includes every attempt the
 router sent (MAG-1818), a hedge's losing attempt among them. The retry and hedging families
 therefore overlap, so do not add them together.
 
@@ -495,11 +495,11 @@ histogram_quantile(0.9,
 | `smartrouter_cross_validation_failed_total` | Counter | `spec`, `apiInterface`, `method` | Requests that did not return a consensus answer — quorum-time failures (no-agreement / diversity / per-group) **and** request-time structural fail-fasts that never tried (`insufficient-capacity` / `insufficient-groups`). `requests_total == success_total + failed_total`. |
 | `smartrouter_cross_validation_provider_agreements_total` | Counter | `spec`, `apiInterface`, `method`, `provider_address` | Times a provider agreed with consensus. |
 | `smartrouter_cross_validation_provider_disagreements_total` | Counter | `spec`, `apiInterface`, `method`, `provider_address` | Times a provider disagreed with consensus. |
-| `smartrouter_cross_validation_mismatch_total` | Counter | `spec`, `apiInterface`, `method`, `group`, `finality` | **Content outliers** by group: one increment **per distinct outlier group per successful deterministic cross-validation request** (a response whose `SHA256(reply.data)` diverged from the reached consensus) — not a per-provider counter. Only emitted when a quorum was reached; quorum failures and node/protocol errors are excluded (failures report a `lava-cross-validation-failure-reason` instead). `finality` is `finalized` / `not_finalized` / `unknown`; post-finality divergence is the high-signal alert. Bounded cardinality (keyed by operator-defined `group`, not provider address). |
-| `smartrouter_cross_validation_failures_total` | Counter | `spec`, `apiInterface`, `method`, `reason` | **Failures by reason** — the by-reason breakdown of `cross_validation_failed_total` (which stays unlabeled, so existing dashboards are unaffected). `reason` is the closed `lava-cross-validation-failure-reason` enum: quorum-time `no-agreement` / `insufficient-responses` / `diversity-unmet` / `group-quorum-unmet`, or request-time structural `insufficient-capacity` / `insufficient-groups`. Use it to separate a structural failure (client should fall back) from a quorum disagreement (a retry may help). Bounded cardinality (the reason set is a closed enum). |
-| `smartrouter_cross_validation_straggler_total` | Counter | `spec`, `apiInterface`, `method`, `outcome` | **Straggler resolutions** (MAG-2187): providers still in flight when the quorum early-exit built the reply (the `lava-cross-validation-pending-providers` header), classified against the reached consensus once their late response lands. `outcome` is the closed enum `agreed` / `disagreed` / `node-error` / `protocol-error` / `not-received` (nothing arrived before the watcher deadline). A late confirmed `disagreed` on a deterministic method also increments `_mismatch_total` for the straggler's group — deduped so the once-per-distinct-group-per-request contract holds across the reply-time and straggler paths combined. Only emitted when a quorum was reached. Bounded cardinality (closed outcome enum). |
+| `smartrouter_cross_validation_mismatch_total` | Counter | `spec`, `apiInterface`, `method`, `group`, `finality` | **Content outliers** by group: one increment **per distinct outlier group per successful deterministic cross-validation request** (a response whose `SHA256(reply.data)` diverged from the reached consensus) — not a per-provider counter. Only emitted when a quorum was reached; quorum failures and node/protocol errors are excluded (failures report a `smartrouter-cross-validation-failure-reason` instead). `finality` is `finalized` / `not_finalized` / `unknown`; post-finality divergence is the high-signal alert. Bounded cardinality (keyed by operator-defined `group`, not provider address). |
+| `smartrouter_cross_validation_failures_total` | Counter | `spec`, `apiInterface`, `method`, `reason` | **Failures by reason** — the by-reason breakdown of `cross_validation_failed_total` (which stays unlabeled, so existing dashboards are unaffected). `reason` is the closed `smartrouter-cross-validation-failure-reason` enum: quorum-time `no-agreement` / `insufficient-responses` / `diversity-unmet` / `group-quorum-unmet`, or request-time structural `insufficient-capacity` / `insufficient-groups`. Use it to separate a structural failure (client should fall back) from a quorum disagreement (a retry may help). Bounded cardinality (the reason set is a closed enum). |
+| `smartrouter_cross_validation_straggler_total` | Counter | `spec`, `apiInterface`, `method`, `outcome` | **Straggler resolutions** (MAG-2187): providers still in flight when the quorum early-exit built the reply (the `smartrouter-cross-validation-pending-providers` header), classified against the reached consensus once their late response lands. `outcome` is the closed enum `agreed` / `disagreed` / `node-error` / `protocol-error` / `not-received` (nothing arrived before the watcher deadline). A late confirmed `disagreed` on a deterministic method also increments `_mismatch_total` for the straggler's group — deduped so the once-per-distinct-group-per-request contract holds across the reply-time and straggler paths combined. Only emitted when a quorum was reached. Bounded cardinality (closed outcome enum). |
 
-> The `_mismatch_total` series is the group-level alerting surface for [outliers](../protocol/rpcsmartrouter/README.md#outlier-behavior). When enough providers still agree, a divergent provider is outvoted and recorded here; per-provider detail lives in the `cross-validation outlier detected` info log and the `lava-cross-validation-disagreeing-providers` header. Dissenters that answered *after* the quorum closed reach it through the [straggler path](../protocol/rpcsmartrouter/README.md#straggler-behavior) (`cross-validation straggler resolved` info log + `_straggler_total`).
+> The `_mismatch_total` series is the group-level alerting surface for [outliers](../protocol/rpcsmartrouter/README.md#outlier-behavior). When enough providers still agree, a divergent provider is outvoted and recorded here; per-provider detail lives in the `cross-validation outlier detected` info log and the `smartrouter-cross-validation-disagreeing-providers` header. Dissenters that answered *after* the quorum closed reach it through the [straggler path](../protocol/rpcsmartrouter/README.md#straggler-behavior) (`cross-validation straggler resolved` info log + `_straggler_total`).
 
 #### Cache
 
@@ -531,8 +531,8 @@ across `outcome`, where before `_failed_total` was a single series.
 > on a detached goroutine **after** the reply is written, and nothing orders the
 > two — so reading one straight after its reply is a race, and polling until it
 > settles makes the result depend on how long you waited rather than on what the
-> router did. Send the `lava-debug-relay` directive instead and read
-> `Lava-Cache-Tier` / `Lava-Cache-Outcome` off the reply, which cannot race
+> router did. Send the `smartrouter-debug-relay` directive instead and read
+> `Smart-Router-Cache-Tier` / `Smart-Router-Cache-Outcome` off the reply, which cannot race
 > because it *is* the reply. The `outcome` values are the same four, plus `off`
 > / `skipped` / `unknown` for a tier that was not consulted (those three never
 > label a metric — there was no lookup to count). See

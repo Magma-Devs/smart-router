@@ -51,7 +51,7 @@ var CacheTimeout = DefaultCacheTimeout
 // It can be overridden via the --min-relay-timeout flag on consumer and smart router commands.
 var MinimumTimePerRelayDelay = time.Second
 
-// MaxCallerRelayTimeout is the longest a caller's lava-relay-timeout header may make the router
+// MaxCallerRelayTimeout is the longest a caller's smartrouter-relay-timeout header may make the router
 // hold one request. It can be overridden via the --max-caller-relay-timeout flag on the smart
 // router command.
 //
@@ -64,7 +64,7 @@ var MinimumTimePerRelayDelay = time.Second
 // shortens a budget.
 var MaxCallerRelayTimeout time.Duration
 
-// MinCallerRelayTimeout is the shortest attempt window a caller's lava-relay-timeout header can ask
+// MinCallerRelayTimeout is the shortest attempt window a caller's smartrouter-relay-timeout header can ask
 // for. The window is the hedge interval, so a value far below one round trip makes the state
 // machine dispatch every attempt the retry limits allow before any endpoint could have answered:
 // a per-request fan-out, whatever the endpoints' health. It sits well under --min-relay-timeout on
@@ -129,7 +129,7 @@ func ValidateAndCapMinRelayTimeout() {
 	// Guard MaxCallerRelayTimeout < 0: a negative ceiling has no meaning. 0 is the default, and
 	// means a caller cannot extend a request's budget.
 	if MaxCallerRelayTimeout < 0 {
-		utils.FormatWarning("max-caller-relay-timeout is negative, resetting to 0 (a caller's lava-relay-timeout cannot extend a request's budget)",
+		utils.FormatWarning("max-caller-relay-timeout is negative, resetting to 0 (a caller's smartrouter-relay-timeout cannot extend a request's budget)",
 			nil,
 			utils.LogAttr("invalid_value", MaxCallerRelayTimeout),
 		)
@@ -140,7 +140,7 @@ func ValidateAndCapMinRelayTimeout() {
 	// Below the default budget it cannot extend anything, and it never shortens anything, so an
 	// operator who set it to cut requests short would otherwise see no effect and no reason.
 	if MaxCallerRelayTimeout > 0 && MaxCallerRelayTimeout <= DefaultTimeout {
-		utils.FormatWarning("max-caller-relay-timeout is not above default-processing-timeout, so it has no effect: it only lets a caller's lava-relay-timeout extend a request's budget, it never shortens one",
+		utils.FormatWarning("max-caller-relay-timeout is not above default-processing-timeout, so it has no effect: it only lets a caller's smartrouter-relay-timeout extend a request's budget, it never shortens one",
 			nil,
 			utils.LogAttr("max_caller_relay_timeout", MaxCallerRelayTimeout),
 			utils.LogAttr("default_processing_timeout", DefaultTimeout),
@@ -199,7 +199,7 @@ func GetTimeoutForProcessing(relayTimeout time.Duration, timeoutInfo TimeoutInfo
 	return ctxTimeout
 }
 
-// BoundCallerRelayTimeout turns the value of a caller's lava-relay-timeout header into the attempt
+// BoundCallerRelayTimeout turns the value of a caller's smartrouter-relay-timeout header into the attempt
 // window the router will use, and reports false when the value must be ignored in favour of
 // ownWindow, the window the router computes for the request by itself.
 //

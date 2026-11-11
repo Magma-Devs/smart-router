@@ -66,21 +66,21 @@ func TestSetProviderVerificationFailures_MovesToTheNewCheck(t *testing.T) {
 func TestSetProviderVerificationFailures_EachFailureStartsItsOwnClock(t *testing.T) {
 	m, clock := newVerificationFailedManager()
 	outAt := clock.advance(0)
-	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "static",
+	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "llama", "static",
 		[]ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "chain-id"}})
 	archiveAt := clock.advance(time.Minute)
-	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "static", []ProviderVerificationFailure{
+	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "llama", "static", []ProviderVerificationFailure{
 		{Scope: VerificationScopeProvider, Check: "chain-id"},
 		{Scope: VerificationScopeService, Service: "archive", Check: "pruning"},
 	})
-	require.Equal(t, outAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "lava", "static", "provider", "", "chain-id", "Fail")))
-	require.Equal(t, archiveAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "lava", "static", "service", "archive", "pruning", "PartialFail")))
+	require.Equal(t, outAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "llama", "static", "provider", "", "chain-id", "Fail")))
+	require.Equal(t, archiveAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "llama", "static", "service", "archive", "pruning", "PartialFail")))
 
-	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "static", nil)
+	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "llama", "static", nil)
 	againAt := clock.advance(time.Hour)
-	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "static",
+	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "llama", "static",
 		[]ProviderVerificationFailure{{Scope: VerificationScopeProvider, Check: "chain-id"}})
-	require.Equal(t, againAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "lava", "static", "provider", "", "chain-id", "Fail")),
+	require.Equal(t, againAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "llama", "static", "provider", "", "chain-id", "Fail")),
 		"a failure after recovery is a new one")
 }
 
@@ -89,10 +89,10 @@ func TestSetProviderVerificationFailures_RecoveryClearsOnlyThatProvider(t *testi
 	m, clock := newVerificationFailedManager()
 	started := clock.advance(0)
 	archive := []ProviderVerificationFailure{{Scope: VerificationScopeService, Service: "archive", Check: "pruning"}}
-	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "backup", archive)
+	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "llama", "backup", archive)
 	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "tatum", "static", archive)
 
-	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "backup", nil)
+	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "llama", "backup", nil)
 
 	require.Equal(t, 1, testutil.CollectAndCount(m.providerVerificationFailed))
 	require.Equal(t, started, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("ETH1", "jsonrpc", "tatum", "static", "service", "archive", "pruning", "PartialFail")))
@@ -115,12 +115,12 @@ func TestCountVerificationCheckFailure_OnePerRun(t *testing.T) {
 		),
 	}
 	archive := ProviderVerificationFailure{Scope: VerificationScopeService, Service: "archive", Check: "pruning"}
-	m.CountVerificationCheckFailure("ETH1", "jsonrpc", "lava", "backup", archive)
-	m.CountVerificationCheckFailure("ETH1", "jsonrpc", "lava", "backup", archive)
-	require.Equal(t, 2.0, testutil.ToFloat64(m.verificationCheckFailures.WithLabelValues("ETH1", "jsonrpc", "lava", "backup", "service", "archive", "pruning", "PartialFail")))
+	m.CountVerificationCheckFailure("ETH1", "jsonrpc", "llama", "backup", archive)
+	m.CountVerificationCheckFailure("ETH1", "jsonrpc", "llama", "backup", archive)
+	require.Equal(t, 2.0, testutil.ToFloat64(m.verificationCheckFailures.WithLabelValues("ETH1", "jsonrpc", "llama", "backup", "service", "archive", "pruning", "PartialFail")))
 
 	var nilManager *SmartRouterMetricsManager
-	require.NotPanics(t, func() { nilManager.CountVerificationCheckFailure("ETH1", "jsonrpc", "lava", "backup", archive) })
+	require.NotPanics(t, func() { nilManager.CountVerificationCheckFailure("ETH1", "jsonrpc", "llama", "backup", archive) })
 }
 
 // The severity label says what a failure costs, as MAG-3950 names it: Fail when it takes a
@@ -129,7 +129,7 @@ func TestCountVerificationCheckFailure_OnePerRun(t *testing.T) {
 func TestSetProviderVerificationFailures_SeverityFollowsWhatTheFailureCosts(t *testing.T) {
 	m, clock := newVerificationFailedManager()
 	started := clock.advance(0)
-	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "lava", "static", []ProviderVerificationFailure{
+	m.SetProviderVerificationFailures("ETH1", "jsonrpc", "llama", "static", []ProviderVerificationFailure{
 		{Scope: VerificationScopeProvider, Check: "chain-id"},
 		{Scope: VerificationScopeService, Service: "archive", Check: "pruning"},
 		{Scope: VerificationScopeURL, Check: "connect"},
@@ -142,7 +142,7 @@ func TestSetProviderVerificationFailures_SeverityFollowsWhatTheFailureCosts(t *t
 		{"url", "", "connect", "Fail"},
 		{"url", "debug", "enabled", "PartialFail"},
 	} {
-		require.Equal(t, started, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues(append([]string{"ETH1", "jsonrpc", "lava", "static"}, labels...)...)), labels)
+		require.Equal(t, started, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues(append([]string{"ETH1", "jsonrpc", "llama", "static"}, labels...)...)), labels)
 	}
 }
 
@@ -152,19 +152,19 @@ func TestSetProviderVerificationFailures_EachWarningStartsItsOwnClock(t *testing
 	m, clock := newVerificationFailedManager()
 	tokens := ProviderVerificationFailure{Scope: VerificationScopeNone, Check: "tokens-owner-indexed", Severity: VerificationSeverityWarning}
 	tokensAt := clock.advance(0)
-	m.SetProviderVerificationFailures("SOLANA", "jsonrpc", "lava", "static", []ProviderVerificationFailure{tokens})
+	m.SetProviderVerificationFailures("SOLANA", "jsonrpc", "llama", "static", []ProviderVerificationFailure{tokens})
 
 	txs := ProviderVerificationFailure{Scope: VerificationScopeNone, Check: "tx-history", Severity: VerificationSeverityWarning}
 	txsAt := clock.advance(time.Hour)
-	m.SetProviderVerificationFailures("SOLANA", "jsonrpc", "lava", "static", []ProviderVerificationFailure{tokens, txs})
-	require.Equal(t, tokensAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("SOLANA", "jsonrpc", "lava", "static", "none", "", "tokens-owner-indexed", "Warning")))
-	require.Equal(t, txsAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("SOLANA", "jsonrpc", "lava", "static", "none", "", "tx-history", "Warning")))
+	m.SetProviderVerificationFailures("SOLANA", "jsonrpc", "llama", "static", []ProviderVerificationFailure{tokens, txs})
+	require.Equal(t, tokensAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("SOLANA", "jsonrpc", "llama", "static", "none", "", "tokens-owner-indexed", "Warning")))
+	require.Equal(t, txsAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("SOLANA", "jsonrpc", "llama", "static", "none", "", "tx-history", "Warning")))
 
 	// The first clears and the second moves on: it is not the first one's failure.
 	clock.advance(time.Hour)
-	m.SetProviderVerificationFailures("SOLANA", "jsonrpc", "lava", "static", []ProviderVerificationFailure{txs})
+	m.SetProviderVerificationFailures("SOLANA", "jsonrpc", "llama", "static", []ProviderVerificationFailure{txs})
 	require.Equal(t, 1, testutil.CollectAndCount(m.providerVerificationFailed))
-	require.Equal(t, txsAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("SOLANA", "jsonrpc", "lava", "static", "none", "", "tx-history", "Warning")))
+	require.Equal(t, txsAt, testutil.ToFloat64(m.providerVerificationFailed.WithLabelValues("SOLANA", "jsonrpc", "llama", "static", "none", "", "tx-history", "Warning")))
 }
 
 // A caller that tracks its failures' starts (VerificationFailuresSince) publishes them as

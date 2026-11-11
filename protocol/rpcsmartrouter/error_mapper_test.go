@@ -109,7 +109,7 @@ func TestClassifyDirectRPCError_RateLimitByMessage(t *testing.T) {
 }
 
 func TestClassifyDirectRPCError_InternalVsExternal(t *testing.T) {
-	// Connection errors are internal (Lava protocol layer)
+	// Connection errors are internal (router protocol layer)
 	timeoutErr := &mockNetError{timeout: true}
 	routerErr, _ := classifyDirectRPCError(timeoutErr, -1, common.TransportJsonRPC)
 	assert.Equal(t, common.CategoryInternal, routerErr.Category)

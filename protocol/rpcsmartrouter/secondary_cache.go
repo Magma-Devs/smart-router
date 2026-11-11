@@ -219,7 +219,7 @@ func (rpcss *RPCSmartRouterServer) trySecondaryCacheLookup(
 	// The cache lookup report is what distinguishes this reply from a primary hit for
 	// the caller: both carry the same locally minted header set and the same bytes, so
 	// before MAG-3540 nothing in the response named the tier. It also picks which
-	// backend the debug-gated Lava-Cache-Backend header reports.
+	// backend the debug-gated Smart-Router-Cache-Backend header reports.
 	relayResult := cachedRelayResult(copyReply, localRelayData, cacheReply.GetStatusCode(), isNodeError, cacheReport.ServedBy(common.CacheTierSecondary))
 	// A cached node error is retried, or not, exactly like a live one.
 	rpcss.classifyCachedNodeError(protocolMessage, &relayResult, cacheReply.GetStatusCode())

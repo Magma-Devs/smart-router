@@ -346,7 +346,7 @@ func TestCrossValidationEvents_ReplyTimePathRecords(t *testing.T) {
 // TestCrossValidationEvents_ReplyTimeAgreementRecordsNothing guards the surface against becoming a
 // log of every cross-validated relay: with no outlier there is nothing to record. A test asserting
 // "no dissent happened" reads an empty result here and confirms the request ran from its own
-// response headers (lava-cross-validation-status / -agreeing-providers).
+// response headers (smartrouter-cross-validation-status / -agreeing-providers).
 func TestCrossValidationEvents_ReplyTimeAgreementRecordsNothing(t *testing.T) {
 	useCrossValidationEventRing(t, 32)
 	srv, _ := newCrossValidationEventTestServer(t)

@@ -658,7 +658,7 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	}, routerRequestLabels))
 	m.extensionUnavailableTotal = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "smartrouter_extension_unavailable_total",
-		Help: "Requests served without an extension the caller asked for with lava-extension, because no node on this router offers it, per extension. Counted once per request per such extension, on the same replies that carry the Lava-Extension-Unavailable response header. An extension the router adds on its own (archive for a deep eth_call) is never counted. Non-zero means callers depend on an extension this deployment has no node for.",
+		Help: "Requests served without an extension the caller asked for with smartrouter-extension, because no node on this router offers it, per extension. Counted once per request per such extension, on the same replies that carry the Smart-Router-Extension-Unavailable response header. An extension the router adds on its own (archive for a deep eth_call) is never counted. Non-zero means callers depend on an extension this deployment has no node for.",
 	}, []string{"spec", "apiInterface", "extension"}))
 
 	m.batchSize = registerOrReuse(prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -1202,7 +1202,7 @@ func (m *SmartRouterMetricsManager) resolveProviderNames(urlOrName string) []str
 	}
 	// Unregistered input is either a provider name (passed straight through by
 	// callers that already resolved it) or a url that never reached
-	// RegisterEndpoint. RedactIfURL leaves the name alone — a lava address is not
+	// RegisterEndpoint. RedactIfURL leaves the name alone — a provider address is not
 	// a url — and keeps a node-url's api key out of a scraped, retained label.
 	return []string{utils.RedactIfURL(urlOrName)}
 }
@@ -1494,7 +1494,7 @@ func (m *SmartRouterMetricsManager) RecordCacheResult(chainId, apiInterface, met
 // extension no node on this router offers (MAG-3935). The extension label is bounded without a
 // registry of its own: only names the spec defines as extensions (plus "websocket") survive
 // SeparateAddonsExtensions before they can be recorded as unavailable, so a caller cannot mint
-// series by sending arbitrary lava-extension values.
+// series by sending arbitrary smartrouter-extension values.
 func (m *SmartRouterMetricsManager) RecordExtensionUnavailable(chainId, apiInterface, extension string) {
 	if m == nil {
 		return

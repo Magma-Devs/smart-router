@@ -7,7 +7,7 @@ func TestRender(t *testing.T) {
 		Metrics: "0.0.0.0:7779", Cache: true,
 		Listeners: []Listener{{ChainID: "ETH1", Iface: "jsonrpc", Port: 3360}},
 		Primary: []Upstream{{
-			Name: "eth-lava", ChainID: "ETH1", Iface: "jsonrpc",
+			Name: "eth-public", ChainID: "ETH1", Iface: "jsonrpc",
 			URLs:   []string{"https://eth1.lava.build", "wss://eth1.lava.build/websocket"},
 			Addons: []string{"debug", "trace"},
 		}, {
@@ -28,7 +28,7 @@ func TestRender(t *testing.T) {
 	must := []string{
 		`cache-be: "cache:20100"`, `chain-id: "ETH1"`,
 		`- url: "wss://eth1.lava.build/websocket"`, `addons: ["debug"]`, `addons: ["trace"]`,
-		`- name: "eth-lava"`, `- name: "eth-keyed"`,
+		`- name: "eth-public"`, `- name: "eth-keyed"`,
 		`auth-config:`, `x-api-key: "${RPC_KEY_ETH1}"`, "backup-direct-rpc:",
 	}
 	for _, m := range must {
@@ -37,22 +37,22 @@ func TestRender(t *testing.T) {
 		}
 	}
 	// Capabilities are NOT separate providers — there must be no "<name>-<addon>"
-	// provider entry. (Older layout emitted eth-lava-debug / eth-lava-trace.)
-	for _, bad := range []string{`- name: "eth-lava-debug"`, `- name: "eth-lava-trace"`} {
+	// provider entry. (Older layout emitted eth-public-debug / eth-public-trace.)
+	for _, bad := range []string{`- name: "eth-public-debug"`, `- name: "eth-public-trace"`} {
 		if contains(tpl, bad) {
 			t.Errorf("YAML must NOT split capabilities into providers, found %q\n---\n%s", bad, tpl)
 		}
 	}
-	// The ws url appears exactly once — under the single eth-lava provider.
+	// The ws url appears exactly once — under the single eth-public provider.
 	if n := countOf(tpl, `- url: "wss://eth1.lava.build/websocket"`); n != 1 {
 		t.Errorf("ws url must appear once, got %d\n---\n%s", n, tpl)
 	}
-	// The http url appears 3× under eth-lava: the base node-url + the debug
+	// The http url appears 3× under eth-public: the base node-url + the debug
 	// addon node-url + the trace addon node-url — all in one provider.
 	if n := countOf(tpl, `- url: "https://eth1.lava.build"`); n != 3 {
-		t.Errorf("eth-lava http url should appear 3× (base + debug + trace node-urls), got %d\n---\n%s", n, tpl)
+		t.Errorf("eth-public http url should appear 3× (base + debug + trace node-urls), got %d\n---\n%s", n, tpl)
 	}
-	// One provider per upstream: eth-lava + eth-keyed (primary) + eth-bk (backup),
+	// One provider per upstream: eth-public + eth-keyed (primary) + eth-bk (backup),
 	// plus the single listener → 4 api-interface lines total.
 	if n := countOf(tpl, `    api-interface: "jsonrpc"`); n != 4 {
 		// 1 listener + 2 primary providers + 1 backup provider = 4 occurrences

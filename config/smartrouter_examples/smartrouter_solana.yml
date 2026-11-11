@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — Solana (SOLANA)
-# Mode: Direct connections to public Solana JSON-RPC endpoints (no Lava providers!)
+# Mode: Direct connections to public Solana JSON-RPC endpoints (no provider-relay network — direct upstreams)
 #
 # 2 upstreams (HTTP):
 #   1. PublicNode               (solana-rpc.publicnode.com)

@@ -43,7 +43,7 @@ def rpc(method, params, sticky=None, request_id=1):
     body = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}).encode()
     headers = {"Content-Type": "application/json", "Connection": "close"}
     if sticky:
-        headers["lava-stickiness"] = sticky
+        headers["smartrouter-stickiness"] = sticky
     req = urllib.request.Request(INGRESS, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=30) as response:
         return json.loads(response.read()), response.headers.get("X-Router-Pod", "unknown")

@@ -28,7 +28,7 @@ import (
 )
 
 // DirectRPCRelaySender handles sending relay requests directly to RPC endpoints
-// (bypassing the Lava provider-relay protocol)
+// (bypassing the provider-relay protocol)
 type DirectRPCRelaySender struct {
 	directConnection    routersession.DirectRPCConnection
 	endpointName        string             // Sanitized endpoint name (no API keys)
@@ -659,14 +659,14 @@ func (d *DirectRPCRelaySender) sendJSONRPCRelay(
 	latestBlockFromResponse := extractBlockHeightFromJSONResponse(responseData, chainMessage)
 
 	// Convert response headers to metadata (same as REST path)
-	// This enables Provider-Latest-Block, lava-identified-node-error, and upstream hints
+	// This enables Provider-Latest-Block, smartrouter-identified-node-error, and upstream hints
 	responseMetadata := convertHTTPHeadersToMetadata(response.Headers)
 
 	// A 429 is not a node error whatever its body says, as on REST and GraphQL: the upstream refused
 	// for rate before any node answered, and relayInnerDirect fails the attempt on the status alone.
 	// CheckResponseError reads the body only, as its other callers need, and finds a prose or HTML
 	// 429 a malformed reply, so the flag rode the failed relay out to the client as
-	// lava-identified-node-error: true on a request no node answered (MAG-3030). The classification
+	// smartrouter-identified-node-error: true on a request no node answered (MAG-3030). The classification
 	// below still runs on hasError, so the rate limit keeps its flags.
 	isNodeError := hasError && statusCode != http.StatusTooManyRequests
 
@@ -1150,7 +1150,7 @@ func (d *DirectRPCRelaySender) sendGRPCRelay(
 			//     was served to the client as a success and was cacheable (MAG-2549).
 			//   - `Code >= 13` additionally left DeadlineExceeded (4) and every other
 			//     sub-13 code marked as not-a-node-error, which is what gates the
-			//     cache write and the lava-identified-node-error header.
+			//     cache write and the smartrouter-identified-node-error header.
 			//
 			// response.StatusCode is the same value the error carried (handleGRPCError
 			// builds both from one errorCode), so this loses nothing.

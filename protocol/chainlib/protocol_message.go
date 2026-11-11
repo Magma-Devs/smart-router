@@ -63,7 +63,7 @@ func (bpm *BaseProtocolMessage) HashCacheRequest(chainId string) ([]byte, func([
 	return bpm.cacheKey.key, bpm.cacheKey.formatter, bpm.cacheKey.err
 }
 
-// explicitExtensionDirective returns the normalized value of the client's lava-extension directive
+// explicitExtensionDirective returns the normalized value of the client's smartrouter-extension directive
 // header, or "" when absent. Normalization makes equivalent directives such as "Archive",
 // " archive " and "archive,debug"/"debug,archive" collapse to the same cache lane.
 func (bpm *BaseProtocolMessage) explicitExtensionDirective() string {
@@ -133,7 +133,7 @@ func (bpm *BaseProtocolMessage) UpdateEarliestAndValidateExtensionRules(extensio
 	return false
 }
 
-// GetBlockedProviders returns every provider the caller excluded with lava-providers-block.
+// GetBlockedProviders returns every provider the caller excluded with smartrouter-providers-block.
 //
 // There is no cap on the count (MAG-3080). One used to silently drop the WHOLE list at three or
 // more names, so the request could land on exactly the providers the caller excluded. Nothing

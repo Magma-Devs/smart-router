@@ -32,7 +32,7 @@
 #     is a PER-NODE question: the smoke scans every master and shows the
 #     split. A handful of smoke keys may well land on only one or two masters
 #     — that is hashing, not a failure; the assertion is total > 0.
-#   - Lava-Cache-Backend names the node the client LAST dialed, so on a hit
+#   - Smart-Router-Cache-Backend names the node the client LAST dialed, so on a hit
 #     expect ONE OF the three masters, not always :7001.
 #   - SCAN is per-node, and multi-key DEL would CROSSSLOT — --flush therefore
 #     scans each master and deletes its keys one by one on that same node.
@@ -482,11 +482,11 @@ if [[ "$SKIP_SMOKE" != "1" ]]; then
 
     HEALTH=""
     for _ in $(seq 1 30); do
-        HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/lava/health")
+        HEALTH=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://127.0.0.1:${ROUTER_PORT}/smartrouter/health")
         [[ "$HEALTH" == "200" ]] && break
         sleep 1
     done
-    [[ "$HEALTH" == "200" ]] && note "router /lava/health" "200" || { note "router /lava/health" "$HEALTH (want 200)"; SMOKE_FAIL=1; }
+    [[ "$HEALTH" == "200" ]] && note "router /smartrouter/health" "200" || { note "router /smartrouter/health" "$HEALTH (want 200)"; SMOKE_FAIL=1; }
 
     # The gauge is driven by a periodic probe (3s budget — WAN-tolerant); give
     # it a couple of cycles rather than sampling once.
@@ -528,7 +528,7 @@ if [[ "$SKIP_SMOKE" != "1" ]]; then
     done
     if [[ "$HIT_OK" == "1" ]]; then
         note "cache_success_total" "$(hits) (>0)"
-        HDR=$(curl -s -D - -o /dev/null -m 20 -X POST "http://127.0.0.1:${ROUTER_PORT}" -H 'Content-Type: application/json' -d "$RELAY_FIXED" | grep -i '^Lava-Cache-Backend' | tr -d '\r')
+        HDR=$(curl -s -D - -o /dev/null -m 20 -X POST "http://127.0.0.1:${ROUTER_PORT}" -H 'Content-Type: application/json' -d "$RELAY_FIXED" | grep -i '^Smart-Router-Cache-Backend' | tr -d '\r')
         [[ -n "$HDR" ]] && note "hit served by" "${HDR#*: } (one of the masters — last dialed)"
     else
         # connected=1 + keys present + zero hits means lookups still time out:
@@ -583,11 +583,11 @@ One-time in your shell (paste as-is), then use 'vc <node> <COMMAND>':
      vc <node-that-has-it> TTL '<paste a key>'
 
 4. Repeat the SAME relay and look at the headers — a hit is served as
-   "Cached"; Lava-Cache-Backend names the LAST-DIALED node, so expect ONE OF
+   "Cached"; Smart-Router-Cache-Backend names the LAST-DIALED node, so expect ONE OF
    the masters (not always :${SEED0##*:}):
      curl -s -D - -o /dev/null -X POST http://127.0.0.1:${ROUTER_PORT} -H 'Content-Type: application/json' \\
        -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x112a880",false],"id":1}' \\
-       | grep -iE 'lava-(provider-address|cache-backend)'
+       | grep -iE 'smart-router-(provider-address|cache-backend)'
      # (hits work even far from the cluster — the lane raised the lookup
      #  budget with --cache-timeout ${CACHE_TIMEOUT}; the production default is 50ms)
 

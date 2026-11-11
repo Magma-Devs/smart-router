@@ -1,5 +1,5 @@
 # Smart Router Direct RPC Configuration — Ethereum with a two-tier cache
-# Mode: Direct connections to Ethereum JSON-RPC endpoints (no Lava providers!)
+# Mode: Direct connections to Ethereum JSON-RPC endpoints (no provider-relay network — direct upstreams)
 #
 # Same as smartrouter_eth_cached.yml, plus a read-only SECONDARY cache tier
 # (docs/SECONDARY-CACHE.md): consulted when the primary produces no hit, before

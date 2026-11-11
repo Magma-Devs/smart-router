@@ -36,7 +36,7 @@ var escapedURLInText = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*:\\/\\/(?:[^`
 
 // schemeLessURLInText matches a credential-bearing scheme-less node url while
 // requiring a recognizable host. That keeps ordinary prose, provider names,
-// lava addresses and bare host:port values untouched.
+// provider addresses and bare host:port values untouched.
 var schemeLessURLInText = regexp.MustCompile(`\b(?:(?:localhost|(?:[a-zA-Z0-9-]+\.)+[a-zA-Z0-9-]+)(?::[0-9]+)?|[a-zA-Z0-9-]+:[0-9]+)(?:[/#][^` + urlStop + `?]*(?:\?[^` + queryStop + `]*)?|\?[^` + queryStop + `]+)`)
 
 // RedactURL reduces one url to scheme://host[:port]. Upstream vendors carry the
@@ -79,7 +79,7 @@ func RedactURL(raw string) string {
 
 // RedactIfURL redacts s only when it looks like a url — it carries a "://"
 // scheme, or a path/query/fragment delimiter. Anything else comes back
-// untouched, which matters where the input is a url OR an identifier: a lava
+// untouched, which matters where the input is a url OR an identifier: a
 // provider address ("provider@provider") is not a url, and RedactURL would read its
 // "@" as userinfo and drop the prefix.
 func RedactIfURL(s string) string {

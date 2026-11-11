@@ -192,12 +192,12 @@ func TestResetValidAddresses_DoesNotBlameASubscription(t *testing.T) {
 // epochs is the failure it exists to catch.
 func TestDiffAddressSets_ReportsWhatChanged(t *testing.T) {
 	added, removed, carried := diffAddressSets(
-		[]string{"tatum", "lava", "blockdaemon"},
-		[]string{"lava", "blockdaemon", "chainstack"},
+		[]string{"tatum", "llama", "blockdaemon"},
+		[]string{"llama", "blockdaemon", "chainstack"},
 	)
 	assertAddresses(t, "added", added, []string{"chainstack"})
 	assertAddresses(t, "removed", removed, []string{"tatum"})
-	assertAddresses(t, "carried_over", carried, []string{"blockdaemon", "lava"})
+	assertAddresses(t, "carried_over", carried, []string{"blockdaemon", "llama"})
 }
 
 // Inputs come from Go map iteration, which is deliberately randomised. Unsorted output would read as
@@ -215,13 +215,13 @@ func TestDiffAddressSets_OutputIsSortedRegardlessOfInputOrder(t *testing.T) {
 // both render as "" — so this is a contract for the callers: a result is always safe to range over
 // and append to without a nil check.
 func TestDiffAddressSets_UnchangedMembershipRendersEmptyNotNil(t *testing.T) {
-	added, removed, carried := diffAddressSets([]string{"lava"}, []string{"lava"})
+	added, removed, carried := diffAddressSets([]string{"llama"}, []string{"llama"})
 	if added == nil || removed == nil {
 		t.Fatalf("added/removed must be non-nil when nothing changed, got added=%#v removed=%#v", added, removed)
 	}
 	assertAddresses(t, "added", added, []string{})
 	assertAddresses(t, "removed", removed, []string{})
-	assertAddresses(t, "carried_over", carried, []string{"lava"})
+	assertAddresses(t, "carried_over", carried, []string{"llama"})
 }
 
 // "Never updated" and "updated at the zero time" are different states; only one of them is real.

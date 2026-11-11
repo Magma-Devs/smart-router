@@ -219,18 +219,18 @@ call() {
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":${params},\"id\":1}"
 }
 
-hdr() { grep -i "^lava-cross-validation-$1:" "$HDR" | head -1 | tr -d '\r' | cut -d' ' -f2-; }
-cv_present() { grep -qi '^lava-cross-validation-' "$HDR"; }
+hdr() { grep -i "^smartrouter-cross-validation-$1:" "$HDR" | head -1 | tr -d '\r' | cut -d' ' -f2-; }
+cv_present() { grep -qi '^smartrouter-cross-validation-' "$HDR"; }
 count_csv() { printf '%s' "$1" | tr ',' '\n' | grep -c '[^[:space:]]' | tr -d ' '; }
 
 # router_healthy [port] : strictly 200, not merely "curl connected".
 #
-# `curl -o /dev/null` exits 0 on a 503, and /lava/health answers 503 while the
+# `curl -o /dev/null` exits 0 on a 503, and /smartrouter/health answers 503 while the
 # router is up but not serving — so a lax probe accepts exactly the state that
 # makes every downstream check fail with an empty header dump.
 router_healthy() {
     local port="${1:-$ROUTER_PORT}"
-    [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:${port}/lava/health" 2>/dev/null)" == "200" ]]
+    [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 5 "http://127.0.0.1:${port}/smartrouter/health" 2>/dev/null)" == "200" ]]
 }
 
 # wait_healthy <port> [screen-name] : poll until the listener answers 200. Gives
@@ -249,9 +249,9 @@ wait_healthy() {
 }
 
 # wait_providers <port> <expected> <method> : poll until a header-driven
-# cross-validated call sees <expected> providers in lava-cross-validation-all-providers.
+# cross-validated call sees <expected> providers in smartrouter-cross-validation-all-providers.
 #
-# A 200 from /lava/health is NOT a provider-readiness signal — the listener
+# A 200 from /smartrouter/health is NOT a provider-readiness signal — the listener
 # starts in a goroutine while provider validation is still running, so a request
 # issued straight after it can see a partial fleet and fail
 # insufficient-capacity. This polls the thing that actually matters. It warms on
@@ -262,8 +262,8 @@ wait_providers() {
     for i in $(seq 1 45); do
         curl -s -m 20 -D "$HDR" -o /dev/null -X POST "http://127.0.0.1:${port}" \
             -H 'Content-Type: application/json' \
-            -H "lava-cross-validation-max-participants: ${expected}" \
-            -H "lava-cross-validation-agreement-threshold: 2" \
+            -H "smartrouter-cross-validation-max-participants: ${expected}" \
+            -H "smartrouter-cross-validation-agreement-threshold: 2" \
             -d "{\"jsonrpc\":\"2.0\",\"method\":\"${method}\",\"params\":[\"$(addr $((900 + i)))\",\"latest\"],\"id\":1}" \
             2>/dev/null || true
         n=$(count_csv "$(hdr all-providers)")

@@ -27,7 +27,7 @@ Cross-validation only does something useful when both pieces are present:
    api-interface)`, each tagged with a `group-label` (vendor / operator / region). Providers
    with no label fold into the implicit `"default"` group.
 2. **A policy (or caller headers) that mandates a quorum.** Either a per-request header
-   (`lava-cross-validation-*`) or a per-method `cross-validation:` policy block. The two
+   (`smartrouter-cross-validation-*`) or a per-method `cross-validation:` policy block. The two
    compose as `clamp(caller, floor, cap)`.
 
 ```yaml
@@ -80,7 +80,7 @@ they contain (see [Caveats](#caveats)).
 
 With no policy for a **stateless** method the caller's headers are the only authority, and any
 self-consistent shape is honored — including the degenerate `max-participants: 1` with
-`agreement-threshold: 1`, which returns `lava-cross-validation-status: success` after a
+`agreement-threshold: 1`, which returns `smartrouter-cross-validation-status: success` after a
 single response because the requested quorum of one was met. Nothing is compared in that
 case; `…-all-providers` and `…-agreeing-providers` each list the one provider queried, so a
 client that needs real corroboration should read those lists rather than `status` alone.
@@ -124,7 +124,7 @@ here for naming a chain/api and method the router serves.
 ## What the caller sees
 
 A cross-validated response carries headers describing the quorum
-(`lava-cross-validation-status`, `…-agreeing-providers`, `…-disagreeing-providers`,
+(`smartrouter-cross-validation-status`, `…-agreeing-providers`, `…-disagreeing-providers`,
 `…-pending-providers`, and on failure `…-failure-reason`, `…-plurality-size` and
 `…-plurality-providers`). The quorum early-exits once the
 threshold is met, so a provider that answers too late is reported as **pending** rather than
@@ -191,7 +191,7 @@ recording path) for test suites that cannot scrape the metrics port — see
   `diversity-unmet` (or `group-quorum-unmet` in per-group mode) at once, rather than waiting
   out the processing budget. This is the same window that paces hedging: usually
   `--min-relay-timeout`, but longer for a heavy or hanging method. The spec's `timeout_ms` or
-  the caller's `lava-relay-timeout` replaces it where set. A provider in such a group that is
+  the caller's `smartrouter-relay-timeout` replaces it where set. A provider in such a group that is
   slower than the window fails the request when the quorum cannot be completed without it,
   even if it would have answered within the budget. While a provider from a group at least
   as large as the threshold could still complete a quorum, on any response, the request
@@ -282,7 +282,7 @@ It ends with a self-check, so a broken stack is caught before you start:
 
 ```
 [Smoke] policy load -> fan-out -> quorum
-    router /lava/health                    200
+    router /smartrouter/health                    200
     policies loaded                        policies=7
     distinct groups                        distinctGroups=3
     mandated cross-validation              success

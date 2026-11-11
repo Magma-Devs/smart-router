@@ -187,12 +187,12 @@ if [[ "$RUN_DEMO" == "1" ]]; then
 
     echo ""
     echo "Step 2: same request via router-external (:3360) — expect a SECONDARY hit (served as Cached)"
-    STEP2_HDR=$(curl -s -D - -o /dev/null -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' -d "$DEMO_BODY" | grep -i 'lava-provider-address')
+    STEP2_HDR=$(curl -s -D - -o /dev/null -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' -d "$DEMO_BODY" | grep -i 'smart-router-provider-address')
     echo "  $STEP2_HDR"
 
     echo ""
     echo "Step 3: repeat immediately — expect a PRIMARY hit (backfill landed)"
-    STEP3_HDR=$(curl -s -D - -o /dev/null -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' -d "$DEMO_BODY" | grep -i 'lava-provider-address')
+    STEP3_HDR=$(curl -s -D - -o /dev/null -X POST http://127.0.0.1:3360 -H 'Content-Type: application/json' -d "$DEMO_BODY" | grep -i 'smart-router-provider-address')
     echo "  $STEP3_HDR"
 
     echo ""
@@ -226,7 +226,7 @@ echo "Step 2: same request via the EXTERNAL router — primary misses, SECONDARY
 echo "  curl -v -X POST http://127.0.0.1:3360 \\"
 echo "    -H 'Content-Type: application/json' \\"
 echo "    -d '$DEMO_BODY'"
-echo "  # response header: Lava-Provider-Address: Cached"
+echo "  # response header: Smart-Router-Provider-Address: Cached"
 echo ""
 echo "Step 3: repeat step 2 — the PRIMARY now hits (populator backfilled it):"
 echo "  # same curl; verify the tier split in metrics:"

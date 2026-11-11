@@ -86,7 +86,7 @@ func TestExtensionUnavailableHeader_WarnsOncePerExtensionButHeadersEveryRequest(
 
 // The router adds archive on its own to an eth_call deep behind the head. The caller did not ask
 // for it, so on a fleet without an archive node that must not come back as the header: it names
-// only what the caller asked for with lava-extension. Driven through ParseRelay, so the caller's
+// only what the caller asked for with smartrouter-extension. Driven through ParseRelay, so the caller's
 // directive and the router's promotion arrive the way a real request brings them.
 func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T) {
 	const tip = 1_000_000
@@ -116,7 +116,7 @@ func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T)
 		reported []string
 	}{
 		{"the router's own archive promotion is not reported", ethCallAt(tip - 1000), nil, nil},
-		{"the caller's lava-extension is still reported", ethCallAt(tip), askForArchive, []string{extensionslib.ArchiveExtension}},
+		{"the caller's smartrouter-extension is still reported", ethCallAt(tip), askForArchive, []string{extensionslib.ArchiveExtension}},
 		{"asked for by the caller and the router, reported once", ethCallAt(tip - 1000), askForArchive, []string{extensionslib.ArchiveExtension}},
 	}
 	for _, tc := range cases {
@@ -154,7 +154,7 @@ func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T)
 // Literal strings cannot reproduce this; it takes a real listener and ONE connection. The handler
 // does what the JSON-RPC listener did before MAG-3881 (GetReqHeaders, then strings.Join per header, which returns
 // a lone value itself rather than a copy), on an app configured like the router's (not Immutable).
-// Both values are seven bytes and lava-extension is the only non-special header, so the second
+// Both values are seven bytes and smartrouter-extension is the only non-special header, so the second
 // request's value lands in the very slot the first one's did.
 func TestExtensionUnavailableHeader_WarnRegisterSurvivesKeepAliveBufferReuse(t *testing.T) {
 	const tip = 1_000_000
@@ -200,7 +200,7 @@ func TestExtensionUnavailableHeader_WarnRegisterSurvivesKeepAliveBufferReuse(t *
 	send := func(extension string) *http.Response {
 		t.Helper()
 		body := `{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}`
-		request := fmt.Sprintf("POST / HTTP/1.1\r\nHost: router\r\nContent-Type: application/json\r\nLava-Extension: %s\r\nContent-Length: %d\r\n\r\n%s",
+		request := fmt.Sprintf("POST / HTTP/1.1\r\nHost: router\r\nContent-Type: application/json\r\nSmartrouter-Extension: %s\r\nContent-Length: %d\r\n\r\n%s",
 			extension, len(body), body)
 		_, err := conn.Write([]byte(request))
 		require.NoError(t, err)
@@ -257,7 +257,7 @@ func extensionUnavailableCount(t *testing.T, spec string) map[string]float64 {
 }
 
 // The operator counter fires on every request that carries the header, where the WARN fires once.
-// Its extension label takes only names the spec defines: a made-up lava-extension is dropped before
+// Its extension label takes only names the spec defines: a made-up smartrouter-extension is dropped before
 // it can be recorded, so callers cannot mint series.
 func TestExtensionUnavailableHeader_CountsEveryRequestAndOnlySpecExtensions(t *testing.T) {
 	// A spec label no other test uses, so the default registry's series are this test's alone.

@@ -2,7 +2,7 @@ package common
 
 // ---------------------------------------------------------------------------
 // Layer A: Protocol Errors (Internal) — range 1000-1999
-// Errors raised from within the Lava protocol itself — not from nodes or chains.
+// Errors raised from within the router itself — not from nodes or chains.
 // ---------------------------------------------------------------------------
 
 var (
@@ -95,7 +95,7 @@ var (
 	RouterErrorRateLimited = registerError(&RouterError{
 		Code: 1020, Name: "PROTOCOL_RATE_LIMITED", Category: CategoryInternal,
 		SubCategory: SubCategoryRateLimit,
-		Description: "Lava-side rate limit exceeded", Retryable: false,
+		Description: "Router-side rate limit exceeded", Retryable: false,
 	})
 	RouterErrorMaxCUExceeded = registerError(&RouterError{
 		Code: 1021, Name: "PROTOCOL_MAX_CU_EXCEEDED", Category: CategoryInternal,

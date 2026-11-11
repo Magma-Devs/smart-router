@@ -35,7 +35,7 @@ func vendorHeaders(w http.ResponseWriter) {
 	h.Set("Set-Cookie", "__cf_bm=abc; Path=/")
 	h.Set("X-RateLimit-Remaining", "99")
 	h.Set(common.PROVIDER_ADDRESS_HEADER_NAME, "somebody-else")
-	h.Set("lava-cross-validation-status", "success")
+	h.Set("smartrouter-cross-validation-status", "success")
 	h.Set("X-Cosmos-Block-Height", "12345")
 }
 

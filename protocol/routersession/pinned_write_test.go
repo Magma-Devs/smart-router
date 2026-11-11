@@ -11,9 +11,9 @@ import (
 )
 
 // MAG-4382 (product decision A): a pinned write goes to the pinned provider only. A write is
-// normally broadcast to every primary, but a pin, by lava-select-provider or lava-stickiness, means
+// normally broadcast to every primary, but a pin, by smartrouter-select-provider or smartrouter-stickiness, means
 // "only this provider" on reads and writes alike, so a pinned write gives up the broadcast. The
-// caller sees who received it in lava-fast-tx-participants.
+// caller sees who received it in smartrouter-fast-tx-participants.
 //
 // Both pin branches of selectProviderAddresses return before getProvidersForStatefulCalls runs, so
 // nothing else enforces this. These tests do, so a change to the broadcast cannot quietly start
@@ -43,13 +43,13 @@ func TestPinnedWrite_GoesToThePinnedProviderOnly(t *testing.T) {
 		require.Equal(t, primaries, selectWriteAndRelease(t, csm, "", ""))
 	})
 
-	t.Run("lava-select-provider", func(t *testing.T) {
+	t.Run("smartrouter-select-provider", func(t *testing.T) {
 		csm := setupStatefulCSM(t, primaries, nil)
 		require.Equal(t, []string{"primary-b"}, selectWriteAndRelease(t, csm, "", "primary-b"),
-			"a write pinned with lava-select-provider must reach the pinned provider only")
+			"a write pinned with smartrouter-select-provider must reach the pinned provider only")
 	})
 
-	t.Run("lava-stickiness", func(t *testing.T) {
+	t.Run("smartrouter-stickiness", func(t *testing.T) {
 		csm := setupStatefulCSM(t, primaries, nil)
 		first := selectWriteAndRelease(t, csm, "session-1", "")
 		require.Len(t, first, 1, "a sticky write must reach its session's provider only, got %v", first)

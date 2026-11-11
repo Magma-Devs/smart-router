@@ -59,13 +59,13 @@ func TestGrpcParseMsgRefusesAHeaderGRPCCannotSend(t *testing.T) {
 
 func TestReplyMetadataValuesAreSendable(t *testing.T) {
 	md := convertRelayMetaDataToMDMetaData([]pairingtypes.Metadata{
-		{Name: "lava-user-request-type", Value: "Default-cosmos.Foo/\xff 50%"},
-		{Name: "lava-identified-node-error", Value: "true"},
+		{Name: "smartrouter-user-request-type", Value: "Default-cosmos.Foo/\xff 50%"},
+		{Name: "smartrouter-identified-node-error", Value: "true"},
 		{Name: "trace-bin", Value: "\xff"},
 	})
-	require.Equal(t, []string{"Default-cosmos.Foo/%FF 50%25"}, md["lava-user-request-type"])
-	require.Equal(t, []string{"true"}, md["lava-identified-node-error"], "a sendable value is unchanged")
+	require.Equal(t, []string{"Default-cosmos.Foo/%FF 50%25"}, md["smartrouter-user-request-type"])
+	require.Equal(t, []string{"true"}, md["smartrouter-identified-node-error"], "a sendable value is unchanged")
 	require.Equal(t, []string{"\xff"}, md["trace-bin"], "binary headers are left alone")
-	_, bad := unsendableGrpcHeader([]pairingtypes.Metadata{{Name: "lava-user-request-type", Value: md["lava-user-request-type"][0]}})
+	_, bad := unsendableGrpcHeader([]pairingtypes.Metadata{{Name: "smartrouter-user-request-type", Value: md["smartrouter-user-request-type"][0]}})
 	require.False(t, bad)
 }

@@ -83,9 +83,9 @@ func NewGRPCClientRateLimiter(config *GRPCStreamingConfig) *GRPCClientRateLimite
 // gRPC streaming metadata header keys for subscription routing
 const (
 	// MetadataGRPCSubscriptionID is the header key for router-assigned subscription ID
-	MetadataGRPCSubscriptionID = "x-lava-grpc-sub-id"
+	MetadataGRPCSubscriptionID = "x-smartrouter-grpc-sub-id"
 	// MetadataGRPCStreamSeq is the header key for stream message sequence number
-	MetadataGRPCStreamSeq = "x-lava-grpc-stream-seq"
+	MetadataGRPCStreamSeq = "x-smartrouter-grpc-stream-seq"
 	// MetadataGRPCClientID is the header key for client identification
-	MetadataGRPCClientID = "x-lava-grpc-client-id"
+	MetadataGRPCClientID = "x-smartrouter-grpc-client-id"
 )

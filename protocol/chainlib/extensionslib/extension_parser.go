@@ -9,7 +9,7 @@ const ArchiveExtension = "archive"
 type ExtensionInfo struct {
 	ExtensionOverride []string
 	LatestBlock       uint64
-	// AdditionalExtensions are the extensions named by the request's lava-extension directive.
+	// AdditionalExtensions are the extensions named by the request's smartrouter-extension directive.
 	// One that no node offers is recorded, so the reply can tell the caller it was dropped
 	// (MAG-3935).
 	AdditionalExtensions []string

@@ -40,20 +40,20 @@ func TestDetachedReqHeaders_OwnsEveryString(t *testing.T) {
 			}
 		}
 		// The control: two zero-copy reads of one header share memory, so the check above can see it.
-		if sharesMemory(c.GetReqHeaders()["Lava-Select-Provider"][0], c.Get("Lava-Select-Provider")) {
+		if sharesMemory(c.GetReqHeaders()["Smartrouter-Select-Provider"][0], c.Get("Smartrouter-Select-Provider")) {
 			viewsShared++
 		}
 		return nil
 	})
 	req := httptest.NewRequest("POST", "/", strings.NewReader("{}"))
-	req.Header.Set("Lava-Select-Provider", "ethprimaryprovider2")
+	req.Header.Set("Smartrouter-Select-Provider", "ethprimaryprovider2")
 	req.Header.Set("X-Request-Id", "tests.simulator.simulator_production_tests")
 	_, err := app.Test(req)
 	require.NoError(t, err)
 
 	require.Equal(t, 1, viewsShared, "control failed: two zero-copy reads of one header were expected to share memory, without which sharesMemory cannot see aliasing")
 	require.Empty(t, missing, "these headers were dropped, or lost a value, in the detached copy")
-	require.Contains(t, equal, "Lava-Select-Provider")
+	require.Contains(t, equal, "Smartrouter-Select-Provider")
 	require.Contains(t, equal, "X-Request-Id")
 	require.Empty(t, shared, "these headers still point into the request buffer")
 }

@@ -960,7 +960,7 @@ func (csm *ConsumerSessionManager) probeProvider(ctx context.Context, consumerSe
 				Latency:  relayLatency,
 				Endpoint: endpointAndConnection.endpoint,
 			})
-			// public lava address is a value that is not changing, so it's thread safe
+			// public address is a value that is not changing, so it's thread safe
 			if DebugProbesEnabled() {
 				utils.FormatDebug("Probed provider successfully", utils.Attribute{Key: "latency", Value: relayLatency}, utils.Attribute{Key: "provider", Value: consumerSessionsWithProvider.PublicAddress})
 			}
@@ -1704,7 +1704,7 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 			// A pinned request must never fall through to a provider the caller did not ask for, so
 			// neither the backup tier nor the blocked-provider walk applies here. But an empty pool
 			// still has to give the pinned provider back, as the old top-of-GetSessions reset did:
-			// without this, lava-select-provider stops resolving the moment every provider is
+			// without this, smartrouter-select-provider stops resolving the moment every provider is
 			// blocked, even though the pinned provider is sitting in that blocked list. Only that
 			// provider comes back; the rest of the list stands (MAG-4731).
 			if released, ok := csm.releaseBlockedProvidersIfPoolEmpty(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget); ok {
@@ -1738,7 +1738,7 @@ type GetSessionsOptions struct {
 	// request right now (usablePreferredProvider), and leaves the request to ordinary selection
 	// when it could not. Unlike a header pin it is the router's preference rather than the caller's
 	// demand: it never fails a request, never releases the blocked list, never outranks the caller's
-	// lava-select-provider or lava-stickiness, and is ignored under a group-diversity policy. It may
+	// smartrouter-select-provider or smartrouter-stickiness, and is ignored under a group-diversity policy. It may
 	// name a backup, which a header pin cannot reach. Read-your-writes pins use it (MAG-4032).
 	PreferredProvider string
 	// MinGroups > 1 makes selection fan out across at least this many distinct provider groups so a
@@ -2438,7 +2438,7 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 		// A sticky provider that already failed THIS request is not replaced (MAG-2280). The retry
 		// policy never retries a pinned request, so selection only sees this on a path nobody meant
 		// to take; falling through to ordinary selection here would be the silent substitution the
-		// pin exists to prevent. Refuse the way lava-select-provider does, and keep the session's
+		// pin exists to prevent. Refuse the way smartrouter-select-provider does, and keep the session's
 		// choice: the provider answered, it is not unusable.
 		if _, failedThisRequest := triedByThisRequest[stickysession.Provider]; failedThisRequest {
 			return nil, utils.FormatWarning(
@@ -2462,7 +2462,7 @@ func (csm *ConsumerSessionManager) selectProviderAddresses(ctx context.Context, 
 			// a provider that cannot take the relay to ignoredProvidersList and calls back here for
 			// a replacement; handing the same provider back every time would be an unbounded spin
 			// under csm.lock.RLock that pegs a core and starves the next UpdateAllProviders writer,
-			// wedging the whole chain. The lava-select-provider branch above carries the same guard.
+			// wedging the whole chain. The smartrouter-select-provider branch above carries the same guard.
 			// When the caller already holds a session (a refill after a success), it keeps that
 			// session and ignores this error.
 			if _, setAside := ignoredProvidersList[stickysession.Provider]; setAside {
@@ -2925,7 +2925,7 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx cont
 	var providerAddresses []string
 	if minGroups > 1 {
 		// A group-diversity policy (an operator mandate) needs >= minGroups distinct provider groups,
-		// which is fundamentally incompatible with a single-provider directive: lava-select-provider
+		// which is fundamentally incompatible with a single-provider directive: smartrouter-select-provider
 		// and a sticky session each pin selection to exactly ONE provider (getValidProviderAddresses
 		// returns just that address). The operator policy wins (UC-1: stricter validation regardless
 		// of what the caller asked).
@@ -3474,7 +3474,7 @@ func (csm *ConsumerSessionManager) releaseWithAvailabilityFailure(consumerSessio
 		//     provider that worked an hour ago and is failing everything now was never caught.
 		//     Concurrent in-flight requests inflate the same total, switching it off on a busy
 		//     router, and the epoch rebuild resets it every 15 minutes anyway.
-		//   - The second chance was not a health mechanism. It came from Lava, where reporting a
+		//   - The second chance was not a health mechanism. It came from the upstream provider-relay protocol, where reporting a
 		//     provider filed an on-chain unresponsiveness complaint against an operator with staked
 		//     collateral; the 3 minutes existed so a brief restart could not cost them money. This
 		//     product submits that list nowhere, so the penalty it deferred does not exist.
@@ -4137,7 +4137,7 @@ func (csm *ConsumerSessionManager) ResetEndpointHealth() int {
 // resetting the per-provider redemption flag.
 //
 // Why ResetTransientFailureState alone is not enough:
-// The lava-pairing-network mode relies on UpdateAllProviders firing on every
+// The pairing-network mode relies on UpdateAllProviders firing on every
 // epoch transition to repopulate validAddresses from pairingAddresses — that
 // is the only path that drains currentlyBlockedProviderAddresses without
 // stranding addresses in routing limbo. In direct-rpc mode the pairing list

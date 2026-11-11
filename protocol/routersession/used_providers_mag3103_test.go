@@ -13,7 +13,7 @@ import (
 // released when the function returns, so the caller iterated shared state while RemoveUsed and
 // ReleaseFromLatestBatch, still running for the slower providers of the same relay, wrote to
 // it. Go treats concurrent map iteration and write as a fatal runtime throw, not a panic, so
-// the whole router process ended. The header that reaches this path, lava-debug-relay, is
+// the whole router process ended. The header that reaches this path, smartrouter-debug-relay, is
 // accepted from any caller.
 
 // The contract, pinned without any scheduling luck: what the caller holds is a snapshot.

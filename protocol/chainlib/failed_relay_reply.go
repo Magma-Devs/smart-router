@@ -34,7 +34,7 @@ type failedRelayReply struct {
 //
 //   - An upstream answered: its status and body go back as is, on every interface, in masked mode
 //     too. The body is not rewritten: no envelope, no added fields, and no GUID (that stays in
-//     the Lava-Guid reply header). The router forwards the caller's own request bytes, so the id
+//     the Smart-Router-Guid reply header). The router forwards the caller's own request bytes, so the id
 //     in a JSON-RPC body is already the caller's.
 //   - No upstream answered: the router's own 502 or 504 and one sentence, in the listener's own
 //     error shape. Masked mode (ReturnMaskedErrors) masks both: ok is false and the listener sends

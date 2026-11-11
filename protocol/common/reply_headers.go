@@ -52,7 +52,7 @@ func HeaderPassesOnReply(kind spectypes.Header_HeaderType) bool {
 // point where an upstream's headers are still distinguishable from the router's own:
 // appendHeadersToRelayResult adds the router's after this, and addHeadersAndSendBytes
 // writes the combined list last-wins, so an upstream header the router sets only on some
-// replies (Lava-Provider-Address outside cross-validation, the cross-validation headers
+// replies (Smart-Router-Provider-Address outside cross-validation, the cross-validation headers
 // inside it) would otherwise reach the client whenever the router did not. A primary
 // cache hit runs it when served (filterCachedReplyMetadata), so an entry written by an
 // older router replays the same reduced set, and a reply that crossed in from the
@@ -60,8 +60,8 @@ func HeaderPassesOnReply(kind spectypes.Header_HeaderType) bool {
 // directive lists, so a secondary hit of an entry answers with the headers a primary hit
 // of the same entry does (MAG-4278).
 //
-// A spec cannot authorise a router-owned name: a directive whose name carries the lava-
-// prefix or matches a header the router mints is ignored, so a spec edit cannot reopen
+// A spec cannot authorise a router-owned name: a directive whose name carries a router
+// prefix (smart-router-, smartrouter-) or matches a header the router mints is ignored, so a spec edit cannot reopen
 // what this closes. Names match case-insensitively, since HTTP canonicalises and gRPC
 // lowercases; the upstream's own spelling is kept. The input carries one entry per
 // header name (the senders keep a multi-valued header's first value), so the first
@@ -101,13 +101,13 @@ func FilterUpstreamReplyMetadata(metadata []pairingtypes.Metadata, directiveList
 }
 
 // IsRouterOwnedHeader reports whether name is one the router mints itself and a client
-// reads as the router's own word: every lava- prefixed header (both spellings), the two
+// reads as the router's own word: every smart-router- and smartrouter- prefixed header (both spellings), the two
 // router headers outside that prefix, and the status-code trailer the gRPC listener sets.
 // The check is on the name alone, so it holds for headers the router adds on every reply
 // and for the ones it adds only on some.
 func IsRouterOwnedHeader(name string) bool {
 	lower := strings.ToLower(name)
-	if strings.HasPrefix(lower, "lava-") {
+	if strings.HasPrefix(lower, "smart-router-") || strings.HasPrefix(lower, "smartrouter-") {
 		return true
 	}
 	switch lower {

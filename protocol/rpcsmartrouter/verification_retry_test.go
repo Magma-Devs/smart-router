@@ -52,14 +52,14 @@ func TestRetrySchedule(t *testing.T) {
 	archive := chainlib.CheckID{Name: "pruning", Extension: "archive"}
 	nextOf := func(check chainlib.CheckID) time.Time {
 		for _, entry := range schedule.snapshot() {
-			if entry.tier == reverifyTierStatic && entry.name == "lava" && entry.check == check {
+			if entry.tier == reverifyTierStatic && entry.name == "llama" && entry.check == check {
 				return entry.due
 			}
 		}
 		return time.Time{}
 	}
 
-	schedule.reconcile(reverifyTierStatic, "lava", nil, []chainlib.CheckID{archive, debug}, time.Time{}, true)
+	schedule.reconcile(reverifyTierStatic, "llama", nil, []chainlib.CheckID{archive, debug}, time.Time{}, true)
 	select {
 	case <-schedule.wake:
 	default:
@@ -71,38 +71,38 @@ func TestRetrySchedule(t *testing.T) {
 	require.Empty(t, schedule.due())
 
 	now = now.Add(30 * time.Second)
-	require.ElementsMatch(t, []chainlib.CheckID{archive, debug}, schedule.due()[reverifyTierStatic]["lava"], "both checks failed in one pass, so both are due together")
+	require.ElementsMatch(t, []chainlib.CheckID{archive, debug}, schedule.due()[reverifyTierStatic]["llama"], "both checks failed in one pass, so both are due together")
 
-	schedule.reconcile(reverifyTierStatic, "lava", []chainlib.CheckID{debug}, []chainlib.CheckID{archive, debug}, time.Time{}, true)
+	schedule.reconcile(reverifyTierStatic, "llama", []chainlib.CheckID{debug}, []chainlib.CheckID{archive, debug}, time.Time{}, true)
 	require.Equal(t, now.Add(time.Minute), nextOf(debug), "the check the retry re-ran and found failing waits twice as long")
 	require.Equal(t, now, nextOf(archive), "the check it did not run keeps its place")
 
-	schedule.reconcile(reverifyTierStatic, "lava", []chainlib.CheckID{archive}, []chainlib.CheckID{debug}, time.Time{}, true)
+	schedule.reconcile(reverifyTierStatic, "llama", []chainlib.CheckID{archive}, []chainlib.CheckID{debug}, time.Time{}, true)
 	require.True(t, nextOf(archive).IsZero(), "a check that passes leaves the schedule")
 	require.Equal(t, now.Add(time.Minute), nextOf(debug), "and the other check's schedule is its own")
 
-	schedule.reconcile(reverifyTierStatic, "lava", []chainlib.CheckID{debug}, []chainlib.CheckID{debug}, now.Add(10*time.Minute), true)
+	schedule.reconcile(reverifyTierStatic, "llama", []chainlib.CheckID{debug}, []chainlib.CheckID{debug}, now.Add(10*time.Minute), true)
 	require.Equal(t, now.Add(10*time.Minute), nextOf(debug), "never before its rate-limit hold-off ends")
 
-	schedule.reconcile(reverifyTierStatic, "lava", nil, []chainlib.CheckID{debug, archive}, time.Time{}, false)
+	schedule.reconcile(reverifyTierStatic, "llama", nil, []chainlib.CheckID{debug, archive}, time.Time{}, false)
 	require.Equal(t, now.Add(10*time.Minute), nextOf(debug), "a whole pass that does not count leaves a waiting check in its place")
 	require.Equal(t, now.Add(30*time.Second), nextOf(archive), "and puts a newly failing one on the schedule")
 
-	schedule.ensure(reverifyTierStatic, "lava")
+	schedule.ensure(reverifyTierStatic, "llama")
 	require.Len(t, schedule.snapshot(), 2, "ensure leaves a provider with checks on the schedule as it is")
-	schedule.ensure(reverifyTierBackup, "lava")
-	require.Equal(t, []chainlib.CheckID{{}}, schedule.due()[reverifyTierBackup]["lava"], "a provider ensure puts on the schedule is due now, for its whole pass")
-	schedule.postpone(reverifyTierBackup, "lava", nil, now.Add(time.Hour))
+	schedule.ensure(reverifyTierBackup, "llama")
+	require.Equal(t, []chainlib.CheckID{{}}, schedule.due()[reverifyTierBackup]["llama"], "a provider ensure puts on the schedule is due now, for its whole pass")
+	schedule.postpone(reverifyTierBackup, "llama", nil, now.Add(time.Hour))
 	require.Empty(t, schedule.due()[reverifyTierBackup], "a rate-limited pass pushes the provider's checks past the hold-off")
 
-	schedule.reconcile(reverifyTierStatic, "lava", nil, nil, time.Time{}, true)
-	schedule.forget(reverifyTierBackup, "lava")
+	schedule.reconcile(reverifyTierStatic, "llama", nil, nil, time.Time{}, true)
+	schedule.forget(reverifyTierBackup, "llama")
 	_, pending = schedule.next()
 	require.False(t, pending, "a whole pass that finds nothing failing clears the provider")
 	require.Empty(t, schedule.snapshot())
 
 	var none *retrySchedule
-	none.reconcile(reverifyTierStatic, "lava", nil, []chainlib.CheckID{debug}, time.Time{}, true)
+	none.reconcile(reverifyTierStatic, "llama", nil, []chainlib.CheckID{debug}, time.Time{}, true)
 	_, pending = none.next()
 	require.False(t, pending, "a chain without inputs has a nil schedule, and nothing on it")
 }
@@ -119,7 +119,7 @@ func TestRetrySchedule_ChecksThatFailTogetherStayDueTogether(t *testing.T) {
 		draws = draws[1:]
 		return draw
 	}
-	schedule.reconcile(reverifyTierStatic, "lava", nil, []chainlib.CheckID{{Name: "enabled", Addon: "debug"}, {Name: "pruning", Extension: "archive"}}, time.Time{}, true)
+	schedule.reconcile(reverifyTierStatic, "llama", nil, []chainlib.CheckID{{Name: "enabled", Addon: "debug"}, {Name: "pruning", Extension: "archive"}}, time.Time{}, true)
 	entries := schedule.snapshot()
 	require.Len(t, entries, 2)
 	require.Equal(t, entries[0].due, entries[1].due)

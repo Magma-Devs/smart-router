@@ -42,7 +42,7 @@ func TestCacheWriteBoundsTheSnapshotNotTheLiveReply(t *testing.T) {
 	require.Equal(t, claim, result.Reply.LatestBlock, "the live reply keeps the node's own claim; only the snapshot is bounded")
 	// What the response path does to the reply once the write has been handed off. Run
 	// with -race: a write that read the live reply would race these.
-	result.Reply.Metadata = append(result.Reply.Metadata, pairingtypes.Metadata{Name: "Lava-Guid", Value: "per-request"})
+	result.Reply.Metadata = append(result.Reply.Metadata, pairingtypes.Metadata{Name: "Smart-Router-Guid", Value: "per-request"})
 	result.Reply.Metadata[0].Value = "changed"
 
 	// Looked up from one block behind so the reply's SeenBlock is the stored floor itself.

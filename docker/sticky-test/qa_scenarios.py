@@ -24,9 +24,9 @@ def rpc(method, params, sticky=None, select=None, request_id=1, timeout=30):
     body = json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}).encode()
     headers = {"Content-Type": "application/json", "Connection": "close"}
     if sticky:
-        headers["lava-stickiness"] = sticky
+        headers["smartrouter-stickiness"] = sticky
     if select:
-        headers["lava-select-provider"] = select
+        headers["smartrouter-select-provider"] = select
     req = urllib.request.Request(INGRESS, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read()), response.headers.get("X-Router-Pod", "?")
@@ -99,13 +99,13 @@ def s_concurrency(parallel=24):
 
 
 def s_select_provider_wins():
-    """lava-select-provider is the more specific ask and must beat a sticky claim."""
+    """smartrouter-select-provider is the more specific ask and must beat a sticky claim."""
     h = head()
     # Establish a claim first.
     pinned, _, _ = fetch_block(h - 100, sticky="both-headers", request_id=1)
     other = next(p for p in PRIMARIES if p != pinned)
     served, _, _ = fetch_block(h - 101, sticky="both-headers", select=other, request_id=2)
-    return report("lava-select-provider beats a sticky claim", served == other, [
+    return report("smartrouter-select-provider beats a sticky claim", served == other, [
         f"claim resolved to: {pinned}",
         f"explicitly asked for: {other}",
         f"served by: {served} (must be the explicitly named one)",
