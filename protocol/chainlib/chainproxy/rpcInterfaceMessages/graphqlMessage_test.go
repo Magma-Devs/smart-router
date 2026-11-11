@@ -682,7 +682,7 @@ func TestParseGraphQLMsgADocumentHoldingAMutationIsAWrite(t *testing.T) {
 
 // MAG-5120, check Q8: a mutation that selects more than one root field once its fragments are
 // expanded, __typename not counted, is refused as a write's shape, with REQUEST_REFUSED and
-// Lava-Write-Outcome: not_sent.
+// Router-Write-Outcome: not_sent.
 func TestParseGraphQLMsgRefusesAMutationWithMoreThanOneRootField(t *testing.T) {
 	const write = `executeTransaction(transactionDataBcs: \"AA==\") { digest }`
 	for _, tc := range []struct {

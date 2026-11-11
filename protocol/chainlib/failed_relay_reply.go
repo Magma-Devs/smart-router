@@ -20,7 +20,7 @@ const (
 	noAnswerJsonRpc noAnswerShape = iota
 	noAnswerJsonError
 	// noAnswerGraphQL is the router's own GraphQL error (MAG-5119): one error with the code
-	// NO_PROVIDER_ANSWER, the guid in extensions and in Lava-Guid, no data key, and a sentence
+	// NO_PROVIDER_ANSWER, the guid in extensions and in Router-Guid, no data key, and a sentence
 	// that names no provider (graphQLNoAnswerMessage).
 	noAnswerGraphQL
 )
@@ -37,7 +37,7 @@ type failedRelayReply struct {
 	contentType string // empty: keep the listener's own Content-Type
 	// fromUpstream is true when the body is the upstream's answer rather than the router's text.
 	fromUpstream bool
-	// guid, when set, is also sent as Lava-Guid, after the relay's own reply headers, so the header
+	// guid, when set, is also sent as Router-Guid, after the relay's own reply headers, so the header
 	// always equals the guid the body carries (the GraphQL shape).
 	guid string
 }
@@ -47,7 +47,7 @@ type failedRelayReply struct {
 //
 //   - An upstream answered: its status and body go back as is, on every interface, in masked mode
 //     too. The body is not rewritten: no envelope, no added fields, and no GUID (that stays in
-//     the Lava-Guid reply header). The router forwards the caller's own request bytes, so the id
+//     the Router-Guid reply header). The router forwards the caller's own request bytes, so the id
 //     in a JSON-RPC body is already the caller's.
 //   - No upstream answered: the router's own 502 or 504 and one sentence, in the listener's own
 //     error shape. Masked mode (ReturnMaskedErrors) masks both: ok is false and the listener sends
@@ -143,7 +143,7 @@ func sendFailedRelayReply(fiberCtx *fiber.Ctx, reply failedRelayReply, metadata 
 		fiberCtx.Response().Header.Del(fiber.HeaderContentType)
 	}
 	if reply.guid != "" {
-		// Last, so it wins over a Lava-Guid among the relay's own reply headers.
+		// Last, so it wins over a Router-Guid among the relay's own reply headers.
 		metadata = append(append([]pairingtypes.Metadata(nil), metadata...), pairingtypes.Metadata{Name: common.GUID_HEADER_NAME, Value: reply.guid})
 	}
 	return addHeadersAndSendBytes(fiberCtx, metadata, reply.body)

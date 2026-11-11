@@ -73,7 +73,7 @@ func TestGraphQLWrite_UnclearOutcomeAnswersWithHTTP200(t *testing.T) {
 }
 
 // TestGraphQLWrite_AcceptedOnlyOnTheChainSuccessRow is the other half of MAG-5122's
-// Lava-Write-Outcome header. accepted is the chain's success row only: Sui's write field carries
+// Router-Write-Outcome header. accepted is the chain's success row only: Sui's write field carries
 // effects with SUCCESS or FAILURE (a transaction that ran and paid gas, MAG-4742). Every other 2xx
 // gets no header, because the router cannot yet tell it apart from "may have run": effects: null
 // (MAG-4518), a reply that did not select effects, and a rejected transaction, which answers with a
@@ -139,7 +139,7 @@ func TestGraphQLWrite_NeverRetriedWhenEveryCopyIsRateLimited(t *testing.T) {
 	}
 }
 
-// writeOutcomeHeader reads Lava-Write-Outcome off a RelayResult's reply, or "" when absent.
+// writeOutcomeHeader reads Router-Write-Outcome off a RelayResult's reply, or "" when absent.
 func writeOutcomeHeader(t *testing.T, result *common.RelayResult) string {
 	t.Helper()
 	if result == nil || result.Reply == nil {

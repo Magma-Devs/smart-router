@@ -319,7 +319,7 @@ func crossValidationRecordTenant(analytics *metrics.RelayMetrics) string {
 // SendParsedRelay before appendHeadersToRelayResult, which is where every other record is built.
 // crossValidationFailFast counts such a request as a failed cross-validated request, so it gets its
 // record too: failed, the structural reason, the policy as resolved, and no endpoints, since every
-// fail-fast site fires before any relay is dispatched. The reply gets Lava-Guid for the same reason
+// fail-fast site fires before any relay is dispatched. The reply gets Router-Guid for the same reason
 // every other record's request does: so the caller can name this record.
 func (rpcss *RPCSmartRouterServer) recordCrossValidationFailFast(ctx context.Context, relayProcessor *relaycore.RelayProcessor, protocolMessage chainlib.ProtocolMessage, analytics *metrics.RelayMetrics, reason string, failFast *common.RelayResult) {
 	var chainId, apiInterface string
