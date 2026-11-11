@@ -1,19 +1,26 @@
 # PRD: per-chain error classification in lava-specs
 
-**Status:** draft for R&D approval (MAG-4910), revision 3.
+**Status:** draft for R&D approval (MAG-4910), revision 4. No implementation is approved by this
+document yet.
 
-- **Who approves:** Nimrod or Tom, on the must-haves, the format and the split. Revision 3 takes
-  Must-have 1 (spec versioning) out of scope. The ticket says the PRD isn't approvable without all
-  four, so the approver also has to accept that departure (1.3).
+- **Who approves:** Nimrod or Tom, on Must-haves 2 to 4, the format and the split. Must-have 1
+  (spec versioning) is out of scope by the author's decision since revision 3. MAG-4910 still lists
+  it as required, so the ticket needs updating to match (1.3, 9).
 - **What it blocks:** MAG-4898, the per-chain research, which starts once this is approved.
-- **What revision 3 changes:**
-  - It takes Must-have 1 out of scope.
-  - It closes four gaps a review of revision 2 found: a write the spec leaves out, spec rows that
-    can still shadow protected decisions, a Nethermind nonce answer, and vendor wording arriving
-    through a custom source.
-  - It reorders the document so the decisions come first.
+- **What revision 4 changes:**
+  - It keeps revision 3's scope and decisions-first structure.
+  - It binds approval to each chain's complete effective policy, including row order, imports
+    and deliberate empty policies, instead of accepting any collection of individually signed rows.
+  - It defines how source review, candidate testing, signing and canary promotion fit together.
+  - It makes write guards apply before caching and retry decisions, and defines fallback for
+    chains that depend on a rejected parent.
+  - It narrows the HTTP carve-out to the statuses whose body is the node's own answer (400, 404,
+    410, 422 and 500 on REST; 400 and 500 elsewhere) and locks every other status the router has
+    a rule for (1.3, 3.2).
+  - It makes every fallback visible: two state gauges, alert rules in smart-router-infrastructure,
+    and tests that prove them before they're published (4.4, 5.4, 5.6).
 
-  Appendix C maps every finding, and every revision-2 section number, to where it went.
+  Appendix C records the revisions and maps revision-2 section numbers to the current structure.
 
 **Baseline.** Anything this document calls "today" was read on 2026-11-10 at the commits below, and
 every file and line reference points at them:
@@ -41,9 +48,9 @@ Appendix A has the evidence for every "today" claim.
 - **The router keeps everything that decides what a verdict does**: the interface rules,
   connection errors, status rules, rate limits, the unknown default, retry and scoring, and write
   safety.
-- **One rule holds the design together: a spec row may say what a node's answer means; it may
-  never say what the router does about it.** Rows point at verdicts the router already registers.
-  They can't define a verdict, a retry, a status rule or a write outcome.
+- **A spec row selects a registered verdict; the router defines that verdict's consequences.**
+  Selecting a different verdict can change behaviour, so it needs the review and rollout gates in
+  section 5. Rows cannot define new verdicts, retry rules, status rules or write outcomes.
 - **Rows inherit through `imports`**, the way `api_collections` do, so ETH1's rows reach BASE and
   COSMOSSDK's reach COSMOSHUB (2.5).
 - **The router and a lava-specs commit ship as a pair.** Each router release bundles one tested
@@ -69,32 +76,39 @@ These hold for every spec, from every source, and the router enforces them itsel
    matched (3.3).
 5. **A known write method is always stateful**: whether the spec marks it, leaves the flag off, or
    doesn't declare the method at all (3.4).
-6. **A row acts only if lava-specs CI checked and signed it.** That's how vendor wording stays out,
-   whatever the source (3.4).
-7. **A section that breaks any of these is dropped for that chain only.** The chain falls back to
-   its bundled section, and the router still boots (4.4).
+6. **A chain's effective policy acts only if it passed source review and the release gates, and
+   matches a signed approval.** The approval covers its context and ordering, not just its rows
+   (3.4). Every source must pass the same check.
+7. **An invalid effective policy falls back as a whole, and never silently.** The affected chain
+   uses its bundled policy. Dependants are checked separately; unrelated chains keep their valid
+   policies, and the router still boots. A gauge, a log line and an alert name the chain and the
+   reason for as long as the fallback lasts (4.4).
 
 ### 1.3 Where this departs from the ticket
 
-**Deliberate departures.** The approver has to accept these:
+**Deliberate departures.** These are the author's decisions. They're recorded here so the approver
+sees them and so MAG-4910 can be brought in line:
 
-- **Must-have 1 (spec versioning) is out of scope.** There are no lava-specs tags, no change log,
-  no pinning of the spec source, and no metric for which source a router loaded. What follows from
-  that:
+- **Must-have 1 (spec versioning) is out of scope** (decided 2026-11-11). There are no lava-specs
+  tags, no change log, no pinning of the spec source, and no metric for which source a router
+  loaded. What follows from that:
   - Routers keep loading whatever spec source they're given. The bundled commit (4.2) is the only
     spec version a router release is tied to.
   - A lava-specs PR that moves a verdict names it in its own description, in place of a
     change-log entry. The fixture replay of Must-have 4 needs that record (5.2).
-  - The ticket's bad-source tests for a "stale" or "unpinned" source have nothing left to test, so
-    they're dropped. The broken-source test stays (5.4).
+  - Stale and unpinned sources remain possible. Testing their rejection is deferred with this
+    requirement; it is not made unnecessary by dropping versioning. Broken-source and approval
+    checks remain mandatory (5.4). A signature proves approval, not freshness.
   - The `schema.behaviour.additive` version is gone. `schema_version` stays as a plain integer,
     because Must-have 2's compatibility file needs it (4.1).
-- **Chain rows can still read text inside HTTP 400, 404, 500 and the other unlocked HTTP
-  statuses.** The ticket says no spec may "override the HTTP / gRPC status rules". Every gRPC
-  status the router has decided is locked (2.4). On HTTP, though, a chain row may still read the
-  node's own text inside an unlocked status, because that body is the node's answer: MAG-4061
-  needs TON's answers inside a 500. The HTTP statuses that are locked are the ones whose verdict
-  carries write safety or endpoint health (3.2).
+- **Chain rows can read text inside the HTTP statuses whose body is the node's own answer: 400,
+  404, 410, 422 and 500 on REST, and 400 and 500 on every other interface.** The ticket says no
+  spec may "override the HTTP / gRPC status rules". Every gRPC status the router has decided is
+  locked, and so is every other HTTP status the router has a rule for (2.4). The readable statuses
+  are the ones the REST chains the router serves answer in (Horizon, Aptos, toncenter, the Cosmos
+  gRPC-gateway, sidecar, nodeos), and the router's own table already reads text inside 400 and 500
+  (`error_classifier.go:404, 413-416`). MAG-4061 needs TON's answers inside a 500. Inside the four
+  4xx statuses a row may only name a verdict that doesn't blame the endpoint (3.2).
 
 **Ticket facts that read differently in the code.** Where the two disagree, the design follows the
 code:
@@ -118,14 +132,28 @@ code:
 
 ### 1.4 What's still open
 
-Section 6 lists what R&D still has to decide. In short:
+The scope departures in 1.3 are settled for this PRD. MAG-4910 still lists all four must-haves,
+so the ticket has to be updated to match before approval is recorded on it (9).
+
+Section 6 lists the remaining decisions. Their gates are:
+
+| Decision | Required before |
+|---|---|
+| Update MAG-4910 for the versioning deferral and the HTTP body carve-out | Approval is recorded on the ticket |
+| Choose the wire form for unknown writes, including Bitcoin `-27` and Starknet `59` | Step 0 write-safety changes ship |
+| Complete and review the initial protected-method table | Step 0 write guards ship |
+| Complete and review source evidence for migrated rows | Step 1 starts |
+| Specify manifest delivery, trust keys, rotation and revocation, and prove candidate promotion | Any external policy acts |
+| Decide whether to narrow generic geth wording and remove existing vendor rows | Those separate behaviour changes ship |
+
+The open work includes:
 
 - whether the geth-wording rows stay generic or move to an ETH1 section;
 - whether the router's own vendor rows stay;
 - whether Bitcoin `-27` and Starknet `59` count as unknown or as accepted;
 - completing the write-method table and the source allowlist;
 - where the signed manifests live, and who holds the signing key;
-- the effort, which revision 3 changes in both directions.
+- the effort for the complete approval and rollout pipeline.
 
 ## 2. The design
 
@@ -140,7 +168,7 @@ Here's what moves into the specs and what stays in the router:
 | Inheritance of rows through `imports`, with override and removal by row id | Interface rules: the JSON-RPC envelope, REST status, gRPC codes, GraphQL `errors` |
 | A chain's own wording added to the slot-already-used group (3.3) | Connection errors, HTTP and gRPC status rules, rate-limit detection, the already-known recognisers, the unknown default |
 | | Write safety: fan-out, the single stop, the unknown outcome, the slot-already-used signatures, the write methods that must stay stateful |
-| | The rows that name a locked verdict (XRP's three, 3.5), the source allowlist and the manifest signing key (3.4) |
+| | The XRP rows that must remain router-owned (3.5), the source allowlist and the manifest verification keys (3.4); private signing keys stay in trusted CI |
 
 In practice, what moves is the six family tables (minus XRP's three router-owned rows), and later,
 chain by chain, the geth-wording rows (section 6). Section 3 lists what never moves.
@@ -162,15 +190,17 @@ Each spec gets one `errors` object, next to `api_collections`:
 
 - **`schema_version`** is an integer. Every section at a given lava-specs commit carries the same
   number, and CI enforces it, so a child and its parents never disagree. A router knows which
-  schema versions it can read (4.1). It drops a section with any other version whole, for that
-  chain only (4.4). It never reads half a section.
+  schema versions it can read (4.1). It drops a section with any other version whole, and that
+  chain and any chain that imports it fall back (4.4); unrelated chains keep their policies. It
+  never reads half a section.
 - **`imports`** is optional, and lists the specs whose rows this section inherits. If it's absent,
   the section follows the spec's own `imports`. `[]` means inherit no rows. It only affects rows;
   the spec's api inheritance is untouched. Step 1 of the rollout uses it to keep today's coverage
   (5.1).
-- **The section itself is optional.** A spec without it loads on every router customers run today,
-  because unknown keys are dropped (A.3). A router that does read sections treats a missing one as
-  "no chain rows of its own", which is exactly how 204 chains behave today.
+- **The section itself is optional.** Older routers ignore the added key (A.3). On a router that
+  reads it, a missing section means no local rows; the chain may still inherit rows. The signed
+  manifest must approve that complete result, including an intentionally empty policy (3.4).
+  Removing a section or its imports is therefore a policy change, not a way to bypass approval.
 
 ### 2.3 The row
 
@@ -195,7 +225,7 @@ Each spec gets one `errors` object, next to `api_collections`:
 | `class` | yes | The rulebook class, C2 to C7. The router keeps a table of the classes each registered error may carry, and a row that disagrees fails validation. The class is for people; the router acts on `error`. |
 | `interface` | no | `jsonrpc`, `rest`, `grpc`, `graphql` or `tendermintrpc`. If it's absent, the row applies to every interface the chain serves after inheritance. |
 | `scope` | yes | `read`, `write` or `both`. A `write` row is only evaluated for stateful apis, and a `read` row only for the rest. Since the router keeps write methods stateful (3.4), a spec can't move a write out from under the write rows. |
-| `source` | yes | A link to the official definition (the protocol spec, the node software's docs, or the source file that defines the error), pinned to a tag or commit. It must be on the router's allowlist, and the row must be in a signed manifest (3.4). |
+| `source` | yes | A link to the official definition (the protocol spec, the node software's docs, or the source file that defines the error), pinned to a tag or commit. It must be on the router's allowlist, with reviewed evidence covered by the effective policy's approval (3.4). |
 | `versions` | yes | The node software versions the row was checked against. At least one. |
 | `slot_used` | no | `true` adds this row's answers to the slot-already-used group (3.3). Only allowed on `write` or `both` rows. It can widen the router's group, never narrow it. |
 | `disabled` | no | `true` removes the parent row with the same `id`, for this spec and its children. A disabling row carries only `id`, `disabled` and optionally `note`; any other field fails validation. |
@@ -221,17 +251,44 @@ For a node error on chain X, the router walks this list in order, and the first 
       (3.5). Read-your-writes turns on `CHAIN_TX_ALREADY_KNOWN` (`read_your_writes.go:218-231`),
       so no spec row may answer one of these first. REST 409, Horizon's duplicate, is a locked
       status in the next step.
-   3. **The locked statuses.** A reply is decided by the transport table, and never reaches step 3,
-      when:
-      - its HTTP status is 401, 403, 409, 429, 502, 503, 504, 520 to 527 or 530. The status is read
-        as the code on REST and GraphQL, and from the `HTTP <status>: ` prefix on every other
-        interface;
+   3. **The locked statuses.** A reply is decided by the transport table, and never reaches the
+      spec rows (step 3), when:
+      - its HTTP status is one the router has a rule for, other than the node-answer statuses of
+        3.2: on REST those are 400, 404, 410, 422 and 500; on GraphQL, JSON-RPC and Tendermint
+        only 400 and 500. So the locked set is 401, 402, 403, 405, 406, 407, 408, 409, 411, 412,
+        413, 414 to 417, 426, 428, 429, 431, 451, 501, 502, 503, 504, 520 to 527 and 530 on every
+        interface (`error_classifier.go:421-449, 555-591`), plus 404, 410 and 422 off REST. The
+        status is read as the code on REST and GraphQL, and from the `HTTP <status>: ` prefix on
+        every other interface. Within this step the REST table's four route-refusal text rows
+        ("endpoint not found", "route not found", "path not found", "method not allowed",
+        `:390-393`) run before the status decision, so a 403 or 405 whose body says "route not
+        found" keeps `NODE_ENDPOINT_NOT_FOUND`, as `TestRESTMessageRowsBeatTheStatusRow` pins
+        (`rest_status_rows_test.go:139`). A status the router has no rule for at all (418 or 425,
+        say) has no decision to protect, so it isn't locked: a `contains` or `regex` row may match
+        its body. It still can't be named in `code` (3.2), and without a match it falls to
+        `UNKNOWN_ERROR`, as today;
       - or its gRPC status is one the router has decided: the six with a row (InvalidArgument,
         NotFound, OutOfRange, Unimplemented, Aborted and Unavailable, `error_classifier.go:482-517`)
         or the six the comment at `:518-538` leaves without one on purpose (DeadlineExceeded,
         PermissionDenied, ResourceExhausted, Unauthenticated, Canceled and DataLoss).
 
       So on gRPC, spec rows only ever see Unknown, AlreadyExists, FailedPrecondition and Internal.
+
+      **HTTP decisions use the status alone.** After the earlier explicit-rate and already-known
+      checks, do not run the full transport classifier on the original RPC code and message to
+      implement this lock: an ordinary phrase or RPC code could win before the status row. Use
+      the router's transport rules with only the extracted status: a status code and empty message
+      on REST/GraphQL, or code 0 and `HTTP <status>: ` on JSON-RPC/Tendermint. Preserve the
+      transport distinction (HTTP 401 is not classified identically on REST and JSON-RPC), and
+      return `UNKNOWN_ERROR` if that transport has no status verdict. Never borrow REST's 409
+      duplicate-transaction meaning for another interface. An actual gRPC status is decided by
+      the gRPC transport rules with no chain rows, preserving their code/text order; an HTTP
+      transport failure without a gRPC status uses the HTTP-only decision instead.
+
+      Read status from transport metadata when available. A legacy `HTTP <status>: ` prefix must
+      be anchored and identified by the transport adapter; a number or a node-controlled phrase
+      elsewhere in the body is not a new status. The cases and expected results belong to the
+      router's tests, independently of any spec table.
 3. **X's spec rows**, as resolved by inheritance (2.5), in file order, filtered by interface and
    scope.
 4. **The router's built-in rows for X's family**, until the switch removes that table (5.1). After
@@ -240,12 +297,12 @@ For a node error on chain X, the router walks this list in order, and the first 
 5. **The remaining transport rows.**
 6. **`UNKNOWN_ERROR`.**
 
-**Step 2 is the only change to today's order, and it's been replayed.** At `6c237073`, with the
-XRP placement of 3.5, it gives today's verdict for all 102 fixtures, and for all 56 counterexamples
-in 5.3 that must keep theirs. Those 56 include 20 XRP engine results with and without an
-`HTTP 500: ` prefix, 12 slot-already-used pairs, and 15 already-known answers spread over five
-families. Both gRPC fixtures are now decided in the locked-status step, with the same verdict as
-today.
+**Step 2 changes the order; migration must preserve the remaining behaviour.** Revision 3 records
+a scratch replay at `6c237073` of all 102 fixtures and 56 keep-set counterexamples: 20 XRP engine
+results with and without `HTTP 500: `, 12 slot-used pairs, 15 already-known answers across five
+families, and nine rate-limit cases. That is evidence for the proposed ordering, not validation of
+an implemented loader, approval check or write policy. Section 5 requires the replay through the
+actual implementation, including the attack rows and deliberately changed status cases below.
 
 **Why the rate-limit part is this narrow.** Revision 1's prefix moved every row that produces
 `NODE_RATE_LIMITED`, the digit-matching status row included, and ignored the gRPC order. It still
@@ -271,11 +328,29 @@ takes the router's verdict even when a chain row matches its text. Cases from th
   of `CHAIN_INVALID_SEQUENCE`;
 - a JSON-RPC reply that arrived as `HTTP 503: account sequence mismatch` becomes
   `NODE_SERVICE_UNAVAILABLE` instead of `CHAIN_INVALID_SEQUENCE`;
+- a JSON-RPC `-32602` reply that arrived as `HTTP 503: invalid params` takes
+  `NODE_SERVICE_UNAVAILABLE`, even though the ordinary RPC-code row would pick
+  `USER_INVALID_PARAMS` if the original inputs were reused;
 - "insufficient fee" inside a gRPC Unavailable, ResourceExhausted or Aborted becomes
   `NODE_SERVICE_UNAVAILABLE`, `UNKNOWN_ERROR` (the router's deliberate answer to that status) or
   `NODE_ABORTED`, instead of `CHAIN_INSUFFICIENT_FEE`;
 - "account not found" inside a gRPC NotFound becomes `NODE_DATA_NOT_HELD`, and "account sequence
   mismatch" inside a gRPC InvalidArgument becomes `USER_INVALID_PARAMS`.
+
+- a REST 402, 408, 451 or 501 whose body a Cosmos row matches takes the status's verdict
+  (`NODE_ACCESS_DENIED`, `NODE_SERVICE_UNAVAILABLE`, `NODE_ACCESS_DENIED`, `NODE_UNIMPLEMENTED`)
+  instead of the row's;
+- a REST 405 whose body says "txn-mempool-conflict" becomes `NODE_METHOD_NOT_ALLOWED` instead of
+  `CHAIN_DOUBLE_SPEND`;
+- a JSON-RPC reply that arrived as `HTTP 408: account sequence mismatch` becomes `UNKNOWN_ERROR`:
+  408 is locked, and the JSON-RPC table has no 408 row (the 408 rule is REST-only, `:442`), so the
+  transport's answer is "no verdict", not the chain row's.
+
+The node-answer statuses are untouched: nodeos's REST 400 "unknown block" stays
+`CHAIN_BLOCK_NOT_FOUND`, the Cosmos gateway's REST 500 "is not available, lowest height" stays
+`CHAIN_STATE_PRUNED`, Aptos's REST 410 and toncenter's REST 422 keep today's status verdicts, and a
+Cosmos row still reads "account not found" inside a REST 404, or inside a 418 that no router rule
+covers.
 
 An XRP reply that arrived as `HTTP 503: tefPAST_SEQ` becomes `NODE_SERVICE_UNAVAILABLE` too. On a
 write it still ends unknown, because 3.3 reads the answer, not the verdict.
@@ -296,7 +371,9 @@ they run first. Both now lose to the prefix:
   read-your-writes. With the prefix, the already-known step decides first and the answer stays
   `CHAIN_TX_ALREADY_KNOWN`.
 
-Both were replayed by putting the row at the head of the family table.
+Revision 3 replayed both by putting the row at the head of the family table. The acceptance gate
+must also exercise them as loaded spec rows, so a validator rejection cannot substitute for proving
+the router-owned decision still wins at run time.
 
 **Two decisions stay outside the rows**, and the new section reader leaves them there:
 
@@ -318,7 +395,15 @@ Rows inherit through `imports` the same way `api_collections` do, unless the sec
 
 So ETH1's rows reach BASE, and COSMOSSDK's reach COSMOSHUB. A child with no section of its own
 inherits its parents' rows unchanged. Only `rows` inherit; `schema_version` is the same across the
-whole repo at any commit, so a child's section and its parents' always share it.
+whole repo at any commit, so a child's section and its parents' share it in a valid source.
+
+Resolve and validate the entire dependency graph before making any policy active. Missing parents,
+cycles, duplicate local row ids, mixed schemas and incompatible definitions of the same inherited
+id are errors. Identical rows reached through a diamond appear once, at their first occurrence.
+A child must explicitly override or disable conflicting inherited ids; parent order must not
+silently choose between different definitions. A disabling row that names no inherited id fails.
+The resolved order, import choices, overrides and removals are covered by the approval in 3.4.
+An invalid dependency makes each affected chain use its complete bundled policy (4.4).
 
 This is new code in `DoExpandSpec`, which today only merges `api_collections` (`expand.go:72-100`).
 With 144 importing files, inheritance is the common case, not an edge case.
@@ -450,9 +535,10 @@ import, and a chain that mustn't inherit a parent's row disables it:
 
 ### 2.7 What the format cannot say
 
-There's no field for a retry, a retry limit, a status code, a gRPC code, a connection error, a
-timeout, a hold-off, a score, a write outcome or a new verdict, and that's deliberate. A row that
-needs any of those is a router change, and gets ticketed as one.
+There's no dedicated field for a retry, a retry limit, an HTTP status, a gRPC code, a connection
+error, a timeout, a hold-off, a score, a write outcome or a new verdict, and that's deliberate.
+(`code` doubles as the HTTP status on REST and GraphQL, and 3.2 limits it to the node-answer
+statuses.) A row that needs any of those is a router change, and gets ticketed as one.
 
 ## 3. Write protection and the other locks (Must-have 3)
 
@@ -509,9 +595,21 @@ its chain serves after inheritance, and the validator checks it against each one
   and GraphQL classify with a status as the code, and JSON-RPC does too whenever the body carries
   no JSON-RPC code (A.1). And no `code` at all on `grpc`, where the code is the gRPC status, and
   the router decides every status that has a row or was left without one on purpose (2.4).
-- **`code` with `contains` may name an unlocked HTTP status**, so a row can read a node's own text
-  inside one, the way the router's own `CodeAndMessage(500, …)` rows do (`:413-416`). A locked
-  status from 2.4 step 2 can't be named at all.
+- **Among HTTP statuses, `code` with `contains` may name only a node-answer status.** On `rest`
+  that's 400, 404, 410, 422 or 500. On `graphql`, `jsonrpc` and `tendermintrpc` it's 400 or 500
+  only: the evidence for the other three is all REST, and a JSON-RPC 404 is a route refusal. On
+  JSON-RPC the status reaches the classifier as the code only when the body carries no JSON-RPC
+  code (A.1). That lets a row read a node's own text inside one, the way the router's own
+  `CodeAndMessage(400, …)` and `CodeAndMessage(500, …)` rows do (`:404, 413-416`). Every other
+  HTTP status the router has a rule for is locked (2.4 step 2) and can't be named at all. A `code`
+  outside 100 to 599 is an ordinary chain or JSON-RPC code, and this rule doesn't touch it. Two
+  more checks apply inside the node-answer statuses:
+  - inside 400, 404, 410 and 422 the row's `error` must be a verdict the router doesn't blame the
+    endpoint for (`EndpointAtFault` false: a caller error, a data-scope or a node-capability
+    verdict). Inside 500 a row may excuse the endpoint, which is MAG-4061's whole point;
+  - inside 404 the text may not match the route-refusal phrases the transport table reads
+    ("endpoint not found", "route not found", "path not found", "method not allowed",
+    `:390-393`), so a `contains: "not found"` row can't swallow a gateway's "route not found".
 - **`code: 429` fails** in any form.
 - **A `contains` or `regex` fails if it matches** a rate-limit phrase (the `NODE_RATE_LIMITED`
   rows' text and `GRPCRateLimitTexts`), an already-known phrase, or the text a locked status
@@ -523,18 +621,50 @@ a protected decision, just by matching first (2.4 has the two examples). So the 
 run in the locked prefix, ahead of every spec row, whatever a row's text says. The checks above are
 the early warning in CI; the prefix is the guarantee.
 
-**Why these statuses are locked.** On HTTP, they're the ones whose verdict carries write safety or
-endpoint health:
+**Which HTTP statuses are locked, and why.** The router's own table already splits its 38 status
+rows (`error_classifier.go:421-449, 555-591`) into answers that come from the node and decisions
+about the endpoint in front of it. The lock follows that split:
 
-- 401 and 403 (credentials);
-- 409 (`CHAIN_TX_ALREADY_KNOWN` on a Horizon write);
-- 429;
-- the gateway and edge statuses 502 to 504, 520 to 527 and 530.
+- **Readable by chain rows on REST: 400, 404, 410, 422 and 500.** Their bodies are the node's own
+  answer on the REST chains the router serves: Horizon's rejected transaction and `not_found`,
+  Aptos's `resource_not_found` and `version_pruned`, toncenter's `{"ok":false, …}` inside a 422 or
+  a 500, the Cosmos gRPC-gateway's pruned height inside a 500, sidecar's and nodeos's request
+  errors (`restMessage_test.go:674-686`, `rest_integration_test.go:282-322, 361-374, 398-410,
+  708-719`, MAG-4061). No gateway or CDN emits 410 or 422. Off REST only 400 and 500 are readable:
+  nothing shows a node answering inside a JSON-RPC or GraphQL 404, 410 or 422, and a JSON-RPC 404
+  is a route refusal (`:569`).
+- **Locked: credentials and refusals.** 401, 402, 403, 407, 426 and 451 are the endpoint answering
+  about its own configuration (`NODE_ACCESS_DENIED`, `:436-440` and `:564`;
+  `error_codes.go:324-339`). A row reading inside one could strand a request on a refusing
+  provider, or blame it.
+- **Locked: the timeout.** 408 is the endpoint giving up on the request, at fault like a 503
+  (`:441-442`).
+- **Locked: HTTP framing and negotiation.** 405, 406, 411, 412, 413, 414 to 417, 428 and 431 are
+  the HTTP layer talking, never the chain (`:421-431, 570-571`). Aptos's and Horizon's 415 is the
+  router's own Content-Type problem (`rest_content_type.go:24-27`,
+  `direct_rpc_connection_test.go:648-651`).
+- **Locked: 409, 429 and 501.** 409 drives read-your-writes (`:449`), 429 drives hold-off and the
+  write re-send (`:572`), and 501 is a route the node doesn't implement, retried elsewhere
+  unblamed (`:574-577`).
+- **Locked: the edge.** 502, 503, 504, 520 to 527 and 530 are a gateway or CDN speaking in the
+  node's place. Horizon's `TRY_AGAIN_LATER` and a syncing Beacon node do answer inside a 503, but
+  503 carries endpoint health; if those deserve another verdict, that's a router rule change to
+  ticket.
 
 On gRPC, every status the router has decided is locked, because on gRPC the status is the code,
-and the ticket locks the gRPC status rules. HTTP statuses whose body is the node's own answer, such
-as 400, 404 and 500, stay readable by chain rows (MAG-4061 needs TON's answers inside a 500). That
-carve-out is a departure from the ticket (1.3).
+and the ticket locks the gRPC status rules. The GraphQL reader turns Sui's own extension codes
+inside a 200 into a status (`graphqlMessage.go:33-55`). `RESOURCE_EXHAUSTED` → 429,
+`FEATURE_UNAVAILABLE` → 403 and `REQUEST_TIMEOUT` → 504 land on locked statuses, so a Sui row
+can't reinterpret them. `INTERNAL_SERVER_ERROR` → 500 lands on a readable one, so a Sui row inside
+500 may excuse it, the same as a real 500. A mutation's caller-side error is filed as a 400
+(`:503-504`), also readable. (`UNAVAILABLE` → 503 and `DEADLINE_EXCEEDED` → 504 are kept for
+non-Sui servers, `:46-47`.)
+
+The five readable statuses are a departure from the ticket, which locks the HTTP status rules
+wholesale (1.3). One thing the carve-out doesn't do: it doesn't close MAG-4061 on its own. At
+`6c237073`, `shouldFailSessionForResult` (`rpcsmartrouter_server.go:2585-2620`) scores every 5xx
+before it reads the fault flags, so a TON row inside a 500 changes the verdict but not the
+endpoint's availability. That second half is router work under MAG-4061.
 
 ### 3.3 Slot already used
 
@@ -551,6 +681,11 @@ have to build: today each such answer keeps its own verdict, and the node's body
 - **When a write ends with no attempt accepted and any answer matches a signature, the router
   reports the write as unknown.** R&D picks the wire form. Today's unclear-write reply is an
   `*unclearWriteError` (`rpcsmartrouter_server.go:1421-1445`), and this adds a fifth reason.
+- **Record the signature before retry decisions.** Once any attempt has returned a slot-used
+  answer, the write cannot open another fan-out, including through the all-rate-limited exception.
+  This holds even if a classifier labels that same answer as a rate limit. The flag survives
+  aggregation of other replies and cannot be cleared by a spec row. An accepted sibling still
+  follows the router's accepted-result rules; reads keep ordinary classification.
 - **Proposed signatures.** MAG-4898 completes them per node software:
 
   | Family | Code | Message | Today's verdict |
@@ -558,7 +693,7 @@ have to build: today each such answer keeps its own verdict, and the node's body
   | any | any | contains "nonce too low" | `CHAIN_NONCE_TOO_LOW` |
   | any | any | contains "nonce is too low" (Nethermind's processor, `error_classifier.go:294`) | `CHAIN_NONCE_TOO_LOW` |
   | any | any | contains "account sequence mismatch" | `CHAIN_INVALID_SEQUENCE` |
-  | XRP | any | starts with `tefPAST_SEQ` | `CHAIN_NONCE_TOO_LOW` |
+  | XRP | any | `tefPAST_SEQ` at the start, after an optional anchored `HTTP <status>: ` prefix, with a token boundary | `CHAIN_NONCE_TOO_LOW` |
   | Bitcoin | -26 | contains "txn-mempool-conflict" | `CHAIN_BITCOIN_VERIFY_REJECTED` |
   | Bitcoin | -25 | contains "missingorspent" or "missing inputs" | `CHAIN_BITCOIN_VERIFY_ERROR` |
   | Bitcoin | any | contains "already spent" or "double spend" | `CHAIN_DOUBLE_SPEND` |
@@ -597,6 +732,11 @@ them.
 - The router keeps a table of write methods in its own code, keyed by api interface and name (and
   by family, for a generic name like XRP's `submit`). It's seeded from `check_stateful.sh`'s list
   plus the writes that list misses (A.4), and MAG-4898 completes it.
+- Match the original request's method identity using the interface parser's canonical form, not
+  an api display name or the generated `Default-` prefix. REST identities include the HTTP verb
+  and route; gRPC uses the full service/method. Family comes from the router's chain identity,
+  not from an editable error section. Check each batch member before aggregation, while retaining
+  existing batch and disabled-method rejection rules. This guard never enables a disabled api.
 - **At load**, after `DoExpandSpec` (called from `utils/keeper/spec.go:79`) and before the chain
   parser receives the spec, any api in the table that the spec doesn't mark `stateful` is loaded as
   stateful anyway. The router logs one warning per chain naming the apis, and counts
@@ -612,32 +752,64 @@ them.
   `Default-eth_sendRawTransaction` with `stateful` 0. With the lock, a method in the table gets a
   stateful, non-deterministic default api, and the router counts it on the same counter with
   `rule="stateful_default"`.
+- **Before use**, every accepted request for a protected method is stateful and ineligible for
+  cache reads and writes, whether its api was declared or generated. A spec's `deterministic`
+  setting cannot undo that. Apply the guard before scope selection, cache lookup, provider
+  selection and retry policy; an accepted batch containing a protected write cannot become a read
+  through category aggregation.
 - `cmd/specvalidate` exports the same table, so lava-specs CI fails a PR that clears `stateful`
   on a write before any router sees it. `check_stateful.sh` reads the table instead of keeping its
   own copy, which also ends its gRPC and Tendermint blind spot.
 - Today the load-time lock flips nothing: all 132 writes on lava-specs `main` are already stateful.
 
-**No vendor wording: a row acts only if lava-specs CI signed it.**
+**No vendor wording: the effective policy needs a signed approval.**
 
 - **Allowlist.** A row's `source` must be on the router's allowlist of node-software and
   protocol-spec origins (the repositories of the node implementations the six families run, plus
   the protocol specs; MAG-4898 completes it), with the link pinned to a tag or a commit.
-- **Content check, in CI.** CI fetches the cited file at the cited ref, and checks that the row's
-  text (the `contains` string, or the longest literal in a `regex`) actually appears in it. That
-  way a vendor's phrase can't ride in on a node-software link.
-- **Signed manifest, checked at run time.** The router can't fetch every cited file at boot, so CI
-  signs what it checked. After the source check passes on a merged commit, lava-specs CI writes a
-  manifest of the SHA-256 of every row's canonical JSON (keys sorted, no whitespace), per chain, and
-  signs it with a key only that CI job holds. The router embeds the public key. It acts on a
-  chain's section only if every row's hash is in a manifest with a valid signature; otherwise it
-  drops the section (4.4).
-- **What that means for each source.** A custom source or a local folder can't carry a row CI
-  never saw, even one that cites an allowed, pinned link. An unmodified lava-specs checkout works
-  anywhere, because its manifest travels with it, and the bundled commit's manifest ships in the
-  image. Customer rows wait for the overlay in section 7, which needs an approval path of its own.
-- **Still open** (section 6): where the manifests are published, who holds the key, how it
-  rotates (a rotation needs a router release, since the key is embedded), and how a signed row
-  that later turns out to be wrong is revoked.
+- **Evidence and review, in CI.** Fetch the cited file at its resolved commit and require official
+  source evidence and representative replies for every matcher. An exact literal check is useful
+  lint, but the longest literal in a regex does not establish the origin of its other alternatives
+  or wildcards. A spec owner must approve the complete matcher and its evidence, including each
+  regex alternative; write rows also need the write-safety owner. A vendor phrase attached to an
+  official URL fails that review. Signing attests to this reviewed evidence; it is not an automatic
+  proof that text is vendor-free.
+- **Approve the complete effective policy.** A manifest entry binds the chain id, schema version,
+  interfaces declared by the expanded spec, resolved error-import graph and its source-section
+  digests, and the final ordered rows after overrides and removals. Every row field is included.
+  An intentionally empty result has an entry too. Hash membership of individual rows is
+  insufficient: reordering,
+  dropping or recombining approved rows can change the first match without changing any row.
+  The manifest also records the originating lava-specs commit and the resolved official-source
+  commits and file digests used in review. A citation tag moving later does not change that
+  evidence.
+- **Bind activation permission too.** The signed approval names the deployment context (candidate
+  or general deployment) and the permitted activation stage (`shadow`, `reads` or `all`) for the
+  policy digest. The router applies the most restrictive of this permission and its configured
+  setting. The pipeline can advance permission for unchanged policy content after the required
+  evidence passes; changing a source or setting cannot advance it. An approval for shadow
+  evaluation is not an approval to affect responses.
+- **One canonical representation.** The validator and loader share the canonical serializer and
+  hash algorithm. It rejects duplicate JSON keys, preserves array order and distinguishes absent
+  imports from `[]`. Its format version is part of the signed payload. CI and every supported
+  loader must produce identical policy digests from the same inputs; ambiguity rejects the policy.
+- **Verify before activation.** A trusted CI promotion job signs the manifest after the gates in
+  section 5. The router embeds the verification trust roots and recomputes each effective policy
+  from the loaded source. The manifest format must be supported, and both the signature and the
+  complete policy digest must match before any external row acts. Unknown signers, revoked
+  approvals, missing entries and digest mismatches fall back under 4.4. There is no URL,
+  local-folder or configuration bypass for ordinary releases.
+- **Deliver specs and approval together.** CI publishes an artifact containing the spec snapshot,
+  manifest and signature; the bundle in the router image has the same components. A local folder
+  works when it carries the matching artifact. A raw Git checkout or GitHub source archive without
+  its approval can supply api definitions, but its error policies fall back to the bundled ones.
+  Customer-authored rows wait for the overlay in section 7 and its separate approval path.
+- **Trust lifecycle is a release gate.** Before external policies act, R&D must specify artifact
+  delivery, key custody and rotation, and revocation of a signer or individual policy digest. A
+  newly trusted key or revocation must reach routers through a trusted router release or an
+  independently authenticated trust update, never through the spec being verified. Offline routers
+  retain their installed trust state; this draft does not claim immediate fleet-wide revocation or
+  protection from replaying an old, still-approved policy. Freshness is deferred with versioning.
 
 The router's own vendor rows are transport rows, and they stay in code whatever this PRD decides.
 Section 6 asks whether R-0.2 removes them.
@@ -685,8 +857,10 @@ effect.
 Each router release names one tested lava-specs commit in `specs/SPEC_COMMIT` and ships that
 commit's files inside the release image.
 
-- The repo's `specs/` folder stays for local runs and tests, but `make specs` fills it from
-  `SPEC_COMMIT`, and a CI check fails if the folder differs from that commit by even a byte.
+- The repo's `specs/` folder stays for local runs and tests, but `make specs` fills its spec files
+  from `SPEC_COMMIT`. CI compares those files byte-for-byte with the named commit and separately
+  verifies the generated manifest and signature. `SPEC_COMMIT` and approval artifacts are release
+  metadata, not extra spec files to compare with the upstream Git tree.
 - The router's CI runs its own validator and the manifest check (3.4) over every section in the
   bundled commit, so the bundled sections are always valid for the router that carries them.
 - `grpctest.json`, which only exists in the router, moves to a test fixture directory.
@@ -705,22 +879,62 @@ source on purpose in `cluster.yaml`.
 
 ### 4.4 Fallback: when a section can't be used
 
-Whenever a chain's section from the loaded source can't be used, the router uses that chain's
-section from its bundled specs instead. That happens when:
+Whenever a chain's effective error policy from the loaded source can't be used, the router uses
+that chain's complete effective policy from the bundled specs instead. That happens when:
 
 - the section has a `schema_version` the router can't read (a newer schema on an older router);
-- a row breaks a rule in section 3, or isn't in a validly signed manifest;
+- a row breaks a rule in section 3, the effective policy has no valid signed approval, or an
+  import dependency cannot be resolved and validated;
 - the router couldn't load the source at all (the host doesn't answer, the URL or ref doesn't
   exist, what comes back isn't an archive, a spec doesn't parse). Then the router boots on its
   bundled specs for everything, not just the errors sections.
 
-In each case the router logs one error at boot naming the chain, the row id and the rule (or the
-reason), counts `smartrouter_spec_errors_section_dropped_total{chain_id, reason}` (for example
-`reason="schema_unknown"` or `reason="unsigned_row"`), or
-`smartrouter_spec_source_fallback_total{reason}` when the whole source failed, and boots. A bad row
-in one spec never takes a router down and never degrades another chain. lava-specs CI runs the same
-validator first, so in practice this path is for a router meeting specs it wasn't tested with, or a
-hand-edited folder.
+Resolve the external and bundled graphs separately. Do not replace a rejected external parent
+with a bundled parent while retaining the external child's overrides: that combination was never
+approved. Each chain whose effective policy depends on the rejected input falls back as a whole;
+an unrelated chain with a valid policy keeps it. API definitions remain from the loaded source
+unless the whole source failed, and the write-method guard still applies to them. Validate the
+fallback against the interfaces the chain actually serves; a bundled row cannot silently acquire
+an interface that was outside its approved context.
+
+In each case the router logs the chain and the cause, including the row or dependency when known,
+and counts `smartrouter_spec_errors_section_dropped_total{chain_id, reason}`. The reasons are a
+closed set: `schema_unknown`, `rule_violation`, `approval_missing`, `signature_invalid`,
+`policy_mismatch`, `approval_revoked`, `dependency_invalid`, `source_file_failed` (a file that
+failed to load beside good ones), `bundled_no_rows` (the bundled specs have no effective rows for
+the chain) and `interface_outside_context` (a served interface the bundled policy's approval
+doesn't cover). A chain can carry more than one at once, say a drop reason and `bundled_no_rows`.
+The source as a whole fails only when nothing loads; that counts
+`smartrouter_spec_source_fallback_total{reason}` with `host_unreachable`, `ref_not_found`,
+`not_archive` or `no_spec_parsed`. The router boots. Fallback is one atomic choice per chain, made
+before serving requests, not a partially accepted list of rows.
+
+**The fallback is never silent.** Logs and counters record that it happened. A gauge shows that
+it's still happening, and an alert tells someone:
+
+- `smartrouter_spec_policy_fallback{spec, apiInterface, reason}` is 1 while a chain and interface
+  serve on their bundled policy, or on the reduced transport-only coverage described below, and 0
+  otherwise. `reason` is the closed set above. Every reason is written at boot, zeros included,
+  the same complete-map discipline as `smartrouter_csm_blocked_providers_by_reason`
+  (`smartrouter_metrics_manager.go:581-584, 1688-1700`), so a rule matches on presence (the
+  series exists at 0) rather than `absent()`, and no reason is missing from the enum. The
+  decision is made once per boot; a fix is a new source and a restart.
+- `smartrouter_spec_source_fallback{reason}` is 1 while the whole source has been replaced by the
+  bundled specs, with the source reasons above.
+- The gauges say `spec` and the counters say `chain_id`. Both are the chain id; the router already
+  uses both names (`error_metrics.go:44`, `smartrouter_metrics_manager.go:584`). Alloy adds
+  `chain` and `router` from the pod labels to every series, and the store adds `cluster`.
+- Two of the three Grafana alert rules in 5.6 read these gauges; the third reads the lock counter.
+  smart-router-infrastructure is where every router alert lives
+  (`grafana/alert-rules/smart-router.yaml`); the chart ships none.
+- `/livez` and `/readyz` don't move. Readiness reflects provider health
+  (`smartrouter_metrics_manager.go:766-793`), and a router on its bundled policy is serving. The
+  alert is the signal.
+
+For comparison, today a bad source is fatal at boot and a bad file is silent (A.3). The alerts that
+fire for a crash-looping router name the pod or the host, never the spec. Both cases become a
+fallback with a gauge and an alert; the skipped-file case falls back per chain with
+`reason="source_file_failed"`.
 
 **The fallback is the same before and after the switch.**
 
@@ -728,8 +942,10 @@ hand-edited folder.
   falling back changes nothing.
 - After the switch deletes the family tables, the bundled section is the only built-in
   classification a chain has. It stays tested: 5.4 runs the fallback after the switch.
-- If the bundled specs have no section for the chain, the chain gets only the transport rows, just
-  like the 204 unmapped chains today, and the reason says so.
+- If the bundled specs have no effective rows for the chain, or a served interface is outside the
+  bundled policy's approved context, that chain/interface gets the locked prefix and remaining
+  transport rows only. The log identifies that reduced coverage. This is not silently counted as
+  successful activation of the external policy.
 
 **After the switch, this fallback is what keeps a chain classified.** Without it, a dropped Solana
 section would send "Node is unhealthy" to the generic `-32005` row, `NODE_LIMIT_EXCEEDED`, which is
@@ -757,8 +973,8 @@ What Step 0 delivers:
 
 - `compatibility.json`, `specs/SPEC_COMMIT`, `make specs`, the folder-matches-commit check, the
   bundled specs in the release image, booting with no source, and the source fallback (section 4);
-- `cmd/specvalidate`, the schema, the `spec_guards.yml` jobs, `CODEOWNERS`, the source check and
-  the manifest signing (5.2, 3.4);
+- `cmd/specvalidate`, the schema, the `spec_guards.yml` jobs, owner-review checks, the source
+  evidence checks, and the candidate-to-release approval pipeline (5.2, 3.4);
 - the locked prefix of 2.4 step 2, and the router-owned XRP rows (3.5);
 - the write-method table, with both the load-time and the request-time lock (3.4);
 - the slot-already-used signatures (3.3);
@@ -780,7 +996,10 @@ rows. Two metrics track it:
   - `spec_only`: a spec row matched and no code family row did, meaning a chain gained it.
 - `smartrouter_spec_error_rows_hits_total{chain_id, row_id}` counts every spec-row hit.
 
-The expected count for every kind is zero. Any mismatch is a bug in the move.
+The expected count for every kind is zero. Any mismatch is a bug in the move. Compare the old and
+new family stages with the same locked prefix and router-owned rows on both sides; count coverage
+at the family stage as well as the final verdict, so a transport fallback cannot hide a lost row.
+The Step 0 changes are tested separately and are not unexplained shadow mismatches.
 
 **Step 2: switch.** A router setting with three values decides which rows act. Here's the order in
 each window:
@@ -793,10 +1012,29 @@ each window:
 | tables deleted (next release) | prefix, spec rows, router-owned rows, transport | same as reads |
 
 - "Prefix" means 2.4 step 2, which is active from Step 0.
-- Flipping the setting doesn't need a release.
+- The table describes the effective stage after applying the signed activation permission (3.4).
+  Flipping the setting doesn't need a release, but cannot advance a policy beyond its approval.
+  An early request for `all` leaves the policy at its approved stage and logs the reason.
+- During the initial migration, the controlled candidate first runs in shadow, then may act on
+  reads after the seven-day gate and writes after the thirty-day gate. Promotion to general use
+  follows the active canary window for the stage being promoted. A read-only approval keeps writes
+  on their code tables; it does not approve the `all` stage.
+- A zero counter without traffic is not evidence of parity. Record the policy digest, the start
+  and end of each window, and observed coverage for every chain and scope being enabled. Exercise
+  unused rows with the fixture suite. A policy change or mismatch restarts its affected window.
+- Rollback before deletion restores the previous setting and approved artifact. After deletion,
+  `shadow` cannot restore absent code tables: rollback requires the previous router release and
+  its tested bundle. Do not leave the switch UI implying otherwise.
 - The six family tables, except the router-owned rows, are deleted in the release after `all` has
   run through one canary window. From that release on, the fallback is the bundled sections (4.4),
   and 5.4 runs it in the router's CI.
+- A release that has deleted the tables bundles an `all`-approved policy. It does not activate an
+  external policy with only `shadow` or `reads` permission: it retains the complete bundled policy
+  for that chain until the external policy is fully approved. This avoids relying on deleted code
+  or combining rows from different policy snapshots.
+  The old migration selector no longer controls serving in that release. A stale `shadow` or
+  `reads` setting logs a configuration warning and retains the complete bundled policy; it cannot
+  request execution of tables that no longer exist.
 
 **Step 3: per-chain rows open up.** MAG-4898 lands researched rows per chain through the gates
 below, and the 36 gains of Appendix B open one at a time, by removing a chain's `"imports": []`.
@@ -804,7 +1042,9 @@ Each of those is a behaviour change, named in its PR with a product call (5.2).
 
 ### 5.2 lava-specs CI, on every pull request
 
-No lava-specs change reaches a customer's router until all of the gates in 5.2 to 5.5 pass.
+An error policy is eligible for general deployment only after the gates in 5.2 to 5.5 pass. The
+controlled canary is the production evaluation before that promotion. These guarantees cover the
+error policies; signing them does not certify unrelated api definitions from arbitrary sources.
 
 - **Schema check.** A JSON Schema for the `errors` section, kept in lava-specs and applied to every
   changed spec.
@@ -815,15 +1055,19 @@ No lava-specs change reaches a customer's router until all of the gates in 5.2 t
 - **Stateful check.** The validator's write-method table (3.4), run on every PR as a job in
   `spec_guards.yml`. Today `check_stateful.sh` only runs inside the agent, once, when a PR opens
   (A.4).
-- **Write-safety job** in `spec_guards.yml`: the validator's write rules, plus a diff keyed by row
-  `id` (not by position) that flags any added, removed or changed `write` or `both` row and any
-  `slot_used`, and labels the PR `write-rows`.
-- **Source check and signing** (3.4): every row's `source` is on the allowlist and pinned, and its
-  text is found in the cited file. Once a PR merges, CI signs the manifest for that commit.
+- **Write-safety job** in `spec_guards.yml`: the validator's write rules and a diff of effective
+  policies for every affected chain, including descendants. Compare row contents by `id` and
+  compare their execution order separately. Changes to imports, overrides, removals, interface
+  coverage or an optional section can change a write policy even when no local row changed.
+  Any such change affecting `write`, `both` or `slot_used` requires write-owner review.
+- **Source evidence and approval** (3.4): every matcher has reviewed official evidence and
+  fixtures. Every root and descendant policy passes the same validation and compatibility tests
+  before its digest is eligible for signing.
 - **Owner review for write rows.** `CODEOWNERS` matches paths and can't name a JSON section, so the
-  gate is a required check instead: a PR labelled `write-rows` needs an approving review from the
-  owners team named in a new `CODEOWNERS` file. The same file makes the spec owners review every
-  root spec.
+  gate is a required check instead. It computes whether write policy changed and requires an
+  approving review from the owners team named in a new `CODEOWNERS` file for the current PR head.
+  It may add `write-rows` for visibility, but removing a label cannot bypass the check. The same
+  file makes the spec owners review source evidence; a changed commit invalidates stale approval.
 - **Behaviour changes named in the PR.** With no change log (1.3), the PR is the record. A PR that
   moves a verdict (a new or changed `error`, a `match` that widens or narrows a verdict, a removed
   or disabled row, a changed `scope`, a new `slot_used`, or a chain that gains or loses inherited
@@ -833,13 +1077,31 @@ No lava-specs change reaches a customer's router until all of the gates in 5.2 t
 - **`check_unused_fields.sh`**, which keeps `description` and `title` out of rows, moves into
   `spec_guards.yml` so it runs on every PR (A.4).
 
+**Testing and signing are separate stages.** PR validation must not require a production signature
+that can only be issued after merge, and PR-controlled code must not run with the signing key:
+
+1. The PR jobs resolve candidate policies, validate them and run the boot matrix. End-to-end
+   signature tests use an isolated test trust root; ordinary release binaries never trust it.
+2. After merge, a trusted job repeats the required checks on the exact candidate snapshot and
+   verifies its owner approvals. It publishes the candidate artifact for the controlled canary.
+   The canary uses a separate trust context unavailable through an ordinary spec-source setting.
+3. After the canary passes, the promotion job issues the production-trusted manifest for those
+   same policy digests and the activation stage that passed. Any policy change creates a new
+   candidate and reruns its gates. General deployments and the release bundle consume only this
+   promoted artifact; an approval for reads cannot be used as evidence that writes passed.
+
+Artifact publication and the canary trust mechanism must be specified and tested before Step 1;
+"sign every merged commit" is not a substitute for this promotion gate.
+
 ### 5.3 Against the router
 
-- **Boot matrix.** Every chain whose spec changed boots, with the PR's specs as the source, on
+- **Boot matrix.** Every chain whose effective policy or api context changed, including importing
+  descendants, boots with the PR's specs as the source on
   every router release in service from the schema's `min_router` up. Each release runs its own
   validator at load. A section dropped at boot (4.4) fails the job unless the PR says so.
 - **Replay.** The 102 cases in `error_fixtures.json`, plus the router's own classifier and status
   suites (`TestRESTStatusRows`, `TestRESTStatusRowsDoNotReachOtherTransports`,
+  `TestRESTMessageRowsBeatTheStatusRow`,
   `TestGRPCRateLimitTexts_TheCodeRowsAboveStillDecide`, `TestEndpointFault_AnswerShapes`,
   `TestGRPCStatusError`), run against the spec rows and must give the same registered error, unless
   the PR names the case and its new verdict (5.2). The fixtures grow with MAG-4898: one case per
@@ -858,8 +1120,27 @@ No lava-specs change reaches a customer's router until all of the gates in 5.2 t
       transaction") on EVM, Solana, Bitcoin, Starknet and Cosmos chains;
     - each slot-already-used signature as a complete code-and-message pair.
   - *Must take the router's verdict, even though a chain row matches the text:* a REST 403 and
-    409; a gRPC Unavailable, ResourceExhausted, NotFound, InvalidArgument and Aborted; and a
-    JSON-RPC reply that arrived as `HTTP 503: `.
+    409; a REST 402, 408, 451 and 501 whose body a family row matches; a gRPC Unavailable,
+    ResourceExhausted, NotFound, InvalidArgument and Aborted; a JSON-RPC reply that arrived as
+    `HTTP 503: ` (`NODE_SERVICE_UNAVAILABLE`); and one that arrived as `HTTP 408: `
+    (`UNKNOWN_ERROR`: JSON-RPC has no 408 row, so the lock yields the transport's no-verdict
+    answer, not the chain row's).
+  - *Must keep the router's own text rows ahead of the status:* a REST 403 and 405 whose body says
+    "route not found" stay `NODE_ENDPOINT_NOT_FOUND` (`rest_status_rows_test.go:139`).
+  - *Must stay readable by chain rows (the node-answer statuses, 3.2):* nodeos's REST 400
+    "unknown block", the Cosmos gateway's REST 500 "is not available, lowest height", Aptos's REST
+    410 `version_pruned`, toncenter's REST 422 `failed to parse ton_addr`, and a REST 404 with a
+    chain's own `not_found` body. Each keeps the verdict the router's own row or status gives it
+    today, and a spec row inside the same status can specialise it.
+  - *Must fail validation:* `{code: 408, contains: …}` and `{code: 402, contains: …}` (locked
+    statuses); `{code: 404, contains: "not found"}` (matches the route-refusal phrases); and a
+    row inside 400 naming `NODE_INTERNAL_ERROR` (blames the endpoint inside a caller-error
+    status).
+  - *Must isolate the HTTP status decision:* a JSON-RPC `-32602` with HTTP 503, HTTP 503 with
+    "insufficient funds" in the body, HTTP 401 on REST and JSON-RPC, and HTTP 409 on JSON-RPC.
+    The first two take `NODE_SERVICE_UNAVAILABLE`; the 401 cases retain their transport-specific
+    verdicts; JSON-RPC 409 stays `UNKNOWN_ERROR`. A node's own text beginning `HTTP 503: ` without
+    a corresponding transport status must not acquire the HTTP lock.
   - A relay-policy test adds that a stateful write whose every answer is the min-fee rejection
     stops after its fan-out and holds no endpoint off.
 - **Attack rows.** The two rows from the review of revision 2 must not change a verdict:
@@ -869,12 +1150,20 @@ No lava-specs change reaches a customer's router until all of the gates in 5.2 t
   complete code-and-message pair through the stateful path, must end unknown. The same pair on a
   read keeps its verdict. Every fixture whose verdict is `CHAIN_NONCE_TOO_LOW`,
   `CHAIN_INVALID_SEQUENCE` or `CHAIN_STARKNET_INVALID_NONCE` must match a signature.
+- **Slot-used retry guard.** Mix a slot-used answer with rate-limit answers, and separately let
+  the same answer also match a rate-limit phrase. Neither case opens another fan-out. Include an
+  accepted sibling to confirm accepted-result handling and XRP replies with an HTTP prefix.
 - **Coverage check.** For every chain, the rows it gets after inheritance are compared with the
-  rows it gets on lava-specs `main` before the PR. A chain that loses rows fails the job, and a
-  chain that gains rows must be named in the PR as a behaviour change (5.2).
-- **Generated row tests.** For every changed row, CI builds a node error from the row's `match`
-  (the code, or a message containing the text) and asserts the row's `error` and `class` on the
-  router version under test.
+  rows it gets at the PR's fixed base commit. A chain that gains, loses or reorders effective rows
+  fails unless the exact behaviour change is declared and approved under 5.2. An approved removal
+  or disabling row is possible; an unexplained coverage change is not.
+- **Row fixtures and generated tests.** For every changed row, supply a source-backed positive
+  reply and a near-miss; add examples for each regex alternative. CI generates a test for each
+  changed row from those fixtures and checks them against the complete effective policy, not only
+  the isolated matcher. A regex need not have an automatically generated example, and a later row
+  can be shadowed by an earlier one. The test records the intended winning
+  row, registered verdict and class, and reports unintended unreachable rows. Synthetic code and
+  literal cases supplement the real replies rather than replacing them.
 
 ### 5.4 Bad-source and lock tests (router repo)
 
@@ -885,9 +1174,20 @@ that the metric carries the reason:
 - A source that isn't an archive, a ref that doesn't exist, a host that doesn't answer, and a spec
   that doesn't parse each boot on the bundled specs, with their own reason on
   `smartrouter_spec_source_fallback_total`.
-- A row that breaks each rule in 3.2, 3.3 and 3.4, a row missing from the manifest, a manifest
-  signed with the wrong key, and a section with an unknown schema each drop that chain's section,
-  and the chain classifies with its bundled section.
+- A row that breaks each rule in 3.2, 3.3 and 3.4, a missing approval, a wrong-key signature, a
+  revoked approval, and an unknown schema each fall back to the affected chain's bundled policy.
+- Reordering or deleting approved rows, deleting a section, altering imports, moving a row to a
+  different chain, or expanding its interfaces fails policy-digest verification even if every
+  individual row appeared in a previously approved manifest. A correctly approved empty policy
+  remains valid.
+- A missing or invalid parent makes each affected descendant use its complete bundled policy;
+  unrelated chains retain their approved external policies. Test cycles, mixed schemas,
+  duplicate/conflicting ids and diamond imports without silently mixing external and bundled rows.
+- A regex with one official literal and a separate vendor-only alternative fails source review;
+  an unapproved custom policy never acts by attaching an official URL or a candidate signature.
+- Requesting `all` with shadow or read-only permission cannot activate write rows. A production
+  binary rejects a candidate-only approval. After table deletion, a partially approved external
+  policy retains the complete bundled policy; it never falls through to missing code tables.
 - **After the switch**, with the family tables deleted: Solana's section dropped from the loaded
   source still classifies `-32005` "Node is unhealthy" as `NODE_SOLANA_UNHEALTHY`, from the bundled
   section.
@@ -895,22 +1195,51 @@ that the metric carries the reason:
   `smartrouter_spec_lock_enforced_total{rule="stateful"}` counts it.
 - A spec that leaves `eth_sendRawTransaction` out still relays it stateful and uncached, and
   `smartrouter_spec_lock_enforced_total{rule="stateful_default"}` counts it.
+- Repeat the cleared, omitted and disabled-method cases for each supported write interface;
+  disabled methods remain rejected. Check accepted batch handling, cache bypass and a declared
+  write whose spec sets `deterministic: true`, not only the final `stateful` flag.
 
-The ticket's "stale" and "unpinned" source tests are dropped with Must-have 1 (1.3).
+**The fallback has to be visible, not just happen.** Each fallback case above also asserts:
+
+- `smartrouter_spec_policy_fallback` reads 1 for the affected chain, interface and reason, 0 for
+  every other reason and for the unaffected chains, and 0 again when the test re-runs the load
+  against the same collector with a valid policy. The whole-source cases assert
+  `smartrouter_spec_source_fallback` the same way. The unit test reads the collector; nothing
+  scrapes the metrics port.
+- The alert rules are proven in smart-router-infrastructure by extending the promtool replay that
+  already covers `sr-router-unhealthy` (`tests/grafana-alert-rules/test_silent_when_idle.py:129-156`):
+  render each per-tenant rule through `expand_tenant`, hold the gauge at 1 past its `for` and
+  assert it fires, then return it to 0 and assert it resolves (a case the existing fixture doesn't
+  have). For `sr-spec-lock-enforced`, the fixture steps the counter once inside the 30m window and
+  the rule fires; a flat counter keeps it silent. The shipped file passes
+  `scripts/grafana-alert-rules.py check`. The infra CI runs both on every PR that touches
+  `grafana/**` or the tests (`.github/workflows/grafana-plan-pr.yaml:121-124`).
+- The rules are published only once a router that emits the gauges is on the fleet. `check` can't
+  tell whether a metric exists (`docs/OBSERVABILITY.md:1325-1330`), so a rule published early would
+  stay green forever.
+
+The ticket's "stale" and "unpinned" source tests are deferred with Must-have 1 (1.3); they return
+if versioning does (7).
 
 ### 5.5 Canary
 
-Managed deployments take a new router release, and with it new bundled specs, on one canary router
-per cluster first. The rest follow after a metrics window.
+Managed deployments evaluate a candidate router/bundle or external policy artifact on one canary
+router per cluster first. The rest consume it only after promotion (5.2). Spec-only releases use
+the same gate; a signature must not make a policy generally available before its canary.
 
 - **Window length.** The proposal is one full day of production traffic, so each chain's daily
-  cycle is covered.
+  cycle is covered. This is a minimum for ordinary compatible policy updates. The initial migration
+  still requires the seven-day read and thirty-day write windows in 5.1; signing or passing a
+  one-day canary does not waive them. Candidate policies can be evaluated in shadow while those
+  windows run, before they are eligible to act or be promoted for general use.
 - **What it compares.** `smartrouter_errors_total` by `error_name` and `chain_id`, before and after
   (`protocol/metrics/error_metrics.go:42-44`). The dropped-section, source-fallback and
-  lock-enforced counters must stay at zero.
+  lock-enforced counters must stay at zero, and both fallback gauges (4.4) must read 0 on the
+  canary for the whole window.
 - **On-prem** only gets the tested pair.
-- **A pair that fails the canary is rolled back** to the previous release. The fix lands as a new
-  lava-specs commit and a new release that bundles it.
+- **A failed canary rolls back** to the previous approved policy artifact; a router/bundle change
+  also rolls back the router release. A spec-only fix does not require a new router binary when
+  its schema and verdicts are compatible. The next router release bundles the promoted commit.
 
 ### 5.6 Observability
 
@@ -921,6 +1250,29 @@ per cluster first. The rest follow after a metrics window.
 | `smartrouter_spec_lock_enforced_total{chain_id, rule}` | router | a spec that cleared `stateful` on a write (`stateful`), or left a write out (`stateful_default`), shows up |
 | `smartrouter_spec_error_rows_mismatch_total{chain_id, kind, row_id, code_error, spec_error, scope}` | router, steps 1 and 2 | the switch criterion |
 | `smartrouter_spec_error_rows_hits_total{chain_id, row_id}` | router | which rows actually matter; feeds the geth-wording decision in section 6 |
+| `smartrouter_spec_policy_fallback{spec, apiInterface, reason}` | router | which chains are on their bundled policy right now, and why; the alert reads it (4.4) |
+| `smartrouter_spec_source_fallback{reason}` | router | the whole source was replaced by the bundled specs |
+
+**Alert rules.** They go in smart-router-infrastructure, `grafana/alert-rules/smart-router.yaml`,
+in the house style: a `uid`, a `title` and a `summary` that name the tenant, a `for`, a `== bool`
+or `> bool` expression, `severity` as the only stamped label, and a description that names the
+first thing to do (there's no runbook link convention). They're templated per tenant like
+`sr-tip-frozen`. The repo's rule for who hears what is "a customer served worse is a page; a
+stalled upstream the router covers is news", and a router on its bundled specs is still serving,
+so all three are warnings. Severities stay a proposal for R&D and ops.
+
+| Rule | Expression | For | Severity | Description says |
+|---|---|---|---|---|
+| `sr-spec-policy-fallback`, "{tenant}: a chain is serving on its bundled error policy" | `max by (cluster, location, router, spec, apiInterface, reason) (smartrouter_spec_policy_fallback{cluster="{tenant}"}) == bool 1` | 10m | warning | the chain (`spec`), interface and reason; for `schema_unknown` upgrade the router or move the source back; otherwise compare the source with the release's `SPEC_COMMIT` and fix the source |
+| `sr-spec-source-fallback`, "{tenant}: the spec source failed to load" | `max by (cluster, location, router, reason) (smartrouter_spec_source_fallback{cluster="{tenant}"}) == bool 1` | 30m | warning | every chain is served from the release's bundled specs, not from the configured source (the chart default, lava-specs `main`, unless overridden); the reason; check the source URL and the host |
+| `sr-spec-lock-enforced`, "{tenant}: a spec tried to weaken a write" | `increase(smartrouter_spec_lock_enforced_total{cluster="{tenant}"}[30m]) > bool 0` | 0s | warning | the chain and rule; `stateful` means a spec cleared the flag on a write, `stateful_default` means clients are calling a write the spec doesn't declare |
+
+Each summary follows the per-tenant form, for example `{tenant}: {{ $labels.spec }}
+({{ $labels.apiInterface }}) on {{ $labels.router }} is on its bundled error policy:
+{{ $labels.reason }}`. The ticket asks for alerts on an unreadable schema and on a rejected
+section; the first rule covers both through its `reason` label. The third is a should-have: a spec
+that tried to clear `stateful` is a review failure somebody should hear about. 5.4 says how each
+rule is proven before it's published.
 
 ## 6. Open for R&D
 
@@ -939,9 +1291,10 @@ per cluster first. The rest follow after a metrics window.
   there" as unknown, as 3.3 proposes, or as accepted, in line with MAG-4059's ranking.
 - **The write-method table and the source allowlist.** Section 3.4 seeds both, and MAG-4898
   completes them family by family.
-- **The manifest and its key.** Where the signed manifests are published (committed by a follow-up
-  CI job, or attached to the commit some other way), who holds the signing key, how it rotates
-  given that the router embeds it, and how a signed row that turns out to be wrong is revoked.
+- **Approval artifacts and trust.** Choose the artifact delivery location, signing service and
+  owners, canonical format, candidate trust context, and rotation/revocation mechanism. The router
+  carries verification keys, never private signing keys. These are implementation decisions within
+  the contract of 3.4 and 5.2, and must be closed before external policies act.
 - **Does the create-spec agent keep an unknown key when it rewrites a spec?** In the update,
   add-testnet and add-collection modes it does, by construction (A.4). New-chain mode needs a
   template and a reference page (MAG-4898 part 3). A test in the skill's `scripts/test_*.sh` should
@@ -957,7 +1310,9 @@ per cluster first. The rest follow after a metrics window.
   to about 9: Step 0 about 4 to 5 weeks, the reader and inheritance about 2, side-by-side and
   metrics about 1, and the switch with its post-switch tests about 1.5. Revision 3 takes the
   pinning, tag and source-metric work out of Step 0, and adds the manifest signing, the
-  request-time stateful lock and the wider prefix, so R&D should resize it.
+  request-time stateful lock and the wider prefix. Revision 4 also requires approval of complete
+  policies and tested promotion, revocation, dependency fallback and rollback. R&D must size that
+  work explicitly; the earlier estimate is not a commitment for this scope.
 
 ## 7. Later
 
@@ -979,13 +1334,16 @@ per cluster first. The rest follow after a metrics window.
 
 ## 9. Done when
 
-- Nimrod or Tom approves Must-haves 2 to 4, the format and the split, and accepts the departures in
-  1.3, Must-have 1's removal included.
-- MAG-4910 is updated to record that Must-have 1 is out of scope.
+- Nimrod or Tom approves Must-haves 2 to 4, the format and the split, with the departures in 1.3
+  in view.
+- MAG-4910 is updated to record that Must-have 1 is out of scope and that chain rows may read text
+  inside the node-answer HTTP statuses (3.2).
 - MAG-4898 is unblocked, with section 2 and Appendix B linked as the approved format and the first
   commit's coverage.
 - The router work is ticketed: Step 0, Step 1 (reader, inheritance, side-by-side metrics), Step 2
   (the setting, the switch and the deletion), and the open items of section 6.
+- The approval record distinguishes PRD approval from rollout readiness. Sections 3 to 5 are
+  implementation requirements; the historical scratch probes do not satisfy the release gates.
 
 ## Appendix A. How things work today
 
@@ -1178,7 +1536,7 @@ folder, or a GitHub or GitLab URL (`utils/specfetcher/fetcher.go:120-264`). From
   source, ref or commit. The only related gauge is `smartrouter_protocol_version`
   (`smartrouter_metrics_manager.go:428-431`).
 
-Revision 3 leaves all of this as it is (1.3).
+This PRD leaves all of this as it is (1.3).
 
 **The release image ships no specs.** `docker/Dockerfile.release:26` and `Dockerfile.ci:13` copy
 only the binary, and the goreleaser archives are binary-only too (`.goreleaser.yaml:48-57`). The
@@ -1188,6 +1546,15 @@ from their lava-specs copies.
 
 **No source, no boot.** The router refuses to start without a spec source
 (`rpcsmartrouter.go:2569-2581`). The error message still names the retired `--static-spec-paths`.
+
+**A bad source is fatal, a bad file is silent.** A spec that can't be loaded or expanded stops the
+boot (`rpcsmartrouter.go:2567-2581`, `:3244-3249`) and the pod crash-loops. In
+smart-router-infrastructure the only alert that points at the pod is `sr-pod-crashlooping`, whose
+own description says a rejected config and an OOM look the same from there; if every replica is
+down, `sr-workload-down` and the hub's `sp-host-not-serving` page as well, and none of the three
+names the spec. Files that fail beside good ones in a folder or a remote repo are skipped with a
+warning and nothing else (`utils/keeper/spec.go:111-128`, `utils/specfetcher/fetcher.go:380-392`).
+Neither state is exported anywhere.
 
 **So every deployed router loads lava-specs `main`.** The Helm chart's default is
 `staticSpecs.url: https://github.com/magma-devs/lava-specs` with no ref
@@ -1268,9 +1635,9 @@ isn't Solana-family for slots either way.
 ### C.1 Where revision 2's sections went
 
 Anna's review on PR #661 (661-1 to 661-8) and the review of revision 2 cite revision 2's numbers.
-They map to revision 3 like this:
+They map to the structure introduced in revision 3 and retained in revision 4 like this:
 
-| Revision 2 | Revision 3 |
+| Revision 2 | Revisions 3 and 4 |
 |---|---|
 | Header: status, baseline, departures | Header, 1.3 |
 | 1. Goal | 1.1 |
@@ -1301,9 +1668,13 @@ They map to revision 3 like this:
 | Review of revision 2: structure | Decisions first, then design, compatibility and rollout; the current state and the revision history move to appendices | whole document |
 | 661-4 and 661-5 | Revision 2 closed these only in part (the status lock missed gRPC and already-known; the vendor lock had no run-time content check). The rows above finish them | 2.4, 3.4 |
 
+This table records revision 3's changes, not a claim that its safeguards were complete. C.4 records
+the additional constraints needed for policy approval and activation.
+
 ### C.3 Changes in revision 2
 
-Section numbers in this table are revision 2's; C.1 maps them.
+Section numbers and the tag-based wording in this table are revision 2's: C.1 maps the numbers,
+and tags left with Must-have 1 (1.3).
 
 | Finding | Change | Where |
 |---|---|---|
@@ -1320,6 +1691,50 @@ Section numbers in this table are revision 2's; C.1 maps them.
 | Second review: fallback contradicts the cutover | The fallback is the bundled tag's section before and after the switch, and 8.3 tests it after the switch | 6, 7.4, 8.3, 9 |
 | Facts moved since revision 1 | New baseline `6c237073` / `bda05974`: XRP has 15 rows, 102 fixtures, 306 indexes, `check_stateful.sh`'s gaps, the third vendor-named row | 2, 4.5 |
 
+### C.4 Changes in revision 4
+
+| Gap | Required design change | Where |
+|---|---|---|
+| A set of approved row hashes does not approve their order or inheritance | Sign each chain's complete effective policy, its interfaces and dependencies, including deliberately empty policies | 2.2, 2.5, 3.4 |
+| A regex's longest literal does not establish the origin of its whole matcher | Require official evidence, representative replies and owner review for the complete matcher; retain literal checks as lint | 3.4, 5.2, 5.3 |
+| Signing only after merge conflicts with PR boot tests and can expose a policy before canary | Separate test trust, controlled candidate evaluation and production promotion of the same policy digests | 3.4, 5.2, 5.5 |
+| A switch can request a stage whose observation window has not passed | Bind candidate/general context and activation stage in the signed approval; clamp the setting to that permission | 3.4, 5.1, 5.4 |
+| Running the full transport table can still let an RPC code or body phrase mask a locked HTTP status | Classify the isolated, transport-origin status; preserve per-interface status meanings and gRPC precedence | 2.4, 5.3 |
+| Replacing one failed parent can create an unapproved mixed policy | Resolve complete graphs; fall back each affected chain as a whole while preserving unrelated valid chains | 2.5, 4.4, 5.4 |
+| The stateful default needs protection before cache and policy use | Guard the original method across interfaces and accepted batches; preserve disabled-method rejection and bypass cache | 3.4, 5.4 |
+| A slot-used result must prevent another send, not only change the final response | Record the flag before retry decisions, including the all-rate-limited exception and prefixed XRP replies | 3.3, 5.3 |
+| A local row diff misses descendant, ordering and interface changes | Diff complete effective policies and require current-head owner approval independently of labels | 5.2, 5.3 |
+| Zero mismatches and a switch setting do not establish a safe rollout or rollback | Require observed coverage and stable policy windows; restore the prior router after code-table deletion | 5.1, 5.5 |
+| Scope departures and scratch probes could be mistaken for approval | Preserve the versioning deferral, state its required ticket approval, and separate design evidence from implementation gates | 1.3, 1.4, 2.4, 9 |
+| Review of the revision-4 draft, 1: the HTTP carve-out admitted any unlocked status (408, 402/407/426/451 included) | Chain rows read text inside 400, 404, 410, 422 and 500 on REST and 400 and 500 elsewhere, following the split the router's own table already makes; every other status with a router rule joins the lock; the router's four route-refusal text rows run ahead of the status decision; inside the four 4xx statuses a row can't blame the endpoint; the 404 route-refusal phrases are refused | 1.3, 2.4, 3.2, 5.3 |
+| Review of the revision-4 draft, 2: the fallback had logs and counters but no alert or acceptance test | Two state gauges with a closed reason enum (coverage states included), three warning-level alert rules in the infra house style, readiness left alone, promtool-proven before publication; the canary requires the gauges at 0 | 1.2, 4.4, 5.4, 5.5, 5.6 |
+| Review of the revision-4 draft: stale approval wording | The versioning deferral is the author's decision; MAG-4910 is updated to match instead of waiting on an approver to accept it | Header, 1.3, 1.4, 9 |
+
+The last three rows were fixed in the revision-4 draft before publication; nothing in them is open.
+
+**Validation of the revision-4 draft fixes.** A second scratch replay at `6c237073`, with the
+widened HTTP lock and the status-only decision of 2.4: all 102 fixtures keep their verdict; all 72
+keep-set counterexamples keep theirs; the 9 change-set cases take the status verdict as 2.4 lists;
+and of 18 HTTP lock cases, the 10 locked ones (REST 402, 408, 451, 501 and 405 with family text,
+and a JSON-RPC `HTTP 408:` prefix) take the status's answer while the 8 readable ones (REST 400,
+500, 410, 422, 404 and the unruled 418) keep today's. Treating a REST code-0 `HTTP <n>: ` message
+as carrying that status changed nothing. No fixture or counterexample carries an HTTP 404, 410 or
+422 prefix off REST, so the narrower carve-out there moves nothing in the replay either. Two
+JSON-RPC fixtures (`evm_http_429`, `evm_http_503`) carry the wording `HTTP status <n>:`, which the
+router doesn't produce (its prefix is `HTTP <n>: `, `direct_rpc_relay.go:718`,
+`node_error_handler.go:80`); the anchored prefix doesn't read it, and they stay with the transport
+rows as today. Not replayed: the route-refusal rows inside the prefix, which the existing
+`TestRESTMessageRowsBeatTheStatusRow` pins instead. As before, this is evidence for the ordering,
+not validation of an implementation.
+
+**Revision-4 validation.** An isolated ordering model using the matchers at smart-router `6c237073`
+preserved all 102 classifier fixtures and passed 14 targeted cases: 12 protected-decision cases
+and the two unrelated-number counterexamples for Bitcoin and Solana. It included the HTTP/RPC-code
+collision, the REST versus JSON-RPC 401/409 distinctions, gRPC precedence and already-known
+protection. This validates the proposed ordering against those inputs; it does not test transport
+metadata provenance, the unimplemented loader, signatures, activation permissions or the write
+state machine. Those remain acceptance gates in section 5.
+
 ## References
 
 - Smart Router error rulebook v1.0, R&D review (Notion `40cf5ce8bcd38108bcf3fd93f85e8af5`):
@@ -1328,7 +1743,7 @@ Section numbers in this table are revision 2's; C.1 maps them.
   - R-K: all-fail ranking;
   - R-0.2: no vendor wording;
   - Q45: slot already used;
-  - and the change log.
+  - and the rulebook's own change log (the 4 Nov Q45 change).
 - `docs/ERROR-REGISTRY-DESIGN.md`: the registered verdicts the rows point at.
 - Jira:
   - MAG-4910: this PRD's ticket;
