@@ -38,7 +38,8 @@ func (m *batchStateMachine) SetResultsChecker(relaycore.ResultsCheckerInf)      
 
 type noMetrics struct{}
 
-func (noMetrics) SetRelayNodeErrorMetric(string, string, string, string) {}
+func (noMetrics) SetRelayNodeErrorMetric(string, string, string, string)  {}
+func (noMetrics) SetRelayNodeResultMetric(string, string, string, string) {}
 func (noMetrics) GetChainIdAndApiInterface() (string, string) {
 	return "ETH1", spectypes.APIInterfaceJsonRPC
 }

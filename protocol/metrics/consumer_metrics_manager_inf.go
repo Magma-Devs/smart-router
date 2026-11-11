@@ -28,6 +28,7 @@ func (NoOpConsumerMetrics) RecordEndToEndLatency(string, string, string, float64
 func (NoOpConsumerMetrics) RecordProviderLatency(string, string, string, string, float64)     {}
 func (NoOpConsumerMetrics) RecordCacheResult(string, string, string, string, string, float64) {}
 func (NoOpConsumerMetrics) SetRelayNodeErrorMetric(string, string, string, string)            {}
+func (NoOpConsumerMetrics) SetRelayNodeResultMetric(string, string, string, string)           {}
 func (NoOpConsumerMetrics) SetProtocolError(string, string, string, string)                   {}
 func (NoOpConsumerMetrics) RecordIncidentRetry(string, string, string, uint64, bool)          {}
 func (NoOpConsumerMetrics) RecordIncidentConsistency(string, string, string, bool)            {}
@@ -84,6 +85,7 @@ type ConsumerMetricsManagerInf interface {
 
 	// --- Errors (RPCConsumerLogs) ---
 	SetRelayNodeErrorMetric(chainId string, apiInterface string, providerAddress string, method string)
+	SetRelayNodeResultMetric(chainId string, apiInterface string, providerAddress string, method string)
 	SetProtocolError(chainId string, apiInterface string, providerAddress string, method string)
 
 	// --- Incidents (appendHeadersToRelayResult / RPCConsumerLogs) ---

@@ -36,6 +36,9 @@ type ResultsCheckerInf interface {
 // MetricsInterface for relay processor metrics
 type MetricsInterface interface {
 	SetRelayNodeErrorMetric(chainId string, apiInterface string, providerAddress string, method string)
+	// SetRelayNodeResultMetric counts a client read the provider answered with a result: the
+	// answers handleResponse does not meter as node errors, less the ones that are not reads.
+	SetRelayNodeResultMetric(chainId string, apiInterface string, providerAddress string, method string)
 }
 
 // ChainIdAndApiInterfaceGetter interface
