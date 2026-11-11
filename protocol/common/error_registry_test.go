@@ -1057,7 +1057,7 @@ func TestClassifyError_UnsupportedMethodMatchersAreNarrow(t *testing.T) {
 	}
 }
 
-// TestClassifyError_PendingStateNotSupportedIsANodeCapability pins MAG-5021. On GK8 Hoodi, Tatum
+// TestClassifyError_PendingStateNotSupportedIsANodeCapability pins MAG-5021. On Hoodi, Tatum
 // answers eth_call with the "pending" block tag with this message. Its code is not confirmed; the
 // reply below assumes -32000. Under -32603, -32602 or -32005 that code's row would win over the
 // text (code rows run first), so the verdict here would not hold. The node serves eth_call;
