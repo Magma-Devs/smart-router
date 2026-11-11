@@ -7080,7 +7080,7 @@ func classifyHTTPStatus(code int, classified *common.LavaError) (shouldMarkUnhea
 	return classifyEndpointHealth(classified, false)
 }
 
-// relayHoldoff is the hot path's and recovery probe's handle on the process-wide
+// relayHoldoff is the hot path's handle on the process-wide
 // rate-limit hold-off registry (docs/RATE-LIMIT-HOLDOFF.md). A package variable rather
 // than a server field so tests can swap in a clock-pinned registry and restore it.
 var relayHoldoff = holdoff.Shared

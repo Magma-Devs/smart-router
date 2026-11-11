@@ -40,7 +40,7 @@ func enabledEndpoints(fleet *healthRelayFleet) int {
 // else can serve. The router's own health check sends its latest-block request through the same
 // path as a client, so it is lent one too — and when the node answered it, the success reached
 // ResetHealth and switched the URL back on. On eth-failover-solo-sim-router that undid, 0.35 s
-// later, a URL the MAG-2550 prober was keeping off because eth_getBalance still hung on it.
+// later, a URL that was off because eth_getBalance still hung on it.
 //
 // A health check's answer is not the evidence that brings a URL back. ResetHealth is for "a
 // successful relay [that] proves the endpoint healthy for REAL traffic (not just cheap polls)",
@@ -49,7 +49,7 @@ func enabledEndpoints(fleet *healthRelayFleet) int {
 //
 // So the health check may still be lent a URL — readiness reports whether the router reaches a
 // node, and it does — but its success leaves the URL off. The URL comes back the ways it is meant
-// to: a real request succeeding on it, or the prober's replay of the request that failed.
+// to: a real request succeeding on it, or the probe loop re-enabling it on its polls.
 func TestHealthCheck_ALentURLStaysOffWhenTheHealthCheckSucceeds(t *testing.T) {
 	fleet := newHealthRelayFleetAnswering(t, nil, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`)
 	disableEveryEndpoint(t, fleet)

@@ -126,7 +126,7 @@ func TestPerProviderGauge_CoversTheBackupPool(t *testing.T) {
 		"a blocked backup must read blocked")
 	require.Equal(t, 0, rec.blockedProvidersCount(), "the regular count does not move for a backup")
 
-	// The recovery probe's release restores a provider in both pools.
+	// The probe loop's release restores a provider in both pools.
 	csm.RestoreRecoveredProvider("backup-b")
 	csm.publishStateSizes()
 	require.Equal(t, map[string]bool{"regular-a": false, "backup-b": false}, rec.providerBlockedSnapshot(),

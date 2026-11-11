@@ -7,7 +7,7 @@ This file is not a replacement for the public docs. Its job is to get a local
 Smart Router instance running quickly, verify that it is healthy, and avoid
 common agent mistakes.
 
-## Source of truth 
+## Source of truth
 
 Use both sources:
 

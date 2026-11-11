@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -69,12 +70,19 @@ func (h *directRelayHarness) relay(t *testing.T, hasNodeError bool, message stri
 
 func newDirectRelayHarness(t *testing.T, status int, body string) *directRelayHarness {
 	t.Helper()
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return newDirectRelayHarnessServing(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
-	}))
+	})
+}
+
+// newDirectRelayHarnessServing is newDirectRelayHarness with the upstream's handler given, for a
+// case whose upstream changes its answer between relays.
+func newDirectRelayHarnessServing(t *testing.T, handler http.HandlerFunc) *directRelayHarness {
+	t.Helper()
+
+	upstream := httptest.NewServer(handler)
 	t.Cleanup(upstream.Close)
 
 	directConn, err := lavasession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: upstream.URL}, 5, "")
@@ -164,6 +172,43 @@ func TestRelayInnerDirect_CleanAnswerResetsTheCounter(t *testing.T) {
 
 	refusals, enabled := h.relay(t, false, "")
 	require.Zero(t, refusals, "a clean 2xx is positive proof the endpoint serves")
+	require.True(t, enabled)
+}
+
+// The same rule on probation (MAG-5094). The probe loop re-enables an endpoint on its polls alone,
+// with a trial budget of a few failures instead of the full one, and only a clean answer to a real
+// request restores the full budget. A caller's error is an answer, but not proof the endpoint
+// serves: it must leave the trial budget exactly where it was, not reset it.
+func TestRelayInnerDirect_OnProbationOnlyACleanAnswerRestoresTheFullBudget(t *testing.T) {
+	var body atomic.Value
+	body.Store(`{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"invalid params"}}`)
+	h := newDirectRelayHarnessServing(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body.Load().(string)))
+	})
+
+	// Switched off by the full budget of failures, then re-enabled by the probe loop's polls.
+	for i := uint64(0); i < lavasession.MaxConsecutiveConnectionAttempts; i++ {
+		h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+	}
+	require.False(t, h.endpoint.IsEnabled(), "premise: the endpoint is switched off")
+	const k = 3
+	for i := 1; i <= k; i++ {
+		h.endpoint.RecordProbeVerdict(time.Now().Add(time.Duration(i)*time.Second), true, k)
+	}
+	require.True(t, h.endpoint.IsEnabled(), "premise: the polls re-enabled it")
+	onTrial := h.endpoint.ConnectionRefusals
+	require.Positive(t, onTrial, "premise: it came back on a trial budget, not a clean slate")
+
+	for i := 0; i < 3; i++ {
+		refusals, enabled := h.relay(t, true, "invalid params")
+		require.Equal(t, onTrial, refusals, "a caller's error neither spends the trial budget nor restores the full one")
+		require.True(t, enabled)
+	}
+
+	body.Store(`{"jsonrpc":"2.0","id":1,"result":"0xabc"}`)
+	refusals, enabled := h.relay(t, false, "")
+	require.Zero(t, refusals, "a clean answer restores the full budget")
 	require.True(t, enabled)
 }
 
