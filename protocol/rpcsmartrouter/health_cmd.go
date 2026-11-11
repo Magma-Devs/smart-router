@@ -284,7 +284,7 @@ func collectHealthProviders(args []string, includeBackup bool, inlineAuth common
 
 	var providers []healthProvider
 	for _, static := range lists {
-		for _, ep := range static {
+		for _, ep := range ordinaryRPCProviderEndpoints(static) {
 			providers = append(providers, healthProvider{
 				name:         ep.Name,
 				chainID:      ep.ChainID,

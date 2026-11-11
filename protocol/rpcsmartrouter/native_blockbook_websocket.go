@@ -14,11 +14,10 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/spf13/viper"
 	"github.com/tidwall/gjson"
 )
-
-const nativeBlockbookConfigKey = "blockbook-websocket"
 
 // This is a separate protocol surface: Blockbook replies and pushes both echo
 // the request id in {id,data}. They have no JSON-RPC subscription id to rewrite.
@@ -31,34 +30,78 @@ type nativeBlockbookEndpoint struct {
 }
 
 func parseNativeBlockbookEndpoints(v *viper.Viper, chainID, apiInterface string) ([]nativeBlockbookEndpoint, error) {
-	if !v.IsSet(nativeBlockbookConfigKey) {
-		return nil, nil
-	}
-	var configured []nativeBlockbookEndpoint
-	if err := v.UnmarshalKey(nativeBlockbookConfigKey, &configured); err != nil {
-		return nil, errors.New("blockbook-websocket: invalid configuration shape")
-	}
-	if len(configured) > 8 {
-		return nil, errors.New("blockbook-websocket: at most 8 endpoints are allowed")
-	}
-	endpoints := make([]nativeBlockbookEndpoint, 0, len(configured))
-	names := map[string]bool{}
-	for i, ep := range configured {
-		u, err := url.Parse(ep.NodeURL.Url)
-		if err != nil || u.Hostname() == "" || u.Fragment != "" || (u.Scheme != "wss" && u.Scheme != "ws") || strings.TrimSpace(ep.Name) == "" || ep.ChainID == "" {
-			// Parsing errors can contain keyed URLs. Report the position, never the value.
-			return nil, fmt.Errorf("blockbook-websocket: entry %d requires a chain-id, name and ws(s) node-url", i)
+	endpoints := make([]nativeBlockbookEndpoint, 0, 8)
+	seen := map[string]bool{}
+	for _, key := range []string{common.DirectRPCConfigName, common.BackupDirectRPCConfigName} {
+		var configured []*lavasession.RPCStaticProviderEndpoint
+		if err := v.UnmarshalKey(key, &configured); err != nil {
+			return nil, errors.New("native Blockbook: invalid provider configuration shape")
 		}
-		key := strings.ToUpper(ep.ChainID) + "/" + ep.Name
-		if names[key] {
-			return nil, fmt.Errorf("blockbook-websocket: entry %d duplicates a provider name", i)
+		for i, provider := range configured {
+			if provider == nil {
+				return nil, errors.New("native Blockbook: provider entry must not be null")
+			}
+			for _, node := range provider.NodeUrls {
+				if !isNativeBlockbookURL(provider, node) {
+					continue
+				}
+				u, err := url.Parse(node.Url)
+				if err != nil || u.Hostname() == "" || u.Fragment != "" || strings.TrimSpace(provider.Name) == "" || provider.ChainID == "" {
+					return nil, fmt.Errorf("native Blockbook: %s entry %d requires a chain-id, name and valid ws(s) URL", key, i)
+				}
+				if !strings.EqualFold(provider.ChainID, chainID) || apiInterface != "jsonrpc" {
+					continue
+				}
+				// Charts can emit archive/non-archive variants of one URL. The
+				// native transport needs one candidate per URL and authentication.
+				identity, _ := json.Marshal([]any{provider.Name, node.Url, node.AuthConfig})
+				if seen[string(identity)] {
+					continue
+				}
+				seen[string(identity)] = true
+				endpoints = append(endpoints, nativeBlockbookEndpoint{ChainID: provider.ChainID, Name: provider.Name, NodeURL: node})
+			}
 		}
-		names[key] = true
-		if strings.EqualFold(ep.ChainID, chainID) && apiInterface == "jsonrpc" {
-			endpoints = append(endpoints, ep)
-		}
+	}
+	if len(endpoints) > 8 {
+		return nil, errors.New("native Blockbook: at most 8 WebSocket endpoints per listener are allowed")
 	}
 	return endpoints, nil
+}
+
+func isNativeBlockbookURL(provider *lavasession.RPCStaticProviderEndpoint, node common.NodeUrl) bool {
+	if provider.ApiInterface != "jsonrpc" {
+		return false
+	}
+	scheme := strings.ToLower(node.Url)
+	if !strings.HasPrefix(scheme, "wss:") && !strings.HasPrefix(scheme, "ws:") {
+		return false
+	}
+	for _, addon := range node.Addons {
+		if strings.EqualFold(addon, "blockbook") {
+			return true
+		}
+	}
+	return false
+}
+
+// Keep native URLs out of JSON-RPC boot verification, polling and relays.
+// Copy each provider so the shared Viper configuration retains its native URLs.
+func ordinaryRPCProviderEndpoints(providers []*lavasession.RPCStaticProviderEndpoint) []*lavasession.RPCStaticProviderEndpoint {
+	ordinary := make([]*lavasession.RPCStaticProviderEndpoint, 0, len(providers))
+	for _, provider := range providers {
+		copy := *provider
+		copy.NodeUrls = make([]common.NodeUrl, 0, len(provider.NodeUrls))
+		for _, node := range provider.NodeUrls {
+			if !isNativeBlockbookURL(provider, node) {
+				copy.NodeUrls = append(copy.NodeUrls, node)
+			}
+		}
+		if len(copy.NodeUrls) > 0 {
+			ordinary = append(ordinary, &copy)
+		}
+	}
+	return ordinary
 }
 
 // Only documented native Blockbook reads and subscriptions enter this path.

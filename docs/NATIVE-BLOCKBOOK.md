@@ -1,25 +1,37 @@
 # Native Blockbook WebSocket sessions
 
-The JSON-RPC listener serves native Blockbook frames when its chain has an
-explicit `blockbook-websocket` configuration. Ordinary HTTP and JSON-RPC
-WebSocket calls keep the existing relay path. This protocol surface is opt-in;
-declaring the HTTP `blockbook` add-on alone does not enable it.
+The JSON-RPC listener serves native Blockbook frames from an existing
+`direct-rpc` or `backup-direct-rpc` node URL when its scheme is `wss://` (or
+`ws://` for local testing) and its addons include `blockbook`. HTTP Blockbook
+URLs keep the existing `bb_*` request/response path; WebSocket URLs without
+that add-on keep ordinary JSON-RPC subscription handling.
 
 ```yaml
-blockbook-websocket:
+direct-rpc:
   - chain-id: BTCT4
+    api-interface: jsonrpc
     name: indexer
-    node-url:
-      url: wss://blockbook.example.invalid/
-      auth-config:
-        auth-headers:
-          x-api-key: ${BLOCKBOOK_KEY}
+    node-urls:
+      - url: https://rpc.example.invalid/
+      - url: wss://blockbook.example.invalid/
+        addons: [blockbook]
+        auth-config:
+          auth-headers:
+            x-api-key: ${BLOCKBOOK_KEY}
 ```
 
-Load the configuration together with the chain's usual `endpoints`,
-`direct-rpc` and `--use-static-spec` settings. Store actual URLs and credentials
-in encrypted configuration. The list has at most eight named upstreams; entries
-for other chains and non-JSON-RPC listeners do not participate.
+In Helm values, use the existing router `nodes[].endpoints[]` fields: set
+`interface: jsonrpc`, the native `wss://` URL and `addons: [blockbook]`.
+No chart extension or separate configuration section is needed. Keep an
+ordinary HTTP RPC endpoint for chain tracking and request/response relays.
+Store actual URLs and credentials in encrypted configuration.
+
+Native URLs are excluded from ordinary JSON-RPC boot verification, polling
+and health probes. They are selected per chain and JSON-RPC listener, in
+primary-list order followed by backup-list order, with at most eight distinct
+URL/authentication candidates per listener. Archive/non-archive variants of
+one URL/authentication pair produce one native candidate. Provider name
+validation still applies to the complete configured primary/backup lists.
 
 Connect to `/ws` or `/websocket` on the normal hostname and send native frames:
 

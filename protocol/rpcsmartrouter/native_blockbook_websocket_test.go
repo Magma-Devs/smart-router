@@ -3,8 +3,11 @@ package rpcsmartrouter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/common"
+	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 )
@@ -21,27 +25,106 @@ func TestNativeBlockbookConfiguration(t *testing.T) {
 	endpoints, err := parseNativeBlockbookEndpoints(v, "BTCT4", "jsonrpc")
 	require.NoError(t, err)
 	require.Empty(t, endpoints)
-	v.Set("blockbook-websocket", []any{map[string]any{"chain-id": "BTCT4", "name": "test", "node-url": map[string]any{"url": "wss://node.example/key"}}})
+	config := `direct-rpc:
+ - name: indexer
+   chain-id: BTCT4
+   api-interface: jsonrpc
+   node-urls:
+    - url: https://rpc.example.invalid/
+      addons: [blockbook]
+    - url: wss://native.example.invalid/
+      addons: [blockbook]
+      auth-config:
+       auth-headers:
+        x-api-key: fixture
+    - url: wss://native.example.invalid/
+      addons: [archive, blockbook]
+      auth-config:
+       auth-headers:
+        x-api-key: fixture
+    - url: wss://ordinary.example.invalid/
+ - name: native-only
+   chain-id: BTCT4
+   api-interface: jsonrpc
+   node-urls:
+    - url: wss://other.example.invalid/
+      addons: [blockbook]
+backup-direct-rpc:
+ - name: backup
+   chain-id: BTCT4
+   api-interface: jsonrpc
+   node-urls:
+    - url: wss://backup.example.invalid/
+      addons: [blockbook]
+`
+	v.SetConfigType("yaml")
+	require.NoError(t, v.ReadConfig(strings.NewReader(config)))
+	before := v.AllSettings()
 	endpoints, err = parseNativeBlockbookEndpoints(v, "BTCT4", "jsonrpc")
 	require.NoError(t, err)
-	require.Len(t, endpoints, 1)
+	require.Len(t, endpoints, 3, "archive variants must not duplicate a native connection candidate")
+	require.Equal(t, "indexer", endpoints[0].Name)
+	require.Equal(t, "fixture", endpoints[0].NodeURL.GetAuthHeaders()["x-api-key"])
+	require.Equal(t, "backup", endpoints[2].Name)
 	endpoints, err = parseNativeBlockbookEndpoints(v, "SEP1", "jsonrpc")
 	require.NoError(t, err)
 	require.Empty(t, endpoints)
 	endpoints, err = parseNativeBlockbookEndpoints(v, "BTCT4", "rest")
 	require.NoError(t, err)
 	require.Empty(t, endpoints)
+	raw, err := ParseStaticProviderEndpoints(v, common.DirectRPCConfigName)
+	require.NoError(t, err)
+	ordinary := ordinaryRPCProviderEndpoints(raw)
+	require.Len(t, ordinary, 1, "native-only providers do not participate in ordinary RPC polling")
+	require.Len(t, ordinary[0].NodeUrls, 2)
+	require.Equal(t, "https://rpc.example.invalid/", ordinary[0].NodeUrls[0].Url)
+	require.Equal(t, "wss://ordinary.example.invalid/", ordinary[0].NodeUrls[1].Url)
+	require.Len(t, raw[0].NodeUrls, 4, "filtering must not mutate the parsed provider or Viper")
+	require.Equal(t, before, v.AllSettings())
 	for _, raw := range []any{
 		"invalid-with-secret",
-		[]any{map[string]any{"chain-id": "BTCT4", "name": "test", "node-url": map[string]any{"url": "https://secret.example/key"}}},
-		[]any{map[string]any{"chain-id": "BTCT4", "name": "test", "node-url": map[string]any{"url": "wss://%SECRET"}}},
+		[]any{map[string]any{"chain-id": "BTCT4", "api-interface": "jsonrpc", "name": "test", "node-urls": []any{map[string]any{"url": "wss://%SECRET", "addons": []string{"blockbook"}}}}},
+		[]any{nil},
 	} {
-		v.Set("blockbook-websocket", raw)
+		v.Set(common.DirectRPCConfigName, raw)
 		_, err := parseNativeBlockbookEndpoints(v, "BTCT4", "jsonrpc")
 		require.Error(t, err)
 		require.NotContains(t, err.Error(), "secret")
 		require.NotContains(t, err.Error(), "SECRET")
 	}
+}
+
+func TestNativeBlockbookCandidateLimitIsPerListener(t *testing.T) {
+	v := viper.New()
+	urls := make([]common.NodeUrl, 9)
+	for i := range urls {
+		urls[i] = common.NodeUrl{Url: fmt.Sprintf("wss://node-%d.example.invalid/", i), Addons: []string{"blockbook"}}
+	}
+	v.Set(common.DirectRPCConfigName, []lavasession.RPCStaticProviderEndpoint{{Name: "indexer", ChainID: "BTCT4", ApiInterface: "jsonrpc", NodeUrls: urls}})
+	_, err := parseNativeBlockbookEndpoints(v, "BTCT4", "jsonrpc")
+	require.Error(t, err)
+	endpoints, err := parseNativeBlockbookEndpoints(v, "SEP1", "jsonrpc")
+	require.NoError(t, err)
+	require.Empty(t, endpoints)
+}
+
+func TestNativeBlockbookHealthUsesOrdinaryURLs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	require.NoError(t, os.WriteFile(path, []byte(`direct-rpc:
+ - name: indexer
+   chain-id: BTCT4
+   api-interface: jsonrpc
+   node-urls:
+    - url: https://rpc.example.invalid/
+      addons: [blockbook]
+    - url: wss://native.example.invalid/
+      addons: [blockbook]
+`), 0600))
+	providers, err := collectHealthProviders([]string{path}, false, common.AuthConfig{})
+	require.NoError(t, err)
+	require.Len(t, providers, 1)
+	require.Len(t, providers[0].nodeUrls, 1)
+	require.Equal(t, "https://rpc.example.invalid/", providers[0].nodeUrls[0].Url)
 }
 
 func nativeTestSession(t *testing.T, endpoint string, send func(context.Context, []byte) bool, disconnected func()) *nativeBlockbookSession {

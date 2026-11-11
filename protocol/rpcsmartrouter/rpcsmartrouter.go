@@ -3405,6 +3405,11 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			if err := PreflightValidateCrossValidationConfig(viper.GetViper(), rpcEndpoints); err != nil {
 				return utils.LavaFormatError("invalid cross-validation configuration", err)
 			}
+			for _, endpoint := range rpcEndpoints {
+				if _, err := parseNativeBlockbookEndpoints(viper.GetViper(), endpoint.ChainID, endpoint.ApiInterface); err != nil {
+					return utils.LavaFormatError("invalid native Blockbook configuration", err)
+				}
+			}
 
 			// Smart router doesn't need blockchain chain ID
 			utils.LavaFormatInfo("Running Smart Router")
@@ -3490,6 +3495,8 @@ rpcsmartrouter smartrouter_examples/smartrouter_eth.yml --cache-be "127.0.0.1:77
 			if err := lavasession.ValidateUniqueProviderNames(directRPCEndpoints, backupDirectRPCEndpoints); err != nil {
 				return utils.LavaFormatError("invalid direct-rpc endpoints definition", err)
 			}
+			directRPCEndpoints = ordinaryRPCProviderEndpoints(directRPCEndpoints)
+			backupDirectRPCEndpoints = ordinaryRPCProviderEndpoints(backupDirectRPCEndpoints)
 
 			if len(directRPCEndpoints) == 0 {
 				return utils.LavaFormatError(
