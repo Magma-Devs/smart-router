@@ -1134,10 +1134,10 @@ func newCustomChainTracker(chainFetcher ChainFetcher, config ChainTrackerConfig)
 	// before the first poll reschedules it. See CurrentPollInterval / updateTimer (MAG-2395).
 	chainTracker.currentPollIntervalNanos.Store(int64(flatPollInterval))
 
-	switch config.ChainId {
-	// TODO: we can do it better by creating a spec fields for custom trackers.
-	// By applying a name SVM for example
-	case "SOLANA", "SOLANAT", "KOII", "KOIIT":
+	// The wrapper comes from fetcherWrapperKindByChainID (fetcher_wrapper_table.go); a chain
+	// with no entry there gets the default wrapper.
+	switch fetcherWrapperKindByChainID[config.ChainId] {
+	case FetcherWrapperSVM:
 		utils.LavaFormatInfo("using SVMChainTracker", utils.Attribute{Key: "chainID", Value: config.ChainId}, utils.Attribute{Key: "headOnly", Value: config.HeadOnlyTracking})
 		svm := &SVMChainTracker{
 			dataFetcher:  chainTracker,

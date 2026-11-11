@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
+	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/stretchr/testify/require"
@@ -19,79 +20,122 @@ import (
 // chaintracker.PollObserver hook (the SVM wrapper, which polls via CustomMessage). Before
 // PR #143 the SVM wrapper did neither, and its endpoints silently recorded nothing.
 //
-// The test starts from chain IDs, not from wrappers. For every enabled spec in specs/ and
-// every API interface it serves, it builds a real ChainTracker, so the ChainTracker itself
-// picks the wrapper by chain ID, and points it at a connection that fails every request.
-// A failed poll must still record a failure. A new wrapper picked for any of these chains
-// that records through neither path leaves the observation empty, and the test fails
-// without anyone having to list the new wrapper here.
+// The test starts from chain IDs, not from wrappers, and takes them from two places: every
+// enabled spec in specs/ with every API interface it serves, and every chain in
+// chaintracker's fetcher wrapper table (CustomFetcherWrapperChainIDs), which is what
+// newCustomChainTracker picks the wrapper from. For each it builds a real ChainTracker, so
+// the ChainTracker itself picks the wrapper by chain ID, and points it at a connection that
+// fails every request. A failed poll must still record a failure. A wrapper that records
+// through neither path leaves the observation empty, and the test fails without anyone
+// having to list the wrapper here: its chains are in the table already.
 //
-// It only sees chains whose spec is in specs/. A wrapper picked for a chain that has no
-// spec there is not covered.
+// A table chain with no spec in specs/ (KOII, KOIIT) borrows the spec of another chain
+// that uses the same wrapper kind (SOLANA): the wrapper is picked by chain ID, and the
+// poll fails before any spec-shaped reply matters. A wrapper kind that no chain in specs/
+// uses fails the test asking for a spec, rather than passing with nothing driven.
 func TestEndpointMonitor_RealPoll_EveryChain_RecordsPollFailure(t *testing.T) {
 	ensureRandSeeded()
 
-	specs, err := specutils.GetAllSpecsFromLocalDir("../../specs/")
+	const specDir = "../../specs/"
+	specs, err := specutils.GetAllSpecsFromLocalDir(specDir)
 	require.NoError(t, err)
 
-	chainIDs := make([]string, 0, len(specs))
+	enabled := map[string]bool{}
 	for id, spec := range specs {
 		if spec.Enabled {
-			chainIDs = append(chainIDs, id)
+			enabled[id] = true
 		}
 	}
-	sort.Strings(chainIDs)
 	// Guard against the loop silently testing nothing, and make sure both wrappers are in it.
-	require.Contains(t, chainIDs, "ETH1")
-	require.Contains(t, chainIDs, "SOLANA")
+	require.True(t, enabled["ETH1"], "specs/ must carry ETH1")
+	require.True(t, enabled["SOLANA"], "specs/ must carry SOLANA")
 
-	for _, chainID := range chainIDs {
-		spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, chainID)
-		require.NoError(t, err, chainID)
-
-		apiInterfaces := map[string]struct{}{}
-		for _, collection := range spec.ApiCollections {
-			if collection.Enabled {
-				apiInterfaces[collection.CollectionData.ApiInterface] = struct{}{}
+	// chainID -> the spec index to load for it. A chain in specs/ loads its own spec; a
+	// wrapper-table chain without one borrows the spec of a same-kind chain that has one.
+	specFor := map[string]string{}
+	for id := range enabled {
+		specFor[id] = id
+	}
+	wrapperTable := chaintracker.CustomFetcherWrapperChainIDs()
+	require.NotEmpty(t, wrapperTable, "the fetcher wrapper table is empty; the SVM chains belong in it")
+	for chainID, kind := range wrapperTable {
+		if enabled[chainID] {
+			continue
+		}
+		donor := ""
+		for other, otherKind := range wrapperTable {
+			if otherKind == kind && enabled[other] && (donor == "" || other < donor) {
+				donor = other
 			}
 		}
-		require.NotEmpty(t, apiInterfaces, "%s serves no API interface", chainID)
+		require.NotEmptyf(t, donor, "%s uses the %q fetcher wrapper but has no spec in specs/, and no other %q chain "+
+			"has one either: add a spec so this canary can drive that wrapper", chainID, kind, kind)
+		specFor[chainID] = donor
+	}
 
-		for apiInterface := range apiInterfaces {
-			t.Run(chainID+"/"+apiInterface, func(t *testing.T) {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
+	chainIDs := make([]string, 0, len(specFor))
+	for id := range specFor {
+		chainIDs = append(chainIDs, id)
+	}
+	sort.Strings(chainIDs)
 
-				chainParser, err := chainlib.NewChainParser(apiInterface)
-				require.NoError(t, err)
-				chainParser.SetSpec(spec)
+	for _, chainID := range chainIDs {
+		specIndex := specFor[chainID]
+		t.Run(chainID, func(t *testing.T) {
+			spec, err := specutils.GetSpecFromLocalDirs([]string{specDir}, specIndex)
+			require.NoError(t, err, specIndex)
+			if specIndex != chainID {
+				t.Logf("%s has no spec in specs/; driving its wrapper with the %s spec", chainID, specIndex)
+			}
 
-				m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
-					ChainParser:      chainParser,
-					ChainID:          chainID,
-					ApiInterface:     apiInterface,
-					AverageBlockTime: 100 * time.Millisecond,
-					BlocksToSave:     1,
+			seen := map[string]bool{}
+			apiInterfaces := make([]string, 0, len(spec.ApiCollections))
+			for _, collection := range spec.ApiCollections {
+				apiInterface := collection.CollectionData.ApiInterface
+				if collection.Enabled && !seen[apiInterface] {
+					seen[apiInterface] = true
+					apiInterfaces = append(apiInterfaces, apiInterface)
+				}
+			}
+			sort.Strings(apiInterfaces)
+			require.NotEmpty(t, apiInterfaces, "%s serves no API interface", specIndex)
+
+			for _, apiInterface := range apiInterfaces {
+				t.Run(apiInterface, func(t *testing.T) {
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+
+					chainParser, err := chainlib.NewChainParser(apiInterface)
+					require.NoError(t, err)
+					chainParser.SetSpec(spec)
+
+					m := NewEndpointMonitor(ctx, EndpointChainTrackerConfig{
+						ChainParser:      chainParser,
+						ChainID:          chainID,
+						ApiInterface:     apiInterface,
+						AverageBlockTime: 100 * time.Millisecond,
+						BlocksToSave:     1,
+					})
+					require.NotNil(t, m)
+					defer m.Stop()
+
+					url := "http://" + chainID + "-down:1/"
+					conn := &mockDirectRPCConnection{url: url, sendErr: errors.New("connection refused")}
+					_, err = m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+					require.NoError(t, err)
+
+					require.Eventually(t, func() bool {
+						o, ok := m.GetObservation(url)
+						return ok && o.ConsecutivePollFailures > 0
+					}, 5*time.Second, 20*time.Millisecond,
+						"a failed latest-block poll on %s/%s recorded no observation: its fetcher wrapper "+
+							"records through neither EndpointPoller.FetchLatestBlockNum nor the PollObserver hook",
+						chainID, apiInterface)
+
+					o, _ := m.GetObservation(url)
+					require.NotEmpty(t, o.LastPollError, "the poll error is recorded")
 				})
-				require.NotNil(t, m)
-				defer m.Stop()
-
-				url := "http://" + chainID + "-down:1/"
-				conn := &mockDirectRPCConnection{url: url, sendErr: errors.New("connection refused")}
-				_, err = m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
-				require.NoError(t, err)
-
-				require.Eventually(t, func() bool {
-					o, ok := m.GetObservation(url)
-					return ok && o.ConsecutivePollFailures > 0
-				}, 5*time.Second, 20*time.Millisecond,
-					"a failed latest-block poll on %s/%s recorded no observation: its fetcher wrapper "+
-						"records through neither EndpointPoller.FetchLatestBlockNum nor the PollObserver hook",
-					chainID, apiInterface)
-
-				o, _ := m.GetObservation(url)
-				require.NotEmpty(t, o.LastPollError, "the poll error is recorded")
-			})
-		}
+			}
+		})
 	}
 }
