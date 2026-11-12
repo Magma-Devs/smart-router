@@ -695,21 +695,23 @@ func (cwm *ConsumerWebsocketManager) ListenToMessages(ctx context.Context) {
 					utils.LogAttr("params", protocolMessage.GetRPCMessage().GetParams()),
 				)
 
-				// A client the manager dropped for not keeping up is told the one way a WebSocket
-				// can tell it: its socket closes with 1013 (try again later), so it reconnects and
-				// resubscribes instead of waiting on a socket nothing will ever push to again. The
-				// frame goes through the writer like any other, and the writer then tears the
-				// connection down, so the deferred UnsubscribeAll ends the client's other
-				// subscriptions on it. Any other end of a subscription leaves the socket open.
-				if errors.Is(cwm.subscriptionEndError(dappID, userIp), ErrSubscriptionClientTooSlow) {
-					utils.LavaFormatDebug("websocket subscription client did not keep up, closing its connection",
+				// A client the manager dropped for not keeping up, or whose subscription the router
+				// lost and could not restore, is told the one way a WebSocket can tell it: its
+				// socket closes with 1013 (try again later), so it reconnects and resubscribes
+				// instead of waiting on a socket nothing will ever push to again. The frame goes
+				// through the writer like any other, and the writer then tears the connection
+				// down, so the deferred UnsubscribeAll ends the client's other subscriptions on it.
+				// Any other end of a subscription leaves the socket open.
+				if endErr := cwm.subscriptionEndError(dappID, userIp); subscriptionEndClosesSocket(endErr) {
+					utils.LavaFormatDebug("websocket subscription ended for a reason the client must hear, closing its connection",
 						utils.LogAttr("GUID", frameCtx),
 						utils.LogAttr("dappID", dappID),
 						utils.LogAttr("userIp", userIp),
+						utils.LogAttr("reason", endErr.Error()),
 					)
 					sendWS(webSocketMsgWithType{
 						messageType: websocket.CloseMessage,
-						msg:         websocket.FormatCloseMessage(websocket.CloseTryAgainLater, ErrSubscriptionClientTooSlow.Error()),
+						msg:         websocket.FormatCloseMessage(websocket.CloseTryAgainLater, endErr.Error()),
 						final:       true,
 					})
 				}
@@ -735,6 +737,16 @@ func (cwm *ConsumerWebsocketManager) reportSubscriptionRelay(ctx context.Context
 	if reporter, ok := cwm.relaySender.(SubscriptionRelayReporter); ok {
 		reporter.ReportSubscriptionRelay(ctx, protocolMessage, start, err)
 	}
+}
+
+// subscriptionEndClosesSocket reports whether the reason a manager gave for ending a subscription
+// is one the client must hear by its socket closing with 1013 (try again later): the client did not
+// keep up with the pushes, or the router lost the subscription and could not restore it (MAG-5022).
+// Either way nothing will push on that subscription again, and the client reconnects and
+// resubscribes. The set is closed on purpose: a reason the ingress does not know leaves the socket
+// open, as before.
+func subscriptionEndClosesSocket(endErr error) bool {
+	return errors.Is(endErr, ErrSubscriptionClientTooSlow) || errors.Is(endErr, ErrSubscriptionUpstreamLost)
 }
 
 // subscriptionEndError asks the subscription manager why it ended a subscription of this
