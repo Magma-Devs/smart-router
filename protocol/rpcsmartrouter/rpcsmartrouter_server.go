@@ -4118,6 +4118,17 @@ func runProbeCycleCore(
 	onRecover func(provider string),
 	replayer *relayProbeRunner,
 ) (scored, reEnabled, syncOmitted, evidenceGated int) {
+	// releaseIfUsable lets the provider back in only when the url the probe just turned back on can
+	// take traffic. Turning a url back on clears only its error switch; a state reason (head-stalled)
+	// can still hold it out. Releasing then hands selection a provider with nothing to dial, and the
+	// next request blocks it again: a release-then-block churn in the logs and the block counters
+	// (MAG-4737). Leaving it blocked loses nothing: when the stall clears, the head-stall step
+	// releases the provider behind the same check.
+	releaseIfUsable := func(target *lavasession.EndpointWithDirectConnection) {
+		if onRecover != nil && target.Endpoint.IsUsable() {
+			onRecover(target.ProviderAddress)
+		}
+	}
 	// One verdict per endpoint (regular + backup), grouped by provider for the single-sample rule.
 	verdictsByProvider := make(map[string][]probing.EndpointVerdict)
 	for _, ep := range endpoints {
@@ -4135,9 +4146,7 @@ func runProbeCycleCore(
 		// nest under endpoint.mu — no lock-order inversion (F2).
 		if ep.Endpoint.RecordProbeVerdict(verdict.Recovery.LastSuccessfulPoll, verdict.Recovery.PollHealthy, cfg.ReEnableHysteresis) {
 			reEnabled++
-			if onRecover != nil {
-				onRecover(ep.ProviderAddress)
-			}
+			releaseIfUsable(ep)
 		} else if method, payload, relayTimeout, ok := ep.Endpoint.PendingRelayProbe(cfg.ReEnableHysteresis); ok {
 			// Two-step re-enable (MAG-2550): poll hysteresis is satisfied but this disable episode
 			// recorded a failing read-only relay, so RecordProbeVerdict held the re-enable. Replay
@@ -4150,17 +4159,15 @@ func runProbeCycleCore(
 			if replayer == nil || replayer.probe == nil {
 				if ep.Endpoint.ConfirmRelayRecovery() {
 					reEnabled++
-					if onRecover != nil {
-						onRecover(ep.ProviderAddress)
-					}
+					releaseIfUsable(ep)
 				}
 			} else {
 				target := ep
 				replayer.launch(target.Endpoint.NetworkAddress, func() {
 					switch replayer.probe(target, method, payload, relayTimeout) {
 					case relayProbeRecovered:
-						if target.Endpoint.ConfirmRelayRecovery() && onRecover != nil {
-							onRecover(target.ProviderAddress)
+						if target.Endpoint.ConfirmRelayRecovery() {
+							releaseIfUsable(target)
 						}
 					case relayProbeStillFailing:
 						target.Endpoint.RelayProbeFailed()

@@ -3718,10 +3718,22 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		consumerSession.Parent.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
 		// this provider is probably in the ignored provider list. we need to validate and return it to valid addresses
 		providerAddress := consumerSession.Parent.PublicLavaAddress
+		parent := consumerSession.Parent
 		// we want this method to run last after we unlock the consumer session
 		// golang defer operates in a Last-In-First-Out (LIFO) order, meaning this defer will run last.
 		defer func() {
-			go csm.releaseBlockedProvider(providerAddress, ReleaseSuccessfulRelay)
+			go func() {
+				// The last chance lends a url whatever holds it out, a stall included, and a stalled
+				// url can answer. The success switches the url back on (ResetHealth, before this
+				// runs) but never clears the stall. Releasing a provider that is still out of
+				// rotation hands selection nothing to dial: the next request blocks it again, and
+				// the one after borrows it again — a block and a release on every request while the
+				// stall lasts (MAG-4737). It stays blocked instead; the head-stall step releases it
+				// when the stall clears.
+				if parent.inRotation() {
+					csm.releaseBlockedProvider(providerAddress, ReleaseSuccessfulRelay)
+				}
+			}()
 		}()
 	}
 
