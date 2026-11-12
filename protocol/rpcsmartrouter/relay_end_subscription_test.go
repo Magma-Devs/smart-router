@@ -13,8 +13,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -32,7 +32,7 @@ func serveRelayEndSubscriptions(t *testing.T, server *RPCSmartRouterServer, mana
 	t.Cleanup(cancel)
 	logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 	require.NoError(t, err)
-	endpoint := &lavasession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: server.listenEndpoint.ChainID, ApiInterface: spectypes.APIInterfaceJsonRPC, HealthCheckPath: common.DEFAULT_HEALTH_PATH}
+	endpoint := &routersession.RPCEndpoint{NetworkAddress: "127.0.0.1:0", ChainID: server.listenEndpoint.ChainID, ApiInterface: spectypes.APIInterfaceJsonRPC, HealthCheckPath: common.DEFAULT_HEALTH_PATH}
 	listener := chainlib.NewJrpcChainListener(ctx, endpoint, server, nil, logs, nil, manager)
 	go listener.Serve(ctx, common.ConsumerCmdFlags{})
 	t.Cleanup(func() {
@@ -197,7 +197,7 @@ func TestRelayEnd_SubscriptionOutcomes(t *testing.T) {
 	})
 	t.Run("an unsubscribe of an unknown subscription", func(t *testing.T) {
 		end := build(subscribe, nothing, common.SubscriptionNotFoundError)
-		require.Equal(t, common.LavaErrorSubscriptionNotFound.Name, end.errorCode)
+		require.Equal(t, common.RouterErrorSubscriptionNotFound.Name, end.errorCode)
 	})
 	t.Run("the node refused the subscribe", func(t *testing.T) {
 		refusal := fmt.Errorf("upstream rejected subscribe: %w", &rpcclient.JsonError{Code: -32601, Message: "the method eth_subscribe does not exist/is not available"})
@@ -217,14 +217,14 @@ func TestRelayEnd_SubscriptionOutcomes(t *testing.T) {
 		require.Equal(t, relayOutcomeNoAnswer, end.outcome)
 		require.Equal(t, attemptOutcomeTransportError, end.attempts[0].outcome)
 		require.Zero(t, end.attempts[0].nodeCode, "no node reply, so no node code")
-		require.Equal(t, common.LavaErrorConnectionRefused.Name, end.attempts[0].errorCode)
+		require.Equal(t, common.RouterErrorConnectionRefused.Name, end.attempts[0].errorCode)
 		require.True(t, end.attempts[0].retryable())
 	})
 	t.Run("the router failed after the node answered", func(t *testing.T) {
 		end := build(subscribe, func(u *chainlib.SubscriptionUpstream) { u.Sent("node-ws", start, time.Millisecond, nil) },
 			errors.New("failed to create subscription reply: unexpected result shape"))
 		require.Equal(t, relayOutcomeRouterError, end.outcome)
-		require.Equal(t, common.LavaErrorSubscriptionInitFailed.Name, end.errorCode)
+		require.Equal(t, common.RouterErrorSubscriptionInitFailed.Name, end.errorCode)
 	})
 	t.Run("joined an open subscription", func(t *testing.T) {
 		end := build(subscribe, func(u *chainlib.SubscriptionUpstream) { u.Joined("node-ws") }, nil)

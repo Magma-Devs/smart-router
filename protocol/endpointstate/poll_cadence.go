@@ -78,7 +78,7 @@ func resolvePollDivisor(divisor float64, chainID, apiInterface string) float64 {
 	// then make the interval NaN — which time.Duration turns into a huge negative, i.e. a timer
 	// that fires immediately and hot-loops the upstream. Reject it explicitly.
 	if math.IsNaN(divisor) {
-		utils.LavaFormatWarning("--"+PollDivisorFlagName+" is not a number; reverting to default", nil,
+		utils.FormatWarning("--"+PollDivisorFlagName+" is not a number; reverting to default", nil,
 			utils.LogAttr("default", DefaultPollDivisor),
 			utils.LogAttr("chainID", chainID),
 			utils.LogAttr("apiInterface", apiInterface),
@@ -86,7 +86,7 @@ func resolvePollDivisor(divisor float64, chainID, apiInterface string) float64 {
 		return DefaultPollDivisor
 	}
 	if divisor < MinPollDivisor || divisor > MaxPollDivisor {
-		utils.LavaFormatWarning("--"+PollDivisorFlagName+" out of allowed range; reverting to default", nil,
+		utils.FormatWarning("--"+PollDivisorFlagName+" out of allowed range; reverting to default", nil,
 			utils.LogAttr("provided", divisor),
 			utils.LogAttr("allowed", []float64{MinPollDivisor, MaxPollDivisor}),
 			utils.LogAttr("default", DefaultPollDivisor),
@@ -146,7 +146,7 @@ func warnIfCadenceOutrunsStaleness(interval, averageBlockTime time.Duration, cha
 	if worstCaseGap <= window {
 		return
 	}
-	utils.LavaFormatWarning("poll cadence can outrun the staleness window when the traffic gate skips", nil,
+	utils.FormatWarning("poll cadence can outrun the staleness window when the traffic gate skips", nil,
 		utils.LogAttr("chainID", chainID),
 		utils.LogAttr("apiInterface", apiInterface),
 		utils.LogAttr("pollInterval", interval),

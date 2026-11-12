@@ -8,7 +8,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/stretchr/testify/assert"
@@ -51,7 +51,7 @@ func newRESTWireFixture(t *testing.T) *restWireFixture {
 	require.NoError(t, err)
 	spec, err := specutils.GetSpecFromLocalDirs([]string{"../../specs/"}, "LAVA")
 	require.NoError(t, err)
-	conn, err := lavasession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, spectypes.APIInterfaceRest)
+	conn, err := routersession.NewDirectRPCConnection(ctx, endpoint.NodeUrls[0], 5, spectypes.APIInterfaceRest)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	return &restWireFixture{

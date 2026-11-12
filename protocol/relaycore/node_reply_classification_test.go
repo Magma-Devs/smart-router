@@ -38,5 +38,5 @@ func TestResultsManager_NodeReplyTextIsNotATransportFault(t *testing.T) {
 	}}, pm)
 	require.Error(t, nodeErr)
 	best := rm.GetBestNodeErrorMessageForUser()
-	require.Equal(t, common.CategoryExternal, best.LavaError.Category, "a node's answer is classified as the node's answer, not as a transport failure")
+	require.Equal(t, common.CategoryExternal, best.RouterError.Category, "a node's answer is classified as the node's answer, not as a transport failure")
 }

@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 )
 
@@ -27,7 +27,7 @@ var RelayProcessorMetrics = &RelayProcessorMetricsMock{}
 
 func SendSuccessResp(relayProcessor *RelayProcessor, provider string, delay time.Duration) {
 	time.Sleep(delay)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
 	response := &RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{
@@ -45,7 +45,7 @@ func SendSuccessResp(relayProcessor *RelayProcessor, provider string, delay time
 
 func SendProtocolError(relayProcessor *RelayProcessor, provider string, delay time.Duration, err error) {
 	time.Sleep(delay)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), err)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), err)
 	response := &RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{
@@ -63,7 +63,7 @@ func SendProtocolError(relayProcessor *RelayProcessor, provider string, delay ti
 
 func SendNodeError(relayProcessor *RelayProcessor, provider string, delay time.Duration) {
 	time.Sleep(delay)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
 	response := &RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{
@@ -84,7 +84,7 @@ func SendNodeError(relayProcessor *RelayProcessor, provider string, delay time.D
 // exercise the retry gate via GetResultsSummary().HasNonRetryableNodeError.
 func SendNodeErrorWithRetryable(relayProcessor *RelayProcessor, provider string, delay time.Duration, nonRetryable bool) {
 	time.Sleep(delay)
-	relayProcessor.GetUsedProviders().RemoveUsed(provider, lavasession.NewRouterKey(nil), nil)
+	relayProcessor.GetUsedProviders().RemoveUsed(provider, routersession.NewRouterKey(nil), nil)
 	response := &RelayResponse{
 		RelayResult: common.RelayResult{
 			Request: &pairingtypes.RelayRequest{

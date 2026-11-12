@@ -176,7 +176,7 @@ func isExistingFile(path string) bool {
 //
 // The directory case only arises for an explicit path — a search of configSearchPaths
 // skips directories and reports ConfigFileNotFoundError — and without it `smartrouter
-// ./config` would take the LavaFormatFatal stack-dump path this fix exists to remove.
+// ./config` would take the FormatFatal stack-dump path this fix exists to remove.
 func isConfigNotFound(err error) bool {
 	var notFound viper.ConfigFileNotFoundError
 	return errors.As(err, &notFound) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.EISDIR)

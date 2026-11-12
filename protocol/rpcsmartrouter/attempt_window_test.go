@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,7 +36,7 @@ func TestAttemptOutlivesItsWindow(t *testing.T) {
 	defer mockServer.Close()
 
 	ctx := context.Background()
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{
@@ -74,7 +74,7 @@ func TestAttemptStillBoundedByItsBudget(t *testing.T) {
 	defer close(release)
 
 	ctx := context.Background()
-	directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: mockServer.URL}, 5, "")
 	require.NoError(t, err)
 
 	sender := &DirectRPCRelaySender{

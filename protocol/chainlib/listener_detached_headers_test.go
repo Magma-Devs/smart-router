@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -68,21 +68,21 @@ func TestListeners_KeepNoHeaderPastTheRequest(t *testing.T) {
 		rand.InitRandomSeed()
 	}
 	jsonBody := `{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`
-	newJsonRPC := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newJsonRPC := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewJrpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, nil, nil)
 	}
-	newRest := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newRest := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewRestChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger)
 	}
-	newTendermint := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newTendermint := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewTendermintRpcChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger, nil, nil)
 	}
-	newGraphQL := func(ctx context.Context, endpoint *lavasession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
+	newGraphQL := func(ctx context.Context, endpoint *routersession.RPCEndpoint, relay RelaySender, logger *metrics.RPCConsumerLogs) ChainListener {
 		return NewGraphQLChainListener(ctx, endpoint, relay, alwaysHealthyReporter{}, logger)
 	}
 	for _, tc := range []struct {
 		name, apiInterface, method, path, body string
-		newListener                            func(context.Context, *lavasession.RPCEndpoint, RelaySender, *metrics.RPCConsumerLogs) ChainListener
+		newListener                            func(context.Context, *routersession.RPCEndpoint, RelaySender, *metrics.RPCConsumerLogs) ChainListener
 	}{
 		{"jsonrpc POST", spectypes.APIInterfaceJsonRPC, http.MethodPost, "/", jsonBody, newJsonRPC},
 		{"rest POST", spectypes.APIInterfaceRest, http.MethodPost, "/cosmos/tx/v1beta1/simulate", "{}", newRest},
@@ -98,7 +98,7 @@ func TestListeners_KeepNoHeaderPastTheRequest(t *testing.T) {
 			logger, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 			require.NoError(t, err)
 			relay := &headerKeepingRelay{}
-			listener := tc.newListener(ctx, &lavasession.RPCEndpoint{
+			listener := tc.newListener(ctx, &routersession.RPCEndpoint{
 				NetworkAddress:  "127.0.0.1:0",
 				ChainID:         "LAV1",
 				ApiInterface:    tc.apiInterface,

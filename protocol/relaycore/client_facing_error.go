@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -27,16 +27,16 @@ var transportFailureCodes = map[uint32]bool{
 // shapes qualify: the upstream answered with an error status (forward status and body as is), or
 // the transport failed before any answer (502, or 504 for a timeout, and the leaf cause). Any other
 // protocol error keeps today's reply. The classification travels as metadata only.
-func clientFacingFromProtocolError(err error, lavaErr *common.LavaError) *common.ClientFacingError {
+func clientFacingFromProtocolError(err error, routerErr *common.RouterError) *common.ClientFacingError {
 	if err == nil {
 		return nil
 	}
 	cf := &common.ClientFacingError{}
-	if lavaErr != nil {
-		cf.RouterErrorCode = lavaErr.Code
-		cf.RouterErrorName = lavaErr.Name
+	if routerErr != nil {
+		cf.RouterErrorCode = routerErr.Code
+		cf.RouterErrorName = routerErr.Name
 	}
-	var httpErr *lavasession.HTTPStatusError
+	var httpErr *routersession.HTTPStatusError
 	if errors.As(err, &httpErr) && httpErr.StatusCode >= 400 {
 		cf.UpstreamStatus = httpErr.StatusCode
 		cf.UpstreamStatusText = httpErr.Status
@@ -46,8 +46,8 @@ func clientFacingFromProtocolError(err error, lavaErr *common.LavaError) *common
 		cf.UpstreamContentType = httpErr.ContentType
 		return cf
 	}
-	if lavaErr != nil {
-		if timedOut, isTransport := transportFailureCodes[lavaErr.Code]; isTransport {
+	if routerErr != nil {
+		if timedOut, isTransport := transportFailureCodes[routerErr.Code]; isTransport {
 			cf.Cause = leafCause(err)
 			cf.TimedOut = timedOut
 			return cf
@@ -82,7 +82,7 @@ func replyProtocolError(picked RelayError, all []RelayError) RelayError {
 }
 
 func replyRank(relayError RelayError) int {
-	cf := clientFacingFromProtocolError(relayError.Err, relayError.LavaError)
+	cf := clientFacingFromProtocolError(relayError.Err, relayError.RouterError)
 	switch {
 	case cf == nil:
 		return 2 // today's reply
@@ -102,10 +102,10 @@ func replyRank(relayError RelayError) int {
 
 // leafCause returns the innermost error's text, skipping the registry wrapper's own description.
 func leafCause(err error) string {
-	var wrapped *common.LavaWrappedError
+	var wrapped *common.RouterWrappedError
 	if errors.As(err, &wrapped) {
 		if cause := wrapped.Unwrap(); cause != nil {
-			if _, isRegistry := cause.(*common.LavaError); !isRegistry {
+			if _, isRegistry := cause.(*common.RouterError); !isRegistry {
 				return cause.Error()
 			}
 		}

@@ -21,20 +21,20 @@ func TestClassifyError_EOFDNSAndTLSAreAtFault(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
-		want *LavaError
+		want *RouterError
 	}{
-		{"bare EOF", io.EOF, LavaErrorConnectionClosed},
-		{"EOF wrapped by the sender", fmt.Errorf("http request failed: %w", io.EOF), LavaErrorConnectionClosed},
-		{"EOF inside url.Error", &url.Error{Op: "Post", URL: "https://rpc.example/", Err: io.EOF}, LavaErrorConnectionClosed},
-		{"unexpected EOF mid-body", fmt.Errorf("failed reading response: %w", io.ErrUnexpectedEOF), LavaErrorConnectionClosed},
-		{"DNS not found", dnsNotFound, LavaErrorDNSFailure},
-		{"DNS not found inside url.Error and OpError", &url.Error{Op: "Post", URL: "https://rpc.example/", Err: &net.OpError{Op: "dial", Net: "tcp", Err: dnsNotFound}}, LavaErrorDNSFailure},
-		{"DNS failure wrapped without %w", errors.New(`Post "https://rpc.example/": dial tcp: lookup rpc.example: no such host`), LavaErrorDNSFailure},
-		{"http served as https", &url.Error{Op: "Post", URL: "https://rpc.example/", Err: errors.New("http: server gave HTTP response to HTTPS client")}, LavaErrorTLSMismatch},
+		{"bare EOF", io.EOF, RouterErrorConnectionClosed},
+		{"EOF wrapped by the sender", fmt.Errorf("http request failed: %w", io.EOF), RouterErrorConnectionClosed},
+		{"EOF inside url.Error", &url.Error{Op: "Post", URL: "https://rpc.example/", Err: io.EOF}, RouterErrorConnectionClosed},
+		{"unexpected EOF mid-body", fmt.Errorf("failed reading response: %w", io.ErrUnexpectedEOF), RouterErrorConnectionClosed},
+		{"DNS not found", dnsNotFound, RouterErrorDNSFailure},
+		{"DNS not found inside url.Error and OpError", &url.Error{Op: "Post", URL: "https://rpc.example/", Err: &net.OpError{Op: "dial", Net: "tcp", Err: dnsNotFound}}, RouterErrorDNSFailure},
+		{"DNS failure wrapped without %w", errors.New(`Post "https://rpc.example/": dial tcp: lookup rpc.example: no such host`), RouterErrorDNSFailure},
+		{"http served as https", &url.Error{Op: "Post", URL: "https://rpc.example/", Err: errors.New("http: server gave HTTP response to HTTPS client")}, RouterErrorTLSMismatch},
 		// The node error handler's rewording of the same three shapes.
-		{"rewritten EOF", errors.New("Provider Side Failed Sending Message, Reason: End of input stream reached"), LavaErrorConnectionClosed},
-		{"rewritten DNS", errors.New("Provider Side Failed Sending Message, Reason: DNS resolution failed"), LavaErrorDNSFailure},
-		{"rewritten TLS", errors.New("Provider Side Failed Sending Message, Reason: misconfigured http endpoint as https"), LavaErrorTLSMismatch},
+		{"rewritten EOF", errors.New("Provider Side Failed Sending Message, Reason: End of input stream reached"), RouterErrorConnectionClosed},
+		{"rewritten DNS", errors.New("Provider Side Failed Sending Message, Reason: DNS resolution failed"), RouterErrorDNSFailure},
+		{"rewritten TLS", errors.New("Provider Side Failed Sending Message, Reason: misconfigured http endpoint as https"), RouterErrorTLSMismatch},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -49,7 +49,7 @@ func TestClassifyError_EOFDNSAndTLSAreAtFault(t *testing.T) {
 // A DNS timeout is still a timeout: the typed timeout check comes first.
 func TestDetectConnectionError_DNSTimeoutStaysATimeout(t *testing.T) {
 	err := &url.Error{Op: "Post", URL: "https://rpc.example/", Err: &net.DNSError{Err: "i/o timeout", Name: "rpc.example", IsTimeout: true}}
-	require.Equal(t, LavaErrorConnectionTimeout, DetectConnectionError(err))
+	require.Equal(t, RouterErrorConnectionTimeout, DetectConnectionError(err))
 }
 
 // TestDetectConnectionErrorInReplyText_KeepsTheTransportOnlyRowsOffNodeReplies: the rows MAG-4242
@@ -66,6 +66,6 @@ func TestDetectConnectionErrorInReplyText_KeepsTheTransportOnlyRowsOffNodeReplie
 		require.Nil(t, DetectConnectionErrorInReplyText(text), text)
 		require.NotNil(t, DetectConnectionError(errors.New(text)), "the transport path still reads %q", text)
 	}
-	require.Equal(t, LavaErrorConnectionRefused, DetectConnectionErrorInReplyText("dial tcp: connection refused"),
+	require.Equal(t, RouterErrorConnectionRefused, DetectConnectionErrorInReplyText("dial tcp: connection refused"),
 		"a row that predates item 5 reads reply text exactly as before")
 }

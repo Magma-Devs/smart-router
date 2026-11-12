@@ -21,7 +21,7 @@ import (
 	"time"
 
 	chaintracker "github.com/magma-Devs/smart-router/protocol/chaintracker"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
@@ -41,8 +41,8 @@ type svmHeadOnlyFetcher struct {
 	observedErrors atomic.Int64
 }
 
-func (f *svmHeadOnlyFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
+func (f *svmHeadOnlyFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
 }
 
 func (f *svmHeadOnlyFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType, apiName string) ([]byte, error) {
@@ -64,7 +64,7 @@ func (f *svmHeadOnlyFetcher) FetchLatestBlockNum(ctx context.Context) (int64, er
 }
 
 func (f *svmHeadOnlyFetcher) FetchChainID(ctx context.Context) (string, string, error) {
-	return "", "", utils.LavaFormatError("FetchChainID not supported", nil)
+	return "", "", utils.FormatError("FetchChainID not supported", nil)
 }
 
 // ObserveLatestBlockPoll makes this fetcher a chaintracker.PollObserver.
@@ -235,8 +235,8 @@ type svmBadReplyFetcher struct {
 	hashCalls atomic.Int64
 }
 
-func (f *svmBadReplyFetcher) FetchEndpoint() lavasession.RPCProviderEndpoint {
-	return lavasession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
+func (f *svmBadReplyFetcher) FetchEndpoint() routersession.RPCProviderEndpoint {
+	return routersession.RPCProviderEndpoint{ChainID: "SOLANA", ApiInterface: "jsonrpc"}
 }
 
 func (f *svmBadReplyFetcher) CustomMessage(ctx context.Context, path string, data []byte, connectionType, apiName string) ([]byte, error) {
@@ -251,7 +251,7 @@ func (f *svmBadReplyFetcher) FetchBlockHashByNum(ctx context.Context, blockNum i
 func (f *svmBadReplyFetcher) FetchLatestBlockNum(ctx context.Context) (int64, error) { return 0, nil }
 
 func (f *svmBadReplyFetcher) FetchChainID(ctx context.Context) (string, string, error) {
-	return "", "", utils.LavaFormatError("FetchChainID not supported", nil)
+	return "", "", utils.FormatError("FetchChainID not supported", nil)
 }
 
 // compile-time proof the fetcher really is the observer hook the SVM path looks for.

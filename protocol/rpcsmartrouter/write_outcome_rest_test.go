@@ -14,10 +14,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavaprotocol"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/relayprotocol"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/assert"
@@ -28,12 +28,12 @@ import (
 // has received its response. This deterministically exercises SendParsedRelay's
 // no-results branch; no response or stop reason is fabricated by the test.
 type heldCancelledRESTConnection struct {
-	lavasession.HTTPDirectRPCDoer
+	routersession.HTTPDirectRPCDoer
 	cancelled chan struct{}
 	release   <-chan struct{}
 }
 
-func (c *heldCancelledRESTConnection) DoHTTPRequest(ctx context.Context, params lavasession.HTTPRequestParams) (*lavasession.HTTPDirectRPCResponse, error) {
+func (c *heldCancelledRESTConnection) DoHTTPRequest(ctx context.Context, params routersession.HTTPRequestParams) (*routersession.HTTPDirectRPCResponse, error) {
 	response, err := c.HTTPDirectRPCDoer.DoHTTPRequest(ctx, params)
 	if ctx.Err() != nil {
 		close(c.cancelled)
@@ -99,7 +99,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 			defer closeServer()
 			chainMessage, err := parser.ParseMsg(path, data, tc.method, nil, extensionslib.ExtensionInfo{})
 			require.NoError(t, err)
-			relayData := lavaprotocol.NewRelayData(ctx, tc.method, path, data, 0, spectypes.NOT_APPLICABLE,
+			relayData := relayprotocol.NewRelayData(ctx, tc.method, path, data, 0, spectypes.NOT_APPLICABLE,
 				spectypes.APIInterfaceRest, nil, "", nil)
 			msg := chainlib.NewProtocolMessage(chainMessage, nil, relayData, "test", "127.0.0.1")
 			if tc.method == http.MethodPost {
@@ -114,7 +114,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 				// so cancellation takes the new budgetExpired health path.
 				nodeURL.Timeout = 2 * time.Second
 			}
-			conn, err := lavasession.NewDirectRPCConnection(ctx, nodeURL, 5, spectypes.APIInterfaceRest)
+			conn, err := routersession.NewDirectRPCConnection(ctx, nodeURL, 5, spectypes.APIInterfaceRest)
 			require.NoError(t, err)
 			defer conn.Close()
 			var held *heldCancelledRESTConnection
@@ -123,7 +123,7 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 				release := make(chan struct{})
 				releaseAttempt = sync.OnceFunc(func() { close(release) })
 				defer releaseAttempt()
-				doer, ok := conn.(lavasession.HTTPDirectRPCDoer)
+				doer, ok := conn.(routersession.HTTPDirectRPCDoer)
 				require.True(t, ok)
 				held = &heldCancelledRESTConnection{
 					HTTPDirectRPCDoer: doer,
@@ -131,19 +131,19 @@ func TestRESTListener_WriteOutcome(t *testing.T) {
 				}
 				conn = held
 			}
-			providerEndpoint := &lavasession.Endpoint{
+			providerEndpoint := &routersession.Endpoint{
 				NetworkAddress: endpoint.NodeUrls[0].Url, Enabled: true,
-				DirectConnections: []lavasession.DirectRPCConnection{conn},
+				DirectConnections: []routersession.DirectRPCConnection{conn},
 			}
 			if tc.hang {
-				providerEndpoint.ConnectionRefusals = lavasession.MaxConsecutiveConnectionAttempts - 1
+				providerEndpoint.ConnectionRefusals = routersession.MaxConsecutiveConnectionAttempts - 1
 			}
-			provider := lavasession.NewConsumerSessionWithProvider("rest-upstream", []*lavasession.Endpoint{providerEndpoint}, 100000, 1, 1)
+			provider := routersession.NewConsumerSessionWithProvider("rest-upstream", []*routersession.Endpoint{providerEndpoint}, 100000, 1, 1)
 			provider.StaticProvider = true
 			sessionManager, rpcEndpoint := createTestSessionManager("LAVA", spectypes.APIInterfaceRest)
 			rpcEndpoint.NetworkAddress = "127.0.0.1:0"
 			require.NoError(t, sessionManager.UpdateAllProviders(1,
-				map[uint64]*lavasession.ConsumerSessionsWithProvider{0: provider}, nil))
+				map[uint64]*routersession.ConsumerSessionsWithProvider{0: provider}, nil))
 			logs, err := metrics.NewRPCConsumerLogs(nil, nil, nil)
 			require.NoError(t, err)
 			server := &RPCSmartRouterServer{

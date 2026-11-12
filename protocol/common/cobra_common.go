@@ -245,7 +245,7 @@ func ValidateDurationConfigValues(v *viper.Viper, flagNames ...string) error {
 	for _, flagName := range flagNames {
 		switch raw := v.Get(flagName).(type) {
 		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
-			return utils.LavaFormatError("duration config value has no unit, and a bare number is read as nanoseconds", nil,
+			return utils.FormatError("duration config value has no unit, and a bare number is read as nanoseconds", nil,
 				utils.LogAttr("flag", flagName),
 				utils.LogAttr("value", raw),
 				utils.LogAttr("write_it_as", "a duration with a unit, e.g. 30s, 500ms or 2m"),
@@ -262,7 +262,7 @@ func ValidateDurationConfigValues(v *viper.Viper, flagNames ...string) error {
 // again as soon as it is set.
 func ValidateEpochDuration(epochDuration time.Duration) error {
 	if epochDuration < 0 {
-		return utils.LavaFormatError("--"+EpochDurationFlag+" must not be negative", nil,
+		return utils.FormatError("--"+EpochDurationFlag+" must not be negative", nil,
 			utils.LogAttr("value", epochDuration),
 			utils.LogAttr("write_it_as", "a positive duration such as 30m, or leave it unset for the 15m default"),
 		)

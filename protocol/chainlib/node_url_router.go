@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 )
 
@@ -18,7 +18,7 @@ type NodeUrlRouterFactory func(ctx context.Context, url common.NodeUrl, chainPar
 // NewNodeUrlRouterFactory builds each node url's own chain proxy, on demand, for
 // verification. The chain router keeps one url per set of declared services, so a
 // check routed through it can land on another url than the one it verifies.
-func NewNodeUrlRouterFactory(nConns uint, endpoint *lavasession.RPCProviderEndpoint) (NodeUrlRouterFactory, error) {
+func NewNodeUrlRouterFactory(nConns uint, endpoint *routersession.RPCProviderEndpoint) (NodeUrlRouterFactory, error) {
 	newProxy, err := chainProxyConstructor(endpoint.ApiInterface)
 	if err != nil {
 		return nil, err
@@ -45,7 +45,7 @@ func (r nodeUrlRouter) SendNodeMsg(ctx context.Context, chainMessage ChainMessag
 	return reply, url, chainID, err
 }
 
-func chainProxyConstructor(apiInterface string) (func(context.Context, uint, lavasession.RPCProviderEndpoint, ChainParser) (ChainProxy, error), error) {
+func chainProxyConstructor(apiInterface string) (func(context.Context, uint, routersession.RPCProviderEndpoint, ChainParser) (ChainProxy, error), error) {
 	switch apiInterface {
 	case spectypes.APIInterfaceJsonRPC:
 		return NewJrpcChainProxy, nil
@@ -67,7 +67,7 @@ func chainProxyConstructor(apiInterface string) (func(context.Context, uint, lav
 // spec whose root path is enabled; see ChainParser.ServesRootCollection), or no websocket url on a spec that subscribes while
 // websocket verification is on.
 // Nil when the list is servable. It dials nothing.
-func ProviderShapeError(endpoint *lavasession.RPCProviderEndpoint, chainParser ChainParser) error {
+func ProviderShapeError(endpoint *routersession.RPCProviderEndpoint, chainParser ChainParser) error {
 	http, httpRoot, websocket := false, false, false
 	for _, url := range endpoint.NodeUrls {
 		if isWebSocketUrl(url.Url) {

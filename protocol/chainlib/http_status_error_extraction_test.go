@@ -5,7 +5,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +16,7 @@ import (
 // only "HTTP 503 Service Unavailable" and blamed the endpoint for a method it simply lacks.
 func TestExtractNodeErrorDetails_DirectHTTPStatusErrorReadsTheJSONRPCBody(t *testing.T) {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"the method eth_foo does not exist/is not available"}}`)
-	direct := &lavasession.HTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable", Body: body}
+	direct := &routersession.HTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable", Body: body}
 	proxy := rpcclient.HTTPError{StatusCode: 503, Status: "503 Service Unavailable", Body: body}
 
 	code, msg := ExtractNodeErrorDetails(direct)
@@ -30,18 +30,18 @@ func TestExtractNodeErrorDetails_DirectHTTPStatusErrorReadsTheJSONRPCBody(t *tes
 	classified := ClassifyNodeError(direct, common.ChainFamilyUnknown, common.TransportJsonRPC)
 	require.NotNil(t, classified)
 	assert.Equal(t, ClassifyNodeError(proxy, common.ChainFamilyUnknown, common.TransportJsonRPC), classified)
-	assert.NotEqual(t, common.LavaErrorNodeServiceUnavailable, classified,
+	assert.NotEqual(t, common.RouterErrorNodeServiceUnavailable, classified,
 		"the body says the method is missing; the status line alone said the service was down")
 }
 
 // Without a JSON-RPC body the direct error falls back to its status, as the proxy one does.
 func TestExtractNodeErrorDetails_DirectHTTPStatusErrorFallsBackToTheStatus(t *testing.T) {
 	for _, body := range [][]byte{nil, []byte(`<html>Service Unavailable</html>`), []byte(`{"message":"busy"}`)} {
-		direct := &lavasession.HTTPStatusError{StatusCode: 503, Body: body}
+		direct := &routersession.HTTPStatusError{StatusCode: 503, Body: body}
 		code, msg := ExtractNodeErrorDetails(direct)
 		assert.Equal(t, 503, code, "body %q", body)
 		assert.Equal(t, direct.Error(), msg, "body %q", body)
-		assert.Equal(t, common.LavaErrorNodeServiceUnavailable,
+		assert.Equal(t, common.RouterErrorNodeServiceUnavailable,
 			ClassifyNodeError(direct, common.ChainFamilyUnknown, common.TransportJsonRPC), "body %q", body)
 	}
 }

@@ -4,9 +4,9 @@ import (
 	"context"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // Test-only aliases and the policy-less constructor. Production builds the state machine through
@@ -23,7 +23,7 @@ type (
 // policy resolver.
 func NewSmartRouterRelayStateMachine(
 	ctx context.Context,
-	usedProviders *lavasession.UsedProviders,
+	usedProviders *routersession.UsedProviders,
 	relaySender SmartRouterRelaySender,
 	protocolMessage chainlib.ProtocolMessage,
 	analytics *metrics.RelayMetrics,

@@ -172,8 +172,8 @@ For `no_answer`, `rejected_before_dispatch` and `router_error`, the first rule t
 | Cross-validation could not be staffed (`insufficient-capacity`, `insufficient-groups`) | `PROTOCOL_INSUFFICIENT_PROVIDERS` |
 | Cross-validation found no quorum (`no-agreement`, `diversity-unmet`, `group-quorum-unmet`) | `PROTOCOL_HASH_CONSENSUS_ERROR` |
 | A `routerFault` | `PROTOCOL_RELAY_PROCESSING_FAILED` |
-| Empty provider pool (`lavasession.PairingListEmptyError`) | `PROTOCOL_NO_PROVIDERS` |
-| Every endpoint disabled (`lavasession.AllProviderEndpointsDisabledError`) | `PROTOCOL_ALL_ENDPOINTS_DISABLED` |
+| Empty provider pool (`routersession.PairingListEmptyError`) | `PROTOCOL_NO_PROVIDERS` |
+| Every endpoint disabled (`routersession.AllProviderEndpointsDisabledError`) | `PROTOCOL_ALL_ENDPOINTS_DISABLED` |
 | Pinned provider unavailable or already failed | `PROTOCOL_PROVIDER_UNAVAILABLE` |
 | Batch over the configured size (`chainlib.ErrBatchRequestSizeExceeded`) | `PROTOCOL_BATCH_SIZE_EXCEEDED` |
 | An unsubscribe of a subscription the client does not hold (`common.SubscriptionNotFoundError`) | `PROTOCOL_SUBSCRIPTION_NOT_FOUND` |

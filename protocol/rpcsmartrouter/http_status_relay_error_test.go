@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/stretchr/testify/require"
 )
@@ -54,7 +54,7 @@ func TestHTTPStatusRelayError(t *testing.T) {
 		err := httpStatusRelayError(503, &pairingtypes.RelayReply{Data: []byte("<html/>"), Metadata: []pairingtypes.Metadata{
 			{Name: "Content-Type", Value: "text/html"},
 		}})
-		var httpErr *lavasession.HTTPStatusError
+		var httpErr *routersession.HTTPStatusError
 		require.ErrorAs(t, err, &httpErr)
 		require.Equal(t, 503, httpErr.StatusCode)
 		require.Equal(t, []byte("<html/>"), httpErr.Body)

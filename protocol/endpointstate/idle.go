@@ -61,7 +61,7 @@ var errNoTrackerForEndpoint = errors.New("no ChainTracker for endpoint")
 func resolveIdleConfig(idleAfter, idlePollInterval, flatPollInterval time.Duration, chainID, apiInterface string) (time.Duration, time.Duration) {
 	if idleAfter == 0 {
 		if idlePollInterval != 0 {
-			utils.LavaFormatWarning("--"+IdlePollIntervalFlagName+" has no effect without --"+IdleAfterFlagName, nil,
+			utils.FormatWarning("--"+IdlePollIntervalFlagName+" has no effect without --"+IdleAfterFlagName, nil,
 				utils.LogAttr("chainID", chainID),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
@@ -69,7 +69,7 @@ func resolveIdleConfig(idleAfter, idlePollInterval, flatPollInterval time.Durati
 		return 0, 0
 	}
 	if idleAfter < MinIdleAfter {
-		utils.LavaFormatWarning("--"+IdleAfterFlagName+" below the minimum; idle mode stays OFF", nil,
+		utils.FormatWarning("--"+IdleAfterFlagName+" below the minimum; idle mode stays OFF", nil,
 			utils.LogAttr("provided", idleAfter),
 			utils.LogAttr("minimum", MinIdleAfter),
 			utils.LogAttr("chainID", chainID),
@@ -78,7 +78,7 @@ func resolveIdleConfig(idleAfter, idlePollInterval, flatPollInterval time.Durati
 		return 0, 0
 	}
 	if idlePollInterval < 0 {
-		utils.LavaFormatWarning("--"+IdlePollIntervalFlagName+" is negative; polling nothing while idle", nil,
+		utils.FormatWarning("--"+IdlePollIntervalFlagName+" is negative; polling nothing while idle", nil,
 			utils.LogAttr("provided", idlePollInterval),
 			utils.LogAttr("chainID", chainID),
 			utils.LogAttr("apiInterface", apiInterface),
@@ -86,7 +86,7 @@ func resolveIdleConfig(idleAfter, idlePollInterval, flatPollInterval time.Durati
 		idlePollInterval = 0
 	}
 	if idlePollInterval > 0 && idlePollInterval < flatPollInterval {
-		utils.LavaFormatWarning("--"+IdlePollIntervalFlagName+" is faster than the normal poll cadence; raising it to the cadence", nil,
+		utils.FormatWarning("--"+IdlePollIntervalFlagName+" is faster than the normal poll cadence; raising it to the cadence", nil,
 			utils.LogAttr("provided", idlePollInterval),
 			utils.LogAttr("pollInterval", flatPollInterval),
 			utils.LogAttr("chainID", chainID),
@@ -246,7 +246,7 @@ func (m *EndpointMonitor) runWake(done chan struct{}, urls []string, startedAt t
 		m.wakeMu.Unlock()
 	}()
 
-	utils.LavaFormatInfo("chain awake: a client relay ended the idle period, polling every endpoint",
+	utils.FormatInfo("chain awake: a client relay ended the idle period, polling every endpoint",
 		utils.LogAttr("chainID", m.chainID),
 		utils.LogAttr("apiInterface", m.apiInterface),
 		utils.LogAttr("endpoints", len(urls)),
@@ -282,7 +282,7 @@ func (m *EndpointMonitor) runWake(done chan struct{}, urls []string, startedAt t
 		}(url)
 	}
 	wg.Wait()
-	utils.LavaFormatInfo("wake burst finished",
+	utils.FormatInfo("wake burst finished",
 		utils.LogAttr("chainID", m.chainID),
 		utils.LogAttr("apiInterface", m.apiInterface),
 		utils.LogAttr("polled", polled.Load()),
@@ -365,7 +365,7 @@ func (m *EndpointMonitor) idleGate(endpointURL string, now time.Time, sinceLastR
 		return false // heartbeat due: this cycle reaches upstream
 	}
 	if m.idleAnnounced.CompareAndSwap(false, true) {
-		utils.LavaFormatInfo("chain idle: no client relay within the idle window, dedicated polls paused",
+		utils.FormatInfo("chain idle: no client relay within the idle window, dedicated polls paused",
 			utils.LogAttr("chainID", m.chainID),
 			utils.LogAttr("apiInterface", m.apiInterface),
 			utils.LogAttr("lastClientRelay", m.lastClientRelay()),

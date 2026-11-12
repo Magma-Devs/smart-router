@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/grpcproxy"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 var _ grpcproxy.ReflectionSource = (*RPCSmartRouterServer)(nil)
@@ -33,14 +33,14 @@ func (rpcss *RPCSmartRouterServer) ReflectionSnapshot(ctx context.Context) (grpc
 // orderSnapshotters splits the endpoints' gRPC connections into primaries and
 // backups, each in provider then address order, so the same endpoint is preferred
 // every time.
-func orderSnapshotters(endpoints []*lavasession.EndpointWithDirectConnection) (primaries, backups []lavasession.GRPCReflectionSnapshotter) {
+func orderSnapshotters(endpoints []*routersession.EndpointWithDirectConnection) (primaries, backups []routersession.GRPCReflectionSnapshotter) {
 	endpoints = slices.Clone(endpoints)
-	slices.SortFunc(endpoints, func(a, b *lavasession.EndpointWithDirectConnection) int {
+	slices.SortFunc(endpoints, func(a, b *routersession.EndpointWithDirectConnection) int {
 		return cmp.Or(cmp.Compare(a.ProviderAddress, b.ProviderAddress),
 			cmp.Compare(a.Endpoint.NetworkAddress, b.Endpoint.NetworkAddress))
 	})
 	for _, endpoint := range endpoints {
-		snapshotter, ok := endpoint.DirectConnection.(lavasession.GRPCReflectionSnapshotter)
+		snapshotter, ok := endpoint.DirectConnection.(routersession.GRPCReflectionSnapshotter)
 		if !ok {
 			continue
 		}
@@ -58,9 +58,9 @@ func orderSnapshotters(endpoints []*lavasession.EndpointWithDirectConnection) (p
 // build, and nothing else is refreshed. With none current it serves the best one
 // held while the primaries and the served endpoint refresh; with none held it waits
 // for the first to be taken.
-func pickReflectionSnapshot(ctx context.Context, primaries, backups []lavasession.GRPCReflectionSnapshotter) (*lavasession.GRPCReflectionSnapshot, error) {
-	var best *lavasession.GRPCReflectionSnapshot
-	var bestFrom lavasession.GRPCReflectionSnapshotter
+func pickReflectionSnapshot(ctx context.Context, primaries, backups []routersession.GRPCReflectionSnapshotter) (*routersession.GRPCReflectionSnapshot, error) {
+	var best *routersession.GRPCReflectionSnapshot
+	var bestFrom routersession.GRPCReflectionSnapshotter
 	for _, snapshotter := range slices.Concat(primaries, backups) {
 		held := snapshotter.PeekReflectionSnapshot()
 		if held == nil {
@@ -84,7 +84,7 @@ func pickReflectionSnapshot(ctx context.Context, primaries, backups []lavasessio
 }
 
 // betterSnapshot reports whether a beats b: complete before partial, then newer.
-func betterSnapshot(a, b *lavasession.GRPCReflectionSnapshot) bool {
+func betterSnapshot(a, b *routersession.GRPCReflectionSnapshot) bool {
 	if a.Complete != b.Complete {
 		return a.Complete
 	}
@@ -94,7 +94,7 @@ func betterSnapshot(a, b *lavasession.GRPCReflectionSnapshot) bool {
 // awaitFirstSnapshot waits for the first snapshot any endpoint takes. The backups
 // join the primaries once half of ctx's time has passed or every primary has
 // failed, so a hung primary cannot starve them.
-func awaitFirstSnapshot(ctx context.Context, primaries, backups []lavasession.GRPCReflectionSnapshotter) (*lavasession.GRPCReflectionSnapshot, error) {
+func awaitFirstSnapshot(ctx context.Context, primaries, backups []routersession.GRPCReflectionSnapshotter) (*routersession.GRPCReflectionSnapshot, error) {
 	if len(primaries)+len(backups) == 0 {
 		return nil, errNoReflectionSnapshotters
 	}
@@ -102,12 +102,12 @@ func awaitFirstSnapshot(ctx context.Context, primaries, backups []lavasession.GR
 	defer cancel()
 
 	type result struct {
-		snapshot *lavasession.GRPCReflectionSnapshot
+		snapshot *routersession.GRPCReflectionSnapshot
 		err      error
 	}
 	results := make(chan result, len(primaries)+len(backups))
 	pending := 0
-	ask := func(tier []lavasession.GRPCReflectionSnapshotter) {
+	ask := func(tier []routersession.GRPCReflectionSnapshotter) {
 		for _, snapshotter := range tier {
 			pending++
 			go func() {

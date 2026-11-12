@@ -71,7 +71,7 @@ func (r *Registry) FindExtensionByName(field protoreflect.FullName) (protoreflec
 			}
 			xdExtensionDescriptor, ok := xd.(protoreflect.ExtensionDescriptor)
 			if !ok {
-				return nil, utils.LavaFormatError("Failed converting xd.(protoreflect.ExtensionDescriptor)", nil, utils.Attribute{Key: "xd", Value: xd})
+				return nil, utils.FormatError("Failed converting xd.(protoreflect.ExtensionDescriptor)", nil, utils.Attribute{Key: "xd", Value: xd})
 			}
 			return r.registerExtension(dynamicpb.NewExtensionType(xdExtensionDescriptor))
 		})
@@ -99,7 +99,7 @@ func (r *Registry) resolveMessage(message protoreflect.FullName) (protoreflect.M
 	}
 	messageDescriptor, ok := md.(protoreflect.MessageDescriptor)
 	if !ok {
-		return nil, utils.LavaFormatError("Failed converting md.(protoreflect.MessageDescriptor)", nil, utils.Attribute{Key: "md", Value: md})
+		return nil, utils.FormatError("Failed converting md.(protoreflect.MessageDescriptor)", nil, utils.Attribute{Key: "md", Value: md})
 	}
 	return r.registerMessage(dynamicpb.NewMessageType(messageDescriptor))
 }

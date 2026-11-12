@@ -212,7 +212,7 @@ func New(cfg Config) (*Store, error) {
 			// logging "connections=0" — which reads as "rotation applied in
 			// place" to an operator, the one thing that did NOT happen. Say
 			// once what actually holds instead of running a loop that cannot act.
-			utils.LavaFormatInfo(cfg.LogName()+" credential rotation under sentinel applies on the next reconnect or failover, not in place on live connections",
+			utils.FormatInfo(cfg.LogName()+" credential rotation under sentinel applies on the next reconnect or failover, not in place on live connections",
 				utils.LogAttr("password-file", cfg.PasswordFile),
 			)
 		} else {
@@ -336,7 +336,7 @@ func warnIfReadSplitIsDiscoveryScoped(cfg Config) {
 	if cfg.EffectiveTopology() == TopologyStandalone {
 		return
 	}
-	utils.LavaFormatWarning(cfg.LogName()+" read-addresses under a discovering topology: the read client performs its own discovery and resolves to the master(s) of the topology those addresses front — it yields replica reads only when it points at a separate replicated deployment (e.g. a regional cluster), not at replicas of the write topology", nil,
+	utils.FormatWarning(cfg.LogName()+" read-addresses under a discovering topology: the read client performs its own discovery and resolves to the master(s) of the topology those addresses front — it yields replica reads only when it points at a separate replicated deployment (e.g. a regional cluster), not at replicas of the write topology", nil,
 		utils.LogAttr("topology", cfg.EffectiveTopology()),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 	)
@@ -362,7 +362,7 @@ func warnIfCredentialsCrossPlaintext(cfg Config) {
 	if len(keys) == 0 {
 		return
 	}
-	utils.LavaFormatWarning(cfg.LogName()+" credentials are configured without tls: they cross the network readable on every new connection to the backend (set tls.enabled: true to protect them in transit; on a loopback or private-network backend this may be intended)", nil,
+	utils.FormatWarning(cfg.LogName()+" credentials are configured without tls: they cross the network readable on every new connection to the backend (set tls.enabled: true to protect them in transit; on a loopback or private-network backend this may be intended)", nil,
 		utils.LogAttr("addresses", cfg.Addresses),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 		utils.LogAttr("credential-keys", keys),
@@ -383,7 +383,7 @@ func warnIfTLSSkipsVerification(cfg Config) {
 	if !cfg.TLS.Enabled || !cfg.TLS.InsecureSkipVerify {
 		return
 	}
-	utils.LavaFormatWarning(cfg.LogName()+" tls.insecure-skip-verify is set: the connection is encrypted but the backend's certificate is NOT verified, so the store's identity is unchecked — a development setting that must not travel to production", nil,
+	utils.FormatWarning(cfg.LogName()+" tls.insecure-skip-verify is set: the connection is encrypted but the backend's certificate is NOT verified, so the store's identity is unchecked — a development setting that must not travel to production", nil,
 		utils.LogAttr("addresses", cfg.Addresses),
 		utils.LogAttr("read-addresses", cfg.ReadAddresses),
 	)
@@ -613,7 +613,7 @@ func (s *Store) GetEntries(ctx context.Context, keys []string) ([]*core.Envelope
 		}
 		env, decErr := decodeEnvelope(data)
 		if decErr != nil {
-			utils.LavaFormatError("corrupt cache entry in RESP backend, treating as miss", decErr, utils.LogAttr("key", s.key(keys[i])))
+			utils.FormatError("corrupt cache entry in RESP backend, treating as miss", decErr, utils.LogAttr("key", s.key(keys[i])))
 			continue
 		}
 		out[i] = env
@@ -676,7 +676,7 @@ func (s *Store) GetInt64(ctx context.Context, key string) (int64, bool, error) {
 		// The in-memory adapter fatals on a corrupt shared-tip entry; a
 		// router-embedded backend on a SHARED store must not be crashable by a
 		// foreign writer, so corruption reads as a miss instead.
-		utils.LavaFormatError("corrupt int64 entry in RESP backend, treating as miss", parseErr, utils.LogAttr("key", s.key(key)), utils.LogAttr("value", raw))
+		utils.FormatError("corrupt int64 entry in RESP backend, treating as miss", parseErr, utils.LogAttr("key", s.key(key)), utils.LogAttr("value", raw))
 		return 0, false, nil
 	}
 	return value, true, nil
@@ -761,7 +761,7 @@ func (s *Store) GetChainTip(ctx context.Context, key string) (int64, bool, error
 	}
 	block, deadlineUnixMs, ok := decodeChainTip(raw)
 	if !ok {
-		utils.LavaFormatError("corrupt chain-tip entry in RESP backend, treating as unknown", nil, utils.LogAttr("key", s.key(key)), utils.LogAttr("value", raw))
+		utils.FormatError("corrupt chain-tip entry in RESP backend, treating as unknown", nil, utils.LogAttr("key", s.key(key)), utils.LogAttr("value", raw))
 		return spectypes.NOT_APPLICABLE, false, nil
 	}
 	if time.Now().UnixMilli() < deadlineUnixMs {
@@ -916,7 +916,7 @@ func (s *Store) SetStickyIfAbsent(ctx context.Context, key string, pin core.Stic
 func decodeStickyPin(raw string) (core.StickyPin, error) {
 	var value stickyPinValue
 	if err := json.Unmarshal([]byte(raw), &value); err != nil {
-		utils.LavaFormatError("corrupt sticky pin in RESP backend", err, utils.LogAttr("value", raw))
+		utils.FormatError("corrupt sticky pin in RESP backend", err, utils.LogAttr("value", raw))
 		return core.StickyPin{}, err
 	}
 	return core.StickyPin{Provider: value.Provider, Epoch: value.Epoch}, nil
@@ -1005,7 +1005,7 @@ func (s *Store) GetEndpointObservation(ctx context.Context, key string) (core.En
 		// Same policy as the int64 tip: a router-embedded backend on a SHARED store must not
 		// be derailed by a foreign writer, so corruption reads as a miss (and the next publish
 		// overwrites it — see the script's fall-through).
-		utils.LavaFormatError("corrupt endpoint observation in RESP backend, treating as miss", nil, utils.LogAttr("key", s.key(key)), utils.LogAttr("value", getCmd.Val()))
+		utils.FormatError("corrupt endpoint observation in RESP backend, treating as miss", nil, utils.LogAttr("key", s.key(key)), utils.LogAttr("value", getCmd.Val()))
 		return core.EndpointObservation{}, 0, false, nil
 	}
 	age := time.Duration(now.UnixMilli()-storedAtMs) * time.Millisecond
@@ -1056,7 +1056,7 @@ func (s *Store) Purge(ctx context.Context) error {
 		return nil
 	}
 	if master, isReplica := s.readEndpointReplicaOf(ctx); isReplica {
-		utils.LavaFormatDebug("resp-cache purge: the read endpoint reports itself a replica, so it is not scanned; the write-side purge reaches it through replication",
+		utils.FormatDebug("resp-cache purge: the read endpoint reports itself a replica, so it is not scanned; the write-side purge reaches it through replication",
 			utils.LogAttr("read-endpoint", s.readEndpoint.current()),
 			utils.LogAttr("replica-of", master),
 			// A textual match: a hostname and the IP it resolves to differ, so this is a hint.
@@ -1065,7 +1065,7 @@ func (s *Store) Purge(ctx context.Context) error {
 	}
 	if err := purgeClient(ctx, s.read, match); err != nil {
 		if redis.HasErrorPrefix(err, "READONLY") {
-			utils.LavaFormatDebug("resp-cache purge: the read endpoint is a read-only replica, so the write-side purge reaches it through replication",
+			utils.FormatDebug("resp-cache purge: the read endpoint is a read-only replica, so the write-side purge reaches it through replication",
 				utils.LogAttr("read-endpoint", s.readEndpoint.current()))
 			return nil
 		}

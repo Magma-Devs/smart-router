@@ -40,7 +40,7 @@ type httpConn struct {
 	url       string
 	closeOnce sync.Once
 	closeCh   chan interface{}
-	mu        utils.LavaMutex // protects headers
+	mu        utils.Mutex // protects headers
 	headers   http.Header
 }
 

@@ -16,7 +16,7 @@ import (
 
 // handleConnectionError runs only on handleAndClassify's Unknown branch, so a connection shape
 // common.DetectConnectionError names never reaches it. These are the shapes it used to reword as
-// well; each one is classified centrally and returned as its LavaError, not as reworded text.
+// well; each one is classified centrally and returned as its RouterError, not as reworded text.
 func TestConnectionShapes_AreDecidedByDetectConnectionError(t *testing.T) {
 	refused := errors.New("connect: connection refused")
 	shapes := map[string]error{

@@ -121,7 +121,7 @@ func GetAllSpecsFromLocalDir(specPath string) (map[string]types.Spec, error) {
 	if len(errs) > 0 {
 		// A corrupt file beside good ones used to vanish silently; the remote loaders warn, so
 		// does this one.
-		utils.LavaFormatWarning("Some spec files failed to load from the local directory", nil,
+		utils.FormatWarning("Some spec files failed to load from the local directory", nil,
 			utils.LogAttr("directory", specPath),
 			utils.LogAttr("error_count", len(errs)),
 			utils.LogAttr("errors", errors.Join(errs...)))
@@ -133,7 +133,7 @@ func GetAllSpecsFromLocalDir(specPath string) (map[string]types.Spec, error) {
 		for id := range specs {
 			specIDs = append(specIDs, id)
 		}
-		utils.LavaFormatInfo("Loaded specs from local directory",
+		utils.FormatInfo("Loaded specs from local directory",
 			utils.LogAttr("spec_count", len(specs)),
 			utils.LogAttr("directory", specPath),
 			utils.LogAttr("spec_ids", strings.Join(specIDs, ", ")))

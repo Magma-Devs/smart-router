@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -127,10 +127,10 @@ func TestEndpointFault_BlameAndProofAreDisjoint(t *testing.T) {
 // Endpoint.ConnectionRefusals and crosses the threshold, and that a blameless one leaves it alone.
 // Without this the fault axis could be perfectly correct and wired to nothing.
 func TestEndpointFault_CounterMovesOnlyOnFault(t *testing.T) {
-	endpointWith := func(refusals uint64) *lavasession.Endpoint {
-		e := &lavasession.Endpoint{NetworkAddress: "http://fault-test", Enabled: true}
+	endpointWith := func(refusals uint64) *routersession.Endpoint {
+		e := &routersession.Endpoint{NetworkAddress: "http://fault-test", Enabled: true}
 		for i := uint64(0); i < refusals; i++ {
-			e.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+			e.MarkUnhealthy(routersession.EndpointDisableNodeError)
 		}
 		return e
 	}
@@ -139,9 +139,9 @@ func TestEndpointFault_CounterMovesOnlyOnFault(t *testing.T) {
 	require.True(t, atFault.IsNodeAtFault, "precondition: the freeze case blames")
 
 	// One short of the threshold, the blaming answer is what disables it.
-	e := endpointWith(lavasession.MaxConsecutiveConnectionAttempts - 1)
+	e := endpointWith(routersession.MaxConsecutiveConnectionAttempts - 1)
 	require.True(t, e.Enabled, "precondition: still enabled one failure short")
-	e.MarkUnhealthy(lavasession.EndpointDisableNodeError) // the relay path's call, gated on IsNodeAtFault
+	e.MarkUnhealthy(routersession.EndpointDisableNodeError) // the relay path's call, gated on IsNodeAtFault
 	require.False(t, e.Enabled,
 		"a node error inside a 200 must be able to disable the endpoint — this is the whole freeze fix")
 
@@ -150,10 +150,10 @@ func TestEndpointFault_CounterMovesOnlyOnFault(t *testing.T) {
 	blameless := jsonrpcNodeError(-32000, "transaction not found")
 	require.False(t, blameless.IsNodeAtFault, "precondition: not-found does not blame")
 
-	survivor := endpointWith(lavasession.MaxConsecutiveConnectionAttempts - 1)
+	survivor := endpointWith(routersession.MaxConsecutiveConnectionAttempts - 1)
 	for i := 0; i < 100; i++ {
 		if blameless.IsNodeAtFault { // never true; mirrors the relay path's gate
-			survivor.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+			survivor.MarkUnhealthy(routersession.EndpointDisableNodeError)
 		}
 	}
 	require.True(t, survivor.Enabled,
@@ -169,7 +169,7 @@ func TestEndpointFault_CounterMovesOnlyOnFault(t *testing.T) {
 //	                             error is the endpoint failing us, named or not.
 //
 // Getting this backwards the first time is what TestGenuineFaults_StillPenalised caught: because
-// LavaErrorUnknown is CategoryExternal by construction, excusing it wholesale silently stopped
+// RouterErrorUnknown is CategoryExternal by construction, excusing it wholesale silently stopped
 // penalising every uncatalogued transport failure.
 func TestEndpointFault_UnrecognisedAnswerAndUnrecognisedFailureDiffer(t *testing.T) {
 	answer := jsonrpcNodeError(-39999, "flux capacitor desynchronised")
@@ -186,8 +186,8 @@ func TestEndpointFault_UnrecognisedAnswerAndUnrecognisedFailureDiffer(t *testing
 		{"novel transport error", errors.New("some totally novel transport thing")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			classified := common.AsLavaError(classifyAndWrap(tc.err, common.ChainFamily(-1), common.TransportJsonRPC))
-			require.Equal(t, common.LavaErrorUnknown, classified, "precondition: genuinely unclassified")
+			classified := common.AsRouterError(classifyAndWrap(tc.err, common.ChainFamily(-1), common.TransportJsonRPC))
+			require.Equal(t, common.RouterErrorUnknown, classified, "precondition: genuinely unclassified")
 
 			atFault, backoff := classifyEndpointHealth(classified, false)
 			require.True(t, atFault,

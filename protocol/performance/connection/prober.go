@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/magma-Devs/smart-router/utils"
 	"google.golang.org/grpc"
@@ -23,7 +23,7 @@ func NewProber(addrss string) *Prober {
 }
 
 func createConnection(ctx context.Context, address string) (pairingtypes.RelayerClient, *grpc.ClientConn, error) {
-	cswp := lavasession.ConsumerSessionsWithProvider{}
+	cswp := routersession.ConsumerSessionsWithProvider{}
 	return cswp.ConnectRawClientWithTimeout(ctx, address)
 }
 
@@ -48,11 +48,11 @@ func (p *Prober) RunOnce(ctx context.Context) error {
 		ApiInterface: "",
 	}
 	var trailer metadata.MD
-	utils.LavaFormatInfo("[+] sending probe", utils.LogAttr("guid", guid))
+	utils.FormatInfo("[+] sending probe", utils.LogAttr("guid", guid))
 	probeResp, err := p.relayerClient.Probe(ctx, probeReq, grpc.Trailer(&trailer))
 	if err != nil {
 		return err
 	}
-	utils.LavaFormatInfo("probe response", utils.LogAttr("guid", probeResp.Guid))
+	utils.FormatInfo("probe response", utils.LogAttr("guid", probeResp.Guid))
 	return nil
 }

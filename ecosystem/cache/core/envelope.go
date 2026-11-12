@@ -40,7 +40,7 @@ func (cv *Envelope) ToCacheReply() *relaytypes.CacheRelayReply {
 	if cv.IsCompressed && len(response.Data) > 0 {
 		decompressed, err := decompressData(response.Data)
 		if err != nil {
-			utils.LavaFormatError("Failed to decompress cache data", err)
+			utils.FormatError("Failed to decompress cache data", err)
 		} else {
 			response.Data = decompressed
 		}
@@ -66,7 +66,7 @@ func NewEnvelope(response *relaytypes.RelayReply, hash []byte, finalized bool, o
 
 	compressed, isCompressed, err := compressData(response.Data)
 	if err != nil {
-		utils.LavaFormatWarning("Failed to compress cache data, storing uncompressed", err)
+		utils.FormatWarning("Failed to compress cache data, storing uncompressed", err)
 	} else if isCompressed {
 		response.Data = compressed
 	}

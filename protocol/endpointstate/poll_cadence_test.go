@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -150,7 +150,7 @@ func TestEndpointMonitor_PollDivisor_ReachesLiveTracker(t *testing.T) {
 
 			conn := &pollNowConn{url: url}
 			conn.block.Store(1000)
-			_, err := m.GetOrCreateTracker("", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+			_, err := m.GetOrCreateTracker("", &routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 			require.NoError(t, err)
 
 			require.Eventually(t, func() bool {

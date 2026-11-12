@@ -7,7 +7,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,7 +15,7 @@ import (
 // surviving map forward exactly as updateEpoch does, and returns the final active set.
 // Each test gets its own hold-off registry so strikes cannot leak across tests through
 // the process-wide default.
-func runCycles(t *testing.T, inputs *chainReverifyInputs, active map[uint64]*lavasession.ConsumerSessionsWithProvider, n int) map[string]struct{} {
+func runCycles(t *testing.T, inputs *chainReverifyInputs, active map[uint64]*routersession.ConsumerSessionsWithProvider, n int) map[string]struct{} {
 	t.Helper()
 	if inputs.rateLimitHoldoff == nil {
 		inputs.rateLimitHoldoff = holdoff.NewRegistry()
@@ -31,14 +31,14 @@ func runCycles(t *testing.T, inputs *chainReverifyInputs, active map[uint64]*lav
 // Before this, the fleet demoted providers that were serving traffic fine, because the
 // fleet's own synchronized verification burst blew a shared 200 rps vendor cap.
 func TestApplyReverification_RateLimitNeverDemotes(t *testing.T) {
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
 
-	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession("tatum")}
 	inputs := &chainReverifyInputs{
 		rpcEndpoint:                rpc,
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{makeProvider("tatum")},
-		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{makeProvider("tatum")},
+		validateFn: func(_ context.Context, _ *routersession.RPCStaticProviderEndpoint) error {
 			return common.StatusCodeError429
 		},
 	}
@@ -52,14 +52,14 @@ func TestApplyReverification_RateLimitNeverDemotes(t *testing.T) {
 // The guard must be narrow: a provider that genuinely cannot serve still has to go. This is the
 // dwellir-on-STRK case, where the upstream could not serve `trace` at all.
 func TestApplyReverification_RealFailureStillDemotes(t *testing.T) {
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
 
-	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession("dwellir")}
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession("dwellir")}
 	inputs := &chainReverifyInputs{
 		rpcEndpoint:                rpc,
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{makeProvider("dwellir")},
-		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{makeProvider("dwellir")},
+		validateFn: func(_ context.Context, _ *routersession.RPCStaticProviderEndpoint) error {
 			return errors.New("[-] verify failed to parse result: upstream does not serve trace")
 		},
 	}
@@ -71,24 +71,24 @@ func TestApplyReverification_RealFailureStillDemotes(t *testing.T) {
 // A rate-limited probe on an inactive provider is not evidence of health either — it must not
 // promote one back into the pairing on no information.
 func TestApplyReverification_RateLimitDoesNotPromote(t *testing.T) {
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
 
 	var converted []string
 	inputs := &chainReverifyInputs{
 		rpcEndpoint: rpc,
-		convertProvidersToSessions: func(p []*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider {
+		convertProvidersToSessions: func(p []*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider {
 			for _, ep := range p {
 				converted = append(converted, ep.Name)
 			}
 			return fakeConvert(p)
 		},
-		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{makeProvider("absent")},
-		validateFn: func(_ context.Context, _ *lavasession.RPCStaticProviderEndpoint) error {
+		configuredStatic: []*routersession.RPCStaticProviderEndpoint{makeProvider("absent")},
+		validateFn: func(_ context.Context, _ *routersession.RPCStaticProviderEndpoint) error {
 			return common.StatusCodeError429
 		},
 	}
 
-	got := runCycles(t, inputs, map[uint64]*lavasession.ConsumerSessionsWithProvider{}, 3)
+	got := runCycles(t, inputs, map[uint64]*routersession.ConsumerSessionsWithProvider{}, 3)
 	require.Empty(t, got, "a rate-limited probe is not evidence of health")
 	require.Empty(t, converted, "must not promote on an inconclusive result")
 }
@@ -96,9 +96,9 @@ func TestApplyReverification_RateLimitDoesNotPromote(t *testing.T) {
 // Mixed set: the rate-limited one survives, the broken one goes, in the same cycle.
 func TestApplyReverification_MixedRateLimitAndFailure(t *testing.T) {
 	withImmediateDemote(t)
-	rpc := &lavasession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
+	rpc := &routersession.RPCEndpoint{ChainID: "TEST", ApiInterface: "jsonrpc"}
 
-	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{
 		0: makeSession("busy"),
 		1: makeSession("broken"),
 		2: makeSession("healthy"),
@@ -106,10 +106,10 @@ func TestApplyReverification_MixedRateLimitAndFailure(t *testing.T) {
 	inputs := &chainReverifyInputs{
 		rpcEndpoint:                rpc,
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{
+		configuredStatic: []*routersession.RPCStaticProviderEndpoint{
 			makeProvider("busy"), makeProvider("broken"), makeProvider("healthy"),
 		},
-		validateFn: func(_ context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+		validateFn: func(_ context.Context, p *routersession.RPCStaticProviderEndpoint) error {
 			switch p.Name {
 			case "busy":
 				return common.StatusCodeError429

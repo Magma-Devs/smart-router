@@ -12,7 +12,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,7 +43,7 @@ func newStallHarness() *stallHarness {
 	return &stallHarness{obs: stallObs{}, health: map[string]bool{}}
 }
 
-func (h *stallHarness) step(t *testing.T, now time.Time, endpoints ...*lavasession.EndpointWithDirectConnection) headStallResult {
+func (h *stallHarness) step(t *testing.T, now time.Time, endpoints ...*routersession.EndpointWithDirectConnection) headStallResult {
 	t.Helper()
 	return runHeadStallStep(endpoints, h.obs.get, stallN, now,
 		func(p string) { h.recovered = append(h.recovered, p) },
@@ -51,15 +51,15 @@ func (h *stallHarness) step(t *testing.T, now time.Time, endpoints ...*lavasessi
 		&h.state, nil)
 }
 
-func backupEp(url, provider string) *lavasession.EndpointWithDirectConnection {
+func backupEp(url, provider string) *routersession.EndpointWithDirectConnection {
 	e := ep(url, provider, true)
 	e.Backup = true
 	return e
 }
 
-func stalled(t *testing.T, e *lavasession.EndpointWithDirectConnection) bool {
+func stalled(t *testing.T, e *routersession.EndpointWithDirectConnection) bool {
 	t.Helper()
-	_, held := e.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled)
+	_, held := e.Endpoint.StateReason(routersession.EndpointDisableHeadStalled)
 	return held
 }
 
@@ -84,7 +84,7 @@ func TestHeadStall_PrimaryOutAtN_BackupTakesOver(t *testing.T) {
 	require.True(t, primary.Endpoint.IsEnabled(), "the event slot is untouched")
 	require.Equal(t, false, h.health["customer-node"])
 	require.True(t, h.state.isStalled("https://primary"))
-	rec, _ := primary.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled)
+	rec, _ := primary.Endpoint.StateReason(routersession.EndpointDisableHeadStalled)
 	require.Equal(t, int64(1000), rec.Block)
 	require.Equal(t, stallNow, rec.Since)
 
@@ -233,7 +233,7 @@ func TestHeadStall_ReleaseTieGoesToMostRecent(t *testing.T) {
 func TestHeadStall_DuplicatePointerCountedOnce(t *testing.T) {
 	h := newStallHarness()
 	both := ep("https://both", "dual", true)
-	dupe := &lavasession.EndpointWithDirectConnection{Endpoint: both.Endpoint, ProviderAddress: "dual", Backup: true}
+	dupe := &routersession.EndpointWithDirectConnection{Endpoint: both.Endpoint, ProviderAddress: "dual", Backup: true}
 	dead := ep("https://ahead", "other", false) // shows the chain moved, but cannot serve
 	h.obs["https://both"] = stuckAt(1000, stallN)
 	h.obs["https://ahead"] = stuckAt(5000, 0)
@@ -268,7 +268,7 @@ func TestHeadStall_ArchiveURLListedTwiceGoesOutAndBackTogether(t *testing.T) {
 	freshPlain := ep("https://b", "vendor", true)
 	h.obs["https://a"] = stuckAt(1000, stallN)
 	h.obs["https://b"] = stuckAt(5000, 0)
-	all := []*lavasession.EndpointWithDirectConnection{stuckArchive, stuckPlain, freshArchive, freshPlain}
+	all := []*routersession.EndpointWithDirectConnection{stuckArchive, stuckPlain, freshArchive, freshPlain}
 
 	require.Equal(t, headStallResult{added: 1}, h.step(t, stallNow, all...))
 	require.True(t, stalled(t, stuckArchive))
@@ -348,17 +348,17 @@ func TestOnTipObservation_DropsRepeatFromStalledEndpoint(t *testing.T) {
 // behind a websocket url that cannot serve.
 func TestHeadStall_WebsocketURLDoesNotSatisfyNeverEmpty(t *testing.T) {
 	ctx := context.Background()
-	conn := func(url string) lavasession.DirectRPCConnection {
-		c, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
+	conn := func(url string) routersession.DirectRPCConnection {
+		c, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, "")
 		require.NoError(t, err)
 		return c
 	}
-	https := &lavasession.EndpointWithDirectConnection{
-		Endpoint:        &lavasession.Endpoint{NetworkAddress: "https://node", Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{conn("https://node")}},
+	https := &routersession.EndpointWithDirectConnection{
+		Endpoint:        &routersession.Endpoint{NetworkAddress: "https://node", Enabled: true, DirectConnections: []routersession.DirectRPCConnection{conn("https://node")}},
 		ProviderAddress: "vendor",
 	}
-	wss := &lavasession.EndpointWithDirectConnection{
-		Endpoint:        &lavasession.Endpoint{NetworkAddress: "wss://node", Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{conn("wss://node")}},
+	wss := &routersession.EndpointWithDirectConnection{
+		Endpoint:        &routersession.Endpoint{NetworkAddress: "wss://node", Enabled: true, DirectConnections: []routersession.DirectRPCConnection{conn("wss://node")}},
 		ProviderAddress: "vendor",
 	}
 	require.False(t, wss.Endpoint.ServesDirectRelays())
@@ -468,11 +468,11 @@ func TestResetEndpointHealthAndGauge_ClearsHeadStalled(t *testing.T) {
 	eps := f.csm.GetAllDirectRPCEndpoints()
 	require.Len(t, eps, 1)
 	stuck := eps[0].Endpoint
-	require.True(t, stuck.AddStateReason(lavasession.EndpointDisableHeadStalled, stallNow, 1000))
+	require.True(t, stuck.AddStateReason(routersession.EndpointDisableHeadStalled, stallNow, 1000))
 	f.server.headStall.sync(map[string]struct{}{stuck.NetworkAddress: {}}, nil)
 
 	router := &RPCSmartRouter{
-		sessionManagers: map[string]*lavasession.ConsumerSessionManager{"k": f.csm},
+		sessionManagers: map[string]*routersession.ConsumerSessionManager{"k": f.csm},
 		rpcServers:      map[string]*RPCSmartRouterServer{"k": f.server},
 	}
 	resetEndpointHealthAndGauge(debugMuxDeps{router: router})

@@ -9,7 +9,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -76,10 +76,10 @@ func TestValidateProviderCollections_DeadSocketCostsOnlyTheSocket(t *testing.T) 
 	require.NoError(t, err)
 	require.True(t, admission.URLRefused(1))
 
-	admissionFor := func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission { return admission }
-	require.Empty(t, collectEndpoints(wsSubscriptions, []*lavasession.RPCStaticProviderEndpoint{provider}, admissionFor, ""),
+	admissionFor := func(*routersession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission { return admission }
+	require.Empty(t, collectEndpoints(wsSubscriptions, []*routersession.RPCStaticProviderEndpoint{provider}, admissionFor, ""),
 		"a refused socket gets no subscription")
-	require.Len(t, collectEndpoints(wsSubscriptions, []*lavasession.RPCStaticProviderEndpoint{provider}, nil, ""), 1,
+	require.Len(t, collectEndpoints(wsSubscriptions, []*routersession.RPCStaticProviderEndpoint{provider}, nil, ""), 1,
 		"configured-ness is not admission")
 	require.Equal(t, []commonlib.NodeUrl{provider.NodeUrls[0]}, admittedNodeUrls(provider, provider.NodeUrls, admission))
 }
@@ -240,15 +240,15 @@ func TestApplyReverification_ARateLimitedUrlBacksOffAndChangesNothing(t *testing
 	holdoffs := holdoff.NewRegistry()
 	inputs := &chainReverifyInputs{
 		chainParser:                liveParser(t, "ETH1", true),
-		rpcEndpoint:                &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		rpcEndpoint:                &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{provider},
 		recordAdmission:            admissions.record,
 		recordReverifiedAdmission:  admissions.recordReverified,
 		admissionFor:               admissions.admissionFor,
 		rateLimitHoldoff:           holdoffs,
 	}
-	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
 	next, demoted, promoted := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 	require.Contains(t, collectNames(next), provider.Name)
@@ -272,15 +272,15 @@ func TestApplyReverification_AnAddonsOwnRateLimitHoldsNothing(t *testing.T) {
 	holdoffs := holdoff.NewRegistry()
 	inputs := &chainReverifyInputs{
 		chainParser:                liveParser(t, "ETH1", true),
-		rpcEndpoint:                &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		rpcEndpoint:                &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		convertProvidersToSessions: fakeConvert,
-		configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider},
+		configuredStatic:           []*routersession.RPCStaticProviderEndpoint{provider},
 		recordAdmission:            admissions.record,
 		recordReverifiedAdmission:  admissions.recordReverified,
 		admissionFor:               admissions.admissionFor,
 		rateLimitHoldoff:           holdoffs,
 	}
-	active := map[uint64]*lavasession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
+	active := map[uint64]*routersession.ConsumerSessionsWithProvider{0: makeSession(provider.Name)}
 
 	next, demoted, _ := applyReverification(t.Context(), inputs, active, reverifyTierStatic, 100)
 	require.Contains(t, collectNames(next), provider.Name)
@@ -301,13 +301,13 @@ func TestRevalidateTier_RecordsTheAdmission(t *testing.T) {
 		commonlib.NodeUrl{Url: up.httpURL("/q/" + upArchive)},
 		commonlib.NodeUrl{Url: up.httpURL("/q/" + upDead)},
 	)
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
 	admissions := newAdmissionRegistry()
 	rpsr := &RPCSmartRouter{reverifyInputs: map[string]*chainReverifyInputs{
 		rpcEndpoint.Key(): {recordAdmission: admissions.record},
 	}}
 
-	recovered, stillFailed := rpsr.revalidateTier(t.Context(), []*lavasession.RPCStaticProviderEndpoint{provider},
+	recovered, stillFailed := rpsr.revalidateTier(t.Context(), []*routersession.RPCStaticProviderEndpoint{provider},
 		liveParser(t, "ETH1", true), rpcEndpoint, reverifyTierStatic, nil, true)
 	require.Len(t, recovered, 1)
 	require.Empty(t, stillFailed)
@@ -327,15 +327,15 @@ func TestApplyReverification_TheUrlGraceIsForAPairedProvider(t *testing.T) {
 		admissions := newAdmissionRegistry()
 		inputs := &chainReverifyInputs{
 			chainParser:                liveParser(t, "ETH1", true),
-			rpcEndpoint:                &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			rpcEndpoint:                &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			convertProvidersToSessions: fakeConvert,
-			configuredStatic:           []*lavasession.RPCStaticProviderEndpoint{provider},
+			configuredStatic:           []*routersession.RPCStaticProviderEndpoint{provider},
 			recordAdmission:            admissions.record,
 			recordReverifiedAdmission:  admissions.recordReverified,
 			admissionFor:               admissions.admissionFor,
 			rateLimitHoldoff:           holdoff.NewRegistry(),
 		}
-		active := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+		active := map[uint64]*routersession.ConsumerSessionsWithProvider{}
 		if paired {
 			active[0] = makeSession(provider.Name)
 		}

@@ -9,7 +9,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -274,7 +274,7 @@ func (s *retrySchedule) signal() {
 
 // heldOffUntil is when a provider's rate-limit hold-off ends, the zero time when it is
 // not held off. A retry is never sent before it.
-func heldOffUntil(registry *holdoff.Registry, p *lavasession.RPCStaticProviderEndpoint) time.Time {
+func heldOffUntil(registry *holdoff.Registry, p *routersession.RPCStaticProviderEndpoint) time.Time {
 	if registry == nil {
 		registry = holdoff.Shared
 	}
@@ -295,8 +295,8 @@ func (rpsr *RPCSmartRouter) runVerificationRetries(
 	ctx context.Context,
 	chainKey string,
 	chainParser chainlib.ChainParser,
-	rpcEndpoint *lavasession.RPCEndpoint,
-	convertProvidersToSessions func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	rpcEndpoint *routersession.RPCEndpoint,
+	convertProvidersToSessions func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider,
 ) {
 	schedule := rpsr.retryScheduleFor(chainKey)
 	if schedule == nil {
@@ -350,16 +350,16 @@ func (rpsr *RPCSmartRouter) runVerificationRetries(
 }
 
 // pairedProvidersOf is the configured providers in the due set that are in the pairing.
-func (rpsr *RPCSmartRouter) pairedProvidersOf(chainKey string, due dueChecks) (static, backup []*lavasession.RPCStaticProviderEndpoint) {
+func (rpsr *RPCSmartRouter) pairedProvidersOf(chainKey string, due dueChecks) (static, backup []*routersession.RPCStaticProviderEndpoint) {
 	rpsr.mu.Lock()
 	defer rpsr.mu.Unlock()
 	inputs := rpsr.reverifyInputs[chainKey]
 	if inputs == nil {
 		return nil, nil
 	}
-	pick := func(tier reverifyTier, sessions map[uint64]*lavasession.ConsumerSessionsWithProvider) []*lavasession.RPCStaticProviderEndpoint {
+	pick := func(tier reverifyTier, sessions map[uint64]*routersession.ConsumerSessionsWithProvider) []*routersession.RPCStaticProviderEndpoint {
 		active := byName(sessions)
-		var out []*lavasession.RPCStaticProviderEndpoint
+		var out []*routersession.RPCStaticProviderEndpoint
 		for _, p := range inputs.configuredFor(tier) {
 			_, isDue := due[tier][p.Name]
 			_, isActive := active[p.Name]
@@ -380,7 +380,7 @@ func (rpsr *RPCSmartRouter) pairedProvidersOf(chainKey string, due dueChecks) (s
 // cadence that would stall every chain behind one provider's timeout. The verdicts are
 // applied under it (decideReverification), and the pairing is pushed only when it moved:
 // UpdateAllProviders resets the session manager's per-epoch state.
-func (rpsr *RPCSmartRouter) retryPaired(ctx context.Context, chainKey string, static, backup []*lavasession.RPCStaticProviderEndpoint, due dueChecks) {
+func (rpsr *RPCSmartRouter) retryPaired(ctx context.Context, chainKey string, static, backup []*routersession.RPCStaticProviderEndpoint, due dueChecks) {
 	rpsr.mu.Lock()
 	inputs := rpsr.reverifyInputs[chainKey]
 	var lastStatic, lastBackup map[string]chainlib.ProviderAdmission
@@ -413,7 +413,7 @@ func (rpsr *RPCSmartRouter) retryPaired(ctx context.Context, chainKey string, st
 	after, err := rpsr.commitPairingLocked(chainKey, epoch, nextStatic, nextBackup, slices.Concat(demotedStatic, demotedBackup))
 	rpsr.mu.Unlock()
 	if err != nil {
-		utils.LavaFormatWarning("retry: failed to update the pairing", err, utils.LogAttr("chainKey", chainKey))
+		utils.FormatWarning("retry: failed to update the pairing", err, utils.LogAttr("chainKey", chainKey))
 	}
 	after()
 }
@@ -422,7 +422,7 @@ func (rpsr *RPCSmartRouter) retryPaired(ctx context.Context, chainKey string, st
 // provider's last one: a provider still serving under the demote grace failed its last
 // pass, and a retry keeps its verdicts from that pass, not from the older admission it
 // serves on. Callers hold RPCSmartRouter.mu.
-func (inputs *chainReverifyInputs) lastPassesOf(tier reverifyTier, providers []*lavasession.RPCStaticProviderEndpoint) map[string]chainlib.ProviderAdmission {
+func (inputs *chainReverifyInputs) lastPassesOf(tier reverifyTier, providers []*routersession.RPCStaticProviderEndpoint) map[string]chainlib.ProviderAdmission {
 	passes := map[string]chainlib.ProviderAdmission{}
 	for _, p := range providers {
 		if pass, ok := inputs.lastPass[retryKey(tier, p.Name)]; ok {
@@ -466,11 +466,11 @@ func (rpsr *RPCSmartRouter) nextVerificationRetry(chainKey string, schedule *ret
 
 // failedProvidersOf copies a chain's failed lists, only the providers in due when it is
 // non-nil.
-func (rpsr *RPCSmartRouter) failedProvidersOf(chainKey string, due dueChecks) (static, backup []*lavasession.RPCStaticProviderEndpoint) {
+func (rpsr *RPCSmartRouter) failedProvidersOf(chainKey string, due dueChecks) (static, backup []*routersession.RPCStaticProviderEndpoint) {
 	rpsr.mu.Lock()
 	defer rpsr.mu.Unlock()
-	pick := func(tier reverifyTier, failed []*lavasession.RPCStaticProviderEndpoint) []*lavasession.RPCStaticProviderEndpoint {
-		var out []*lavasession.RPCStaticProviderEndpoint
+	pick := func(tier reverifyTier, failed []*routersession.RPCStaticProviderEndpoint) []*routersession.RPCStaticProviderEndpoint {
+		var out []*routersession.RPCStaticProviderEndpoint
 		for _, p := range failed {
 			if due == nil {
 				out = append(out, p)
@@ -485,7 +485,7 @@ func (rpsr *RPCSmartRouter) failedProvidersOf(chainKey string, due dueChecks) (s
 	return pick(reverifyTierStatic, rpsr.failedStaticProviders[chainKey]), pick(reverifyTierBackup, rpsr.failedBackupProviders[chainKey])
 }
 
-func containsName(static, backup []*lavasession.RPCStaticProviderEndpoint, tier reverifyTier, name string) bool {
+func containsName(static, backup []*routersession.RPCStaticProviderEndpoint, tier reverifyTier, name string) bool {
 	list := static
 	if tier == reverifyTierBackup {
 		list = backup
@@ -507,13 +507,13 @@ func (rpsr *RPCSmartRouter) retryOutOfPairing(
 	ctx context.Context,
 	chainKey string,
 	chainParser chainlib.ChainParser,
-	rpcEndpoint *lavasession.RPCEndpoint,
-	convertProvidersToSessions func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider,
-	static, backup []*lavasession.RPCStaticProviderEndpoint,
+	rpcEndpoint *routersession.RPCEndpoint,
+	convertProvidersToSessions func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider,
+	static, backup []*routersession.RPCStaticProviderEndpoint,
 	due dueChecks,
 	countAttempt bool,
 ) {
-	utils.LavaFormatInfo("Retrying failed providers",
+	utils.FormatInfo("Retrying failed providers",
 		utils.LogAttr("chain", rpcEndpoint.ChainID),
 		utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 		utils.LogAttr("failedStatic", len(static)),
@@ -527,10 +527,10 @@ func (rpsr *RPCSmartRouter) retryOutOfPairing(
 // queueDemoted adds the providers an epoch pass demoted to a chain's failed list. A
 // session the pass rebuilt is in demoted too, and in promoted: it is not out.
 func queueDemoted(
-	failedByChain *map[string][]*lavasession.RPCStaticProviderEndpoint,
+	failedByChain *map[string][]*routersession.RPCStaticProviderEndpoint,
 	chainKey string,
-	configured []*lavasession.RPCStaticProviderEndpoint,
-	demoted []*lavasession.ConsumerSessionsWithProvider,
+	configured []*routersession.RPCStaticProviderEndpoint,
+	demoted []*routersession.ConsumerSessionsWithProvider,
 	promoted []string,
 ) {
 	rebuilt := nameSet(promoted)
@@ -539,7 +539,7 @@ func queueDemoted(
 		queued[p.Name] = struct{}{}
 	}
 	for _, s := range demoted {
-		name := s.PublicLavaAddress
+		name := s.PublicAddress
 		if _, back := rebuilt[name]; back {
 			continue
 		}
@@ -549,7 +549,7 @@ func queueDemoted(
 		for _, p := range configured {
 			if p.Name == name {
 				if *failedByChain == nil {
-					*failedByChain = map[string][]*lavasession.RPCStaticProviderEndpoint{}
+					*failedByChain = map[string][]*routersession.RPCStaticProviderEndpoint{}
 				}
 				(*failedByChain)[chainKey] = append((*failedByChain)[chainKey], p)
 				queued[name] = struct{}{}

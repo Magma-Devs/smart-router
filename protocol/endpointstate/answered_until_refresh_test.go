@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -22,18 +22,18 @@ type stragglerConn struct {
 	polls atomic.Int32
 }
 
-func (c *stragglerConn) SendRequest(ctx context.Context, data []byte, _ map[string]string) (*lavasession.DirectRPCResponse, error) {
+func (c *stragglerConn) SendRequest(ctx context.Context, data []byte, _ map[string]string) (*routersession.DirectRPCResponse, error) {
 	if strings.Contains(string(data), "eth_blockNumber") {
 		c.polls.Add(1)
 	}
-	return &lavasession.DirectRPCResponse{
+	return &routersession.DirectRPCResponse{
 		Data:       []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":"0x%x"}`, c.block.Load())),
 		StatusCode: 200,
 	}, nil
 }
 
-func (c *stragglerConn) GetProtocol() lavasession.DirectRPCProtocol {
-	return lavasession.DirectRPCProtocolHTTP
+func (c *stragglerConn) GetProtocol() routersession.DirectRPCProtocol {
+	return routersession.DirectRPCProtocolHTTP
 }
 func (c *stragglerConn) Close() error                { return nil }
 func (c *stragglerConn) GetURL() string              { return c.url }
@@ -78,7 +78,7 @@ func TestAnsweredPollBelowAFreshPeerTipStillReportsTheAnswer(t *testing.T) {
 
 	conn := &stragglerConn{url: url}
 	conn.block.Store(256)
-	_, err := m.GetOrCreateTracker("straggler-provider", &lavasession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
+	_, err := m.GetOrCreateTracker("straggler-provider", &routersession.Endpoint{NetworkAddress: url, Enabled: true}, conn)
 	require.NoError(t, err)
 
 	time.Sleep(3200 * time.Millisecond)

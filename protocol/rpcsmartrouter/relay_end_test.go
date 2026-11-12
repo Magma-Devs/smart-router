@@ -23,10 +23,10 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils"
@@ -211,12 +211,12 @@ func newRelayEndServer(t *testing.T, chainID, apiInterface string, chainParser c
 // is left. It also returns each upstream's URL by name.
 func newRelayEndServerWithBackups(t *testing.T, chainID, apiInterface string, chainParser chainlib.ChainParser, primaries, backups []relayEndNode) (*RPCSmartRouterServer, map[string]string) {
 	t.Helper()
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, chainID)
-	csm := lavasession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", lavasession.NewActiveSubscriptionProvidersStorage())
+	csm := routersession.NewConsumerSessionManager(rpcEndpoint, optimizer, nil, "test-router", routersession.NewActiveSubscriptionProvidersStorage())
 	urls := map[string]string{}
-	tier := func(nodes []relayEndNode) map[uint64]*lavasession.ConsumerSessionsWithProvider {
-		providers := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	tier := func(nodes []relayEndNode) map[uint64]*routersession.ConsumerSessionsWithProvider {
+		providers := map[uint64]*routersession.ConsumerSessionsWithProvider{}
 		for i, node := range nodes {
 			providers[uint64(i)], urls[node.name] = relayEndProvider(t, node)
 		}
@@ -238,7 +238,7 @@ func newRelayEndServerWithBackups(t *testing.T, chainID, apiInterface string, ch
 
 // relayEndProvider serves node on a local address, or reserves one that refuses connections, and
 // returns the provider with its URL.
-func relayEndProvider(t *testing.T, node relayEndNode) (*lavasession.ConsumerSessionsWithProvider, string) {
+func relayEndProvider(t *testing.T, node relayEndNode) (*routersession.ConsumerSessionsWithProvider, string) {
 	t.Helper()
 	var url string
 	if node.handler == nil {
@@ -252,10 +252,10 @@ func relayEndProvider(t *testing.T, node relayEndNode) (*lavasession.ConsumerSes
 		t.Cleanup(upstream.CloseClientConnections)
 		url = upstream.URL
 	}
-	connection, err := lavasession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: url}, 5, "")
+	connection, err := routersession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: url}, 5, "")
 	require.NoError(t, err)
-	endpoint := &lavasession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{connection}}
-	provider := lavasession.NewConsumerSessionWithProvider(node.name, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
+	endpoint := &routersession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{connection}}
+	provider := routersession.NewConsumerSessionWithProvider(node.name, []*routersession.Endpoint{endpoint}, 100000, 1, 1)
 	provider.StaticProvider = true
 	return provider, url
 }
@@ -670,7 +670,7 @@ func TestRelayEnd_CacheHit(t *testing.T) {
 // relayEndUnit builds an event from hand-made inputs, for the rules no live relay reaches cheaply.
 func relayEndUnit(t *testing.T, in relayEndInput) *relayEnd {
 	t.Helper()
-	server := &RPCSmartRouterServer{listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
+	server := &RPCSmartRouterServer{listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}}
 	return server.buildRelayEnd(utils.WithUniqueIdentifier(context.Background(), 1), in)
 }
 
@@ -679,7 +679,7 @@ func TestRelayEnd_RouterError(t *testing.T) {
 		fault := routerFault{errors.New("ProcessRelaySend channel closed unexpectedly")}
 		end := relayEndUnit(t, relayEndInput{err: fmt.Errorf("failed processing responses from RPC endpoints: %w", fault), cause: fault, start: time.Now()})
 		require.Equal(t, relayOutcomeRouterError, end.outcome)
-		require.Equal(t, common.LavaErrorRelayProcessingFailed.Name, end.errorCode)
+		require.Equal(t, common.RouterErrorRelayProcessingFailed.Name, end.errorCode)
 		require.Equal(t, "ProcessRelaySend channel closed unexpectedly", end.errorText)
 	})
 	t.Run("neither an answer nor an error", func(t *testing.T) {
@@ -688,7 +688,7 @@ func TestRelayEnd_RouterError(t *testing.T) {
 	})
 	t.Run("the mark survives the error wrapping the state machine does", func(t *testing.T) {
 		require.True(t, isRouterFault(fmt.Errorf("batch: %w", routerFault{errors.New("RelayPrivateData is nil")})))
-		require.False(t, isRouterFault(lavasession.PairingListEmptyError))
+		require.False(t, isRouterFault(routersession.PairingListEmptyError))
 	})
 }
 
@@ -700,15 +700,15 @@ func TestRelayEnd_ErrorCodeRules(t *testing.T) {
 		attempts relayEndAttempts
 		want     string
 	}{
-		{"empty pool", utils.LavaFormatError("ETH1 could not get a provider address", lavasession.PairingListEmptyError), nil, nil, common.LavaErrorNoProviders.Name},
-		{"every endpoint disabled", lavasession.AllProviderEndpointsDisabledError, nil, nil, common.LavaErrorAllEndpointsDisabled.Name},
-		{"pinned provider unavailable", utils.LavaFormatError("Selected provider not available", lavasession.SelectedProviderUnavailableError), nil, nil, common.LavaErrorProviderUnavailable.Name},
-		{"pinned provider already failed", lavasession.SelectedProviderAlreadyFailedError, nil, nil, common.LavaErrorProviderUnavailable.Name},
-		{"batch too large", chainlib.ErrBatchRequestSizeExceeded, nil, nil, common.LavaErrorBatchSizeExceeded.Name},
+		{"empty pool", utils.FormatError("ETH1 could not get a provider address", routersession.PairingListEmptyError), nil, nil, common.RouterErrorNoProviders.Name},
+		{"every endpoint disabled", routersession.AllProviderEndpointsDisabledError, nil, nil, common.RouterErrorAllEndpointsDisabled.Name},
+		{"pinned provider unavailable", utils.FormatError("Selected provider not available", routersession.SelectedProviderUnavailableError), nil, nil, common.RouterErrorProviderUnavailable.Name},
+		{"pinned provider already failed", routersession.SelectedProviderAlreadyFailedError, nil, nil, common.RouterErrorProviderUnavailable.Name},
+		{"batch too large", chainlib.ErrBatchRequestSizeExceeded, nil, nil, common.RouterErrorBatchSizeExceeded.Name},
 		// validateCrossValidationCapacity wraps the empty-pool sentinel, so the reason has to win.
-		{"cross-validation cannot be staffed", utils.LavaFormatError("requested cross-validation maxParticipants exceeds available candidate endpoints", lavasession.PairingListEmptyError), &common.RelayResult{CrossValidationFailureReason: common.CrossValidationReasonInsufficientCapacity}, nil, common.LavaErrorInsufficientProviders.Name},
-		{"cross-validation disagreed", errors.New("cross-validation failed"), &common.RelayResult{CrossValidationFailureReason: common.CrossValidationReasonNoAgreement}, nil, common.LavaErrorHashConsensusError.Name},
-		{"the budget ran out", context.DeadlineExceeded, nil, nil, common.LavaErrorContextDeadline.Name},
+		{"cross-validation cannot be staffed", utils.FormatError("requested cross-validation maxParticipants exceeds available candidate endpoints", routersession.PairingListEmptyError), &common.RelayResult{CrossValidationFailureReason: common.CrossValidationReasonInsufficientCapacity}, nil, common.RouterErrorInsufficientProviders.Name},
+		{"cross-validation disagreed", errors.New("cross-validation failed"), &common.RelayResult{CrossValidationFailureReason: common.CrossValidationReasonNoAgreement}, nil, common.RouterErrorHashConsensusError.Name},
+		{"the budget ran out", context.DeadlineExceeded, nil, nil, common.RouterErrorContextDeadline.Name},
 		{"the last attempt's code", errors.New("failed relay, insufficient results"), nil, relayEndAttempts{{errorCode: "PROTOCOL_CONNECTION_REFUSED"}, {}, {errorCode: "PROTOCOL_CONNECTION_RESET"}, {}}, "PROTOCOL_CONNECTION_RESET"},
 		{"nothing to name", errors.New("invalid character"), nil, nil, ""},
 	}
@@ -726,14 +726,14 @@ func TestRelayEnd_AttemptsFollowTheDispatchHistory(t *testing.T) {
 	}
 	protocolErrors := []relaycore.RelayError{
 		{
-			Err: errors.New("dial tcp: connection refused"), ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}, LavaError: common.LavaErrorConnectionRefused,
+			Err: errors.New("dial tcp: connection refused"), ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}, RouterError: common.RouterErrorConnectionRefused,
 			Response: &relaycore.RelayResponse{RelayResult: common.RelayResult{AttemptLatency: 2 * time.Millisecond}},
 		},
 	}
 
 	// node-a failed, node-b answered, and node-a's second attempt has not come back.
 	start := time.Now()
-	dispatches := []lavasession.Dispatch{
+	dispatches := []routersession.Dispatch{
 		{Provider: "node-a", Batch: 0, At: start.Add(time.Millisecond)},
 		{Provider: "node-b", Batch: 1, At: start.Add(30 * time.Millisecond)},
 		{Provider: "node-a", Batch: 2, At: start.Add(60 * time.Millisecond)},
@@ -757,7 +757,7 @@ func TestRelayEnd_AttemptsFollowTheDispatchHistory(t *testing.T) {
 	require.Len(t, cached, 1)
 	require.False(t, cached[0].sent, "a cache hit was never sent, so it has no batch")
 
-	ranOut := relayEndAttemptsOf([]lavasession.Dispatch{{Provider: "node-a", At: start}}, start, nil, nil, nil, true)
+	ranOut := relayEndAttemptsOf([]routersession.Dispatch{{Provider: "node-a", At: start}}, start, nil, nil, nil, true)
 	require.Equal(t, attemptOutcomeTimeout, ranOut[0].outcome, "silent when the budget ran out")
 }
 
@@ -765,49 +765,49 @@ func TestRelayEnd_AttemptsFollowTheDispatchHistory(t *testing.T) {
 // writeOutcomeIsUnknown, even when the reply's classification carries MayHaveReachedNode.
 func TestRelayEnd_WriteUnknownCodeComesFromATransportError(t *testing.T) {
 	nodeReply := relayEndNodeErrorAttempt(relaycore.RelayError{
-		Err: errors.New("something odd"), LavaError: common.LavaErrorUnknown,
+		Err: errors.New("something odd"), RouterError: common.RouterErrorUnknown,
 		Response: &relaycore.RelayResponse{RelayResult: common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}}},
 	})
-	require.True(t, common.LavaErrorUnknown.MayHaveReachedNode, "the case under test")
+	require.True(t, common.RouterErrorUnknown.MayHaveReachedNode, "the case under test")
 	reset := relayEndProtocolErrorAttempt(relaycore.RelayError{
-		Err: errors.New("connection reset by peer"), LavaError: common.LavaErrorConnectionReset,
+		Err: errors.New("connection reset by peer"), RouterError: common.RouterErrorConnectionReset,
 		ProviderInfo: common.ProviderInfo{ProviderAddress: "node-b"},
 	}, false)
 
-	require.Equal(t, common.LavaErrorConnectionReset.Name, relayEndWriteUnknownCode(nil, relayEndAttempts{nodeReply, reset}, false))
-	require.Equal(t, common.LavaErrorContextDeadline.Name, relayEndWriteUnknownCode(nil, relayEndAttempts{nodeReply, reset}, true))
+	require.Equal(t, common.RouterErrorConnectionReset.Name, relayEndWriteUnknownCode(nil, relayEndAttempts{nodeReply, reset}, false))
+	require.Equal(t, common.RouterErrorContextDeadline.Name, relayEndWriteUnknownCode(nil, relayEndAttempts{nodeReply, reset}, true))
 }
 
 func TestRelayEnd_AttemptOutcomes(t *testing.T) {
 	rateLimited := relayEndNodeErrorAttempt(relaycore.RelayError{
-		Err: errors.New("too many requests"), LavaError: common.LavaErrorNodeRateLimited,
+		Err: errors.New("too many requests"), RouterError: common.RouterErrorNodeRateLimited,
 		Response: &relaycore.RelayResponse{RelayResult: common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}, IsRateLimited: true}},
 	})
 	require.Equal(t, attemptOutcomeRateLimited, rateLimited.outcome)
 	require.Equal(t, "node-a", rateLimited.upstream)
-	require.Equal(t, common.LavaErrorNodeRateLimited.Retryable, rateLimited.retryable())
+	require.Equal(t, common.RouterErrorNodeRateLimited.Retryable, rateLimited.retryable())
 	unclassified := relayEndNodeErrorAttempt(relaycore.RelayError{Err: errors.New("odd"), Response: &relaycore.RelayResponse{}})
-	require.Equal(t, common.LavaErrorUnknown.Name, unclassified.errorCode)
-	require.Equal(t, common.LavaErrorUnknown.Retryable, unclassified.retryable(), "an unclassified error takes UNKNOWN_ERROR's verdict")
+	require.Equal(t, common.RouterErrorUnknown.Name, unclassified.errorCode)
+	require.Equal(t, common.RouterErrorUnknown.Retryable, unclassified.retryable(), "an unclassified error takes UNKNOWN_ERROR's verdict")
 
 	for _, tc := range []struct {
 		name         string
 		err          error
-		lavaError    *common.LavaError
+		routerError  *common.RouterError
 		ranOutOfRoad bool
 		want         string
 	}{
-		{"a hedge loser", context.Canceled, common.LavaErrorContextCanceled, false, attemptOutcomeCancelled},
-		{"cancelled when the budget ran out", context.Canceled, common.LavaErrorContextCanceled, true, attemptOutcomeTimeout},
-		{"a deadline", context.DeadlineExceeded, common.LavaErrorContextDeadline, false, attemptOutcomeTimeout},
-		{"a 429", common.StatusCodeError429, common.LavaErrorRateLimited, false, attemptOutcomeRateLimited},
-		{"a reset", errors.New("connection reset by peer"), common.LavaErrorConnectionReset, false, attemptOutcomeTransportError},
+		{"a hedge loser", context.Canceled, common.RouterErrorContextCanceled, false, attemptOutcomeCancelled},
+		{"cancelled when the budget ran out", context.Canceled, common.RouterErrorContextCanceled, true, attemptOutcomeTimeout},
+		{"a deadline", context.DeadlineExceeded, common.RouterErrorContextDeadline, false, attemptOutcomeTimeout},
+		{"a 429", common.StatusCodeError429, common.RouterErrorRateLimited, false, attemptOutcomeRateLimited},
+		{"a reset", errors.New("connection reset by peer"), common.RouterErrorConnectionReset, false, attemptOutcomeTransportError},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: tc.err, LavaError: tc.lavaError, ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}}, tc.ranOutOfRoad)
+			attempt := relayEndProtocolErrorAttempt(relaycore.RelayError{Err: tc.err, RouterError: tc.routerError, ProviderInfo: common.ProviderInfo{ProviderAddress: "node-a"}}, tc.ranOutOfRoad)
 			require.Equal(t, tc.want, attempt.outcome)
-			require.Equal(t, tc.lavaError.Name, attempt.errorCode)
-			require.Equal(t, tc.lavaError.Retryable, attempt.retryable(), "the registry's verdict, as the narrative lines print it")
+			require.Equal(t, tc.routerError.Name, attempt.errorCode)
+			require.Equal(t, tc.routerError.Retryable, attempt.retryable(), "the registry's verdict, as the narrative lines print it")
 		})
 	}
 }

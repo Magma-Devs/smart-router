@@ -118,7 +118,7 @@ func TestResultsManager_GraphQLInBodyFaultIsClassifiedByItsCode(t *testing.T) {
 			name:        "INTERNAL_SERVER_ERROR is the node's internal error, logged at ERROR",
 			request:     graphQLResultsCheckpointRead,
 			reply:       graphQLErrorReply("boom", "INTERNAL_SERVER_ERROR"),
-			wantName:    common.LavaErrorNodeInternalError.Name,
+			wantName:    common.RouterErrorNodeInternalError.Name,
 			wantAtFault: true,
 			wantLevel:   "error",
 		},
@@ -126,7 +126,7 @@ func TestResultsManager_GraphQLInBodyFaultIsClassifiedByItsCode(t *testing.T) {
 			name:        "REQUEST_TIMEOUT is a gateway timeout, logged at ERROR",
 			request:     graphQLResultsCheckpointRead,
 			reply:       graphQLErrorReply("Request timed out", "REQUEST_TIMEOUT"),
-			wantName:    common.LavaErrorNodeGatewayTimeout.Name,
+			wantName:    common.RouterErrorNodeGatewayTimeout.Name,
 			wantAtFault: true,
 			wantLevel:   "error",
 		},
@@ -134,14 +134,14 @@ func TestResultsManager_GraphQLInBodyFaultIsClassifiedByItsCode(t *testing.T) {
 			name:      "RESOURCE_EXHAUSTED is a rate limit: busy, not broken",
 			request:   graphQLResultsCheckpointRead,
 			reply:     graphQLErrorReply("slow down", "RESOURCE_EXHAUSTED"),
-			wantName:  common.LavaErrorNodeRateLimited.Name,
+			wantName:  common.RouterErrorNodeRateLimited.Name,
 			wantLevel: "debug",
 		},
 		{
 			name:      "FEATURE_UNAVAILABLE is a capability this node does not offer",
 			request:   graphQLResultsCheckpointRead,
 			reply:     graphQLErrorReply("not available", "FEATURE_UNAVAILABLE"),
-			wantName:  common.LavaErrorNodeAccessDenied.Name,
+			wantName:  common.RouterErrorNodeAccessDenied.Name,
 			wantLevel: "debug",
 		},
 		{
@@ -150,7 +150,7 @@ func TestResultsManager_GraphQLInBodyFaultIsClassifiedByItsCode(t *testing.T) {
 			name:      "a code-less error on a mutation is the caller's invalid request",
 			request:   graphQLResultsSubmit,
 			reply:     graphQLErrorReply("Invalid user signature", ""),
-			wantName:  common.LavaErrorUserInvalidRequest.Name,
+			wantName:  common.RouterErrorUserInvalidRequest.Name,
 			wantLevel: "debug",
 		},
 	}
@@ -164,10 +164,10 @@ func TestResultsManager_GraphQLInBodyFaultIsClassifiedByItsCode(t *testing.T) {
 			})
 
 			best := resultsManager.GetBestNodeErrorMessageForUser()
-			require.NotNil(t, best.LavaError)
+			require.NotNil(t, best.RouterError)
 			// assert, not require: a wrong classification shows in all four at once.
-			assert.Equal(t, test.wantName, best.LavaError.Name, "classified by the 200's status instead of the error's code")
-			assert.Equal(t, test.wantAtFault, best.LavaError.EndpointAtFault())
+			assert.Equal(t, test.wantName, best.RouterError.Name, "classified by the 200's status instead of the error's code")
+			assert.Equal(t, test.wantAtFault, best.RouterError.EndpointAtFault())
 			assert.Equal(t, []string{test.wantName}, metricNames, "the smartrouter_errors_total label")
 			assert.Equal(t, []string{test.wantLevel}, levels, "the level of the node-error line")
 
@@ -179,9 +179,9 @@ func TestResultsManager_GraphQLInBodyFaultIsClassifiedByItsCode(t *testing.T) {
 			require.True(t, ok, "a GraphQL message classifies its own replies")
 			senderStatus := statusClassifier.ClassificationStatus([]byte(test.reply), http.StatusOK)
 			sender := common.ClassifyNodeErrorForRetry(common.GetChainFamilyOrDefault("SUI"), common.TransportREST, senderStatus, message)
-			assert.Equal(t, sender.IsNodeAtFault, best.LavaError.EndpointAtFault(), "the results manager blames the endpoint differently from the sender")
-			assert.Equal(t, sender.IsRateLimited, best.LavaError.SubCategory.IsRateLimit())
-			assert.Equal(t, sender.IsNonRetryable, !best.LavaError.Retryable)
+			assert.Equal(t, sender.IsNodeAtFault, best.RouterError.EndpointAtFault(), "the results manager blames the endpoint differently from the sender")
+			assert.Equal(t, sender.IsRateLimited, best.RouterError.SubCategory.IsRateLimit())
+			assert.Equal(t, sender.IsNonRetryable, !best.RouterError.Retryable)
 		})
 	}
 }
@@ -204,13 +204,13 @@ func TestResultsManager_GraphQLBestErrorKeepsItsChoice(t *testing.T) {
 	best := resultsManager.GetBestNodeErrorMessageForUser()
 	require.NotNil(t, best.Response)
 	require.Equal(t, internal, string(best.Response.RelayResult.Reply.Data), "the two providers that agree are the answer")
-	require.Equal(t, common.LavaErrorNodeInternalError.Name, best.LavaError.Name)
+	require.Equal(t, common.RouterErrorNodeInternalError.Name, best.RouterError.Name)
 
-	require.Equal(t, common.CategoryExternal, common.LavaErrorUnknown.Category,
+	require.Equal(t, common.CategoryExternal, common.RouterErrorUnknown.Category,
 		"the old label was External too, so the category preference cannot have reordered the candidates")
 	for _, code := range []string{"INTERNAL_SERVER_ERROR", "REQUEST_TIMEOUT", "RESOURCE_EXHAUSTED", "FEATURE_UNAVAILABLE"} {
 		resultsManager := NewResultsManager(1, "SUI")
 		require.Error(t, resultsManager.SetResponse(graphQLNodeErrorResponse("provider-a", graphQLErrorReply("m", code)), protocolMessage))
-		require.Equal(t, common.CategoryExternal, resultsManager.GetBestNodeErrorMessageForUser().LavaError.Category, code)
+		require.Equal(t, common.CategoryExternal, resultsManager.GetBestNodeErrorMessageForUser().RouterError.Category, code)
 	}
 }

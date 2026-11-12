@@ -27,13 +27,13 @@ const (
 	ERRORED_PROVIDERS_HEADER_NAME                   = "Lava-Errored-Providers"
 	NODE_ERRORS_PROVIDERS_HEADER_NAME               = "Lava-Node-Errors-providers"
 	REPORTED_PROVIDERS_HEADER_NAME                  = "Lava-Reported-Providers"
-	LAVA_RELAY_PROTOCOL_HEADER_NAME                 = "Lava-Relay-Protocol"
+	RELAY_PROTOCOL_HEADER_NAME                      = "Lava-Relay-Protocol"
 	USER_REQUEST_TYPE                               = "lava-user-request-type"
 	STATEFUL_API_HEADER                             = "lava-stateful-api"
 	STATEFUL_ALL_PROVIDERS_HEADER_NAME              = "lava-fast-tx-participants"
 	REQUESTED_BLOCK_HEADER_NAME                     = "lava-parsed-requested-block"
-	LAVA_IDENTIFIED_NODE_ERROR_HEADER               = "lava-identified-node-error"
-	LAVA_HEDGE_TRIGGERED_HEADER                     = "lava-hedge-triggered"
+	IDENTIFIED_NODE_ERROR_HEADER                    = "lava-identified-node-error"
+	HEDGE_TRIGGERED_HEADER                          = "lava-hedge-triggered"
 	SMART_ROUTER_VERSION_HEADER_NAME                = "Smart-Router-Version"
 	// EXTENSION_UNAVAILABLE_HEADER_NAME lists, comma-separated, the extensions the caller asked for
 	// with lava-extension that no node on this router offers. The request was served WITHOUT them
@@ -65,8 +65,8 @@ const (
 	RELAY_TIMEOUT_HEADER_NAME             = "lava-relay-timeout"
 	EXTENSION_OVERRIDE_HEADER_NAME        = "lava-extension"
 	FORCE_CACHE_REFRESH_HEADER_NAME       = "lava-force-cache-refresh"
-	LAVA_DEBUG_RELAY                      = "lava-debug-relay"
-	LAVA_LB_UNIQUE_ID_HEADER              = "lava-lb-unique-id"
+	DEBUG_RELAY                           = "lava-debug-relay"
+	LB_UNIQUE_ID_HEADER                   = "lava-lb-unique-id"
 	SELECTION_STATS_HEADER_NAME           = "lava-selection-stats"
 	STICKINESS_HEADER_NAME                = "lava-stickiness"
 	SELECT_PROVIDER_HEADER_NAME           = "lava-select-provider"
@@ -154,12 +154,12 @@ const (
 // prefix of the older directives.
 const INTERNAL_PROBE_HEADER_NAME = "smartrouter-internal-probe"
 
-var SPECIAL_LAVA_DIRECTIVE_HEADERS = map[string]struct{}{
+var SPECIAL_DIRECTIVE_HEADERS = map[string]struct{}{
 	BLOCK_PROVIDERS_ADDRESSES_HEADER_NAME:       {},
 	RELAY_TIMEOUT_HEADER_NAME:                   {},
 	EXTENSION_OVERRIDE_HEADER_NAME:              {},
 	FORCE_CACHE_REFRESH_HEADER_NAME:             {},
-	LAVA_DEBUG_RELAY:                            {},
+	DEBUG_RELAY:                                 {},
 	STICKINESS_HEADER_NAME:                      {},
 	SELECT_PROVIDER_HEADER_NAME:                 {},
 	SELECT_PROVIDER_STRICT_HEADER_NAME:          {},
@@ -474,14 +474,14 @@ func (gc *GrpcConfig) Validate() error {
 	case GrpcDescriptorSourceReflection, GrpcDescriptorSourceFile, GrpcDescriptorSourceHybrid, "":
 		// Valid
 	default:
-		return utils.LavaFormatError("invalid gRPC descriptor source", nil,
+		return utils.FormatError("invalid gRPC descriptor source", nil,
 			utils.LogAttr("source", source),
 			utils.LogAttr("valid_options", "reflection, file, hybrid"))
 	}
 
 	// Validate descriptor path is provided when needed
 	if gc.NeedsDescriptorFile() && gc.DescriptorSetPath == "" {
-		return utils.LavaFormatError("descriptor-set-path is required when descriptor-source is file or hybrid", nil,
+		return utils.FormatError("descriptor-set-path is required when descriptor-source is file or hybrid", nil,
 			utils.LogAttr("descriptor_source", source))
 	}
 
@@ -512,12 +512,12 @@ func (gc *GrpcConfig) ValidateReflectionTimeout() error {
 	}
 
 	if gc.ReflectionTimeout < 100*time.Millisecond {
-		return utils.LavaFormatError("reflection-timeout too short", nil,
+		return utils.FormatError("reflection-timeout too short", nil,
 			utils.LogAttr("timeout", gc.ReflectionTimeout),
 			utils.LogAttr("min", "100ms"))
 	}
 	if gc.ReflectionTimeout > 30*time.Second {
-		return utils.LavaFormatError("reflection-timeout too long", nil,
+		return utils.FormatError("reflection-timeout too long", nil,
 			utils.LogAttr("timeout", gc.ReflectionTimeout),
 			utils.LogAttr("max", "30s"))
 	}
@@ -530,7 +530,7 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 	case spectypes.APIInterfaceRest, spectypes.APIInterfaceGraphQL:
 		parsedUrl, err := url.Parse(endpoint)
 		if err != nil {
-			return utils.LavaFormatError("could not parse node url", err,
+			return utils.FormatError("could not parse node url", err,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
@@ -540,7 +540,7 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 		case "http", "https":
 			return nil
 		default:
-			return utils.LavaFormatError("URL scheme should be (http/https), got: "+parsedUrl.Scheme, nil,
+			return utils.FormatError("URL scheme should be (http/https), got: "+parsedUrl.Scheme, nil,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
@@ -548,7 +548,7 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 	case spectypes.APIInterfaceJsonRPC, spectypes.APIInterfaceTendermintRPC:
 		parsedUrl, err := url.Parse(endpoint)
 		if err != nil {
-			return utils.LavaFormatError("could not parse node url", err,
+			return utils.FormatError("could not parse node url", err,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
@@ -560,20 +560,20 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 		case "ws", "wss":
 			return nil
 		default:
-			return utils.LavaFormatError("URL scheme should be websocket (ws/wss) or (http/https), got: "+parsedUrl.Scheme, nil,
+			return utils.FormatError("URL scheme should be websocket (ws/wss) or (http/https), got: "+parsedUrl.Scheme, nil,
 				utils.LogAttr("url", endpoint),
 				utils.LogAttr("apiInterface", apiInterface),
 			)
 		}
 	case spectypes.APIInterfaceGrpc:
 		if endpoint == "" {
-			return utils.LavaFormatError("invalid grpc URL, empty", nil)
+			return utils.FormatError("invalid grpc URL, empty", nil)
 		}
 		parsedUrl, err := url.Parse(endpoint)
 		if err == nil {
 			// user provided a valid url with a scheme
 			if parsedUrl.Scheme != "" && strings.Contains(endpoint, "/") {
-				return utils.LavaFormatError("grpc URL scheme should be empty and it is not, endpoint definition example: 127.0.0.1:9090 -or- my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "scheme", Value: parsedUrl.Scheme})
+				return utils.FormatError("grpc URL scheme should be empty and it is not, endpoint definition example: 127.0.0.1:9090 -or- my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "scheme", Value: parsedUrl.Scheme})
 			}
 			return nil
 		} else {
@@ -582,10 +582,10 @@ func ValidateEndpoint(endpoint, apiInterface string) error {
 			if err == nil {
 				return nil
 			}
-			return utils.LavaFormatError("invalid grpc URL, usage example: 127.0.0.1:9090 or my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "url", Value: endpoint})
+			return utils.FormatError("invalid grpc URL, usage example: 127.0.0.1:9090 or my-node.com/grpc", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface}, utils.Attribute{Key: "url", Value: endpoint})
 		}
 	default:
-		return utils.LavaFormatError("unsupported apiInterface", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface})
+		return utils.FormatError("unsupported apiInterface", nil, utils.Attribute{Key: "apiInterface", Value: apiInterface})
 	}
 }
 
@@ -619,7 +619,7 @@ type RelayResult struct {
 	// the lava-cross-validation-failure-reason header. One of CrossValidationReason* ("" on success).
 	CrossValidationFailureReason string
 	// IsNonRetryable is the umbrella flag the retry state machine consults:
-	// it's true whenever the matched registry LavaError has Retryable=false,
+	// it's true whenever the matched registry RouterError has Retryable=false,
 	// which covers execution reverted, out of gas, invalid signature, double
 	// spend, caller mistakes, etc. Retrying on another provider would just
 	// reproduce the same deterministic failure. A node's refusal of its own
@@ -652,7 +652,7 @@ type RelayResult struct {
 	IsNodeCapability bool
 	// IsNodeAtFault — positive evidence the endpoint itself is broken or unable to serve, as
 	// opposed to answering truthfully about a request it cannot satisfy. This is what the
-	// endpoint-health counter reads; see LavaError.EndpointAtFault for why it is not Retryable.
+	// endpoint-health counter reads; see RouterError.EndpointAtFault for why it is not Retryable.
 	IsNodeAtFault bool
 	// ClientFacing is what the listener shows the caller when the relay ends in a protocol error:
 	// the upstream's own answer when it gave one, else the leaf cause (MAG-4218).
@@ -682,10 +682,10 @@ func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transpor
 	rr.applyClassification(ClassifyNodeErrorForRetry(family, transport, errorCode, message))
 }
 
-// ApplyLavaErrorClassification sets the same flags from a verdict the caller already holds, for a
+// ApplyRouterErrorClassification sets the same flags from a verdict the caller already holds, for a
 // signal the registry cannot see in a code and a message (a gRPC rate limit only its metadata
 // carries).
-func (rr *RelayResult) ApplyLavaErrorClassification(classified *LavaError) {
+func (rr *RelayResult) ApplyRouterErrorClassification(classified *RouterError) {
 	if rr == nil {
 		return
 	}

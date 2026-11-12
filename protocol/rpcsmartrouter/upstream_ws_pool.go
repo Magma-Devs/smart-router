@@ -74,7 +74,7 @@ func (c *UpstreamWSConnection) connect(ctx context.Context) error {
 	// Note: Don't store nil in lastError - atomic.Value panics on nil
 	// The healthy flag indicates success; lastError is only set on failure
 
-	utils.LavaFormatDebug("WebSocket connection established",
+	utils.FormatDebug("WebSocket connection established",
 		utils.LogAttr("endpoint", c.sanitizedURL),
 	)
 
@@ -115,7 +115,7 @@ func (c *UpstreamWSConnection) Close() error {
 		c.client = nil
 	}
 
-	utils.LavaFormatDebug("WebSocket connection closed",
+	utils.FormatDebug("WebSocket connection closed",
 		utils.LogAttr("endpoint", c.sanitizedURL),
 	)
 
