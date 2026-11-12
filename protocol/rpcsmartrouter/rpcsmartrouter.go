@@ -3037,7 +3037,7 @@ func (rpsr *RPCSmartRouter) CreateSmartRouterEndpoint(
 		for _, p := range tier.providers {
 			if _, failed := tier.failed[p]; !failed {
 				inputs.countRefusals(tier.tier, p, admissionFor(p))
-				inputs.retries.reconcile(tier.tier, p.Name, nil, inputs.retriesOf(p, admissionFor(p), nil), heldOffUntil(nil, p), true)
+				inputs.retries.reconcile(tier.tier, p.Name, nil, inputs.retriesOf(p, admissionFor(p), nil), heldOffUntil(nil, p, inputs.chainParser), true)
 			}
 		}
 	}
@@ -4560,7 +4560,7 @@ func (rpsr *RPCSmartRouter) revalidateTier(
 			// One back with something still failing, a url still refused, stays on the
 			// schedule for what still fails.
 			inputs.retries.reconcile(tier, provider.Name, result.ran, inputs.retriesOf(provider, result.admission, nil),
-				heldOffUntil(inputs.rateLimitHoldoff, provider), countAttempt)
+				heldOffUntil(inputs.rateLimitHoldoff, provider, inputs.chainParser), countAttempt)
 		}
 		recovered = append(recovered, provider)
 		utils.FormatInfo("[+] provider recovered and passed verification",

@@ -272,16 +272,16 @@ func (s *retrySchedule) signal() {
 	}
 }
 
-// heldOffUntil is when the first of a provider's node urls comes out of its rate-limit
+// heldOffUntil is when the first of a provider's dialed urls (reverifyNodeUrls) comes out of its rate-limit
 // hold-off, the zero time when one is not held off. A retry is never sent before it: a
 // pass asks only the urls that are not held (MAG-4733), and skips a provider whose every
 // url is.
-func heldOffUntil(registry *holdoff.Registry, p *routersession.RPCStaticProviderEndpoint) time.Time {
+func heldOffUntil(registry *holdoff.Registry, p *routersession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) time.Time {
 	if registry == nil {
 		registry = holdoff.Shared
 	}
 	var first time.Time
-	for _, entry := range holdoffEntries(holdoff.ProviderKey(p.ChainID, p.ApiInterface, p.Name), p) {
+	for _, entry := range holdoffEntries(holdoff.ProviderKey(p.ChainID, p.ApiInterface, p.Name), p, chainParser) {
 		ready := registry.ReadyAt(entry.provider, entry.url)
 		if ready.IsZero() {
 			return time.Time{}

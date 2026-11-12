@@ -217,16 +217,30 @@ func failureCheck(err error) string {
 	return "unknown"
 }
 
-// holdoffURLKeys is the URL tier's key of each of a probed provider's node urls, by position:
-// the url itself, the key the relay path records a 429 under for the endpoint it dialed. A 429
-// is held on the url that answered it, so relay selection, which counts a provider's urls one by
+// reverifyNodeUrls is the list a re-verify pass verifies for a provider: the urls the router
+// dials (dialedNodeUrls), so a generated per-path url is its own position, as it is its own
+// endpoint for relays (MAG-4214). The hold-off entries, the skip set and the pass's per-url
+// results all index this one list (MAG-4732). With no chain parser (a test's validateFn) it is
+// the configured list.
+func reverifyNodeUrls(p *routersession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) []common.NodeUrl {
+	if chainParser == nil {
+		return p.NodeUrls
+	}
+	return dialedNodeUrls(p.NodeUrls, chainParser, p.ApiInterface)
+}
+
+// holdoffURLKeys is the URL tier's key of each of a probed provider's dialed urls
+// (reverifyNodeUrls), by position: the url itself, the key the relay path records a 429 under
+// for the endpoint it dialed (its NetworkAddress, base + path for a generated url). A 429 is
+// held on the url that answered it, so relay selection, which counts a provider's urls one by
 // one, keeps off that url and not a sibling (MAG-4733).
-func holdoffURLKeys(p *routersession.RPCStaticProviderEndpoint) []string {
-	if len(p.NodeUrls) == 0 {
+func holdoffURLKeys(p *routersession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) []string {
+	urls := reverifyNodeUrls(p, chainParser)
+	if len(urls) == 0 {
 		return []string{p.Name}
 	}
-	keys := make([]string, len(p.NodeUrls))
-	for index, url := range p.NodeUrls {
+	keys := make([]string, len(urls))
+	for index, url := range urls {
 		keys[index] = url.Url
 		if keys[index] == "" {
 			keys[index] = p.Name
@@ -245,15 +259,13 @@ type holdoffEntry struct {
 	url      string
 }
 
-func holdoffEntries(providerKey string, p *routersession.RPCStaticProviderEndpoint) []holdoffEntry {
-	urls := holdoffURLKeys(p)
+func holdoffEntries(providerKey string, p *routersession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) []holdoffEntry {
+	urls := holdoffURLKeys(p, chainParser)
 	entries := make([]holdoffEntry, len(urls))
 	for index, url := range urls {
 		entries[index] = holdoffEntry{provider: providerKey, url: url}
-		if index < len(p.NodeUrls) {
-			if socket, err := chainlib.IsUrlWebSocket(p.NodeUrls[index].Url); err == nil && socket {
-				entries[index].provider = url
-			}
+		if socket, err := chainlib.IsUrlWebSocket(url); err == nil && socket {
+			entries[index].provider = url
 		}
 	}
 	return entries
@@ -474,7 +486,7 @@ func probeReverification(
 		result := reverifyProbe{provider: p, started: time.Now(), ran: only[p.Name]}
 		// The provider on this chain and api-interface, as relay selection keys it.
 		providerKey := holdoff.ProviderKey(inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name)
-		entries := holdoffEntries(providerKey, p)
+		entries := holdoffEntries(providerKey, p, inputs.chainParser)
 		held := map[int]struct{}{}
 		for index, entry := range entries {
 			if registry.HeldOff(entry.provider, entry.url) {
@@ -633,7 +645,7 @@ func decideReverification(
 				healthyNames[p.Name] = struct{}{}
 			}
 			delete(inputs.lastPass, streakKey)
-			inputs.retries.reconcile(tier, p.Name, probe.ran, inputs.retriesOf(p, probe.admission, nil), heldOffUntil(inputs.rateLimitHoldoff, p), true)
+			inputs.retries.reconcile(tier, p.Name, probe.ran, inputs.retriesOf(p, probe.admission, nil), heldOffUntil(inputs.rateLimitHoldoff, p, inputs.chainParser), true)
 			continue
 		}
 		inputs.rescheduleFailed(tier, p, probe.ran, probe.admission, err, true)
@@ -745,7 +757,7 @@ func (inputs *chainReverifyInputs) retriesOf(p *routersession.RPCStaticProviderE
 // to read, pushes back the checks it was due for past the hold-off instead. With count
 // false, a pass that ran every check does not push back the checks already waiting.
 func (inputs *chainReverifyInputs) rescheduleFailed(tier reverifyTier, p *routersession.RPCStaticProviderEndpoint, ran []chainlib.CheckID, admission chainlib.ProviderAdmission, err error, count bool) {
-	notBefore := heldOffUntil(inputs.rateLimitHoldoff, p)
+	notBefore := heldOffUntil(inputs.rateLimitHoldoff, p, inputs.chainParser)
 	if _, verified := chainlib.FailedPass(err); !verified && isRateLimitFailure(err) {
 		inputs.retries.postpone(tier, p.Name, ran, notBefore)
 		return

@@ -63,7 +63,7 @@ func TestRecordPassHoldoffs_AWebsocketRateLimitDoesNotHoldTheEntry(t *testing.T)
 		common.NodeUrl{Url: "https://b"},
 	)
 	key := holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name)
-	entries := holdoffEntries(key, provider)
+	entries := holdoffEntries(key, provider, nil)
 	require.Equal(t, holdoffEntry{provider: "wss://a", url: "wss://a"}, entries[1])
 
 	reg := holdoff.NewRegistry()
@@ -245,12 +245,12 @@ func TestHeldOffUntil_OneFreeURLIsEnough(t *testing.T) {
 	reg := holdoff.NewRegistry()
 	reg.RecordRateLimit(key, "https://b", 30*time.Second)
 	reg.RecordRateLimit("wss://a", "wss://a", 0)
-	require.True(t, heldOffUntil(reg, provider).IsZero(), "a is free")
+	require.True(t, heldOffUntil(reg, provider, nil).IsZero(), "a is free")
 
 	reg.RecordRateLimit(key, "https://a", 0)
-	until := heldOffUntil(reg, provider)
+	until := heldOffUntil(reg, provider, nil)
 	require.False(t, until.IsZero(), "every url held")
-	for _, entry := range holdoffEntries(key, provider) {
+	for _, entry := range holdoffEntries(key, provider, nil) {
 		require.False(t, until.After(reg.ReadyAt(entry.provider, entry.url)), "the first url to come out")
 	}
 }
