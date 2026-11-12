@@ -3,6 +3,38 @@
   "api_interface": "jsonrpc",
   "chain": "ETH1",
   "connection": "<connection>",
+  "customer_request": {
+    "GUID": "<customer request>",
+    "api_interface": "jsonrpc",
+    "api_method": "eth_getBalance",
+    "attempts": [
+      {
+        "outcome": "success",
+        "provider": "node-a"
+      }
+    ],
+    "cache_hit": false,
+    "cache_tier": "none",
+    "chain": "ETH1",
+    "completed_at_ns": "<ns>",
+    "duration_ms": "<ms>",
+    "error_code": 0,
+    "error_name": "none",
+    "has_reply": true,
+    "outcome": "success",
+    "partial_batch": false,
+    "provider": "node-a",
+    "provider_fault": false,
+    "recovery": "none",
+    "reply_size": 40,
+    "request_kind": "customer",
+    "retryable": false,
+    "schema_version": 1,
+    "started_at_ns": "<ns>",
+    "status": 200,
+    "stop_reason": "Success",
+    "terminal": true
+  },
   "error": "",
   "error_code": "",
   "event": "relay_end",

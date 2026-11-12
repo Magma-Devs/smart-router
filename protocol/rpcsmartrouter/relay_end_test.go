@@ -112,6 +112,17 @@ func normalizeRelayEnd(t *testing.T, line string, sortAttempts bool) map[string]
 		return text
 	}
 	event["error"] = stable(requireRelayEndString(t, event, "error"))
+	if customer, ok := event["customer_request"].(map[string]any); ok {
+		require.Equal(t, event["GUID"], customer["GUID"])
+		require.Equal(t, true, customer["terminal"])
+		require.Equal(t, "customer", customer["request_kind"])
+		require.GreaterOrEqual(t, customer["completed_at_ns"], customer["started_at_ns"])
+		customer["GUID"] = "<customer request>"
+		customer["started_at_ns"], customer["completed_at_ns"], customer["duration_ms"] = "<ns>", "<ns>", "<ms>"
+		if diagnostic, ok := customer["error_message"].(string); ok {
+			customer["error_message"] = stable(diagnostic)
+		}
+	}
 
 	raw, present := event["attempts"]
 	if !present {

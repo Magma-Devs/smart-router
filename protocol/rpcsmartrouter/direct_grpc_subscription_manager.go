@@ -135,9 +135,6 @@ type DirectGRPCSubscriptionManager struct {
 	// Active subscriptions keyed by hashedParams (method + request params)
 	activeSubscriptions map[string]*grpcActiveSubscription
 
-	// endpointNames names each endpoint's provider for relay_end (SetEndpointNames).
-	endpointNames subscriptionEndpointNames
-
 	// Pending subscriptions for deduplication (prevent duplicate upstream connections)
 	pendingSubscriptions map[string]*pendingSubscriptionsBroadcastManager
 
@@ -540,6 +537,7 @@ func (dgm *DirectGRPCSubscriptionManager) joinExistingSubscription(
 	hashedParams string,
 ) (*pairingtypes.RelayReply, <-chan *pairingtypes.RelayReply, error) {
 	sub.lock.Lock()
+	metrics.ObserveCustomerProvider(ctx, dgm.endpointNames.name(sub.endpointURL))
 
 	// Liveness, under the same lock cleanupSubscription nils connectedClients beneath —
 	// StartSubscription reads the subscription out of the map under dgm.lock and then

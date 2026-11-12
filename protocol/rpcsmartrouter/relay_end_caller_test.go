@@ -143,6 +143,7 @@ func TestRelayEnd_CallerIDsFromTheListener(t *testing.T) {
 			_, _, err := client.ReadMessage()
 			require.NoError(t, err)
 		}
+		require.Eventually(t, func() bool { return len(newRelayEndsSince(read, seen)) == 2 }, time.Second, time.Millisecond)
 		events := newRelayEndsSince(read, seen)
 		require.Len(t, events, 2)
 		require.Equal(t, relayOutcomeRejectedBeforeDispatch, relayEndField(t, events[1], "outcome"), "the case under test: a frame that does not parse")

@@ -68,9 +68,23 @@ type HealthReporter interface {
 // streamCallback is optional; when non-nil the proxy offers every request to it
 // first, so server-streaming methods are served as streams instead of being forced
 // through the single-message unary path.
-func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionSource ReflectionSource, streamCallback StreamProxyCallBack) (*grpc.Server, *http.Server, error) {
+func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionSource ReflectionSource, streamCallback StreamProxyCallBack, observers ...ReflectionRequestObserver) (*grpc.Server, *http.Server, error) {
+	var reflectionObserver ReflectionRequestObserver
+	if len(observers) > 0 {
+		reflectionObserver = observers[0]
+	}
+	return NewGRPCProxyWithObservers(cb, healthCheckPath, cmdFlags, healthReporter, reflectionSource, streamCallback, reflectionObserver, nil)
+}
+
+// NewGRPCProxyWithObservers adds one lifecycle around both streaming dispatch and
+// unary fallback. Dedicated health services remain outside customer accounting.
+func NewGRPCProxyWithObservers(cb ProxyCallBack, healthCheckPath string, cmdFlags common.ConsumerCmdFlags, healthReporter HealthReporter, reflectionSource ReflectionSource, streamCallback StreamProxyCallBack, reflectionObserver ReflectionRequestObserver, observer RequestObserver) (*grpc.Server, *http.Server, error) {
 	serverReceiveMaxMessageSize := grpc.MaxRecvMsgSize(common.GRPCMaxCallRecvMsgSize) // 512 MB instead of grpc-go's 4 MB default
-	s := grpc.NewServer(grpc.UnknownServiceHandler(makeProxyFunc(cb, streamCallback)), grpc.ForceServerCodec(RawBytesCodec{}), serverReceiveMaxMessageSize)
+	proxyHandler := makeProxyFunc(cb, streamCallback)
+	if observer != nil {
+		proxyHandler = observeProxyRequests(proxyHandler, observer)
+	}
+	s := grpc.NewServer(grpc.UnknownServiceHandler(proxyHandler), grpc.ForceServerCodec(RawBytesCodec{}), serverReceiveMaxMessageSize)
 	grpc_health_v1.RegisterHealthServer(s, health.NewServer())
 
 	wrappedServer := grpcweb.WrapServer(s)
@@ -80,7 +94,11 @@ func NewGRPCProxyWithReflection(cb ProxyCallBack, healthCheckPath string, cmdFla
 	if reflectionSource == nil {
 		reflectionSource = noUpstreamReflection{}
 	}
-	reflectionGrpcServer := grpc.NewServer(serverReceiveMaxMessageSize)
+	reflectionOptions := []grpc.ServerOption{serverReceiveMaxMessageSize}
+	if reflectionObserver != nil {
+		reflectionOptions = append(reflectionOptions, reflectionObserverOption(reflectionObserver))
+	}
+	reflectionGrpcServer := grpc.NewServer(reflectionOptions...)
 	RegisterReflection(reflectionGrpcServer, reflectionSource)
 	wrappedReflectionServer := grpcweb.WrapServer(reflectionGrpcServer)
 

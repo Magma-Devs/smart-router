@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync/atomic"
@@ -172,6 +173,11 @@ func (s *OTelUsageSink) Emit(event RelayUsageEvent) {
 		attribute.String("origin", event.Origin),
 	)
 
+	rec.AddAttributes(attribute.String("request_kind", event.RequestKind))
+	if event.Customer != nil {
+		snapshot, _ := json.Marshal(event.Customer)
+		rec.AddAttributes(attribute.String("customer_request", string(snapshot)), attribute.Bool("terminal", true), attribute.Int("schema_version", event.Customer.SchemaVersion), attribute.String("outcome", event.Customer.Outcome), attribute.String("recovery", event.Customer.Recovery), attribute.String("error_name", event.Customer.ErrorName), attribute.String("request_id", event.Customer.RequestID), attribute.String("GUID", event.Customer.GUID), attribute.Int64("completed_at_ns", event.Customer.CompletedAtNs))
+	}
 	s.logger.Emit(context.Background(), rec)
 	s.sentCount.Add(1)
 }

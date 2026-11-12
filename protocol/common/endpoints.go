@@ -605,6 +605,7 @@ type ProviderInfo struct {
 const DefaultProviderGroup = "default"
 
 type RelayResult struct {
+	CustomerError       *LavaError // immutable registry identity attached to an observed node error
 	Request             *pairingtypes.RelayRequest
 	Reply               *pairingtypes.RelayReply
 	ProviderInfo        ProviderInfo
@@ -679,7 +680,7 @@ func (rr *RelayResult) ApplyNodeErrorClassification(family ChainFamily, transpor
 	if rr == nil {
 		return
 	}
-	rr.applyClassification(ClassifyNodeErrorForRetry(family, transport, errorCode, message))
+	rr.ApplyLavaErrorClassification(ClassifyError(nil, family, transport, errorCode, message))
 }
 
 // ApplyLavaErrorClassification sets the same flags from a verdict the caller already holds, for a
@@ -689,6 +690,7 @@ func (rr *RelayResult) ApplyLavaErrorClassification(classified *LavaError) {
 	if rr == nil {
 		return
 	}
+	rr.CustomerError = classified
 	rr.applyClassification(nodeErrorClassificationOf(classified))
 }
 

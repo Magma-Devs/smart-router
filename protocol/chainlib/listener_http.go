@@ -87,8 +87,10 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 		headers := convertToMetadataMap(metadataValues)
 		spec.logReceived(ctx, guid, msgSeed, dappID, req, headers)
 
+		ctx = apil.logger.BeginCustomerRequest(ctx, analytics)
 		relayResult, err := apil.relaySender.SendRelay(ctx, req.url, req.body, req.connectionType, dappID, userIp, analytics, headers)
 		reply := relayResult.GetReply()
+		apil.logger.ObserveCustomerReply(analytics, relayResult)
 		apil.logger.AddMetricForHttp(analytics, err, metadataValues)
 		if err != nil {
 			if spec.answerError != nil {

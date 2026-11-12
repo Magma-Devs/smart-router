@@ -9,6 +9,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcclient"
+	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/parser"
 	"github.com/magma-Devs/smart-router/utils"
 )
@@ -385,4 +386,30 @@ func checkResponseErrorForBatch(data []byte, httpStatusCode int, elementCheck fu
 		return false, ""
 	}
 	return true, aggregated.String()
+}
+
+// SummarizeJSONRPCBatch observes each envelope using the same shape rules as the
+// retry pipeline, without consulting or changing BatchNodeErrorOnAny. It keeps
+// only counts and the first failure identity, never copies successful payloads.
+func SummarizeJSONRPCBatch(data []byte) (successful, failed, firstErrorCode int, firstErrorMessage string) {
+	walkErr := scanJsonrpcBatchElements(data, func(element []byte) bool {
+		faulty, message, _ := checkJsonrpcEnvelope(element, "JSON-RPC batch element")
+		if !faulty {
+			successful++
+			return true
+		}
+		if failed == 0 {
+			firstErrorCode = common.ExtractJSONRPCErrorCode(element)
+			firstErrorMessage = message
+		}
+		failed++
+		return true
+	})
+	if walkErr != nil {
+		if failed == 0 {
+			firstErrorMessage = "malformed JSON-RPC batch response"
+		}
+		failed++
+	}
+	return
 }

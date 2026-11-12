@@ -9,6 +9,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/utils"
 	"golang.org/x/time/rate"
 )
@@ -191,7 +192,9 @@ func subscriptionClientKey(dappID, consumerIp, connectionUniqueId string) string
 // Sticky entries are written by the managers once the upstream answered, not here, so a
 // primary that fails to connect does not pin the client and block the cascade.
 type subscriptionEndpoints struct {
-	logPrefix string // "DirectWS" or "DirectGRPC"
+	primaryConfigured bool
+	endpointNames     subscriptionEndpointNames
+	logPrefix         string // "DirectWS" or "DirectGRPC"
 	// exhausted is the error selectEndpoint returns when neither tier has an endpoint to give.
 	exhausted string
 
@@ -214,13 +217,14 @@ type subscriptionEndpoints struct {
 
 func newSubscriptionEndpoints(logPrefix, exhausted string, primary, backup []*common.NodeUrl, optimizer WebSocketEndpointOptimizer) subscriptionEndpoints {
 	return subscriptionEndpoints{
-		logPrefix:      logPrefix,
-		exhausted:      exhausted,
-		optimizer:      optimizer,
-		stickyStore:    lavasession.NewStickySessionStore(),
-		primary:        primary,
-		backup:         backup,
-		endpointsByURL: indexEndpoints(primary, backup),
+		logPrefix:         logPrefix,
+		primaryConfigured: len(primary) > 0,
+		exhausted:         exhausted,
+		optimizer:         optimizer,
+		stickyStore:       lavasession.NewStickySessionStore(),
+		primary:           primary,
+		backup:            backup,
+		endpointsByURL:    indexEndpoints(primary, backup),
 	}
 }
 
@@ -250,18 +254,20 @@ func (se *subscriptionEndpoints) holdoffs() *holdoff.Registry {
 // so a snapshot stays coherent for the duration of a selection — including across the
 // optimizer call, which must not run while the lock is held.
 type endpointsSnapshot struct {
-	primary []*common.NodeUrl
-	backup  []*common.NodeUrl
-	byURL   map[string]*common.NodeUrl
+	primaryConfigured bool
+	primary           []*common.NodeUrl
+	backup            []*common.NodeUrl
+	byURL             map[string]*common.NodeUrl
 }
 
 func (se *subscriptionEndpoints) endpointsSnapshot() endpointsSnapshot {
 	se.tiersLock.RLock()
 	defer se.tiersLock.RUnlock()
 	return endpointsSnapshot{
-		primary: se.primary,
-		backup:  se.backup,
-		byURL:   se.endpointsByURL,
+		primary:           se.primary,
+		primaryConfigured: se.primaryConfigured,
+		backup:            se.backup,
+		byURL:             se.endpointsByURL,
 	}
 }
 
@@ -317,7 +323,12 @@ func sameEndpointURLs(a, b []*common.NodeUrl) bool {
 }
 
 // selectEndpoint selects the endpoint a client's new subscription goes to.
-func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (*common.NodeUrl, error) {
+func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey string, ignoredEndpoints map[string]struct{}) (selected *common.NodeUrl, errRet error) {
+	defer func() {
+		if selected != nil {
+			metrics.ObserveCustomerProvider(ctx, se.endpointNames.name(selected.Url))
+		}
+	}()
 	// One snapshot for the whole cascade: setEndpoints can swap the tiers underneath
 	// us, and re-reading between tiers could see primary from before the swap and
 	// backup from after.
@@ -357,6 +368,9 @@ func (se *subscriptionEndpoints) selectEndpoint(ctx context.Context, clientKey s
 	)
 	ep, backupErr := se.selectFromTier(ctx, snapshot.backup, snapshot.byURL, ignoredEndpoints)
 	if backupErr == nil {
+		if snapshot.primaryConfigured && len(snapshot.primary) == 0 {
+			metrics.MarkCustomerReroute(ctx, "", "primary-pool-unavailable", []string{se.endpointNames.name(ep.Url)})
+		}
 		return ep, nil
 	}
 
@@ -440,4 +454,11 @@ func (se *subscriptionEndpoints) selectFromTier(ctx context.Context, tier []*com
 	)
 
 	return selectedEndpoint, nil
+}
+
+// SetCustomerPrimaryConfigured keeps configured intent through dark startup without changing selection.
+func (se *subscriptionEndpoints) SetCustomerPrimaryConfigured(configured bool) {
+	se.tiersLock.Lock()
+	defer se.tiersLock.Unlock()
+	se.primaryConfigured = configured
 }
