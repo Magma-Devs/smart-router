@@ -98,7 +98,7 @@ func TestProbeCycle_ReEnablesRecoveredEndpoint(t *testing.T) {
 		getObs := func(string) (endpointstate.EndpointObservation, bool) {
 			return freshObs(1000, now.Add(-time.Second), pollTime, 20*time.Millisecond), true
 		}
-		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, onRecover, nil)
+		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, onRecover)
 	}
 
 	// K-1 distinct polls: still disabled, no recovery callback.
@@ -132,7 +132,7 @@ func TestProbeCycle_FailedPollDoesNotReEnable(t *testing.T) {
 	}
 	var recovered []string
 	for i := 0; i < 10; i++ {
-		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, func(p string) { recovered = append(recovered, p) }, nil)
+		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, func(p string) { recovered = append(recovered, p) })
 	}
 	require.False(t, dc.Endpoint.Enabled, "a failed last poll must never re-enable")
 	require.Empty(t, recovered)
@@ -150,7 +150,7 @@ func TestProbeCycle_StaleEndpointStaysDisabled(t *testing.T) {
 		return endpointstate.EndpointObservation{LatestBlock: 1000, ObservedAt: now.Add(-60 * time.Second)}, true
 	}
 	for i := 0; i < 10; i++ {
-		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, nil, nil)
+		runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, nil)
 	}
 	require.False(t, dc.Endpoint.Enabled, "a still-stale endpoint must not be re-enabled")
 }
@@ -178,7 +178,7 @@ func TestProbeCycle_OneSamplePerProvider(t *testing.T) {
 
 	rec := &recordingAppender{}
 	ref := provideroptimizer.SyncReference{ConsensusConfigured: true, Block: 1000, Time: now, Fresh: true}
-	runProbeCycleCore(endpoints, getObs, 1000, true, ref, now, probeCfg(), rec, nil, nil)
+	runProbeCycleCore(endpoints, getObs, 1000, true, ref, now, probeCfg(), rec, nil)
 
 	require.Len(t, rec.calls, 1, "exactly one QoS sample per provider per cycle (rule E2)")
 	require.Equal(t, "provider1", rec.calls[0].provider)
@@ -199,7 +199,7 @@ func TestProbeCycle_NoBaselineOmitsSync(t *testing.T) {
 	endpoints := []*lavasession.EndpointWithDirectConnection{ep("http://a:8545", "provider1", true)}
 	rec := &recordingAppender{}
 	// hasBaseline=false → the prober must not set hasSync.
-	runProbeCycleCore(endpoints, getObs, 0, false, provideroptimizer.SyncReference{ConsensusConfigured: true}, now, probeCfg(), rec, nil, nil)
+	runProbeCycleCore(endpoints, getObs, 0, false, provideroptimizer.SyncReference{ConsensusConfigured: true}, now, probeCfg(), rec, nil)
 
 	require.Len(t, rec.calls, 1)
 	require.Equal(t, 1.0, rec.calls[0].availability)
@@ -218,7 +218,7 @@ func TestProbeCycle_CoversBackupsAndMultipleProviders(t *testing.T) {
 		ep("http://b:8545", "backup-provider", true), // GetAllDirectRPCEndpoints includes backups
 	}
 	rec := &recordingAppender{}
-	runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), rec, nil, nil)
+	runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), rec, nil)
 
 	require.Len(t, rec.calls, 2, "both the regular and backup providers get a sample")
 	seen := map[string]bool{}
@@ -238,7 +238,7 @@ func TestProbeCycle_NoObservationIsUnhealthy(t *testing.T) {
 	}
 	endpoints := []*lavasession.EndpointWithDirectConnection{ep("http://a:8545", "provider1", true)}
 	rec := &recordingAppender{}
-	runProbeCycleCore(endpoints, getObs, 0, false, provideroptimizer.SyncReference{}, now, probeCfg(), rec, nil, nil)
+	runProbeCycleCore(endpoints, getObs, 0, false, provideroptimizer.SyncReference{}, now, probeCfg(), rec, nil)
 
 	require.Len(t, rec.calls, 1)
 	require.Equal(t, 0.0, rec.calls[0].availability, "an unobserved endpoint scores unhealthy")
@@ -260,20 +260,19 @@ func TestProbeCycleCore_ReturnsCycleCounts(t *testing.T) {
 	}
 
 	// Fresh baseline → sync fed for both providers, nothing omitted.
-	scored, reEnabled, syncOmitted, evidenceGated := runProbeCycleCore(
+	scored, reEnabled, syncOmitted := runProbeCycleCore(
 		endpoints, healthy, 1000, true,
 		provideroptimizer.SyncReference{ConsensusConfigured: true, Block: 1000, Time: now, Fresh: true},
-		now, probeCfg(), &recordingAppender{}, nil, nil)
+		now, probeCfg(), &recordingAppender{}, nil)
 	require.Equal(t, 2, scored, "both endpoints scored")
 	require.Equal(t, 0, reEnabled, "already-enabled endpoints are never re-enabled")
 	require.Equal(t, 0, syncOmitted, "fresh baseline → no sync omitted")
-	require.Equal(t, 0, evidenceGated, "no endpoint holds relay evidence")
 
 	// No baseline → F5: sync omitted for every provider sample.
-	_, _, syncOmitted, _ = runProbeCycleCore(
+	_, _, syncOmitted = runProbeCycleCore(
 		endpoints, healthy, 0, false,
 		provideroptimizer.SyncReference{ConsensusConfigured: true},
-		now, probeCfg(), &recordingAppender{}, nil, nil)
+		now, probeCfg(), &recordingAppender{}, nil)
 	require.Equal(t, 2, syncOmitted, "no fresh baseline → both providers' sync omitted (F5)")
 }
 
@@ -292,7 +291,7 @@ func TestProbeCycleCore_CountsReEnable(t *testing.T) {
 		getObs := func(string) (endpointstate.EndpointObservation, bool) {
 			return freshObs(1000, now.Add(-time.Second), pollTime, 20*time.Millisecond), true
 		}
-		_, reEnabled, _, _ := runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, nil, nil)
+		_, reEnabled, _ := runProbeCycleCore(endpoints, getObs, 1000, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, nil)
 		lastReEnabled = reEnabled
 		if i < K {
 			require.Equal(t, 0, reEnabled, "no re-enable before the K-th distinct healthy poll")
@@ -335,7 +334,7 @@ func TestProbeCycle_HeldOffEndpointIsNotScoredUnavailable(t *testing.T) {
 			return obs, ok
 		}
 		rec := &recordingAppender{}
-		runProbeCycleCore(endpoints, getObs, 1000, true, ref, now, probeCfg(), rec, nil, nil)
+		runProbeCycleCore(endpoints, getObs, 1000, true, ref, now, probeCfg(), rec, nil)
 		return rec.calls
 	}
 

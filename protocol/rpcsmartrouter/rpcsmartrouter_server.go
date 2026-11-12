@@ -57,7 +57,7 @@ const (
 	// internalRelayTryTimeout bounds ONE try of a relay the ROUTER sends for itself — the startup
 	// check and the recurring health monitor. It never applies to a customer request.
 	//
-	// Not to be confused with the endpoint prober (ProbeLoopInterval, recovery_probe.go), which is a
+	// Not to be confused with the endpoint prober (ProbeLoopInterval, runProbeLoop), which is a
 	// separate mechanism with its own cadence; this is the timeout for the crafted GET_BLOCKNUM relay
 	// that sendCraftedRelays sends through the ordinary relay path.
 	//
@@ -143,10 +143,6 @@ type RPCSmartRouterServer struct {
 	// (MAG-2202 endpoint 4). Written off the data plane by runProbeCycle; read by the debug handler.
 	probeStats probeLoopStats
 
-	// probeReplayer executes MAG-2550 recovery replays off the probe loop (one goroutine per
-	// replay, at most one outstanding per endpoint). Initialized once in runProbeLoop; nil until
-	// then, which runProbeCycleCore treats as "no replay wiring" (poll-only fallback).
-	probeReplayer *relayProbeRunner
 	// headStall is the head-stalled step's state (MAG-3986): which urls hold head-stalled, read by
 	// onTipObservation on every tip vote, and which stuck endpoints never-empty is keeping.
 	headStall headStallState
@@ -3820,18 +3816,6 @@ type probeLoopStats struct {
 	// of its own.
 	qosFeedPausedIdle   bool
 	headStallPausedIdle bool
-	// evidenceGatedCount is how many disabled endpoints held recorded relay evidence in the last
-	// cycle (MAG-2550) — endpoints that will need a successful replay (or the attempt-budget
-	// fallback) before re-enabling. Without this a replay-held endpoint is indistinguishable from
-	// one still earning its poll streak.
-	evidenceGatedCount int
-	// Cumulative MAG-2550 replay outcomes (counted per completed replay, on the replayer's
-	// goroutine). replaysRecovered approximates replay-granted re-enables — the re-enable happens
-	// on the replayer's goroutine, outside any cycle, so it is never part of reEnabledCount.
-	replaysAttempted    uint64
-	replaysRecovered    uint64
-	replaysStillFailing uint64
-	replaysInconclusive uint64
 	// Cumulative MAG-3986 head-stall transitions.
 	stalledAdded    uint64
 	stalledRemoved  uint64
@@ -3857,7 +3841,7 @@ func (s *probeLoopStats) setInterval(d time.Duration) {
 }
 
 // recordCycle overwrites the last-cycle snapshot and bumps the completed-cycle counter.
-func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, scored, reEnabled, syncOmitted, evidenceGated int, qosFeedPausedIdle, headStallPausedIdle bool) {
+func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, scored, reEnabled, syncOmitted int, qosFeedPausedIdle, headStallPausedIdle bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cyclesCompleted++
@@ -3866,25 +3850,8 @@ func (s *probeLoopStats) recordCycle(startedAt time.Time, dur time.Duration, sco
 	s.endpointsScored = scored
 	s.reEnabledCount = reEnabled
 	s.syncOmittedCount = syncOmitted
-	s.evidenceGatedCount = evidenceGated
 	s.qosFeedPausedIdle = qosFeedPausedIdle
 	s.headStallPausedIdle = headStallPausedIdle
-}
-
-// countReplay records one completed MAG-2550 recovery replay. Called from the replayer's
-// goroutine, so it takes the stats lock rather than assuming the cycle's context.
-func (s *probeLoopStats) countReplay(verdict relayProbeVerdict) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.replaysAttempted++
-	switch verdict {
-	case relayProbeRecovered:
-		s.replaysRecovered++
-	case relayProbeStillFailing:
-		s.replaysStillFailing++
-	case relayProbeInconclusive:
-		s.replaysInconclusive++
-	}
 }
 
 // probeLoopSnapshot is the read-only view the /debug/probe-loop handler emits per chain.
@@ -3896,13 +3863,8 @@ type probeLoopSnapshot struct {
 	EndpointsScored     int
 	ReEnabledCount      int
 	SyncOmittedCount    int
-	EvidenceGatedCount  int
 	QoSFeedPausedIdle   bool
 	HeadStallPausedIdle bool
-	ReplaysAttempted    uint64
-	ReplaysRecovered    uint64
-	ReplaysStillFailing uint64
-	ReplaysInconclusive uint64
 	StalledAdded        uint64
 	StalledRemoved      uint64
 	StalledKept         uint64
@@ -3921,13 +3883,8 @@ func (s *probeLoopStats) snapshot() probeLoopSnapshot {
 		EndpointsScored:     s.endpointsScored,
 		ReEnabledCount:      s.reEnabledCount,
 		SyncOmittedCount:    s.syncOmittedCount,
-		EvidenceGatedCount:  s.evidenceGatedCount,
 		QoSFeedPausedIdle:   s.qosFeedPausedIdle,
 		HeadStallPausedIdle: s.headStallPausedIdle,
-		ReplaysAttempted:    s.replaysAttempted,
-		ReplaysRecovered:    s.replaysRecovered,
-		ReplaysStillFailing: s.replaysStillFailing,
-		ReplaysInconclusive: s.replaysInconclusive,
 		StalledAdded:        s.stalledAdded,
 		StalledRemoved:      s.stalledRemoved,
 		StalledKept:         s.stalledKept,
@@ -3975,17 +3932,6 @@ func (rpcss *RPCSmartRouterServer) runProbeLoop(ctx context.Context, cadence tim
 	// Publish the effective cadence for /debug/probe-loop (CycleIntervalMs) before the first tick,
 	// so the endpoint reports the interval even before a cycle has completed.
 	rpcss.probeStats.setInterval(cadence)
-	// The replay judge is wrapped with the stats counter so every replay outcome is visible in
-	// /debug/probe-loop (attempted/recovered/still-failing/inconclusive) — a feature that can hold
-	// an endpoint out of rotation must be observable in production, not only in one log line.
-	rpcss.probeReplayer = &relayProbeRunner{
-		async: true,
-		probe: func(ep *lavasession.EndpointWithDirectConnection, method string, payload []byte, relayTimeout time.Duration) relayProbeVerdict {
-			verdict := rpcss.replayFailingRelay(ep, payload, relayTimeout)
-			rpcss.probeStats.countReplay(verdict)
-			return verdict
-		},
-	}
 	// The optimizer's AppendProbeData is optional (inline assertion) so the loop degrades to
 	// re-enable-only if a future optimizer lacks it, rather than failing to start.
 	appender, _ := rpcss.sessionManager.GetProviderOptimizer().(probeQoSAppender)
@@ -4025,19 +3971,18 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 	feedPaused := rpcss.qosFeedPaused(startedAt)
 	stallPaused := rpcss.headStallPaused(startedAt)
 	rpcss.publishChainIdle(startedAt)
-	scored, reEnabled, syncOmitted, evidenceGated := runProbeCycleCore(
+	scored, reEnabled, syncOmitted := runProbeCycleCore(
 		endpoints,
 		rpcss.endpointChainTrackerManager.GetObservation,
 		baseline, hasBaseline, syncRef, startedAt, cfg, probeAppenderUnlessIdle(appender, feedPaused),
 		rpcss.sessionManager.RestoreRecoveredProvider,
-		rpcss.probeReplayer,
 	)
 	// MAG-3986: after the re-enable pass, so an endpoint the probe just returned to rotation is
 	// counted as usable by never-empty.
 	if !stallPaused {
 		rpcss.runHeadStall(endpoints, startedAt)
 	}
-	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, evidenceGated, feedPaused, stallPaused)
+	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, feedPaused, stallPaused)
 }
 
 // qosFeedPaused is the probe loop's decision to withhold its QoS feed this cycle. Idle mode
@@ -4099,13 +4044,9 @@ func probeAppenderUnlessIdle(appender probeQoSAppender, idle bool) probeQoSAppen
 // endpoint whose url is held off is left out of its provider's sample rather than scored dead.
 //
 // Returns the per-cycle telemetry for /debug/probe-loop (MAG-2202 endpoint 4): scored = endpoints
-// that received a verdict; reEnabled = endpoints the probe re-enabled SYNCHRONOUSLY this cycle
-// (poll-only path — replay-granted re-enables complete on the replayer's goroutine and are
-// visible in probeLoopStats' replay counters instead); syncOmitted = providers whose QoS sample
-// fed NO sync evidence (F5: no fresh consensus baseline, or no block in the sample); evidenceGated
-// = disabled endpoints currently holding recorded relay evidence, i.e. endpoints that will require
-// a successful replay (or the attempt-budget fallback) to re-enable. syncOmitted is 0 when
-// appender is nil (no QoS feed happens, so nothing is omitted).
+// that received a verdict; reEnabled = endpoints the probe re-enabled this cycle; syncOmitted =
+// providers whose QoS sample fed NO sync evidence (F5: no fresh consensus baseline, or no block in
+// the sample). syncOmitted is 0 when appender is nil (no QoS feed happens, so nothing is omitted).
 func runProbeCycleCore(
 	endpoints []*lavasession.EndpointWithDirectConnection,
 	getObservation func(url string) (endpointstate.EndpointObservation, bool),
@@ -4116,8 +4057,7 @@ func runProbeCycleCore(
 	cfg probing.VerdictConfig,
 	appender probeQoSAppender,
 	onRecover func(provider string),
-	replayer *relayProbeRunner,
-) (scored, reEnabled, syncOmitted, evidenceGated int) {
+) (scored, reEnabled, syncOmitted int) {
 	// One verdict per endpoint (regular + backup), grouped by provider for the single-sample rule.
 	verdictsByProvider := make(map[string][]probing.EndpointVerdict)
 	for _, ep := range endpoints {
@@ -4125,9 +4065,6 @@ func runProbeCycleCore(
 			continue
 		}
 		scored++
-		if snap := ep.Endpoint.HealthSnapshot(); !snap.Enabled && snap.RelayProbeMethod != "" {
-			evidenceGated++
-		}
 		obs, _ := getObservation(ep.Endpoint.NetworkAddress)
 		verdict := probing.RenderEndpointVerdict(obs, baseline, hasBaseline, now, cfg)
 		// Proactive re-enable from POST-DISABLE successful-poll evidence only (F1). RecordProbeVerdict
@@ -4137,37 +4074,6 @@ func runProbeCycleCore(
 			reEnabled++
 			if onRecover != nil {
 				onRecover(ep.ProviderAddress)
-			}
-		} else if method, payload, relayTimeout, ok := ep.Endpoint.PendingRelayProbe(cfg.ReEnableHysteresis); ok {
-			// Two-step re-enable (MAG-2550): poll hysteresis is satisfied but this disable episode
-			// recorded a failing read-only relay, so RecordProbeVerdict held the re-enable. Replay
-			// the recorded request through the endpoint's own connection and re-enable only when it
-			// no longer produces a health-affecting failure. The replayer runs the replay OFF this
-			// loop (its own goroutine, at most one outstanding per endpoint) so a slow replay never
-			// starves the cycle's QoS feed; the verdict is applied on completion through the
-			// endpoint's race-safe transitions. A nil replayer (tests / degraded wiring) falls back
-			// to poll-only evidence rather than parking the endpoint forever.
-			if replayer == nil || replayer.probe == nil {
-				if ep.Endpoint.ConfirmRelayRecovery() {
-					reEnabled++
-					if onRecover != nil {
-						onRecover(ep.ProviderAddress)
-					}
-				}
-			} else {
-				target := ep
-				replayer.launch(target.Endpoint.NetworkAddress, func() {
-					switch replayer.probe(target, method, payload, relayTimeout) {
-					case relayProbeRecovered:
-						if target.Endpoint.ConfirmRelayRecovery() && onRecover != nil {
-							onRecover(target.ProviderAddress)
-						}
-					case relayProbeStillFailing:
-						target.Endpoint.RelayProbeFailed()
-					case relayProbeInconclusive:
-						target.Endpoint.RelayProbeInconclusive()
-					}
-				})
 			}
 		}
 		// Busy is not dead (MAG-4387). A rate-limit hold-off stops the url's poll on purpose — and on
@@ -4192,7 +4098,7 @@ func runProbeCycleCore(
 	}
 
 	if appender == nil {
-		return scored, reEnabled, syncOmitted, evidenceGated // re-enable still happened above; QoS feed unavailable
+		return scored, reEnabled, syncOmitted // re-enable still happened above; QoS feed unavailable
 	}
 	for provider, verdicts := range verdictsByProvider {
 		sample, ok := probing.AggregateProviderSample(verdicts)
@@ -4207,7 +4113,7 @@ func runProbeCycleCore(
 		}
 		appender.AppendProbeData(provider, sample.Availability, sample.Latency, sample.HasLatency, sample.Block, hasSync, syncRef)
 	}
-	return scored, reEnabled, syncOmitted, evidenceGated
+	return scored, reEnabled, syncOmitted
 }
 
 // onTipObservation is the EndpointMonitor's OnTipObservation hook: it feeds every positive
@@ -5998,11 +5904,8 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 			rpcss.relayErrors.RecordProtocolError(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, chainMessage.GetApi().Name)
 		}
 
-		// Apply health tracking based on error classification. The failing request is recorded
-		// FIRST (read-only methods only) so that if this failure crosses the disable threshold,
-		// the disable episode carries its replayable recovery evidence (MAG-2550).
+		// Apply health tracking based on error classification.
 		if shouldMarkUnhealthy && targetEndpoint != nil {
-			rpcss.recordRelayEvidence(routerHealthCheck, targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(classified))
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 		}
@@ -6043,7 +5946,6 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		shouldMarkUnhealthy, _ := classifyHTTPStatus(statusCode, statusClassified)
 
 		if shouldMarkUnhealthy && targetEndpoint != nil {
-			rpcss.recordRelayEvidence(routerHealthCheck, targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 			targetEndpoint.MarkUnhealthy(endpointDisableReasonFor(statusClassified))
 			rpcss.smartRouterEndpointMetrics.SetEndpointOverallHealth(rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface, endpointName, false)
 			utils.LavaFormatDebug("endpoint returned error status",
@@ -6084,8 +5986,7 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// 200 is the commonest shape of a dying node and the single most likely thing to freeze it.
 	//
 	// Classified through the same gate as the err arm, so "was the endpoint at fault" has one
-	// answer regardless of how the failure arrived. Evidence is recorded first, as the other arms
-	// do, so a disable episode crossing the threshold here carries its replay payload (MAG-2550).
+	// answer regardless of how the failure arrived.
 	// The verdict was already resolved by the sender's ApplyNodeErrorClassification, so this reads
 	// it rather than re-classifying — one answer to "was the endpoint at fault", wherever it is
 	// asked (common.LavaError.EndpointAtFault).
@@ -6097,7 +5998,6 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 	// would take BOTH arms, counting up and then resetting to zero in the same relay. No registry
 	// row produces that shape today; the chaining is what keeps it impossible when one is added.
 	if result.IsNodeAtFault && targetEndpoint != nil && (lostBroadcast == nil || !lostBroadcast(result.IsNodeError)) {
-		rpcss.recordRelayEvidence(routerHealthCheck, targetEndpoint, chainMessage, originalRequestData, relayTimeout)
 		// EndpointDisableNodeError unconditionally, rather than through endpointDisableReasonFor:
 		// reaching this arm REQUIRES an answer to have arrived (err == nil): a non-2xx the sender
 		// kept as the node's reply — any 4xx, or a 5xx whose JSON body is the node's own answer
@@ -6116,11 +6016,11 @@ func (rpcss *RPCSmartRouterServer) relayInnerDirect(
 		// router's own latest-block poll: not the "REAL traffic" ResetHealth is for, and not the
 		// "real customer request" a lent success re-enables on (MAG-4232). On a single-provider
 		// router whose url was off because one method hung, the health check's eth_blockNumber
-		// switched it back on 0.35 s after the MAG-2550 prober had kept it off for that method.
+		// switched it back on 0.35 s after it had been switched off for that method.
 		//
 		// So the health check is still lent the url — readiness reports whether a node answers, and
-		// it does — but the url stays off until a client request succeeds on it or the prober's
-		// replay of the failed request does. On an endpoint that is already on, its success resets
+		// it does — but the url stays off until a client request succeeds on it or the probe loop
+		// re-enables it on its polls. On an endpoint that is already on, its success resets
 		// the counter as any success does, as it did before: failures of the health check count
 		// against an endpoint, so its successes must too, or an idle chain's endpoint would collect
 		// blips that nothing ever cleared.
@@ -7180,7 +7080,7 @@ func classifyHTTPStatus(code int, classified *common.LavaError) (shouldMarkUnhea
 	return classifyEndpointHealth(classified, false)
 }
 
-// relayHoldoff is the hot path's and recovery probe's handle on the process-wide
+// relayHoldoff is the hot path's handle on the process-wide
 // rate-limit hold-off registry (docs/RATE-LIMIT-HOLDOFF.md). A package variable rather
 // than a server field so tests can swap in a clock-pinned registry and restore it.
 var relayHoldoff = holdoff.Shared
@@ -7226,20 +7126,6 @@ func httpStatusRelayError(statusCode int, reply *pairingtypes.RelayReply) error 
 		httpErr.RetryAfter, _ = common.ParseRetryAfter(header, time.Now())
 	}
 	return httpErr
-}
-
-// recordRelayEvidence records a failed relay as the endpoint's replay evidence (MAG-2550), except
-// for the router's own health check on an endpoint that is switched off. The health check reaches
-// such an endpoint only through the last chance, and its request is the router's own latest-block
-// poll, not the request that switched the endpoint off. Recording it would make the prober replay
-// the poll, which the node answers, and switch the endpoint back on: the MAG-4790 outcome by the
-// prober's door instead of the health check's (review of #631, 631-2). On an endpoint that is on,
-// its failure is recorded as any failure is.
-func (rpcss *RPCSmartRouterServer) recordRelayEvidence(routerHealthCheck bool, endpoint *lavasession.Endpoint, chainMessage chainlib.ChainMessage, requestData []byte, relayTimeout time.Duration) {
-	if routerHealthCheck && endpoint != nil && !endpoint.IsEnabled() {
-		return
-	}
-	rpcss.recordRelayProbeEvidence(endpoint, chainMessage, requestData, relayTimeout)
 }
 
 // redactNodeReply withholds the secrets in a node's error reply (utils.RedactSecrets). A reply

@@ -64,8 +64,8 @@ func endsRelay(verdict *common.LavaError, err error) bool {
 }
 
 // healthVerdict is the classification endpoint health uses for a direct attempt's error. An error
-// that wraps a status error is judged by that status error's body, as the recovery probe judges
-// it, since the verdict the wrapper carries may be the retry verdict instead (retryVerdict). Only
+// that wraps a status error is judged by that status error's body,
+// since the verdict the wrapper carries may be the retry verdict instead (retryVerdict). Only
 // the JSON-RPC sender produces a status error, and it classifies one on the JSON-RPC table, so
 // that table is used here too, whatever the endpoint's transport.
 func healthVerdict(err error, chainFamily common.ChainFamily, transport common.TransportType) *common.LavaError {

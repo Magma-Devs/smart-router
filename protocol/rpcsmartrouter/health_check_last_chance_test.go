@@ -3,9 +3,7 @@ package rpcsmartrouter
 import (
 	"context"
 	"errors"
-	"net/http"
 	"testing"
-	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
@@ -42,7 +40,7 @@ func enabledEndpoints(fleet *healthRelayFleet) int {
 // else can serve. The router's own health check sends its latest-block request through the same
 // path as a client, so it is lent one too — and when the node answered it, the success reached
 // ResetHealth and switched the URL back on. On eth-failover-solo-sim-router that undid, 0.35 s
-// later, a URL the MAG-2550 prober was keeping off because eth_getBalance still hung on it.
+// later, a URL that was off because eth_getBalance still hung on it.
 //
 // A health check's answer is not the evidence that brings a URL back. ResetHealth is for "a
 // successful relay [that] proves the endpoint healthy for REAL traffic (not just cheap polls)",
@@ -51,7 +49,7 @@ func enabledEndpoints(fleet *healthRelayFleet) int {
 //
 // So the health check may still be lent a URL — readiness reports whether the router reaches a
 // node, and it does — but its success leaves the URL off. The URL comes back the ways it is meant
-// to: a real request succeeding on it, or the prober's replay of the request that failed.
+// to: a real request succeeding on it, or the probe loop re-enabling it on its polls.
 func TestHealthCheck_ALentURLStaysOffWhenTheHealthCheckSucceeds(t *testing.T) {
 	fleet := newHealthRelayFleetAnswering(t, nil, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`)
 	disableEveryEndpoint(t, fleet)
@@ -136,31 +134,4 @@ func TestHealthCheck_ClearsTheFailuresOfAnEndpointThatIsOn(t *testing.T) {
 	}
 	require.Positive(t, stillOn,
 		"the health check's success cleared the failures of the endpoint it reached, so one more does not switch it off")
-}
-
-// Review of #631, 631-2. A lent health check that FAILS must not rewrite the replay evidence of the
-// switched-off endpoint it was lent. The evidence is the request that switched the endpoint off, and
-// the prober replays it to decide whether the endpoint is back (MAG-2550). If the health check's
-// own latest-block poll replaced it, the prober would replay the poll, which the node answers, and
-// switch the endpoint on: the MAG-4790 outcome through the prober instead of the health check.
-func TestHealthCheck_AFailedLendLeavesTheReplayEvidenceAlone(t *testing.T) {
-	fleet := newHealthRelayFleetServing(t, nil, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	})
-	disableEveryEndpoint(t, fleet)
-	const failingMethod = "eth_getBalance"
-	payload := []byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getBalance","params":["0xa1","latest"]}`)
-	for _, endpoint := range fleet.endpoints {
-		endpoint.RecordFailingRelay(failingMethod, payload, 5*time.Second)
-		require.Equal(t, failingMethod, endpoint.HealthSnapshot().RelayProbeMethod, "premise: the endpoint carries the evidence of what switched it off")
-	}
-
-	_, _ = fleet.server.sendCraftedRelays(1, false)
-
-	require.Positive(t, fleet.served.Load(), "premise: the health check was lent an endpoint and the node was asked")
-	for _, endpoint := range fleet.endpoints {
-		require.Equal(t, failingMethod, endpoint.HealthSnapshot().RelayProbeMethod,
-			"the health check's own failed poll must not replace the request the prober replays")
-	}
-	require.Zero(t, enabledEndpoints(fleet))
 }

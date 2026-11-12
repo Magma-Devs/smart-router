@@ -1592,12 +1592,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					"LatestBlock":              obs.LatestBlock,
 					"ObservedAt":               debugTimeRFC3339(obs.ObservedAt),
 					"Source":                   obs.Source.String(),
-					// The MAG-2550 replay gate, made visible: a disabled endpoint with a
-					// RelayProbeMethod is held pending a successful replay of that method (or
-					// the attempt-budget fallback) — NOT merely earning its poll streak.
-					"RelayProbeMethod":   health.RelayProbeMethod,
-					"RelayProbeAttempts": health.RelayProbeAttempts,
-					"ReenableProbeFlaps": health.ReenableProbeFlaps,
+					"ReenableProbeFlaps":       health.ReenableProbeFlaps,
 					// MAG-3986: Enabled is the event slot only. Usable is what selection
 					// sees — Enabled AND no state reason. StateReasons lists head-stalled
 					// with when it was added and the block it was stuck on; SameBlockCycles
@@ -1794,17 +1789,10 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				"EndpointsScored":     s.EndpointsScored,
 				"ReEnabledCount":      s.ReEnabledCount,
 				"SyncOmittedCount":    s.SyncOmittedCount,
-				// MAG-2550 replay-gate telemetry: how many disabled endpoints are held on
-				// recorded relay evidence, and the cumulative replay outcomes.
-				"EvidenceGatedCount": s.EvidenceGatedCount,
 				// Idle mode: the last cycle withheld its QoS feed / skipped the head-stall step
 				// because the chain was idle or a wake burst was still re-polling.
 				"QoSFeedPausedIdle":   s.QoSFeedPausedIdle,
 				"HeadStallPausedIdle": s.HeadStallPausedIdle,
-				"ReplaysAttempted":    s.ReplaysAttempted,
-				"ReplaysRecovered":    s.ReplaysRecovered,
-				"ReplaysStillFailing": s.ReplaysStillFailing,
-				"ReplaysInconclusive": s.ReplaysInconclusive,
 				// MAG-3986 head-stall transitions, cumulative since process start.
 				"StalledAdded":    s.StalledAdded,
 				"StalledRemoved":  s.StalledRemoved,
