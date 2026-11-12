@@ -39,8 +39,8 @@ func requireClassifiedAs(t *testing.T, msg string, lavaError string) common.Node
 
 // TestCheckXRPLResponseError pins MAG-4033: an XRPL submit is a success only when the node applied
 // or queued the transaction. A rejection is a node error, so a stateful broadcast keeps waiting for
-// a sibling instead of returning the first rejection — the dfns case, where a node that had the
-// payment by gossip answered tefPAST_SEQ before the node that applied it answered tesSUCCESS.
+// a sibling instead of returning the first rejection: a node that had the payment by gossip
+// answered tefPAST_SEQ before the node that applied it answered tesSUCCESS.
 func TestCheckXRPLResponseError(t *testing.T) {
 	submit := JsonrpcMessage{Method: "submit"}
 
@@ -194,8 +194,8 @@ func TestCheckXRPLResponseError(t *testing.T) {
 		})
 	}
 
-	// MAG-4817: an API error is a node error on every method, not only a submission. The GK8 case
-	// was lgrNotFound for a ledger the node did not hold yet, read as the answer and cached as final.
+	// MAG-4817: an API error is a node error on every method, not only a submission. A node
+	// answered lgrNotFound for a ledger it did not hold yet; this was cached as a final answer.
 	reads := []struct {
 		name        string
 		method      string

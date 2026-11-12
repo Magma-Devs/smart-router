@@ -274,7 +274,7 @@ func TestLastChance_LendsAHeadStalledURL(t *testing.T) {
 	require.True(t, stalled, "a successful answer must not clear the stall")
 }
 
-// gk8 FTM250, 2026-10-22: the only primary serves the debug add-on, its URL is head-stalled but
+// FTM250, 2026-10-22: the only primary serves the debug add-on, its URL is head-stalled but
 // enabled (one block behind), and the backup does not serve debug. Before, every debug call got
 // "No Providers For Addon" until the stall cleared. Now the debug call is lent the stalled URL,
 // while a plain call still goes to the backup first.

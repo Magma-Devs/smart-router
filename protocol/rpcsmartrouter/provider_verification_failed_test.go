@@ -81,35 +81,35 @@ func newVerificationFailedRouter(t *testing.T, spec string, inputs *chainReverif
 }
 
 // A provider out of the pairing is published with the check it failed, so a chart
-// can say which verification took it out and for how long. The gk8 case: a backup
-// that never passed had no series of any kind.
+// can say which verification took it out and for how long. A backup that never
+// passed had no series of any kind.
 func TestPublishServingTier_ProviderOutCarriesTheFailedCheck(t *testing.T) {
 	const spec = "VERIFYFAILEDCHECK"
 	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
 	inputs := &chainReverifyInputs{
-		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "tatum"}, {Name: "gk8"}},
+		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{{Name: "tatum"}, {Name: "primary-b"}},
 		configuredBackup: []*lavasession.RPCStaticProviderEndpoint{{Name: "blockdaemon"}},
 	}
 	rpsr := newVerificationFailedRouter(t, spec, inputs)
 	rpsr.providerSessions[chainKey] = sessionsFor("tatum")
-	inputs.noteFailure(reverifyTierStatic, "gk8", &chainlib.VerificationFailure{Check: "chain-id", Err: errors.New("deadline")})
+	inputs.noteFailure(reverifyTierStatic, "primary-b", &chainlib.VerificationFailure{Check: "chain-id", Err: errors.New("deadline")})
 	inputs.noteFailure(reverifyTierBackup, "blockdaemon", &chainlib.VerificationFailure{Check: chainlib.CheckLatestBlock, Err: errors.New("400")})
 
 	rpsr.publishServingTierLocked(chainKey)
 	require.Equal(t, []string{
 		"blockdaemon|backup|provider||latest-block|Fail",
-		"gk8|static|provider||chain-id|Fail",
+		"primary-b|static|provider||chain-id|Fail",
 	}, failingSeries(t, spec), "an admitted provider with nothing refused has no series")
 
 	// The backup recovers: its series goes away; the primary still out keeps its own.
 	rpsr.backupProviderSessions[chainKey] = sessionsFor("blockdaemon")
 	rpsr.publishServingTierLocked(chainKey)
-	require.Equal(t, []string{"gk8|static|provider||chain-id|Fail"}, failingSeries(t, spec))
+	require.Equal(t, []string{"primary-b|static|provider||chain-id|Fail"}, failingSeries(t, spec))
 
 	// The epoch re-verifier demotes the other primary. The demotion path never writes
 	// the failed lists, only lastFailure, and the provider must still show.
 	inputs.noteFailure(reverifyTierStatic, "tatum", &chainlib.VerificationFailure{Check: "pruning", Err: errors.New("pruned")})
-	rpsr.providerSessions[chainKey] = sessionsFor("gk8")
+	rpsr.providerSessions[chainKey] = sessionsFor("primary-b")
 	rpsr.publishServingTierLocked(chainKey)
 	require.Equal(t, []string{"tatum|static|provider||pruning|Fail"}, failingSeries(t, spec))
 }

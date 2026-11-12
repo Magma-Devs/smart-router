@@ -306,7 +306,7 @@ type HTTPDirectRPCConnection struct {
 // vendor sends now and then, and recycling its connection each time would only
 // add handshakes. Erring low is cheap the other way round: a wrongly retired
 // connection costs TLS-resumed dials (see minConnRetireInterval), and a stuck one
-// kept the dfns optimism-sepolia router down for 50 minutes.
+// kept an optimism-sepolia router down for 50 minutes.
 const consecutive5xxBeforeConnRetire = 2
 
 // minConnRetireInterval is the least time between two retirements of this url's

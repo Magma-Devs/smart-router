@@ -252,8 +252,8 @@ func sendRESTThroughMockUpstream(t *testing.T, status int, body string) *common.
 	return result
 }
 
-// TestRESTRelay_404_EmptyBody_IsANodeError pins the sender's side for the dfns incident: an empty
-// 404 from a gateway is a node error (a broadcast keeps waiting for its sibling), classified by
+// TestRESTRelay_404_EmptyBody_IsANodeError pins the sender's side of MAG-3974: an empty 404
+// from a gateway is a node error (a broadcast keeps waiting for its sibling), classified by
 // the registry's 404 row as data-scope: retried elsewhere on a read, not the endpoint's fault.
 func TestRESTRelay_404_EmptyBody_IsANodeError(t *testing.T) {
 	result := sendRESTThroughMockUpstream(t, http.StatusNotFound, "")
@@ -706,7 +706,7 @@ func TestRESTRelay_503_TryAgainLater_KeepsTheNodesReply(t *testing.T) {
 }
 
 // TestRESTRelay_500_TonRejection_KeepsTheNodesReply: toncenter rejects a sendBoc with a JSON 500
-// (MAG-3974, seen live on dfns TON testnet). The client must get toncenter's reason, not the router's
+// (MAG-3974, seen on TON testnet). The client must get toncenter's reason, not the router's
 // "insufficient results" 500, or it cannot tell that the message will never be accepted.
 func TestRESTRelay_500_TonRejection_KeepsTheNodesReply(t *testing.T) {
 	body := `{"ok":false,"error":"duplicate message","code":500}`

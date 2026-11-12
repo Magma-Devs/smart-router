@@ -388,7 +388,7 @@ func TestConsensusObservations_ExcludesStalledURLs(t *testing.T) {
 	require.Len(t, consensusObservations(snap, nil), 3, "with nothing stalled every known block votes")
 }
 
-// The Plasma lock, replayed against a real ChainState (dfns PLASMAT, 2026-09-25). Tatum froze at N
+// The Plasma lock, replayed against a real ChainState (PLASMAT, 2026-09-25). Tatum froze at N
 // and kept repeating it; Chainstack climbed but its blocks were more than OutlierThreshold above the
 // fresh tip, so they were rejected as lies while Tatum's repeats kept the tip fresh — for 70 minutes.
 // Once Tatum is head-stalled its repeats stop voting, the tip goes stale after TTL, and the stale tip
