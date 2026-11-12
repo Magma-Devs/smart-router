@@ -59,6 +59,7 @@ func ep(url, provider string, enabled bool) *routersession.EndpointWithDirectCon
 	return &routersession.EndpointWithDirectConnection{
 		Endpoint:        &routersession.Endpoint{NetworkAddress: url, Enabled: enabled},
 		ProviderAddress: provider,
+		HoldoffKey:      holdoff.ProviderKey("ETH1", "jsonrpc", provider),
 	}
 }
 
@@ -340,7 +341,9 @@ func TestProbeCycle_HeldOffEndpointIsNotScoredUnavailable(t *testing.T) {
 	}
 
 	t.Run("held off on the relay path's key, stale: no sample", func(t *testing.T) {
-		calls := run(t, func(reg *holdoff.Registry) { reg.RecordRateLimit("provider1", "http://a:8545", 0) },
+		calls := run(t, func(reg *holdoff.Registry) {
+			reg.RecordRateLimit(holdoff.ProviderKey("ETH1", "jsonrpc", "provider1"), "http://a:8545", 0)
+		},
 			map[string]endpointstate.EndpointObservation{"http://a:8545": stale},
 			ep("http://a:8545", "provider1", true))
 		require.Empty(t, calls, "a provider whose every endpoint is held off and unobserved is not sampled")
@@ -353,13 +356,17 @@ func TestProbeCycle_HeldOffEndpointIsNotScoredUnavailable(t *testing.T) {
 		require.Empty(t, calls)
 	})
 	t.Run("held off and never observed: no sample", func(t *testing.T) {
-		calls := run(t, func(reg *holdoff.Registry) { reg.RecordRateLimit("provider1", "http://a:8545", 0) },
+		calls := run(t, func(reg *holdoff.Registry) {
+			reg.RecordRateLimit(holdoff.ProviderKey("ETH1", "jsonrpc", "provider1"), "http://a:8545", 0)
+		},
 			map[string]endpointstate.EndpointObservation{},
 			ep("http://a:8545", "provider1", true))
 		require.Empty(t, calls)
 	})
 	t.Run("a held-off stale endpoint is left out, its healthy sibling still counts", func(t *testing.T) {
-		calls := run(t, func(reg *holdoff.Registry) { reg.RecordRateLimit("provider1", "http://a:8545", 0) },
+		calls := run(t, func(reg *holdoff.Registry) {
+			reg.RecordRateLimit(holdoff.ProviderKey("ETH1", "jsonrpc", "provider1"), "http://a:8545", 0)
+		},
 			map[string]endpointstate.EndpointObservation{"http://a:8545": stale, "http://b:8545": fresh},
 			ep("http://a:8545", "provider1", true), ep("http://b:8545", "provider1", true))
 		require.Len(t, calls, 1)
@@ -368,14 +375,18 @@ func TestProbeCycle_HeldOffEndpointIsNotScoredUnavailable(t *testing.T) {
 		require.True(t, calls[0].hasSync)
 	})
 	t.Run("a held-off endpoint with a fresh observation is judged as usual", func(t *testing.T) {
-		calls := run(t, func(reg *holdoff.Registry) { reg.RecordRateLimit("provider1", "http://a:8545", 0) },
+		calls := run(t, func(reg *holdoff.Registry) {
+			reg.RecordRateLimit(holdoff.ProviderKey("ETH1", "jsonrpc", "provider1"), "http://a:8545", 0)
+		},
 			map[string]endpointstate.EndpointObservation{"http://a:8545": fresh},
 			ep("http://a:8545", "provider1", true))
 		require.Len(t, calls, 1)
 		require.Equal(t, 1.0, calls[0].availability)
 	})
 	t.Run("a stale endpoint that is not held off is still unavailable", func(t *testing.T) {
-		calls := run(t, func(reg *holdoff.Registry) { reg.RecordRateLimit("provider2", "http://b:8545", 0) },
+		calls := run(t, func(reg *holdoff.Registry) {
+			reg.RecordRateLimit(holdoff.ProviderKey("ETH1", "jsonrpc", "provider2"), "http://b:8545", 0)
+		},
 			map[string]endpointstate.EndpointObservation{"http://a:8545": stale},
 			ep("http://a:8545", "provider1", true))
 		require.Len(t, calls, 1)

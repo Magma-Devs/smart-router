@@ -49,7 +49,7 @@ func TestLastChance_AWssURLDoesNotHideAProviderFromTheLastChance(t *testing.T) {
 		triedByThisRequest: map[string]struct{}{},
 		currentEpoch:       csm.atomicReadCurrentEpoch(),
 	}
-	got, err := csm.tryGetConsumerSessionWithProviderFromBlockedProviderList(context.Background(), 1, ignored, 10, spectypes.LATEST_BLOCK, "", nil, common.NO_STATE, 0, NewUsedProviders(nil))
+	got, err := csm.tryGetConsumerSessionWithProviderFromBlockedProviderList(context.Background(), 1, ignored, 10, spectypes.LATEST_BLOCK, "", nil, nil, common.NO_STATE, 0, NewUsedProviders(nil))
 	require.NoError(t, err, "the last chance must not end in No pairings available")
 	require.Contains(t, got, "primary")
 	require.True(t, got["primary"].lastChance)

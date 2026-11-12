@@ -447,10 +447,11 @@ signal that an upstream is refusing us for load.
 
 | Metric | Type | Labels | Description |
 | --- | --- | --- | --- |
-| `smartrouter_rate_limit_holdoffs_total` | Counter | `provider`, `event` | Registry events. `event` is the closed set `recorded` (a 429 held an endpoint off — a new hold-off, or a Retry-After that extended one; a 429 inside a standing hold-off changes nothing and is not counted, so a burst counts once), `escalated` (the hold-off widened to the whole provider name — counted once on the transition, not per refresh), `cleared` (an answer dropped a standing penalty — not counted when there was nothing to clear). |
+| `smartrouter_rate_limit_holdoffs_total` | Counter | `provider`, `event` | Registry events. `event` is the closed set `recorded` (a 429 held an endpoint off — a new hold-off, or a Retry-After that extended one; a 429 inside a standing hold-off changes nothing and is not counted, so a burst counts once), `escalated` (the hold-off widened to the whole provider entry — the provider on one chain and api-interface, not the same name on others (MAG-4732); counted once on the transition, not per refresh), `cleared` (an answer dropped a standing penalty — not counted when there was nothing to clear). |
 | `smartrouter_rate_limit_holdoff_seconds` | Histogram | `provider` | Applied hold-off duration per `recorded` event, in **seconds** (buckets `15, 30, 60, 120, 300, 600, 1800, 3600` — not the shared millisecond latency buckets). Shows upstream `Retry-After` magnitudes against the exponential default. |
 
-`provider` is the configured provider name on the relay / probe / re-verify paths. The
+`provider` is the configured provider name on the relay / probe / re-verify paths, summed
+over chains and api-interfaces: the registry holds each entry apart, the label does not. The
 WS and gRPC subscription paths and the per-url chain tracker key the registry by node URL
 (the tracker so that its poll's 429 holds that URL, not the provider, off — MAG-4165); those
 keys are reduced to `scheme://host` before they become a label, so a `sum by (provider)`
@@ -461,7 +462,7 @@ API keys in their path or query and a credential must never reach a Prometheus s
 # upstreams currently tripping their caps
 sum by (provider) (increase(smartrouter_rate_limit_holdoffs_total{event="recorded"}[15m])) > 0
 
-# a vendor-wide cap: the hold-off escalated across a provider's URLs
+# a vendor-wide cap: the hold-off escalated across the URLs of one provider entry (chain + api-interface)
 increase(smartrouter_rate_limit_holdoffs_total{event="escalated"}[1h]) > 0
 
 # how long upstreams are telling us to wait (p90)

@@ -222,6 +222,7 @@ func TestRelay_GRPCRateLimitIsHeldOffForTheWaitItAskedFor(t *testing.T) {
 
 			server, provider, url := newGRPCRateLimitRouter(t, startRateLimitingGRPCNode(t, tc.message, tc.header, tc.trailer))
 			relayGRPCCall(t, server)
+			provider = server.holdoffProviderKey(provider)
 
 			if tc.want == 0 {
 				require.False(t, registry.HeldOff(provider, url), "a refusal that is no rate limit holds nothing off")

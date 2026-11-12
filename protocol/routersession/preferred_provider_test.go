@@ -101,7 +101,7 @@ func TestGetSessions_PreferredProvider(t *testing.T) {
 		previous := csm.rateLimitHoldoff
 		csm.rateLimitHoldoff = registry
 		t.Cleanup(func() { csm.rateLimitHoldoff = previous })
-		registry.RecordRateLimit("provider@primary1", "http://primary1/rpc", time.Minute)
+		holdOffProvider(csm, "provider@primary1", time.Minute)
 		for i := 0; i < 10; i++ {
 			require.NotEqual(t, "provider@primary1", getOne(t, csm, "", "", "provider@primary1"), "i #%d", i)
 		}
