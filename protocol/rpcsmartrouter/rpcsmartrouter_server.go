@@ -150,6 +150,9 @@ type RPCSmartRouterServer struct {
 	// headStall is the head-stalled step's state (MAG-3986): which urls hold head-stalled, read by
 	// onTipObservation on every tip vote, and which stuck endpoints never-empty is keeping.
 	headStall headStallState
+	// urlOutCountsSeen is the out-of-rotation counts the probe loop already published per endpoint
+	// (MAG-5244, url_out_of_rotation.go). Touched only by the probe loop.
+	urlOutCountsSeen urlOutCountsSeen
 
 	// Cached API names of the two tip-defining spec methods (GET_BLOCKNUM / GET_BLOCK_BY_NUM), resolved
 	// once on the first relay via tipApiNamesOnce. tipBlockFromRelay runs on every successful relay;
@@ -4037,6 +4040,8 @@ func (rpcss *RPCSmartRouterServer) runProbeCycle(appender probeQoSAppender, cfg 
 	if !stallPaused {
 		rpcss.runHeadStall(endpoints, startedAt)
 	}
+	// MAG-5244: last, so the per-url gauge shows what the re-enable pass and the head-stall step left.
+	rpcss.publishURLsOutOfRotation(endpoints)
 	rpcss.probeStats.recordCycle(startedAt, time.Since(startedAt), scored, reEnabled, syncOmitted, evidenceGated, feedPaused, stallPaused)
 }
 

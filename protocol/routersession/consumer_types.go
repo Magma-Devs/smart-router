@@ -3,6 +3,7 @@ package routersession
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strconv"
 	"sync"
@@ -259,8 +260,13 @@ type Endpoint struct {
 	// accident. The endpoint is usable only when Enabled AND this map is empty (usableLocked).
 	// Nil until the first state reason is added.
 	stateReasons map[EndpointDisableReason]StateReasonRecord
-	Addons       map[string]struct{}
-	Extensions   map[string]struct{}
+	// outOfRotationCounts counts, per reason, how many times this endpoint has left rotation
+	// (MAG-5244): each Enabled→false transition under its disable reason, and each state reason
+	// added. It only goes up, so the metrics publisher can turn it into a counter that a hold
+	// shorter than a scrape cannot hide. Nil until the first time the endpoint goes out.
+	outOfRotationCounts map[EndpointDisableReason]uint64
+	Addons              map[string]struct{}
+	Extensions          map[string]struct{}
 	// StandaloneAddons mirrors common.NodeUrl.StandaloneAddons: this endpoint
 	// serves ONLY the collections its Addons name, not those plus the base one.
 	// Set for a url whose add-on REPLACES the base api surface rather than
@@ -367,6 +373,9 @@ type EndpointHealthSnapshot struct {
 	// StateReasons lists the state-type reasons (head-stalled) this endpoint is out for, in a stable
 	// order, each with when it was added and the block it was recorded at. Empty when none.
 	StateReasons []StateReasonRecord
+	// OutOfRotationCounts is how many times the endpoint has left rotation, per reason, since it was
+	// created (MAG-5244). A copy; nil when it never went out.
+	OutOfRotationCounts map[EndpointDisableReason]uint64
 }
 
 // HealthSnapshot returns the endpoint's enable/recovery state under e.mu. Read-only companion to
@@ -387,6 +396,7 @@ func (e *Endpoint) HealthSnapshot() EndpointHealthSnapshot {
 		ReenableProbeFlaps:       e.reenableProbeFlaps,
 		Usable:                   e.usableLocked(),
 		StateReasons:             e.stateReasonsLocked(),
+		OutOfRotationCounts:      maps.Clone(e.outOfRotationCounts),
 	}
 }
 
@@ -548,6 +558,7 @@ func (e *Endpoint) disableLocked(at time.Time, reason EndpointDisableReason) {
 		reason = EndpointDisableUnspecified
 	}
 	e.Enabled = false
+	e.countOutOfRotationLocked(reason)
 	e.disabledAt = at
 	// Edge-triggered with disabledAt, and for the same reason: the reason belongs to the failure that
 	// actually took the endpoint out. A later failure of a different kind against an already-disabled
