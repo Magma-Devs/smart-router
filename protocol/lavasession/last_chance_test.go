@@ -243,7 +243,7 @@ func TestLastChance_BackupSuccessLiftsItsBlock(t *testing.T) {
 // MAG-4737: a lent url that is head-stalled can answer, and the answer switches it back on but
 // leaves the stall. The provider has nothing usable, so lifting its block would only hand the next
 // request a provider to block again — a block and a release on every request for as long as the
-// stall lasts (365 pairs in 100 s in a local run). It stays blocked; the head-stall step lifts the
+// stall lasts (362 pairs in 95 s in a local run). It stays blocked; the head-stall step lifts the
 // block when the stall clears. Checked for both tiers: they keep separate blocked lists.
 func TestLastChance_StalledSuccessKeepsTheBlock(t *testing.T) {
 	stall := func(t *testing.T, e *Endpoint) {
@@ -285,6 +285,85 @@ func TestLastChance_StalledSuccessKeepsTheBlock(t *testing.T) {
 			return !slices.Contains(csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "primary")
 		}, 300*time.Millisecond, 10*time.Millisecond, "a stalled primary stays blocked after a lent success")
 	})
+}
+
+// lcDone hands every session of a lent request back as answered.
+func lcDone(t *testing.T, csm *ConsumerSessionManager, sessions ConsumerSessionsMap) {
+	t.Helper()
+	for _, s := range sessions {
+		require.NoError(t, csm.OnSessionDone(s.Session, spectypes.LATEST_BLOCK, 10, time.Millisecond, time.Millisecond, 1, 1, 1, false, nil))
+	}
+}
+
+// Not every lent answer switches the url back on: a client error (a reverted eth_call) and the
+// router's own health check reach OnSessionDone without ResetHealth. The url is still off, so the
+// provider has nothing to dial and its block stays, stall or no stall (MAG-4737).
+func TestLastChance_AnswerThatLeavesTheURLOffKeepsTheBlock(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+	_, _ = lcGet(csm, NewUsedProviders(nil)) // first request: provider gets blocked, then lent
+	sessions, err := lcGet(csm, NewUsedProviders(nil))
+	require.NoError(t, err)
+	lcDone(t, csm, sessions) // no ResetHealth: the answer did not prove the url healthy
+	require.False(t, p.Endpoints[0].IsEnabled())
+	require.Never(t, func() bool {
+		return !slices.Contains(csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "primary")
+	}, 300*time.Millisecond, 10*time.Millisecond, "a lent answer that leaves the url off keeps the block")
+}
+
+// Two lent requests in flight on one blocked provider. The first to answer leaves the url off (a
+// client error); the second is a real success and switches it on. The lent flag is one per
+// provider: when the first answer cleared it without releasing, the second found nothing to act
+// on, and the provider stayed blocked with a usable url until another request fell through to the
+// last chance (MAG-4737; 30 s with no traffic in a local run). The flag now goes only with the
+// release, so the second answer lifts the block.
+func TestLastChance_SecondLentSuccessLiftsTheBlock(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+	_, _ = lcGet(csm, NewUsedProviders(nil)) // first request: provider gets blocked, then lent
+	first, err := lcGet(csm, NewUsedProviders(nil))
+	require.NoError(t, err)
+	second, err := lcGet(csm, NewUsedProviders(nil))
+	require.NoError(t, err)
+
+	lcDone(t, csm, first) // a client error: no ResetHealth
+	require.Never(t, func() bool {
+		return !slices.Contains(csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "primary")
+	}, 100*time.Millisecond, 10*time.Millisecond, "the first answer left the url off: still blocked")
+
+	p.Endpoints[0].ResetHealth() // what the relay path does on the success, before OnSessionDone
+	lcDone(t, csm, second)
+	require.Eventually(t, func() bool {
+		return !slices.Contains(csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "primary")
+	}, 2*time.Second, 10*time.Millisecond, "the second answer switched the url on: the block lifts")
+	require.Equal(t, BlockedProviderSessionUnusedStatus, p.atomicReadBlockedStatus(), "the lent flag goes with the release")
+}
+
+// A stalled backup keeps its lent flag after a lent success, because its block stands. When
+// another route releases it (here the one the probe and the head-stall step use), the flag goes
+// with the block, as it does for a primary: left set, a later failure would read as a lent attempt.
+func TestLastChance_BackupReleasedByAnotherRouteDropsTheLentFlag(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	b := lcBackupWithDebug(t)
+	disableAt(t, b.Endpoints[0], probeBase)
+	require.True(t, b.Endpoints[0].AddStateReason(EndpointDisableHeadStalled, probeBase, stalledBlock))
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, []*ConsumerSessionsWithProvider{b})
+	sessions, err := lcGetDebug(csm, NewUsedProviders(nil))
+	require.NoError(t, err)
+	require.Equal(t, "backup", lcServedBy(t, sessions))
+	b.Endpoints[0].ResetHealth()
+	lcDone(t, csm, sessions)
+	require.Never(t, func() bool {
+		return !slices.Contains(csm.ProviderRoutingSnapshot().BlockedBackupProviders, "backup")
+	}, 100*time.Millisecond, 10*time.Millisecond, "still stalled: still blocked")
+	require.Equal(t, BlockedProviderSessionUsedStatus, b.atomicReadBlockedStatus())
+
+	require.True(t, b.Endpoints[0].RemoveStateReason(EndpointDisableHeadStalled))
+	csm.RestoreRecoveredProvider("backup")
+	require.NotContains(t, csm.ProviderRoutingSnapshot().BlockedBackupProviders, "backup")
+	require.Equal(t, BlockedProviderSessionUnusedStatus, b.atomicReadBlockedStatus())
 }
 
 // A websocket url can never answer a relay, so it is never lent.

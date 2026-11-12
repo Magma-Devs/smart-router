@@ -3591,6 +3591,12 @@ func (csm *ConsumerSessionManager) releaseBlockedBackupLocked(providerAddress st
 		return
 	}
 	delete(csm.blockedBackupProviders, providerAddress)
+	// Same reset the primaries' release performs: the lent flag belongs to the block that just
+	// ended. A backup lent while stalled keeps the flag until it is released (OnSessionDone), and
+	// this release may come from another route (the head-stall step, the probe).
+	if provider := csm.backupProviders[providerAddress]; provider != nil {
+		provider.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
+	}
 	if record, released := csm.releaseBlockRecordLocked(providerAddress, true); released {
 		csm.logProviderReleased(providerAddress, record, route, csm.blockedTotalLocked())
 	}
@@ -3714,8 +3720,6 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 	}
 
 	if consumerSession.Parent.atomicReadBlockedStatus() == BlockedProviderSessionUsedStatus {
-		// we will deal with the removal of this provider from the blocked list so we can for now set it as default
-		consumerSession.Parent.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
 		// this provider is probably in the ignored provider list. we need to validate and return it to valid addresses
 		providerAddress := consumerSession.Parent.PublicLavaAddress
 		parent := consumerSession.Parent
@@ -3723,16 +3727,24 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 		// golang defer operates in a Last-In-First-Out (LIFO) order, meaning this defer will run last.
 		defer func() {
 			go func() {
-				// The last chance lends a url whatever holds it out, a stall included, and a stalled
-				// url can answer. The success switches the url back on (ResetHealth, before this
-				// runs) but never clears the stall. Releasing a provider that is still out of
-				// rotation hands selection nothing to dial: the next request blocks it again, and
-				// the one after borrows it again — a block and a release on every request while the
-				// stall lasts (MAG-4737). It stays blocked instead; the head-stall step releases it
-				// when the stall clears.
-				if parent.inRotation() {
-					csm.releaseBlockedProvider(providerAddress, ReleaseSuccessfulRelay)
+				// A lent answer does not always leave the provider with a url to dial. The last
+				// chance lends a url whatever holds it out: a stall survives the answer, and a
+				// client error or the router's own health check never switches the url back on
+				// (only a real success does, through ResetHealth, before this runs). Releasing a
+				// provider that is still out of rotation hands selection nothing to dial: the next
+				// request blocks it again, and the one after borrows it again — a block and a
+				// release on every request while the stall lasts (MAG-4737). It stays blocked
+				// instead; the head-stall step releases it when the stall clears.
+				//
+				// The lent flag is cleared only with the release. Two lent requests can be in
+				// flight at once: cleared up front, a first answer that leaves the url out would
+				// take the flag with it, and the second answer, the real success that switches the
+				// url on, would find nothing to act on and leave a usable provider blocked.
+				if !parent.inRotation() {
+					return
 				}
+				parent.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
+				csm.releaseBlockedProvider(providerAddress, ReleaseSuccessfulRelay)
 			}()
 		}()
 	}
