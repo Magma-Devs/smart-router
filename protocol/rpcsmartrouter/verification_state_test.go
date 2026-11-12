@@ -77,6 +77,48 @@ func TestTrackFailures_LogsEachTransitionOnce(t *testing.T) {
 	require.Empty(t, inputs.failing["static|"+provider][0].Service)
 }
 
+// A provider out of the pairing is listed by the check that took it out alone, but it
+// did not pass what else it failed (review of #602). Its missing websocket url logs no
+// "passes again" when it goes out and no second line when it is back, and keeps its
+// start; an archive check that it passes when it is back passes again then, counted
+// from its own start.
+func TestTrackFailures_AProviderOutOfThePairingPassesNothingItFailed(t *testing.T) {
+	utils.EnableDebugLogBuffer(1000)
+	defer utils.ClearDebugLogBuffer()
+	utils.ClearDebugLogBuffer()
+	const provider = "track-held-provider"
+	inputs := &chainReverifyInputs{rpcEndpoint: bootTestEndpoint()}
+	start := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	missing := metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeService, Service: chainlib.WebSocketExtension, Check: chainlib.CheckMissingURL}
+	archive := metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeService, Service: "archive", Check: "pruning"}
+	out := []metrics.ProviderVerificationFailure{{Scope: metrics.VerificationScopeProvider, Check: "chain-id"}}
+
+	inputs.trackFailures(reverifyTierStatic, provider, []metrics.ProviderVerificationFailure{missing, archive}, start)
+	tracked := inputs.trackFailures(reverifyTierStatic, provider, out, start.Add(20*time.Minute))
+	require.Len(t, tracked, 1, "while it is out, the provider is published by the check that took it out")
+	inputs.trackFailures(reverifyTierStatic, provider, out, start.Add(21*time.Minute))
+	tracked = inputs.trackFailures(reverifyTierStatic, provider, []metrics.ProviderVerificationFailure{missing}, start.Add(25*time.Minute))
+
+	require.Len(t, tracked, 1)
+	require.Equal(t, chainlib.CheckMissingURL, tracked[0].Check)
+	require.Equal(t, start, tracked[0].Since, "the url is missing since the start, not since the readmit")
+	require.Empty(t, inputs.heldWhileOut, "nothing is held once the provider is back")
+
+	lines := verificationLogLines(t, provider)
+	checks := make([]any, 0, len(lines))
+	for _, line := range lines {
+		checks = append(checks, line["check"])
+	}
+	require.Equal(t, []any{chainlib.CheckMissingURL, "pruning", "chain-id", "chain-id", "pruning"}, checks,
+		"the start fails missing-url and pruning, the demote fails chain-id alone, the readmit passes chain-id and pruning")
+	require.Equal(t, "verification check failing", lines[2]["message"])
+	require.Nil(t, lines[2]["previousCheck"], "chain-id takes no part's place")
+	require.Equal(t, "verification check passes again", lines[3]["message"])
+	require.Equal(t, "5m0s", lines[3]["failedFor"])
+	require.Equal(t, "verification check passes again", lines[4]["message"])
+	require.Equal(t, "25m0s", lines[4]["failedFor"], "pruning failed from the start until the readmit")
+}
+
 // GET /debug/verification shows, per configured provider, what it is failing with the
 // start the gauge publishes, whether it is in the pairing, and each check's next retry.
 func TestDebugVerification_ShowsFailingChecksAndRetries(t *testing.T) {
