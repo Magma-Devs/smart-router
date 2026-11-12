@@ -49,7 +49,18 @@ func (e *Endpoint) AddStateReason(reason EndpointDisableReason, at time.Time, bl
 		e.stateReasons = make(map[EndpointDisableReason]StateReasonRecord, 1)
 	}
 	e.stateReasons[reason] = StateReasonRecord{Reason: reason, Since: at, Block: block}
+	e.countOutOfRotationLocked(reason)
 	return true
+}
+
+// countOutOfRotationLocked records one more time the endpoint left rotation for reason (MAG-5244).
+// Called on the edge only: the Enabled→false transition (disableLocked) and a state reason that was
+// not held before (AddStateReason). Caller must hold e.mu for writing.
+func (e *Endpoint) countOutOfRotationLocked(reason EndpointDisableReason) {
+	if e.outOfRotationCounts == nil {
+		e.outOfRotationCounts = make(map[EndpointDisableReason]uint64, 1)
+	}
+	e.outOfRotationCounts[reason]++
 }
 
 // RemoveStateReason drops one state reason. It returns false when the reason was not held. It never

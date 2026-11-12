@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,6 +49,8 @@ type SmartRouterMetricsManager struct {
 	endpointURLLatestBlock         *prometheus.GaugeVec   // rpc_endpoint_url_latest_block
 	endpointURLAnsweredUntil       *prometheus.GaugeVec   // rpc_endpoint_url_answered_until_seconds
 	endpointURLRelaysServiced      *prometheus.CounterVec // rpc_endpoint_url_relays_serviced_total
+	endpointURLOutOfRotation       *prometheus.GaugeVec   // rpc_endpoint_url_out_of_rotation
+	endpointURLOutOfRotationTotal  *prometheus.CounterVec // rpc_endpoint_url_out_of_rotation_total
 	endpointFetchLatestFails       *prometheus.CounterVec // rpc_endpoint_fetch_latest_fails
 	endpointFetchBlockFails        *prometheus.CounterVec // rpc_endpoint_fetch_block_fails
 	endpointFetchLatestSuccess     *prometheus.CounterVec // rpc_endpoint_fetch_latest_success
@@ -178,6 +181,10 @@ type SmartRouterMetricsManager struct {
 	// ALL provider names sharing the URL — otherwise only the last-registered provider gets
 	// the metric label, leaving its peers stuck at the zero value on dashboards.
 	urlToProviderNames map[string][]string
+	// urlsOutOfRotation is the rpc_endpoint_url_out_of_rotation series published on the last
+	// probe cycle, per "spec|apiInterface", keyed by the joined label values. The next cycle
+	// deletes the ones that no longer hold. Guarded by lock.
+	urlsOutOfRotation map[string]map[string][]string
 	// urlInternalPaths maps a registered url to the spec path it serves ("/v2", or "" for the
 	// root), for the internal_path label of the per-url series. Guarded by lock.
 	urlInternalPaths map[string]string
@@ -299,6 +306,19 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 		Name: "rpc_endpoint_url_relays_serviced_total",
 		Help: "Relays one node url of a provider served successfully.",
 	}, urlLabels))
+
+	// Why a url is out of rotation (MAG-5244). The provider block reason is always
+	// all-endpoints-disabled, which says every url is out and nothing about why; the cause is
+	// on the url.
+	urlReasonLabels := append(slices.Clone(urlLabels), "reason")
+	m.endpointURLOutOfRotation = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rpc_endpoint_url_out_of_rotation",
+		Help: "1 while one node url of a provider is out of rotation, labelled with why: unreachable (requests got no answer), node-error (the node answered with its own failure), head-stalled (it answers, but its block stopped moving while another url moved on), unspecified (should not appear). A url out for two reasons has two series. The series exists only while the url is out. Written once per probe cycle. url and internal_path as rpc_endpoint_url_latest_block.",
+	}, urlReasonLabels))
+	m.endpointURLOutOfRotationTotal = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_endpoint_url_out_of_rotation_total",
+		Help: "Times one node url of a provider left rotation, by reason (as rpc_endpoint_url_out_of_rotation). Counts every time, including a hold shorter than a scrape, which the gauge cannot show.",
+	}, urlReasonLabels))
 
 	m.endpointFetchLatestFails = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_fetch_latest_fails",
@@ -984,6 +1004,68 @@ func (m *SmartRouterMetricsManager) AddEndpointURLRelayServiced(spec, apiInterfa
 	m.endpointURLRelaysServiced.WithLabelValues(m.urlSeriesLabelValuesLocked(spec, apiInterface, providerName, endpointURL)...).Inc()
 }
 
+// URLOutOfRotation is what one node url of a provider reports to PublishURLsOutOfRotation for one
+// probe cycle: the reasons it is out of rotation for right now, and how many times it newly left
+// rotation, per reason, since the cycle before.
+type URLOutOfRotation struct {
+	Provider string
+	URL      string
+	Reasons  []string
+	WentOut  map[string]uint64
+}
+
+// PublishURLsOutOfRotation publishes, for one chain and interface, why each node url is out of
+// rotation (MAG-5244). urls is every url the caller looked at this cycle, in or out. For each one
+// it sets rpc_endpoint_url_out_of_rotation to 1 under every reason that holds, and adds the new
+// times it left rotation to rpc_endpoint_url_out_of_rotation_total. Then it deletes every gauge
+// series it published for this chain and interface on an earlier cycle that no longer holds: a
+// url that came back, and also a url that is no longer listed at all (its provider left the
+// pairing), which would otherwise stay at 1 for ever.
+//
+// Only series that cleared are deleted, never all of them first, so a scrape between two cycles
+// never reads a gap for a url that is still out. The counter is never deleted here; it goes with
+// the url's other series in ForgetEndpointURLLatestBlock.
+//
+// Only a registered url gets a series, as for the other per-url metrics.
+func (m *SmartRouterMetricsManager) PublishURLsOutOfRotation(spec, apiInterface string, urls []URLOutOfRotation) {
+	if m == nil || m.endpointURLOutOfRotation == nil {
+		return
+	}
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	scope := spec + "|" + apiInterface
+	// Keyed by the joined label values. The separator cannot appear in a label value here: a
+	// provider name, a hex fingerprint, a spec path and a reason constant.
+	now := make(map[string][]string)
+	for _, u := range urls {
+		if _, registered := m.urlToProviderNames[u.URL]; !registered {
+			continue
+		}
+		base := m.urlSeriesLabelValuesLocked(spec, apiInterface, u.Provider, u.URL)
+		for _, reason := range u.Reasons {
+			values := append(slices.Clone(base), reason)
+			m.endpointURLOutOfRotation.WithLabelValues(values...).Set(1)
+			now[strings.Join(values, "\x00")] = values
+		}
+		if m.endpointURLOutOfRotationTotal != nil {
+			for reason, n := range u.WentOut {
+				if n > 0 {
+					m.endpointURLOutOfRotationTotal.WithLabelValues(append(slices.Clone(base), reason)...).Add(float64(n))
+				}
+			}
+		}
+	}
+	for key, values := range m.urlsOutOfRotation[scope] {
+		if _, still := now[key]; !still {
+			m.endpointURLOutOfRotation.DeleteLabelValues(values...)
+		}
+	}
+	if m.urlsOutOfRotation == nil {
+		m.urlsOutOfRotation = make(map[string]map[string][]string)
+	}
+	m.urlsOutOfRotation[scope] = now
+}
+
 // ForgetEndpointURLLatestBlock deletes a url's per-url series for every provider configured with
 // it. The caller is a removed tracker: a series left behind would stand still forever, which is
 // what the stuck-provider alerts fire on.
@@ -1001,6 +1083,16 @@ func (m *SmartRouterMetricsManager) ForgetEndpointURLLatestBlock(spec, apiInterf
 		}
 		if m.endpointURLRelaysServiced != nil {
 			m.endpointURLRelaysServiced.DeleteLabelValues(values...)
+		}
+		// The out-of-rotation series carry one more label, the reason, so they are matched by
+		// the url's own labels. The gauge is also cleared by the next PublishURLsOutOfRotation;
+		// the counter only here.
+		byURL := prometheus.Labels{"spec": values[0], "apiInterface": values[1], "endpoint_id": values[2], "url": values[3], "internal_path": values[4]}
+		if m.endpointURLOutOfRotation != nil {
+			m.endpointURLOutOfRotation.DeletePartialMatch(byURL)
+		}
+		if m.endpointURLOutOfRotationTotal != nil {
+			m.endpointURLOutOfRotationTotal.DeletePartialMatch(byURL)
 		}
 	}
 }
