@@ -60,14 +60,14 @@ func TestServingError_AFailedPathCostsOnlyThatPath(t *testing.T) {
 
 	var noneServed ProviderAdmission
 	noneServed.refuseURL(0, errNotServed)
-	noneServed.throttleURL(1, throttledErr())
+	noneServed.throttleURL(1, urls[1], throttledErr())
 	err := noneServed.servingError(urls[:2])
 	require.ErrorIs(t, err, errNotServed, "no path served: the failure, not the throttle")
 	require.False(t, IsRateLimitFailure(err))
 
 	var servedAndUnknown ProviderAdmission
 	servedAndUnknown.refuseURL(0, errNotServed)
-	servedAndUnknown.throttleURL(2, throttledErr())
+	servedAndUnknown.throttleURL(2, urls[2], throttledErr())
 	require.True(t, IsRateLimitFailure(servedAndUnknown.servingError(urls)),
 		"a lost path is no failure while /v3 is served; the throttled /v4 leaves the pass inconclusive, as before")
 }

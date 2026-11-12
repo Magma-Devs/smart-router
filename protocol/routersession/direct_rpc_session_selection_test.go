@@ -368,7 +368,7 @@ func TestFetchEndpointConnection_InternalPath(t *testing.T) {
 		lost.UnservedInternalPaths = map[string]struct{}{"/v2": {}}
 
 		connected, endpoints, _, err := lost.fetchEndpointConnectionFromConsumerSessionWithProvider(
-			ctx, endpointPickSkipDisabled, true, "", nil, path("/v2"))
+			ctx, endpointPickSkipDisabled, true, "", nil, path("/v2"), nil)
 		require.NoError(t, err, "passed over, not blocked: its /v3 endpoint is healthy")
 		require.False(t, connected)
 		require.Empty(t, endpoints)
