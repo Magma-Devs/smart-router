@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -621,8 +622,8 @@ func trackingDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endp
 // that traverses the failover client's own hook chain.
 type dataDialMarkKey struct{}
 
-// markDataDialsHook marks data-path dials so trackingDialerMarkedOnly can tell
-// them apart from sentinel control-plane dials.
+// markDataDialsHook marks data-path dials so sentinelDialer can tell them
+// apart from sentinel control-plane dials.
 //
 // Why a hook and not an address list: go-redis copies FailoverOptions.Dialer
 // verbatim into the options it builds for the SENTINEL control-plane
@@ -640,7 +641,7 @@ type dataDialMarkKey struct{}
 // internal sentinel clients are separate *Clients built from sentinelOptions
 // that never traverse that chain. A dial carries the mark iff it is a data
 // dial — by construction, not by heuristic. buildClient installs the hook;
-// trackingDialerMarkedOnly is the other half of the pair.
+// sentinelDialer is the other half of the pair.
 type markDataDialsHook struct{}
 
 func (markDataDialsHook) DialHook(next redis.DialHook) redis.DialHook {
@@ -655,26 +656,97 @@ func (markDataDialsHook) ProcessPipelineHook(next redis.ProcessPipelineHook) red
 	return next
 }
 
-// trackingDialerMarkedOnly records only dials carrying the data-dial mark —
-// the sentinel-topology tracker (see markDataDialsHook for why sentinel cannot
-// use the plain trackingDialer).
+// sentinelDialer is the one dialer go-redis uses for the data node and for
+// every Sentinel. A dial carrying the data-dial mark is a data dial: it gets
+// the full dial budget and is the only kind the tracker records. Any other
+// dial is a Sentinel dial (see markDataDialsHook for why the mark, and not the
+// address, tells them apart).
 //
-// It records no faults, and cannot: the data-dial mark is what separates a
-// master dial from a control-plane dial, and this is the only place that sees
-// the mark — go-redis dials from a queue under a context of its own, so a fault
-// recorded inside baseDialer arrives here already attributed to the data
-// endpoint. A down sentinel is a non-paging condition under quorum, and
-// sentinels re-dial on their own schedule, so recording those would report a
-// healthy master unreachable continuously (see OpWindow).
-func trackingDialerMarkedOnly(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
-	base := baseDialer(tlsCfg, dialTimeout, nil)
+// It records no faults: a down Sentinel is a non-paging condition under
+// quorum, and counting one would report a healthy master unreachable for as
+// long as it stayed down (see OpWindow).
+func sentinelDialer(tlsCfg *tls.Config, dialTimeout time.Duration, tracker *endpointTracker) func(context.Context, string, string) (net.Conn, error) {
+	dialData := baseDialer(tlsCfg, dialTimeout, nil)
+	answerTimeout := sentinelAnswerTimeout(dialTimeout)
+	dialControl := baseDialer(tlsCfg, answerTimeout, nil)
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		conn, err := base(ctx, network, addr)
-		if err == nil && ctx.Value(dataDialMarkKey{}) != nil {
+		if ctx.Value(dataDialMarkKey{}) == nil {
+			return dialSentinel(ctx, dialControl, answerTimeout, network, addr)
+		}
+		conn, err := dialData(ctx, network, addr)
+		if err == nil {
 			tracker.note(addr)
 		}
 		return conn, err
 	}
+}
+
+// sentinelAnswerTimeout is how long a Sentinel has to complete a dial or
+// answer one request: two fifths of the dial budget. go-redis asks the
+// attached Sentinel inside a data dial and leaves it only while that dial's
+// budget is still running, after two failed answers, so two answers and the
+// question to the other Sentinels have to fit in one budget.
+func sentinelAnswerTimeout(dialTimeout time.Duration) time.Duration {
+	return dialTimeout * 2 / 5
+}
+
+// dialSentinel bounds everything a Sentinel connection does by answerTimeout:
+// the dial and its TLS handshake here, each request through sentinelConn.
+func dialSentinel(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error), answerTimeout time.Duration, network, addr string) (net.Conn, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, answerTimeout)
+	defer cancel()
+	conn, err := dial(dialCtx, network, addr)
+	if err != nil {
+		var netErr net.Error
+		if ctx.Err() == nil && errors.As(err, &netErr) && netErr.Timeout() {
+			return nil, sentinelDialTimeoutError{cause: err}
+		}
+		return nil, err
+	}
+	return &sentinelConn{Conn: conn, answerTimeout: answerTimeout}, nil
+}
+
+// sentinelDialTimeoutError is a Sentinel dial that timed out, without the
+// *net.OpError identity it had: still a net.Error, no longer a dial error.
+// go-redis retries a failed dial three times inside one question, and three
+// more timeouts outlast the data dial's budget, which is the one failure it
+// does not leave a Sentinel for.
+type sentinelDialTimeoutError struct{ cause error }
+
+func (e sentinelDialTimeoutError) Error() string { return e.cause.Error() }
+func (sentinelDialTimeoutError) Timeout() bool   { return true }
+func (sentinelDialTimeoutError) Temporary() bool { return true }
+
+// sentinelConn clamps every deadline go-redis sets on a Sentinel connection to
+// answerTimeout from now. go-redis sets the caller's deadline, which is the
+// data dial's whole budget, so a Sentinel that accepts and never replies would
+// otherwise hold each question until the budget is spent. A zero deadline is
+// the subscription's blocking receive and stays unbounded.
+type sentinelConn struct {
+	net.Conn
+	answerTimeout time.Duration
+}
+
+func (c *sentinelConn) clamp(deadline time.Time) time.Time {
+	if deadline.IsZero() {
+		return deadline
+	}
+	if limit := time.Now().Add(c.answerTimeout); deadline.After(limit) {
+		return limit
+	}
+	return deadline
+}
+
+func (c *sentinelConn) SetDeadline(t time.Time) error {
+	return c.Conn.SetDeadline(c.clamp(t))
+}
+
+func (c *sentinelConn) SetReadDeadline(t time.Time) error {
+	return c.Conn.SetReadDeadline(c.clamp(t))
+}
+
+func (c *sentinelConn) SetWriteDeadline(t time.Time) error {
+	return c.Conn.SetWriteDeadline(c.clamp(t))
 }
 
 // standaloneOptions builds the single-node client options. provider is nil
@@ -723,10 +795,10 @@ func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source Cre
 		// Records the DATA-node address — whichever node currently holds the
 		// master role, which changes on every failover. This same dialer is
 		// reused verbatim for the sentinel control-plane connections (including
-		// runtime-DISCOVERED sentinels no config list can name), so it records
-		// only dials carrying the data-dial mark stamped by markDataDialsHook —
-		// which buildClient installs on the failover client's hook chain.
-		Dialer:           trackingDialerMarkedOnly(tlsCfg, cfg.dialTimeout(), tracker),
+		// runtime-DISCOVERED sentinels no config list can name), so it tells the
+		// two apart by the data-dial mark stamped by markDataDialsHook — which
+		// buildClient installs on the failover client's hook chain.
+		Dialer:           sentinelDialer(tlsCfg, cfg.dialTimeout(), tracker),
 		MasterName:       cfg.MasterName,
 		SentinelAddrs:    addrs,
 		SentinelUsername: cfg.SentinelUsername,
@@ -735,11 +807,16 @@ func (cfg Config) failoverOptions(addrs []string, tlsCfg *tls.Config, source Cre
 		CredentialsProviderContext: func(ctx context.Context) (string, string, error) {
 			return source.Credentials()
 		},
-		TLSConfig:    tlsCfg,
-		DialTimeout:  cfg.dialTimeout(),
-		ReadTimeout:  cfg.ReadTimeout,
-		WriteTimeout: cfg.WriteTimeout,
-		PoolSize:     cfg.PoolSize,
+		TLSConfig:   tlsCfg,
+		DialTimeout: cfg.dialTimeout(),
+		// One attempt per dial. A pool that retries a failed Sentinel dial
+		// itself returns it after the data dial's budget is spent, and go-redis
+		// then stays on that Sentinel. The command that needed a data dial
+		// retries it.
+		DialerRetries: 1,
+		ReadTimeout:   cfg.ReadTimeout,
+		WriteTimeout:  cfg.WriteTimeout,
+		PoolSize:      cfg.PoolSize,
 		// See standaloneOptions: the caller's deadline must bound socket I/O.
 		ContextTimeoutEnabled: true,
 	}
@@ -769,8 +846,8 @@ func (cfg Config) buildClient(addrs []string, tlsCfg *tls.Config, creds clientCr
 	switch cfg.EffectiveTopology() {
 	case TopologySentinel:
 		client := redis.NewFailoverClient(cfg.failoverOptions(addrs, tlsCfg, creds.source, creds.sentinelPassword, tracker))
-		// The mark half of the tracker pair (trackingDialerMarkedOnly is the
-		// other): this hook chain wraps only the returned client's own data-pool
+		// The mark half of the dialer pair (sentinelDialer is the other): this
+		// hook chain wraps only the returned client's own data-pool
 		// dials, never the internal sentinel clients' — see markDataDialsHook.
 		client.AddHook(markDataDialsHook{})
 		return client

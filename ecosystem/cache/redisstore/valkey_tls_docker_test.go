@@ -47,7 +47,7 @@ func TestTLSDockerValkey(t *testing.T) {
 	out, err := docker("run", "--rm", "-d", "--name", container,
 		"-p", fmt.Sprintf("127.0.0.1:%d:6379", hostPort),
 		"-v", certDir+":/certs:ro",
-		"valkey/valkey:7.2",
+		valkeyImage,
 		"valkey-server", "--port", "0", "--tls-port", "6379",
 		"--tls-cert-file", "/certs/server.pem",
 		"--tls-key-file", "/certs/server.key",

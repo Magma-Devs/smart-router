@@ -164,7 +164,7 @@ make -C "$PROJECT_ROOT" install
 echo "[Setup] starting valkey (docker, 127.0.0.1:${VALKEY_PORT}, volatile-lru)"
 docker run -d --rm --name "$VALKEY_NAME" --label "$LANE_LABEL" \
   -p 127.0.0.1:${VALKEY_PORT}:6379 \
-  valkey/valkey:7.2 valkey-server --maxmemory 256mb --maxmemory-policy volatile-lru >/dev/null
+  valkey/valkey:9.1.3 valkey-server --maxmemory 256mb --maxmemory-policy volatile-lru >/dev/null
 for _ in $(seq 1 20); do
     docker exec "$VALKEY_NAME" valkey-cli ping >/dev/null 2>&1 && break
     sleep 0.5
