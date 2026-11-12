@@ -28,7 +28,7 @@ require (
 	github.com/itchyny/gojq v0.12.20
 	github.com/jhump/protoreflect v1.19.0
 	github.com/redis/go-redis/v9 v9.23.0
-	github.com/spf13/pflag v1.0.10
+	github.com/spf13/pflag v1.1.0
 	github.com/tidwall/gjson v1.20.2
 	github.com/tidwall/sjson v1.2.5
 	github.com/vektah/gqlparser/v2 v2.5.64
