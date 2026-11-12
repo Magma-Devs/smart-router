@@ -128,6 +128,11 @@ type chainReverifyInputs struct {
 	// "<tier>|<name>" (trackFailures). The gauge, the transition logs and
 	// /debug/verification all read it. Guarded by RPCSmartRouter.mu; lazily allocated.
 	failing map[string][]metrics.TimedVerificationFailure
+	// heldWhileOut is what each provider out of the pairing failed besides the check that
+	// took it out, keyed like failing (trackFailures). Nothing checked it while the
+	// provider was out, so it did not pass: it comes back with its start when the provider
+	// is readmitted, or passes again then. Guarded by RPCSmartRouter.mu; lazily allocated.
+	heldWhileOut map[string][]metrics.TimedVerificationFailure
 	// lastPass is the pass that refused each provider out of the pairing, keyed
 	// "<tier>|<name>" (noteFailure). Its retry re-runs only the checks that failed there
 	// and keeps the other verdicts. Dropped when the provider passes. Guarded by
