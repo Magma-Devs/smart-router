@@ -91,6 +91,7 @@ type RPCSmartRouterServer struct {
 	cache                performance.CacheBackend
 	consistencyConfig    *relaycore.ConsistencyValidationConfig // Configuration for consistency validation
 	sharedState          bool                                   // using the cache backend to sync the latest seen block
+	relayCacheDisabled   bool                                   // --disable-relay-cache: no relay reply is read from a cache tier or written to one
 	relaysMonitor        *metrics.RelaysMonitor
 	debugRelays          bool
 	chainListener        chainlib.ChainListener
@@ -191,6 +192,7 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 	rpcss.rpcSmartRouterLogs = rpcSmartRouterLogs
 	rpcss.chainParser = chainParser
 	rpcss.sharedState = sharedState
+	rpcss.relayCacheDisabled = cmdFlags.DisableRelayCache
 	rpcss.wsSubscriptionManager = wsSubscriptionManager
 	rpcss.debugRelays = cmdFlags.DebugRelays
 	rpcss.enableSelectionStats = cmdFlags.EnableSelectionStats
@@ -4896,6 +4898,7 @@ func skipCacheWriteAfterDegrade(ctx context.Context, relayProcessor *relaycore.R
 // tryCacheWrite attempts to write a successful relay response to the cache.
 // It runs in a separate goroutine to avoid blocking the relay response.
 // Cache writes are skipped when:
+// - Relay caching is off (--disable-relay-cache)
 // - Cache is not active
 // - Quorum is enabled (quorum requires fresh endpoint validation)
 // - Request is stateful or node-bound (cacheExclusionReason)
@@ -4927,8 +4930,9 @@ func (rpcss *RPCSmartRouterServer) tryCacheWriteResolved(
 	relayResult *common.RelayResult,
 	resolvedBlock *int64,
 ) {
-	// Skip if cache is not active (nil interface: server wired without a backend)
-	if rpcss.cache == nil || !rpcss.cache.CacheActive() {
+	// Skip if relay caching is off, or the cache is not active (nil interface: server wired
+	// without a backend)
+	if rpcss.relayCacheDisabled || rpcss.cache == nil || !rpcss.cache.CacheActive() {
 		return
 	}
 
@@ -5401,8 +5405,10 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 	// attempted iff it is itself active — a
 	// healthy secondary keeps serving while the primary is down or unconfigured.
 	crossValidationEnabled := selection == relaycore.CrossValidation && crossValidationParams != nil
-	primaryCacheActive := rpcss.cache != nil && rpcss.cache.CacheActive()
-	secondaryCacheActive := rpcss.secondaryCacheActive()
+	// With relay caching off (--disable-relay-cache) no tier is asked: both report "off" and the
+	// request goes to an upstream. The backend is then there for shared state alone.
+	primaryCacheActive := !rpcss.relayCacheDisabled && rpcss.cache != nil && rpcss.cache.CacheActive()
+	secondaryCacheActive := !rpcss.relayCacheDisabled && rpcss.secondaryCacheActive()
 
 	// What the tiers did on THIS attempt, carried onto every result this attempt
 	// produces so the caller can read it off the reply instead of racing the

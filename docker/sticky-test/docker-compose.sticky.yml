@@ -39,6 +39,9 @@ x-router: &router
     # affinity table, and the sticky phase MUST fail. A harness that passes either way
     # is not measuring anything.
     - "--shared-state=${STICKY_SHARED_STATE:-true}"
+    # Relay caching off: the cache-be pod then holds the claims and nothing else. The sticky
+    # phase must pass either way, since a claim never rode on a cached reply.
+    - "--disable-relay-cache=${STICKY_DISABLE_RELAY_CACHE:-false}"
     # Metrics default to disabled; the harness needs them to read the sticky claim
     # outcomes, which are how an operator tells a wired feature from a firing one.
     - "--metrics-listen-address"
