@@ -113,6 +113,37 @@ func TestProbeCycle_ReEnablesRecoveredEndpoint(t *testing.T) {
 	require.Equal(t, []string{"provider1"}, recovered, "recovery restores the provider's routing state (F2)")
 }
 
+// TestProbeCycle_ReEnabledButHeadStalledKeepsProviderBlocked (MAG-4737): the probe turns a url back
+// on from good polls, but the url is still head-stalled, so it cannot take traffic. The probe must
+// not let the provider back in: selection would find nothing to dial and block it again at once.
+// The stall comes off only in the head-stall step, which releases the provider behind its own
+// IsUsable check.
+func TestProbeCycle_ReEnabledButHeadStalledKeepsProviderBlocked(t *testing.T) {
+	const url = "http://ep:8545"
+	base := time.Unix(1_700_000_000, 0)
+
+	dc := ep(url, "provider1", false)
+	require.True(t, dc.Endpoint.AddStateReason(lavasession.EndpointDisableHeadStalled, base, 1000))
+	endpoints := []*lavasession.EndpointWithDirectConnection{dc}
+
+	var recovered []string
+	onRecover := func(p string) { recovered = append(recovered, p) }
+	for i := 1; i <= int(probeCfg().ReEnableHysteresis); i++ {
+		pollTime := base.Add(time.Duration(i) * time.Second)
+		now := pollTime.Add(time.Millisecond)
+		getObs := func(string) (endpointstate.EndpointObservation, bool) {
+			// Within the lag tolerance of the tip, so the poll counts as keeping up: the one shape in
+			// which a stalled url is turned back on.
+			return freshObs(1000, now.Add(-time.Second), pollTime, 20*time.Millisecond), true
+		}
+		runProbeCycleCore(endpoints, getObs, 1005, true, provideroptimizer.SyncReference{}, now, probeCfg(), nil, onRecover, nil)
+	}
+
+	require.True(t, dc.Endpoint.Enabled, "precondition: the probe turned the url back on")
+	require.False(t, dc.Endpoint.IsUsable(), "precondition: the url is still held out by the stall")
+	require.Empty(t, recovered, "a url that cannot take traffic must not release its provider")
+}
+
 // TestProbeCycle_FailedPollDoesNotReEnable: a disabled endpoint whose last poll FAILED
 // (ConsecutivePollFailures > 0) is never re-enabled — PollHealthy is false even if a stale relay keeps
 // ObservedAt fresh (F1: recovery is poll-driven, and a trailing failure invalidates it).
