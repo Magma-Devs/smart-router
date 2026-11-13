@@ -1,6 +1,7 @@
 package rpcInterfaceMessages
 
 import (
+	"bytes"
 	"fmt"
 	"net/url"
 	"strings"
@@ -128,8 +129,10 @@ func extractErrorMessage(data []byte, httpStatusCode int) string {
 	return fmt.Sprintf("HTTP %d", httpStatusCode)
 }
 
-// GetParams will be deprecated after we remove old client
-// Currently needed because of parser.RPCInput interface
+// GetParams is the request's parameters as the block parser (parser.RPCInput) reads them: the
+// spec path's {placeholders} by name, the URL query, and the fields of a JSON body. A path or
+// query value wins over a body field of the same name. A body that is not a JSON object (an
+// array, a scalar) is the parameters only when the path and query name none.
 func (rm RestMessage) GetParams() interface{} {
 	urlObj, err := url.Parse(rm.Path)
 	if err != nil {
@@ -150,10 +153,38 @@ func (rm RestMessage) GetParams() interface{} {
 	for key, values := range urlObj.Query() {
 		parameters[key] = strings.Join(values, ",")
 	}
+	body := rm.bodyParams()
+	if fields, ok := body.(map[string]interface{}); ok {
+		for key, value := range fields {
+			if _, named := parameters[key]; !named {
+				parameters[key] = value
+			}
+		}
+	} else if body != nil && len(parameters) == 0 {
+		return body
+	}
 	if len(parameters) == 0 {
 		return nil
 	}
 	return parameters
+}
+
+// bodyParams is the request body decoded as JSON, or nil when there is none or it is not JSON.
+//
+// A method that carries a body names its block there: TRX asks for one as
+// /wallet/getblockbynum {"num": N}, EOS as /v1/chain/get_block {"block_num_or_id": N}, the
+// Rosetta API (ICP) as /block {"block_identifier": {"index": N}}, each spec reading it with
+// PARSE_CANONICAL. Without the body those requests parse as NOT_APPLICABLE, and the spec's
+// archive rule never sends an old block to an archive node (MAG-5307).
+func (rm RestMessage) bodyParams() interface{} {
+	if len(bytes.TrimSpace(rm.Msg)) == 0 {
+		return nil
+	}
+	var body interface{}
+	if err := json.Unmarshal(rm.Msg, &body); err != nil {
+		return nil
+	}
+	return body
 }
 
 // GetResult will be deprecated after we remove old client
