@@ -110,9 +110,9 @@ func (c *Config) YAML() string {
 //
 // The router verifies every node url over its own connection and keeps the
 // provider while it has an http url left: the base url carries base traffic, the
-// ws url subscriptions (a spec that subscribes needs one unless the router runs
-// with --skip-websocket-verification), and each addon url the capability it
-// declares. This emitter lays out whatever the probe confirmed; it doesn't decide
+// ws url subscriptions (without one, a provider on a spec that subscribes serves
+// everything else and publishes the websocket's missing-url), and each addon url
+// the capability it declares. This emitter lays out whatever the probe confirmed; it doesn't decide
 // which capabilities are supported.
 func writeRPCBlock(b *strings.Builder, key string, ups []Upstream) {
 	fmt.Fprintf(b, "%s:\n", key)
