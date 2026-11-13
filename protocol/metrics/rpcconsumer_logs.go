@@ -63,6 +63,14 @@ func (rpccl *RPCConsumerLogs) SetRelayNodeErrorMetric(chainId, apiInterface, pro
 	rpccl.consumerOptimizerQoSClient.SetNodeErrorToProvider(providerAddress, chainId)
 }
 
+func (rpccl *RPCConsumerLogs) SetRelayNodeResultMetric(chainId, apiInterface, providerAddress, method string) {
+	if providerAddress == "" {
+		// a reply with no provider (the cache) is not an endpoint's answer
+		return
+	}
+	rpccl.consumerMetricsManager.SetRelayNodeResultMetric(chainId, apiInterface, providerAddress, method)
+}
+
 func (rpccl *RPCConsumerLogs) SetCrossValidationMetric(
 	chainId, apiInterface, method string,
 	success bool,

@@ -3245,6 +3245,8 @@ type cvGuardMetrics struct{}
 
 func (cvGuardMetrics) SetRelayNodeErrorMetric(chainId, apiInterface, providerAddress, method string) {
 }
+func (cvGuardMetrics) SetRelayNodeResultMetric(chainId, apiInterface, providerAddress, method string) {
+}
 func (cvGuardMetrics) GetChainIdAndApiInterface() (string, string) { return "LAVA", "rest" }
 
 // TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions is the
