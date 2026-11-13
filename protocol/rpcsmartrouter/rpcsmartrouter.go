@@ -4334,8 +4334,10 @@ func (rpsr *RPCSmartRouter) publishVerificationFailedLocked(chainKey string, inp
 // The websocket is one of the provider's services here (MAG-3950). A ws(s) url carries
 // no relay, only subscriptions (MAG-3477), so a refused one costs the provider its
 // websocket: scope=service when no ws(s) url of it is left, scope=url while another
-// serves. A provider with no ws(s) url on a chain that subscribes is published as the
-// websocket's missing-url.
+// serves. A refused url is read from the list the admission verified, the dialed one
+// with its generated per-path urls (MAG-4214). A provider with no ws(s) url on a chain
+// that subscribes is published as the websocket's missing-url; its configured urls say so
+// as the dialed ones would, since expanding a url never changes its transport.
 func refusalsOf(chainParser chainlib.ChainParser, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) []metrics.ProviderVerificationFailure {
 	refused, refusedURLs := admission.Refused(), admission.RefusedURLs()
 	failures := make([]metrics.ProviderVerificationFailure, 0, len(refused)+len(refusedURLs)+1)
@@ -4349,9 +4351,9 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *routersession.RPCSta
 	urlFailures := make([]metrics.ProviderVerificationFailure, 0, len(refusedURLs))
 	for _, index := range refusedURLs {
 		failure := metrics.ProviderVerificationFailure{Scope: metrics.VerificationScopeURL, Check: failureCheck(admission.URLRefusal(index))}
-		if index < len(provider.NodeUrls) && chainlib.IsWebSocketURL(provider.NodeUrls[index].Url) {
+		if url, ok := admission.URLAt(index); ok && chainlib.IsWebSocketURL(url.Url) {
 			failure.Service = chainlib.WebSocketExtension
-			if !websocketLeft(provider, admission) {
+			if !websocketLeft(chainParser, provider, admission) {
 				failure.Scope = metrics.VerificationScopeService
 			}
 		}
@@ -4379,10 +4381,16 @@ func refusalsOf(chainParser chainlib.ChainParser, provider *routersession.RPCSta
 	return failures
 }
 
-// websocketLeft reports whether a ws(s) url of the provider is still admitted.
-func websocketLeft(provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
-	for index, url := range provider.NodeUrls {
-		if chainlib.IsWebSocketURL(url.Url) && !admission.URLRefused(index) {
+// websocketLeft reports whether a ws(s) url the provider dials is still admitted. It
+// reads the dialed list, generated per-path urls included, and finds each url's verdict
+// by value, as servedElsewhere does (MAG-4214).
+func websocketLeft(chainParser chainlib.ChainParser, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) bool {
+	urls := provider.NodeUrls
+	if chainParser != nil {
+		urls = dialedNodeUrls(urls, chainParser, provider.ApiInterface)
+	}
+	for _, url := range urls {
+		if chainlib.IsWebSocketURL(url.Url) && !admission.RefusesURL(url) {
 			return true
 		}
 	}

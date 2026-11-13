@@ -603,8 +603,8 @@ func (a *ProviderAdmission) throttleURL(index int, cause error) {
 	}
 }
 
-// URLRefused reports whether the configured node url at this position could not be
-// dialed or failed a check no single service owns. The router builds no endpoint
+// URLRefused reports whether the node url at this position of the list the pass
+// verified (URLAt) could not be dialed or failed a check no single service owns. The router builds no endpoint
 // for it and hands it no subscription.
 func (a ProviderAdmission) URLRefused(index int) bool {
 	_, refused := a.refusedURLs[index]
@@ -622,6 +622,16 @@ func (a ProviderAdmission) RefusesURL(url common.NodeUrl) bool {
 		}
 	}
 	return false
+}
+
+// URLAt is the node url the pass verified at this position. Positions are into that
+// list, the dialed one with its generated per-path urls (MAG-4214), not into the
+// configured one. ok is false for a position the pass did not verify.
+func (a ProviderAdmission) URLAt(index int) (url common.NodeUrl, ok bool) {
+	if index < 0 || index >= len(a.urls) {
+		return common.NodeUrl{}, false
+	}
+	return a.urls[index], true
 }
 
 // URLRefusal is why the node url at this position was refused, nil when it was not.

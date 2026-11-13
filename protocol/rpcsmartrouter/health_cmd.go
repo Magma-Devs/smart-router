@@ -446,11 +446,12 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 	// A provider serves no subscriptions with no ws(s) url on a chain that subscribes, and
 	// with ws(s) urls the router refuses every one of: the metric publishes both as the
 	// websocket service (refusalsOf, websocketLeft), so each admitted row says so too.
+	// validations are by position in the dialed list, so that is the list it reads.
 	noSubscriptions := ""
 	switch {
 	case chainlib.MissingWebsocket(endpoint.NodeUrls, chainParser):
 		noSubscriptions = noWebsocketReason
-	case everyWebsocketRefused(provider.nodeUrls, validations):
+	case everyWebsocketRefused(endpoint.NodeUrls, validations):
 		noSubscriptions = noWebsocketAdmittedReason
 	}
 
@@ -477,7 +478,8 @@ const noWebsocketReason = "no ws(s) node url: serves no subscriptions"
 const noWebsocketAdmittedReason = "no ws(s) node url admitted: serves no subscriptions"
 
 // everyWebsocketRefused reports whether a provider has a ws(s) url and the router
-// refuses each one it has, as websocketLeft reads the admission.
+// refuses each one it has, as websocketLeft reads the admission. urls is the list the
+// validations are by position in: the dialed one (MAG-4214).
 func everyWebsocketRefused(urls []commonlib.NodeUrl, validations []chainlib.NodeURLValidation) bool {
 	sockets := 0
 	for i, url := range urls {
