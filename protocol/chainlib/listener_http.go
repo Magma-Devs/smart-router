@@ -100,6 +100,10 @@ func (apil *chainListenerBase) relayHTTP(spec httpRelaySpec) fiber.Handler {
 				if status, body, loggedReply, ok := spec.refusal(err, msgSeed); ok {
 					apil.logger.LogRequestAndResponse(spec.logModule, true, req.logMethod, req.logPath, req.loggedBody, loggedReply, msgSeed, time.Since(startTime), err)
 					fiberCtx.Status(status)
+					// A refusal is made before any provider is asked, so no relay ran to put the
+					// request's headers on it. The request id goes on here, the one the body's guid
+					// and the router's log lines carry (MAG-4351).
+					fiberCtx.Set(common.GUID_HEADER_NAME, msgSeed)
 					return addHeadersAndSendBytes(fiberCtx, reply.GetMetadata(), body)
 				}
 			}

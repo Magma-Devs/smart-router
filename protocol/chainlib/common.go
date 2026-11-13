@@ -361,8 +361,10 @@ func convertToJsonError(errorMsg string) []byte {
 	return jsonResponse
 }
 
-// graphQLRefusalStatus is the HTTP status the GraphQL listener answers a request it refuses by one
-// of its own limits with (MAG-4577).
+// graphQLRefusalStatus is the HTTP status the GraphQL listener answers a request it refuses with:
+// one past the router's own limits (MAG-4577), one the router and the node would read differently
+// (MAG-4908), and one the router cannot read (MAG-4351, whose owner decided 400 on 2026-11-09; the
+// GraphQL-over-HTTP draft answers a parse failure with 400 too).
 //
 // 400, for three reasons. The request itself is the reason and no retry of it can succeed, which is
 // the 4xx half of the status line and the whole point of the change: a 500 told every alert rule and
@@ -374,8 +376,8 @@ func convertToJsonError(errorMsg string) []byte {
 // length, which is not what these limits measure: a query with 301 root fields can be a few hundred
 // bytes.
 //
-// ONE constant for the three limits, so the owner's answer is one edit. The router owner was asked
-// to confirm 400 against 413 and 422 on MAG-4577; the ticket records the choice as theirs.
+// ONE constant for every refusal, so the owner's answer is one edit. The router owner was asked to
+// confirm 400 against 413 and 422 on MAG-4577; the ticket records the choice as theirs.
 const graphQLRefusalStatus = fiber.StatusBadRequest
 
 // convertToGraphQLError returns a GraphQL response carrying one error, which is what a GraphQL
@@ -395,7 +397,13 @@ const graphQLRefusalStatus = fiber.StatusBadRequest
 // guid goes in `extensions`, which the specification reserves for exactly this. It is the id the
 // router's own log line carries, so support can still join a complaint to the request, which the
 // old body gave up only because it was unreadable.
-func convertToGraphQLError(message, guid string) []byte {
+//
+// code goes in `extensions` too, where GraphQL servers put an error's code: GRAPHQL_PARSE_FAILED
+// for a query that does not parse, REQUEST_REFUSED for any other request the router cannot read
+// (MAG-4351). Empty leaves it out, which is the limits' and MAG-4908's reply as decided (MAG-4577).
+// The router's own error field (`router_error` in the rulebook) is not written yet: its name waits
+// on one naming decision for every interface, and GraphQL follows it in MAG-4911.
+func convertToGraphQLError(message, code, guid string) []byte {
 	type graphQLErrorEntry struct {
 		Message    string            `json:"message"`
 		Extensions map[string]string `json:"extensions,omitempty"`
@@ -405,8 +413,15 @@ func convertToGraphQLError(message, guid string) []byte {
 	}{
 		Errors: []graphQLErrorEntry{{Message: message}},
 	}
+	extensions := map[string]string{}
+	if code != "" {
+		extensions["code"] = code
+	}
 	if guid != "" {
-		body.Errors[0].Extensions = map[string]string{"guid": guid}
+		extensions["guid"] = guid
+	}
+	if len(extensions) > 0 {
+		body.Errors[0].Extensions = extensions
 	}
 	jsonResponse, err := json.Marshal(body)
 	if err != nil {

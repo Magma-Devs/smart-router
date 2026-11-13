@@ -1,7 +1,6 @@
 package rpcInterfaceMessages
 
 import (
-	"errors"
 	"net/http"
 	"testing"
 
@@ -453,6 +452,8 @@ func TestParseGraphQLMsgRejectsSubscriptions(t *testing.T) {
 	// the read named checkpoints.
 	_, err := ParseGraphQLMsg([]byte(`{"query":"subscription { checkpoints { sequenceNumber } }"}`))
 	require.ErrorContains(t, err, "subscriptions are not served")
+	// Refused, and sent to no provider (MAG-4351, MAG-4577).
+	require.Equal(t, GraphQLRequestRefusedCode, GraphQLRefusalFrom(err).Code())
 }
 
 func TestGraphQLMessageRawRequestHash(t *testing.T) {
@@ -575,12 +576,66 @@ func TestParseGraphQLMsgRefusesKeysTheNodeWouldReadDifferently(t *testing.T) {
 		})
 	}
 
-	// A body the check cannot read as an object is the decoder's to report, as before.
-	for _, body := range []string{`["query"]`, `{"query":`} {
+	// A body the check cannot read as an object is the envelope decoder's to report. That used to be
+	// an error and not a refusal, answered 500 until MAG-4351 decided the unreadable family; it is now
+	// that family's refusal, with its code, rather than this check's.
+	for body, wantMessage := range map[string]string{
+		`["query"]`: "graphql request body is a JSON array",
+		`{"query":`: "graphql request body is not JSON",
+	} {
 		_, err := ParseGraphQLMsg([]byte(body))
-		require.Error(t, err, body)
-		require.False(t, errors.Is(err, ErrGraphQLRequestRefused), "not a refusal: %s", body)
-		require.ErrorContains(t, err, "failed unmarshalling graphql request body")
+		require.ErrorIs(t, err, ErrGraphQLRequestRefused, body)
+		require.Equal(t, GraphQLRequestRefusedCode, GraphQLRefusalFrom(err).Code(), body)
+		require.ErrorContains(t, err, wantMessage, body)
+	}
+}
+
+// TestParseGraphQLMsgRefusesWhatItCannotRead is MAG-4351, as its owner decided on 2026-11-09: every
+// request the router cannot read is a refusal with a code. GRAPHQL_PARSE_FAILED is a query the
+// parser cannot read; REQUEST_REFUSED is the body, a member, the operation, a fragment or a
+// subscription. The message is the caller's to read, so it is written from the decoders' typed
+// fields and never carries their error text, which names the router's Go types.
+func TestParseGraphQLMsgRefusesWhatItCannotRead(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, wantCode, wantMessage string
+	}{
+		{"a syntax error", `{"query":"{ checkpoint { sequenceNumber }"}`, GraphQLParseFailedCode, "failed parsing graphql query: Expected Name, found <EOF> (line 1, column 32)"},
+		{"a query that is not GraphQL", `{"query":"not graphql at all"}`, GraphQLParseFailedCode, `failed parsing graphql query: Unexpected Name "not" (line 1, column 1)`},
+		{"a string the lexer cannot read", `{"query":"{ a(\"x) }"}`, GraphQLParseFailedCode, "failed parsing graphql query: "},
+		{"an empty body", ``, GraphQLRequestRefusedCode, "graphql request body is empty"},
+		{"a body of whitespace", " \n\t", GraphQLRequestRefusedCode, "graphql request body is empty"},
+		{"a body that is not JSON", `not json at all`, GraphQLRequestRefusedCode, "graphql request body is not JSON"},
+		{"a body cut short", `{"query":`, GraphQLRequestRefusedCode, "graphql request body is not JSON"},
+		{"a body with more after the object", `{"query":"{ chainIdentifier }"} {}`, GraphQLRequestRefusedCode, "graphql request body is not JSON"},
+		{"a batch", `[{"query":"{ chainIdentifier }"}]`, GraphQLRequestRefusedCode, "graphql request body is a JSON array: batched requests are not served"},
+		{"a string body", `"{ chainIdentifier }"`, GraphQLRequestRefusedCode, "graphql request body is not a JSON object"},
+		{"a null body", `null`, GraphQLRequestRefusedCode, "graphql request body is not a JSON object"},
+		{"a query that is not a string", `{"query":5}`, GraphQLRequestRefusedCode, `graphql request member "query" must be a string`},
+		{"an operation name that is not a string", `{"query":"{ chainIdentifier }","operationName":["A"]}`, GraphQLRequestRefusedCode, `graphql request member "operationName" must be a string`},
+		{"variables that are a number", `{"query":"{ chainIdentifier }","variables":7}`, GraphQLRequestRefusedCode, `graphql request member "variables" must be an object`},
+		{"variables that are an array", `{"query":"{ chainIdentifier }","variables":[1]}`, GraphQLRequestRefusedCode, `graphql request member "variables" must be an object`},
+		{"a variable the decoder cannot hold", `{"query":"{ chainIdentifier }","variables":{"n":1e999}}`, GraphQLRequestRefusedCode, `graphql request member "variables" holds a value the router cannot read`},
+		{"an empty query", `{"query":"   "}`, GraphQLRequestRefusedCode, "graphql request carries no query"},
+		{"a null query", `{"query":null}`, GraphQLRequestRefusedCode, "graphql request carries no query"},
+		{"no query member", `{"variables":{}}`, GraphQLRequestRefusedCode, "graphql request carries no query"},
+		{"a document of fragments only", `{"query":"fragment F on Query { chainIdentifier }"}`, GraphQLRequestRefusedCode, "graphql document defines no operation"},
+		{"two operations and no operation name", `{"query":"query A { chainIdentifier } query B { checkpoint { digest } }"}`, GraphQLRequestRefusedCode, "graphql document defines multiple operations and the request names none"},
+		{"an operation name that matches none", `{"query":"query A { chainIdentifier }","operationName":"Missing"}`, GraphQLRequestRefusedCode, `graphql document defines no operation named "Missing"`},
+		{"an undefined fragment", `{"query":"{ ...Missing }"}`, GraphQLRequestRefusedCode, `graphql query spreads undefined fragment "Missing"`},
+		{"a cyclic fragment", `{"query":"fragment A on Query { ...B } fragment B on Query { ...A } { ...A }"}`, GraphQLRequestRefusedCode, `graphql fragment "A" is cyclic`},
+		{"a subscription", `{"query":"subscription { checkpoints { sequenceNumber } }"}`, GraphQLRequestRefusedCode, "graphql subscriptions are not served over HTTP POST"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseGraphQLMsg([]byte(tc.body))
+			refusal := GraphQLRefusalFrom(err)
+			require.NotNil(t, refusal, "a refusal, not an error the listener answers 500: %v", err)
+			require.ErrorIs(t, err, ErrGraphQLRequestRefused)
+			require.Equal(t, tc.wantCode, refusal.Code())
+			require.Contains(t, refusal.ClientMessage(), tc.wantMessage)
+			for _, decoderText := range []string{"graphQLRequestEnvelope", "Go struct", "Go value", "input:"} {
+				require.NotContains(t, refusal.ClientMessage(), decoderText, "a decoder's own text")
+			}
+		})
 	}
 }
 
