@@ -44,8 +44,7 @@ references by identity (`CHAIN_TX_ALREADY_KNOWN`, `CHAIN_BLOCK_NOT_FOUND`,
 Invariants the router enforces at run time, for every spec from every source:
 
 1. A write fans out once, then stops, unless every failure was a rate limit; no row may name a
-   rate-limit verdict (§4, §5.3). Nothing re-sends a write: not a retry, not a WebSocket restore
-   (§5.7).
+   rate-limit verdict (§4, §5.3).
 2. No spec row runs ahead of the locked prefix (§3).
 3. A row can't name a `PROTOCOL_*`, rate-limit, `CHAIN_TX_ALREADY_KNOWN` or `UNKNOWN_ERROR` verdict;
    a spec can't define a rate-limit or internal verdict or redefine a router-owned name or code.
@@ -603,11 +602,8 @@ ref missing, not an archive, nothing parses) the router boots on the bundled spe
   (`AppendRelayFailure`); anything else leaves it alone. Today every refusal but a 429 counts a
   failure (`direct_ws_subscription_manager.go:444-458`, called at `:645, 656`), and a delivered
   error frame ends the subscription with no count and no health effect (`:1386-1398`).
-- Selection, retry, restore and teardown are unchanged for reads. A write subscription (a stateful
-  subscribe api, such as submit-and-watch) is never restored by re-sending it (invariant 1): on an
-  upstream drop it ends without a resend, recorded as an unclear write in relay_end; what the client
-  is sent follows the rulebook's WebSocket chapter.
-- Connect, upgrade and transport failures keep the connection rules.
+- Selection, retry, restore and teardown are unchanged by this design. Connect, upgrade and
+  transport failures keep the connection rules.
 
 ## 6. Compatibility and release pair
 
@@ -789,9 +785,8 @@ shape covered, and keeps the bundled policy for any chain whose external policy 
 - WebSocket (§5.7), on `jsonrpc` and `tendermintrpc`: a refused subscribe and an error frame
   delivered to the subscription's error channel (injected there on `tendermintrpc`) are counted
   with their verdict and `apiInterface`; a client-fault refusal counts no failure, an unclassified
-  or at-fault one counts a failure, a rate-limited one holds the URL off; a read subscription is
-  restored as today; a submit-and-watch subscription whose upstream drops is not re-sent (the node
-  sees one submit) and is recorded as an unclear write.
+  or at-fault one counts a failure, a rate-limited one holds the URL off; restore and teardown are
+  unchanged.
 
 ### 8.3 Router repo tests (bad source, locks, fallback)
 
