@@ -15,8 +15,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/prometheus/client_golang/prometheus"
@@ -39,7 +39,7 @@ func headerValues(metadata []pairingtypes.Metadata, name string) []string {
 func appendHeadersFor(t *testing.T, srv *RPCSmartRouterServer, unavailable []string) []pairingtypes.Metadata {
 	t.Helper()
 	relayResult := &common.RelayResult{
-		ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+		ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 		Reply:        &pairingtypes.RelayReply{},
 	}
 	srv.appendHeadersToRelayResult(context.Background(), relayResult, 0, &MockRelayProcessorForHeaders{},
@@ -52,7 +52,7 @@ func TestExtensionUnavailableHeader_NamesTheDroppedExtension(t *testing.T) {
 	metadata := appendHeadersFor(t, &RPCSmartRouterServer{}, []string{"archive"})
 
 	require.Equal(t, []string{"archive"}, headerValues(metadata, common.EXTENSION_UNAVAILABLE_HEADER_NAME))
-	require.Equal(t, []string{"lava@provider1"}, headerValues(metadata, common.PROVIDER_ADDRESS_HEADER_NAME),
+	require.Equal(t, []string{"provider@provider1"}, headerValues(metadata, common.PROVIDER_ADDRESS_HEADER_NAME),
 		"the request is still served, and still says by whom")
 }
 
@@ -98,7 +98,7 @@ func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T)
 	srv := &RPCSmartRouterServer{
 		chainParser:    ethJsonRPCParser(t),
 		chainState:     chainState,
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
 	}
 	// The promotion needs a known head; without one the deep call below would not be promoted
 	// and the first case would pass without testing anything.
@@ -126,7 +126,7 @@ func TestExtensionUnavailableHeader_NamesOnlyWhatTheCallerAskedFor(t *testing.T)
 			require.Empty(t, protocolMessage.GetExtensions(), "no node offers archive, so it is never applied")
 
 			relayResult := &common.RelayResult{
-				ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+				ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 				Reply:        &pairingtypes.RelayReply{},
 			}
 			srv.appendHeadersToRelayResult(ctx, relayResult, 0, &MockRelayProcessorForHeaders{}, protocolMessage,
@@ -163,7 +163,7 @@ func TestExtensionUnavailableHeader_WarnRegisterSurvivesKeepAliveBufferReuse(t *
 	srv := &RPCSmartRouterServer{
 		chainParser:    ethJsonRPCParser(t),
 		chainState:     chainState,
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: spectypes.APIInterfaceJsonRPC},
 	}
 
 	app := fiber.New(fiber.Config{ReadBufferSize: 128 * 1024, WriteBufferSize: 128 * 1024})
@@ -178,7 +178,7 @@ func TestExtensionUnavailableHeader_WarnRegisterSurvivesKeepAliveBufferReuse(t *
 			return err
 		}
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 			Reply:        &pairingtypes.RelayReply{},
 		}
 		srv.appendHeadersToRelayResult(ctx, relayResult, 0, &MockRelayProcessorForHeaders{}, protocolMessage,
@@ -267,7 +267,7 @@ func TestExtensionUnavailableHeader_CountsEveryRequestAndOnlySpecExtensions(t *t
 	srv := &RPCSmartRouterServer{
 		chainParser:                ethJsonRPCParser(t),
 		chainState:                 chainState,
-		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: spec, ApiInterface: spectypes.APIInterfaceJsonRPC},
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: spec, ApiInterface: spectypes.APIInterfaceJsonRPC},
 		smartRouterEndpointMetrics: metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{}),
 	}
 	relay := func(extensions string) []string {
@@ -277,7 +277,7 @@ func TestExtensionUnavailableHeader_CountsEveryRequestAndOnlySpecExtensions(t *t
 			[]pairingtypes.Metadata{{Name: common.EXTENSION_OVERRIDE_HEADER_NAME, Value: extensions}})
 		require.NoError(t, err)
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 			Reply:        &pairingtypes.RelayReply{},
 		}
 		srv.appendHeadersToRelayResult(ctx, relayResult, 0, &MockRelayProcessorForHeaders{}, protocolMessage,

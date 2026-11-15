@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
 )
@@ -31,15 +31,15 @@ func TestCleanupStaleTrackers_DeletesTheRemovedURLsSeries(t *testing.T) {
 	t.Cleanup(m.Stop)
 
 	// Unique to this test: the metrics manager registers on the process-global registry.
-	const provider = "lava@mag4204CleanupProvider"
+	const provider = "provider@mag4204CleanupProvider"
 	const kept, dropped = "http://kept.mag4204:8545", "http://dropped.mag4204:8545"
 	mm := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	require.NotNil(t, mm)
 	mm.RegisterEndpoint("ETH1", "jsonrpc", kept, provider)
 	mm.RegisterEndpoint("ETH1", "jsonrpc", dropped, provider)
 
-	keptEp := &lavasession.Endpoint{NetworkAddress: kept, Enabled: true}
-	for _, ep := range []*lavasession.Endpoint{keptEp, {NetworkAddress: dropped, Enabled: true}} {
+	keptEp := &routersession.Endpoint{NetworkAddress: kept, Enabled: true}
+	for _, ep := range []*routersession.Endpoint{keptEp, {NetworkAddress: dropped, Enabled: true}} {
 		_, err := m.GetOrCreateTracker("", ep, nil)
 		require.NoError(t, err)
 	}
@@ -48,12 +48,12 @@ func TestCleanupStaleTrackers_DeletesTheRemovedURLsSeries(t *testing.T) {
 	require.Len(t, urlBlocks(t, provider), 2)
 
 	rpcss := &RPCSmartRouterServer{
-		listenEndpoint:              &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:              &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		endpointChainTrackerManager: m,
 		smartRouterEndpointMetrics:  mm,
 	}
-	sessions := map[uint64]*lavasession.ConsumerSessionsWithProvider{
-		0: {PublicLavaAddress: provider, Endpoints: []*lavasession.Endpoint{keptEp}},
+	sessions := map[uint64]*routersession.ConsumerSessionsWithProvider{
+		0: {PublicAddress: provider, Endpoints: []*routersession.Endpoint{keptEp}},
 	}
 	(&RPCSmartRouter{}).cleanupStaleTrackers("ETH1-jsonrpc", rpcss, sessions, nil)
 

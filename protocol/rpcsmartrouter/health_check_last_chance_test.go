@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,8 +17,8 @@ import (
 func disableEveryEndpoint(t *testing.T, fleet *healthRelayFleet) {
 	t.Helper()
 	for _, endpoint := range fleet.endpoints {
-		for i := uint64(0); i < lavasession.MaxConsecutiveConnectionAttempts; i++ {
-			endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+		for i := uint64(0); i < routersession.MaxConsecutiveConnectionAttempts; i++ {
+			endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
 		}
 		require.False(t, endpoint.IsEnabled(), "premise: the endpoint is switched off")
 	}
@@ -73,7 +73,7 @@ func sendTheLatestBlockRequestUnmarked(t *testing.T, fleet *healthRelayFleet) {
 	defer cancel()
 	message := fleet.craftedMessage(t)
 
-	usedProviders := lavasession.NewUsedProviders(nil)
+	usedProviders := routersession.NewUsedProviders(nil)
 	usedProviders.SetChainID(fleet.server.listenEndpoint.ChainID)
 	stateMachine, err := fleet.server.internalRelayStateMachine(ctx, usedProviders, message)
 	require.NoError(t, err)
@@ -81,7 +81,7 @@ func sendTheLatestBlockRequestUnmarked(t *testing.T, fleet *healthRelayFleet) {
 		fleet.server.rpcSmartRouterLogs, fleet.server, stateMachine)
 
 	err = fleet.server.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(message), relayProcessor, nil, nil)
-	if errors.Is(err, lavasession.PairingListEmptyError) {
+	if errors.Is(err, routersession.PairingListEmptyError) {
 		relayProcessor.GetUsedProviders().ClearUnwanted()
 		err = fleet.server.sendRelayToEndpoint(ctx, 1, relaycore.GetEmptyRelayState(message), relayProcessor, nil, nil)
 	}
@@ -116,8 +116,8 @@ func TestHealthCheck_ALentURLComesBackForAnyoneElse(t *testing.T) {
 func TestHealthCheck_ClearsTheFailuresOfAnEndpointThatIsOn(t *testing.T) {
 	fleet := newHealthRelayFleetAnswering(t, nil, `{"jsonrpc":"2.0","id":1,"result":"0x10"}`)
 	for _, endpoint := range fleet.endpoints {
-		for i := uint64(0); i < lavasession.MaxConsecutiveConnectionAttempts-1; i++ {
-			endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+		for i := uint64(0); i < routersession.MaxConsecutiveConnectionAttempts-1; i++ {
+			endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
 		}
 		require.True(t, endpoint.IsEnabled(), "premise: one failure short of the threshold, still on")
 	}
@@ -127,7 +127,7 @@ func TestHealthCheck_ClearsTheFailuresOfAnEndpointThatIsOn(t *testing.T) {
 
 	stillOn := 0
 	for _, endpoint := range fleet.endpoints {
-		endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+		endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
 		if endpoint.IsEnabled() {
 			stillOn++
 		}

@@ -7,8 +7,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/core"
 	"github.com/magma-Devs/smart-router/ecosystem/cache/redisstore"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/performance"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
@@ -33,7 +33,7 @@ func (observationlessBackend) Close() error                { return nil }
 // so a router on the RESP backend gets a peer store. A typed-nil *Cache (no --cache-be) and a
 // backend without the capability both yield nil — gate off, poll locally.
 func TestPeerObservationStore_WiresAnyCapableBackend(t *testing.T) {
-	endpoint := &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
+	endpoint := &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"}
 
 	mr := miniredis.RunT(t)
 	store, err := redisstore.NewWithClient(redis.NewClient(&redis.Options{Addr: mr.Addr()}), "sr")

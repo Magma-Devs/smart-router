@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,16 +28,16 @@ import (
 // threshold in a readable number of relays.
 func benchAfter(t *testing.T, value uint64) {
 	t.Helper()
-	original := lavasession.MaxConsecutiveConnectionAttempts
-	t.Cleanup(func() { lavasession.MaxConsecutiveConnectionAttempts = original })
-	lavasession.MaxConsecutiveConnectionAttempts = value
+	original := routersession.MaxConsecutiveConnectionAttempts
+	t.Cleanup(func() { routersession.MaxConsecutiveConnectionAttempts = original })
+	routersession.MaxConsecutiveConnectionAttempts = value
 }
 
 // directRelayHarness wires one endpoint to one upstream through the real relay path.
 type directRelayHarness struct {
 	rpcss    *RPCSmartRouterServer
-	session  *lavasession.SingleConsumerSession
-	endpoint *lavasession.Endpoint
+	session  *routersession.SingleConsumerSession
+	endpoint *routersession.Endpoint
 	// lostBroadcast is handed to relayInnerDirect as is; nil is a relay outside a broadcast.
 	lostBroadcast func(answeredWithNodeError bool) bool
 	// upstream is the endpoint's server; closing it makes the next dial refused.
@@ -85,29 +85,29 @@ func newDirectRelayHarnessServing(t *testing.T, handler http.HandlerFunc) *direc
 	upstream := httptest.NewServer(handler)
 	t.Cleanup(upstream.Close)
 
-	directConn, err := lavasession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: upstream.URL}, 5, "")
+	directConn, err := routersession.NewDirectRPCConnection(context.Background(), common.NodeUrl{Url: upstream.URL}, 5, "")
 	require.NoError(t, err)
 
-	endpoint := &lavasession.Endpoint{
+	endpoint := &routersession.Endpoint{
 		NetworkAddress:    upstream.URL,
 		Enabled:           true,
-		DirectConnections: []lavasession.DirectRPCConnection{directConn},
+		DirectConnections: []routersession.DirectRPCConnection{directConn},
 	}
-	cswp := &lavasession.ConsumerSessionsWithProvider{
-		PublicLavaAddress: "upstream-under-test",
-		PairingEpoch:      100,
-		Endpoints:         []*lavasession.Endpoint{endpoint},
+	cswp := &routersession.ConsumerSessionsWithProvider{
+		PublicAddress: "upstream-under-test",
+		PairingEpoch:  100,
+		Endpoints:     []*routersession.Endpoint{endpoint},
 	}
 
 	return &directRelayHarness{
 		// A nil metrics manager is safe: every setter on it is nil-guarded, and the counter this
 		// asserts on lives on the Endpoint, not in the metric.
 		rpcss: &RPCSmartRouterServer{
-			listenEndpoint: &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint: &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		},
-		session: &lavasession.SingleConsumerSession{
+		session: &routersession.SingleConsumerSession{
 			Parent: cswp,
-			Connection: &lavasession.DirectRPCSessionConnection{
+			Connection: &routersession.DirectRPCSessionConnection{
 				DirectConnection: directConn,
 				EndpointAddress:  upstream.URL,
 				Endpoint:         endpoint,
@@ -167,8 +167,8 @@ func TestRelayInnerDirect_CleanAnswerResetsTheCounter(t *testing.T) {
 	benchAfter(t, 5)
 	h := newDirectRelayHarness(t, http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":"0xabc"}`)
 
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
 
 	refusals, enabled := h.relay(t, false, "")
 	require.Zero(t, refusals, "a clean 2xx is positive proof the endpoint serves")
@@ -188,8 +188,8 @@ func TestRelayInnerDirect_OnProbationOnlyACleanAnswerRestoresTheFullBudget(t *te
 	})
 
 	// Switched off by the full budget of failures, then re-enabled by the probe loop's polls.
-	for i := uint64(0); i < lavasession.MaxConsecutiveConnectionAttempts; i++ {
-		h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+	for i := uint64(0); i < routersession.MaxConsecutiveConnectionAttempts; i++ {
+		h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
 	}
 	require.False(t, h.endpoint.IsEnabled(), "premise: the endpoint is switched off")
 	const k = 3
@@ -225,8 +225,8 @@ func TestRelayInnerDirect_BlamelessAnswerNeitherBlamesNorCertifies(t *testing.T)
 	h := newDirectRelayHarness(t, http.StatusOK,
 		`{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"transaction not found"}}`)
 
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
 
 	for i := 0; i < 3; i++ {
 		refusals, enabled := h.relay(t, true, "transaction not found")
@@ -244,8 +244,8 @@ func TestRelayInnerDirect_UnrecognisedStatusDoesNotCertifyHealth(t *testing.T) {
 	benchAfter(t, 5)
 	h := newDirectRelayHarness(t, http.StatusForbidden, `{"error":"go away"}`)
 
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
-	h.endpoint.MarkUnhealthy(lavasession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
+	h.endpoint.MarkUnhealthy(routersession.EndpointDisableNodeError)
 
 	refusals, _ := h.relay(t, false, "")
 	require.Equal(t, uint64(2), refusals,

@@ -8,8 +8,8 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -67,32 +67,32 @@ func (t reverifyTier) String() string {
 // each epoch tick.
 type chainReverifyInputs struct {
 	chainParser                chainlib.ChainParser
-	rpcEndpoint                *lavasession.RPCEndpoint
-	convertProvidersToSessions func([]*lavasession.RPCStaticProviderEndpoint) map[uint64]*lavasession.ConsumerSessionsWithProvider
-	configuredStatic           []*lavasession.RPCStaticProviderEndpoint
-	configuredBackup           []*lavasession.RPCStaticProviderEndpoint
+	rpcEndpoint                *routersession.RPCEndpoint
+	convertProvidersToSessions func([]*routersession.RPCStaticProviderEndpoint) map[uint64]*routersession.ConsumerSessionsWithProvider
+	configuredStatic           []*routersession.RPCStaticProviderEndpoint
+	configuredBackup           []*routersession.RPCStaticProviderEndpoint
 	// validateFn is the per-provider validation callback applyReverification
 	// dispatches to. Production leaves it nil and applyReverification falls back
 	// to validateProvider (real network probe). Tests inject a fake to exercise
 	// updateEpoch's orchestration without standing up upstreams.
-	validateFn func(context.Context, *lavasession.RPCStaticProviderEndpoint) error
+	validateFn func(context.Context, *routersession.RPCStaticProviderEndpoint) error
 	// recordAdmission publishes a freshly computed per-collection admission so the
 	// endpoint builder stops using the boot-time one. Nil in tests that do not
 	// build endpoints.
 	// It returns true when the admitted set actually moved, which is what tells
 	// applyReverification to rebuild that provider's session.
-	recordAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool
+	recordAdmission func(*routersession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool
 	// recordReverifiedAdmission is recordAdmission for an epoch pass: a url that
 	// fails for the first time keeps its place until it has failed
 	// reverifyDemoteThreshold passes running. Nil falls back to recordAdmission.
-	recordReverifiedAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool
+	recordReverifiedAdmission func(*routersession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool
 	// admissionFor reads the admission last published for a provider, so the
 	// subscription tiers leave out the urls it refused and a rate-limited pass can
 	// keep what the last one knew. Nil in tests that do not build endpoints.
-	admissionFor func(*lavasession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission
+	admissionFor func(*routersession.RPCStaticProviderEndpoint) chainlib.ProviderAdmission
 	// refusedFor returns what was last refused to a provider that keeps serving, as the
 	// metric publishes it (refusalsOf). Nil in tests that do not build endpoints.
-	refusedFor func(*lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure
+	refusedFor func(*routersession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure
 	// lastFailure is the check each provider last failed, keyed "<tier>|<name>" like
 	// demoteFailStreak. Written on every failed verification (boot, the retry loop,
 	// the epoch pass) and read only for a provider that is out of the pairing, so an
@@ -120,7 +120,7 @@ type chainReverifyInputs struct {
 	rateLimitHoldoff *holdoff.Registry
 	// urlStriking reports whether a url of the provider failed a pass it is still graced
 	// for (admissionRegistry.striking). Nil in tests that do not build endpoints.
-	urlStriking func(*lavasession.RPCStaticProviderEndpoint) bool
+	urlStriking func(*routersession.RPCStaticProviderEndpoint) bool
 	// retries is the chain's verification retry schedule (MAG-3950). Nil in tests that
 	// build chainReverifyInputs by hand; every method on it is nil-safe.
 	retries *retrySchedule
@@ -200,7 +200,7 @@ func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, e
 // countRefusals counts each service and node url this pass refused a provider it
 // admits, and each Warning check it failed, one failed run each. A retry counts only
 // the checks it ran, not the verdicts it kept from an earlier pass.
-func (inputs *chainReverifyInputs) countRefusals(tier reverifyTier, provider *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) {
+func (inputs *chainReverifyInputs) countRefusals(tier reverifyTier, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) {
 	if inputs.countFailedCheck == nil {
 		return
 	}
@@ -217,13 +217,151 @@ func failureCheck(err error) string {
 	return "unknown"
 }
 
-// holdoffURLKey is the URL tier's key for a probed provider: its first node URL, so two
-// providers sharing a vendor name but hitting different endpoints are held off apart.
-func holdoffURLKey(p *lavasession.RPCStaticProviderEndpoint) string {
-	if len(p.NodeUrls) > 0 && p.NodeUrls[0].Url != "" {
-		return p.NodeUrls[0].Url
+// reverifyNodeUrls is the list a re-verify pass verifies for a provider: the urls the router
+// dials (dialedNodeUrls), so a generated per-path url is its own position, as it is its own
+// endpoint for relays (MAG-4214). The hold-off entries, the skip set and the pass's per-url
+// results all index this one list (MAG-4732). With no chain parser (a test's validateFn) it is
+// the configured list.
+func reverifyNodeUrls(p *routersession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) []common.NodeUrl {
+	if chainParser == nil {
+		return p.NodeUrls
 	}
-	return p.Name
+	return dialedNodeUrls(p.NodeUrls, chainParser, p.ApiInterface)
+}
+
+// holdoffURLKeys is the URL tier's key of each of a probed provider's dialed urls
+// (reverifyNodeUrls), by position: the url itself, the key the relay path records a 429 under
+// for the endpoint it dialed (its NetworkAddress, base + path for a generated url). A 429 is
+// held on the url that answered it, so relay selection, which counts a provider's urls one by
+// one, keeps off that url and not a sibling (MAG-4733).
+func holdoffURLKeys(p *routersession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) []string {
+	urls := reverifyNodeUrls(p, chainParser)
+	if len(urls) == 0 {
+		return []string{p.Name}
+	}
+	keys := make([]string, len(urls))
+	for index, url := range urls {
+		keys[index] = url.Url
+		if keys[index] == "" {
+			keys[index] = p.Name
+		}
+	}
+	return keys
+}
+
+// holdoffEntry is where the hold-off keeps one node url: under the provider entry's key
+// (holdoff.ProviderKey) for a url that answers relays, and under the url alone for a
+// websocket url — the key the WS subscription path reads and writes. Relay selection never
+// counts a websocket url, so a 429 on it must not count toward the entry's escalation and
+// hold the entry's https urls with it.
+type holdoffEntry struct {
+	provider string
+	url      string
+}
+
+func holdoffEntries(providerKey string, p *routersession.RPCStaticProviderEndpoint, chainParser chainlib.ChainParser) []holdoffEntry {
+	urls := holdoffURLKeys(p, chainParser)
+	entries := make([]holdoffEntry, len(urls))
+	for index, url := range urls {
+		entries[index] = holdoffEntry{provider: providerKey, url: url}
+		if socket, err := chainlib.IsUrlWebSocket(url); err == nil && socket {
+			entries[index].provider = url
+		}
+	}
+	return entries
+}
+
+// urlPassResult is what one re-verify pass learned about one node url, for the hold-off.
+type urlPassResult struct {
+	// throttle is the rate limit the url met, nil when it met none.
+	throttle error
+	// answered: the url answered with something other than a rate limit.
+	answered bool
+	// notAsked: the pass left the url out because it was held off.
+	notAsked bool
+}
+
+// recordPassHoldoffs writes one pass's results into the hold-off. Results are merged per
+// registry key first, since the same url may be configured more than once (with different
+// services): a key met a rate limit when any of its urls did. Then every rate limit is
+// recorded before any answer: an answer drops the entry's escalation, so a url that answered
+// in this pass is free whatever the config order, and a url that answered never clears a
+// 429 the same pass met on the same url. A url the pass did not ask changes nothing.
+func recordPassHoldoffs(reg *holdoff.Registry, chainID, providerName string, entries []holdoffEntry, results []urlPassResult) {
+	type merged struct {
+		throttle error
+		index    int
+		answered bool
+	}
+	byEntry := map[holdoffEntry]*merged{}
+	var order []holdoffEntry
+	for index, entry := range entries {
+		result := results[index]
+		if result.notAsked {
+			continue
+		}
+		m := byEntry[entry]
+		if m == nil {
+			m = &merged{index: index}
+			byEntry[entry] = m
+			order = append(order, entry)
+		}
+		if result.throttle != nil && m.throttle == nil {
+			m.throttle, m.index = result.throttle, index
+		}
+		m.answered = m.answered || result.answered
+	}
+	for _, entry := range order {
+		m := byEntry[entry]
+		if m.throttle == nil {
+			continue
+		}
+		retryAfter, _ := common.RetryAfterFrom(m.throttle)
+		delay := reg.RecordRateLimit(entry.provider, entry.url, retryAfter)
+		utils.FormatWarning("re-verify: provider url rate-limited, backing off", m.throttle,
+			utils.LogAttr("chain", chainID),
+			utils.LogAttr("provider", providerName),
+			utils.LogAttr("url_index", m.index),
+			utils.LogAttr("holdoff", delay.String()),
+		)
+	}
+	for _, entry := range order {
+		if m := byEntry[entry]; m.throttle == nil && m.answered {
+			reg.RecordAnswer(entry.provider, entry.url)
+		}
+	}
+}
+
+// urlPassResults is what one probe learned per node url, for the hold-off. A url the
+// pass did not ask — held off, or a retry kept its verdicts without dialing it — is
+// not asked. A pass that says nothing per url (a test's validateFn) answers or limits
+// every url alike; a pass that never ran (a config error) sent nothing, so it answers
+// none of them.
+func urlPassResults(inputs *chainReverifyInputs, result reverifyProbe, urls int, held map[int]struct{}) []urlPassResult {
+	err, pass := result.err, result.admission
+	perURL := inputs.validateFn == nil && pass.Verified()
+	// A rate limit the pass does not tie to a url holds every url it asked, as it held
+	// the provider before.
+	untied := isRateLimitFailure(err) && (!perURL || pass.URLThrottle() == nil)
+	results := make([]urlPassResult, urls)
+	for index := range results {
+		r := &results[index]
+		if _, skipped := held[index]; skipped || (perURL && !pass.URLAsked(index)) {
+			r.notAsked = true
+			continue
+		}
+		switch {
+		case perURL:
+			r.throttle = pass.URLRateLimit(index)
+			r.answered = r.throttle == nil && common.DetectConnectionError(pass.URLRefusal(index)) == nil
+		case inputs.validateFn != nil:
+			r.answered = common.DetectConnectionError(err) == nil && !isRateLimitFailure(err)
+		}
+		if r.throttle == nil && untied {
+			r.throttle, r.answered = err, false
+		}
+	}
+	return results
 }
 
 // isRateLimitFailure reports whether a failed validation was the upstream refusing us for
@@ -274,10 +412,10 @@ func isRateLimitFailure(err error) bool {
 func applyReverification(
 	ctx context.Context,
 	inputs *chainReverifyInputs,
-	fresh map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	fresh map[uint64]*routersession.ConsumerSessionsWithProvider,
 	tier reverifyTier,
 	epoch uint64,
-) (map[uint64]*lavasession.ConsumerSessionsWithProvider, []*lavasession.ConsumerSessionsWithProvider, []string) {
+) (map[uint64]*routersession.ConsumerSessionsWithProvider, []*routersession.ConsumerSessionsWithProvider, []string) {
 	configured := inputs.configuredFor(tier)
 	if len(configured) == 0 {
 		return fresh, nil, nil
@@ -286,7 +424,7 @@ func applyReverification(
 }
 
 // configuredFor is one tier's configured providers.
-func (inputs *chainReverifyInputs) configuredFor(tier reverifyTier) []*lavasession.RPCStaticProviderEndpoint {
+func (inputs *chainReverifyInputs) configuredFor(tier reverifyTier) []*routersession.RPCStaticProviderEndpoint {
 	if tier == reverifyTierBackup {
 		return inputs.configuredBackup
 	}
@@ -295,7 +433,7 @@ func (inputs *chainReverifyInputs) configuredFor(tier reverifyTier) []*lavasessi
 
 // reverifyProbe is one provider's re-verification before its verdict is applied.
 type reverifyProbe struct {
-	provider *lavasession.RPCStaticProviderEndpoint
+	provider *routersession.RPCStaticProviderEndpoint
 	// err is the verdict: nil when the provider passed.
 	err error
 	// admission is what this pass admitted the provider for, before the merge with the
@@ -314,12 +452,21 @@ type reverifyProbe struct {
 // router lock: decideReverification applies them. The rate-limit hold-off is its own
 // registry, updated here:
 //
-// A provider that answered with a rate-limit is held off rather than re-probed. The skip
-// returns the rate-limit error itself, so the reconciliation reaches the same
-// inconclusive verdict it would have from a fresh 429 — membership unchanged, streak
-// untouched — without spending a request to learn it. Any other answer clears the
-// penalty: an upstream that is answering us again, even to report a genuine capability
-// failure, is no longer refusing us for load. A probe with no answer clears nothing.
+// A url held off after a rate limit is not asked: the pass would send it the request it
+// was told to stop sending. It reads as only rate-limited, so it keeps the verdict the
+// last pass gave it, and the provider's other urls are still checked: a url refused for a
+// capability problem comes back while a sibling is busy (MAG-4733). Only when every url
+// is held is the probe skipped, returning the rate-limit error itself, so the
+// reconciliation reaches the same inconclusive verdict it would have from a fresh 429 —
+// membership unchanged, streak untouched — without spending a request to learn it.
+//
+// Each url is held or cleared on its own key (recordPassHoldoffs): a 429 holds the url
+// that answered it. Any other answer clears the url: an upstream that is answering us
+// again, even to report a genuine capability failure, is no longer refusing us for load.
+// A url that got no answer (timeout, refused or reset connection, DNS) clears nothing: a
+// gateway enforcing a ban often drops the connection rather than answering, and the
+// url's entries are shared — RecordAnswer also drops the per-url chain tracker's
+// hold-off and strikes (MAG-4165).
 //
 // With only, a provider named in it re-runs only those checks and keeps its other
 // verdicts from its last pass: previous's, else the admission last recorded for it (a
@@ -327,7 +474,7 @@ type reverifyProbe struct {
 func probeReverification(
 	ctx context.Context,
 	inputs *chainReverifyInputs,
-	providers []*lavasession.RPCStaticProviderEndpoint,
+	providers []*routersession.RPCStaticProviderEndpoint,
 	only map[string][]chainlib.CheckID,
 	previous map[string]chainlib.ProviderAdmission,
 ) []reverifyProbe {
@@ -335,21 +482,25 @@ func probeReverification(
 	if registry == nil {
 		registry = holdoff.Shared
 	}
-	probe := func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) reverifyProbe {
+	probe := func(c context.Context, p *routersession.RPCStaticProviderEndpoint) reverifyProbe {
 		result := reverifyProbe{provider: p, started: time.Now(), ran: only[p.Name]}
-		urlKey := holdoffURLKey(p)
-		if registry.HeldOff(p.Name, urlKey) {
-			utils.LavaFormatDebug("re-verify: provider held off after a rate-limit, skipping probe",
+		// The provider on this chain and api-interface, as relay selection keys it.
+		providerKey := holdoff.ProviderKey(inputs.rpcEndpoint.ChainID, inputs.rpcEndpoint.ApiInterface, p.Name)
+		entries := holdoffEntries(providerKey, p, inputs.chainParser)
+		held := map[int]struct{}{}
+		for index, entry := range entries {
+			if registry.HeldOff(entry.provider, entry.url) {
+				held[index] = struct{}{}
+			}
+		}
+		if len(held) == len(entries) {
+			utils.FormatDebug("re-verify: every url of the provider held off after a rate-limit, skipping probe",
 				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 				utils.LogAttr("provider", p.Name),
 			)
 			result.err = common.StatusCodeError429
 			return result
 		}
-		// throttle is the rate limit a pass that otherwise succeeded met on one of the
-		// provider's urls, and unanswered why the url the hold-off is keyed by
-		// (holdoffURLKey: the first one) got no answer when the provider passed without it.
-		var throttle, unanswered error
 		if inputs.validateFn != nil {
 			result.err = inputs.validateFn(c, p)
 		} else {
@@ -362,43 +513,10 @@ func probeReverification(
 			if !failed && inputs.admissionFor != nil {
 				last = inputs.admissionFor(p)
 			}
-			result.admission, result.err = revalidateProviderCollections(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout, last, result.ran)
+			result.admission, result.err = revalidateProviderCollections(c, p, inputs.chainParser, SpecReVerifyAttemptTimeout, last, result.ran, held)
 			result.validated = result.err == nil
-			if result.validated {
-				// A provider now passes on its other urls with its first one refused. That
-				// url's refusal is the pass's verdict on it: a dial or a request that got
-				// no answer leaves its hold-off as it was (MAG-4165).
-				if cause := result.admission.URLRefusal(0); common.DetectConnectionError(cause) != nil {
-					unanswered = cause
-				}
-				// Only a url that was rate-limited backs the provider off: the hold-off is
-				// the provider's, and relay selection skips a held provider for every
-				// request. A 429 on one add-on's own check (a premium method's own limit)
-				// says nothing about the base traffic the provider carries.
-				throttle = result.admission.URLThrottle()
-			}
 		}
-		if isRateLimitFailure(result.err) {
-			throttle = result.err
-		}
-		if throttle != nil {
-			retryAfter, _ := common.RetryAfterFrom(throttle)
-			delay := registry.RecordRateLimit(p.Name, urlKey, retryAfter)
-			utils.LavaFormatWarning("re-verify: provider rate-limited, backing off", throttle,
-				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
-				utils.LogAttr("provider", p.Name),
-				utils.LogAttr("holdoff", delay.String()),
-			)
-			return result
-		}
-		// A probe that got no answer (timeout, refused or reset connection, DNS) is not one:
-		// it clears nothing. A gateway enforcing a ban often drops the connection rather than
-		// answering, and the url's entries are shared — RecordAnswer also drops the per-url
-		// chain tracker's hold-off and strikes (MAG-4165). The same goes for the keyed url
-		// alone, when the provider passed on its others.
-		if common.DetectConnectionError(result.err) == nil && unanswered == nil {
-			registry.RecordAnswer(p.Name, urlKey)
-		}
+		recordPassHoldoffs(registry, inputs.rpcEndpoint.ChainID, p.Name, entries, urlPassResults(inputs, result, len(entries), held))
 		return result
 	}
 
@@ -434,12 +552,12 @@ func probeReverification(
 // probed: a retry probes only the providers that are due.
 func decideReverification(
 	inputs *chainReverifyInputs,
-	fresh map[uint64]*lavasession.ConsumerSessionsWithProvider,
+	fresh map[uint64]*routersession.ConsumerSessionsWithProvider,
 	tier reverifyTier,
 	epoch uint64,
 	probes []reverifyProbe,
 	carry bool,
-) (map[uint64]*lavasession.ConsumerSessionsWithProvider, []*lavasession.ConsumerSessionsWithProvider, []string) {
+) (map[uint64]*routersession.ConsumerSessionsWithProvider, []*routersession.ConsumerSessionsWithProvider, []string) {
 	activeNames := byName(fresh)
 	healthyNames := make(map[string]struct{}, len(probes))
 	decided := make([]reverifyProbe, 0, len(probes))
@@ -492,7 +610,7 @@ func decideReverification(
 		}
 	}
 
-	var toAdmit []*lavasession.RPCStaticProviderEndpoint
+	var toAdmit []*routersession.RPCStaticProviderEndpoint
 	if inputs.demoteFailStreak == nil {
 		inputs.demoteFailStreak = make(map[string]int)
 	}
@@ -506,7 +624,7 @@ func decideReverification(
 			switch {
 			case !wasActive:
 				toAdmit = append(toAdmit, p)
-				utils.LavaFormatInfo("re-verify: "+tier.String()+" provider recovered",
+				utils.FormatInfo("re-verify: "+tier.String()+" provider recovered",
 					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 					utils.LogAttr("provider", p.Name),
 				)
@@ -519,7 +637,7 @@ func decideReverification(
 				// recovered — or one newly refused — would not reach the pairing until
 				// the provider happened to be demoted and promoted (MAG-3326 review).
 				toAdmit = append(toAdmit, p)
-				utils.LavaFormatInfo("re-verify: rebuilding "+tier.String()+" provider, admitted services changed",
+				utils.FormatInfo("re-verify: rebuilding "+tier.String()+" provider, admitted services changed",
 					utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 					utils.LogAttr("provider", p.Name),
 				)
@@ -527,7 +645,7 @@ func decideReverification(
 				healthyNames[p.Name] = struct{}{}
 			}
 			delete(inputs.lastPass, streakKey)
-			inputs.retries.reconcile(tier, p.Name, probe.ran, inputs.retriesOf(p, probe.admission, nil), heldOffUntil(inputs.rateLimitHoldoff, p), true)
+			inputs.retries.reconcile(tier, p.Name, probe.ran, inputs.retriesOf(p, probe.admission, nil), heldOffUntil(inputs.rateLimitHoldoff, p, inputs.chainParser), true)
 			continue
 		}
 		inputs.rescheduleFailed(tier, p, probe.ran, probe.admission, err, true)
@@ -539,7 +657,7 @@ func decideReverification(
 			if wasActive {
 				healthyNames[p.Name] = struct{}{}
 			}
-			utils.LavaFormatWarning("re-verify: "+tier.String()+" rate-limited, treating as inconclusive", err,
+			utils.FormatWarning("re-verify: "+tier.String()+" rate-limited, treating as inconclusive", err,
 				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 				utils.LogAttr("provider", p.Name),
 				utils.LogAttr("active", wasActive),
@@ -558,7 +676,7 @@ func decideReverification(
 			// Already out of the pairing — nothing to demote, and the streak governs only the
 			// demote decision, so keep it clear (a later promote then gets a full grace budget).
 			delete(inputs.demoteFailStreak, streakKey)
-			utils.LavaFormatDebug("re-verify: failed-init "+tier.String()+" still failing",
+			utils.FormatDebug("re-verify: failed-init "+tier.String()+" still failing",
 				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 				utils.LogAttr("provider", p.Name),
 				utils.LogAttr("err", err.Error()),
@@ -572,7 +690,7 @@ func decideReverification(
 		streak := inputs.demoteFailStreak[streakKey]
 		if streak < reverifyDemoteThreshold {
 			healthyNames[p.Name] = struct{}{} // grace: stays paired this pass
-			utils.LavaFormatWarning("re-verify: active "+tier.String()+" failed but kept — under demote threshold", err,
+			utils.FormatWarning("re-verify: active "+tier.String()+" failed but kept — under demote threshold", err,
 				utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 				utils.LogAttr("provider", p.Name),
 				utils.LogAttr("consecutiveFailures", streak),
@@ -581,7 +699,7 @@ func decideReverification(
 			continue
 		}
 		delete(inputs.demoteFailStreak, streakKey)
-		utils.LavaFormatWarning("re-verify: demoting active "+tier.String(), err,
+		utils.FormatWarning("re-verify: demoting active "+tier.String(), err,
 			utils.LogAttr("chain", inputs.rpcEndpoint.ChainID),
 			utils.LogAttr("provider", p.Name),
 			utils.LogAttr("consecutiveFailures", streak),
@@ -593,10 +711,10 @@ func decideReverification(
 	// freshen-loop's idx semantics. Demoted sessions are surfaced to the caller
 	// (not closed here) so connection teardown happens *after* the session
 	// manager has swung to the new pairing — see updateEpoch.
-	next := make(map[uint64]*lavasession.ConsumerSessionsWithProvider, len(fresh))
-	var demoted []*lavasession.ConsumerSessionsWithProvider
+	next := make(map[uint64]*routersession.ConsumerSessionsWithProvider, len(fresh))
+	var demoted []*routersession.ConsumerSessionsWithProvider
 	for idx, s := range fresh {
-		if _, ok := healthyNames[s.PublicLavaAddress]; !ok {
+		if _, ok := healthyNames[s.PublicAddress]; !ok {
 			demoted = append(demoted, s)
 			continue
 		}
@@ -621,7 +739,7 @@ func decideReverification(
 // failing (chainlib.ProviderAdmission.Retries). A pass with no verdicts to read — a
 // test's validateFn, a provider config the router cannot use — leaves the whole pass
 // when it failed or left the provider degraded.
-func (inputs *chainReverifyInputs) retriesOf(p *lavasession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission, err error) []chainlib.CheckID {
+func (inputs *chainReverifyInputs) retriesOf(p *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission, err error) []chainlib.CheckID {
 	if refused, ok := chainlib.FailedPass(err); ok {
 		admission = refused
 	}
@@ -638,8 +756,8 @@ func (inputs *chainReverifyInputs) retriesOf(p *lavasession.RPCStaticProviderEnd
 // failed waits longer. A pass a rate limit kept from answering at all, with no verdict
 // to read, pushes back the checks it was due for past the hold-off instead. With count
 // false, a pass that ran every check does not push back the checks already waiting.
-func (inputs *chainReverifyInputs) rescheduleFailed(tier reverifyTier, p *lavasession.RPCStaticProviderEndpoint, ran []chainlib.CheckID, admission chainlib.ProviderAdmission, err error, count bool) {
-	notBefore := heldOffUntil(inputs.rateLimitHoldoff, p)
+func (inputs *chainReverifyInputs) rescheduleFailed(tier reverifyTier, p *routersession.RPCStaticProviderEndpoint, ran []chainlib.CheckID, admission chainlib.ProviderAdmission, err error, count bool) {
+	notBefore := heldOffUntil(inputs.rateLimitHoldoff, p, inputs.chainParser)
 	if _, verified := chainlib.FailedPass(err); !verified && isRateLimitFailure(err) {
 		inputs.retries.postpone(tier, p.Name, ran, notBefore)
 		return
@@ -652,7 +770,7 @@ func (inputs *chainReverifyInputs) rescheduleFailed(tier reverifyTier, p *lavase
 // part only a rate limit kept from answering. A failing Warning check is not: it
 // switches nothing off, and the epoch keeps its series current. It is read only for a
 // pass with no verdicts to read (retriesOf).
-func (inputs *chainReverifyInputs) degraded(p *lavasession.RPCStaticProviderEndpoint, pass chainlib.ProviderAdmission) bool {
+func (inputs *chainReverifyInputs) degraded(p *routersession.RPCStaticProviderEndpoint, pass chainlib.ProviderAdmission) bool {
 	if pass.Throttled() != nil {
 		return true
 	}
@@ -664,10 +782,10 @@ func (inputs *chainReverifyInputs) degraded(p *lavasession.RPCStaticProviderEndp
 
 // byName builds a name → session lookup so callers can answer
 // "is this provider currently active" in O(1).
-func byName(sessions map[uint64]*lavasession.ConsumerSessionsWithProvider) map[string]*lavasession.ConsumerSessionsWithProvider {
-	out := make(map[string]*lavasession.ConsumerSessionsWithProvider, len(sessions))
+func byName(sessions map[uint64]*routersession.ConsumerSessionsWithProvider) map[string]*routersession.ConsumerSessionsWithProvider {
+	out := make(map[string]*routersession.ConsumerSessionsWithProvider, len(sessions))
 	for _, s := range sessions {
-		out[s.PublicLavaAddress] = s
+		out[s.PublicAddress] = s
 	}
 	return out
 }
@@ -682,7 +800,7 @@ func byName(sessions map[uint64]*lavasession.ConsumerSessionsWithProvider) map[s
 // Intentionally fire-and-forget from a goroutine after UpdateAllProviders has
 // returned: the new pairing is already live, so any in-flight relay holds a
 // session pointer from the *new* map, and dropping the old transports is safe.
-func closeDemotedDirectConnections(demoted []*lavasession.ConsumerSessionsWithProvider) {
+func closeDemotedDirectConnections(demoted []*routersession.ConsumerSessionsWithProvider) {
 	for _, s := range demoted {
 		for _, ep := range s.Endpoints {
 			for _, dc := range ep.DirectConnections {
@@ -690,8 +808,8 @@ func closeDemotedDirectConnections(demoted []*lavasession.ConsumerSessionsWithPr
 					continue
 				}
 				if err := dc.Close(); err != nil {
-					utils.LavaFormatDebug("re-verify: error closing demoted direct connection",
-						utils.LogAttr("provider", s.PublicLavaAddress),
+					utils.FormatDebug("re-verify: error closing demoted direct connection",
+						utils.LogAttr("provider", s.PublicAddress),
 						utils.LogAttr("url", dc.GetURL()),
 						utils.LogAttr("err", err.Error()),
 					)
@@ -730,16 +848,16 @@ var BootValidateTimeout = 30 * time.Second
 // same seam chainReverifyInputs.validateFn provides for applyReverification.
 func validateProviderTier(
 	ctx context.Context,
-	providers []*lavasession.RPCStaticProviderEndpoint,
-	rpcEndpoint *lavasession.RPCEndpoint,
+	providers []*routersession.RPCStaticProviderEndpoint,
+	rpcEndpoint *routersession.RPCEndpoint,
 	chainParser chainlib.ChainParser,
 	tier reverifyTier,
-	validate func(context.Context, *lavasession.RPCStaticProviderEndpoint) error,
+	validate func(context.Context, *routersession.RPCStaticProviderEndpoint) error,
 	// It returns true when the admitted set actually moved, which is what tells
 	// applyReverification to rebuild that provider's session.
-	recordAdmission func(*lavasession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool,
-) (map[*lavasession.RPCStaticProviderEndpoint]error, []*lavasession.RPCStaticProviderEndpoint) {
-	failedSet := make(map[*lavasession.RPCStaticProviderEndpoint]error)
+	recordAdmission func(*routersession.RPCStaticProviderEndpoint, chainlib.ProviderAdmission) bool,
+) (map[*routersession.RPCStaticProviderEndpoint]error, []*routersession.RPCStaticProviderEndpoint) {
+	failedSet := make(map[*routersession.RPCStaticProviderEndpoint]error)
 	if len(providers) == 0 {
 		return failedSet, nil
 	}
@@ -747,7 +865,7 @@ func validateProviderTier(
 		// Per-collection at boot, recording what each provider was admitted for.
 		// Returning nil for a service-attributable failure is the point: the
 		// provider stays, minus that service (MAG-3326).
-		validate = func(c context.Context, p *lavasession.RPCStaticProviderEndpoint) error {
+		validate = func(c context.Context, p *routersession.RPCStaticProviderEndpoint) error {
 			admission, err := validateProviderCollections(c, p, chainParser, BootValidateTimeout)
 			if err != nil {
 				return err
@@ -759,7 +877,7 @@ func validateProviderTier(
 		}
 	}
 
-	utils.LavaFormatInfo("Validating providers",
+	utils.FormatInfo("Validating providers",
 		utils.LogAttr("chain", rpcEndpoint.ChainID),
 		utils.LogAttr("apiInterface", rpcEndpoint.ApiInterface),
 		utils.LogAttr("tier", tier.String()),
@@ -780,19 +898,19 @@ func validateProviderTier(
 	}
 	wg.Wait()
 
-	var failedOrdered []*lavasession.RPCStaticProviderEndpoint
+	var failedOrdered []*routersession.RPCStaticProviderEndpoint
 	for i, p := range providers {
 		if err := results[i]; err != nil {
 			failedSet[p] = err
 			failedOrdered = append(failedOrdered, p)
-			utils.LavaFormatWarning("provider validation failed — excluding from provider list", err,
+			utils.FormatWarning("provider validation failed — excluding from provider list", err,
 				utils.LogAttr("chain", rpcEndpoint.ChainID),
 				utils.LogAttr("tier", tier.String()),
 				utils.LogAttr("provider", p.Name),
 			)
 			continue
 		}
-		utils.LavaFormatInfo("Provider validated successfully",
+		utils.FormatInfo("Provider validated successfully",
 			utils.LogAttr("chain", rpcEndpoint.ChainID),
 			utils.LogAttr("tier", tier.String()),
 			utils.LogAttr("provider", p.Name),
@@ -808,28 +926,30 @@ func validateProviderTier(
 // the rest (MAG-3326).
 func validateProviderCollections(
 	ctx context.Context,
-	provider *lavasession.RPCStaticProviderEndpoint,
+	provider *routersession.RPCStaticProviderEndpoint,
 	chainParser chainlib.ChainParser,
 	timeout time.Duration,
 ) (chainlib.ProviderAdmission, error) {
-	return revalidateProviderCollections(ctx, provider, chainParser, timeout, chainlib.ProviderAdmission{}, nil)
+	return revalidateProviderCollections(ctx, provider, chainParser, timeout, chainlib.ProviderAdmission{}, nil, nil)
 }
 
 // revalidateProviderCollections is validateProviderCollections for a retry: it re-runs
 // only the checks in only and keeps the other verdicts from previous, the provider's
 // last pass (chainlib.ChainFetcher.ValidateCollectionsAgain), so a retry re-runs what
 // failed, not every check (MAG-3950). With only empty it verifies the provider whole.
+// The node urls at the positions in skip are not asked (chainlib.ValidateCollectionsExcept).
 func revalidateProviderCollections(
 	ctx context.Context,
-	provider *lavasession.RPCStaticProviderEndpoint,
+	provider *routersession.RPCStaticProviderEndpoint,
 	chainParser chainlib.ChainParser,
 	timeout time.Duration,
 	previous chainlib.ProviderAdmission,
 	only []chainlib.CheckID,
+	skip map[int]struct{},
 ) (chainlib.ProviderAdmission, error) {
 	// The urls the router dials, generated per-path ones included, each verified on
 	// its own path (MAG-4214).
-	endpoint := &lavasession.RPCProviderEndpoint{
+	endpoint := &routersession.RPCProviderEndpoint{
 		NetworkAddress: provider.NetworkAddress,
 		ChainID:        provider.ChainID,
 		ApiInterface:   provider.ApiInterface,
@@ -850,7 +970,7 @@ func revalidateProviderCollections(
 		return chainlib.ProviderAdmission{}, &chainlib.VerificationFailure{Check: chainlib.CheckConfig, Err: err}
 	}
 
-	parallelConnections := uint(lavasession.DefaultMaximumStreamsOverASingleConnection)
+	parallelConnections := uint(routersession.DefaultMaximumStreamsOverASingleConnection)
 	nodeUrlRouter, err := chainlib.NewNodeUrlRouterFactory(parallelConnections, endpoint)
 	if err != nil {
 		return chainlib.ProviderAdmission{}, &chainlib.VerificationFailure{Check: chainlib.CheckConfig, Err: err}
@@ -863,7 +983,7 @@ func revalidateProviderCollections(
 	})
 
 	if len(only) > 0 {
-		return verificationFetcher.ValidateCollectionsAgain(attemptCtx, previous, only)
+		return verificationFetcher.ValidateCollectionsAgain(attemptCtx, previous, only, skip)
 	}
-	return verificationFetcher.ValidateCollections(attemptCtx)
+	return verificationFetcher.ValidateCollectionsExcept(attemptCtx, skip)
 }

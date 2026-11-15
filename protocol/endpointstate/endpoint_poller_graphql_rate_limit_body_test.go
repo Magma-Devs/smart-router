@@ -11,7 +11,7 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chaintracker"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/holdoff"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	rand "github.com/magma-Devs/smart-router/utils/rand"
 	"github.com/stretchr/testify/require"
@@ -83,7 +83,7 @@ func newReplyingSuiGraphQLPoller(t *testing.T, body string) *EndpointPoller {
 	t.Helper()
 	const url = "https://sui-graphql.example/graphql"
 	return NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: url, Enabled: true},
+		&routersession.Endpoint{NetworkAddress: url, Enabled: true},
 		&fixedReplyConnection{url: url, body: body},
 		newSuiGraphQLPollParser(t),
 		"SUI",
@@ -150,7 +150,7 @@ type countingReplyConnection struct {
 	calls atomic.Int32
 }
 
-func (c *countingReplyConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*lavasession.DirectRPCResponse, error) {
+func (c *countingReplyConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*routersession.DirectRPCResponse, error) {
 	c.calls.Add(1)
 	return c.fixedReplyConnection.SendRequest(ctx, data, headers)
 }
@@ -166,7 +166,7 @@ func TestChainTracker_GraphQLRateLimitBodyRecordsAHoldoff(t *testing.T) {
 	const url = "https://sui-graphql.example/graphql"
 	connection := &countingReplyConnection{fixedReplyConnection: fixedReplyConnection{url: url, body: graphQLRateLimitReplyBody}}
 	poller := NewEndpointPoller(
-		&lavasession.Endpoint{NetworkAddress: url, Enabled: true},
+		&routersession.Endpoint{NetworkAddress: url, Enabled: true},
 		connection,
 		newSuiGraphQLPollParser(t),
 		"SUI",

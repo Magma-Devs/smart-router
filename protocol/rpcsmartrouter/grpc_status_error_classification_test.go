@@ -11,7 +11,7 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 )
 
 // ---------------------------------------------------------------------------
@@ -52,18 +52,18 @@ func (m *grpcStatusChainMessage) CheckResponseError(data []byte, httpStatusCode 
 func grpcStatusRelay(t *testing.T, code codes.Code, nodeMessage string) *common.RelayResult {
 	t.Helper()
 
-	body, err := json.Marshal(lavasession.GRPCNodeErrorResponse{
+	body, err := json.Marshal(routersession.GRPCNodeErrorResponse{
 		ErrorMessage: nodeMessage,
 		ErrorCode:    uint32(code),
 	})
 	require.NoError(t, err)
 
 	conn := &fakeDirectConn{
-		resp: &lavasession.DirectRPCResponse{
+		resp: &routersession.DirectRPCResponse{
 			Data:       body,
 			StatusCode: int(code),
 		},
-		err: &lavasession.GRPCStatusError{
+		err: &routersession.GRPCStatusError{
 			Code:    uint32(code),
 			Message: nodeMessage,
 		},
@@ -361,7 +361,7 @@ func TestHealthResetRequiresPositiveProof(t *testing.T) {
 // fullnode, so it is now non-retryable and neither scored nor counted toward benching. DataLoss is
 // the unregistered control.
 func TestSendGRPCRelay_AbortedIsNotTheEndpointsFault(t *testing.T) {
-	require.Equal(t, common.LavaErrorNodeAborted,
+	require.Equal(t, common.RouterErrorNodeAborted,
 		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.Aborted), "rejected by consensus"))
 
 	aborted := grpcStatusRelay(t, codes.Aborted, "rejected by consensus")
@@ -372,7 +372,7 @@ func TestSendGRPCRelay_AbortedIsNotTheEndpointsFault(t *testing.T) {
 	require.False(t, relayProvesEndpointHealthy(aborted), "and it is not proof of health either")
 
 	dataLoss := grpcStatusRelay(t, codes.DataLoss, "unrecoverable data loss")
-	require.Equal(t, common.LavaErrorUnknown,
+	require.Equal(t, common.RouterErrorUnknown,
 		common.ClassifyError(nil, common.ChainFamilySui, common.TransportGRPC, int(codes.DataLoss), "unrecoverable data loss"),
 		"DataLoss has no row")
 	require.False(t, dataLoss.IsNodeAtFault, "an unclassified answer is never evidence against the endpoint")

@@ -18,12 +18,12 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainstate"
 	"github.com/magma-Devs/smart-router/protocol/common"
 	"github.com/magma-Devs/smart-router/protocol/endpointtip"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
 	"github.com/magma-Devs/smart-router/protocol/qos"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
 	"github.com/magma-Devs/smart-router/protocol/relaycoretest"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	pairingtypes "github.com/magma-Devs/smart-router/types/relay"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/prometheus/client_golang/prometheus"
@@ -44,7 +44,7 @@ type MockRelayProcessorForHeaders struct {
 	// it (MAG-3762), and a real request's history holds the provider of every result it recorded,
 	// so a test that records results must say what went out. dispatchedTo and dispatchedTogether
 	// build it; a cache hit that dispatched nothing sets an empty one.
-	usedProviders *lavasession.UsedProviders
+	usedProviders *routersession.UsedProviders
 }
 
 func (m *MockRelayProcessorForHeaders) GetCrossValidationParams() *common.CrossValidationParams {
@@ -67,7 +67,7 @@ func (m *MockRelayProcessorForHeaders) GetCrossValidationQueriedProviders() []st
 	return m.crossValidationQueriedProviders
 }
 
-func (m *MockRelayProcessorForHeaders) GetUsedProviders() *lavasession.UsedProviders {
+func (m *MockRelayProcessorForHeaders) GetUsedProviders() *routersession.UsedProviders {
 	if m.usedProviders != nil {
 		return m.usedProviders
 	}
@@ -76,7 +76,7 @@ func (m *MockRelayProcessorForHeaders) GetUsedProviders() *lavasession.UsedProvi
 	if len(m.successResults)+len(m.nodeErrors)+len(m.protocolErrors) > 0 {
 		panic("MockRelayProcessorForHeaders: results recorded but usedProviders unset; set the dispatch history the request would have")
 	}
-	return lavasession.NewUsedProviders(nil)
+	return routersession.NewUsedProviders(nil)
 }
 
 func (m *MockRelayProcessorForHeaders) NodeErrors() (ret []common.RelayResult) {
@@ -90,9 +90,9 @@ func (m *MockRelayProcessorForHeaders) GetDegradedExtensions() []string {
 // Integration tests that actually call appendHeadersToRelayResult
 func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 	ctx := context.Background()
-	providerAddress1 := "lava@provider1"
-	providerAddress2 := "lava@provider2"
-	providerAddress3 := "lava@provider3"
+	providerAddress1 := "provider@provider1"
+	providerAddress2 := "provider@provider2"
+	providerAddress3 := "provider@provider3"
 
 	t.Run("cross-validation disabled - single provider header", func(t *testing.T) {
 		// Create a mock relay processor with cross-validation disabled (use default values)
@@ -190,7 +190,7 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 		require.NotNil(t, statusHeader)
 		require.Equal(t, "failed", statusHeader.Value) // Below threshold = failed
 		require.NotNil(t, allProvidersHeader)
-		require.Equal(t, "lava@provider1", allProvidersHeader.Value) // Comma-separated format
+		require.Equal(t, "provider@provider1", allProvidersHeader.Value) // Comma-separated format
 		require.NotNil(t, agreeingProvidersHeader)
 		require.Equal(t, "", agreeingProvidersHeader.Value) // Empty on failure
 		require.NotNil(t, pendingProvidersHeader)
@@ -263,21 +263,21 @@ func TestAppendHeadersToRelayResultIntegration(t *testing.T) {
 
 		// Verify disagreeing providers header: provider3 is a node error, so it dissents even on success
 		require.NotNil(t, disagreeingProvidersHeader)
-		require.Equal(t, "lava@provider3", disagreeingProvidersHeader.Value)
-		require.NotContains(t, disagreeingProvidersHeader.Value, "lava@provider1")
-		require.NotContains(t, disagreeingProvidersHeader.Value, "lava@provider2")
+		require.Equal(t, "provider@provider3", disagreeingProvidersHeader.Value)
+		require.NotContains(t, disagreeingProvidersHeader.Value, "provider@provider1")
+		require.NotContains(t, disagreeingProvidersHeader.Value, "provider@provider2")
 
 		// Verify all providers header (includes all 3)
 		require.NotNil(t, allProvidersHeader)
-		require.Contains(t, allProvidersHeader.Value, "lava@provider1")
-		require.Contains(t, allProvidersHeader.Value, "lava@provider2")
-		require.Contains(t, allProvidersHeader.Value, "lava@provider3")
+		require.Contains(t, allProvidersHeader.Value, "provider@provider1")
+		require.Contains(t, allProvidersHeader.Value, "provider@provider2")
+		require.Contains(t, allProvidersHeader.Value, "provider@provider3")
 
 		// Verify agreeing providers header (only providers 1 and 2 have matching hash)
 		require.NotNil(t, agreeingProvidersHeader)
-		require.Contains(t, agreeingProvidersHeader.Value, "lava@provider1")
-		require.Contains(t, agreeingProvidersHeader.Value, "lava@provider2")
-		require.NotContains(t, agreeingProvidersHeader.Value, "lava@provider3")
+		require.Contains(t, agreeingProvidersHeader.Value, "provider@provider1")
+		require.Contains(t, agreeingProvidersHeader.Value, "provider@provider2")
+		require.NotContains(t, agreeingProvidersHeader.Value, "provider@provider3")
 
 		// Verify pending providers header: every queried provider responded (success or node error)
 		require.NotNil(t, pendingProvidersHeader)
@@ -370,19 +370,19 @@ func TestAppendHeadersToRelayResult_DisagreeingOnQuorumFailure(t *testing.T) {
 	relayProcessor := &MockRelayProcessorForHeaders{
 		crossValidationParams:           &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5},
 		selection:                       relaycore.CrossValidation,
-		crossValidationQueriedProviders: []string{"lava@provider1", "lava@provider2", "lava@provider3"},
+		crossValidationQueriedProviders: []string{"provider@provider1", "provider@provider2", "provider@provider3"},
 		// Two successful but disagreeing responses (different hashes) plus a node error: none agree up to
 		// the threshold, so the quorum fails.
 		successResults: []common.RelayResult{
-			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}, ResponseHash: hashA},
-			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}, ResponseHash: hashB},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}, ResponseHash: hashA},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"}, ResponseHash: hashB},
 		},
 		nodeErrors: []common.RelayResult{
-			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider3"}},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider3"}},
 		},
 	}
 	relayResult := &common.RelayResult{
-		ProviderInfo:    common.ProviderInfo{ProviderAddress: "lava@provider1"},
+		ProviderInfo:    common.ProviderInfo{ProviderAddress: "provider@provider1"},
 		CrossValidation: 1, // below threshold -> failed
 		Reply:           &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 	}
@@ -409,9 +409,9 @@ func TestAppendHeadersToRelayResult_DisagreeingOnQuorumFailure(t *testing.T) {
 	require.Equal(t, "", agreeingHeader.Value)
 	// Both successful-but-disagreeing providers AND the node-error provider are in the disagreeing set.
 	require.NotNil(t, disagreeingHeader)
-	require.Contains(t, disagreeingHeader.Value, "lava@provider1")
-	require.Contains(t, disagreeingHeader.Value, "lava@provider2")
-	require.Contains(t, disagreeingHeader.Value, "lava@provider3")
+	require.Contains(t, disagreeingHeader.Value, "provider@provider1")
+	require.Contains(t, disagreeingHeader.Value, "provider@provider2")
+	require.Contains(t, disagreeingHeader.Value, "provider@provider3")
 }
 
 // TestAppendHeadersToRelayResult_PluralityOnQuorumFailure pins the MAG-2192 contract: on a failed quorum
@@ -438,29 +438,29 @@ func TestAppendHeadersToRelayResult_PluralityOnQuorumFailure(t *testing.T) {
 		{
 			// The ticket's repro, plus a provider still in flight that must not be counted.
 			name:            "two of three agree below threshold",
-			queried:         []string{"lava@provider1", "lava@provider2", "lava@provider3", "lava@provider4"},
-			successResults:  []common.RelayResult{responded("lava@provider1", hashA), responded("lava@provider2", hashA), responded("lava@provider3", hashB)},
+			queried:         []string{"provider@provider1", "provider@provider2", "provider@provider3", "provider@provider4"},
+			successResults:  []common.RelayResult{responded("provider@provider1", hashA), responded("provider@provider2", hashA), responded("provider@provider3", hashB)},
 			relayResult:     &common.RelayResult{StatusCode: 500, CrossValidationFailureReason: common.CrossValidationReasonNoAgreement},
 			wantStatus:      "failed",
-			wantDisagreeing: "lava@provider1,lava@provider2,lava@provider3",
+			wantDisagreeing: "provider@provider1,provider@provider2,provider@provider3",
 			wantPlurality:   true,
 			wantSize:        "2",
-			wantProviders:   "lava@provider1,lava@provider2",
+			wantProviders:   "provider@provider1,provider@provider2",
 		},
 		{
 			name:            "tie reports the size but no providers",
-			queried:         []string{"lava@provider1", "lava@provider2", "lava@provider3", "lava@provider4"},
-			successResults:  []common.RelayResult{responded("lava@provider1", hashA), responded("lava@provider2", hashA), responded("lava@provider3", hashB), responded("lava@provider4", hashB)},
+			queried:         []string{"provider@provider1", "provider@provider2", "provider@provider3", "provider@provider4"},
+			successResults:  []common.RelayResult{responded("provider@provider1", hashA), responded("provider@provider2", hashA), responded("provider@provider3", hashB), responded("provider@provider4", hashB)},
 			relayResult:     &common.RelayResult{StatusCode: 500, CrossValidationFailureReason: common.CrossValidationReasonNoAgreement},
 			wantStatus:      "failed",
-			wantDisagreeing: "lava@provider1,lava@provider2,lava@provider3,lava@provider4",
+			wantDisagreeing: "provider@provider1,provider@provider2,provider@provider3,provider@provider4",
 			wantPlurality:   true,
 			wantSize:        "2",
 			wantProviders:   "",
 		},
 		{
 			name:            "nobody answered",
-			queried:         []string{"lava@provider1", "lava@provider2", "lava@provider3"},
+			queried:         []string{"provider@provider1", "provider@provider2", "provider@provider3"},
 			relayResult:     &common.RelayResult{StatusCode: 500, CrossValidationFailureReason: common.CrossValidationReasonInsufficientResponses},
 			wantStatus:      "failed",
 			wantDisagreeing: "",
@@ -471,9 +471,9 @@ func TestAppendHeadersToRelayResult_PluralityOnQuorumFailure(t *testing.T) {
 		{
 			// On success the agreeing-providers header already names the consensus; no plurality headers.
 			name:            "quorum reached",
-			queried:         []string{"lava@provider1", "lava@provider2", "lava@provider3"},
-			successResults:  []common.RelayResult{responded("lava@provider1", hashA), responded("lava@provider2", hashA), responded("lava@provider3", hashA)},
-			relayResult:     &common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}, CrossValidation: 3, ResponseHash: hashA},
+			queried:         []string{"provider@provider1", "provider@provider2", "provider@provider3"},
+			successResults:  []common.RelayResult{responded("provider@provider1", hashA), responded("provider@provider2", hashA), responded("provider@provider3", hashA)},
+			relayResult:     &common.RelayResult{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}, CrossValidation: 3, ResponseHash: hashA},
 			wantStatus:      "success",
 			wantDisagreeing: "",
 		},
@@ -519,16 +519,16 @@ func TestAppendHeadersToRelayResult_PendingProvidersOnEarlyExit(t *testing.T) {
 	relayProcessor := &MockRelayProcessorForHeaders{
 		crossValidationParams:           &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 3},
 		selection:                       relaycore.CrossValidation,
-		crossValidationQueriedProviders: []string{"lava@provider1", "lava@provider2", "lava@provider3"},
+		crossValidationQueriedProviders: []string{"provider@provider1", "provider@provider2", "provider@provider3"},
 		// Early exit at quorum: only the two agreeing responses were received; provider3 is in flight.
 		successResults: []common.RelayResult{
-			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}, ResponseHash: winningHash},
-			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}, ResponseHash: winningHash},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}, ResponseHash: winningHash},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"}, ResponseHash: winningHash},
 		},
 		nodeErrors: []common.RelayResult{},
 	}
 	relayResult := &common.RelayResult{
-		ProviderInfo:    common.ProviderInfo{ProviderAddress: "lava@provider1"},
+		ProviderInfo:    common.ProviderInfo{ProviderAddress: "provider@provider1"},
 		CrossValidation: 2, // meets threshold
 		ResponseHash:    winningHash,
 		Reply:           &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
@@ -554,13 +554,13 @@ func TestAppendHeadersToRelayResult_PendingProvidersOnEarlyExit(t *testing.T) {
 	require.NotNil(t, statusHeader)
 	require.Equal(t, "success", statusHeader.Value)
 	require.NotNil(t, agreeingHeader)
-	require.Equal(t, "lava@provider1,lava@provider2", agreeingHeader.Value)
+	require.Equal(t, "provider@provider1,provider@provider2", agreeingHeader.Value)
 	// Confirmed dissent only: the router never received provider3's response, so it must not be accused.
 	require.NotNil(t, disagreeingHeader)
 	require.Equal(t, "", disagreeingHeader.Value)
 	// ...but it must not be silently dropped either: it is explicitly pending.
 	require.NotNil(t, pendingHeader)
-	require.Equal(t, "lava@provider3", pendingHeader.Value)
+	require.Equal(t, "provider@provider3", pendingHeader.Value)
 }
 
 // TestAppendHeadersToRelayResult_ExhaustedTransportErrors covers the Lava-Provider-Address contract on
@@ -573,17 +573,17 @@ func TestAppendHeadersToRelayResult_ExhaustedTransportErrors(t *testing.T) {
 	ctx := context.Background()
 	relayProcessor := &MockRelayProcessorForHeaders{
 		selection:     relaycore.Stateless,
-		usedProviders: dispatchedTo("lava@provider1", "lava@provider2", "lava@provider3"),
+		usedProviders: dispatchedTo("provider@provider1", "provider@provider2", "provider@provider3"),
 		protocolErrors: []relaycore.RelayError{
-			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
-			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
-			{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider3"}},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"}},
+			{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider3"}},
 		},
 	}
 	// The failure result carries the SINGLE provider whose error body is returned (provider3 chosen as
 	// the best protocol error) — never a comma-joined list.
 	relayResult := &common.RelayResult{
-		ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider3"},
+		ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider3"},
 		StatusCode:   http.StatusInternalServerError,
 		Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 	}
@@ -605,7 +605,7 @@ func TestAppendHeadersToRelayResult_ExhaustedTransportErrors(t *testing.T) {
 	require.NotNil(t, retriesHeader)
 	require.Equal(t, "2", retriesHeader.Value)
 	require.NotNil(t, providerHeader)
-	require.Equal(t, "lava@provider1,lava@provider2,lava@provider3", providerHeader.Value)
+	require.Equal(t, "provider@provider1,provider@provider2,provider@provider3", providerHeader.Value)
 }
 
 // TestAppendHeadersToRelayResult_FailureReasonHeader verifies that a cross-validation failure surfaces a
@@ -616,12 +616,12 @@ func TestAppendHeadersToRelayResult_FailureReasonHeader(t *testing.T) {
 	relayProcessor := &MockRelayProcessorForHeaders{
 		crossValidationParams:           &common.CrossValidationParams{AgreementThreshold: 2, MaxParticipants: 5, MinGroups: 2},
 		selection:                       relaycore.CrossValidation,
-		crossValidationQueriedProviders: []string{"lava@provider1", "lava@provider2"},
+		crossValidationQueriedProviders: []string{"provider@provider1", "provider@provider2"},
 		successResults:                  []common.RelayResult{},
 		nodeErrors:                      []common.RelayResult{},
 	}
 	relayResult := &common.RelayResult{
-		ProviderInfo:                 common.ProviderInfo{ProviderAddress: "lava@provider1"},
+		ProviderInfo:                 common.ProviderInfo{ProviderAddress: "provider@provider1"},
 		CrossValidation:              0, // below threshold -> failed
 		CrossValidationFailureReason: common.CrossValidationReasonDiversityUnmet,
 		Reply:                        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
@@ -667,7 +667,7 @@ func TestAppendHeadersToRelayResult_MismatchMetric(t *testing.T) {
 		cs.SetLatestBlock(1_000_000) // so finality resolves (not "unknown")
 		s := &RPCSmartRouterServer{
 			smartRouterEndpointMetrics: mm,
-			listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			chainParser:                chainParser,
 			chainState:                 cs,
 		}
@@ -784,7 +784,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 	cs.SetLatestBlock(1_000_000) // so finality resolves (not "unknown")
 	srv := &RPCSmartRouterServer{
 		smartRouterEndpointMetrics: mm,
-		listenEndpoint:             &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:             &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 		chainParser:                chainParser,
 		chainState:                 cs,
 	}
@@ -847,7 +847,7 @@ func TestWatchCrossValidationStragglers_LauncherGlue(t *testing.T) {
 			common.CROSS_VALIDATION_HEADER_MAX_PARTICIPANTS:    "3",
 			common.CROSS_VALIDATION_HEADER_AGREEMENT_THRESHOLD: "2",
 		}, nil, "dapp", "1.2.3.4")
-		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, lavasession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
+		sm, smErr := NewSmartRouterRelayStateMachineWithPolicy(ctx, routersession.NewUsedProviders(nil), &SmartRouterRelaySenderMock{retValue: nil}, pm, nil, false, nil, "ETH1", "jsonrpc")
 		require.NoError(t, smErr)
 		require.Equal(t, relaycore.CrossValidation, sm.GetSelection(), "caller CV headers must enable cross-validation")
 		rp := relaycore.NewRelayProcessor(ctx, sm.GetCrossValidationParams(), relaycoretest.RelayProcessorMetrics, relaycoretest.RelayProcessorMetrics, sm)
@@ -995,7 +995,7 @@ func TestCrossValidationFailFast_EmitsRequestFailedMetrics(t *testing.T) {
 	require.NoError(t, err)
 	srv := &RPCSmartRouterServer{
 		rpcSmartRouterLogs: logs,
-		listenEndpoint:     &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+		listenEndpoint:     &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 	}
 	const method = "cv_failfast_metric"
 	pm := &MockProtocolMessage{api: &spectypes.Api{Name: method}}
@@ -1042,9 +1042,9 @@ func TestCrossValidationFailFast_EmitsRequestFailedMetrics(t *testing.T) {
 // the default no-policy path.
 func TestAppendHeadersToRelayResult_GroupLabelsInertWithoutPolicy(t *testing.T) {
 	ctx := context.Background()
-	providerAddress1 := "lava@provider1"
-	providerAddress2 := "lava@provider2"
-	providerAddress3 := "lava@provider3"
+	providerAddress1 := "provider@provider1"
+	providerAddress2 := "provider@provider2"
+	providerAddress3 := "provider@provider3"
 	winningHash := [32]byte{1, 2, 3, 4, 5, 6, 7, 8}
 
 	// collectCVHeaders runs the header builder for a cross-validation success
@@ -1125,15 +1125,15 @@ func TestRetryCountHeader(t *testing.T) {
 	t.Run("single node error no success - no retry header", func(t *testing.T) {
 		// Scenario: unsupported method like "seth_blockNumber" — 1 attempt, 0 retries
 		relayProcessor := &MockRelayProcessorForHeaders{
-			usedProviders:  dispatchedTo("lava@provider1"),
+			usedProviders:  dispatchedTo("provider@provider1"),
 			successResults: []common.RelayResult{},
 			nodeErrors: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}},
 			},
 		}
 
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 
@@ -1149,17 +1149,17 @@ func TestRetryCountHeader(t *testing.T) {
 	t.Run("one node error then success - retry header is 1", func(t *testing.T) {
 		// Scenario: first provider returned node error, second succeeded — 1 retry
 		relayProcessor := &MockRelayProcessorForHeaders{
-			usedProviders: dispatchedTo("lava@provider1", "lava@provider2"),
+			usedProviders: dispatchedTo("provider@provider1", "provider@provider2"),
 			successResults: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"}},
 			},
 			nodeErrors: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}},
 			},
 		}
 
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 
@@ -1175,18 +1175,18 @@ func TestRetryCountHeader(t *testing.T) {
 
 	t.Run("two node errors then success - retry header is 2", func(t *testing.T) {
 		relayProcessor := &MockRelayProcessorForHeaders{
-			usedProviders: dispatchedTo("lava@provider1", "lava@provider2", "lava@provider3"),
+			usedProviders: dispatchedTo("provider@provider1", "provider@provider2", "provider@provider3"),
 			successResults: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider3"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider3"}},
 			},
 			nodeErrors: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"}},
 			},
 		}
 
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider3"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider3"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 
@@ -1202,16 +1202,16 @@ func TestRetryCountHeader(t *testing.T) {
 
 	t.Run("single protocol error no success - no retry header", func(t *testing.T) {
 		relayProcessor := &MockRelayProcessorForHeaders{
-			usedProviders:  dispatchedTo("lava@provider1"),
+			usedProviders:  dispatchedTo("provider@provider1"),
 			successResults: []common.RelayResult{},
 			nodeErrors:     []common.RelayResult{},
 			protocolErrors: []relaycore.RelayError{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}},
 			},
 		}
 
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 
@@ -1226,18 +1226,18 @@ func TestRetryCountHeader(t *testing.T) {
 
 	t.Run("protocol error then success - retry header is 1", func(t *testing.T) {
 		relayProcessor := &MockRelayProcessorForHeaders{
-			usedProviders: dispatchedTo("lava@provider1", "lava@provider2"),
+			usedProviders: dispatchedTo("provider@provider1", "provider@provider2"),
 			successResults: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"}},
 			},
 			nodeErrors: []common.RelayResult{},
 			protocolErrors: []relaycore.RelayError{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}},
 			},
 		}
 
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 
@@ -1254,21 +1254,21 @@ func TestRetryCountHeader(t *testing.T) {
 	t.Run("mixed errors then success - retry header counts all retries", func(t *testing.T) {
 		// 1 protocol error + 2 node errors + 1 success = 4 attempts, 3 retries
 		relayProcessor := &MockRelayProcessorForHeaders{
-			usedProviders: dispatchedTo("lava@provider1", "lava@provider2", "lava@provider3", "lava@provider4"),
+			usedProviders: dispatchedTo("provider@provider1", "provider@provider2", "provider@provider3", "provider@provider4"),
 			successResults: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider4"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider4"}},
 			},
 			nodeErrors: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider3"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider3"}},
 			},
 			protocolErrors: []relaycore.RelayError{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}},
 			},
 		}
 
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider4"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider4"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 
@@ -1284,15 +1284,15 @@ func TestRetryCountHeader(t *testing.T) {
 
 	t.Run("no errors no retries - no retry header", func(t *testing.T) {
 		relayProcessor := &MockRelayProcessorForHeaders{
-			usedProviders: dispatchedTo("lava@provider1"),
+			usedProviders: dispatchedTo("provider@provider1"),
 			successResults: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}},
 			},
 			nodeErrors: []common.RelayResult{},
 		}
 
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 
@@ -1308,16 +1308,16 @@ func TestRetryCountHeader(t *testing.T) {
 	t.Run("two node errors no success - retry header is 1", func(t *testing.T) {
 		// 2 node errors, 0 success — 2 attempts, 1 retry
 		relayProcessor := &MockRelayProcessorForHeaders{
-			usedProviders:  dispatchedTo("lava@provider1", "lava@provider2"),
+			usedProviders:  dispatchedTo("provider@provider1", "provider@provider2"),
 			successResults: []common.RelayResult{},
 			nodeErrors: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"}},
 			},
 		}
 
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 
@@ -1359,17 +1359,17 @@ func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
 		// absorption must swallow too (MAG-3762).
 		relayProcessor := &MockRelayProcessorForHeaders{
 			selection:     relaycore.Stateful,
-			usedProviders: dispatchedTogether("lava@simprovider1", "lava@simprovider2", "lava@simprovider3"),
+			usedProviders: dispatchedTogether("provider@simprovider1", "provider@simprovider2", "provider@simprovider3"),
 			successResults: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider2"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@simprovider2"}},
 			},
 			protocolErrors: []relaycore.RelayError{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@simprovider1"}},
 			},
 		}
 
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider2"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@simprovider2"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 
@@ -1390,7 +1390,7 @@ func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
 		// lava-fast-tx-participants instead.
 		providerHeader := findHeader(relayResult.Reply.Metadata, common.PROVIDER_ADDRESS_HEADER_NAME)
 		require.NotNil(t, providerHeader)
-		require.Equal(t, "lava@simprovider2", providerHeader.Value)
+		require.Equal(t, "provider@simprovider2", providerHeader.Value)
 	})
 
 	t.Run("stateful fan-out all healthy - no Lava-Retries header", func(t *testing.T) {
@@ -1398,16 +1398,16 @@ func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
 		// Three successes in one batch must not produce any retry header.
 		relayProcessor := &MockRelayProcessorForHeaders{
 			selection:     relaycore.Stateful,
-			usedProviders: dispatchedTogether("lava@simprovider1", "lava@simprovider2", "lava@simprovider3"),
+			usedProviders: dispatchedTogether("provider@simprovider1", "provider@simprovider2", "provider@simprovider3"),
 			successResults: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider1"}},
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider2"}},
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider3"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@simprovider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@simprovider2"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@simprovider3"}},
 			},
 		}
 
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider1"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@simprovider1"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 
@@ -1430,17 +1430,17 @@ func TestRetryCountHeaderStatefulFanoutAbsorption(t *testing.T) {
 		// would silently zero out the counter for the most common path.
 		relayProcessor := &MockRelayProcessorForHeaders{
 			selection:     relaycore.Stateless,
-			usedProviders: dispatchedTo("lava@provider1", "lava@provider2"),
+			usedProviders: dispatchedTo("provider@provider1", "provider@provider2"),
 			successResults: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"}},
 			},
 			nodeErrors: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}},
 			},
 		}
 
 		relayResult := &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider2"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider2"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 
@@ -1474,16 +1474,16 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 
 	newRelayResult := func() *common.RelayResult {
 		return &common.RelayResult{
-			ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"},
+			ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"},
 			Reply:        &pairingtypes.RelayReply{Metadata: []pairingtypes.Metadata{}},
 		}
 	}
 
-	newProcessor := func(usedProviders *lavasession.UsedProviders) *MockRelayProcessorForHeaders {
+	newProcessor := func(usedProviders *routersession.UsedProviders) *MockRelayProcessorForHeaders {
 		return &MockRelayProcessorForHeaders{
 			usedProviders: usedProviders,
 			successResults: []common.RelayResult{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@provider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@provider1"}},
 			},
 		}
 	}
@@ -1494,11 +1494,11 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 		analytics := &metrics.RelayMetrics{HedgeCount: 1}
 
 		// The ticker hedged to provider2, and provider1 answered while the hedge was still out.
-		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(dispatchedTo("lava@provider1", "lava@provider2")), &MockProtocolMessage{
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(dispatchedTo("provider@provider1", "provider@provider2")), &MockProtocolMessage{
 			api: &spectypes.Api{Name: "eth_blockNumber"},
 		}, "eth_blockNumber", analytics, true)
 
-		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.LAVA_HEDGE_TRIGGERED_HEADER)
+		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.HEDGE_TRIGGERED_HEADER)
 		require.NotNil(t, hedgeHeader, "hedge header must be set when HedgeCount > 0")
 		require.Equal(t, "true", hedgeHeader.Value)
 		// Independent, not exclusive: the hedge was an attempt the router sent, so the same reply
@@ -1514,11 +1514,11 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 		rpcSmartRouterServer := &RPCSmartRouterServer{}
 		analytics := &metrics.RelayMetrics{HedgeCount: 0}
 
-		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(dispatchedTo("lava@provider1")), &MockProtocolMessage{
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(dispatchedTo("provider@provider1")), &MockProtocolMessage{
 			api: &spectypes.Api{Name: "eth_blockNumber"},
 		}, "eth_blockNumber", analytics, true)
 
-		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.LAVA_HEDGE_TRIGGERED_HEADER)
+		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.HEDGE_TRIGGERED_HEADER)
 		require.Nil(t, hedgeHeader, "hedge header must be omitted when HedgeCount == 0 (no \"false\" value ever emitted)")
 	})
 
@@ -1526,11 +1526,11 @@ func TestHedgeTriggeredHeader(t *testing.T) {
 		relayResult := newRelayResult()
 		rpcSmartRouterServer := &RPCSmartRouterServer{}
 
-		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(dispatchedTo("lava@provider1")), &MockProtocolMessage{
+		rpcSmartRouterServer.appendHeadersToRelayResult(ctx, relayResult, 0, newProcessor(dispatchedTo("provider@provider1")), &MockProtocolMessage{
 			api: &spectypes.Api{Name: "eth_blockNumber"},
 		}, "eth_blockNumber", nil, true)
 
-		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.LAVA_HEDGE_TRIGGERED_HEADER)
+		hedgeHeader := findHeader(relayResult.Reply.Metadata, common.HEDGE_TRIGGERED_HEADER)
 		require.Nil(t, hedgeHeader, "hedge header must be omitted when analytics is nil")
 	})
 }
@@ -1582,14 +1582,14 @@ func TestCacheServedResponseHeaders(t *testing.T) {
 	t.Run("cache hit after two protocol errors - matches MAG-1653 reproduction", func(t *testing.T) {
 		// 2 P1 503s + 1 cache hit = 3 attempts, 2 retries.
 		relayProcessor := &MockRelayProcessorForHeaders{
-			usedProviders: dispatchedTo("lava@simprovider1", "lava@simprovider1"),
+			usedProviders: dispatchedTo("provider@simprovider1", "provider@simprovider1"),
 			successResults: []common.RelayResult{
 				{ProviderInfo: common.ProviderInfo{ProviderAddress: ""}}, // cache result
 			},
 			nodeErrors: []common.RelayResult{},
 			protocolErrors: []relaycore.RelayError{
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider1"}},
-				{ProviderInfo: common.ProviderInfo{ProviderAddress: "lava@simprovider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@simprovider1"}},
+				{ProviderInfo: common.ProviderInfo{ProviderAddress: "provider@simprovider1"}},
 			},
 		}
 
@@ -1611,7 +1611,7 @@ func TestCacheServedResponseHeaders(t *testing.T) {
 		require.NotNil(t, providerHeader)
 		// Ordering contract: errors chronologically first, resolver last.
 		// "Cached" sits at the end as the response source.
-		require.Equal(t, "lava@simprovider1,Cached", providerHeader.Value)
+		require.Equal(t, "provider@simprovider1,Cached", providerHeader.Value)
 	})
 }
 
@@ -1749,9 +1749,9 @@ func TestResolverAlwaysLastInProviderHeader(t *testing.T) {
 // TestStatefulRelayTargetsHeader tests the stateful API header functionality
 func TestStatefulRelayTargetsHeader(t *testing.T) {
 	ctx := context.Background()
-	providerAddress1 := "lava@provider1"
-	providerAddress2 := "lava@provider2"
-	providerAddress3 := "lava@provider3"
+	providerAddress1 := "provider@provider1"
+	providerAddress2 := "provider@provider2"
+	providerAddress3 := "provider@provider3"
 
 	t.Run("stateful API - all providers header included", func(t *testing.T) {
 		// Create a mock relay processor with stateful relay targets
@@ -2237,8 +2237,8 @@ func TestWaitForPairingContextCancellation(t *testing.T) {
 			defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 			rpcss := &RPCSmartRouterServer{
-				sessionManager: &lavasession.ConsumerSessionManager{},
-				listenEndpoint: &lavasession.RPCEndpoint{ChainID: "test-chain", ApiInterface: "jsonrpc"},
+				sessionManager: &routersession.ConsumerSessionManager{},
+				listenEndpoint: &routersession.RPCEndpoint{ChainID: "test-chain", ApiInterface: "jsonrpc"},
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -2271,7 +2271,7 @@ func TestWaitForPairingRapidStartStop(t *testing.T) {
 	// Run 50 rapid start/stop cycles
 	for i := 0; i < 50; i++ {
 		rpcss := &RPCSmartRouterServer{
-			sessionManager: &lavasession.ConsumerSessionManager{},
+			sessionManager: &routersession.ConsumerSessionManager{},
 		}
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -2307,8 +2307,8 @@ func TestWaitForPairingLongWait(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 	rpcss := &RPCSmartRouterServer{
-		sessionManager: &lavasession.ConsumerSessionManager{},
-		listenEndpoint: &lavasession.RPCEndpoint{ChainID: "test-chain", ApiInterface: "jsonrpc"},
+		sessionManager: &routersession.ConsumerSessionManager{},
+		listenEndpoint: &routersession.RPCEndpoint{ChainID: "test-chain", ApiInterface: "jsonrpc"},
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2354,7 +2354,7 @@ func TestWaitForPairingConcurrentCalls(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			rpcss := &RPCSmartRouterServer{
-				sessionManager: &lavasession.ConsumerSessionManager{},
+				sessionManager: &routersession.ConsumerSessionManager{},
 			}
 			rpcss.waitForPairing(ctx)
 		}()
@@ -2775,13 +2775,13 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		config := relaycore.DefaultConsistencyValidationConfig()
 
 		// Create endpoint at block 100 (synced)
-		endpoint := &lavasession.Endpoint{NetworkAddress: "http://ep1:8545"}
+		endpoint := &routersession.Endpoint{NetworkAddress: "http://ep1:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://ep1:8545", 100)
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://ep1:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://ep1:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: endpoint,
 					},
 				},
@@ -2789,7 +2789,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 			chainState:        chainTip,
 		}
@@ -2815,24 +2815,24 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		config := relaycore.DefaultConsistencyValidationConfig()
 
 		// Create synced endpoint at block 195 (within threshold)
-		syncedEndpoint := &lavasession.Endpoint{NetworkAddress: "http://synced:8545"}
+		syncedEndpoint := &routersession.Endpoint{NetworkAddress: "http://synced:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://synced:8545", 195)
 
 		// Create stale endpoint at block 100 (way behind, lag=100 > threshold=10)
-		staleEndpoint := &lavasession.Endpoint{NetworkAddress: "http://stale:8545"}
+		staleEndpoint := &routersession.Endpoint{NetworkAddress: "http://stale:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://stale:8545", 100)
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://synced:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://synced:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: syncedEndpoint,
 					},
 				},
 			},
-			"http://stale:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+			"http://stale:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: staleEndpoint,
 					},
 				},
@@ -2840,7 +2840,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 			chainState:        chainTip,
 		}
@@ -2867,23 +2867,23 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		config := relaycore.DefaultConsistencyValidationConfig()
 
 		// Both endpoints are stale
-		staleEndpoint1 := &lavasession.Endpoint{NetworkAddress: "http://stale1:8545"}
+		staleEndpoint1 := &routersession.Endpoint{NetworkAddress: "http://stale1:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://stale1:8545", 100)
 
-		staleEndpoint2 := &lavasession.Endpoint{NetworkAddress: "http://stale2:8545"}
+		staleEndpoint2 := &routersession.Endpoint{NetworkAddress: "http://stale2:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://stale2:8545", 50)
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://stale1:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://stale1:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: staleEndpoint1,
 					},
 				},
 			},
-			"http://stale2:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+			"http://stale2:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: staleEndpoint2,
 					},
 				},
@@ -2891,7 +2891,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 			chainState:        chainTip,
 		}
@@ -2904,7 +2904,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 
 		valid, failed, err := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMsg)
 		require.Error(t, err)
-		require.True(t, errors.Is(err, lavasession.ConsistencyPreValidationError))
+		require.True(t, errors.Is(err, routersession.ConsistencyPreValidationError))
 		require.Nil(t, valid)
 		require.Len(t, failed, 2)
 	})
@@ -2916,13 +2916,13 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 
 		config := relaycore.DefaultConsistencyValidationConfig()
 
-		endpoint := &lavasession.Endpoint{NetworkAddress: "http://ep1:8545"}
+		endpoint := &routersession.Endpoint{NetworkAddress: "http://ep1:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://ep1:8545", 100)
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://ep1:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://ep1:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: endpoint,
 					},
 				},
@@ -2930,7 +2930,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 		}
 
@@ -2947,9 +2947,9 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 	})
 
 	t.Run("no config - skip validation, return all as valid", func(t *testing.T) {
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://ep1:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{},
+		sessions := routersession.ConsumerSessionsMap{
+			"http://ep1:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{},
 			},
 		}
 
@@ -2976,12 +2976,12 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		config := relaycore.DefaultConsistencyValidationConfig()
 
 		// Endpoint has no block data yet (LatestBlock == 0)
-		newEndpoint := &lavasession.Endpoint{NetworkAddress: "http://new:8545"}
+		newEndpoint := &routersession.Endpoint{NetworkAddress: "http://new:8545"}
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://new:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://new:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: newEndpoint,
 					},
 				},
@@ -2989,7 +2989,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 			chainState:        chainTip,
 		}
@@ -3014,13 +3014,13 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 
 		config := relaycore.DefaultConsistencyValidationConfig()
 
-		staleEndpoint := &lavasession.Endpoint{NetworkAddress: "http://stale:8545"}
+		staleEndpoint := &routersession.Endpoint{NetworkAddress: "http://stale:8545"}
 		seedEndpointTip("ETH1", "jsonrpc", "http://stale:8545", 50) // very stale
 
-		sessions := lavasession.ConsumerSessionsMap{
-			"http://stale:8545": &lavasession.SessionInfo{
-				Session: &lavasession.SingleConsumerSession{
-					Connection: &lavasession.DirectRPCSessionConnection{
+		sessions := routersession.ConsumerSessionsMap{
+			"http://stale:8545": &routersession.SessionInfo{
+				Session: &routersession.SingleConsumerSession{
+					Connection: &routersession.DirectRPCSessionConnection{
 						Endpoint: staleEndpoint,
 					},
 				},
@@ -3028,7 +3028,7 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 		}
 
 		rpcss := &RPCSmartRouterServer{
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: "ETH1", ApiInterface: "jsonrpc"},
 			consistencyConfig: config,
 			chainState:        chainTip,
 		}
@@ -3050,13 +3050,13 @@ func TestFilterEndpointsByConsistency_ReturnsFailedSessions(t *testing.T) {
 func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 	t.Run("all stale exhausts normal selection then serves one fallback pass", func(t *testing.T) {
 		state := newConsistencyFallbackState()
-		usedProviders := lavasession.NewUsedProviders(nil)
-		routerKey := lavasession.NewRouterKey(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
+		routerKey := routersession.NewRouterKey(nil)
 		usedProviders.AddUnwantedAddresses("transport-failure", routerKey)
 
 		reject := func(provider string) {
-			state.recordRejected(lavasession.ConsumerSessionsMap{
-				provider: &lavasession.SessionInfo{},
+			state.recordRejected(routersession.ConsumerSessionsMap{
+				provider: &routersession.SessionInfo{},
 			})
 			usedProviders.AddUnwantedAddresses(provider, routerKey)
 		}
@@ -3072,12 +3072,12 @@ func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 				switch attempts {
 				case 1:
 					reject("stale-1")
-					return lavasession.ConsistencyPreValidationError
+					return routersession.ConsistencyPreValidationError
 				case 2:
 					reject("stale-2")
-					return fmt.Errorf("second stale candidate: %w", lavasession.ConsistencyPreValidationError)
+					return fmt.Errorf("second stale candidate: %w", routersession.ConsistencyPreValidationError)
 				case 3:
-					return lavasession.PairingListEmptyError
+					return routersession.PairingListEmptyError
 				case 4:
 					require.True(t, state.allows("stale-1"))
 					require.True(t, state.allows("stale-2"))
@@ -3100,8 +3100,8 @@ func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 
 	t.Run("fresh alternative wins without activating stale fallback", func(t *testing.T) {
 		state := newConsistencyFallbackState()
-		usedProviders := lavasession.NewUsedProviders(nil)
-		routerKey := lavasession.NewRouterKey(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
+		routerKey := routersession.NewRouterKey(nil)
 		attempts := 0
 
 		err := sendRelayTaskWithConsistencyFallback(
@@ -3109,9 +3109,9 @@ func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 			func() error {
 				attempts++
 				if attempts == 1 {
-					state.recordRejected(lavasession.ConsumerSessionsMap{"stale": &lavasession.SessionInfo{}})
+					state.recordRejected(routersession.ConsumerSessionsMap{"stale": &routersession.SessionInfo{}})
 					usedProviders.AddUnwantedAddresses("stale", routerKey)
-					return lavasession.ConsistencyPreValidationError
+					return routersession.ConsistencyPreValidationError
 				}
 				return nil
 			},
@@ -3125,8 +3125,8 @@ func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 
 	t.Run("fallback activation is one shot", func(t *testing.T) {
 		state := newConsistencyFallbackState()
-		usedProviders := lavasession.NewUsedProviders(nil)
-		routerKey := lavasession.NewRouterKey(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
+		routerKey := routersession.NewRouterKey(nil)
 		attempts := 0
 
 		err := sendRelayTaskWithConsistencyFallback(
@@ -3134,54 +3134,54 @@ func TestSendRelayTaskWithConsistencyFallback(t *testing.T) {
 			func() error {
 				attempts++
 				if attempts == 1 {
-					state.recordRejected(lavasession.ConsumerSessionsMap{"stale": &lavasession.SessionInfo{}})
+					state.recordRejected(routersession.ConsumerSessionsMap{"stale": &routersession.SessionInfo{}})
 					usedProviders.AddUnwantedAddresses("stale", routerKey)
-					return lavasession.ConsistencyPreValidationError
+					return routersession.ConsistencyPreValidationError
 				}
-				return lavasession.PairingListEmptyError
+				return routersession.PairingListEmptyError
 			},
 		)
 
-		require.ErrorIs(t, err, lavasession.PairingListEmptyError)
+		require.ErrorIs(t, err, routersession.PairingListEmptyError)
 		require.Equal(t, 3, attempts, "a failed fallback pass must not reopen providers indefinitely")
 	})
 
 	t.Run("cross-validation remains strict", func(t *testing.T) {
 		state := newConsistencyFallbackState()
-		usedProviders := lavasession.NewUsedProviders(nil)
+		usedProviders := routersession.NewUsedProviders(nil)
 		attempts := 0
 
 		err := sendRelayTaskWithConsistencyFallback(
 			context.Background(), relaycore.CrossValidation, state, usedProviders,
 			func() error {
 				attempts++
-				return lavasession.ConsistencyPreValidationError
+				return routersession.ConsistencyPreValidationError
 			},
 		)
 
-		require.ErrorIs(t, err, lavasession.ConsistencyPreValidationError)
+		require.ErrorIs(t, err, routersession.ConsistencyPreValidationError)
 		require.Equal(t, 1, attempts)
 	})
 }
 
 func TestPromoteConsistencyFallback(t *testing.T) {
 	state := newConsistencyFallbackState()
-	usedProviders := lavasession.NewUsedProviders(nil)
-	state.recordRejected(lavasession.ConsumerSessionsMap{
-		"previously-rejected": &lavasession.SessionInfo{},
+	usedProviders := routersession.NewUsedProviders(nil)
+	state.recordRejected(routersession.ConsumerSessionsMap{
+		"previously-rejected": &routersession.SessionInfo{},
 	})
-	usedProviders.AddUnwantedAddresses("previously-rejected", lavasession.NewRouterKey(nil))
+	usedProviders.AddUnwantedAddresses("previously-rejected", routersession.NewRouterKey(nil))
 	_, activated := state.activate(usedProviders)
 	require.True(t, activated)
 
-	failed := lavasession.ConsumerSessionsMap{
-		"previously-rejected": &lavasession.SessionInfo{},
-		"new-stale-provider":  &lavasession.SessionInfo{},
+	failed := routersession.ConsumerSessionsMap{
+		"previously-rejected": &routersession.SessionInfo{},
+		"new-stale-provider":  &routersession.SessionInfo{},
 	}
 	valid, remainingFailed, promoted, err := promoteConsistencyFallback(
 		nil,
 		failed,
-		lavasession.ConsistencyPreValidationError,
+		routersession.ConsistencyPreValidationError,
 		state,
 	)
 
@@ -3198,11 +3198,11 @@ func TestPromoteConsistencyFallback(t *testing.T) {
 // This ensures immediate blocking via unwantedProviders rather than "allow one retry".
 func TestConsistencyPreValidationError_NotRetryable(t *testing.T) {
 	// ConsistencyPreValidationError should NOT be a session sync loss
-	require.False(t, lavasession.IsSessionSyncLoss(lavasession.ConsistencyPreValidationError),
+	require.False(t, routersession.IsSessionSyncLoss(routersession.ConsistencyPreValidationError),
 		"ConsistencyPreValidationError should NOT be treated as session sync loss")
 
 	// SessionOutOfSyncError IS a session sync loss (for comparison)
-	require.True(t, lavasession.IsSessionSyncLoss(lavasession.SessionOutOfSyncError),
+	require.True(t, routersession.IsSessionSyncLoss(routersession.SessionOutOfSyncError),
 		"SessionOutOfSyncError should be treated as session sync loss")
 }
 
@@ -3216,7 +3216,7 @@ func TestConsistencyPreValidationError_NotRetryable(t *testing.T) {
 // and the cross-validation params; the early-exit path under test does not
 // touch the other methods.
 type cvGuardStateMachine struct {
-	usedProviders *lavasession.UsedProviders
+	usedProviders *routersession.UsedProviders
 	cvParams      *common.CrossValidationParams
 	// protocolMessage is what sendRelayToEndpoint reads off the processor before it gets sessions.
 	// The post-filter test below drives sendRelayToDirectEndpoints, which takes the message as an
@@ -3236,7 +3236,7 @@ func (m *cvGuardStateMachine) GetCrossValidationParams() *common.CrossValidation
 	return m.cvParams
 }
 
-func (m *cvGuardStateMachine) GetUsedProviders() *lavasession.UsedProviders     { return m.usedProviders }
+func (m *cvGuardStateMachine) GetUsedProviders() *routersession.UsedProviders   { return m.usedProviders }
 func (m *cvGuardStateMachine) SetResultsChecker(rc relaycore.ResultsCheckerInf) {}
 
 // cvGuardMetrics is a no-op MetricsInterface + ChainIdAndApiInterfaceGetter
@@ -3260,7 +3260,7 @@ func (cvGuardMetrics) GetChainIdAndApiInterface() (string, string) { return "LAV
 //
 // Asserts:
 //   - returns in well under processingTimeout (the regression was a 30s stall)
-//   - error wraps lavasession.PairingListEmptyError (CV state machine short-circuits on this)
+//   - error wraps routersession.PairingListEmptyError (CV state machine short-circuits on this)
 //   - usedProviders.CurrentlyUsed() == 0 (catches surviving-session leak — 97266e4 regression)
 //   - usedProviders.SessionsLatestBatch() == 0 (catches counter leak — a78426a regression)
 func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *testing.T) {
@@ -3287,42 +3287,42 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	// Tips live in the shared endpointtip store, keyed LAVA|rest|url (matching the rpcss
 	// listenEndpoint below). Reset first so other tests' entries can't interfere.
 	endpointtip.Default().Reset()
-	syncedEp := &lavasession.Endpoint{NetworkAddress: "http://synced:8545"}
+	syncedEp := &routersession.Endpoint{NetworkAddress: "http://synced:8545"}
 	seedEndpointTip("LAVA", "rest", "http://synced:8545", 195)
-	staleEp1 := &lavasession.Endpoint{NetworkAddress: "http://stale1:8545"}
+	staleEp1 := &routersession.Endpoint{NetworkAddress: "http://stale1:8545"}
 	seedEndpointTip("LAVA", "rest", "http://stale1:8545", 50)
-	staleEp2 := &lavasession.Endpoint{NetworkAddress: "http://stale2:8545"}
+	staleEp2 := &routersession.Endpoint{NetworkAddress: "http://stale2:8545"}
 	seedEndpointTip("LAVA", "rest", "http://stale2:8545", 50)
 
-	mkSession := func(addr string, ep *lavasession.Endpoint) *lavasession.SingleConsumerSession {
-		return &lavasession.SingleConsumerSession{
+	mkSession := func(addr string, ep *routersession.Endpoint) *routersession.SingleConsumerSession {
+		return &routersession.SingleConsumerSession{
 			// Parent.Endpoints[0] is read by the QoS metrics path inside
 			// OnSessionFailure (consumer_session_manager.go:1807); leaving the
 			// slice empty panics. The endpoint identity doesn't matter here —
 			// only the indexing has to succeed.
-			Parent:     &lavasession.ConsumerSessionsWithProvider{PublicLavaAddress: addr, Endpoints: []*lavasession.Endpoint{ep}},
-			Connection: &lavasession.DirectRPCSessionConnection{Endpoint: ep},
+			Parent:     &routersession.ConsumerSessionsWithProvider{PublicAddress: addr, Endpoints: []*routersession.Endpoint{ep}},
+			Connection: &routersession.DirectRPCSessionConnection{Endpoint: ep},
 			QoSManager: qos.NewQoSManager(),
 		}
 	}
-	sess1 := mkSession("lava@provider1", syncedEp)
-	sess2 := mkSession("lava@provider2", staleEp1)
-	sess3 := mkSession("lava@provider3", staleEp2)
-	for _, s := range []*lavasession.SingleConsumerSession{sess1, sess2, sess3} {
+	sess1 := mkSession("provider@provider1", syncedEp)
+	sess2 := mkSession("provider@provider2", staleEp1)
+	sess3 := mkSession("provider@provider3", staleEp2)
+	for _, s := range []*routersession.SingleConsumerSession{sess1, sess2, sess3} {
 		_, ok := s.TryUseSession()
 		require.True(t, ok, "test setup: failed to lock session")
 	}
 
 	// Mimic GetSessions: AddUsed registers all 3 in UsedProviders; SetUsageForSession
 	// wires each session back to UsedProviders so Free(nil) calls RemoveUsed correctly.
-	usedProviders := lavasession.NewUsedProviders(nil)
-	sessionsMap := lavasession.ConsumerSessionsMap{
-		"lava@provider1": &lavasession.SessionInfo{Session: sess1},
-		"lava@provider2": &lavasession.SessionInfo{Session: sess2},
-		"lava@provider3": &lavasession.SessionInfo{Session: sess3},
+	usedProviders := routersession.NewUsedProviders(nil)
+	sessionsMap := routersession.ConsumerSessionsMap{
+		"provider@provider1": &routersession.SessionInfo{Session: sess1},
+		"provider@provider2": &routersession.SessionInfo{Session: sess2},
+		"provider@provider3": &routersession.SessionInfo{Session: sess3},
 	}
 	usedProviders.AddUsed(sessionsMap, nil)
-	routerKey := lavasession.NewRouterKey(nil)
+	routerKey := routersession.NewRouterKey(nil)
 	require.NoError(t, sess1.SetUsageForSession(0, nil, usedProviders, routerKey))
 	require.NoError(t, sess2.SetUsageForSession(0, nil, usedProviders, routerKey))
 	require.NoError(t, sess3.SetUsageForSession(0, nil, usedProviders, routerKey))
@@ -3338,11 +3338,11 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 		sm)
 
 	// Real session manager — OnSessionFailure runs against it for the 2 dropped sessions.
-	rpcEndpoint := &lavasession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
+	rpcEndpoint := &routersession.RPCEndpoint{ChainID: "LAVA", ApiInterface: "rest"}
 	optimizer := provideroptimizer.NewProviderOptimizer(provideroptimizer.StrategyBalanced, time.Second, uint(1), nil, "LAVA")
-	sessionManager := lavasession.NewConsumerSessionManager(
+	sessionManager := routersession.NewConsumerSessionManager(
 		rpcEndpoint, optimizer, nil, "test-router",
-		lavasession.NewActiveSubscriptionProvidersStorage())
+		routersession.NewActiveSubscriptionProvidersStorage())
 
 	rpcss := &RPCSmartRouterServer{
 		listenEndpoint:    rpcEndpoint,
@@ -3367,7 +3367,7 @@ func TestSendRelayToDirectEndpoints_CrossValidationGuardReleasesAllSessions(t *t
 	require.Less(t, elapsed, time.Second,
 		"fast-fail required (commit 97266e4 regression catch); took %v", elapsed)
 	require.Error(t, sendErr)
-	require.Truef(t, errors.Is(sendErr, lavasession.PairingListEmptyError),
+	require.Truef(t, errors.Is(sendErr, routersession.PairingListEmptyError),
 		"error must wrap PairingListEmptyError so the CV short-circuit in policy.OnSendRelayResult can see it; got: %v", sendErr)
 	require.Equal(t, 0, usedProviders.CurrentlyUsed(),
 		"surviving valid sessions leaked into CurrentlyUsed — commit 97266e4 regression: validateReturnCondition will block on this and the request will stall processingTimeout")
@@ -3503,22 +3503,22 @@ func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *tes
 		return &RPCSmartRouterServer{
 			consistencyConfig: config,
 			chainState:        cs,
-			listenEndpoint:    &lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface},
+			listenEndpoint:    &routersession.RPCEndpoint{ChainID: chainID, ApiInterface: apiInterface},
 		}
 	}
-	endpointSession := func(addr string, latest int64) *lavasession.SessionInfo {
-		ep := &lavasession.Endpoint{NetworkAddress: addr}
+	endpointSession := func(addr string, latest int64) *routersession.SessionInfo {
+		ep := &routersession.Endpoint{NetworkAddress: addr}
 		// Per-endpoint tip now lives in the shared endpointtip store (keyed chain|api|url),
 		// read by filterEndpointsByConsistency in place of the removed Endpoint.LatestBlock.
 		seedEndpointTip(chainID, apiInterface, addr, latest)
-		return &lavasession.SessionInfo{Session: &lavasession.SingleConsumerSession{
-			Connection: &lavasession.DirectRPCSessionConnection{Endpoint: ep},
+		return &routersession.SessionInfo{Session: &routersession.SingleConsumerSession{
+			Connection: &routersession.DirectRPCSessionConnection{Endpoint: ep},
 		}}
 	}
 
 	t.Run("slot tip (fixed) is in sync -> endpoint valid", func(t *testing.T) {
 		rpcss := newServer()
-		sessions := lavasession.ConsumerSessionsMap{
+		sessions := routersession.ConsumerSessionsMap{
 			"http://slot:8899": endpointSession("http://slot:8899", slotTip),
 		}
 		valid, failed, err := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMsg)
@@ -3529,7 +3529,7 @@ func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *tes
 
 	t.Run("block-height tip (regression) looks ~21M behind -> filtered, no pairings", func(t *testing.T) {
 		rpcss := newServer()
-		sessions := lavasession.ConsumerSessionsMap{
+		sessions := routersession.ConsumerSessionsMap{
 			"http://blockheight:8899": endpointSession("http://blockheight:8899", blockHeightTip),
 		}
 		valid, failed, err := rpcss.filterEndpointsByConsistency(ctx, sessions, protocolMsg)
@@ -3540,7 +3540,7 @@ func TestFilterEndpointsByConsistency_SolanaSlotVsBlockHeightUnitMismatch(t *tes
 
 	t.Run("mixed fleet -> only the slot tip survives", func(t *testing.T) {
 		rpcss := newServer()
-		sessions := lavasession.ConsumerSessionsMap{
+		sessions := routersession.ConsumerSessionsMap{
 			"http://slot:8899":        endpointSession("http://slot:8899", slotTip),
 			"http://blockheight:8899": endpointSession("http://blockheight:8899", blockHeightTip),
 		}
@@ -3690,7 +3690,7 @@ func TestCacheBackendHeaderIsDebugGated(t *testing.T) {
 // written — so a test reading it straight after its reply races it. These two headers
 // are part of the reply, so there is nothing to wait for.
 func TestCacheTierHeaders(t *testing.T) {
-	withDirective := map[string]string{common.LAVA_DEBUG_RELAY: "true"}
+	withDirective := map[string]string{common.DEBUG_RELAY: "true"}
 
 	tierOf := func(metadata []pairingtypes.Metadata) *pairingtypes.Metadata {
 		return findMetadataHeader(metadata, common.CACHE_TIER_HEADER_NAME)

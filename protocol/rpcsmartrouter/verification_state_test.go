@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 	"github.com/stretchr/testify/require"
 )
@@ -82,10 +82,10 @@ func TestTrackFailures_LogsEachTransitionOnce(t *testing.T) {
 func TestDebugVerification_ShowsFailingChecksAndRetries(t *testing.T) {
 	const spec = "VERIFYDEBUG"
 	const chainKey = spec + "jsonrpc" // RPCEndpoint.Key()
-	out, served := &lavasession.RPCStaticProviderEndpoint{Name: "out"}, &lavasession.RPCStaticProviderEndpoint{Name: "served"}
+	out, served := &routersession.RPCStaticProviderEndpoint{Name: "out"}, &routersession.RPCStaticProviderEndpoint{Name: "served"}
 	inputs := &chainReverifyInputs{
-		configuredStatic: []*lavasession.RPCStaticProviderEndpoint{out, served},
-		refusedFor: func(p *lavasession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
+		configuredStatic: []*routersession.RPCStaticProviderEndpoint{out, served},
+		refusedFor: func(p *routersession.RPCStaticProviderEndpoint) []metrics.ProviderVerificationFailure {
 			if p.Name == "served" {
 				return []metrics.ProviderVerificationFailure{{Scope: metrics.VerificationScopeService, Service: "archive", Check: "pruning"}}
 			}

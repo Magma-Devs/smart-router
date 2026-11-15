@@ -136,7 +136,7 @@ func (p *streamSnapshot) take(wait time.Duration) ReflectionSnapshot {
 		case err == nil:
 			p.snapshot, p.pinned = snapshot, true
 		case wait > 0:
-			utils.LavaFormatWarning("gRPC reflection: no upstream snapshot yet, describing the reflection services only", err)
+			utils.FormatWarning("gRPC reflection: no upstream snapshot yet, describing the reflection services only", err)
 		}
 	}
 	return p.snapshot

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,9 +55,9 @@ func TestSelectProviderStrict(t *testing.T) {
 // Only the two errors that name the pin are terminal at the send stage; an empty pool or a
 // transport failure keeps the ordinary resend path.
 func TestPinnedUpstreamUnservable(t *testing.T) {
-	require.True(t, PinnedUpstreamUnservable(fmt.Errorf("wrapped: %w", lavasession.SelectedProviderUnavailableError)))
-	require.True(t, PinnedUpstreamUnservable(lavasession.SelectedProviderAlreadyFailedError))
-	require.False(t, PinnedUpstreamUnservable(lavasession.PairingListEmptyError))
+	require.True(t, PinnedUpstreamUnservable(fmt.Errorf("wrapped: %w", routersession.SelectedProviderUnavailableError)))
+	require.True(t, PinnedUpstreamUnservable(routersession.SelectedProviderAlreadyFailedError))
+	require.False(t, PinnedUpstreamUnservable(routersession.PairingListEmptyError))
 	require.False(t, PinnedUpstreamUnservable(errors.New("dial tcp: connection refused")))
 	require.False(t, PinnedUpstreamUnservable(nil))
 }

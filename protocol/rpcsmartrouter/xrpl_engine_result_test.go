@@ -20,9 +20,9 @@ import (
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
 	"github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/relaycore"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/magma-Devs/smart-router/utils/rand"
 )
@@ -78,7 +78,7 @@ func TestDirectRPCRelaySender_XRPLSubmitVerdicts(t *testing.T) {
 			defer upstream.Close()
 
 			ctx := context.Background()
-			directConn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
+			directConn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: upstream.URL}, 5, "")
 			require.NoError(t, err)
 			t.Cleanup(func() { directConn.Close() })
 			sender := &DirectRPCRelaySender{
@@ -107,13 +107,13 @@ func TestDirectRPCRelaySender_XRPLSubmitVerdicts(t *testing.T) {
 // verdict. It returns the listener's address.
 func startXRPLRouter(t *testing.T, ctx context.Context, upstreams map[string]string) string {
 	t.Helper()
-	providers := map[uint64]*lavasession.ConsumerSessionsWithProvider{}
+	providers := map[uint64]*routersession.ConsumerSessionsWithProvider{}
 	for name, url := range upstreams {
-		conn, err := lavasession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, spectypes.APIInterfaceJsonRPC)
+		conn, err := routersession.NewDirectRPCConnection(ctx, common.NodeUrl{Url: url}, 5, spectypes.APIInterfaceJsonRPC)
 		require.NoError(t, err)
 		t.Cleanup(func() { conn.Close() })
-		endpoint := &lavasession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []lavasession.DirectRPCConnection{conn}}
-		provider := lavasession.NewConsumerSessionWithProvider(name, []*lavasession.Endpoint{endpoint}, 100000, 1, 1)
+		endpoint := &routersession.Endpoint{NetworkAddress: url, Enabled: true, DirectConnections: []routersession.DirectRPCConnection{conn}}
+		provider := routersession.NewConsumerSessionWithProvider(name, []*routersession.Endpoint{endpoint}, 100000, 1, 1)
 		provider.StaticProvider = true
 		providers[uint64(len(providers))] = provider
 	}
@@ -236,9 +236,9 @@ func TestJSONRPCListener_XRPLSubmitBroadcast(t *testing.T) {
 			require.Equal(t, http.StatusOK, response.StatusCode, string(body))
 			require.Equal(t, engineVerdictOf(t, []byte(tc.wantReply)), engineVerdictOf(t, body), string(body))
 			if tc.wantNodeErrFlag {
-				require.Equal(t, "true", response.Header.Get(common.LAVA_IDENTIFIED_NODE_ERROR_HEADER))
+				require.Equal(t, "true", response.Header.Get(common.IDENTIFIED_NODE_ERROR_HEADER))
 			} else {
-				require.Empty(t, response.Header.Get(common.LAVA_IDENTIFIED_NODE_ERROR_HEADER))
+				require.Empty(t, response.Header.Get(common.IDENTIFIED_NODE_ERROR_HEADER))
 			}
 		})
 	}

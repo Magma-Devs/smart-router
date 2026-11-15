@@ -13,9 +13,9 @@ import (
 
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
 	"github.com/magma-Devs/smart-router/protocol/provideroptimizer"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	specutils "github.com/magma-Devs/smart-router/utils/keeper"
 	"github.com/magma-Devs/smart-router/utils/rand"
@@ -92,15 +92,15 @@ func tontParser(t *testing.T) chainlib.ChainParser {
 	return parser
 }
 
-func tontProvider(urls ...commonlib.NodeUrl) *lavasession.RPCStaticProviderEndpoint {
-	return &lavasession.RPCStaticProviderEndpoint{Name: "cs", ChainID: "TONT", ApiInterface: spectypes.APIInterfaceRest, NodeUrls: urls}
+func tontProvider(urls ...commonlib.NodeUrl) *routersession.RPCStaticProviderEndpoint {
+	return &routersession.RPCStaticProviderEndpoint{Name: "cs", ChainID: "TONT", ApiInterface: spectypes.APIInterfaceRest, NodeUrls: urls}
 }
 
 // endpointsFor stands in for the session build: one endpoint per admitted url.
-func endpointsFor(urls []commonlib.NodeUrl) []*lavasession.Endpoint {
-	endpoints := make([]*lavasession.Endpoint, 0, len(urls))
+func endpointsFor(urls []commonlib.NodeUrl) []*routersession.Endpoint {
+	endpoints := make([]*routersession.Endpoint, 0, len(urls))
 	for _, url := range urls {
-		endpoints = append(endpoints, &lavasession.Endpoint{NetworkAddress: url.Url, InternalPath: url.InternalPath})
+		endpoints = append(endpoints, &routersession.Endpoint{NetworkAddress: url.Url, InternalPath: url.InternalPath})
 	}
 	return endpoints
 }
@@ -281,7 +281,7 @@ func TestCreateSmartRouterEndpoint_PathLostAtBootComesBackOnRetry(t *testing.T) 
 	t.Cleanup(cancel)
 	rpsr := createTestRPCSmartRouter()
 	rpsr.reverifyInputs = make(map[string]*chainReverifyInputs)
-	endpoint := &lavasession.RPCEndpoint{ChainID: "TONT", ApiInterface: spectypes.APIInterfaceRest, NetworkAddress: "127.0.0.1:0"}
+	endpoint := &routersession.RPCEndpoint{ChainID: "TONT", ApiInterface: spectypes.APIInterfaceRest, NetworkAddress: "127.0.0.1:0"}
 	metricsManager := metrics.NewSmartRouterMetricsManager(metrics.SmartRouterMetricsManagerOptions{})
 	logs, err := metrics.NewRPCConsumerLogs(metricsManager, nil, nil)
 	require.NoError(t, err)
@@ -289,10 +289,10 @@ func TestCreateSmartRouterEndpoint_PathLostAtBootComesBackOnRetry(t *testing.T) 
 	taProvider := tontProvider(commonlib.NodeUrl{Url: ta.srv.URL})
 	taProvider.Name = "ta"
 	options := &rpcSmartRouterStartOptions{
-		rpcEndpoints:        []*lavasession.RPCEndpoint{endpoint},
+		rpcEndpoints:        []*routersession.RPCEndpoint{endpoint},
 		strategy:            provideroptimizer.StrategyBalanced,
 		cmdFlags:            commonlib.ConsumerCmdFlags{StaticSpecPaths: []string{"../chainlib/testdata/ton_internal_paths.json"}},
-		staticProvidersList: []*lavasession.RPCStaticProviderEndpoint{csProvider, taProvider},
+		staticProvidersList: []*routersession.RPCStaticProviderEndpoint{csProvider, taProvider},
 	}
 	require.NoError(t, rpsr.CreateSmartRouterEndpoint(ctx, endpoint, make(chan error, 1), &commonlib.SafeSyncMap[string, *provideroptimizer.ProviderOptimizer]{},
 		map[string]*sync.Mutex{"TONT": {}}, options, "test-router", logs, nil, metricsManager, nil))
@@ -304,7 +304,7 @@ func TestCreateSmartRouterEndpoint_PathLostAtBootComesBackOnRetry(t *testing.T) 
 		rpsr.mu.Lock()
 		defer rpsr.mu.Unlock()
 		for _, s := range rpsr.providerSessions[endpoint.Key()] {
-			if s.PublicLavaAddress != name {
+			if s.PublicAddress != name {
 				continue
 			}
 			sessions++

@@ -15,7 +15,7 @@ var (
 	TimeoutMutexBoolean, _ = strconv.ParseBool(TimeoutMutex)
 )
 
-type LavaMutex struct {
+type Mutex struct {
 	mu          sync.Mutex
 	quit        chan bool
 	SecondsLeft int
@@ -23,12 +23,12 @@ type LavaMutex struct {
 	lockCount   int
 }
 
-func (dm *LavaMutex) getLineAndFile() string {
+func (dm *Mutex) getLineAndFile() string {
 	_, file, line, _ := runtime.Caller(2)
 	return fmt.Sprintf("%s:%d", file, line)
 }
 
-func (dm *LavaMutex) waitForTimeout() {
+func (dm *Mutex) waitForTimeout() {
 	dm.quit = make(chan bool)
 	ticker := time.NewTicker(TIMEOUT * time.Second)
 	go func() {
@@ -46,7 +46,7 @@ func (dm *LavaMutex) waitForTimeout() {
 	}()
 }
 
-func (dm *LavaMutex) Lock() {
+func (dm *Mutex) Lock() {
 	if TimeoutMutexBoolean {
 		tempLineAndFile := dm.getLineAndFile()
 		dm.lockCount++
@@ -61,7 +61,7 @@ func (dm *LavaMutex) Lock() {
 	}
 }
 
-func (dm *LavaMutex) TryLock() (isLocked bool) {
+func (dm *Mutex) TryLock() (isLocked bool) {
 	if TimeoutMutexBoolean {
 		tempLineAndFile := dm.getLineAndFile()
 		isLocked = dm.mu.TryLock()
@@ -78,7 +78,7 @@ func (dm *LavaMutex) TryLock() (isLocked bool) {
 	}
 }
 
-func (dm *LavaMutex) Unlock() {
+func (dm *Mutex) Unlock() {
 	if TimeoutMutexBoolean {
 		// fmt.Println("Unlock: ", dm.getLineAndFile())
 		dm.lockCount++

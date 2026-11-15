@@ -15,7 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/magma-Devs/smart-router/protocol/chainlib"
 	commonlib "github.com/magma-Devs/smart-router/protocol/common"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/protocol/statetracker"
 	"github.com/stretchr/testify/require"
 )
@@ -291,11 +291,11 @@ func liveParser(t *testing.T, chainID string, skipWebsocket bool) chainlib.Chain
 	parser, err := chainlib.NewChainParser("jsonrpc")
 	require.NoError(t, err)
 	parser.SetSkipWebsocketVerification(skipWebsocket)
-	endpoint := lavasession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"}
+	endpoint := routersession.RPCEndpoint{ChainID: chainID, ApiInterface: "jsonrpc"}
 	require.NoError(t, statetracker.RegisterForSpecUpdatesOrSetStaticSpecsWithToken(t.Context(), parser, []string{"../../specs/"}, endpoint, "", ""))
 	return parser
 }
 
-func staticProvider(chainID string, urls ...commonlib.NodeUrl) *lavasession.RPCStaticProviderEndpoint {
-	return &lavasession.RPCStaticProviderEndpoint{Name: "p", ChainID: chainID, ApiInterface: "jsonrpc", NodeUrls: urls}
+func staticProvider(chainID string, urls ...commonlib.NodeUrl) *routersession.RPCStaticProviderEndpoint {
+	return &routersession.RPCStaticProviderEndpoint{Name: "p", ChainID: chainID, ApiInterface: "jsonrpc", NodeUrls: urls}
 }

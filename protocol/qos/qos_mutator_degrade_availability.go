@@ -11,6 +11,6 @@ func (qoSMutatorDegradeAvailability *QoSMutatorDegradeAvailability) Mutate(repor
 	if report.answeredRelays > 0 {
 		report.answeredRelays--
 	} else {
-		utils.LavaFormatError("Tried to degrade availability more than answered relays", nil, utils.LogAttr("report", report))
+		utils.FormatError("Tried to degrade availability more than answered relays", nil, utils.LogAttr("report", report))
 	}
 }

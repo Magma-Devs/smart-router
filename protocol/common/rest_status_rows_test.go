@@ -14,51 +14,51 @@ import (
 // scores the endpoint, so every row here is deliberate.
 func TestRESTStatusRows(t *testing.T) {
 	type verdict struct {
-		code      *LavaError
+		code      *RouterError
 		retryable bool
 		atFault   bool
 		dataScope bool
 	}
-	userError := verdict{LavaErrorUserInvalidRequest, false, false, false}
+	userError := verdict{RouterErrorUserInvalidRequest, false, false, false}
 	// retryable, and NOT at fault: another provider can serve it, and the endpoint that refused
 	// answered truthfully about its own configuration.
-	accessDenied := verdict{LavaErrorNodeAccessDenied, true, false, false}
+	accessDenied := verdict{RouterErrorNodeAccessDenied, true, false, false}
 	cases := map[int]verdict{
 		400: userError,
 		401: accessDenied,
 		402: accessDenied,
 		403: accessDenied,
-		404: {LavaErrorNodeDataNotHeld, true, false, true},
+		404: {RouterErrorNodeDataNotHeld, true, false, true},
 		// MAG-2771: this front end's refusal, retried on another provider, unblamed.
-		405: {LavaErrorNodeMethodNotAllowed, true, false, false},
+		405: {RouterErrorNodeMethodNotAllowed, true, false, false},
 		406: userError,
 		407: accessDenied,
-		408: {LavaErrorNodeServiceUnavailable, true, true, false},
-		409: {LavaErrorChainTxAlreadyKnown, false, false, false},
-		410: {LavaErrorChainStatePruned, true, false, true},
+		408: {RouterErrorNodeServiceUnavailable, true, true, false},
+		409: {RouterErrorChainTxAlreadyKnown, false, false, false},
+		410: {RouterErrorChainStatePruned, true, false, true},
 		411: userError,
 		412: userError,
-		413: {LavaErrorUserRequestTooLarge, false, false, false},
+		413: {RouterErrorUserRequestTooLarge, false, false, false},
 		414: userError,
 		415: userError,
 		416: userError,
 		417: userError,
-		422: {LavaErrorUserInvalidParams, false, false, false},
+		422: {RouterErrorUserInvalidParams, false, false, false},
 		426: accessDenied,
 		428: userError,
-		429: {LavaErrorNodeRateLimited, true, false, false},
+		429: {RouterErrorNodeRateLimited, true, false, false},
 		431: userError,
 		451: accessDenied,
-		501: {LavaErrorNodeUnimplemented, true, false, false},
+		501: {RouterErrorNodeUnimplemented, true, false, false},
 		// The 5xx half. Absent before, which is where the interesting behaviour lives: 500 and 503
 		// are what ServerErrorIsNodeReply hands back to the client, and they are the two statuses
 		// whose blame the REST message rows above can override.
-		500: {LavaErrorNodeInternalError, true, true, false},
-		502: {LavaErrorNodeBadGateway, true, true, false},
-		503: {LavaErrorNodeServiceUnavailable, true, true, false},
-		504: {LavaErrorNodeGatewayTimeout, true, true, false},
-		520: {LavaErrorNodeServerError, true, true, false},
-		524: {LavaErrorNodeGatewayTimeout, true, true, false},
+		500: {RouterErrorNodeInternalError, true, true, false},
+		502: {RouterErrorNodeBadGateway, true, true, false},
+		503: {RouterErrorNodeServiceUnavailable, true, true, false},
+		504: {RouterErrorNodeGatewayTimeout, true, true, false},
+		520: {RouterErrorNodeServerError, true, true, false},
+		524: {RouterErrorNodeGatewayTimeout, true, true, false},
 	}
 	for status, want := range cases {
 		t.Run(fmt.Sprintf("REST %d", status), func(t *testing.T) {
@@ -75,11 +75,11 @@ func TestRESTStatusRows(t *testing.T) {
 // The JSON-RPC sender prefixes "HTTP <status>: " to the message of a non-2xx reply, which is the
 // string a shared HTTPStatusContains row would match, so that is what is asserted here.
 func TestRESTStatusRowsDoNotReachOtherTransports(t *testing.T) {
-	unchanged := map[int]*LavaError{
-		400: LavaErrorUnknown, 402: LavaErrorUnknown, 403: LavaErrorUnknown, 406: LavaErrorUnknown,
-		407: LavaErrorUnknown, 408: LavaErrorUnknown, 409: LavaErrorUnknown, 410: LavaErrorUnknown,
-		422: LavaErrorUnknown, 451: LavaErrorUnknown,
-		401: LavaErrorNodeUnauthorized, 404: LavaErrorNodeEndpointNotFound,
+	unchanged := map[int]*RouterError{
+		400: RouterErrorUnknown, 402: RouterErrorUnknown, 403: RouterErrorUnknown, 406: RouterErrorUnknown,
+		407: RouterErrorUnknown, 408: RouterErrorUnknown, 409: RouterErrorUnknown, 410: RouterErrorUnknown,
+		422: RouterErrorUnknown, 451: RouterErrorUnknown,
+		401: RouterErrorNodeUnauthorized, 404: RouterErrorNodeEndpointNotFound,
 	}
 	for status, want := range unchanged {
 		msg := fmt.Sprintf("HTTP %d: malformed JSON-RPC response: body is not valid JSON", status)
@@ -98,12 +98,12 @@ func TestRESTBeyondHeadIsRetryable(t *testing.T) {
 		"Unknown Block", // nodeos unknown_block_exception
 	} {
 		got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, 400, msg)
-		require.Same(t, LavaErrorChainBlockNotFound, got, msg)
+		require.Same(t, RouterErrorChainBlockNotFound, got, msg)
 		require.True(t, got.Retryable)
 		require.False(t, got.EndpointAtFault())
 		require.True(t, got.SubCategory.IsDataScope())
 	}
-	require.Same(t, LavaErrorUserInvalidRequest,
+	require.Same(t, RouterErrorUserInvalidRequest,
 		ClassifyError(nil, ChainFamilyUnknown, TransportREST, 400, "The request you sent was invalid in some way."),
 		"any other 400 stays a user error")
 }
@@ -115,7 +115,7 @@ func TestRESTBeyondHeadIsRetryable(t *testing.T) {
 func TestRESTUnmappedStatusIsUnknownAndScored(t *testing.T) {
 	for _, status := range []int{304, 418, 421, 423, 509, 599} {
 		got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, status, fmt.Sprintf("HTTP %d", status))
-		require.Same(t, LavaErrorUnknown, got, "REST %d", status)
+		require.Same(t, RouterErrorUnknown, got, "REST %d", status)
 		require.True(t, got.Retryable, "REST %d is retried", status)
 		require.False(t, got.EndpointAtFault(), "REST %d does not blame the endpoint", status)
 		require.False(t, got.SubCategory.IsDataScope(), "REST %d is not excused by the availability gate", status)
@@ -131,16 +131,16 @@ func TestRESTMessageRowsBeatTheStatusRow(t *testing.T) {
 	cases := []struct {
 		status int
 		body   string
-		want   *LavaError
+		want   *RouterError
 	}{
-		{400, `{"message":"method not allowed"}`, LavaErrorNodeMethodNotAllowed},
-		{400, "route not found", LavaErrorNodeEndpointNotFound},
-		{400, `{"message":"endpoint not found"}`, LavaErrorNodeEndpointNotFound},
-		{403, "route not found", LavaErrorNodeEndpointNotFound},
-		{422, `{"ok":false,"error":"path not found"}`, LavaErrorNodeEndpointNotFound},
+		{400, `{"message":"method not allowed"}`, RouterErrorNodeMethodNotAllowed},
+		{400, "route not found", RouterErrorNodeEndpointNotFound},
+		{400, `{"message":"endpoint not found"}`, RouterErrorNodeEndpointNotFound},
+		{403, "route not found", RouterErrorNodeEndpointNotFound},
+		{422, `{"ok":false,"error":"path not found"}`, RouterErrorNodeEndpointNotFound},
 		// and a body with nothing specific still falls through to the status row
-		{400, `{"message":"The request you sent was invalid in some way."}`, LavaErrorUserInvalidRequest},
-		{403, `<!DOCTYPE html><html>blocked</html>`, LavaErrorNodeAccessDenied},
+		{400, `{"message":"The request you sent was invalid in some way."}`, RouterErrorUserInvalidRequest},
+		{403, `<!DOCTYPE html><html>blocked</html>`, RouterErrorNodeAccessDenied},
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%d %.28s", tc.status, tc.body), func(t *testing.T) {
@@ -156,13 +156,13 @@ func TestRESTMessageRowsBeatTheStatusRow(t *testing.T) {
 func TestRESTUnknownBlockIsGatedOnThe400(t *testing.T) {
 	// nodeos's own 400 still classifies.
 	got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, 400, "Unknown Block")
-	require.Same(t, LavaErrorChainBlockNotFound, got)
+	require.Same(t, RouterErrorChainBlockNotFound, got)
 	require.True(t, got.SubCategory.IsDataScope())
 
 	// the same words under any other status do not.
 	for _, status := range []int{200, 404, 500, 503} {
 		got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, status, `{"error":"unknown blockchain id"}`)
-		require.NotSame(t, LavaErrorChainBlockNotFound, got,
+		require.NotSame(t, RouterErrorChainBlockNotFound, got,
 			"REST %d must not be read as block-not-found just because the body says \"unknown block\"", status)
 	}
 	// and a 500 with those words stays the endpoint's fault.
@@ -178,12 +178,12 @@ func TestREST500ThatIsReallyTheCallersAnswer(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
-		want *LavaError
+		want *RouterError
 	}{
-		{"Cosmos pruned height", `{"code":2,"message":"height 1 is not available, lowest height is 25280088","details":[]}`, LavaErrorChainStatePruned},
-		{"Cosmos malformed address", `{"code":2,"message":"decoding bech32 failed: invalid character not part of charset: 111","details":[]}`, LavaErrorUserInvalidParams},
-		{"Sidecar unknown block hash", `{"code":500,"message":"Unable to retrieve header and parent from supplied hash"}`, LavaErrorChainBlockNotFound},
-		{"MultiversX tx not found", `{"data":null,"error":"transaction not found","code":"internal_issue"}`, LavaErrorChainTxNotFound},
+		{"Cosmos pruned height", `{"code":2,"message":"height 1 is not available, lowest height is 25280088","details":[]}`, RouterErrorChainStatePruned},
+		{"Cosmos malformed address", `{"code":2,"message":"decoding bech32 failed: invalid character not part of charset: 111","details":[]}`, RouterErrorUserInvalidParams},
+		{"Sidecar unknown block hash", `{"code":500,"message":"Unable to retrieve header and parent from supplied hash"}`, RouterErrorChainBlockNotFound},
+		{"MultiversX tx not found", `{"data":null,"error":"transaction not found","code":"internal_issue"}`, RouterErrorChainTxNotFound},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -197,18 +197,18 @@ func TestREST500ThatIsReallyTheCallersAnswer(t *testing.T) {
 	// gating each row on a probed body rather than excusing every 500.
 	for _, body := range []string{"", "<html>500 Internal Server Error</html>", `{"message":"database connection lost"}`} {
 		got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, 500, body)
-		require.Same(t, LavaErrorNodeInternalError, got, "body %q", body)
+		require.Same(t, RouterErrorNodeInternalError, got, "body %q", body)
 		require.True(t, got.EndpointAtFault(), "body %q", body)
 	}
 }
 
 // TestRESTAccessDeniedIsRetriedButNotBlamed is the registry half of the endpoint-disable fix: a 401
 // or 403 is retried on another provider, and the refusing endpoint keeps its health. See
-// LavaErrorNodeAccessDenied for what blaming it cost.
+// RouterErrorNodeAccessDenied for what blaming it cost.
 func TestRESTAccessDeniedIsRetriedButNotBlamed(t *testing.T) {
 	for _, status := range []int{401, 402, 403, 407, 426, 451} {
 		got := ClassifyError(nil, ChainFamilyUnknown, TransportREST, status, fmt.Sprintf("HTTP %d", status))
-		require.Same(t, LavaErrorNodeAccessDenied, got, "REST %d", status)
+		require.Same(t, RouterErrorNodeAccessDenied, got, "REST %d", status)
 		require.True(t, got.Retryable, "REST %d is retried elsewhere", status)
 		require.False(t, got.EndpointAtFault(), "REST %d does not blame the endpoint", status)
 		require.True(t, got.SubCategory.IsNodeCapability(), "REST %d carries the capability label", status)

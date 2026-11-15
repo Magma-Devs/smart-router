@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/magma-Devs/smart-router/protocol/endpointstate"
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -105,7 +105,7 @@ type headStallResult struct {
 // and a fake observation getter. endpoints is the same slice the probe cycle scored: both tiers,
 // possibly listing one *Endpoint twice when a provider sits in both pools.
 func runHeadStallStep(
-	endpoints []*lavasession.EndpointWithDirectConnection,
+	endpoints []*routersession.EndpointWithDirectConnection,
 	getObservation func(url string) (endpointstate.EndpointObservation, bool),
 	n int,
 	now time.Time,
@@ -115,9 +115,9 @@ func runHeadStallStep(
 	logAttrs []utils.Attribute,
 ) (res headStallResult) {
 	// One entry per *Endpoint, and each provider's endpoints for the gauge rule.
-	unique := make([]*lavasession.EndpointWithDirectConnection, 0, len(endpoints))
-	seen := make(map[*lavasession.Endpoint]struct{}, len(endpoints))
-	byProvider := make(map[string][]*lavasession.Endpoint)
+	unique := make([]*routersession.EndpointWithDirectConnection, 0, len(endpoints))
+	seen := make(map[*routersession.Endpoint]struct{}, len(endpoints))
+	byProvider := make(map[string][]*routersession.Endpoint)
 	for _, ep := range endpoints {
 		if ep == nil || ep.Endpoint == nil {
 			continue
@@ -143,7 +143,7 @@ func runHeadStallStep(
 	// nothing to go to (MAG-4025 shape).
 	type urlGroup struct {
 		url string
-		eps []*lavasession.EndpointWithDirectConnection
+		eps []*routersession.EndpointWithDirectConnection
 	}
 	var groups []*urlGroup
 	groupOf := make(map[string]*urlGroup)
@@ -157,7 +157,7 @@ func runHeadStallStep(
 		g.eps = append(g.eps, ep)
 	}
 	// groupAny reports whether any endpoint of the url satisfies pred.
-	groupAny := func(g *urlGroup, pred func(*lavasession.Endpoint) bool) bool {
+	groupAny := func(g *urlGroup, pred func(*routersession.Endpoint) bool) bool {
 		for _, ep := range g.eps {
 			if pred(ep.Endpoint) {
 				return true
@@ -165,8 +165,8 @@ func runHeadStallStep(
 		}
 		return false
 	}
-	isUsable := func(e *lavasession.Endpoint) bool { return e.IsUsable() }
-	isEnabled := func(e *lavasession.Endpoint) bool { return e.IsEnabled() }
+	isUsable := func(e *routersession.Endpoint) bool { return e.IsUsable() }
+	isEnabled := func(e *routersession.Endpoint) bool { return e.IsEnabled() }
 	groupUsable := func(g *urlGroup) bool { return groupAny(g, isUsable) }
 	countUsableURLs := func() int {
 		n := 0
@@ -190,18 +190,18 @@ func runHeadStallStep(
 	}
 
 	// stuckRecord returns the head-stalled record of the url, if any of its endpoints holds one.
-	stuckRecord := func(g *urlGroup) (lavasession.StateReasonRecord, bool) {
+	stuckRecord := func(g *urlGroup) (routersession.StateReasonRecord, bool) {
 		for _, ep := range g.eps {
-			if rec, held := ep.Endpoint.StateReason(lavasession.EndpointDisableHeadStalled); held {
+			if rec, held := ep.Endpoint.StateReason(routersession.EndpointDisableHeadStalled); held {
 				return rec, true
 			}
 		}
-		return lavasession.StateReasonRecord{}, false
+		return routersession.StateReasonRecord{}, false
 	}
 
 	// holdsStall reports whether one endpoint holds head-stalled.
-	holdsStall := func(e *lavasession.Endpoint) bool {
-		_, held := e.StateReason(lavasession.EndpointDisableHeadStalled)
+	holdsStall := func(e *routersession.Endpoint) bool {
+		_, held := e.StateReason(routersession.EndpointDisableHeadStalled)
 		return held
 	}
 
@@ -213,9 +213,9 @@ func runHeadStallStep(
 		if !held {
 			return false
 		}
-		var released []*lavasession.EndpointWithDirectConnection
+		var released []*routersession.EndpointWithDirectConnection
 		for _, ep := range g.eps {
-			if ep.Endpoint.RemoveStateReason(lavasession.EndpointDisableHeadStalled) {
+			if ep.Endpoint.RemoveStateReason(routersession.EndpointDisableHeadStalled) {
 				released = append(released, ep)
 			}
 		}
@@ -224,7 +224,7 @@ func runHeadStallStep(
 		}
 		state.clearKept(g.url)
 		first := released[0]
-		utils.LavaFormatInfo("head-stalled "+why, append([]utils.Attribute{
+		utils.FormatInfo("head-stalled "+why, append([]utils.Attribute{
 			utils.LogAttr("endpoint", g.url),
 			utils.LogAttr("provider", first.ProviderAddress),
 			utils.LogAttr("backup", first.Backup),
@@ -277,7 +277,7 @@ func runHeadStallStep(
 	// 2. Add: N cycles in a row without moving while another url is ahead, unless it is the last
 	// usable url. Every endpoint of the url goes out together, or none does.
 	for _, g := range groups {
-		var pending []*lavasession.EndpointWithDirectConnection
+		var pending []*routersession.EndpointWithDirectConnection
 		for _, ep := range g.eps {
 			if !holdsStall(ep.Endpoint) {
 				pending = append(pending, ep)
@@ -295,7 +295,7 @@ func runHeadStallStep(
 		if wasUsable && usable <= 1 {
 			if state.markKept(g.url) {
 				res.kept++
-				utils.LavaFormatInfo("head-stalled kept by never-empty", append([]utils.Attribute{
+				utils.FormatInfo("head-stalled kept by never-empty", append([]utils.Attribute{
 					utils.LogAttr("endpoint", g.url),
 					utils.LogAttr("provider", pending[0].ProviderAddress),
 					utils.LogAttr("backup", pending[0].Backup),
@@ -307,7 +307,7 @@ func runHeadStallStep(
 		}
 		added := false
 		for _, ep := range pending {
-			if ep.Endpoint.AddStateReason(lavasession.EndpointDisableHeadStalled, now, obs.HighestBlockSeen) {
+			if ep.Endpoint.AddStateReason(routersession.EndpointDisableHeadStalled, now, obs.HighestBlockSeen) {
 				added = true
 			}
 		}
@@ -319,7 +319,7 @@ func runHeadStallStep(
 			usable--
 		}
 		res.added++
-		utils.LavaFormatInfo("head-stalled added", append([]utils.Attribute{
+		utils.FormatInfo("head-stalled added", append([]utils.Attribute{
 			utils.LogAttr("endpoint", g.url),
 			utils.LogAttr("provider", pending[0].ProviderAddress),
 			utils.LogAttr("backup", pending[0].Backup),
@@ -337,7 +337,7 @@ func runHeadStallStep(
 	// slot is on can actually serve, so only those are candidates.
 	if countUsableURLs() == 0 {
 		var pick *urlGroup
-		var pickRec lavasession.StateReasonRecord
+		var pickRec routersession.StateReasonRecord
 		for _, g := range groups {
 			rec, held := stuckRecord(g)
 			if !held {
@@ -379,7 +379,7 @@ func runHeadStallStep(
 }
 
 // runHeadStall wires runHeadStallStep to this server's live dependencies.
-func (rpcss *RPCSmartRouterServer) runHeadStall(endpoints []*lavasession.EndpointWithDirectConnection, now time.Time) {
+func (rpcss *RPCSmartRouterServer) runHeadStall(endpoints []*routersession.EndpointWithDirectConnection, now time.Time) {
 	if rpcss.endpointChainTrackerManager == nil {
 		return
 	}

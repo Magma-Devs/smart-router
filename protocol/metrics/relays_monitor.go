@@ -145,7 +145,7 @@ func (sem *RelaysMonitor) startInner(ctx context.Context) {
 		case <-sem.ticker.C:
 			verdict := sem.relaySender()
 			sem.recordProbeResult(verdict)
-			utils.LavaFormatInfo("Health Check Interval Check",
+			utils.FormatInfo("Health Check Interval Check",
 				utils.LogAttr("chain", sem.chainID),
 				utils.LogAttr("apiInterface", sem.apiInterface),
 				utils.LogAttr("verdict", verdict.String()),

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	spectypes "github.com/magma-Devs/smart-router/types/spec"
 	"github.com/stretchr/testify/require"
 )
@@ -28,7 +28,7 @@ type countingDirectRPCConnection struct {
 	matchedSends atomic.Int32
 }
 
-func (c *countingDirectRPCConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*lavasession.DirectRPCResponse, error) {
+func (c *countingDirectRPCConnection) SendRequest(ctx context.Context, data []byte, headers map[string]string) (*routersession.DirectRPCResponse, error) {
 	c.sends.Add(1)
 	if c.matchSubstr != "" && bytes.Contains(data, []byte(c.matchSubstr)) {
 		c.matchedSends.Add(1)
@@ -154,7 +154,7 @@ func TestEndpointMonitor_SolanaTrafficGate_SuppressesUpstreamPoll(t *testing.T) 
 	})
 	t.Cleanup(m.Stop)
 
-	ep := &lavasession.Endpoint{NetworkAddress: url, Enabled: true}
+	ep := &routersession.Endpoint{NetworkAddress: url, Enabled: true}
 	_, err := m.GetOrCreateTracker("", ep, conn)
 	require.NoError(t, err)
 	gen, ok := m.ObservationGeneration(url)

@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/magma-Devs/smart-router/protocol/lavasession"
 	"github.com/magma-Devs/smart-router/protocol/metrics"
+	"github.com/magma-Devs/smart-router/protocol/routersession"
 	"github.com/magma-Devs/smart-router/utils"
 )
 
@@ -51,9 +51,9 @@ func (inputs *chainReverifyInputs) trackFailures(tier reverifyTier, name string,
 			line = append(line, utils.LogAttr("previousCheck", replaced.Check))
 		}
 		if f.Severity == metrics.VerificationSeverityWarning {
-			utils.LavaFormatWarning("verification check failing", nil, line...)
+			utils.FormatWarning("verification check failing", nil, line...)
 		} else {
-			utils.LavaFormatError("verification check failing", nil, line...)
+			utils.FormatError("verification check failing", nil, line...)
 		}
 	}
 	for _, f := range previous {
@@ -63,7 +63,7 @@ func (inputs *chainReverifyInputs) trackFailures(tier reverifyTier, name string,
 		if _, ok := takesThePlaceOf(f, next, previous); ok {
 			continue // logged as the check that replaced it
 		}
-		utils.LavaFormatInfo("verification check passes again", append(attrs(f), utils.LogAttr("failedFor", now.Sub(f.Since).Round(time.Second).String()))...)
+		utils.FormatInfo("verification check passes again", append(attrs(f), utils.LogAttr("failedFor", now.Sub(f.Since).Round(time.Second).String()))...)
 	}
 	return next
 }
@@ -153,7 +153,7 @@ func (rpsr *RPCSmartRouter) verificationDebugState() map[string]any {
 		chain := verificationDebugChain{Chain: inputs.rpcEndpoint.ChainID, ApiInterface: inputs.rpcEndpoint.ApiInterface, Providers: []verificationDebugProvider{}}
 		for _, tier := range []struct {
 			tier     reverifyTier
-			sessions map[uint64]*lavasession.ConsumerSessionsWithProvider
+			sessions map[uint64]*routersession.ConsumerSessionsWithProvider
 		}{
 			{reverifyTierStatic, rpsr.providerSessions[chainKey]},
 			{reverifyTierBackup, rpsr.backupProviderSessions[chainKey]},
