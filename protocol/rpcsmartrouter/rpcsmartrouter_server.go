@@ -4058,6 +4058,34 @@ func runProbeCycleCore(
 	appender probeQoSAppender,
 	onRecover func(provider string),
 ) (scored, reEnabled, syncOmitted int) {
+	// releaseIfUsable lets the provider back in only when the url the probe just turned back on can
+	// take traffic. Turning a url back on clears only its error switch; a state reason (head-stalled)
+	// can still hold it out. Releasing then hands selection a provider with nothing to dial, and the
+	// next request blocks it again: a release-then-block churn in the logs and the block counters
+	// (MAG-4737). Leaving it blocked loses nothing: when the stall clears, the head-stall step
+	// releases the provider behind the same check.
+	releaseIfUsable := func(target *routersession.EndpointWithDirectConnection) {
+		if onRecover == nil {
+			return
+		}
+		if target.Endpoint.IsUsable() {
+			onRecover(target.ProviderAddress)
+			return
+		}
+		// Said out loud because the re-enable was: RecordProbeVerdict has just logged it and counted
+		// it in reEnabled, and without this line an operator following the address sees the url come
+		// back and the provider stay blocked with nothing in between.
+		snap := target.Endpoint.HealthSnapshot()
+		reasons := make([]string, 0, len(snap.StateReasons))
+		for _, rec := range snap.StateReasons {
+			reasons = append(reasons, string(rec.Reason))
+		}
+		utils.FormatDebug("probe re-enabled a url but its provider stays blocked: a state reason still holds the url out",
+			utils.LogAttr("endpoint", target.Endpoint.NetworkAddress),
+			utils.LogAttr("provider", target.ProviderAddress),
+			utils.LogAttr("state_reasons", reasons),
+		)
+	}
 	// One verdict per endpoint (regular + backup), grouped by provider for the single-sample rule.
 	verdictsByProvider := make(map[string][]probing.EndpointVerdict)
 	for _, ep := range endpoints {
@@ -4072,9 +4100,7 @@ func runProbeCycleCore(
 		// nest under endpoint.mu — no lock-order inversion (F2).
 		if ep.Endpoint.RecordProbeVerdict(verdict.Recovery.LastSuccessfulPoll, verdict.Recovery.PollHealthy, cfg.ReEnableHysteresis) {
 			reEnabled++
-			if onRecover != nil {
-				onRecover(ep.ProviderAddress)
-			}
+			releaseIfUsable(ep)
 		}
 		// Busy is not dead (MAG-4387). A rate-limit hold-off stops the url's poll on purpose — and on
 		// an interface whose user relays carry no tip, nothing else refreshes the observation — so a

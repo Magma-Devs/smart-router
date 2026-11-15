@@ -146,7 +146,9 @@ func TestAllPrimariesBlocked_NoBackupReleasesTheBlockAsBefore(t *testing.T) {
 //
 // This is the realistic shape of an outage: providers are blocked because their endpoints went
 // down, and the release does not re-enable endpoints (see HEALTH-STORE-PLAN.md), so every released
-// provider fails again immediately.
+// provider fails again immediately. Since MAG-4737 the release also asks whether any candidate has
+// a usable url (inRotation): with every endpoint down none has, so the first pass declines as well
+// and the relay gets no release at all, instead of one release that could not serve it.
 func TestProvidersBlockedMidRelay_DoNotReleaseTheBlockAgain(t *testing.T) {
 	ctx := context.Background()
 	csm := setupBenchTestCSM(t, false)
@@ -169,9 +171,10 @@ func TestProvidersBlockedMidRelay_DoNotReleaseTheBlockAgain(t *testing.T) {
 		require.Empty(t, csm.validAddresses, "relay %d: the pool must not be left looking healthy", relay)
 		require.Len(t, csm.currentlyBlockedProviderAddresses, 2, "relay %d: both providers must stay blocked", relay)
 
-		// One release per relay, not two. numberOfResets scales the blocklisted-session allowance,
-		// so a double release loosens that cap twice as fast as it should.
-		require.Equal(t, uint64(relay), csm.numberOfResets, "relay %d: exactly one release per relay", relay)
+		// No release at all: every endpoint is down, so no provider is in rotation and a release
+		// could not have served the relay (MAG-4737). numberOfResets scales the blocklisted-session
+		// allowance, so a release that serves nothing loosens that cap for nothing.
+		require.Zero(t, csm.numberOfResets, "relay %d: no release for a pool with nothing usable in it", relay)
 	}
 }
 
