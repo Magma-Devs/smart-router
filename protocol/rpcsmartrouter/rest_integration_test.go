@@ -331,8 +331,7 @@ func TestRESTRelay_409_Duplicate_IsANodeErrorNotScored(t *testing.T) {
 // MaxConsecutiveConnectionAttempts (--bench-after, default 50) and is reset only by a 2xx. A vendor
 // gating one path behind a plan took out the whole endpoint; a wrong or expired shared credential
 // answering 401 on every path took out every endpoint using it, with nothing ever resetting the
-// counter. REST gets no replayable probe evidence either (recordRelayProbeEvidence is JSON-RPC
-// only), so recovery was poll-only.
+// counter.
 func TestRESTRelay_403_AccessDenied_IsRetriedButNotBlamed(t *testing.T) {
 	result := sendRESTThroughMockUpstream(t, http.StatusForbidden, `<!DOCTYPE html><html>blocked</html>`)
 
