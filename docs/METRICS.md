@@ -440,7 +440,7 @@ therefore overlap, so do not add them together.
 #### Rate-limit hold-off
 
 Emitted by the [hold-off registry](RATE-LIMIT-HOLDOFF.md) itself, so every consumer path
-(re-verify, hot path, recovery probe, ws subscriptions) is covered without wiring. A
+(re-verify, hot path, ws subscriptions) is covered without wiring. A
 rate-limited relay releases its session with no QoS sample in either direction, so a
 vendor cap does not show up in `rpc_endpoint_selection_score` — this pair is the direct
 signal that an upstream is refusing us for load.
