@@ -220,7 +220,7 @@ cat > "$CONFIG_FILE" <<EOF
 # Three ETH1 jsonrpc providers backed by the provider_simulator's eth-sim pool.
 # GROUP LABELS are the point: tier-1 x2 + $DISSENTER_GROUP x1, so a dissent row can be
 # checked for the label actually reaching ProviderInfo.ProviderGroup on a live relay.
-# The simulator is http-only here, so the router runs with --skip-websocket-verification.
+# The simulator is http-only here: these providers serve no subscriptions and publish missing-url.
 endpoints:
   - listen-address: "0.0.0.0:$ETH_PORT"
     chain-id: "ETH1"

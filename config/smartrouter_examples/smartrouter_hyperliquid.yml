@@ -3,11 +3,11 @@
 #
 # Upstream: the official Hyperliquid EVM RPC (rpc.hyperliquid.xyz/evm), HTTP.
 # It's a standard EVM JSON-RPC (eth_chainId == 0x3e7 / 999) but serves no
-# websocket leg, so start the router with --skip-websocket-verification.
+# websocket leg; the HYPERLIQUID spec defines no subscriptions, so none is missed.
 #
 # Run it:
 #   smartrouter config/smartrouter_examples/smartrouter_hyperliquid.yml \
-#     --use-static-spec specs/ --skip-websocket-verification
+#     --use-static-spec specs/
 
 # Prometheus metrics (scrape at http://<host>:7779/metrics). "disabled" turns it off.
 metrics-listen-address: "0.0.0.0:7779"
