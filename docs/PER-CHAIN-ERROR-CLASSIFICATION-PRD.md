@@ -58,7 +58,8 @@ Invariants the router enforces at run time, for every spec from every source:
    400, 404, 410 or 422 on REST, HTTP 400 on the other HTTP interfaces, or gRPC InvalidArgument,
    NotFound, AlreadyExists, FailedPrecondition or OutOfRange (§3 step 3).
 9. An envelope can mark a success reply as an error and fill the record's code and text. It never
-   sets a status and never turns an error into a success.
+   sets a status and never turns an error into a success, and no policy stops marking a reply that a
+   router-owned rule reads (§4.6).
 
 ## 2. Spec format
 
@@ -72,8 +73,9 @@ Invariants the router enforces at run time, for every spec from every source:
 
 - `schema_version`: integer, identical in every section at a lava-specs commit (CI enforces). A
   router drops a section with an unknown version whole; the chain and its importers fall back.
-- `imports` (optional): specs whose rows, verdicts and envelopes this section inherits. Absent = the
-  spec's own `imports`; `[]` = inherit nothing. Doesn't affect api inheritance.
+- `imports` (optional): specs whose rows and verdicts this section inherits. Absent = the spec's own
+  `imports`; `[]` = inherit none. Envelopes always inherit through the spec's own `imports`; drop
+  one with `disabled`. Doesn't affect api inheritance.
 - `envelopes` (optional): where the chain's errors sit in replies (§2.5). `verdicts` (optional): the
   chain's own verdicts. `rows`: the classification rows.
 - The section is optional; older routers ignore the key. A missing section means no local rows; the
@@ -91,7 +93,7 @@ Invariants the router enforces at run time, for every spec from every source:
 | Field | Req. | Rule |
 |---|---|---|
 | `id` | yes | Unique within the chain after inheritance; `<family>.<snake_case>`. A child overrides a parent's row by repeating it. |
-| `match` | yes | Keys, all of which must hold: `code` (the record's chain code, number or string: `-32005`, `"sdk/32"`, `"tx_bad_seq"`); `status` (the record's status, a readable one only, §4.3: an HTTP status, or a gRPC code name such as `"NotFound"`); at most one of `contains` (case-insensitive, as `MessageContains`) or `regex` (Go RE2, case-sensitive unless `(?i)`, must compile), read on the record's `text`, or on its `detail` with `"field": "detail"`. At least one of `code`, `contains`, `regex`. No header matcher. |
+| `match` | yes | Keys, all of which must hold: `code` (the record's chain code, number or string, matched by JSON type and value: `-32005`, `"sdk/32"`, `"tx_bad_seq"`); `status` (the record's status, a readable one only, §4.3: an HTTP status, or a gRPC code name such as `"NotFound"`); at most one of `contains` (case-insensitive, as `MessageContains`) or `regex` (Go RE2, case-sensitive unless `(?i)`, must compile), read on the record's `text`, or on its `detail` with `"field": "detail"`. At least one of `code`, `contains`, `regex`. No header matcher. |
 | `error` | yes | A verdict name the chain defines or inherits, or an unlocked router-owned one (e.g. `CHAIN_STATE_PRUNED`). |
 | `interface` | no | `jsonrpc`, `tendermintrpc`, `rest`, `graphql`, `grpc`, or a list of them; absent = every interface the chain serves. Migrated code rows carry `jsonrpc`: the family codes are JSON-RPC codes. |
 | `scope` | yes | `read`, `write` or `both`. `write` rows run only for stateful apis, `read` rows only for the rest. Today's rows apply to reads and writes alike, so migrated rows keep `both`; narrowing one is a declared behaviour change (§8.1). Agave's `sendTransaction` can answer `-32016`, and a Cosmos simulate (a read) can answer "account sequence mismatch". |
@@ -114,7 +116,7 @@ Invariants the router enforces at run time, for every spec from every source:
 | `code` | definition | Integer, unique across lava-specs, never router-owned. An override omits it or repeats it unchanged. Migrated verdicts keep their codes; new ones use the reserved range (proposal 5000–5999, router uses 1001–4007; §10). Logs and `relay_end` only, not a metric label (`error_metrics.go:37-40`). |
 | `sub_category` | definition | `none`, `data_scope` or `node_capability`. Fault axis as `EndpointAtFault` (`error_registry.go:136-152`): `data_scope`/`node_capability` never at fault and must be `retryable: true`; `none` + retryable = node at fault; `none` + non-retryable = caller's fault. |
 | `retryable` | definition | Whether a read tries the next provider, subject to the retry precedence below. Writes follow the stateful policy regardless. |
-| `class` | definition | The rulebook's kind (Part I): C1 an answer; **C2** the caller's or the chain's answer, every provider would say the same (`none`, non-retryable); **C3** cannot serve here, another provider may (`data_scope` or `node_capability`, retryable); C4 throttled; **C5** provider fault (`none`, retryable); C6 refuses us (401/402/403, gRPC PermissionDenied/Unauthenticated). A spec verdict is C2, C3 or C5; C1, C4 and C6 are router-owned. Informational: the router acts on the flags. |
+| `class` | definition | The rulebook's kind (Part I), fixed by the flags: **C2** the caller's or the chain's answer, every provider would say the same (`none`, non-retryable); **C3** cannot serve here, another provider may (`data_scope` or `node_capability`); **C5** provider fault (`none`, retryable). The other kinds are router-owned: C1 an answer, C4 throttled, C6 refuses us (401/402/403, gRPC PermissionDenied/Unauthenticated). Informational: the router acts on the flags; §4.1 checks the match. |
 | `note` | no | One line. |
 
 **Definitions and overrides.** A definition (the verdict's origin spec) carries every field marked
@@ -209,9 +211,10 @@ New code in `DoExpandSpec` (today merges only `api_collections`, `expand.go:72-1
 root files import another).
 
 - Order: the child's rows, then each parent's rows the child didn't override or disable by `id`, in
-  the parents' order; envelopes merge the same way. Verdicts are keyed by `name`; an override
-  carries only the fields it changes (`sub_category`, `retryable`, `class`, `note`), never `code`,
-  and the effective verdict must be complete after expansion (§2.3). A verdict can't be removed.
+  the parents' order; envelopes merge the same way along the spec's own `imports` (§2.1). Verdicts
+  are keyed by `name`; an override carries only the fields it changes (`sub_category`,
+  `retryable`, `class`, `note`), never `code`, and the effective verdict must be complete after
+  expansion (§2.3). A verdict can't be removed.
 - A row's `error` must resolve, after inheritance, to a defined/inherited verdict or an unlocked
   router-owned one; otherwise the policy is invalid.
 - Resolve and validate the whole graph before any policy acts. Errors: missing parents, cycles,
@@ -227,14 +230,17 @@ root files import another).
 ### 2.5 Error record and envelopes
 
 The router builds one record per failed or refused reply on every interface, and every reader of
-the reply uses that record: the senders, the results manager, the cache tiers and the subscription
-managers (Appendix A). Spec rows match only the record. Router rows (§3 steps 2, 4, 5) keep the
-inputs they read today.
+the reply uses that record: the senders, the results manager, both cache tiers (today
+`classifyCachedNodeError` classifies JSON-RPC and Tendermint only,
+`rpcsmartrouter_server.go:2216-2238`) and the subscription managers (Appendix A). Spec rows match
+only the record. Router rows (§3 steps 2, 4, 5) keep the inputs they read today; for an error an
+envelope found in a success they read the reply's status as the code and the record's `text`, as
+the code shapes feed them today (`direct_rpc_relay.go:702-705, 911`).
 
 | Field | Content |
 |---|---|
-| `interface` | The api's interface, one of five (the classifier gets three transports today, `error_classifier.go:768-778`). |
-| `status` | The HTTP status, or the gRPC code; 0 on a WebSocket frame. Set by the transport, never by a spec. |
+| `interface` | The api's interface, one of five (the classifier gets three transports today, `error_classifier.go:768-777`). |
+| `status` | The HTTP status, on GraphQL the status the reader derives from the reply (`ClassificationStatus`, `graphqlMessage.go:483-507`); the gRPC code; 0 on a WebSocket frame. Set by the router, never by a spec. |
 | `code` | The chain's own code, number or string: `error.code` on JSON-RPC and Tendermint, the GraphQL error's `extensions.code`, or an envelope's. |
 | `text` | What today's readers extract: `error.message`; on REST the body's `message`, `error` or `error.message`, else the body (`restMessage.go:99-127`); the GraphQL error's `message`; the gRPC status message; an envelope's text. |
 | `detail` | JSON-RPC and Tendermint `error.data`; gRPC status details as JSON. |
@@ -242,14 +248,15 @@ inputs they read today.
 
 The router's standard shapes: the JSON-RPC error object; the HTTP status; the GraphQL `errors` array
 (the error read is the one today's reader picks, `graphqlMessage.go:462-481`) and the extension
-codes the router maps to statuses (`:48-55`); the gRPC status and its details. Every chain shape is
-an envelope. Example, XRP's in-result errors (in code today at `xrplEngineResult.go:64-104`):
+codes the router maps to statuses (`:48-55`; they stay router code because they set a status, which
+an envelope can't); the gRPC status and its details. Every other chain shape is an envelope.
+Example, XRP's in-result errors (in code today at `xrplEngineResult.go:64-104`):
 
 ```json
 "envelopes": [
   { "id": "xrp.api_error", "interface": "jsonrpc", "scope": "both",
     "error_when": [ { "pointer": "/result/status", "equals": "error" } ],
-    "code": ["/result/error"], "text": ["/result/error", "/result/error_message", "/result/error_exception"],
+    "code": ["/result/error"], "text": ["/result/error", ["/result/error_message", "/result/error_exception"]],
     "source": "https://github.com/XRPLF/rippled/blob/2.3.0/src/libxrpl/protocol/ErrorCodes.cpp", "versions": ["rippled 2.3"] },
   { "id": "xrp.submit_rejected", "interface": "jsonrpc", "scope": "write", "apis": ["submit", "submit_multisigned"],
     "error_when": [ { "pointer": "/result/engine_result", "regex": "^te[fmlr][A-Z][A-Z0-9_]*$", "not_in": ["terQUEUED"] } ],
@@ -260,29 +267,35 @@ an envelope. Example, XRP's in-result errors (in code today at `xrplEngineResult
 
 | Field | Req. | Rule |
 |---|---|---|
-| `id` | yes | As a row's; overridden and disabled by `id`. |
+| `id` | yes | As a row's; a child overrides or disables an inherited envelope by `id`. |
 | `interface` | yes | One interface. |
-| `scope` | yes | As a row's. A broadcast refusal is `write`, so a read answered in the same shape is left alone. |
+| `scope` | yes | As a row's. Migrated envelopes keep the reach of today's checks (Cosmos `tx_response` and Tendermint `result.response`: `both`; XRP engine result: `write`); narrowing one is a declared behaviour change (§8.1). |
 | `apis` | no | Api names in canonical form (§5.3); absent = every api on the interface. |
-| `error_when` | yes | Conditions, any one enough. A condition is a JSON pointer and checks that must all hold: `exists`, `equals`, `not_equals`, `in`, `not_in`, `regex`. |
-| `code` | no | Pointers; the first that resolves (null = unresolved). With `space`, a pointer, the code is `"<space>/<code>"` (Cosmos ABCI: `"sdk/32"`). |
-| `text` | no | Pointers; those that resolve, joined with `: `. |
+| `error_when` | yes | Conditions, any one enough. A condition is a JSON pointer with checks that must all hold (`exists`, `equals`, `not_equals`, `in`, `not_in`, `regex`), plus optional `and`: further pointers with checks, all of which must hold. |
+| `code` | no | Pointers; the first that resolves. With `space`, a pointer, the code is `"<space>/<code>"` (Cosmos ABCI: `"sdk/32"`). |
+| `text` | no | Pointers, or a list of pointers meaning the first that resolves; those that resolve, joined with `: `. |
 | `source`, `versions` | yes | As a row's. |
+| `disabled`, `note` | no | As a row's. |
 
-- Pointers read the JSON body. On gRPC they read the reply, or the status details, decoded with the
-  method descriptor the connection caches (`direct_rpc_relay.go:1240-1253`). No descriptor, or a
-  value of another type: the envelope is skipped and counted (§9). The gRPC writes of §5.3 must
-  decode without the node's reflection (as MAG-5128 requires), so their envelopes are never skipped.
-- On a success reply the first matching envelope makes the reply a node error (`in_success`),
-  handled like any other: classified, counted, and never a write's success. On an error reply it
-  only adds `code` and `text`.
+- Pointers read the JSON body. On gRPC they read the reply, decoded with the method's cached
+  descriptor (`direct_rpc_relay.go:1248-1253`), or the status details, each decoded by its `Any`
+  type URL (`google.rpc` types built in). A body that can't be decoded (not JSON; on gRPC no
+  descriptor, or a detail type the router can't resolve) skips the envelope, counted (§9). A check
+  on an absent or null value fails, except `exists: false`; a value of the wrong type fails its
+  check. For `code` and `text`, absent, null or non-scalar values are unresolved.
+- On a success reply the first envelope whose `error_when` holds makes the reply a node error
+  (`in_success`), handled like any other: classified, counted, and never a write's success. On an
+  error reply the first envelope whose `error_when` holds fills `code` and `text` where the standard
+  shape left them empty.
 - Step 1 moves today's chain shapes in code to envelopes, with the same verdicts: the Cosmos
-  `tx_response` check (`restMessage.go:55-60, 83-96`, into `cosmossdk.json`; replies it no longer
-  reaches are counted `code_only`); Tendermint's `result.response` check
-  (`tendermintRPCMessage.go:39-51`); XRP's result check (picked per family,
-  `jsonRPCChainFamily.go:14-35`).
-- An envelope that feeds a router-owned rule (XRP results for §5.5, codes the signatures read for
-  §5.2) is a write-safety change (§8.1).
+  `tx_response` check (`restMessage.go:55-60, 83-96`) into `cosmossdk.json`; Tendermint's
+  `result.response` check (`tendermintRPCMessage.go:39-51`: `code ≠ 0` and a non-empty `log`, so
+  an `and` condition) into `tendermint.json`, which every spec with a tendermintrpc collection
+  imports (`cosmossdk.json` would miss NAMTSE, THORCHAIN and THORCHAINT); XRP's result
+  check (picked per family, `jsonRPCChainFamily.go:14-35`) into `ripple.json`. Replies outside
+  their importers are counted `code_only`.
+- An envelope that feeds a router-owned rule (XRP results for §5.5 and §3 step 2, the codes and
+  texts the §5.2 signatures read) is locked as §4.6 says and is a write-safety change (§8.1).
 
 ## 3. Matching order
 
@@ -299,22 +312,25 @@ For a record on chain X, first match wins:
    2. Already-known recognisers, keyed by family and interface like §5.2: JSON-RPC "already known",
       "alreadyknown", `(?i)\bknown transaction\b` (`:310, 311, 316`); XRP `tefALREADY` (`:117`).
       (REST 409 is a locked status below.) Other interfaces' answers are added as researched (§5.2).
-   3. Locked statuses, decided by the transport rules **on the status alone**: HTTP 401, 402, 403,
-      405, 406, 407, 408, 409, 411, 412, 413, 414–417, 426, 428, 429, 431, 451, 501, 502, 503, 504,
-      520–527, 530 on every interface, plus 404, 410, 422 off REST (`:421-449, 555-591`); gRPC
-      Canceled, DeadlineExceeded, PermissionDenied, ResourceExhausted, Aborted, Unimplemented,
-      Unavailable, DataLoss, Unauthenticated (1, 4, 7, 8, 10, 12, 14, 15, 16; `:482-538`), so
-      spec rows see gRPC Unknown, InvalidArgument, NotFound, AlreadyExists, FailedPrecondition,
-      OutOfRange and Internal. Classify (status, "") on REST/GraphQL/gRPC or
-      (0, `HTTP <status>: `) on JSON-RPC/Tendermint, per transport, `UNKNOWN_ERROR` if that
-      transport has no status verdict; never borrow REST's 409 meaning elsewhere. The status is the
-      record's `status` (today's JSON-RPC rows read it as the sender's anchored `HTTP <n>: `
-      prefix, `direct_rpc_relay.go:716-718`), never a number elsewhere in the body (two fixtures,
-      `evm_http_429` and `evm_http_503`, use `HTTP status <n>:`, which the router never produces;
-      they stay with the transport rows). Statuses the GraphQL reader synthesises from Sui
-      extension codes (`graphqlMessage.go:33-55`) count like real ones. The REST route-refusal text
-      rows (`:390-393`) run before the status decision (keeps `TestRESTMessageRowsBeatTheStatusRow`,
-      `rest_status_rows_test.go:139`). Statuses with no router rule (418, 425) are not locked.
+   3. Locked statuses, decided by the transport rules **on the status alone**:
+      - HTTP 401, 402, 403, 405, 406, 407, 408, 409, 411, 412, 413, 414–417, 426, 428, 429, 431,
+        451, 501, 502, 503, 504, 520–527, 530 on every interface, plus 404, 410, 422 off REST
+        (`:421-449, 555-591`). Statuses with no router rule (418, 425) are not locked.
+      - gRPC Canceled, DeadlineExceeded, PermissionDenied, ResourceExhausted, Aborted,
+        Unimplemented, Unavailable, DataLoss, Unauthenticated (1, 4, 7, 8, 10, 12, 14, 15, 16;
+        `:482-538`), so spec rows see gRPC Unknown, InvalidArgument, NotFound, AlreadyExists,
+        FailedPrecondition, OutOfRange and Internal.
+      - Classify (status, "") on REST, GraphQL and gRPC, or (0, `HTTP <status>: `) on JSON-RPC and
+        Tendermint, per transport; `UNKNOWN_ERROR` if that transport has no status verdict; never
+        borrow REST's 409 meaning elsewhere.
+      - The status is the record's `status` (today's JSON-RPC rows read it as the sender's anchored
+        `HTTP <n>: ` prefix, `direct_rpc_relay.go:716-718`), never a number elsewhere in the body.
+        Two fixtures, `evm_http_429` and `evm_http_503`, use `HTTP status <n>:`, which the router
+        never produces; they stay with the transport rows.
+      - On GraphQL the status is the one the reader derives (§2.5), so the statuses it takes from
+        Sui's extension codes (`graphqlMessage.go:33-55`) count like real ones.
+      - The REST route-refusal text rows (`:390-393`) run before the status decision (keeps
+        `TestRESTMessageRowsBeatTheStatusRow`, `rest_status_rows_test.go:139`).
 3. **X's spec rows**, resolved by inheritance, file order, filtered by interface and scope. **No
    blame inside a readable client status**: when the record's status is 400, 404, 410 or 422 on
    REST, 400 on GraphQL, JSON-RPC and Tendermint, or gRPC InvalidArgument, NotFound, AlreadyExists,
@@ -322,7 +338,8 @@ For a record on chain X, first match wins:
    applied, whatever its matcher. The reply takes step 2.3's status-only decision instead
    (`USER_INVALID_REQUEST`, `NODE_DATA_NOT_HELD`, `CHAIN_STATE_PRUNED`, `USER_INVALID_PARAMS`, or
    `UNKNOWN_ERROR` where the transport has no row: JSON-RPC and Tendermint 400, gRPC AlreadyExists
-   and FailedPrecondition; none blames the endpoint), counted as
+   and FailedPrecondition; none has `EndpointAtFault`, and `UNKNOWN_ERROR` still feeds the
+   availability gate, as today), counted as
    `smartrouter_spec_lock_enforced_total{chain_id, apiInterface, rule="status_fault"}`.
    Falling through to the later rows instead would be unsafe: Solana's `-32005` would reach the
    generic `-32005`, a rate limit.
@@ -337,7 +354,9 @@ REST 403 "account not found" → `NODE_ACCESS_DENIED`; REST 409 "account sequenc
 `CHAIN_TX_ALREADY_KNOWN`; REST 402/408/451/501/405 with family text → the status verdict; JSON-RPC
 `HTTP 503: …` → `NODE_SERVICE_UNAVAILABLE` (also for `-32602` bodies and `tefPAST_SEQ`, which still
 ends unknown on a write via §5.2); JSON-RPC `HTTP 408: …` → `UNKNOWN_ERROR` (no JSON-RPC 408 row);
-gRPC 14/8/10 "insufficient fee" → `NODE_SERVICE_UNAVAILABLE`/`UNKNOWN_ERROR`/`NODE_ABORTED`; once
+gRPC 14/8/10 "insufficient fee" → `NODE_SERVICE_UNAVAILABLE`/`UNKNOWN_ERROR`/`NODE_ABORTED`; gRPC
+1/4/7/8/15/16 with text a gRPC text row matches ("not implemented", `error_classifier.go:540-542`)
+→ `UNKNOWN_ERROR` (was `NODE_UNIMPLEMENTED`); once
 spec rows act, a family row that blames the endpoint (Solana `-32005`, Bitcoin `-28`/`-10`/`-9`,
 Starknet `63`, NEAR `NOT_SYNCED_YET`, XRP `noNetwork`/`amendmentBlocked`/`internal…`) answering
 under JSON-RPC HTTP 400 → `UNKNOWN_ERROR` (step 3; no fixture has this shape, and Step 1 counts it
@@ -371,6 +390,9 @@ section makes the chain's policy invalid → fallback (§5.6).
   still carries it (Steps 1–2).
 - An effective verdict missing a definition field after inheritance: an incomplete definition, or
   a partial entry for a name the chain doesn't inherit (§2.3).
+- A `class` other than C2, C3 or C5, or one that disagrees with the flags (C2 = `none` +
+  non-retryable, C3 = `data_scope`/`node_capability`, C5 = `none` + retryable); an override that
+  changes `retryable` or `sub_category` sets `class` too.
 
 ### 4.2 Verdicts a row may not name
 
@@ -418,6 +440,10 @@ them a REST route).
   success it leaves alone.
 - R&D review for any change to a chain's effective envelopes; write-safety review as well when the
   scope covers writes or the envelope feeds a router-owned rule (§2.5).
+- An envelope that feeds a router-owned rule (§3 step 2, §5.2, §5.5) can't be disabled, and an
+  override may only widen it (`apis`, `scope`, `error_when`). The validator, in CI and at load,
+  runs the router's evidence for those rules through the effective envelopes and rejects a policy
+  that no longer marks one (`rule_violation`).
 
 ## 5. Run-time locks in the router
 
@@ -435,10 +461,10 @@ them a REST route).
   | any | any | any | contains "nonce too low" | `CHAIN_NONCE_TOO_LOW` |
   | any | any | any | contains "nonce is too low" (`error_classifier.go:294`) | `CHAIN_NONCE_TOO_LOW` |
   | any | any | any | contains "account sequence mismatch" | `CHAIN_INVALID_SEQUENCE` |
-  | XRP | jsonrpc | any | `tefPAST_SEQ` at start, after optional anchored `HTTP <status>: ` | `CHAIN_NONCE_TOO_LOW` |
+  | XRP | jsonrpc | any | `tefPAST_SEQ` at start | `CHAIN_NONCE_TOO_LOW` |
   | Bitcoin | jsonrpc | -26 | contains "txn-mempool-conflict" | `CHAIN_BITCOIN_VERIFY_REJECTED` |
   | Bitcoin | jsonrpc | -25 | contains "missingorspent" or "missing inputs" | `CHAIN_BITCOIN_VERIFY_ERROR` |
-  | Bitcoin | jsonrpc | any | contains "already spent" or "double spend" | `CHAIN_DOUBLE_SPEND` |
+  | Bitcoin | any | any | contains "already spent" or "double spend" | `CHAIN_DOUBLE_SPEND` |
   | Bitcoin | jsonrpc | -27 | any | `CHAIN_BITCOIN_ALREADY_IN_CHAIN` |
   | Starknet | jsonrpc | 52 | any | `CHAIN_STARKNET_INVALID_NONCE` |
   | Starknet | jsonrpc | 59 | any | `CHAIN_STARKNET_DUPLICATE_TX` |
@@ -447,7 +473,7 @@ them a REST route).
   already-known recognisers (§3 step 2.2) per node software and interface; each addition is a
   write-safety change (§8.1). Candidates to verify:
 
-  - slot already used: Cosmos code `sdk/32` (rest, grpc, tendermintrpc), Stellar `tx_bad_seq`
+  - slot already used: Cosmos code `sdk/32`, Stellar `tx_bad_seq`
     (Horizon 400), Aptos `SEQUENCE_NUMBER_TOO_OLD`, Cardano `BadInputsUTxO` (Blockfrost), Sui
     object versions already used;
   - already known: Cosmos `sdk/19`, TON "duplicate message".
@@ -554,15 +580,18 @@ ref missing, not an archive, nothing parses) the router boots on the bundled spe
 
 ### 5.7 WebSocket subscriptions
 
-- A subscribe the node refuses, and an error frame it pushes on an open subscription, on `jsonrpc`
-  and `tendermintrpc`, each build a record (`status` 0; `code`, `text` and `detail` from the
-  frame's error object) and go through §3 with the subscribe api's scope (submit-and-watch methods
-  are writes, so §5.2 applies to them). relay_end uses the same verdict.
-- The verdict is counted in `smartrouter_errors_total` and decides the URL's health: a rate limit
-  holds it off, `EndpointAtFault` counts a failure (`AppendRelayFailure`), anything else leaves it
-  alone. Today every refusal but a 429 counts a failure
-  (`direct_ws_subscription_manager.go:444-458`, called at `:645, 656`), and a pushed error frame
-  ends the subscription with no count and no health effect (`:1384-1395`).
+- A subscribe the node refuses, and an error frame delivered to an open subscription
+  (`listenForUpstreamMessages`, `direct_ws_subscription_manager.go:1386-1398`), on `jsonrpc` and
+  `tendermintrpc`, each build a record (`status` 0; `code`, `text` and `detail` from the frame's
+  error object) and go through §3 with the subscribe api's scope. Submit-and-watch methods are
+  writes: a §5.2 match is recorded as an unclear write in relay_end, and the client still gets the
+  node's frame. relay_end uses the same verdict.
+- The verdict is counted in `smartrouter_errors_total` and decides the URL's availability as on the
+  relay path (`shouldFailSessionForResult`, `rpcsmartrouter_server.go:2585-2620`): a rate limit
+  holds it off; a verdict that path scores (`UNKNOWN_ERROR` included) counts a failure
+  (`AppendRelayFailure`); anything else leaves it alone. Today every refusal but a 429 counts a
+  failure (`direct_ws_subscription_manager.go:444-458`, called at `:645, 656`), and a delivered
+  error frame ends the subscription with no count and no health effect (`:1386-1398`).
 - Selection, retry, restore and teardown are unchanged. Connect, upgrade and transport failures keep
   the connection rules.
 
@@ -585,7 +614,8 @@ ref missing, not an archive, nothing parses) the router boots on the bundled spe
 **Step 0 (no spec row or envelope read yet).** Visible changes: boot on bundled specs instead of
 refusing; writes relayed stateful even when cleared or undeclared; slot-already-used writes
 reported unclear; locked statuses decide their own replies; WebSocket subscription errors counted
-and judged by their verdict (§5.7); `smartrouter_errors_total` gains `apiInterface`. Deliverables:
+and judged by their verdict (§5.7); node errors served from cache get their verdict on every
+interface; `smartrouter_errors_total` gains `apiInterface`. Deliverables:
 `compatibility.json`, `SPEC_COMMIT`, `make specs`, folder-matches-commit check, bundled specs in
 the image, source fallback (§6, §5.6); `cmd/specvalidate`, schema, `spec_guards.yml` jobs,
 owner-review and evidence checks, approval pipeline (§4, §8.1); the error record on every
@@ -624,8 +654,9 @@ coverage at the family stage as well as the final verdict, per interface.
 
 The setting can't exceed the approved stage (§5.4); an early `all` logs and stays. Record the policy
 digest, window start/end and observed coverage per chain, interface and scope (denominators:
-`smartrouter_requests_read_total` and `smartrouter_requests_write_total{spec, apiInterface}`); a
-policy change or mismatch restarts the window; exercise unused rows and envelopes with fixtures.
+`smartrouter_requests_read_total` and `smartrouter_requests_write_total`, summed by `spec` and
+`apiInterface`); a policy change or mismatch restarts the window; exercise unused rows and
+envelopes with fixtures.
 Envelopes switch with the spec rows. Rollback before deletion = previous setting + artifact; after
 deletion = previous router release + bundle. The family tables, the code shapes and the 41 code
 verdict definitions are deleted in the release after `all` has passed one canary (`chainFamilyMap`
@@ -680,7 +711,9 @@ external policy has only `shadow`/`reads` permission.
   `details` (gRPC) and `in_success`. Each fixture runs through its interface's reader and record,
   not `ClassifyError` alone (the harness takes three transports today,
   `error_fixtures_test.go:43-47`; 97 of the 102 are JSON-RPC, none Tendermint or GraphQL). Every
-  row and envelope needs a fixture on each interface it applies to.
+  row and envelope needs a fixture on each interface it applies to. The five fixtures whose status
+  exists only as text (`rest_404_not_found`, `rest_429_rate_limit`, `rest_503_unavailable`,
+  `evm_http_429`, `evm_http_503`) keep running through `ClassifyError`.
 - Counterexamples. Keep today's verdict: Bitcoin `-26` "min relay fee not met, 429 < 1000" and
   "mempool min fee not met, 429 < 1000", Agave `-32005` "Node is behind by 429 slots"; a rate-limit
   phrase inside gRPC 3/5/10/11/12; JSON-RPC code 429; XRP router-owned rows and other engine results
@@ -702,9 +735,10 @@ external policy has only `shadow`/`reads` permission.
   after fan-out and holds nothing off.
 - Attack row as a loaded spec row: `{code: -32000}` → `CHAIN_TX_REJECTED` vs EVM "already known":
   no verdict change.
-- No blame inside a readable client status (§3 step 3): a code-only, a `contains` and a `regex`
-  spec row naming `NODE_INTERNAL_ERROR`, matched under REST 400, 404, 410 and 422, JSON-RPC HTTP
-  400, and gRPC InvalidArgument, NotFound, AlreadyExists, FailedPrecondition and OutOfRange, each
+- No blame inside a readable client status (§3 step 3): a code-only (an envelope supplies the code
+  on REST and gRPC), a `contains` and a `regex` spec row naming `NODE_INTERNAL_ERROR`, matched under
+  REST 400, 404, 410 and 422, GraphQL 400, JSON-RPC HTTP 400, and gRPC InvalidArgument, NotFound,
+  AlreadyExists, FailedPrecondition and OutOfRange, each
   give the status-only verdict and count `rule="status_fault"`; the same rows on an HTTP 200
   JSON-RPC error and under gRPC Internal apply; Solana `-32005` under JSON-RPC HTTP 400 gives
   `UNKNOWN_ERROR`, never the generic `-32005` rate limit.
@@ -727,12 +761,15 @@ external policy has only `shadow`/`reads` permission.
   regex alternative), tested against the complete effective policy, recording the winning row,
   verdict (name + flags) and class, reporting unreachable rows.
 - Envelopes: per envelope, a reply it marks and a success it leaves alone, on each api it covers; a
-  write-scope envelope leaves a read with the same shape alone; on gRPC, with and without a cached
-  descriptor (skipped and counted); an error an envelope finds in a success never ends a write's
-  fan-out as its success.
-- WebSocket (§5.7), on `jsonrpc` and `tendermintrpc`: a refused subscribe and a pushed error frame
-  are counted with their verdict and `apiInterface`; a client-fault refusal counts no failure, a
-  rate-limited one holds the URL off, an at-fault one counts a failure; restore and teardown are
+  write-scope envelope leaves a read with the same shape alone; absent, null and wrong-type values
+  per §2.5; on gRPC, with and without a cached descriptor (skipped and counted), and a gRPC write
+  decoded with no reflection on the node; an error an envelope finds in a success never ends a
+  write's fan-out as its success; a policy that disables or narrows an envelope a router-owned rule
+  reads is rejected (§4.6).
+- WebSocket (§5.7), on `jsonrpc` and `tendermintrpc`: a refused subscribe and an error frame
+  delivered to the subscription's error channel (injected there on `tendermintrpc`) are counted
+  with their verdict and `apiInterface`; a client-fault refusal counts no failure, an unclassified
+  or at-fault one counts a failure, a rate-limited one holds the URL off; restore and teardown are
   unchanged.
 
 ### 8.3 Router repo tests (bad source, locks, fallback)
@@ -821,6 +858,7 @@ description names the rule (`stateful`, `stateful_default`, `status_fault`).
 | Manifest delivery, signing service, key custody, rotation, revocation; candidate trust context | any external policy acts |
 | Generic geth-wording rows (`error_classifier.go:269-346`, `:241`): keep generic or move to ETH1, after 30 days of hits data; the router's vendor rows (Alchemy `-32600`, QuickNode's `blocked …` row): keep or remove | those behaviour changes ship |
 | Signature and already-known candidates per interface (§5.2): MAG-4898's evidence for each | each ships |
+| The gRPC writes of §5.3 decode without the node's reflection (MAG-5128 item 5) | an envelope on a gRPC write acts |
 | create-spec agent keeps unknown keys in update modes by construction; new-chain mode needs a template (MAG-4898 part 3); add a test in `scripts/test_*.sh` | Step 3 |
 | Effort: ticket said 6–8 engineer-weeks; revision 2 split ≈9; the approval pipeline, request-time lock, wider prefix, per-chain verdicts and interface parity (record, envelopes, per-interface fixtures, WebSocket) add to it | R&D sizes |
 
@@ -843,15 +881,15 @@ versioning if picked up again.
 | Retry precedence on JSON-RPC/Tendermint: `retryVerdict` + `endsRelay` (5xx), MAG-1870 status pass (other non-2xx) | `rpcsmartrouter/error_mapper.go:39-64`; `direct_rpc_relay.go:500-501, 600-612, 698-766`; tests `direct_http_status_body_test.go:92, 140`, `direct_rpc_integration_test.go:530` |
 | Read-your-writes, SVM block retry, node error handler (identity comparisons) | `read_your_writes.go:218-231`; `svm_block_hash_retry.go:99`; `node_error_handler.go:23, 164` |
 | How a status reaches the classifier | REST `direct_rpc_relay.go:911`; GraphQL `graphqlMessage.go:33-55, 490`, `direct_rpc_relay.go:1034`; JSON-RPC prefix `direct_rpc_relay.go:703-720`, `node_error_handler.go:80` |
-| Interfaces → classifier transports (graphql → REST, tendermintrpc → JSON-RPC) | `error_classifier.go:768-778`; sender dispatch `direct_rpc_relay.go:500-510` |
+| Interfaces → classifier transports (graphql → REST, tendermintrpc → JSON-RPC) | `error_classifier.go:768-777`; sender dispatch `direct_rpc_relay.go:500-510` |
 | What each reader passes to the classifier today: JSON-RPC and Tendermint `code` and `message`; REST `message`/`error`/`error.message`, else the body (first 1 KB); GraphQL one error's `message` and `extensions.code`; gRPC status and message (the results manager falls back to the body) | `rpcInterfaceMessages/jsonRPCMessage.go:101-128`, `tendermintRPCMessage.go:39-59`; `restMessage.go:99-127`; `graphqlMessage.go:141-151, 462-498`; `direct_rpc_relay.go:1128-1213`; `relaycore/results_manager.go:151-153` |
 | Chain shapes in code (envelopes from Step 1, §2.5) | Cosmos `restMessage.go:55-60, 83-96`; Tendermint `tendermintRPCMessage.go:39-51`; XRP `xrplEngineResult.go:64-104`, `jsonRPCChainFamily.go:14-35`; GraphQL extension codes `graphqlMessage.go:48-55` (stay router code) |
 | Classification sites: senders; results manager; cache (JSON-RPC and Tendermint only); subscriptions (relay_end only) | `direct_rpc_relay.go:720, 911, 1034, 1202, 1279`; `relaycore/results_manager.go:191, 200`; `rpcsmartrouter_server.go:2216-2238`; `subscription_relay_end.go:66-99` |
-| WebSocket subscribe failures and pushed error frames | `direct_ws_subscription_manager.go:444-458, 645, 656, 1384-1395` |
+| WebSocket subscribe failures and delivered error frames | `direct_ws_subscription_manager.go:444-458, 645, 656, 1386-1398` |
 | Default api for undeclared methods | `base_chain_parser.go:532-560, 579`; `rest.go:158`; disabled apis `:582, 848-851` |
 | Spec loading, imports (`DoExpandSpec`; child wins by name within a collection), unknown keys dropped, source | `utils/keeper/spec.go:23-26, 79, 89, 111-128`; `utils/specfetcher/fetcher.go:120-264, 380-411`; `types/spec/expand.go:20-103`; `api_collection.go:580-582`; `combinable.go:37-67`; `cobra_common.go:79`; `rpcsmartrouter.go:2567-2581` |
 | Fixtures and tests (`TestErrorFixtures`, `TestFaultAxis_EveryRegisteredCodeIsAccountedFor`, `TestFaultAxis_RegistryContract`, REST/gRPC status suites) | `testdata/error_fixtures.json` (102: 97 jsonrpc, 3 rest, 2 grpc); `error_fixtures_test.go:43-47` (three transports), `:56`; `error_fault_axis_test.go:32-164, 203`; `rest_status_rows_test.go:15, 77, 139`; `grpc_rate_limit_vocabulary_test.go:57`; `endpoint_fault_test.go:35`; `direct_rpc_connection_test.go:466`; `unsupported_method_scoring_invariant_test.go:49-61, 86-100`; `error_registry_test.go:42-57` |
-| Metrics, readiness; per-interface denominators (`smartrouter_requests_*`, `smartrouter_ws_subscription_errors_total`, `{spec, apiInterface}`) | `protocol/metrics/error_metrics.go:21-44`; `smartrouter_metrics_manager.go:436-446, 581-584, 625-648, 766-793, 1688-1700` |
+| Metrics, readiness; per-interface denominators (`smartrouter_requests_*{spec, apiInterface, provider_address, method}`, `smartrouter_ws_subscription_errors_total{spec, apiInterface}`) | `protocol/metrics/error_metrics.go:21-44`; `smartrouter_metrics_manager.go:438-446, 581-584, 625-648, 766-793, 1688-1700` |
 | Images and chart | `docker/Dockerfile.release:26`, `Dockerfile.ci:13`, `docker/Dockerfile:30`, `docker-compose.yml:53`; chart `values.yaml:450-458`, `templates/routers_deployment.yaml:368-369` |
 | lava-specs CI | `spec_guards.yml`, `spec_pipeline.yml`, `create_spec.yml`; `check_stateful.sh:97-119, 188`; `check_unused_fields.sh:27`; `check_update_diff.sh` |
 | Infra alerting | `grafana/alert-rules/smart-router.yaml`; `scripts/grafana-alert-rules.py`; `tests/grafana-alert-rules/`; `docs/OBSERVABILITY.md:1138-1370` |
