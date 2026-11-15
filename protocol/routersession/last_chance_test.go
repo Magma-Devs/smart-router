@@ -284,7 +284,85 @@ func TestLastChance_StalledSuccessKeepsTheBlock(t *testing.T) {
 		require.Never(t, func() bool {
 			return !slices.Contains(csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "primary")
 		}, 300*time.Millisecond, 10*time.Millisecond, "a stalled primary stays blocked after a lent success")
+
+		// The next request is lent the stalled url directly. The pool-empty release, the cascade's
+		// step before the last chance, asks inRotation too: releasing a provider with no usable url
+		// would only hand selection nothing to dial and block it again (MAG-4737).
+		require.Zero(t, csm.atomicReadNumberOfResets(), "no request so far released the lone stalled primary on its way to the lend")
+		sessions, err = lcGet(csm, NewUsedProviders(nil))
+		require.NoError(t, err)
+		require.Equal(t, "primary", lcServedBy(t, sessions))
+		require.Zero(t, csm.atomicReadNumberOfResets(), "a provider with no usable url is lent, not released and re-blocked")
+		require.Contains(t, csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "primary")
+		lcDone(t, csm, sessions)
 	})
+}
+
+// MAG-4737: for a blocked provider with no usable url the pool-empty release was a detour. Selection
+// was handed the released provider, found nothing to dial and blocked it again, and the last chance
+// lent it anyway, so every request logged a release and a re-block while a lone provider stayed
+// switched off or head-stalled. The release now asks inRotation, as the pinned release already did,
+// and the lend happens without it. A stale block, one whose url is usable again, is still released.
+func TestPoolEmptyRelease_LendsAProviderWithNoUsableURLInsteadOfReleasingIt(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+	first, err := lcGet(csm, NewUsedProviders(nil)) // blocks the provider on the way, then lends it
+	require.NoError(t, err)
+	lcDone(t, csm, first) // the lent answer did not switch the url on
+	require.Contains(t, csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "primary")
+
+	for i := 0; i < 3; i++ {
+		sessions, err := lcGet(csm, NewUsedProviders(nil))
+		require.NoError(t, err)
+		require.Equal(t, "primary", lcServedBy(t, sessions), "request %d is lent the switched-off url", i+2)
+		lcDone(t, csm, sessions)
+	}
+	require.Zero(t, csm.atomicReadNumberOfResets(), "no request released the provider on its way to the lend")
+	require.Contains(t, csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "primary")
+}
+
+// A stale block, one whose url is usable again while nothing has released the provider yet, is
+// still released by the pool-empty release, and ordinary selection serves the request. The lent
+// session is handed back through the failure path on purpose: a success would spawn the release
+// goroutine of OnSessionDone, and this test is about the pool-empty route alone.
+func TestPoolEmptyRelease_StillReleasesAProviderWhoseURLIsUsableAgain(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	disableAt(t, p.Endpoints[0], probeBase)
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+	first, err := lcGet(csm, NewUsedProviders(nil)) // blocks the provider on the way, then lends it
+	require.NoError(t, err)
+	for _, s := range first {
+		require.NoError(t, csm.OnSessionFailure(s.Session, errLastChanceRelay))
+	}
+	require.Contains(t, csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "primary")
+	require.Zero(t, csm.atomicReadNumberOfResets())
+
+	require.True(t, p.Endpoints[0].ResetHealth()) // the probe, say, switched the url back on
+	sessions, err := lcGet(csm, NewUsedProviders(nil))
+	require.NoError(t, err)
+	require.Equal(t, "primary", lcServedBy(t, sessions))
+	require.Equal(t, uint64(1), csm.atomicReadNumberOfResets(), "a blocked provider whose url is usable again is released by the pool-empty release")
+	require.NotContains(t, csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses, "primary")
+	lcDone(t, csm, sessions)
+}
+
+// The clear in OnSessionDone is the only one for a provider lent while on neither blocked list
+// (the walk's out-of-rotation group, MAG-4829): the two pool releases clear only an address they
+// hold. A success on such a provider must still drop the flag, or every later failure on it reads
+// as a lent attempt.
+func TestLastChance_SuccessOnAnUnlistedLentProviderDropsTheFlag(t *testing.T) {
+	p := lcProvider(t, "primary", "http://127.0.0.1:1")
+	csm := lcCSM(t, []*ConsumerSessionsWithProvider{p}, nil)
+	p.atomicWriteBlockedStatus(BlockedProviderSessionUsedStatus) // lent by the walk while on no list
+	require.Empty(t, csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses)
+	sessions, err := lcGet(csm, NewUsedProviders(nil))
+	require.NoError(t, err)
+	lcDone(t, csm, sessions)
+	require.Eventually(t, func() bool {
+		return p.atomicReadBlockedStatus() == BlockedProviderSessionUnusedStatus
+	}, 2*time.Second, 10*time.Millisecond, "the success drops the lent flag although no list held the provider")
+	require.Empty(t, csm.ProviderRoutingSnapshot().CurrentlyBlockedProviderAddresses)
 }
 
 // lcDone hands every session of a lent request back as answered.

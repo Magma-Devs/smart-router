@@ -4125,9 +4125,26 @@ func runProbeCycleCore(
 	// (MAG-4737). Leaving it blocked loses nothing: when the stall clears, the head-stall step
 	// releases the provider behind the same check.
 	releaseIfUsable := func(target *routersession.EndpointWithDirectConnection) {
-		if onRecover != nil && target.Endpoint.IsUsable() {
-			onRecover(target.ProviderAddress)
+		if onRecover == nil {
+			return
 		}
+		if target.Endpoint.IsUsable() {
+			onRecover(target.ProviderAddress)
+			return
+		}
+		// Said out loud because the re-enable was: RecordProbeVerdict has just logged it and counted
+		// it in reEnabled, and without this line an operator following the address sees the url come
+		// back and the provider stay blocked with nothing in between.
+		snap := target.Endpoint.HealthSnapshot()
+		reasons := make([]string, 0, len(snap.StateReasons))
+		for _, rec := range snap.StateReasons {
+			reasons = append(reasons, string(rec.Reason))
+		}
+		utils.FormatDebug("probe re-enabled a url but its provider stays blocked: a state reason still holds the url out",
+			utils.LogAttr("endpoint", target.Endpoint.NetworkAddress),
+			utils.LogAttr("provider", target.ProviderAddress),
+			utils.LogAttr("state_reasons", reasons),
+		)
 	}
 	// One verdict per endpoint (regular + backup), grouped by provider for the single-sample rule.
 	verdictsByProvider := make(map[string][]probing.EndpointVerdict)
