@@ -554,3 +554,39 @@ func TestVerificationRetries_ADueCheckThatEveryUrlPassedRunsAtEveryUrl(t *testin
 	require.Greater(t, count(up.methods("http", a), "eth_chainId"), askedA, "the due check runs at the first url")
 	require.Greater(t, count(up.methods("http", b), "eth_chainId"), askedB, "and at the second")
 }
+
+// A url held off after a rate limit is left out of a pass (MAG-4733), and what the pass
+// leaves to retry for it is its own dial, as for a url that could not be dialed: not the
+// whole pass, which would ask the sibling that passed everything its checks again. While
+// the hold-off lasts the retry asks nothing; once it ends, the retry verifies the held url
+// alone, and the provider leaves the schedule.
+func TestVerificationRetries_AHeldOffUrlIsRetriedAloneOnceItsHoldOffEnds(t *testing.T) {
+	up := newFakeUpstreams(t)
+	const a, b = "/ho/a/" + upArchive, "/ho/b/" + upArchive
+	provider := staticProvider("ETH1", commonlib.NodeUrl{Url: up.httpURL(a)}, commonlib.NodeUrl{Url: up.httpURL(b)})
+	rig := newPairedRetryRig(t, provider)
+	require.False(t, rig.pending(), "every url passed at boot")
+	key := holdoff.ProviderKey("ETH1", "jsonrpc", provider.Name)
+	rig.inputs.rateLimitHoldoff.RecordRateLimit(key, provider.NodeUrls[0].Url, 30*time.Second)
+	askedA, askedB := count(up.methods("http", a), "eth_chainId"), count(up.methods("http", b), "eth_chainId")
+
+	rig.rpsr.updateEpoch(context.Background(), rig.rpsr.epochTimer.GetCurrentEpoch())
+	require.Equal(t, askedA, count(up.methods("http", a), "eth_chainId"), "the epoch pass leaves the held url out")
+	require.Greater(t, count(up.methods("http", b), "eth_chainId"), askedB, "and verifies its sibling")
+	connect := chainlib.CheckID{Name: chainlib.CheckConnect}
+	require.Equal(t, []chainlib.CheckID{connect}, rig.inputs.retries.checksOf(reverifyTierStatic, provider.Name),
+		"the held url is retried alone, not the whole pass")
+	require.NotNil(t, rig.session(t, provider.Name), "the provider serves on its sibling")
+	askedB = count(up.methods("http", b), "eth_chainId")
+
+	rig.retryOnly(provider, connect)
+	require.Equal(t, askedA, count(up.methods("http", a), "eth_chainId"), "still held: the retry asks the url nothing")
+	require.Equal(t, askedB, count(up.methods("http", b), "eth_chainId"), "and its sibling nothing either")
+	require.Equal(t, []chainlib.CheckID{connect}, rig.inputs.retries.checksOf(reverifyTierStatic, provider.Name), "still on the schedule")
+
+	rig.inputs.rateLimitHoldoff.RecordAnswer(key, provider.NodeUrls[0].Url)
+	rig.retryOnly(provider, connect)
+	require.Greater(t, count(up.methods("http", a), "eth_chainId"), askedA, "the hold-off is over: the retry verifies the held url")
+	require.Equal(t, askedB, count(up.methods("http", b), "eth_chainId"), "its sibling keeps its verdicts and is asked nothing")
+	require.False(t, rig.pending(), "the url passes, and the provider leaves the schedule")
+}

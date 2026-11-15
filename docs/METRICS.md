@@ -683,7 +683,9 @@ or url, and a url on its first strike. A retry re-runs only the provider's check
 due, at each node url that failed them, and keeps every other verdict from the pass before:
 with `debug` and `archive` both failing, each has its own schedule, and the checks that
 pass (`chain-id` and the rest) are re-run by the epoch alone, as is a due check at a url
-that passed it. A url that could not be dialed is retried by its dial alone (`connect`).
+that passed it. A url that could not be dialed is retried by its dial alone (`connect`), and
+so is a url a pass did not ask because it was held off after a rate limit (MAG-4733): once
+the hold-off ends, that url alone is dialed and verified, and its siblings keep their verdicts.
 Checks that failed in the same pass stay due together until
 their attempts part. While its chain is dark, every provider out of the pairing is
 verified whole from 2s instead, doubling to 3m, and those passes do not push a check's

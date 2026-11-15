@@ -282,8 +282,9 @@ type ProviderAdmission struct {
 // add-on and extension the value covers. ETH1's pruning is four of them: the base
 // one, archive, trace, and trace's archive. The zero CheckID is the whole pass, what a
 // retry re-runs for a provider whose pass gave no verdicts to keep. A url that could
-// not be dialed has no verdicts to keep either, but only that url: its retry is its
-// dial, CheckID{Name: CheckConnect}, which no check of another url answers to.
+// not be dialed, or that the pass left out for its hold-off, has no verdicts to keep
+// either, but only that url: its retry is its dial, CheckID{Name: CheckConnect}, which
+// no check of another url answers to.
 type CheckID struct {
 	Name      string
 	Addon     string
@@ -415,11 +416,13 @@ func (a ProviderAdmission) Ran(check string) bool {
 
 // Retries is what a retry of this pass re-runs (MAG-3950), once each and sorted: every
 // check that failed, or that a rate limit or the deadline kept from answering, and the
-// dial of a url that could not be dialed. That retry dials the url again, and runs its
-// checks once it answers; the provider's other urls keep their verdicts, so a dead
-// websocket url costs no re-run of the http checks that passed (MAG-4505). A Warning
-// check is not retried: it switches nothing off, and the epoch re-runs it. Neither is
-// an add-on name the spec does not define: the router reads its config once.
+// dial of a url that could not be dialed, or that the pass did not ask because it is
+// held off after a rate limit (ErrNotAskedHeldOff). That retry dials the url again, and
+// runs its checks once it answers; the provider's other urls keep their verdicts, so a
+// dead websocket url, or a url waiting out its hold-off, costs no re-run of the http
+// checks that passed (MAG-4505). A Warning check is not retried: it switches nothing
+// off, and the epoch re-runs it. Neither is an add-on name the spec does not define:
+// the router reads its config once.
 func (a ProviderAdmission) Retries() []CheckID {
 	var ids []CheckID
 	add := func(id CheckID) {
@@ -429,9 +432,9 @@ func (a ProviderAdmission) Retries() []CheckID {
 	}
 	for _, outcome := range a.pass {
 		if outcome.err != nil {
-			switch FailedCheck(outcome.err) {
-			case CheckUnsupportedAddon:
-			case CheckConnect:
+			switch {
+			case FailedCheck(outcome.err) == CheckUnsupportedAddon:
+			case FailedCheck(outcome.err) == CheckConnect, errors.Is(outcome.err, ErrNotAskedHeldOff):
 				add(CheckID{Name: CheckConnect})
 			default:
 				add(CheckID{})
