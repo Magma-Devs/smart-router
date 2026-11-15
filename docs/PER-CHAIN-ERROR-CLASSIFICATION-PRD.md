@@ -43,6 +43,7 @@ Invariants the router enforces at run time, for every spec from every source:
    order and imports.
 7. An invalid policy falls back whole to the bundled policy, unrelated chains keep theirs, the
    router boots, and a gauge, log line and alert name the chain and reason.
+8. No spec verdict blames the endpoint for a reply whose HTTP status is a readable 4xx (§3 step 3).
 
 ## 2. Spec format
 
@@ -65,7 +66,7 @@ Invariants the router enforces at run time, for every spec from every source:
 
 ```json
 { "id": "solana.blockhash_not_found", "match": { "contains": "blockhash not found" },
-  "error": "CHAIN_SOLANA_BLOCKHASH_NOT_FOUND", "interface": "jsonrpc", "scope": "write",
+  "error": "CHAIN_SOLANA_BLOCKHASH_NOT_FOUND", "interface": "jsonrpc", "scope": "both",
   "source": "https://github.com/anza-xyz/agave/blob/v2.1.0/sdk/src/transaction/error.rs",
   "versions": ["agave 2.1"] }
 ```
@@ -76,7 +77,7 @@ Invariants the router enforces at run time, for every spec from every source:
 | `match` | yes | Exactly one of `{"code": N}`, `{"contains": s}`, `{"regex": re2}`, `{"code": N, "contains": s}`. `contains` case-insensitive (as `MessageContains`); `regex` Go RE2, case-sensitive unless `(?i)`, must compile. No status, gRPC-code or header matcher. |
 | `error` | yes | A verdict name the chain defines or inherits, or an unlocked router-owned one (e.g. `CHAIN_STATE_PRUNED`). |
 | `interface` | no | `jsonrpc`, `rest`, `grpc`, `graphql`, `tendermintrpc`; absent = every interface the chain serves. |
-| `scope` | yes | `read`, `write` or `both`. `write` rows run only for stateful apis, `read` rows only for the rest. |
+| `scope` | yes | `read`, `write` or `both`. `write` rows run only for stateful apis, `read` rows only for the rest. Today's rows apply to reads and writes alike, so migrated rows keep `both`; narrowing one is a declared behaviour change (§8.1). Agave's `sendTransaction` can answer `-32016`, and a Cosmos simulate (a read) can answer "account sequence mismatch". |
 | `source` | yes | Official definition, pinned to a tag or commit, on the router's allowlist (§4.4). |
 | `versions` | yes | Node software versions checked; at least one. |
 | `slot_used` | no | `true` adds the row's answers to the slot-already-used group; `write`/`both` rows only; widens, never narrows. |
@@ -92,20 +93,43 @@ Invariants the router enforces at run time, for every spec from every source:
 
 | Field | Req. | Rule |
 |---|---|---|
-| `name` | yes | One origin spec per name across lava-specs; never router-owned. A chain that inherits a verdict overrides it by repeating the name with the fields it changes. New names: `CHAIN_<FAMILY>_*` / `NODE_<FAMILY>_*`; migrated verdicts keep their names. Clients never see it (node bodies are forwarded unchanged, `failed_relay_reply.go:35-38`); it appears in `smartrouter_errors_total{error_name}`, logs and the `relay_end` event. |
-| `code` | on definition | Integer, unique across lava-specs, never router-owned. An override omits it or repeats it unchanged. Migrated verdicts keep their codes; new ones use the reserved range (proposal 5000–5999, router uses 1001–4007; §10). Logs and `relay_end` only, not a metric label (`error_metrics.go:37-40`). |
-| `sub_category` | yes | `none`, `data_scope` or `node_capability`. Fault axis as `EndpointAtFault` (`error_registry.go:136-152`): `data_scope`/`node_capability` never at fault and must be `retryable: true`; `none` + retryable = node at fault; `none` + non-retryable = caller's fault. |
-| `retryable` | yes | Whether a read tries the next provider. Writes follow the stateful policy regardless. |
-| `class` | yes | Rulebook class C2–C7; informational. |
+| `name` | always | One origin spec per name across lava-specs; never router-owned. New names: `CHAIN_<FAMILY>_*` / `NODE_<FAMILY>_*`; migrated verdicts keep their names. Clients never see it (node bodies are forwarded unchanged, `failed_relay_reply.go:35-38`); it appears in `smartrouter_errors_total{error_name}`, logs and the `relay_end` event. |
+| `code` | definition | Integer, unique across lava-specs, never router-owned. An override omits it or repeats it unchanged. Migrated verdicts keep their codes; new ones use the reserved range (proposal 5000–5999, router uses 1001–4007; §10). Logs and `relay_end` only, not a metric label (`error_metrics.go:37-40`). |
+| `sub_category` | definition | `none`, `data_scope` or `node_capability`. Fault axis as `EndpointAtFault` (`error_registry.go:136-152`): `data_scope`/`node_capability` never at fault and must be `retryable: true`; `none` + retryable = node at fault; `none` + non-retryable = caller's fault. |
+| `retryable` | definition | Whether a read tries the next provider, subject to the retry precedence below. Writes follow the stateful policy regardless. |
+| `class` | definition | Rulebook class C2–C7; informational. |
 | `note` | no | One line. |
+
+**Definitions and overrides.** A definition (the verdict's origin spec) carries every field marked
+*definition*. An override (a chain repeating a name it inherits) carries `name` plus only the fields
+it changes among `sub_category`, `retryable`, `class` and `note`, and never changes `code`. After
+inheritance every effective verdict must have every definition field, or the policy is invalid
+(§4.1).
+
+**Retry precedence.** The JSON-RPC and Tendermint sender (`direct_rpc_relay.go:500-501`) already
+lets the HTTP status override a verdict's retry decision, and this spec keeps that order:
+
+- Status ≥ 500 (`direct_rpc_relay.go:600-612`): if the verdict would end the relay and the status
+  alone wouldn't, the attempt fails over carrying the status's verdict; the verdict decides only
+  endpoint health (`retryVerdict`, `rpcsmartrouter/error_mapper.go:39-64`). Solana `-32002` under
+  HTTP 500 is classified `CHAIN_SOLANA_SIMULATION_FAILED` (the endpoint isn't blamed) and retried
+  as `NODE_INTERNAL_ERROR`.
+- Another non-2xx status: the status pass can turn a retryable verdict non-retryable, never the
+  reverse (MAG-1870, `direct_rpc_relay.go:722-766`).
+- REST and GraphQL classify with the status as the code; the verdict applies as written (TON's 500
+  row below).
+
+Whether a non-retryable verdict inside a JSON-RPC 5xx should end the relay instead is open (review
+613-1, §10).
 
 Every spec verdict is `CategoryExternal`; there is no `category` field. There is no
 `may_have_reached_node` field (the router reads it only on transport failures,
-`rpcsmartrouter_server.go:1498`, `relay_end.go:588`). The validator prints each verdict's computed
-fault decision.
+`rpcsmartrouter_server.go:1498`, `relay_end.go:588`). The validator prints each effective verdict's
+computed fault decision.
 
-**Example: Solana** (`solana.json`; 14 rows today at `error_classifier.go:25-45`, four shown).
-`CHAIN_STATE_PRUNED` (3204) is router-owned (used by `:354-355`, `:413`, `:444`) and only named.
+**Example: Solana** (`solana.json`; 14 rows today at `error_classifier.go:25-45`, four shown,
+migrated unchanged with `scope: both`). `CHAIN_STATE_PRUNED` (3204) is router-owned (used by
+`:354-355`, `:413`, `:444`) and only named.
 
 ```json
 "errors": {
@@ -116,16 +140,26 @@ fault decision.
     { "name": "CHAIN_SOLANA_BLOCKHASH_NOT_FOUND", "code": 3304, "sub_category": "none", "retryable": false, "class": "C6" }
   ],
   "rows": [
-    { "id": "solana.block_cleaned_up", "match": { "code": -32001 }, "error": "CHAIN_STATE_PRUNED", "scope": "read",
+    { "id": "solana.block_cleaned_up", "match": { "code": -32001 }, "error": "CHAIN_STATE_PRUNED", "scope": "both",
       "source": "https://github.com/anza-xyz/agave/blob/v2.1.0/rpc-client-api/src/custom_error.rs", "versions": ["agave 2.1"] },
     { "id": "solana.node_unhealthy", "match": { "code": -32005 }, "error": "NODE_SOLANA_UNHEALTHY", "scope": "both",
       "source": "https://github.com/anza-xyz/agave/blob/v2.1.0/rpc-client-api/src/custom_error.rs", "versions": ["agave 2.1"] },
-    { "id": "solana.min_context_slot", "match": { "code": -32016 }, "error": "CHAIN_SOLANA_MIN_CONTEXT_SLOT_NOT_REACHED", "scope": "read",
+    { "id": "solana.min_context_slot", "match": { "code": -32016 }, "error": "CHAIN_SOLANA_MIN_CONTEXT_SLOT_NOT_REACHED", "scope": "both",
       "source": "https://github.com/anza-xyz/agave/blob/v2.1.0/rpc-client-api/src/custom_error.rs", "versions": ["agave 2.1"] },
-    { "id": "solana.blockhash_not_found", "match": { "contains": "blockhash not found" }, "error": "CHAIN_SOLANA_BLOCKHASH_NOT_FOUND", "scope": "write",
+    { "id": "solana.blockhash_not_found", "match": { "contains": "blockhash not found" }, "error": "CHAIN_SOLANA_BLOCKHASH_NOT_FOUND", "scope": "both",
       "source": "https://github.com/anza-xyz/agave/blob/v2.1.0/sdk/src/transaction/error.rs", "versions": ["agave 2.1"] }
   ]
 }
+```
+
+**Example: an override that changes only `retryable`** (a child of `solana.json`). The effective
+verdict keeps 3304, `none` and C6 from the origin and becomes retryable, which the validator reports
+as "node at fault, retry elsewhere", for this chain and its children only:
+
+```json
+"errors": { "schema_version": 1,
+  "verdicts": [ { "name": "CHAIN_SOLANA_BLOCKHASH_NOT_FOUND", "retryable": true,
+    "note": "this cluster's RPC nodes lag; another node may know the blockhash" } ] }
 ```
 
 **Example: a chain-specific verdict** (TON, MAG-4061). Note that `shouldFailSessionForResult`
@@ -159,8 +193,9 @@ New code in `DoExpandSpec` (today merges only `api_collections`, `expand.go:72-1
 root files import another).
 
 - Order: the child's rows, then each parent's rows the child didn't override or disable by `id`, in
-  the parents' order. Verdicts are keyed by `name`; an override changes `sub_category`,
-  `retryable`, `class`, `note`, never `code`. A verdict can't be removed.
+  the parents' order. Verdicts are keyed by `name`; an override carries only the fields it changes
+  (`sub_category`, `retryable`, `class`, `note`), never `code`, and the effective verdict must be
+  complete after expansion (§2.3). A verdict can't be removed.
 - A row's `error` must resolve, after inheritance, to a defined/inherited verdict or an unlocked
   router-owned one; otherwise the policy is invalid.
 - Resolve and validate the whole graph before any policy acts. Errors: missing parents, cycles,
@@ -200,7 +235,16 @@ For a node error on chain X, first match wins:
       count like real ones. The REST route-refusal text rows (`:390-393`) run before the status
       decision (keeps `TestRESTMessageRowsBeatTheStatusRow`, `rest_status_rows_test.go:139`).
       Statuses with no router rule (418, 425) are not locked.
-3. **X's spec rows**, resolved by inheritance, file order, filtered by interface and scope.
+3. **X's spec rows**, resolved by inheritance, file order, filtered by interface and scope. **No
+   blame inside a readable 4xx**: when the reply's HTTP status (read as in step 2.3) is 400, 404,
+   410 or 422 on REST, or 400 on GraphQL, JSON-RPC and Tendermint, a matching row whose verdict has
+   `EndpointAtFault` true is not applied, whatever its matcher (code, `contains` or `regex`). The
+   reply takes step 2.3's status-only decision instead (`USER_INVALID_REQUEST`, `NODE_DATA_NOT_HELD`,
+   `CHAIN_STATE_PRUNED`, `USER_INVALID_PARAMS`, or `UNKNOWN_ERROR` for JSON-RPC and Tendermint 400,
+   whose table has no 400 row; none blames the endpoint), counted as
+   `smartrouter_spec_lock_enforced_total{chain_id, rule="status_fault"}`.
+   Falling through to the later rows instead would be unsafe: Solana's `-32005` would reach the
+   generic `-32005`, a rate limit.
 4. **The router's family rows** until the switch deletes them; afterwards the router-owned rows
    that must follow spec rows (XRP `te[fmlr]…` catch-all).
 5. **Remaining transport rows.**
@@ -214,9 +258,12 @@ REST 403 "account not found" → `NODE_ACCESS_DENIED`; REST 409 "account sequenc
 ends unknown on a write via §5.2); JSON-RPC `HTTP 408: …` → `UNKNOWN_ERROR` (no JSON-RPC 408 row);
 gRPC 14/8/10 "insufficient fee" → `NODE_SERVICE_UNAVAILABLE`/`UNKNOWN_ERROR`/`NODE_ABORTED`; gRPC 5
 "account not found" → `NODE_DATA_NOT_HELD`; gRPC 3 "account sequence mismatch" →
-`USER_INVALID_PARAMS`. Node-answer statuses are untouched (REST 400 "unknown block" stays
-`CHAIN_BLOCK_NOT_FOUND`, REST 500 "is not available, lowest height" stays `CHAIN_STATE_PRUNED`,
-Aptos 410 and toncenter 422 keep their verdicts). A gRPC rate limit visible only in reply metadata
+`USER_INVALID_PARAMS`; once spec rows act, a family row that blames the endpoint (Solana `-32005`,
+Bitcoin `-28`/`-10`/`-9`, Starknet `63`, NEAR `NOT_SYNCED_YET`, XRP `noNetwork`/`amendmentBlocked`/
+`internal…`) answering under JSON-RPC HTTP 400 → `UNKNOWN_ERROR` (step 3; no fixture has this
+shape, and Step 1 counts it as `differ` if traffic does). Node-answer statuses are otherwise
+untouched (REST 400 "unknown block" stays `CHAIN_BLOCK_NOT_FOUND`, REST 500 "is not available,
+lowest height" stays `CHAIN_STATE_PRUNED`, Aptos 410 and toncenter 422 keep their verdicts). A gRPC rate limit visible only in reply metadata
 applies only when rows return `UNKNOWN_ERROR` (`direct_rpc_relay.go:1208-1209`), hence
 ResourceExhausted is locked.
 
@@ -240,6 +287,8 @@ section makes the chain's policy invalid → fallback (§5.6).
   lava-specs; at load both chains fall back with `verdict_collision`).
 - A migrated verdict whose copy differs from the router's definition in any field, while the router
   still carries it (Steps 1–2).
+- An effective verdict missing a definition field after inheritance: an incomplete definition, or
+  a partial entry for a name the chain doesn't inherit (§2.3).
 
 ### 4.2 Verdicts a row may not name
 
@@ -252,14 +301,19 @@ Checked per interface the row applies to:
 
 - `code` alone equal to an HTTP status (100–599) on any interface; any `code` on `grpc`.
 - `code` + `contains` naming an HTTP status other than 400/404/410/422/500 on `rest` or 400/500 on
-  `graphql`/`jsonrpc`/`tendermintrpc`. Inside 400/404/410/422 the verdict must have
-  `EndpointAtFault` false; inside 404 the text may not match "endpoint not found", "route not
-  found", "path not found", "method not allowed" (`error_classifier.go:390-393`). Codes outside
-  100–599 are unrestricted.
+  `graphql`/`jsonrpc`/`tendermintrpc`, or naming 400/404/410/422 with a verdict whose
+  `EndpointAtFault` is true (it could never apply, §3 step 3). Codes outside 100–599 are
+  unrestricted.
 - `code: 429` in any form.
 - `contains`/`regex` matching a rate-limit phrase (`NODE_RATE_LIMITED` rows, `GRPCRateLimitTexts`),
-  an already-known phrase, an `HTTP <status>: ` prefix of a locked status, or a bare locked status
-  number as `HTTPStatusContains` reads it.
+  an already-known phrase, an `HTTP <status>: ` prefix of a locked status, a bare locked status
+  number as `HTTPStatusContains` reads it, or, on `rest` and `graphql`, a route-refusal phrase
+  ("endpoint not found", "route not found", "path not found", "method not allowed",
+  `error_classifier.go:390-393`), whatever status the row names. No family row's text overlaps
+  those phrases at `6c237073`.
+
+A row whose `code` isn't a status can't be tied to a status statically; for it the no-blame rule is
+enforced per reply (§3 step 3).
 
 ### 4.4 Source and evidence
 
@@ -315,14 +369,16 @@ on a listed write. `check_stateful.sh` reads this table instead of its own list.
   `submit_multisigned`; Sui `ExecuteTransaction`, `executeTransaction`; Concordium `SendBlockItem`,
   `PUT /v0/submit…`; Cosmos `BroadcastTx`, `broadcast_tx_*`). MAG-4898 completes it.
 - At load (after `DoExpandSpec`, `utils/keeper/spec.go:79`, before the chain parser): a listed api
-  not marked `stateful` is loaded stateful; warn per chain; count
-  `smartrouter_spec_lock_enforced_total{chain_id, rule="stateful"}`. Today all 132 writes are
-  stateful.
+  not marked `stateful` is loaded stateful; warn per chain; set the gauge
+  `smartrouter_spec_lock_enforced{spec, apiInterface, rule="stateful"}` to the number of apis
+  forced, written at boot for every chain and interface, zeros included. A gauge, because this
+  happens before the first scrape: a counter first scraped at its final value never shows an
+  `increase()`. Today all 132 writes are stateful.
 - At request time: an undeclared method gets a `Default-` api (`getSupportedApi` →
   `defaultApiContainer`, `base_chain_parser.go:532-560, 579`; `rest.go:158`; via `jsonRPC.go:121`,
   `graphql.go:166`, `grpc.go:137-143`, `tendermintRPC.go:48-54`), today with no `Stateful` and
   `Deterministic: true`. A listed method gets a stateful, non-deterministic default api; count
-  `rule="stateful_default"`.
+  `smartrouter_spec_lock_enforced_total{chain_id, rule="stateful_default"}`.
 - Identity = the parser's canonical form (verb + route on REST, full service/method on gRPC), never
   a display name or the `Default-` prefix; family from the router's chain identity. Apply before
   scope selection, cache lookup, provider selection and retry; bypass cache reads and writes
@@ -498,13 +554,25 @@ has only `shadow`/`reads` permission.
   "unknown block", 500 "is not available, lowest height", 410 `version_pruned`, 422
   `failed to parse ton_addr`, 404 with a chain's own `not_found`. Fail validation:
   `{code: 408, contains}`, `{code: 402, contains}`, `{code: 404, contains: "not found"}`, a row
-  inside 400 naming `NODE_INTERNAL_ERROR`. Isolate the status: JSON-RPC `-32602` with HTTP 503 and
+  inside 400 naming `NODE_INTERNAL_ERROR`, `{contains: "route not found"}` on `rest`. Isolate the status: JSON-RPC `-32602` with HTTP 503 and
   HTTP 503 "insufficient funds" → `NODE_SERVICE_UNAVAILABLE`; HTTP 401 keeps its per-transport
   verdict; JSON-RPC 409 → `UNKNOWN_ERROR`; a body beginning `HTTP 503: ` without a transport status
   isn't locked. Relay-policy: a stateful write whose every answer is the min-fee rejection stops
   after fan-out and holds nothing off.
 - Attack rows as loaded spec rows: `{contains: "block not found"}` → `CHAIN_BLOCK_NOT_FOUND` vs gRPC
   InvalidArgument, `{code: -32000}` → `CHAIN_TX_REJECTED` vs EVM "already known": no verdict changes.
+- No blame inside a readable 4xx (§3 step 3): a code-only, a `contains` and a `regex` spec row
+  naming `NODE_INTERNAL_ERROR`, matched under REST 400, 404, 410 and 422 and under JSON-RPC HTTP
+  400, each give the status-only verdict and count `rule="status_fault"`; the same rows on an
+  HTTP 200 JSON-RPC error apply; Solana `-32005` under JSON-RPC HTTP 400 gives `UNKNOWN_ERROR`,
+  never the generic `-32005` rate limit.
+- Retry precedence (§2.3), end to end through `relayInnerDirect` with spec-loaded rows and
+  verdicts: JSON-RPC HTTP 500 + Solana `-32002` is classified `CHAIN_SOLANA_SIMULATION_FAILED`, the
+  endpoint isn't blamed, and the attempt fails over as `NODE_INTERNAL_ERROR`; a non-2xx status
+  whose status pass is non-retryable makes a retryable spec verdict non-retryable; REST 500 with a
+  non-retryable spec verdict ends the relay. The cases in `direct_http_status_body_test.go:92, 140`
+  and `TestDirectRPCRelaySender_HTTPStatusOverridesRetryableBodyCode_MAG1870`
+  (`direct_rpc_integration_test.go:530`) pass unchanged with the verdicts loaded from specs.
 - Slot-already-used: every signature as a full pair through the stateful path ends unknown; the same
   pair on a read keeps its verdict; every fixture with `CHAIN_NONCE_TOO_LOW`, `CHAIN_INVALID_SEQUENCE`
   or `CHAIN_STARKNET_INVALID_NONCE` matches a signature; mixed with rate-limit answers, or matching a
@@ -523,8 +591,10 @@ has only `shadow`/`reads` permission.
   Verdict cases: router-owned redefinition, `rate_limit`, unknown sub-category, out-of-range code,
   migrating copy differs, row naming an unseen verdict; `verdict_collision` for two non-inheriting
   definers; a valid chain-specific verdict loads and the relay path reads its flags; a child
-  override applies only to the child (ETH1 retryable vs BASE non-retryable); an override changing a
-  code, or incompatible inherited definitions without an override, fail.
+  override applies only to the child (ETH1 retryable vs BASE non-retryable); a partial override
+  carrying only `retryable` yields the origin's code, sub-category and class with the child's
+  `retryable`; an override changing a code, a partial entry for a name the chain doesn't inherit,
+  a definition missing a field, or incompatible inherited definitions without an override, fail.
 - Reordering/deleting approved rows, deleting a section, altering imports, moving a row between
   chains, widening interfaces → digest verification fails; approved empty policy passes. Invalid
   parent → dependants on bundled policy, unrelated chains untouched; cycles, mixed schemas,
@@ -534,15 +604,19 @@ has only `shadow`/`reads` permission.
   binary rejects candidate-only approval; after deletion a partially approved policy keeps bundled.
 - After the switch: Solana's section dropped → `-32005` "Node is unhealthy" still
   `NODE_SOLANA_UNHEALTHY` from the bundled section.
-- `eth_sendRawTransaction` with `stateful` 0 → loaded stateful, `rule="stateful"` counted; omitted →
-  relayed stateful and uncached, `rule="stateful_default"` counted; repeat cleared/omitted/disabled
-  per write interface, batches, cache bypass, `deterministic: true` on a declared write.
+- `eth_sendRawTransaction` with `stateful` 0 → loaded stateful, and the gauge
+  `smartrouter_spec_lock_enforced{rule="stateful"}` reads 1 for that chain and interface (0
+  elsewhere, read from the collector right after load); omitted → relayed stateful and uncached,
+  `rule="stateful_default"` counted; repeat cleared/omitted/disabled per write interface, batches,
+  cache bypass, `deterministic: true` on a declared write.
 - Every fallback case asserts the gauges (1 for the affected chain/interface/reason, 0 elsewhere,
   0 after reload with a valid policy, read from the collector).
 - Alert rules proven in smart-router-infrastructure by extending the promtool replay in
   `tests/grafana-alert-rules/test_silent_when_idle.py:129-156` (render per-tenant rules via
-  `expand_tenant`; gauge 1 past `for` fires, back to 0 resolves; counter step fires
-  `sr-spec-lock-enforced`) and `scripts/grafana-alert-rules.py check`; CI
+  `expand_tenant`; gauge 1 past `for` fires, back to 0 resolves). For `sr-spec-lock-enforced`: the
+  lock gauge at 1 from the first sample fires (the startup case an `increase()` misses), a counter
+  first observed at 1 and flat also fires, and both resolve when the series reset after a
+  restart. Plus `scripts/grafana-alert-rules.py check`; CI
   `.github/workflows/grafana-plan-pr.yaml:121-124`. Publish rules only after a router emitting the
   gauges is on the fleet (`check` can't see whether a metric exists, `docs/OBSERVABILITY.md:1325-1330`).
 
@@ -550,8 +624,8 @@ has only `shadow`/`reads` permission.
 
 One canary router per cluster, one full day of production traffic (minimum; the 7/30-day windows of
 §7 still apply). Compare `smartrouter_errors_total` by `error_name` and `chain_id`
-(`protocol/metrics/error_metrics.go:42-44`); dropped-section, source-fallback and lock-enforced
-counters at zero; both fallback gauges 0. On-prem gets the tested pair only. Failed canary → previous
+(`protocol/metrics/error_metrics.go:42-44`); dropped-section and source-fallback counters at zero,
+the lock gauge and counter at zero, both fallback gauges 0. On-prem gets the tested pair only. Failed canary → previous
 artifact (and router release if the bundle changed); the next release bundles the promoted commit.
 
 ## 9. Observability
@@ -560,7 +634,8 @@ artifact (and router release if the bundle changed); the next release bundles th
 |---|---|
 | `smartrouter_spec_errors_section_dropped_total{chain_id, reason}` | rejected section, with reason |
 | `smartrouter_spec_source_fallback_total{reason}` | source couldn't load |
-| `smartrouter_spec_lock_enforced_total{chain_id, rule}` | `stateful` / `stateful_default` |
+| `smartrouter_spec_lock_enforced{spec, apiInterface, rule}` (gauge) | writes forced stateful at load (`stateful`), as state since boot |
+| `smartrouter_spec_lock_enforced_total{chain_id, rule}` | request-time enforcement: `stateful_default`, `status_fault` |
 | `smartrouter_spec_error_rows_mismatch_total{…}`, `smartrouter_spec_error_rows_hits_total{…}` | switch criterion; which rows matter |
 | `smartrouter_spec_policy_fallback{spec, apiInterface, reason}`, `smartrouter_spec_source_fallback{reason}` | current fallback state; alerts read them |
 | `smartrouter_errors_total{error_name, error_category, retryable, chain_id}` | unchanged shape; spec verdicts appear as `error_name`; an override means one name may carry different `retryable` per `chain_id`, so update the 1:1 comment and the "~100 codes" budget (`error_metrics.go:21-28`) and dashboards |
@@ -573,7 +648,11 @@ description with the first operator action), all `warning`:
 |---|---|---|
 | `sr-spec-policy-fallback` | `max by (cluster, location, router, spec, apiInterface, reason) (smartrouter_spec_policy_fallback{cluster="{tenant}"}) == bool 1` | 10m |
 | `sr-spec-source-fallback` | `max by (cluster, location, router, reason) (smartrouter_spec_source_fallback{cluster="{tenant}"}) == bool 1` | 30m |
-| `sr-spec-lock-enforced` | `increase(smartrouter_spec_lock_enforced_total{cluster="{tenant}"}[30m]) > bool 0` | 0s |
+| `sr-spec-lock-enforced` | `(max by (cluster, location, router, spec, apiInterface, rule) (smartrouter_spec_lock_enforced{cluster="{tenant}"}) > bool 0) or (max by (cluster, location, router, chain_id, rule) (smartrouter_spec_lock_enforced_total{cluster="{tenant}"}) > bool 0)` | 0s |
+
+`sr-spec-lock-enforced` reads values, not `increase()`, so load-time enforcement that happens before
+the first scrape still fires. It stays firing until the spec is fixed and the router restarts; the
+description names the rule (`stateful`, `stateful_default`, `status_fault`).
 
 ## 10. Open decisions
 
@@ -581,6 +660,7 @@ description with the first operator action), all `warning`:
 |---|---|
 | Update MAG-4910 for the three departures | approval is recorded |
 | Wire form for unknown writes; Bitcoin `-27` / Starknet `59` unknown or accepted (MAG-4059) | Step 0 write-safety ships |
+| Whether a non-retryable verdict inside a JSON-RPC 5xx should end the relay instead of failing over (review 613-1, `error_mapper.go:39-45`); until then the status decides retry (§2.3) | a spec relies on `retryable: false` under a JSON-RPC 5xx |
 | Initial write-method table | Step 0 write guards ship |
 | Reserved code range (proposal 5000–5999; split e.g. 5000–5499 `NODE_*`, 5500–5999 `CHAIN_*` to match `TestRegistry_CodeRanges` and `docs/ERROR-REGISTRY-DESIGN.md`); docs follow-up (`ERROR-REGISTRY-DESIGN.md`, public docs, `docs/RELAY-END-EVENT.md:65, 138`) | Step 0 validator |
 | Source evidence for migrated rows; the R&D owners team for verdict review | Step 1 |
@@ -606,6 +686,7 @@ versioning if picked up again.
 | Rate-limit flag → re-send (`Policy.Decide`, `onlyRateLimited`) and hold-off | `relaypolicy/policy.go:40-60`; `relaycore/relay_processor.go:1520, 669`; `endpoints.go:698`; `rpcsmartrouter_server.go:3241-3255` |
 | Unclear-write decision (`writeOutcomeIsUnknown`, `unclearWriteOutcomeFor`); REST node-reply rule (`ServerErrorIsNodeReply`); 5xx scored before fault flags (`shouldFailSessionForResult`) | `rpcsmartrouter_server.go:1447-1508, 1421-1445, 6032, 2585-2620`; `relaycore/results_manager.go:72`; `restMessage.go:74-78` |
 | Transport/status errors classified with the chain family | `rpcsmartrouter/error_mapper.go:23-37, 71-83`; `node_error_handler.go:119-126` |
+| Retry precedence on JSON-RPC/Tendermint: `retryVerdict` + `endsRelay` (5xx), MAG-1870 status pass (other non-2xx) | `rpcsmartrouter/error_mapper.go:39-64`; `direct_rpc_relay.go:500-501, 600-612, 698-766`; tests `direct_http_status_body_test.go:92, 140`, `direct_rpc_integration_test.go:530` |
 | Read-your-writes, SVM block retry, node error handler (identity comparisons) | `read_your_writes.go:218-231`; `svm_block_hash_retry.go:99`; `node_error_handler.go:23, 164` |
 | How a status reaches the classifier | REST `direct_rpc_relay.go:911`; GraphQL `graphqlMessage.go:33-55, 490`, `direct_rpc_relay.go:1034`; JSON-RPC prefix `direct_rpc_relay.go:703-720`, `node_error_handler.go:80` |
 | Default api for undeclared methods | `base_chain_parser.go:532-560, 579`; `rest.go:158`; disabled apis `:582, 848-851` |
