@@ -28,11 +28,18 @@ import (
 //
 // testdata/sui.json is lava-specs sui.json byte for byte, the file a deployed router downloads from
 // lava-specs main when it starts. It was copied at lava-specs main bda0597 (2026-11-10); the last
-// commit there to change it is 1c547bd (2026-10-07). To refresh it, run
+// commit there to change it is 1c547bd (2026-10-07). The copy does not follow lava-specs: a change
+// there to SUI or SUIT reaches these tests only when the copy is refreshed. So the tests guard the
+// router's side of the import (the loader, the expansion, the parser and the verification pass),
+// not later edits to the spec. To refresh the copy, run
 //
 //	curl -fsSL https://raw.githubusercontent.com/Magma-Devs/lava-specs/main/sui.json -o protocol/chainlib/testdata/sui.json
 //
-// then update suiSpecSHA256 and the two commits above.
+// then update suiSpecSHA256 and the two commits above. The tests also pin what the file declares:
+// the api counts in TestSuiTestnetSpecImportsTheMainnetApis, the JSON-RPC chain ids in
+// TestSuiTestnetChainIDCheckExpectsTheTestnetChainID, and the GraphQL and gRPC chain ids below. A
+// refresh that changes one of them fails the test that pins it, with the value in the message;
+// update it there.
 const (
 	suiSpecFile   = "testdata/sui.json"
 	suiSpecSHA256 = "e556f3467344b99fffbcdc7d7ef1b22caf5471ab058afcf0df5b686721f1d940"
@@ -194,7 +201,8 @@ func suiCollection(t *testing.T, spec spectypes.Spec, apiInterface string) *spec
 // suiParser is the parser a router builds for spec on the interface. It first fails the test on a
 // check that has no request: SetSpec dereferences the parse directive of every check on its
 // interface, and SUIT's checks carry none of their own until the import gives them SUI's, so a lost
-// import would panic the whole package run instead of failing one test.
+// import would panic the whole package run instead of failing one test. A router given that spec
+// panics at boot the same way (MAG-5117).
 func suiParser(t *testing.T, spec spectypes.Spec, apiInterface string) ChainParser {
 	t.Helper()
 	for _, collection := range spec.ApiCollections {
