@@ -1,13 +1,18 @@
 # PRD: per-chain error classification in lava-specs
 
-**Status:** draft for R&D approval (MAG-4910), revision 4. No implementation is approved by this
+**Status:** draft for R&D approval (MAG-4910), revision 5. No implementation is approved by this
 document yet.
 
 - **Who approves:** Nimrod or Tom, on Must-haves 2 to 4, the format and the split. Must-have 1
   (spec versioning) is out of scope by the author's decision since revision 3. MAG-4910 still lists
   it as required, so the ticket needs updating to match (1.3, 9).
 - **What it blocks:** MAG-4898, the per-chain research, which starts once this is approved.
-- **What revision 4 changes:**
+- **What revision 5 changes:** the verdicts a chain's rows point at are defined in the chain's
+  spec too, with the flags that decide retry, fault and scoring, so a chain-specific verdict or a
+  changed consequence is a lava-specs PR rather than a router release. The router keeps the flag
+  vocabulary, what each flag does, and the verdicts its own machinery depends on (1.1, 2.3, 3.2).
+  Names and codes stay unique across lava-specs.
+- **What revision 4 changed:**
   - It keeps revision 3's scope and decisions-first structure.
   - It binds approval to each chain's complete effective policy, including row order, imports
     and deliberate empty policies, instead of accepting any collection of individually signed rows.
@@ -42,15 +47,18 @@ Appendix A has the evidence for every "today" claim.
 
 ### 1.1 What we're proposing
 
-- **Each chain's spec carries its own error rows.** A row says which code or message from that
-  chain's nodes means which verdict the router already registers. Today these rows are Go code, so
-  every new chain error needs a router release (A.1).
-- **The router keeps everything that decides what a verdict does**: the interface rules,
-  connection errors, status rules, rate limits, the unknown default, retry and scoring, and write
-  safety.
-- **A spec row selects a registered verdict; the router defines that verdict's consequences.**
-  Selecting a different verdict can change behaviour, so it needs the review and rollout gates in
-  section 5. Rows cannot define new verdicts, retry rules, status rules or write outcomes.
+- **Each chain's spec carries its own error rows and the verdicts they point at.** A row says
+  which code or message from that chain's nodes means which verdict. A verdict says what that
+  answer is: its name and code, whether it's retryable, and whether it's the endpoint's fault, the
+  caller's, or a question of what the node holds. Today both are Go code, so every new chain error
+  needs a router release (A.1).
+- **The router keeps the vocabulary and the machinery.** It defines what each flag does (retry,
+  fault, scoring, hold-off, caching), the interface rules, connection errors, status rules, rate
+  limits, the unknown default, write safety, and the verdicts its own logic depends on. A spec
+  chooses flags from a closed menu; it can't add a consequence the router doesn't have.
+- **Choosing or changing a verdict changes behaviour**, so it goes through the review and rollout
+  gates in section 5, with R&D reviewing the verdicts and the spec owners the rows. Rows and
+  verdicts cannot define retry rules, status rules or write outcomes.
 - **Rows inherit through `imports`**, the way `api_collections` do, so ETH1's rows reach BASE and
   COSMOSSDK's reach COSMOSHUB (2.5).
 - **The router and a lava-specs commit ship as a pair.** Each router release bundles one tested
@@ -71,7 +79,8 @@ These hold for every spec, from every source, and the router enforces them itsel
    already-known recognisers, the locked HTTP statuses, and every gRPC status the router has
    decided (2.4).
 3. **A row can't name** a `PROTOCOL_*` verdict, a rate-limit verdict, `CHAIN_TX_ALREADY_KNOWN` or
-   `UNKNOWN_ERROR` (3.2).
+   `UNKNOWN_ERROR`, and **a spec can't define** a verdict with the rate-limit sub-category or the
+   router's internal category, or redefine a name or code the router owns (3.2).
 4. **A write that fails with a "slot already used" answer is reported as unknown**, whatever row
    matched (3.3).
 5. **A known write method is always stateful**: whether the spec marks it, leaves the flag off, or
@@ -109,6 +118,14 @@ sees them and so MAG-4910 can be brought in line:
   gRPC-gateway, sidecar, nodeos), and the router's own table already reads text inside 400 and 500
   (`error_classifier.go:404, 413-416`). MAG-4061 needs TON's answers inside a 500. Inside the four
   4xx statuses a row may only name a verdict that doesn't blame the endpoint (3.2).
+- **A chain's spec defines the verdicts its rows point at, flags included** (decided 2026-11-15).
+  The ticket's goal keeps "what each class does" in the router. Revision 5 splits that: the spec
+  says which flags a verdict carries (retryable and the sub-category), and the router keeps what
+  each flag does and every verdict its own machinery references (2.3, 3.2). The
+  ticket's locks still hold: no spec can name or define a rate-limit verdict, touch the status
+  rules, raise a retry limit or move a write out of unknown. What changes is that a chain can get a
+  verdict of its own, or change one's consequences, without a router release. R&D still reviews
+  every verdict change (5.2).
 
 **Ticket facts that read differently in the code.** Where the two disagree, the design follows the
 code:
@@ -143,6 +160,8 @@ Section 6 lists the remaining decisions. Their gates are:
 | Choose the wire form for unknown writes, including Bitcoin `-27` and Starknet `59` | Step 0 write-safety changes ship |
 | Complete and review the initial protected-method table | Step 0 write guards ship |
 | Complete and review source evidence for migrated rows | Step 1 starts |
+| Fix the reserved code range for spec-defined verdicts | Step 0 ships the validator |
+| Name the R&D owners team that reviews verdict changes | Step 1 starts |
 | Specify manifest delivery, trust keys, rotation and revocation, and prove candidate promotion | Any external policy acts |
 | Decide whether to narrow generic geth wording and remove existing vendor rows | Those separate behaviour changes ship |
 
@@ -152,6 +171,8 @@ The open work includes:
 - whether the router's own vendor rows stay;
 - whether Bitcoin `-27` and Starknet `59` count as unknown or as accepted;
 - completing the write-method table and the source allowlist;
+- the reserved code range for spec-defined verdicts, and how the public error catalogue follows
+  them;
 - where the signed manifests live, and who holds the signing key;
 - the effort for the complete approval and rollout pipeline.
 
@@ -163,15 +184,17 @@ Here's what moves into the specs and what stays in the router:
 
 | Lives in the spec (per chain) | Stays in router code |
 |---|---|
-| Which node code or message means which **registered verdict** for this chain's nodes | The verdict registry: names, codes, category, sub-category, retryable, may-have-reached-node |
-| Each row's rulebook class, interface, read or write scope, source and versions checked | What a verdict makes the router do: retry, stop, hold off, mark unhealthy, score, cache |
-| Inheritance of rows through `imports`, with override and removal by row id | Interface rules: the JSON-RPC envelope, REST status, gRPC codes, GraphQL `errors` |
+| Which node code or message means which **verdict** for this chain's nodes | The flag vocabulary: the sub-categories a verdict may carry, and what `retryable`, `data_scope` and `node_capability` make the router do: retry, stop, blame or excuse the endpoint, score |
+| The chain's **verdicts**: name, code, sub-category, retryable, class, inherited and overridable through `imports` | The **router-owned verdicts**: every verdict a transport row points at, the 25 the router's logic references by identity, the protocol, connection and status verdicts, `UNKNOWN_ERROR` (3.2); and the transport-failure flag `may_have_reached_node`, which only those carry |
+| Each row's interface, read or write scope, source and versions checked | Retry counts, hold-off timing, the caching rules |
+| Inheritance of rows and verdicts through `imports`, with override by id or name and removal of rows | Interface rules: the JSON-RPC envelope, REST status, gRPC codes, GraphQL `errors` |
 | A chain's own wording added to the slot-already-used group (3.3) | Connection errors, HTTP and gRPC status rules, rate-limit detection, the already-known recognisers, the unknown default |
 | | Write safety: fan-out, the single stop, the unknown outcome, the slot-already-used signatures, the write methods that must stay stateful |
 | | The XRP rows that must remain router-owned (3.5), the source allowlist and the manifest verification keys (3.4); private signing keys stay in trusted CI |
 
-In practice, what moves is the six family tables (minus XRP's three router-owned rows), and later,
-chain by chain, the geth-wording rows (section 6). Section 3 lists what never moves.
+In practice, what moves is the six family tables (minus XRP's three router-owned rows) and the 41
+verdicts only those tables use, and later, chain by chain, the geth-wording rows (section 6).
+Section 3 lists what never moves.
 
 ### 2.2 The errors section
 
@@ -183,33 +206,39 @@ Each spec gets one `errors` object, next to `api_collections`:
   "api_collections": [ "..." ],
   "errors": {
     "schema_version": 1,
+    "verdicts": [ "..." ],
     "rows": [ "..." ]
   }
 }
 ```
 
+- **`verdicts`** is the chain's own part of the verdict registry: the verdicts its rows may point
+  at that aren't router-owned, each with the flags that decide what the router does with it (2.3).
+  It's optional: a chain whose rows only use router-owned or inherited verdicts has none.
+- **`rows`** says which node answer means which verdict (2.3).
 - **`schema_version`** is an integer. Every section at a given lava-specs commit carries the same
   number, and CI enforces it, so a child and its parents never disagree. A router knows which
   schema versions it can read (4.1). It drops a section with any other version whole, and that
   chain and any chain that imports it fall back (4.4); unrelated chains keep their policies. It
   never reads half a section.
-- **`imports`** is optional, and lists the specs whose rows this section inherits. If it's absent,
-  the section follows the spec's own `imports`. `[]` means inherit no rows. It only affects rows;
-  the spec's api inheritance is untouched. Step 1 of the rollout uses it to keep today's coverage
-  (5.1).
+- **`imports`** is optional, and lists the specs whose rows and verdicts this section inherits. If
+  it's absent, the section follows the spec's own `imports`. `[]` means inherit nothing. It only
+  affects the errors section; the spec's api inheritance is untouched. Step 1 of the rollout uses
+  it to keep today's coverage (5.1).
 - **The section itself is optional.** Older routers ignore the added key (A.3). On a router that
   reads it, a missing section means no local rows; the chain may still inherit rows. The signed
   manifest must approve that complete result, including an intentionally empty policy (3.4).
   Removing a section or its imports is therefore a policy change, not a way to bypass approval.
 
-### 2.3 The row
+### 2.3 The row and the verdict
+
+**The row** says what a node's answer means:
 
 ```json
 {
   "id": "solana.blockhash_not_found",
   "match": { "contains": "blockhash not found" },
   "error": "CHAIN_SOLANA_BLOCKHASH_NOT_FOUND",
-  "class": "C6",
   "interface": "jsonrpc",
   "scope": "write",
   "source": "https://github.com/anza-xyz/agave/blob/v2.1.0/sdk/src/transaction/error.rs",
@@ -221,8 +250,7 @@ Each spec gets one `errors` object, next to `api_collections`:
 |---|---|---|
 | `id` | yes | A stable name, unique within the chain after inheritance. By convention `<family>.<snake_case>`. A child overrides a parent's row by repeating its id. |
 | `match` | yes | Exactly one of `{"code": N}`, `{"contains": "text"}`, `{"regex": "re2"}` or `{"code": N, "contains": "text"}`. `contains` is case-insensitive, like `MessageContains`. `regex` is Go RE2, case-sensitive unless it says `(?i)`, and must compile. There's no status, gRPC-code or header matcher: those are interface rules and stay in code. 3.2 limits what `code` may name on each interface. |
-| `error` | yes | The **name** of a registered router error, for example `CHAIN_BLOCK_NOT_FOUND`. Validation fails on a name the router doesn't register, and on the names in 3.2. |
-| `class` | yes | The rulebook class, C2 to C7. The router keeps a table of the classes each registered error may carry, and a row that disagrees fails validation. The class is for people; the router acts on `error`. |
+| `error` | yes | The **name** of a verdict: one the chain defines or inherits (below), or a router-owned one that isn't locked, for example `CHAIN_STATE_PRUNED`. Validation fails on a name the chain can't see after inheritance, and on the names in 3.2. |
 | `interface` | no | `jsonrpc`, `rest`, `grpc`, `graphql` or `tendermintrpc`. If it's absent, the row applies to every interface the chain serves after inheritance. |
 | `scope` | yes | `read`, `write` or `both`. A `write` row is only evaluated for stateful apis, and a `read` row only for the rest. Since the router keeps write methods stateful (3.4), a spec can't move a write out from under the write rows. |
 | `source` | yes | A link to the official definition (the protocol spec, the node software's docs, or the source file that defines the error), pinned to a tag or commit. It must be on the router's allowlist, with reviewed evidence covered by the effective policy's approval (3.4). |
@@ -230,6 +258,36 @@ Each spec gets one `errors` object, next to `api_collections`:
 | `slot_used` | no | `true` adds this row's answers to the slot-already-used group (3.3). Only allowed on `write` or `both` rows. It can widen the router's group, never narrow it. |
 | `disabled` | no | `true` removes the parent row with the same `id`, for this spec and its children. A disabling row carries only `id`, `disabled` and optionally `note`; any other field fails validation. |
 | `note` | no | One line for the reader. It's called `note` because `description` and `title` are both rejected key names (A.4). |
+
+**The verdict** says what that answer is, in the router's vocabulary:
+
+```json
+{
+  "name": "CHAIN_SOLANA_BLOCKHASH_NOT_FOUND",
+  "code": 3304,
+  "sub_category": "none",
+  "retryable": false,
+  "class": "C6",
+  "note": "a blockhash the cluster no longer accepts; the caller must re-sign"
+}
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `name` | yes | Stable, and never a router-owned name (3.2). A verdict has one origin: the spec that defines it, and no other spec may define the same name at the same commit. A chain that inherits the verdict may **override** it by repeating the name with the fields it changes (2.5); that isn't a second definition. New verdicts follow `CHAIN_<FAMILY>_*` or `NODE_<FAMILY>_*`; a verdict migrated from the router's table keeps its name. A node's own error body is forwarded to the client unchanged (`failed_relay_reply.go:35-38`), so clients never see a verdict; operators do, in `smartrouter_errors_total{error_name}`, the coded log fields and the `relay_end` event's `error_code`. |
+| `code` | yes on a definition, not on an override | An integer, unique across lava-specs at a commit, and never a router-owned code. An override keeps the origin's code: it omits the field or repeats it unchanged. A migrated verdict keeps its code (the 41 in 5.1 Step 1); a new one takes a value from the reserved range (section 6 picks it; the proposal is 5000 to 5999, clear of the router's 1001 to 4007). It appears in structured logs and the `relay_end` event, not as a metric label (`error_metrics.go:37-40`) and never in a client reply. |
+| `sub_category` | yes | Exactly `none`, `data_scope` or `node_capability`. With `retryable` it decides the fault axis exactly as the router's own rule does (`error_registry.go:136-152`): `data_scope` and `node_capability` are never the endpoint's fault; `none` with `retryable: true` is the node saying it's broken, and the endpoint is at fault; `none` with `retryable: false` is the caller's fault. `data_scope` and `node_capability` require `retryable: true`, the rule the router's registry tests pin (3.2). `rate_limit` and `unsupported_method` can't be used (3.2). |
+| `retryable` | yes | Whether the router tries the next provider for a read. On a write the stateful policy decides, whatever this says (3.1). |
+| `class` | yes | The rulebook class, C2 to C7. For people and the change record; the router acts on the flags. |
+| `note` | no | One line for the reader. |
+
+Every spec-defined verdict is in the router's external category: a node or a caller answered. The
+internal category (the router's own failures) and the rate-limit sub-category are router-owned
+(3.2). There's no `may_have_reached_node` field either: the router reads that flag only on
+transport failures (`rpcsmartrouter_server.go:1498`, `relay_end.go:588`), and a spec row never
+classifies one, so a spec verdict is always a settled reply. The validator prints the fault
+decision each verdict's flags produce, so a reviewer sees what a spec is asking for in the router's
+terms.
 
 ### 2.4 Matching order
 
@@ -394,13 +452,24 @@ Rows inherit through `imports` the same way `api_collections` do, unless the sec
   order.
 
 So ETH1's rows reach BASE, and COSMOSSDK's reach COSMOSHUB. A child with no section of its own
-inherits its parents' rows unchanged. Only `rows` inherit; `schema_version` is the same across the
-whole repo at any commit, so a child's section and its parents' share it in a valid source.
+inherits its parents' rows unchanged. `schema_version` is the same across the whole repo at any
+commit, so a child's section and its parents' share it in a valid source.
+
+Verdicts inherit the same way, keyed by `name`. A child that repeats an inherited verdict's name
+overrides its flags for itself and its own children, and that's the granularity the design is
+for: BASE can make an ETH1 verdict non-retryable without touching a row. An override changes
+`sub_category`, `retryable`, `class` or `note`; it never changes the `code`, which stays the
+origin's. A spec that repeats a name it doesn't inherit isn't overriding,
+it's defining the name a second time, and that fails (3.2). A verdict can't be removed, only
+overridden; an inherited verdict no row uses is harmless. A row's `error` must resolve, after
+inheritance, to a verdict the chain defines or inherits, or to a router-owned verdict that isn't
+locked (3.2); otherwise the policy is invalid and the chain falls back (4.4).
 
 Resolve and validate the entire dependency graph before making any policy active. Missing parents,
-cycles, duplicate local row ids, mixed schemas and incompatible definitions of the same inherited
-id are errors. Identical rows reached through a diamond appear once, at their first occurrence.
-A child must explicitly override or disable conflicting inherited ids; parent order must not
+cycles, duplicate local row ids or verdict names, mixed schemas and incompatible definitions of
+the same inherited id or name are errors. Identical rows reached through a diamond appear once, at
+their first occurrence. A child must explicitly override or disable conflicting inherited ids;
+parent order must not
 silently choose between different definitions. A disabling row that names no inherited id fails.
 The resolved order, import choices, overrides and removals are covered by the approval in 3.4.
 An invalid dependency makes each affected chain use its complete bundled policy (4.4).
@@ -422,37 +491,52 @@ ETH1 ever does, a section's own `imports` settles it.
 
 ### 2.6 Examples
 
-The examples below move three of today's family tables as they are. A few things to keep in mind
-while reading them:
+The examples below take three of today's family tables as they are, verdicts included, one XRP
+row, and a new TON verdict. A few things to keep in mind while reading them:
 
-- Each `error` is the registered name today's code row points at.
+- Each `error` is the name today's code row points at. Where the verdict is used only by that
+  family's table, it's defined in the example with today's code and flags (the 41 of 5.1 Step 1).
+  Where a transport row or router logic also uses it, it's router-owned and the row just names it:
+  `CHAIN_STATE_PRUNED` and `CHAIN_NONCE_TOO_LOW` below.
 - Today's rows apply to reads and writes alike, so a row moved as-is gets `scope: both`. The
   `read` and `write` scopes below are there to show the field. Narrowing a row to one scope is a
   behaviour change: Agave's `sendTransaction` can answer `-32016`, and a Cosmos SDK simulate, which
   is a read, can answer "account sequence mismatch".
 - The `class` letters, `source` links and `versions` only show the shape. MAG-4898 supplies the
-  researched values, and the router's class table checks them.
+  researched values. The flags are today's, read from `error_codes.go`.
 
-**Solana** (`solana.json`, no imports; 14 rows today at `error_classifier.go:25-45`, four shown):
+**Solana** (`solana.json`, no imports; 14 rows today at `error_classifier.go:25-45`, four shown).
+Three of the four verdicts are the family's own; `CHAIN_STATE_PRUNED` (3204) is router-owned,
+because the JSON-RPC pruned-state rows (`:354-355`) and the REST 500 and 410 rows (`:413`, `:444`)
+use it too.
 
 ```json
 "errors": {
   "schema_version": 1,
+  "verdicts": [
+    { "name": "NODE_SOLANA_UNHEALTHY", "code": 2150, "sub_category": "none",
+      "retryable": true, "class": "C3", "note": "the node is behind or unhealthy (-32005)" },
+    { "name": "CHAIN_SOLANA_MIN_CONTEXT_SLOT_NOT_REACHED", "code": 3311,
+      "sub_category": "data_scope", "retryable": true, "class": "C6",
+      "note": "the node hasn't reached the requested slot yet (-32016)" },
+    { "name": "CHAIN_SOLANA_BLOCKHASH_NOT_FOUND", "code": 3304, "sub_category": "none",
+      "retryable": false, "class": "C6", "note": "a blockhash the cluster no longer accepts" }
+  ],
   "rows": [
     { "id": "solana.block_cleaned_up", "match": { "code": -32001 },
-      "error": "CHAIN_STATE_PRUNED", "class": "C6", "scope": "read",
+      "error": "CHAIN_STATE_PRUNED", "scope": "read",
       "source": "https://github.com/anza-xyz/agave/blob/v2.1.0/rpc-client-api/src/custom_error.rs",
       "versions": ["agave 2.1"] },
     { "id": "solana.node_unhealthy", "match": { "code": -32005 },
-      "error": "NODE_SOLANA_UNHEALTHY", "class": "C3", "scope": "both",
+      "error": "NODE_SOLANA_UNHEALTHY", "scope": "both",
       "source": "https://github.com/anza-xyz/agave/blob/v2.1.0/rpc-client-api/src/custom_error.rs",
       "versions": ["agave 2.1"] },
     { "id": "solana.min_context_slot", "match": { "code": -32016 },
-      "error": "CHAIN_SOLANA_MIN_CONTEXT_SLOT_NOT_REACHED", "class": "C6", "scope": "read",
+      "error": "CHAIN_SOLANA_MIN_CONTEXT_SLOT_NOT_REACHED", "scope": "read",
       "source": "https://github.com/anza-xyz/agave/blob/v2.1.0/rpc-client-api/src/custom_error.rs",
       "versions": ["agave 2.1"] },
     { "id": "solana.blockhash_not_found", "match": { "contains": "blockhash not found" },
-      "error": "CHAIN_SOLANA_BLOCKHASH_NOT_FOUND", "class": "C6", "scope": "write",
+      "error": "CHAIN_SOLANA_BLOCKHASH_NOT_FOUND", "scope": "write",
       "source": "https://github.com/anza-xyz/agave/blob/v2.1.0/sdk/src/transaction/error.rs",
       "versions": ["agave 2.1"],
       "note": "a recent blockhash that rolled off the 150-slot window; common under load" }
@@ -463,46 +547,65 @@ while reading them:
 **Bitcoin** (`btc.json`, no imports; 10 rows today at `:46-60`, three shown). The code rows run
 before the phrase rows, so Bitcoin Core's mempool conflict, sent under `-26`, is
 `CHAIN_BITCOIN_VERIFY_REJECTED` today, not `CHAIN_DOUBLE_SPEND`. That's fine: whichever verdict a
-row gives, 3.3 decides "slot already used" from the answer itself.
+row gives, 3.3 decides "slot already used" from the answer itself. All three verdicts are the
+family's own.
 
 ```json
 "errors": {
   "schema_version": 1,
+  "verdicts": [
+    { "name": "NODE_BITCOIN_WARMUP", "code": 2101, "sub_category": "none",
+      "retryable": true, "class": "C3", "note": "RPC_IN_WARMUP (-28): the node is still starting" },
+    { "name": "CHAIN_BITCOIN_VERIFY_REJECTED", "code": 3342, "sub_category": "none",
+      "retryable": false, "class": "C6", "note": "RPC_VERIFY_REJECTED (-26): rejected by network rules" },
+    { "name": "CHAIN_DOUBLE_SPEND", "code": 3015, "sub_category": "none",
+      "retryable": false, "class": "C6", "note": "an input this transaction spends is already spent" }
+  ],
   "rows": [
     { "id": "bitcoin.in_warmup", "match": { "code": -28 },
-      "error": "NODE_BITCOIN_WARMUP", "class": "C3", "scope": "both",
+      "error": "NODE_BITCOIN_WARMUP", "scope": "both",
       "source": "https://github.com/bitcoin/bitcoin/blob/v28.0/src/rpc/protocol.h",
       "versions": ["bitcoind 28"] },
     { "id": "bitcoin.verify_rejected", "match": { "code": -26 },
-      "error": "CHAIN_BITCOIN_VERIFY_REJECTED", "class": "C6", "scope": "write",
+      "error": "CHAIN_BITCOIN_VERIFY_REJECTED", "scope": "write",
       "source": "https://github.com/bitcoin/bitcoin/blob/v28.0/src/rpc/protocol.h",
       "versions": ["bitcoind 28"] },
     { "id": "bitcoin.mempool_conflict", "match": { "contains": "txn-mempool-conflict" },
-      "error": "CHAIN_DOUBLE_SPEND", "class": "C6", "scope": "write",
+      "error": "CHAIN_DOUBLE_SPEND", "scope": "write",
       "source": "https://github.com/bitcoin/bitcoin/blob/v28.0/src/validation.cpp",
       "versions": ["bitcoind 28"] }
   ]
 }
 ```
 
-**Cosmos SDK** (`cosmossdk.json`, imports IBC and TENDERMINT; 4 rows today at `:61-74`).
-COSMOSHUB, OSMOSIS and the other Cosmos chains inherit these through `imports` and add their own.
+**Cosmos SDK** (`cosmossdk.json`, imports IBC and TENDERMINT; 4 rows today at `:61-74`, three
+shown). COSMOSHUB, OSMOSIS and the other Cosmos chains inherit these rows and verdicts through
+`imports` and add their own. A chain that answers unfunded accounts differently can override
+`CHAIN_ACCOUNT_NOT_FOUND`'s flags by repeating its name, or disable the row (below).
 
 ```json
 "errors": {
   "schema_version": 1,
+  "verdicts": [
+    { "name": "CHAIN_INVALID_SEQUENCE", "code": 3012, "sub_category": "none",
+      "retryable": false, "class": "C6", "note": "the account sequence doesn't match (the Cosmos nonce)" },
+    { "name": "CHAIN_INSUFFICIENT_FEE", "code": 3013, "sub_category": "none",
+      "retryable": false, "class": "C6", "note": "the fee is below what the node requires" },
+    { "name": "CHAIN_ACCOUNT_NOT_FOUND", "code": 3107, "sub_category": "none",
+      "retryable": false, "class": "C6", "note": "the account or contract doesn't exist" }
+  ],
   "rows": [
     { "id": "cosmossdk.sequence_mismatch", "match": { "contains": "account sequence mismatch" },
-      "error": "CHAIN_INVALID_SEQUENCE", "class": "C6", "scope": "write",
+      "error": "CHAIN_INVALID_SEQUENCE", "scope": "write",
       "source": "https://github.com/cosmos/cosmos-sdk/blob/v0.50.10/x/auth/ante/sigverify.go",
       "versions": ["cosmos-sdk 0.50"] },
     { "id": "cosmossdk.insufficient_fee", "match": { "contains": "insufficient fee" },
-      "error": "CHAIN_INSUFFICIENT_FEE", "class": "C6", "scope": "write",
+      "error": "CHAIN_INSUFFICIENT_FEE", "scope": "write",
       "source": "https://github.com/cosmos/cosmos-sdk/blob/v0.50.10/types/errors/errors.go",
       "versions": ["cosmos-sdk 0.50"],
       "note": "also matches the plural \"insufficient fees\"" },
     { "id": "cosmossdk.account_not_found", "match": { "contains": "account not found" },
-      "error": "CHAIN_ACCOUNT_NOT_FOUND", "class": "C6", "scope": "both",
+      "error": "CHAIN_ACCOUNT_NOT_FOUND", "scope": "both",
       "source": "https://github.com/cosmos/cosmos-sdk/blob/v0.50.10/x/auth/keeper/grpc_query.go",
       "versions": ["cosmos-sdk 0.50"],
       "note": "kept per family on purpose: EVM phrasing differs and would false-match calls against unfunded addresses" }
@@ -511,15 +614,31 @@ COSMOSHUB, OSMOSIS and the other Cosmos chains inherit these through `imports` a
 ```
 
 **XRP** (`ripple.json`, no imports; 15 rows today at `:108-166`). Twelve move as `regex` rows,
-since `xrplMessageStartsWith` is an anchored regex anyway; three stay in router code (3.5). One
-shown:
+since `xrplMessageStartsWith` is an anchored regex anyway; three stay in router code (3.5). All
+fifteen point at router-owned verdicts, so `ripple.json` defines none. One row shown:
 
 ```json
 { "id": "xrp.past_seq", "match": { "regex": "^(?:HTTP \\d+: )?tefPAST_SEQ\\b" },
-  "error": "CHAIN_NONCE_TOO_LOW", "class": "C6", "scope": "write",
+  "error": "CHAIN_NONCE_TOO_LOW", "scope": "write",
   "source": "https://github.com/XRPLF/rippled/blob/2.3.0/include/xrpl/protocol/TER.h",
   "versions": ["rippled 2.3"] }
 ```
+
+**A chain-specific verdict** (the point of revision 5). TON answers a future block and every
+rejected `sendBoc` with a 500 (MAG-4061). With a verdict of its own, `ton.json` can say that
+answer is about data the node doesn't hold, not a broken node, without a router release:
+
+```json
+"errors": { "schema_version": 1,
+  "verdicts": [ { "name": "CHAIN_TON_BLOCK_NOT_FOUND", "code": 5001, "sub_category": "data_scope",
+    "retryable": true, "class": "C6", "note": "LITE_SERVER_NOTREADY: the block isn't in this node's ltdb yet" } ],
+  "rows": [ { "id": "ton.block_not_found", "match": { "code": 500, "contains": "block not found" },
+    "error": "CHAIN_TON_BLOCK_NOT_FOUND", "interface": "rest", "scope": "read",
+    "source": "https://github.com/ton-blockchain/ton/blob/v2024.10/...", "versions": ["ton 2024.10"] } ] }
+```
+
+The validator reports that these flags make the answer "not the endpoint's fault, retry
+elsewhere". The availability gate that still scores every 5xx is router work (3.2).
 
 **Disabling and section imports.** STRKS picks up the Starknet rows with a single spec-level
 import, and a chain that mustn't inherit a parent's row disables it:
@@ -535,18 +654,21 @@ import, and a chain that mustn't inherit a parent's row disables it:
 
 ### 2.7 What the format cannot say
 
-There's no dedicated field for a retry, a retry limit, an HTTP status, a gRPC code, a connection
-error, a timeout, a hold-off, a score, a write outcome or a new verdict, and that's deliberate.
-(`code` doubles as the HTTP status on REST and GraphQL, and 3.2 limits it to the node-answer
-statuses.) A row that needs any of those is a router change, and gets ticketed as one.
+A spec configures behaviour by choosing flags from the router's vocabulary, and the router defines
+what each flag does. So there's no field for a retry count or limit, a hold-off, a status rule, a
+connection error, a timeout, a score, a write outcome, or a new flag or category, and that's
+deliberate: those are the consequences Must-have 3 keeps in code, and the router's own machinery
+depends on them being the same for every chain. (A row's `code` doubles as the HTTP status on REST
+and GraphQL, and 3.2 limits it to the node-answer statuses.) A chain that needs a consequence the
+vocabulary doesn't have is a router change, and gets ticketed as one.
 
 ## 3. Write protection and the other locks (Must-have 3)
 
 ### 3.1 What is locked by construction
 
-Rows name verdicts, and verdicts and their consequences are code, so the format alone keeps a spec
-away from retries, limits, status rules and write outcomes (2.7). On top of that, the code already
-guarantees two things:
+Rows name verdicts, verdicts carry flags from a closed vocabulary, and what each flag does is code,
+so the format alone keeps a spec away from retry limits, status rules and write outcomes (2.7). On
+top of that, the code already guarantees two things:
 
 - Whatever verdict a row names, the stateful policy stops a write after its one fan-out, unless
   every failure was a rate limit (A.2).
@@ -559,8 +681,8 @@ status error gets its retry and health verdicts with the chain family (A.2). So 
 run-time rules in the router, not just checks in CI. That leaves five doors open, and 3.2 to 3.5
 close them:
 
-1. a row that names a rate-limit verdict, which opens the one exception under which a write is
-   sent again;
+1. a row that names a rate-limit verdict, or a spec that defines one, which opens the one
+   exception under which a write is sent again;
 2. a row that hides a rate limit, a status, or an answer the router acts on, such as "already
    known";
 3. a slot-already-used answer reported as anything but unknown;
@@ -570,8 +692,42 @@ close them:
 
 ### 3.2 Verdicts and matches a row may not use
 
-The validator (5.2) reads all of these from the registry and the router's tables, never from a
-copied list.
+The validator (5.2) reads all of these from the router's registry of owned verdicts, its flag
+vocabulary and its tables, never from a copied list.
+
+**Verdicts a spec may not define.** A `verdicts` entry fails validation, and the chain's policy
+falls back (4.4), when:
+
+- **Its `name` or `code` is router-owned.** The router exports that set from `cmd/specvalidate`:
+  every verdict a transport row points at, the 25 registered verdicts the router's logic
+  references by identity or code (among them `CHAIN_TX_ALREADY_KNOWN`, `CHAIN_BLOCK_NOT_FOUND`,
+  `CHAIN_SOLANA_MISSING_LONG_TERM`, `NODE_RATE_LIMITED`, `NODE_BAD_GATEWAY`, `NODE_GATEWAY_TIMEOUT`,
+  `NODE_ENDPOINT_NOT_FOUND`), the protocol, connection and status verdicts, and `UNKNOWN_ERROR`
+  (A.1). A chain that wants a different outcome for one of those situations adds its own row,
+  pointing at its own verdict, ahead of the transport rows, the way Solana's `-32005` shadows the
+  generic one. It never changes a router-owned verdict's flags.
+- **Its `sub_category` is `rate_limit` or `unsupported_method`.** The rate-limit flag is the lever
+  for hold-off and the write re-send (A.2), so only router-owned verdicts carry it. The router's
+  enum still has `unsupported_method` (`error_registry.go:41`) though no verdict does: it stops the
+  retry regardless of `retryable` and caches the reply (`node_error_handler.go:131-145, 193-206`),
+  which is exactly the kind of consequence 2.7 keeps out of a spec's hands.
+- **Its `sub_category` is `data_scope` or `node_capability` with `retryable: false`.** The router's
+  own registry tests forbid that pair (`unsupported_method_scoring_invariant_test.go:49-61,
+  86-100`): a non-retryable capability verdict ends the request at the first provider that says
+  no, the failure MAG-2771 removed.
+- **It tries to be internal.** There's no `category` field: every spec verdict is external, a node
+  or a caller answered. The internal category is the router's own failures.
+- **It uses a sub-category or flag the router version doesn't know.** That's a schema mismatch,
+  and the compatibility file says which router reads it (4.1).
+- **Its `code` is outside the reserved range**, unless it's one of the 41 migrated verdicts keeping
+  its code (5.1 Step 1).
+- **It defines a name or code a spec it doesn't inherit from already defines.** CI catches this
+  across lava-specs at a commit. The router catches it at load too: when two loaded specs define
+  the same name or code and neither inherits it from the other, both chains' policies are invalid
+  with `reason="verdict_collision"`, so a hand-edited folder can't make one chain's code mean two
+  things. Repeating an inherited name is an override, not a definition (2.5).
+- **It's a migrating verdict that differs from the router's copy.** While the router still carries
+  one of the 41 in code (Steps 1 and 2), the spec's definition must match it in every field.
 
 **Verdicts a row may not name.** A row fails when its `error` is:
 
@@ -580,12 +736,15 @@ copied list.
   a rate limit, and a write whose every failure was a rate limit is sent again (A.2). So a row
   naming one could make the router re-send a write a node already executed, and hold off the
   providers that answered.
-- **Any `PROTOCOL_*` verdict** (38 of 134). These are the router's own, never a node's reply.
+- **Any `PROTOCOL_*` verdict** (38 of 134, the router's internal category). These are the
+  router's own, never a node's reply.
 - **`CHAIN_TX_ALREADY_KNOWN`.** The read-your-writes logic turns on it
   (`read_your_writes.go:218-231`), so its recognisers stay in code and run in the locked prefix
   (2.4): JSON-RPC's "already known" rows (`error_classifier.go:310, 311, 316`), REST 409 (`:449`)
   and XRP's `tefALREADY` (`:117`, 3.5).
 - **`UNKNOWN_ERROR`.** A row that says "unknown" shouldn't exist.
+- **A verdict the chain can't see.** The name must be one the chain defines or inherits after
+  2.5, or a router-owned verdict outside this list.
 
 **Matches a row may not use.** A row also fails when its match could replace a status rule or hide
 a rate limit, on any interface it applies to. A row without `interface` applies to every interface
@@ -776,7 +935,8 @@ them.
   proof that text is vendor-free.
 - **Approve the complete effective policy.** A manifest entry binds the chain id, schema version,
   interfaces declared by the expanded spec, resolved error-import graph and its source-section
-  digests, and the final ordered rows after overrides and removals. Every row field is included.
+  digests, the chain's effective verdicts after overrides, and the final ordered rows after
+  overrides and removals. Every row and verdict field is included.
   An intentionally empty result has an entry too. Hash membership of individual rows is
   insufficient: reordering,
   dropping or recombining approved rows can change the first match without changing any row.
@@ -838,7 +998,10 @@ or later in the order changes no verdict, because their tokens match no other XR
 ### 4.1 Schema versions and the compatibility file
 
 `schema_version` moves only when an older router can't read the new format. With Must-have 1 out
-of scope (1.3), it's the only version number lava-specs carries.
+of scope (1.3), it's the only version number lava-specs carries. The flag vocabulary a verdict may
+use (2.3) is part of the format: a router version knows a fixed set of sub-categories and flags, so
+a new value is a new schema version, and a section using it on an older router is dropped like any
+other unknown schema (4.4).
 
 A `compatibility.json` at the lava-specs root has one line per schema version, naming the first
 router release that reads it:
@@ -883,8 +1046,9 @@ Whenever a chain's effective error policy from the loaded source can't be used, 
 that chain's complete effective policy from the bundled specs instead. That happens when:
 
 - the section has a `schema_version` the router can't read (a newer schema on an older router);
-- a row breaks a rule in section 3, the effective policy has no valid signed approval, or an
-  import dependency cannot be resolved and validated;
+- a row or a verdict breaks a rule in section 3, a row names a verdict the chain can't see (3.2),
+  two loaded specs collide on a verdict name or code, the effective policy has no valid signed
+  approval, or an import dependency cannot be resolved and validated;
 - the router couldn't load the source at all (the host doesn't answer, the URL or ref doesn't
   exist, what comes back isn't an archive, a spec doesn't parse). Then the router boots on its
   bundled specs for everything, not just the errors sections.
@@ -900,10 +1064,11 @@ an interface that was outside its approved context.
 In each case the router logs the chain and the cause, including the row or dependency when known,
 and counts `smartrouter_spec_errors_section_dropped_total{chain_id, reason}`. The reasons are a
 closed set: `schema_unknown`, `rule_violation`, `approval_missing`, `signature_invalid`,
-`policy_mismatch`, `approval_revoked`, `dependency_invalid`, `source_file_failed` (a file that
-failed to load beside good ones), `bundled_no_rows` (the bundled specs have no effective rows for
-the chain) and `interface_outside_context` (a served interface the bundled policy's approval
-doesn't cover). A chain can carry more than one at once, say a drop reason and `bundled_no_rows`.
+`policy_mismatch`, `approval_revoked`, `dependency_invalid`, `verdict_collision` (two unrelated
+specs define the same verdict name or code, 3.2), `source_file_failed` (a file that failed to load
+beside good ones), `bundled_no_rows` (the bundled specs have no effective rows for the chain) and
+`interface_outside_context` (a served interface the bundled policy's approval doesn't cover). A
+chain can carry more than one at once, say a drop reason and `bundled_no_rows`.
 The source as a whole fails only when nothing loads; that counts
 `smartrouter_spec_source_fallback_total{reason}` with `host_unreachable`, `ref_not_found`,
 `not_archive` or `no_spec_parsed`. The router boots. Fallback is one atomic choice per chain, made
@@ -976,18 +1141,36 @@ What Step 0 delivers:
 - `cmd/specvalidate`, the schema, the `spec_guards.yml` jobs, owner-review checks, the source
   evidence checks, and the candidate-to-release approval pipeline (5.2, 3.4);
 - the locked prefix of 2.4 step 2, and the router-owned XRP rows (3.5);
+- the validator's side of the per-chain verdict registry: the exported router-owned set, the
+  reserved code range, and the exact-copy check for the 41 migrating verdicts (2.3, 3.2). Loading
+  verdicts from a spec is reader work, so it lands with Step 1;
 - the write-method table, with both the load-time and the request-time lock (3.4);
 - the slot-already-used signatures (3.3);
 - the AVAX* keys in `chainFamilyMap` renamed (section 6);
 - the Helm chart's default moved from the bare URL to the bundled specs.
 
 **Step 1: side by side.** The six family tables (minus XRP's three router-owned rows) are copied
-into their root specs with no verdict change. STRKS imports STRK, and each of the 36 chains that
-would gain rows gets `"errors": {"schema_version": 1, "imports": []}` (Appendix B), so every chain
-keeps exactly today's rows. No router acts on that commit yet.
+into their root specs with no verdict change, and so are the 41 verdicts only those tables use,
+with their exact codes and flags (A.1); the 17 family-table verdicts that transport rows or router
+logic also use stay router-owned and are only named. STRKS imports STRK, and each of the 36 chains
+that would gain rows gets `"errors": {"schema_version": 1, "imports": []}` (Appendix B), so every
+chain keeps exactly today's rows and verdicts. No router acts on that commit yet.
 
-The router reads the sections and evaluates spec rows next to its code rows, but acts on the code
-rows. Two metrics track it:
+The router reads the sections, rows and verdicts both, and evaluates spec rows next to its code
+rows, but acts on the code rows. A migrated verdict's copy has to match the router's definition
+field for field to load at all (3.2), so the comparison here is by verdict name; the flags are
+proven equal by validation, not by traffic.
+
+Three facts about today's code shape the reader, whatever R&D's design turns out to be. The
+registry maps are filled at init and read without locks, and `registerError` panics on a
+duplicate code or name (`error_registry.go:602-629`), so spec verdicts live in a per-chain policy
+resolved at load, outside `errorRegistry`, and an override is a per-chain view, not a second
+registration. `ClassifyError` is keyed by `ChainFamily` (`error_classifier.go:788, 801`); the
+chain's policy becomes that key. And the router compares its own verdicts by pointer identity
+(`svm_block_hash_retry.go:99`, `read_your_writes.go:230`, `rpcsmartrouter_server.go:1599-1603`),
+so a row that names a router-owned verdict must resolve to the router's own `*LavaError`, never to
+a copy built from the spec, or read-your-writes and the SVM block retry stop firing. Two metrics
+track the run:
 
 - `smartrouter_spec_error_rows_mismatch_total{chain_id, kind, row_id, code_error, spec_error, scope}`
   counts three kinds of disagreement:
@@ -1026,8 +1209,9 @@ each window:
   `shadow` cannot restore absent code tables: rollback requires the previous router release and
   its tested bundle. Do not leave the switch UI implying otherwise.
 - The six family tables, except the router-owned rows, are deleted in the release after `all` has
-  run through one canary window. From that release on, the fallback is the bundled sections (4.4),
-  and 5.4 runs it in the router's CI.
+  run through one canary window, and with them the code definitions of the 41 migrated verdicts,
+  which are spec-owned from then on. From that release on, the fallback is the bundled sections
+  (4.4), and 5.4 runs it in the router's CI.
 - A release that has deleted the tables bundles an `all`-approved policy. It does not activate an
   external policy with only `shadow` or `reads` permission: it retains the complete bundled policy
   for that chain until the external policy is fully approved. This avoids relying on deleted code
@@ -1036,9 +1220,11 @@ each window:
   `reads` setting logs a configuration warning and retains the complete bundled policy; it cannot
   request execution of tables that no longer exist.
 
-**Step 3: per-chain rows open up.** MAG-4898 lands researched rows per chain through the gates
-below, and the 36 gains of Appendix B open one at a time, by removing a chain's `"imports": []`.
-Each of those is a behaviour change, named in its PR with a product call (5.2).
+**Step 3: per-chain rows and verdicts open up.** MAG-4898 lands researched rows per chain through
+the gates below, and with them the first chain-specific verdicts (TON's 500 answers in 2.6, for
+one). The 36 gains of Appendix B open one at a time, by removing a chain's `"imports": []`. Each of
+those is a behaviour change, named in its PR with a product call and, for a new or changed
+verdict, R&D's review (5.2).
 
 ### 5.2 lava-specs CI, on every pull request
 
@@ -1068,11 +1254,19 @@ error policies; signing them does not certify unrelated api definitions from arb
   approving review from the owners team named in a new `CODEOWNERS` file for the current PR head.
   It may add `write-rows` for visibility, but removing a label cannot bypass the check. The same
   file makes the spec owners review source evidence; a changed commit invalidates stale approval.
+- **R&D review for verdicts.** The same kind of check computes whether any chain's effective
+  verdicts changed (a new verdict, changed flags, an override, or an inherited verdict a chain
+  gains or loses) and requires an approving review from the R&D owners team named in `CODEOWNERS`.
+  Flags decide retry, fault and scoring, so the people who review that in the router review it
+  here. The check also fails a name or code defined by a spec the chain doesn't inherit from, a
+  code outside the reserved range, an override that changes a code, and a migrating verdict whose
+  copy differs from the router's (3.2).
 - **Behaviour changes named in the PR.** With no change log (1.3), the PR is the record. A PR that
   moves a verdict (a new or changed `error`, a `match` that widens or narrows a verdict, a removed
-  or disabled row, a changed `scope`, a new `slot_used`, or a chain that gains or loses inherited
-  rows) lists each affected chain in its description, with the old verdict, the new one and why,
-  and carries a `behaviour-change` label. The replay and the coverage check (5.3) fail a PR that
+  or disabled row, a changed `scope`, a new `slot_used`, a new or changed verdict or its flags, or
+  a chain that gains or loses inherited rows or verdicts) lists each affected chain in its
+  description, with the old verdict or flags, the new ones and why, and carries a
+  `behaviour-change` label. The replay and the coverage check (5.3) fail a PR that
   moves a verdict without it.
 - **`check_unused_fields.sh`**, which keeps `description` and `title` out of rows, moves into
   `spec_guards.yml` so it runs on every PR (A.4).
@@ -1103,9 +1297,16 @@ Artifact publication and the canary trust mechanism must be specified and tested
   suites (`TestRESTStatusRows`, `TestRESTStatusRowsDoNotReachOtherTransports`,
   `TestRESTMessageRowsBeatTheStatusRow`,
   `TestGRPCRateLimitTexts_TheCodeRowsAboveStillDecide`, `TestEndpointFault_AnswerShapes`,
-  `TestGRPCStatusError`), run against the spec rows and must give the same registered error, unless
-  the PR names the case and its new verdict (5.2). The fixtures grow with MAG-4898: one case per
-  row, citing the row's `source`.
+  `TestGRPCStatusError`), run against the spec rows and verdicts and must give the same verdict
+  name with the same flags, unless the PR names the case and its new verdict (5.2). The fixtures
+  carry the expected flags as well as the name, and grow with MAG-4898: one case per row, citing
+  the row's `source`. The fault decision for a spec verdict is recorded in its fixture, not in the
+  router's hand-written `faultAxisTable` (`error_fault_axis_test.go:32-149`), and the replay
+  checks that it equals `EndpointAtFault` of the verdict's flags. The rows
+  `TestFaultAxis_RegistryContract` keeps for the 41 migrating verdicts (`:151-164`) move to a
+  fixture read from the bundled sections when their code definitions go, and
+  `TestRegistry_CodeRanges` (`error_registry_test.go:42-57`, 1000 to 4999 today) learns the
+  reserved range.
 - **Counterexamples.** The fixtures are almost all JSON-RPC, so they miss some answers. Two fixed
   sets fill that gap.
   - *Must keep today's verdict:*
@@ -1149,21 +1350,24 @@ Artifact publication and the canary trust mechanism must be specified and tested
 - **Slot-already-used pairs.** Every signature in 3.3, Bitcoin's `-25` and `-26` included, sent as a
   complete code-and-message pair through the stateful path, must end unknown. The same pair on a
   read keeps its verdict. Every fixture whose verdict is `CHAIN_NONCE_TOO_LOW`,
-  `CHAIN_INVALID_SEQUENCE` or `CHAIN_STARKNET_INVALID_NONCE` must match a signature.
+  `CHAIN_INVALID_SEQUENCE` or `CHAIN_STARKNET_INVALID_NONCE` must match a signature. The last two
+  are migrating verdicts, so after the switch the router's CI reads their definitions from the
+  bundled specs.
 - **Slot-used retry guard.** Mix a slot-used answer with rate-limit answers, and separately let
   the same answer also match a rate-limit phrase. Neither case opens another fan-out. Include an
   accepted sibling to confirm accepted-result handling and XRP replies with an HTTP prefix.
-- **Coverage check.** For every chain, the rows it gets after inheritance are compared with the
-  rows it gets at the PR's fixed base commit. A chain that gains, loses or reorders effective rows
-  fails unless the exact behaviour change is declared and approved under 5.2. An approved removal
+- **Coverage check.** For every chain, the rows and verdicts it gets after inheritance are
+  compared with what it gets at the PR's fixed base commit. A chain that gains, loses or reorders
+  effective rows, or whose effective verdicts change in name or flags, fails unless the exact
+  behaviour change is declared and approved under 5.2. An approved removal
   or disabling row is possible; an unexplained coverage change is not.
 - **Row fixtures and generated tests.** For every changed row, supply a source-backed positive
   reply and a near-miss; add examples for each regex alternative. CI generates a test for each
   changed row from those fixtures and checks them against the complete effective policy, not only
   the isolated matcher. A regex need not have an automatically generated example, and a later row
   can be shadowed by an earlier one. The test records the intended winning
-  row, registered verdict and class, and reports unintended unreachable rows. Synthetic code and
-  literal cases supplement the real replies rather than replacing them.
+  row, its verdict (name and flags) and class, and reports unintended unreachable rows. Synthetic
+  code and literal cases supplement the real replies rather than replacing them.
 
 ### 5.4 Bad-source and lock tests (router repo)
 
@@ -1176,6 +1380,18 @@ that the metric carries the reason:
   `smartrouter_spec_source_fallback_total`.
 - A row that breaks each rule in 3.2, 3.3 and 3.4, a missing approval, a wrong-key signature, a
   revoked approval, and an unknown schema each fall back to the affected chain's bundled policy.
+- A verdict that redefines a router-owned name or code, carries `rate_limit`, uses a sub-category
+  the router doesn't know, takes a code outside the reserved range, or differs from the router's
+  definition of a migrating verdict, and a row naming a verdict the chain can't see, each make the
+  policy invalid and the chain falls back. Two loaded specs that define the same name or code
+  without inheriting it both fall back with `verdict_collision`. A chain-specific verdict with
+  valid flags loads, its rows classify to it, and the relay path reads its flags: a `data_scope`
+  verdict isn't scored against the endpoint, a non-retryable one stops the read.
+- A child that overrides an inherited verdict's flags gets the override on its own traffic while
+  the parent and its other children keep the original: with ETH1's verdict retryable and BASE's
+  override non-retryable, the same answer fails over on ETH1 and stops on BASE. An override that
+  changes the `code`, and two incompatible definitions of one inherited name without an explicit
+  override, each fail validation.
 - Reordering or deleting approved rows, deleting a section, altering imports, moving a row to a
   different chain, or expanding its interfaces fails policy-digest verification even if every
   individual row appeared in a previously approved manifest. A correctly approved empty policy
@@ -1207,11 +1423,12 @@ that the metric carries the reason:
   `smartrouter_spec_source_fallback` the same way. The unit test reads the collector; nothing
   scrapes the metrics port.
 - The alert rules are proven in smart-router-infrastructure by extending the promtool replay that
-  already covers `sr-router-unhealthy` (`tests/grafana-alert-rules/test_silent_when_idle.py:129-156`):
-  render each per-tenant rule through `expand_tenant`, hold the gauge at 1 past its `for` and
-  assert it fires, then return it to 0 and assert it resolves (a case the existing fixture doesn't
-  have). For `sr-spec-lock-enforced`, the fixture steps the counter once inside the 30m window and
-  the rule fires; a flat counter keeps it silent. The shipped file passes
+  already covers `sr-router-unhealthy`
+  (`tests/grafana-alert-rules/test_silent_when_idle.py:129-156`): render each per-tenant rule
+  through `expand_tenant`, hold the gauge at 1 past its `for` and assert it fires, then return it
+  to 0 and assert it resolves (a case the existing fixture doesn't have). For
+  `sr-spec-lock-enforced`, the fixture steps the counter once inside the 30m window and the rule
+  fires; a flat counter keeps it silent. The shipped file passes
   `scripts/grafana-alert-rules.py check`. The infra CI runs both on every PR that touches
   `grafana/**` or the tests (`.github/workflows/grafana-plan-pr.yaml:121-124`).
 - The rules are published only once a router that emits the gauges is on the fleet. `check` can't
@@ -1252,6 +1469,7 @@ the same gate; a signature must not make a policy generally available before its
 | `smartrouter_spec_error_rows_hits_total{chain_id, row_id}` | router | which rows actually matter; feeds the geth-wording decision in section 6 |
 | `smartrouter_spec_policy_fallback{spec, apiInterface, reason}` | router | which chains are on their bundled policy right now, and why; the alert reads it (4.4) |
 | `smartrouter_spec_source_fallback{reason}` | router | the whole source was replaced by the bundled specs |
+| `smartrouter_errors_total{error_name, error_category, retryable, chain_id}` | router, exists today | unchanged in shape; `error_name` now includes spec-defined verdicts, so a new chain verdict shows up on the existing dashboards without a change. A per-chain override means one `error_name` can carry different `retryable` values by `chain_id`; the label set already has both (`error_metrics.go:44`), but the comment that calls them 1:1 derivable and budgets "~100 registered codes" (`:21-28`) and the dashboards built on it need updating |
 
 **Alert rules.** They go in smart-router-infrastructure, `grafana/alert-rules/smart-router.yaml`,
 in the house style: a `uid`, a `title` and a `summary` that name the tenant, a `for`, a `== bool`
@@ -1291,6 +1509,15 @@ rule is proven before it's published.
   there" as unknown, as 3.3 proposes, or as accepted, in line with MAG-4059's ranking.
 - **The write-method table and the source allowlist.** Section 3.4 seeds both, and MAG-4898
   completes them family by family.
+- **The reserved code range and the docs that list verdicts.** Pick the range for spec-defined
+  verdict codes. The proposal is 5000 to 5999, but the router's tests tie 1000 to 1999 to the
+  internal category and 2000 to 4999 to the external one (`TestRegistry_CodeRanges`,
+  `error_registry_test.go:42-57`), and `docs/ERROR-REGISTRY-DESIGN.md` documents the layers by
+  range, so the spec range wants the same split (say 5000 to 5499 for `NODE_*`, 5500 to 5999 for
+  `CHAIN_*`) and the test learns it. Decide too how the docs follow a verdict defined in a spec:
+  `docs/ERROR-REGISTRY-DESIGN.md` and the public docs list the router's registry, and
+  `docs/RELAY-END-EVENT.md:65, 138` define the event's `error_code` as "the error registry name";
+  with revision 5 the source is the spec as well. Also name the R&D owners team for 5.2.
 - **Approval artifacts and trust.** Choose the artifact delivery location, signing service and
   owners, canonical format, candidate trust context, and rotation/revocation mechanism. The router
   carries verification keys, never private signing keys. These are implementation decisions within
@@ -1311,8 +1538,10 @@ rule is proven before it's published.
   metrics about 1, and the switch with its post-switch tests about 1.5. Revision 3 takes the
   pinning, tag and source-metric work out of Step 0, and adds the manifest signing, the
   request-time stateful lock and the wider prefix. Revision 4 also requires approval of complete
-  policies and tested promotion, revocation, dependency fallback and rollback. R&D must size that
-  work explicitly; the earlier estimate is not a commitment for this scope.
+  policies and tested promotion, revocation, dependency fallback and rollback. Revision 5 adds the
+  per-chain verdict registry: loading verdicts from specs beside the router-owned ones, the
+  exported owned set, flag comparison in the side-by-side run, and the verdict review gate. R&D
+  must size that work explicitly; the earlier estimate is not a commitment for this scope.
 
 ## 7. Later
 
@@ -1336,8 +1565,9 @@ rule is proven before it's published.
 
 - Nimrod or Tom approves Must-haves 2 to 4, the format and the split, with the departures in 1.3
   in view.
-- MAG-4910 is updated to record that Must-have 1 is out of scope and that chain rows may read text
-  inside the node-answer HTTP statuses (3.2).
+- MAG-4910 is updated to record that Must-have 1 is out of scope, that chain rows may read text
+  inside the node-answer HTTP statuses (3.2), and that a chain's spec defines the verdicts its rows
+  point at (2.3).
 - MAG-4898 is unblocked, with section 2 and Appendix B linked as the approved format and the first
   commit's coverage.
 - The router work is ticketed: Step 0, Step 1 (reader, inheritance, side-by-side metrics), Step 2
@@ -1450,6 +1680,29 @@ no row.
   `TestRESTStatusRowsDoNotReachOtherTransports` (`protocol/common/rest_status_rows_test.go:15, 77`),
   `TestEndpointFault_AnswerShapes` (`protocol/rpcsmartrouter/endpoint_fault_test.go:35`) and
   `TestGRPCStatusError` (`protocol/lavasession/direct_rpc_connection_test.go:466`).
+
+**The registry.** `error_codes.go` registers 133 verdicts through `registerError`, plus
+`UNKNOWN_ERROR` wired in directly (`error_registry.go:589-596, 608-630`): 65 `CHAIN_*` (codes 3001
+to 3363), 23 `NODE_*` (2001 to 2150), 7 `USER_*` (4001 to 4007) and 38 `PROTOCOL_*` (1001 to
+1053). Each carries a category (`CategoryExternal` for everything a node or caller answered,
+`CategoryInternal` for the router's own 38), a sub-category (`none`, `data_scope` on 16,
+`node_capability` on 7, `rate_limit` on 3; `unsupported_method` is in the enum but on no verdict
+since MAG-2771, `error_registry.go:41`), `Retryable` and `MayHaveReachedNode` (true on five of the
+nine connection verdicts: timeout, reset, closed, context deadline and context canceled; and on
+`NODE_GATEWAY_TIMEOUT`, `NODE_BAD_GATEWAY` and `NODE_ABORTED`; the struct is at
+`error_registry.go:157-170`). `EndpointAtFault` is derived from those flags in one place
+(`:136-152`). Two maps hold the
+registry, by code and by name, filled at init and read without locks; `registerError` rejects a
+duplicate of either (`:602-629`). Router logic outside the registry and classifier files
+references 25 registered verdicts by identity or code: 16 protocol, 4 node (`NODE_RATE_LIMITED`,
+`NODE_GATEWAY_TIMEOUT`, `NODE_BAD_GATEWAY`, `NODE_ENDPOINT_NOT_FOUND`), 3 chain
+(`CHAIN_TX_ALREADY_KNOWN`, `CHAIN_BLOCK_NOT_FOUND`, `CHAIN_SOLANA_MISSING_LONG_TERM`) and 2 user,
+26 with `UNKNOWN_ERROR`. (A grep for `LavaError…` identifiers returns 29; four hits are a
+Tendermint reply constant and two method-name fragments, not verdicts.) Of the 58 verdicts the six
+family tables use, 17 are also used by transport rows or that logic, and 41 are used by a family
+table alone (Solana 10, Bitcoin 8, Cosmos SDK 3, Starknet 16, NEAR 4; none of XRP's, which all
+point at shared verdicts). Those 41 are the ones Step 1 moves into specs with their codes and flags
+unchanged.
 
 **The upshot: a new chain error needs a code release.** MAG-4824 (v1.6.7), MAG-4817 and MAG-5021
 (both v1.6.8) are examples.
@@ -1635,9 +1888,9 @@ isn't Solana-family for slots either way.
 ### C.1 Where revision 2's sections went
 
 Anna's review on PR #661 (661-1 to 661-8) and the review of revision 2 cite revision 2's numbers.
-They map to the structure introduced in revision 3 and retained in revision 4 like this:
+They map to the structure introduced in revision 3 and kept since like this:
 
-| Revision 2 | Revisions 3 and 4 |
+| Revision 2 | Revisions 3 to 5 |
 |---|---|
 | Header: status, baseline, departures | Header, 1.3 |
 | 1. Goal | 1.1 |
@@ -1734,6 +1987,26 @@ collision, the REST versus JSON-RPC 401/409 distinctions, gRPC precedence and al
 protection. This validates the proposed ordering against those inputs; it does not test transport
 metadata provenance, the unimplemented loader, signatures, activation permissions or the write
 state machine. Those remain acceptance gates in section 5.
+
+### C.5 Changes in revision 5
+
+| Decision | Change | Where |
+|---|---|---|
+| Author's decision (2026-11-15): a chain's spec defines the verdicts its rows point at, per chain, not in a shared file | A `verdicts` list beside `rows` with name, code, sub-category, retryable and class; a verdict has one origin spec and chains that inherit it override its flags by name, never its code; names and codes unique across lava-specs, with a `verdict_collision` fallback at load; the router keeps the flag vocabulary, what each flag does, the transport-failure flag `may_have_reached_node`, and the router-owned verdicts (every transport-row verdict, the 25 its logic references by identity, protocol, connection, status and unknown); no spec verdict may carry `rate_limit` or `unsupported_method`, be internal, or pair `data_scope`/`node_capability` with `retryable: false`; the 41 family-only verdicts move in Step 1 with codes and flags unchanged and must match the router's copy field for field; R&D reviews every verdict change through a required check. Listed as a departure from the ticket's "the router keeps what each class does" | 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.5, 2.6, 2.7, 3.1, 3.2, 3.4, 4.1, 4.4, 5.1, 5.2, 5.3, 5.4, 5.6, 6, 9, A.1 |
+
+**Revision-5 evidence.** The split of today's verdicts was computed at `6c237073` with `git grep`
+over `protocol/**/*.go`, excluding the registry and classifier files and tests, and then checked
+by hand: 25 registered verdicts are referenced by identity or code in router logic (the raw
+identifier grep returns 29; four hits are a Tendermint reply constant and method-name fragments);
+the family tables use 58, of which 17 are also transport-row or logic verdicts and 41 are
+family-only. The vocabulary, flags and code ranges in 2.3 and A.1 are read from
+`error_registry.go` and `error_codes.go`; every example verdict's code and flags in 2.6 were
+checked against `error_codes.go`. A review of the draft found that a node's error body reaches
+the client unchanged (`failed_relay_reply.go:35-38`), so a verdict's name and code are an
+operator's view, not a client's; that `may_have_reached_node` is read only on transport failures;
+and that the router's tests require `data_scope` and `node_capability` verdicts to be retryable.
+All three are in the text above. Nothing about loading verdicts from a spec has been prototyped;
+the relay path's use of the flags is today's code, read through the registry.
 
 ## References
 
