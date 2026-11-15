@@ -93,7 +93,7 @@ func TestHTTPDirectRPCConnection_AcceptEncodingGzip(t *testing.T) {
 	defer cancel()
 	h := newHTTPConnection(t, common.NodeUrl{Url: srv.URL, AcceptEncoding: "gzip"})
 
-	// SendRequest: the chain tracker's polls and the recovery probe. A caller header
+	// SendRequest: the chain tracker's polls. A caller header
 	// cannot replace the url's choice.
 	sendResp, err := h.SendRequest(ctx, []byte(`{"jsonrpc":"2.0","id":1}`), map[string]string{"Accept-Encoding": "identity"})
 	require.NoError(t, err)

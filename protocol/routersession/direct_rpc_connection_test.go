@@ -823,7 +823,7 @@ func TestGRPCDirectRPCConnection_DescriptorSourceFailureIsFatal(t *testing.T) {
 // rate-limit surface: it mints its HTTPStatusError with the response in scope, so a caller
 // deciding when to come back reads the upstream's answer through the same
 // common.RetryAfterFrom the chainlib proxies feed. The existing type assertion on
-// *HTTPStatusError (recovery_probe) must keep working alongside it.
+// *HTTPStatusError must keep working alongside it.
 func TestHTTPDirectRPCConnection_SendRequest_CapturesRetryAfter(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "90")

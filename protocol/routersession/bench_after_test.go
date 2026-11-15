@@ -71,7 +71,7 @@ func TestBenchAfter_IsConsecutiveNotCumulative(t *testing.T) {
 // The probe re-enable grants a TRIAL, not a clean slate, and it is expressed relative to the
 // threshold — so it has to track the flag rather than a hardcoded 47.
 //
-// The rule (MAG-2550): probe evidence is cheap polls plus at most one replayed relay, so a
+// The rule (MAG-2550): probe evidence is cheap polls, not real traffic, so a
 // still-broken endpoint must fall back out after a handful of real failures instead of burning
 // another full budget of client requests.
 func TestBenchAfter_ProbeTrialBudgetTracksTheThreshold(t *testing.T) {
