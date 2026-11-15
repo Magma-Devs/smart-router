@@ -326,6 +326,19 @@ func (e *Endpoint) ServesInternalPath(internalPath string) bool {
 	return e.InternalPath == internalPath
 }
 
+// servesRequest reports whether this endpoint can take a relay of this collection: it is on the
+// request's internal path when the provider restricts to it (restrictsToPathLocked), it answers
+// relays (ServesDirectRelays), and it serves the add-on and extensions. It is the one rule both the
+// url walk and relayURLs apply, so the rate-limit read and the pick agree on which urls count
+// (MAG-4732). Whether the endpoint is usable right now is left to each caller: the walk relaxes it
+// for the reconnect probe and the last chance.
+func (e *Endpoint) servesRequest(addon string, extensions []string, restrictToPath bool, internalPath *string) bool {
+	if restrictToPath && !e.ServesInternalPath(*internalPath) {
+		return false
+	}
+	return e.ServesDirectRelays() && e.CheckSupportForServices(addon, extensions)
+}
+
 // IsEnabled returns the endpoint's enable bit under the endpoint mutex. Enabled is written under
 // e.mu by MarkUnhealthy / ResetHealth / RecordProbeVerdict; every production READ must go through a
 // synchronized accessor like this to avoid the data race the race detector flagged (F3).
@@ -1250,6 +1263,104 @@ func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos [
 	}
 }
 
+// restrictsToPathLocked reports whether a relay for internalPath is restricted to the endpoints
+// serving that path — only when this provider has any. Every path is expanded at construction
+// (rpcsmartrouter.go), so a provider that CAN serve the path has a matching endpoint and the filter
+// bites. A provider that has none — a provider-relay pool, where the path lives on the provider's
+// side and not in our url, or an endpoint list built some way we haven't modelled — keeps every
+// endpoint it had, rather than losing the whole pool to a filter that was never populated for it.
+//
+// Matching is exact in both directions. On a chain with no internal paths every endpoint is "" and
+// every relay asks for "", so this is a no-op. On a chain that enables a root collection ALONGSIDE
+// versioned ones (STRK: "" carries the whole method set, /rpc/v0_8 … carry it again per version), a
+// root relay must stay on the root url rather than drift onto a versioned door the expansion
+// generated.
+//
+// A path the provider was configured for but lost (UnservedInternalPaths) restricts too, and so
+// matches nothing: the provider is passed over for this request, as one that lacks a requested
+// add-on is.
+//
+// cswp.Lock must be held.
+func (cswp *ConsumerSessionsWithProvider) restrictsToPathLocked(internalPath *string) bool {
+	if internalPath == nil {
+		return false
+	}
+	if _, lost := cswp.UnservedInternalPaths[*internalPath]; lost {
+		return true
+	}
+	for _, endpoint := range cswp.Endpoints {
+		if endpoint.ServesInternalPath(*internalPath) {
+			return true
+		}
+	}
+	return false
+}
+
+// relayURLs lists the url of every endpoint the walk below could hand out in normal selection for
+// a request of this collection: usable, able to answer a relay, serving the add-on, extensions and
+// internal path. These are the urls the rate-limit hold-off asks about when it decides whether the
+// whole provider is held (MAG-4732): a websocket url, a head-stalled url or another path's url
+// cannot take the request, so its being free does not make the provider free.
+func (cswp *ConsumerSessionsWithProvider) relayURLs(addon string, extensions []string, internalPath *string) []string {
+	cswp.Lock.RLock()
+	defer cswp.Lock.RUnlock()
+	restrictToPath := cswp.restrictsToPathLocked(internalPath)
+	urls := make([]string, 0, len(cswp.Endpoints))
+	for _, endpoint := range cswp.Endpoints {
+		if !endpoint.servesRequest(addon, extensions, restrictToPath, internalPath) || !endpoint.IsUsable() {
+			continue
+		}
+		urls = append(urls, endpoint.NetworkAddress)
+	}
+	return urls
+}
+
+// endpointsInPickOrderLocked is cswp.Endpoints in the order the url walk tries them.
+//
+// Every url held off after a rate limit moves to the back (heldOff says which); both groups keep
+// config order. Nothing is dropped: when every url that fits the request is held, one is still
+// handed out, as filterRateLimitedProviders keeps a held provider rather than leave a request with
+// nowhere to go (MAG-4732). The held urls need no order of their own: two held at once escalate to
+// the provider, which holds them all until the longest ends. A nil heldOff keeps config order.
+//
+// The last chance (endpointPickLendDisabled) then orders by lendRankLocked: a url in rotation, then
+// one held by a state reason, then a switched-off one. The provider is lent one url for this
+// request, and config order alone could spend that lend on a dead url while a sibling would answer
+// (MAG-4734). A lent head-stalled url is still switched on, so it does not take the request's one
+// chance (GetSessions checks Enabled, kept by decision on MAG-4734): ranked first, it lets one
+// request be lent the stalled url of each blocked provider in turn. The sort is stable, so the
+// rate-limit order and config order hold within a rank. It is taken per pick, not kept, because a
+// url's state changes between requests.
+//
+// cswp.Lock must be held; each endpoint's mu is taken after it.
+func (cswp *ConsumerSessionsWithProvider) endpointsInPickOrderLocked(mode endpointPickMode, heldOff func(url string) bool) []*Endpoint {
+	ordered := cswp.Endpoints
+	if heldOff != nil {
+		ordered = make([]*Endpoint, 0, len(cswp.Endpoints))
+		var held []*Endpoint
+		for _, endpoint := range cswp.Endpoints {
+			if heldOff(endpoint.NetworkAddress) {
+				held = append(held, endpoint)
+			} else {
+				ordered = append(ordered, endpoint)
+			}
+		}
+		ordered = append(ordered, held...)
+	}
+	if mode != endpointPickLendDisabled {
+		return ordered
+	}
+	ranks := make(map[*Endpoint]int, len(ordered))
+	for _, endpoint := range ordered {
+		endpoint.mu.RLock()
+		ranks[endpoint] = endpoint.lendRankLocked()
+		endpoint.mu.RUnlock()
+	}
+	ordered = slices.Clone(ordered) // never reorder cswp.Endpoints itself
+	slices.SortStableFunc(ordered, func(a, b *Endpoint) int { return ranks[a] - ranks[b] })
+	return ordered
+}
+
 // fetching an endpoint from a ConsumerSessionWithProvider and establishing a connection,
 // can fail without an error if trying to connect once to each endpoint but none of them are active.
 //
@@ -1260,41 +1371,22 @@ func (cswp *ConsumerSessionsWithProvider) sortEndpointsByLatency(endpointInfos [
 // on the root url.
 //
 // mode says what happens to an endpoint whose Enabled flag is off (endpointPickMode).
-func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, mode endpointPickMode, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
+func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSessionWithProvider(ctx context.Context, mode endpointPickMode, getAllEndpoints bool, addon string, extensionNames []string, internalPath *string, heldOff func(url string) bool) (connected bool, endpointsList []*EndpointAndChosenConnection, providerAddress string, err error) {
 	getConnectionFromConsumerSessionsWithProvider := func(ctx context.Context) (connected bool, endpointPtr []*EndpointAndChosenConnection, allDisabled bool) {
 		endpoints := make([]*EndpointAndChosenConnection, 0)
 		cswp.Lock.Lock()
 		defer cswp.Lock.Unlock()
-		// Restrict to the endpoints serving the api's internal path — but only
-		// when this provider has any. Every path is expanded at construction
-		// (rpcsmartrouter.go), so a provider that CAN serve the path has a
-		// matching endpoint and the filter bites. A provider that has none — a
-		// provider-relay pool, where the path lives on the provider's side and
-		// not in our url, or an endpoint list built some way we haven't
-		// modelled — keeps every endpoint it had, rather than losing the whole
-		// pool to a filter that was never populated for it.
-		//
-		// Matching is exact in both directions. On a chain with no internal
-		// paths every endpoint is "" and every relay asks for "", so this is a
-		// no-op. On a chain that enables a root collection ALONGSIDE versioned
-		// ones (STRK: "" carries the whole method set, /rpc/v0_8 … carry it
-		// again per version), a root relay must stay on the root url rather
-		// than drift onto a versioned door the expansion generated.
-		//
-		// A path the provider was configured for but lost (UnservedInternalPaths)
-		// restricts too, and so matches nothing: the provider is passed over for
-		// this request, as one that lacks a requested add-on is.
-		restrictToPath := false
-		if internalPath != nil {
-			_, restrictToPath = cswp.UnservedInternalPaths[*internalPath]
-			if !restrictToPath {
-				restrictToPath = slices.ContainsFunc(cswp.Endpoints, func(endpoint *Endpoint) bool {
-					return endpoint.ServesInternalPath(*internalPath)
-				})
-			}
-		}
-		for idx, endpoint := range cswp.Endpoints {
-			if restrictToPath && !endpoint.ServesInternalPath(*internalPath) {
+		restrictToPath := cswp.restrictsToPathLocked(internalPath)
+		// A url held off after a rate limit goes to the back of the list, so a free sibling is
+		// handed out first; nothing is skipped for it. The last chance also tries the urls that
+		// can answer before the dead ones (endpointsInPickOrderLocked).
+		for _, endpoint := range cswp.endpointsInPickOrderLocked(mode, heldOff) {
+			// Another path's url, a websocket-only url (it can never answer a relay, see
+			// ServesDirectRelays) and a url without the add-on cannot take this request. Skipping a
+			// websocket url leaves the provider with no selectable endpoint once its https url is
+			// backed off, so the caller ignores the provider for this request and picks another,
+			// rather than handing out a session that fails on the spot.
+			if !endpoint.servesRequest(addon, extensionNames, restrictToPath, internalPath) {
 				continue
 			}
 			// A disabled endpoint is skipped in normal selection. The reconnect probe retries it
@@ -1317,21 +1409,8 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			if (heldByState && !lastChanceBorrow) || (!enabled && mode != endpointPickReconnectDisabled && !lastChanceBorrow) {
 				continue
 			}
-			// A websocket-only endpoint can never answer a relay — see ServesDirectRelays.
-			// Skipping it leaves the provider with no selectable endpoint once its https url
-			// is backed off, so the caller ignores the provider for this request and picks
-			// another, rather than handing out a session that fails on the spot.
-			if !endpoint.ServesDirectRelays() {
-				continue
-			}
 			if mode == endpointPickReconnectDisabled && !enabled {
 				utils.FormatDebug("retrying to connect to disabled endpoint", utils.LogAttr("endpoint", endpoint.NetworkAddress), utils.LogAttr("provider", cswp.PublicAddress), utils.LogAttr("GUID", ctx))
-			}
-
-			// check endpoint supports the requested addons
-			supported := endpoint.CheckSupportForServices(addon, extensionNames)
-			if !supported {
-				continue
 			}
 			// connectEndpoint tries to get an existing connection or creates a new one.
 			// Uses explicit lock scopes to avoid holding lock during network calls.
@@ -1531,10 +1610,10 @@ func (cswp *ConsumerSessionsWithProvider) fetchEndpointConnectionFromConsumerSes
 			// nothing more than a successful dial.
 			if mode == endpointPickReconnectDisabled && !enabled {
 				endpoint.mu.Lock()
-				if !cswp.Endpoints[idx].Enabled {
-					cswp.Endpoints[idx].Enabled = true // return enabled once we successfully reconnect
+				if !endpoint.Enabled {
+					endpoint.Enabled = true // return enabled once we successfully reconnect
 					// Clear recovery tracking on re-enable so a future disable starts a fresh streak (F1).
-					cswp.Endpoints[idx].clearRecoveryTrackingLocked()
+					endpoint.clearRecoveryTrackingLocked()
 				}
 				endpoint.mu.Unlock()
 			}
