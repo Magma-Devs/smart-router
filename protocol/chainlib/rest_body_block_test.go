@@ -15,6 +15,7 @@ import (
 func trxLikeRestParser(t *testing.T) ChainParser {
 	t.Helper()
 	byNum := spectypes.BlockParser{ParserArg: []string{"0", "num"}, ParserFunc: spectypes.PARSER_FUNC_PARSE_CANONICAL}
+	byIdOrNum := spectypes.BlockParser{ParserArg: []string{"0", "id_or_num"}, ParserFunc: spectypes.PARSER_FUNC_PARSE_CANONICAL}
 	head := spectypes.BlockParser{ParserArg: []string{"latest"}, ParserFunc: spectypes.PARSER_FUNC_DEFAULT}
 	spec := spectypes.Spec{
 		Enabled: true,
@@ -26,6 +27,7 @@ func trxLikeRestParser(t *testing.T) ChainParser {
 				Extensions:     []*spectypes.Extension{{Name: extensionslib.ArchiveExtension, Rule: &spectypes.Rule{Block: 127}}},
 				Apis: []*spectypes.Api{
 					{Enabled: true, Name: "/wallet/getblockbynum", ComputeUnits: 10, BlockParsing: byNum},
+					{Enabled: true, Name: "/wallet/getblock", ComputeUnits: 10, BlockParsing: byIdOrNum},
 					{Enabled: true, Name: "/wallet/getnowblock", ComputeUnits: 10, BlockParsing: head},
 				},
 			},
@@ -57,6 +59,10 @@ func TestRestPostBodyBlockIsJudgedByTheArchiveRule(t *testing.T) {
 		{"an old block", "/wallet/getblockbynum", `{"num":500}`, 500, true},
 		{"a recent block", "/wallet/getblockbynum", `{"num":990}`, 990, false},
 		{"no block named", "/wallet/getblockbynum", `{}`, spectypes.NOT_APPLICABLE, false},
+		{"an old block as a string", "/wallet/getblock", `{"id_or_num":"500"}`, 500, true},
+		// TRX getblock and EOS get_block take a block id in the same field. An id names no height,
+		// so it is judged as no block named, not read as a number (as {"blockHash": …}, MAG-4142).
+		{"a block id", "/wallet/getblock", `{"id_or_num":"0000000000010c4a732d1e215e87466271e425c86945783c3d3f122bfa5affd9"}`, spectypes.NOT_APPLICABLE, false},
 		{"the head, by its own api", "/wallet/getnowblock", `{}`, spectypes.LATEST_BLOCK, false},
 	}
 	for _, tc := range tests {

@@ -148,7 +148,7 @@ func TestRestMessageGetParamsReadsTheBody(t *testing.T) {
 			expected: nil,
 		},
 		{
-			name:     "an empty object or a blank body is no params",
+			name:     "an empty object is no params",
 			specPath: "/wallet/getnowblock",
 			path:     "/wallet/getnowblock",
 			body:     " {} ",
