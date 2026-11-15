@@ -128,6 +128,11 @@ type chainReverifyInputs struct {
 	// "<tier>|<name>" (trackFailures). The gauge, the transition logs and
 	// /debug/verification all read it. Guarded by RPCSmartRouter.mu; lazily allocated.
 	failing map[string][]metrics.TimedVerificationFailure
+	// heldWhileOut is what each provider out of the pairing failed besides the check that
+	// took it out, keyed like failing (trackFailures). Nothing checked it while the
+	// provider was out, so it did not pass: it comes back with its start when the provider
+	// is readmitted, or passes again then. Guarded by RPCSmartRouter.mu; lazily allocated.
+	heldWhileOut map[string][]metrics.TimedVerificationFailure
 	// lastPass is the pass that refused each provider out of the pairing, keyed
 	// "<tier>|<name>" (noteFailure). Its retry re-runs only the checks that failed there
 	// and keeps the other verdicts. Dropped when the provider passes. Guarded by
@@ -198,13 +203,17 @@ func (inputs *chainReverifyInputs) noteFailure(tier reverifyTier, name string, e
 }
 
 // countRefusals counts each service and node url this pass refused a provider it
-// admits, and each Warning check it failed, one failed run each. A retry counts only
-// the checks it ran, not the verdicts it kept from an earlier pass.
+// admits, and each Warning check it failed, one failed run each. A missing websocket
+// url is not counted: no check ran, and the gauge already holds it while it lasts. A
+// retry counts only the checks it ran, not the verdicts it kept from an earlier pass.
 func (inputs *chainReverifyInputs) countRefusals(tier reverifyTier, provider *routersession.RPCStaticProviderEndpoint, admission chainlib.ProviderAdmission) {
 	if inputs.countFailedCheck == nil {
 		return
 	}
 	for _, failure := range refusalsOf(inputs.chainParser, provider, admission.Rerun()) {
+		if failure.Check == chainlib.CheckMissingURL {
+			continue
+		}
 		inputs.countFailedCheck(tier, provider.Name, failure)
 	}
 }

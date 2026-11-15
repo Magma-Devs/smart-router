@@ -34,6 +34,7 @@ const (
 	upSolana    = "sol"       // Solana node without the token-owner index
 	upTraceRate = "tracerate" // full ETH1 node whose trace_ methods answer 429: a premium method's own limit
 	upDebug     = "debug"     // full ETH1 node that serves the debug add-on too
+	upPolygon   = "polygon"   // ETH1-shaped node of another chain: eth_chainId answers 0x89
 	// pruned ETH1 node that serves the debug add-on: fails only the archive check
 	upPrunedDebug = "pruneddebug"
 	// ETH1 node that answers another chain's id: fails chain-id
@@ -260,7 +261,7 @@ func reply(p string, request map[string]any) map[string]any {
 		if p == upSlowChain {
 			time.Sleep(10 * time.Second)
 		}
-		if p == upWrongChain || p == upPrunedWrongChain {
+		if p == upPolygon || p == upWrongChain || p == upPrunedWrongChain {
 			return result("0x89")
 		}
 		return result("0x1")

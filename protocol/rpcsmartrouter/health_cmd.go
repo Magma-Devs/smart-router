@@ -443,6 +443,17 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 	if excluded == nil {
 		excluded = admissionErr
 	}
+	// A provider serves no subscriptions with no ws(s) url on a chain that subscribes, and
+	// with ws(s) urls the router refuses every one of: the metric publishes both as the
+	// websocket service (refusalsOf, websocketLeft), so each admitted row says so too.
+	// validations are by position in the dialed list, so that is the list it reads.
+	noSubscriptions := ""
+	switch {
+	case chainlib.MissingWebsocket(endpoint.NodeUrls, chainParser):
+		noSubscriptions = noWebsocketReason
+	case everyWebsocketRefused(endpoint.NodeUrls, validations):
+		noSubscriptions = noWebsocketAdmittedReason
+	}
 
 	rows := make([]healthEndpointResult, 0, len(endpoint.NodeUrls))
 	for i, url := range endpoint.NodeUrls {
@@ -450,9 +461,48 @@ func probeProvider(ctx context.Context, provider healthProvider, opts healthOpti
 		row.SpecValid = true
 		applyValidation(&row, validations[i])
 		row.Router = routerVerdict(validations[i], excluded)
+		if noSubscriptions != "" {
+			row.Router = row.Router.withoutSubscriptions(noSubscriptions)
+		}
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// noWebsocketReason is what an admitted row adds when its provider has no ws(s) url on
+// a chain that subscribes: the router serves it without subscriptions (MAG-3950).
+const noWebsocketReason = "no ws(s) node url: serves no subscriptions"
+
+// noWebsocketAdmittedReason is what an admitted row adds when the router refuses every
+// ws(s) url of its provider, a dead socket for one: it serves no subscriptions either.
+const noWebsocketAdmittedReason = "no ws(s) node url admitted: serves no subscriptions"
+
+// everyWebsocketRefused reports whether a provider has a ws(s) url and the router
+// refuses each one it has, as websocketLeft reads the admission. urls is the list the
+// validations are by position in: the dialed one (MAG-4214).
+func everyWebsocketRefused(urls []commonlib.NodeUrl, validations []chainlib.NodeURLValidation) bool {
+	sockets := 0
+	for i, url := range urls {
+		if !chainlib.IsWebSocketURL(url.Url) {
+			continue
+		}
+		sockets++
+		if i >= len(validations) || !validations[i].Refused {
+			return false
+		}
+	}
+	return sockets > 0
+}
+
+func (v healthRouterVerdict) withoutSubscriptions(reason string) healthRouterVerdict {
+	if v.Verdict != routerAdmitted {
+		return v
+	}
+	if v.Reason != "" {
+		v.Reason += "; "
+	}
+	v.Reason += reason
+	return v
 }
 
 // applyValidation folds one node url's results into its row: every verification, the

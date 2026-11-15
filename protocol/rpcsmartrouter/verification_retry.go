@@ -66,8 +66,9 @@ type retrySchedule struct {
 }
 
 // retryEntryKey is one provider's check on the schedule. The whole pass (the zero
-// CheckID) stands for a failure no single check owns: a url that could not be dialed,
-// or a provider whose pass gave no verdicts to read.
+// CheckID) stands for a failure no single check owns: a provider whose pass gave no
+// verdicts to read. A url that could not be dialed has an entry of its own, its dial
+// (CheckConnect), so its retry dials that url alone.
 type retryEntryKey struct {
 	tier  reverifyTier
 	name  string

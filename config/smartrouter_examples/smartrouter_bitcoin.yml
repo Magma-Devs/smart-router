@@ -2,12 +2,12 @@
 # Mode: Direct connection to a public Bitcoin JSON-RPC endpoint (no Lava providers!)
 #
 # Upstream: PublicNode (bitcoin-rpc.publicnode.com), HTTP. Bitcoin Core's
-# JSON-RPC has no websocket/subscription surface, so this example is HTTP-only —
-# start the router with --skip-websocket-verification.
+# JSON-RPC has no websocket/subscription surface, so this example is HTTP-only
+# and has no subscriptions to miss.
 #
 # Run it:
 #   smartrouter config/smartrouter_examples/smartrouter_bitcoin.yml \
-#     --use-static-spec specs/ --skip-websocket-verification
+#     --use-static-spec specs/
 
 # Prometheus metrics (scrape at http://<host>:7779/metrics). "disabled" turns it off.
 metrics-listen-address: "0.0.0.0:7779"
