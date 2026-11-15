@@ -1454,8 +1454,10 @@ func (csm *ConsumerSessionManager) cacheAddonAddresses(addon string, extensions 
 
 // releaseCouldServeThisRequest reports whether releasing the blocked list could hand THIS request a
 // provider it has not already tried. A release refills validAddresses from the whole pairing pool,
-// so the question is whether any of those providers is both absent from this request's ignored set
-// and able to serve the addon and extensions asked for.
+// so the question is whether any of those providers is absent from this request's ignored set, able
+// to serve the addon and extensions asked for, and has a url a relay can use (inRotation, MAG-4737):
+// a released provider with none is handed out, found undialable and blocked again, and the last
+// chance lends it anyway.
 //
 // When the answer is no, releasing cannot rescue the request and only destroys standing state that
 // every other relay depends on. That happens whenever the pool empties *during* a request rather
@@ -1513,20 +1515,24 @@ func (csm *ConsumerSessionManager) releaseCouldServeThisRequest(ignored map[stri
 		// request is handed it, finds nothing to dial and blocks it again on the spot, failing as it
 		// would have anyway. Meanwhile a dead provider sat in the pool where a new sticky session
 		// could claim it fleet-wide (MAG-4731), and every request the session sent reset its node's
-		// block and logged both edges. Only the pinned path asks this: a pin can be served by this
-		// provider alone and never reaches the last-chance walk, so a release it cannot use buys it
-		// nothing. The unpinned release is the cascade's own last resort and keeps its rule.
+		// block and logged both edges.
 		if !csm.pairing[resolved].inRotation() {
 			return "", false
 		}
 		return resolved, true
 	}
 
+	// The unpinned release asks the same question of every candidate (MAG-4737). A blocked provider
+	// with no usable url cannot serve this request through a release: selection would hand it out,
+	// find nothing to dial and block it again on the spot, and the last chance would then lend it
+	// anyway. So the release is withheld and the walk lends it directly, without the release and
+	// re-block every request used to log while a lone provider stayed head-stalled or switched off.
+	// A blocked provider whose url is usable again (a stale block) is still released.
 	for _, address := range csm.pairingAddresses {
 		if _, alreadyTried := ignored[address]; alreadyTried {
 			continue
 		}
-		if capable(address) {
+		if capable(address) && csm.pairing[address].inRotation() {
 			return "", true
 		}
 	}
@@ -3630,6 +3636,12 @@ func (csm *ConsumerSessionManager) releaseBlockedBackupLocked(providerAddress st
 		return
 	}
 	delete(csm.blockedBackupProviders, providerAddress)
+	// Same reset the primaries' release performs: the lent flag belongs to the block that just
+	// ended. A backup lent while stalled keeps the flag until it is released (OnSessionDone), and
+	// this release may come from another route (the head-stall step, the probe).
+	if provider := csm.backupProviders[providerAddress]; provider != nil {
+		provider.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
+	}
 	if record, released := csm.releaseBlockRecordLocked(providerAddress, true); released {
 		csm.logProviderReleased(providerAddress, record, route, csm.blockedTotalLocked())
 	}
@@ -3753,14 +3765,38 @@ func (csm *ConsumerSessionManager) OnSessionDone(
 	}
 
 	if consumerSession.Parent.atomicReadBlockedStatus() == BlockedProviderSessionUsedStatus {
-		// we will deal with the removal of this provider from the blocked list so we can for now set it as default
-		consumerSession.Parent.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
 		// this provider is probably in the ignored provider list. we need to validate and return it to valid addresses
 		providerAddress := consumerSession.Parent.PublicAddress
+		parent := consumerSession.Parent
 		// we want this method to run last after we unlock the consumer session
 		// golang defer operates in a Last-In-First-Out (LIFO) order, meaning this defer will run last.
 		defer func() {
-			go csm.releaseBlockedProvider(providerAddress, ReleaseSuccessfulRelay)
+			go func() {
+				// A lent answer does not always leave the provider with a url to dial. The last
+				// chance lends a url whatever holds it out: a stall survives the answer, and a
+				// client error or the router's own health check never switches the url back on
+				// (only a real success does, through ResetHealth, before this runs). Releasing a
+				// provider that is still out of rotation hands selection nothing to dial: the next
+				// request blocks it again, and the one after borrows it again — a block and a
+				// release on every request while the stall lasts (MAG-4737). It stays blocked
+				// instead; the head-stall step releases it when the stall clears.
+				//
+				// The lent flag is cleared only with the release. Two lent requests can be in
+				// flight at once: cleared up front, a first answer that leaves the url out would
+				// take the flag with it, and the second answer, the real success that switches the
+				// url on, would find nothing to act on and leave a usable provider blocked.
+				//
+				// This clear is also the only one for a provider lent while on neither blocked list
+				// (the walk's out-of-rotation group, MAG-4829): the two pool releases clear only an
+				// address they hold. The check is best effort, as on the other release routes: a
+				// stall or disable landing between this read and the release costs one
+				// evidence-driven re-block.
+				if !parent.inRotation() {
+					return
+				}
+				parent.atomicWriteBlockedStatus(BlockedProviderSessionUnusedStatus)
+				csm.releaseBlockedProvider(providerAddress, ReleaseSuccessfulRelay)
+			}()
 		}()
 	}
 
