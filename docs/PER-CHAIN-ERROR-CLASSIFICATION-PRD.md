@@ -44,7 +44,8 @@ references by identity (`CHAIN_TX_ALREADY_KNOWN`, `CHAIN_BLOCK_NOT_FOUND`,
 Invariants the router enforces at run time, for every spec from every source:
 
 1. A write fans out once, then stops, unless every failure was a rate limit; no row may name a
-   rate-limit verdict (§4, §5.3).
+   rate-limit verdict (§4, §5.3). Nothing re-sends a write: not a retry, not a WebSocket restore
+   (§5.7).
 2. No spec row runs ahead of the locked prefix (§3).
 3. A row can't name a `PROTOCOL_*`, rate-limit, `CHAIN_TX_ALREADY_KNOWN` or `UNKNOWN_ERROR` verdict;
    a spec can't define a rate-limit or internal verdict or redefine a router-owned name or code.
@@ -58,8 +59,9 @@ Invariants the router enforces at run time, for every spec from every source:
    400, 404, 410 or 422 on REST, HTTP 400 on the other HTTP interfaces, or gRPC InvalidArgument,
    NotFound, AlreadyExists, FailedPrecondition or OutOfRange (§3 step 3).
 9. An envelope can mark a success reply as an error and fill the record's code and text. It never
-   sets a status and never turns an error into a success, and no policy stops marking a reply that a
-   router-owned rule reads (§4.6).
+   sets a status and never turns an error into a success. Safety envelopes (§2.5) run first, in
+   every fallback too, and no policy can remove, narrow or shadow them or change the router
+   decision they lead to (§4.6, §5.6).
 
 ## 2. Spec format
 
@@ -283,10 +285,11 @@ Example, XRP's in-result errors (in code today at `xrplEngineResult.go:64-104`):
   descriptor, or a detail type the router can't resolve) skips the envelope, counted (§9). A check
   on an absent or null value fails, except `exists: false`; a value of the wrong type fails its
   check. For `code` and `text`, absent, null or non-scalar values are unresolved.
-- On a success reply the first envelope whose `error_when` holds makes the reply a node error
-  (`in_success`), handled like any other: classified, counted, and never a write's success. On an
-  error reply the first envelope whose `error_when` holds fills `code` and `text` where the standard
-  shape left them empty.
+- Order: safety envelopes first, then the rest in inheritance order. On a success reply the first
+  envelope whose `error_when` holds makes the reply a node error (`in_success`), handled like any
+  other: classified, counted, and never a write's success. On an error reply the first envelope
+  whose `error_when` holds fills `code` and `text` where the standard shape left them empty. When a
+  safety envelope marks a reply, its `code` and `text` stand and no other envelope runs.
 - Step 1 moves today's chain shapes in code to envelopes, with the same verdicts: the Cosmos
   `tx_response` check (`restMessage.go:55-60, 83-96`) into `cosmossdk.json`; Tendermint's
   `result.response` check (`tendermintRPCMessage.go:39-51`: `code ≠ 0` and a non-empty `log`, so
@@ -294,8 +297,10 @@ Example, XRP's in-result errors (in code today at `xrplEngineResult.go:64-104`):
   imports (`cosmossdk.json` would miss NAMTSE, THORCHAIN and THORCHAINT); XRP's result
   check (picked per family, `jsonRPCChainFamily.go:14-35`) into `ripple.json`. Replies outside
   their importers are counted `code_only`.
-- An envelope that feeds a router-owned rule (XRP results for §5.5 and §3 step 2, the codes and
-  texts the §5.2 signatures read) is locked as §4.6 says and is a write-safety change (§8.1).
+- **Safety envelopes** are the envelopes that feed a router-owned rule: XRP results (§3 step 2,
+  §5.5) and the codes and texts the §5.2 signatures read (Cosmos `tx_response` included). The
+  router's release bundles them with its approval. They run first, are locked as §4.6 says, stay
+  in every fallback (§5.6), and any change to one is a write-safety change (§8.1).
 
 ## 3. Matching order
 
@@ -439,11 +444,13 @@ them a REST route).
 - Evidence as for rows (§4.4): for each api covered, a source-backed reply the envelope marks and a
   success it leaves alone.
 - R&D review for any change to a chain's effective envelopes; write-safety review as well when the
-  scope covers writes or the envelope feeds a router-owned rule (§2.5).
-- An envelope that feeds a router-owned rule (§3 step 2, §5.2, §5.5) can't be disabled, and an
-  override may only widen it (`apis`, `scope`, `error_when`). The validator, in CI and at load,
-  runs the router's evidence for those rules through the effective envelopes and rejects a policy
-  that no longer marks one (`rule_violation`).
+  scope covers writes or the envelope is a safety envelope (§2.5).
+- A safety envelope can't be disabled, and an override may only widen it (`apis`, `scope`,
+  `error_when`); its `code` and `text` stay as bundled.
+- The validator, in CI and at load, runs the router's evidence for the router-owned rules (§3 step
+  2, §5.2, §5.5) through the complete effective policy, envelopes, rows and router rules together,
+  and rejects a policy under which any evidence reply no longer reaches the same router decision:
+  the same prefix verdict, signature match or §5.5 row, not merely an error (`rule_violation`).
 
 ## 5. Run-time locks in the router
 
@@ -562,7 +569,11 @@ ref missing, not an archive, nothing parses) the router boots on the bundled spe
   Validate the fallback against the interfaces the chain serves. One atomic choice per chain, before
   serving.
 - If the bundled specs have no effective rows for the chain, or a served interface is outside the
-  bundled approval, the chain gets the prefix and transport rows only, logged as reduced coverage.
+  bundled approval, the chain gets the prefix, the bundled safety envelopes (§2.5) of every root its
+  loaded spec imports and of its `chainFamilyMap` family, and the transport rows, logged as reduced
+  coverage. Safety envelopes stay in every fallback state, whole-source failure included. A write
+  path no bundled safety envelope covers is read by its interface's standard shape; before the code
+  shapes are deleted, Step 1's `code_only` count shows whether one ever fired there (§7).
 - Log chain + cause; count `smartrouter_spec_errors_section_dropped_total{chain_id, reason}`,
   reason ∈ {`schema_unknown`, `rule_violation`, `approval_missing`, `signature_invalid`,
   `policy_mismatch`, `approval_revoked`, `dependency_invalid`, `verdict_collision`,
@@ -592,8 +603,11 @@ ref missing, not an archive, nothing parses) the router boots on the bundled spe
   (`AppendRelayFailure`); anything else leaves it alone. Today every refusal but a 429 counts a
   failure (`direct_ws_subscription_manager.go:444-458`, called at `:645, 656`), and a delivered
   error frame ends the subscription with no count and no health effect (`:1386-1398`).
-- Selection, retry, restore and teardown are unchanged. Connect, upgrade and transport failures keep
-  the connection rules.
+- Selection, retry, restore and teardown are unchanged for reads. A write subscription (a stateful
+  subscribe api, such as submit-and-watch) is never restored by re-sending it (invariant 1): on an
+  upstream drop it ends without a resend, recorded as an unclear write in relay_end; what the client
+  is sent follows the rulebook's WebSocket chapter.
+- Connect, upgrade and transport failures keep the connection rules.
 
 ## 6. Compatibility and release pair
 
@@ -623,7 +637,7 @@ interface and reader, with `apiInterface` passed to classification, and the enve
 (§2.5); locked prefix and router-owned XRP rows (§3, §5.5); exported router-owned set, reserved
 code range, exact-copy check for the 41 migrating verdicts (§4.1); write-method table with both
 locks and per-interface identity (§5.3); slot-already-used signatures and recognisers with their
-interface column (§5.2); WebSocket classification (§5.7); Helm default → bundled.
+interface column (§5.2); the WebSocket rules (§5.7); Helm default → bundled.
 
 **Step 1 (side by side).** Copy the six family tables (minus the three XRP rows) into their root
 specs unchanged, with the 41 family-only verdicts at today's codes and flags; the 17 family-table
@@ -661,8 +675,9 @@ Envelopes switch with the spec rows. Rollback before deletion = previous setting
 deletion = previous router release + bundle. The family tables, the code shapes and the 41 code
 verdict definitions are deleted in the release after `all` has passed one canary (`chainFamilyMap`
 stays: fault axis, transport rows, signatures, `IsSolanaFamily` `protocol/common/svm.go:10-13`);
-that release bundles an `all`-approved policy and keeps the bundled policy for any chain whose
-external policy has only `shadow`/`reads` permission.
+that release bundles an `all`-approved policy with a safety envelope for every path a deleted code
+shape covered, and keeps the bundled policy for any chain whose external policy has only
+`shadow`/`reads` permission.
 
 **Step 3.** MAG-4898 lands researched rows and chain-specific verdicts; the 36 gains open by removing
 `"imports": []`, each a behaviour change with product sign-off and, for verdicts, R&D review.
@@ -676,7 +691,7 @@ external policy has only `shadow`/`reads` permission.
 - Stateful check (§4.5) as a `spec_guards.yml` job.
 - Write-safety job: validator write rules + diff of effective policies for every affected chain and
   descendant (row contents by `id`, order separately); any change touching `write`, `both` or
-  `slot_used`, or an envelope that covers writes or feeds a router-owned rule, needs write-owner
+  `slot_used`, or an envelope that covers writes or is a safety envelope, needs write-owner
   review via a required check (labels are informational). A new
   `CODEOWNERS` file names the owners teams (spec owners, write-safety owners, R&D); since it can't
   target a JSON section, the required checks compute what changed and demand the right approval on
@@ -764,13 +779,19 @@ external policy has only `shadow`/`reads` permission.
   write-scope envelope leaves a read with the same shape alone; absent, null and wrong-type values
   per §2.5; on gRPC, with and without a cached descriptor (skipped and counted), and a gRPC write
   decoded with no reflection on the node; an error an envelope finds in a success never ends a
-  write's fan-out as its success; a policy that disables or narrows an envelope a router-owned rule
-  reads is rejected (§4.6).
+  write's fan-out as its success.
+- Safety envelopes (§2.5, §4.6): a policy that disables or narrows one, or changes its `code` or
+  `text`, is rejected; a child envelope that matches the same XRP `tefPAST_SEQ` reply but extracts
+  only `engine_result_message` changes nothing, because the safety envelope runs first, and the
+  write still ends unknown (§5.2); with the chain on reduced coverage and on whole-source fallback,
+  XRP HTTP 200 replies carrying `tefPAST_SEQ` and `tooBusy` still reach the signature and the rate
+  limit.
 - WebSocket (§5.7), on `jsonrpc` and `tendermintrpc`: a refused subscribe and an error frame
   delivered to the subscription's error channel (injected there on `tendermintrpc`) are counted
   with their verdict and `apiInterface`; a client-fault refusal counts no failure, an unclassified
-  or at-fault one counts a failure, a rate-limited one holds the URL off; restore and teardown are
-  unchanged.
+  or at-fault one counts a failure, a rate-limited one holds the URL off; a read subscription is
+  restored as today; a submit-and-watch subscription whose upstream drops is not re-sent (the node
+  sees one submit) and is recorded as an unclear write.
 
 ### 8.3 Router repo tests (bad source, locks, fallback)
 
