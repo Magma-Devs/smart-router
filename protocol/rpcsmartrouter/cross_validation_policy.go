@@ -539,6 +539,13 @@ func (r *CrossValidationPolicyResolver) headerlessParams(chainID, apiInterface s
 
 // resolveKnob computes one knob's effective value: start from the caller value (if present), else the
 // floor (if set), else the default; then clamp into [floor, cap].
+//
+// The floor side of that clamp is the default itself when no explicit floor is configured (MAG-2784):
+// without this, a caller-present value below the default went completely unclamped whenever a policy
+// carried no floor, so "enabled: true" with nothing else configured let a caller weaken the policy
+// below what that same policy gives a caller who sends no headers at all — the one case "enabled"
+// is supposed to rule out. An explicit floor still wins over the default either way, exactly as
+// before: this only fills in a floor where none was written, never overrides one that was.
 func resolveKnob(callerVal int, callerPresent bool, b Bound, def int) int {
 	base := def
 	switch {
@@ -547,8 +554,12 @@ func resolveKnob(callerVal int, callerPresent bool, b Bound, def int) int {
 	case b.Floor != nil:
 		base = *b.Floor
 	}
-	if b.Floor != nil && base < *b.Floor {
-		base = *b.Floor
+	floor := b.Floor
+	if floor == nil {
+		floor = &def
+	}
+	if base < *floor {
+		base = *floor
 	}
 	if b.Cap != nil && base > *b.Cap {
 		base = *b.Cap
