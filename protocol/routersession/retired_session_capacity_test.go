@@ -90,3 +90,82 @@ func retiredSessionCapacityRecovers(t *testing.T, sessionLimit int) {
 	}
 	require.Zero(t, csm.atomicReadNumberOfResets(), "and it did not need a pool reset to get there")
 }
+
+// TestRetiredSessionsNeverExhaustTheCeiling is MAG-5063: retiring far MORE sessions than the
+// ceiling allows — not a fraction of it, as retiredSessionCapacityRecovers above does — must
+// never strand a provider that is still answering.
+//
+// Before the fix, a BlockListed session stayed in cswp.Sessions for the rest of the epoch:
+// nothing ever removed it. So retiring more sessions than MaxSessionsAllowedPerProvider, on its
+// own, permanently refused the provider with "No pairings available.", however healthy its node
+// was — about 16,000 failures to one provider in the reported outage, against a 1,000-session
+// ceiling. The fix reclaims a BlockListed session the next time this provider is asked for one
+// (GetConsumerSessionInstanceFromEndpoint), so the map never grows past the ceiling in the first
+// place, and a provider's node answering again is served at once, however many requests failed
+// earlier in the epoch.
+func TestRetiredSessionsNeverExhaustTheCeiling(t *testing.T) {
+	level := zerolog.GlobalLevel()
+	zerolog.SetGlobalLevel(zerolog.Disabled)
+	t.Cleanup(func() { zerolog.SetGlobalLevel(level) })
+
+	original := MaxSessionsAllowedPerProvider
+	MaxSessionsAllowedPerProvider = 10
+	t.Cleanup(func() { MaxSessionsAllowedPerProvider = original })
+
+	const address = "recovered-after-many-retirements"
+	ctx := context.Background()
+	csm := CreateConsumerSessionManager()
+	pairing := epochPairing(t, address, true)
+	pairing[0].MaxComputeUnits = 1000000000
+	require.NoError(t, csm.UpdateAllProviders(firstEpochHeight, pairing, nil))
+	endpoint := csm.pairing[address].Endpoints[0]
+
+	get := func() (ConsumerSessionsMap, error) {
+		return csm.GetSessions(ctx, 1, cuForFirstRequest, NewUsedProviders(nil),
+			servicedBlockNumber, "", nil, common.NO_STATE, 0, "", "")
+	}
+
+	// Retire five times the ceiling's worth of sessions — the shape of the reported outage, where
+	// ordinary traffic during a node outage retired far more sessions than the ceiling allows.
+	for retired := 0; retired < MaxSessionsAllowedPerProvider*5; retired++ {
+		sessions, err := get()
+		require.NoError(t, err, "retiring session %d", retired)
+		for _, info := range sessions {
+			require.NoError(t, csm.OnSessionDone(info.Session, servicedBlockNumber, cuForFirstRequest,
+				time.Millisecond, info.Session.CalculateExpectedLatency(2*time.Millisecond), 1, 1, 1, false, nil))
+		}
+		endpoint.ResetHealth() // the success above, as the relay path would apply it
+
+		for i := 0; i <= MaximumNumberOfFailuresAllowedPerConsumerSession; i++ {
+			sessions, err = get()
+			require.NoError(t, err, "burst %d attempt %d", retired, i)
+			endpoint.MarkUnhealthy(EndpointDisableNodeError)
+			for _, info := range sessions {
+				require.NoError(t, csm.OnSessionFailure(info.Session, errors.New("transient upstream failure")))
+			}
+		}
+		require.True(t, endpoint.IsEnabled(),
+			"bench-after must not have fired: the interleaved success keeps the endpoint healthy")
+	}
+
+	// The retired sessions were reclaimed as they went, not kept until the epoch rolls over: the
+	// map never grew to anywhere near five times the ceiling.
+	require.LessOrEqual(t, len(csm.pairing[address].Sessions), MaxSessionsAllowedPerProvider+1,
+		"a retired session must not go on counting against the ceiling once it is dead weight (MAG-5063)")
+
+	require.True(t, endpoint.IsEnabled(), "the upstream is healthy and enabled")
+	require.Empty(t, csm.blockedProviderRecords, "and nothing blocked it")
+
+	// The upstream is answering. It must serve the next request — no block, no pool reset, no
+	// waiting for the epoch — however many requests failed earlier in the epoch.
+	sessions, err := get()
+	require.NoErrorf(t, err,
+		"healthy upstream stranded after %d retirements against a %d-session ceiling: sessions=%d resets=%d enabled=%t",
+		MaxSessionsAllowedPerProvider*5, MaxSessionsAllowedPerProvider,
+		len(csm.pairing[address].Sessions), csm.atomicReadNumberOfResets(), endpoint.IsEnabled())
+	require.NotEmpty(t, sessions)
+	for _, info := range sessions {
+		require.NoError(t, csm.OnSessionDiscarded(info.Session, nil))
+	}
+	require.Zero(t, csm.atomicReadNumberOfResets(), "and it did not need a pool reset to get there")
+}
