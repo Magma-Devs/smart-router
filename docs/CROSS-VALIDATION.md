@@ -85,6 +85,32 @@ single response because the requested quorum of one was met. Nothing is compared
 case; `…-all-providers` and `…-agreeing-providers` each list the one provider queried, so a
 client that needs real corroboration should read those lists rather than `status` alone.
 
+### max-participants: every configured upstream
+
+`max-participants` also accepts two string values instead of a number (MAG-2783):
+
+```yaml
+      max-participants: primary   # every non-backup upstream for this chain and interface
+      max-participants: all       # every upstream, backup tier included
+```
+
+Both resolve to a floor, exactly like the numeric shorthand (`max-participants: 2` means
+`{floor: 2}`) — a caller may still ask for *more* via the header, though there is nothing
+left to give once every configured upstream is already in the fan-out. `primary` counts the
+same `direct-rpc` providers the group-diversity fan-out already draws on; `all` adds
+`backup-direct-rpc` on top.
+
+**`all`'s backup participants are a count, not a group.** The backup tier carries no
+`group-label` today, so a backup folded in by `all` contributes to `max-participants` and the
+agreement quorum, but not to a `min-groups` diversity requirement — diversity is still judged
+on the primaries alone. A policy combining `max-participants: all` with `min-groups` > 1 gets
+both effects independently, not a backup that counts toward the group spread.
+
+Resolution happens once the router knows the endpoint's real provider counts (after dialing,
+before serving), so the two strings behave exactly like the equivalent number from then on —
+the same `insufficient-capacity` / `insufficient-groups` guards apply, and a request can still
+be refused if a primary is down and nothing backfilled the shortfall.
+
 ## Worked examples
 
 Two bundled example configs demonstrate the full setup end to end:

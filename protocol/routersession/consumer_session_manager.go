@@ -398,6 +398,15 @@ func (csm *ConsumerSessionManager) ProviderGroupAssignments() map[string][]strin
 	return assignments
 }
 
+// BackupProviderCount reports how many backup providers this session manager currently holds.
+// Cross-validation's max-participants: all (MAG-2783) needs it — backups are otherwise invisible to
+// cross-validation's provider counting, which only ever looks at ProviderGroupAssignments' primaries.
+func (csm *ConsumerSessionManager) BackupProviderCount() int {
+	csm.lock.RLock()
+	defer csm.lock.RUnlock()
+	return len(csm.backupProviders)
+}
+
 // ProviderAndGroupCountsForRequest returns the number of providers and the number of distinct group
 // labels among the providers that actually support the request's addon + extensions — i.e. the concrete
 // candidate set, not all valid providers. Used by the per-request cross-validation capacity check so a
@@ -1676,7 +1685,7 @@ func (csm *ConsumerSessionManager) releaseBlockedProvidersIfPoolEmpty(ctx contex
 	return sessionWithProviderMap, true
 }
 
-func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Context, wantedProviderNumber int, usedProviders UsedProvidersInf, tempIgnoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensionNames []string, internalPath *string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int) (sessionWithProviderMap SessionWithProviderMap, err error) {
+func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Context, wantedProviderNumber int, usedProviders UsedProvidersInf, tempIgnoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensionNames []string, internalPath *string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int, includeBackups bool) (sessionWithProviderMap SessionWithProviderMap, err error) {
 	sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProvider(ctx, wantedProviderNumber, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, internalPath, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
 	if err != nil {
 		if errors.Is(err, PairingListEmptyError) {
@@ -1684,8 +1693,15 @@ func (csm *ConsumerSessionManager) getSessionWithProviderOrError(ctx context.Con
 			// blocked list, then the blocked providers themselves, for maximum availability.
 			if len(csm.backupProviders) > 0 {
 				utils.FormatDebug("No regular providers available, trying backup providers", utils.LogAttr("GUID", ctx))
-				// try to get a session from the backup providers
-				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, virtualEpoch, usedProviders)
+				// try to get a session from the backup providers. Every primary is gone, so
+				// includeBackups (max-participants: all, MAG-2783) asks for the full
+				// wantedProviderNumber here instead of the usual single emergency spare — with
+				// zero primaries, backups are the ENTIRE participant set, not a top-up.
+				backupWanted := 1
+				if includeBackups {
+					backupWanted = wantedProviderNumber
+				}
+				sessionWithProviderMap, err = csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, backupWanted, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, virtualEpoch, usedProviders)
 				if err == nil {
 					// backup providers succeeded, return the session
 					utils.FormatDebug("Successfully got session from backup providers", utils.LogAttr("GUID", ctx))
@@ -1774,6 +1790,11 @@ type GetSessionsOptions struct {
 	// enables a root collection alongside versioned ones (STRK) must keep its
 	// root traffic on the root url.
 	InternalPath *string
+	// IncludeBackups makes selection top up a primary-only shortfall from the backup tier, up to
+	// wantedProviderNumber, instead of treating backups as the emergency-only fallback they are for
+	// every other request (MAG-2783's max-participants: all). Default false preserves today's
+	// behavior exactly: backups are only ever tried when the primaries return zero candidates.
+	IncludeBackups bool
 }
 
 func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProviderNumber int, cuNeededForSession uint64, usedProviders UsedProvidersInf, requestedBlock int64, addon string, extensions []*spectypes.Extension, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, opts ...GetSessionsOptions) (
@@ -1784,6 +1805,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	minGroups := groupBlindMinGroups
 	perGroupTarget := groupBlindPerGroupTarget
 	var internalPath *string
+	includeBackups := false
 	if len(opts) > 0 {
 		if opts[0].MinGroups > 1 {
 			minGroups = opts[0].MinGroups
@@ -1792,6 +1814,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 			perGroupTarget = opts[0].PerGroupTarget
 		}
 		internalPath = opts[0].InternalPath
+		includeBackups = opts[0].IncludeBackups
 	}
 
 	// A group-diversity mandate outranks any caller directive, and the drop happens HERE, before
@@ -1911,10 +1934,21 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 	utils.FormatTrace("GetSessions tempIgnoredProviders", utils.LogAttr("tempIgnoredProviders", tempIgnoredProviders), utils.LogAttr("GUID", ctx))
 
 	// Get a valid consumerSessionsWithProvider
-	sessionWithProviderMap, err := csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, internalPath, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+	sessionWithProviderMap, err := csm.getSessionWithProviderOrError(ctx, wantedProviderNumber, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, internalPath, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget, includeBackups)
 	if err != nil {
 		utils.FormatTrace("GetSessions error", utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
 		return nil, err
+	}
+
+	// max-participants: all (MAG-2783): the primaries above may have returned fewer than
+	// wantedProviderNumber without erroring — getValidConsumerSessionsWithProvider succeeds on
+	// any non-zero result — so a policy that explicitly asked for every upstream would otherwise
+	// silently settle for the primaries alone. Top up from the backup tier BEFORE wantedSession
+	// captures the goal below, so the retry loop's own target reflects the combined count.
+	if includeBackups {
+		if shortfall := wantedProviderNumber - len(sessionWithProviderMap); shortfall > 0 {
+			csm.topUpWithBackups(ctx, sessionWithProviderMap, shortfall, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, virtualEpoch, usedProviders)
+		}
 	}
 
 	// Save how many sessions we are aiming to have
@@ -2059,7 +2093,7 @@ func (csm *ConsumerSessionManager) GetSessions(ctx context.Context, wantedProvid
 		}
 
 		// If we do not have enough fetch more
-		sessionWithProviderMap, err = csm.getSessionWithProviderOrError(ctx, 1, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, internalPath, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget)
+		sessionWithProviderMap, err = csm.getSessionWithProviderOrError(ctx, 1, usedProviders, tempIgnoredProviders, cuNeededForSession, requestedBlock, addon, extensionNames, internalPath, stateful, virtualEpoch, stickiness, selectedProvider, minGroups, perGroupTarget, includeBackups)
 		// If error exists but we have sessions, return them
 		if err != nil && len(sessions) != 0 {
 			return sessions, nil
@@ -2845,8 +2879,12 @@ func (csm *ConsumerSessionManager) tryGetConsumerSessionWithProviderFromBlockedP
 	return nil, utils.FormatError(csm.rpcEndpoint.ChainID+" could not get a provider address from blocked provider list", PairingListEmptyError, utils.LogAttr("csm.currentlyBlockedProviderAddresses", csm.currentlyBlockedProviderAddresses), utils.LogAttr("addons", addon), utils.LogAttr("extensions", extensions), utils.LogAttr("ignoredProviders", ignoredProviders.providers), utils.LogAttr("GUID", ctx))
 }
 
-// getValidConsumerSessionsWithProviderFromBackupProviderList retrieves valid backup provider sessions for emergency fallback when no regular providers are available.
-func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) { //nolint:unparam // virtualEpoch is unused: CU accounting never trips in this fork (MAG-4243); kept so the backup path mirrors the primary one
+// getValidConsumerSessionsWithProviderFromBackupProviderList retrieves up to wantedCount valid
+// backup provider sessions: emergency fallback (wantedCount 1) when no regular providers are
+// available at all, or a cross-validation "all" fan-out's top-up (wantedCount > 1, MAG-2783) when
+// the primaries alone fell short. Returns as many as the backup pool can actually offer, which may
+// be fewer than wantedCount — the caller decides whether a partial result is still useful.
+func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBackupProviderList(ctx context.Context, wantedCount int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, virtualEpoch uint64, usedProviders UsedProvidersInf) (sessionWithProviderMap SessionWithProviderMap, err error) { //nolint:unparam // virtualEpoch is unused: CU accounting never trips in this fork (MAG-4243); kept so the backup path mirrors the primary one
 	csm.lock.RLock()
 	defer csm.lock.RUnlock()
 
@@ -2904,11 +2942,22 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 		utils.LogAttr("GUID", ctx),
 	)
 
-	// Use the optimizer to select a single backup provider by QoS score.
-	// On cold start (no relay history) selection is uniform; as backups serve relays the optimizer
-	// accumulates latency/availability data and improves ranking.
-	// Returning one provider per call allows each retry to pick the next-best backup.
-	selectedAddresses := csm.providerOptimizer.ChooseUpstream(ctx, backupProviderAddresses, ignoredProviders.providers, cuNeededForSession, requestedBlock)
+	// Ask the optimizer for one backup at a time by QoS score, up to wantedCount: ChooseUpstream
+	// always returns exactly one address (a weighted-random pick, not a ranked list — despite its own
+	// doc comment), so reaching more than one means calling it again. Each pick is added to
+	// ignoredProviders before the next call, which is also what ChooseUpstream reads to exclude it,
+	// so the loop cannot pick the same address twice. On cold start (no relay history) selection is
+	// uniform; as backups serve relays the optimizer accumulates latency/availability data and
+	// improves ranking.
+	selectedAddresses := make([]string, 0, wantedCount)
+	for len(selectedAddresses) < wantedCount {
+		picked := csm.providerOptimizer.ChooseUpstream(ctx, backupProviderAddresses, ignoredProviders.providers, cuNeededForSession, requestedBlock)
+		if len(picked) == 0 {
+			break
+		}
+		ignoredProviders.providers[picked[0]] = struct{}{}
+		selectedAddresses = append(selectedAddresses, picked[0])
+	}
 	if len(selectedAddresses) == 0 {
 		utils.FormatInfo("[BackupProviders] Optimizer returned no selection from backup candidates",
 			utils.LogAttr("candidates", backupProviderAddresses),
@@ -2916,37 +2965,55 @@ func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProviderFromBacku
 		)
 		return nil, utils.FormatError("optimizer returned no backup provider", nil, utils.LogAttr("GUID", ctx))
 	}
-	selectedAddress := selectedAddresses[0]
 
-	consumerSessionsWithProvider := csm.backupProviders[selectedAddress]
-	if consumerSessionsWithProvider == nil {
-		utils.FormatFatal("optimizer selected backup provider missing from map", nil,
-			utils.Attribute{Key: "selectedAddress", Value: selectedAddress},
-			utils.Attribute{Key: "backupProviderAddresses", Value: backupProviderAddresses},
-			utils.Attribute{Key: "epochAtStart", Value: currentEpoch},
-			utils.Attribute{Key: "currentEpoch", Value: csm.atomicReadCurrentEpoch()},
-			utils.LogAttr("GUID", ctx),
-		)
+	sessionWithProviderMap = make(SessionWithProviderMap, len(selectedAddresses))
+	for _, selectedAddress := range selectedAddresses {
+		consumerSessionsWithProvider := csm.backupProviders[selectedAddress]
+		if consumerSessionsWithProvider == nil {
+			utils.FormatFatal("optimizer selected backup provider missing from map", nil,
+				utils.Attribute{Key: "selectedAddress", Value: selectedAddress},
+				utils.Attribute{Key: "backupProviderAddresses", Value: backupProviderAddresses},
+				utils.Attribute{Key: "epochAtStart", Value: currentEpoch},
+				utils.Attribute{Key: "currentEpoch", Value: csm.atomicReadCurrentEpoch()},
+				utils.LogAttr("GUID", ctx),
+			)
+		}
+
+		// Already added to ignoredProviders by the selection loop above, so a following call
+		// (retry, or a future top-up needing more) picks a different backup.
+		sessionWithProviderMap[selectedAddress] = &SessionWithProvider{
+			SessionsWithProvider: consumerSessionsWithProvider,
+			CurrentEpoch:         currentEpoch,
+		}
 	}
 
-	// Add selected provider to ignored so the next retry picks a different backup
-	ignoredProviders.providers[selectedAddress] = struct{}{}
-
-	utils.FormatInfo("[BackupProviders] Optimizer selected backup provider",
-		utils.LogAttr("selected", selectedAddress),
+	utils.FormatInfo("[BackupProviders] Optimizer selected backup providers",
+		utils.LogAttr("selected", selectedAddresses),
+		utils.LogAttr("wanted", wantedCount),
 		utils.LogAttr("candidates_considered", backupProviderAddresses),
-		utils.LogAttr("remaining_backups", len(backupProviderAddresses)-1),
+		utils.LogAttr("remaining_backups", len(backupProviderAddresses)-len(selectedAddresses)),
 		utils.LogAttr("GUID", ctx),
 	)
 
-	sessionWithProviderMap = SessionWithProviderMap{
-		selectedAddress: &SessionWithProvider{
-			SessionsWithProvider: consumerSessionsWithProvider,
-			CurrentEpoch:         currentEpoch,
-		},
-	}
-
 	return sessionWithProviderMap, nil
+}
+
+// topUpWithBackups fills a primary-only shortfall from the backup tier into base, in place, when a
+// cross-validation policy explicitly asked to include backups (max-participants: all, MAG-2783).
+// Best-effort: if backups cannot fill the whole shortfall (none configured, all ignored/blocked, or
+// the optimizer has nothing left to offer), base's own count stands — the capacity guard downstream
+// judges the final combined count against the request's agreement-threshold, the same way it already
+// judges an ordinary primary-only shortfall today.
+func (csm *ConsumerSessionManager) topUpWithBackups(ctx context.Context, base SessionWithProviderMap, shortfall int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, virtualEpoch uint64, usedProviders UsedProvidersInf) {
+	backupSessions, err := csm.getValidConsumerSessionsWithProviderFromBackupProviderList(ctx, shortfall, ignoredProviders, cuNeededForSession, requestedBlock, addon, extensions, virtualEpoch, usedProviders)
+	if err != nil {
+		utils.FormatDebug("cross-validation backup top-up could not fill the shortfall",
+			utils.LogAttr("shortfall", shortfall), utils.LogAttr("error", err.Error()), utils.LogAttr("GUID", ctx))
+		return
+	}
+	for addr, session := range backupSessions {
+		base[addr] = session
+	}
 }
 
 func (csm *ConsumerSessionManager) getValidConsumerSessionsWithProvider(ctx context.Context, wantedProviderNumber int, ignoredProviders *ignoredProviders, cuNeededForSession uint64, requestedBlock int64, addon string, extensions []string, internalPath *string, stateful uint32, virtualEpoch uint64, stickiness string, selectedProvider string, minGroups, perGroupTarget int) (sessionWithProviderMap SessionWithProviderMap, err error) {

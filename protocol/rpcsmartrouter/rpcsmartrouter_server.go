@@ -202,6 +202,15 @@ func (rpcss *RPCSmartRouterServer) ServeRPCRequests(
 		return cvErr
 	}
 	rpcss.crossValidationResolver = cvResolver
+	// Resolve any max-participants: primary/all sentinel (MAG-2783) against this endpoint's actual
+	// provider counts before anything reads it — the boot-time advisory right below included.
+	// configuredProviderGroups is the same configured-primaries layout that advisory already counts
+	// from; backups are otherwise invisible to cross-validation entirely (BackupProviderCount).
+	primaryCount := 0
+	for _, group := range configuredProviderGroups {
+		primaryCount += len(group)
+	}
+	cvResolver.SetParticipantCounts(primaryCount, primaryCount+sessionManager.BackupProviderCount())
 	// Scoped to this endpoint: a policy for another chain or interface is not this endpoint's to check or
 	// to report (MAG-3604).
 	if len(cvResolver.PolicyRefs(listenEndpoint.ChainID, listenEndpoint.ApiInterface)) > 0 {
@@ -5746,11 +5755,16 @@ func (rpcss *RPCSmartRouterServer) sendRelayToEndpoint(
 		resolvedInternalPath := apiCollection.CollectionData.InternalPath
 		sessionOpts.InternalPath = &resolvedInternalPath
 	}
-	if cvp := relayProcessor.GetCrossValidationParams(); cvp != nil && cvp.MinGroups > 1 {
-		sessionOpts.MinGroups = cvp.MinGroups
-		if cvp.PerGroupQuorum {
-			sessionOpts.PerGroupTarget = cvp.AgreementThreshold
+	if cvp := relayProcessor.GetCrossValidationParams(); cvp != nil {
+		if cvp.MinGroups > 1 {
+			sessionOpts.MinGroups = cvp.MinGroups
+			if cvp.PerGroupQuorum {
+				sessionOpts.PerGroupTarget = cvp.AgreementThreshold
+			}
 		}
+		// max-participants: all (MAG-2783) — independent of group diversity, so this is read
+		// unconditionally rather than nested under the MinGroups > 1 branch above.
+		sessionOpts.IncludeBackups = cvp.IncludeBackups
 	}
 
 	// MAG-4032: a pending-nonce read or a transaction lookup that names a write this router just
