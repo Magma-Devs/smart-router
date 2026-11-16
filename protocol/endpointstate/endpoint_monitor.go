@@ -58,6 +58,10 @@ const (
 	EndpointChainTrackerPolling       EndpointChainTrackerState = "polling"
 	EndpointChainTrackerRetryingStart EndpointChainTrackerState = "retrying_start"
 	EndpointChainTrackerStopped       EndpointChainTrackerState = "stopped"
+	// EndpointChainTrackerNotTrackedByDesign is the state of a url that has no tracker on
+	// purpose: it serves only its add-on collections (standalone-addons) and none of them
+	// declares a way to read the head. See EndpointMonitor.untracked (MAG-5349).
+	EndpointChainTrackerNotTrackedByDesign EndpointChainTrackerState = "not_tracked_by_design"
 )
 
 // EndpointMonitor manages per-endpoint ChainTrackers for the Smart Router.
@@ -79,6 +83,16 @@ type EndpointMonitor struct {
 	// Map from endpoint URL to ChainTracker lifecycle state and last startup error.
 	trackerStates     map[string]EndpointChainTrackerState
 	trackerLastErrors map[string]string
+
+	// untracked holds the urls this monitor decided NOT to track (MAG-5349): a url that
+	// serves only its add-on collections (standalone-addons) where none of them declares
+	// GET_BLOCKNUM. Such a url has no head to read — a transaction-submit service is the
+	// case that forced this — and the base collection's head request is the very probe
+	// standalone-addons opted out of. A tracker for it could only fail its start and retry
+	// for the life of the url, so none is created. The entry is what makes the decision
+	// (and its one log line) happen once per url instead of once per relay. Guarded by mu;
+	// a url is in at most one of trackers and untracked.
+	untracked map[string]struct{}
 
 	// Per-endpoint observation records (MAG-2158 / Topic A): the side-effect-free
 	// telemetry the probing layer (Topic D) and the per-chain ChainState (Topic C)
@@ -319,6 +333,7 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 		fetchers:          make(map[string]*EndpointPoller),
 		cancelFuncs:       make(map[string]context.CancelFunc),
 		trackerStates:     make(map[string]EndpointChainTrackerState),
+		untracked:         make(map[string]struct{}),
 		trackerLastErrors: make(map[string]string),
 		observations:      make(map[string]EndpointObservation),
 		generations:       make(map[string]uint64),
@@ -412,6 +427,9 @@ func NewEndpointMonitor(ctx context.Context, config EndpointChainTrackerConfig) 
 // GetOrCreateTracker returns an existing ChainTracker for the endpoint or creates a new one.
 // Thread-safe - uses lazy initialization to avoid creating trackers for unused endpoints.
 //
+// It returns (nil, nil) for a url that is not tracked by design (see untracked): no tracker
+// exists and none is missing. IsUntrackedByDesign tells that case from a tracked url.
+//
 // providerName is the name the relay path records rate-limit hold-offs under (the provider's
 // public address). The tracker reads the relay path's (provider, url) entry, so a relay's
 // hold-off or the provider escalation slows its poll; it records its own 429s under the url
@@ -430,6 +448,10 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 		m.mu.RUnlock()
 		return tracker, nil
 	}
+	if _, untracked := m.untracked[endpointURL]; untracked {
+		m.mu.RUnlock()
+		return nil, nil
+	}
 	m.mu.RUnlock()
 
 	// Slow path: create new tracker
@@ -439,6 +461,22 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	// Double-check after acquiring write lock
 	if tracker, exists := m.trackers[endpointURL]; exists {
 		return tracker, nil
+	}
+	if _, untracked := m.untracked[endpointURL]; untracked {
+		return nil, nil
+	}
+
+	if m.hasNoHeadByDesign(endpoint) {
+		m.untracked[endpointURL] = struct{}{}
+		m.trackerStates[endpointURL] = EndpointChainTrackerNotTrackedByDesign
+		delete(m.trackerLastErrors, endpointURL)
+		utils.FormatInfo("no ChainTracker for endpoint: it serves only add-on collections and none of them declares a way to read the head",
+			utils.LogAttr("endpoint", endpointURL),
+			utils.LogAttr("chainID", m.chainID),
+			utils.LogAttr("apiInterface", m.apiInterface),
+			utils.LogAttr("addons", sortedAddons(endpoint)),
+		)
+		return nil, nil
 	}
 
 	// Create the chain fetcher
@@ -608,6 +646,39 @@ func (m *EndpointMonitor) GetOrCreateTracker(
 	)
 
 	return tracker, nil
+}
+
+// hasNoHeadByDesign reports whether a url must not get a tracker: it serves only its add-on
+// collections (standalone-addons) and none of them declares GET_BLOCKNUM. It asks the same
+// lookup the poller would (EndpointPoller.FetchLatestBlockNum), so the answer is exactly
+// "this url's tracker could never start".
+//
+// Narrow on purpose. A url that serves the base collection and finds no GET_BLOCKNUM is a
+// broken spec, not a design, and keeps failing loudly through the tracker's start. A chain
+// with a custom wrapper (Solana) does not read the head through the directive at all, so the
+// directive's absence says nothing about it.
+func (m *EndpointMonitor) hasNoHeadByDesign(endpoint *routersession.Endpoint) bool {
+	if endpoint == nil || m.chainParser == nil || endpoint.ServesBaseCollection() {
+		return false
+	}
+	if !chaintracker.PollsHeadBySpecDirective(m.chainID) {
+		return false
+	}
+	_, _, ok := m.chainParser.GetParsingByTagForCollection(spectypes.FUNCTION_TAG_GET_BLOCKNUM, sortedAddons(endpoint), endpoint.InternalPath, false)
+	return !ok
+}
+
+// IsUntrackedByDesign reports whether the url has no tracker on purpose (see untracked).
+// The probe loop reads it to leave such a url out of its provider's sample: it has no polls
+// to be judged by, and "never polled" must not read as "dead".
+func (m *EndpointMonitor) IsUntrackedByDesign(endpointURL string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, untracked := m.untracked[endpointURL]
+	return untracked
 }
 
 func (m *EndpointMonitor) startTrackerWithRetry(tracker chaintracker.IChainTracker, trackerCtx context.Context, endpointURL string) {
@@ -930,6 +1001,17 @@ func (m *EndpointMonitor) RemoveTracker(endpointURL string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// A url that was never tracked (see untracked) has only its entry and its state to drop.
+	if _, untracked := m.untracked[endpointURL]; untracked {
+		delete(m.untracked, endpointURL)
+		delete(m.trackerStates, endpointURL)
+		utils.FormatInfo("forgot endpoint that had no ChainTracker by design",
+			utils.LogAttr("endpoint", endpointURL),
+			utils.LogAttr("chainID", m.chainID),
+		)
+		return
+	}
+
 	// Cancel the tracker's context first - this signals the goroutine to exit
 	if cancel, exists := m.cancelFuncs[endpointURL]; exists {
 		cancel()
@@ -1004,12 +1086,17 @@ func (m *EndpointMonitor) WorstCaseGapBetweenPolls() time.Duration {
 	return worstCaseGapBetweenPolls(m.PollInterval())
 }
 
-// GetAllEndpoints returns all endpoint URLs with active ChainTrackers.
+// GetAllEndpoints returns every endpoint URL this monitor knows: those with an active
+// ChainTracker, and those it holds as not tracked by design (see untracked). The second
+// kind is listed so the callers that drop a url which left the config (RemoveTracker)
+// drop it too.
 func (m *EndpointMonitor) GetAllEndpoints() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	return slices.Collect(maps.Keys(m.trackers))
+	urls := make([]string, 0, len(m.trackers)+len(m.untracked))
+	urls = slices.AppendSeq(urls, maps.Keys(m.trackers))
+	return slices.AppendSeq(urls, maps.Keys(m.untracked))
 }
 
 // GetEndpointCount returns the number of active ChainTrackers.
@@ -1042,6 +1129,7 @@ func (m *EndpointMonitor) Stop() {
 	m.cancelFuncs = make(map[string]context.CancelFunc)
 	m.trackerStates = make(map[string]EndpointChainTrackerState)
 	m.trackerLastErrors = make(map[string]string)
+	m.untracked = make(map[string]struct{})
 
 	// Mark stopped and clear observation state. stopped is sticky: recordPollObservation
 	// and RecordRelayObservation both bail when it is set, so an in-flight poll that

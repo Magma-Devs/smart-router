@@ -1623,6 +1623,7 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 				url := ep.Endpoint.NetworkAddress
 				health := ep.Endpoint.HealthSnapshot()
 				obs := observations[url] // zero value when no observation recorded yet
+				trackerState, _, _ := server.endpointChainTrackerManager.GetTrackerState(url)
 				rows = append(rows, map[string]any{
 					"ChainID":        server.listenEndpoint.ChainID,
 					"ApiInterface":   server.listenEndpoint.ApiInterface,
@@ -1658,6 +1659,11 @@ func buildDebugMux(deps debugMuxDeps) *http.ServeMux {
 					// exponentialBackoff-stretched when the endpoint has been failing. This is the
 					// observable /debug/reset-probe-backoff returns to base (MAG-2395).
 					"PollIntervalMs": backoffByURL[url].Milliseconds(),
+					// TrackerState is the lifecycle state of the url's tracker. "not_tracked_by_design"
+					// is a url with no tracker on purpose (MAG-5349): it serves only add-on collections
+					// and none declares a way to read the head, so the poll fields above stay empty
+					// for good and say nothing about its health.
+					"TrackerState": string(trackerState),
 					// HashPolling says whether this chain's tracker does block-hash work
 					// (fork detection) and, when it does not, WHY — "off-operator-choice"
 					// (--enable-fork-detection not set) vs "off-spec-no-block-by-num" (the

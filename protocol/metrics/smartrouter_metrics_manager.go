@@ -47,6 +47,7 @@ type SmartRouterMetricsManager struct {
 	endpointLatestBlock            *prometheus.GaugeVec   // rpc_endpoint_latest_block
 	endpointURLLatestBlock         *prometheus.GaugeVec   // rpc_endpoint_url_latest_block
 	endpointURLAnsweredUntil       *prometheus.GaugeVec   // rpc_endpoint_url_answered_until_seconds
+	endpointURLBlockTracking       *prometheus.GaugeVec   // rpc_endpoint_url_block_tracking
 	endpointURLRelaysServiced      *prometheus.CounterVec // rpc_endpoint_url_relays_serviced_total
 	endpointFetchLatestFails       *prometheus.CounterVec // rpc_endpoint_fetch_latest_fails
 	endpointFetchBlockFails        *prometheus.CounterVec // rpc_endpoint_fetch_block_fails
@@ -296,6 +297,10 @@ func NewSmartRouterMetricsManager(options SmartRouterMetricsManagerOptions) *Sma
 	m.endpointURLAnsweredUntil = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "rpc_endpoint_url_answered_until_seconds",
 		Help: "Unix time until which a node url counts as answering: its last answer, a poll or a relay, plus max(2m, 6 x the interval its tracker polls at). A url past it has stopped answering: it is down, not stuck.",
+	}, urlLabels))
+	m.endpointURLBlockTracking = registerOrReuse(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "rpc_endpoint_url_block_tracking",
+		Help: "Whether the router tracks the head of a node url: 1 = tracked, 0 = not tracked by design (the url serves only add-on collections and none of them declares a way to read the head). A url at 0 has no block polls, so its health is known only from the relays it serves.",
 	}, urlLabels))
 	m.endpointURLRelaysServiced = registerOrReuse(prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_endpoint_url_relays_serviced_total",
@@ -967,6 +972,26 @@ func (m *SmartRouterMetricsManager) SetProviderURLLatestBlock(spec, apiInterface
 	m.setURLLatestBlockLocked(spec, apiInterface, providerName, endpointURL, block, answeredUntil)
 }
 
+// SetEndpointURLBlockTracking records on rpc_endpoint_url_block_tracking whether a url's head is
+// tracked, for every provider configured with the url. A reader of the per-url series cannot
+// otherwise tell a url that has no head by design (MAG-5349) from one whose polls went missing:
+// both show no block and no poll outcome. Only a registered url gets a series, as for the other
+// per-url series; ForgetEndpointURLLatestBlock deletes it with them.
+func (m *SmartRouterMetricsManager) SetEndpointURLBlockTracking(spec, apiInterface, endpointURL string, tracked bool) {
+	if m == nil || m.endpointURLBlockTracking == nil {
+		return
+	}
+	value := 0.0
+	if tracked {
+		value = 1
+	}
+	m.lock.RLock()
+	defer m.lock.RUnlock()
+	for _, providerName := range m.urlToProviderNames[endpointURL] {
+		m.endpointURLBlockTracking.WithLabelValues(m.urlSeriesLabelValuesLocked(spec, apiInterface, providerName, endpointURL)...).Set(value)
+	}
+}
+
 // answeredUntilFrom is the answered-until time of an answer at now.
 func answeredUntilFrom(now time.Time, answerTimeout time.Duration) time.Time {
 	if answerTimeout <= 0 {
@@ -1016,6 +1041,9 @@ func (m *SmartRouterMetricsManager) ForgetEndpointURLLatestBlock(spec, apiInterf
 		}
 		if m.endpointURLRelaysServiced != nil {
 			m.endpointURLRelaysServiced.DeleteLabelValues(values...)
+		}
+		if m.endpointURLBlockTracking != nil {
+			m.endpointURLBlockTracking.DeleteLabelValues(values...)
 		}
 	}
 }
