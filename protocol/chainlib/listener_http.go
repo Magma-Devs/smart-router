@@ -168,7 +168,7 @@ func (apil *chainListenerBase) listen(ctx context.Context, app *fiber.App) {
 		apil.listeningAddress.Store(&addr)
 	}()
 
-	ListenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe)
+	listenWithRetry(ctx, app, apil.endpoint.NetworkAddress, addrChannelSafe, &apil.gate)
 }
 
 // answerJsonRpcBatchTooLarge answers a batch over the operator's size limit with 429.
