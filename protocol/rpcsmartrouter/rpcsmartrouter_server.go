@@ -904,6 +904,9 @@ func preferStructuralFailureReason(result *common.RelayResult, failFastReason st
 // natural pre-finality propagation lag. "unknown" covers sentinel requested blocks (latest/pending/
 // not-applicable) and the case where the latest block is not yet known.
 func (rpcss *RPCSmartRouterServer) crossValidationFinalityLabel(protocolMessage chainlib.ProtocolMessage) string {
+	if rpcss.chainParser == nil {
+		return "unknown"
+	}
 	requestedBlock, _ := protocolMessage.RequestedBlock()
 	// The GATED tip (fresh ChainState tip, else 0) — deliberately the same read cache finalization
 	// uses, so this label agrees with the finalized/temp cache split rather than describing a
@@ -1952,7 +1955,7 @@ func (rpcss *RPCSmartRouterServer) SendParsedRelay(
 	// Start the async straggler watcher AFTER the headers snapshot (MAG-2187): it becomes the responses
 	// channel's sole reader and resolves the exact pending set the header just reported. No-op when
 	// nothing is pending or no consensus was reached.
-	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName(), pendingProviders)
+	rpcss.watchCrossValidationStragglers(ctx, relayProcessor, returnedResult, protocolMessage, protocolMessage.GetApi().GetName(), pendingProviders, analytics)
 
 	// Checked BEFORE the err branch, and independently of it. processNonCrossValidationResult returns
 	// the first node error with err == nil whenever there are no successes, so gating this on
@@ -6384,7 +6387,7 @@ const crossValidationStragglerGrace = 5 * time.Second
 // reply-time path could never see for a provider that lost the race to quorum). No-op unless a
 // consensus was reached and a provider is actually pending; on a failed cross-validation there is
 // no consensus to compare against.
-func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Context, relayProcessor *relaycore.RelayProcessor, relayResult *common.RelayResult, protocolMessage chainlib.ProtocolMessage, apiName string, pendingProviders []string) {
+func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Context, relayProcessor *relaycore.RelayProcessor, relayResult *common.RelayResult, protocolMessage chainlib.ProtocolMessage, apiName string, pendingProviders []string, analytics *metrics.RelayMetrics) {
 	if relayProcessor == nil || relayResult == nil || relayProcessor.GetSelection() != relaycore.CrossValidation || len(pendingProviders) == 0 {
 		return
 	}
@@ -6392,7 +6395,7 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 	if cvParams == nil || relayResult.CrossValidation < cvParams.AgreementThreshold {
 		return
 	}
-	successResults, _, _ := relayProcessor.GetResultsData()
+	successResults, nodeErrorResults, protocolErrorResults := relayProcessor.GetResultsData()
 
 	consensusHash := relayResult.ResponseHash
 	deterministic := protocolMessage.GetApi() != nil && protocolMessage.GetApi().Category.Deterministic
@@ -6401,6 +6404,30 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 	if rpcss.listenEndpoint != nil {
 		chainId, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
 	}
+
+	// MAG-2787: the compliance record this request owns (appendHeadersToRelayResult deferred it here
+	// because providers were still pending when a consensus was already reached). Built once, now,
+	// from everything known at this exact moment — pendingProviders are reported not-received
+	// provisionally — then patched in place as each straggler resolves (the record closure below),
+	// and emitted exactly once after the watch loop returns, by which point every pending provider has
+	// been accounted for one way or another.
+	requestedBlock, _ := protocolMessage.RequestedBlock()
+	complianceRecord := buildCrossValidationRecord(crossValidationRecordInputs{
+		ChainID:              chainId,
+		ApiInterface:         apiInterface,
+		Method:               apiName,
+		RequestID:            crossValidationRequestID(ctx),
+		Tenant:               crossValidationRecordTenant(analytics),
+		BlockHeight:          requestedBlock,
+		Finality:             finality,
+		CVParams:             cvParams,
+		CVSuccess:            true,
+		ConsensusHash:        consensusHash,
+		SuccessResults:       successResults,
+		NodeErrorResults:     nodeErrorResults,
+		ProtocolErrorResults: protocolErrorResults,
+		AllProviders:         relayProcessor.GetCrossValidationQueriedProviders(),
+	})
 	// Deadline: the generous per-batch bound stamped at launch (see sendRelayToDirectEndpoints —
 	// relayTimeout + attemptBudget + max url.Timeout + grace, anchored at launch, dominating any real relay-phase
 	// sum). The watcher normally returns early when the last straggler pushes, so this only bounds a
@@ -6486,11 +6513,23 @@ func (rpcss *RPCSmartRouterServer) watchCrossValidationStragglers(ctx context.Co
 			rpcss.smartRouterEndpointMetrics.SetCrossValidationMismatchMetric(chainId, apiInterface, apiName, group, finality)
 		}
 		rpcss.smartRouterEndpointMetrics.SetCrossValidationStragglerMetric(chainId, apiInterface, apiName, straggler.Outcome)
+
+		// MAG-2787: patch this provider's entry in the compliance record owned by this request from
+		// its provisional not-received state to the real resolution. Safe without a lock: record() runs
+		// sequentially on the single watcher goroutine below, strictly before WatchCrossValidationStragglers
+		// returns and the record is emitted.
+		patchCrossValidationRecordStraggler(complianceRecord, straggler)
 	}
 
 	// WithoutCancel: the reply has already been sent, so the watcher must outlive the request context;
-	// it is bounded by maxWait. Values (GUID) are preserved for log correlation.
-	go relayProcessor.WatchCrossValidationStragglers(context.WithoutCancel(ctx), pendingProviders, consensusHash, maxWait, record)
+	// it is bounded by maxWait. Values (GUID) are preserved for log correlation. The compliance record
+	// is emitted once every pending provider is accounted for — genuinely resolved or, past maxWait,
+	// reported not-received — which is exactly what WatchCrossValidationStragglers guarantees before
+	// it returns.
+	go func() {
+		relayProcessor.WatchCrossValidationStragglers(context.WithoutCancel(ctx), pendingProviders, consensusHash, maxWait, record)
+		rpcss.emitCrossValidationRecord(complianceRecord)
+	}()
 }
 
 // RelayProcessorForHeaders interface for methods used by appendHeadersToRelayResult
@@ -6713,6 +6752,41 @@ func (rpcss *RPCSmartRouterServer) appendHeadersToRelayResult(ctx context.Contex
 					Value: strings.Join(pluralityProviders, ","),
 				},
 			)
+		}
+
+		// MAG-2787: the structured compliance record. Deferred to the straggler watcher — which the
+		// caller invokes right after this function returns, handed the exact pendingProviders computed
+		// above — whenever a consensus was reached but providers are still in flight: the watcher owns
+		// building the FINAL record once every one of them resolves, so emitting here too would double
+		// -record that exact case. Every other case (a failure, or a success with nothing pending) is
+		// already complete right now.
+		if !(cvSuccess && len(pendingProviders) > 0) {
+			var failureReason string
+			if relayResult != nil {
+				failureReason = relayResult.CrossValidationFailureReason
+			}
+			var chainId, apiInterface string
+			if rpcss.listenEndpoint != nil {
+				chainId, apiInterface = rpcss.listenEndpoint.ChainID, rpcss.listenEndpoint.ApiInterface
+			}
+			requestedBlock, _ := protocolMessage.RequestedBlock()
+			rpcss.emitCrossValidationRecord(buildCrossValidationRecord(crossValidationRecordInputs{
+				ChainID:              chainId,
+				ApiInterface:         apiInterface,
+				Method:               apiName,
+				RequestID:            crossValidationRequestID(ctx),
+				Tenant:               crossValidationRecordTenant(analytics),
+				BlockHeight:          requestedBlock,
+				Finality:             rpcss.crossValidationFinalityLabel(protocolMessage),
+				CVParams:             cvParams,
+				CVSuccess:            cvSuccess,
+				FailureReason:        failureReason,
+				ConsensusHash:        consensusHash,
+				SuccessResults:       successResults,
+				NodeErrorResults:     nodeErrorResults,
+				ProtocolErrorResults: protocolErrorResults,
+				AllProviders:         allProvidersList,
+			}))
 		}
 	} else if relayResult != nil {
 		// For non-cross-validation mode: keep existing single provider behavior

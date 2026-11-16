@@ -351,6 +351,36 @@ recorded" and "nothing dissented" are opposite answers. The ring is bounded (409
 `X-Cross-Validation-Events-Dropped` response header reports evictions so truncation cannot pass for
 absence.
 
+### Compliance record (always on, not debug-gated)
+
+Unrelated to the debug ring above: every cross-validated request — success or failure, agreement or
+dissent — emits exactly one structured JSON log line, `"cross-validation record"`, into the router's
+normal log output (MAG-2787, part of MAG-2782's Kraken compliance work — RTS (EU) 2024/1774
+Art. 14(1)(a)/23(2)(b), DORA Art. 12(7)). Unlike the debug ring, this is **always on**, independent of
+`--debug-address`, and independent of `--log-level` — it is written through a dedicated fixed-level
+logger specifically so turning the router's verbosity down can never silence compliance evidence. The
+router holds nothing and serves no read API for these records; a separate ticket (MAG-2788) covers
+reading them back from the log pipeline (Loki on S3).
+
+The record carries digests and metadata only, **never** a request or response body. Key fields:
+
+| Field | Meaning |
+| --- | --- |
+| `seq` | process-wide monotonic counter, assigned before the record is queued for writing — a gap in the sequence as seen in the log stream is how a dropped record becomes visible, rather than silent |
+| `requestId` | the same value returned in the `Lava-Guid` response header |
+| `tenant` | the caller's customer-id/dapp-id header, bounded the same way the `customer` Prometheus label is |
+| `agreementThreshold`, `maxParticipants`, `minGroups` | the policy **as resolved for this request**, not whatever the config says when the record is later read |
+| `status`, `failureReason` | `success` or `failed`; the closed failure-reason enum on failure |
+| `servedDigest` | which answer was served — empty on failure, where there was no winner |
+| `pluralitySize`, `pluralityProviders` | on a failed quorum, the largest agreeing group's composition |
+| `endpoints` | every provider queried, each with its outcome (`agreed`/`disagreed`/`node-error`/`protocol-error`/`not-received`) and digest — a digest is only ever meaningful alongside its outcome, since an empty digest means both "answered with empty content" and "never answered" |
+| `lateResolutions` | stragglers that resolved after the reply, with how long that took — empty when nothing was still pending at reply time |
+| `digestAlgorithmVersion` | which canonicalization every digest in the record used |
+
+Writing is asynchronous through a bounded queue: a full queue drops the record rather than blocking
+the relay, and increments `smartrouter_cross_validation_record_dropped_total{spec, apiInterface}` — the
+same drop a reader with no metrics access can still see as a hole in `seq`.
+
 ## Usage
 
 ```bash
