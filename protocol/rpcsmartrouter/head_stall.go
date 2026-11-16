@@ -22,7 +22,7 @@ import (
 // Its repeated block also stops voting on the chain tip (onTipObservation), which is what kept a wrong
 // tip alive in the Plasma incident.
 //
-// Rules, from agent_docs/bug-reports/stuck-provider-not-detected/plan.md:
+// Rules, from the MAG-3986 plan:
 //   - add at the first cycle that sees SameBlockCycles >= N (D11), N = StallCycleThreshold (D20), and
 //     only while another url of the chain has shown a higher block — a quiet chain marks nothing;
 //   - remove only when the endpoint's highest block goes ABOVE the one it was stuck on (D9, H2) — never because

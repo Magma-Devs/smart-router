@@ -648,9 +648,7 @@ Stacks, Tron, TON, nodeos, MultiversX). No status-code *range* separates a chain
 success across them: Horizon reports a rejected transaction as a 400 problem document and a
 missing account as a 404, Aptos a pruned version as a 410, Cosmos a missing transaction as a 404
 and a bad address as a 500, the sidecar a missing block hash as a 500. Every one of those is the
-node answering "no". Full write-up:
-`agent_docs/bug-reports/dfns-investigations/rest-stateful-bug/rest-blockchain-errors-research.md`
-(local).
+node answering "no". Investigation evidence is recorded in MAG-3972, MAG-3974 and MAG-3976.
 
 So `RestMessage.CheckResponseError` treats **every status outside 2xx as a node error** (a 429
 keeps its rate-limit handling; a 2xx is a success unless its body carries a Cosmos transaction
@@ -658,7 +656,7 @@ error; a status of 0 is "not set" and reads as a success). The body travels to t
 unchanged. What "node error" changes is the same as on JSON-RPC:
 
 - A write broadcast keeps waiting for a sibling's success instead of taking the first refusal
-  as the result (the dfns incident: a gateway's empty 404 ended the fan-out while the other
+  as the result (the empty-404 incident: a gateway's empty 404 ended the fan-out while the other
   vendor broadcast the transaction). This is the whole of what MAG-3972/3974/3976 need.
 - The error registry classifies the reply, and its REST status rows decide the rest.
 - Every REST node error is counted the way a JSON-RPC one is (`smartrouter_errors_total`,
