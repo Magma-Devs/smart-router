@@ -233,7 +233,9 @@ func HydrateGrpcResponseParsing(chainMessage ChainMessageForSend, methodDescript
 	if err != nil {
 		return utils.FormatError("HydrateGrpcResponseParsing: failed building descriptor source", err)
 	}
-	_, formatter, err := grpcurl.RequestParserAndFormatter(grpcurl.FormatJSON, descriptorSource, nil, grpcurl.FormatOptions{
+	// Only the formatter is used. grpcurl still builds its request decoder over the reader, and
+	// encoding/json panics on a nil one, so it gets an empty reader.
+	_, formatter, err := grpcurl.RequestParserAndFormatter(grpcurl.FormatJSON, descriptorSource, bytes.NewReader(nil), grpcurl.FormatOptions{
 		EmitJSONDefaultFields: false,
 		IncludeTextSeparator:  false,
 		AllowUnknownFields:    true,
@@ -815,7 +817,9 @@ func (cp *GrpcChainProxy) SendNodeMsg(ctx context.Context, chainMessage ChainMes
 
 	msgFactory := dynamic.NewMessageFactoryWithDefaults()
 
-	var reader io.Reader
+	// A request with no body is never parsed, but grpcurl builds its decoder over the reader
+	// either way, and encoding/json panics on a nil one. So the reader starts out empty, not nil.
+	var reader io.Reader = bytes.NewReader(nil)
 	msg := msgFactory.NewMessage(methodDescriptor.GetInputType())
 	formatMessage := false
 	if len(nodeMessage.Msg) > 0 {
