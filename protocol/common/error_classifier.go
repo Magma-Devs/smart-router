@@ -383,8 +383,8 @@ var genericErrorMappings = map[TransportType][]errorMapping{
 		// "method not allowed" or "route not found" lost its route-refusal verdict and was
 		// returned as the caller's bad request instead of going to another provider).
 		//
-		// Evidence for every row: agent_docs/.../rest-stateful-bug/rest-status-code-map.md and
-		// rest-blockchain-errors-research.md (twelve families probed live 2026-09-27).
+		// Evidence for every row is recorded in MAG-3972, MAG-3974 and MAG-3976 (twelve families
+		// probed live 2026-09-27).
 
 		// --- 1. What the node said: the route does not exist, whoever answered. ---
 		{MessageContains("endpoint not found"), RouterErrorNodeEndpointNotFound},
