@@ -73,22 +73,57 @@ type finalWriteFrame struct {
 	} `json:"params"`
 }
 
-// requireFinalWriteFrame reads exactly one frame from replies and decodes it as the ended-write
-// notification, then requires the channel to close right after — nothing else is ever sent to a
-// client whose write subscription just ended.
-func requireFinalWriteFrame(t *testing.T, sub subscription) finalWriteFrame {
+// writePushMethod is the name a Substrate node gives the status pushes of
+// author_submitAndWatchExtrinsic, and the name a client routes them by.
+const writePushMethod = "author_extrinsicUpdate"
+
+// newWriteHarness is newReleaseHarness with the mock node naming a write subscription's pushes
+// the way a Substrate node does. Set before anything subscribes, so the node only ever reads it.
+func newWriteHarness(t *testing.T) *releaseHarness {
 	t.Helper()
-	var frame finalWriteFrame
+	h := newReleaseHarness(t)
+	h.srv.notificationMethods = map[string]string{writeSubscribeMethod: writePushMethod}
+	return h
+}
+
+// requireFirstPush waits for an ordinary push on sub, the way a node sends "ready" right after
+// it accepts the extrinsic, and requires it to carry the node's push name.
+func requireFirstPush(t *testing.T, sub subscription) {
+	t.Helper()
 	select {
 	case reply, ok := <-sub.replies:
-		require.True(t, ok, "the client must get a final frame, not a silent close")
-		require.NoError(t, json.Unmarshal(reply.Data, &frame))
+		require.True(t, ok, "the subscription ended before its first push")
+		var push finalWriteFrame
+		require.NoError(t, json.Unmarshal(reply.Data, &push))
+		require.Equal(t, writePushMethod, push.Method)
+		require.Zero(t, push.Params.Error.Code, "an ordinary push, not the final frame")
 	case <-time.After(5 * time.Second):
-		t.Fatal("no final frame arrived for the ended write subscription")
+		t.Fatal("no push arrived on the write subscription")
 	}
-	require.True(t, channelClosed(sub.replies, 5*time.Second),
-		"nothing else may be sent to a client once its write subscription has ended")
-	return frame
+}
+
+// requireFinalWriteFrame reads replies up to the ended-write notification, the first frame that
+// carries params.error, skipping the ordinary pushes the node sent before it went away. It then
+// requires the channel to close: the subscription ends with that frame.
+func requireFinalWriteFrame(t *testing.T, sub subscription) finalWriteFrame {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case reply, ok := <-sub.replies:
+			require.True(t, ok, "the client must get a final frame, not a silent close")
+			var frame finalWriteFrame
+			require.NoError(t, json.Unmarshal(reply.Data, &frame))
+			if frame.Params.Error.Code == 0 {
+				continue // an ordinary push from before the drop
+			}
+			require.True(t, channelClosed(sub.replies, 5*time.Second),
+				"the subscription must end with its final frame")
+			return frame
+		case <-deadline:
+			t.Fatal("no final frame arrived for the ended write subscription")
+		}
+	}
 }
 
 // TestWriteSubscriptionDrop_EndsInsteadOfResubscribing is MAG-5331's headline scenario: one
@@ -97,16 +132,20 @@ func requireFinalWriteFrame(t *testing.T, sub subscription) finalWriteFrame {
 // fix, handleUpstreamDisconnect re-subscribed on every restore with no regard for what the
 // subscribe method actually did, so the node received the submission again.
 func TestWriteSubscriptionDrop_EndsInsteadOfResubscribing(t *testing.T) {
-	h := newReleaseHarness(t)
+	h := newWriteHarness(t)
 
 	creator := h.subscribeWrite("ws-1")
 	joiner := h.subscribeWrite("ws-2") // dedupes onto the same upstream watch; both must be ended
 	require.Equal(t, 1, h.upstreamCalls(writeSubscribeMethod), "the second client must join, not resubscribe")
+	// The watch has pushed its first status by the time the socket drops, as a live one has.
+	requireFirstPush(t, creator)
+	requireFirstPush(t, joiner)
 
 	h.srv.dropConnections()
 
 	creatorFrame := requireFinalWriteFrame(t, creator)
-	require.Equal(t, writeSubscribeMethod, creatorFrame.Method)
+	require.Equal(t, writePushMethod, creatorFrame.Method,
+		"the final frame carries the node's push name, which the client routes by, not the subscribe call's")
 	require.Equal(t, creator.routerID, creatorFrame.Params.Subscription,
 		"the final frame must name the creator's own subscription id, not the joiner's or the upstream's")
 	require.NotZero(t, creatorFrame.Params.Error.Code)
@@ -150,7 +189,7 @@ func TestWriteSubscriptionEndsForEveryDisconnectCause(t *testing.T) {
 
 	for _, tc := range causes {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newReleaseHarness(t)
+			h := newWriteHarness(t)
 			sub := h.subscribeWrite("ws-1")
 
 			activeSub := h.subscriptionOf(sub.clientKey)
@@ -168,6 +207,22 @@ func TestWriteSubscriptionEndsForEveryDisconnectCause(t *testing.T) {
 			require.Eventually(t, func() bool { return h.pooledSubscriptionCount() == 0 }, 5*time.Second, 10*time.Millisecond)
 		})
 	}
+}
+
+// TestWriteSubscriptionEndedBeforeAnyPush_NamesTheSubscribeCall: a drop that comes before the
+// node pushed anything leaves the router no push name to use, so the final frame falls back to
+// the subscribe call's name, the only one it has.
+func TestWriteSubscriptionEndedBeforeAnyPush_NamesTheSubscribeCall(t *testing.T) {
+	h := newWriteHarness(t)
+	h.srv.messageInterval = time.Hour // the node accepts the submit and never pushes
+	sub := h.subscribeWrite("ws-1")
+
+	h.srv.dropConnections()
+
+	frame := requireFinalWriteFrame(t, sub)
+	require.Equal(t, writeSubscribeMethod, frame.Method)
+	require.Equal(t, sub.routerID, frame.Params.Subscription)
+	require.Equal(t, 1, h.upstreamCalls(writeSubscribeMethod))
 }
 
 // errSentinelSocketClosed stands in for the plain, non-JsonError the listener passes

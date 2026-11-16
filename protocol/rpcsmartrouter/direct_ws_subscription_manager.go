@@ -59,6 +59,14 @@ type directActiveSubscription struct {
 	// that drops is ended, never restored, whatever the cause.
 	isWrite bool
 
+	// pushMethod is the method of the pushes the node has sent on a write subscription
+	// (author_extrinsicUpdate for author_submitAndWatchExtrinsic), recorded from the first one.
+	// endWriteSubscription names its final frame with it: a client library routes a push by that
+	// name plus the subscription id (polkadot.js keys its handler author_extrinsicUpdate::<id>),
+	// so a frame named after the subscribe call never reaches the caller. Nil until the first
+	// push; only a write subscription records it.
+	pushMethod atomic.Pointer[string]
+
 	// unsubscribeMethod is what the node is told to drop this subscription with on the paths
 	// where no client message names the method: the teardown that runs when the last client
 	// goes, a failed restore's cleanup, and the discard of a subscription a restore re-opened
@@ -1430,6 +1438,10 @@ func (dwsm *DirectWSSubscriptionManager) listenForUpstreamMessages(
 			if msg == nil {
 				continue
 			}
+			if activeSub.isWrite && msg.Method != "" && activeSub.pushMethod.Load() == nil {
+				method := msg.Method
+				activeSub.pushMethod.Store(&method)
+			}
 			dwsm.routeMessageToClients(activeSub, msg)
 		}
 	}
@@ -1780,10 +1792,17 @@ func (dwsm *DirectWSSubscriptionManager) endWriteSubscription(hashedParams strin
 		utils.LogAttr("connectedClients", len(clients)),
 	)
 
+	// Named like the pushes the node already sent on this subscription, so the client routes
+	// it to the same handler; the subscribe call's name only when the drop came before any push.
+	frameMethod := activeSub.subscribeMethod
+	if pushMethod := activeSub.pushMethod.Load(); pushMethod != nil {
+		frameMethod = *pushMethod
+	}
+
 	// Sent before any client is released below: releaseClientLocked closes the same channel
 	// this writes to, and a send to it afterward would just report TrySendClosed.
 	for _, client := range clients {
-		frame, err := writeSubscriptionEndedFrame(activeSub.subscribeMethod, client.routerID, numericIDs)
+		frame, err := writeSubscriptionEndedFrame(frameMethod, client.routerID, numericIDs)
 		if err != nil {
 			utils.FormatError("DirectWS: failed to build the final frame for an ended write subscription", err,
 				utils.LogAttr("routerID", client.routerID),
@@ -1805,21 +1824,23 @@ func (dwsm *DirectWSSubscriptionManager) endWriteSubscription(hashedParams strin
 // method plus params.subscription — so a dispatcher keyed on this subscription's id still has
 // something to match it to, with "error" standing in for "result".
 //
-// method echoes the subscribe call itself (e.g. "author_submitAndWatchExtrinsic"), not the
-// chain's actual push/notification method (e.g. "author_extrinsicUpdate" in that case): the
-// spec's SUBSCRIBE directive names only itself, nothing distinct for the notification it
-// produces (see the catalogue survey behind MAG-4278 item 1), so the router has no declared name
-// to give this frame instead. The exact wire shape was left open by MAG-5331's acceptance
-// criteria pending a docs/compatibility decision — treat this as the provisional answer, not a
-// settled contract.
+// method is the one the node's own pushes on this subscription carried (e.g.
+// "author_extrinsicUpdate" for author_submitAndWatchExtrinsic), recorded in
+// directActiveSubscription.pushMethod: the spec's SUBSCRIBE directive names only the subscribe
+// call, so the router learns the push name from the node. A client routes a push by that name and
+// the subscription id, and polkadot.js then reads params.error on a subscription message and fails
+// the caller's callback with it. When the drop came before any push, method is the subscribe
+// call's name, the only one the router has. The exact wire shape was left open by MAG-5331's
+// acceptance criteria pending a docs/compatibility decision — treat this as the provisional
+// answer, not a settled contract.
 //
 // The error reuses errUnclearWriteAnswerLost's text: the connection that would have carried the
 // write's final status broke after the write was already sent, which is exactly that case, not
 // a timeout (errUnknownWriteOutcome) — nothing here waited for a deadline.
-func writeSubscriptionEndedFrame(subscribeMethod, routerID string, numericIDs bool) ([]byte, error) {
+func writeSubscriptionEndedFrame(method, routerID string, numericIDs bool) ([]byte, error) {
 	response := map[string]any{
 		"jsonrpc": "2.0",
-		"method":  subscribeMethod,
+		"method":  method,
 		"params": map[string]any{
 			"subscription": subscriptionIDValue(routerID, numericIDs),
 			"error": map[string]any{
