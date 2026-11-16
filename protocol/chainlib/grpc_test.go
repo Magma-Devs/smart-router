@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jhump/protoreflect/dynamic"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/chainproxy/rpcInterfaceMessages"
 	"github.com/magma-Devs/smart-router/protocol/chainlib/extensionslib"
@@ -24,8 +25,8 @@ import (
 // per-endpoint gRPC ChainTracker). A gRPC response is binary protobuf and the per-endpoint poller
 // crafts a chain message with NO method descriptor (reflection happens inside the DirectRPCConnection,
 // not in CraftChainMessage); HydrateGrpcResponseParsing wires the connection's cached descriptor in so
-// the response can be decoded. The happy path (descriptor → decodable response) is proven end-to-end by
-// the live gRPC poll, whose per-endpoint ChainTracker fetches a height matching the relay-harvested one.
+// the response can be decoded. TestHydrateGrpcResponseParsing_DecodesTheReply covers the happy path
+// (descriptor → decodable response).
 func TestHydrateGrpcResponseParsing_Guards(t *testing.T) {
 	// A nil descriptor is rejected up front, before the message is mutated — otherwise the gRPC chain
 	// message would be left un-parseable with the cause swallowed.
@@ -45,6 +46,38 @@ func TestHydrateGrpcResponseParsing_Guards(t *testing.T) {
 	require.NoError(t, err)
 	_, ok := grpcMsg.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
 	require.True(t, ok, "crafted gRPC message must expose a *GrpcMessage for the helper to hydrate")
+}
+
+// The poller hydrates a crafted gRPC message on every poll, so the helper has to work with a real
+// descriptor: afterwards the message decodes the node's binary reply into the JSON the spec's
+// result parsing reads. Hydrating builds a grpcurl parser that is never read, which is why this
+// also pins that the helper hands grpcurl a reader encoding/json accepts.
+func TestHydrateGrpcResponseParsing_DecodesTheReply(t *testing.T) {
+	grpcParser := &GrpcChainParser{
+		BaseChainParser: BaseChainParser{
+			serverApis: map[ApiKey]ApiContainer{
+				{Name: "bank.Query/Params", ConnectionType: connectionType_test}: {api: &spectypes.Api{Name: "bank.Query/Params", Enabled: true}, collectionKey: CollectionKey{ConnectionType: connectionType_test}},
+			},
+			apiCollections: map[CollectionKey]*spectypes.ApiCollection{{ConnectionType: connectionType_test}: {Enabled: true, CollectionData: spectypes.CollectionData{ApiInterface: spectypes.APIInterfaceGrpc}}},
+		},
+	}
+	chainMessage, err := grpcParser.ParseMsg("bank.Query/Params", []byte("{}"), connectionType_test, nil, extensionslib.ExtensionInfo{LatestBlock: 0})
+	require.NoError(t, err)
+
+	method := queryServiceFile(t, "bank").FindService("bank.Query").FindMethodByName("Params")
+	require.NotNil(t, method)
+	require.NoError(t, HydrateGrpcResponseParsing(chainMessage, method))
+
+	reply := dynamic.NewMessage(method.GetOutputType())
+	require.NoError(t, reply.TrySetFieldByName("bank_only", "from the node"))
+	replyBytes, err := reply.Marshal()
+	require.NoError(t, err)
+
+	grpcMessage, ok := chainMessage.GetRPCMessage().(*rpcInterfaceMessages.GrpcMessage)
+	require.True(t, ok)
+	parsed, err := grpcMessage.NewParsableRPCInput(replyBytes)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"bank_only":"from the node"}`, string(parsed.GetResult()))
 }
 
 const (
