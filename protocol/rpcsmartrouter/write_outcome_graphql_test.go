@@ -72,41 +72,71 @@ func TestGraphQLWrite_UnclearOutcomeAnswersWithHTTP200(t *testing.T) {
 	require.Equal(t, "unknown", writeOutcomeHeader(t, result))
 }
 
-// TestGraphQLWrite_AcceptedGetsTheHeader is the other half of MAG-5122's Lava-Write-Outcome
-// header: a write served by its first accepted copy is "accepted".
-func TestGraphQLWrite_AcceptedGetsTheHeader(t *testing.T) {
+// TestGraphQLWrite_AcceptedOnlyOnTheChainSuccessRow is the other half of MAG-5122's
+// Lava-Write-Outcome header. accepted is the chain's success row only: Sui's write field carries
+// effects with SUCCESS or FAILURE (a transaction that ran and paid gas, MAG-4742). Every other 2xx
+// gets no header, because the router cannot yet tell it apart from "may have run": effects: null
+// (MAG-4518), a reply that did not select effects, and a rejected transaction, which answers with a
+// GraphQL error inside a 200 and still comes back with err == nil.
+func TestGraphQLWrite_AcceptedOnlyOnTheChainSuccessRow(t *testing.T) {
 	rand.InitRandomSeed()
 	tc := graphQLWriteCase(t)
-	chainParser := tc.parser(t)
-	healthy := writeUpstream{status: http.StatusOK, body: tc.success}
-	a, b := healthy, healthy
-	a.name, b.name = "a-"+t.Name(), "b-"+t.Name()
-	_, server := newTwoPrimaryWriteServer(t, tc, chainParser, [2]writeUpstream{a, b})
+	for _, c := range []struct {
+		name, body, header string
+	}{
+		{"effects SUCCESS", `{"data":{"executeTransaction":{"effects":{"status":"SUCCESS"}}}}`, "accepted"},
+		{"effects FAILURE", `{"data":{"executeTransaction":{"effects":{"status":"FAILURE","executionError":{"message":"MoveAbort"}}}}}`, "accepted"},
+		{"effects null", `{"data":{"executeTransaction":{"effects":null}}}`, ""},
+		{"no effects selected", tc.success, ""},
+		{"rejected with a GraphQL error", `{"errors":[{"message":"Invalid user signature"}]}`, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			chainParser := tc.parser(t)
+			served := writeUpstream{status: http.StatusOK, body: c.body}
+			a, b := served, served
+			a.name, b.name = "a-"+t.Name(), "b-"+t.Name()
+			_, server := newTwoPrimaryWriteServer(t, tc, chainParser, [2]writeUpstream{a, b})
 
-	result, err := sendWrite(t, tc, chainParser, server)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	require.Equal(t, "accepted", writeOutcomeHeader(t, result))
+			result, _ := sendWrite(t, tc, chainParser, server)
+			require.NotNil(t, result)
+			require.Equal(t, c.header, writeOutcomeHeader(t, result))
+		})
+	}
 }
 
 // TestGraphQLWrite_NeverRetriedWhenEveryCopyIsRateLimited is MAG-5122's Sending point 2: never
-// re-sent, including today's re-send when every provider answered 429. With no third provider to
-// retry onto, a retry here can only show up as a second hit on one of these two — which must never
-// happen.
+// re-sent, including today's re-send when every provider answered 429. Both primaries answer 429,
+// which holds both off, so the re-send the Stateful rate-limit carve-out allows can only go to the
+// backup: the tier a write reaches when no primary can be selected, and one the broadcast did not
+// reach. With two primaries and no backup the re-send has nowhere to go, so a test of that shape
+// passes with the carve-out still on.
+//
+// The JSON-RPC and REST writes keep the carve-out (MAG-5061 owns changing it there): their backup
+// is hit, which is what proves this setup can see a re-send at all.
 func TestGraphQLWrite_NeverRetriedWhenEveryCopyIsRateLimited(t *testing.T) {
 	rand.InitRandomSeed()
-	tc := graphQLWriteCase(t)
-	chainParser := tc.parser(t)
-	rateLimited := writeUpstream{status: http.StatusTooManyRequests, body: `{"code":-32007,"message":"50/second request limit reached"}`}
-	a, b := rateLimited, rateLimited
-	a.name, b.name = "a-"+t.Name(), "b-"+t.Name()
-	hits, server := newTwoPrimaryWriteServer(t, tc, chainParser, [2]writeUpstream{a, b})
+	for _, tc := range writeInterfaceCases {
+		t.Run(tc.name, func(t *testing.T) {
+			chainParser := tc.parser(t)
+			rateLimited := writeUpstream{status: http.StatusTooManyRequests, body: `{"code":-32007,"message":"50/second request limit reached"}`}
+			a, b := rateLimited, rateLimited
+			a.name, b.name = "a-"+t.Name(), "b-"+t.Name()
+			backup := writeUpstream{name: "backup-" + t.Name(), status: http.StatusOK, body: tc.success}
+			hits := make([]int64, 3)
+			server := newWriteServer(t, tc, chainParser, []writeUpstream{a, b}, []writeUpstream{backup}, hits)
 
-	_, err := sendWrite(t, tc, chainParser, server)
-	require.Error(t, err)
-	time.Sleep(50 * time.Millisecond) // let any wrongly-issued retry land before counting hits
-	require.Equal(t, int64(1), atomic.LoadInt64(&hits[0]), "sent once, never re-sent")
-	require.Equal(t, int64(1), atomic.LoadInt64(&hits[1]), "sent once, never re-sent")
+			_, _ = sendWrite(t, tc, chainParser, server)
+			require.Equal(t, int64(1), atomic.LoadInt64(&hits[0]), "each primary got the broadcast once")
+			require.Equal(t, int64(1), atomic.LoadInt64(&hits[1]), "each primary got the broadcast once")
+			if tc.apiInterface != spectypes.APIInterfaceGraphQL {
+				require.Equal(t, int64(1), atomic.LoadInt64(&hits[2]),
+					"control: this interface keeps the carve-out, so its re-send reaches the backup")
+				return
+			}
+			require.Never(t, func() bool { return atomic.LoadInt64(&hits[2]) > 0 }, 200*time.Millisecond, 10*time.Millisecond,
+				"a GraphQL write is never re-sent, not even when every primary answered 429")
+		})
+	}
 }
 
 // writeOutcomeHeader reads Lava-Write-Outcome off a RelayResult's reply, or "" when absent.
