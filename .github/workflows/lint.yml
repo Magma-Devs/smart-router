@@ -22,7 +22,7 @@ jobs:
           cache-dependency-path: go.sum
 
       # golangci-lint is currently advisory on this repo: the fork is on
-      # Go 1.26 and earlier golangci-lint releases refuse to lint a newer
+      # Go 1.27 and earlier golangci-lint releases refuse to lint a newer
       # toolchain than they were built with. Once a stable v2.x is pinned
       # and known to produce a clean run against this codebase, drop the
       # continue-on-error flags on the retries.
@@ -53,7 +53,7 @@ jobs:
           args: --config .golangci.yml -v
 
   # Supply-chain vuln scan. Unlike golangci-lint above (advisory while the
-  # Go 1.26 toolchain outpaces stable linter releases), this job GATES: a
+  # Go 1.27 toolchain outpaces stable linter releases), this job GATES: a
   # known-vulnerable dependency or stdlib version should block the merge.
   # govulncheck is call-graph aware — it only flags advisories whose
   # vulnerable symbols are actually reachable from this codebase, so it
